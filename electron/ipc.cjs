@@ -2,7 +2,32 @@
 
 const { ipcMain, dialog, app } = require('electron');
 const fs = require('node:fs');
-const { assertWriteAllowed } = require('./writePathPolicy.cjs');
+const path = require('node:path');
+const { assertWriteAllowed, assertWriteTargetSafe } = require('./writePathPolicy.cjs');
+
+// Paths the renderer is allowed to read via file:read, populated only by
+// dialog:open/dialog:save results (i.e. paths the user explicitly picked in
+// a native OS dialog). Normalized absolute + lowercase so lookups are
+// case-insensitive and immune to '..'/relative-segment mismatches.
+const approvedReadPaths = new Set();
+
+function normalizeForApproval(rawPath) {
+  return path.resolve(rawPath).toLowerCase();
+}
+
+function approvePath(rawPath) {
+  approvedReadPaths.add(normalizeForApproval(rawPath));
+}
+
+function isReadApproved(rawPath) {
+  return approvedReadPaths.has(normalizeForApproval(rawPath));
+}
+
+function resetApproved() {
+  approvedReadPaths.clear();
+}
+
+const _testing = { approvePath, isReadApproved, resetApproved };
 
 /**
  * Registers every IPC handler used by the renderer's window.electronAPI.
@@ -11,13 +36,18 @@ const { assertWriteAllowed } = require('./writePathPolicy.cjs');
  */
 function registerIpc(getWin) {
   ipcMain.handle('file:read', async (_event, filePath) => {
-    return fs.promises.readFile(filePath);
+    if (!isReadApproved(filePath)) {
+      throw new Error('Read not permitted: path was not user-approved');
+    }
+    return fs.promises.readFile(path.resolve(filePath));
   });
 
   ipcMain.handle('file:write', async (_event, filePath, arrayBuffer) => {
     try {
       assertWriteAllowed(filePath);
-      await fs.promises.writeFile(filePath, Buffer.from(arrayBuffer));
+      const resolved = path.resolve(filePath);
+      assertWriteTargetSafe(resolved);
+      await fs.promises.writeFile(resolved, Buffer.from(arrayBuffer));
       return { ok: true };
     } catch (err) {
       return { ok: false, error: String(err.message) };
@@ -33,6 +63,7 @@ function registerIpc(getWin) {
       properties
     });
     if (result.canceled || result.filePaths.length === 0) return null;
+    result.filePaths.forEach(approvePath);
     return result.filePaths;
   });
 
@@ -43,6 +74,7 @@ function registerIpc(getWin) {
       filters: opts.filters
     });
     if (result.canceled || !result.filePath) return null;
+    approvePath(result.filePath);
     return result.filePath;
   });
 
@@ -88,4 +120,4 @@ function registerIpc(getWin) {
   }
 }
 
-module.exports = { registerIpc };
+module.exports = { registerIpc, _testing };
