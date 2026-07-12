@@ -3,36 +3,54 @@ import { maxAcrossChannels, maybeReportProgress } from './envelope';
 
 const LOOKAHEAD_MS = 5; // fixed, not a user param
 
+/** Compact the deque's consumed prefix once the head pointer grows past this,
+ * bounding memory to O(window + threshold) instead of O(n) for long signals. */
+const DEQUE_COMPACT_THRESHOLD = 4096;
+
 /**
- * Trailing sliding-window max of |signal| over the last `windowSize` samples
- * (inclusive of the current sample), computed in O(n) via a monotonic deque
- * of indices (values decreasing front-to-back). A plain head index is used
- * instead of `Array.shift()` to avoid O(n) per-removal reindexing.
+ * Forward-looking sliding-window max: `out[i] = max(signal[i .. min(i +
+ * lookahead, length-1)])` — the window covers the current sample plus the
+ * next `lookahead` samples and shrinks naturally at the tail. Computed in
+ * O(n) via a monotonic deque of indices (values decreasing front-to-back).
+ * A plain head index avoids `Array.shift()`'s O(n) reindexing; the consumed
+ * prefix is periodically sliced off to keep the deque's memory bounded.
  */
-function slidingWindowMax(signal: Float32Array, windowSize: number): Float32Array {
+function forwardWindowMax(signal: Float32Array, lookahead: number): Float32Array {
   const length = signal.length;
   const out = new Float32Array(length);
   const idx: number[] = [];
   let head = 0;
+  let next = 0; // next index to feed into the deque
   for (let i = 0; i < length; i++) {
-    const v = signal[i];
-    while (idx.length > head && signal[idx[idx.length - 1]] <= v) idx.pop();
-    idx.push(i);
-    while (idx[head] <= i - windowSize) head++;
+    const end = Math.min(i + lookahead, length - 1);
+    while (next <= end) {
+      const v = signal[next];
+      while (idx.length > head && signal[idx[idx.length - 1]] <= v) idx.pop();
+      idx.push(next);
+      next++;
+    }
+    while (idx[head] < i) head++;
+    if (head > DEQUE_COMPACT_THRESHOLD) {
+      idx.splice(0, head);
+      head = 0;
+    }
     out[i] = signal[idx[head]];
   }
   return out;
 }
 
 /**
- * Lookahead brick-wall limiter. A `LOOKAHEAD_MS` delay line lets the gain
- * envelope react to peaks before they reach the output: the gain applied to
- * `in[i - L]` is derived from the max of `|in|` over the window `[i-L, i]`,
- * i.e. it already "sees" `L` samples into that delayed sample's future.
- * Gain smoothing is instant-attack (snap down immediately when the target
- * gain drops) / one-pole release (climb back toward 1 over `releaseMs`). A
- * final hard clamp to +/-ceiling is applied as an unconditional safety net.
- * The first `LOOKAHEAD_MS` of output come from the delay line's zero-fill.
+ * Lookahead brick-wall limiter with forward-looking alignment: `out[i] =
+ * in[i] * g[i]`, where `g[i]` is derived from the max of the detector over
+ * the FUTURE window `in[i .. i+L]` (`L` = `LOOKAHEAD_MS` of samples; the
+ * window shrinks naturally at the tail). Because the gain envelope sees `L`
+ * samples ahead, it snaps down before a peak arrives — with no delay line,
+ * so the output stays sample-aligned with the input, nothing is dropped at
+ * the tail, and there is no zero pre-roll at the head. Gain smoothing is
+ * instant-attack (take the min immediately when the target gain drops) /
+ * one-pole release (climb back toward 1 over `releaseMs`). A final hard
+ * clamp to +/-ceiling is applied as an unconditional safety net. Output
+ * length always equals input length.
  */
 export const limiterEffect: EffectDefinition = {
   id: 'limiter',
@@ -50,7 +68,7 @@ export const limiterEffect: EffectDefinition = {
 
     const length = channels[0]?.length ?? 0;
     const detector = maxAcrossChannels(channels);
-    const windowMax = slidingWindowMax(detector, lookaheadSamples + 1);
+    const windowMax = forwardWindowMax(detector, lookaheadSamples);
 
     const releaseCoef = Math.exp(-1 / ((releaseMs / 1000) * sampleRate));
     const gainEnv = new Float32Array(length);
@@ -63,10 +81,9 @@ export const limiterEffect: EffectDefinition = {
 
     const out = channels.map((c) => new Float32Array(c.length));
     for (let i = 0; i < length; i++) {
-      const gain = gainEnv[i];
+      const g = gainEnv[i];
       for (let ch = 0; ch < channels.length; ch++) {
-        const delayed = i >= lookaheadSamples ? channels[ch][i - lookaheadSamples] : 0;
-        let v = delayed * gain;
+        let v = channels[ch][i] * g;
         if (v > ceilLin) v = ceilLin;
         else if (v < -ceilLin) v = -ceilLin;
         out[ch][i] = v;

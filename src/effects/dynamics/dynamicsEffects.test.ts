@@ -217,6 +217,43 @@ describe('limiterEffect', () => {
       expect(v).toBeCloseTo(0, 6);
     });
   });
+
+  it('forward-looking alignment: no zero pre-roll head, no dropped tail, length preserved', () => {
+    const input = sine(1000, 0.3, 1); // full-scale; ~2.2 cycles per 100 samples @44.1k
+    const out = run(limiterEffect, [input], { ceilingDb: -6, releaseMs: 50 });
+    const ceilLin = dbToLin(-6);
+    expect(out[0].length).toBe(input.length);
+    // FIRST 100 samples must already sit near the ceiling — the delayed-output
+    // design emitted a 5ms (221-sample) zero pre-roll from the delay-line fill.
+    const headPeak = maxAbs(out[0], 0, 100);
+    expect(headPeak).toBeGreaterThanOrEqual(ceilLin * 0.9);
+    expect(headPeak).toBeLessThanOrEqual(ceilLin + 1e-4);
+    // LAST 100 samples near the ceiling too (no dropped tail; release-edge tolerance).
+    const tailPeak = maxAbs(out[0], out[0].length - 100, out[0].length);
+    expect(tailPeak).toBeGreaterThanOrEqual(ceilLin * 0.85);
+    expect(tailPeak).toBeLessThanOrEqual(ceilLin + 1e-4);
+  });
+
+  it('preserves content in the final lookahead window (burst in the last 50 samples)', () => {
+    const n = 2000;
+    const input = new Float32Array(n);
+    for (let i = n - 50; i < n; i++) input[i] = 1; // full-scale burst at the very end
+    const out = run(limiterEffect, [input], { ceilingDb: -6, releaseMs: 50 });
+    const ceilLin = dbToLin(-6);
+    // The delayed-output design never emitted the last L input samples — this
+    // burst vanished entirely. It must appear in place, limited to the ceiling.
+    const burstPeak = maxAbs(out[0], n - 50, n);
+    expect(burstPeak).toBeGreaterThanOrEqual(ceilLin * 0.9);
+    expect(maxAbs(out[0])).toBeLessThanOrEqual(ceilLin + 1e-4);
+  });
+
+  it('keeps a quiet signal sample-aligned (no lookahead time shift)', () => {
+    const input = sine(1000, 0.1, dbToLin(-20)); // far below ceiling -> gain stays 1
+    const out = run(limiterEffect, [input], { ceilingDb: -6, releaseMs: 50 });
+    for (let i = 0; i < input.length; i += 7) {
+      expect(out[0][i]).toBeCloseTo(input[i], 5);
+    }
+  });
 });
 
 describe('noiseGateEffect', () => {
