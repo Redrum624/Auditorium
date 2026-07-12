@@ -10,6 +10,10 @@ import { graphicEqEffect } from './eq/GraphicEqEffect';
 import { compressorEffect } from './dynamics/CompressorEffect';
 import { limiterEffect } from './dynamics/LimiterEffect';
 import { noiseGateEffect } from './dynamics/NoiseGateEffect';
+import { echoEffect } from './time/EchoEffect';
+import { reverbEffect } from './time/ReverbEffect';
+import { chorusEffect } from './time/ChorusEffect';
+import { flangerEffect } from './time/FlangerEffect';
 
 let registered = false;
 
@@ -32,4 +36,8 @@ export function registerAllEffects(): void {
   registerEffect(compressorEffect);
   registerEffect(limiterEffect);
   registerEffect(noiseGateEffect);
+  registerEffect(echoEffect);
+  registerEffect(reverbEffect);
+  registerEffect(chorusEffect);
+  registerEffect(flangerEffect);
 }
