@@ -1,4 +1,5 @@
 import { docLength } from '../audio/AudioDocument';
+import { playbackEngine, type PlaybackPlayOptions } from '../audio/PlaybackEngine';
 import type { AppState } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 
@@ -187,9 +188,60 @@ function registerSelectionAndTransportCommands(): void {
       },
     },
 
-    stub('transport.playPause', 'Play/Pause', 'Space'),
-    stub('transport.stop', 'Stop'),
-    stub('transport.toggleLoop', 'Loop'),
+    {
+      id: 'transport.playPause',
+      label: 'Play/Pause',
+      shortcut: 'Space',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        const state = useAppStore.getState();
+        if (!activeDoc(state)) return;
+        const { selection, cursorSample, playback, setPlayback } = state;
+
+        // Playing -> pause, keeping the current position.
+        if (playbackEngine.state === 'playing') {
+          playbackEngine.pause();
+          setPlayback({ state: 'paused' });
+          return;
+        }
+
+        // Resume from the paused sample, else start at the selection or cursor.
+        const from =
+          playbackEngine.state === 'paused'
+            ? playbackEngine.getPositionSample()
+            : selection
+              ? selection.start
+              : cursorSample;
+
+        const opts: PlaybackPlayOptions = {};
+        if (selection) {
+          if (playback.loop) opts.loopRegion = selection;
+          else opts.playRegion = selection;
+        }
+        playbackEngine.play(from, opts);
+        setPlayback({ state: 'playing', positionSample: from });
+      },
+    },
+    {
+      id: 'transport.stop',
+      label: 'Stop',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        playbackEngine.stop();
+        useAppStore
+          .getState()
+          .setPlayback({ state: 'stopped', positionSample: playbackEngine.getPositionSample() });
+      },
+    },
+    {
+      id: 'transport.toggleLoop',
+      label: 'Loop',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        const { playback, setPlayback } = useAppStore.getState();
+        setPlayback({ loop: !playback.loop });
+      },
+    },
     stub('transport.record', 'Record'),
     stub('marker.add', 'Add Marker', 'M'),
   ]);

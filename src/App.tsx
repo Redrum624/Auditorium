@@ -3,6 +3,7 @@ import WaveformView from './components/Editor/WaveformView';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
+import TransportBar from './components/Layout/TransportBar';
 import { installShortcuts } from './services/shortcuts';
 import { useAppStore } from './stores/appStore';
 
@@ -40,8 +41,7 @@ export default function App() {
           <PanelShell title="Markers" />
         </div>
       </div>
-      {/* Task 9: transport bar */}
-      <div className="h-14 border-t border-[#3a3a42] bg-[#232328]" />
+      <TransportBar />
       <StatusBar />
     </div>
   );
