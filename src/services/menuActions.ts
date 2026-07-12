@@ -1,3 +1,4 @@
+import { docLength } from '../audio/AudioDocument';
 import type { AppState } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 
@@ -121,4 +122,78 @@ function registerDefaultCommands(): void {
   ]);
 }
 
+function activeDoc(s: AppState) {
+  return s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
+}
+
+/** Registers the selection/transport commands driven by keyboard shortcuts
+ * (Task 8). `edit.selectAll`, `edit.deselect`, `transport.goToStart` and
+ * `transport.goToEnd` are implemented against the store now; the rest of
+ * transport and `marker.add` remain disabled stubs until their owning tasks
+ * (9, 23) land. Overwrites the `edit.selectAll` stub registered above. */
+function registerSelectionAndTransportCommands(): void {
+  registerCommands([
+    {
+      id: 'edit.selectAll',
+      label: 'Select All',
+      shortcut: 'Ctrl+A',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        const { documents, activeDocumentId, setSelection } = useAppStore.getState();
+        const doc = documents.find((d) => d.id === activeDocumentId);
+        if (!doc) return;
+        setSelection({ start: 0, end: docLength(doc) });
+      },
+    },
+    {
+      id: 'edit.deselect',
+      label: 'Deselect',
+      shortcut: 'Esc',
+      enabled: (s) => s.selection !== null,
+      run: async () => {
+        useAppStore.getState().setSelection(null);
+      },
+    },
+    {
+      id: 'transport.goToStart',
+      label: 'Go to Start',
+      shortcut: 'Home',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        const { zoom, setCursor, setZoom } = useAppStore.getState();
+        setCursor(0);
+        setZoom({ samplesPerPixel: zoom.samplesPerPixel, scrollSample: 0 });
+      },
+    },
+    {
+      id: 'transport.goToEnd',
+      label: 'Go to End',
+      shortcut: 'End',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        const { documents, activeDocumentId, zoom, setCursor, setZoom } = useAppStore.getState();
+        const doc = documents.find((d) => d.id === activeDocumentId);
+        if (!doc) return;
+        const len = docLength(doc);
+        setCursor(len);
+        // The service layer doesn't know the viewport width (only the
+        // WaveformView component does), so it can't compute the exact
+        // scrollSample that puts the cursor at the right edge. Simplify by
+        // scrolling to the document length; any subsequent wheel zoom/scroll
+        // in WaveformView clamps scrollSample back into its valid range
+        // (see the onWheel handler's maxScroll), so this over-scroll is
+        // self-correcting rather than a permanent stuck state.
+        setZoom({ samplesPerPixel: zoom.samplesPerPixel, scrollSample: len });
+      },
+    },
+
+    stub('transport.playPause', 'Play/Pause', 'Space'),
+    stub('transport.stop', 'Stop'),
+    stub('transport.toggleLoop', 'Loop'),
+    stub('transport.record', 'Record'),
+    stub('marker.add', 'Add Marker', 'M'),
+  ]);
+}
+
 registerDefaultCommands();
+registerSelectionAndTransportCommands();

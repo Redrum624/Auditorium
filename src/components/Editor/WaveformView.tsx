@@ -1,10 +1,21 @@
 import { useEffect, useRef, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import { docLength } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { getPyramids } from '../../services/peaksCache';
 import { pixelToSample, renderWaveform } from './waveformRender';
+import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selectionGestures';
 import TimelineRuler from './TimelineRuler';
+
+/** Transient drag-selection state, kept in a ref (not store state) since it
+ * only matters between pointerdown and pointerup. */
+interface DragState {
+  anchorSample: number;
+  anchorX: number;
+  /** Once true, a live selection is being drawn and pointerup must not clear it. */
+  exceeded: boolean;
+}
 
 const MIN_SPP = 1 / 32;
 const ZOOM_FACTOR = 1.25;
@@ -114,11 +125,86 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
     return () => canvas.removeEventListener('wheel', onWheel);
   }, [size.width, length]);
 
+  const dragRef = useRef<DragState | null>(null);
+
+  function sampleAtClientX(clientX: number): { x: number; sample: number } {
+    const canvas = canvasRef.current;
+    const rect = canvas ? canvas.getBoundingClientRect() : { left: 0 };
+    const x = clientX - rect.left;
+    const sample = clamp(pixelToSample(x, zoom.scrollSample, zoom.samplesPerPixel), 0, length);
+    return { x, sample };
+  }
+
+  const handlePointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const { x, sample } = sampleAtClientX(e.clientX);
+    const { setCursor, setSelection } = useAppStore.getState();
+
+    setCursor(sample);
+
+    if (e.detail >= 2) {
+      // Double-click: select the entire document.
+      setSelection(length > 0 ? { start: 0, end: length } : null);
+      dragRef.current = null;
+      return;
+    }
+
+    if (typeof canvas.setPointerCapture === 'function') {
+      canvas.setPointerCapture(e.pointerId);
+    }
+
+    if (e.shiftKey) {
+      const anchor = shiftClickAnchor(sample, selection, cursorSample);
+      dragRef.current = { anchorSample: anchor, anchorX: x, exceeded: true };
+      setSelection(dragToSelection(anchor, sample));
+    } else {
+      dragRef.current = { anchorSample: sample, anchorX: x, exceeded: false };
+    }
+  };
+
+  const handlePointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const drag = dragRef.current;
+    if (!drag) return;
+    const { x, sample } = sampleAtClientX(e.clientX);
+
+    if (!drag.exceeded) {
+      if (!exceedsDragThreshold(drag.anchorX, x)) return;
+      drag.exceeded = true;
+    }
+    useAppStore.getState().setSelection(dragToSelection(drag.anchorSample, sample));
+  };
+
+  const handlePointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {
+    const canvas = canvasRef.current;
+    if (canvas && typeof canvas.releasePointerCapture === 'function') {
+      try {
+        canvas.releasePointerCapture(e.pointerId);
+      } catch {
+        // Capture may already have been released (e.g. lost on blur); ignore.
+      }
+    }
+    const drag = dragRef.current;
+    dragRef.current = null;
+    if (drag && !drag.exceeded) {
+      // Plain click with no movement: clears any existing selection.
+      useAppStore.getState().setSelection(null);
+    }
+  };
+
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#1a1a1e]" data-testid="waveform-view">
       <TimelineRuler sampleRate={doc.sampleRate} />
       <div ref={containerRef} className="relative min-h-0 min-w-0 flex-1">
-        <canvas ref={canvasRef} className="block h-full w-full" data-testid="waveform-canvas" />
+        <canvas
+          ref={canvasRef}
+          className="block h-full w-full"
+          data-testid="waveform-canvas"
+          onPointerDown={handlePointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerUp}
+        />
       </div>
     </div>
   );

@@ -1,7 +1,9 @@
+import { useEffect } from 'react';
 import WaveformView from './components/Editor/WaveformView';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
+import { installShortcuts } from './services/shortcuts';
 import { useAppStore } from './stores/appStore';
 
 export default function App() {
@@ -9,6 +11,9 @@ export default function App() {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
   const view = useAppStore((s) => s.view);
   const doc = documents.find((d) => d.id === activeDocumentId) ?? null;
+
+  // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
+  useEffect(() => installShortcuts(window), []);
 
   return (
     <div
