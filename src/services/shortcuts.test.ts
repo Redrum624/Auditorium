@@ -137,6 +137,33 @@ describe('installShortcuts', () => {
     expect(runCommandSpy).not.toHaveBeenCalled();
   });
 
+  it('ignores keydown events targeting a <select> element', () => {
+    const runCommandSpy = jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
+    uninstall = installShortcuts(window);
+
+    const select = document.createElement('select');
+    document.body.appendChild(select);
+    select.dispatchEvent(keydown({ key: 'z', ctrlKey: true }));
+    document.body.removeChild(select);
+
+    expect(runCommandSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores keydown events targeting a contentEditable element', () => {
+    const runCommandSpy = jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
+    uninstall = installShortcuts(window);
+
+    const div = document.createElement('div');
+    // jsdom does not implement isContentEditable (always undefined), so define
+    // it explicitly to exercise the contentEditable ignore branch.
+    Object.defineProperty(div, 'isContentEditable', { value: true });
+    document.body.appendChild(div);
+    div.dispatchEvent(keydown({ key: 'z', ctrlKey: true }));
+    document.body.removeChild(div);
+
+    expect(runCommandSpy).not.toHaveBeenCalled();
+  });
+
   it('ignores keydown events while composing (IME)', () => {
     const runCommandSpy = jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
     uninstall = installShortcuts(window);

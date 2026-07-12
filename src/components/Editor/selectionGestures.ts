@@ -14,16 +14,18 @@ export function dragToSelection(anchorSample: number, currentSample: number): Se
   return { start, end };
 }
 
-/** True once a pointer has moved past the minimum screen-pixel threshold,
- * used to distinguish a click (sets cursor only) from the start of a
+/** True once a pointer has moved at least the minimum screen-pixel threshold
+ * (inclusive: a 3px move with the default threshold counts as a drag), used
+ * to distinguish a click (sets cursor only) from the start of a
  * drag-selection. */
 export function exceedsDragThreshold(anchorX: number, currentX: number, thresholdPx = 3): boolean {
-  return Math.abs(currentX - anchorX) > thresholdPx;
+  return Math.abs(currentX - anchorX) >= thresholdPx;
 }
 
 /** Resolves the extension anchor sample for a shift+click: the edge of an
  * existing selection farthest from the click point (so the near edge is the
- * one that moves), or the current cursor position when there is no
+ * one that moves and the larger span is kept; an exact-midpoint tie keeps
+ * start as the anchor), or the current cursor position when there is no
  * selection yet. */
 export function shiftClickAnchor(
   clickSample: number,
@@ -31,5 +33,7 @@ export function shiftClickAnchor(
   cursorSample: number
 ): number {
   if (!selection) return cursorSample;
-  return clickSample >= selection.start ? selection.start : selection.end;
+  const distToStart = Math.abs(clickSample - selection.start);
+  const distToEnd = Math.abs(clickSample - selection.end);
+  return distToEnd > distToStart ? selection.end : selection.start;
 }
