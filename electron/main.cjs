@@ -1,7 +1,11 @@
 const { app, BrowserWindow } = require('electron');
 const path = require('node:path');
+const { registerIpc } = require('./ipc.cjs');
+const { setAppPaths } = require('./writePathPolicy.cjs');
 
 app.setName('audition_app');
+
+let mainWindow = null;
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -39,11 +43,15 @@ function createWindow() {
     }
   });
 
+  mainWindow = win;
   return win;
 }
 
 app.whenReady().then(() => {
+  setAppPaths({ appPath: app.getAppPath(), userData: app.getPath('userData') });
+
   createWindow();
+  registerIpc(() => mainWindow);
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
