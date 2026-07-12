@@ -11,6 +11,18 @@ const { assertWriteAllowed, assertWriteTargetSafe } = require('./writePathPolicy
 // case-insensitive and immune to '..'/relative-segment mismatches.
 const approvedReadPaths = new Set();
 
+// TEST-ONLY: the scripted smoke harness sets AUDITORIUM_TEST=1 so it can
+// openPath()/exportActive()/saveActiveAs() without native dialogs. In that mode
+// only, reads are auto-approved and writes are permitted under <cwd>/test-output/
+// (which the production write policy would otherwise reject as inside the app
+// path). Never true in a normal run.
+const IS_TEST = process.env.AUDITORIUM_TEST === '1';
+const TEST_OUTPUT_DIR = path.resolve(process.cwd(), 'test-output');
+
+function isUnderTestOutput(resolvedPath) {
+  return resolvedPath === TEST_OUTPUT_DIR || resolvedPath.startsWith(TEST_OUTPUT_DIR + path.sep);
+}
+
 function normalizeForApproval(rawPath) {
   return path.resolve(rawPath).toLowerCase();
 }
@@ -36,7 +48,7 @@ const _testing = { approvePath, isReadApproved, resetApproved };
  */
 function registerIpc(getWin) {
   ipcMain.handle('file:read', async (_event, filePath) => {
-    if (!isReadApproved(filePath)) {
+    if (!IS_TEST && !isReadApproved(filePath)) {
       throw new Error('Read not permitted: path was not user-approved');
     }
     return fs.promises.readFile(path.resolve(filePath));
@@ -44,9 +56,15 @@ function registerIpc(getWin) {
 
   ipcMain.handle('file:write', async (_event, filePath, arrayBuffer) => {
     try {
-      assertWriteAllowed(filePath);
       const resolved = path.resolve(filePath);
-      assertWriteTargetSafe(resolved);
+      if (IS_TEST && isUnderTestOutput(resolved)) {
+        // Test-only escape hatch: writes under test-output/ bypass the write
+        // policy (see IS_TEST comment). Ensure the dir exists first.
+        await fs.promises.mkdir(path.dirname(resolved), { recursive: true });
+      } else {
+        assertWriteAllowed(filePath);
+        assertWriteTargetSafe(resolved);
+      }
       await fs.promises.writeFile(resolved, Buffer.from(arrayBuffer));
       return { ok: true };
     } catch (err) {

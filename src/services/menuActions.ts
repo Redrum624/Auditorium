@@ -10,6 +10,8 @@ import {
 } from './editOps';
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { getClipboard } from './clipboard';
+import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
+import { openExportDialog, openNewFileDialog } from './dialogBus';
 
 export interface MenuCommand {
   id: string;
@@ -313,6 +315,71 @@ function registerEditCommands(): void {
   ]);
 }
 
+/** Registers the real File > * commands (Task 11), overwriting the disabled
+ * stubs. New/Open are always available; Save/Save As/Export/Close require an
+ * active document. New and Export open React dialogs via the dialog bus; the
+ * rest drive the fileService flows. run() is async so awaits propagate. */
+function registerFileCommands(): void {
+  const hasDoc = (s: AppState) => activeDoc(s) !== null;
+  const activeId = () => useAppStore.getState().activeDocumentId;
+  registerCommands([
+    {
+      id: 'file.new',
+      label: 'New',
+      shortcut: 'Ctrl+N',
+      enabled: () => true,
+      run: async () => openNewFileDialog(),
+    },
+    {
+      id: 'file.open',
+      label: 'Open…',
+      shortcut: 'Ctrl+O',
+      enabled: () => true,
+      run: async () => {
+        await openFilesViaDialog();
+      },
+    },
+    {
+      id: 'file.save',
+      label: 'Save',
+      shortcut: 'Ctrl+S',
+      enabled: hasDoc,
+      run: async () => {
+        const id = activeId();
+        if (id) await saveDocument(id);
+      },
+    },
+    {
+      id: 'file.saveAs',
+      label: 'Save As…',
+      shortcut: 'Ctrl+Shift+S',
+      enabled: hasDoc,
+      run: async () => {
+        const id = activeId();
+        if (id) await saveDocument(id, true);
+      },
+    },
+    {
+      id: 'file.export',
+      label: 'Export…',
+      shortcut: 'Ctrl+E',
+      enabled: hasDoc,
+      run: async () => openExportDialog(),
+    },
+    {
+      id: 'file.close',
+      label: 'Close',
+      shortcut: 'Ctrl+W',
+      enabled: hasDoc,
+      run: async () => {
+        const id = activeId();
+        if (id) await closeDocumentFlow(id);
+      },
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
+registerFileCommands();

@@ -6,4 +6,5 @@ installer/
 .superpowers/
 .claude/
 docs/superpowers/plans/.parts/
+test-assets/
 test-output/

@@ -90,12 +90,12 @@ describe('getMenuSections', () => {
     ]);
   });
 
-  it('unregistered File/Edit stub commands report disabled', () => {
+  it('File commands needing an active document report disabled when none is open', () => {
     const file = getMenuSections().find((s) => s.title === 'File')!;
-    const newCmd = file.items.find(
-      (item): item is MenuCommand => item !== 'separator' && item.id === 'file.new'
+    const saveCmd = file.items.find(
+      (item): item is MenuCommand => item !== 'separator' && item.id === 'file.save'
     )!;
-    expect(newCmd.enabled(useAppStore.getState())).toBe(false);
+    expect(saveCmd.enabled(useAppStore.getState())).toBe(false);
   });
 
   it('Help section exposes an enabled about command', () => {

@@ -20,12 +20,13 @@ describe('MenuBar', () => {
     expect(screen.getByText('Open…')).toBeInTheDocument();
   });
 
-  it('marks a disabled stub item as disabled', () => {
+  it('marks an item that needs an active document as disabled', () => {
     render(<MenuBar />);
     fireEvent.click(screen.getByRole('button', { name: 'File' }));
 
-    const openItem = screen.getByRole('button', { name: /Open…/ });
-    expect(openItem).toBeDisabled();
+    // Export requires an active document; with none open it is disabled.
+    const exportItem = screen.getByRole('button', { name: /Export…/ });
+    expect(exportItem).toBeDisabled();
   });
 
   it('closes the dropdown on Escape', () => {

@@ -33,6 +33,15 @@ Object.freeze(electronAPI);
 
 contextBridge.exposeInMainWorld('electronAPI', electronAPI);
 
+// TEST-ONLY: expose whether the app was launched by the smoke harness so
+// App.tsx can install its window.__test hooks. The flag arrives via
+// webPreferences.additionalArguments (see electron/main.cjs); false in a
+// normal run.
+contextBridge.exposeInMainWorld(
+  '__auditoriumTest',
+  process.argv.includes('--auditorium-test')
+);
+
 delete window.module;
 delete window.exports;
 delete window.require;

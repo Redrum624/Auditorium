@@ -1,11 +1,16 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import WaveformView from './components/Editor/WaveformView';
+import ExportDialog from './components/Dialogs/ExportDialog';
+import NewFileDialog from './components/Dialogs/NewFileDialog';
+import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
 import TransportBar from './components/Layout/TransportBar';
+import { registerDialogSetters } from './services/dialogBus';
 import { installShortcuts } from './services/shortcuts';
+import { installTestHooks } from './services/testHooks';
 import { useAppStore } from './stores/appStore';
 
 export default function App() {
@@ -14,8 +19,41 @@ export default function App() {
   const view = useAppStore((s) => s.view);
   const doc = documents.find((d) => d.id === activeDocumentId) ?? null;
 
+  const [exportOpen, setExportOpen] = useState(false);
+  const [newFileOpen, setNewFileOpen] = useState(false);
+
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
+
+  // Let the file.new / file.export commands open these React dialogs (Task 11).
+  useEffect(
+    () =>
+      registerDialogSetters({
+        openNewFileDialog: () => setNewFileOpen(true),
+        openExportDialog: () => setExportOpen(true),
+      }),
+    []
+  );
+
+  // Scripted-smoke test hooks — only when the preload flagged test mode.
+  useEffect(() => {
+    if ((window as unknown as { __auditoriumTest?: boolean }).__auditoriumTest) {
+      installTestHooks();
+    }
+  }, []);
+
+  // Best-effort guard against losing unsaved edits on window close/reload.
+  // Full native close interception is a v2 item (see task brief).
+  const hasDirty = documents.some((d) => d.dirty);
+  useEffect(() => {
+    if (!hasDirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      e.returnValue = '';
+    };
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [hasDirty]);
 
   return (
     <div
@@ -25,7 +63,9 @@ export default function App() {
       <TitleBar />
       <div className="flex min-h-0 flex-1">
         <div className="flex w-[240px] flex-col border-r border-[#3a3a42] bg-[#232328]">
-          <PanelShell title="Files" />
+          <PanelShell title="Files">
+            <FilesPanel />
+          </PanelShell>
           <PanelShell title="Effects" />
         </div>
         <div className="flex min-w-0 flex-1 flex-col bg-[#1a1a1e]">
@@ -46,6 +86,9 @@ export default function App() {
       </div>
       <TransportBar />
       <StatusBar />
+
+      {newFileOpen && <NewFileDialog onClose={() => setNewFileOpen(false)} />}
+      {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}
     </div>
   );
 }

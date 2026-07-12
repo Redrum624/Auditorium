@@ -21,7 +21,11 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
-      webSecurity: true
+      webSecurity: true,
+      // TEST-ONLY: forward the smoke-harness flag into the sandboxed preload via
+      // process.argv (the documented channel for sandboxed preloads). Empty in
+      // any normal run, so the renderer never installs test hooks in production.
+      additionalArguments: process.env.AUDITORIUM_TEST === '1' ? ['--auditorium-test'] : []
     }
   });
 
