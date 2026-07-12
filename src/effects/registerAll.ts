@@ -7,6 +7,9 @@ import { invertEffect } from './basic/InvertEffect';
 import { dcRemoveEffect } from './basic/DcRemoveEffect';
 import { parametricEqEffect } from './eq/ParametricEqEffect';
 import { graphicEqEffect } from './eq/GraphicEqEffect';
+import { compressorEffect } from './dynamics/CompressorEffect';
+import { limiterEffect } from './dynamics/LimiterEffect';
+import { noiseGateEffect } from './dynamics/NoiseGateEffect';
 
 let registered = false;
 
@@ -26,4 +29,7 @@ export function registerAllEffects(): void {
   registerEffect(dcRemoveEffect);
   registerEffect(parametricEqEffect);
   registerEffect(graphicEqEffect);
+  registerEffect(compressorEffect);
+  registerEffect(limiterEffect);
+  registerEffect(noiseGateEffect);
 }
