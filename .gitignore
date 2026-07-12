@@ -1,0 +1,9 @@
+node_modules/
+dist/
+release/
+installer/
+*.log
+.superpowers/
+.claude/
+docs/superpowers/plans/.parts/
+test-output/
