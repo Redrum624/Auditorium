@@ -136,25 +136,67 @@ describe('parametricEqEffect', () => {
     ).not.toThrow();
   });
 
-  it('exposes the exact param ids from the brief, in hp -> band1..5 -> lp order', () => {
-    const ids = parametricEqEffect.params.map((p) => p.id);
-    expect(ids[0]).toBe('hpEnabled');
-    expect(ids[1]).toBe('hpFreq');
-    expect(ids[ids.length - 2]).toBe('lpEnabled');
-    expect(ids[ids.length - 1]).toBe('lpFreq');
-    for (let n = 1; n <= 5; n++) {
-      expect(ids).toContain(`band${n}Enabled`);
-      expect(ids).toContain(`band${n}Freq`);
-      expect(ids).toContain(`band${n}Gain`);
-      expect(ids).toContain(`band${n}Q`);
-    }
-    expect(ids).toContain('band1Type');
-    expect(ids).toContain('band5Type');
-    expect(ids).not.toContain('band2Type');
-    expect(ids).not.toContain('band3Type');
-    expect(ids).not.toContain('band4Type');
-    // band index order: band1's params must all precede band2's.
-    expect(ids.indexOf('band1Q')).toBeLessThan(ids.indexOf('band2Enabled'));
+  it('pins the complete param id order: hp, band1(+type)..band4, band5(+type), lp', () => {
+    expect(parametricEqEffect.params.map((p) => p.id)).toEqual([
+      'hpEnabled',
+      'hpFreq',
+      'band1Enabled',
+      'band1Freq',
+      'band1Gain',
+      'band1Q',
+      'band1Type',
+      'band2Enabled',
+      'band2Freq',
+      'band2Gain',
+      'band2Q',
+      'band3Enabled',
+      'band3Freq',
+      'band3Gain',
+      'band3Q',
+      'band4Enabled',
+      'band4Freq',
+      'band4Gain',
+      'band4Q',
+      'band5Enabled',
+      'band5Freq',
+      'band5Gain',
+      'band5Q',
+      'band5Type',
+      'lpEnabled',
+      'lpFreq',
+    ]);
+  });
+
+  it('band1Type=lowshelf +12dB @100Hz boosts a 30Hz probe ~x4, diverging >2x from peaking', () => {
+    const base = {
+      ...disableAllBands,
+      band1Enabled: true,
+      band1Freq: 100,
+      band1Gain: 12,
+      band1Q: 1,
+    };
+    const shelfGain = probeGain(parametricEqEffect, 30, { ...base, band1Type: 'lowshelf' });
+    const peakGain = probeGain(parametricEqEffect, 30, { ...base, band1Type: 'peaking' });
+    // Low-shelf boosts everything below its corner (~x4 at 30Hz); a Q=1 peaking
+    // bell centered at 100Hz has already fallen back near unity by 30Hz.
+    expect(Math.abs(shelfGain - 4) / 4).toBeLessThan(0.1);
+    expect(shelfGain / peakGain).toBeGreaterThan(2);
+  });
+
+  it('band5Type=highshelf +12dB @10kHz boosts a 16kHz probe ~x4, diverging >2x from peaking', () => {
+    const base = {
+      ...disableAllBands,
+      band5Enabled: true,
+      band5Freq: 10000,
+      band5Gain: 12,
+      band5Q: 1,
+    };
+    const shelfGain = probeGain(parametricEqEffect, 16000, { ...base, band5Type: 'highshelf' });
+    const peakGain = probeGain(parametricEqEffect, 16000, { ...base, band5Type: 'peaking' });
+    // High-shelf boosts everything above its corner (~x4 at 16kHz); a Q=1
+    // peaking bell centered at 10kHz has largely fallen back by 16kHz.
+    expect(Math.abs(shelfGain - 4) / 4).toBeLessThan(0.1);
+    expect(shelfGain / peakGain).toBeGreaterThan(2);
   });
 
   it('defaults match the brief: band1-3 enabled, band4-5 disabled, HP/LP off', () => {
