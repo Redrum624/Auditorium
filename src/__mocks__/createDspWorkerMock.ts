@@ -32,6 +32,13 @@ class FakeDspWorker {
       try {
         const def = getEffect(msg.effectId);
         if (!def) throw new Error(`Unknown effect: ${msg.effectId}`);
+
+        // Mirror the real worker's Task 19 side channel exactly (dsp.worker.ts):
+        // expose `extra` to process() via a module-level global, cleaned up below.
+        if (msg.extra !== undefined) {
+          (globalThis as { __effectExtra?: unknown }).__effectExtra = msg.extra;
+        }
+
         this.emit({ type: 'progress', id: msg.id, fraction: 0.5 });
         const result = def.process(msg.channels, msg.sampleRate, msg.params);
         this.emit({ type: 'done', id: msg.id, channels: result.channels });
@@ -41,6 +48,8 @@ class FakeDspWorker {
           id: msg.id,
           message: err instanceof Error ? err.message : String(err),
         });
+      } finally {
+        delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
       }
     });
   }

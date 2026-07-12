@@ -18,11 +18,20 @@ let nextRunId = 1;
  * committed through `applyEdit` (so it is undoable), replacing the region — which
  * also handles length-changing effects — and the selection is updated to span the
  * new region extent. On worker error, an error dialog is shown and NO edit is made.
+ *
+ * The promise ALWAYS resolves (never rejects, never hangs): if applying the result
+ * fails — e.g. the document was closed while the worker was busy — the failure is
+ * surfaced via an error dialog and the promise resolves with no edit applied, so
+ * callers (EffectDialog's busy state) reliably settle.
+ *
+ * `extra` is an opaque payload forwarded to the worker's `__effectExtra` side
+ * channel (reserved for Task 19's noise profile).
  */
 export async function runEffectOnSelection(
   effectId: string,
   params: Record<string, EffectParamValue>,
-  onProgress?: (fraction: number) => void
+  onProgress?: (fraction: number) => void,
+  extra?: unknown
 ): Promise<void> {
   const state = useAppStore.getState();
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
@@ -54,14 +63,25 @@ export async function runEffectOnSelection(
         worker.terminate();
         const resultChannels = msg.channels;
         const resultLen = resultChannels[0]?.length ?? 0;
-        applyEdit(
-          `Effect: ${def.name}`,
-          docId,
-          (d) => replaceRegion(d, start, end, resultChannels),
-          { selection: { start, end: start + resultLen }, cursorSample: start }
-        );
-        onProgress?.(1);
-        resolve();
+        try {
+          applyEdit(
+            `Effect: ${def.name}`,
+            docId,
+            (d) => replaceRegion(d, start, end, resultChannels),
+            { selection: { start, end: start + resultLen }, cursorSample: start }
+          );
+          onProgress?.(1);
+        } catch (err) {
+          // The doc may have been closed/removed while the worker was busy.
+          // Surface it and settle — no edit was applied.
+          void window.electronAPI?.showMessageBox({
+            type: 'error',
+            title: 'Effect failed',
+            message: err instanceof Error ? err.message : String(err),
+          });
+        } finally {
+          resolve();
+        }
         return;
       }
 
@@ -77,7 +97,7 @@ export async function runEffectOnSelection(
 
     const transfer = regionChannels.map((c) => c.buffer as ArrayBuffer);
     worker.postMessage(
-      { type: 'run', id: runId, effectId, channels: regionChannels, sampleRate, params },
+      { type: 'run', id: runId, effectId, channels: regionChannels, sampleRate, params, extra },
       transfer
     );
   });

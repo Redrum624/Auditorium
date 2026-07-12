@@ -85,6 +85,48 @@ describe('runEffectOnSelection', () => {
     expect(s.selection).toEqual({ start: 0, end: 5 });
   });
 
+  it('passes extra through to the worker-side channel (__effectExtra) and cleans it up', async () => {
+    let seen: unknown = 'unset';
+    registerEffect({
+      id: 'test-extra',
+      name: 'Extra Reader',
+      category: 'Utility',
+      params: [],
+      process: (channels) => {
+        seen = (globalThis as { __effectExtra?: unknown }).__effectExtra;
+        return { channels: channels.map((c) => c.slice()) };
+      },
+    });
+    seedDoc([0.1, 0.2]);
+
+    await runEffectOnSelection('test-extra', {}, undefined, { profile: [1, 2, 3] });
+
+    expect(seen).toEqual({ profile: [1, 2, 3] });
+    // The side channel must not leak past the run.
+    expect((globalThis as { __effectExtra?: unknown }).__effectExtra).toBeUndefined();
+  });
+
+  it('settles (no hang) when applyEdit fails because the doc was closed mid-run', async () => {
+    registerEffect({
+      id: 'test-close-doc',
+      name: 'Close Doc',
+      category: 'Utility',
+      params: [],
+      process: (channels) => {
+        // Simulate the user closing the document while the worker was busy.
+        const s = useAppStore.getState();
+        if (s.activeDocumentId) s.closeDocument(s.activeDocumentId);
+        return { channels: channels.map((c) => c.slice()) };
+      },
+    });
+    const docId = seedDoc([0.1, 0.2, 0.3]);
+
+    // Must resolve (not hang, not reject) even though applyEdit throws
+    // 'document not found' in the done branch.
+    await expect(runEffectOnSelection('test-close-doc', {})).resolves.toBeUndefined();
+    expect(canUndo(docId)).toBe(false);
+  });
+
   it('applies no edit when the effect throws (error path)', async () => {
     registerEffect({
       id: 'test-throw',
