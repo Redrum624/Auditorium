@@ -1,0 +1,224 @@
+// Pure waveform drawing. The canvas context is injected so this is fully
+// testable with a recording stub. All coordinates are CSS pixels; the caller
+// is responsible for devicePixelRatio scaling (ctx.setTransform).
+
+import { getPeaksForRange, type PeakPyramid } from '../../audio/peaks';
+import type { SelectionRange } from '../../stores/appStore';
+
+export interface RenderOpts {
+  width: number;
+  height: number;
+  channels: Float32Array[];
+  pyramids: PeakPyramid[];
+  scrollSample: number;
+  samplesPerPixel: number;
+  selection: SelectionRange | null;
+  cursorSample: number;
+  playheadSample: number | null;
+  /** Optional marker overlay (Task 23). Default: none. */
+  markers?: { positionSample: number }[];
+}
+
+const BG = '#1a1a1e';
+const AXIS = '#3a3a42';
+const BODY = 'rgba(38,198,218,0.7)'; // #26c6da @ 70%
+const CENTER = '#26c6da';
+const SELECTION_FILL = '#26c6da22';
+const SELECTION_EDGE = '#26c6da';
+const CURSOR = '#ffffff';
+const PLAYHEAD = '#ffd54f';
+const MARKER = '#ff8a65';
+
+/** Fraction of a half-lane a full-scale (|v|=1) sample occupies (leaves margin). */
+const VSCALE = 0.9;
+
+/** Convert a pixel x within the canvas to an absolute sample index. */
+export function pixelToSample(x: number, scrollSample: number, samplesPerPixel: number): number {
+  return scrollSample + x * samplesPerPixel;
+}
+
+/** Convert an absolute sample index to a pixel x within the canvas. */
+export function sampleToPixel(s: number, scrollSample: number, samplesPerPixel: number): number {
+  return (s - scrollSample) / samplesPerPixel;
+}
+
+function verticalLine(ctx: CanvasRenderingContext2D, x: number, height: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x, 0);
+  ctx.lineTo(x, height);
+  ctx.stroke();
+}
+
+export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts): void {
+  const {
+    width,
+    height,
+    channels,
+    pyramids,
+    scrollSample,
+    samplesPerPixel,
+    selection,
+    cursorSample,
+    playheadSample,
+    markers = [],
+  } = opts;
+
+  // Background.
+  ctx.fillStyle = BG;
+  ctx.fillRect(0, 0, width, height);
+
+  if (width <= 0 || height <= 0 || channels.length === 0) return;
+
+  const laneH = height / channels.length;
+  const startSample = scrollSample;
+  const endSample = scrollSample + width * samplesPerPixel;
+
+  for (let ch = 0; ch < channels.length; ch++) {
+    const channel = channels[ch];
+    const laneTop = ch * laneH;
+    const center = laneTop + laneH / 2;
+    const amp = (laneH / 2) * VSCALE;
+
+    // Zero-axis reference line.
+    ctx.strokeStyle = AXIS;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, center);
+    ctx.lineTo(width, center);
+    ctx.stroke();
+
+    if (samplesPerPixel >= 1) {
+      drawBuckets(ctx, channel, pyramids[ch], width, startSample, endSample, center, amp);
+    } else {
+      drawSamples(ctx, channel, width, scrollSample, samplesPerPixel, center, amp);
+    }
+  }
+
+  drawSelection(ctx, selection, height, scrollSample, samplesPerPixel, width);
+  drawMarkers(ctx, markers, height, scrollSample, samplesPerPixel, width);
+
+  // Cursor (white) and playhead (yellow) overlays.
+  const cx = sampleToPixel(cursorSample, scrollSample, samplesPerPixel);
+  if (cx >= 0 && cx <= width) {
+    ctx.strokeStyle = CURSOR;
+    verticalLine(ctx, cx, height);
+  }
+  if (playheadSample != null) {
+    const px = sampleToPixel(playheadSample, scrollSample, samplesPerPixel);
+    if (px >= 0 && px <= width) {
+      ctx.strokeStyle = PLAYHEAD;
+      verticalLine(ctx, px, height);
+    }
+  }
+}
+
+/** Bucket mode: one translucent min/max bar per pixel column plus a solid
+ * center trace. Used when each pixel spans >= 1 sample. */
+function drawBuckets(
+  ctx: CanvasRenderingContext2D,
+  channel: Float32Array,
+  pyramid: PeakPyramid,
+  width: number,
+  startSample: number,
+  endSample: number,
+  center: number,
+  amp: number
+): void {
+  const cols = Math.max(1, Math.floor(width));
+  const { min, max } = getPeaksForRange(pyramid, channel, startSample, endSample, cols);
+
+  // Translucent envelope body.
+  ctx.fillStyle = BODY;
+  for (let x = 0; x < cols; x++) {
+    const yTop = center - max[x] * amp;
+    const yBot = center - min[x] * amp;
+    ctx.fillRect(x, yTop, 1, Math.max(1, yBot - yTop));
+  }
+
+  // Solid center trace (midpoint of each column) for a brighter core.
+  ctx.fillStyle = CENTER;
+  for (let x = 0; x < cols; x++) {
+    const mid = (min[x] + max[x]) / 2;
+    ctx.fillRect(x, center - mid * amp, 1, 1);
+  }
+}
+
+/** Per-sample mode: connected polyline through individual samples, with small
+ * square dots when zoomed in far enough. Used when a pixel spans < 1 sample. */
+function drawSamples(
+  ctx: CanvasRenderingContext2D,
+  channel: Float32Array,
+  width: number,
+  scrollSample: number,
+  samplesPerPixel: number,
+  center: number,
+  amp: number
+): void {
+  const endSample = scrollSample + width * samplesPerPixel;
+  const first = Math.max(0, Math.floor(scrollSample));
+  const last = Math.min(channel.length - 1, Math.ceil(endSample));
+  if (last < first) return;
+
+  ctx.strokeStyle = CENTER;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let s = first; s <= last; s++) {
+    const x = sampleToPixel(s, scrollSample, samplesPerPixel);
+    const y = center - channel[s] * amp;
+    if (s === first) ctx.moveTo(x, y);
+    else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  if (samplesPerPixel < 1 / 8) {
+    ctx.fillStyle = CENTER;
+    for (let s = first; s <= last; s++) {
+      const x = sampleToPixel(s, scrollSample, samplesPerPixel);
+      const y = center - channel[s] * amp;
+      ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+    }
+  }
+}
+
+function drawSelection(
+  ctx: CanvasRenderingContext2D,
+  selection: SelectionRange | null,
+  height: number,
+  scrollSample: number,
+  samplesPerPixel: number,
+  width: number
+): void {
+  if (!selection || selection.end <= selection.start) return;
+  const x0 = sampleToPixel(selection.start, scrollSample, samplesPerPixel);
+  const x1 = sampleToPixel(selection.end, scrollSample, samplesPerPixel);
+  const left = Math.max(0, Math.min(x0, x1));
+  const right = Math.min(width, Math.max(x0, x1));
+  if (right <= left) return;
+
+  ctx.fillStyle = SELECTION_FILL;
+  ctx.fillRect(left, 0, right - left, height);
+
+  ctx.strokeStyle = SELECTION_EDGE;
+  ctx.lineWidth = 1;
+  if (x0 >= 0 && x0 <= width) verticalLine(ctx, x0, height);
+  if (x1 >= 0 && x1 <= width) verticalLine(ctx, x1, height);
+}
+
+function drawMarkers(
+  ctx: CanvasRenderingContext2D,
+  markers: { positionSample: number }[],
+  height: number,
+  scrollSample: number,
+  samplesPerPixel: number,
+  width: number
+): void {
+  if (markers.length === 0) return;
+  ctx.strokeStyle = MARKER;
+  ctx.lineWidth = 1;
+  ctx.setLineDash([4, 3]);
+  for (const m of markers) {
+    const mx = sampleToPixel(m.positionSample, scrollSample, samplesPerPixel);
+    if (mx >= 0 && mx <= width) verticalLine(ctx, mx, height);
+  }
+  ctx.setLineDash([]);
+}

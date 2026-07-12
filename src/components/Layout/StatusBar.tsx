@@ -1,5 +1,6 @@
 import { docLength } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
+import { formatTime } from '../../utils/timeFormat';
 
 export default function StatusBar() {
   const documents = useAppStore((s) => s.documents);
@@ -12,11 +13,13 @@ export default function StatusBar() {
 
   return (
     <div className="flex h-6 items-center gap-4 border-t border-[#3a3a42] bg-[#232328] px-3 text-xs text-[#8b8b92]">
-      {/* Task 7 swaps to formatTime */}
-      <span>cursor {cursorSample} smp</span>
+      <span>cursor {doc ? formatTime(cursorSample, doc.sampleRate) : '—'}</span>
       <span>
-        {selection
-          ? `sel ${selection.start}–${selection.end} smp (${selection.end - selection.start} smp)`
+        {doc && selection
+          ? `sel ${formatTime(selection.start, doc.sampleRate)}–${formatTime(
+              selection.end,
+              doc.sampleRate
+            )} (${formatTime(selection.end - selection.start, doc.sampleRate)})`
           : 'sel —'}
       </span>
       <span>
