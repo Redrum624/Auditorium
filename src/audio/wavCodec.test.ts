@@ -129,17 +129,31 @@ describe('decodeWav error handling', () => {
 
   it('rejects an unsupported fmt audio format code', () => {
     const buf = buildFmtOnlyWav({ audioFormat: 2, numChannels: 1, sampleRate: SAMPLE_RATE, bitsPerSample: 16 });
-    expect(() => decodeWav(buf)).toThrow();
+    expect(() => decodeWav(buf)).toThrow('Unsupported WAV audio format code: 2');
   });
 
   it('rejects PCM (fmt=1) with an unsupported bit depth', () => {
     const buf = buildFmtOnlyWav({ audioFormat: 1, numChannels: 1, sampleRate: SAMPLE_RATE, bitsPerSample: 12 });
-    expect(() => decodeWav(buf)).toThrow();
+    expect(() => decodeWav(buf)).toThrow('Unsupported PCM bit depth: 12');
   });
 
   it('rejects IEEE float (fmt=3) with bits other than 32', () => {
     const buf = buildFmtOnlyWav({ audioFormat: 3, numChannels: 1, sampleRate: SAMPLE_RATE, bitsPerSample: 16 });
-    expect(() => decodeWav(buf)).toThrow();
+    expect(() => decodeWav(buf)).toThrow('Unsupported IEEE float bit depth: 16');
+  });
+
+  it('rejects a buffer cut off in the middle of the fmt chunk with a clean Error', () => {
+    const full = buildFmtOnlyWav({ audioFormat: 1, numChannels: 1, sampleRate: SAMPLE_RATE, bitsPerSample: 16 });
+    // Keep RIFF header (12) + fmt chunk header (8) but only 6 of the 16 declared fmt bytes.
+    const truncated = full.slice(0, 12 + 8 + 6);
+    expect(() => decodeWav(truncated)).toThrow('truncated fmt chunk');
+  });
+
+  it('rejects a fmt chunk whose declared size is smaller than 16 with a clean Error', () => {
+    const buf = buildFmtOnlyWav({ audioFormat: 1, numChannels: 1, sampleRate: SAMPLE_RATE, bitsPerSample: 16 });
+    const view = new DataView(buf);
+    view.setUint32(16, 12, true); // lie: fmt chunkSize = 12 (< minimum 16)
+    expect(() => decodeWav(buf)).toThrow('truncated fmt chunk');
   });
 });
 
@@ -156,6 +170,18 @@ describe('encodeWav clipping', () => {
     const view = new DataView(buf);
     const sample = view.getInt16(44, true);
     expect(sample).toBe(-32768);
+  });
+});
+
+describe('decodeWav clamping', () => {
+  it('clamps a foreign full-scale 16-bit sample (-32768) to exactly -1', () => {
+    // Foreign encoders using a /32768 write scale can emit -32768; after our
+    // symmetric /32767 normalization that would be ~-1.0000305 without clamping.
+    const buf = buildRaw16BitWav([-32768, 32767, 0], SAMPLE_RATE);
+    const decoded = decodeWav(buf);
+    expect(decoded.channels[0][0]).toBe(-1);
+    expect(decoded.channels[0][1]).toBe(1);
+    expect(decoded.channels[0][2]).toBe(0);
   });
 });
 
@@ -192,6 +218,30 @@ function buildFmtOnlyWav(fmt: {
   view.setUint32(28, byteRate, true);
   view.setUint16(32, blockAlign, true);
   view.setUint16(34, fmt.bitsPerSample, true);
+  return buffer;
+}
+
+/** Builds a mono 16-bit PCM WAV from raw int16 sample values (no float scaling), as a foreign encoder would. */
+function buildRaw16BitWav(rawSamples: number[], sampleRate: number): ArrayBuffer {
+  const dataSize = rawSamples.length * 2;
+  const buffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(buffer);
+  writeAscii(view, 0, 'RIFF');
+  view.setUint32(4, buffer.byteLength - 8, true);
+  writeAscii(view, 8, 'WAVE');
+  writeAscii(view, 12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true); // PCM
+  view.setUint16(22, 1, true); // mono
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeAscii(view, 36, 'data');
+  view.setUint32(40, dataSize, true);
+  for (let i = 0; i < rawSamples.length; i++) {
+    view.setInt16(44 + i * 2, rawSamples[i], true);
+  }
   return buffer;
 }
 

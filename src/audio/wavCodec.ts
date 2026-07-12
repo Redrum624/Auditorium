@@ -109,6 +109,9 @@ export function decodeWav(buf: ArrayBuffer): { channels: Float32Array[]; sampleR
     const chunkDataStart = offset + 8;
 
     if (chunkId === 'fmt ') {
+      if (chunkSize < 16 || chunkDataStart + 16 > view.byteLength) {
+        throw new Error('Invalid WAV: truncated fmt chunk');
+      }
       fmt = {
         audioFormat: view.getUint16(chunkDataStart, true),
         numChannels: view.getUint16(chunkDataStart + 2, true),
@@ -162,6 +165,12 @@ export function decodeWav(buf: ArrayBuffer): { channels: Float32Array[]; sampleR
       } else {
         // 32-bit PCM integer
         sample = view.getInt32(pos, true) / 2147483647;
+      }
+      if (fmt.audioFormat !== FMT_IEEE_FLOAT) {
+        // Foreign encoders using a 2^(n-1) write scale can emit full-scale
+        // negative samples (e.g. -32768) that normalize slightly below -1;
+        // clamp so the app-wide [-1, 1] contract holds.
+        sample = Math.max(-1, Math.min(1, sample));
       }
       channels[ch][frame] = sample;
       pos += bytesPerSample;
