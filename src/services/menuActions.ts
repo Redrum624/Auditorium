@@ -2,6 +2,14 @@ import { docLength } from '../audio/AudioDocument';
 import { playbackEngine, type PlaybackPlayOptions } from '../audio/PlaybackEngine';
 import type { AppState } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
+import {
+  cutSelection,
+  copySelection,
+  pasteAtCursor,
+  deleteSelection,
+} from './editOps';
+import { canRedo, canUndo, redo, undo } from './undoHistory';
+import { getClipboard } from './clipboard';
 
 export interface MenuCommand {
   id: string;
@@ -247,5 +255,64 @@ function registerSelectionAndTransportCommands(): void {
   ]);
 }
 
+/** Registers the real destructive-edit and undo/redo commands (Task 10),
+ * overwriting the disabled stubs. cut/copy/delete need an active doc + a
+ * selection; paste needs an active doc + a non-empty clipboard; undo/redo are
+ * gated on the active document's history stacks. */
+function registerEditCommands(): void {
+  const hasSelection = (s: AppState) => activeDoc(s) !== null && s.selection !== null;
+  registerCommands([
+    {
+      id: 'edit.undo',
+      label: 'Undo',
+      shortcut: 'Ctrl+Z',
+      enabled: (s) => s.activeDocumentId !== null && canUndo(s.activeDocumentId),
+      run: async () => {
+        const id = useAppStore.getState().activeDocumentId;
+        if (id) undo(id);
+      },
+    },
+    {
+      id: 'edit.redo',
+      label: 'Redo',
+      shortcut: 'Ctrl+Y',
+      enabled: (s) => s.activeDocumentId !== null && canRedo(s.activeDocumentId),
+      run: async () => {
+        const id = useAppStore.getState().activeDocumentId;
+        if (id) redo(id);
+      },
+    },
+    {
+      id: 'edit.cut',
+      label: 'Cut',
+      shortcut: 'Ctrl+X',
+      enabled: hasSelection,
+      run: async () => cutSelection(),
+    },
+    {
+      id: 'edit.copy',
+      label: 'Copy',
+      shortcut: 'Ctrl+C',
+      enabled: hasSelection,
+      run: async () => copySelection(),
+    },
+    {
+      id: 'edit.paste',
+      label: 'Paste',
+      shortcut: 'Ctrl+V',
+      enabled: (s) => activeDoc(s) !== null && getClipboard() !== null,
+      run: async () => pasteAtCursor(),
+    },
+    {
+      id: 'edit.delete',
+      label: 'Delete',
+      shortcut: 'Del',
+      enabled: hasSelection,
+      run: async () => deleteSelection(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
+registerEditCommands();

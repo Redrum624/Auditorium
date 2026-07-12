@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import WaveformView from './components/Editor/WaveformView';
+import HistoryPanel from './components/Panels/HistoryPanel';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
@@ -37,7 +38,9 @@ export default function App() {
           )}
         </div>
         <div className="flex w-[280px] flex-col border-l border-[#3a3a42] bg-[#232328]">
-          <PanelShell title="History" />
+          <PanelShell title="History">
+            <HistoryPanel />
+          </PanelShell>
           <PanelShell title="Markers" />
         </div>
       </div>
