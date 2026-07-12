@@ -3,11 +3,14 @@ const net = require('node:net');
 const path = require('node:path');
 
 const PORT = 3005;
-const HOST = '127.0.0.1';
+const HOST = 'localhost';
 const ROOT = path.join(__dirname, '..');
-const isWin = process.platform === 'win32';
-const npmCmd = isWin ? 'npm.cmd' : 'npm';
-const electronCmd = isWin ? 'npx.cmd' : 'npx';
+
+// Spawn the real vite/electron executables directly (no shell, no npm/npx
+// wrapper) so `child.kill()` terminates the actual process instead of an
+// intermediary shell whose descendants would otherwise be orphaned.
+const viteBin = path.join(ROOT, 'node_modules', 'vite', 'bin', 'vite.js');
+const electronBin = require('electron');
 
 let vite = null;
 let electron = null;
@@ -48,10 +51,9 @@ function shutdown(code) {
 }
 
 async function main() {
-  vite = spawn(npmCmd, ['run', 'dev-server-only'], {
+  vite = spawn(process.execPath, [viteBin, '--port', String(PORT), '--strictPort'], {
     cwd: ROOT,
-    stdio: 'inherit',
-    shell: false
+    stdio: 'inherit'
   });
 
   vite.on('exit', (code) => {
@@ -70,10 +72,9 @@ async function main() {
     return;
   }
 
-  electron = spawn(electronCmd, ['electron', '.'], {
+  electron = spawn(electronBin, ['.'], {
     cwd: ROOT,
     stdio: 'inherit',
-    shell: false,
     env: { ...process.env, VITE_DEV_SERVER: '1' }
   });
 
