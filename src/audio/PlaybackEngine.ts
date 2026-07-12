@@ -45,6 +45,8 @@ export class PlaybackEngine {
   private gain: GainNode | null = null;
   private splitter: ChannelSplitterNode | null = null;
   private analysers: AnalyserNode[] = [];
+  /** Per-channel scratch buffers reused by pollLevels (sized to fftSize). */
+  private levelBuffers: Float32Array<ArrayBuffer>[] = [];
 
   private buffer: AudioBuffer | null = null;
   private meta: { sampleRate: number; length: number; channelCount: number } | null = null;
@@ -211,6 +213,7 @@ export class PlaybackEngine {
     this.splitter?.disconnect();
     for (const a of this.analysers) a.disconnect();
     this.analysers = [];
+    this.levelBuffers = [];
     this.gain = null;
     this.splitter = null;
     this.levelCbs.clear();
@@ -256,6 +259,9 @@ export class PlaybackEngine {
     this.gain = gain;
     this.splitter = splitter;
     this.analysers = analysers;
+    // Reusable per-channel scratch buffers for level polling — allocating
+    // a Float32Array(fftSize) per channel every 33ms would churn the GC.
+    this.levelBuffers = analysers.map((a) => new Float32Array(a.fftSize));
   }
 
   /** Natural completion: source played to its end without a manual stop. */
@@ -272,6 +278,8 @@ export class PlaybackEngine {
   private teardownSource(): void {
     const s = this.source;
     if (!s) return;
+    // Null onended BEFORE stop(): Web Audio fires onended on manual stop too,
+    // and a manual teardown must never be handled as a natural end.
     s.onended = null;
     this.source = null;
     try {
@@ -312,8 +320,8 @@ export class PlaybackEngine {
 
   private pollLevels(): void {
     if (this.levelCbs.size === 0) return;
-    const peaks = this.analysers.map((analyser) => {
-      const buf = new Float32Array(analyser.fftSize);
+    const peaks = this.analysers.map((analyser, i) => {
+      const buf = this.levelBuffers[i];
       analyser.getFloatTimeDomainData(buf);
       let peak = 0;
       for (let i = 0; i < buf.length; i++) {

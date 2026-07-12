@@ -65,6 +65,10 @@ class FakeSource extends FakeNode {
   stop(): void {
     if (this.stopped) throw new Error('already stopped');
     this.stopped = true;
+    // Real Web Audio fires onended after a manual stop() too. Modelling that
+    // faithfully is what proves the engine never mistakes a manual
+    // stop/pause/load teardown for a natural end.
+    this.onended?.();
   }
   fireEnded(): void {
     this.onended?.();
@@ -308,6 +312,52 @@ describe('PlaybackEngine', () => {
       engine.stop();
       jest.advanceTimersByTime(200);
       expect(received.length).toBe(count);
+    });
+  });
+
+  describe('manual teardown is never mistaken for natural end (stop() fires onended)', () => {
+    it('pause() lands in paused with position preserved — no stopped transition', () => {
+      const { engine, ctx } = makeEngine();
+      engine.load(makeDoc({ sampleRate: 1000 }));
+      const states: string[] = [];
+      engine.onStateChange((s) => states.push(s));
+
+      engine.play(100, {});
+      ctx.advance(0.3); // pos 400
+      engine.pause(); // source.stop() fires onended synchronously here
+
+      expect(engine.state).toBe('paused');
+      expect(engine.getPositionSample()).toBe(400); // not reset to play start
+      expect(states).toEqual(['playing', 'paused']); // no 'stopped' snuck in
+    });
+
+    it('load() while playing emits a single stopped transition, not a natural end', () => {
+      const { engine, ctx } = makeEngine();
+      engine.load(makeDoc({ sampleRate: 1000 }));
+      const states: string[] = [];
+      engine.onStateChange((s) => states.push(s));
+
+      engine.play(200, {});
+      ctx.advance(0.1);
+      engine.load(makeDoc({ sampleRate: 1000 })); // tears the old source down
+
+      expect(engine.state).toBe('stopped');
+      expect(states).toEqual(['playing', 'stopped']); // exactly one stop, no double-emit
+    });
+
+    it('manual stop() emits exactly one stopped transition', () => {
+      const { engine, ctx } = makeEngine();
+      engine.load(makeDoc({ sampleRate: 1000 }));
+      const states: string[] = [];
+      engine.onStateChange((s) => states.push(s));
+
+      engine.play(250, {});
+      ctx.advance(0.4);
+      engine.stop(); // source.stop() fires onended; must not re-enter handleEnded
+
+      expect(engine.state).toBe('stopped');
+      expect(engine.getPositionSample()).toBe(250);
+      expect(states).toEqual(['playing', 'stopped']);
     });
   });
 
