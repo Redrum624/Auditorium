@@ -5,6 +5,8 @@ import { fadeEffect } from './basic/FadeEffect';
 import { reverseEffect } from './basic/ReverseEffect';
 import { invertEffect } from './basic/InvertEffect';
 import { dcRemoveEffect } from './basic/DcRemoveEffect';
+import { parametricEqEffect } from './eq/ParametricEqEffect';
+import { graphicEqEffect } from './eq/GraphicEqEffect';
 
 let registered = false;
 
@@ -22,4 +24,6 @@ export function registerAllEffects(): void {
   registerEffect(reverseEffect);
   registerEffect(invertEffect);
   registerEffect(dcRemoveEffect);
+  registerEffect(parametricEqEffect);
+  registerEffect(graphicEqEffect);
 }
