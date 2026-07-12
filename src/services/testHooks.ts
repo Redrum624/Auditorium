@@ -4,7 +4,9 @@
 
 import { docLength, type AudioDocument } from '../audio/AudioDocument';
 import { encodeWav } from '../audio/wavCodec';
+import type { EffectParamValue } from '../effects/types';
 import { useAppStore } from '../stores/appStore';
+import { runEffectOnSelection } from './effectRunner';
 import { encodeExport, openFilePath, type ExportOptions } from './fileService';
 
 export interface TestStateSummary {
@@ -20,6 +22,22 @@ export interface TestApi {
   getStateSummary(): TestStateSummary;
   exportActive(opts: ExportOptions, outPath: string): Promise<boolean>;
   saveActiveAs(outPath: string): Promise<boolean>;
+  getPeak(): number;
+  applyEffect(effectId: string, params: Record<string, EffectParamValue>): Promise<number>;
+}
+
+/** Largest absolute sample value across all channels of the active document. */
+function activePeak(): number {
+  const doc = activeDoc();
+  if (!doc) return 0;
+  let peak = 0;
+  for (const ch of doc.channels) {
+    for (let i = 0; i < ch.length; i++) {
+      const a = Math.abs(ch[i]);
+      if (a > peak) peak = a;
+    }
+  }
+  return peak;
 }
 
 function activeDoc(): AudioDocument | null {
@@ -62,6 +80,15 @@ export function installTestHooks(): void {
         useAppStore.getState().updateDocument({ ...doc, filePath: outPath, dirty: false });
       }
       return result.ok;
+    },
+
+    getPeak: () => activePeak(),
+
+    // Runs the effect end-to-end through the real DSP worker (no selection => whole
+    // document) and returns the resulting peak. Used by the headed smoke test.
+    applyEffect: async (effectId, params) => {
+      await runEffectOnSelection(effectId, params);
+      return activePeak();
     },
   };
 

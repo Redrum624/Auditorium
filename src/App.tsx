@@ -1,17 +1,26 @@
 import { useEffect, useState } from 'react';
 import WaveformView from './components/Editor/WaveformView';
+import EffectDialog from './components/Dialogs/EffectDialog';
 import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
+import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
 import TransportBar from './components/Layout/TransportBar';
+import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters } from './services/dialogBus';
+import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
 import { useAppStore } from './stores/appStore';
+
+// Populate the effect registry and its menu commands once at module load — before
+// the first render — so the Effects menu and panel are fully built on first paint.
+registerAllEffects();
+registerEffectCommands();
 
 export default function App() {
   const documents = useAppStore((s) => s.documents);
@@ -21,6 +30,7 @@ export default function App() {
 
   const [exportOpen, setExportOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
+  const [effectDialogId, setEffectDialogId] = useState<string | null>(null);
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
@@ -31,6 +41,7 @@ export default function App() {
       registerDialogSetters({
         openNewFileDialog: () => setNewFileOpen(true),
         openExportDialog: () => setExportOpen(true),
+        openEffectDialog: (effectId) => setEffectDialogId(effectId),
       }),
     []
   );
@@ -66,7 +77,9 @@ export default function App() {
           <PanelShell title="Files">
             <FilesPanel />
           </PanelShell>
-          <PanelShell title="Effects" />
+          <PanelShell title="Effects">
+            <EffectsPanel />
+          </PanelShell>
         </div>
         <div className="flex min-w-0 flex-1 flex-col bg-[#1a1a1e]">
           {doc && view === 'waveform' ? (
@@ -89,6 +102,9 @@ export default function App() {
 
       {newFileOpen && <NewFileDialog onClose={() => setNewFileOpen(false)} />}
       {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}
+      {effectDialogId && (
+        <EffectDialog effectId={effectDialogId} onClose={() => setEffectDialogId(null)} />
+      )}
     </div>
   );
 }

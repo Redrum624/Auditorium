@@ -89,6 +89,24 @@ async function main() {
     );
     assert(true, 'waveform canvas contains varied pixels (not a blank fill)');
 
+    // 2b) Apply an effect (Amplify -6 dB) via the real DSP worker -----------
+    console.log('Applying Amplify -6 dB through the DSP worker...');
+    const peakBefore = await page.evaluate(() => window.__test.getPeak());
+    const peakAfter = await page.evaluate(() =>
+      window.__test.applyEffect('amplify', { gainDb: -6 })
+    );
+    console.log(`  peak before: ${peakBefore.toFixed(4)}, after: ${peakAfter.toFixed(4)}`);
+    assert(peakBefore > 0, 'document had a non-zero peak before the effect');
+    // -6 dB ~= x0.501; allow a small tolerance.
+    const expected = peakBefore * Math.pow(10, -6 / 20);
+    assert(
+      Math.abs(peakAfter - expected) < 0.01,
+      `peak after -6 dB (${peakAfter.toFixed(4)}) ~= half of before (${expected.toFixed(4)})`
+    );
+    // Restore the original samples so the subsequent export/save checks are
+    // unaffected by the effect.
+    await page.evaluate(() => window.__test.applyEffect('amplify', { gainDb: 6 }));
+
     // 3) Export MP3 ---------------------------------------------------------
     console.log(`Exporting MP3 to ${OUT_MP3} ...`);
     const mp3Ok = await page.evaluate(

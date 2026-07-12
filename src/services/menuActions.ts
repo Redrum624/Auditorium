@@ -11,7 +11,8 @@ import {
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { getClipboard } from './clipboard';
 import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
-import { openExportDialog, openNewFileDialog } from './dialogBus';
+import { openEffectDialog, openExportDialog, openNewFileDialog } from './dialogBus';
+import { getAllEffects } from '../effects/EffectRegistry';
 
 export interface MenuCommand {
   id: string;
@@ -75,13 +76,36 @@ function fallbackCommand(id: string): MenuCommand {
   return { id, label: id, enabled: () => false, run: async () => {} };
 }
 
+/** Builds the Effects section's item ids live from the registry: a disabled
+ * category-label item for each `EffectCategory`, followed by that category's
+ * effects (both category and effect commands are registered by
+ * `registerEffectCommands`). Falls back to the `effects.none` stub until any
+ * effect is registered. */
+function effectsSectionItemIds(): (string | 'separator')[] {
+  const effects = getAllEffects();
+  if (effects.length === 0) return ['effects.none'];
+  const ids: (string | 'separator')[] = [];
+  let lastCategory: string | null = null;
+  for (const e of effects) {
+    if (e.category !== lastCategory) {
+      ids.push(`effects.cat.${e.category}`);
+      lastCategory = e.category;
+    }
+    ids.push(`effect.${e.id}`);
+  }
+  return ids;
+}
+
 export function getMenuSections(): MenuSection[] {
-  return LAYOUT.map((section) => ({
-    title: section.title,
-    items: section.itemIds.map((id) =>
-      id === 'separator' ? 'separator' : (registry.get(id) ?? fallbackCommand(id))
-    ),
-  }));
+  return LAYOUT.map((section) => {
+    const itemIds = section.title === 'Effects' ? effectsSectionItemIds() : section.itemIds;
+    return {
+      title: section.title,
+      items: itemIds.map((id) =>
+        id === 'separator' ? 'separator' : (registry.get(id) ?? fallbackCommand(id))
+      ),
+    };
+  });
 }
 
 function stub(id: string, label: string, shortcut?: string): MenuCommand {
@@ -377,6 +401,30 @@ function registerFileCommands(): void {
       },
     },
   ]);
+}
+
+/** Registers one command per registered effect (`effect.<id>`, opens the effect
+ * dialog, enabled when a document is active) plus one disabled category-label
+ * command per category (`effects.cat.<Category>`). Idempotent by id: re-running
+ * after new effects register just overwrites/extends. Call after `registerAll`
+ * has populated the effect registry (App.tsx does this at startup). */
+export function registerEffectCommands(): void {
+  const cmds: MenuCommand[] = [];
+  for (const effect of getAllEffects()) {
+    cmds.push({
+      id: `effects.cat.${effect.category}`,
+      label: effect.category,
+      enabled: () => false,
+      run: async () => {},
+    });
+    cmds.push({
+      id: `effect.${effect.id}`,
+      label: effect.name,
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openEffectDialog(effect.id),
+    });
+  }
+  registerCommands(cmds);
 }
 
 registerDefaultCommands();
