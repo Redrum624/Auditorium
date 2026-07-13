@@ -69,3 +69,20 @@ and applies it to both channels, keeping the stereo image phase-locked. Tracked
 for a future pass — the DSP already centralizes the search in `wsola.ts`, so
 linking is a matter of sharing the chosen offset across channels rather than
 running the search twice.
+
+## Spectral display uses a linear frequency axis
+
+**Area:** View > Spectral Frequency Display (`src/workers/spectrogramCore.ts`,
+`src/components/Editor/SpectrogramView.tsx`)
+
+**v1 behavior:** Spectrogram rows map linearly to FFT bins
+(`bin = row * (fftSize/2) / height`), so the vertical axis is linear in
+frequency: the octaves below 1 kHz — where most musical detail lives — occupy
+only a small strip at the bottom of the display, while the top half of the view
+covers the comparatively sparse 10–22 kHz region. Rendering is also done at
+device-pixel-ratio 1, so the raster is slightly soft on HiDPI screens.
+
+**Intended behavior:** Adobe Audition defaults to a logarithmic frequency axis
+(with linear as an option), which spreads low-frequency content across most of
+the display. A log mapping only changes the row→bin function in
+`spectrogramCore.ts`; the worker protocol and view are already agnostic to it.
