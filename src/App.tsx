@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import WaveformView from './components/Editor/WaveformView';
+import ConvertDialog from './components/Dialogs/ConvertDialog';
 import EffectDialog from './components/Dialogs/EffectDialog';
 import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
@@ -11,7 +12,7 @@ import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
 import TransportBar from './components/Layout/TransportBar';
 import { registerAllEffects } from './effects/registerAll';
-import { registerDialogSetters } from './services/dialogBus';
+import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
@@ -31,6 +32,7 @@ export default function App() {
   const [exportOpen, setExportOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [effectDialogId, setEffectDialogId] = useState<string | null>(null);
+  const [convertMode, setConvertMode] = useState<ConvertMode | null>(null);
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
@@ -42,6 +44,7 @@ export default function App() {
         openNewFileDialog: () => setNewFileOpen(true),
         openExportDialog: () => setExportOpen(true),
         openEffectDialog: (effectId) => setEffectDialogId(effectId),
+        openConvertDialog: (mode) => setConvertMode(mode),
       }),
     []
   );
@@ -104,6 +107,9 @@ export default function App() {
       {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}
       {effectDialogId && (
         <EffectDialog effectId={effectDialogId} onClose={() => setEffectDialogId(null)} />
+      )}
+      {convertMode && (
+        <ConvertDialog mode={convertMode} onClose={() => setConvertMode(null)} />
       )}
     </div>
   );

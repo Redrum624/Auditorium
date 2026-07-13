@@ -11,7 +11,7 @@ import {
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { getClipboard } from './clipboard';
 import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
-import { openEffectDialog, openExportDialog, openNewFileDialog } from './dialogBus';
+import { openConvertDialog, openEffectDialog, openExportDialog, openNewFileDialog } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
 
 export interface MenuCommand {
@@ -64,6 +64,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.delete',
       'separator',
       'edit.selectAll',
+      'separator',
+      'edit.convertSampleRate',
+      'edit.convertChannels',
     ],
   },
   { title: 'Effects', itemIds: ['effects.none'] },
@@ -427,7 +430,28 @@ export function registerEffectCommands(): void {
   registerCommands(cmds);
 }
 
+/** Registers the whole-document conversion commands (Task 17) in the Edit menu.
+ * Both open the ConvertDialog (via the dialog bus) in the matching mode and
+ * require an active document. */
+function registerDocumentToolCommands(): void {
+  registerCommands([
+    {
+      id: 'edit.convertSampleRate',
+      label: 'Convert Sample Rate…',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openConvertDialog('sampleRate'),
+    },
+    {
+      id: 'edit.convertChannels',
+      label: 'Convert Channels…',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openConvertDialog('channels'),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
 registerFileCommands();
+registerDocumentToolCommands();

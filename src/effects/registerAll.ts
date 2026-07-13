@@ -14,6 +14,10 @@ import { echoEffect } from './time/EchoEffect';
 import { reverbEffect } from './time/ReverbEffect';
 import { chorusEffect } from './time/ChorusEffect';
 import { flangerEffect } from './time/FlangerEffect';
+import { distortionEffect } from './color/DistortionEffect';
+import { deHumEffect } from './restoration/DeHumEffect';
+import { channelMixerEffect } from './stereo/ChannelMixerEffect';
+import { panEffect } from './stereo/PanEffect';
 
 let registered = false;
 
@@ -40,4 +44,8 @@ export function registerAllEffects(): void {
   registerEffect(reverbEffect);
   registerEffect(chorusEffect);
   registerEffect(flangerEffect);
+  registerEffect(distortionEffect);
+  registerEffect(deHumEffect);
+  registerEffect(channelMixerEffect);
+  registerEffect(panEffect);
 }

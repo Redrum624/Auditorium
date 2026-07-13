@@ -87,6 +87,8 @@ describe('getMenuSections', () => {
       'edit.paste',
       'edit.delete',
       'edit.selectAll',
+      'edit.convertSampleRate',
+      'edit.convertChannels',
     ]);
   });
 
