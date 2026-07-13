@@ -4,16 +4,54 @@
  * lower of the two Nyquist rates (anti-aliasing on downsample) multiplied by a
  * Hann window spanning +/- TAPS_PER_SIDE input samples. Weights are normalized
  * per output sample so DC gain is exactly 1 (a constant signal stays constant).
+ *
+ * The kernel g(d) = 2fc·sinc(2fc·d)·hann(d) depends only on the fractional tap
+ * distance `d` and the cutoff `fc`, so it is precomputed ONCE per fc into a
+ * densely-sampled table (TABLE_OVERSAMPLE steps per unit tap spacing) and read
+ * back with linear interpolation in the inner loop — replacing two transcendental
+ * calls (sin for sinc, cos for the Hann window) per tap with a single table
+ * lookup. Tables are cached by fc since a given conversion ratio reuses one fc.
  */
 
 const TAPS_PER_SIDE = 32;
 const PROGRESS_INTERVAL = 65536;
+
+/** Table sampling density: entries per unit of tap spacing (per input sample). */
+const TABLE_OVERSAMPLE = 512;
+/** Total table entries covering d in [-TAPS_PER_SIDE, +TAPS_PER_SIDE] inclusive. */
+const TABLE_SIZE = TAPS_PER_SIDE * 2 * TABLE_OVERSAMPLE + 1;
 
 /** Normalized sinc: sin(pi*x)/(pi*x), with sinc(0) = 1. */
 function sinc(x: number): number {
   if (x === 0) return 1;
   const px = Math.PI * x;
   return Math.sin(px) / px;
+}
+
+/** Precomputed kernel tables keyed by cutoff fc (conversions reuse ratios/fc). */
+const kernelCache = new Map<number, Float64Array>();
+
+/**
+ * Returns the kernel table g(d) = 2fc·sinc(2fc·d)·hann(d) for the given cutoff,
+ * sampled at TABLE_OVERSAMPLE steps per tap-spacing unit across
+ * d ∈ [-TAPS_PER_SIDE, +TAPS_PER_SIDE]. Index i maps to
+ * d = i/TABLE_OVERSAMPLE - TAPS_PER_SIDE. The Hann window is exactly 0 at the
+ * endpoints, so the table tapers to 0 there. Cached per fc.
+ */
+function getKernelTable(fc: number): Float64Array {
+  const cached = kernelCache.get(fc);
+  if (cached) return cached;
+
+  const twoFc = 2 * fc;
+  const invTaps = 1 / TAPS_PER_SIDE;
+  const table = new Float64Array(TABLE_SIZE);
+  for (let i = 0; i < TABLE_SIZE; i++) {
+    const d = i / TABLE_OVERSAMPLE - TAPS_PER_SIDE;
+    const win = 0.5 * (1 + Math.cos(Math.PI * d * invTaps));
+    table[i] = twoFc * sinc(twoFc * d) * win;
+  }
+  kernelCache.set(fc, table);
+  return table;
 }
 
 export function resampleChannel(
@@ -43,8 +81,7 @@ export function resampleChannel(
   // Normalized cutoff (cycles/sample of the INPUT). 0.5 when upsampling;
   // lowered to toRate/(2*fromRate) when downsampling for anti-aliasing.
   const fc = 0.5 * Math.min(1, ratio);
-  const twoFc = 2 * fc;
-  const invTaps = 1 / TAPS_PER_SIDE;
+  const table = getKernelTable(fc);
 
   for (let i = 0; i < outLen; i++) {
     const pos = i * step; // fractional source position in input samples
@@ -58,9 +95,13 @@ export function resampleChannel(
       const d = pos - k;
       if (d <= -TAPS_PER_SIDE || d >= TAPS_PER_SIDE) continue;
       if (k < 0 || k >= inLen) continue;
-      // Hann window (half-width TAPS_PER_SIDE): 0.5*(1 + cos(pi*d/N)).
-      const win = 0.5 * (1 + Math.cos(Math.PI * d * invTaps));
-      const weight = twoFc * sinc(twoFc * d) * win;
+      // Read g(d) from the precomputed kernel table with linear interpolation.
+      // d ∈ (-TAPS_PER_SIDE, TAPS_PER_SIDE) so the index stays within bounds and
+      // i0 + 1 never exceeds the last entry.
+      const fidx = (d + TAPS_PER_SIDE) * TABLE_OVERSAMPLE;
+      const i0 = fidx | 0; // truncation = floor for the non-negative fidx here
+      const frac = fidx - i0;
+      const weight = table[i0] + frac * (table[i0 + 1] - table[i0]);
       weightSum += weight;
       acc += input[k] * weight;
     }
