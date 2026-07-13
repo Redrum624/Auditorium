@@ -49,9 +49,10 @@ current cursor. `Ctrl+A` selects all; `Escape` clears the selection.
 
 Standard editing acts on the current selection: `Ctrl+X` cut, `Ctrl+C` copy,
 `Ctrl+V` paste at the cursor, `Delete` removes the selection. Undo/redo
-(`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) is unlimited within a session and is
-tracked per document — the **History** tab in the right sidebar lists every
-applied edit; click any entry to jump the document's state to that point.
+(`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) keeps up to 50 steps per file (oldest
+dropped beyond that) and is tracked per document — the **History** tab in the
+right sidebar lists every applied edit; click any entry to jump the
+document's state to that point.
 
 ### Markers
 

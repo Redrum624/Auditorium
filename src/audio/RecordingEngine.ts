@@ -170,7 +170,19 @@ export class RecordingEngine {
 
       ctx = this.createContext(opts.sampleRate);
       const moduleUrl = this.createModuleUrl(RECORDER_WORKLET_SOURCE);
-      await ctx.audioWorklet.addModule(moduleUrl);
+      try {
+        await ctx.audioWorklet.addModule(moduleUrl);
+      } finally {
+        // The module URL is a one-shot object URL (blob:); once addModule has
+        // resolved or rejected it's no longer needed, so free it immediately
+        // rather than leaking it for the life of the page. Guarded for jsdom /
+        // injected fake URLs where revokeObjectURL may not exist.
+        try {
+          URL.revokeObjectURL?.(moduleUrl);
+        } catch {
+          /* ignore */
+        }
+      }
 
       const source = ctx.createMediaStreamSource(stream);
       const node = this.createWorkletNode(ctx, WORKLET_NAME);

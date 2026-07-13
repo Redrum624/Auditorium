@@ -2,6 +2,9 @@
   "name": "audition_app",
   "productName": "Auditorium",
   "version": "0.1.0",
+  "description": "Audition-class desktop audio editor: waveform and spectral editing, 22 effects, noise reduction, recording, and multitrack mixing.",
+  "author": "Auditorium contributors",
+  "license": "MIT",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {

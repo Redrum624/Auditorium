@@ -308,6 +308,61 @@ describe('RecordingEngine', () => {
     });
   });
 
+  describe('worklet module URL cleanup', () => {
+    // The default createModuleUrl allocates a one-shot blob: object URL for
+    // the worklet module; it must be revoked once addModule settles instead
+    // of leaking for the life of the page. jsdom doesn't implement
+    // URL.revokeObjectURL, so these tests install a spy stub for it.
+    let originalRevoke: typeof URL.revokeObjectURL;
+
+    beforeEach(() => {
+      originalRevoke = URL.revokeObjectURL;
+    });
+
+    afterEach(() => {
+      URL.revokeObjectURL = originalRevoke;
+    });
+
+    it('revokes the module URL after addModule resolves', async () => {
+      const revokeObjectURL = jest.fn();
+      URL.revokeObjectURL = revokeObjectURL;
+      const stream = new FakeStream();
+      const node = new FakeWorkletNode();
+      const ctx = new FakeContext(44100);
+      const createModuleUrl = jest.fn(() => 'blob:worklet-test');
+      const engine = new RecordingEngine({
+        getUserMedia: async () => stream as unknown as MediaStream,
+        createContext: () => ctx as unknown as RecordingContextLike,
+        createWorkletNode: () => node as unknown as WorkletNodeLike,
+        createModuleUrl,
+      });
+
+      await engine.start({ channels: 1, sampleRate: 44100 });
+
+      expect(createModuleUrl).toHaveBeenCalledWith(RECORDER_WORKLET_SOURCE);
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:worklet-test');
+    });
+
+    it('revokes the module URL even when addModule rejects', async () => {
+      const revokeObjectURL = jest.fn();
+      URL.revokeObjectURL = revokeObjectURL;
+      const stream = new FakeStream();
+      const ctx = new FakeContext(44100);
+      ctx.audioWorklet.addModule = async () => {
+        throw new Error('Unable to load a worklet module');
+      };
+      const engine = new RecordingEngine({
+        getUserMedia: async () => stream as unknown as MediaStream,
+        createContext: () => ctx as unknown as RecordingContextLike,
+        createWorkletNode: () => new FakeWorkletNode() as unknown as WorkletNodeLike,
+        createModuleUrl: () => 'blob:worklet-fail-test',
+      });
+
+      await expect(engine.start({ channels: 1, sampleRate: 44100 })).rejects.toThrow('worklet');
+      expect(revokeObjectURL).toHaveBeenCalledWith('blob:worklet-fail-test');
+    });
+  });
+
   describe('listInputs', () => {
     it('maps audioinput devices and preserves empty labels', async () => {
       const engine = new RecordingEngine({
