@@ -1,4 +1,4 @@
-import { createDocument, type AudioDocument } from '../audio/AudioDocument';
+import { createDocument, nextId, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createClip, createTrack, type Session } from './session';
 import { openSessionViaDialog, parseSessionFile, saveSessionViaDialog, serializeSession } from './sessionFile';
@@ -34,6 +34,10 @@ function sine(n: number, freq = 440, sr = 44100, amplitude = 0.5): Float32Array 
   return out;
 }
 
+function trackJson(id: string, clips: object[] = []) {
+  return { id, name: 'T', volumeDb: 0, pan: 0, muted: false, solo: false, armed: false, clips };
+}
+
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(44100);
@@ -48,7 +52,7 @@ describe('serializeSession', () => {
     track.clips = [clip];
     const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
 
-    const json = serializeSession(session, [referenced, unreferenced]);
+    const { json } = serializeSession(session, [referenced, unreferenced]);
     const parsed = JSON.parse(json);
 
     expect(parsed.formatVersion).toBe(1);
@@ -61,9 +65,30 @@ describe('serializeSession', () => {
     const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     const session: Session = { name: 'S', sampleRate: 44100, tracks: [createTrack('T')] };
 
-    const json = serializeSession(session, [doc]);
+    const { json } = serializeSession(session, [doc]);
 
     expect(JSON.parse(json).documents).toHaveLength(0);
+  });
+
+  it('drops clips whose source document is not currently open and reports the count', () => {
+    const openDoc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const closedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    const keptClip = createClip({ documentId: openDoc.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    const orphanClip = createClip({ documentId: closedDoc.id, startSample: 200, offsetSample: 0, lengthSample: 100 });
+    track.clips = [keptClip, orphanClip];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    // closedDoc is intentionally NOT passed in docs — simulates the clip's source
+    // document having been closed since the clip was added to the session.
+    const { json, droppedClipCount } = serializeSession(session, [openDoc]);
+    const parsed = JSON.parse(json);
+
+    expect(droppedClipCount).toBe(1);
+    expect(parsed.session.tracks[0].clips).toHaveLength(1);
+    expect(parsed.session.tracks[0].clips[0].id).toBe(keptClip.id);
+    expect(parsed.documents).toHaveLength(1);
+    expect(parsed.documents[0].id).toBe(openDoc.id);
   });
 });
 
@@ -85,7 +110,7 @@ describe('serializeSession -> parseSessionFile round trip', () => {
     track.clips = [clip];
     const session: Session = { name: 'My Session', sampleRate: 48000, tracks: [track] };
 
-    const json = serializeSession(session, [doc]);
+    const { json } = serializeSession(session, [doc]);
     const { session: restored, documents } = parseSessionFile(json);
 
     expect(restored.name).toBe('My Session');
@@ -124,7 +149,7 @@ describe('serializeSession -> parseSessionFile round trip', () => {
     trackB.clips = [createClip({ documentId: docB.id, startSample: 0, offsetSample: 0, lengthSample: 50 })];
     const session: Session = { name: 'S', sampleRate: 44100, tracks: [trackA, trackB] };
 
-    const json = serializeSession(session, [docA, docB]);
+    const { json } = serializeSession(session, [docA, docB]);
     const { session: restored, documents } = parseSessionFile(json);
 
     const restoredIds = new Set(documents.map((d) => d.id));
@@ -154,7 +179,7 @@ describe('serializeSession -> parseSessionFile round trip', () => {
     track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: n })];
     const session: Session = { name: 'Big Session', sampleRate: 44100, tracks: [track] };
 
-    const json = serializeSession(session, [doc]);
+    const { json } = serializeSession(session, [doc]);
     const { documents } = parseSessionFile(json);
 
     expect(documents[0].channels).toHaveLength(3);
@@ -218,6 +243,49 @@ describe('saveSessionViaDialog', () => {
       expect.objectContaining({ type: 'error', message: 'disk full' })
     );
   });
+
+  it('warns via an info message box when saved clips referenced closed source files', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    const openDoc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const closedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(openDoc);
+    useAppStore.getState().addDocument(closedDoc);
+    useAppStore.getState().closeDocument(closedDoc.id);
+
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: openDoc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: closedDoc.id, startSample: 100, offsetSample: 0, lengthSample: 10 }));
+
+    await saveSessionViaDialog();
+
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+    const [, data] = api.writeFile.mock.calls[0];
+    const text = new TextDecoder().decode(data as ArrayBuffer);
+    const parsed = JSON.parse(text);
+    expect(parsed.session.tracks[0].clips).toHaveLength(1);
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', message: '1 clip(s) referenced closed files and were not saved.' })
+    );
+  });
+
+  it('does not show a message box when no clips were dropped', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(doc);
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+
+    await saveSessionViaDialog();
+
+    expect(api.showMessageBox).not.toHaveBeenCalled();
+  });
 });
 
 describe('openSessionViaDialog', () => {
@@ -226,7 +294,7 @@ describe('openSessionViaDialog', () => {
     const track = createTrack('Loaded Track');
     track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
     const session: Session = { name: 'Loaded Session', sampleRate: 44100, tracks: [track] };
-    const json = serializeSession(session, [doc]);
+    const { json } = serializeSession(session, [doc]);
     const bytes = new TextEncoder().encode(json);
 
     const api = installApi({
@@ -294,13 +362,37 @@ describe('openSessionViaDialog', () => {
     expect(useSessionStore.getState().session).toBe(before);
     expect(useAppStore.getState().view).not.toBe('multitrack');
   });
+
+  it('shows an info message box and drops clips when opened clips reference no embedded document', async () => {
+    const json = JSON.stringify({
+      formatVersion: 1,
+      session: {
+        name: 'Stale',
+        sampleRate: 44100,
+        tracks: [
+          trackJson('track-1', [
+            { id: 'clip-1', documentId: 'doc-77', startSample: 0, offsetSample: 0, lengthSample: 100, gainDb: 0 },
+          ]),
+        ],
+      },
+      documents: [],
+    });
+    const bytes = new TextEncoder().encode(json);
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\stale.audm']),
+      readFile: jest.fn(async () => bytes.buffer),
+    });
+
+    await openSessionViaDialog();
+
+    expect(useSessionStore.getState().session.tracks[0].clips).toHaveLength(0);
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', message: '1 clip(s) referenced missing audio and were removed.' })
+    );
+  });
 });
 
 describe('id-counter seeding after parse', () => {
-  function trackJson(id: string, clips: object[] = []) {
-    return { id, name: 'T', volumeDb: 0, pan: 0, muted: false, solo: false, armed: false, clips };
-  }
-
   it('parseSessionFile seeds track/clip counters past the max suffix in the loaded session', () => {
     const json = JSON.stringify({
       formatVersion: 1,
@@ -356,5 +448,35 @@ describe('id-counter seeding after parse', () => {
 
     const newClip = createClip({ documentId: 'doc-1', startSample: 200, offsetSample: 0, lengthSample: 32 });
     expect(Number(newClip.id.split('-')[1])).toBeGreaterThan(95000);
+  });
+
+  it('seeds the doc counter past a stale documentId retained in the file, even with no embedded documents', () => {
+    // Hand-built file: a clip references 'doc-77' but no document with that id
+    // is embedded (e.g. the source was closed before save, pre-fix, or the
+    // file was hand-edited). Loading must drop the orphaned clip AND seed the
+    // 'doc' counter past 77 so a freshly minted document can never collide
+    // with the stale retained id.
+    const json = JSON.stringify({
+      formatVersion: 1,
+      session: {
+        name: 'S',
+        sampleRate: 44100,
+        tracks: [
+          trackJson('track-1', [
+            { id: 'clip-1', documentId: 'doc-77', startSample: 0, offsetSample: 0, lengthSample: 100, gainDb: 0 },
+          ]),
+        ],
+      },
+      documents: [],
+    });
+
+    const { session, documents, droppedClipCount } = parseSessionFile(json);
+
+    expect(documents).toHaveLength(0);
+    expect(session.tracks[0].clips).toHaveLength(0);
+    expect(droppedClipCount).toBe(1);
+
+    const freshId = nextId('doc');
+    expect(Number(freshId.split('-')[1])).toBeGreaterThan(77);
   });
 });

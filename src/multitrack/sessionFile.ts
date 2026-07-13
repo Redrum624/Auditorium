@@ -54,10 +54,32 @@ function base64ToBuffer(b64: string): ArrayBuffer {
  * Serializes a session to the .audm JSON format. Only documents actually
  * referenced by at least one clip are embedded (as base64 32-bit-float WAV),
  * so unreferenced open documents don't bloat the file.
+ *
+ * Clips whose documentId has no matching entry in `docs` (i.e. the clip's
+ * source document was closed since the clip was added to the session) are
+ * dropped from the saved session — otherwise the clip would be written out
+ * with no embedded audio, and on load could silently bind to an unrelated
+ * document that happens to reuse its stale id (see parseSessionFile).
+ * `droppedClipCount` lets the caller warn the user.
  */
-export function serializeSession(session: Session, docs: AudioDocument[]): string {
+export function serializeSession(
+  session: Session,
+  docs: AudioDocument[]
+): { json: string; droppedClipCount: number } {
+  const openIds = new Set(docs.map((d) => d.id));
+  let droppedClipCount = 0;
+
+  const tracks = session.tracks.map((track) => {
+    const clips = track.clips.filter((clip) => {
+      const keep = openIds.has(clip.documentId);
+      if (!keep) droppedClipCount++;
+      return keep;
+    });
+    return { ...track, clips };
+  });
+
   const referencedIds = new Set<string>();
-  for (const track of session.tracks) {
+  for (const track of tracks) {
     for (const clip of track.clips) referencedIds.add(clip.documentId);
   }
 
@@ -71,8 +93,8 @@ export function serializeSession(session: Session, docs: AudioDocument[]): strin
       wavBase64: bufferToBase64(encodeWav(d.channels, d.sampleRate, 32)),
     }));
 
-  const file: SessionFileShape = { formatVersion: FORMAT_VERSION, session, documents };
-  return JSON.stringify(file);
+  const file: SessionFileShape = { formatVersion: FORMAT_VERSION, session: { ...session, tracks }, documents };
+  return { json: JSON.stringify(file), droppedClipCount };
 }
 
 /** Largest numeric suffix among ids of the form `${prefix}-<digits>`; 0 if none match. */
@@ -95,12 +117,27 @@ function maxIdSuffix(ids: string[], prefix: string): number {
  * counters reset every process start — so this also seeds the 'track' and
  * 'clip' counters past the largest suffix in the loaded session, ensuring a
  * later addTrack()/createClip() can never mint a duplicate of a loaded id.
+ *
+ * The 'doc' counter is seeded too, computed over the raw clip.documentIds as
+ * they appear in the file *before* remapping. A well-formed post-fix file
+ * never needs this (serializeSession no longer writes clips with no matching
+ * open document), but a pre-fix or hand-edited file can retain a stale
+ * `doc-N` id on a clip whose source was never embedded; without seeding, a
+ * freshly created document later in the process could mint that same id and
+ * the orphaned clip would silently bind to unrelated audio. As belt-and-
+ * braces, any clip whose (remapped) documentId doesn't match a recreated
+ * document is dropped; `droppedClipCount` lets the caller notify the user.
  */
-export function parseSessionFile(text: string): { session: Session; documents: AudioDocument[] } {
+export function parseSessionFile(
+  text: string
+): { session: Session; documents: AudioDocument[]; droppedClipCount: number } {
   const parsed = JSON.parse(text) as SessionFileShape;
   if (parsed.formatVersion !== FORMAT_VERSION) {
     throw new Error(`Unsupported session file version: ${parsed.formatVersion} (expected ${FORMAT_VERSION})`);
   }
+
+  const rawDocumentIds = parsed.session.tracks.flatMap((t) => t.clips.map((c) => c.documentId));
+  bumpIdCounter('doc', maxIdSuffix(rawDocumentIds, 'doc') + 1);
 
   const idMap = new Map<string, string>();
   const documents: AudioDocument[] = parsed.documents.map((fd) => {
@@ -110,25 +147,39 @@ export function parseSessionFile(text: string): { session: Session; documents: A
     return doc;
   });
 
+  const recreatedIds = new Set(documents.map((d) => d.id));
+  let droppedClipCount = 0;
+
   const session: Session = {
     ...parsed.session,
     tracks: parsed.session.tracks.map((t) => ({
       ...t,
-      clips: t.clips.map((c) => ({ ...c, documentId: idMap.get(c.documentId) ?? c.documentId })),
+      clips: t.clips
+        .map((c) => ({ ...c, documentId: idMap.get(c.documentId) ?? c.documentId }))
+        .filter((c) => {
+          const keep = recreatedIds.has(c.documentId);
+          if (!keep) droppedClipCount++;
+          return keep;
+        }),
     })),
   };
 
-  const trackIds = session.tracks.map((t) => t.id);
-  const clipIds = session.tracks.flatMap((t) => t.clips.map((c) => c.id));
+  // Seeded from the raw file, not the (possibly clip-dropping) `session`
+  // above: a dropped clip's id must still be retired so nothing minted later
+  // in the process can reuse it.
+  const trackIds = parsed.session.tracks.map((t) => t.id);
+  const clipIds = parsed.session.tracks.flatMap((t) => t.clips.map((c) => c.id));
   bumpIdCounter('track', maxIdSuffix(trackIds, 'track') + 1);
   bumpIdCounter('clip', maxIdSuffix(clipIds, 'clip') + 1);
 
-  return { session, documents };
+  return { session, documents, droppedClipCount };
 }
 
 /** Prompts for a save location and writes the current session (with only its
  * referenced documents) as .audm. A cancelled dialog is a no-op; a failed
- * write surfaces an error message box. */
+ * write surfaces an error message box. If any clips referenced a closed
+ * source document, they're dropped from the save and, after a successful
+ * write, an info message box reports how many. */
 export async function saveSessionViaDialog(): Promise<void> {
   const session = useSessionStore.getState().session;
   const docs = useAppStore.getState().documents;
@@ -140,11 +191,19 @@ export async function saveSessionViaDialog(): Promise<void> {
   });
   if (!targetPath) return; // cancelled
 
-  const json = serializeSession(session, docs);
+  const { json, droppedClipCount } = serializeSession(session, docs);
   const data = new TextEncoder().encode(json).buffer;
   const result = await api().writeFile(targetPath, data);
   if (!result.ok) {
     await api().showMessageBox({ type: 'error', title: 'Save Session failed', message: result.error });
+    return;
+  }
+  if (droppedClipCount > 0) {
+    await api().showMessageBox({
+      type: 'info',
+      title: 'Save Session',
+      message: `${droppedClipCount} clip(s) referenced closed files and were not saved.`,
+    });
   }
 }
 
@@ -152,7 +211,9 @@ export async function saveSessionViaDialog(): Promise<void> {
  * added to the Files panel via addDocument), replaces the session store's
  * session, and switches the view to 'multitrack'. A cancelled dialog is a
  * no-op; an unsupported/corrupt file surfaces an error message box and
- * leaves the current session untouched. */
+ * leaves the current session untouched. If any clips referenced audio that
+ * couldn't be recreated (a stale/missing document id), they're dropped and
+ * an info message box reports how many. */
 export async function openSessionViaDialog(): Promise<void> {
   const paths = await api().showOpenDialog({
     filters: [{ name: 'Auditorium Session', extensions: ['audm'] }],
@@ -162,7 +223,7 @@ export async function openSessionViaDialog(): Promise<void> {
   // readFile is inside the try so an IO failure (unapproved path, fs error)
   // surfaces the same error box as a corrupt/unsupported file, instead of
   // rejecting unhandled.
-  let result: { session: Session; documents: AudioDocument[] };
+  let result: { session: Session; documents: AudioDocument[]; droppedClipCount: number };
   try {
     const buf = await api().readFile(paths[0]);
     const text = new TextDecoder().decode(buf);
@@ -185,4 +246,12 @@ export async function openSessionViaDialog(): Promise<void> {
     mtPlayheadSample: 0,
   });
   useAppStore.getState().setView('multitrack');
+
+  if (result.droppedClipCount > 0) {
+    await api().showMessageBox({
+      type: 'info',
+      title: 'Open Session',
+      message: `${result.droppedClipCount} clip(s) referenced missing audio and were removed.`,
+    });
+  }
 }
