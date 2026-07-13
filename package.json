@@ -13,10 +13,44 @@
     "smoke": "node scripts/e2e-smoke.cjs",
     "make-test-tone": "node scripts/make-test-tone.cjs",
     "electron": "electron .",
-    "build:win": "npm run build && electron-builder --win --x64"
+    "gen-icon": "node scripts/gen-icon.cjs",
+    "build:win": "node scripts/clean-release.cjs && npm run build && node scripts/build-installer.cjs && node scripts/gen-readme-txt.cjs"
+  },
+  "build": {
+    "appId": "com.auditorium.app",
+    "productName": "Auditorium",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "electron/**",
+      "!electron/**/*.test.cjs",
+      "assets/icon.ico",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "assets/icon.ico",
+      "artifactName": "${productName} Setup ${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Auditorium"
+    }
   },
   "devDependencies": {
     "@breezystack/lamejs": "^1.2.7",
+    "@napi-rs/canvas": "^0.1.100",
     "@tailwindcss/vite": "^4.3.2",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
@@ -32,6 +66,7 @@
     "jest-environment-jsdom": "^30.4.1",
     "lucide-react": "^1.24.0",
     "playwright": "^1.61.1",
+    "png-to-ico": "^2.1.8",
     "react": "^19.2.7",
     "react-dom": "^19.2.7",
     "tailwindcss": "^4.3.2",

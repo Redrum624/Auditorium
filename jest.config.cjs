@@ -26,6 +26,11 @@ module.exports = {
       displayName: 'main',
       testEnvironment: 'node',
       testMatch: ['<rootDir>/electron/**/*.test.cjs']
+    },
+    {
+      displayName: 'scripts',
+      testEnvironment: 'node',
+      testMatch: ['<rootDir>/scripts/**/*.test.cjs']
     }
   ]
 };

@@ -5,6 +5,5 @@ installer/
 *.log
 .superpowers/
 .claude/
-docs/superpowers/plans/.parts/
 test-assets/
 test-output/
