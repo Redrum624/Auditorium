@@ -13,9 +13,9 @@ samples as-is — no resampling — so the pasted region plays back at the
 destination document's rate and its perceived pitch/duration shifts accordingly.
 
 **Intended behavior:** Adobe Audition resamples clipboard audio to the
-destination document's sample rate on paste. Once the resampler lands (Task 12),
+destination document's sample rate on paste. The resampler exists (`src/dsp/resample.ts`);
 `pasteAtCursor` should convert `clipboard.channels` from `clipboard.sampleRate`
-to the destination `sampleRate` before inserting. Tracked for Task 23.
+to the destination `sampleRate` before inserting. Planned for v1.1.
 
 ## Non-WAV imports are resampled to 48000 Hz
 
