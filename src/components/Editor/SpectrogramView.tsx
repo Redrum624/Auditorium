@@ -1,0 +1,249 @@
+import { useEffect, useRef, useState } from 'react';
+import type { AudioDocument } from '../../audio/AudioDocument';
+import { docLength, mixDown } from '../../audio/AudioDocument';
+import { useAppStore } from '../../stores/appStore';
+import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
+import { sampleToPixel } from './waveformRender';
+import { useEditorGestures } from './useEditorGestures';
+import TimelineRuler from './TimelineRuler';
+
+const FFT_SIZE = 2048;
+const DB_MIN = -90;
+const DB_MAX = 0;
+const DEBOUNCE_MS = 150;
+
+interface MagsData {
+  mags: Float32Array;
+  width: number;
+  height: number;
+}
+interface SpectroDone {
+  type: 'done';
+  id: number;
+  mags: Float32Array;
+  width: number;
+  height: number;
+}
+
+/** 256-entry inferno-like colour LUT (RGB triples): black -> deep purple ->
+ * magenta -> orange -> near-white, built once by interpolating control stops. */
+const LUT = buildLut();
+
+function buildLut(): Uint8ClampedArray {
+  const stops: Array<[number, [number, number, number]]> = [
+    [0.0, [0, 0, 0]],
+    [0.13, [26, 11, 46]], // #1a0b2e
+    [0.3, [74, 20, 110]],
+    [0.5, [140, 41, 129]],
+    [0.68, [200, 70, 74]],
+    [0.83, [240, 140, 50]],
+    [0.94, [250, 210, 90]],
+    [1.0, [255, 255, 225]],
+  ];
+  const lut = new Uint8ClampedArray(256 * 3);
+  for (let i = 0; i < 256; i++) {
+    const t = i / 255;
+    let a = stops[0];
+    let b = stops[stops.length - 1];
+    for (let s = 0; s < stops.length - 1; s++) {
+      if (t >= stops[s][0] && t <= stops[s + 1][0]) {
+        a = stops[s];
+        b = stops[s + 1];
+        break;
+      }
+    }
+    const span = b[0] - a[0] || 1;
+    const f = (t - a[0]) / span;
+    lut[i * 3 + 0] = a[1][0] + (b[1][0] - a[1][0]) * f;
+    lut[i * 3 + 1] = a[1][1] + (b[1][1] - a[1][1]) * f;
+    lut[i * 3 + 2] = a[1][2] + (b[1][2] - a[1][2]) * f;
+  }
+  return lut;
+}
+
+function verticalLine(ctx: CanvasRenderingContext2D, x: number, height: number): void {
+  ctx.beginPath();
+  ctx.moveTo(x, 0);
+  ctx.lineTo(x, height);
+  ctx.stroke();
+}
+
+function drawSpectrogram(ctx: CanvasRenderingContext2D, m: MagsData, width: number, height: number): void {
+  const { mags, width: mw, height: mh } = m;
+  if (mw <= 0 || mh <= 0) return;
+  const img = ctx.createImageData(width, height);
+  const data = img.data;
+  const dbSpan = DB_MAX - DB_MIN;
+  for (let x = 0; x < width; x++) {
+    const col = Math.min(mw - 1, Math.floor((x * mw) / width));
+    for (let y = 0; y < height; y++) {
+      // y=0 is the top of the canvas -> high frequency; flip so low freq is at the bottom.
+      const row = Math.min(mh - 1, Math.floor(((height - 1 - y) * mh) / height));
+      const db = mags[col * mh + row];
+      let t = (db - DB_MIN) / dbSpan;
+      t = t < 0 ? 0 : t > 1 ? 1 : t;
+      const li = Math.round(t * 255) * 3;
+      const di = (y * width + x) * 4;
+      data[di] = LUT[li];
+      data[di + 1] = LUT[li + 1];
+      data[di + 2] = LUT[li + 2];
+      data[di + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+/**
+ * Spectral (spectrogram) editor view (Task 19). Mirrors WaveformView's chrome
+ * (timeline ruler, wheel zoom/scroll, click/drag selection, cursor) via the
+ * shared `useEditorGestures` hook, but renders a linear-frequency spectrogram
+ * of the mono mix. Magnitudes are computed off-thread by the spectrogram worker
+ * (debounced 150ms on zoom/scroll/doc change), mapped through an inferno LUT over
+ * a -90..0 dB range, and painted as an ImageData raster with translucent
+ * selection, cursor, and playhead overlays on top.
+ */
+export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const [size, setSize] = useState({ width: 0, height: 0 });
+  const [magsData, setMagsData] = useState<MagsData | null>(null);
+
+  const zoom = useAppStore((s) => s.zoom);
+  const selection = useAppStore((s) => s.selection);
+  const cursorSample = useAppStore((s) => s.cursorSample);
+  const playback = useAppStore((s) => s.playback);
+
+  const length = docLength(doc);
+  const gestures = useEditorGestures(canvasRef, length, size.width);
+
+  const workerRef = useRef<Worker | null>(null);
+  const reqIdRef = useRef(0);
+
+  // Observe the drawing area size (CSS pixels).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => setSize({ width: el.clientWidth, height: el.clientHeight });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  // One worker per mount; stale replies (older request ids) are ignored.
+  useEffect(() => {
+    const worker = createSpectrogramWorker();
+    workerRef.current = worker;
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data as SpectroDone;
+      if (!msg || msg.type !== 'done' || msg.id !== reqIdRef.current) return;
+      setMagsData({ mags: msg.mags, width: msg.width, height: msg.height });
+    };
+    return () => {
+      worker.terminate();
+      workerRef.current = null;
+    };
+  }, []);
+
+  // Recompute the spectrogram (debounced) whenever the data, zoom, or size change.
+  useEffect(() => {
+    const width = Math.round(size.width);
+    const height = Math.round(size.height);
+    if (width <= 0 || height <= 0) return;
+    const worker = workerRef.current;
+    if (!worker) return;
+
+    const t = setTimeout(() => {
+      const { samplesPerPixel: spp, scrollSample } = zoom;
+      const start = Math.max(0, Math.floor(scrollSample));
+      const end = Math.min(length, Math.ceil(scrollSample + width * spp));
+      if (end <= start) return;
+      const mono = mixDown(doc.channels);
+      const id = ++reqIdRef.current;
+      worker.postMessage(
+        {
+          type: 'compute',
+          id,
+          channel: mono,
+          sampleRate: doc.sampleRate,
+          startSample: start,
+          endSample: end,
+          width,
+          height,
+          fftSize: FFT_SIZE,
+        },
+        [mono.buffer]
+      );
+    }, DEBOUNCE_MS);
+    return () => clearTimeout(t);
+  }, [doc, doc.channels, doc.sampleRate, length, zoom, size]);
+
+  // Paint the latest magnitudes plus selection/cursor/playhead overlays.
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return; // jsdom / no backend
+    const width = Math.round(size.width);
+    const height = Math.round(size.height);
+    if (width <= 0 || height <= 0) return;
+
+    canvas.width = width;
+    canvas.height = height;
+
+    ctx.fillStyle = '#0a0a0f';
+    ctx.fillRect(0, 0, width, height);
+    if (magsData) drawSpectrogram(ctx, magsData, width, height);
+
+    const { samplesPerPixel: spp, scrollSample } = zoom;
+
+    // Selection: translucent fill + edges.
+    if (selection && selection.end > selection.start) {
+      const x0 = sampleToPixel(selection.start, scrollSample, spp);
+      const x1 = sampleToPixel(selection.end, scrollSample, spp);
+      const left = Math.max(0, Math.min(x0, x1));
+      const right = Math.min(width, Math.max(x0, x1));
+      if (right > left) {
+        ctx.fillStyle = 'rgba(38,198,218,0.18)';
+        ctx.fillRect(left, 0, right - left, height);
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#26c6da';
+        if (x0 >= 0 && x0 <= width) verticalLine(ctx, x0, height);
+        if (x1 >= 0 && x1 <= width) verticalLine(ctx, x1, height);
+      }
+    }
+
+    // Cursor (white) and playhead (yellow).
+    const cx = sampleToPixel(cursorSample, scrollSample, spp);
+    if (cx >= 0 && cx <= width) {
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = '#ffffff';
+      verticalLine(ctx, cx, height);
+    }
+    if (playback.state === 'playing') {
+      const px = sampleToPixel(playback.positionSample, scrollSample, spp);
+      if (px >= 0 && px <= width) {
+        ctx.lineWidth = 1;
+        ctx.strokeStyle = '#ffd54f';
+        verticalLine(ctx, px, height);
+      }
+    }
+  }, [magsData, size, zoom, selection, cursorSample, playback.state, playback.positionSample]);
+
+  return (
+    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#1a1a1e]" data-testid="spectrogram-view">
+      <TimelineRuler sampleRate={doc.sampleRate} />
+      <div ref={containerRef} className="relative min-h-0 min-w-0 flex-1">
+        <canvas
+          ref={canvasRef}
+          className="block h-full w-full"
+          data-testid="spectrogram-canvas"
+          onPointerDown={gestures.onPointerDown}
+          onPointerMove={gestures.onPointerMove}
+          onPointerUp={gestures.onPointerUp}
+          onPointerCancel={gestures.onPointerUp}
+        />
+      </div>
+    </div>
+  );
+}

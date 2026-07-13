@@ -42,6 +42,7 @@ export default function TransportBar() {
   const doc = useAppStore((s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null);
   const playback = useAppStore((s) => s.playback);
   const cursorSample = useAppStore((s) => s.cursorSample);
+  const view = useAppStore((s) => s.view);
 
   const hasDoc = doc !== null;
   const isPlaying = playback.state === 'playing';
@@ -103,6 +104,30 @@ export default function TransportBar() {
       <TransportButton label="Record" disabled>
         <Circle size={16} fill="currentColor" className="text-[#ef5350]" />
       </TransportButton>
+
+      {/* Editor view toggle: Waveform | Spectral. */}
+      <div
+        className="ml-2 flex overflow-hidden rounded border border-[#3a3a42]"
+        data-testid="view-toggle"
+      >
+        {(['waveform', 'spectral'] as const).map((v) => (
+          <button
+            key={v}
+            type="button"
+            aria-label={v === 'waveform' ? 'Waveform view' : 'Spectral view'}
+            aria-pressed={view === v}
+            disabled={!hasDoc}
+            onClick={() => useAppStore.getState().setView(v)}
+            className={`px-2.5 py-1 text-xs capitalize transition-colors disabled:cursor-default disabled:opacity-40 ${
+              view === v
+                ? 'bg-[#26c6da] text-[#101014]'
+                : 'bg-[#2e2e34] text-[#d4d4d8] enabled:hover:bg-[#3a3a42]'
+            }`}
+          >
+            {v}
+          </button>
+        ))}
+      </div>
 
       <div
         data-testid="transport-time"

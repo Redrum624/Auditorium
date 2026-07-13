@@ -133,6 +133,53 @@ async function main() {
     // 88200 frames * 2ch * 4 bytes (32f) + 44 header ≈ 705644 bytes.
     assert(wavBuf.length > 700000, `out.wav has a plausible size (got ${wavBuf.length})`);
 
+    // 4b) Spectral (spectrogram) view renders non-uniform pixels ------------
+    console.log('Switching to the Spectral view and checking the spectrogram...');
+    await page.evaluate(() => window.__test.setView('spectral'));
+    await page.waitForFunction(
+      () => {
+        const c = document.querySelector('[data-testid="spectrogram-canvas"]');
+        if (!(c instanceof HTMLCanvasElement)) return false;
+        const ctx = c.getContext('2d');
+        if (!ctx || c.width === 0 || c.height === 0) return false;
+        const data = ctx.getImageData(0, 0, c.width, c.height).data;
+        let first = null;
+        for (let i = 0; i < data.length; i += 4 * 101) {
+          const px = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+          if (first === null) first = px;
+          else if (px !== first) return true;
+        }
+        return false;
+      },
+      null,
+      { timeout: 15000 }
+    );
+    assert(true, 'spectrogram canvas contains varied pixels (a spectral image)');
+
+    // 4c) Capture a noise print, run Noise Reduction, assert RMS drops ------
+    console.log('Capturing a noise print and applying Noise Reduction...');
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate(() => window.__test.captureNoisePrint());
+    const rmsBefore = await page.evaluate(() => window.__test.getRms());
+    await page.evaluate(() => {
+      const spectra = window.__test.getNoiseProfileSpectra();
+      return window.__test.applyEffect(
+        'noise-reduction',
+        { reductionDb: 20, sensitivity: 2, smoothing: 0.5 },
+        { spectra }
+      );
+    });
+    const rmsAfter = await page.evaluate(() => window.__test.getRms());
+    console.log(`  RMS before: ${rmsBefore.toFixed(4)}, after: ${rmsAfter.toFixed(4)}`);
+    assert(rmsBefore > 0, 'document had a non-zero RMS before noise reduction');
+    assert(
+      rmsAfter < rmsBefore,
+      `RMS dropped after noise reduction (${rmsAfter.toFixed(4)} < ${rmsBefore.toFixed(4)})`
+    );
+    // Persist so the (now noise-reduced) document isn't dirty at teardown —
+    // otherwise app.close() triggers the unsaved-changes beforeunload prompt.
+    await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
     // 5) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');

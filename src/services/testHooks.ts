@@ -5,8 +5,10 @@
 import { docLength, type AudioDocument } from '../audio/AudioDocument';
 import { encodeWav } from '../audio/wavCodec';
 import type { EffectParamValue } from '../effects/types';
+import type { EditorView } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 import { runEffectOnSelection } from './effectRunner';
+import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { encodeExport, openFilePath, type ExportOptions } from './fileService';
 
 export interface TestStateSummary {
@@ -23,7 +25,15 @@ export interface TestApi {
   exportActive(opts: ExportOptions, outPath: string): Promise<boolean>;
   saveActiveAs(outPath: string): Promise<boolean>;
   getPeak(): number;
-  applyEffect(effectId: string, params: Record<string, EffectParamValue>): Promise<number>;
+  getRms(): number;
+  applyEffect(
+    effectId: string,
+    params: Record<string, EffectParamValue>,
+    extra?: unknown
+  ): Promise<number>;
+  setView(view: EditorView): void;
+  captureNoisePrint(): void;
+  getNoiseProfileSpectra(): number[][] | null;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -38,6 +48,19 @@ function activePeak(): number {
     }
   }
   return peak;
+}
+
+/** Root-mean-square across all channels of the active document. */
+function activeRms(): number {
+  const doc = activeDoc();
+  if (!doc) return 0;
+  let sum = 0;
+  let count = 0;
+  for (const ch of doc.channels) {
+    for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+    count += ch.length;
+  }
+  return count > 0 ? Math.sqrt(sum / count) : 0;
 }
 
 function activeDoc(): AudioDocument | null {
@@ -84,11 +107,23 @@ export function installTestHooks(): void {
 
     getPeak: () => activePeak(),
 
+    getRms: () => activeRms(),
+
     // Runs the effect end-to-end through the real DSP worker (no selection => whole
-    // document) and returns the resulting peak. Used by the headed smoke test.
-    applyEffect: async (effectId, params) => {
-      await runEffectOnSelection(effectId, params);
+    // document). `extra` is forwarded to the worker's `__effectExtra` side channel
+    // (Noise Reduction's captured profile). Returns the resulting peak.
+    applyEffect: async (effectId, params, extra) => {
+      await runEffectOnSelection(effectId, params, undefined, extra);
       return activePeak();
+    },
+
+    setView: (view) => useAppStore.getState().setView(view),
+
+    captureNoisePrint: () => captureNoiseProfile(),
+
+    getNoiseProfileSpectra: () => {
+      const profile = getNoiseProfile();
+      return profile ? profile.spectra.map((s) => Array.from(s)) : null;
     },
   };
 

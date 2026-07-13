@@ -4,6 +4,7 @@ import { playbackEngine } from '../../audio/PlaybackEngine';
 import { getEffect } from '../../effects/EffectRegistry';
 import type { EffectParamDef, EffectParamValue } from '../../effects/types';
 import { runEffectOnSelection } from '../../services/effectRunner';
+import { getNoiseProfile } from '../../services/noiseProfile';
 import { useAppStore } from '../../stores/appStore';
 import DialogShell from './DialogShell';
 
@@ -43,11 +44,16 @@ export default function EffectDialog({
   const [progress, setProgress] = useState(0);
   const [previewing, setPreviewing] = useState(false);
 
-  const canApply = useMemo(() => Boolean(def) && activeDocumentId !== null && !busy, [
-    def,
-    activeDocumentId,
-    busy,
-  ]);
+  // Noise Reduction needs a captured noise print, delivered to the worker via the
+  // `extra` side channel; without one, Apply is disabled and a hint is shown.
+  const isNoiseReduction = def?.id === 'noise-reduction';
+  const hasNoiseProfile = getNoiseProfile() !== null;
+  const missingNoiseProfile = isNoiseReduction && !hasNoiseProfile;
+
+  const canApply = useMemo(
+    () => Boolean(def) && activeDocumentId !== null && !busy && !missingNoiseProfile,
+    [def, activeDocumentId, busy, missingNoiseProfile]
+  );
 
   if (!def) return null;
 
@@ -59,7 +65,10 @@ export default function EffectDialog({
     setBusy(true);
     setProgress(0);
     try {
-      await runEffectOnSelection(def.id, params, setProgress);
+      const extra = isNoiseReduction
+        ? { spectra: (getNoiseProfile()?.spectra ?? []).map((s) => Array.from(s)) }
+        : undefined;
+      await runEffectOnSelection(def.id, params, setProgress, extra);
       onClose();
     } finally {
       setBusy(false);
@@ -102,6 +111,13 @@ export default function EffectDialog({
 
         {def.params.length === 0 && (
           <p className="text-xs text-[#8b8b92]">This effect has no parameters.</p>
+        )}
+
+        {missingNoiseProfile && (
+          <p data-testid="noise-profile-hint" className="text-xs text-[#e0a458]">
+            Capture a noise print first: select a quiet, noise-only region and choose
+            Effects → Capture Noise Print.
+          </p>
         )}
 
         {busy && (

@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import WaveformView from './components/Editor/WaveformView';
+import SpectrogramView from './components/Editor/SpectrogramView';
 import ConvertDialog from './components/Dialogs/ConvertDialog';
 import EffectDialog from './components/Dialogs/EffectDialog';
 import ExportDialog from './components/Dialogs/ExportDialog';
@@ -85,7 +86,9 @@ export default function App() {
           </PanelShell>
         </div>
         <div className="flex min-w-0 flex-1 flex-col bg-[#1a1a1e]">
-          {doc && view === 'waveform' ? (
+          {doc && view === 'spectral' ? (
+            <SpectrogramView doc={doc} />
+          ) : doc ? (
             <WaveformView doc={doc} />
           ) : (
             <div className="flex flex-1 items-center justify-center text-[#8b8b92]">

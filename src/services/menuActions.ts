@@ -13,6 +13,7 @@ import { getClipboard } from './clipboard';
 import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
 import { openConvertDialog, openEffectDialog, openExportDialog, openNewFileDialog } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
+import { captureNoiseProfile } from './noiseProfile';
 
 export interface MenuCommand {
   id: string;
@@ -86,8 +87,10 @@ function fallbackCommand(id: string): MenuCommand {
  * effect is registered. */
 function effectsSectionItemIds(): (string | 'separator')[] {
   const effects = getAllEffects();
-  if (effects.length === 0) return ['effects.none'];
-  const ids: (string | 'separator')[] = [];
+  if (effects.length === 0) return ['noise.capture', 'separator', 'effects.none'];
+  // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
+  // Noise Reduction effect), above the category-grouped effect list.
+  const ids: (string | 'separator')[] = ['noise.capture', 'separator'];
   let lastCategory: string | null = null;
   for (const e of effects) {
     if (e.category !== lastCategory) {
@@ -430,6 +433,42 @@ export function registerEffectCommands(): void {
   registerCommands(cmds);
 }
 
+/** Registers the Task 19 restoration + view commands: `noise.capture` (top of
+ * the Effects menu, enabled only when a selection exists — it profiles the
+ * selected region) and the real `view.waveform` / `view.spectral` toggles
+ * (enabled when an active doc exists and that view isn't already current).
+ * `view.multitrack` stays a disabled stub until Phase D. */
+function registerNoiseAndViewCommands(): void {
+  registerCommands([
+    {
+      id: 'noise.capture',
+      label: 'Capture Noise Print',
+      enabled: (s) => activeDoc(s) !== null && s.selection !== null,
+      run: async () => {
+        captureNoiseProfile();
+        void window.electronAPI?.showMessageBox({
+          type: 'info',
+          title: 'Noise Print',
+          message:
+            'Noise print captured from the selection. Now run Effects → Noise Reduction.',
+        });
+      },
+    },
+    {
+      id: 'view.waveform',
+      label: 'Waveform',
+      enabled: (s) => activeDoc(s) !== null && s.view !== 'waveform',
+      run: async () => useAppStore.getState().setView('waveform'),
+    },
+    {
+      id: 'view.spectral',
+      label: 'Spectral',
+      enabled: (s) => activeDoc(s) !== null && s.view !== 'spectral',
+      run: async () => useAppStore.getState().setView('spectral'),
+    },
+  ]);
+}
+
 /** Registers the whole-document conversion commands (Task 17) in the Edit menu.
  * Both open the ConvertDialog (via the dialog bus) in the matching mode and
  * require an active document. */
@@ -455,3 +494,4 @@ registerSelectionAndTransportCommands();
 registerEditCommands();
 registerFileCommands();
 registerDocumentToolCommands();
+registerNoiseAndViewCommands();
