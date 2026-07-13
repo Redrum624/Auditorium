@@ -11,6 +11,7 @@ import {
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { getClipboard } from './clipboard';
 import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
+import { openSessionViaDialog, saveSessionViaDialog } from '../multitrack/sessionFile';
 import {
   openConvertDialog,
   openEffectDialog,
@@ -57,7 +58,17 @@ export async function runCommand(id: string): Promise<void> {
 const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }[] = [
   {
     title: 'File',
-    itemIds: ['file.new', 'file.open', 'file.save', 'file.saveAs', 'file.export', 'separator', 'file.close'],
+    itemIds: [
+      'file.new',
+      'file.open',
+      'file.save',
+      'file.saveAs',
+      'file.export',
+      'session.save',
+      'session.open',
+      'separator',
+      'file.close',
+    ],
   },
   {
     title: 'Edit',
@@ -422,6 +433,27 @@ function registerFileCommands(): void {
   ]);
 }
 
+/** Registers the multitrack session commands (Task 21): `session.save` writes
+ * the current session as .audm and is only enabled while the multitrack view
+ * is active (there's nothing meaningful to save otherwise); `session.open` is
+ * always available and switches the view to 'multitrack' on success. */
+function registerSessionCommands(): void {
+  registerCommands([
+    {
+      id: 'session.save',
+      label: 'Save Session…',
+      enabled: (s) => s.view === 'multitrack',
+      run: async () => saveSessionViaDialog(),
+    },
+    {
+      id: 'session.open',
+      label: 'Open Session…',
+      enabled: () => true,
+      run: async () => openSessionViaDialog(),
+    },
+  ]);
+}
+
 /** Registers one command per registered effect (`effect.<id>`, opens the effect
  * dialog, enabled when a document is active) plus one disabled category-label
  * command per category (`effects.cat.<Category>`). Idempotent by id: re-running
@@ -506,5 +538,6 @@ registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
 registerFileCommands();
+registerSessionCommands();
 registerDocumentToolCommands();
 registerNoiseAndViewCommands();

@@ -73,8 +73,22 @@ describe('getMenuSections', () => {
       'file.save',
       'file.saveAs',
       'file.export',
+      'session.save',
+      'session.open',
       'file.close',
     ]);
+  });
+
+  it('session.save is only enabled in the multitrack view; session.open is always enabled', () => {
+    const file = getMenuSections().find((s) => s.title === 'File')!;
+    const findCmd = (id: string) =>
+      file.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+
+    expect(findCmd('session.save').enabled(useAppStore.getState())).toBe(false);
+    expect(findCmd('session.open').enabled(useAppStore.getState())).toBe(true);
+
+    useAppStore.setState({ view: 'multitrack' });
+    expect(findCmd('session.save').enabled(useAppStore.getState())).toBe(true);
   });
 
   it('Edit section contains the documented command ids in order', () => {
