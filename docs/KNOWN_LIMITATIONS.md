@@ -86,3 +86,38 @@ device-pixel-ratio 1, so the raster is slightly soft on HiDPI screens.
 (with linear as an option), which spreads low-frequency content across most of
 the display. A log mapping only changes the row→bin function in
 `spectrogramCore.ts`; the worker protocol and view are already agnostic to it.
+
+## Multitrack parameter changes are not live during playback
+
+**Area:** Multitrack > playback (`src/multitrack/MultitrackPlayer.ts`, `src/services/transportService.ts`)
+
+**v1 behavior:** The realtime multitrack player builds its WebAudio graph once per
+`play()` — volume, pan, mute/solo, clip gain, and clip geometry changes made while
+playing do not affect the running audio. Stop and play again to hear them. Source
+`AudioBuffer`s are also rebuilt on every `play()` (no cross-play cache).
+
+**Intended behavior:** Bind track parameters to live `GainNode`/`StereoPannerNode`
+AudioParams so slider moves are audible immediately, and cache per-document buffers
+keyed on channel identity.
+
+## Track arm (R) is visual-only — no multitrack recording
+
+**Area:** Multitrack > TrackHeader (`src/components/Multitrack/TrackHeader.tsx`)
+
+**v1 behavior:** The R toggle stores the `armed` flag but nothing consumes it.
+Recording happens only via the single-file Record dialog (transport record button),
+which creates a new document rather than recording into an armed track at the playhead.
+
+**Intended behavior:** Audition-style punch-in recording onto armed tracks.
+
+## Realtime multitrack pan law differs slightly from mixdown
+
+**Area:** Multitrack playback vs. Mix Down (`src/multitrack/MultitrackPlayer.ts` vs `src/multitrack/mixdown.ts`)
+
+**v1 behavior:** Realtime monitoring pans through WebAudio `StereoPannerNode`
+(equal-power for mono, its built-in stereo law), while the offline mixdown uses the
+documented constant-power (mono) / balance (stereo) law. The rendered mixdown is
+authoritative; monitoring can differ by a fraction of a dB on panned stereo tracks.
+
+**Intended behavior:** Implement the mixdown pan law manually in the realtime graph
+(per-channel gain nodes) so monitor and render match exactly.
