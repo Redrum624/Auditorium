@@ -203,7 +203,33 @@ async function main() {
     // unsaved-changes beforeunload prompt at teardown.
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
 
-    // 6) Screenshot ---------------------------------------------------------
+    // 6) Multitrack: new session, two clips, mixdown ------------------------
+    console.log('Building a multitrack session and mixing down...');
+    // Re-open the tone so it is the active document to insert.
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    await page.evaluate(() => window.__test.newSession(44100));
+
+    const c1 = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
+    const c2 = await page.evaluate((off) => window.__test.insertActiveDocAsClip(1, off), 22050);
+    console.log(`  clip 1: ${JSON.stringify(c1)} | clip 2: ${JSON.stringify(c2)}`);
+    assert(c1 && c1.lengthSample === 88200, `clip 1 spans the whole tone (88200; got ${c1 && c1.lengthSample})`);
+    assert(c2 && c2.startSample === 22050, `clip 2 starts at sample 22050 (got ${c2 && c2.startSample})`);
+
+    const mix = await page.evaluate(() => window.__test.mixdownSession());
+    console.log(`  mixdown: ${JSON.stringify(mix)}`);
+    const expectedMixLen = 22050 + 88200; // last clip end (session samples)
+    assert(mix !== null, 'mixdown produced a document');
+    assert(mix.length === expectedMixLen, `mixdown length is ${expectedMixLen} (got ${mix.length})`);
+    assert(mix.sampleRate === 44100, `mixdown sample rate is 44100 (got ${mix.sampleRate})`);
+    assert(mix.rms > 0, `mixdown is non-silent (rms ${mix.rms.toFixed(4)} > 0)`);
+    assert(/^Mixdown /.test(mix.name), `mixdown doc named 'Mixdown N' (got ${mix.name})`);
+
+    // The mixdown became the active document in the waveform view.
+    const mixSummary = await page.evaluate(() => window.__test.getStateSummary());
+    assert(mixSummary.length === expectedMixLen, `active doc is the mixdown (length ${mixSummary.length})`);
+    assert(mixSummary.channels === 2, `mixdown is stereo (got ${mixSummary.channels})`);
+
+    // 7) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 

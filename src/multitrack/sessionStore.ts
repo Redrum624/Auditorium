@@ -8,6 +8,12 @@ export interface SessionState {
   mtCursorSample: number;
   mtZoom: { samplesPerPixel: number; scrollSample: number };
   mtPlayState: 'stopped' | 'playing';
+  /**
+   * Live playhead position (session samples) pushed by the transport pump while
+   * multitrack playback runs — the read-model the lanes render their playhead
+   * line from. Additive extension over the Task 21 contract (Task 22).
+   */
+  mtPlayheadSample: number;
 }
 
 export interface SessionActions {
@@ -26,6 +32,8 @@ export interface SessionActions {
   setSelectedClip(id: string | null): void;
   setMtCursor(s: number): void;
   setMtZoom(z: SessionState['mtZoom']): void;
+  setMtPlayState(state: SessionState['mtPlayState']): void;
+  setMtPlayheadSample(s: number): void;
 }
 
 function defaultMtZoom(): SessionState['mtZoom'] {
@@ -87,6 +95,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   mtCursorSample: 0,
   mtZoom: defaultMtZoom(),
   mtPlayState: 'stopped',
+  mtPlayheadSample: 0,
 
   newSession(sampleRate) {
     set({
@@ -95,6 +104,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       mtCursorSample: 0,
       mtZoom: defaultMtZoom(),
       mtPlayState: 'stopped',
+      mtPlayheadSample: 0,
     });
   },
 
@@ -226,5 +236,13 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
 
   setMtZoom(z) {
     set({ mtZoom: z });
+  },
+
+  setMtPlayState(state) {
+    set({ mtPlayState: state });
+  },
+
+  setMtPlayheadSample(sample) {
+    set({ mtPlayheadSample: sample });
   },
 }));

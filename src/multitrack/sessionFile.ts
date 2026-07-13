@@ -182,6 +182,7 @@ export async function openSessionViaDialog(): Promise<void> {
     mtCursorSample: 0,
     mtZoom: { samplesPerPixel: 512, scrollSample: 0 },
     mtPlayState: 'stopped',
+    mtPlayheadSample: 0,
   });
   useAppStore.getState().setView('multitrack');
 }

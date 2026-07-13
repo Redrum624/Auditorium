@@ -8,15 +8,32 @@ const MIN_TICK_PX = 80;
 // Candidate tick spacings in seconds (ascending).
 const TICK_STEPS = [0.001, 0.01, 0.1, 0.5, 1, 5, 10, 30, 60, 300];
 
-/** 24px time ruler above the waveform. Shares zoom from the store; clicking
- * seeks the cursor. Ticks are chosen so labels stay >= 80px apart. */
-export default function TimelineRuler({ sampleRate }: { sampleRate: number }) {
+interface Zoom {
+  samplesPerPixel: number;
+  scrollSample: number;
+}
+
+interface TimelineRulerProps {
+  sampleRate: number;
+  /** External zoom source (multitrack lanes). Defaults to the app store's zoom
+   * (single-document editor) when omitted. */
+  zoom?: Zoom;
+  /** Seek handler for a ruler click. Defaults to the app store's setCursor. */
+  onSeek?: (sample: number) => void;
+}
+
+/** 24px time ruler. Shares a zoom source (app store by default, or the passed
+ * multitrack zoom); clicking seeks. Ticks are chosen so labels stay >= 80px
+ * apart. */
+export default function TimelineRuler({ sampleRate, zoom: zoomProp, onSeek }: TimelineRulerProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [width, setWidth] = useState(0);
 
-  const zoom = useAppStore((s) => s.zoom);
-  const setCursor = useAppStore((s) => s.setCursor);
+  const storeZoom = useAppStore((s) => s.zoom);
+  const storeSetCursor = useAppStore((s) => s.setCursor);
+  const zoom = zoomProp ?? storeZoom;
+  const seek = onSeek ?? storeSetCursor;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -75,7 +92,7 @@ export default function TimelineRuler({ sampleRate }: { sampleRate: number }) {
     const rect = e.currentTarget.getBoundingClientRect();
     const x = e.clientX - rect.left;
     const sample = Math.round(pixelToSample(x, zoom.scrollSample, zoom.samplesPerPixel));
-    setCursor(Math.max(0, sample));
+    seek(Math.max(0, sample));
   };
 
   return (

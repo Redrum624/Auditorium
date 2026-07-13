@@ -1,7 +1,10 @@
-import { docLength } from '../audio/AudioDocument';
-import { playbackEngine, type PlaybackPlayOptions } from '../audio/PlaybackEngine';
+import { createDocument, docLength, nextId } from '../audio/AudioDocument';
 import type { AppState } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
+import { useSessionStore } from '../multitrack/sessionStore';
+import { createClip } from '../multitrack/session';
+import { mixdownSession } from '../multitrack/mixdown';
+import { transportPlayPause, transportStop } from './transportService';
 import {
   cutSelection,
   copySelection,
@@ -66,6 +69,7 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'file.export',
       'session.save',
       'session.open',
+      'multitrack.mixdown',
       'separator',
       'file.close',
     ],
@@ -85,6 +89,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'separator',
       'edit.convertSampleRate',
       'edit.convertChannels',
+      'separator',
+      'multitrack.insertDoc',
+      'multitrack.addTrack',
     ],
   },
   { title: 'Effects', itemIds: ['effects.none'] },
@@ -246,49 +253,20 @@ function registerSelectionAndTransportCommands(): void {
     },
 
     {
+      // View-routed: the multitrack view plays via the MultitrackPlayer, the
+      // waveform/spectral view via the single-document PlaybackEngine. The
+      // dispatch lives in transportService so the command id stays stable.
       id: 'transport.playPause',
       label: 'Play/Pause',
       shortcut: 'Space',
-      enabled: (s) => activeDoc(s) !== null,
-      run: async () => {
-        const state = useAppStore.getState();
-        if (!activeDoc(state)) return;
-        const { selection, cursorSample, playback, setPlayback } = state;
-
-        // Playing -> pause, keeping the current position.
-        if (playbackEngine.state === 'playing') {
-          playbackEngine.pause();
-          setPlayback({ state: 'paused' });
-          return;
-        }
-
-        // Resume from the paused sample, else start at the selection or cursor.
-        const from =
-          playbackEngine.state === 'paused'
-            ? playbackEngine.getPositionSample()
-            : selection
-              ? selection.start
-              : cursorSample;
-
-        const opts: PlaybackPlayOptions = {};
-        if (selection) {
-          if (playback.loop) opts.loopRegion = selection;
-          else opts.playRegion = selection;
-        }
-        playbackEngine.play(from, opts);
-        setPlayback({ state: 'playing', positionSample: from });
-      },
+      enabled: (s) => s.view === 'multitrack' || activeDoc(s) !== null,
+      run: async () => transportPlayPause(),
     },
     {
       id: 'transport.stop',
       label: 'Stop',
-      enabled: (s) => activeDoc(s) !== null,
-      run: async () => {
-        playbackEngine.stop();
-        useAppStore
-          .getState()
-          .setPlayback({ state: 'stopped', positionSample: playbackEngine.getPositionSample() });
-      },
+      enabled: (s) => s.view === 'multitrack' || activeDoc(s) !== null,
+      run: async () => transportStop(),
     },
     {
       id: 'transport.toggleLoop',
@@ -360,11 +338,23 @@ function registerEditCommands(): void {
       run: async () => pasteAtCursor(),
     },
     {
+      // In the multitrack view, Delete removes the selected clip; elsewhere it
+      // deletes the active document's selected region (Task 22 view routing).
       id: 'edit.delete',
       label: 'Delete',
       shortcut: 'Del',
-      enabled: hasSelection,
-      run: async () => deleteSelection(),
+      enabled: (s) =>
+        s.view === 'multitrack'
+          ? useSessionStore.getState().selectedClipId !== null
+          : hasSelection(s),
+      run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          const clipId = useSessionStore.getState().selectedClipId;
+          if (clipId) useSessionStore.getState().removeClip(clipId);
+          return;
+        }
+        deleteSelection();
+      },
     },
   ]);
 }
@@ -534,6 +524,103 @@ function registerDocumentToolCommands(): void {
   ]);
 }
 
+/** True when the current session has at least one clip on any track. */
+function sessionHasClips(): boolean {
+  return useSessionStore.getState().session.tracks.some((t) => t.clips.length > 0);
+}
+
+/** Inserts the entire active document as a clip at the multitrack cursor. The
+ * target track is the one holding the selected clip, else the first track.
+ * Clip length is expressed in session samples (converted when the document rate
+ * differs from the session rate). No-op without an active doc or any track. */
+function insertActiveDocAsClip(): void {
+  const doc = activeDoc(useAppStore.getState());
+  if (!doc) return;
+  const store = useSessionStore.getState();
+  const { session, selectedClipId, mtCursorSample } = store;
+  if (session.tracks.length === 0) return;
+
+  const owningTrack = selectedClipId
+    ? session.tracks.find((t) => t.clips.some((c) => c.id === selectedClipId))
+    : undefined;
+  const targetTrack = owningTrack ?? session.tracks[0];
+
+  const srcLen = docLength(doc);
+  const lengthSample =
+    doc.sampleRate === session.sampleRate
+      ? srcLen
+      : Math.round((srcLen * session.sampleRate) / doc.sampleRate);
+
+  const clip = createClip({
+    documentId: doc.id,
+    startSample: mtCursorSample,
+    offsetSample: 0,
+    lengthSample,
+  });
+  store.addClip(targetTrack.id, clip);
+  store.setSelectedClip(clip.id);
+}
+
+/** Renders the session offline to a stereo document, adds it to the Files
+ * panel, and switches to the waveform view. Surfaces a message when there is
+ * nothing audible to mix (empty / all-muted session). */
+async function mixdownToNewFile(): Promise<void> {
+  const session = useSessionStore.getState().session;
+  const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+  const { channels, sampleRate } = mixdownSession(session, docs);
+
+  if (channels[0].length === 0) {
+    await window.electronAPI?.showMessageBox({
+      type: 'info',
+      title: 'Mix Down',
+      message: 'Nothing audible to mix down.',
+    });
+    return;
+  }
+
+  const n = nextId('mixdown').split('-')[1];
+  const doc = createDocument({
+    name: `Mixdown ${n}`,
+    sampleRate,
+    channels: [channels[0], channels[1]],
+  });
+  useAppStore.getState().addDocument(doc);
+  useAppStore.getState().setView('waveform');
+}
+
+/** Registers the Task 22 multitrack commands: the real `view.multitrack`
+ * toggle (always available — the multitrack view works with no open document),
+ * `multitrack.addTrack`, `multitrack.insertDoc`, and `multitrack.mixdown`. The
+ * three action commands are enabled only while the multitrack view is active. */
+function registerMultitrackCommands(): void {
+  registerCommands([
+    {
+      id: 'view.multitrack',
+      label: 'Multitrack',
+      enabled: (s) => s.view !== 'multitrack',
+      run: async () => useAppStore.getState().setView('multitrack'),
+    },
+    {
+      id: 'multitrack.addTrack',
+      label: 'Add Track',
+      enabled: (s) => s.view === 'multitrack',
+      run: async () => useSessionStore.getState().addTrack(),
+    },
+    {
+      id: 'multitrack.insertDoc',
+      label: 'Insert Active File at Cursor',
+      enabled: (s) => s.view === 'multitrack' && activeDoc(s) !== null,
+      run: async () => insertActiveDocAsClip(),
+    },
+    {
+      id: 'multitrack.mixdown',
+      label: 'Mix Down to New File',
+      enabled: (s) => s.view === 'multitrack' && sessionHasClips(),
+      run: async () => mixdownToNewFile(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -541,3 +628,4 @@ registerFileCommands();
 registerSessionCommands();
 registerDocumentToolCommands();
 registerNoiseAndViewCommands();
+registerMultitrackCommands();

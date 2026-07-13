@@ -75,6 +75,7 @@ describe('getMenuSections', () => {
       'file.export',
       'session.save',
       'session.open',
+      'multitrack.mixdown',
       'file.close',
     ]);
   });
@@ -103,6 +104,8 @@ describe('getMenuSections', () => {
       'edit.selectAll',
       'edit.convertSampleRate',
       'edit.convertChannels',
+      'multitrack.insertDoc',
+      'multitrack.addTrack',
     ]);
   });
 

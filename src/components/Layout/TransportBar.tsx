@@ -1,6 +1,8 @@
 import { useEffect, type ReactNode } from 'react';
 import { Circle, Pause, Play, Repeat, Square } from 'lucide-react';
 import { playbackEngine } from '../../audio/PlaybackEngine';
+import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
+import { useSessionStore } from '../../multitrack/sessionStore';
 import { runCommand } from '../../services/menuActions';
 import { useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
@@ -32,11 +34,13 @@ function TransportButton({ label, onClick, disabled, active, children }: Transpo
 }
 
 /**
- * Bottom transport bar: stop / play-pause / loop / record buttons, a large
- * monospace time readout, and the level meter. It owns the wiring between the
- * store and the shared PlaybackEngine: loading the active document into the
- * engine on identity change, mirroring engine state transitions back into the
- * store (covers natural end), and pumping the play position via requestAnimationFrame.
+ * Bottom transport bar: stop / play-pause / loop / record buttons, an
+ * editor-view segmented control (Waveform | Spectral | Multitrack), a large
+ * monospace time readout, and the level meter. It owns the store↔engine wiring
+ * for BOTH engines: loading the active document into the PlaybackEngine, and
+ * mirroring each engine's state + pumping its play position (routed by the
+ * active view) so the waveform playhead and the multitrack playhead both track
+ * their engine.
  */
 export default function TransportBar() {
   const doc = useAppStore((s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null);
@@ -44,17 +48,22 @@ export default function TransportBar() {
   const cursorSample = useAppStore((s) => s.cursorSample);
   const view = useAppStore((s) => s.view);
 
-  const hasDoc = doc !== null;
-  const isPlaying = playback.state === 'playing';
+  const mtSampleRate = useSessionStore((s) => s.session.sampleRate);
+  const mtCursorSample = useSessionStore((s) => s.mtCursorSample);
+  const mtPlayState = useSessionStore((s) => s.mtPlayState);
+  const mtPlayheadSample = useSessionStore((s) => s.mtPlayheadSample);
 
-  // Load the active document into the engine whenever its identity changes
-  // (a new file, or an edit that produced a new document object).
+  const hasDoc = doc !== null;
+  const isMultitrack = view === 'multitrack';
+  const canTransport = hasDoc || isMultitrack;
+  const isPlaying = isMultitrack ? mtPlayState === 'playing' : playback.state === 'playing';
+
+  // Load the active document into the engine whenever its identity changes.
   useEffect(() => {
     if (doc) playbackEngine.load(doc);
   }, [doc]);
 
-  // Mirror engine state transitions into the store so natural end (onended)
-  // updates the UI even though no command ran.
+  // Mirror PlaybackEngine state transitions into the app store (covers natural end).
   useEffect(() => {
     return playbackEngine.onStateChange((state) => {
       useAppStore
@@ -63,9 +72,19 @@ export default function TransportBar() {
     });
   }, []);
 
-  // While playing, pump the derived position into the store each animation frame.
+  // Mirror MultitrackPlayer state transitions into the session store (covers
+  // natural end); push the final playhead so it snaps to rest on stop.
   useEffect(() => {
-    if (playback.state !== 'playing') return;
+    return multitrackPlayer.onStateChange((state) => {
+      const s = useSessionStore.getState();
+      s.setMtPlayState(state);
+      s.setMtPlayheadSample(multitrackPlayer.getPositionSample());
+    });
+  }, []);
+
+  // Waveform/spectral position pump (only while that view is playing).
+  useEffect(() => {
+    if (isMultitrack || playback.state !== 'playing') return;
     let raf = 0;
     const tick = () => {
       useAppStore.getState().setPlayback({ positionSample: playbackEngine.getPositionSample() });
@@ -73,20 +92,42 @@ export default function TransportBar() {
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
-  }, [playback.state]);
+  }, [playback.state, isMultitrack]);
 
-  const sampleRate = doc?.sampleRate ?? 44100;
-  const readoutSample = isPlaying ? playback.positionSample : cursorSample;
+  // Multitrack position pump (only while the multitrack view is playing).
+  useEffect(() => {
+    if (!isMultitrack || mtPlayState !== 'playing') return;
+    let raf = 0;
+    const tick = () => {
+      useSessionStore.getState().setMtPlayheadSample(multitrackPlayer.getPositionSample());
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, [isMultitrack, mtPlayState]);
+
+  const readoutRate = isMultitrack ? mtSampleRate : (doc?.sampleRate ?? 44100);
+  const readoutSample = isMultitrack
+    ? mtPlayState === 'playing'
+      ? mtPlayheadSample
+      : mtCursorSample
+    : isPlaying
+      ? playback.positionSample
+      : cursorSample;
 
   return (
     <div className="flex h-14 items-center gap-3 border-t border-[#3a3a42] bg-[#232328] px-3">
-      <TransportButton label="Stop" disabled={!hasDoc} onClick={() => void runCommand('transport.stop')}>
+      <TransportButton
+        label="Stop"
+        disabled={!canTransport}
+        onClick={() => void runCommand('transport.stop')}
+      >
         <Square size={16} fill="currentColor" />
       </TransportButton>
 
       <TransportButton
         label={isPlaying ? 'Pause' : 'Play'}
-        disabled={!hasDoc}
+        disabled={!canTransport}
         onClick={() => void runCommand('transport.playPause')}
       >
         {isPlaying ? <Pause size={18} fill="currentColor" /> : <Play size={18} fill="currentColor" />}
@@ -105,18 +146,19 @@ export default function TransportBar() {
         <Circle size={16} fill="currentColor" className="text-[#ef5350]" />
       </TransportButton>
 
-      {/* Editor view toggle: Waveform | Spectral. */}
+      {/* Editor view toggle: Waveform | Spectral | Multitrack. Multitrack works
+          without an open document; the single-doc views require one. */}
       <div
         className="ml-2 flex overflow-hidden rounded border border-[#3a3a42]"
         data-testid="view-toggle"
       >
-        {(['waveform', 'spectral'] as const).map((v) => (
+        {(['waveform', 'spectral', 'multitrack'] as const).map((v) => (
           <button
             key={v}
             type="button"
-            aria-label={v === 'waveform' ? 'Waveform view' : 'Spectral view'}
+            aria-label={`${v} view`}
             aria-pressed={view === v}
-            disabled={!hasDoc}
+            disabled={v !== 'multitrack' && !hasDoc}
             onClick={() => useAppStore.getState().setView(v)}
             className={`px-2.5 py-1 text-xs capitalize transition-colors disabled:cursor-default disabled:opacity-40 ${
               view === v
@@ -133,7 +175,7 @@ export default function TransportBar() {
         data-testid="transport-time"
         className="ml-2 font-mono text-2xl tabular-nums text-[#d4d4d8]"
       >
-        {formatTime(readoutSample, sampleRate)}
+        {formatTime(readoutSample, readoutRate)}
       </div>
 
       <div className="ml-auto">

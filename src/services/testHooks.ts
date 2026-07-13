@@ -8,6 +8,9 @@ import { encodeWav } from '../audio/wavCodec';
 import type { EffectParamValue } from '../effects/types';
 import type { EditorView } from '../stores/appStore';
 import { nextId, useAppStore } from '../stores/appStore';
+import { createClip } from '../multitrack/session';
+import { useSessionStore } from '../multitrack/sessionStore';
+import { mixdownSession as renderMixdown } from '../multitrack/mixdown';
 import { runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { encodeExport, openFilePath, type ExportOptions } from './fileService';
@@ -36,6 +39,12 @@ export interface TestApi {
   captureNoisePrint(): void;
   getNoiseProfileSpectra(): number[][] | null;
   recordSeconds(seconds: number): Promise<{ length: number; sampleRate: number; rms: number }>;
+  newSession(sampleRate: number): void;
+  insertActiveDocAsClip(
+    trackIndex: number,
+    startSample: number
+  ): { clipId: string; lengthSample: number; startSample: number } | null;
+  mixdownSession(): { name: string; length: number; sampleRate: number; rms: number } | null;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -151,6 +160,56 @@ export function installTestHooks(): void {
       }
       const rms = count > 0 ? Math.sqrt(sum / count) : 0;
       return { length: channels[0]?.length ?? 0, sampleRate, rms };
+    },
+
+    // --- Multitrack (Task 22) ---------------------------------------------
+    newSession: (sampleRate) => {
+      useSessionStore.getState().newSession(sampleRate);
+      useAppStore.getState().setView('multitrack');
+    },
+
+    // Inserts the active document as a clip on tracks[trackIndex] at startSample
+    // (session samples), converting length when the doc rate differs.
+    insertActiveDocAsClip: (trackIndex, startSample) => {
+      const doc = activeDoc();
+      if (!doc) return null;
+      const store = useSessionStore.getState();
+      const { session } = store;
+      const track = session.tracks[trackIndex];
+      if (!track) return null;
+      const srcLen = docLength(doc);
+      const lengthSample =
+        doc.sampleRate === session.sampleRate
+          ? srcLen
+          : Math.round((srcLen * session.sampleRate) / doc.sampleRate);
+      const clip = createClip({ documentId: doc.id, startSample, offsetSample: 0, lengthSample });
+      store.addClip(track.id, clip);
+      return { clipId: clip.id, lengthSample, startSample };
+    },
+
+    // Renders the session offline, adds the resulting stereo doc, switches to
+    // the waveform view, and reports its length + RMS for assertion.
+    mixdownSession: () => {
+      const session = useSessionStore.getState().session;
+      const map = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+      const { channels, sampleRate } = renderMixdown(session, map);
+      if (channels[0].length === 0) return null;
+      const n = nextId('mixdown').split('-')[1];
+      const doc = createDocument({
+        name: `Mixdown ${n}`,
+        sampleRate,
+        channels: [channels[0], channels[1]],
+      });
+      useAppStore.getState().addDocument(doc);
+      useAppStore.getState().setView('waveform');
+      let sum = 0;
+      let count = 0;
+      for (const ch of doc.channels) {
+        for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+        count += ch.length;
+      }
+      const rms = count > 0 ? Math.sqrt(sum / count) : 0;
+      return { name: doc.name, length: doc.channels[0].length, sampleRate, rms };
     },
   };
 
