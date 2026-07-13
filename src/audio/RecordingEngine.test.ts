@@ -284,6 +284,28 @@ describe('RecordingEngine', () => {
       );
       expect(engine.isRecording).toBe(false);
     });
+
+    it('releases the mic and closes the context when worklet setup fails after getUserMedia', async () => {
+      // Regression: getUserMedia succeeds, then addModule rejects (the exact
+      // CSP failure seen in the first smoke run). The LOCAL stream/context must
+      // be torn down or the mic stays lit and retries stack leaked contexts.
+      const stream = new FakeStream();
+      const ctx = new FakeContext(44100);
+      ctx.audioWorklet.addModule = async () => {
+        throw new Error('Unable to load a worklet module');
+      };
+      const engine = new RecordingEngine({
+        getUserMedia: async () => stream as unknown as MediaStream,
+        createContext: () => ctx as unknown as RecordingContextLike,
+        createWorkletNode: () => new FakeWorkletNode() as unknown as WorkletNodeLike,
+        createModuleUrl: () => 'blob:test',
+      });
+
+      await expect(engine.start({ channels: 1, sampleRate: 44100 })).rejects.toThrow('worklet');
+      expect(engine.isRecording).toBe(false);
+      expect(stream.tracks[0].stopped).toBe(true); // mic released
+      expect(ctx.closed).toBe(true); // context not leaked
+    });
   });
 
   describe('listInputs', () => {

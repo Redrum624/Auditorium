@@ -157,12 +157,18 @@ export class RecordingEngine {
     this.requestedChannels = opts.channels;
     this.chunks = [];
 
+    // Declared outside the try so the catch can release resources acquired
+    // BEFORE the failing step — e.g. getUserMedia succeeded (mic indicator on)
+    // but addModule then rejected. Without this the mic stays lit and every
+    // retry leaks another AudioContext.
+    let stream: MediaStream | null = null;
+    let ctx: RecordingContextLike | null = null;
     try {
       const audio: MediaTrackConstraints = { channelCount: opts.channels };
       if (opts.deviceId) audio.deviceId = { exact: opts.deviceId };
-      const stream = await this.getUserMedia({ audio });
+      stream = await this.getUserMedia({ audio });
 
-      const ctx = this.createContext(opts.sampleRate);
+      ctx = this.createContext(opts.sampleRate);
       const moduleUrl = this.createModuleUrl(RECORDER_WORKLET_SOURCE);
       await ctx.audioWorklet.addModule(moduleUrl);
 
@@ -188,6 +194,19 @@ export class RecordingEngine {
     } catch (err) {
       this._isRecording = false;
       this.disposeGraph();
+      // Release the mic and the context created before the failure.
+      try {
+        stream?.getTracks().forEach((t) => t.stop());
+      } catch {
+        /* ignore */
+      }
+      if (ctx?.close) {
+        try {
+          await ctx.close();
+        } catch {
+          /* ignore */
+        }
+      }
       throw err;
     }
   }

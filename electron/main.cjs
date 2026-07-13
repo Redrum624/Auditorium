@@ -55,18 +55,20 @@ function createWindow() {
 app.whenReady().then(() => {
   setAppPaths({ appPath: app.getAppPath(), userData: app.getPath('userData') });
 
-  // Grant ONLY microphone/audio capture ('media'), and only to our own renderer
-  // bundle; deny everything else (camera, geolocation, notifications, …). Both
-  // handlers are wired so the two Chromium code paths (the async permission
-  // *request* and the synchronous permission *check* getUserMedia consults) use
-  // the same policy. See electron/permissionPolicy.cjs.
+  // Grant ONLY microphone/audio capture ('media' restricted to audio media
+  // types), and only to our own renderer bundle; deny everything else (camera,
+  // geolocation, notifications, …). Both handlers are wired so the two Chromium
+  // code paths (the async permission *request* and the synchronous permission
+  // *check* getUserMedia consults) use the same policy, with their respective
+  // details shapes (mediaTypes vs mediaType) forwarded for the audio-only gate.
+  // See electron/permissionPolicy.cjs.
   const ses = session.defaultSession;
-  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+  ses.setPermissionRequestHandler((webContents, permission, callback, details) => {
     const url = webContents ? webContents.getURL() : '';
-    callback(isMediaAllowed(permission, url));
+    callback(isMediaAllowed(permission, url, details));
   });
-  ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
-    return isMediaAllowed(permission, requestingOrigin);
+  ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin, details) => {
+    return isMediaAllowed(permission, requestingOrigin, details);
   });
 
   createWindow();
