@@ -5,6 +5,7 @@ import ConvertDialog from './components/Dialogs/ConvertDialog';
 import EffectDialog from './components/Dialogs/EffectDialog';
 import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
+import RecordDialog from './components/Dialogs/RecordDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
@@ -34,6 +35,7 @@ export default function App() {
   const [newFileOpen, setNewFileOpen] = useState(false);
   const [effectDialogId, setEffectDialogId] = useState<string | null>(null);
   const [convertMode, setConvertMode] = useState<ConvertMode | null>(null);
+  const [recordOpen, setRecordOpen] = useState(false);
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
@@ -46,6 +48,7 @@ export default function App() {
         openExportDialog: () => setExportOpen(true),
         openEffectDialog: (effectId) => setEffectDialogId(effectId),
         openConvertDialog: (mode) => setConvertMode(mode),
+        openRecordDialog: () => setRecordOpen(true),
       }),
     []
   );
@@ -114,6 +117,7 @@ export default function App() {
       {convertMode && (
         <ConvertDialog mode={convertMode} onClose={() => setConvertMode(null)} />
       )}
+      {recordOpen && <RecordDialog onClose={() => setRecordOpen(false)} />}
     </div>
   );
 }

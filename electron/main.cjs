@@ -1,7 +1,8 @@
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 const path = require('node:path');
 const { registerIpc } = require('./ipc.cjs');
 const { setAppPaths } = require('./writePathPolicy.cjs');
+const { isMediaAllowed } = require('./permissionPolicy.cjs');
 
 app.setName('audition_app');
 
@@ -53,6 +54,20 @@ function createWindow() {
 
 app.whenReady().then(() => {
   setAppPaths({ appPath: app.getAppPath(), userData: app.getPath('userData') });
+
+  // Grant ONLY microphone/audio capture ('media'), and only to our own renderer
+  // bundle; deny everything else (camera, geolocation, notifications, …). Both
+  // handlers are wired so the two Chromium code paths (the async permission
+  // *request* and the synchronous permission *check* getUserMedia consults) use
+  // the same policy. See electron/permissionPolicy.cjs.
+  const ses = session.defaultSession;
+  ses.setPermissionRequestHandler((webContents, permission, callback) => {
+    const url = webContents ? webContents.getURL() : '';
+    callback(isMediaAllowed(permission, url));
+  });
+  ses.setPermissionCheckHandler((_webContents, permission, requestingOrigin) => {
+    return isMediaAllowed(permission, requestingOrigin);
+  });
 
   createWindow();
   registerIpc(() => mainWindow);

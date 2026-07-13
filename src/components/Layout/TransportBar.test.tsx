@@ -3,6 +3,7 @@ import TransportBar from './TransportBar';
 import LevelMeter from './LevelMeter';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
+import { registerDialogSetters } from '../../services/dialogBus';
 
 function makeDoc(): AudioDocument {
   return createDocument({
@@ -26,11 +27,13 @@ describe('TransportBar', () => {
     expect(screen.getByTestId('transport-time')).toHaveTextContent('0:00.000');
   });
 
-  it('disables transport controls when no document is open', () => {
+  it('disables playback controls when no document is open (Record stays enabled)', () => {
     render(<TransportBar />);
     expect(screen.getByRole('button', { name: 'Play' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Record' })).toBeDisabled();
+    // Record is always enabled — the dialog owns device selection/errors and
+    // recording creates a brand-new document, so no active doc is required.
+    expect(screen.getByRole('button', { name: 'Record' })).toBeEnabled();
   });
 
   it('enables play/stop/loop once a document is active', () => {
@@ -40,8 +43,21 @@ describe('TransportBar', () => {
     expect(screen.getByRole('button', { name: 'Play' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Stop' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Loop' })).toBeEnabled();
-    // Record stays disabled until the recording task lands.
-    expect(screen.getByRole('button', { name: 'Record' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Record' })).toBeEnabled();
+  });
+
+  it('opens the Record dialog when the Record button is clicked', () => {
+    const openRecord = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: openRecord,
+    });
+    render(<TransportBar />);
+    fireEvent.click(screen.getByRole('button', { name: 'Record' }));
+    expect(openRecord).toHaveBeenCalled();
   });
 
   it('toggles the loop flag in the store when the loop button is clicked', () => {

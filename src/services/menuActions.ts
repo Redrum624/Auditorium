@@ -11,7 +11,13 @@ import {
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { getClipboard } from './clipboard';
 import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
-import { openConvertDialog, openEffectDialog, openExportDialog, openNewFileDialog } from './dialogBus';
+import {
+  openConvertDialog,
+  openEffectDialog,
+  openExportDialog,
+  openNewFileDialog,
+  openRecordDialog,
+} from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
 
@@ -282,7 +288,14 @@ function registerSelectionAndTransportCommands(): void {
         setPlayback({ loop: !playback.loop });
       },
     },
-    stub('transport.record', 'Record'),
+    {
+      // Always enabled: the dialog owns device selection and surfaces any
+      // permission/no-device error itself, so there's nothing to gate on here.
+      id: 'transport.record',
+      label: 'Record',
+      enabled: () => true,
+      run: async () => openRecordDialog(),
+    },
     stub('marker.add', 'Add Marker', 'M'),
   ]);
 }

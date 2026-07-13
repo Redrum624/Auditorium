@@ -101,7 +101,7 @@ export default function TransportBar() {
         <Repeat size={16} />
       </TransportButton>
 
-      <TransportButton label="Record" disabled>
+      <TransportButton label="Record" onClick={() => void runCommand('transport.record')}>
         <Circle size={16} fill="currentColor" className="text-[#ef5350]" />
       </TransportButton>
 

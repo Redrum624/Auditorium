@@ -2,11 +2,12 @@
 // Installed by App.tsx only when the preload flags test mode (--auditorium-test,
 // set from AUDITORIUM_TEST=1). Never present in a normal run.
 
-import { docLength, type AudioDocument } from '../audio/AudioDocument';
+import { createDocument, docLength, type AudioDocument } from '../audio/AudioDocument';
+import { RecordingEngine } from '../audio/RecordingEngine';
 import { encodeWav } from '../audio/wavCodec';
 import type { EffectParamValue } from '../effects/types';
 import type { EditorView } from '../stores/appStore';
-import { useAppStore } from '../stores/appStore';
+import { nextId, useAppStore } from '../stores/appStore';
 import { runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { encodeExport, openFilePath, type ExportOptions } from './fileService';
@@ -34,6 +35,7 @@ export interface TestApi {
   setView(view: EditorView): void;
   captureNoisePrint(): void;
   getNoiseProfileSpectra(): number[][] | null;
+  recordSeconds(seconds: number): Promise<{ length: number; sampleRate: number; rms: number }>;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -124,6 +126,31 @@ export function installTestHooks(): void {
     getNoiseProfileSpectra: () => {
       const profile = getNoiseProfile();
       return profile ? profile.spectra.map((s) => Array.from(s)) : null;
+    },
+
+    // Drives a real RecordingEngine end-to-end (bypassing the dialog) for the
+    // headed mic smoke: records `seconds` from the (fake-device) mic, creates a
+    // 'Recording N' document, and reports its length + RMS so the harness can
+    // assert a non-silent capture of roughly the expected duration.
+    recordSeconds: async (seconds) => {
+      const engine = new RecordingEngine();
+      await engine.start({ channels: 1, sampleRate: 44100 });
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+      const { channels, sampleRate } = await engine.stop();
+      const doc = createDocument({
+        name: `Recording ${nextId('recording').split('-')[1]}`,
+        sampleRate,
+        channels,
+      });
+      useAppStore.getState().addDocument(doc);
+      let sum = 0;
+      let count = 0;
+      for (const ch of channels) {
+        for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+        count += ch.length;
+      }
+      const rms = count > 0 ? Math.sqrt(sum / count) : 0;
+      return { length: channels[0]?.length ?? 0, sampleRate, rms };
     },
   };
 

@@ -43,7 +43,14 @@ async function main() {
 
   console.log('Launching built app under Playwright Electron...');
   const app = await electron.launch({
-    args: ['.'],
+    // The two fake-media switches make Chromium synthesize a mic (a periodic
+    // tone) and auto-accept the capture prompt, so the recording step below runs
+    // headless-safe with no real hardware.
+    args: [
+      '.',
+      '--use-fake-device-for-media-stream',
+      '--use-fake-ui-for-media-stream',
+    ],
     cwd: ROOT,
     env: { ...process.env, AUDITORIUM_TEST: '1' },
   });
@@ -180,7 +187,23 @@ async function main() {
     // otherwise app.close() triggers the unsaved-changes beforeunload prompt.
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
 
-    // 5) Screenshot ---------------------------------------------------------
+    // 5) Microphone recording via the fake device ---------------------------
+    console.log('Recording 2s from the fake microphone (drives RecordingEngine)...');
+    const rec = await page.evaluate(() => window.__test.recordSeconds(2));
+    console.log(
+      `  recorded length: ${rec.length} samples @ ${rec.sampleRate} Hz, rms: ${rec.rms.toFixed(4)}`
+    );
+    const expectedLen = 2 * rec.sampleRate;
+    assert(
+      Math.abs(rec.length - expectedLen) < expectedLen * 0.2,
+      `recorded ~2 seconds (${rec.length} ≈ ${expectedLen} ±20%)`
+    );
+    assert(rec.rms > 0, `recording is non-silent (rms ${rec.rms.toFixed(4)} > 0)`);
+    // Persist so the new (dirty) recording document doesn't trip the
+    // unsaved-changes beforeunload prompt at teardown.
+    await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
+    // 6) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 

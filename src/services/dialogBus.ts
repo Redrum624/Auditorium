@@ -13,22 +13,26 @@ let openExport: OpenSetter | null = null;
 let openNewFile: OpenSetter | null = null;
 let openEffect: OpenEffectSetter | null = null;
 let openConvert: OpenConvertSetter | null = null;
+let openRecord: OpenSetter | null = null;
 
 export function registerDialogSetters(setters: {
   openExportDialog: OpenSetter;
   openNewFileDialog: OpenSetter;
   openEffectDialog: OpenEffectSetter;
   openConvertDialog: OpenConvertSetter;
+  openRecordDialog: OpenSetter;
 }): () => void {
   openExport = setters.openExportDialog;
   openNewFile = setters.openNewFileDialog;
   openEffect = setters.openEffectDialog;
   openConvert = setters.openConvertDialog;
+  openRecord = setters.openRecordDialog;
   return () => {
     openExport = null;
     openNewFile = null;
     openEffect = null;
     openConvert = null;
+    openRecord = null;
   };
 }
 
@@ -46,4 +50,8 @@ export function openEffectDialog(effectId: string): void {
 
 export function openConvertDialog(mode: ConvertMode): void {
   openConvert?.(mode);
+}
+
+export function openRecordDialog(): void {
+  openRecord?.();
 }
