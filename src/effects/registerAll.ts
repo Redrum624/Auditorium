@@ -18,6 +18,8 @@ import { distortionEffect } from './color/DistortionEffect';
 import { deHumEffect } from './restoration/DeHumEffect';
 import { channelMixerEffect } from './stereo/ChannelMixerEffect';
 import { panEffect } from './stereo/PanEffect';
+import { timeStretchEffect } from './pitch/TimeStretchEffect';
+import { pitchShiftEffect } from './pitch/PitchShiftEffect';
 
 let registered = false;
 
@@ -48,4 +50,6 @@ export function registerAllEffects(): void {
   registerEffect(deHumEffect);
   registerEffect(channelMixerEffect);
   registerEffect(panEffect);
+  registerEffect(timeStretchEffect);
+  registerEffect(pitchShiftEffect);
 }

@@ -47,3 +47,25 @@ File > Export, which never changes the document's path or dirty state.
 
 **Intended behavior:** Round-trip a file back to its original container/format on
 Save (e.g. re-encode MP3 in place), gated on the format-aware encoder set.
+
+## Time Stretch / Pitch Shift process stereo channels independently
+
+**Area:** Effects > Time & Pitch (`src/effects/pitch/TimeStretchEffect.ts`,
+`src/effects/pitch/PitchShiftEffect.ts`, `src/dsp/wsola.ts`)
+
+**v1 behavior:** WSOLA time stretch and the resample-based pitch shift run the
+left and right channels through completely separate similarity searches. Each
+channel independently picks the copy offset that best matches its own waveform,
+so the two channels can pick different offsets at the same moment. Output
+LENGTHS stay identical (same input length and factor produce the same
+`round(N*ratio)`), but the fine-grained inter-channel PHASE relationship is not
+preserved. On a strongly correlated stereo image (e.g. a mono-ish mix or a
+hard-panned transient) this can cause subtle stereo-image widening or wander
+during heavily stretched/shifted passages.
+
+**Intended behavior:** Adobe Audition uses a stereo-linked WSOLA that derives a
+single set of frame offsets from a combined mid (or max-correlation) detector
+and applies it to both channels, keeping the stereo image phase-locked. Tracked
+for a future pass — the DSP already centralizes the search in `wsola.ts`, so
+linking is a matter of sharing the chosen offset across channels rather than
+running the search twice.
