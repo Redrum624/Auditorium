@@ -92,14 +92,14 @@ describe('addTrack / removeTrack / renameTrack', () => {
     expect(useSessionStore.getState().selectedClipId).toBe(clip.id);
   });
 
-  it('renameTrack trims names to 60 characters', () => {
+  it('renameTrack preserves the full name without truncation', () => {
     const store = useSessionStore.getState();
     const trackId = store.session.tracks[0].id;
     const longName = 'x'.repeat(80);
     store.renameTrack(trackId, longName);
     const track = useSessionStore.getState().session.tracks.find((t) => t.id === trackId)!;
-    expect(track.name).toBe('x'.repeat(60));
-    expect(track.name).toHaveLength(60);
+    expect(track.name).toBe(longName);
+    expect(track.name).toHaveLength(80);
   });
 });
 

@@ -119,11 +119,10 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   renameTrack(id, name) {
-    const trimmed = name.slice(0, 60);
     set((s) => ({
       session: {
         ...s.session,
-        tracks: s.session.tracks.map((t) => (t.id === id ? { ...t, name: trimmed } : t)),
+        tracks: s.session.tracks.map((t) => (t.id === id ? { ...t, name } : t)),
       },
     }));
   },

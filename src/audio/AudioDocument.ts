@@ -15,6 +15,20 @@ export function nextId(prefix: string): string {
   return `${prefix}-${next}`;
 }
 
+/**
+ * Ensures the next `nextId(prefix)` call returns at least `${prefix}-${minNext}`.
+ * Never lowers a counter. Needed when loading records that carry persisted ids
+ * (e.g. a saved .audm session keeps its track/clip ids verbatim): the module
+ * counters reset every process start, so without seeding them past the loaded
+ * ids, a later nextId() could mint a duplicate of an id already in the data.
+ */
+export function bumpIdCounter(prefix: string, minNext: number): void {
+  const current = idCounters[prefix] ?? 0;
+  if (minNext - 1 > current) {
+    idCounters[prefix] = minNext - 1;
+  }
+}
+
 export function createDocument(opts: {
   name: string;
   sampleRate: number;

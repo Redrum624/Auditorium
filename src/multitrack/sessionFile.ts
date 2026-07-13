@@ -1,4 +1,4 @@
-import { createDocument, type AudioDocument } from '../audio/AudioDocument';
+import { bumpIdCounter, createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { decodeWav, encodeWav } from '../audio/wavCodec';
 import { useAppStore } from '../stores/appStore';
 import type { Session } from './session';
@@ -75,10 +75,26 @@ export function serializeSession(session: Session, docs: AudioDocument[]): strin
   return JSON.stringify(file);
 }
 
+/** Largest numeric suffix among ids of the form `${prefix}-<digits>`; 0 if none match. */
+function maxIdSuffix(ids: string[], prefix: string): number {
+  const re = new RegExp(`^${prefix}-(\\d+)$`);
+  let max = 0;
+  for (const id of ids) {
+    const m = re.exec(id);
+    if (m) max = Math.max(max, Number(m[1]));
+  }
+  return max;
+}
+
 /**
  * Parses a .audm JSON string, decoding each embedded document with fresh
  * ('doc-N') ids and remapping every clip.documentId through the old->new id
  * map. Throws if formatVersion isn't the version this build understands.
+ *
+ * Track/clip ids are kept verbatim from the file, but the per-prefix nextId
+ * counters reset every process start — so this also seeds the 'track' and
+ * 'clip' counters past the largest suffix in the loaded session, ensuring a
+ * later addTrack()/createClip() can never mint a duplicate of a loaded id.
  */
 export function parseSessionFile(text: string): { session: Session; documents: AudioDocument[] } {
   const parsed = JSON.parse(text) as SessionFileShape;
@@ -101,6 +117,11 @@ export function parseSessionFile(text: string): { session: Session; documents: A
       clips: t.clips.map((c) => ({ ...c, documentId: idMap.get(c.documentId) ?? c.documentId })),
     })),
   };
+
+  const trackIds = session.tracks.map((t) => t.id);
+  const clipIds = session.tracks.flatMap((t) => t.clips.map((c) => c.id));
+  bumpIdCounter('track', maxIdSuffix(trackIds, 'track') + 1);
+  bumpIdCounter('clip', maxIdSuffix(clipIds, 'clip') + 1);
 
   return { session, documents };
 }
@@ -138,11 +159,13 @@ export async function openSessionViaDialog(): Promise<void> {
   });
   if (!paths || paths.length === 0) return; // cancelled
 
-  const buf = await api().readFile(paths[0]);
-  const text = new TextDecoder().decode(buf);
-
+  // readFile is inside the try so an IO failure (unapproved path, fs error)
+  // surfaces the same error box as a corrupt/unsupported file, instead of
+  // rejecting unhandled.
   let result: { session: Session; documents: AudioDocument[] };
   try {
+    const buf = await api().readFile(paths[0]);
+    const text = new TextDecoder().decode(buf);
     result = parseSessionFile(text);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

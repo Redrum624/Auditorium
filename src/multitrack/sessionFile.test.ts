@@ -276,4 +276,85 @@ describe('openSessionViaDialog', () => {
     expect(useSessionStore.getState().session).toBe(before);
     expect(useAppStore.getState().view).not.toBe('multitrack');
   });
+
+  it('shows an error message box and leaves the current session untouched when readFile fails', async () => {
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\denied.audm']),
+      readFile: jest.fn(async () => {
+        throw new Error('EACCES: permission denied');
+      }),
+    });
+    const before = useSessionStore.getState().session;
+
+    await openSessionViaDialog();
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', message: expect.stringContaining('EACCES') })
+    );
+    expect(useSessionStore.getState().session).toBe(before);
+    expect(useAppStore.getState().view).not.toBe('multitrack');
+  });
+});
+
+describe('id-counter seeding after parse', () => {
+  function trackJson(id: string, clips: object[] = []) {
+    return { id, name: 'T', volumeDb: 0, pan: 0, muted: false, solo: false, armed: false, clips };
+  }
+
+  it('parseSessionFile seeds track/clip counters past the max suffix in the loaded session', () => {
+    const json = JSON.stringify({
+      formatVersion: 1,
+      session: {
+        name: 'S',
+        sampleRate: 44100,
+        tracks: [
+          trackJson('track-9000', [
+            { id: 'clip-90000', documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 100, gainDb: 0 },
+          ]),
+          trackJson('track-8999'),
+        ],
+      },
+      documents: [],
+    });
+
+    parseSessionFile(json);
+
+    const track = createTrack('after-load');
+    const clip = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 32 });
+    expect(Number(track.id.split('-')[1])).toBeGreaterThan(9000);
+    expect(Number(clip.id.split('-')[1])).toBeGreaterThan(90000);
+  });
+
+  it('after opening a session, addTrack()/addClip() never mint ids colliding with loaded ones', async () => {
+    const json = JSON.stringify({
+      formatVersion: 1,
+      session: {
+        name: 'Loaded',
+        sampleRate: 44100,
+        tracks: [
+          trackJson('track-9500', [
+            { id: 'clip-95000', documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 100, gainDb: 0 },
+          ]),
+        ],
+      },
+      documents: [],
+    });
+    const bytes = new TextEncoder().encode(json);
+    installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\old.audm']),
+      readFile: jest.fn(async () => bytes.buffer),
+    });
+
+    await openSessionViaDialog();
+    useSessionStore.getState().addTrack();
+
+    const tracks = useSessionStore.getState().session.tracks;
+    const trackIds = tracks.map((t) => t.id);
+    expect(new Set(trackIds).size).toBe(trackIds.length); // no duplicates
+    const newTrack = tracks[tracks.length - 1];
+    expect(Number(newTrack.id.split('-')[1])).toBeGreaterThan(9500);
+
+    const newClip = createClip({ documentId: 'doc-1', startSample: 200, offsetSample: 0, lengthSample: 32 });
+    expect(Number(newClip.id.split('-')[1])).toBeGreaterThan(95000);
+  });
 });
