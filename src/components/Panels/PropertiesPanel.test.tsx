@@ -29,7 +29,7 @@ describe('PropertiesPanel (waveform/spectral view)', () => {
     expect(screen.getByText(/no document/i)).toBeInTheDocument();
   });
 
-  it('shows document facts: name, path, sample rate, channels, duration, samples, dirty', () => {
+  it('shows document facts: name, path, sample rate, channels, bit depth, duration, samples, dirty', () => {
     addDoc({ channels: 2, filePath: 'C:\\audio\\clip.wav' });
     render(<PropertiesPanel />);
 
@@ -37,6 +37,9 @@ describe('PropertiesPanel (waveform/spectral view)', () => {
     expect(screen.getByText('C:\\audio\\clip.wav')).toBeInTheDocument();
     expect(screen.getByText('44100 Hz')).toBeInTheDocument();
     expect(screen.getByText('Stereo')).toBeInTheDocument();
+    // All in-memory audio is Float32 regardless of the source file; the
+    // original bit depth isn't tracked after import (KNOWN_LIMITATIONS.md).
+    expect(screen.getByText('32-bit float (internal)')).toBeInTheDocument();
     expect(screen.getByText('0:01.000')).toBeInTheDocument(); // 44100 samples @ 44100Hz
     expect(screen.getByText('44,100')).toBeInTheDocument();
     expect(screen.getByText('No')).toBeInTheDocument(); // dirty: false on a fresh doc
@@ -108,21 +111,82 @@ describe('PropertiesPanel (multitrack view)', () => {
     expect(gainInput.value).toBe('3');
   });
 
-  it('editing the gain input calls setClipGain with the clip id and the new value', () => {
+  function seedSelectedClip(gainDb = 0) {
     const doc = addDoc();
     const trackId = useSessionStore.getState().session.tracks[0].id;
-    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100, gainDb });
     useSessionStore.getState().addClip(trackId, clip);
     useSessionStore.getState().setSelectedClip(clip.id);
+    return clip;
+  }
+
+  function clipGain(clipId: string): number {
+    return useSessionStore
+      .getState()
+      .session.tracks.flatMap((t) => t.clips)
+      .find((c) => c.id === clipId)!.gainDb;
+  }
+
+  it('commits the typed gain to setClipGain on blur', () => {
+    const clip = seedSelectedClip();
 
     render(<PropertiesPanel />);
     const gainInput = screen.getByLabelText(/gain/i);
     fireEvent.change(gainInput, { target: { value: '-6' } });
+    fireEvent.blur(gainInput);
 
-    const updatedClip = useSessionStore
-      .getState()
-      .session.tracks.flatMap((t) => t.clips)
-      .find((c) => c.id === clip.id)!;
-    expect(updatedClip.gainDb).toBe(-6);
+    expect(clipGain(clip.id)).toBe(-6);
+  });
+
+  it('commits the typed gain on Enter', () => {
+    const clip = seedSelectedClip();
+
+    render(<PropertiesPanel />);
+    const gainInput = screen.getByLabelText(/gain/i);
+    fireEvent.change(gainInput, { target: { value: '4.5' } });
+    fireEvent.keyDown(gainInput, { key: 'Enter' });
+
+    expect(clipGain(clip.id)).toBe(4.5);
+  });
+
+  it('keeps an intermediate draft like "1." in the input without snapping it (commits only on blur)', () => {
+    const clip = seedSelectedClip();
+
+    render(<PropertiesPanel />);
+    const gainInput = screen.getByLabelText(/gain/i) as HTMLInputElement;
+    fireEvent.change(gainInput, { target: { value: '1.' } });
+
+    // Mid-typing: the store is untouched and the draft text survives verbatim
+    // (the old value={clip.gainDb} binding snapped '1.' back to '1').
+    expect(clipGain(clip.id)).toBe(0);
+    expect(gainInput.value).toBe('1.');
+
+    fireEvent.change(gainInput, { target: { value: '1.5' } });
+    fireEvent.blur(gainInput);
+    expect(clipGain(clip.id)).toBe(1.5);
+  });
+
+  it('reverts the draft to the current gain when blurred with garbage input', () => {
+    const clip = seedSelectedClip(3);
+
+    render(<PropertiesPanel />);
+    const gainInput = screen.getByLabelText(/gain/i) as HTMLInputElement;
+    fireEvent.change(gainInput, { target: { value: '' } });
+    fireEvent.blur(gainInput);
+
+    expect(clipGain(clip.id)).toBe(3); // unchanged
+    expect(gainInput.value).toBe('3'); // draft reverted
+  });
+
+  it('shows the clamped value in the input after committing an out-of-range gain', () => {
+    const clip = seedSelectedClip();
+
+    render(<PropertiesPanel />);
+    const gainInput = screen.getByLabelText(/gain/i) as HTMLInputElement;
+    fireEvent.change(gainInput, { target: { value: '100' } });
+    fireEvent.blur(gainInput);
+
+    expect(clipGain(clip.id)).toBe(24); // store clamps to +24
+    expect(gainInput.value).toBe('24'); // draft reflects the clamp
   });
 });

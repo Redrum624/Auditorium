@@ -27,7 +27,10 @@ m4a, aac, webm) is decoded through the Web Audio API's `decodeAudioData` on an
 `OfflineAudioContext(1, 1, 48000)`. Chromium resamples `decodeAudioData` output
 to the context's sample rate, so all non-WAV imports arrive at **48000 Hz**
 regardless of their source rate. Audio with more than two channels is truncated
-to the first two (L/R).
+to the first two (L/R). The original file's **source bit depth is not tracked
+after import** either (for WAV or any other format) — all audio is held in
+memory as 32-bit float (`Float32Array`), which is what the Properties panel's
+"Bit Depth" row reports.
 
 **Intended behavior:** Decode non-WAV sources at their native sample rate (or
 resample deliberately) and support a proper channel down-mix. Requires a

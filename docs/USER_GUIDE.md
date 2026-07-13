@@ -57,15 +57,33 @@ applied edit; click any entry to jump the document's state to that point.
 
 Press `M` (or **Edit → Add Marker**) to drop a marker named `Marker N` at the
 current cursor position. The **Markers** tab in the right sidebar lists every
-marker on the active document: click a row to move the cursor there and
-re-center the view around it; double-click a marker's name to rename it
-inline (`Enter` or clicking away commits, `Escape` cancels); the ✕ button
-removes it. **Edit → Next Marker** / **Previous Marker** jump the cursor to
-the closest marker after/before it (no wraparound). On the waveform and
-spectral canvases, each marker draws as a small orange triangle flag with a
-dashed vertical line through the full height of the view, with its name
+marker on the active document: click a marker's **time** to move the cursor
+there and re-center the view around it; double-click a marker's name to
+rename it inline (`Enter` or clicking away commits, `Escape` cancels); the ✕
+button removes it. **Edit → Next Marker** / **Previous Marker** jump the
+cursor to the closest marker after/before it (no wraparound). On the waveform
+and spectral canvases, each marker draws as a small orange triangle flag with
+a dashed vertical line through the full height of the view, with its name
 labeled next to the flag when there's enough horizontal room. Markers are
 **session-only** — they are not saved into any file (see Known Limitations).
+
+### The right sidebar (History | Markers | Properties)
+
+The right sidebar is a three-tab strip; **History** is the default tab.
+
+- **History** — the active document's undo history (see *Cut / Copy / Paste /
+  Delete* above).
+- **Markers** — the active document's marker list (see *Markers* above).
+- **Properties** — read-only facts about what you're working on. In the
+  waveform/spectral views it shows the active document's name, path (`—` for
+  never-saved documents), sample rate, channels (Mono/Stereo), bit depth
+  (always `32-bit float (internal)` — all audio is held in memory as 32-bit
+  float; the original file's bit depth isn't tracked after import, see Known
+  Limitations), duration, sample count, and whether it has unsaved changes —
+  plus the selection's start/end/length while one exists. In the multitrack
+  view it shows the selected clip's source document, track, start/offset/
+  length, and an editable **Gain (dB)** field (−24..+24, committed on
+  `Enter` or when the field loses focus).
 
 ## Effects
 

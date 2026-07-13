@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { docLength } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
@@ -42,6 +43,11 @@ function DocumentProperties() {
       <Row label="Path" value={doc.filePath ?? '—'} />
       <Row label="Sample Rate" value={`${doc.sampleRate} Hz`} />
       <Row label="Channels" value={doc.channels.length === 1 ? 'Mono' : 'Stereo'} />
+      {/* All in-memory audio is Float32Array; the ORIGINAL file's bit depth
+          isn't tracked after import (AudioDocument has no bitDepth field —
+          locked Task 3 contract; see docs/KNOWN_LIMITATIONS.md). This is a
+          truthful static fact, not a per-document value. */}
+      <Row label="Bit Depth" value="32-bit float (internal)" />
       <Row label="Duration" value={formatTime(length, doc.sampleRate)} />
       <Row label="Samples" value={length.toLocaleString()} />
       <Row label="Dirty" value={doc.dirty ? 'Yes' : 'No'} />
@@ -55,6 +61,55 @@ function DocumentProperties() {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Clip gain editor with a local draft string, committed (parsed + clamped)
+ * on blur/Enter only. Binding value={clip.gainDb} directly and committing in
+ * onChange snapped intermediate keystrokes — typing '1.' became '1' because
+ * Number('1.') round-tripped through the store re-render (review minor).
+ * The parent keys this component by clip id so the draft resets when the
+ * selection moves to a different clip.
+ */
+function GainInput({
+  gainDb,
+  onCommit,
+}: {
+  gainDb: number;
+  onCommit: (gainDb: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(gainDb));
+
+  const commit = () => {
+    const n = Number(draft);
+    if (draft.trim() !== '' && Number.isFinite(n)) {
+      const clamped = Math.min(GAIN_MAX, Math.max(GAIN_MIN, n));
+      onCommit(clamped);
+      setDraft(String(clamped)); // reflect the store's clamp in the field
+    } else {
+      setDraft(String(gainDb)); // revert garbage/empty to the current value
+    }
+  };
+
+  return (
+    // type="text" (not "number"): the number input's value-sanitization
+    // discards intermediate drafts like '1.' (→ ''), which is the exact
+    // snap this draft state exists to prevent. Range is enforced by the
+    // commit-time clamp (and again by the store).
+    <input
+      type="text"
+      inputMode="decimal"
+      value={draft}
+      aria-label="Clip gain (dB)"
+      title={`Gain in dB, ${GAIN_MIN} to +${GAIN_MAX}`}
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+      }}
+      className="w-16 rounded border border-[#3a3a42] bg-[#1a1a1e] px-1 py-0.5 text-right text-[#d4d4d8] outline-none focus:border-[#26c6da]"
+    />
   );
 }
 
@@ -92,18 +147,11 @@ function ClipProperties() {
 
       <label className="flex items-center justify-between gap-2 px-2 py-1.5 text-xs">
         <span className="text-[#8b8b92]">Gain (dB)</span>
-        <input
-          type="number"
-          min={GAIN_MIN}
-          max={GAIN_MAX}
-          step={0.5}
-          value={clip.gainDb}
-          aria-label="Clip gain (dB)"
-          onChange={(e) => {
-            const n = Number(e.target.value);
-            if (Number.isFinite(n)) setClipGain(clip!.id, n);
-          }}
-          className="w-16 rounded border border-[#3a3a42] bg-[#1a1a1e] px-1 py-0.5 text-right text-[#d4d4d8] outline-none focus:border-[#26c6da]"
+        {/* key={clip.id}: reset the draft when a different clip is selected. */}
+        <GainInput
+          key={clip.id}
+          gainDb={clip.gainDb}
+          onCommit={(g) => setClipGain(clip!.id, g)}
         />
       </label>
     </div>

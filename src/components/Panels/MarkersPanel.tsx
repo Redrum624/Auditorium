@@ -11,11 +11,15 @@ import { formatTime } from '../../utils/timeFormat';
 const NO_MARKERS: Marker[] = [];
 
 /**
- * Marker list for the active document (Task 23). Clicking a row moves the
- * cursor to the marker and re-centers the waveform/spectral view around it;
- * double-clicking the name switches it to an inline input (Enter/blur
- * commits, Escape cancels); the trailing button removes the marker. Markers
- * are session-only — see docs/KNOWN_LIMITATIONS.md.
+ * Marker list for the active document (Task 23). Each row is a plain (non-
+ * interactive) container holding sibling controls — deliberately NOT a
+ * clickable row: a real browser fires click, click, dblclick for a double-
+ * click, so a row-level onClick would navigate twice before a name-dblclick
+ * rename could open (review finding). Instead the time readout is an explicit
+ * "Go to" button that moves the cursor and re-centers the view; double-
+ * clicking the name switches it to an inline input (Enter/blur commits,
+ * Escape cancels); the trailing ✕ removes the marker. Markers are
+ * session-only — see docs/KNOWN_LIMITATIONS.md.
  */
 export default function MarkersPanel() {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
@@ -61,13 +65,7 @@ export default function MarkersPanel() {
         <li key={m.id} data-testid="markers-item" className="group">
           <div
             data-testid="markers-row"
-            role="button"
-            tabIndex={0}
-            onClick={() => goTo(m.positionSample)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') goTo(m.positionSample);
-            }}
-            className="flex cursor-pointer items-center gap-2 px-2 py-1 hover:bg-[#2e2e34]"
+            className="flex items-center gap-2 px-2 py-1 hover:bg-[#2e2e34]"
           >
             <Flag size={12} className="shrink-0" style={{ color: '#ff8a65' }} aria-hidden="true" />
 
@@ -76,9 +74,7 @@ export default function MarkersPanel() {
                 autoFocus
                 value={draft}
                 onChange={(e) => setDraft(e.target.value)}
-                onClick={(e) => e.stopPropagation()}
                 onKeyDown={(e) => {
-                  e.stopPropagation();
                   if (e.key === 'Enter') commitRename(m.id);
                   else if (e.key === 'Escape') setEditingId(null);
                 }}
@@ -87,8 +83,7 @@ export default function MarkersPanel() {
               />
             ) : (
               <span
-                onDoubleClick={(e) => {
-                  e.stopPropagation();
+                onDoubleClick={() => {
                   setDraft(m.name);
                   setEditingId(m.id);
                 }}
@@ -99,18 +94,21 @@ export default function MarkersPanel() {
               </span>
             )}
 
-            <span className="shrink-0 tabular-nums text-xs text-[#8b8b92]">
+            <button
+              type="button"
+              aria-label={`Go to ${m.name}`}
+              title="Go to marker"
+              onClick={() => goTo(m.positionSample)}
+              className="shrink-0 rounded px-1 py-0.5 tabular-nums text-xs text-[#8b8b92] transition-colors hover:bg-[#3a3a42] hover:text-[#26c6da]"
+            >
               {formatTime(m.positionSample, doc.sampleRate)}
-            </span>
+            </button>
 
             <button
               type="button"
               aria-label={`Delete ${m.name}`}
               title="Delete marker"
-              onClick={(e) => {
-                e.stopPropagation();
-                removeMarker(activeDocumentId, m.id);
-              }}
+              onClick={() => removeMarker(activeDocumentId, m.id)}
               className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#8b8b92] opacity-0 transition-opacity hover:bg-[#3a3a42] hover:text-[#d4d4d8] group-hover:opacity-100"
             >
               <X size={14} />
