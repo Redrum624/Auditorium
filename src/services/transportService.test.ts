@@ -3,7 +3,7 @@ import { playbackEngine } from '../audio/PlaybackEngine';
 import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { useAppStore } from '../stores/appStore';
-import { transportPlayPause, transportStop } from './transportService';
+import { stopAll, transportPlayPause, transportStop } from './transportService';
 
 function openDoc() {
   const doc = createDocument({ name: 'a', sampleRate: 44100, channels: [new Float32Array(1000)] });
@@ -102,6 +102,25 @@ describe('transportService', () => {
       transportStop();
       expect(multitrackPlayer.stop).toHaveBeenCalled();
       expect(playbackEngine.stop).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('stopAll (Task 23: view-switch guard)', () => {
+    it('stops both engines unconditionally regardless of the active view', () => {
+      openDoc();
+      peState.mockReturnValue('playing');
+      mtState.mockReturnValue('playing');
+
+      stopAll();
+
+      expect(playbackEngine.stop).toHaveBeenCalledTimes(1);
+      expect(multitrackPlayer.stop).toHaveBeenCalledTimes(1);
+    });
+
+    it('stops both engines even when neither is playing (idempotent, no-op-safe)', () => {
+      stopAll();
+      expect(playbackEngine.stop).toHaveBeenCalledTimes(1);
+      expect(multitrackPlayer.stop).toHaveBeenCalledTimes(1);
     });
   });
 });

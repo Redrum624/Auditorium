@@ -29,6 +29,9 @@ export interface SessionActions {
   moveClip(clipId: string, toTrackId: string, newStartSample: number): void; // clamps >=0; nudges to nearest free gap
   trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32
   removeClip(clipId: string): void;
+  /** Sets a clip's gain trim in dB, clamped to [-24, 24]. No-op for an unknown
+   * clip id. Additive (Task 23): wired to the PropertiesPanel's clip gain input. */
+  setClipGain(clipId: string, gainDb: number): void;
   setSelectedClip(id: string | null): void;
   setMtCursor(s: number): void;
   setMtZoom(z: SessionState['mtZoom']): void;
@@ -223,6 +226,20 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       );
       const selectedClipId = s.selectedClipId === clipId ? null : s.selectedClipId;
       return { session: { ...s.session, tracks }, selectedClipId };
+    });
+  },
+
+  setClipGain(clipId, gainDb) {
+    set((s) => {
+      const loc = findClipLocation(s.session.tracks, clipId);
+      if (!loc) return s;
+      const clamped = Math.min(24, Math.max(-24, gainDb));
+      const tracks = s.session.tracks.map((t, i) =>
+        i === loc.trackIdx
+          ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, gainDb: clamped } : c)) }
+          : t
+      );
+      return { session: { ...s.session, tracks } };
     });
   },
 

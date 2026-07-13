@@ -3,9 +3,14 @@ import type { AudioDocument } from '../../audio/AudioDocument';
 import { docLength, mixDown } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
-import { sampleToPixel } from './waveformRender';
+import { drawMarkers, sampleToPixel } from './waveformRender';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
+import type { Marker } from '../../stores/appStore';
+
+// Stable empty-array reference — see WaveformView.tsx for why this must not
+// be a fresh `[]` literal in the selector (infinite render loop otherwise).
+const NO_MARKERS: Marker[] = [];
 
 const FFT_SIZE = 2048;
 const DB_MIN = -90;
@@ -112,6 +117,7 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
   const selection = useAppStore((s) => s.selection);
   const cursorSample = useAppStore((s) => s.cursorSample);
   const playback = useAppStore((s) => s.playback);
+  const markers = useAppStore((s) => s.markers[doc.id] ?? NO_MARKERS);
 
   const length = docLength(doc);
   const gestures = useEditorGestures(canvasRef, length, size.width);
@@ -213,6 +219,10 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
       }
     }
 
+    // Markers: dashed line + triangle flag + name label (Task 23), same visuals
+    // as the waveform view's renderWaveform (shared drawMarkers).
+    drawMarkers(ctx, markers, height, scrollSample, spp, width);
+
     // Cursor (white) and playhead (yellow).
     const cx = sampleToPixel(cursorSample, scrollSample, spp);
     if (cx >= 0 && cx <= width) {
@@ -228,7 +238,16 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
         verticalLine(ctx, px, height);
       }
     }
-  }, [magsData, size, zoom, selection, cursorSample, playback.state, playback.positionSample]);
+  }, [
+    magsData,
+    size,
+    zoom,
+    selection,
+    cursorSample,
+    playback.state,
+    playback.positionSample,
+    markers,
+  ]);
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#1a1a1e]" data-testid="spectrogram-view">

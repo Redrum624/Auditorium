@@ -67,6 +67,19 @@ export function transportPlayPause(): void {
   setPlayback({ state: 'playing', positionSample: from });
 }
 
+/**
+ * Stops BOTH engines unconditionally, regardless of the active view (Task 23).
+ * Switching views mid-playback (waveform/spectral <-> multitrack) otherwise
+ * orphans whichever engine was playing, since transportStop() only routes to
+ * the engine for the CURRENT view. App.tsx calls this whenever the view
+ * changes. Both engines' stop() are already idempotent/no-op-safe when not
+ * playing, so calling both unconditionally is cheap and side-effect-free.
+ */
+export function stopAll(): void {
+  playbackEngine.stop();
+  multitrackPlayer.stop();
+}
+
 export function transportStop(): void {
   const app = useAppStore.getState();
 

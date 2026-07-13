@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import WaveformView from './components/Editor/WaveformView';
 import SpectrogramView from './components/Editor/SpectrogramView';
 import MultitrackView from './components/Multitrack/MultitrackView';
@@ -10,6 +10,8 @@ import RecordDialog from './components/Dialogs/RecordDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
+import MarkersPanel from './components/Panels/MarkersPanel';
+import PropertiesPanel from './components/Panels/PropertiesPanel';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
@@ -19,7 +21,15 @@ import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
+import { stopAll } from './services/transportService';
 import { useAppStore } from './stores/appStore';
+
+type SidebarTab = 'history' | 'markers' | 'properties';
+const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
+  { id: 'history', label: 'History' },
+  { id: 'markers', label: 'Markers' },
+  { id: 'properties', label: 'Properties' },
+];
 
 // Populate the effect registry and its menu commands once at module load — before
 // the first render — so the Effects menu and panel are fully built on first paint.
@@ -37,9 +47,22 @@ export default function App() {
   const [effectDialogId, setEffectDialogId] = useState<string | null>(null);
   const [convertMode, setConvertMode] = useState<ConvertMode | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
+  const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
+
+  // Switching views mid-playback otherwise orphans whichever engine was
+  // playing (transportStop() only routes to the CURRENT view's engine) — stop
+  // BOTH engines whenever the view changes. Skips the initial mount (there is
+  // nothing to stop yet, and stopAll() is idempotent/no-op-safe regardless).
+  const prevViewRef = useRef(view);
+  useEffect(() => {
+    if (prevViewRef.current !== view) {
+      stopAll();
+    }
+    prevViewRef.current = view;
+  }, [view]);
 
   // Let the file.new / file.export commands open these React dialogs (Task 11).
   useEffect(
@@ -97,16 +120,37 @@ export default function App() {
           ) : doc ? (
             <WaveformView doc={doc} />
           ) : (
-            <div className="flex flex-1 items-center justify-center text-[#8b8b92]">
-              Open an audio file to begin
+            <div className="flex flex-1 items-center justify-center text-center text-[#8b8b92]">
+              Open an audio file (Ctrl+O) or create a new one (Ctrl+N)
             </div>
           )}
         </div>
         <div className="flex w-[280px] flex-col border-l border-[#3a3a42] bg-[#232328]">
-          <PanelShell title="History">
-            <HistoryPanel />
-          </PanelShell>
-          <PanelShell title="Markers" />
+          <div className="flex shrink-0 border-b border-[#3a3a42]" data-testid="sidebar-tabs">
+            {SIDEBAR_TABS.map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setSidebarTab(tab.id)}
+                className={`flex-1 border-b-2 px-2 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
+                  sidebarTab === tab.id
+                    ? 'border-[#26c6da] text-[#26c6da]'
+                    : 'border-transparent text-[#8b8b92] hover:text-[#d4d4d8]'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div
+            className="min-h-0 flex-1 overflow-auto"
+            data-testid="sidebar-panel"
+            data-active-tab={sidebarTab}
+          >
+            {sidebarTab === 'history' && <HistoryPanel />}
+            {sidebarTab === 'markers' && <MarkersPanel />}
+            {sidebarTab === 'properties' && <PropertiesPanel />}
+          </div>
         </div>
       </div>
       <TransportBar />

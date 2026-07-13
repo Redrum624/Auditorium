@@ -1,5 +1,5 @@
 import { createDocument, docLength, nextId } from '../audio/AudioDocument';
-import type { AppState } from '../stores/appStore';
+import type { AppState, Marker } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip } from '../multitrack/session';
@@ -92,6 +92,10 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'separator',
       'multitrack.insertDoc',
       'multitrack.addTrack',
+      'separator',
+      'marker.add',
+      'marker.next',
+      'marker.prev',
     ],
   },
   { title: 'Effects', itemIds: ['effects.none'] },
@@ -286,6 +290,8 @@ function registerSelectionAndTransportCommands(): void {
       run: async () => openRecordDialog(),
     },
     stub('marker.add', 'Add Marker', 'M'),
+    stub('marker.next', 'Next Marker'),
+    stub('marker.prev', 'Previous Marker'),
   ]);
 }
 
@@ -621,6 +627,63 @@ function registerMultitrackCommands(): void {
   ]);
 }
 
+/** Returns the active document's markers (sorted by position, per the store's
+ * invariant), or `[]` when there is no active document. */
+function activeDocMarkers(s: AppState): Marker[] {
+  return s.activeDocumentId ? (s.markers[s.activeDocumentId] ?? []) : [];
+}
+
+/** Registers the real marker commands (Task 23), overwriting the disabled
+ * `marker.add`/`marker.next`/`marker.prev` stubs. `marker.add` inserts a
+ * sequentially-named marker (`Marker <n>`, n taken from the generated id's
+ * suffix) at the cursor — the store keeps the array sorted by position.
+ * `marker.next`/`marker.prev` jump the cursor to the nearest marker strictly
+ * after/before it, with NO wraparound; both report enabled whenever the
+ * active document has ANY marker at all (a cheap existence check, not a
+ * directional one — see task resolution), and run() is a safe no-op when
+ * there is nothing in that direction. */
+function registerMarkerCommands(): void {
+  registerCommands([
+    {
+      id: 'marker.add',
+      label: 'Add Marker',
+      shortcut: 'M',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        const { activeDocumentId, cursorSample, addMarker } = useAppStore.getState();
+        if (!activeDocumentId) return;
+        const id = nextId('marker');
+        const n = id.split('-')[1];
+        addMarker(activeDocumentId, { id, name: `Marker ${n}`, positionSample: cursorSample });
+      },
+    },
+    {
+      id: 'marker.next',
+      label: 'Next Marker',
+      enabled: (s) => activeDocMarkers(s).length > 0,
+      run: async () => {
+        const state = useAppStore.getState();
+        const next = activeDocMarkers(state).find((m) => m.positionSample > state.cursorSample);
+        if (next) state.setCursor(next.positionSample);
+      },
+    },
+    {
+      id: 'marker.prev',
+      label: 'Previous Marker',
+      enabled: (s) => activeDocMarkers(s).length > 0,
+      run: async () => {
+        const state = useAppStore.getState();
+        let prev: Marker | undefined;
+        for (const m of activeDocMarkers(state)) {
+          if (m.positionSample < state.cursorSample) prev = m;
+          else break;
+        }
+        if (prev) state.setCursor(prev.positionSample);
+      },
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -629,3 +692,4 @@ registerSessionCommands();
 registerDocumentToolCommands();
 registerNoiseAndViewCommands();
 registerMultitrackCommands();
+registerMarkerCommands();

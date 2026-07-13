@@ -6,6 +6,7 @@ interface Call {
   args: number[];
   fillStyle?: string;
   strokeStyle?: string;
+  text?: string;
 }
 
 /** Minimal CanvasRenderingContext2D stub that records the drawing calls
@@ -28,7 +29,12 @@ class StubCtx {
     this.calls.push({ method: 'beginPath', args: [] });
   }
   moveTo(...args: number[]) {
-    this.calls.push({ method: 'moveTo', args, strokeStyle: String(this.strokeStyle) });
+    this.calls.push({
+      method: 'moveTo',
+      args,
+      strokeStyle: String(this.strokeStyle),
+      fillStyle: String(this.fillStyle),
+    });
   }
   lineTo(...args: number[]) {
     this.calls.push({ method: 'lineTo', args, strokeStyle: String(this.strokeStyle) });
@@ -42,8 +48,14 @@ class StubCtx {
   clearRect(...args: number[]) {
     this.calls.push({ method: 'clearRect', args });
   }
+  closePath() {
+    this.calls.push({ method: 'closePath', args: [] });
+  }
   setLineDash(d: number[]) {
     this.dash = d;
+  }
+  fillText(text: string, x: number, y: number) {
+    this.calls.push({ method: 'fillText', args: [x, y], text, fillStyle: String(this.fillStyle) });
   }
 }
 
@@ -177,5 +189,84 @@ describe('renderWaveform per-sample mode', () => {
     });
     const line = stub.calls.filter((c) => c.method === 'lineTo' && c.strokeStyle === '#26c6da');
     expect(line.length).toBeGreaterThan(0);
+  });
+});
+
+const MARKER_COLOR = '#ff8a65';
+
+describe('renderWaveform markers (Task 23)', () => {
+  function baseOpts(width: number, height: number): RenderOpts {
+    const ch = constantChannel(1000, 0); // spp = 10
+    const py = buildPeaks(ch);
+    return {
+      width,
+      height,
+      channels: [ch],
+      pyramids: [py],
+      scrollSample: 0,
+      samplesPerPixel: 10,
+      selection: null,
+      cursorSample: 0,
+      playheadSample: null,
+    };
+  }
+
+  it('draws nothing marker-related when markers is omitted or empty', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, baseOpts(100, 100));
+    expect(stub.calls.some((c) => c.strokeStyle === MARKER_COLOR)).toBe(false);
+    expect(stub.calls.some((c) => c.fillStyle === MARKER_COLOR)).toBe(false);
+  });
+
+  it('draws a dashed vertical line at each marker position in the marker color', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, { ...baseOpts(100, 100), markers: [{ positionSample: 300 }] }); // x = 30
+
+    const dashedMoveTo = stub.calls.filter((c) => c.method === 'moveTo' && c.strokeStyle === MARKER_COLOR);
+    expect(dashedMoveTo.some((c) => Math.abs(c.args[0] - 30) < 1e-6)).toBe(true);
+  });
+
+  it('draws a filled triangle flag at each marker position', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, { ...baseOpts(100, 100), markers: [{ positionSample: 300 }] }); // x = 30
+
+    const fills = stub.calls.filter((c) => c.method === 'fill');
+    expect(fills.length).toBeGreaterThan(0);
+    // The triangle's path starts at the marker x, at the top of the canvas.
+    const triangleStart = stub.calls.find(
+      (c) => c.method === 'moveTo' && c.fillStyle === MARKER_COLOR && Math.abs(c.args[0] - 30) < 1e-6 && c.args[1] === 0
+    );
+    expect(triangleStart).toBeDefined();
+  });
+
+  it('labels a marker with its name near the flag when zoom permits', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, {
+      ...baseOpts(200, 100),
+      markers: [{ positionSample: 300, name: 'Verse' }], // x = 30
+    });
+    const label = stub.calls.find((c) => c.method === 'fillText' && c.text === 'Verse');
+    expect(label).toBeDefined();
+    expect(label!.args[0]).toBeGreaterThan(30); // drawn to the right of the flag
+  });
+
+  it('skips a label that would land within 40px of the previously drawn label (overlap avoidance)', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, {
+      ...baseOpts(200, 100),
+      markers: [
+        { positionSample: 300, name: 'A' }, // x = 30
+        { positionSample: 350, name: 'B' }, // x = 35 -> within 40px of A, should be skipped
+        { positionSample: 900, name: 'C' }, // x = 90 -> far enough, should be drawn
+      ],
+    });
+    const labels = stub.calls.filter((c) => c.method === 'fillText').map((c) => c.text);
+    expect(labels).toEqual(['A', 'C']);
+  });
+
+  it('does not draw a label when the marker has no name', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, { ...baseOpts(100, 100), markers: [{ positionSample: 300 }] });
+    expect(stub.calls.some((c) => c.method === 'fillText')).toBe(false);
   });
 });

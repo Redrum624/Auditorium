@@ -110,6 +110,24 @@ which creates a new document rather than recording into an armed track at the pl
 
 **Intended behavior:** Audition-style punch-in recording onto armed tracks.
 
+## Markers are session-only (not persisted)
+
+**Area:** Markers (`src/stores/appStore.ts` `markers`, `src/components/Panels/MarkersPanel.tsx`,
+`src/services/menuActions.ts` `marker.add`/`marker.next`/`marker.prev`)
+
+**v1 behavior:** Markers live only in the in-memory app store (`markers: Record<docId, Marker[]>`),
+keyed by document id. They are not written into `.wav`/`.mp3` exports (this app's
+WAV/MP3 encoders have no marker/cue-chunk support), not round-tripped through
+File > Save/Save As, and not included in a saved multitrack session (`.audm`,
+`src/multitrack/sessionFile.ts`) even when the source document is inserted as a
+clip. Closing a document also discards its markers (`closeDocument` deletes the
+`markers[id]` entry). Reopening the same file later starts with zero markers.
+
+**Intended behavior:** Adobe Audition persists markers with the file (a WAV
+cue/label chunk, or its own metadata sidecar) and/or with the session. Doing
+the same here needs either a WAV cue-chunk writer/reader or a marker section
+in the `.audm` session format — neither exists yet.
+
 ## Realtime multitrack pan law differs slightly from mixdown
 
 **Area:** Multitrack playback vs. Mix Down (`src/multitrack/MultitrackPlayer.ts` vs `src/multitrack/mixdown.ts`)

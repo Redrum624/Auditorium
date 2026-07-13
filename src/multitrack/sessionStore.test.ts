@@ -358,3 +358,44 @@ describe('setSelectedClip / setMtCursor / setMtZoom', () => {
     expect(state.mtZoom).toEqual({ samplesPerPixel: 256, scrollSample: 999 });
   });
 });
+
+describe('setClipGain', () => {
+  beforeEach(() => {
+    useSessionStore.getState().newSession(44100);
+  });
+
+  function seedClip(): string {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const clip = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 100 });
+    store.addClip(trackId, clip);
+    return clip.id;
+  }
+
+  it('updates the gainDb of the target clip only', () => {
+    const clipId = seedClip();
+    const other = createClip({ documentId: 'doc-1', startSample: 500, offsetSample: 0, lengthSample: 50 });
+    useSessionStore.getState().addClip(useSessionStore.getState().session.tracks[0].id, other);
+
+    useSessionStore.getState().setClipGain(clipId, 6);
+
+    expect(findClip(clipId)!.gainDb).toBe(6);
+    expect(findClip(other.id)!.gainDb).toBe(0);
+  });
+
+  it('clamps to the -24..+24 range', () => {
+    const clipId = seedClip();
+
+    useSessionStore.getState().setClipGain(clipId, 100);
+    expect(findClip(clipId)!.gainDb).toBe(24);
+
+    useSessionStore.getState().setClipGain(clipId, -100);
+    expect(findClip(clipId)!.gainDb).toBe(-24);
+  });
+
+  it('is a no-op for an unknown clip id', () => {
+    const before = useSessionStore.getState().session;
+    useSessionStore.getState().setClipGain('clip-does-not-exist', 5);
+    expect(useSessionStore.getState().session).toBe(before);
+  });
+});

@@ -15,8 +15,10 @@ export interface RenderOpts {
   selection: SelectionRange | null;
   cursorSample: number;
   playheadSample: number | null;
-  /** Optional marker overlay (Task 23). Default: none. */
-  markers?: { positionSample: number }[];
+  /** Optional marker overlay (Task 7: dashed line; Task 23: + flag + label).
+   * `name` is optional so callers that only have positions still typecheck;
+   * omitting it just suppresses that marker's label. Default: none. */
+  markers?: { positionSample: number; name?: string }[];
 }
 
 const BG = '#1a1a1e';
@@ -204,15 +206,28 @@ function drawSelection(
   if (x1 >= 0 && x1 <= width) verticalLine(ctx, x1, height);
 }
 
-function drawMarkers(
+/** Triangle flag half-size in px (Task 23): the flag spans FLAG_SIZE px wide
+ * and 2*FLAG_SIZE px tall, pointing down-right from the marker's dashed line. */
+const FLAG_SIZE = 5;
+/** Minimum horizontal gap (px) between two marker labels before the later one
+ * is skipped — a simple, cheap overlap-avoidance heuristic (no text-width
+ * measurement): compares marker x positions, not label pixel extents. */
+const LABEL_MIN_GAP = 40;
+
+/** Draws the dashed marker lines (Task 7) plus a small triangle flag and an
+ * optional name label at the top of each in-view marker (Task 23). Exported
+ * so SpectrogramView (which paints its own overlays rather than going through
+ * renderWaveform) can reuse the exact same marker visuals. */
+export function drawMarkers(
   ctx: CanvasRenderingContext2D,
-  markers: { positionSample: number }[],
+  markers: { positionSample: number; name?: string }[],
   height: number,
   scrollSample: number,
   samplesPerPixel: number,
   width: number
 ): void {
   if (markers.length === 0) return;
+
   ctx.strokeStyle = MARKER;
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 3]);
@@ -221,4 +236,25 @@ function drawMarkers(
     if (mx >= 0 && mx <= width) verticalLine(ctx, mx, height);
   }
   ctx.setLineDash([]);
+
+  ctx.fillStyle = MARKER;
+  ctx.font = '10px sans-serif';
+  ctx.textBaseline = 'top';
+  let lastLabelX = -Infinity;
+  for (const m of markers) {
+    const mx = sampleToPixel(m.positionSample, scrollSample, samplesPerPixel);
+    if (mx < -FLAG_SIZE || mx > width + FLAG_SIZE) continue;
+
+    ctx.beginPath();
+    ctx.moveTo(mx, 0);
+    ctx.lineTo(mx + FLAG_SIZE, 0);
+    ctx.lineTo(mx, FLAG_SIZE * 2);
+    ctx.closePath();
+    ctx.fill();
+
+    if (m.name && mx - lastLabelX >= LABEL_MIN_GAP) {
+      ctx.fillText(m.name, mx + FLAG_SIZE + 2, 0);
+      lastLabelX = mx;
+    }
+  }
 }

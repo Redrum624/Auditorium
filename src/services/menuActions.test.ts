@@ -1,10 +1,17 @@
 import { registerCommands, runCommand, getMenuSections } from './menuActions';
 import type { MenuCommand, MenuSection } from './menuActions';
 import { useAppStore, makeInitialState } from '../stores/appStore';
+import { createDocument } from '../audio/AudioDocument';
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
 });
+
+function openDoc() {
+  const doc = createDocument({ name: 'a', sampleRate: 44100, channels: [new Float32Array(1000)] });
+  useAppStore.getState().addDocument(doc);
+  return doc;
+}
 
 function commandIds(items: MenuSection['items']): string[] {
   return items
@@ -106,6 +113,9 @@ describe('getMenuSections', () => {
       'edit.convertChannels',
       'multitrack.insertDoc',
       'multitrack.addTrack',
+      'marker.add',
+      'marker.next',
+      'marker.prev',
     ]);
   });
 
@@ -138,5 +148,122 @@ describe('getMenuSections', () => {
 
     await runCommand('file.new');
     expect(run).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('marker commands (Task 23)', () => {
+  function findEditCmd(id: string): MenuCommand {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  describe('marker.add', () => {
+    it('is disabled with no active document', () => {
+      expect(findEditCmd('marker.add').enabled(useAppStore.getState())).toBe(false);
+    });
+
+    it('adds a marker named "Marker N" at the cursor, N taken from the generated id', async () => {
+      const doc = openDoc();
+      useAppStore.getState().setCursor(777);
+
+      expect(findEditCmd('marker.add').enabled(useAppStore.getState())).toBe(true);
+      await runCommand('marker.add');
+
+      const markers = useAppStore.getState().markers[doc.id];
+      expect(markers).toHaveLength(1);
+      expect(markers[0].positionSample).toBe(777);
+      expect(markers[0].name).toBe(`Marker ${markers[0].id.split('-')[1]}`);
+    });
+
+    it('keeps adding markers sorted by position (store invariant, exercised through the command)', async () => {
+      const doc = openDoc();
+      useAppStore.getState().setCursor(500);
+      await runCommand('marker.add');
+      useAppStore.getState().setCursor(100);
+      await runCommand('marker.add');
+
+      const positions = useAppStore.getState().markers[doc.id].map((m) => m.positionSample);
+      expect(positions).toEqual([100, 500]);
+    });
+  });
+
+  describe('marker.next / marker.prev', () => {
+    it('are disabled with no active document or when the active document has no markers', () => {
+      expect(findEditCmd('marker.next').enabled(useAppStore.getState())).toBe(false);
+      expect(findEditCmd('marker.prev').enabled(useAppStore.getState())).toBe(false);
+
+      openDoc();
+      expect(findEditCmd('marker.next').enabled(useAppStore.getState())).toBe(false);
+      expect(findEditCmd('marker.prev').enabled(useAppStore.getState())).toBe(false);
+    });
+
+    it('are enabled once any marker exists, even from the wrong side (cheap existence check)', async () => {
+      openDoc();
+      useAppStore.getState().setCursor(1000);
+      await runCommand('marker.add'); // single marker at 1000
+
+      // Cursor is already past the only marker: marker.next has nothing ahead,
+      // but enabled() is a cheap "any marker exists" check per the resolution.
+      expect(findEditCmd('marker.next').enabled(useAppStore.getState())).toBe(true);
+      expect(findEditCmd('marker.prev').enabled(useAppStore.getState())).toBe(true);
+    });
+
+    it('marker.next jumps the cursor to the nearest marker after the cursor, no wrap', async () => {
+      openDoc();
+      useAppStore.getState().setCursor(100);
+      await runCommand('marker.add'); // marker at 100
+      useAppStore.getState().setCursor(500);
+      await runCommand('marker.add'); // marker at 500
+      useAppStore.getState().setCursor(900);
+      await runCommand('marker.add'); // marker at 900
+
+      useAppStore.getState().setCursor(150);
+      await runCommand('marker.next');
+      expect(useAppStore.getState().cursorSample).toBe(500);
+
+      await runCommand('marker.next');
+      expect(useAppStore.getState().cursorSample).toBe(900);
+
+      // No marker after 900: cursor stays put (no wrap).
+      await runCommand('marker.next');
+      expect(useAppStore.getState().cursorSample).toBe(900);
+    });
+
+    it('marker.prev jumps the cursor to the nearest marker before the cursor, no wrap', async () => {
+      openDoc();
+      useAppStore.getState().setCursor(100);
+      await runCommand('marker.add'); // marker at 100
+      useAppStore.getState().setCursor(500);
+      await runCommand('marker.add'); // marker at 500
+      useAppStore.getState().setCursor(900);
+      await runCommand('marker.add'); // marker at 900
+
+      useAppStore.getState().setCursor(850);
+      await runCommand('marker.prev');
+      expect(useAppStore.getState().cursorSample).toBe(500);
+
+      await runCommand('marker.prev');
+      expect(useAppStore.getState().cursorSample).toBe(100);
+
+      // No marker before 100: cursor stays put (no wrap).
+      await runCommand('marker.prev');
+      expect(useAppStore.getState().cursorSample).toBe(100);
+    });
+
+    it('marker.next/prev at a position exactly on a marker jump to the next/previous DIFFERENT marker (strict inequality)', async () => {
+      openDoc();
+      useAppStore.getState().setCursor(100);
+      await runCommand('marker.add');
+      useAppStore.getState().setCursor(500);
+      await runCommand('marker.add');
+
+      useAppStore.getState().setCursor(100); // exactly on the first marker
+      await runCommand('marker.next');
+      expect(useAppStore.getState().cursorSample).toBe(500);
+
+      useAppStore.getState().setCursor(500); // exactly on the second marker
+      await runCommand('marker.prev');
+      expect(useAppStore.getState().cursorSample).toBe(100);
+    });
   });
 });

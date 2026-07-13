@@ -6,6 +6,13 @@ import { getPyramids } from '../../services/peaksCache';
 import { renderWaveform } from './waveformRender';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
+import type { Marker } from '../../stores/appStore';
+
+// Stable empty-array reference: `s.markers[doc.id] ?? []` would otherwise
+// allocate a NEW array on every selector call when the doc has no markers,
+// which breaks useSyncExternalStore's snapshot-equality check and causes an
+// infinite render loop ("Maximum update depth exceeded").
+const NO_MARKERS: Marker[] = [];
 
 /** Core editor view: timeline ruler + waveform canvas with wheel zoom/scroll. */
 export default function WaveformView({ doc }: { doc: AudioDocument }) {
@@ -17,6 +24,7 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
   const selection = useAppStore((s) => s.selection);
   const cursorSample = useAppStore((s) => s.cursorSample);
   const playback = useAppStore((s) => s.playback);
+  const markers = useAppStore((s) => s.markers[doc.id] ?? NO_MARKERS);
 
   const length = docLength(doc);
   const gestures = useEditorGestures(canvasRef, length, size.width);
@@ -59,8 +67,9 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
       selection,
       cursorSample,
       playheadSample,
+      markers,
     });
-    // doc.channels identity, zoom, selection, cursor, playhead, size drive redraws.
+    // doc.channels identity, zoom, selection, cursor, playhead, markers, size drive redraws.
   }, [
     doc,
     doc.channels,
@@ -69,6 +78,7 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
     cursorSample,
     playback.positionSample,
     playback.state,
+    markers,
     size,
   ]);
 
