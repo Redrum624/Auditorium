@@ -1,4 +1,4 @@
-import { timeStretch, timeStretchLinked } from './wsola';
+import { timeStretch, timeStretchLinked, planStretch, computeOffsets, olaWithOffsets } from './wsola';
 
 const SR = 44100;
 
@@ -211,5 +211,52 @@ describe('timeStretchLinked (stereo-linked WSOLA)', () => {
       expect(Math.abs(zeroCrossingRate(ch) - 880) / 880).toBeLessThan(0.08);
       expectFinite(ch);
     }
+  }, 15000);
+
+  it('renders every channel with the MID-signal offsets on divergent stereo content', () => {
+    // DISCRIMINATING fixture: L and R at different frequencies (220 vs 277 Hz), so
+    // each channel's OWN similarity search picks different offsets than the mid's.
+    // A same-frequency phase-offset pair does NOT discriminate (the normalized
+    // xcorr cancels a constant phase offset and both searches agree) — this one does.
+    const l = sine(220, 0.5);
+    const r = sine(277, 0.5);
+    const ratio = 1.5;
+
+    const plan = planStretch(l.length, SR, ratio);
+    if (plan.kind !== 'ola') throw new Error('expected the OLA regime for this fixture');
+
+    const mid = new Float32Array(l.length);
+    for (let i = 0; i < l.length; i++) mid[i] = (l[i] + r[i]) / 2;
+
+    const midOffsets = computeOffsets(mid, plan);
+    const ownOffsets = computeOffsets(r, plan);
+
+    // Fixture sanity: R's own search must diverge from the mid search on ≥30% of
+    // frames, otherwise this test could pass even without linking.
+    let differing = 0;
+    for (let k = 0; k < midOffsets.length; k++) {
+      if (midOffsets[k] !== ownOffsets[k]) differing++;
+    }
+    expect(differing / midOffsets.length).toBeGreaterThanOrEqual(0.3);
+
+    const linked = timeStretchLinked([l, r], SR, ratio);
+
+    // Core F3 invariant: the linked R output IS the OLA of R under the MID's offsets.
+    const expected = olaWithOffsets(r, midOffsets, plan);
+    expect(linked[1].length).toBe(expected.length);
+    let maxDevFromMid = 0;
+    for (let i = 0; i < expected.length; i++) {
+      maxDevFromMid = Math.max(maxDevFromMid, Math.abs(linked[1][i] - expected[i]));
+    }
+    expect(maxDevFromMid).toBeLessThanOrEqual(1e-6);
+
+    // ...and NOT what R would produce with its own per-channel search: if the
+    // linking were removed, linked[1] would equal timeStretch(r) exactly.
+    const unlinked = timeStretch(r, SR, ratio);
+    let maxDevFromOwn = 0;
+    for (let i = 0; i < Math.min(unlinked.length, linked[1].length); i++) {
+      maxDevFromOwn = Math.max(maxDevFromOwn, Math.abs(linked[1][i] - unlinked[i]));
+    }
+    expect(maxDevFromOwn).toBeGreaterThan(1e-3);
   }, 15000);
 });

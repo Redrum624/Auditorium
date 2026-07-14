@@ -88,7 +88,7 @@ function bestMatchOffset(
  *  - `nearest` — input too short to window; fall back to nearest-sample remap.
  *  - `ola`     — the real overlap-add path (carries all frame/search parameters).
  */
-type StretchPlan =
+export type StretchPlan =
   | { kind: 'empty'; outLen: number }
   | { kind: 'nearest'; outLen: number; r: number; N: number }
   | {
@@ -104,8 +104,14 @@ type StretchPlan =
       window: Float32Array;
     };
 
-/** Derives the synthesis regime and all WSOLA parameters for one stretch job. */
-function planStretch(N: number, sampleRate: number, ratio: number): StretchPlan {
+/**
+ * Derives the synthesis regime and all WSOLA parameters for one stretch job.
+ *
+ * Exported (together with computeOffsets / olaWithOffsets) so tests can assert the
+ * linked path's shared-offset invariant directly; these are INTERNAL building blocks,
+ * not public DSP surface — application code calls timeStretch / timeStretchLinked.
+ */
+export function planStretch(N: number, sampleRate: number, ratio: number): StretchPlan {
   const r = Math.min(MAX_RATIO, Math.max(MIN_RATIO, ratio));
   const outLen = Math.round(N * r);
 
@@ -145,7 +151,7 @@ function nearestRemap(channel: Float32Array, outLen: number, r: number, N: numbe
  * (0 → 0.99) is reported here; the caller fires the terminal 1.0. Frame 0 has no
  * predecessor and is copied straight from its nominal position.
  */
-function computeOffsets(
+export function computeOffsets(
   signal: Float32Array,
   plan: Extract<StretchPlan, { kind: 'ola' }>,
   onProgress?: (f: number) => void
@@ -181,7 +187,7 @@ function computeOffsets(
  * several channels can share ONE similarity search yet keep their own OLA — the key
  * to stereo-linked stretching (identical offsets ⇒ inter-channel phase preserved).
  */
-function olaWithOffsets(
+export function olaWithOffsets(
   channel: Float32Array,
   offsets: number[],
   plan: Extract<StretchPlan, { kind: 'ola' }>
