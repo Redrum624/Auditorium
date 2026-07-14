@@ -1,9 +1,11 @@
 import { createDocument } from '../audio/AudioDocument';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
+import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { useAppStore } from '../stores/appStore';
-import { stopAll, transportPlayPause, transportStop } from './transportService';
+import * as dialogBus from './dialogBus';
+import { stopAll, transportPlayPause, transportRecord, transportStop } from './transportService';
 
 function openDoc() {
   const doc = createDocument({ name: 'a', sampleRate: 44100, channels: [new Float32Array(1000)] });
@@ -102,6 +104,71 @@ describe('transportService', () => {
       transportStop();
       expect(multitrackPlayer.stop).toHaveBeenCalled();
       expect(playbackEngine.stop).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('record routing (transportRecord)', () => {
+    let recIsRecording: jest.SpyInstance;
+    let recStart: jest.SpyInstance;
+    let recStop: jest.SpyInstance;
+    let openRecord: jest.SpyInstance;
+
+    beforeEach(() => {
+      recIsRecording = jest.spyOn(multitrackRecorder, 'isRecording').mockReturnValue(false);
+      recStart = jest.spyOn(multitrackRecorder, 'start').mockResolvedValue(undefined);
+      recStop = jest.spyOn(multitrackRecorder, 'stop').mockResolvedValue(undefined);
+      openRecord = jest.spyOn(dialogBus, 'openRecordDialog').mockImplementation(() => {});
+    });
+
+    it('opens the Record dialog in the waveform view (no recorder toggle)', async () => {
+      openDoc();
+      await transportRecord();
+      expect(openRecord).toHaveBeenCalledTimes(1);
+      expect(recStart).not.toHaveBeenCalled();
+      expect(recStop).not.toHaveBeenCalled();
+    });
+
+    it('starts the punch-in recorder in the multitrack view when idle', async () => {
+      useAppStore.setState({ view: 'multitrack' });
+      await transportRecord();
+      expect(recStart).toHaveBeenCalledTimes(1);
+      expect(openRecord).not.toHaveBeenCalled();
+    });
+
+    it('stops the punch-in recorder in the multitrack view when already recording', async () => {
+      useAppStore.setState({ view: 'multitrack' });
+      recIsRecording.mockReturnValue(true);
+      await transportRecord();
+      expect(recStop).toHaveBeenCalledTimes(1);
+      expect(recStart).not.toHaveBeenCalled();
+    });
+
+    it('surfaces recorder errors via a message box without throwing', async () => {
+      useAppStore.setState({ view: 'multitrack' });
+      recStart.mockRejectedValue(new Error('No armed tracks'));
+      const showMessageBox = jest.fn(async () => 0);
+      (window as unknown as { electronAPI: { showMessageBox: jest.Mock } }).electronAPI = {
+        showMessageBox,
+      };
+      await expect(transportRecord()).resolves.toBeUndefined();
+      expect(showMessageBox).toHaveBeenCalled();
+    });
+
+    it('transportStop also stops the recorder while multitrack-recording', () => {
+      useAppStore.setState({ view: 'multitrack' });
+      recIsRecording.mockReturnValue(true);
+      transportStop();
+      expect(recStop).toHaveBeenCalledTimes(1);
+      expect(multitrackPlayer.stop).toHaveBeenCalled();
+    });
+
+    it('transportPlayPause commits the take (stops the recorder) while recording', () => {
+      useAppStore.setState({ view: 'multitrack' });
+      recIsRecording.mockReturnValue(true);
+      mtState.mockReturnValue('playing');
+      transportPlayPause();
+      expect(recStop).toHaveBeenCalledTimes(1);
+      expect(multitrackPlayer.play).not.toHaveBeenCalled();
     });
   });
 

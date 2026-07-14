@@ -51,16 +51,6 @@ File > Export, which never changes the document's path or dirty state.
 **Intended behavior:** Round-trip a file back to its original container/format on
 Save (e.g. re-encode MP3 in place), gated on the format-aware encoder set.
 
-## Track arm (R) is visual-only — no multitrack recording
-
-**Area:** Multitrack > TrackHeader (`src/components/Multitrack/TrackHeader.tsx`)
-
-**v1 behavior:** The R toggle stores the `armed` flag but nothing consumes it.
-Recording happens only via the single-file Record dialog (transport record button),
-which creates a new document rather than recording into an armed track at the playhead.
-
-**Intended behavior:** Audition-style punch-in recording onto armed tracks.
-
 ## Markers are session-only (not persisted)
 
 **Area:** Markers (`src/stores/appStore.ts` `markers`, `src/components/Panels/MarkersPanel.tsx`,

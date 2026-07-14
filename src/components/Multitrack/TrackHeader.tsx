@@ -1,5 +1,6 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { X } from 'lucide-react';
+import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import type { Track } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
 
@@ -14,12 +15,14 @@ function Toggle({
   active,
   onClick,
   activeColor = '#26c6da',
+  className = '',
 }: {
   label: string;
   glyph: string;
   active: boolean;
   onClick: () => void;
   activeColor?: string;
+  className?: string;
 }) {
   return (
     <button
@@ -28,7 +31,7 @@ function Toggle({
       aria-pressed={active}
       title={label}
       onClick={onClick}
-      className="flex h-5 w-5 items-center justify-center rounded border text-[10px] font-semibold transition-colors"
+      className={`flex h-5 w-5 items-center justify-center rounded border text-[10px] font-semibold transition-colors ${className}`}
       style={{
         borderColor: active ? activeColor : '#3a3a42',
         backgroundColor: active ? activeColor : '#2e2e34',
@@ -41,8 +44,9 @@ function Toggle({
 }
 
 /** Left-column controls for one track: editable name (double-click), M/S/R
- * toggles (R is arm — visual only in v1, no multitrack recording yet), volume
- * slider (−60..+12 dB) and pan slider (−1..1), each with a value readout. */
+ * toggles (R arms the track for punch-in recording), volume slider (−60..+12 dB)
+ * and pan slider (−1..1), each with a value readout. While a multitrack take is
+ * recording, the R toggle of every armed track pulses red. */
 export default function TrackHeader({ track }: { track: Track }) {
   const renameTrack = useSessionStore((s) => s.renameTrack);
   const setTrackParam = useSessionStore((s) => s.setTrackParam);
@@ -50,6 +54,8 @@ export default function TrackHeader({ track }: { track: Track }) {
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(track.name);
+  const [recording, setRecording] = useState(() => multitrackRecorder.isRecording());
+  useEffect(() => multitrackRecorder.onChange(setRecording), []);
 
   const commitName = () => {
     const name = draft.trim();
@@ -114,6 +120,7 @@ export default function TrackHeader({ track }: { track: Track }) {
             glyph="R"
             active={track.armed}
             activeColor="#ef5350"
+            className={recording && track.armed ? 'animate-pulse' : ''}
             onClick={() => setTrackParam(track.id, { armed: !track.armed })}
           />
           <button

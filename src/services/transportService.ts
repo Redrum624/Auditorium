@@ -1,8 +1,10 @@
 import { playbackEngine, type PlaybackPlayOptions } from '../audio/PlaybackEngine';
 import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
+import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import { useSessionStore } from '../multitrack/sessionStore';
 import type { AppState } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
+import { openRecordDialog } from './dialogBus';
 
 /**
  * View-routed transport. The transport UI and shortcuts always dispatch the
@@ -30,6 +32,13 @@ export function transportPlayPause(): void {
   const app = useAppStore.getState();
 
   if (app.view === 'multitrack') {
+    // Play/Pause is the play↔stop toggle in multitrack (no pause). While a
+    // punch-in take is running it commits the take (the recorder stops the
+    // monitor player), so Space never leaves the recorder orphaned.
+    if (multitrackRecorder.isRecording()) {
+      void multitrackRecorder.stop();
+      return;
+    }
     if (multitrackPlayer.state === 'playing') {
       multitrackPlayer.stop();
       return;
@@ -76,6 +85,7 @@ export function transportPlayPause(): void {
  * playing, so calling both unconditionally is cheap and side-effect-free.
  */
 export function stopAll(): void {
+  if (multitrackRecorder.isRecording()) void multitrackRecorder.stop();
   playbackEngine.stop();
   multitrackPlayer.stop();
 }
@@ -84,6 +94,9 @@ export function transportStop(): void {
   const app = useAppStore.getState();
 
   if (app.view === 'multitrack') {
+    // A running punch-in take is stopped too (the recorder stops the player and
+    // commits the take); the extra player.stop() below is an idempotent no-op.
+    if (multitrackRecorder.isRecording()) void multitrackRecorder.stop();
     multitrackPlayer.stop();
     return;
   }
@@ -92,4 +105,38 @@ export function transportStop(): void {
   useAppStore
     .getState()
     .setPlayback({ state: 'stopped', positionSample: playbackEngine.getPositionSample() });
+}
+
+/** True when `transport.record` should be enabled: the multitrack view needs at
+ * least one armed track (nothing to punch into otherwise); the waveform/spectral
+ * views open the Record dialog, which owns device/permission errors itself, so
+ * recording is always available there. */
+export function canRecord(): boolean {
+  if (useAppStore.getState().view !== 'multitrack') return true;
+  return useSessionStore.getState().session.tracks.some((t) => t.armed);
+}
+
+/**
+ * View-routed record command. In the multitrack view it TOGGLES punch-in
+ * recording onto the armed tracks (start when idle, stop when recording); any
+ * error surfaces via a native message box and leaves the transport state
+ * unchanged. In the waveform/spectral views it opens the single-file Record
+ * dialog (behavior preserved from the original menuActions implementation).
+ */
+export async function transportRecord(): Promise<void> {
+  if (useAppStore.getState().view !== 'multitrack') {
+    openRecordDialog();
+    return;
+  }
+  try {
+    if (multitrackRecorder.isRecording()) await multitrackRecorder.stop();
+    else await multitrackRecorder.start();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    void window.electronAPI?.showMessageBox({
+      type: 'error',
+      title: 'Recording failed',
+      message: `Could not record: ${message}`,
+    });
+  }
 }

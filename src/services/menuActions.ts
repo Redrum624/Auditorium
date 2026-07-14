@@ -4,7 +4,7 @@ import { useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip } from '../multitrack/session';
 import { mixdownSession } from '../multitrack/mixdown';
-import { transportPlayPause, transportStop } from './transportService';
+import { transportPlayPause, transportRecord, transportStop } from './transportService';
 import {
   cutSelection,
   copySelection,
@@ -20,7 +20,6 @@ import {
   openEffectDialog,
   openExportDialog,
   openNewFileDialog,
-  openRecordDialog,
 } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
@@ -286,12 +285,17 @@ function registerSelectionAndTransportCommands(): void {
       },
     },
     {
-      // Always enabled: the dialog owns device selection and surfaces any
-      // permission/no-device error itself, so there's nothing to gate on here.
+      // View-routed: the multitrack view punches into armed tracks (enabled only
+      // when at least one is armed); the waveform/spectral views open the Record
+      // dialog, which owns device selection and surfaces its own errors, so it's
+      // always available there. The toggle/dispatch lives in transportService.
       id: 'transport.record',
       label: 'Record',
-      enabled: () => true,
-      run: async () => openRecordDialog(),
+      enabled: (s) =>
+        s.view === 'multitrack'
+          ? useSessionStore.getState().session.tracks.some((t) => t.armed)
+          : true,
+      run: async () => transportRecord(),
     },
     stub('marker.add', 'Add Marker', 'M'),
     stub('marker.next', 'Next Marker'),

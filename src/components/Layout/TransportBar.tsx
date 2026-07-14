@@ -1,7 +1,8 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
 import { Circle, Pause, Play, Repeat, Square } from 'lucide-react';
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
+import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { runCommand } from '../../services/menuActions';
 import { useAppStore } from '../../stores/appStore';
@@ -52,11 +53,20 @@ export default function TransportBar() {
   const mtCursorSample = useSessionStore((s) => s.mtCursorSample);
   const mtPlayState = useSessionStore((s) => s.mtPlayState);
   const mtPlayheadSample = useSessionStore((s) => s.mtPlayheadSample);
+  const armedCount = useSessionStore((s) => s.session.tracks.filter((t) => t.armed).length);
 
   const hasDoc = doc !== null;
   const isMultitrack = view === 'multitrack';
   const canTransport = hasDoc || isMultitrack;
   const isPlaying = isMultitrack ? mtPlayState === 'playing' : playback.state === 'playing';
+
+  // Live punch-in recording state, mirrored from the multitrack recorder so the
+  // Record button can pulse red while a take is running. The button is enabled
+  // only when there's somewhere to record into: an armed track in the multitrack
+  // view, else always (the Record dialog handles its own device errors).
+  const [mtRecording, setMtRecording] = useState(() => multitrackRecorder.isRecording());
+  useEffect(() => multitrackRecorder.onChange(setMtRecording), []);
+  const recordEnabled = isMultitrack ? armedCount >= 1 : true;
 
   // Load the active document into the engine whenever its identity changes.
   useEffect(() => {
@@ -155,8 +165,16 @@ export default function TransportBar() {
         <Repeat size={16} />
       </TransportButton>
 
-      <TransportButton label="Record" onClick={() => void runCommand('transport.record')}>
-        <Circle size={16} fill="currentColor" className="text-[#ef5350]" />
+      <TransportButton
+        label={mtRecording ? 'Stop recording' : 'Record'}
+        disabled={!recordEnabled}
+        onClick={() => void runCommand('transport.record')}
+      >
+        <Circle
+          size={16}
+          fill="currentColor"
+          className={`text-[#ef5350] ${mtRecording ? 'animate-pulse' : ''}`}
+        />
       </TransportButton>
 
       {/* Editor view toggle: Waveform | Spectral | Multitrack. Multitrack works

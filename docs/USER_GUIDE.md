@@ -27,8 +27,8 @@ blank document of a chosen length.
 The **Record** button on the transport bar opens the Record dialog: pick an
 input device, channel count, and sample rate, watch the live input level
 meter, then start/stop. A finished recording is added to the Files panel as a
-new document — it does not record into a multitrack track (see Known
-Limitations).
+new document. To record straight into a session instead, see **Recording into
+the multitrack** below.
 
 ### The Files panel (left sidebar)
 
@@ -144,8 +144,8 @@ document open. A session has a name, a sample rate, and any number of tracks.
 
 - **Tracks**: each has a name (double-click to rename), Mute/Solo/Arm toggles,
   a volume slider (−60..+12 dB) and a pan slider (−1..1). **Add Track** adds
-  an empty track. Track arm (R) is currently visual-only — see Known
-  Limitations.
+  an empty track. Arm (R) marks a track as a recording target — see **Recording
+  into the multitrack** below.
 - **Clips**: **Edit → Insert Active File at Cursor** places the whole active
   document as a clip on the selected (or first) track at the multitrack
   cursor. Drag a clip to move it (it snaps forward past overlaps rather than
@@ -158,6 +158,15 @@ document open. A session has a name, a sample rate, and any number of tracks.
   mute/solo changes apply **live while playing** — the realtime monitor uses the
   same pan law as Mix Down, so it matches the render. Clip moves, trims, and clip
   gain take effect on the next play.
+- **Recording into the multitrack**: **arm** one or more tracks with their **R**
+  toggle, position the multitrack cursor where the take should begin, then press
+  **Record** on the transport bar. The session plays back from the cursor as a
+  monitor while your input is captured; press **Record** again (or **Stop**) to
+  end the take. The recording becomes a new *Track Recording* document and is
+  dropped as a clip at the punch-in point on every track that was armed when you
+  started. The Record button and the armed tracks' R toggles pulse red while a
+  take is running. (The Record button is disabled until at least one track is
+  armed.)
 - **Mix Down**: **File → Mix Down to New File** renders the whole session
   offline to a new stereo document (added to the Files panel), respecting
   mute/solo/volume/pan/gain.
