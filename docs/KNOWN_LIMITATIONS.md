@@ -51,23 +51,6 @@ File > Export, which never changes the document's path or dirty state.
 **Intended behavior:** Round-trip a file back to its original container/format on
 Save (e.g. re-encode MP3 in place), gated on the format-aware encoder set.
 
-## Spectral display uses a linear frequency axis
-
-**Area:** View > Spectral Frequency Display (`src/workers/spectrogramCore.ts`,
-`src/components/Editor/SpectrogramView.tsx`)
-
-**v1 behavior:** Spectrogram rows map linearly to FFT bins
-(`bin = row * (fftSize/2) / height`), so the vertical axis is linear in
-frequency: the octaves below 1 kHz — where most musical detail lives — occupy
-only a small strip at the bottom of the display, while the top half of the view
-covers the comparatively sparse 10–22 kHz region. Rendering is also done at
-device-pixel-ratio 1, so the raster is slightly soft on HiDPI screens.
-
-**Intended behavior:** Adobe Audition defaults to a logarithmic frequency axis
-(with linear as an option), which spreads low-frequency content across most of
-the display. A log mapping only changes the row→bin function in
-`spectrogramCore.ts`; the worker protocol and view are already agnostic to it.
-
 ## Multitrack parameter changes are not live during playback
 
 **Area:** Multitrack > playback (`src/multitrack/MultitrackPlayer.ts`, `src/services/transportService.ts`)

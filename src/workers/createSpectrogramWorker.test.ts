@@ -31,6 +31,7 @@ it('mock spectrogram worker replies `done` with a core-consistent grid', async (
     width: 20,
     height: 64,
     fftSize: 2048,
+    scale: 'linear',
   });
 
   const msg = await done;
@@ -47,8 +48,57 @@ it('mock spectrogram worker replies `done` with a core-consistent grid', async (
     width: 20,
     height: 64,
     fftSize: 2048,
+    sampleRate: SR,
+    scale: 'linear',
   });
   expect(Array.from(msg.mags)).toEqual(Array.from(expected));
 
   worker.terminate();
+});
+
+it('plumbs `scale` through to computeSpectrogramColumns (Task F4)', async () => {
+  // Same request, differing only in `scale`, must produce different grids —
+  // this fails if the mock ignores `msg.scale` and always uses the core's
+  // internal default.
+  const SR = 44100;
+  const channel = new Float32Array(8192);
+  for (let n = 0; n < channel.length; n++) channel[n] = Math.sin((2 * Math.PI * 1000 * n) / SR);
+
+  async function computeVia(scale: 'log' | 'linear'): Promise<Done> {
+    const worker = createSpectrogramWorker();
+    const done = new Promise<Done>((resolve) => {
+      worker.onmessage = (e: MessageEvent) => resolve(e.data as Done);
+    });
+    worker.postMessage({
+      type: 'compute',
+      id: 1,
+      channel,
+      sampleRate: SR,
+      startSample: 0,
+      endSample: 8192,
+      width: 20,
+      height: 64,
+      fftSize: 2048,
+      scale,
+    });
+    const msg = await done;
+    worker.terminate();
+    return msg;
+  }
+
+  const log = await computeVia('log');
+  const linear = await computeVia('linear');
+  expect(Array.from(log.mags)).not.toEqual(Array.from(linear.mags));
+
+  const expectedLog = computeSpectrogramColumns({
+    channel,
+    startSample: 0,
+    endSample: 8192,
+    width: 20,
+    height: 64,
+    fftSize: 2048,
+    sampleRate: SR,
+    scale: 'log',
+  });
+  expect(Array.from(log.mags)).toEqual(Array.from(expectedLog));
 });

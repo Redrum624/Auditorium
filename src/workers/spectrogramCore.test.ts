@@ -30,11 +30,13 @@ describe('computeSpectrogramColumns', () => {
       width,
       height,
       fftSize: FFT,
+      sampleRate: SR,
+      scale: 'linear',
     });
     expect(mags.length).toBe(width * height);
   });
 
-  it('locates a constant sine at a stable row near the expected linear bin', () => {
+  it('locates a constant sine at a stable row near the expected linear bin (scale: linear)', () => {
     const freq = 1000;
     const channel = new Float32Array(SR);
     for (let n = 0; n < channel.length; n++) channel[n] = Math.sin((2 * Math.PI * freq * n) / SR);
@@ -47,6 +49,8 @@ describe('computeSpectrogramColumns', () => {
       width,
       height,
       fftSize: FFT,
+      sampleRate: SR,
+      scale: 'linear',
     });
 
     const halfBins = FFT / 2; // 1024
@@ -60,6 +64,71 @@ describe('computeSpectrogramColumns', () => {
     for (const r of rows) expect(Math.abs(r - expectedRow)).toBeLessThanOrEqual(3);
 
     // ...and the peak row is stable across columns (constant tone).
+    const min = Math.min(...rows);
+    const max = Math.max(...rows);
+    expect(max - min).toBeLessThanOrEqual(1);
+  });
+
+  it('defaults to the log scale when `scale` is omitted', () => {
+    const freq = 1000;
+    const channel = new Float32Array(SR);
+    for (let n = 0; n < channel.length; n++) channel[n] = Math.sin((2 * Math.PI * freq * n) / SR);
+    const width = 10;
+    const height = 64;
+
+    const withDefault = computeSpectrogramColumns({
+      channel,
+      startSample: 0,
+      endSample: channel.length,
+      width,
+      height,
+      fftSize: FFT,
+      sampleRate: SR,
+    });
+    const withExplicitLog = computeSpectrogramColumns({
+      channel,
+      startSample: 0,
+      endSample: channel.length,
+      width,
+      height,
+      fftSize: FFT,
+      sampleRate: SR,
+      scale: 'log',
+    });
+
+    expect(Array.from(withDefault)).toEqual(Array.from(withExplicitLog));
+  });
+
+  it('locates a constant sine at the expected log-mapped row (scale: log, Task F4)', () => {
+    // 440 Hz sine @ 44100, height 256: argmax row ~= round((h-1)*log(440/20)/log(22050/20)).
+    // Row 0 = 20 Hz (the LOWEST frequency), consistent with the linear scale's
+    // row 0 = DC; SpectrogramView's paint step flips rows so row 0 is drawn at
+    // the BOTTOM of the canvas (low frequencies at the bottom, like Audition).
+    const freq = 440;
+    const channel = new Float32Array(SR);
+    for (let n = 0; n < channel.length; n++) channel[n] = Math.sin((2 * Math.PI * freq * n) / SR);
+    const width = 40;
+    const height = 256;
+    const mags = computeSpectrogramColumns({
+      channel,
+      startSample: 0,
+      endSample: channel.length,
+      width,
+      height,
+      fftSize: FFT,
+      sampleRate: SR,
+      scale: 'log',
+    });
+
+    const fnyq = SR / 2;
+    const fmin = 20;
+    const expectedRow = Math.round(((height - 1) * Math.log(freq / fmin)) / Math.log(fnyq / fmin));
+
+    const rows: number[] = [];
+    for (let col = 5; col < width - 5; col++) rows.push(argmaxRow(mags, col, height));
+
+    for (const r of rows) expect(Math.abs(r - expectedRow)).toBeLessThanOrEqual(2);
+
     const min = Math.min(...rows);
     const max = Math.max(...rows);
     expect(max - min).toBeLessThanOrEqual(1);

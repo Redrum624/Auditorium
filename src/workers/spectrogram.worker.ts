@@ -13,6 +13,7 @@ interface ComputeMessage {
   width: number;
   height: number;
   fftSize: number;
+  scale?: 'log' | 'linear';
 }
 
 // Narrow cast so this compiles under the DOM lib without the conflicting
@@ -32,6 +33,8 @@ ctx.onmessage = (e) => {
     width: msg.width,
     height: msg.height,
     fftSize: msg.fftSize,
+    sampleRate: msg.sampleRate,
+    scale: msg.scale,
   });
   ctx.postMessage(
     { type: 'done', id: msg.id, mags, width: msg.width, height: msg.height },

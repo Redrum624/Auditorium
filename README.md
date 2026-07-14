@@ -43,7 +43,7 @@ use `npm run dev`.
 ## Modules
 
 - **Waveform Editor** — the default per-sample amplitude view with zoom, scroll, selection, cursor, and playhead.
-- **Spectral Frequency Display** — an off-main-thread spectrogram (linear frequency axis, inferno color map) of the active document.
+- **Spectral Frequency Display** — an off-main-thread spectrogram (logarithmic frequency axis by default, toggleable to linear, inferno color map, HiDPI-rendered) of the active document.
 - **Multitrack Editor** — a session timeline of tracks and clips with per-track volume/pan/mute/solo/arm and draggable, trimmable clips.
 - **Recorder** — a record dialog with input-device selection, channel/sample-rate choice, and a live input-level meter.
 - **Effects Rack** — a categorized effects panel and menu; each effect opens a parameter dialog with a preview before applying.

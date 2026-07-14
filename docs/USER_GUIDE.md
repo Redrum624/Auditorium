@@ -128,9 +128,11 @@ Switch between views from the transport bar's view toggle or **View** menu:
 
 - **Waveform** — the default per-sample amplitude view, with zoom (mouse
   wheel) and scroll.
-- **Spectral** — a spectrogram (linear frequency axis, −90..0 dB range,
-  inferno-style color map) of the mono mix of the active document, computed
-  off the main thread. See Known Limitations for the linear-vs-log axis note.
+- **Spectral** — a spectrogram (logarithmic frequency axis by default,
+  −90..0 dB range, inferno-style color map, rendered at full device-pixel
+  resolution) of the mono mix of the active document, computed off the main
+  thread. Toggle to a linear axis via **View → Spectral: Toggle Log/Linear
+  Scale**.
 
 Both views share the same selection, cursor, playhead, and marker overlays,
 and the same zoom/scroll gestures.

@@ -24,6 +24,7 @@ import {
 } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
+import { toggleSpectralScale } from './spectralScale';
 
 export interface MenuCommand {
   id: string;
@@ -99,7 +100,10 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
     ],
   },
   { title: 'Effects', itemIds: ['effects.none'] },
-  { title: 'View', itemIds: ['view.waveform', 'view.spectral', 'view.multitrack'] },
+  {
+    title: 'View',
+    itemIds: ['view.waveform', 'view.spectral', 'view.spectralScale', 'view.multitrack'],
+  },
   { title: 'Help', itemIds: ['help.about'] },
 ];
 
@@ -476,9 +480,11 @@ export function registerEffectCommands(): void {
 
 /** Registers the Task 19 restoration + view commands: `noise.capture` (top of
  * the Effects menu, enabled only when a selection exists — it profiles the
- * selected region) and the real `view.waveform` / `view.spectral` toggles
- * (enabled when an active doc exists and that view isn't already current).
- * `view.multitrack` stays a disabled stub until Phase D. */
+ * selected region), the real `view.waveform` / `view.spectral` toggles
+ * (enabled when an active doc exists and that view isn't already current), and
+ * `view.spectralScale` (Task F4 — flips the module-level spectral scale
+ * setting; enabled only while the spectral view is active). `view.multitrack`
+ * stays a disabled stub until Phase D. */
 function registerNoiseAndViewCommands(): void {
   registerCommands([
     {
@@ -506,6 +512,12 @@ function registerNoiseAndViewCommands(): void {
       label: 'Spectral',
       enabled: (s) => activeDoc(s) !== null && s.view !== 'spectral',
       run: async () => useAppStore.getState().setView('spectral'),
+    },
+    {
+      id: 'view.spectralScale',
+      label: 'Spectral: Toggle Log/Linear Scale',
+      enabled: (s) => s.view === 'spectral',
+      run: async () => toggleSpectralScale(),
     },
   ]);
 }

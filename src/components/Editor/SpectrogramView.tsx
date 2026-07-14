@@ -3,6 +3,7 @@ import type { AudioDocument } from '../../audio/AudioDocument';
 import { docLength, mixDown } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
+import { useSpectralScale } from '../../services/spectralScale';
 import { drawMarkers, sampleToPixel } from './waveformRender';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
@@ -99,13 +100,19 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, m: MagsData, width: numb
 }
 
 /**
- * Spectral (spectrogram) editor view (Task 19). Mirrors WaveformView's chrome
- * (timeline ruler, wheel zoom/scroll, click/drag selection, cursor) via the
- * shared `useEditorGestures` hook, but renders a linear-frequency spectrogram
- * of the mono mix. Magnitudes are computed off-thread by the spectrogram worker
- * (debounced 150ms on zoom/scroll/doc change), mapped through an inferno LUT over
- * a -90..0 dB range, and painted as an ImageData raster with translucent
- * selection, cursor, and playhead overlays on top.
+ * Spectral (spectrogram) editor view (Task 19; log axis + HiDPI in Task F4).
+ * Mirrors WaveformView's chrome (timeline ruler, wheel zoom/scroll, click/drag
+ * selection, cursor) via the shared `useEditorGestures` hook, but renders a
+ * spectrogram of the mono mix — logarithmic frequency axis by default (matching
+ * Audition), toggleable to linear via the `view.spectralScale` command and the
+ * `spectralScale` store. Magnitudes are computed off-thread by the spectrogram
+ * worker (debounced 150ms on zoom/scroll/doc/scale change) at the canvas's
+ * device-pixel resolution (`devicePixelRatio`-scaled width/height, so the
+ * raster is full-res on HiDPI screens), mapped through an inferno LUT over a
+ * -90..0 dB range, and painted via `putImageData` (which ignores the canvas
+ * transform, so it's drawn at raw device-pixel size) with translucent
+ * selection, marker, cursor, and playhead overlays on top, drawn in CSS-pixel
+ * space under a `ctx.setTransform(dpr, ...)` scale (mirrors WaveformView).
  */
 export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -118,6 +125,7 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
   const cursorSample = useAppStore((s) => s.cursorSample);
   const playback = useAppStore((s) => s.playback);
   const markers = useAppStore((s) => s.markers[doc.id] ?? NO_MARKERS);
+  const scale = useSpectralScale();
 
   const length = docLength(doc);
   const gestures = useEditorGestures(canvasRef, length, size.width);
@@ -151,18 +159,27 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     };
   }, []);
 
-  // Recompute the spectrogram (debounced) whenever the data, zoom, or size change.
+  // Recompute the spectrogram (debounced) whenever the data, zoom, size, or
+  // scale change. Requests are made at the DEVICE-PIXEL resolution (CSS size *
+  // devicePixelRatio) so the raster the worker returns is full-res on HiDPI
+  // screens; `width`/`spp` used for the sample-range math stay in CSS pixels
+  // since `zoom.samplesPerPixel` is defined in CSS-pixel terms (matches the
+  // gesture math in useEditorGestures).
   useEffect(() => {
-    const width = Math.round(size.width);
-    const height = Math.round(size.height);
-    if (width <= 0 || height <= 0) return;
+    const cssWidth = Math.round(size.width);
+    const cssHeight = Math.round(size.height);
+    if (cssWidth <= 0 || cssHeight <= 0) return;
     const worker = workerRef.current;
     if (!worker) return;
+
+    const dpr = window.devicePixelRatio || 1;
+    const width = Math.round(cssWidth * dpr);
+    const height = Math.round(cssHeight * dpr);
 
     const t = setTimeout(() => {
       const { samplesPerPixel: spp, scrollSample } = zoom;
       const start = Math.max(0, Math.floor(scrollSample));
-      const end = Math.min(length, Math.ceil(scrollSample + width * spp));
+      const end = Math.min(length, Math.ceil(scrollSample + cssWidth * spp));
       if (end <= start) return;
       const mono = mixDown(doc.channels);
       const id = ++reqIdRef.current;
@@ -177,12 +194,13 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
           width,
           height,
           fftSize: FFT_SIZE,
+          scale,
         },
         [mono.buffer]
       );
     }, DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [doc, doc.channels, doc.sampleRate, length, zoom, size]);
+  }, [doc, doc.channels, doc.sampleRate, length, zoom, size, scale]);
 
   // Paint the latest magnitudes plus selection/cursor/playhead overlays.
   useEffect(() => {
@@ -194,12 +212,22 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     const height = Math.round(size.height);
     if (width <= 0 || height <= 0) return;
 
-    canvas.width = width;
-    canvas.height = height;
+    // HiDPI backing store: canvas.width/height are DEVICE pixels; CSS size
+    // (set by the `h-full w-full` classes) is unaffected. `ctx.setTransform`
+    // scales subsequent CSS-pixel-space vector drawing (background fill,
+    // selection/marker/cursor/playhead overlays below) to match. `putImageData`
+    // (in drawSpectrogram) is exempt from the canvas transform by spec, so it's
+    // called with the raw device-pixel dimensions directly.
+    const dpr = window.devicePixelRatio || 1;
+    const backingWidth = Math.round(width * dpr);
+    const backingHeight = Math.round(height * dpr);
+    canvas.width = backingWidth;
+    canvas.height = backingHeight;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
     ctx.fillStyle = '#0a0a0f';
     ctx.fillRect(0, 0, width, height);
-    if (magsData) drawSpectrogram(ctx, magsData, width, height);
+    if (magsData) drawSpectrogram(ctx, magsData, backingWidth, backingHeight);
 
     const { samplesPerPixel: spp, scrollSample } = zoom;
 

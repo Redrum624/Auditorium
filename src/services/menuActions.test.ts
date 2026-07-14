@@ -2,6 +2,7 @@ import { registerCommands, runCommand, getMenuSections } from './menuActions';
 import type { MenuCommand, MenuSection } from './menuActions';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument } from '../audio/AudioDocument';
+import { getSpectralScale, toggleSpectralScale } from './spectralScale';
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
@@ -265,5 +266,45 @@ describe('marker commands (Task 23)', () => {
       await runCommand('marker.prev');
       expect(useAppStore.getState().cursorSample).toBe(100);
     });
+  });
+});
+
+describe('view.spectralScale (Task F4)', () => {
+  afterEach(() => {
+    // The scale store is module-level; restore the documented default.
+    if (getSpectralScale() !== 'log') toggleSpectralScale();
+  });
+
+  function findViewCmd(id: string): MenuCommand {
+    const view = getMenuSections().find((s) => s.title === 'View')!;
+    return view.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  it('is registered in the View section, after view.spectral', () => {
+    const view = getMenuSections().find((s) => s.title === 'View')!;
+    const ids = view.items
+      .filter((item): item is MenuCommand => item !== 'separator')
+      .map((item) => item.id);
+    expect(ids).toContain('view.spectralScale');
+    expect(ids.indexOf('view.spectralScale')).toBeGreaterThan(ids.indexOf('view.spectral'));
+  });
+
+  it('is enabled only while the spectral view is active', () => {
+    useAppStore.setState({ view: 'waveform' });
+    expect(findViewCmd('view.spectralScale').enabled(useAppStore.getState())).toBe(false);
+
+    useAppStore.setState({ view: 'spectral' });
+    expect(findViewCmd('view.spectralScale').enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('running it toggles the spectral scale store', async () => {
+    expect(getSpectralScale()).toBe('log');
+    useAppStore.setState({ view: 'spectral' });
+
+    await runCommand('view.spectralScale');
+    expect(getSpectralScale()).toBe('linear');
+
+    await runCommand('view.spectralScale');
+    expect(getSpectralScale()).toBe('log');
   });
 });

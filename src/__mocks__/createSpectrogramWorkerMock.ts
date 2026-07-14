@@ -10,6 +10,7 @@ interface ComputeMessage {
   width: number;
   height: number;
   fftSize: number;
+  scale?: 'log' | 'linear';
 }
 
 /**
@@ -35,6 +36,8 @@ class FakeSpectrogramWorker {
         width: msg.width,
         height: msg.height,
         fftSize: msg.fftSize,
+        sampleRate: msg.sampleRate,
+        scale: msg.scale,
       });
       this.onmessage?.({
         data: { type: 'done', id: msg.id, mags, width: msg.width, height: msg.height },
