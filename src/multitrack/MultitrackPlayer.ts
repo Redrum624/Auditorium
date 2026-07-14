@@ -10,16 +10,27 @@ export interface MultitrackPlayerDeps {
 }
 
 /**
+ * Per-clip pan gain pair. `mode` records which pan law this clip's `panL`/`panR`
+ * follow — chosen by the CLIP's source channel count, exactly like the offline
+ * mixdown applies its law per clip (see `play`).
+ */
+export interface ClipPanNodes {
+  panL: GainNode;
+  panR: GainNode;
+  mode: 'mono' | 'stereo';
+}
+
+/**
  * Live per-track nodes kept in the player's registry while playing, so track
- * parameter changes retro-apply to the running graph without a rebuild. `panMode`
- * records which pan law the track's `panL`/`panR` gains follow (see `play`).
+ * parameter changes retro-apply to the running graph without a rebuild. Pan is
+ * per CLIP (`clipPans`, keyed by clip id): the pan law depends on each clip's
+ * source channel count, so a track mixing mono and stereo clips gets a distinct
+ * gain pair per clip. Volume and mute are per track.
  */
 export interface LiveTrackNodes {
   volumeGain: GainNode;
-  panL: GainNode;
-  panR: GainNode;
   muteGain: GainNode;
-  panMode: 'mono' | 'stereo';
+  clipPans: Map<string, ClipPanNodes>;
 }
 
 function dbToLinear(db: number): number {
@@ -39,28 +50,28 @@ const PARAM_SMOOTH = 0.015;
 /**
  * Realtime WebAudio playback of a multitrack session. On each `play(fromSample)`
  * the whole graph is rebuilt. Per track the chain is
- *   panL/panR (`GainNode`) → `ChannelMergerNode(2)` → volume (`GainNode`)
- *     → mute (`GainNode`) → shared master (`GainNode`) → destination,
- * and one `AudioBufferSourceNode` per clip whose end is past `fromSample`.
+ *   per-clip panL/panR (`GainNode` pairs) → shared `ChannelMergerNode(2)`
+ *     → volume (`GainNode`) → mute (`GainNode`) → shared master (`GainNode`)
+ *     → destination,
+ * with one `AudioBufferSourceNode` per clip whose end is past `fromSample`.
  * Buffers are built at the SESSION sample rate from the same slice/resample logic
  * as the offline mixdown (`readClipSlice`), with the clip's gain baked in.
  *
  * PAN LAW — implemented manually so realtime monitoring matches the offline
- * mixdown EXACTLY (the two used to differ by a fraction of a dB):
- *  - MONO source: the mono buffer fans out into `panL` and `panR`, whose gains
- *    come from `monoPanGains(pan)` (constant-power). merger input 0 = L, 1 = R.
- *  - STEREO source: a `ChannelSplitterNode(2)` sends channel 0 → `panL`,
- *    channel 1 → `panR`, whose gains come from `stereoBalanceGains(pan)` (balance).
- *  A track's `panMode` is `stereo` if ANY of its clips is stereo, else `mono`
- *  (a rare mixed-channel track routes its mono clips through the same nodes under
- *  the stereo law — an accepted approximation for that edge case; homogeneous
- *  tracks, the normal case, match the mixdown exactly).
+ * mixdown EXACTLY. Like the mixdown, the law is chosen PER CLIP by the clip's
+ * source channel count (a track mixing mono and stereo clips therefore gets a
+ * distinct pan pair per clip — the two laws differ by up to ~3 dB at center):
+ *  - MONO clip: the mono buffer fans out into its own `panL`/`panR`, gains from
+ *    `monoPanGains(track.pan)` (constant-power). merger input 0 = L, 1 = R.
+ *  - STEREO clip: a `ChannelSplitterNode(2)` sends channel 0 → `panL`,
+ *    channel 1 → `panR`, gains from `stereoBalanceGains(track.pan)` (balance).
  *
  * LIVE PARAMETERS: every track (audible or not) gets its full chain built and is
  * registered in `trackNodes`, so `applyTrackParams` can retro-apply volume, pan,
  * and mute/solo changes to the RUNNING graph via `setTargetAtTime` — no rebuild,
- * no source restart. Effective mute (mute + solo) rides the per-track `muteGain`
- * (0/1), so muting/soloing/un-muting is audible immediately.
+ * no source restart. Pan updates every clip's gain pair under that clip's OWN
+ * law. Effective mute (mute + solo) rides the per-track `muteGain` (0/1), so
+ * muting/soloing/un-muting is audible immediately.
  *
  * Sources are scheduled at `ctx.currentTime + max(0, (clipStart − from)/rate)`
  * with a mid-clip start offset and the remaining duration, so seeking into the
@@ -132,43 +143,48 @@ export class MultitrackPlayer {
     // track with no clip past `from` contributes nothing and is skipped.
     for (const t of session.tracks) {
       const built: { clip: Clip; buffer: AudioBuffer }[] = [];
-      let anyStereo = false;
       for (const c of t.clips) {
         if (c.startSample + c.lengthSample <= from) continue;
         const doc = docs.get(c.documentId);
         if (!doc) continue;
         const buffer = this.buildClipBuffer(ctx, c, doc, sr);
         if (!buffer) continue;
-        if (buffer.numberOfChannels >= 2) anyStereo = true;
         built.push({ clip: c, buffer });
       }
       if (built.length === 0) continue;
 
-      // Per-track chain: panL/panR -> merger(2) -> volume -> mute -> master.
-      const panMode: LiveTrackNodes['panMode'] = anyStereo ? 'stereo' : 'mono';
+      // Per-track chain: per-clip panL/panR -> shared merger(2) -> volume ->
+      // mute -> master. The pan LAW is chosen per clip below, like the mixdown.
       const merger = ctx.createChannelMerger(2);
-      const panL = ctx.createGain();
-      const panR = ctx.createGain();
-      const { gL, gR } = panMode === 'mono' ? monoPanGains(t.pan) : stereoBalanceGains(t.pan);
-      panL.gain.value = gL;
-      panR.gain.value = gR;
       const volumeGain = ctx.createGain();
       volumeGain.gain.value = dbToLinear(t.volumeDb);
       const muteGain = ctx.createGain();
       muteGain.gain.value = isEffectivelyMuted(t, anySolo) ? 0 : 1;
 
-      panL.connect(merger, 0, 0);
-      panR.connect(merger, 0, 1);
       merger.connect(volumeGain);
       volumeGain.connect(muteGain);
       muteGain.connect(master);
-      graphNodes.push(merger, panL, panR, volumeGain, muteGain);
-      this.trackNodes.set(t.id, { volumeGain, panL, panR, muteGain, panMode });
+      graphNodes.push(merger, volumeGain, muteGain);
+      const clipPans = new Map<string, ClipPanNodes>();
+      this.trackNodes.set(t.id, { volumeGain, muteGain, clipPans });
 
       for (const { clip: c, buffer } of built) {
         const src = ctx.createBufferSource();
         src.buffer = buffer;
-        if (buffer.numberOfChannels >= 2) {
+
+        // Per-clip pan pair under the clip's OWN law (mixdown parity).
+        const mode: ClipPanNodes['mode'] = buffer.numberOfChannels >= 2 ? 'stereo' : 'mono';
+        const panL = ctx.createGain();
+        const panR = ctx.createGain();
+        const { gL, gR } = mode === 'mono' ? monoPanGains(t.pan) : stereoBalanceGains(t.pan);
+        panL.gain.value = gL;
+        panR.gain.value = gR;
+        panL.connect(merger, 0, 0);
+        panR.connect(merger, 0, 1);
+        graphNodes.push(panL, panR);
+        clipPans.set(c.id, { panL, panR, mode });
+
+        if (mode === 'stereo') {
           // Stereo: channel 0 -> panL, channel 1 -> panR (balance law).
           const splitter = ctx.createChannelSplitter(2);
           src.connect(splitter);
@@ -243,9 +259,10 @@ export class MultitrackPlayer {
 
   /**
    * Retro-applies track volume, pan, and mute/solo to the RUNNING graph without
-   * rebuilding it — each registered track's `volumeGain`/`panL`/`panR`/`muteGain`
-   * is ramped via `setTargetAtTime` (15 ms). No-op when stopped or for tracks not
-   * in the current graph. Solo state is derived from the passed tracks. Clip
+   * rebuilding it — each registered track's `volumeGain`/`muteGain` and every
+   * clip's `panL`/`panR` pair (under that clip's OWN pan law) are ramped via
+   * `setTargetAtTime` (15 ms). No-op when stopped or for tracks not in the
+   * current graph. Solo state is derived from the passed tracks. Clip
    * geometry/gain are baked per source and intentionally NOT handled here.
    */
   applyTrackParams(tracks: Track[]): void {
@@ -257,10 +274,13 @@ export class MultitrackPlayer {
       const nodes = this.trackNodes.get(t.id);
       if (!nodes) continue;
       nodes.volumeGain.gain.setTargetAtTime(dbToLinear(t.volumeDb), now, PARAM_SMOOTH);
-      const { gL, gR } =
-        nodes.panMode === 'mono' ? monoPanGains(t.pan) : stereoBalanceGains(t.pan);
-      nodes.panL.gain.setTargetAtTime(gL, now, PARAM_SMOOTH);
-      nodes.panR.gain.setTargetAtTime(gR, now, PARAM_SMOOTH);
+      const monoG = monoPanGains(t.pan);
+      const stereoG = stereoBalanceGains(t.pan);
+      for (const pans of nodes.clipPans.values()) {
+        const { gL, gR } = pans.mode === 'mono' ? monoG : stereoG;
+        pans.panL.gain.setTargetAtTime(gL, now, PARAM_SMOOTH);
+        pans.panR.gain.setTargetAtTime(gR, now, PARAM_SMOOTH);
+      }
       const target = isEffectivelyMuted(t, anySolo) ? 0 : 1;
       nodes.muteGain.gain.setTargetAtTime(target, now, PARAM_SMOOTH);
     }

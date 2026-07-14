@@ -151,10 +151,26 @@ function last<T>(arr: T[]): T {
 }
 
 /** Reads a live track's node as a FakeGain (they are FakeGain under the fake ctx). */
-function gainOf(player: MultitrackPlayer, trackId: string, key: 'volumeGain' | 'panL' | 'panR' | 'muteGain'): FakeGain {
+function gainOf(player: MultitrackPlayer, trackId: string, key: 'volumeGain' | 'muteGain'): FakeGain {
   const nodes = player.liveTrackNodes(trackId);
   if (!nodes) throw new Error(`no live nodes for ${trackId}`);
   return nodes[key] as unknown as FakeGain;
+}
+
+/** Reads a clip's live pan pair as FakeGains (per-clip pan topology). */
+function clipPanOf(
+  player: MultitrackPlayer,
+  trackId: string,
+  clipId: string
+): { panL: FakeGain; panR: FakeGain; mode: 'mono' | 'stereo' } {
+  const nodes = player.liveTrackNodes(trackId);
+  const pans = nodes?.clipPans.get(clipId);
+  if (!pans) throw new Error(`no live pan nodes for ${trackId}/${clipId}`);
+  return {
+    panL: pans.panL as unknown as FakeGain,
+    panR: pans.panR as unknown as FakeGain,
+    mode: pans.mode,
+  };
 }
 
 let idSeq = 0;
@@ -279,36 +295,66 @@ describe('MultitrackPlayer', () => {
     expect(gainOf(player, 'T', 'volumeGain').gain.value).toBeCloseTo(Math.pow(10, -6 / 20), 6);
   });
 
-  it('builds a mono pan graph whose gains equal mixdown monoPanGains', () => {
+  it('builds a mono clip pan pair whose gains equal mixdown monoPanGains', () => {
     for (const pan of [-1, -0.5, 0, 0.5, 1]) {
       const { player } = makePlayer();
-      const s = session([
-        track({ id: 'T', pan, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
-      ]);
-      player.play(0, s, docs(doc('doc-1'))); // mono source
+      const c = clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 });
+      player.play(0, session([track({ id: 'T', pan, clips: [c] })]), docs(doc('doc-1'))); // mono source
 
       const { gL, gR } = monoPanGains(pan);
-      expect(player.liveTrackNodes('T')!.panMode).toBe('mono');
-      expect(gainOf(player, 'T', 'panL').gain.value).toBeCloseTo(gL, 6);
-      expect(gainOf(player, 'T', 'panR').gain.value).toBeCloseTo(gR, 6);
+      const pans = clipPanOf(player, 'T', c.id);
+      expect(pans.mode).toBe('mono');
+      expect(pans.panL.gain.value).toBeCloseTo(gL, 6);
+      expect(pans.panR.gain.value).toBeCloseTo(gR, 6);
       player.stop();
     }
   });
 
-  it('builds a stereo pan graph whose gains equal mixdown stereoBalanceGains', () => {
+  it('builds a stereo clip pan pair whose gains equal mixdown stereoBalanceGains', () => {
     for (const pan of [-1, -0.5, 0, 0.5, 1]) {
       const { player } = makePlayer();
-      const s = session([
-        track({ id: 'T', pan, clips: [clip({ documentId: 'doc-2', startSample: 0, lengthSample: 500 })] }),
-      ]);
-      player.play(0, s, docs(stereoDoc('doc-2'))); // stereo source
+      const c = clip({ documentId: 'doc-2', startSample: 0, lengthSample: 500 });
+      player.play(0, session([track({ id: 'T', pan, clips: [c] })]), docs(stereoDoc('doc-2'))); // stereo source
 
       const { gL, gR } = stereoBalanceGains(pan);
-      expect(player.liveTrackNodes('T')!.panMode).toBe('stereo');
-      expect(gainOf(player, 'T', 'panL').gain.value).toBeCloseTo(gL, 6);
-      expect(gainOf(player, 'T', 'panR').gain.value).toBeCloseTo(gR, 6);
+      const pans = clipPanOf(player, 'T', c.id);
+      expect(pans.mode).toBe('stereo');
+      expect(pans.panL.gain.value).toBeCloseTo(gL, 6);
+      expect(pans.panR.gain.value).toBeCloseTo(gR, 6);
       player.stop();
     }
+  });
+
+  it('applies each law per CLIP on a mixed mono+stereo track (mixdown parity)', () => {
+    // Discriminator for the per-clip topology: with one mono and one stereo clip
+    // on the SAME track, each clip's pan pair must follow its OWN law — a single
+    // per-track pan pair cannot satisfy both (the laws differ by ~3 dB at center).
+    const { player } = makePlayer();
+    const monoClip = clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 });
+    const stereoClip = clip({ documentId: 'doc-2', startSample: 500, lengthSample: 500 });
+    const t = track({ id: 'T', pan: 0.5, clips: [monoClip, stereoClip] });
+    player.play(0, session([t]), docs(doc('doc-1'), stereoDoc('doc-2')));
+
+    const mono = clipPanOf(player, 'T', monoClip.id);
+    const monoLaw = monoPanGains(0.5);
+    expect(mono.mode).toBe('mono');
+    expect(mono.panL.gain.value).toBeCloseTo(monoLaw.gL, 6);
+    expect(mono.panR.gain.value).toBeCloseTo(monoLaw.gR, 6);
+
+    const stereo = clipPanOf(player, 'T', stereoClip.id);
+    const stereoLaw = stereoBalanceGains(0.5);
+    expect(stereo.mode).toBe('stereo');
+    expect(stereo.panL.gain.value).toBeCloseTo(stereoLaw.gL, 6);
+    expect(stereo.panR.gain.value).toBeCloseTo(stereoLaw.gR, 6);
+
+    // A live pan change keeps each clip under its own law.
+    player.applyTrackParams([{ ...t, pan: -0.5 }]);
+    const monoLaw2 = monoPanGains(-0.5);
+    const stereoLaw2 = stereoBalanceGains(-0.5);
+    expect(last(mono.panL.gain.targetCalls).value).toBeCloseTo(monoLaw2.gL, 6);
+    expect(last(mono.panR.gain.targetCalls).value).toBeCloseTo(monoLaw2.gR, 6);
+    expect(last(stereo.panL.gain.targetCalls).value).toBeCloseTo(stereoLaw2.gL, 6);
+    expect(last(stereo.panR.gain.targetCalls).value).toBeCloseTo(stereoLaw2.gR, 6);
   });
 
   it('applies a live volume change without rebuilding the sources', () => {
@@ -329,18 +375,19 @@ describe('MultitrackPlayer', () => {
     expect(ctx.sources[0]).toBe(sourceBefore);
   });
 
-  it('applies a live pan change through the same nodes (mono law)', () => {
+  it('applies a live pan change through the same clip pan nodes (mono law)', () => {
     const { player } = makePlayer();
-    const t = track({ id: 'T', pan: 0, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] });
+    const c = clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 });
+    const t = track({ id: 'T', pan: 0, clips: [c] });
     player.play(0, session([t]), docs(doc('doc-1')));
 
-    const panL = gainOf(player, 'T', 'panL');
-    const panR = gainOf(player, 'T', 'panR');
+    const { panL, panR } = clipPanOf(player, 'T', c.id);
     player.applyTrackParams([{ ...t, pan: 0.5 }]);
 
     const { gL, gR } = monoPanGains(0.5);
     expect(last(panL.gain.targetCalls).value).toBeCloseTo(gL, 6);
     expect(last(panR.gain.targetCalls).value).toBeCloseTo(gR, 6);
+    expect(last(panL.gain.targetCalls).timeConstant).toBe(0.015);
   });
 
   it('applies live solo/un-solo/mute via muteGain (mute wins on a soloed track)', () => {
