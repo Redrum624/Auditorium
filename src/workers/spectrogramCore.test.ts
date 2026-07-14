@@ -127,7 +127,9 @@ describe('computeSpectrogramColumns', () => {
     const rows: number[] = [];
     for (let col = 5; col < width - 5; col++) rows.push(argmaxRow(mags, col, height));
 
-    for (const r of rows) expect(Math.abs(r - expectedRow)).toBeLessThanOrEqual(2);
+    // ±3: bin quantization puts the argmax at exactly 2 rows from the continuous
+    // formula for this fixture (rows 111/112 share the peak bin); ±2 was zero-margin.
+    for (const r of rows) expect(Math.abs(r - expectedRow)).toBeLessThanOrEqual(3);
 
     const min = Math.min(...rows);
     const max = Math.max(...rows);
