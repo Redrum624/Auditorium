@@ -154,7 +154,10 @@ document open. A session has a name, a sample rate, and any number of tracks.
   in the **Properties** tab.
 - **Playback**: the multitrack view has its own transport, cursor, and
   playhead, driven by the same transport bar buttons. There is no pause in
-  multitrack playback (v1) — Play/Pause toggles play↔stop.
+  multitrack playback (v1) — Play/Pause toggles play↔stop. Volume, pan, and
+  mute/solo changes apply **live while playing** — the realtime monitor uses the
+  same pan law as Mix Down, so it matches the render. Clip moves, trims, and clip
+  gain take effect on the next play.
 - **Mix Down**: **File → Mix Down to New File** renders the whole session
   offline to a new stereo document (added to the Files panel), respecting
   mute/solo/volume/pan/gain.

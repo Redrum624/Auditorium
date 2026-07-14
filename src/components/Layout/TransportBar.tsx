@@ -106,6 +106,19 @@ export default function TransportBar() {
     return () => cancelAnimationFrame(raf);
   }, [isMultitrack, mtPlayState]);
 
+  // Live multitrack parameters: while the multitrack view is playing, push track
+  // volume/pan/mute/solo changes into the running graph as they happen (the store
+  // replaces the tracks array on every edit). Unsubscribes on stop/view change/
+  // unmount so no stray updates hit a torn-down graph.
+  useEffect(() => {
+    if (!isMultitrack || mtPlayState !== 'playing') return;
+    return useSessionStore.subscribe((state, prev) => {
+      if (state.session.tracks !== prev.session.tracks) {
+        multitrackPlayer.applyTrackParams(state.session.tracks);
+      }
+    });
+  }, [isMultitrack, mtPlayState]);
+
   const readoutRate = isMultitrack ? mtSampleRate : (doc?.sampleRate ?? 44100);
   const readoutSample = isMultitrack
     ? mtPlayState === 'playing'

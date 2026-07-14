@@ -51,19 +51,6 @@ File > Export, which never changes the document's path or dirty state.
 **Intended behavior:** Round-trip a file back to its original container/format on
 Save (e.g. re-encode MP3 in place), gated on the format-aware encoder set.
 
-## Multitrack parameter changes are not live during playback
-
-**Area:** Multitrack > playback (`src/multitrack/MultitrackPlayer.ts`, `src/services/transportService.ts`)
-
-**v1 behavior:** The realtime multitrack player builds its WebAudio graph once per
-`play()` — volume, pan, mute/solo, clip gain, and clip geometry changes made while
-playing do not affect the running audio. Stop and play again to hear them. Source
-`AudioBuffer`s are also rebuilt on every `play()` (no cross-play cache).
-
-**Intended behavior:** Bind track parameters to live `GainNode`/`StereoPannerNode`
-AudioParams so slider moves are audible immediately, and cache per-document buffers
-keyed on channel identity.
-
 ## Track arm (R) is visual-only — no multitrack recording
 
 **Area:** Multitrack > TrackHeader (`src/components/Multitrack/TrackHeader.tsx`)
@@ -91,15 +78,3 @@ clip. Closing a document also discards its markers (`closeDocument` deletes the
 cue/label chunk, or its own metadata sidecar) and/or with the session. Doing
 the same here needs either a WAV cue-chunk writer/reader or a marker section
 in the `.audm` session format — neither exists yet.
-
-## Realtime multitrack pan law differs slightly from mixdown
-
-**Area:** Multitrack playback vs. Mix Down (`src/multitrack/MultitrackPlayer.ts` vs `src/multitrack/mixdown.ts`)
-
-**v1 behavior:** Realtime monitoring pans through WebAudio `StereoPannerNode`
-(equal-power for mono, its built-in stereo law), while the offline mixdown uses the
-documented constant-power (mono) / balance (stereo) law. The rendered mixdown is
-authoritative; monitoring can differ by a fraction of a dB on panned stereo tracks.
-
-**Intended behavior:** Implement the mixdown pan law manually in the realtime graph
-(per-channel gain nodes) so monitor and render match exactly.

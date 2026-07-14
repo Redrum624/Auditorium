@@ -40,12 +40,22 @@ function dbToLinear(db: number): number {
   return Math.pow(10, db / 20);
 }
 
-function monoPanGains(pan: number): { gL: number; gR: number } {
+/**
+ * Constant-power mono pan law (see class PAN LAW note). Exported so the realtime
+ * `MultitrackPlayer` builds its per-channel gain nodes from the SAME math the
+ * offline mixdown uses — monitor and render then match exactly. `mixdownSession`
+ * still calls it internally; the export is purely additive.
+ */
+export function monoPanGains(pan: number): { gL: number; gR: number } {
   const theta = ((pan + 1) / 2) * (Math.PI / 2);
   return { gL: Math.cos(theta), gR: Math.sin(theta) };
 }
 
-function stereoBalanceGains(pan: number): { gL: number; gR: number } {
+/**
+ * Stereo balance pan law (see class PAN LAW note). Exported for the realtime
+ * `MultitrackPlayer` (same rationale as {@link monoPanGains}); additive export.
+ */
+export function stereoBalanceGains(pan: number): { gL: number; gR: number } {
   const gL = pan <= 0 ? 1 : Math.cos((pan * Math.PI) / 2);
   const gR = pan >= 0 ? 1 : Math.cos((-pan * Math.PI) / 2);
   return { gL, gR };

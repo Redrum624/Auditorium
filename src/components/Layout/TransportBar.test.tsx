@@ -1,8 +1,10 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import TransportBar from './TransportBar';
 import LevelMeter from './LevelMeter';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
+import { useSessionStore } from '../../multitrack/sessionStore';
+import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { registerDialogSetters } from '../../services/dialogBus';
 
 function makeDoc(): AudioDocument {
@@ -74,6 +76,43 @@ describe('TransportBar', () => {
     useAppStore.getState().setCursor(44100); // 1 second
     render(<TransportBar />);
     expect(screen.getByTestId('transport-time')).toHaveTextContent('0:01.000');
+  });
+
+  it('pushes live track-param changes to the player while multitrack is playing, then stops after', () => {
+    // The multitrack position pump uses rAF while playing — stub it to a no-op so
+    // no dangling frame callback survives the test (works whether or not the jsdom
+    // build pre-defines it).
+    const origRaf = globalThis.requestAnimationFrame;
+    const origCaf = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = (() => 0) as typeof globalThis.requestAnimationFrame;
+    globalThis.cancelAnimationFrame = (() => {}) as typeof globalThis.cancelAnimationFrame;
+    const applySpy = jest.spyOn(multitrackPlayer, 'applyTrackParams').mockImplementation(() => {});
+
+    useSessionStore.getState().newSession(44100);
+    useAppStore.getState().setView('multitrack');
+    useSessionStore.getState().setMtPlayState('playing');
+
+    const { unmount } = render(<TransportBar />);
+    applySpy.mockClear();
+
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    // A track edit replaces the tracks array → subscription fires applyTrackParams.
+    act(() => useSessionStore.getState().setTrackParam(trackId, { volumeDb: -3 }));
+    expect(applySpy).toHaveBeenCalledTimes(1);
+    expect(applySpy.mock.calls[0][0]).toBe(useSessionStore.getState().session.tracks);
+
+    // Stopping unsubscribes; further edits do not reach the player.
+    act(() => useSessionStore.getState().setMtPlayState('stopped'));
+    applySpy.mockClear();
+    act(() => useSessionStore.getState().setTrackParam(trackId, { volumeDb: -6 }));
+    expect(applySpy).not.toHaveBeenCalled();
+
+    unmount();
+    // Restore session store + rAF for later suites.
+    useSessionStore.getState().newSession(44100);
+    applySpy.mockRestore();
+    globalThis.requestAnimationFrame = origRaf;
+    globalThis.cancelAnimationFrame = origCaf;
   });
 });
 

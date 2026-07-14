@@ -1,18 +1,28 @@
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
+import { monoPanGains, stereoBalanceGains } from './mixdown';
 import { MultitrackPlayer } from './MultitrackPlayer';
 import type { Clip, Session, Track } from './session';
 
 // ---------------------------------------------------------------------------
 // Minimal fake Web Audio graph (mirrors PlaybackEngine.test's approach). Only
 // the surface MultitrackPlayer touches is modelled; currentTime is advanced
-// manually so scheduling and position math are deterministic.
+// manually so scheduling and position math are deterministic. The player now
+// builds a manual per-channel gain graph (no StereoPannerNode) and ramps track
+// params live via `AudioParam.setTargetAtTime`, so the fakes model splitters,
+// mergers, and a recording `setTargetAtTime`.
 // ---------------------------------------------------------------------------
 
+interface Connection {
+  dest: unknown;
+  output?: number;
+  input?: number;
+}
+
 class FakeNode {
-  connections: unknown[] = [];
+  connections: Connection[] = [];
   disconnected = false;
-  connect(dest: unknown): unknown {
-    this.connections.push(dest);
+  connect(dest: unknown, output?: number, input?: number): unknown {
+    this.connections.push({ dest, output, input });
     return dest;
   }
   disconnect(): void {
@@ -20,12 +30,35 @@ class FakeNode {
   }
 }
 
-class FakeGain extends FakeNode {
-  gain = { value: 0 };
+interface TargetCall {
+  value: number;
+  startTime: number;
+  timeConstant: number;
 }
 
-class FakePanner extends FakeNode {
-  pan = { value: 0 };
+class FakeParam {
+  value = 0;
+  targetCalls: TargetCall[] = [];
+  setTargetAtTime(value: number, startTime: number, timeConstant: number): void {
+    this.targetCalls.push({ value, startTime, timeConstant });
+    this.value = value; // reflect the target for convenience
+  }
+}
+
+class FakeGain extends FakeNode {
+  gain = new FakeParam();
+}
+
+class FakeSplitter extends FakeNode {
+  constructor(public channels: number) {
+    super();
+  }
+}
+
+class FakeMerger extends FakeNode {
+  constructor(public channels: number) {
+    super();
+  }
 }
 
 class FakeBuffer {
@@ -70,7 +103,8 @@ class FakeAudioContext {
   destination = new FakeNode();
   sources: FakeSource[] = [];
   gains: FakeGain[] = [];
-  panners: FakePanner[] = [];
+  splitters: FakeSplitter[] = [];
+  mergers: FakeMerger[] = [];
   createBuffer(ch: number, len: number, sr: number): FakeBuffer {
     return new FakeBuffer(ch, len, sr);
   }
@@ -84,10 +118,15 @@ class FakeAudioContext {
     this.gains.push(g);
     return g;
   }
-  createStereoPanner(): FakePanner {
-    const p = new FakePanner();
-    this.panners.push(p);
-    return p;
+  createChannelSplitter(channels: number): FakeSplitter {
+    const s = new FakeSplitter(channels);
+    this.splitters.push(s);
+    return s;
+  }
+  createChannelMerger(channels: number): FakeMerger {
+    const m = new FakeMerger(channels);
+    this.mergers.push(m);
+    return m;
   }
   resume(): Promise<void> {
     return Promise.resolve();
@@ -104,6 +143,18 @@ function makePlayer(): { player: MultitrackPlayer; ctx: FakeAudioContext } {
   const ctx = new FakeAudioContext();
   const player = new MultitrackPlayer({ createContext: () => ctx as unknown as AudioContext });
   return { player, ctx };
+}
+
+/** Last element of an array (avoids relying on Array.prototype.at lib target). */
+function last<T>(arr: T[]): T {
+  return arr[arr.length - 1];
+}
+
+/** Reads a live track's node as a FakeGain (they are FakeGain under the fake ctx). */
+function gainOf(player: MultitrackPlayer, trackId: string, key: 'volumeGain' | 'panL' | 'panR' | 'muteGain'): FakeGain {
+  const nodes = player.liveTrackNodes(trackId);
+  if (!nodes) throw new Error(`no live nodes for ${trackId}`);
+  return nodes[key] as unknown as FakeGain;
 }
 
 let idSeq = 0;
@@ -136,6 +187,15 @@ function session(tracks: Track[], sampleRate = 1000): Session {
 
 function doc(id: string, length = 2000, sampleRate = 1000): AudioDocument {
   const d = createDocument({ name: id, sampleRate, channels: [new Float32Array(length).fill(0.5)] });
+  return { ...d, id };
+}
+
+function stereoDoc(id: string, length = 2000, sampleRate = 1000): AudioDocument {
+  const d = createDocument({
+    name: id,
+    sampleRate,
+    channels: [new Float32Array(length).fill(0.5), new Float32Array(length).fill(-0.5)],
+  });
   return { ...d, id };
 }
 
@@ -183,34 +243,138 @@ describe('MultitrackPlayer', () => {
     expect(ctx.sources[0].startCalls[0].offset).toBeCloseTo(0.3, 6); // (1500 - 1200)/1000
   });
 
-  it('does not schedule muted-track clips; honors solo', () => {
-    const muted = session([
-      track({ muted: true, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
-      track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
-    ]);
-    const p1 = makePlayer();
-    p1.player.play(0, muted, docs(doc('doc-1')));
-    expect(p1.ctx.sources).toHaveLength(1);
-
-    const soloed = session([
-      track({ solo: true, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
-      track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
-    ]);
-    const p2 = makePlayer();
-    p2.player.play(0, soloed, docs(doc('doc-1')));
-    expect(p2.ctx.sources).toHaveLength(1);
-  });
-
-  it('sets the track gain (volume) and panner value per audible track', () => {
+  it('builds EVERY track and gates a muted track via its muteGain (0)', () => {
     const { player, ctx } = makePlayer();
     const s = session([
-      track({ volumeDb: -6, pan: 0.5, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
+      track({ id: 'A', muted: true, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
+      track({ id: 'B', clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
     ]);
     player.play(0, s, docs(doc('doc-1')));
 
-    // One track gain node built with 10^(-6/20); one panner at 0.5.
-    expect(ctx.gains.some((g) => Math.abs(g.gain.value - Math.pow(10, -6 / 20)) < 1e-6)).toBe(true);
-    expect(ctx.panners[0].pan.value).toBeCloseTo(0.5, 6);
+    // Both tracks are now built (so mute can be lifted live) — both scheduled.
+    expect(ctx.sources).toHaveLength(2);
+    expect(gainOf(player, 'A', 'muteGain').gain.value).toBe(0); // muted → silent
+    expect(gainOf(player, 'B', 'muteGain').gain.value).toBe(1);
+  });
+
+  it('gates non-soloed tracks via muteGain when any track is soloed', () => {
+    const { player, ctx } = makePlayer();
+    const s = session([
+      track({ id: 'A', solo: true, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
+      track({ id: 'B', clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
+    ]);
+    player.play(0, s, docs(doc('doc-1')));
+
+    expect(ctx.sources).toHaveLength(2);
+    expect(gainOf(player, 'A', 'muteGain').gain.value).toBe(1); // soloed → audible
+    expect(gainOf(player, 'B', 'muteGain').gain.value).toBe(0); // not soloed → silent
+  });
+
+  it('sets the track volume gain from volumeDb at build', () => {
+    const { player } = makePlayer();
+    const s = session([
+      track({ id: 'T', volumeDb: -6, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
+    ]);
+    player.play(0, s, docs(doc('doc-1')));
+    expect(gainOf(player, 'T', 'volumeGain').gain.value).toBeCloseTo(Math.pow(10, -6 / 20), 6);
+  });
+
+  it('builds a mono pan graph whose gains equal mixdown monoPanGains', () => {
+    for (const pan of [-1, -0.5, 0, 0.5, 1]) {
+      const { player } = makePlayer();
+      const s = session([
+        track({ id: 'T', pan, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
+      ]);
+      player.play(0, s, docs(doc('doc-1'))); // mono source
+
+      const { gL, gR } = monoPanGains(pan);
+      expect(player.liveTrackNodes('T')!.panMode).toBe('mono');
+      expect(gainOf(player, 'T', 'panL').gain.value).toBeCloseTo(gL, 6);
+      expect(gainOf(player, 'T', 'panR').gain.value).toBeCloseTo(gR, 6);
+      player.stop();
+    }
+  });
+
+  it('builds a stereo pan graph whose gains equal mixdown stereoBalanceGains', () => {
+    for (const pan of [-1, -0.5, 0, 0.5, 1]) {
+      const { player } = makePlayer();
+      const s = session([
+        track({ id: 'T', pan, clips: [clip({ documentId: 'doc-2', startSample: 0, lengthSample: 500 })] }),
+      ]);
+      player.play(0, s, docs(stereoDoc('doc-2'))); // stereo source
+
+      const { gL, gR } = stereoBalanceGains(pan);
+      expect(player.liveTrackNodes('T')!.panMode).toBe('stereo');
+      expect(gainOf(player, 'T', 'panL').gain.value).toBeCloseTo(gL, 6);
+      expect(gainOf(player, 'T', 'panR').gain.value).toBeCloseTo(gR, 6);
+      player.stop();
+    }
+  });
+
+  it('applies a live volume change without rebuilding the sources', () => {
+    const { player, ctx } = makePlayer();
+    const t = track({ id: 'T', volumeDb: 0, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] });
+    player.play(0, session([t]), docs(doc('doc-1')));
+
+    const sourceBefore = ctx.sources[0];
+    const vol = gainOf(player, 'T', 'volumeGain');
+
+    player.applyTrackParams([{ ...t, volumeDb: -6 }]);
+
+    const call = last(vol.gain.targetCalls);
+    expect(call.value).toBeCloseTo(Math.pow(10, -6 / 20), 6);
+    expect(call.timeConstant).toBe(0.015);
+    // Same source instance — the running graph was retuned, not rebuilt.
+    expect(ctx.sources).toHaveLength(1);
+    expect(ctx.sources[0]).toBe(sourceBefore);
+  });
+
+  it('applies a live pan change through the same nodes (mono law)', () => {
+    const { player } = makePlayer();
+    const t = track({ id: 'T', pan: 0, clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] });
+    player.play(0, session([t]), docs(doc('doc-1')));
+
+    const panL = gainOf(player, 'T', 'panL');
+    const panR = gainOf(player, 'T', 'panR');
+    player.applyTrackParams([{ ...t, pan: 0.5 }]);
+
+    const { gL, gR } = monoPanGains(0.5);
+    expect(last(panL.gain.targetCalls).value).toBeCloseTo(gL, 6);
+    expect(last(panR.gain.targetCalls).value).toBeCloseTo(gR, 6);
+  });
+
+  it('applies live solo/un-solo/mute via muteGain (mute wins on a soloed track)', () => {
+    const { player } = makePlayer();
+    const a = track({ id: 'A', clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] });
+    const b = track({ id: 'B', clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] });
+    player.play(0, session([a, b]), docs(doc('doc-1')));
+
+    const aMute = gainOf(player, 'A', 'muteGain');
+    const bMute = gainOf(player, 'B', 'muteGain');
+
+    // Solo A → B silent, A audible.
+    player.applyTrackParams([{ ...a, solo: true }, b]);
+    expect(last(bMute.gain.targetCalls).value).toBe(0);
+    expect(last(aMute.gain.targetCalls).value).toBe(1);
+
+    // Un-solo → both audible.
+    player.applyTrackParams([a, b]);
+    expect(last(bMute.gain.targetCalls).value).toBe(1);
+    expect(last(aMute.gain.targetCalls).value).toBe(1);
+
+    // Mute wins even on the soloed track.
+    player.applyTrackParams([{ ...a, solo: true, muted: true }, b]);
+    expect(last(aMute.gain.targetCalls).value).toBe(0);
+  });
+
+  it('ignores applyTrackParams when stopped', () => {
+    const { player } = makePlayer();
+    const t = track({ id: 'T', clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] });
+    player.play(0, session([t]), docs(doc('doc-1')));
+    player.stop();
+    // No live nodes remain and the call is a safe no-op.
+    expect(player.liveTrackNodes('T')).toBeUndefined();
+    expect(() => player.applyTrackParams([{ ...t, volumeDb: -12 }])).not.toThrow();
   });
 
   it('derives position from ctx.currentTime and the session rate, clamped to the end', () => {
