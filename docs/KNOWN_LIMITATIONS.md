@@ -3,20 +3,6 @@
 Tracked deviations from full Adobe Audition parity. Each entry names the area,
 the current v1 behavior, and the intended future behavior.
 
-## Paste across differing sample rates
-
-**Area:** Edit > Paste (`src/services/editOps.ts` `pasteAtCursor`, `src/services/clipboard.ts`)
-
-**v1 behavior:** The clipboard stores the copied audio at its source sample
-rate. Pasting into a document with a different sample rate inserts the raw
-samples as-is — no resampling — so the pasted region plays back at the
-destination document's rate and its perceived pitch/duration shifts accordingly.
-
-**Intended behavior:** Adobe Audition resamples clipboard audio to the
-destination document's sample rate on paste. The resampler exists (`src/dsp/resample.ts`);
-`pasteAtCursor` should convert `clipboard.channels` from `clipboard.sampleRate`
-to the destination `sampleRate` before inserting. Planned for v1.1.
-
 ## Non-WAV imports are resampled to 48000 Hz
 
 **Area:** File > Open (`src/audio/decodeAudio.ts` `decodeArrayBuffer`)

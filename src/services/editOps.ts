@@ -10,6 +10,7 @@ import type { SelectionRange } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 import { pushUndo } from './undoHistory';
 import { getClipboard, setClipboard } from './clipboard';
+import { resampleChannel } from '../dsp/resample';
 
 interface AfterState {
   selection?: SelectionRange | null;
@@ -95,14 +96,19 @@ export function copySelection(): void {
 /**
  * Pastes the clipboard: replaces the selection when one exists, otherwise
  * inserts at the cursor. The cursor lands just after the inserted material.
- * v1 inserts raw samples even on a sample-rate mismatch (see KNOWN_LIMITATIONS).
+ * When the clipboard's sample rate differs from the destination document's,
+ * each channel is resampled to the document's rate first, so cursor advance
+ * and inserted length are computed on the CONVERTED data.
  */
 export function pasteAtCursor(): void {
   const doc = activeDoc();
   if (!doc) return;
   const clip = getClipboard();
   if (!clip) return;
-  const data = clip.channels;
+  const data =
+    clip.sampleRate === doc.sampleRate
+      ? clip.channels
+      : clip.channels.map((channel) => resampleChannel(channel, clip.sampleRate, doc.sampleRate));
   const insertLength = data[0]?.length ?? 0;
   const { selection, cursorSample } = useAppStore.getState();
 

@@ -11,6 +11,21 @@ import { getClipboard, setClipboard, clearClipboard } from './clipboard';
 import { undo, redo, getHistory } from './undoHistory';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength, deleteRegion, type AudioDocument } from '../audio/AudioDocument';
+import * as resampleModule from '../dsp/resample';
+
+/** Count sign changes (zero crossings) in a signal, ignoring exact zeros. */
+function countZeroCrossings(x: Float32Array, start = 0, end = x.length): number {
+  let count = 0;
+  let prevSign = 0;
+  for (let i = start; i < end; i++) {
+    const s = x[i] > 0 ? 1 : x[i] < 0 ? -1 : 0;
+    if (s !== 0) {
+      if (prevSign !== 0 && s !== prevSign) count++;
+      prevSign = s;
+    }
+  }
+  return count;
+}
 
 // A ramp of distinct non-zero values so we can pinpoint exactly which samples an
 // op moved/removed/zeroed (index i -> value i + 1 + offset).
@@ -157,6 +172,70 @@ describe('pasteAtCursor', () => {
     pasteAtCursor();
     expect(chan()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
     expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('does not resample when clipboard and document sample rates match', () => {
+    const doc = addDoc([ramp(10)]);
+    const spy = jest.spyOn(resampleModule, 'resampleChannel');
+    setClipboard({ channels: [new Float32Array([100, 200])], sampleRate: 44100 });
+    useAppStore.getState().setCursor(3);
+
+    pasteAtCursor();
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(chan()).toEqual([1, 2, 3, 100, 200, 4, 5, 6, 7, 8, 9, 10]);
+    expect(useAppStore.getState().cursorSample).toBe(5);
+    expect(getHistory(doc.id).done).toEqual(['Paste']);
+    spy.mockRestore();
+  });
+
+  it('resamples the clipboard to the document rate on a rate mismatch, preserving pitch', () => {
+    const doc = addDoc([new Float32Array(1000)]); // silence, mono, 44100 Hz doc
+    const clipRate = 22050;
+    const clipLen = Math.round(clipRate * 0.1); // 0.1s @ 22050 = 2205 samples
+    const clipData = new Float32Array(clipLen);
+    for (let i = 0; i < clipLen; i++) {
+      clipData[i] = Math.sin((2 * Math.PI * 440 * i) / clipRate);
+    }
+    const spy = jest.spyOn(resampleModule, 'resampleChannel');
+    setClipboard({ channels: [clipData], sampleRate: clipRate });
+    useAppStore.getState().setCursor(0);
+
+    pasteAtCursor();
+
+    expect(spy).toHaveBeenCalledWith(clipData, clipRate, doc.sampleRate);
+
+    const insertedLength = docLength(activeDoc()) - 1000;
+    const expectedLength = Math.round(clipLen * (doc.sampleRate / clipRate));
+    expect(Math.abs(insertedLength - expectedLength)).toBeLessThanOrEqual(1);
+    expect(useAppStore.getState().cursorSample).toBe(insertedLength);
+
+    // Zero-crossing rate over an interior window (margin excludes kernel edge taper).
+    const inserted = activeDoc().channels[0];
+    const margin = 200;
+    const windowStart = margin;
+    const windowEnd = insertedLength - margin;
+    const crossings = countZeroCrossings(inserted, windowStart, windowEnd);
+    const windowDuration = (windowEnd - windowStart) / doc.sampleRate;
+    const estimatedFreq = crossings / (2 * windowDuration);
+    expect(Math.abs(estimatedFreq - 440) / 440).toBeLessThan(0.05);
+
+    spy.mockRestore();
+  });
+
+  it('undo restores the pre-paste document exactly after a resampled paste', () => {
+    const doc = addDoc([ramp(10)]);
+    const originalChannel = doc.channels[0];
+    setClipboard({ channels: [new Float32Array([0.1, 0.2, 0.3])], sampleRate: 22050 });
+    useAppStore.getState().setCursor(3);
+
+    pasteAtCursor();
+    expect(activeDoc().channels[0]).not.toBe(originalChannel);
+
+    undo(doc.id);
+    expect(activeDoc().channels[0]).toBe(originalChannel);
+    expect(docLength(activeDoc())).toBe(10);
+    expect(chan()).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
   });
 });
 
