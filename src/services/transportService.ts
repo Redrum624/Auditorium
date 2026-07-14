@@ -107,12 +107,16 @@ export function transportStop(): void {
     .setPlayback({ state: 'stopped', positionSample: playbackEngine.getPositionSample() });
 }
 
-/** True when `transport.record` should be enabled: the multitrack view needs at
- * least one armed track (nothing to punch into otherwise); the waveform/spectral
- * views open the Record dialog, which owns device/permission errors itself, so
- * recording is always available there. */
+/** Single source of `transport.record` enablement (menuActions and TransportBar
+ * both consult this): the multitrack view needs at least one armed track
+ * (nothing to punch into otherwise) — except while a take is already running,
+ * which must stay stoppable via the record toggle even if the user disarms
+ * every track mid-take. The waveform/spectral views open the Record dialog,
+ * which owns device/permission errors itself, so recording is always available
+ * there. */
 export function canRecord(): boolean {
   if (useAppStore.getState().view !== 'multitrack') return true;
+  if (multitrackRecorder.isRecording()) return true;
   return useSessionStore.getState().session.tracks.some((t) => t.armed);
 }
 

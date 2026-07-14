@@ -5,6 +5,7 @@ import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { runCommand } from '../../services/menuActions';
+import { canRecord } from '../../services/transportService';
 import { useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
 import LevelMeter from './LevelMeter';
@@ -53,7 +54,9 @@ export default function TransportBar() {
   const mtCursorSample = useSessionStore((s) => s.mtCursorSample);
   const mtPlayState = useSessionStore((s) => s.mtPlayState);
   const mtPlayheadSample = useSessionStore((s) => s.mtPlayheadSample);
-  const armedCount = useSessionStore((s) => s.session.tracks.filter((t) => t.armed).length);
+  // Subscribe to the armed set (value unused directly) so canRecord() below is
+  // re-evaluated whenever a track is armed/disarmed.
+  useSessionStore((s) => s.session.tracks.some((t) => t.armed));
 
   const hasDoc = doc !== null;
   const isMultitrack = view === 'multitrack';
@@ -61,12 +64,12 @@ export default function TransportBar() {
   const isPlaying = isMultitrack ? mtPlayState === 'playing' : playback.state === 'playing';
 
   // Live punch-in recording state, mirrored from the multitrack recorder so the
-  // Record button can pulse red while a take is running. The button is enabled
-  // only when there's somewhere to record into: an armed track in the multitrack
-  // view, else always (the Record dialog handles its own device errors).
+  // Record button can pulse red while a take is running. Enablement comes from
+  // transportService.canRecord() — the same source the menu command uses — and
+  // is re-derived on every armed-set / view / recording-state render trigger.
   const [mtRecording, setMtRecording] = useState(() => multitrackRecorder.isRecording());
   useEffect(() => multitrackRecorder.onChange(setMtRecording), []);
-  const recordEnabled = isMultitrack ? armedCount >= 1 : true;
+  const recordEnabled = canRecord();
 
   // Load the active document into the engine whenever its identity changes.
   useEffect(() => {

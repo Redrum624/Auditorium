@@ -62,6 +62,20 @@ describe('TransportBar', () => {
     expect(openRecord).toHaveBeenCalled();
   });
 
+  it('disables Record in the multitrack view until a track is armed', () => {
+    useSessionStore.getState().newSession(44100);
+    useAppStore.getState().setView('multitrack');
+    render(<TransportBar />);
+    expect(screen.getByRole('button', { name: 'Record' })).toBeDisabled();
+
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    act(() => useSessionStore.getState().setTrackParam(trackId, { armed: true }));
+    expect(screen.getByRole('button', { name: 'Record' })).toBeEnabled();
+
+    // Restore session store for later suites.
+    act(() => useSessionStore.getState().newSession(44100));
+  });
+
   it('toggles the loop flag in the store when the loop button is clicked', () => {
     useAppStore.getState().addDocument(makeDoc());
     render(<TransportBar />);

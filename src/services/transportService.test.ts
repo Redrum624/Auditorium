@@ -5,7 +5,13 @@ import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { useAppStore } from '../stores/appStore';
 import * as dialogBus from './dialogBus';
-import { stopAll, transportPlayPause, transportRecord, transportStop } from './transportService';
+import {
+  canRecord,
+  stopAll,
+  transportPlayPause,
+  transportRecord,
+  transportStop,
+} from './transportService';
 
 function openDoc() {
   const doc = createDocument({ name: 'a', sampleRate: 44100, channels: [new Float32Array(1000)] });
@@ -169,6 +175,22 @@ describe('transportService', () => {
       transportPlayPause();
       expect(recStop).toHaveBeenCalledTimes(1);
       expect(multitrackPlayer.play).not.toHaveBeenCalled();
+    });
+
+    it('canRecord gates on armed tracks in multitrack view, stays true mid-take and elsewhere', () => {
+      expect(canRecord()).toBe(true); // waveform view: dialog handles its own errors
+
+      useAppStore.setState({ view: 'multitrack' });
+      expect(canRecord()).toBe(false); // nothing armed → nothing to punch into
+
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      useSessionStore.getState().setTrackParam(trackId, { armed: true });
+      expect(canRecord()).toBe(true);
+
+      // A running take stays stoppable even if the user disarms everything.
+      useSessionStore.getState().setTrackParam(trackId, { armed: false });
+      recIsRecording.mockReturnValue(true);
+      expect(canRecord()).toBe(true);
     });
   });
 

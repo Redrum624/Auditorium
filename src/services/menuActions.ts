@@ -4,7 +4,7 @@ import { useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip } from '../multitrack/session';
 import { mixdownSession } from '../multitrack/mixdown';
-import { transportPlayPause, transportRecord, transportStop } from './transportService';
+import { canRecord, transportPlayPause, transportRecord, transportStop } from './transportService';
 import {
   cutSelection,
   copySelection,
@@ -285,16 +285,13 @@ function registerSelectionAndTransportCommands(): void {
       },
     },
     {
-      // View-routed: the multitrack view punches into armed tracks (enabled only
-      // when at least one is armed); the waveform/spectral views open the Record
-      // dialog, which owns device selection and surfaces its own errors, so it's
-      // always available there. The toggle/dispatch lives in transportService.
+      // View-routed: the multitrack view punches into armed tracks; the
+      // waveform/spectral views open the Record dialog. Enablement AND the
+      // toggle/dispatch live in transportService (canRecord/transportRecord)
+      // so the menu and the TransportBar share one source of truth.
       id: 'transport.record',
       label: 'Record',
-      enabled: (s) =>
-        s.view === 'multitrack'
-          ? useSessionStore.getState().session.tracks.some((t) => t.armed)
-          : true,
+      enabled: () => canRecord(),
       run: async () => transportRecord(),
     },
     stub('marker.add', 'Add Marker', 'M'),

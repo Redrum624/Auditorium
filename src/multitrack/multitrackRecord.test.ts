@@ -195,6 +195,95 @@ describe('multitrackRecorder', () => {
     expect(rec.isRecording()).toBe(false);
   });
 
+  it('commits the take exactly once when stop() is called twice concurrently', async () => {
+    const armed = armTrack(0);
+    let resolveStop!: (r: EngineResult) => void;
+    const engine: RecordingEngineLike & { start: jest.Mock; stop: jest.Mock } = {
+      start: jest.fn(async () => {}),
+      stop: jest.fn(
+        () =>
+          new Promise<EngineResult>((res) => {
+            resolveStop = res;
+          })
+      ),
+    };
+    const player = spyPlayer();
+    const rec = makeRecorder(engine, player);
+
+    await rec.start();
+    // Two stop triggers land inside engine.stop()'s async window (double-click
+    // Stop, or Stop button + record toggle) — only one may commit.
+    const p1 = rec.stop();
+    const p2 = rec.stop();
+    resolveStop({ channels: [new Float32Array(128), new Float32Array(128)], sampleRate: 44100 });
+    await Promise.all([p1, p2]);
+
+    expect(engine.stop).toHaveBeenCalledTimes(1);
+    expect(useAppStore.getState().documents).toHaveLength(1);
+    expect(trackById(armed).clips).toHaveLength(1);
+    expect(rec.isRecording()).toBe(false);
+  });
+
+  it('defers a stop() issued during an in-flight start() until the start settles, then commits once', async () => {
+    const armed = armTrack(0);
+    let resolveStart!: () => void;
+    const engine: RecordingEngineLike & { start: jest.Mock; stop: jest.Mock } = {
+      start: jest.fn(
+        () =>
+          new Promise<void>((res) => {
+            resolveStart = res;
+          })
+      ),
+      stop: jest.fn(async () => ({
+        channels: [new Float32Array(64), new Float32Array(64)],
+        sampleRate: 44100,
+      })),
+    };
+    const player = spyPlayer();
+    const rec = makeRecorder(engine, player);
+
+    const pStart = rec.start(); // suspended in the permission-prompt window
+    const pStop = rec.stop(); // user hits Stop while the prompt is open
+    expect(engine.stop).not.toHaveBeenCalled(); // must wait for the start to settle
+
+    resolveStart();
+    await Promise.all([pStart, pStop]);
+
+    // The graph was fully built before teardown; no live mic left behind.
+    expect(engine.stop).toHaveBeenCalledTimes(1);
+    expect(rec.isRecording()).toBe(false);
+    expect(useAppStore.getState().documents).toHaveLength(1);
+    expect(trackById(armed).clips).toHaveLength(1);
+  });
+
+  it('a stop() waiting on a FAILING start() aborts cleanly without touching the engine', async () => {
+    armTrack(0);
+    let rejectStart!: (e: Error) => void;
+    const engine: RecordingEngineLike & { start: jest.Mock; stop: jest.Mock } = {
+      start: jest.fn(
+        () =>
+          new Promise<void>((_res, rej) => {
+            rejectStart = rej;
+          })
+      ),
+      stop: jest.fn(async () => ({ channels: [], sampleRate: 44100 })),
+    };
+    const player = spyPlayer();
+    const rec = makeRecorder(engine, player);
+
+    const pStart = rec.start();
+    const pStop = rec.stop();
+    rejectStart(new Error('mic denied'));
+
+    await expect(pStart).rejects.toThrow('mic denied');
+    await pStop; // resolves without committing anything
+
+    expect(engine.stop).not.toHaveBeenCalled(); // nothing was ever recording
+    expect(player.stop).toHaveBeenCalled(); // start()'s own monitor rollback
+    expect(rec.isRecording()).toBe(false);
+    expect(useAppStore.getState().documents).toHaveLength(0);
+  });
+
   it('notifies onChange subscribers as recording starts and stops', async () => {
     armTrack(0);
     const engine = fakeEngine({ channels: [new Float32Array(64), new Float32Array(64)], sampleRate: 44100 });
