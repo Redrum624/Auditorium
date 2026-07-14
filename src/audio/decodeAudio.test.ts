@@ -54,6 +54,31 @@ describe('decodeArrayBuffer sample rate', () => {
     await decodeArrayBuffer(garbage, 'clip.mp3');
     expect(capturedRate).toBe(48000);
   });
+
+  it('retries at 48000 when the context rejects the sniffed rate', async () => {
+    // A corrupt FLAC whose STREAMINFO rate bits are all set sniffs as 1048575,
+    // which a real OfflineAudioContext rejects with NotSupportedError.
+    const attempted: number[] = [];
+    class ThrowingCtx extends MockOfflineAudioContext {
+      constructor(channels: number, length: number, rate: number) {
+        super(channels, length, rate);
+        attempted.push(rate);
+        if (rate === 1048575) throw new Error('NotSupportedError: sample rate out of range');
+      }
+    }
+    (globalThis as unknown as { OfflineAudioContext: unknown }).OfflineAudioContext = ThrowingCtx;
+
+    const flac = new Uint8Array(42);
+    flac.set([0x66, 0x4c, 0x61, 0x43], 0); // 'fLaC'
+    flac[7] = 34; // STREAMINFO length
+    flac[18] = 0xff;
+    flac[19] = 0xff;
+    flac[20] = 0xf0; // 20-bit rate = 1048575
+
+    const result = await decodeArrayBuffer(flac.buffer, 'corrupt.flac');
+    expect(attempted).toEqual([1048575, 48000]);
+    expect(result.sampleRate).toBe(48000);
+  });
 });
 
 describe('downmixToStereo', () => {

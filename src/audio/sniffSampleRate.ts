@@ -130,6 +130,13 @@ function readBoxes(bytes: Uint8Array, view: DataView, start: number, end: number
   return boxes;
 }
 
+/**
+ * Best-effort: returns the FIRST trak whose mdhd timescale looks like an audio
+ * rate (8000..192000) WITHOUT checking the trak's handler type (`hdlr` ==
+ * 'soun'). Fine for .m4a (audio-only); a video .mp4 whose video track uses an
+ * audio-plausible timescale may yield the video timescale instead — decodeAudio's
+ * construct-retry then absorbs any rate the context rejects.
+ */
 function sniffMp4(bytes: Uint8Array, view: DataView): number | null {
   const top = readBoxes(bytes, view, 0, bytes.length);
   if (!top) return null;
@@ -191,6 +198,8 @@ function sniffMp3(bytes: Uint8Array): number | null {
     const layerBits = (b1 >> 1) & 0x03;
     if (layerBits === 0x00) continue; // reserved layer
     if (i + 2 >= bytes.length) break;
+    const bitrateIndex = (bytes[i + 2] >> 4) & 0x0f;
+    if (bitrateIndex === 0x0f || bitrateIndex === 0x00) continue; // reserved / free — cuts false syncs
     const srIndex = (bytes[i + 2] >> 2) & 0x03;
     if (srIndex === 0x03) continue; // reserved sample-rate index
     const row = MP3_RATE_TABLE[versionBits];

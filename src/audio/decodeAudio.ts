@@ -68,7 +68,16 @@ export async function decodeArrayBuffer(buf: ArrayBuffer, hintedName: string): P
   }
 
   const rate = sniffSampleRate(buf, hintedName) ?? 48000;
-  const ctx = new OfflineAudioContext(1, 1, rate);
+  // A corrupt header can sniff to a rate the browser rejects (OfflineAudioContext
+  // throws NotSupportedError outside roughly [3000, 768000] Hz). Rather than
+  // range-capping in the sniffers (hi-res FLAC at 352.8k/384k is legal), retry
+  // once at the 48000 fallback so such files still open, as they did pre-sniffing.
+  let ctx: OfflineAudioContext;
+  try {
+    ctx = new OfflineAudioContext(1, 1, rate);
+  } catch {
+    ctx = new OfflineAudioContext(1, 1, 48000);
+  }
   // decodeAudioData detaches the buffer it is given; pass a copy so the caller's
   // ArrayBuffer stays usable.
   const audioBuffer = await ctx.decodeAudioData(buf.slice(0));

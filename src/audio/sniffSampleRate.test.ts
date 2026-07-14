@@ -25,9 +25,9 @@ function mp3Mpeg1_44100(): number[] {
   return [0xff, 0xfb, 0x90, 0x00, ...zeros(20)];
 }
 
-// 0xFF 0xF3 0x00 0x00: MPEG2 (10), Layer III (01), srIndex 0 -> 22050.
+// 0xFF 0xF3 0x90 0x00: MPEG2 (10), Layer III (01), bitrate idx 9, srIndex 0 -> 22050.
 function mp3Mpeg2_22050(): number[] {
-  return [0xff, 0xf3, 0x00, 0x00, ...zeros(20)];
+  return [0xff, 0xf3, 0x90, 0x00, ...zeros(20)];
 }
 
 // ID3v2 header (10 bytes) with a syncsafe body size of 5, five filler bytes,
@@ -127,6 +127,13 @@ describe('sniffSampleRate', () => {
     });
     it('skips an ID3v2 header before the first frame', () => {
       expect(sniffSampleRate(toBuf(mp3WithId3()), 'a.mp3')).toBe(44100);
+    });
+    it('rejects a header with the reserved bitrate index 1111', () => {
+      // Otherwise-valid MPEG1 Layer III header but bitrate index 0b1111.
+      expect(sniffSampleRate(toBuf([0xff, 0xfb, 0xf0, 0x00, ...zeros(20)]), 'a.mp3')).toBeNull();
+    });
+    it('rejects a header with the free bitrate index 0000', () => {
+      expect(sniffSampleRate(toBuf([0xff, 0xfb, 0x00, 0x00, ...zeros(20)]), 'a.mp3')).toBeNull();
     });
   });
 
