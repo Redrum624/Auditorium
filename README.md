@@ -77,7 +77,8 @@ use `npm run dev`.
 - Session markers: drop with `M`, rename inline, jump to next/previous, list in the Markers panel.
 - **Noise-print workflow**: capture a noise print from a selection, then Noise Reduction subtracts it from the target region.
 - Recording device selection, channel count, and sample rate in the record dialog.
-- **Export**: WAV at 16-bit, 24-bit, or 32-bit float; MP3 at 128/192/256/320 kbps (CBR).
+- **Export**: WAV at 16-bit, 24-bit, or 32-bit float; FLAC (16-bit, lossless); MP3 at 128/192/256/320 kbps (CBR).
+- **Format-faithful Save**: Save re-encodes in place into the source container — WAV (32-bit float), MP3 (192 kbps), or FLAC (verbatim, at the source bit depth). The Properties panel reports the source file's bit depth ("16-bit source → 32-bit float").
 - **Sessions**: save/open multitrack sessions as `.audm`, and mix down a whole session to a new stereo document.
 - Keyboard shortcuts throughout — see [`KEYBOARD_SHORTCUTS.md`](KEYBOARD_SHORTCUTS.md) for the full table.
 

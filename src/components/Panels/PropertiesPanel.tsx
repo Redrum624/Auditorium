@@ -43,11 +43,18 @@ function DocumentProperties() {
       <Row label="Path" value={doc.filePath ?? '—'} />
       <Row label="Sample Rate" value={`${doc.sampleRate} Hz`} />
       <Row label="Channels" value={doc.channels.length === 1 ? 'Mono' : 'Stereo'} />
-      {/* All in-memory audio is Float32Array; the ORIGINAL file's bit depth
-          isn't tracked after import (AudioDocument has no bitDepth field —
-          locked Task 3 contract; see docs/KNOWN_LIMITATIONS.md). This is a
-          truthful static fact, not a per-document value. */}
-      <Row label="Bit Depth" value="32-bit float (internal)" />
+      {/* All in-memory audio is Float32Array. When the source file's bit depth
+          is known (WAV/FLAC, recorded on import — Task F7), show it alongside
+          the internal float format; otherwise report the internal fact alone
+          (lossy sources like MP3/OGG carry no meaningful source depth). */}
+      <Row
+        label="Bit Depth"
+        value={
+          doc.sourceBitDepth
+            ? `${doc.sourceBitDepth}-bit source → 32-bit float`
+            : '32-bit float (internal)'
+        }
+      />
       <Row label="Duration" value={formatTime(length, doc.sampleRate)} />
       <Row label="Samples" value={length.toLocaleString()} />
       <Row label="Dirty" value={doc.dirty ? 'Yes' : 'No'} />

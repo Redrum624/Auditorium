@@ -10,17 +10,22 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { docLength, createDocument } from '../audio/AudioDocument';
 import { decodeArrayBuffer } from '../audio/decodeAudio';
 import { encodeMp3 } from '../audio/mp3Encoder';
+import { encodeFlac } from '../audio/flacEncoder';
 import { decodeWav } from '../audio/wavCodec';
 import * as undoHistory from './undoHistory';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 
 // Decode is mocked so file-service tests never touch OfflineAudioContext/lamejs.
+// The MP3/FLAC encoders are mocked to spy on the format-faithful save routing
+// without exercising the (separately-tested) encoders on every routing case.
 jest.mock('../audio/decodeAudio', () => ({ decodeArrayBuffer: jest.fn() }));
 jest.mock('../audio/mp3Encoder', () => ({ encodeMp3: jest.fn(() => new ArrayBuffer(2048)) }));
+jest.mock('../audio/flacEncoder', () => ({ encodeFlac: jest.fn(() => new ArrayBuffer(4096)) }));
 
 const mockDecode = decodeArrayBuffer as jest.MockedFunction<typeof decodeArrayBuffer>;
 const mockEncodeMp3 = encodeMp3 as jest.MockedFunction<typeof encodeMp3>;
+const mockEncodeFlac = encodeFlac as jest.MockedFunction<typeof encodeFlac>;
 
 interface MockApi {
   readFile: jest.Mock;
@@ -58,6 +63,7 @@ beforeEach(() => {
   jest.clearAllMocks();
   mockDecode.mockResolvedValue(decoded());
   mockEncodeMp3.mockReturnValue(new ArrayBuffer(2048));
+  mockEncodeFlac.mockReturnValue(new ArrayBuffer(4096));
 });
 
 describe('openFilePath', () => {
@@ -72,12 +78,33 @@ describe('openFilePath', () => {
     expect(state.activeDocumentId).toBe(state.documents[0].id);
   });
 
-  it('gives non-wav sources a null filePath (Save falls back to save-as WAV)', async () => {
+  it('keeps the filePath and tags sourceFormat for round-trippable mp3/flac sources', async () => {
     installApi();
     await openFilePath('D:\\audio\\clip.mp3');
-    const doc = useAppStore.getState().documents[0];
-    expect(doc.name).toBe('clip.mp3');
-    expect(doc.filePath).toBeNull();
+    await openFilePath('D:\\audio\\track.flac');
+    const [mp3, flac] = useAppStore.getState().documents;
+    expect(mp3.filePath).toBe('D:\\audio\\clip.mp3');
+    expect(mp3.sourceFormat).toBe('mp3');
+    expect(flac.filePath).toBe('D:\\audio\\track.flac');
+    expect(flac.sourceFormat).toBe('flac');
+  });
+
+  it('gives ogg/other sources a null filePath (Save falls back to save-as WAV)', async () => {
+    installApi();
+    await openFilePath('D:\\audio\\voice.ogg');
+    await openFilePath('D:\\audio\\clip.m4a');
+    const [ogg, other] = useAppStore.getState().documents;
+    expect(ogg.filePath).toBeNull();
+    expect(ogg.sourceFormat).toBe('ogg');
+    expect(other.filePath).toBeNull();
+    expect(other.sourceFormat).toBe('other');
+  });
+
+  it('records the source bit depth from a decoded WAV', async () => {
+    installApi();
+    mockDecode.mockResolvedValueOnce({ ...decoded(), sourceBitDepth: 24 });
+    await openFilePath('D:\\audio\\song.wav');
+    expect(useAppStore.getState().documents[0].sourceBitDepth).toBe(24);
   });
 });
 
@@ -110,12 +137,20 @@ describe('openFilesViaDialog', () => {
   });
 });
 
-function seedDoc(opts: { filePath: string | null; dirty?: boolean; name?: string }) {
+function seedDoc(opts: {
+  filePath: string | null;
+  dirty?: boolean;
+  name?: string;
+  sourceFormat?: ReturnType<typeof createDocument>['sourceFormat'];
+  sourceBitDepth?: number;
+}) {
   const doc = createDocument({
     name: opts.name ?? 'doc',
     sampleRate: 44100,
     channels: [new Float32Array(10), new Float32Array(10)],
     filePath: opts.filePath,
+    sourceFormat: opts.sourceFormat,
+    sourceBitDepth: opts.sourceBitDepth,
   });
   useAppStore.getState().addDocument(doc);
   if (opts.dirty) useAppStore.getState().updateDocument({ ...doc, dirty: true });
@@ -152,6 +187,55 @@ describe('saveDocument', () => {
     expect(saved.filePath).toBe('D:\\out\\new.wav');
     expect(saved.name).toBe('new.wav');
     expect(saved.dirty).toBe(false);
+  });
+
+  it('re-encodes an MP3 source in place at 192 kbps (no save-as dialog)', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\clip.mp3',
+      dirty: true,
+      name: 'clip.mp3',
+      sourceFormat: 'mp3',
+    });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(mockEncodeMp3).toHaveBeenCalledWith(doc.channels, 44100, 192);
+    expect(mockEncodeFlac).not.toHaveBeenCalled();
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\clip.mp3', expect.any(ArrayBuffer));
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+  });
+
+  it('re-encodes a FLAC source in place at the source bit depth', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\track.flac',
+      dirty: true,
+      name: 'track.flac',
+      sourceFormat: 'flac',
+      sourceBitDepth: 24,
+    });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 24);
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\track.flac', expect.any(ArrayBuffer));
+  });
+
+  it('re-encodes a 16-bit FLAC source at 16-bit (default when depth is not 24)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\track.flac',
+      name: 'track.flac',
+      sourceFormat: 'flac',
+      sourceBitDepth: 16,
+    });
+
+    await saveDocument(doc.id);
+
+    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 16);
   });
 
   it('forces save-as when as=true even with an existing .wav path', async () => {

@@ -1,4 +1,4 @@
-import { sniffSampleRate } from './sniffSampleRate';
+import { sniffSampleRate, readFlacStreamInfo } from './sniffSampleRate';
 
 // --- fixture helpers ---------------------------------------------------------
 
@@ -54,6 +54,21 @@ function flac48000(): number[] {
   b[18] = 0x0b;
   b[19] = 0xb8;
   b[20] = 0x00;
+  return b;
+}
+
+// 'fLaC' + STREAMINFO carrying rate 44100 AND a 16-bit sample size (stereo), so
+// readFlacStreamInfo's bit-depth math has a real value to read. From byte 18:
+// rate[0..19]=44100, channels-1[20..22]=1, bits-1[23..27]=15.
+//   b[18]=0x0A, b[19]=0xC4, b[20]=(0x4<<4)|(1<<1)|0=0x42, b[21]=0xF0
+function flac44100_16bit(): number[] {
+  const b = zeros(42);
+  ascii('fLaC').forEach((v, i) => (b[i] = v));
+  b[7] = 34;
+  b[18] = 0x0a;
+  b[19] = 0xc4;
+  b[20] = 0x42;
+  b[21] = 0xf0;
   return b;
 }
 
@@ -140,6 +155,23 @@ describe('sniffSampleRate', () => {
   describe('FLAC', () => {
     it('reads the STREAMINFO sample rate', () => {
       expect(sniffSampleRate(toBuf(flac48000()), 'a.flac')).toBe(48000);
+    });
+  });
+
+  describe('readFlacStreamInfo', () => {
+    it('reads both the sample rate and the source bit depth', () => {
+      expect(readFlacStreamInfo(toBuf(flac44100_16bit()))).toEqual({
+        sampleRate: 44100,
+        bitDepth: 16,
+      });
+    });
+
+    it('returns null for non-FLAC bytes', () => {
+      expect(readFlacStreamInfo(toBuf([...ascii('RIFF'), ...zeros(40)]))).toBeNull();
+    });
+
+    it('returns null (never throws) for a truncated STREAMINFO', () => {
+      expect(readFlacStreamInfo(toBuf(ascii('fLaC')))).toBeNull();
     });
   });
 

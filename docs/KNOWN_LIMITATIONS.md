@@ -23,33 +23,24 @@ rather than dropped: `mix = 0.7071·mean(ch2…chN-1)`, `L' = clamp(ch0 + mix, �
 needed; the current fallback is a bounded, safe default. The downmix is a fixed
 −3 dB fold; a user-selectable surround downmix matrix could follow.
 
-## Source bit depth is not tracked after import
-
-**Area:** File > Open / Properties (`src/audio/decodeAudio.ts`,
-`src/components/Panels/PropertiesPanel.tsx`)
-
-**v1 behavior:** The original file's **source bit depth is not tracked after
-import** (for WAV or any other format) — all audio is held in memory as 32-bit
-float (`Float32Array`), which is what the Properties panel's "Bit Depth" row
-reports.
-
-**Intended behavior:** Record the source bit depth on import and surface it in
-the Properties panel (e.g. "16-bit source → 32-bit float").
-
-## Save always writes WAV; non-WAV sources become save-as
+## Ogg (and other exotic containers) become save-as WAV
 
 **Area:** File > Save / Save As (`src/services/fileService.ts` `saveDocument`,
 `openFilePath`)
 
-**v1 behavior:** The app only ever *writes* WAV (32-bit float). A document opened
-from a non-WAV source keeps `filePath = null`, so the first Save opens a save-as
-dialog defaulting to a `.wav` file rather than overwriting the original in its
-source format. Documents opened from a `.wav` keep their path and Save writes
-straight back. Re-encoding to MP3 (or any lossy format) is available only via
-File > Export, which never changes the document's path or dirty state.
+**v1.1 behavior:** Save is now **format-faithful** for the common containers.
+A document opened from `.wav`, `.mp3`, or `.flac` keeps its `filePath` and Save
+re-encodes **in place into that same container**: WAV → 32-bit float, MP3 → 192
+kbps CBR, FLAC → verbatim FLAC at the source bit depth (16 or 24). Only `.ogg`
+and other unrecognized/exotic sources (m4a, aac, webm) are still opened with
+`filePath = null`, so their first Save falls back to a save-as `.wav` dialog —
+Auditorium has no Ogg Vorbis/Opus encoder, and re-encoding a lossy source to a
+different lossy container on every Save would silently degrade it. The original
+source bit depth is recorded on import and shown in the Properties panel
+("16-bit source → 32-bit float").
 
-**Intended behavior:** Round-trip a file back to its original container/format on
-Save (e.g. re-encode MP3 in place), gated on the format-aware encoder set.
+**Intended behavior:** Add an Ogg Vorbis/Opus encoder to round-trip `.ogg`
+sources in place as well; until then, save-as WAV is the safe lossless default.
 
 ## Markers are session-only (not persisted)
 

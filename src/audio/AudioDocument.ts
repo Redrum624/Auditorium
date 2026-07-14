@@ -5,6 +5,10 @@ export interface AudioDocument {
   sampleRate: number; // e.g. 44100, 48000
   channels: Float32Array[]; // length 1 (mono) or 2 (stereo); all same length
   dirty: boolean;
+  // Source-file provenance (Task F7, additive-optional). Drives format-faithful
+  // Save (re-encode in the original container) and the Properties bit-depth row.
+  sourceBitDepth?: number; // original file's PCM depth (WAV/FLAC); undefined for lossy
+  sourceFormat?: 'wav' | 'mp3' | 'flac' | 'ogg' | 'other';
 }
 
 const idCounters: Record<string, number> = {};
@@ -34,6 +38,8 @@ export function createDocument(opts: {
   sampleRate: number;
   channels: Float32Array[];
   filePath?: string | null;
+  sourceBitDepth?: number;
+  sourceFormat?: AudioDocument['sourceFormat'];
 }): AudioDocument {
   return {
     id: nextId('doc'),
@@ -42,6 +48,8 @@ export function createDocument(opts: {
     sampleRate: opts.sampleRate,
     channels: opts.channels,
     dirty: false,
+    sourceBitDepth: opts.sourceBitDepth,
+    sourceFormat: opts.sourceFormat,
   };
 }
 

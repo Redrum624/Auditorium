@@ -16,7 +16,7 @@ const MP3_BITRATES: (128 | 192 | 256 | 320)[] = [128, 192, 256, 320];
  * close; a cancelled save-dialog leaves this open. */
 export default function ExportDialog({ onClose }: { onClose: () => void }) {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
-  const [format, setFormat] = useState<'wav' | 'mp3'>('wav');
+  const [format, setFormat] = useState<'wav' | 'mp3' | 'flac'>('wav');
   const [wavBitDepth, setWavBitDepth] = useState<WavBitDepth>(24);
   const [mp3Kbps, setMp3Kbps] = useState<128 | 192 | 256 | 320>(192);
   const [busy, setBusy] = useState(false);
@@ -43,14 +43,22 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
             id="export-format"
             className={FIELD}
             value={format}
-            onChange={(e) => setFormat(e.target.value === 'mp3' ? 'mp3' : 'wav')}
+            onChange={(e) => {
+              const v = e.target.value;
+              setFormat(v === 'mp3' ? 'mp3' : v === 'flac' ? 'flac' : 'wav');
+            }}
           >
             <option value="wav">WAV (uncompressed)</option>
+            <option value="flac">FLAC (16-bit)</option>
             <option value="mp3">MP3 (compressed)</option>
           </select>
         </div>
 
-        {format === 'wav' ? (
+        {format === 'flac' ? (
+          <p className="text-xs text-[#8b8b92]">
+            Lossless FLAC, 16-bit. No quality setting to choose.
+          </p>
+        ) : format === 'wav' ? (
           <div>
             <label className={LABEL} htmlFor="export-bitdepth">
               Bit depth

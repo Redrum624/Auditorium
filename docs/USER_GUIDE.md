@@ -185,11 +185,16 @@ spectral views.
 without changing the open document's path or dirty state:
 
 - **WAV**: 16-bit, 24-bit, or 32-bit float.
+- **FLAC**: 16-bit, lossless (verbatim — no quality setting).
 - **MP3**: 128/192/256/320 kbps (constant bitrate only — see Known
   Limitations for the VBR gap).
 
-**File → Save** (`Ctrl+S`) / **Save As…** always writes WAV (32-bit float);
-see Known Limitations for how this interacts with non-WAV sources.
+**File → Save** (`Ctrl+S`) is **format-faithful**: for a document opened from
+`.wav`, `.mp3`, or `.flac` it re-encodes in place into that same container —
+WAV as 32-bit float, MP3 at 192 kbps, FLAC as verbatim FLAC at the source bit
+depth. Documents opened from `.ogg` or other exotic containers, and brand-new
+untitled documents, fall back to a **Save As…** dialog that writes WAV (32-bit
+float). **Save As…** always writes WAV. See Known Limitations for the Ogg gap.
 
 ## Shortcuts reference
 

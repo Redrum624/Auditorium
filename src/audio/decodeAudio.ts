@@ -4,6 +4,9 @@ import { sniffSampleRate } from './sniffSampleRate';
 export interface DecodedAudio {
   channels: Float32Array[];
   sampleRate: number;
+  /** Original file bit depth when the decoder knows it (WAV only — the Web Audio
+   * path yields Float32 with no source-depth info). Undefined otherwise. */
+  sourceBitDepth?: number;
 }
 
 // -3 dB (1/√2) fold gain applied to the surround/extra channels when downmixing.
@@ -59,8 +62,8 @@ export function downmixToStereo(channels: Float32Array[]): Float32Array[] {
  */
 export async function decodeArrayBuffer(buf: ArrayBuffer, hintedName: string): Promise<DecodedAudio> {
   if (/\.wav$/i.test(hintedName)) {
-    const { channels, sampleRate } = decodeWav(buf);
-    return { channels, sampleRate };
+    const { channels, sampleRate, bitDepth } = decodeWav(buf);
+    return { channels, sampleRate, sourceBitDepth: bitDepth };
   }
 
   if (typeof OfflineAudioContext === 'undefined') {

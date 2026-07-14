@@ -75,6 +75,25 @@ describe('ExportDialog', () => {
     });
   });
 
+  it('exports FLAC (16-bit) with no quality select shown', async () => {
+    const doc = seedActiveDoc();
+    render(<ExportDialog onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'flac' } });
+    // FLAC has no quality control: neither the bit-depth nor the kbps select.
+    expect(screen.queryByTestId('export-bitdepth')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('export-kbps')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+
+    await waitFor(() => expect(mockExport).toHaveBeenCalled());
+    expect(mockExport).toHaveBeenCalledWith(doc.id, {
+      format: 'flac',
+      wavBitDepth: 24,
+      mp3Kbps: 192,
+    });
+  });
+
   it('stays open when export is cancelled (returns null)', async () => {
     seedActiveDoc();
     mockExport.mockResolvedValue(null);

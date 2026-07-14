@@ -18,6 +18,7 @@ const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
 const OUT_DIR = path.join(ROOT, 'test-output');
 const OUT_MP3 = path.join(OUT_DIR, 'out.mp3');
 const OUT_WAV = path.join(OUT_DIR, 'out.wav');
+const OUT_FLAC = path.join(OUT_DIR, 'out.flac');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -37,7 +38,7 @@ async function main() {
     });
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  for (const f of [OUT_MP3, OUT_WAV, SHOT]) {
+  for (const f of [OUT_MP3, OUT_WAV, OUT_FLAC, SHOT]) {
     if (fs.existsSync(f)) fs.rmSync(f);
   }
 
@@ -139,6 +140,48 @@ async function main() {
     assert(wavBuf.toString('ascii', 8, 12) === 'WAVE', 'out.wav has WAVE magic');
     // 88200 frames * 2ch * 4 bytes (32f) + 44 header ≈ 705644 bytes.
     assert(wavBuf.length > 700000, `out.wav has a plausible size (got ${wavBuf.length})`);
+
+    // 5b) FLAC format-faithful export → real Chromium FLAC decode round-trip --
+    // This is the strongest validation of the encoder: the packaged Chromium
+    // (FFmpeg) decoder must accept our container/frames/CRCs and reconstruct the
+    // samples. Re-open the pristine tone first so the comparison is clean.
+    console.log('Exporting FLAC and decoding it back through Chromium...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const flacBefore = await page.evaluate(() => window.__test.getStateSummary());
+    const flacOrig = await page.evaluate(() => window.__test.getChannelSamples(0, 20000, 512));
+    const flacOk = await page.evaluate(
+      (out) => window.__test.exportActive({ format: 'flac', wavBitDepth: 16, mp3Kbps: 192 }, out),
+      OUT_FLAC
+    );
+    assert(flacOk === true, 'exportActive(flac) reported success');
+    assert(fs.existsSync(OUT_FLAC), 'out.flac exists on disk');
+    const flacHead = fs.readFileSync(OUT_FLAC).subarray(0, 4).toString('ascii');
+    assert(flacHead === 'fLaC', 'out.flac begins with the fLaC magic');
+    // Chromium decodes OUR FLAC bytes here — if the stream were malformed,
+    // decodeAudioData would throw and openPath would surface an error.
+    await page.evaluate((p) => window.__test.openPath(p), OUT_FLAC);
+    const flacRt = await page.evaluate(() => window.__test.getStateSummary());
+    assert(flacRt.sampleRate === 44100, `decoded FLAC preserves 44100 Hz (got ${flacRt.sampleRate})`);
+    assert(
+      Math.abs(flacRt.length - flacBefore.length) <= 1,
+      `decoded FLAC length ~= original (${flacRt.length} vs ${flacBefore.length})`
+    );
+    assert(flacRt.channels === 2, `decoded FLAC is stereo (got ${flacRt.channels})`);
+    const flacBack = await page.evaluate(() => window.__test.getChannelSamples(0, 20000, 512));
+    let flacMaxErr = 0;
+    for (let i = 0; i < flacOrig.length; i++) {
+      flacMaxErr = Math.max(flacMaxErr, Math.abs(flacOrig[i] - flacBack[i]));
+    }
+    console.log(`  max sample error after FLAC round trip: ${flacMaxErr.toExponential(3)}`);
+    // Encoder scales by 32767, Chromium's 16-bit→float decode divides by 32768,
+    // so a full-scale sample can differ by up to 1.5/32768; allow a hair more.
+    const flacTol = 1.6 / 32768;
+    assert(
+      flacMaxErr <= flacTol,
+      `FLAC round-trip samples within one 16-bit step (${flacMaxErr.toExponential(3)} <= ${flacTol.toExponential(3)})`
+    );
+    // Restore the pristine tone as the active document for the steps that follow.
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
 
     // 4b) Spectral (spectrogram) view renders non-uniform pixels ------------
     console.log('Switching to the Spectral view and checking the spectrogram...');

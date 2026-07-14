@@ -5,7 +5,9 @@ import { useSessionStore } from '../../multitrack/sessionStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { createClip } from '../../multitrack/session';
 
-function addDoc(opts?: Partial<{ channels: number; filePath: string | null }>): AudioDocument {
+function addDoc(
+  opts?: Partial<{ channels: number; filePath: string | null; sourceBitDepth: number }>
+): AudioDocument {
   const channelCount = opts?.channels ?? 1;
   const channels = Array.from({ length: channelCount }, () => new Float32Array(44100)); // 1s @ 44100Hz
   const doc = createDocument({
@@ -13,6 +15,7 @@ function addDoc(opts?: Partial<{ channels: number; filePath: string | null }>): 
     sampleRate: 44100,
     channels,
     filePath: opts?.filePath,
+    sourceBitDepth: opts?.sourceBitDepth,
   });
   useAppStore.getState().addDocument(doc);
   return doc;
@@ -43,6 +46,13 @@ describe('PropertiesPanel (waveform/spectral view)', () => {
     expect(screen.getByText('0:01.000')).toBeInTheDocument(); // 44100 samples @ 44100Hz
     expect(screen.getByText('44,100')).toBeInTheDocument();
     expect(screen.getByText('No')).toBeInTheDocument(); // dirty: false on a fresh doc
+  });
+
+  it('shows "N-bit source → 32-bit float" when the source bit depth is known', () => {
+    addDoc({ channels: 2, filePath: 'C:\\audio\\clip.wav', sourceBitDepth: 16 });
+    render(<PropertiesPanel />);
+    expect(screen.getByText('16-bit source → 32-bit float')).toBeInTheDocument();
+    expect(screen.queryByText('32-bit float (internal)')).not.toBeInTheDocument();
   });
 
   it('shows a mono channel count and a "—" path placeholder when filePath is null', () => {

@@ -76,6 +76,32 @@ function sniffFlac(bytes: Uint8Array): number | null {
   return rate > 0 ? rate : null;
 }
 
+/**
+ * Parse a FLAC STREAMINFO block for the fields Save/Properties need: the native
+ * sample rate and the source bit depth. The 20-bit rate, 3-bit (channels−1) and
+ * 5-bit (bits−1) fields are packed contiguously starting at byte 18 (see the bit
+ * offsets above). Returns null on any bounds/magic doubt — never throws — so the
+ * caller falls back to leaving the bit depth unknown.
+ *
+ * Bit layout from byte 18: rate[0..19], channels−1[20..22], bits−1[23..27].
+ *   bits−1 = ((byte20 & 1) << 4) | (byte21 >> 4)
+ */
+export function readFlacStreamInfo(
+  buf: ArrayBuffer
+): { sampleRate: number; bitDepth: number } | null {
+  try {
+    const bytes = new Uint8Array(buf);
+    if (!matchAscii(bytes, 0, 'fLaC')) return null;
+    if (bytes.length < 22) return null;
+    const sampleRate = (bytes[18] << 12) | (bytes[19] << 4) | (bytes[20] >> 4);
+    const bitDepth = (((bytes[20] & 1) << 4) | (bytes[21] >> 4)) + 1;
+    if (sampleRate <= 0) return null;
+    return { sampleRate, bitDepth };
+  } catch {
+    return null;
+  }
+}
+
 // --- OGG ---------------------------------------------------------------------
 
 function sniffOgg(bytes: Uint8Array, view: DataView): number | null {

@@ -30,6 +30,7 @@ export interface TestApi {
   saveActiveAs(outPath: string): Promise<boolean>;
   getPeak(): number;
   getRms(): number;
+  getChannelSamples(channel: number, start: number, count: number): number[];
   applyEffect(
     effectId: string,
     params: Record<string, EffectParamValue>,
@@ -119,6 +120,18 @@ export function installTestHooks(): void {
     getPeak: () => activePeak(),
 
     getRms: () => activeRms(),
+
+    // Returns a slice of the active document's channel samples for the FLAC
+    // round-trip smoke (compare the source tone against our encoder's output
+    // after the packaged Chromium decodes it back).
+    getChannelSamples: (channel, start, count) => {
+      const doc = activeDoc();
+      const ch = doc?.channels[channel];
+      if (!ch) return [];
+      const out: number[] = [];
+      for (let i = 0; i < count && start + i < ch.length; i++) out.push(ch[start + i]);
+      return out;
+    },
 
     // Runs the effect end-to-end through the real DSP worker (no selection => whole
     // document). `extra` is forwarded to the worker's `__effectExtra` side channel
