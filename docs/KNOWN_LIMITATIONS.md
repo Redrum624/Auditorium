@@ -3,24 +3,38 @@
 Tracked deviations from full Adobe Audition parity. Each entry names the area,
 the current v1 behavior, and the intended future behavior.
 
-## Non-WAV imports are resampled to 48000 Hz
+## Unsniffable containers fall back to 48000 Hz; >2-channel downmix law
 
-**Area:** File > Open (`src/audio/decodeAudio.ts` `decodeArrayBuffer`)
+**Area:** File > Open (`src/audio/decodeAudio.ts` `decodeArrayBuffer`,
+`src/audio/sniffSampleRate.ts`)
 
-**v1 behavior:** WAV files are decoded by our own `decodeWav`, preserving the
-exact samples and original sample rate. Every other format (mp3, ogg, flac,
-m4a, aac, webm) is decoded through the Web Audio API's `decodeAudioData` on an
-`OfflineAudioContext(1, 1, 48000)`. Chromium resamples `decodeAudioData` output
-to the context's sample rate, so all non-WAV imports arrive at **48000 Hz**
-regardless of their source rate. Audio with more than two channels is truncated
-to the first two (L/R). The original file's **source bit depth is not tracked
-after import** either (for WAV or any other format) — all audio is held in
-memory as 32-bit float (`Float32Array`), which is what the Properties panel's
-"Bit Depth" row reports.
+**v1.1 behavior:** Non-WAV imports now arrive at their **native sample rate**.
+Before decoding, `sniffSampleRate` parses the container header (MP3 frame sync,
+FLAC STREAMINFO, OGG Vorbis/Opus identification, MP4/M4A `mdhd` timescale, and a
+defensive WAV `fmt` reader) and the `OfflineAudioContext` is built at that rate,
+so Chromium's `decodeAudioData` no longer resamples the output. Only containers
+whose rate cannot be sniffed (an exotic/unrecognized layout, or a 64-bit-box
+MP4) fall back to **48000 Hz**. Audio with more than two channels is down-mixed
+to stereo — the extra channels (index ≥ 2) are folded into both L and R at −3 dB
+rather than dropped: `mix = 0.7071·mean(ch2…chN-1)`, `L' = clamp(ch0 + mix, ±1)`,
+`R' = clamp(ch1 + mix, ±1)`.
 
-**Intended behavior:** Decode non-WAV sources at their native sample rate (or
-resample deliberately) and support a proper channel down-mix. Requires a
-format-aware decoder rather than the browser's fixed-rate `decodeAudioData`.
+**Intended behavior:** For unsniffable formats, add per-container parsers as
+needed; the current fallback is a bounded, safe default. The downmix is a fixed
+−3 dB fold; a user-selectable surround downmix matrix could follow.
+
+## Source bit depth is not tracked after import
+
+**Area:** File > Open / Properties (`src/audio/decodeAudio.ts`,
+`src/components/Panels/PropertiesPanel.tsx`)
+
+**v1 behavior:** The original file's **source bit depth is not tracked after
+import** (for WAV or any other format) — all audio is held in memory as 32-bit
+float (`Float32Array`), which is what the Properties panel's "Bit Depth" row
+reports.
+
+**Intended behavior:** Record the source bit depth on import and surface it in
+the Properties panel (e.g. "16-bit source → 32-bit float").
 
 ## Save always writes WAV; non-WAV sources become save-as
 
