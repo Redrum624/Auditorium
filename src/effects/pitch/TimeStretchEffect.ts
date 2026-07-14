@@ -1,13 +1,13 @@
 import type { EffectDefinition } from '../types';
-import { timeStretch } from '../../dsp/wsola';
+import { timeStretchLinked } from '../../dsp/wsola';
 
 /**
  * Time Stretch — changes duration while preserving pitch (WSOLA). `stretchPercent`
  * is the output length as a percentage of the input: 200 makes the audio twice as
  * long (half speed), 50 makes it half as long, both with the pitch unchanged.
- * 100% is a no-op (exact copy). Stereo channels are stretched independently — with
- * identical length inputs they map to identical output lengths, so channels stay
- * aligned (see the stereo phase caveat in docs/KNOWN_LIMITATIONS.md).
+ * 100% is a no-op (exact copy). Stereo channels are stretched with a single shared
+ * similarity search (stereo-linked WSOLA), so they map to identical output lengths
+ * AND keep their inter-channel phase relationship locked.
  */
 export const timeStretchEffect: EffectDefinition = {
   id: 'time-stretch',
@@ -24,10 +24,7 @@ export const timeStretchEffect: EffectDefinition = {
     }
 
     const ratio = percent / 100;
-    const numCh = channels.length;
-    const out = channels.map((c, ch) =>
-      timeStretch(c, sampleRate, ratio, (f) => onProgress?.((ch + f) / numCh))
-    );
+    const out = timeStretchLinked(channels, sampleRate, ratio, onProgress);
     onProgress?.(1);
     return { channels: out };
   },

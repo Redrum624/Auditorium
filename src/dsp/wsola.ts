@@ -81,19 +81,36 @@ function bestMatchOffset(
   return bestCand;
 }
 
-export function timeStretch(
-  input: Float32Array,
-  sampleRate: number,
-  ratio: number,
-  onProgress?: (f: number) => void
-): Float32Array {
-  const N = input.length;
+/**
+ * The full WSOLA layout derived from an input length, sample rate and ratio, plus
+ * which of the three synthesis regimes applies:
+ *  - `empty`   — nothing to synthesize (zero-length input or output).
+ *  - `nearest` — input too short to window; fall back to nearest-sample remap.
+ *  - `ola`     — the real overlap-add path (carries all frame/search parameters).
+ */
+type StretchPlan =
+  | { kind: 'empty'; outLen: number }
+  | { kind: 'nearest'; outLen: number; r: number; N: number }
+  | {
+      kind: 'ola';
+      outLen: number;
+      r: number;
+      N: number;
+      frame: number;
+      synthesisHop: number;
+      analysisHop: number;
+      search: number;
+      compare: number;
+      window: Float32Array;
+    };
+
+/** Derives the synthesis regime and all WSOLA parameters for one stretch job. */
+function planStretch(N: number, sampleRate: number, ratio: number): StretchPlan {
   const r = Math.min(MAX_RATIO, Math.max(MIN_RATIO, ratio));
   const outLen = Math.round(N * r);
 
   if (N === 0 || outLen === 0) {
-    onProgress?.(1);
-    return new Float32Array(Math.max(0, outLen));
+    return { kind: 'empty', outLen: Math.max(0, outLen) };
   }
 
   // Frame length in samples, forced even so synthesisHop = frame/2 is integral.
@@ -103,10 +120,7 @@ export function timeStretch(
 
   // Degenerate tiny-input fallback: nearest-sample time remap (no windows to overlap).
   if (frame < 4) {
-    const out = new Float32Array(outLen);
-    for (let i = 0; i < outLen; i++) out[i] = input[Math.min(N - 1, Math.round(i / r))];
-    onProgress?.(1);
-    return out;
+    return { kind: 'nearest', outLen, r, N };
   }
 
   const synthesisHop = frame / 2;
@@ -115,15 +129,32 @@ export function timeStretch(
   const compare = Math.max(1, Math.min(frame, Math.round((COMPARE_MS / 1000) * sampleRate)));
   const window = hann(frame);
 
-  const read = (idx: number): number => (idx >= 0 && idx < N ? input[idx] : 0);
+  return { kind: 'ola', outLen, r, N, frame, synthesisHop, analysisHop, search, compare, window };
+}
 
-  // Accumulators sized with a full-frame tail so the final synthesis frame fits.
-  const bufLen = outLen + frame;
-  const acc = new Float64Array(bufLen);
-  const weight = new Float64Array(bufLen);
+/** Nearest-sample time remap used when the input is too short to window. */
+function nearestRemap(channel: Float32Array, outLen: number, r: number, N: number): Float32Array {
+  const out = new Float32Array(outLen);
+  for (let i = 0; i < outLen; i++) out[i] = channel[Math.min(N - 1, Math.round(i / r))];
+  return out;
+}
 
-  // Reference = "natural continuation" of the previously placed frame. For frame 0
-  // there is no predecessor, so it is copied straight from position 0.
+/**
+ * Runs the WSOLA similarity search over `signal`, returning the chosen input copy
+ * offset for each synthesis frame. This is the expensive phase, so `onProgress`
+ * (0 → 0.99) is reported here; the caller fires the terminal 1.0. Frame 0 has no
+ * predecessor and is copied straight from its nominal position.
+ */
+function computeOffsets(
+  signal: Float32Array,
+  plan: Extract<StretchPlan, { kind: 'ola' }>,
+  onProgress?: (f: number) => void
+): number[] {
+  const { N, outLen, synthesisHop, analysisHop, search, compare } = plan;
+  const read = (idx: number): number => (idx >= 0 && idx < N ? signal[idx] : 0);
+
+  const offsets: number[] = [];
+  // Reference = "natural continuation" of the previously placed frame.
   let refStart = synthesisHop;
 
   for (let k = 0; ; k++) {
@@ -132,12 +163,7 @@ export function timeStretch(
 
     const nominalStart = Math.round(k * analysisHop);
     const chosen = k === 0 ? nominalStart : bestMatchOffset(read, nominalStart, refStart, compare, search);
-
-    for (let j = 0; j < frame; j++) {
-      const w = window[j];
-      acc[synthesisPos + j] += w * read(chosen + j);
-      weight[synthesisPos + j] += w;
-    }
+    offsets.push(chosen);
 
     refStart = chosen + synthesisHop;
 
@@ -146,10 +172,112 @@ export function timeStretch(
     }
   }
 
+  return offsets;
+}
+
+/**
+ * Overlap-adds `channel` onto the synthesis grid using pre-computed copy `offsets`,
+ * normalizing by the accumulated window weight. Because the offsets are an input,
+ * several channels can share ONE similarity search yet keep their own OLA — the key
+ * to stereo-linked stretching (identical offsets ⇒ inter-channel phase preserved).
+ */
+function olaWithOffsets(
+  channel: Float32Array,
+  offsets: number[],
+  plan: Extract<StretchPlan, { kind: 'ola' }>
+): Float32Array {
+  const { N, outLen, frame, synthesisHop, window } = plan;
+  const read = (idx: number): number => (idx >= 0 && idx < N ? channel[idx] : 0);
+
+  // Accumulators sized with a full-frame tail so the final synthesis frame fits.
+  const bufLen = outLen + frame;
+  const acc = new Float64Array(bufLen);
+  const weight = new Float64Array(bufLen);
+
+  for (let k = 0; k < offsets.length; k++) {
+    const synthesisPos = k * synthesisHop;
+    const chosen = offsets[k];
+    for (let j = 0; j < frame; j++) {
+      const w = window[j];
+      acc[synthesisPos + j] += w * read(chosen + j);
+      weight[synthesisPos + j] += w;
+    }
+  }
+
   const out = new Float32Array(outLen);
   for (let i = 0; i < outLen; i++) {
     out[i] = weight[i] > 1e-6 ? acc[i] / weight[i] : 0;
   }
+  return out;
+}
+
+export function timeStretch(
+  input: Float32Array,
+  sampleRate: number,
+  ratio: number,
+  onProgress?: (f: number) => void
+): Float32Array {
+  const plan = planStretch(input.length, sampleRate, ratio);
+
+  if (plan.kind === 'empty') {
+    onProgress?.(1);
+    return new Float32Array(plan.outLen);
+  }
+  if (plan.kind === 'nearest') {
+    const out = nearestRemap(input, plan.outLen, plan.r, plan.N);
+    onProgress?.(1);
+    return out;
+  }
+
+  const offsets = computeOffsets(input, plan, onProgress);
+  const out = olaWithOffsets(input, offsets, plan);
+  onProgress?.(1);
+  return out;
+}
+
+/**
+ * Stereo-linked WSOLA. The similarity search runs ONCE on the mid signal (the
+ * arithmetic mean of all channels), and the resulting per-frame copy offsets are
+ * applied identically to every channel's overlap-add. This keeps the inter-channel
+ * phase relationship phase-locked across the stretch — unlike running `timeStretch`
+ * per channel, where each channel could pick different offsets and drift the stereo
+ * image. Mono input delegates to `timeStretch` (byte-identical). All channels are
+ * assumed equal length and yield identical output lengths (`round(N*ratio)`).
+ */
+export function timeStretchLinked(
+  channels: Float32Array[],
+  sampleRate: number,
+  ratio: number,
+  onProgress?: (f: number) => void
+): Float32Array[] {
+  if (channels.length === 1) {
+    return [timeStretch(channels[0], sampleRate, ratio, onProgress)];
+  }
+
+  const numCh = channels.length;
+  const N = channels[0].length;
+  const plan = planStretch(N, sampleRate, ratio);
+
+  if (plan.kind === 'empty') {
+    onProgress?.(1);
+    return channels.map(() => new Float32Array(plan.outLen));
+  }
+  if (plan.kind === 'nearest') {
+    const out = channels.map((c) => nearestRemap(c, plan.outLen, plan.r, plan.N));
+    onProgress?.(1);
+    return out;
+  }
+
+  // Mid signal = arithmetic mean of the channels; the search runs on it once.
+  const mid = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    let sum = 0;
+    for (let c = 0; c < numCh; c++) sum += channels[c][i];
+    mid[i] = sum / numCh;
+  }
+
+  const offsets = computeOffsets(mid, plan, onProgress);
+  const out = channels.map((c) => olaWithOffsets(c, offsets, plan));
   onProgress?.(1);
   return out;
 }

@@ -1,4 +1,4 @@
-import { timeStretch } from './wsola';
+import { timeStretch, timeStretchLinked } from './wsola';
 
 const SR = 44100;
 
@@ -7,6 +7,33 @@ function sine(freq: number, seconds: number, amplitude = 1, sr = SR): Float32Arr
   const out = new Float32Array(n);
   for (let i = 0; i < n; i++) out[i] = amplitude * Math.sin((2 * Math.PI * freq * i) / sr);
   return out;
+}
+
+/** Sine with an explicit starting phase (radians). */
+function sinePhase(freq: number, seconds: number, phase: number, sr = SR): Float32Array {
+  const n = Math.round(seconds * sr);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = Math.sin((2 * Math.PI * freq * i) / sr + phase);
+  return out;
+}
+
+/**
+ * Integer lag d in [-maxLag, maxLag] maximizing the (unnormalized) cross-correlation
+ * Σ a[start+i+d]·b[start+i] over a mid-signal window — i.e. how far channel a must be
+ * shifted to line up with channel b. The caller guarantees the window + lag stay in bounds.
+ */
+function bestLag(a: Float32Array, b: Float32Array, start: number, winLen: number, maxLag: number): number {
+  let bestScore = -Infinity;
+  let bestD = 0;
+  for (let d = -maxLag; d <= maxLag; d++) {
+    let sum = 0;
+    for (let i = 0; i < winLen; i++) sum += a[start + i + d] * b[start + i];
+    if (sum > bestScore) {
+      bestScore = sum;
+      bestD = d;
+    }
+  }
+  return bestD;
 }
 
 /** Count sign changes (zero crossings) in an interior window, ignoring exact zeros. */
@@ -122,4 +149,67 @@ describe('timeStretch (WSOLA)', () => {
     const out = timeStretch(new Float32Array(0), SR, 2.0);
     expect(out.length).toBe(0);
   });
+});
+
+describe('timeStretchLinked (stereo-linked WSOLA)', () => {
+  it('mono delegation is sample-identical to timeStretch', () => {
+    const input = sine(330, 0.4);
+    const linked = timeStretchLinked([input], SR, 1.5);
+    const direct = timeStretch(input, SR, 1.5);
+    expect(linked.length).toBe(1);
+    expect(linked[0].length).toBe(direct.length);
+    for (let i = 0; i < direct.length; i++) expect(linked[0][i]).toBe(direct[i]);
+  }, 15000);
+
+  it('yields identical output lengths per channel = round(N*ratio)', () => {
+    const l = sine(300, 0.3);
+    const r = sine(500, 0.3);
+    const ratio = 1.5;
+    const out = timeStretchLinked([l, r], SR, ratio);
+    const expected = Math.round(l.length * ratio);
+    expect(out.length).toBe(2);
+    expect(out[0].length).toBe(expected);
+    expect(out[1].length).toBe(expected);
+  }, 15000);
+
+  it('preserves the inter-channel phase lag through a 1.5× stretch', () => {
+    // L = sin, R = sin shifted +90°; R leads L by a quarter period (~50 samples @220Hz).
+    const l = sinePhase(220, 0.5, 0);
+    const r = sinePhase(220, 0.5, Math.PI / 2);
+
+    const winLen = 8192;
+    const maxLag = 100;
+    const startBefore = Math.floor((l.length - winLen) / 2);
+    const lagBefore = bestLag(l, r, startBefore, winLen, maxLag);
+
+    const out = timeStretchLinked([l, r], SR, 1.5);
+    const startAfter = Math.floor((out[0].length - winLen) / 2);
+    const lagAfter = bestLag(out[0], out[1], startAfter, winLen, maxLag);
+
+    // Sanity: the 90° offset is ~50 samples at 220 Hz / 44100 Hz.
+    expect(Math.abs(lagBefore - 50)).toBeLessThanOrEqual(2);
+    // The linked path applies ONE set of copy offsets to both channels, so the
+    // relative lag is preserved exactly — it must NOT drift across the stretch.
+    expect(lagAfter).toBe(lagBefore);
+  }, 15000);
+
+  it('preserves frequency on the linked stereo path (zero-crossing rate ±8%) at ratio 2.0', () => {
+    const l = sinePhase(440, 0.5, 0);
+    const r = sinePhase(440, 0.5, Math.PI / 2);
+    const out = timeStretchLinked([l, r], SR, 2.0);
+    for (const ch of out) {
+      expect(Math.abs(zeroCrossingRate(ch) - 880) / 880).toBeLessThan(0.08);
+      expectFinite(ch);
+    }
+  }, 15000);
+
+  it('preserves frequency on the linked stereo path (zero-crossing rate ±8%) at ratio 0.5', () => {
+    const l = sinePhase(440, 0.5, 0);
+    const r = sinePhase(440, 0.5, Math.PI / 2);
+    const out = timeStretchLinked([l, r], SR, 0.5);
+    for (const ch of out) {
+      expect(Math.abs(zeroCrossingRate(ch) - 880) / 880).toBeLessThan(0.08);
+      expectFinite(ch);
+    }
+  }, 15000);
 });
