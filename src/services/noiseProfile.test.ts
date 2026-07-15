@@ -1,4 +1,11 @@
-import { captureNoiseProfile, getNoiseProfile, clearNoiseProfile } from './noiseProfile';
+import { renderHook, act } from '@testing-library/react';
+import {
+  captureNoiseProfile,
+  getNoiseProfile,
+  clearNoiseProfile,
+  getNoiseProfileVersion,
+  useNoiseProfileVersion,
+} from './noiseProfile';
 import { createDocument } from '../audio/AudioDocument';
 import { stft } from '../dsp/stft';
 import { useAppStore, makeInitialState } from '../stores/appStore';
@@ -85,5 +92,46 @@ describe('noiseProfile', () => {
     expect(getNoiseProfile()).not.toBeNull();
     clearNoiseProfile();
     expect(getNoiseProfile()).toBeNull();
+  });
+
+  it('records the docId the profile was captured from (Task F8)', () => {
+    const mono = noiseBuffer(8192, 555);
+    const doc = createDocument({ name: 'm.wav', sampleRate: SR, channels: [mono] });
+    useAppStore.getState().addDocument(doc);
+    captureNoiseProfile();
+    expect(getNoiseProfile()!.docId).toBe(doc.id);
+  });
+
+  it('bumps the version on capture and on a clearing clear (Task F8)', () => {
+    const mono = noiseBuffer(8192, 666);
+    const doc = createDocument({ name: 'm.wav', sampleRate: SR, channels: [mono] });
+    useAppStore.getState().addDocument(doc);
+
+    const v0 = getNoiseProfileVersion();
+    captureNoiseProfile();
+    const v1 = getNoiseProfileVersion();
+    expect(v1).toBeGreaterThan(v0);
+    clearNoiseProfile();
+    expect(getNoiseProfileVersion()).toBeGreaterThan(v1);
+  });
+
+  it('clearing an already-empty slot does not bump the version', () => {
+    const v0 = getNoiseProfileVersion();
+    clearNoiseProfile();
+    expect(getNoiseProfileVersion()).toBe(v0);
+  });
+
+  it('useNoiseProfileVersion re-renders subscribers on capture/clear (Task F8)', () => {
+    const mono = noiseBuffer(8192, 777);
+    const doc = createDocument({ name: 'm.wav', sampleRate: SR, channels: [mono] });
+    useAppStore.getState().addDocument(doc);
+
+    const { result } = renderHook(() => useNoiseProfileVersion());
+    const v0 = result.current;
+    act(() => captureNoiseProfile());
+    expect(result.current).toBeGreaterThan(v0);
+    const v1 = result.current;
+    act(() => clearNoiseProfile());
+    expect(result.current).toBeGreaterThan(v1);
   });
 });

@@ -13,11 +13,23 @@ interface ComputeMessage {
   scale?: 'log' | 'linear';
 }
 
+// Test-only fault injection (Task F8): when set, every compute request replies
+// with an `error` message instead of computing, letting SpectrogramView's
+// error branch be exercised deterministically. Reset it in afterEach.
+let injectedError: string | null = null;
+
+export function _setSpectrogramWorkerError(message: string | null): void {
+  injectedError = message;
+}
+
 /**
  * Test double for the spectrogram worker: computes the magnitude grid
  * SYNCHRONOUSLY on the main thread behind a microtask, emitting the same `done`
- * message as the real worker. Lets SpectrogramView be exercised without a real
- * Worker, and shares the exact pure core (`computeSpectrogramColumns`).
+ * message as the real worker — or, mirroring the real worker's error branch
+ * (Task F8), an `{type:'error', id, message}` message when the compute throws
+ * (or when a test injected a fault via `_setSpectrogramWorkerError`). Lets
+ * SpectrogramView be exercised without a real Worker, and shares the exact pure
+ * core (`computeSpectrogramColumns`).
  */
 class FakeSpectrogramWorker {
   onmessage: ((e: MessageEvent) => void) | null = null;
@@ -29,19 +41,30 @@ class FakeSpectrogramWorker {
     if (this.terminated || !msg || msg.type !== 'compute') return;
     queueMicrotask(() => {
       if (this.terminated) return;
-      const mags = computeSpectrogramColumns({
-        channel: msg.channel,
-        startSample: msg.startSample,
-        endSample: msg.endSample,
-        width: msg.width,
-        height: msg.height,
-        fftSize: msg.fftSize,
-        sampleRate: msg.sampleRate,
-        scale: msg.scale,
-      });
-      this.onmessage?.({
-        data: { type: 'done', id: msg.id, mags, width: msg.width, height: msg.height },
-      } as MessageEvent);
+      try {
+        if (injectedError !== null) throw new Error(injectedError);
+        const mags = computeSpectrogramColumns({
+          channel: msg.channel,
+          startSample: msg.startSample,
+          endSample: msg.endSample,
+          width: msg.width,
+          height: msg.height,
+          fftSize: msg.fftSize,
+          sampleRate: msg.sampleRate,
+          scale: msg.scale,
+        });
+        this.onmessage?.({
+          data: { type: 'done', id: msg.id, mags, width: msg.width, height: msg.height },
+        } as MessageEvent);
+      } catch (err) {
+        this.onmessage?.({
+          data: {
+            type: 'error',
+            id: msg.id,
+            message: err instanceof Error ? err.message : String(err),
+          },
+        } as MessageEvent);
+      }
     });
   }
 

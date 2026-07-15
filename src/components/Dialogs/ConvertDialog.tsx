@@ -14,7 +14,10 @@ const SAMPLE_RATES = [22050, 44100, 48000, 96000];
  * Whole-document conversion dialog with two modes. In `sampleRate` mode it picks
  * a target rate and resamples every channel; in `channels` mode it picks mono or
  * stereo and mixes down / duplicates. Both apply to the active document through
- * documentTools (undoable) and close on Apply.
+ * documentTools (undoable) and close on Apply. The selects open seeded with the
+ * ACTIVE document's current sample rate / channel count (Task F8) — falling back
+ * to 44100 Hz / stereo when there is no document or its rate isn't an offered
+ * option — so the dialog reflects where the doc IS before you pick a target.
  */
 export default function ConvertDialog({
   mode,
@@ -24,8 +27,16 @@ export default function ConvertDialog({
   onClose: () => void;
 }) {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
-  const [sampleRate, setSampleRate] = useState(44100);
-  const [channelCount, setChannelCount] = useState<1 | 2>(2);
+  const [sampleRate, setSampleRate] = useState(() => {
+    const s = useAppStore.getState();
+    const doc = s.documents.find((d) => d.id === s.activeDocumentId);
+    return doc && SAMPLE_RATES.includes(doc.sampleRate) ? doc.sampleRate : 44100;
+  });
+  const [channelCount, setChannelCount] = useState<1 | 2>(() => {
+    const s = useAppStore.getState();
+    const doc = s.documents.find((d) => d.id === s.activeDocumentId);
+    return doc?.channels.length === 1 ? 1 : 2;
+  });
 
   const isRateMode = mode === 'sampleRate';
   const title = isRateMode ? 'Convert Sample Rate' : 'Convert Channels';

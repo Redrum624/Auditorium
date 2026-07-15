@@ -83,6 +83,31 @@ describe('distortionEffect', () => {
     expect(Math.abs(out[0][0])).toBeLessThanOrEqual(1 + 1e-9);
   });
 
+  it('foldback outputs 0 for non-finite samples (NaN) instead of propagating them (Task F8)', () => {
+    const input = Float32Array.from([Number.NaN, 0.05]);
+    const out = run(distortionEffect, [input], { drive: 10, mode: 'foldback', outputDb: 0 });
+    expect(out[0][0]).toBe(0);
+    expect(out[0][1]).toBeCloseTo(0.5, 6); // neighbors unaffected
+  });
+
+  it('foldback outputs 0 for Infinity input without hanging (Task F8)', () => {
+    const input = Float32Array.from([Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]);
+    const out = run(distortionEffect, [input], { drive: 10, mode: 'foldback', outputDb: 0 });
+    expect(out[0][0]).toBe(0);
+    expect(out[0][1]).toBe(0);
+  });
+
+  it('foldback terminates within the 64-iteration cap on huge finite values and clamps to [-1, 1] (Task F8)', () => {
+    // 1e20 * drive: float rounding makes `2 - v === -v`, so the unbounded fold
+    // loop never converged before the cap existed.
+    const input = Float32Array.from([1e19, -1e19]);
+    const out = run(distortionEffect, [input], { drive: 10, mode: 'foldback', outputDb: 0 });
+    for (const v of out[0]) {
+      expect(Number.isFinite(v)).toBe(true);
+      expect(Math.abs(v)).toBeLessThanOrEqual(1);
+    }
+  });
+
   it('output gain scales the result by 10^(outputDb/20)', () => {
     const input = Float32Array.from([1]);
     const at0 = run(distortionEffect, [input], { drive: 10, mode: 'hardclip', outputDb: 0 })[0][0];

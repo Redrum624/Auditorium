@@ -12,11 +12,11 @@ jest.mock('../../services/documentTools', () => ({
 const mockRate = convertSampleRate as jest.MockedFunction<typeof convertSampleRate>;
 const mockChannels = convertChannels as jest.MockedFunction<typeof convertChannels>;
 
-function seedActiveDoc() {
+function seedActiveDoc(sampleRate = 44100, channelCount = 2) {
   const doc = createDocument({
     name: 'song.wav',
-    sampleRate: 44100,
-    channels: [new Float32Array(8), new Float32Array(8)],
+    sampleRate,
+    channels: Array.from({ length: channelCount }, () => new Float32Array(8)),
   });
   useAppStore.getState().addDocument(doc);
   return doc;
@@ -61,5 +61,30 @@ describe('ConvertDialog', () => {
   it('Apply is disabled when no document is active', () => {
     render(<ConvertDialog mode="sampleRate" onClose={() => {}} />);
     expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+  });
+
+  describe('seeding from the active document (Task F8)', () => {
+    it('seeds the rate select from the active doc sample rate', () => {
+      seedActiveDoc(48000);
+      render(<ConvertDialog mode="sampleRate" onClose={() => {}} />);
+      expect((screen.getByTestId('convert-rate') as HTMLSelectElement).value).toBe('48000');
+    });
+
+    it('seeds the channels select from the active doc channel count', () => {
+      seedActiveDoc(44100, 1);
+      render(<ConvertDialog mode="channels" onClose={() => {}} />);
+      expect((screen.getByTestId('convert-channels') as HTMLSelectElement).value).toBe('1');
+    });
+
+    it('falls back to 44100 when the doc rate is not an offered option', () => {
+      seedActiveDoc(32000);
+      render(<ConvertDialog mode="sampleRate" onClose={() => {}} />);
+      expect((screen.getByTestId('convert-rate') as HTMLSelectElement).value).toBe('44100');
+    });
+
+    it('falls back to the defaults (44100/stereo) with no document open', () => {
+      render(<ConvertDialog mode="sampleRate" onClose={() => {}} />);
+      expect((screen.getByTestId('convert-rate') as HTMLSelectElement).value).toBe('44100');
+    });
   });
 });

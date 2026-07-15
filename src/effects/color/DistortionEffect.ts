@@ -42,8 +42,15 @@ export const distortionEffect: EffectDefinition = {
       }
       if (mode === 'foldback') {
         let v = x * drive;
-        while (v > 1 || v < -1) v = v > 1 ? 2 - v : -2 - v;
-        return v;
+        // Non-finite input (NaN/±Infinity) can't fold — emit silence rather
+        // than propagate it (Task F8). The fold loop is also capped: for huge
+        // finite v, float rounding makes `2 - v === -v`, so the loop would
+        // never converge; after 64 reflections we clamp whatever remains.
+        if (!Number.isFinite(v)) return 0;
+        for (let iter = 0; (v > 1 || v < -1) && iter < 64; iter++) {
+          v = v > 1 ? 2 - v : -2 - v;
+        }
+        return v > 1 ? 1 : v < -1 ? -1 : v;
       }
       // tanh (default)
       return Math.tanh(x * drive) / tanhDenom;

@@ -30,6 +30,11 @@ interface SpectroDone {
   width: number;
   height: number;
 }
+interface SpectroError {
+  type: 'error';
+  id: number;
+  message: string;
+}
 
 /** 256-entry inferno-like colour LUT (RGB triples): black -> deep purple ->
  * magenta -> orange -> near-white, built once by interpolating control stops. */
@@ -119,6 +124,7 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [magsData, setMagsData] = useState<MagsData | null>(null);
+  const [computeFailed, setComputeFailed] = useState(false);
 
   const zoom = useAppStore((s) => s.zoom);
   const selection = useAppStore((s) => s.selection);
@@ -144,13 +150,22 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     return () => ro.disconnect();
   }, []);
 
-  // One worker per mount; stale replies (older request ids) are ignored.
+  // One worker per mount; stale replies (older request ids) are ignored. A
+  // compute failure (Task F8) is warned to the console and flagged so a small
+  // overlay says so; the next successful compute clears the flag.
   useEffect(() => {
     const worker = createSpectrogramWorker();
     workerRef.current = worker;
     worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data as SpectroDone;
-      if (!msg || msg.type !== 'done' || msg.id !== reqIdRef.current) return;
+      const msg = e.data as SpectroDone | SpectroError;
+      if (!msg || msg.id !== reqIdRef.current) return;
+      if (msg.type === 'error') {
+        console.warn(`Spectrogram compute failed: ${msg.message}`);
+        setComputeFailed(true);
+        return;
+      }
+      if (msg.type !== 'done') return;
+      setComputeFailed(false);
       setMagsData({ mags: msg.mags, width: msg.width, height: msg.height });
     };
     return () => {
@@ -290,6 +305,14 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
           onPointerUp={gestures.onPointerUp}
           onPointerCancel={gestures.onPointerUp}
         />
+        {computeFailed && (
+          <div
+            data-testid="spectrogram-error"
+            className="pointer-events-none absolute left-2 top-2 rounded bg-[#1a1a1e]/80 px-1.5 py-0.5 text-xs text-[#8b8b92]"
+          >
+            Spectrogram failed
+          </div>
+        )}
       </div>
     </div>
   );

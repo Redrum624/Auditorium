@@ -15,6 +15,7 @@ import { decodeWav } from '../audio/wavCodec';
 import * as undoHistory from './undoHistory';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
+import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 
 // Decode is mocked so file-service tests never touch OfflineAudioContext/lamejs.
 // The MP3/FLAC encoders are mocked to spy on the format-faithful save routing
@@ -400,5 +401,37 @@ describe('closeDocumentFlow', () => {
 
     expect(api.writeFile).not.toHaveBeenCalled();
     expect(useAppStore.getState().documents).toHaveLength(1);
+  });
+
+  describe('noise profile lifetime (Task F8)', () => {
+    afterEach(() => clearNoiseProfile());
+
+    it('clears the noise profile when its source document closes', async () => {
+      installApi();
+      const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+      captureNoiseProfile(); // captures from the active (only) doc
+      expect(getNoiseProfile()?.docId).toBe(doc.id);
+
+      await closeDocumentFlow(doc.id);
+
+      expect(getNoiseProfile()).toBeNull();
+    });
+
+    it('keeps the noise profile when a DIFFERENT document closes', async () => {
+      installApi();
+      const source = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+      captureNoiseProfile();
+      const other = createDocument({
+        name: 'other',
+        sampleRate: 44100,
+        channels: [new Float32Array(10)],
+        filePath: 'D:\\b.wav',
+      });
+      useAppStore.getState().addDocument(other);
+
+      await closeDocumentFlow(other.id);
+
+      expect(getNoiseProfile()?.docId).toBe(source.id);
+    });
   });
 });

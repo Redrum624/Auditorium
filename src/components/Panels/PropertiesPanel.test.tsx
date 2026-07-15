@@ -188,6 +188,24 @@ describe('PropertiesPanel (multitrack view)', () => {
     expect(gainInput.value).toBe('3'); // draft reverted
   });
 
+  it('Escape reverts the draft to the committed value and blurs without committing (Task F8)', () => {
+    const clip = seedSelectedClip(3);
+
+    render(<PropertiesPanel />);
+    const gainInput = screen.getByLabelText(/gain/i) as HTMLInputElement;
+    gainInput.focus();
+    fireEvent.change(gainInput, { target: { value: '-12' } });
+    fireEvent.keyDown(gainInput, { key: 'Escape' });
+
+    expect(clipGain(clip.id)).toBe(3); // store untouched
+    expect(gainInput.value).toBe('3'); // draft reverted
+    expect(document.activeElement).not.toBe(gainInput); // blurred
+
+    // A later blur must not resurrect the abandoned draft as a commit.
+    fireEvent.blur(gainInput);
+    expect(clipGain(clip.id)).toBe(3);
+  });
+
   it('shows the clamped value in the input after committing an out-of-range gain', () => {
     const clip = seedSelectedClip();
 

@@ -7,6 +7,7 @@ import { getPyramids } from '../../services/peaksCache';
 import type { Clip } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { sampleToPixel } from '../Editor/waveformRender';
+import { getClipWaveformCanvas, zoomBucket } from './clipWaveformCache';
 
 const HANDLE_PX = 6;
 const DRAG_THRESHOLD = 4;
@@ -78,8 +79,12 @@ export default function ClipView({
   const widthPx = Math.max(2, clip.lengthSample / zoom.samplesPerPixel);
   const canvasH = Math.max(1, laneHeight - 22);
 
-  // Mini waveform. The effect deps ((clip geometry, width, height)) act as the
-  // cache: it only redraws when the clip slice or its on-screen size changes.
+  // Mini waveform (Task F8): the peak envelope is drawn ONCE into an offscreen
+  // canvas cached by (clipId, lengthSample, zoom bucket, channels identity,
+  // height) — see clipWaveformCache.ts — and merely BLITTED here on every
+  // render. Within a zoom bucket (a 2x samplesPerPixel range) the cached bitmap
+  // is blit-scaled to the current width; an edit to the source document
+  // replaces doc.channels (identity change), which invalidates the entry.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -94,21 +99,47 @@ export default function ClipView({
     ctx.clearRect(0, 0, w, canvasH);
     if (!doc || doc.channels.length === 0) return;
 
-    const channel = doc.channels[0];
-    const pyramid = getPyramids(doc)[0];
-    const docStart = clip.offsetSample;
-    const docEnd = docStart + docSpan(clip.lengthSample, doc.sampleRate, sessionRate);
-    const { min, max } = getPeaksForRange(pyramid, channel, docStart, docEnd, w);
+    const off = getClipWaveformCanvas(
+      {
+        clipId: clip.id,
+        lengthSample: clip.lengthSample,
+        bucket: zoomBucket(zoom.samplesPerPixel),
+        height: canvasH,
+        channels: doc.channels,
+      },
+      w,
+      (offCanvas) => {
+        const octx = offCanvas.getContext('2d');
+        if (!octx) return; // jsdom / no backend
+        const ow = offCanvas.width;
+        const oh = offCanvas.height;
+        const channel = doc.channels[0];
+        const pyramid = getPyramids(doc)[0];
+        const docStart = clip.offsetSample;
+        const docEnd = docStart + docSpan(clip.lengthSample, doc.sampleRate, sessionRate);
+        const { min, max } = getPeaksForRange(pyramid, channel, docStart, docEnd, ow);
 
-    ctx.fillStyle = 'rgba(38,198,218,0.85)';
-    const mid = canvasH / 2;
-    const amp = (canvasH / 2) * 0.9;
-    for (let x = 0; x < w; x++) {
-      const yTop = mid - max[x] * amp;
-      const yBot = mid - min[x] * amp;
-      ctx.fillRect(x, yTop, 1, Math.max(1, yBot - yTop));
-    }
-  }, [doc, clip.offsetSample, clip.lengthSample, widthPx, canvasH, sessionRate]);
+        octx.fillStyle = 'rgba(38,198,218,0.85)';
+        const mid = oh / 2;
+        const amp = (oh / 2) * 0.9;
+        for (let x = 0; x < ow; x++) {
+          const yTop = mid - max[x] * amp;
+          const yBot = mid - min[x] * amp;
+          octx.fillRect(x, yTop, 1, Math.max(1, yBot - yTop));
+        }
+      }
+    );
+    ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, w, canvasH);
+  }, [
+    doc,
+    clip.id,
+    clip.offsetSample,
+    clip.lengthSample,
+    widthPx,
+    canvasH,
+    sessionRate,
+    zoom.samplesPerPixel,
+  ]);
 
   const maxTrimEnd = (): number => {
     if (!doc) return Number.POSITIVE_INFINITY;

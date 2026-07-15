@@ -24,6 +24,15 @@ const electronAPI = {
     return () => ipcRenderer.removeListener('window:maximized-changed', listener);
   },
 
+  // Native close guard (Task F8): main asks over 'app:close-requested'; the
+  // renderer answers with its dirty-document count over 'app:close-response'.
+  onCloseRequested: (cb) => {
+    const listener = () => cb();
+    ipcRenderer.on('app:close-requested', listener);
+    return () => ipcRenderer.removeListener('app:close-requested', listener);
+  },
+  respondCloseRequest: (dirtyCount) => ipcRenderer.send('app:close-response', dirtyCount),
+
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
   pathBasename: (p) => p.split(/[\\/]/).pop()

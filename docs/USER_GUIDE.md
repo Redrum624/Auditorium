@@ -36,6 +36,11 @@ Every open document is listed with its name (a trailing `*` means unsaved
 changes), duration, and sample rate. Click a row to make it active; hover and
 click the ✕ to close it (you'll be prompted to save if it's dirty).
 
+Closing the **app window** with unsaved changes is guarded natively: the app
+counts your dirty documents and shows a confirmation ("N file(s) have unsaved
+changes.") with **Quit** (discard everything and exit) and **Cancel** (keep
+the app open). With no unsaved changes the window closes immediately.
+
 ## Editing
 
 ### Selection
@@ -84,7 +89,8 @@ The right sidebar is a three-tab strip; **History** is the default tab.
   plus the selection's start/end/length while one exists. In the multitrack
   view it shows the selected clip's source document, track, start/offset/
   length, and an editable **Gain (dB)** field (−24..+24, committed on
-  `Enter` or when the field loses focus).
+  `Enter` or when the field loses focus; `Escape` reverts your typing to the
+  committed value).
 
 ## Effects
 
@@ -120,7 +126,9 @@ Noise Reduction needs a noise *print* before it can run:
    cleaned (the capture and the apply regions can differ).
 
 The captured print is in-memory only: it is not saved with the document and
-is cleared when you capture a new one.
+is cleared when you capture a new one — or when you close the document it was
+captured from (the print belongs to audio that no longer exists). The Noise
+Reduction dialog notices a capture or clear immediately, even while open.
 
 ## Views
 
@@ -132,7 +140,9 @@ Switch between views from the transport bar's view toggle or **View** menu:
   −90..0 dB range, inferno-style color map, rendered at full device-pixel
   resolution) of the mono mix of the active document, computed off the main
   thread. Toggle to a linear axis via **View → Spectral: Toggle Log/Linear
-  Scale**.
+  Scale**. If a spectrogram computation fails, a small "Spectrogram failed"
+  note appears in the view (details go to the developer console); the next
+  successful recompute — e.g. after zooming — clears it.
 
 Both views share the same selection, cursor, playhead, and marker overlays,
 and the same zoom/scroll gestures.

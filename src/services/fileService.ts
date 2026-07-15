@@ -6,6 +6,7 @@ import { encodeMp3 } from '../audio/mp3Encoder';
 import { encodeWav, type WavBitDepth } from '../audio/wavCodec';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { useAppStore } from '../stores/appStore';
+import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { invalidatePeaks } from './peaksCache';
 import { clearHistory } from './undoHistory';
 
@@ -248,8 +249,10 @@ export function newDocument(opts: {
 /**
  * Close a document, prompting to save first when it has unsaved changes. Shared
  * by the File > Close command and the Files panel's ✕ button. Guarantees the
- * per-document undo history and peak cache are freed and playback is stopped, so
- * closing never leaks memory or leaves the engine pointed at a gone document.
+ * per-document undo history and peak cache are freed, playback is stopped, and
+ * a noise profile captured FROM this document is cleared (Task F8 — the print
+ * belongs to audio that no longer exists), so closing never leaks memory or
+ * leaves the engine pointed at a gone document.
  */
 export async function closeDocumentFlow(docId: string): Promise<void> {
   const doc = findDoc(docId);
@@ -276,5 +279,6 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   store().closeDocument(docId);
   clearHistory(docId);
   invalidatePeaks(docId);
+  if (getNoiseProfile()?.docId === docId) clearNoiseProfile();
   playbackEngine.stop();
 }

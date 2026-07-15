@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { docLength } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
@@ -73,11 +73,12 @@ function DocumentProperties() {
 
 /**
  * Clip gain editor with a local draft string, committed (parsed + clamped)
- * on blur/Enter only. Binding value={clip.gainDb} directly and committing in
- * onChange snapped intermediate keystrokes — typing '1.' became '1' because
- * Number('1.') round-tripped through the store re-render (review minor).
- * The parent keys this component by clip id so the draft resets when the
- * selection moves to a different clip.
+ * on blur/Enter only; Escape reverts the draft to the committed value and
+ * blurs without committing (Task F8). Binding value={clip.gainDb} directly and
+ * committing in onChange snapped intermediate keystrokes — typing '1.' became
+ * '1' because Number('1.') round-tripped through the store re-render (review
+ * minor). The parent keys this component by clip id so the draft resets when
+ * the selection moves to a different clip.
  */
 function GainInput({
   gainDb,
@@ -87,8 +88,13 @@ function GainInput({
   onCommit: (gainDb: number) => void;
 }) {
   const [draft, setDraft] = useState(String(gainDb));
+  // True only across the synchronous blur dispatched by Escape's .blur() call,
+  // so that blur's commit is skipped (the stale draft closure would otherwise
+  // commit the exact value Escape just abandoned).
+  const escapingRef = useRef(false);
 
   const commit = () => {
+    if (escapingRef.current) return;
     const n = Number(draft);
     if (draft.trim() !== '' && Number.isFinite(n)) {
       const clamped = Math.min(GAIN_MAX, Math.max(GAIN_MIN, n));
@@ -114,6 +120,12 @@ function GainInput({
       onBlur={commit}
       onKeyDown={(e) => {
         if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') {
+          setDraft(String(gainDb)); // revert to the committed value
+          escapingRef.current = true;
+          e.currentTarget.blur(); // dispatches blur synchronously
+          escapingRef.current = false;
+        }
       }}
       className="w-16 rounded border border-[#3a3a42] bg-[#1a1a1e] px-1 py-0.5 text-right text-[#d4d4d8] outline-none focus:border-[#26c6da]"
     />

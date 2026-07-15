@@ -1,12 +1,18 @@
-const { app, BrowserWindow, session } = require('electron');
+const { app, BrowserWindow, dialog, ipcMain, session } = require('electron');
 const path = require('node:path');
 const { registerIpc } = require('./ipc.cjs');
+const { createCloseGuard } = require('./closeGuard.cjs');
 const { setAppPaths } = require('./writePathPolicy.cjs');
 const { isMediaAllowed } = require('./permissionPolicy.cjs');
 
 app.setName('audition_app');
 
 let mainWindow = null;
+
+// Native close guard (Task F8): the window's 'close' event is intercepted, the
+// renderer reports its dirty-document count over IPC, and main shows a native
+// Quit/Cancel message box when the count is non-zero. See closeGuard.cjs.
+const closeGuard = createCloseGuard({ ipcMain, dialog });
 
 function createWindow() {
   const win = new BrowserWindow({
@@ -47,6 +53,8 @@ function createWindow() {
       event.preventDefault();
     }
   });
+
+  win.on('close', (event) => closeGuard.handleClose(win, event));
 
   mainWindow = win;
   return win;

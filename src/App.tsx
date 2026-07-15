@@ -84,18 +84,19 @@ export default function App() {
     }
   }, []);
 
-  // Best-effort guard against losing unsaved edits on window close/reload.
-  // Full native close interception is a v2 item (see task brief).
-  const hasDirty = documents.some((d) => d.dirty);
+  // Native close guard (Task F8, replaces the old beforeunload handler): main
+  // intercepts the window's 'close' event and asks how many documents are
+  // dirty; we answer with the count read at REQUEST time (getState, not a
+  // stale render closure). Main then closes silently (0) or shows a native
+  // Quit/Cancel box. See electron/closeGuard.cjs.
   useEffect(() => {
-    if (!hasDirty) return;
-    const onBeforeUnload = (e: BeforeUnloadEvent) => {
-      e.preventDefault();
-      e.returnValue = '';
-    };
-    window.addEventListener('beforeunload', onBeforeUnload);
-    return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [hasDirty]);
+    const api = window.electronAPI;
+    if (!api?.onCloseRequested) return; // jsdom / older preload
+    return api.onCloseRequested(() => {
+      const dirty = useAppStore.getState().documents.filter((d) => d.dirty).length;
+      api.respondCloseRequest(dirty);
+    });
+  }, []);
 
   return (
     <div

@@ -4,7 +4,7 @@ import { playbackEngine } from '../../audio/PlaybackEngine';
 import { getEffect } from '../../effects/EffectRegistry';
 import type { EffectParamDef, EffectParamValue } from '../../effects/types';
 import { runEffectOnSelection } from '../../services/effectRunner';
-import { getNoiseProfile } from '../../services/noiseProfile';
+import { getNoiseProfile, useNoiseProfileVersion } from '../../services/noiseProfile';
 import { useAppStore } from '../../stores/appStore';
 import DialogShell from './DialogShell';
 
@@ -46,6 +46,9 @@ export default function EffectDialog({
 
   // Noise Reduction needs a captured noise print, delivered to the worker via the
   // `extra` side channel; without one, Apply is disabled and a hint is shown.
+  // Subscribing to the profile version (Task F8) makes the gate REACTIVE: a
+  // capture or clear while the dialog is open re-renders it immediately.
+  useNoiseProfileVersion();
   const isNoiseReduction = def?.id === 'noise-reduction';
   const hasNoiseProfile = getNoiseProfile() !== null;
   const missingNoiseProfile = isNoiseReduction && !hasNoiseProfile;

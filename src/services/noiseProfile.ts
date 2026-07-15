@@ -5,13 +5,21 @@
  * spectrum (fftSize 2048, hop 512) across all frames of that region. The result
  * lives in a module-level slot consumed later by the Noise Reduction effect
  * (surfaced to the DSP worker as `extra.spectra`) and cleared explicitly.
+ *
+ * Task F8: the profile records the docId it was captured from so it can be
+ * cleared when that document closes (see fileService.closeDocumentFlow), and a
+ * version counter + `useNoiseProfileVersion()` (useSyncExternalStore) let React
+ * consumers (EffectDialog's hasNoiseProfile) re-render on capture/clear.
  */
 
+import { useSyncExternalStore } from 'react';
 import { cloneRegion, docLength } from '../audio/AudioDocument';
 import { stft } from '../dsp/stft';
 import { useAppStore } from '../stores/appStore';
 
 export interface NoiseProfile {
+  /** Id of the document the profile was captured from (Task F8). */
+  docId: string;
   docSampleRate: number;
   /** Average magnitude spectrum per channel, length fftSize/2+1. */
   spectra: Float32Array[];
@@ -21,6 +29,24 @@ const FFT_SIZE = 2048;
 const HOP = 512;
 
 let profile: NoiseProfile | null = null;
+let version = 0;
+const listeners = new Set<() => void>();
+
+function bumpVersion(): void {
+  version++;
+  for (const listener of listeners) listener();
+}
+
+function subscribe(cb: () => void): () => void {
+  listeners.add(cb);
+  return () => {
+    listeners.delete(cb);
+  };
+}
+
+function getSnapshot(): number {
+  return version;
+}
 
 export function captureNoiseProfile(): void {
   const state = useAppStore.getState();
@@ -44,7 +70,8 @@ export function captureNoiseProfile(): void {
     return avg;
   });
 
-  profile = { docSampleRate: doc.sampleRate, spectra };
+  profile = { docId: doc.id, docSampleRate: doc.sampleRate, spectra };
+  bumpVersion();
 }
 
 export function getNoiseProfile(): NoiseProfile | null {
@@ -52,5 +79,17 @@ export function getNoiseProfile(): NoiseProfile | null {
 }
 
 export function clearNoiseProfile(): void {
+  if (profile === null) return; // nothing to clear — don't wake subscribers
   profile = null;
+  bumpVersion();
+}
+
+/** Monotonic counter bumped on every capture/clear; non-reactive read. */
+export function getNoiseProfileVersion(): number {
+  return version;
+}
+
+/** Re-renders the caller whenever the noise profile is captured or cleared. */
+export function useNoiseProfileVersion(): number {
+  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 }
