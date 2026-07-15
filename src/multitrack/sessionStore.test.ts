@@ -45,6 +45,20 @@ describe('newSession', () => {
       expect(ids[i]).toBe(ids[i - 1] + 1);
     }
   });
+
+  it('clears the mini-waveform cache (F9) — a fresh session invalidates every clip bitmap', () => {
+    clipWaveformCache._resetClipWaveformCache();
+    clipWaveformCache.getClipWaveformCanvas(
+      { clipId: 'clip-stale', lengthSample: 100, bucket: 0, height: 40, offsetSample: 0, channels: [] },
+      10,
+      () => {}
+    );
+    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(1);
+
+    useSessionStore.getState().newSession(44100);
+
+    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(0);
+  });
 });
 
 describe('addTrack / removeTrack / renameTrack', () => {
@@ -91,6 +105,31 @@ describe('addTrack / removeTrack / renameTrack', () => {
     store.removeTrack(trackA);
 
     expect(useSessionStore.getState().selectedClipId).toBe(clip.id);
+  });
+
+  it('removeTrack purges every removed clip from the mini-waveform cache (F9)', () => {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const clipA = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 100 });
+    const clipB = createClip({ documentId: 'doc-1', startSample: 500, offsetSample: 0, lengthSample: 100 });
+    store.addClip(trackId, clipA);
+    store.addClip(trackId, clipB);
+    clipWaveformCache._resetClipWaveformCache();
+    clipWaveformCache.getClipWaveformCanvas(
+      { clipId: clipA.id, lengthSample: 100, bucket: 0, height: 40, offsetSample: 0, channels: [] },
+      10,
+      () => {}
+    );
+    clipWaveformCache.getClipWaveformCanvas(
+      { clipId: clipB.id, lengthSample: 100, bucket: 0, height: 40, offsetSample: 0, channels: [] },
+      10,
+      () => {}
+    );
+    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(2);
+
+    store.removeTrack(trackId);
+
+    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(0);
   });
 
   it('renameTrack preserves the full name without truncation', () => {

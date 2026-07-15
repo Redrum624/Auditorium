@@ -211,6 +211,13 @@ export function createMultitrackRecorder(deps: MultitrackRecorderDeps): Multitra
 
 /** Shared singleton wired to the real engine, player, and stores. */
 export const multitrackRecorder: MultitrackRecorder = createMultitrackRecorder({
+  // This engine is a second, independent RecordingEngine instance — RecordDialog
+  // (src/components/Dialogs/RecordDialog.tsx) owns its own for single-document
+  // recording. The two never contend for the mic today only because RecordDialog
+  // is rendered modally (the multitrack Record button and its dialog can't both
+  // be driving input at once). If RecordDialog ever becomes non-modal, this
+  // engine and that one need a shared mic-ownership gate to prevent both from
+  // opening the input device concurrently.
   engine: new RecordingEngine(),
   player: multitrackPlayer,
   getSession: () => useSessionStore.getState().session,

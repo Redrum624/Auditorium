@@ -1,7 +1,10 @@
 import { create } from 'zustand';
 import type { Clip, Session, Track } from './session';
 import { createTrack } from './session';
-import { purgeClip as purgeClipWaveform } from '../components/Multitrack/clipWaveformCache';
+import {
+  purgeClip as purgeClipWaveform,
+  clearClipWaveformCache,
+} from '../components/Multitrack/clipWaveformCache';
 
 export interface SessionState {
   session: Session;
@@ -110,6 +113,10 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       mtPlayState: 'stopped',
       mtPlayheadSample: 0,
     });
+    // A fresh session discards every track/clip that could own a cached
+    // mini-waveform bitmap (F9) — clear the whole cache rather than track
+    // which entries belonged to the discarded session.
+    clearClipWaveformCache();
   },
 
   addTrack() {
@@ -120,9 +127,13 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   removeTrack(id) {
+    // Captured inside the set() updater below so the post-set purge (F9) knows
+    // exactly which clips died with the track, without a second state lookup.
+    let removedClipIds: string[] = [];
     set((s) => {
       const removed = s.session.tracks.find((t) => t.id === id);
       if (!removed) return s;
+      removedClipIds = removed.clips.map((c) => c.id);
       const tracks = s.session.tracks.filter((t) => t.id !== id);
       const selectedClipId =
         s.selectedClipId !== null && removed.clips.some((c) => c.id === s.selectedClipId)
@@ -130,6 +141,9 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
           : s.selectedClipId;
       return { session: { ...s.session, tracks }, selectedClipId };
     });
+    // Each removed clip's mini-waveform bitmap (and the doc channels reference
+    // it holds) must not sit in the cache until unrelated churn evicts it (F9).
+    for (const clipId of removedClipIds) purgeClipWaveform(clipId);
   },
 
   renameTrack(id, name) {

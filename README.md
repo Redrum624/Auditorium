@@ -79,6 +79,8 @@ use `npm run dev`.
 - Recording device selection, channel count, and sample rate in the record dialog.
 - **Export**: WAV at 16-bit, 24-bit, or 32-bit float; FLAC (16-bit, lossless); MP3 at 128/192/256/320 kbps (CBR).
 - **Format-faithful Save**: Save re-encodes in place into the source container — WAV (32-bit float), MP3 (192 kbps), or FLAC (verbatim, at the source bit depth). The Properties panel reports the source file's bit depth ("16-bit source → 32-bit float").
+- **Spectral log/linear toggle**: the Spectral Frequency Display's frequency axis switches between logarithmic (default) and linear scaling.
+- **Multitrack punch-in recording**: arm one or more tracks with their **R** toggle, position the multitrack cursor, then press **Record** — the take lands as a clip on every track that was armed when it started.
 - **Sessions**: save/open multitrack sessions as `.audm`, and mix down a whole session to a new stereo document.
 - Keyboard shortcuts throughout — see [`KEYBOARD_SHORTCUTS.md`](KEYBOARD_SHORTCUTS.md) for the full table.
 

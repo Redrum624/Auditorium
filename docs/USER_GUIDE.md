@@ -12,9 +12,13 @@ differs from Adobe Audition, see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 **File → Open…** (`Ctrl+O`) opens a native file picker. Supported formats:
 `.wav`, `.mp3`, `.ogg`, `.flac`, `.m4a`, `.aac`, `.webm`. WAV files are decoded
 exactly, at their original sample rate. Every other format is decoded through
-the browser's Web Audio API and always lands at **48000 Hz** regardless of its
-source rate (see Known Limitations) and is truncated to two channels if it has
-more.
+the browser's Web Audio API; before decoding, Auditorium sniffs the container
+header (MP3 frame sync, FLAC STREAMINFO, OGG Vorbis/Opus, MP4/M4A) to recover
+the source sample rate, so the import keeps its **native rate** whenever that
+header is readable — only genuinely unsniffable/exotic containers fall back to
+**48000 Hz** (see Known Limitations). Audio with more than two channels is
+**downmixed to stereo**, not truncated: the extra channels are blended into
+both L and R at −3 dB rather than discarded.
 
 ### Creating a new file
 
@@ -82,11 +86,15 @@ The right sidebar is a three-tab strip; **History** is the default tab.
 - **Markers** — the active document's marker list (see *Markers* above).
 - **Properties** — read-only facts about what you're working on. In the
   waveform/spectral views it shows the active document's name, path (`—` for
-  never-saved documents), sample rate, channels (Mono/Stereo), bit depth
-  (always `32-bit float (internal)` — all audio is held in memory as 32-bit
-  float; the original file's bit depth isn't tracked after import, see Known
-  Limitations), duration, sample count, and whether it has unsaved changes —
-  plus the selection's start/end/length while one exists. In the multitrack
+  never-saved documents), sample rate, channels (Mono/Stereo), bit depth,
+  duration, sample count, and whether it has unsaved changes — plus the
+  selection's start/end/length while one exists. All audio is held in memory
+  as 32-bit float, but for WAV/FLAC sources the original file's bit depth is
+  recorded on import and shown alongside it, e.g. `16-bit source → 32-bit
+  float`; MP3/OGG sources (which carry no meaningful source depth) show
+  `32-bit float (internal)`. Save writes the document back at its source
+  format and depth for `.wav`, `.mp3`, and `.flac` (see *Format-faithful
+  Save* in the README). In the multitrack
   view it shows the selected clip's source document, track, start/offset/
   length, and an editable **Gain (dB)** field (−24..+24, committed on
   `Enter` or when the field loses focus; `Escape` reverts your typing to the

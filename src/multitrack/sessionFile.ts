@@ -3,6 +3,7 @@ import { decodeWav, encodeWav } from '../audio/wavCodec';
 import { useAppStore } from '../stores/appStore';
 import type { Session } from './session';
 import { useSessionStore } from './sessionStore';
+import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
 /** .audm format version. Bump when the on-disk shape changes incompatibly. */
 const FORMAT_VERSION = 1;
@@ -245,6 +246,9 @@ export async function openSessionViaDialog(): Promise<void> {
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
   });
+  // Every clip in the just-replaced session is either new or a stale id from a
+  // previous session — either way no bitmap in the cache belongs to it (F9).
+  clearClipWaveformCache();
   useAppStore.getState().setView('multitrack');
 
   if (result.droppedClipCount > 0) {
