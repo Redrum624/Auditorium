@@ -14,6 +14,12 @@ import { mixdownSession as renderMixdown } from '../multitrack/mixdown';
 import { runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { encodeExport, openFilePath, type ExportOptions } from './fileService';
+import { convertSampleRate } from './documentTools';
+import { copySelection, pasteAtCursor } from './editOps';
+import { getClipboard } from './clipboard';
+import { getSpectralScale, toggleSpectralScale, type SpectralScale } from './spectralScale';
+import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
+import { multitrackRecorder } from '../multitrack/multitrackRecord';
 
 export interface TestStateSummary {
   docCount: number;
@@ -46,6 +52,33 @@ export interface TestApi {
     startSample: number
   ): { clipId: string; lengthSample: number; startSample: number } | null;
   mixdownSession(): { name: string; length: number; sampleRate: number; rms: number } | null;
+  // --- v1.1 flows -------------------------------------------------------------
+  pasteResampleFlow(): {
+    copiedLen: number;
+    clipRate: number;
+    destRate: number;
+    beforeLen: number;
+    afterLen: number;
+    insertedLen: number;
+  };
+  getSpectralScale(): SpectralScale;
+  toggleSpectralScale(): SpectralScale;
+  multitrackLiveParamCheck(): Promise<{
+    started: boolean;
+    stillPlaying: boolean;
+    advanced: boolean;
+    pos1: number;
+    pos2: number;
+    volumeGain: number | null;
+  }>;
+  punchInRecord(seconds: number): Promise<{
+    docCreated: boolean;
+    docName: string | null;
+    clipStart: number | null;
+    clipLength: number | null;
+    cursor: number;
+    armedTrackName: string | null;
+  }>;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -223,6 +256,109 @@ export function installTestHooks(): void {
       }
       const rms = count > 0 ? Math.sqrt(sum / count) : 0;
       return { name: doc.name, length: doc.channels[0].length, sampleRate, rms };
+    },
+
+    // --- v1.1 flows -------------------------------------------------------
+
+    // Paste with automatic sample-rate conversion (Task F1). Duplicates the
+    // active (full-rate) document, halves the copy to 22050 Hz via the real
+    // convertSampleRate transform, copies a fixed region from it, then pastes
+    // into the original 44100 Hz document — pasteAtCursor resamples the 22050 Hz
+    // clipboard up to the doc rate, so the inserted length is ~2x what was
+    // copied. Returns the lengths/rates so the harness can assert the doubling.
+    pasteResampleFlow: () => {
+      const dest = activeDoc();
+      if (!dest) throw new Error('pasteResampleFlow: no active document');
+      const destRate = dest.sampleRate;
+      const destId = dest.id;
+      // Duplicate the active tone as a new document, then halve its rate.
+      const copy = createDocument({
+        name: 'Resample Source',
+        sampleRate: destRate,
+        channels: dest.channels.map((c) => c.slice()),
+      });
+      useAppStore.getState().addDocument(copy); // becomes active
+      convertSampleRate(copy.id, Math.round(destRate / 2)); // -> 22050 Hz
+      // Copy a fixed region from the (now half-rate) document.
+      useAppStore.getState().setSelection({ start: 0, end: 10000 });
+      copySelection();
+      const clip = getClipboard();
+      const copiedLen = clip?.channels[0]?.length ?? 0;
+      const clipRate = clip?.sampleRate ?? 0;
+      // Paste into the original full-rate document at its start.
+      useAppStore.getState().setActiveDocument(destId);
+      const before = activeDoc();
+      const beforeLen = before ? docLength(before) : 0;
+      useAppStore.getState().setSelection(null);
+      useAppStore.getState().setCursor(0);
+      pasteAtCursor();
+      const after = activeDoc();
+      const afterLen = after ? docLength(after) : 0;
+      return { copiedLen, clipRate, destRate, beforeLen, afterLen, insertedLen: afterLen - beforeLen };
+    },
+
+    getSpectralScale: () => getSpectralScale(),
+
+    toggleSpectralScale: () => {
+      toggleSpectralScale();
+      return getSpectralScale();
+    },
+
+    // Live multitrack parameters (Task F5): play the current session, change a
+    // track's volume via the session store, and retro-apply it to the RUNNING
+    // graph (as the MultitrackView subscription does) — no source rebuild. The
+    // harness asserts the playhead keeps advancing and the volume gain ramped.
+    multitrackLiveParamCheck: async () => {
+      const store = useSessionStore.getState();
+      const session = store.session;
+      const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+      multitrackPlayer.play(0, session, docs);
+      const started = multitrackPlayer.state === 'playing';
+      const pos1 = multitrackPlayer.getPositionSample();
+      const track0 = session.tracks[0];
+      if (track0) {
+        store.setTrackParam(track0.id, { volumeDb: -12 });
+        multitrackPlayer.applyTrackParams(useSessionStore.getState().session.tracks);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      const pos2 = multitrackPlayer.getPositionSample();
+      const stillPlaying = multitrackPlayer.state === 'playing';
+      const volumeGain =
+        track0 ? multitrackPlayer.liveTrackNodes(track0.id)?.volumeGain.gain.value ?? null : null;
+      multitrackPlayer.stop();
+      return { started, stillPlaying, advanced: pos2 > pos1, pos1, pos2, volumeGain };
+    },
+
+    // Multitrack punch-in recording (Task F6): arm the first track, set the
+    // punch-in cursor, then run the real multitrackRecorder against the fake mic
+    // (launch flags). On stop it creates a 'Track Recording N' document and drops
+    // a clip onto the armed track at the cursor; the harness asserts both exist.
+    punchInRecord: async (seconds) => {
+      const store = useSessionStore.getState();
+      const track0 = store.session.tracks[0];
+      if (!track0) throw new Error('punchInRecord: no track to arm');
+      store.setTrackParam(track0.id, { armed: true });
+      const cursor = 22050;
+      store.setMtCursor(cursor);
+      await multitrackRecorder.start();
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+      await multitrackRecorder.stop();
+      const docs = useAppStore.getState().documents;
+      const recDoc = docs.find((d) => /^Track Recording /.test(d.name)) ?? null;
+      const armedTrack = useSessionStore
+        .getState()
+        .session.tracks.find((t) => t.id === track0.id);
+      const clip = recDoc
+        ? armedTrack?.clips.find((c) => c.documentId === recDoc.id)
+        : undefined;
+      return {
+        docCreated: recDoc !== null,
+        docName: recDoc?.name ?? null,
+        clipStart: clip?.startSample ?? null,
+        clipLength: clip?.lengthSample ?? null,
+        cursor,
+        armedTrackName: armedTrack?.name ?? null,
+      };
     },
   };
 

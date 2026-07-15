@@ -18,8 +18,12 @@
  * at the BOTTOM of the canvas (low frequencies at the bottom, like Audition);
  * no draw-order change was needed for the log scale.
  * The value stored is magnitude in dB. The grid is column-major:
- * `mags[col*height + row]`. `hop` is chosen so columns are ~1 sample-window per
- * pixel for the visible span, clamped to [128, 8192].
+ * `mags[col*height + row]`. Column `col` windows samples starting at
+ * `startSample + floor(col*span/width)` (fractional stride), so the `width`
+ * columns always spread across exactly [startSample, endSample] — the paint
+ * step maps x->column linearly and relies on this. (An earlier integer `hop`
+ * clamped to >=128 strode past `endSample` whenever span/width < 128, painting
+ * the right side of the raster black and misaligning it with the ruler.)
  */
 
 import { fft } from '../dsp/fft';
@@ -43,12 +47,6 @@ export interface SpectrogramParams {
   scale?: 'log' | 'linear';
 }
 
-export function spectrogramHop(startSample: number, endSample: number, width: number): number {
-  const span = Math.max(1, endSample - startSample);
-  const raw = Math.floor(span / Math.max(1, width));
-  return Math.min(8192, Math.max(128, raw));
-}
-
 export function computeSpectrogramColumns(p: SpectrogramParams): Float32Array {
   const { channel, startSample, endSample, width, height, fftSize, sampleRate } = p;
   const scale = p.scale ?? 'log';
@@ -56,7 +54,7 @@ export function computeSpectrogramColumns(p: SpectrogramParams): Float32Array {
   const halfBins = fftSize / 2; // highest bin index (Nyquist)
   const binWidth = sampleRate / fftSize;
   const fnyq = sampleRate / 2;
-  const hop = spectrogramHop(startSample, endSample, width);
+  const span = Math.max(1, endSample - startSample);
   const out = new Float32Array(Math.max(0, width * height));
   if (width <= 0 || height <= 0) return out;
 
@@ -77,7 +75,8 @@ export function computeSpectrogramColumns(p: SpectrogramParams): Float32Array {
   const im = new Float32Array(fftSize);
 
   for (let col = 0; col < width; col++) {
-    const start = startSample + col * hop;
+    // Fractional stride: columns spread across exactly [startSample, endSample].
+    const start = startSample + Math.floor((col * span) / width);
     im.fill(0);
     for (let i = 0; i < fftSize; i++) {
       const idx = start + i;

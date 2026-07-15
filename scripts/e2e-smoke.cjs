@@ -26,6 +26,48 @@ function assert(cond, msg) {
   console.log(`  ok: ${msg}`);
 }
 
+// Waits until the given canvas has drawn at least two differing pixels (i.e. it
+// is not a blank/uniform fill). Shared by the waveform and spectrogram checks.
+async function waitNonUniform(page, testid, timeout = 15000) {
+  await page.waitForFunction(
+    (id) => {
+      const c = document.querySelector(`[data-testid="${id}"]`);
+      if (!(c instanceof HTMLCanvasElement)) return false;
+      const ctx = c.getContext('2d');
+      if (!ctx || c.width === 0 || c.height === 0) return false;
+      const data = ctx.getImageData(0, 0, c.width, c.height).data;
+      let first = null;
+      for (let i = 0; i < data.length; i += 4 * 97) {
+        const px = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+        if (first === null) first = px;
+        else if (px !== first) return true;
+      }
+      return false;
+    },
+    testid,
+    { timeout }
+  );
+}
+
+// FNV-1a hash of the spectrogram canvas raster, so a repaint after a scale
+// toggle (Task F4) can be detected by a changed hash.
+async function spectroHash(page) {
+  return page.evaluate(() => {
+    const c = document.querySelector('[data-testid="spectrogram-canvas"]');
+    if (!(c instanceof HTMLCanvasElement)) return -1;
+    const ctx = c.getContext('2d');
+    if (!ctx || !c.width || !c.height) return -1;
+    const data = ctx.getImageData(0, 0, c.width, c.height).data;
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < data.length; i += 4 * 53) {
+      h = Math.imul(h ^ data[i], 16777619) >>> 0;
+      h = Math.imul(h ^ data[i + 1], 16777619) >>> 0;
+      h = Math.imul(h ^ data[i + 2], 16777619) >>> 0;
+    }
+    return h >>> 0;
+  });
+}
+
 async function main() {
   // Preconditions ----------------------------------------------------------
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
@@ -206,6 +248,41 @@ async function main() {
     );
     assert(true, 'spectrogram canvas contains varied pixels (a spectral image)');
 
+    // 4b-2) Toggle the spectral scale (log <-> linear): the worker recomputes at
+    // the new frequency mapping and the canvas repaints (Task F4). Assert the
+    // default is log, the toggle flips to linear, the raster changes, and the
+    // image stays non-uniform after the recompute.
+    console.log('Toggling the spectral scale (log -> linear) and checking recompute...');
+    const scaleBefore = await page.evaluate(() => window.__test.getSpectralScale());
+    const hashBefore = await spectroHash(page);
+    const scaleAfter = await page.evaluate(() => window.__test.toggleSpectralScale());
+    console.log(`  spectral scale: ${scaleBefore} -> ${scaleAfter}`);
+    assert(scaleBefore === 'log', `spectral scale defaults to log (got ${scaleBefore})`);
+    assert(scaleAfter === 'linear', `toggle flips log -> linear (got ${scaleAfter})`);
+    await page.waitForFunction(
+      (prev) => {
+        const c = document.querySelector('[data-testid="spectrogram-canvas"]');
+        if (!(c instanceof HTMLCanvasElement)) return false;
+        const ctx = c.getContext('2d');
+        if (!ctx || !c.width || !c.height) return false;
+        const data = ctx.getImageData(0, 0, c.width, c.height).data;
+        let h = 2166136261 >>> 0;
+        for (let i = 0; i < data.length; i += 4 * 53) {
+          h = Math.imul(h ^ data[i], 16777619) >>> 0;
+          h = Math.imul(h ^ data[i + 1], 16777619) >>> 0;
+          h = Math.imul(h ^ data[i + 2], 16777619) >>> 0;
+        }
+        return (h >>> 0) !== prev;
+      },
+      hashBefore,
+      { timeout: 15000 }
+    );
+    const hashAfter = await spectroHash(page);
+    console.log(`  spectrogram raster hash: ${hashBefore} -> ${hashAfter}`);
+    assert(hashAfter !== hashBefore, 'spectrogram raster changed after the scale toggle (repaint happened)');
+    await waitNonUniform(page, 'spectrogram-canvas');
+    assert(true, 'spectrogram still non-uniform after recompute on the linear scale');
+
     // 4c) Capture a noise print, run Noise Reduction, assert RMS drops ------
     console.log('Capturing a noise print and applying Noise Reduction...');
     await page.evaluate(() => window.__test.setView('waveform'));
@@ -271,6 +348,52 @@ async function main() {
     const mixSummary = await page.evaluate(() => window.__test.getStateSummary());
     assert(mixSummary.length === expectedMixLen, `active doc is the mixdown (length ${mixSummary.length})`);
     assert(mixSummary.channels === 2, `mixdown is stereo (got ${mixSummary.channels})`);
+
+    // 6b) Live multitrack parameters (Task F5): play the session, change a track
+    // volume, retro-apply it to the running graph, confirm the playhead keeps
+    // advancing (no rebuild, no stall).
+    console.log('Playing the session and changing a track volume live...');
+    await page.evaluate(() => window.__test.setView('multitrack'));
+    // Let App.tsx's view-change stopAll() effect settle before we start playback.
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    const live = await page.evaluate(() => window.__test.multitrackLiveParamCheck());
+    console.log(`  live params: ${JSON.stringify(live)}`);
+    assert(live.started === true, 'multitrack playback started');
+    assert(live.stillPlaying === true, 'playback still playing after the live volume change');
+    assert(live.advanced === true, `playhead advanced while playing (${live.pos1} -> ${live.pos2})`);
+    assert(
+      live.volumeGain !== null && live.volumeGain < 0.6,
+      `track volume gain ramped down toward -12 dB (~0.25); got ${live.volumeGain}`
+    );
+
+    // 6c) Punch-in recording (Task F6): arm a track, set the cursor, record from
+    // the fake mic, and confirm a 'Track Recording N' doc + a clip at the cursor.
+    console.log('Punch-in recording onto an armed track (fake mic)...');
+    const punch = await page.evaluate(() => window.__test.punchInRecord(1.5));
+    console.log(`  punch-in: ${JSON.stringify(punch)}`);
+    assert(punch.docCreated === true, 'a Track Recording document was created');
+    assert(
+      /^Track Recording \d+$/.test(punch.docName || ''),
+      `recording doc named 'Track Recording N' (got ${punch.docName})`
+    );
+    assert(punch.clipStart === 22050, `clip landed at the punch-in cursor 22050 (got ${punch.clipStart})`);
+    assert((punch.clipLength || 0) > 0, `recorded clip has a positive length (got ${punch.clipLength})`);
+
+    // 6d) Paste with automatic sample-rate conversion (Task F1): copy a region
+    // from a 22050 Hz document and paste it into the 44100 Hz tone; the pasted
+    // length must be ~2x the copied length after the up-conversion.
+    console.log('Paste with automatic sample-rate conversion (22050 -> 44100)...');
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const paste = await page.evaluate(() => window.__test.pasteResampleFlow());
+    console.log(`  paste-resample: ${JSON.stringify(paste)}`);
+    assert(paste.destRate === 44100, `destination doc is 44100 Hz (got ${paste.destRate})`);
+    assert(paste.clipRate === 22050, `clipboard captured at 22050 Hz (got ${paste.clipRate})`);
+    assert(paste.copiedLen === 10000, `copied 10000 samples from the 22050 Hz doc (got ${paste.copiedLen})`);
+    assert(
+      Math.abs(paste.insertedLen - 2 * paste.copiedLen) <= 2,
+      `pasted length ~= 2x copied (${paste.insertedLen} vs 2*${paste.copiedLen})`
+    );
 
     // 7) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });

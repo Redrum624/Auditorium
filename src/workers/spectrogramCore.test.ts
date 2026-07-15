@@ -99,6 +99,34 @@ describe('computeSpectrogramColumns', () => {
     expect(Array.from(withDefault)).toEqual(Array.from(withExplicitLog));
   });
 
+  it('spreads its columns across exactly [startSample, endSample] even when the span is narrow', () => {
+    // Regression (v1.1 release smoke): with span/width < 128 the old hop clamp
+    // (min 128) made the columns stride PAST endSample, so the right part of the
+    // raster windowed silence beyond the doc and painted black — horizontally
+    // compressing the image and misaligning it with the ruler/overlays. Columns
+    // must always cover the requested span and nothing more: here every column
+    // of a full-span sine must be loud, including the last one.
+    const channel = new Float32Array(8000);
+    for (let n = 0; n < channel.length; n++) channel[n] = Math.sin((2 * Math.PI * 1000 * n) / SR);
+    const width = 100; // span/width = 80 < 128 -> the old clamp overshot the span
+    const height = 64;
+    const mags = computeSpectrogramColumns({
+      channel,
+      startSample: 0,
+      endSample: channel.length,
+      width,
+      height,
+      fftSize: FFT,
+      sampleRate: SR,
+      scale: 'linear',
+    });
+    for (let col = 0; col < width; col++) {
+      let maxDb = -Infinity;
+      for (let row = 0; row < height; row++) maxDb = Math.max(maxDb, mags[col * height + row]);
+      expect(maxDb).toBeGreaterThan(-30);
+    }
+  });
+
   it('locates a constant sine at the expected log-mapped row (scale: log, Task F4)', () => {
     // 440 Hz sine @ 44100, height 256: argmax row ~= round((h-1)*log(440/20)/log(22050/20)).
     // Row 0 = 20 Hz (the LOWEST frequency), consistent with the linear scale's

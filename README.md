@@ -4,6 +4,10 @@
      then docs/screenshot.png is a placeholder. -->
 ![Auditorium](docs/screenshot.png)
 
+![Spectral view](docs/screenshot-spectral.png)
+
+*Spectral frequency display (log scale)*
+
 Auditorium is a free, Audition-class desktop audio editor for Windows, built on
 Electron and React. It does destructive waveform editing and spectral-frequency
 editing, ships 22 built-in effects, spectral noise reduction, microphone
