@@ -25,6 +25,13 @@ const DEFAULT_TIMEOUT_MS = 2000;
 function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   /** @type {{ win: any, timer: any } | null} */
   let pending = null;
+  // True from the moment the Quit/Cancel dialog is shown until it resolves.
+  // Without this latch, a second 'close' event fired while the native dialog
+  // is up (pending is already null — its round trip finished) would start a
+  // brand-new round trip: a second 'app:close-requested' send and a second
+  // timer, potentially destroying the window out from under the still-open
+  // dialog, or stacking a second dialog once the renderer replies again.
+  let dialogOpen = false;
 
   ipcMain.on('app:close-response', async (_event, dirtyCount) => {
     if (!pending) return; // stray/duplicate reply
@@ -37,24 +44,31 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
       win.destroy();
       return;
     }
-    const result = await dialog.showMessageBox(win, {
-      type: 'warning',
-      title: 'Unsaved changes',
-      message: `${n} file(s) have unsaved changes.`,
-      buttons: ['Quit', 'Cancel'],
-      defaultId: 1,
-      cancelId: 1,
-    });
-    if (result.response === 0) {
-      win.destroy(); // Quit — discard unsaved changes
+    dialogOpen = true;
+    try {
+      const result = await dialog.showMessageBox(win, {
+        type: 'warning',
+        title: 'Unsaved changes',
+        message: `${n} file(s) have unsaved changes.`,
+        buttons: ['Quit', 'Cancel'],
+        defaultId: 1,
+        cancelId: 1,
+      });
+      if (result.response === 0) {
+        win.destroy(); // Quit — discard unsaved changes
+      }
+      // Cancel: do nothing; the prevented close already kept the window alive.
+    } finally {
+      dialogOpen = false;
     }
-    // Cancel: do nothing; the prevented close already kept the window alive.
   });
 
   /** Wire to `win.on('close', (event) => guard.handleClose(win, event))`. */
   function handleClose(win, event) {
+    // Always prevent an uncontrolled close, even when a round trip or the
+    // dialog is already in flight — only destroy() (below) closes the window.
     event.preventDefault();
-    if (pending) return; // a round trip is already in flight
+    if (pending || dialogOpen) return; // a round trip or dialog is already in flight
     const timer = setTimeout(() => {
       // Renderer unresponsive — close anyway rather than trap the user.
       pending = null;

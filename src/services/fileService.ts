@@ -9,6 +9,7 @@ import { useAppStore } from '../stores/appStore';
 import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { invalidatePeaks } from './peaksCache';
 import { clearHistory } from './undoHistory';
+import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac';
@@ -280,5 +281,9 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   clearHistory(docId);
   invalidatePeaks(docId);
   if (getNoiseProfile()?.docId === docId) clearNoiseProfile();
+  // A closing doc can invalidate many clips' cached mini-waveforms at once
+  // (every clip sourced from it); clearing the whole cache is cheap and
+  // avoids leaking the doc's channels arrays via a retained cache entry (F9).
+  clearClipWaveformCache();
   playbackEngine.stop();
 }

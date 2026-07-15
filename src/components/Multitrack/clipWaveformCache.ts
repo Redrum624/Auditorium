@@ -89,9 +89,30 @@ export function getClipWaveformCanvas(
   return canvas;
 }
 
+/**
+ * Purge the cached bitmap for one clip (Task F9). Call this wherever a clip
+ * dies individually — its stale offscreen canvas (and the source-doc channels
+ * reference it holds) would otherwise sit in the cache, retained, until
+ * LRU-evicted by unrelated clip churn.
+ */
+export function purgeClip(clipId: string): void {
+  cache.delete(clipId);
+}
+
+/**
+ * Empty the entire cache (Task F9). Closing a document can invalidate many
+ * clips at once (every clip sourced from that doc) — rather than track which
+ * cache entries belong to a closing doc, clear the whole (small, mini)
+ * waveform cache. Worst case is a redraw of the still-open clips currently on
+ * screen, which is cheap.
+ */
+export function clearClipWaveformCache(): void {
+  cache.clear();
+}
+
 /** Test-only: empty the cache. */
 export function _resetClipWaveformCache(): void {
-  cache.clear();
+  clearClipWaveformCache();
 }
 
 /** Test-only: current number of cached entries. */

@@ -29,6 +29,30 @@ const BLOCK_SIZE = 4096;
 // Uint8Array and returns the 16 raw digest bytes (little-endian words), which is
 // exactly the byte order FLAC stores. Verified in tests against RFC 1321 vectors.
 
+/**
+ * Write RFC 1321's 64-bit little-endian message-bit-length field into
+ * `msg[paddedLen-8 .. paddedLen-1]`: the low-order 32-bit word first
+ * (paddedLen-8..-5), then the high-order word (paddedLen-4..-1). A
+ * >=512 MiB message (>= 2^32 bits) needs the high word — writing only the
+ * low word silently wraps the length mod 2^32 and produces a wrong digest.
+ * `byteLength` is the ORIGINAL (unpadded) message length in bytes; kept
+ * separate from `msg` so the length-encoding math can be exercised against a
+ * synthetic multi-gigabyte length without allocating a multi-gigabyte buffer.
+ */
+function writeMd5Length(msg: Uint8Array, paddedLen: number, byteLength: number): void {
+  const bits = byteLength * 8;
+  const lo = bits >>> 0; // ToUint32: exactly `bits mod 2^32`
+  const hi = Math.floor(bits / 0x100000000);
+  msg[paddedLen - 8] = lo & 0xff;
+  msg[paddedLen - 7] = (lo >>> 8) & 0xff;
+  msg[paddedLen - 6] = (lo >>> 16) & 0xff;
+  msg[paddedLen - 5] = (lo >>> 24) & 0xff;
+  msg[paddedLen - 4] = hi & 0xff;
+  msg[paddedLen - 3] = (hi >>> 8) & 0xff;
+  msg[paddedLen - 2] = (hi >>> 16) & 0xff;
+  msg[paddedLen - 1] = (hi >>> 24) & 0xff;
+}
+
 function md5(bytes: Uint8Array): Uint8Array {
   const add32 = (a: number, b: number): number => (a + b) & 0xffffffff;
   const rol = (n: number, c: number): number => (n << c) | (n >>> (32 - c));
@@ -46,18 +70,12 @@ function md5(bytes: Uint8Array): Uint8Array {
     cmn(c ^ (b | ~d), a, b, x, s, t);
 
   // Build the padded message as 32-bit little-endian words.
-  const originalLenBits = bytes.length * 8;
   const withOne = bytes.length + 1;
   const paddedLen = (((withOne + 8 + 63) >> 6) << 6); // multiple of 64
   const msg = new Uint8Array(paddedLen);
   msg.set(bytes);
   msg[bytes.length] = 0x80;
-  // 64-bit little-endian bit length (low 32 bits; high 32 bits stay 0 for our
-  // stream sizes — a FLAC document under 512 MB never overflows 32 bits here).
-  msg[paddedLen - 8] = originalLenBits & 0xff;
-  msg[paddedLen - 7] = (originalLenBits >>> 8) & 0xff;
-  msg[paddedLen - 6] = (originalLenBits >>> 16) & 0xff;
-  msg[paddedLen - 5] = (originalLenBits >>> 24) & 0xff;
+  writeMd5Length(msg, paddedLen, bytes.length);
 
   let a = 1732584193;
   let b = -271733879;
@@ -414,4 +432,4 @@ export function encodeFlac(
 
 /** Test-only exports so the structural tests can validate the primitives
  * against independent reimplementations. Not part of the public encoder API. */
-export const __flacInternal = { md5, crc8, crc16, quantize };
+export const __flacInternal = { md5, crc8, crc16, quantize, writeMd5Length };

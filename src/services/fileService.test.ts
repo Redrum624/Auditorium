@@ -16,6 +16,7 @@ import * as undoHistory from './undoHistory';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
+import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 
 // Decode is mocked so file-service tests never touch OfflineAudioContext/lamejs.
 // The MP3/FLAC encoders are mocked to spy on the format-faithful save routing
@@ -357,6 +358,16 @@ describe('closeDocumentFlow', () => {
     expect(clearSpy).toHaveBeenCalledWith(doc.id);
     expect(peaksSpy).toHaveBeenCalledWith(doc.id);
     expect(stopSpy).toHaveBeenCalled();
+  });
+
+  it('clears the mini-waveform cache on close (Task F9 — a closing doc may invalidate many clips)', async () => {
+    installApi();
+    const cacheSpy = jest.spyOn(clipWaveformCache, 'clearClipWaveformCache');
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+
+    await closeDocumentFlow(doc.id);
+
+    expect(cacheSpy).toHaveBeenCalledTimes(1);
   });
 
   it('does not close when the dirty prompt is cancelled', async () => {

@@ -121,4 +121,47 @@ describe('closeGuard (Task F8 native close guard)', () => {
     expect(win.destroyed).toBe(true);
     expect(dialog.showMessageBox).not.toHaveBeenCalled();
   });
+
+  test('a second close event while the Quit/Cancel dialog is open still prevents the close but does not start a second round trip', async () => {
+    jest.useFakeTimers();
+    try {
+      let resolveDialog;
+      const dialogPromise = new Promise((resolve) => {
+        resolveDialog = resolve;
+      });
+      const ipcMain = fakeIpcMain();
+      const dialog = { showMessageBox: jest.fn(() => dialogPromise) };
+      const guard = createCloseGuard({ ipcMain, dialog, timeoutMs: 2000 });
+      const win = fakeWin();
+      const event = fakeEvent();
+
+      guard.handleClose(win, event);
+      const responded = ipcMain.emit('app:close-response', 2); // dialog now "open" (unresolved)
+
+      const secondEvent = fakeEvent();
+      guard.handleClose(win, secondEvent);
+      expect(secondEvent.prevented).toBe(true); // window must never close uncontrolled
+      expect(win.webContents.send).toHaveBeenCalledTimes(1); // exactly one round trip
+      expect(dialog.showMessageBox).toHaveBeenCalledTimes(1); // exactly one dialog
+
+      // A rogue second timer (from a second round trip) would fire here and
+      // destroy the window out from under the still-open dialog.
+      jest.advanceTimersByTime(2001);
+      expect(win.destroyed).toBe(false);
+
+      resolveDialog({ response: 1 }); // Cancel
+      await responded;
+      expect(win.destroyed).toBe(false);
+
+      // The guard must still work normally afterwards.
+      const thirdEvent = fakeEvent();
+      guard.handleClose(win, thirdEvent);
+      expect(thirdEvent.prevented).toBe(true);
+      expect(win.webContents.send).toHaveBeenCalledTimes(2);
+      await ipcMain.emit('app:close-response', 0);
+      expect(win.destroyed).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

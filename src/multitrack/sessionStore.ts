@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Clip, Session, Track } from './session';
 import { createTrack } from './session';
+import { purgeClip as purgeClipWaveform } from '../components/Multitrack/clipWaveformCache';
 
 export interface SessionState {
   session: Session;
@@ -227,6 +228,9 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       const selectedClipId = s.selectedClipId === clipId ? null : s.selectedClipId;
       return { session: { ...s.session, tracks }, selectedClipId };
     });
+    // A dead clip's mini-waveform bitmap (and the doc channels reference it
+    // holds) must not sit in the cache until unrelated churn evicts it (F9).
+    purgeClipWaveform(clipId);
   },
 
   setClipGain(clipId, gainDb) {

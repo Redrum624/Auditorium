@@ -1,5 +1,6 @@
 import { createClip } from './session';
 import { useSessionStore } from './sessionStore';
+import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 
 function findClip(clipId: string) {
   for (const track of useSessionStore.getState().session.tracks) {
@@ -338,6 +339,18 @@ describe('removeClip', () => {
     store.removeClip(clip.id);
 
     expect(useSessionStore.getState().selectedClipId).toBeNull();
+  });
+
+  it('purges the removed clip from the mini-waveform cache (Task F9)', () => {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const clip = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 100 });
+    store.addClip(trackId, clip);
+    const purgeSpy = jest.spyOn(clipWaveformCache, 'purgeClip');
+
+    store.removeClip(clip.id);
+
+    expect(purgeSpy).toHaveBeenCalledWith(clip.id);
   });
 });
 

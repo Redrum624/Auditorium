@@ -1,6 +1,8 @@
 import {
   getClipWaveformCanvas,
   zoomBucket,
+  purgeClip,
+  clearClipWaveformCache,
   _resetClipWaveformCache,
   _clipWaveformCacheSize,
   type ClipWaveformKey,
@@ -129,5 +131,42 @@ describe('getClipWaveformCanvas', () => {
     const drawOne = jest.fn();
     getClipWaveformCanvas(key({ clipId: 'clip-1' }), 10, drawOne);
     expect(drawOne).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('purgeClip', () => {
+  it('deletes only the matching clip id entry (a live clip dying individually)', () => {
+    getClipWaveformCanvas(key({ clipId: 'clip-1' }), 10, () => {});
+    getClipWaveformCanvas(key({ clipId: 'clip-2' }), 10, () => {});
+    expect(_clipWaveformCacheSize()).toBe(2);
+
+    purgeClip('clip-1');
+
+    expect(_clipWaveformCacheSize()).toBe(1);
+    const draw = jest.fn();
+    getClipWaveformCanvas(key({ clipId: 'clip-1' }), 10, draw);
+    expect(draw).toHaveBeenCalledTimes(1); // re-drawn: its bitmap was purged
+
+    const hit = jest.fn();
+    getClipWaveformCanvas(key({ clipId: 'clip-2' }), 10, hit);
+    expect(hit).not.toHaveBeenCalled(); // untouched: still cached
+  });
+
+  it('is a no-op for an unknown clip id', () => {
+    getClipWaveformCanvas(key({ clipId: 'clip-1' }), 10, () => {});
+    purgeClip('does-not-exist');
+    expect(_clipWaveformCacheSize()).toBe(1);
+  });
+});
+
+describe('clearClipWaveformCache', () => {
+  it('empties every entry (a doc close that may invalidate many clips)', () => {
+    getClipWaveformCanvas(key({ clipId: 'clip-1' }), 10, () => {});
+    getClipWaveformCanvas(key({ clipId: 'clip-2' }), 10, () => {});
+    expect(_clipWaveformCacheSize()).toBe(2);
+
+    clearClipWaveformCache();
+
+    expect(_clipWaveformCacheSize()).toBe(0);
   });
 });

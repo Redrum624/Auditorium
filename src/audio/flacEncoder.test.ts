@@ -190,6 +190,33 @@ describe('md5 (vendored, verified against RFC 1321 vectors)', () => {
 });
 
 // -----------------------------------------------------------------------------
+// MD5 64-bit length field — a >512 MiB buffer is impractical to allocate in a
+// test, so the length-encoding step is factored into writeMd5Length and
+// exercised directly against a synthetic length instead.
+// -----------------------------------------------------------------------------
+
+describe('writeMd5Length (RFC 1321 64-bit little-endian bit-length field)', () => {
+  it('splits a length whose bit-count exceeds 2^32 into low/high 32-bit words', () => {
+    // byteLength = 2^30 => bits = 2^33 => low word 0, high word 2.
+    const paddedLen = 64;
+    const msg = new Uint8Array(paddedLen);
+    __flacInternal.writeMd5Length(msg, paddedLen, 2 ** 30);
+
+    expect(Array.from(msg.slice(paddedLen - 8, paddedLen - 4))).toEqual([0, 0, 0, 0]); // low word
+    expect(Array.from(msg.slice(paddedLen - 4, paddedLen))).toEqual([2, 0, 0, 0]); // high word
+  });
+
+  it('writes a zero high word for sub-512MiB lengths (existing small-message behavior)', () => {
+    // byteLength = 3 ('abc') => bits = 24.
+    const paddedLen = 64;
+    const msg = new Uint8Array(paddedLen);
+    __flacInternal.writeMd5Length(msg, paddedLen, 3);
+
+    expect(Array.from(msg.slice(paddedLen - 8, paddedLen))).toEqual([24, 0, 0, 0, 0, 0, 0, 0]);
+  });
+});
+
+// -----------------------------------------------------------------------------
 // CRCs
 // -----------------------------------------------------------------------------
 
