@@ -20,6 +20,9 @@ export interface ClipWaveformKey {
   lengthSample: number;
   bucket: number;
   height: number;
+  /** Offset into the source doc. Defensive: today every offset change also
+   *  changes lengthSample (trim), but a future slip edit must not blit stale pixels. */
+  offsetSample: number;
   /** Source-document channels; compared by identity so an edit that replaces
    *  the channel arrays invalidates the cached waveform. */
   channels: Float32Array[];
@@ -42,6 +45,7 @@ function keysMatch(entry: Entry, key: ClipWaveformKey): boolean {
     entry.lengthSample === key.lengthSample &&
     entry.bucket === key.bucket &&
     entry.height === key.height &&
+    entry.offsetSample === key.offsetSample &&
     entry.channels === key.channels
   );
 }

@@ -17,6 +17,7 @@ function key(overrides: Partial<ClipWaveformKey> = {}): ClipWaveformKey {
     lengthSample: 44100,
     bucket: 7,
     height: 40,
+    offsetSample: 0,
     channels: SHARED_CHANNELS,
     ...overrides,
   };

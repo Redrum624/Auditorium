@@ -105,6 +105,7 @@ export default function ClipView({
         lengthSample: clip.lengthSample,
         bucket: zoomBucket(zoom.samplesPerPixel),
         height: canvasH,
+        offsetSample: clip.offsetSample,
         channels: doc.channels,
       },
       w,
