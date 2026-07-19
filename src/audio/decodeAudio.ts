@@ -1,4 +1,4 @@
-import { decodeWav } from './wavCodec';
+import { decodeWav, type WavMarker } from './wavCodec';
 import { sniffSampleRate } from './sniffSampleRate';
 
 export interface DecodedAudio {
@@ -7,6 +7,9 @@ export interface DecodedAudio {
   /** Original file bit depth when the decoder knows it (WAV only — the Web Audio
    * path yields Float32 with no source-depth info). Undefined otherwise. */
   sourceBitDepth?: number;
+  /** Markers read from the WAV's cue/adtl chunks (WAV only). Undefined for
+   * everything else — no other supported container has a marker chunk. */
+  markers?: WavMarker[];
 }
 
 // -3 dB (1/√2) fold gain applied to the surround/extra channels when downmixing.
@@ -62,8 +65,8 @@ export function downmixToStereo(channels: Float32Array[]): Float32Array[] {
  */
 export async function decodeArrayBuffer(buf: ArrayBuffer, hintedName: string): Promise<DecodedAudio> {
   if (/\.wav$/i.test(hintedName)) {
-    const { channels, sampleRate, bitDepth } = decodeWav(buf);
-    return { channels, sampleRate, sourceBitDepth: bitDepth };
+    const { channels, sampleRate, bitDepth, markers } = decodeWav(buf);
+    return { channels, sampleRate, sourceBitDepth: bitDepth, markers };
   }
 
   if (typeof OfflineAudioContext === 'undefined') {

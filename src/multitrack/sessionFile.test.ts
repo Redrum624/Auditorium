@@ -1,5 +1,5 @@
 import { createDocument, nextId, type AudioDocument } from '../audio/AudioDocument';
-import { useAppStore, makeInitialState } from '../stores/appStore';
+import { useAppStore, makeInitialState, type Marker } from '../stores/appStore';
 import { createClip, createTrack, type Session } from './session';
 import { openSessionViaDialog, parseSessionFile, saveSessionViaDialog, serializeSession } from './sessionFile';
 import { useSessionStore } from './sessionStore';
@@ -56,7 +56,7 @@ describe('serializeSession', () => {
     const { json } = serializeSession(session, [referenced, unreferenced]);
     const parsed = JSON.parse(json);
 
-    expect(parsed.formatVersion).toBe(1);
+    expect(parsed.formatVersion).toBe(2);
     expect(parsed.documents).toHaveLength(1);
     expect(parsed.documents[0].id).toBe(referenced.id);
     expect(parsed.documents[0].wavBase64).toEqual(expect.any(String));
@@ -191,12 +191,130 @@ describe('serializeSession -> parseSessionFile round trip', () => {
 
   it('throws for an unsupported formatVersion', () => {
     const bad = JSON.stringify({
-      formatVersion: 2,
+      formatVersion: 3,
       session: { name: 'x', sampleRate: 44100, tracks: [] },
       documents: [],
     });
 
     expect(() => parseSessionFile(bad)).toThrow(/formatVersion|version/i);
+  });
+});
+
+describe('markers (.audm v2)', () => {
+  it('serializeSession embeds markers only for docs referenced by a clip', () => {
+    const referenced = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const unreferenced = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: referenced.id, startSample: 0, offsetSample: 0, lengthSample: 100 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const markersByDoc: Record<string, Marker[]> = {
+      [referenced.id]: [{ id: 'm-1', name: 'Hook', positionSample: 5 }],
+      [unreferenced.id]: [{ id: 'm-2', name: 'Ignored', positionSample: 1 }],
+    };
+
+    const { json } = serializeSession(session, [referenced, unreferenced], markersByDoc);
+    const parsed = JSON.parse(json);
+
+    expect(parsed.formatVersion).toBe(2);
+    expect(parsed.markers).toEqual({
+      [referenced.id]: [{ id: 'm-1', name: 'Hook', positionSample: 5 }],
+    });
+  });
+
+  it('serializeSession omits the markers key entirely when no referenced doc has any', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { json } = serializeSession(session, [doc], {});
+    const parsed = JSON.parse(json);
+
+    expect(parsed.markers).toBeUndefined();
+  });
+
+  it('round-trips marker names/positions through parseSessionFile, remapped to the fresh doc id, with fresh marker ids', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const markersByDoc: Record<string, Marker[]> = {
+      [doc.id]: [
+        { id: 'm-1', name: 'Verse', positionSample: 50 },
+        { id: 'm-2', name: 'Intro', positionSample: 10 },
+      ],
+    };
+
+    const { json } = serializeSession(session, [doc], markersByDoc);
+    const { documents, markers } = parseSessionFile(json);
+
+    const newDocId = documents[0].id;
+    expect(newDocId).not.toBe(doc.id); // fresh doc id, per existing contract
+    expect(markers[newDocId].map((m) => m.name)).toEqual(['Intro', 'Verse']); // sorted by position
+    expect(markers[newDocId].map((m) => m.positionSample)).toEqual([10, 50]);
+    const ids = markers[newDocId].map((m) => m.id);
+    expect(new Set(ids).size).toBe(2); // fresh, distinct ids
+    expect(ids.every((id) => /^marker-\d+$/.test(id))).toBe(true);
+  });
+
+  it('parseSessionFile accepts a v1 file (no markers key) and returns an empty markers map', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const v1File = {
+      formatVersion: 1,
+      session: JSON.parse(serializeSession(session, [doc]).json).session,
+      documents: JSON.parse(serializeSession(session, [doc]).json).documents,
+      // no `markers` key at all — a genuine v1 file
+    };
+
+    const { markers } = parseSessionFile(JSON.stringify(v1File));
+
+    expect(markers).toEqual({});
+  });
+
+  it('openSessionViaDialog seeds the appStore markers for the recreated document', async () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const markersByDoc: Record<string, Marker[]> = {
+      [doc.id]: [{ id: 'm-1', name: 'Drop', positionSample: 3 }],
+    };
+    const { json } = serializeSession(session, [doc], markersByDoc);
+    const bytes = new TextEncoder().encode(json);
+    installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\session.audm']),
+      readFile: jest.fn(async () => bytes.buffer),
+    });
+
+    await openSessionViaDialog();
+
+    const appState = useAppStore.getState();
+    const newDocId = appState.documents[0].id;
+    expect(appState.markers[newDocId]).toEqual([
+      expect.objectContaining({ name: 'Drop', positionSample: 3 }),
+    ]);
+  });
+
+  it('saveSessionViaDialog includes the current appStore markers for referenced docs', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(doc);
+    useAppStore.getState().addMarker(doc.id, { id: 'm-1', name: 'Peak', positionSample: 2 });
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+
+    await saveSessionViaDialog();
+
+    const [, data] = api.writeFile.mock.calls[0];
+    const parsed = JSON.parse(new TextDecoder().decode(data as ArrayBuffer));
+    expect(parsed.markers).toEqual({
+      [doc.id]: [{ id: 'm-1', name: 'Peak', positionSample: 2 }],
+    });
   });
 });
 
@@ -219,7 +337,7 @@ describe('saveSessionViaDialog', () => {
     expect(path).toBe('D:\\out\\session.audm');
     const text = new TextDecoder().decode(data as ArrayBuffer);
     const parsed = JSON.parse(text);
-    expect(parsed.formatVersion).toBe(1);
+    expect(parsed.formatVersion).toBe(2);
     expect(parsed.documents).toHaveLength(1);
     expect(parsed.session.tracks[0].clips[0].lengthSample).toBe(10);
   });

@@ -1,4 +1,4 @@
-import { encodeWav, decodeWav, WavBitDepth } from './wavCodec';
+import { encodeWav, decodeWav, WavBitDepth, WavMarker } from './wavCodec';
 
 function sineWave(freq: number, seconds: number, sampleRate: number): Float32Array {
   const length = Math.round(seconds * sampleRate);
@@ -195,6 +195,362 @@ describe('decodeWav with extra chunks before data', () => {
     expectChannelsClose(decoded.channels, [samples], toleranceFor(16));
   });
 });
+
+describe('encodeWav with no markers is byte-identical to the pre-marker encoder', () => {
+  it('produces the same bytes whether markers is omitted, undefined, or an empty array', () => {
+    const stereo = [sineWave(440, DURATION, SAMPLE_RATE), sineWave(220, DURATION, SAMPLE_RATE)];
+    const noArg = encodeWav(stereo, SAMPLE_RATE, 24);
+    const undefinedArg = encodeWav(stereo, SAMPLE_RATE, 24, undefined);
+    const emptyArg = encodeWav(stereo, SAMPLE_RATE, 24, []);
+    expect(new Uint8Array(undefinedArg)).toEqual(new Uint8Array(noArg));
+    expect(new Uint8Array(emptyArg)).toEqual(new Uint8Array(noArg));
+  });
+
+  it('total length stays exactly 44 + dataSize (no cue/LIST chunks appended)', () => {
+    const mono = [sineWave(440, DURATION, SAMPLE_RATE)];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, []);
+    expect(buf.byteLength).toBe(44 + mono[0].length * 2);
+  });
+});
+
+describe('encodeWav / decodeWav markers round trip', () => {
+  const markers: WavMarker[] = [
+    { name: 'Intro', positionSample: 100 },
+    { name: 'Verse 1', positionSample: 4410 },
+    { name: 'Chorus', positionSample: 8820 },
+  ];
+
+  it('round-trips marker names and positions, sorted by position', () => {
+    const mono = [sineWave(440, DURATION * 3, SAMPLE_RATE)];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, markers);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([
+      { name: 'Intro', positionSample: 100 },
+      { name: 'Verse 1', positionSample: 4410 },
+      { name: 'Chorus', positionSample: 8820 },
+    ]);
+  });
+
+  it('returns markers already sorted even when encoded out of position order', () => {
+    const mono = [sineWave(440, DURATION * 3, SAMPLE_RATE)];
+    const outOfOrder: WavMarker[] = [
+      { name: 'Chorus', positionSample: 8820 },
+      { name: 'Intro', positionSample: 100 },
+      { name: 'Verse 1', positionSample: 4410 },
+    ];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, outOfOrder);
+    const decoded = decodeWav(buf);
+    expect(decoded.channels).toBeDefined(); // sanity: still a valid decode
+    expect(decoded.markers.map((m) => m.positionSample)).toEqual([100, 4410, 8820]);
+  });
+
+  it('returns an empty markers array when the WAV has none', () => {
+    const mono = [sineWave(440, DURATION, SAMPLE_RATE)];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([]);
+  });
+
+  it('RIFF size accounts for the appended cue + LIST/adtl chunks', () => {
+    const mono = [sineWave(440, DURATION, SAMPLE_RATE)];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, [{ name: 'M', positionSample: 5 }]);
+    const view = new DataView(buf);
+    expect(view.getUint32(4, true)).toBe(buf.byteLength - 8);
+  });
+});
+
+describe('encodeWav cue/LIST chunk structural layout (Audacity/Audition-compatible)', () => {
+  it('writes a well-formed cue chunk: dwName 1-based index, dwSampleOffset=position, fccChunk=data, other fields 0', () => {
+    const mono = [sineWave(440, DURATION, SAMPLE_RATE)];
+    const markersIn: WavMarker[] = [
+      { name: 'A', positionSample: 10 },
+      { name: 'B', positionSample: 20 },
+    ];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, markersIn);
+    const view = new DataView(buf);
+    const dataSize = mono[0].length * 2;
+    let offset = 44 + dataSize; // data chunk ends here (even, 16-bit mono -> no pad needed)
+
+    expect(readAscii(view, offset, 4)).toBe('cue ');
+    const cueChunkSize = view.getUint32(offset + 4, true);
+    expect(cueChunkSize).toBe(4 + markersIn.length * 24);
+    const numCuePoints = view.getUint32(offset + 8, true);
+    expect(numCuePoints).toBe(2);
+
+    const cueDataStart = offset + 12;
+    for (let i = 0; i < markersIn.length; i++) {
+      const base = cueDataStart + i * 24;
+      expect(view.getUint32(base, true)).toBe(i + 1); // dwName, 1-based
+      expect(view.getUint32(base + 4, true)).toBe(0); // dwPosition
+      expect(readAscii(view, base + 8, 4)).toBe('data'); // fccChunk
+      expect(view.getUint32(base + 12, true)).toBe(0); // dwChunkStart
+      expect(view.getUint32(base + 16, true)).toBe(0); // dwBlockStart
+      expect(view.getUint32(base + 20, true)).toBe(markersIn[i].positionSample); // dwSampleOffset
+    }
+  });
+
+  it('writes a LIST/adtl chunk with one NUL-terminated, word-aligned labl per marker matching cue dwName', () => {
+    const mono = [sineWave(440, DURATION, SAMPLE_RATE)];
+    // 'AB' -> odd payload (4 + 2 + 1 = 7) forces a pad byte; 'CDE' -> even payload (4+3+1=8) needs none.
+    const markersIn: WavMarker[] = [
+      { name: 'AB', positionSample: 1 },
+      { name: 'CDE', positionSample: 2 },
+    ];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, markersIn);
+    const view = new DataView(buf);
+    const dataSize = mono[0].length * 2;
+    const cueChunkTotal = 8 + (4 + markersIn.length * 24);
+    let offset = 44 + dataSize + cueChunkTotal;
+
+    expect(readAscii(view, offset, 4)).toBe('LIST');
+    const listSize = view.getUint32(offset + 4, true);
+    expect(readAscii(view, offset + 8, 4)).toBe('adtl');
+
+    let sub = offset + 12;
+    const listEnd = offset + 8 + listSize;
+
+    expect(readAscii(view, sub, 4)).toBe('labl');
+    const size0 = view.getUint32(sub + 4, true);
+    expect(size0).toBe(4 + 'AB'.length + 1); // dwName + text + NUL = 7 (odd)
+    expect(view.getUint32(sub + 8, true)).toBe(1); // dwName matches cue point 1
+    expect(readAscii(view, sub + 12, 2)).toBe('AB');
+    expect(view.getUint8(sub + 12 + 2)).toBe(0); // NUL terminator
+    expect(view.getUint8(sub + 12 + 2 + 1)).toBe(0); // pad byte (size0 is odd)
+    sub += 8 + size0 + (size0 % 2);
+
+    expect(readAscii(view, sub, 4)).toBe('labl');
+    const size1 = view.getUint32(sub + 4, true);
+    expect(size1).toBe(4 + 'CDE'.length + 1); // 8, even — no pad
+    expect(view.getUint32(sub + 8, true)).toBe(2); // dwName matches cue point 2
+    expect(readAscii(view, sub + 12, 3)).toBe('CDE');
+    expect(view.getUint8(sub + 12 + 3)).toBe(0);
+    sub += 8 + size1 + (size1 % 2);
+
+    expect(sub).toBe(listEnd);
+    expect(listEnd).toBe(buf.byteLength);
+  });
+
+  it('inserts a data-chunk pad byte before cue when dataSize is odd (24-bit mono, odd frame count)', () => {
+    // 3 bytes/frame * odd frame count -> odd dataSize.
+    const oddFrames = 7;
+    const mono = [Float32Array.from({ length: oddFrames }, (_, i) => (i - 3) / 8)];
+    const buf = encodeWav(mono, SAMPLE_RATE, 24, [{ name: 'X', positionSample: 0 }]);
+    const view = new DataView(buf);
+    const dataSize = oddFrames * 3;
+    expect(dataSize % 2).toBe(1);
+    // pad byte at 44+dataSize, then 'cue ' at 44+dataSize+1
+    expect(readAscii(view, 44 + dataSize + 1, 4)).toBe('cue ');
+  });
+});
+
+describe('decodeWav marker tolerance', () => {
+  it('reads cue points that appear BEFORE the data chunk', () => {
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithCueBeforeData(samples, SAMPLE_RATE, [{ name: 'Early', positionSample: 7 }]);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([{ name: 'Early', positionSample: 7 }]);
+  });
+
+  it('defaults a cue point with no matching labl to "Marker N" (N = 1-based dwName)', () => {
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithCueOnlyNoLabels(samples, SAMPLE_RATE, [42, 99]);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([
+      { name: 'Marker 42', positionSample: 42 },
+      { name: 'Marker 99', positionSample: 99 },
+    ]);
+  });
+
+  it('tolerates an unknown sub-chunk inside LIST/adtl alongside labl', () => {
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithUnknownAdtlSubchunk(samples, SAMPLE_RATE);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([{ name: 'Note', positionSample: 3 }]);
+  });
+});
+
+/** Builds a mono 16-bit PCM WAV with a 'cue ' chunk placed BEFORE 'data'. */
+function buildWavWithCueBeforeData(
+  samples: Float32Array,
+  sampleRate: number,
+  markers: { name: string; positionSample: number }[]
+): ArrayBuffer {
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const cuePayloadSize = 4 + markers.length * 24;
+  const labelSizes = markers.map((m) => 4 + m.name.length + 1);
+  const listPayloadSize = 4 + labelSizes.reduce((sum, size) => sum + 8 + size + (size % 2), 0);
+  const totalSize =
+    12 + (8 + 16) + (8 + cuePayloadSize) + (8 + listPayloadSize) + (8 + dataSize);
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  writeAscii(view, offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, totalSize - 8, true); offset += 4;
+  writeAscii(view, offset, 'WAVE'); offset += 4;
+
+  writeAscii(view, offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2; // PCM
+  view.setUint16(offset, 1, true); offset += 2; // mono
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * bytesPerSample, true); offset += 4;
+  view.setUint16(offset, bytesPerSample, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+
+  writeAscii(view, offset, 'cue '); offset += 4;
+  view.setUint32(offset, cuePayloadSize, true); offset += 4;
+  view.setUint32(offset, markers.length, true); offset += 4;
+  markers.forEach((m, i) => {
+    view.setUint32(offset, i + 1, true); offset += 4; // dwName
+    view.setUint32(offset, 0, true); offset += 4; // dwPosition
+    writeAscii(view, offset, 'data'); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, m.positionSample, true); offset += 4;
+  });
+
+  writeAscii(view, offset, 'LIST'); offset += 4;
+  view.setUint32(offset, listPayloadSize, true); offset += 4;
+  writeAscii(view, offset, 'adtl'); offset += 4;
+  markers.forEach((m, i) => {
+    const size = labelSizes[i];
+    writeAscii(view, offset, 'labl'); offset += 4;
+    view.setUint32(offset, size, true); offset += 4;
+    view.setUint32(offset, i + 1, true); offset += 4; // dwName matches cue point
+    writeAscii(view, offset, m.name); offset += m.name.length;
+    view.setUint8(offset, 0); offset += 1;
+    if (size % 2 !== 0) {
+      view.setUint8(offset, 0);
+      offset += 1;
+    }
+  });
+
+  writeAscii(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, dataSize, true); offset += 4;
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+    view.setInt16(offset, clamped, true);
+    offset += 2;
+  }
+
+  return buffer;
+}
+
+/** Builds a mono 16-bit PCM WAV with a 'cue ' chunk (no LIST/adtl at all), each cue's dwName = its own value. */
+function buildWavWithCueOnlyNoLabels(samples: Float32Array, sampleRate: number, dwNames: number[]): ArrayBuffer {
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const cuePayloadSize = 4 + dwNames.length * 24;
+  const totalSize = 12 + (8 + 16) + (8 + dataSize) + (8 + cuePayloadSize);
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  writeAscii(view, offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, totalSize - 8, true); offset += 4;
+  writeAscii(view, offset, 'WAVE'); offset += 4;
+
+  writeAscii(view, offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * bytesPerSample, true); offset += 4;
+  view.setUint16(offset, bytesPerSample, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+
+  writeAscii(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, dataSize, true); offset += 4;
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+    view.setInt16(offset, clamped, true);
+    offset += 2;
+  }
+
+  writeAscii(view, offset, 'cue '); offset += 4;
+  view.setUint32(offset, cuePayloadSize, true); offset += 4;
+  view.setUint32(offset, dwNames.length, true); offset += 4;
+  for (const n of dwNames) {
+    view.setUint32(offset, n, true); offset += 4; // dwName = the cue point's own "position" value here
+    view.setUint32(offset, 0, true); offset += 4;
+    writeAscii(view, offset, 'data'); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, n, true); offset += 4; // dwSampleOffset
+  }
+
+  return buffer;
+}
+
+/** Builds a mono 16-bit PCM WAV whose LIST/adtl chunk has an unrecognized sub-chunk ('note') before its single 'labl'. */
+function buildWavWithUnknownAdtlSubchunk(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const cuePayloadSize = 4 + 1 * 24;
+  const notePayload = 'hi'; // 2 bytes, even -> no pad
+  const noteChunkTotal = 8 + notePayload.length;
+  const lablName = 'Note';
+  const lablPayloadSize = 4 + lablName.length + 1; // 4+4+1=9, odd -> 1 pad byte
+  const lablChunkTotal = 8 + lablPayloadSize + (lablPayloadSize % 2);
+  const listPayloadSize = 4 + noteChunkTotal + lablChunkTotal;
+  const totalSize = 12 + (8 + 16) + (8 + dataSize) + (8 + cuePayloadSize) + (8 + listPayloadSize);
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  writeAscii(view, offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, totalSize - 8, true); offset += 4;
+  writeAscii(view, offset, 'WAVE'); offset += 4;
+
+  writeAscii(view, offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * bytesPerSample, true); offset += 4;
+  view.setUint16(offset, bytesPerSample, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+
+  writeAscii(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, dataSize, true); offset += 4;
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+    view.setInt16(offset, clamped, true);
+    offset += 2;
+  }
+
+  writeAscii(view, offset, 'cue '); offset += 4;
+  view.setUint32(offset, cuePayloadSize, true); offset += 4;
+  view.setUint32(offset, 1, true); offset += 4;
+  view.setUint32(offset, 1, true); offset += 4; // dwName
+  view.setUint32(offset, 0, true); offset += 4;
+  writeAscii(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, 0, true); offset += 4;
+  view.setUint32(offset, 0, true); offset += 4;
+  view.setUint32(offset, 3, true); offset += 4; // dwSampleOffset = 3
+
+  writeAscii(view, offset, 'LIST'); offset += 4;
+  view.setUint32(offset, listPayloadSize, true); offset += 4;
+  writeAscii(view, offset, 'adtl'); offset += 4;
+
+  writeAscii(view, offset, 'note'); offset += 4;
+  view.setUint32(offset, notePayload.length, true); offset += 4;
+  writeAscii(view, offset, notePayload); offset += notePayload.length;
+
+  writeAscii(view, offset, 'labl'); offset += 4;
+  view.setUint32(offset, lablPayloadSize, true); offset += 4;
+  view.setUint32(offset, 1, true); offset += 4; // dwName matches the cue point
+  writeAscii(view, offset, lablName); offset += lablName.length;
+  view.setUint8(offset, 0); offset += 1;
+  if (lablPayloadSize % 2 === 1) {
+    view.setUint8(offset, 0);
+    offset += 1;
+  }
+
+  return buffer;
+}
 
 /** Builds a minimal WAV buffer containing only RIFF/WAVE + a fmt chunk (no data), for testing fmt validation. */
 function buildFmtOnlyWav(fmt: {

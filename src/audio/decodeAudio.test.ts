@@ -1,4 +1,5 @@
 import { decodeArrayBuffer, downmixToStereo } from './decodeAudio';
+import { encodeWav } from './wavCodec';
 
 class FakeAudioBuffer {
   constructor(
@@ -78,6 +79,22 @@ describe('decodeArrayBuffer sample rate', () => {
     const result = await decodeArrayBuffer(flac.buffer, 'corrupt.flac');
     expect(attempted).toEqual([1048575, 48000]);
     expect(result.sampleRate).toBe(48000);
+  });
+});
+
+describe('decodeArrayBuffer markers passthrough (WAV only)', () => {
+  it('returns markers decoded from a WAV cue/adtl chunk', async () => {
+    const mono = [new Float32Array(100)];
+    const buf = encodeWav(mono, 44100, 16, [{ name: 'Hook', positionSample: 42 }]);
+    const result = await decodeArrayBuffer(buf, 'song.wav');
+    expect(result.markers).toEqual([{ name: 'Hook', positionSample: 42 }]);
+  });
+
+  it('returns an empty markers array for a WAV with none', async () => {
+    const mono = [new Float32Array(100)];
+    const buf = encodeWav(mono, 44100, 16);
+    const result = await decodeArrayBuffer(buf, 'song.wav');
+    expect(result.markers).toEqual([]);
   });
 });
 

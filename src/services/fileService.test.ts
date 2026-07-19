@@ -108,6 +108,35 @@ describe('openFilePath', () => {
     await openFilePath('D:\\audio\\song.wav');
     expect(useAppStore.getState().documents[0].sourceBitDepth).toBe(24);
   });
+
+  it('seeds appStore markers from a decoded WAV, with fresh marker ids', async () => {
+    installApi();
+    mockDecode.mockResolvedValueOnce({
+      ...decoded(),
+      markers: [
+        { name: 'Verse', positionSample: 500 },
+        { name: 'Intro', positionSample: 10 },
+      ],
+    });
+    await openFilePath('D:\\audio\\song.wav');
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(2);
+    expect(markers.map((m) => m.positionSample)).toEqual([10, 500]); // kept sorted
+    expect(markers.map((m) => m.name)).toEqual(['Intro', 'Verse']);
+    for (const m of markers) {
+      expect(m.id).toMatch(/^marker-\d+$/);
+    }
+    expect(new Set(markers.map((m) => m.id)).size).toBe(2); // distinct ids
+  });
+
+  it('does not create a markers entry when the decoded WAV has none', async () => {
+    installApi();
+    mockDecode.mockResolvedValueOnce({ ...decoded(), markers: [] });
+    await openFilePath('D:\\audio\\song.wav');
+    const docId = useAppStore.getState().documents[0].id;
+    expect(useAppStore.getState().markers[docId]).toBeUndefined();
+  });
 });
 
 describe('openFilesViaDialog', () => {
@@ -260,6 +289,30 @@ describe('saveDocument', () => {
     expect(useAppStore.getState().documents[0].dirty).toBe(true);
   });
 
+  it('includes the active doc markers when saving in place to WAV', async () => {
+    const api = installApi();
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 3 });
+
+    await saveDocument(doc.id);
+
+    const [, data] = api.writeFile.mock.calls[0];
+    const decodedBack = decodeWav(data as ArrayBuffer);
+    expect(decodedBack.markers).toEqual([{ name: 'Chorus', positionSample: 3 }]);
+  });
+
+  it('includes the active doc markers when saving-as to WAV', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\new.wav') });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Untitled 1' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Hook', positionSample: 7 });
+
+    await saveDocument(doc.id);
+
+    const [, data] = api.writeFile.mock.calls[0];
+    const decodedBack = decodeWav(data as ArrayBuffer);
+    expect(decodedBack.markers).toEqual([{ name: 'Hook', positionSample: 7 }]);
+  });
+
   it('shows an error and keeps dirty when the write fails', async () => {
     const api = installApi({ writeFile: jest.fn(async () => ({ ok: false, error: 'disk full' })) });
     const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
@@ -301,6 +354,17 @@ describe('exportDocument', () => {
     expect(result).toBe('D:\\out\\track.wav');
     const [, data] = api.writeFile.mock.calls[0];
     expect(decodeWav(data as ArrayBuffer).bitDepth).toBe(24);
+  });
+
+  it('includes the doc markers when exporting to WAV', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.wav') });
+    const doc = seedDoc({ filePath: null, name: 'doc' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Bridge', positionSample: 9 });
+
+    await exportDocument(doc.id, { format: 'wav', wavBitDepth: 16, mp3Kbps: 128 });
+
+    const [, data] = api.writeFile.mock.calls[0];
+    expect(decodeWav(data as ArrayBuffer).markers).toEqual([{ name: 'Bridge', positionSample: 9 }]);
   });
 
   it('appends the format extension when the picked path lacks it', async () => {

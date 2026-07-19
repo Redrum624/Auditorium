@@ -1,12 +1,15 @@
-import { bumpIdCounter, createDocument, type AudioDocument } from '../audio/AudioDocument';
+import { bumpIdCounter, createDocument, nextId, type AudioDocument } from '../audio/AudioDocument';
 import { decodeWav, encodeWav } from '../audio/wavCodec';
-import { useAppStore } from '../stores/appStore';
+import { useAppStore, type Marker } from '../stores/appStore';
 import type { Session } from './session';
 import { useSessionStore } from './sessionStore';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
-/** .audm format version. Bump when the on-disk shape changes incompatibly. */
-const FORMAT_VERSION = 1;
+/** .audm format version. Bump when the on-disk shape changes incompatibly.
+ * v1: no markers. v2 (current): adds an optional `markers` map. Loader accepts
+ * both; only the current version is ever written. */
+const FORMAT_VERSION = 2;
+const SUPPORTED_VERSIONS = new Set([1, 2]);
 
 const BASE64_CHUNK_SIZE = 32 * 1024; // avoid call-stack overflow from spreading huge typed arrays
 
@@ -22,6 +25,9 @@ interface SessionFileShape {
   formatVersion: number;
   session: Session;
   documents: SessionFileDocument[];
+  /** docId (matching `documents[].id`, pre-remap) -> markers. v2+; only docs
+   * referenced by the session that actually have markers get an entry. */
+  markers?: Record<string, Marker[]>;
 }
 
 function api() {
@@ -62,10 +68,17 @@ function base64ToBuffer(b64: string): ArrayBuffer {
  * with no embedded audio, and on load could silently bind to an unrelated
  * document that happens to reuse its stale id (see parseSessionFile).
  * `droppedClipCount` lets the caller warn the user.
+ *
+ * `markersByDoc` (docId -> markers, e.g. the app store's `markers` state) is
+ * embedded under the same "referenced by a clip" restriction as the audio
+ * itself — a marker for a document with no embedded audio would be orphaned.
+ * Docs with no markers get no entry; the `markers` key is omitted from the
+ * file entirely when nothing qualifies, keeping v1-shaped saves lean.
  */
 export function serializeSession(
   session: Session,
-  docs: AudioDocument[]
+  docs: AudioDocument[],
+  markersByDoc: Record<string, Marker[]> = {}
 ): { json: string; droppedClipCount: number } {
   const openIds = new Set(docs.map((d) => d.id));
   let droppedClipCount = 0;
@@ -94,7 +107,18 @@ export function serializeSession(
       wavBase64: bufferToBase64(encodeWav(d.channels, d.sampleRate, 32)),
     }));
 
-  const file: SessionFileShape = { formatVersion: FORMAT_VERSION, session: { ...session, tracks }, documents };
+  const markers: Record<string, Marker[]> = {};
+  for (const id of referencedIds) {
+    const list = markersByDoc[id];
+    if (list && list.length > 0) markers[id] = list;
+  }
+
+  const file: SessionFileShape = {
+    formatVersion: FORMAT_VERSION,
+    session: { ...session, tracks },
+    documents,
+    ...(Object.keys(markers).length > 0 ? { markers } : {}),
+  };
   return { json: JSON.stringify(file), droppedClipCount };
 }
 
@@ -128,13 +152,25 @@ function maxIdSuffix(ids: string[], prefix: string): number {
  * the orphaned clip would silently bind to unrelated audio. As belt-and-
  * braces, any clip whose (remapped) documentId doesn't match a recreated
  * document is dropped; `droppedClipCount` lets the caller notify the user.
+ *
+ * `markers` in the returned object is keyed by the FRESH (remapped) document
+ * ids, with fresh `nextId('marker')` ids of its own — markers carry no
+ * cross-references, so minting new ids (like documents, rather than keeping
+ * file ids verbatim like tracks/clips) is simplest and avoids any future
+ * collision with the running process's marker counter. Absent for v1 files
+ * (which predate markers) — callers get back an empty map, not undefined.
  */
-export function parseSessionFile(
-  text: string
-): { session: Session; documents: AudioDocument[]; droppedClipCount: number } {
+export function parseSessionFile(text: string): {
+  session: Session;
+  documents: AudioDocument[];
+  droppedClipCount: number;
+  markers: Record<string, Marker[]>;
+} {
   const parsed = JSON.parse(text) as SessionFileShape;
-  if (parsed.formatVersion !== FORMAT_VERSION) {
-    throw new Error(`Unsupported session file version: ${parsed.formatVersion} (expected ${FORMAT_VERSION})`);
+  if (!SUPPORTED_VERSIONS.has(parsed.formatVersion)) {
+    throw new Error(
+      `Unsupported session file version: ${parsed.formatVersion} (expected one of ${[...SUPPORTED_VERSIONS].join(', ')})`
+    );
   }
 
   const rawDocumentIds = parsed.session.tracks.flatMap((t) => t.clips.map((c) => c.documentId));
@@ -173,7 +209,18 @@ export function parseSessionFile(
   bumpIdCounter('track', maxIdSuffix(trackIds, 'track') + 1);
   bumpIdCounter('clip', maxIdSuffix(clipIds, 'clip') + 1);
 
-  return { session, documents, droppedClipCount };
+  const markers: Record<string, Marker[]> = {};
+  if (parsed.markers) {
+    for (const [oldDocId, list] of Object.entries(parsed.markers)) {
+      const newDocId = idMap.get(oldDocId);
+      if (!newDocId) continue; // stale reference to a doc that wasn't recreated
+      markers[newDocId] = list
+        .map((m) => ({ id: nextId('marker'), name: m.name, positionSample: m.positionSample }))
+        .sort((a, b) => a.positionSample - b.positionSample);
+    }
+  }
+
+  return { session, documents, droppedClipCount, markers };
 }
 
 /** Prompts for a save location and writes the current session (with only its
@@ -192,7 +239,7 @@ export async function saveSessionViaDialog(): Promise<void> {
   });
   if (!targetPath) return; // cancelled
 
-  const { json, droppedClipCount } = serializeSession(session, docs);
+  const { json, droppedClipCount } = serializeSession(session, docs, useAppStore.getState().markers);
   const data = new TextEncoder().encode(json).buffer;
   const result = await api().writeFile(targetPath, data);
   if (!result.ok) {
@@ -224,7 +271,12 @@ export async function openSessionViaDialog(): Promise<void> {
   // readFile is inside the try so an IO failure (unapproved path, fs error)
   // surfaces the same error box as a corrupt/unsupported file, instead of
   // rejecting unhandled.
-  let result: { session: Session; documents: AudioDocument[]; droppedClipCount: number };
+  let result: {
+    session: Session;
+    documents: AudioDocument[];
+    droppedClipCount: number;
+    markers: Record<string, Marker[]>;
+  };
   try {
     const buf = await api().readFile(paths[0]);
     const text = new TextDecoder().decode(buf);
@@ -237,6 +289,9 @@ export async function openSessionViaDialog(): Promise<void> {
 
   for (const doc of result.documents) {
     useAppStore.getState().addDocument(doc);
+  }
+  for (const [docId, markerList] of Object.entries(result.markers)) {
+    useAppStore.getState().setMarkersForDoc(docId, markerList);
   }
   useSessionStore.setState({
     session: result.session,

@@ -1,11 +1,11 @@
-import { createDocument, type AudioDocument } from '../audio/AudioDocument';
+import { createDocument, nextId, type AudioDocument } from '../audio/AudioDocument';
 import { decodeArrayBuffer } from '../audio/decodeAudio';
 import { readFlacStreamInfo } from '../audio/sniffSampleRate';
 import { encodeFlac } from '../audio/flacEncoder';
 import { encodeMp3 } from '../audio/mp3Encoder';
 import { encodeWav, type WavBitDepth } from '../audio/wavCodec';
 import { playbackEngine } from '../audio/PlaybackEngine';
-import { useAppStore } from '../stores/appStore';
+import { useAppStore, type Marker } from '../stores/appStore';
 import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { invalidatePeaks } from './peaksCache';
 import { clearHistory } from './undoHistory';
@@ -58,7 +58,7 @@ function findDoc(docId: string): AudioDocument | undefined {
 export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuffer {
   switch (opts.format) {
     case 'wav':
-      return encodeWav(doc.channels, doc.sampleRate, opts.wavBitDepth);
+      return encodeWav(doc.channels, doc.sampleRate, opts.wavBitDepth, store().markers[doc.id]);
     case 'mp3':
       return encodeMp3(doc.channels, doc.sampleRate, opts.mp3Kbps);
     case 'flac':
@@ -68,7 +68,9 @@ export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuff
 
 /** Re-encode a document into its ORIGINAL container for an in-place Save.
  * MP3 → 192 kbps CBR; FLAC → verbatim FLAC at the source bit depth (16 or 24);
- * wav/undefined → 32-bit-float WAV (the app's canonical lossless container). */
+ * wav/undefined → 32-bit-float WAV (the app's canonical lossless container),
+ * carrying the doc's markers as cue/adtl chunks. MP3/FLAC have no standard
+ * marker chunk, so their markers are not written (see docs/KNOWN_LIMITATIONS.md). */
 function encodeInPlace(doc: AudioDocument): ArrayBuffer {
   switch (doc.sourceFormat) {
     case 'mp3':
@@ -76,7 +78,7 @@ function encodeInPlace(doc: AudioDocument): ArrayBuffer {
     case 'flac':
       return encodeFlac(doc.channels, doc.sampleRate, doc.sourceBitDepth === 24 ? 24 : 16);
     default:
-      return encodeWav(doc.channels, doc.sampleRate, 32);
+      return encodeWav(doc.channels, doc.sampleRate, 32, store().markers[doc.id]);
   }
 }
 
@@ -113,6 +115,14 @@ export async function openFilePath(path: string): Promise<void> {
     sourceBitDepth,
   });
   store().addDocument(doc);
+  if (decoded.markers && decoded.markers.length > 0) {
+    const markers: Marker[] = decoded.markers.map((m) => ({
+      id: nextId('marker'),
+      name: m.name,
+      positionSample: m.positionSample,
+    }));
+    store().setMarkersForDoc(doc.id, markers);
+  }
 }
 
 /** Prompt for one or more audio files and open each; the last opened becomes
@@ -172,7 +182,7 @@ export async function saveDocument(docId: string, as = false): Promise<void> {
   if (!current) return;
   // Save-as always produces WAV; in-place re-encodes into the source container.
   const data = saveAs
-    ? encodeWav(current.channels, current.sampleRate, 32)
+    ? encodeWav(current.channels, current.sampleRate, 32, store().markers[current.id])
     : encodeInPlace(current);
   const result = await api().writeFile(targetPath, data);
   if (!result.ok) {

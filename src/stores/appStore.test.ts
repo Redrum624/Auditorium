@@ -276,4 +276,30 @@ describe('markers', () => {
     expect(markers[0].name).toBe('new name');
     expect(markers[0].positionSample).toBe(500);
   });
+
+  it('setMarkersForDoc replaces the whole list for a doc, sorted by positionSample', () => {
+    const doc = makeDoc(1000);
+    useAppStore.getState().addDocument(doc);
+    useAppStore.getState().setMarkersForDoc(doc.id, [m('m-2', 500), m('m-1', 100)]);
+    const markers = useAppStore.getState().markers[doc.id];
+    expect(markers.map((x) => x.id)).toEqual(['m-1', 'm-2']);
+    expect(markers.map((x) => x.positionSample)).toEqual([100, 500]);
+  });
+
+  it('setMarkersForDoc overwrites a previously-set list for the same doc', () => {
+    const doc = makeDoc(1000);
+    useAppStore.getState().addDocument(doc);
+    useAppStore.getState().addMarker(doc.id, m('m-1', 50));
+    useAppStore.getState().setMarkersForDoc(doc.id, [m('m-2', 200)]);
+    expect(useAppStore.getState().markers[doc.id].map((x) => x.id)).toEqual(['m-2']);
+  });
+
+  it('setMarkersForDoc does not affect other documents', () => {
+    const [a, b] = [makeDoc(1000, 'a'), makeDoc(1000, 'b')];
+    useAppStore.getState().addDocument(a);
+    useAppStore.getState().addDocument(b);
+    useAppStore.getState().addMarker(b.id, m('m-b', 10));
+    useAppStore.getState().setMarkersForDoc(a.id, [m('m-a', 20)]);
+    expect(useAppStore.getState().markers[b.id].map((x) => x.id)).toEqual(['m-b']);
+  });
 });

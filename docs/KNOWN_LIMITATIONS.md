@@ -42,20 +42,30 @@ source bit depth is recorded on import and shown in the Properties panel
 **Intended behavior:** Add an Ogg Vorbis/Opus encoder to round-trip `.ogg`
 sources in place as well; until then, save-as WAV is the safe lossless default.
 
-## Markers are session-only (not persisted)
+## Markers are not persisted in MP3/FLAC (resolved for WAV and sessions)
 
-**Area:** Markers (`src/stores/appStore.ts` `markers`, `src/components/Panels/MarkersPanel.tsx`,
-`src/services/menuActions.ts` `marker.add`/`marker.next`/`marker.prev`)
+**Area:** Markers (`src/stores/appStore.ts` `markers`, `src/audio/wavCodec.ts`
+`encodeWav`/`decodeWav`, `src/multitrack/sessionFile.ts`)
 
-**v1 behavior:** Markers live only in the in-memory app store (`markers: Record<docId, Marker[]>`),
-keyed by document id. They are not written into `.wav`/`.mp3` exports (this app's
-WAV/MP3 encoders have no marker/cue-chunk support), not round-tripped through
-File > Save/Save As, and not included in a saved multitrack session (`.audm`,
-`src/multitrack/sessionFile.ts`) even when the source document is inserted as a
-clip. Closing a document also discards its markers (`closeDocument` deletes the
-`markers[id]` entry). Reopening the same file later starts with zero markers.
+**v1.2 behavior:** Markers now round-trip through the two containers that matter
+most. `encodeWav`/`decodeWav` write and read a standard `cue `/`LIST`-`adtl`
+chunk pair (one cue point + one NUL-terminated `labl` per marker, Audacity/
+Audition-compatible), so opening and saving/exporting a `.wav` file — at any
+bit depth, including in-place Save and Save As — keeps its markers. Opening a
+`.wav` seeds the app store with fresh marker ids read back from the file. The
+`.audm` session format (`formatVersion: 2`) adds an optional `markers` map keyed
+by document id, embedded for any document referenced by a clip; loading a
+session seeds the store with fresh marker ids, and v1 session files (no
+`markers` key) still load fine with zero markers. Closing a document still
+discards its markers from the live store (`closeDocument` deletes the
+`markers[id]` entry) — but if the document was a `.wav` file or was saved as
+part of a session, its markers survive on disk and come back on reopen.
 
-**Intended behavior:** Adobe Audition persists markers with the file (a WAV
-cue/label chunk, or its own metadata sidecar) and/or with the session. Doing
-the same here needs either a WAV cue-chunk writer/reader or a marker section
-in the `.audm` session format — neither exists yet.
+**Remaining gap:** MP3 and FLAC have no standard marker/cue-chunk field, so an
+in-place Save or Export to either format still does not carry markers — only
+the `.audm` session format (or re-saving as WAV) preserves them for those
+sources.
+
+**Intended behavior:** No further work planned; MP3/FLAC markers are a
+container-format limitation, not a missing feature — Adobe Audition has the
+same restriction for those formats.

@@ -39,6 +39,7 @@ export interface AppActions {
   addMarker(docId: string, m: Marker): void; // keeps array sorted by positionSample
   removeMarker(docId: string, markerId: string): void;
   renameMarker(docId: string, markerId: string, name: string): void;
+  setMarkersForDoc(docId: string, markers: Marker[]): void; // replaces the whole list, sorted by positionSample
 }
 
 export function makeInitialState(): AppState {
@@ -162,6 +163,13 @@ export const useAppStore = create<AppState & AppActions>()((set) => ({
       const existing = s.markers[docId];
       if (!existing) return s;
       const list = existing.map((m) => (m.id === markerId ? { ...m, name } : m));
+      return { markers: { ...s.markers, [docId]: list } };
+    });
+  },
+
+  setMarkersForDoc(docId, markers) {
+    set((s) => {
+      const list = [...markers].sort((a, b) => a.positionSample - b.positionSample);
       return { markers: { ...s.markers, [docId]: list } };
     });
   },
