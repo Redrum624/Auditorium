@@ -27,24 +27,36 @@ than dropped: `mix = 0.7071·mean(ch2…chN-1)`, `L' = clamp(ch0 + mix, ±1)`,
 needed; the current fallback is a bounded, safe default. The downmix is a fixed
 −3 dB fold; a user-selectable surround downmix matrix could follow.
 
-## Ogg (and other exotic containers) become save-as WAV
+## Ogg sources re-encode in place as Opus-in-Ogg (resolved)
 
-**Area:** File > Save / Save As (`src/services/fileService.ts` `saveDocument`,
-`openFilePath`)
+**Area:** File > Save / Save As / Export (`src/services/fileService.ts`,
+`src/audio/oggOpusEncoder.ts`, `src/audio/oggPage.ts`)
 
-**v1.1 behavior:** Save is now **format-faithful** for the common containers.
-A document opened from `.wav`, `.mp3`, or `.flac` keeps its `filePath` and Save
-re-encodes **in place into that same container**: WAV → 32-bit float, MP3 → 192
-kbps CBR, FLAC → verbatim FLAC at the source bit depth (16 or 24). Only `.ogg`
-and other unrecognized/exotic sources (m4a, aac, webm) are still opened with
-`filePath = null`, so their first Save falls back to a save-as `.wav` dialog —
-Auditorium has no Ogg Vorbis/Opus encoder, and re-encoding a lossy source to a
-different lossy container on every Save would silently degrade it. The original
-source bit depth is recorded on import and shown in the Properties panel
-("16-bit source → 32-bit float").
+**v1.2 behavior:** Save is now **format-faithful for `.ogg` too**. A document
+opened from `.ogg` keeps its `filePath`, and Save re-encodes it **in place as
+Opus-in-Ogg**: the audio is resampled to Opus's canonical 48 kHz (via the
+existing windowed-sinc `resampleChannel`), encoded to Opus packets by the host's
+WebCodecs `AudioEncoder`, and wrapped by a pure-TypeScript Ogg page muxer
+(`oggPage.ts` — RFC 3533 framing with the non-reflected CRC-32 poly 0x04C11DB7,
+RFC 7845 OpusHead/OpusTags headers, byte-exact lacing, and cross-page packet
+spanning with the continued flag). Legacy Ogg **Vorbis** sources are therefore
+re-encoded as **Opus** in the same Ogg container — a modern, universally
+decodable codec — rather than round-tripping Vorbis. File > Export also offers
+**OGG (Opus)** at 96/128/192 kbps; in-place Save uses 128 kbps. As with MP3
+in-place Save, each Save is a **lossy → lossy** re-encode, so repeated saves
+accumulate generation loss (the same caveat noted for MP3). Only genuinely
+exotic sources (m4a, aac, webm, unrecognized) are still opened with
+`filePath = null` and fall back to save-as WAV on first Save.
 
-**Intended behavior:** Add an Ogg Vorbis/Opus encoder to round-trip `.ogg`
-sources in place as well; until then, save-as WAV is the safe lossless default.
+If WebCodecs is unavailable in the host (no Opus encoder), an in-place `.ogg`
+Save falls back to the save-as WAV dialog — the lossless default — and Export
+surfaces an error rather than writing a broken file. Ogg has no standard marker
+chunk, so markers are not written to `.ogg` (same as MP3/FLAC; use WAV or the
+`.audm` session to persist markers).
+
+**Intended behavior:** No further work planned — Opus-in-Ogg is the correct
+modern default. A native Vorbis encoder (to keep Vorbis sources as Vorbis) is a
+possible future refinement but not needed for round-tripping.
 
 ## Markers are not persisted in MP3/FLAC (resolved for WAV and sessions)
 

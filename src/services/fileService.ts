@@ -3,6 +3,7 @@ import { decodeArrayBuffer } from '../audio/decodeAudio';
 import { readFlacStreamInfo } from '../audio/sniffSampleRate';
 import { encodeFlac } from '../audio/flacEncoder';
 import { encodeMp3 } from '../audio/mp3Encoder';
+import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
 import { encodeWav, type WavBitDepth } from '../audio/wavCodec';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { useAppStore, type Marker } from '../stores/appStore';
@@ -12,13 +13,23 @@ import { clearHistory } from './undoHistory';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
 export interface ExportOptions {
-  format: 'wav' | 'mp3' | 'flac';
+  format: 'wav' | 'mp3' | 'flac' | 'ogg';
   wavBitDepth: WavBitDepth;
   mp3Kbps: 128 | 192 | 256 | 320;
+  /** Opus bitrate in bits/second; only used when format is 'ogg'. */
+  oggBitrate?: 96_000 | 128_000 | 192_000;
 }
 
 /** In-place Save bitrate for re-encoded MP3 sources (matches Export's default). */
 const MP3_SAVE_KBPS = 192;
+
+/** Copy a Uint8Array into a standalone ArrayBuffer for the IPC writeFile call
+ * (which detaches/transfers the buffer). */
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const out = new ArrayBuffer(bytes.byteLength);
+  new Uint8Array(out).set(bytes);
+  return out;
+}
 
 type SourceFormat = NonNullable<AudioDocument['sourceFormat']>;
 
@@ -63,20 +74,28 @@ export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuff
       return encodeMp3(doc.channels, doc.sampleRate, opts.mp3Kbps);
     case 'flac':
       return encodeFlac(doc.channels, doc.sampleRate, 16);
+    case 'ogg':
+      // Opus encoding is async (WebCodecs); exportDocument routes 'ogg' through
+      // encodeOggOpus directly, so this synchronous path is never reached.
+      throw new Error('OGG export must go through exportDocument (async encodeOggOpus)');
   }
 }
 
 /** Re-encode a document into its ORIGINAL container for an in-place Save.
  * MP3 → 192 kbps CBR; FLAC → verbatim FLAC at the source bit depth (16 or 24);
- * wav/undefined → 32-bit-float WAV (the app's canonical lossless container),
- * carrying the doc's markers as cue/adtl chunks. MP3/FLAC have no standard
- * marker chunk, so their markers are not written (see docs/KNOWN_LIMITATIONS.md). */
-function encodeInPlace(doc: AudioDocument): ArrayBuffer {
+ * OGG → Opus-in-Ogg at 128 kbps (async via WebCodecs); wav/undefined →
+ * 32-bit-float WAV (the app's canonical lossless container), carrying the doc's
+ * markers as cue/adtl chunks. MP3/FLAC/OGG have no standard marker chunk, so
+ * their markers are not written (see docs/KNOWN_LIMITATIONS.md). Rejects with
+ * OggEncoderUnavailableError when the Opus encoder is missing (jsdom/no WebCodecs). */
+async function encodeInPlace(doc: AudioDocument): Promise<ArrayBuffer> {
   switch (doc.sourceFormat) {
     case 'mp3':
       return encodeMp3(doc.channels, doc.sampleRate, MP3_SAVE_KBPS);
     case 'flac':
       return encodeFlac(doc.channels, doc.sampleRate, doc.sourceBitDepth === 24 ? 24 : 16);
+    case 'ogg':
+      return toArrayBuffer(await encodeOggOpus(doc.channels, doc.sampleRate));
     default:
       return encodeWav(doc.channels, doc.sampleRate, 32, store().markers[doc.id]);
   }
@@ -85,12 +104,12 @@ function encodeInPlace(doc: AudioDocument): ArrayBuffer {
 /**
  * Read, decode, and add a single file as a new document.
  *
- * `.wav`, `.mp3`, and `.flac` sources keep their `filePath` so Save re-encodes
- * back into that container in place (see `saveDocument`). `.ogg` and everything
- * else get `filePath = null`, so their first Save falls back to a save-as `.wav`
- * dialog (re-encoding Ogg Vorbis losslessly-enough is out of scope — see
- * docs/KNOWN_LIMITATIONS.md). The source format and (for WAV/FLAC) the original
- * bit depth are recorded on the document for the Properties panel and Save.
+ * `.wav`, `.mp3`, `.flac`, and `.ogg` sources keep their `filePath` so Save
+ * re-encodes back into that container in place (see `saveDocument`): `.ogg`
+ * round-trips as Opus-in-Ogg via WebCodecs. Everything else (m4a, aac, webm,
+ * unrecognized) gets `filePath = null`, so its first Save falls back to a
+ * save-as `.wav` dialog. The source format and (for WAV/FLAC) the original bit
+ * depth are recorded on the document for the Properties panel and Save.
  * Throws on read/decode failure; callers that batch-open catch per file.
  */
 export async function openFilePath(path: string): Promise<void> {
@@ -99,7 +118,10 @@ export async function openFilePath(path: string): Promise<void> {
   const name = api().pathBasename(path);
   const sourceFormat = formatForPath(path);
   const keepsPath =
-    sourceFormat === 'wav' || sourceFormat === 'mp3' || sourceFormat === 'flac';
+    sourceFormat === 'wav' ||
+    sourceFormat === 'mp3' ||
+    sourceFormat === 'flac' ||
+    sourceFormat === 'ogg';
   let sourceBitDepth: number | undefined;
   if (sourceFormat === 'wav') {
     sourceBitDepth = decoded.sourceBitDepth;
@@ -151,7 +173,9 @@ export async function openFilesViaDialog(): Promise<void> {
 /**
  * Save a document, format-faithfully. When it has a `filePath` and `as` is
  * false, re-encode into the ORIGINAL container in place: WAV → 32-bit float,
- * MP3 → 192 kbps, FLAC → verbatim FLAC at the source bit depth (`encodeInPlace`).
+ * MP3 → 192 kbps, FLAC → verbatim FLAC at the source bit depth, OGG → Opus-in-
+ * Ogg at 128 kbps (`encodeInPlace`). If the Opus encoder is unavailable (no
+ * WebCodecs) an in-place `.ogg` Save falls back to the save-as WAV dialog.
  * Otherwise (no path, or Save As) prompt a save-as dialog which always writes
  * WAV. On success name/filePath update and dirty clears — without an undo entry.
  * A cancelled dialog is a no-op; a failed write surfaces an error message box.
@@ -160,30 +184,57 @@ export async function saveDocument(docId: string, as = false): Promise<void> {
   const doc = findDoc(docId);
   if (!doc) return;
 
-  let targetPath: string | null;
-  let saveAs: boolean;
+  // In-place: re-encode into the source container. Only wav/mp3/flac/ogg sources
+  // ever carry a filePath (other/exotic sources are opened with filePath = null).
   if (doc.filePath && !as) {
-    // In-place: re-encode into the source container. Only wav/mp3/flac sources
-    // ever carry a filePath (ogg/other are opened with filePath = null).
-    targetPath = doc.filePath;
-    saveAs = false;
-  } else {
-    const defaultName = isWavPath(doc.name) ? doc.name : `${doc.name}.wav`;
-    targetPath = await api().showSaveDialog({
-      defaultPath: defaultName,
-      filters: [{ name: 'Waveform Audio', extensions: ['wav'] }],
-    });
-    if (!targetPath) return; // cancelled
-    saveAs = true;
+    const targetPath = doc.filePath; // narrowed to string
+    const current = findDoc(docId);
+    if (!current) return;
+    let data: ArrayBuffer;
+    try {
+      data = await encodeInPlace(current);
+    } catch (err) {
+      // No Opus encoder here (e.g. no WebCodecs): fall back to the save-as WAV
+      // dialog, the same lossless default an exotic source's first Save uses.
+      if (err instanceof OggEncoderUnavailableError) {
+        await saveAsWav(docId);
+        return;
+      }
+      throw err;
+    }
+    const result = await api().writeFile(targetPath, data);
+    if (!result.ok) {
+      await api().showMessageBox({ type: 'error', title: 'Save failed', message: result.error });
+      return;
+    }
+    store().updateDocument({ ...current, dirty: false });
+    return;
   }
+
+  await saveAsWav(docId);
+}
+
+/**
+ * Prompt a save-as dialog and write a 32-bit-float WAV (the lossless default),
+ * carrying the doc's markers and retagging its provenance to WAV so a later
+ * Save writes WAV in place. Shared by the first Save of a path-less/exotic
+ * source and the Opus-unavailable in-place `.ogg` fallback. Cancelled dialog is
+ * a no-op; a failed write surfaces an error message box.
+ */
+async function saveAsWav(docId: string): Promise<void> {
+  const doc = findDoc(docId);
+  if (!doc) return;
+  const defaultName = isWavPath(doc.name) ? doc.name : `${doc.name}.wav`;
+  const targetPath = await api().showSaveDialog({
+    defaultPath: defaultName,
+    filters: [{ name: 'Waveform Audio', extensions: ['wav'] }],
+  });
+  if (!targetPath) return; // cancelled
 
   // Re-read the latest doc in case it changed while the dialog was open.
   const current = findDoc(docId);
   if (!current) return;
-  // Save-as always produces WAV; in-place re-encodes into the source container.
-  const data = saveAs
-    ? encodeWav(current.channels, current.sampleRate, 32, store().markers[current.id])
-    : encodeInPlace(current);
+  const data = encodeWav(current.channels, current.sampleRate, 32, store().markers[current.id]);
   const result = await api().writeFile(targetPath, data);
   if (!result.ok) {
     await api().showMessageBox({ type: 'error', title: 'Save failed', message: result.error });
@@ -193,10 +244,8 @@ export async function saveDocument(docId: string, as = false): Promise<void> {
     ...current,
     filePath: targetPath,
     name: api().pathBasename(targetPath),
-    // A Save-As to WAV changes the on-disk container; retag provenance so a
-    // subsequent Save writes WAV in place rather than the old source format.
-    sourceFormat: saveAs ? 'wav' : current.sourceFormat,
-    sourceBitDepth: saveAs ? 32 : current.sourceBitDepth,
+    sourceFormat: 'wav',
+    sourceBitDepth: 32,
     dirty: false,
   });
 }
@@ -210,10 +259,16 @@ export async function exportDocument(docId: string, opts: ExportOptions): Promis
   const doc = findDoc(docId);
   if (!doc) return null;
 
-  const ext = opts.format; // 'wav' | 'mp3' | 'flac'
+  const ext = opts.format; // 'wav' | 'mp3' | 'flac' | 'ogg'
   const baseName = doc.name.replace(/\.[^.]+$/, '');
   const filterName =
-    opts.format === 'wav' ? 'Waveform Audio' : opts.format === 'flac' ? 'FLAC Audio' : 'MP3 Audio';
+    opts.format === 'wav'
+      ? 'Waveform Audio'
+      : opts.format === 'flac'
+        ? 'FLAC Audio'
+        : opts.format === 'ogg'
+          ? 'Ogg Opus Audio'
+          : 'MP3 Audio';
   let targetPath = await api().showSaveDialog({
     defaultPath: `${baseName}.${ext}`,
     filters: [{ name: filterName, extensions: [ext] }],
@@ -223,7 +278,20 @@ export async function exportDocument(docId: string, opts: ExportOptions): Promis
     targetPath += `.${ext}`;
   }
 
-  const data = encodeExport(doc, opts);
+  // Opus encoding is async (WebCodecs); the other formats are synchronous.
+  let data: ArrayBuffer;
+  try {
+    data =
+      opts.format === 'ogg'
+        ? toArrayBuffer(await encodeOggOpus(doc.channels, doc.sampleRate, opts.oggBitrate))
+        : encodeExport(doc, opts);
+  } catch (err) {
+    if (err instanceof OggEncoderUnavailableError) {
+      await api().showMessageBox({ type: 'error', title: 'Export failed', message: err.message });
+      return null;
+    }
+    throw err;
+  }
   const result = await api().writeFile(targetPath, data);
   if (!result.ok) {
     await api().showMessageBox({ type: 'error', title: 'Export failed', message: result.error });

@@ -10,22 +10,29 @@ const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
 
 const WAV_BIT_DEPTHS: WavBitDepth[] = [16, 24, 32];
 const MP3_BITRATES: (128 | 192 | 256 | 320)[] = [128, 192, 256, 320];
+const OGG_BITRATES: (96_000 | 128_000 | 192_000)[] = [96_000, 128_000, 192_000];
 
 /** Export dialog: pick a container format and its quality setting, then export
  * the active document. On success `exportDocument` shows the confirmation and we
  * close; a cancelled save-dialog leaves this open. */
 export default function ExportDialog({ onClose }: { onClose: () => void }) {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
-  const [format, setFormat] = useState<'wav' | 'mp3' | 'flac'>('wav');
+  const [format, setFormat] = useState<'wav' | 'mp3' | 'flac' | 'ogg'>('wav');
   const [wavBitDepth, setWavBitDepth] = useState<WavBitDepth>(24);
   const [mp3Kbps, setMp3Kbps] = useState<128 | 192 | 256 | 320>(192);
+  const [oggBitrate, setOggBitrate] = useState<96_000 | 128_000 | 192_000>(128_000);
   const [busy, setBusy] = useState(false);
 
   const doExport = async () => {
     if (!activeDocumentId || busy) return;
     setBusy(true);
     try {
-      const path = await exportDocument(activeDocumentId, { format, wavBitDepth, mp3Kbps });
+      const path = await exportDocument(activeDocumentId, {
+        format,
+        wavBitDepth,
+        mp3Kbps,
+        oggBitrate,
+      });
       if (path) onClose();
     } finally {
       setBusy(false);
@@ -45,12 +52,15 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
             value={format}
             onChange={(e) => {
               const v = e.target.value;
-              setFormat(v === 'mp3' ? 'mp3' : v === 'flac' ? 'flac' : 'wav');
+              setFormat(
+                v === 'mp3' ? 'mp3' : v === 'flac' ? 'flac' : v === 'ogg' ? 'ogg' : 'wav'
+              );
             }}
           >
             <option value="wav">WAV (uncompressed)</option>
             <option value="flac">FLAC (16-bit)</option>
             <option value="mp3">MP3 (compressed)</option>
+            <option value="ogg">OGG (Opus)</option>
           </select>
         </div>
 
@@ -58,6 +68,27 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
           <p className="text-xs text-[#8b8b92]">
             Lossless FLAC, 16-bit. No quality setting to choose.
           </p>
+        ) : format === 'ogg' ? (
+          <div>
+            <label className={LABEL} htmlFor="export-ogg-bitrate">
+              Bit rate
+            </label>
+            <select
+              id="export-ogg-bitrate"
+              data-testid="export-ogg-bitrate"
+              className={FIELD}
+              value={oggBitrate}
+              onChange={(e) =>
+                setOggBitrate(Number(e.target.value) as 96_000 | 128_000 | 192_000)
+              }
+            >
+              {OGG_BITRATES.map((r) => (
+                <option key={r} value={r}>
+                  {r / 1000} kbps
+                </option>
+              ))}
+            </select>
+          </div>
         ) : format === 'wav' ? (
           <div>
             <label className={LABEL} htmlFor="export-bitdepth">

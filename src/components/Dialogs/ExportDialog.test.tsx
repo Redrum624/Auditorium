@@ -55,6 +55,7 @@ describe('ExportDialog', () => {
       format: 'wav',
       wavBitDepth: 32,
       mp3Kbps: 192,
+      oggBitrate: 128_000,
     });
     await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
@@ -72,6 +73,28 @@ describe('ExportDialog', () => {
       format: 'mp3',
       wavBitDepth: 24,
       mp3Kbps: 320,
+      oggBitrate: 128_000,
+    });
+  });
+
+  it('swaps to an OGG bit-rate select and exports Opus at the chosen bitrate', async () => {
+    const doc = seedActiveDoc();
+    render(<ExportDialog onClose={() => {}} />);
+
+    fireEvent.change(screen.getByLabelText('Format'), { target: { value: 'ogg' } });
+    expect(screen.getByTestId('export-ogg-bitrate')).toBeInTheDocument();
+    expect(screen.queryByTestId('export-bitdepth')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('export-kbps')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('export-ogg-bitrate'), { target: { value: '192000' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+
+    await waitFor(() => expect(mockExport).toHaveBeenCalled());
+    expect(mockExport).toHaveBeenCalledWith(doc.id, {
+      format: 'ogg',
+      wavBitDepth: 24,
+      mp3Kbps: 192,
+      oggBitrate: 192_000,
     });
   });
 
@@ -91,6 +114,7 @@ describe('ExportDialog', () => {
       format: 'flac',
       wavBitDepth: 24,
       mp3Kbps: 192,
+      oggBitrate: 128_000,
     });
   });
 

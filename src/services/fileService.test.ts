@@ -11,6 +11,7 @@ import { docLength, createDocument } from '../audio/AudioDocument';
 import { decodeArrayBuffer } from '../audio/decodeAudio';
 import { encodeMp3 } from '../audio/mp3Encoder';
 import { encodeFlac } from '../audio/flacEncoder';
+import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
 import { decodeWav } from '../audio/wavCodec';
 import * as undoHistory from './undoHistory';
 import * as peaksCache from './peaksCache';
@@ -24,10 +25,26 @@ import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 jest.mock('../audio/decodeAudio', () => ({ decodeArrayBuffer: jest.fn() }));
 jest.mock('../audio/mp3Encoder', () => ({ encodeMp3: jest.fn(() => new ArrayBuffer(2048)) }));
 jest.mock('../audio/flacEncoder', () => ({ encodeFlac: jest.fn(() => new ArrayBuffer(4096)) }));
+// The Opus encoder needs WebCodecs (absent under jsdom); mock it to spy on the
+// save/export routing while keeping a REAL typed error class so the fallback
+// path's `instanceof OggEncoderUnavailableError` check resolves correctly.
+jest.mock('../audio/oggOpusEncoder', () => {
+  class OggEncoderUnavailableError extends Error {
+    constructor(message = 'unavailable') {
+      super(message);
+      this.name = 'OggEncoderUnavailableError';
+    }
+  }
+  return {
+    encodeOggOpus: jest.fn(async () => new Uint8Array([0x4f, 0x67, 0x67, 0x53])), // 'OggS'
+    OggEncoderUnavailableError,
+  };
+});
 
 const mockDecode = decodeArrayBuffer as jest.MockedFunction<typeof decodeArrayBuffer>;
 const mockEncodeMp3 = encodeMp3 as jest.MockedFunction<typeof encodeMp3>;
 const mockEncodeFlac = encodeFlac as jest.MockedFunction<typeof encodeFlac>;
+const mockEncodeOgg = encodeOggOpus as jest.MockedFunction<typeof encodeOggOpus>;
 
 interface MockApi {
   readFile: jest.Mock;
@@ -66,6 +83,7 @@ beforeEach(() => {
   mockDecode.mockResolvedValue(decoded());
   mockEncodeMp3.mockReturnValue(new ArrayBuffer(2048));
   mockEncodeFlac.mockReturnValue(new ArrayBuffer(4096));
+  mockEncodeOgg.mockResolvedValue(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
 });
 
 describe('openFilePath', () => {
@@ -91,13 +109,18 @@ describe('openFilePath', () => {
     expect(flac.sourceFormat).toBe('flac');
   });
 
-  it('gives ogg/other sources a null filePath (Save falls back to save-as WAV)', async () => {
+  it('keeps the filePath for .ogg sources (in-place Opus re-encode) and tags sourceFormat', async () => {
     installApi();
     await openFilePath('D:\\audio\\voice.ogg');
-    await openFilePath('D:\\audio\\clip.m4a');
-    const [ogg, other] = useAppStore.getState().documents;
-    expect(ogg.filePath).toBeNull();
+    const [ogg] = useAppStore.getState().documents;
+    expect(ogg.filePath).toBe('D:\\audio\\voice.ogg');
     expect(ogg.sourceFormat).toBe('ogg');
+  });
+
+  it('gives other/exotic sources a null filePath (Save falls back to save-as WAV)', async () => {
+    installApi();
+    await openFilePath('D:\\audio\\clip.m4a');
+    const [other] = useAppStore.getState().documents;
     expect(other.filePath).toBeNull();
     expect(other.sourceFormat).toBe('other');
   });
@@ -269,6 +292,46 @@ describe('saveDocument', () => {
     expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 16);
   });
 
+  it('re-encodes an OGG source in place via encodeOggOpus (no save-as dialog)', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100);
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\voice.ogg', expect.any(ArrayBuffer));
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+  });
+
+  it('falls back to save-as WAV when the Opus encoder is unavailable', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\voice.wav') });
+    mockEncodeOgg.mockRejectedValueOnce(new OggEncoderUnavailableError());
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).toHaveBeenCalledTimes(1);
+    // The .ogg was NOT written; a real 32-bit WAV went to the picked path.
+    const [path, data] = api.writeFile.mock.calls[0];
+    expect(path).toBe('D:\\out\\voice.wav');
+    expect(decodeWav(data as ArrayBuffer).bitDepth).toBe(32);
+    const saved = useAppStore.getState().documents[0];
+    expect(saved.filePath).toBe('D:\\out\\voice.wav');
+    expect(saved.sourceFormat).toBe('wav'); // retagged so a later Save writes WAV
+    expect(saved.dirty).toBe(false);
+  });
+
   it('forces save-as when as=true even with an existing .wav path', async () => {
     const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\copy.wav') });
     const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
@@ -365,6 +428,36 @@ describe('exportDocument', () => {
 
     const [, data] = api.writeFile.mock.calls[0];
     expect(decodeWav(data as ArrayBuffer).markers).toEqual([{ name: 'Bridge', positionSample: 9 }]);
+  });
+
+  it('exports OGG via encodeOggOpus with the chosen bitrate and writes .ogg', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.ogg') });
+    const doc = seedDoc({ filePath: null, name: 'doc' });
+
+    const result = await exportDocument(doc.id, {
+      format: 'ogg',
+      wavBitDepth: 16,
+      mp3Kbps: 128,
+      oggBitrate: 192_000,
+    });
+
+    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100, 192_000);
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\track.ogg', expect.any(ArrayBuffer));
+    expect(result).toBe('D:\\out\\track.ogg');
+  });
+
+  it('surfaces an error and writes nothing when the Opus encoder is unavailable', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.ogg') });
+    mockEncodeOgg.mockRejectedValueOnce(new OggEncoderUnavailableError());
+    const doc = seedDoc({ filePath: null, name: 'doc' });
+
+    const result = await exportDocument(doc.id, { format: 'ogg', wavBitDepth: 16, mp3Kbps: 128 });
+
+    expect(result).toBeNull();
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Export failed' })
+    );
   });
 
   it('appends the format extension when the picked path lacks it', async () => {
