@@ -8,15 +8,19 @@ the current v1 behavior, and the intended future behavior.
 **Area:** File > Open (`src/audio/decodeAudio.ts` `decodeArrayBuffer`,
 `src/audio/sniffSampleRate.ts`)
 
-**v1.1 behavior:** Non-WAV imports now arrive at their **native sample rate**.
+**v1.2 behavior:** Non-WAV imports now arrive at their **native sample rate**.
 Before decoding, `sniffSampleRate` parses the container header (MP3 frame sync,
-FLAC STREAMINFO, OGG Vorbis/Opus identification, MP4/M4A `mdhd` timescale, and a
-defensive WAV `fmt` reader) and the `OfflineAudioContext` is built at that rate,
-so Chromium's `decodeAudioData` no longer resamples the output. Only containers
-whose rate cannot be sniffed (an exotic/unrecognized layout, or a 64-bit-box
-MP4) fall back to **48000 Hz**. Audio with more than two channels is down-mixed
-to stereo — the extra channels (index ≥ 2) are folded into both L and R at −3 dB
-rather than dropped: `mix = 0.7071·mean(ch2…chN-1)`, `L' = clamp(ch0 + mix, ±1)`,
+FLAC STREAMINFO, OGG Vorbis/Opus identification, MP4/M4A `mdhd` timescale, a
+defensive WAV `fmt` reader, a bounded WebM/Matroska EBML walk down to
+`Segment→Tracks→TrackEntry→Audio→SamplingFrequency` — with Opus tracks fixed at
+48000 Hz regardless of the stored value — and an ADTS/AAC frame-header
+`sampling_frequency_index` scan requiring two consecutive valid frames before
+trusting the sync) and the `OfflineAudioContext` is built at that rate, so
+Chromium's `decodeAudioData` no longer resamples the output. Only genuinely
+unrecognized/exotic container layouts and 64-bit-box MP4 files still fall back
+to **48000 Hz**. Audio with more than two channels is down-mixed to stereo —
+the extra channels (index ≥ 2) are folded into both L and R at −3 dB rather
+than dropped: `mix = 0.7071·mean(ch2…chN-1)`, `L' = clamp(ch0 + mix, ±1)`,
 `R' = clamp(ch1 + mix, ±1)`.
 
 **Intended behavior:** For unsniffable formats, add per-container parsers as

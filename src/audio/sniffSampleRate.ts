@@ -22,9 +22,14 @@ export function sniffSampleRate(buf: ArrayBuffer, _hintedName: string): number |
     if (matchAscii(bytes, 0, 'OggS')) {
       return sniffOgg(bytes, view);
     }
+    if (bytes.length >= 4 && bytes[0] === 0x1a && bytes[1] === 0x45 && bytes[2] === 0xdf && bytes[3] === 0xa3) {
+      return sniffWebm(bytes, view);
+    }
     if (bytes.length >= 8 && matchAscii(bytes, 4, 'ftyp')) {
       return sniffMp4(bytes, view);
     }
+    const adtsRate = sniffAdts(bytes);
+    if (adtsRate !== null) return adtsRate;
     // Fallback: raw MPEG audio (with or without an ID3v2 tag).
     return sniffMp3(bytes);
   } catch {
@@ -122,6 +127,161 @@ function sniffOgg(bytes: Uint8Array, view: DataView): number | null {
   return null;
 }
 
+// --- WebM / Matroska (EBML) ---------------------------------------------------
+
+// EBML class IDs relevant to reaching Segment -> Tracks -> TrackEntry -> Audio
+// -> SamplingFrequency, plus TrackEntry's CodecID (an Opus track always decodes
+// at 48 kHz, so its stored SamplingFrequency, if present, is irrelevant).
+const EBML_ID_SEGMENT = 0x18538067;
+const EBML_ID_TRACKS = 0x1654ae6b;
+const EBML_ID_TRACKENTRY = 0xae;
+const EBML_ID_CODECID = 0x86;
+const EBML_ID_AUDIO = 0xe1;
+const EBML_ID_SAMPLINGFREQUENCY = 0xb5;
+
+// Bounded scan: we never read past the first 512 KB of the file while walking
+// EBML structure, so a malformed or gigantic file cannot make this loop for long.
+const WEBM_SCAN_LIMIT = 512 * 1024;
+
+interface EbmlElement {
+  id: number;
+  contentStart: number;
+  contentEnd: number; // exclusive; clamped to the enclosing bounded range
+  unknownSize: boolean;
+}
+
+/**
+ * Read one EBML vint starting at `offset`. Its length is encoded by the
+ * position of the leading 1 bit in the first byte (1..8 bytes). Returns null
+ * on a truncated vint or a malformed one (first byte 0, i.e. length > 8,
+ * which this parser does not support).
+ */
+function readEbmlVint(
+  bytes: Uint8Array,
+  offset: number,
+  limit: number
+): { length: number; marker: number; firstByte: number } | null {
+  if (offset >= limit) return null;
+  const first = bytes[offset];
+  if (first === 0) return null;
+  let length = 1;
+  let marker = 0x80;
+  while (!(first & marker)) {
+    marker >>= 1;
+    length++;
+  }
+  if (offset + length > limit) return null;
+  return { length, marker, firstByte: first };
+}
+
+// Element IDs keep their marker bit (the raw bytes concatenated as one big
+// integer); real Matroska/EBML class IDs are 1-4 bytes.
+function readEbmlId(bytes: Uint8Array, offset: number, limit: number): { id: number; length: number } | null {
+  const vint = readEbmlVint(bytes, offset, limit);
+  if (!vint || vint.length > 4) return null;
+  let id = vint.firstByte;
+  for (let i = 1; i < vint.length; i++) id = id * 256 + bytes[offset + i];
+  return { id, length: vint.length };
+}
+
+// Element sizes strip the marker bit. A size vint whose remaining data bits
+// are ALL 1 denotes "unknown size" (common for a streamed/live-recorded Segment).
+function readEbmlSize(
+  bytes: Uint8Array,
+  offset: number,
+  limit: number
+): { size: number; length: number; unknown: boolean } | null {
+  const vint = readEbmlVint(bytes, offset, limit);
+  if (!vint || vint.length > 8) return null;
+  const dataMask = vint.marker - 1;
+  let value = vint.firstByte & dataMask;
+  let allOnes = value === dataMask;
+  for (let i = 1; i < vint.length; i++) {
+    const b = bytes[offset + i];
+    value = value * 256 + b;
+    if (b !== 0xff) allOnes = false;
+  }
+  return { size: value, length: vint.length, unknown: allOnes };
+}
+
+/**
+ * Read one element (id + size) at `offset`, bounded to `limit`. An
+ * unknown-size element is treated as extending to `limit` — we cannot know
+ * its true end, so we defensively assume it is the last element in the
+ * current bounded range rather than guessing further (and this keeps every
+ * scan bounded, never unbounded).
+ */
+function readEbmlElement(bytes: Uint8Array, offset: number, limit: number): EbmlElement | null {
+  const idInfo = readEbmlId(bytes, offset, limit);
+  if (!idInfo) return null;
+  const sizeInfo = readEbmlSize(bytes, offset + idInfo.length, limit);
+  if (!sizeInfo) return null;
+  const contentStart = offset + idInfo.length + sizeInfo.length;
+  if (contentStart > limit) return null;
+  if (sizeInfo.unknown) {
+    return { id: idInfo.id, contentStart, contentEnd: limit, unknownSize: true };
+  }
+  const contentEnd = contentStart + sizeInfo.size;
+  if (contentEnd > limit || contentEnd < contentStart) return null; // truncated or overflowed
+  return { id: idInfo.id, contentStart, contentEnd, unknownSize: false };
+}
+
+/** First direct child with `id` inside [start, end). Null if absent or on any parse doubt. */
+function findEbmlChild(bytes: Uint8Array, id: number, start: number, end: number): EbmlElement | null {
+  let offset = start;
+  while (offset < end) {
+    const el = readEbmlElement(bytes, offset, end);
+    if (!el) return null;
+    if (el.id === id) return el;
+    offset = el.contentEnd;
+  }
+  return null;
+}
+
+/** All direct children with `id` inside [start, end); stops (without failing) at the first parse doubt. */
+function findAllEbmlChildren(bytes: Uint8Array, id: number, start: number, end: number): EbmlElement[] {
+  const result: EbmlElement[] = [];
+  let offset = start;
+  while (offset < end) {
+    const el = readEbmlElement(bytes, offset, end);
+    if (!el) break;
+    if (el.id === id) result.push(el);
+    offset = el.contentEnd;
+  }
+  return result;
+}
+
+function readEbmlFloat(bytes: Uint8Array, view: DataView, start: number, end: number): number | null {
+  const length = end - start;
+  if (length === 4) return view.getFloat32(start, false); // EBML numerics are stored big-endian
+  if (length === 8) return view.getFloat64(start, false);
+  return null;
+}
+
+function sniffWebm(bytes: Uint8Array, view: DataView): number | null {
+  const scanEnd = Math.min(bytes.length, WEBM_SCAN_LIMIT);
+  const header = readEbmlElement(bytes, 0, scanEnd); // the EBML header element itself
+  if (!header) return null;
+  const segment = findEbmlChild(bytes, EBML_ID_SEGMENT, header.contentEnd, scanEnd);
+  if (!segment) return null;
+  const tracks = findEbmlChild(bytes, EBML_ID_TRACKS, segment.contentStart, segment.contentEnd);
+  if (!tracks) return null;
+
+  for (const entry of findAllEbmlChildren(bytes, EBML_ID_TRACKENTRY, tracks.contentStart, tracks.contentEnd)) {
+    const codec = findEbmlChild(bytes, EBML_ID_CODECID, entry.contentStart, entry.contentEnd);
+    if (codec && readAscii(bytes, codec.contentStart, codec.contentEnd - codec.contentStart) === 'A_OPUS') {
+      return 48000; // Opus always decodes at 48 kHz regardless of the stored value
+    }
+    const audio = findEbmlChild(bytes, EBML_ID_AUDIO, entry.contentStart, entry.contentEnd);
+    if (!audio) continue;
+    const freq = findEbmlChild(bytes, EBML_ID_SAMPLINGFREQUENCY, audio.contentStart, audio.contentEnd);
+    if (!freq) continue;
+    const rate = readEbmlFloat(bytes, view, freq.contentStart, freq.contentEnd);
+    if (rate && rate > 0) return Math.round(rate);
+  }
+  return null;
+}
+
 // --- MP4 / M4A ---------------------------------------------------------------
 
 interface Mp4Box {
@@ -188,6 +348,75 @@ function sniffMp4(bytes: Uint8Array, view: DataView): number | null {
     if (tsOff + 4 > bytes.length) continue;
     const ts = view.getUint32(tsOff, false);
     if (ts >= 8000 && ts <= 192000) return ts;
+  }
+  return null;
+}
+
+// --- ADTS / AAC ----------------------------------------------------------------
+
+// ISO/IEC 13818-7 sampling_frequency_index -> Hz table. Indices 12-15 are
+// reserved/escape (not covered by this table) and rejected.
+const ADTS_RATE_TABLE = [
+  96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000,
+];
+
+interface AdtsFrame {
+  sampleRate: number;
+  frameLength: number;
+}
+
+/**
+ * Parse a 7-byte fixed ADTS header at `offset`. Returns null on any bounds
+ * doubt, a non-zero layer (ADTS is always layer 00 — this is what tells it
+ * apart from an MPEG audio frame sync, which never has layer 00), or an
+ * invalid/reserved sampling_frequency_index.
+ */
+function readAdtsFrame(bytes: Uint8Array, offset: number): AdtsFrame | null {
+  if (offset + 7 > bytes.length) return null;
+  if (bytes[offset] !== 0xff) return null;
+  const b1 = bytes[offset + 1];
+  if ((b1 & 0xf0) !== 0xf0) return null; // 12-bit syncword
+  const layer = (b1 >> 1) & 0x03;
+  if (layer !== 0x00) return null; // ADTS is always layer 00
+
+  const b2 = bytes[offset + 2];
+  const freqIndex = (b2 >> 2) & 0x0f;
+  if (freqIndex >= ADTS_RATE_TABLE.length) return null; // 12/13/14/15: reserved or escape
+
+  const b3 = bytes[offset + 3];
+  const b4 = bytes[offset + 4];
+  const b5 = bytes[offset + 5];
+  const frameLength = ((b3 & 0x03) << 11) | (b4 << 3) | (b5 >> 5);
+  if (frameLength < 7) return null; // must be at least the fixed header itself
+
+  return { sampleRate: ADTS_RATE_TABLE[freqIndex], frameLength };
+}
+
+/**
+ * Scan for a syncword, then require a SECOND valid ADTS header reporting the
+ * same rate exactly `frameLength` bytes later before trusting the sync — the
+ * same defensive consecutive-frame check the MP3 fallback below relies on to
+ * avoid a false positive on a stray 0xFF byte.
+ */
+function sniffAdts(bytes: Uint8Array): number | null {
+  let start = 0;
+  // Skip an ID3v2 tag: 'ID3' + version(2) + flags(1) + syncsafe size(4 @ offset 6).
+  if (bytes.length >= 10 && matchAscii(bytes, 0, 'ID3')) {
+    const size =
+      ((bytes[6] & 0x7f) << 21) |
+      ((bytes[7] & 0x7f) << 14) |
+      ((bytes[8] & 0x7f) << 7) |
+      (bytes[9] & 0x7f);
+    start = 10 + size;
+  }
+
+  const limit = Math.min(bytes.length - 1, start + 64 * 1024);
+  for (let i = start; i < limit; i++) {
+    if (bytes[i] !== 0xff) continue;
+    const frame = readAdtsFrame(bytes, i);
+    if (!frame) continue;
+    const next = readAdtsFrame(bytes, i + frame.frameLength);
+    if (next && next.sampleRate === frame.sampleRate) return frame.sampleRate;
   }
   return null;
 }

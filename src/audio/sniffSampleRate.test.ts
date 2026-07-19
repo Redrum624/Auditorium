@@ -130,6 +130,96 @@ function mp4(timescale: number): number[] {
   return [...ftyp, ...moov];
 }
 
+// --- WebM / Matroska (EBML) ---------------------------------------------------
+//
+// Hand-built minimal EBML: EBML-header element (empty content) + Segment >
+// Tracks > TrackEntry > [CodecID] > Audio > SamplingFrequency. Every element
+// here uses a 1-byte size vint (0x80 | length, length <= 126), which the real
+// Matroska/EBML spec IDs below support given how small these fixtures are.
+
+const ID_EBML = [0x1a, 0x45, 0xdf, 0xa3]; // EBML header, 4-byte id, marker 0x10
+const ID_SEGMENT = [0x18, 0x53, 0x80, 0x67];
+const ID_TRACKS = [0x16, 0x54, 0xae, 0x6b];
+const ID_TRACKENTRY = [0xae];
+const ID_AUDIO = [0xe1];
+const ID_SAMPLINGFREQ = [0xb5];
+const ID_CODECID = [0x86];
+
+function vintSize(n: number): number[] {
+  if (n > 126) throw new Error('fixture helper only supports 1-byte size vints (n <= 126)');
+  return [0x80 | n]; // marker bit (length=1) | 7-bit value
+}
+
+function ebmlElement(id: number[], content: number[]): number[] {
+  return [...id, ...vintSize(content.length), ...content];
+}
+
+function f32be(n: number): number[] {
+  const buf = new ArrayBuffer(4);
+  new DataView(buf).setFloat32(0, n, false);
+  return Array.from(new Uint8Array(buf));
+}
+
+function f64be(n: number): number[] {
+  const buf = new ArrayBuffer(8);
+  new DataView(buf).setFloat64(0, n, false);
+  return Array.from(new Uint8Array(buf));
+}
+
+// Builds EBML-header + Segment > Tracks > TrackEntry > [CodecID] > Audio > SamplingFrequency.
+function webmAudio(rateBytes: number[], codecId?: string): number[] {
+  const samplingFreq = ebmlElement(ID_SAMPLINGFREQ, rateBytes);
+  const audio = ebmlElement(ID_AUDIO, samplingFreq);
+  const codec = codecId ? ebmlElement(ID_CODECID, ascii(codecId)) : [];
+  const trackEntry = ebmlElement(ID_TRACKENTRY, [...codec, ...audio]);
+  const tracks = ebmlElement(ID_TRACKS, trackEntry);
+  const segment = ebmlElement(ID_SEGMENT, tracks);
+  const header = ebmlElement(ID_EBML, []);
+  return [...header, ...segment];
+}
+
+function webmFloat32(rate: number): number[] {
+  return webmAudio(f32be(rate));
+}
+
+function webmFloat64(rate: number): number[] {
+  return webmAudio(f64be(rate));
+}
+
+// SamplingFrequency deliberately carries a DIFFERENT value (8000) than the
+// expected result (48000) to prove the Opus override wins regardless of it.
+function webmOpus(): number[] {
+  return webmAudio(f32be(8000), 'A_OPUS');
+}
+
+// --- ADTS / AAC ----------------------------------------------------------------
+
+// Encodes just the fixed 7-byte ADTS header fields the sniffer reads: sync,
+// layer=00, sampling_frequency_index, and frame_length. All other bits
+// (profile, channel_config, buffer_fullness, ...) are zeroed — the sniffer
+// ignores them.
+function adtsFrame(freqIndex: number, frameLength: number): number[] {
+  const b1 = 0xf1; // sync low nibble 1111, ID=0, layer=00, protection_absent=1
+  const b2 = (freqIndex & 0x0f) << 2;
+  const b3 = (frameLength >> 11) & 0x03;
+  const b4 = (frameLength >> 3) & 0xff;
+  const b5 = (frameLength & 0x07) << 5;
+  const b6 = 0x00;
+  return [0xff, b1, b2, b3, b4, b5, b6];
+}
+
+// Two back-to-back frames, frameLength=7 (header-only, no payload) so the
+// second frame's sync sits immediately after the first header.
+function adtsTwoFrames(freqIndex: number): number[] {
+  const frame = adtsFrame(freqIndex, 7);
+  return [...frame, ...frame];
+}
+
+// ID3v2 header (10 bytes, syncsafe size=0) directly followed by two valid frames.
+function adtsWithId3(freqIndex: number): number[] {
+  return [...ascii('ID3'), 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, ...adtsTwoFrames(freqIndex)];
+}
+
 // -----------------------------------------------------------------------------
 
 describe('sniffSampleRate', () => {
@@ -193,6 +283,44 @@ describe('sniffSampleRate', () => {
     });
   });
 
+  describe('WebM / Matroska (EBML)', () => {
+    it('reads a float32 SamplingFrequency', () => {
+      expect(sniffSampleRate(toBuf(webmFloat32(48000)), 'a.webm')).toBe(48000);
+    });
+    it('reads a float64 SamplingFrequency', () => {
+      expect(sniffSampleRate(toBuf(webmFloat64(44100)), 'a.webm')).toBe(44100);
+    });
+    it('returns 48000 for an Opus track regardless of the stored SamplingFrequency', () => {
+      expect(sniffSampleRate(toBuf(webmOpus()), 'a.webm')).toBe(48000);
+    });
+    it('returns null for truncated/garbage EBML', () => {
+      expect(sniffSampleRate(toBuf([0x1a, 0x45, 0xdf, 0xa3]), 'a.webm')).toBeNull();
+      expect(sniffSampleRate(toBuf([0x1a, 0x45, 0xdf, 0xa3, ...zeros(40)]), 'a.webm')).toBeNull();
+    });
+  });
+
+  describe('ADTS / AAC', () => {
+    it.each([
+      [0, 96000],
+      [3, 48000],
+      [7, 22050],
+      [11, 8000],
+    ])('reads sampling_frequency_index %i as %i Hz', (freqIndex, expectedRate) => {
+      expect(sniffSampleRate(toBuf(adtsTwoFrames(freqIndex)), 'a.aac')).toBe(expectedRate);
+    });
+    it('skips an ID3v2 header before the first frame', () => {
+      expect(sniffSampleRate(toBuf(adtsWithId3(3)), 'a.aac')).toBe(48000);
+    });
+    it('rejects a single valid frame not confirmed by a second (two-frame rule)', () => {
+      const bytes = [...adtsFrame(3, 7), ...zeros(7)];
+      expect(sniffSampleRate(toBuf(bytes), 'a.aac')).toBeNull();
+    });
+    it('rejects an invalid/reserved sampling_frequency_index', () => {
+      expect(sniffSampleRate(toBuf(adtsTwoFrames(12)), 'a.aac')).toBeNull();
+      expect(sniffSampleRate(toBuf(adtsTwoFrames(15)), 'a.aac')).toBeNull();
+    });
+  });
+
   describe('WAV (defensive)', () => {
     it('reads the fmt chunk sample rate', () => {
       const view = new DataView(new ArrayBuffer(44));
@@ -223,7 +351,17 @@ describe('sniffSampleRate', () => {
     });
 
     it('never throws for any truncation of a valid fixture', () => {
-      const makers = [mp3Mpeg1_44100, mp3WithId3, flac48000, oggVorbis22050, oggOpus, () => mp4(44100)];
+      const makers = [
+        mp3Mpeg1_44100,
+        mp3WithId3,
+        flac48000,
+        oggVorbis22050,
+        oggOpus,
+        () => mp4(44100),
+        () => webmFloat32(48000),
+        () => webmOpus(),
+        () => adtsTwoFrames(3),
+      ];
       for (const make of makers) {
         const full = make();
         for (let len = 0; len <= full.length; len++) {
