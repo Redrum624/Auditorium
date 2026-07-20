@@ -80,7 +80,10 @@ part of a session, its markers survive on disk and come back on reopen.
 **Remaining gap:** MP3 and FLAC have no standard marker/cue-chunk field, so an
 in-place Save or Export to either format still does not carry markers — only
 the `.audm` session format (or re-saving as WAV) preserves them for those
-sources.
+sources. Also, WAV `labl` text is written as Latin-1: marker names using
+characters beyond U+00FF (CJK, emoji) are corrupted on WAV save — accented
+Western-European names round-trip fine, and `.audm` sessions (JSON) preserve
+full Unicode names for any source.
 
 **Intended behavior:** No further work planned; MP3/FLAC markers are a
 container-format limitation, not a missing feature — Adobe Audition has the
