@@ -13,12 +13,13 @@ differs from Adobe Audition, see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 `.wav`, `.mp3`, `.ogg`, `.flac`, `.m4a`, `.aac`, `.webm`. WAV files are decoded
 exactly, at their original sample rate. Every other format is decoded through
 the browser's Web Audio API; before decoding, Auditorium sniffs the container
-header (MP3 frame sync, FLAC STREAMINFO, OGG Vorbis/Opus, MP4/M4A) to recover
-the source sample rate, so the import keeps its **native rate** whenever that
-header is readable — only genuinely unsniffable/exotic containers fall back to
-**48000 Hz** (see Known Limitations). Audio with more than two channels is
-**downmixed to stereo**, not truncated: the extra channels are blended into
-both L and R at −3 dB rather than discarded.
+header (MP3 frame sync, FLAC STREAMINFO, OGG Vorbis/Opus, MP4/M4A, WebM/Matroska
+EBML, and raw ADTS/AAC frame headers) to recover the source sample rate, so the
+import keeps its **native rate** whenever that header is readable — only
+genuinely unsniffable/exotic containers fall back to **48000 Hz** (see Known
+Limitations). Audio with more than two channels is **downmixed to stereo**, not
+truncated: the extra channels are blended into both L and R at −3 dB rather
+than discarded.
 
 ### Creating a new file
 
@@ -74,8 +75,12 @@ button removes it. **Edit → Next Marker** / **Previous Marker** jump the
 cursor to the closest marker after/before it (no wraparound). On the waveform
 and spectral canvases, each marker draws as a small orange triangle flag with
 a dashed vertical line through the full height of the view, with its name
-labeled next to the flag when there's enough horizontal room. Markers are
-**session-only** — they are not saved into any file (see Known Limitations).
+labeled next to the flag when there's enough horizontal room. Markers persist
+to disk: a `.wav` document's markers are written into standard cue/adtl chunks
+on in-place Save, Save As, and Export, and read back the next time that file is
+opened; a multitrack session's markers are embedded in the `.audm` file. MP3
+and FLAC have no standard marker chunk, so markers still don't survive a Save
+or Export to either of those (see Known Limitations).
 
 ### The right sidebar (History | Markers | Properties)
 
@@ -206,13 +211,16 @@ without changing the open document's path or dirty state:
 - **FLAC**: 16-bit, lossless (verbatim — no quality setting).
 - **MP3**: 128/192/256/320 kbps (constant bitrate only — see Known
   Limitations for the VBR gap).
+- **OGG (Opus)**: 96/128/192 kbps.
 
 **File → Save** (`Ctrl+S`) is **format-faithful**: for a document opened from
-`.wav`, `.mp3`, or `.flac` it re-encodes in place into that same container —
-WAV as 32-bit float, MP3 at 192 kbps, FLAC as verbatim FLAC at the source bit
-depth. Documents opened from `.ogg` or other exotic containers, and brand-new
-untitled documents, fall back to a **Save As…** dialog that writes WAV (32-bit
-float). **Save As…** always writes WAV. See Known Limitations for the Ogg gap.
+`.wav`, `.mp3`, `.flac`, or `.ogg` it re-encodes in place into that same
+container — WAV as 32-bit float, MP3 at 192 kbps, FLAC as verbatim FLAC at the
+source bit depth, OGG as Opus-in-Ogg at 128 kbps (if the host has no WebCodecs
+Opus encoder, an in-place OGG Save falls back to the Save As… dialog instead).
+Documents opened from other exotic containers (M4A, AAC, WebM, or anything
+unrecognized), and brand-new untitled documents, always use a **Save As…**
+dialog that writes WAV (32-bit float). **Save As…** always writes WAV.
 
 ## Shortcuts reference
 
