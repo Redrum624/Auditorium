@@ -5,15 +5,16 @@
 import { createDocument, docLength, type AudioDocument } from '../audio/AudioDocument';
 import { RecordingEngine } from '../audio/RecordingEngine';
 import { encodeWav } from '../audio/wavCodec';
+import { encodeOggOpus } from '../audio/oggOpusEncoder';
 import type { EffectParamValue } from '../effects/types';
-import type { EditorView } from '../stores/appStore';
+import type { EditorView, Marker } from '../stores/appStore';
 import { nextId, useAppStore } from '../stores/appStore';
 import { createClip } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { mixdownSession as renderMixdown } from '../multitrack/mixdown';
 import { runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
-import { encodeExport, openFilePath, type ExportOptions } from './fileService';
+import { encodeExport, openFilePath, saveDocument, type ExportOptions } from './fileService';
 import { convertSampleRate } from './documentTools';
 import { copySelection, pasteAtCursor } from './editOps';
 import { getClipboard } from './clipboard';
@@ -27,6 +28,7 @@ export interface TestStateSummary {
   length: number;
   sampleRate: number | null;
   channels: number | null;
+  filePath: string | null;
 }
 
 export interface TestApi {
@@ -79,6 +81,12 @@ export interface TestApi {
     cursor: number;
     armedTrackName: string | null;
   }>;
+  // --- v1.2 flows -------------------------------------------------------------
+  addMarkerToActive(positionSample: number, name: string): string | null;
+  getActiveMarkers(): { name: string; positionSample: number }[];
+  closeActive(): void;
+  exportActiveOgg(outPath: string, bitrate?: number): Promise<boolean>;
+  saveActiveInPlace(): Promise<{ ok: boolean; dirty: boolean | null; filePath: string | null }>;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -128,6 +136,7 @@ export function installTestHooks(): void {
         length: doc ? docLength(doc) : 0,
         sampleRate: doc?.sampleRate ?? null,
         channels: doc?.channels.length ?? null,
+        filePath: doc?.filePath ?? null,
       };
     },
 
@@ -142,7 +151,12 @@ export function installTestHooks(): void {
     saveActiveAs: async (outPath) => {
       const doc = activeDoc();
       if (!doc) return false;
-      const data = encodeWav(doc.channels, doc.sampleRate, 32);
+      const data = encodeWav(
+        doc.channels,
+        doc.sampleRate,
+        32,
+        useAppStore.getState().markers[doc.id]
+      );
       const result = await window.electronAPI.writeFile(outPath, data);
       if (result.ok) {
         useAppStore.getState().updateDocument({ ...doc, filePath: outPath, dirty: false });
@@ -359,6 +373,69 @@ export function installTestHooks(): void {
         cursor,
         armedTrackName: armedTrack?.name ?? null,
       };
+    },
+
+    // --- v1.2 flows ---------------------------------------------------------
+
+    // Adds a marker to the active document via the real store action (Task G1),
+    // minting a fresh id the same way the app does. Returns the new marker's id,
+    // or null if there is no active document.
+    addMarkerToActive: (positionSample, name) => {
+      const doc = activeDoc();
+      if (!doc) return null;
+      const marker: Marker = { id: nextId('marker'), name, positionSample };
+      useAppStore.getState().addMarker(doc.id, marker);
+      return marker.id;
+    },
+
+    // Reads back the active document's markers (sorted by position, per the
+    // store contract) for the round-trip smoke's assertions.
+    getActiveMarkers: () => {
+      const doc = activeDoc();
+      if (!doc) return [];
+      const list = useAppStore.getState().markers[doc.id] ?? [];
+      return list.map((m) => ({ name: m.name, positionSample: m.positionSample }));
+    },
+
+    // Closes the active document via the plain store action (no save-prompt
+    // dialog, which would block headless) so the markers smoke can prove a
+    // reopened file's markers came from disk, not leftover store state.
+    closeActive: () => {
+      const doc = activeDoc();
+      if (!doc) return;
+      useAppStore.getState().closeDocument(doc.id);
+    },
+
+    // Encodes the active document to Ogg Opus via the real async encoder
+    // (WebCodecs AudioEncoder + the pure-TS Ogg muxer, Task G2) and writes it
+    // directly — bypassing exportDocument's native save dialog, which cannot be
+    // driven headlessly, the same way exportActive bypasses it for the
+    // synchronous formats.
+    exportActiveOgg: async (outPath, bitrate) => {
+      const doc = activeDoc();
+      if (!doc) return false;
+      const bytes = await encodeOggOpus(doc.channels, doc.sampleRate, bitrate);
+      const buf = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buf).set(bytes);
+      const result = await window.electronAPI.writeFile(outPath, buf);
+      return result.ok;
+    },
+
+    // Drives the REAL production saveDocument() for an in-place Save. Safe to
+    // call directly here (unlike exportDocument): when the document already has
+    // a filePath, saveDocument re-encodes and writes without prompting any
+    // dialog on success (only on failure, which a test-output-dir write should
+    // never hit).
+    saveActiveInPlace: async () => {
+      const doc = activeDoc();
+      if (!doc) return { ok: false, dirty: null, filePath: null };
+      try {
+        await saveDocument(doc.id);
+      } catch {
+        return { ok: false, dirty: doc.dirty, filePath: doc.filePath };
+      }
+      const after = activeDoc();
+      return { ok: true, dirty: after?.dirty ?? null, filePath: after?.filePath ?? null };
     },
   };
 

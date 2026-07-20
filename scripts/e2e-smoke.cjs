@@ -19,6 +19,8 @@ const OUT_DIR = path.join(ROOT, 'test-output');
 const OUT_MP3 = path.join(OUT_DIR, 'out.mp3');
 const OUT_WAV = path.join(OUT_DIR, 'out.wav');
 const OUT_FLAC = path.join(OUT_DIR, 'out.flac');
+const OUT_MARKERS_WAV = path.join(OUT_DIR, 'markers.wav');
+const OUT_OGG = path.join(OUT_DIR, 'out.ogg');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -80,7 +82,7 @@ async function main() {
     });
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  for (const f of [OUT_MP3, OUT_WAV, OUT_FLAC, SHOT]) {
+  for (const f of [OUT_MP3, OUT_WAV, OUT_FLAC, OUT_MARKERS_WAV, OUT_OGG, SHOT]) {
     if (fs.existsSync(f)) fs.rmSync(f);
   }
 
@@ -395,7 +397,86 @@ async function main() {
       `pasted length ~= 2x copied (${paste.insertedLen} vs 2*${paste.copiedLen})`
     );
 
-    // 7) Screenshot ---------------------------------------------------------
+    // 7) Markers round-trip (Task G1 acceptance): add 2 markers, save-as WAV,
+    // close, reopen, and confirm both markers survive with correct positions and
+    // names — proving the cue/adtl chunks (not leftover store state) carried them.
+    console.log('Markers round-trip: add, save-as WAV, close, reopen...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const m1 = await page.evaluate(() => window.__test.addMarkerToActive(5000, 'Verse'));
+    const m2 = await page.evaluate(() => window.__test.addMarkerToActive(20000, 'Chorus'));
+    assert(m1 !== null, 'marker 1 added to the active document');
+    assert(m2 !== null, 'marker 2 added to the active document');
+
+    const markersSaveOk = await page.evaluate(
+      (out) => window.__test.saveActiveAs(out),
+      OUT_MARKERS_WAV
+    );
+    assert(markersSaveOk === true, 'saveActiveAs(markers.wav) reported success');
+    assert(fs.existsSync(OUT_MARKERS_WAV), 'markers.wav exists on disk');
+
+    await page.evaluate(() => window.__test.closeActive());
+    await page.evaluate((p) => window.__test.openPath(p), OUT_MARKERS_WAV);
+    const markersAfter = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  markers after reopen: ${JSON.stringify(markersAfter)}`);
+    assert(markersAfter.length === 2, `2 markers survive the WAV round trip (got ${markersAfter.length})`);
+    assert(
+      markersAfter[0] &&
+        markersAfter[0].positionSample === 5000 &&
+        markersAfter[0].name === 'Verse',
+      `marker 1 round-tripped correctly (${JSON.stringify(markersAfter[0])})`
+    );
+    assert(
+      markersAfter[1] &&
+        markersAfter[1].positionSample === 20000 &&
+        markersAfter[1].name === 'Chorus',
+      `marker 2 round-tripped correctly (${JSON.stringify(markersAfter[1])})`
+    );
+
+    // 7b) OGG (Opus) round-trip (Task G2 acceptance): export via the real async
+    // WebCodecs encoder + pure-TS Ogg muxer, decode it back through Chromium's
+    // real Opus decoder, then verify in-place Save re-encodes at the same path.
+    console.log('OGG (Opus) round trip: export, decode via Chromium, in-place save...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const oggExportOk = await page.evaluate(
+      (out) => window.__test.exportActiveOgg(out, 128_000),
+      OUT_OGG
+    );
+    assert(oggExportOk === true, 'exportActiveOgg reported success');
+    assert(fs.existsSync(OUT_OGG), 'out.ogg exists on disk');
+    const oggHead = fs.readFileSync(OUT_OGG).subarray(0, 4).toString('ascii');
+    assert(oggHead === 'OggS', 'out.ogg begins with the OggS magic');
+
+    // Reopen through the app: this is a REAL Chromium Opus decode of our bytes.
+    await page.evaluate((p) => window.__test.openPath(p), OUT_OGG);
+    const oggSummary = await page.evaluate(() => window.__test.getStateSummary());
+    console.log(`  reopened ogg: ${JSON.stringify(oggSummary)}`);
+    assert(oggSummary.sampleRate === 48000, `decoded ogg is 48000 Hz (got ${oggSummary.sampleRate})`);
+    const oggDuration = oggSummary.length / oggSummary.sampleRate;
+    assert(
+      Math.abs(oggDuration - 2.0) <= 0.02,
+      `decoded ogg duration ~= 2.0s within ±20ms (got ${oggDuration.toFixed(4)}s)`
+    );
+    const oggPeak = await page.evaluate(() => window.__test.getPeak());
+    assert(oggPeak > 0.1, `decoded ogg is non-silent (peak ${oggPeak.toFixed(4)} > 0.1)`);
+    assert(
+      oggSummary.filePath === OUT_OGG,
+      `reopened ogg document kept its filePath (got ${oggSummary.filePath})`
+    );
+
+    // In-place Save re-encodes Opus-in-Ogg to the same path via the real
+    // production saveDocument() (no dialog needed — filePath is already set).
+    const oggSizeBefore = fs.statSync(OUT_OGG).size;
+    const saveResult = await page.evaluate(() => window.__test.saveActiveInPlace());
+    console.log(`  in-place save result: ${JSON.stringify(saveResult)}`);
+    assert(saveResult.ok === true, 'in-place ogg Save reported success');
+    assert(saveResult.dirty === false, 'document is clean after in-place Save');
+    assert(saveResult.filePath === OUT_OGG, 'in-place Save kept the same filePath');
+    const oggHeadAfter = fs.readFileSync(OUT_OGG).subarray(0, 4).toString('ascii');
+    assert(oggHeadAfter === 'OggS', 'out.ogg still begins with the OggS magic after re-save');
+    const oggSizeAfter = fs.statSync(OUT_OGG).size;
+    console.log(`  out.ogg size: ${oggSizeBefore} -> ${oggSizeAfter} bytes (re-encoded in place)`);
+
+    // 8) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 
