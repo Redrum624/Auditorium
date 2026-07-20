@@ -398,6 +398,41 @@ describe('muxOpusStream', () => {
     expect(last.granule).toBe(BigInt(preSkip + 2500));
   });
 
+  it('gives INTERMEDIATE audio pages K*960 granules (no +preSkip) and stays non-decreasing', () => {
+    const preSkip = 312;
+    const totalSamples = 5000;
+    // Six 20 ms packets, 200 bytes each; maxPageBytes=300 forces two packets per
+    // page → three audio pages (seq 2,3,4). Per RFC 7845 §4 the granule already
+    // includes the pre-skip samples, so an intermediate page's granule must be
+    // exactly K*960 — NOT preSkip + K*960.
+    const stream = muxOpusStream({
+      serial: 11,
+      channelCount: 1,
+      preSkip,
+      inputSampleRate: 48000,
+      packets: Array.from({ length: 6 }, () => opkt(200, 960)),
+      totalSamples,
+      maxPageBytes: 300,
+    });
+    const pages = parsePages(stream);
+    const audioPages = pages.filter((p) => p.sequence >= 2);
+    expect(audioPages.length).toBeGreaterThanOrEqual(3);
+
+    // First audio page completes packets 1–2 → cumulative 2*960, no +preSkip.
+    expect(audioPages[0].granule).toBe(BigInt(2 * 960));
+    // Second (intermediate) audio page completes packets 3–4 → 4*960.
+    expect(audioPages[1].granule).toBe(BigInt(4 * 960));
+    // Final EOS page is trimmed to preSkip + true total.
+    const last = audioPages[audioPages.length - 1];
+    expect(last.headerType & HEADER_TYPE.EOS).toBe(HEADER_TYPE.EOS);
+    expect(last.granule).toBe(BigInt(preSkip + totalSamples));
+
+    // Granules are non-decreasing across ALL pages (headers at 0 included).
+    for (let i = 1; i < pages.length; i++) {
+      expect(pages[i].granule >= pages[i - 1].granule).toBe(true);
+    }
+  });
+
   it('produces a valid CRC on every page and a contiguous sequence', () => {
     const stream = muxOpusStream({
       serial: 5,

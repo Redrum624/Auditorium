@@ -292,14 +292,18 @@ export function muxOpusStream(opts: MuxOptions): Uint8Array {
   const parts: Uint8Array[] = [headPage, tagsPage];
 
   if (!noAudio) {
-    // Assign each audio packet the granule position reached after it decodes.
+    // Each audio packet's granule is the cumulative count of 48 kHz decoder-
+    // output samples after it decodes. Per RFC 7845 §4 the granule already
+    // INCLUDES the pre-skip samples (they are the first samples the decoder
+    // emits), so pre-skip is NOT added on top of the cumulative count here.
     let cumulative = 0;
     const streamPackets: StreamPacket[] = opts.packets.map((p) => {
       cumulative += p.sampleCount;
-      return { data: p.data, granule: BigInt(opts.preSkip + cumulative) };
+      return { data: p.data, granule: BigInt(cumulative) };
     });
-    // Trim the final packet's granule to the true content length so the EOS
-    // page tells decoders to drop the encoder's tail padding.
+    // Trim the final packet's granule to preSkip + true content length so the
+    // EOS page tells decoders to drop the encoder's tail padding (playback
+    // length = final granule − preSkip = totalSamples).
     const totalSamples = opts.totalSamples ?? cumulative;
     streamPackets[streamPackets.length - 1].granule = BigInt(opts.preSkip + totalSamples);
 
