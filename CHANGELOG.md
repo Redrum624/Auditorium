@@ -5,6 +5,18 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-07-22
+
+### Fixed
+
+- Editing during an in-place `.ogg` save could be silently lost. Cause: `.ogg` is the only asynchronous encode path (WebCodecs), and `saveDocument` wrote its pre-encode snapshot back into the store with `dirty: false` after the await — an edit made while the encoder ran was clobbered by the stale snapshot and marked saved. Fix: after the await, the store is updated only if the live document is still the exact pre-save snapshot (reference equality — every edit produces a fresh document object); otherwise the newer edit is kept and the document stays dirty, matching "save, then edit" semantics. A per-document in-flight guard also prevents a second concurrent Save from interleaving file writes ("Save in progress" notice). Affects: `src/services/fileService.ts`.
+- Unexpected OGG encoder errors were invisible to the user. Cause: `saveDocument` and `exportDocument` only handled the typed `OggEncoderUnavailableError` (save-as-WAV fallback); any other encoder rejection (e.g. a WebCodecs `DOMException`) propagated as an unhandled rejection with no dialog. Fix: non-typed encode errors now surface through the same error message box already used for file-write failures, and the document stays dirty. Affects: `src/services/fileService.ts`.
+- Corrupt WAV files could produce spurious markers. Cause: the `cue ` chunk decoder bounded its reads by the end of the file buffer instead of the chunk's declared size, so a corrupt `numCuePoints` let it interpret bytes of the following chunks as cue points. Fix: cue-point reads are clamped to the declared chunk size (mirroring the existing `LIST/adtl` clamp) and the iteration count is capped by what the chunk can actually hold; malformed files parse what fits and never throw. Affects: `src/audio/wavCodec.ts`.
+
+### Changed
+
+- WebM sniffing test coverage: added fixtures for sibling-element skipping at every EBML walk level, a leading video track followed by an audio track, and two audio tracks (first wins — pinned); removed the dead `unknownSize` field. No production behavior change. Affects: `src/audio/sniffSampleRate.ts`.
+
 ## [1.2.0] - 2026-07-19
 
 ### Added
