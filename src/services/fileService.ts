@@ -64,6 +64,18 @@ function findDoc(docId: string): AudioDocument | undefined {
   return store().documents.find((d) => d.id === docId);
 }
 
+/** Extract a display message from a thrown/rejected value that may or may not
+ * be an Error (encoders can reject with a DOMException or a plain value). */
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** docIds with a Save currently in flight (spans the encode + write awaits).
+ * `encodeInPlace`'s OGG branch is async (WebCodecs), so a second saveDocument()
+ * call for the same doc could otherwise start a second encode/write and race
+ * the first. Guarded at the top of the exported saveDocument. */
+const inFlightSaves = new Set<string>();
+
 /** Encode a document to bytes for the given export options. Exported so the
  * (test-only) test hooks can reuse the exact same encoding path. */
 export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuffer {
@@ -178,9 +190,36 @@ export async function openFilesViaDialog(): Promise<void> {
  * WebCodecs) an in-place `.ogg` Save falls back to the save-as WAV dialog.
  * Otherwise (no path, or Save As) prompt a save-as dialog which always writes
  * WAV. On success name/filePath update and dirty clears — without an undo entry.
- * A cancelled dialog is a no-op; a failed write surfaces an error message box.
+ * A cancelled dialog is a no-op; a failed write, or a non-`OggEncoderUnavailableError`
+ * encode failure, surfaces an error message box and leaves the doc dirty.
+ *
+ * A second call for the same `docId` while one is already mid-encode/write
+ * (the OGG branch is async) does not start a second write; it surfaces
+ * "Save in progress" and returns (Task H1). If any store-observable edit lands
+ * on the doc during an in-flight save's encode/write, the save's post-write
+ * bookkeeping never clobbers it: the live doc keeps its newer channels and
+ * stays dirty (Task H1).
  */
 export async function saveDocument(docId: string, as = false): Promise<void> {
+  if (inFlightSaves.has(docId)) {
+    // A save for this doc is already mid-encode/write (encodeInPlace's OGG
+    // branch is async). Don't start a second write that could race the first.
+    await api().showMessageBox({
+      type: 'warning',
+      title: 'Save in progress',
+      message: 'A save is already in progress for this document.',
+    });
+    return;
+  }
+  inFlightSaves.add(docId);
+  try {
+    await saveDocumentLocked(docId, as);
+  } finally {
+    inFlightSaves.delete(docId);
+  }
+}
+
+async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
   const doc = findDoc(docId);
   if (!doc) return;
 
@@ -200,14 +239,26 @@ export async function saveDocument(docId: string, as = false): Promise<void> {
         await saveAsWav(docId);
         return;
       }
-      throw err;
+      // Any other encode failure: surface it the same way a write failure is
+      // surfaced below, rather than letting it throw upward unhandled.
+      await api().showMessageBox({ type: 'error', title: 'Save failed', message: errorMessage(err) });
+      return;
     }
     const result = await api().writeFile(targetPath, data);
     if (!result.ok) {
       await api().showMessageBox({ type: 'error', title: 'Save failed', message: result.error });
       return;
     }
-    store().updateDocument({ ...current, dirty: false });
+    // Only clear dirty (and only write to the store at all) when nothing
+    // edited the doc during the encode/write awaits. Every edit replaces the
+    // store's doc object (AudioDocument.ts), so reference equality against
+    // the pre-await snapshot is a valid "unchanged" test. If it changed, the
+    // live doc already has newer channels — leave it untouched and still
+    // dirty; the file on disk now holds the older snapshot, same semantics as
+    // "save, then edit". Never write the pre-await snapshot's channels back.
+    if (findDoc(docId) === current) {
+      store().updateDocument({ ...current, dirty: false });
+    }
     return;
   }
 
@@ -240,14 +291,21 @@ async function saveAsWav(docId: string): Promise<void> {
     await api().showMessageBox({ type: 'error', title: 'Save failed', message: result.error });
     return;
   }
-  store().updateDocument({
-    ...current,
-    filePath: targetPath,
-    name: api().pathBasename(targetPath),
-    sourceFormat: 'wav',
-    sourceBitDepth: 32,
-    dirty: false,
-  });
+  // Same staleness discipline as the in-place path: only retag filePath/name/
+  // provenance and clear dirty if nothing edited the doc during the write
+  // await. If it changed, leave the live (newer) doc untouched and dirty —
+  // the just-written file holds the pre-edit snapshot; a later Save will
+  // re-prompt (or re-encode in place, once a filePath exists) consistently.
+  if (findDoc(docId) === current) {
+    store().updateDocument({
+      ...current,
+      filePath: targetPath,
+      name: api().pathBasename(targetPath),
+      sourceFormat: 'wav',
+      sourceBitDepth: 32,
+      dirty: false,
+    });
+  }
 }
 
 /**
@@ -290,7 +348,10 @@ export async function exportDocument(docId: string, opts: ExportOptions): Promis
       await api().showMessageBox({ type: 'error', title: 'Export failed', message: err.message });
       return null;
     }
-    throw err;
+    // Any other encode failure (generic Error, DOMException, ...): surface it
+    // the same way instead of letting it throw upward unhandled.
+    await api().showMessageBox({ type: 'error', title: 'Export failed', message: errorMessage(err) });
+    return null;
   }
   const result = await api().writeFile(targetPath, data);
   if (!result.ok) {

@@ -389,6 +389,160 @@ describe('saveDocument', () => {
   });
 });
 
+describe('saveDocument — async in-place save races (Task H1)', () => {
+  function controllableEncode(): { resolve: (bytes: Uint8Array) => void; reject: (err: unknown) => void } {
+    let resolveFn!: (bytes: Uint8Array) => void;
+    let rejectFn!: (err: unknown) => void;
+    mockEncodeOgg.mockImplementationOnce(
+      () =>
+        new Promise<Uint8Array>((res, rej) => {
+          resolveFn = res;
+          rejectFn = rej;
+        })
+    );
+    // Wrap in closures so callers can hold the returned object before
+    // mockEncodeOgg has actually been invoked (resolveFn/rejectFn are only
+    // assigned once the Promise executor runs, at call time).
+    return {
+      resolve: (bytes) => resolveFn(bytes),
+      reject: (err) => rejectFn(err),
+    };
+  }
+
+  it('keeps a mid-save edit\'s newer channels and dirty flag; the file still receives the pre-edit snapshot bytes', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+    const { resolve } = controllableEncode();
+
+    const savePromise = saveDocument(doc.id);
+
+    // Simulate an edit landing while the encode is in flight: every edit
+    // replaces the store's doc object with a fresh one (AudioDocument.ts).
+    const editedChannels = [new Float32Array([1, 2, 3]), new Float32Array([4, 5, 6])];
+    const edited = { ...useAppStore.getState().documents[0], channels: editedChannels, dirty: true };
+    useAppStore.getState().updateDocument(edited);
+
+    resolve(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await savePromise;
+
+    const live = useAppStore.getState().documents[0];
+    expect(live.channels).toBe(editedChannels); // newer channels preserved, not clobbered
+    expect(live.dirty).toBe(true); // stays dirty — disk holds an older snapshot
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('clears dirty normally when nothing edits the doc during the async encode', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+
+    await saveDocument(doc.id);
+
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('serializes a concurrent second save for the same doc: single write, "save in progress" surfaced', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+    const { resolve } = controllableEncode();
+
+    const first = saveDocument(doc.id);
+    const second = saveDocument(doc.id); // fires while the first is still mid-encode
+
+    resolve(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await Promise.all([first, second]);
+
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Save in progress' })
+    );
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+  });
+
+  it('allows a save after a prior save for the same doc has completed', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+
+    await saveDocument(doc.id);
+    useAppStore.getState().updateDocument({ ...useAppStore.getState().documents[0], dirty: true });
+    await saveDocument(doc.id);
+
+    expect(api.writeFile).toHaveBeenCalledTimes(2);
+    expect(api.showMessageBox).not.toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Save in progress' })
+    );
+  });
+
+  it('surfaces a generic encoder rejection as a user-facing error and keeps the doc dirty (no unhandled rejection)', async () => {
+    const api = installApi();
+    mockEncodeOgg.mockRejectedValueOnce(new Error('WebCodecs internal failure'));
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+
+    await saveDocument(doc.id);
+
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        title: 'Save failed',
+        message: 'WebCodecs internal failure',
+      })
+    );
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
+  });
+
+  it('keeps a mid-save-as edit\'s newer channels and dirty flag; the filePath is not retagged', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\new.wav') });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Untitled 1' });
+    let resolveWrite!: (r: { ok: true } | { ok: false; error: string }) => void;
+    api.writeFile.mockImplementationOnce(
+      () => new Promise((resolve) => { resolveWrite = resolve; })
+    );
+
+    const savePromise = saveDocument(doc.id);
+    // Let the save-as dialog + doc re-fetch happen before editing.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const editedChannels = [new Float32Array([9, 9]), new Float32Array([9, 9])];
+    const edited = { ...useAppStore.getState().documents[0], channels: editedChannels, dirty: true };
+    useAppStore.getState().updateDocument(edited);
+
+    resolveWrite({ ok: true });
+    await savePromise;
+
+    const live = useAppStore.getState().documents[0];
+    expect(live.channels).toBe(editedChannels);
+    expect(live.dirty).toBe(true);
+    expect(live.filePath).toBeNull(); // not retagged to the just-written path
+  });
+});
+
 describe('exportDocument', () => {
   it('encodes MP3 via encodeMp3 and writes it, leaving the doc unchanged', async () => {
     const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.mp3') });
@@ -457,6 +611,20 @@ describe('exportDocument', () => {
     expect(api.writeFile).not.toHaveBeenCalled();
     expect(api.showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', title: 'Export failed' })
+    );
+  });
+
+  it('surfaces a generic (non-typed) encoder rejection as a user-facing error, no unhandled rejection (Task H1)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.ogg') });
+    mockEncodeOgg.mockRejectedValueOnce(new DOMException('encode failed', 'EncodingError'));
+    const doc = seedDoc({ filePath: null, name: 'doc' });
+
+    const result = await exportDocument(doc.id, { format: 'ogg', wavBitDepth: 16, mp3Kbps: 128 });
+
+    expect(result).toBeNull();
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Export failed', message: 'encode failed' })
     );
   });
 
