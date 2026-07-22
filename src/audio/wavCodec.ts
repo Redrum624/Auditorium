@@ -212,10 +212,15 @@ export function decodeWav(buf: ArrayBuffer): {
       dataOffset = chunkDataStart;
       dataSize = Math.min(chunkSize, view.byteLength - chunkDataStart);
     } else if (chunkId === 'cue ' && chunkDataStart + 4 <= view.byteLength) {
+      const cueEnd = Math.min(chunkDataStart + chunkSize, view.byteLength);
       const numCuePoints = view.getUint32(chunkDataStart, true);
-      for (let i = 0; i < numCuePoints; i++) {
+      // Never read past what the declared chunk size can actually hold, even
+      // if adjacent (unrelated) bytes happen to still be within view.byteLength.
+      const maxCuePointsInChunk = Math.max(0, Math.floor((chunkSize - 4) / 24));
+      const cuePointCount = Math.min(numCuePoints, maxCuePointsInChunk);
+      for (let i = 0; i < cuePointCount; i++) {
         const base = chunkDataStart + 4 + i * 24;
-        if (base + 24 > view.byteLength) break; // truncated/corrupt — stop, keep what we have
+        if (base + 24 > cueEnd) break; // truncated/corrupt — stop, keep what we have
         cuePoints.push({ name: view.getUint32(base, true), sampleOffset: view.getUint32(base + 20, true) });
       }
     } else if (chunkId === 'LIST' && chunkDataStart + 4 <= view.byteLength) {

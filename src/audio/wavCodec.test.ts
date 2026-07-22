@@ -369,6 +369,30 @@ describe('decodeWav marker tolerance', () => {
   });
 });
 
+describe('decodeWav cue chunk bounded by declared chunk size (H2 hardening)', () => {
+  it('ignores decoy cue-point bytes beyond the declared chunk size even though numCuePoints lies about how many points follow', () => {
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithOversizedCueChunk(samples, SAMPLE_RATE);
+    const decoded = decodeWav(buf);
+    // Only the single cue point that physically fits inside the declared
+    // chunkSize (28 bytes: 4B count + 1x24B point) may be decoded.
+    expect(decoded.markers).toEqual([{ name: 'Marker 1', positionSample: 5 }]);
+    // The decoy points sit right after the chunk's declared end (still within
+    // view.byteLength) and must never be interpreted as cues.
+    expect(decoded.markers.some((m) => m.positionSample === 999999)).toBe(false);
+  });
+
+  it('does not throw on a cue chunk truncated at the buffer end; decodes only the points that physically fit', () => {
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithTruncatedCueChunk(samples, SAMPLE_RATE);
+    expect(() => decodeWav(buf)).not.toThrow();
+    const decoded = decodeWav(buf);
+    // The chunk header lies (declares room for 3 points, numCuePoints claims
+    // 3) but the buffer physically ends after only 1 full 24-byte point.
+    expect(decoded.markers).toEqual([{ name: 'Marker 1', positionSample: 9 }]);
+  });
+});
+
 /** Builds a mono 16-bit PCM WAV with a 'cue ' chunk placed BEFORE 'data'. */
 function buildWavWithCueBeforeData(
   samples: Float32Array,
@@ -550,6 +574,118 @@ function buildWavWithUnknownAdtlSubchunk(samples: Float32Array, sampleRate: numb
   }
 
   return buffer;
+}
+
+/** Builds a mono 16-bit PCM WAV whose 'cue ' chunk header declares a chunkSize
+ *  that only holds 1 cue point (28 bytes: 4B count + 1x24B point), but whose
+ *  numCuePoints field lies and claims 5. Immediately after the chunk's
+ *  DECLARED end (still within view.byteLength) sit 4 decoy 24-byte records
+ *  with a recognizable dwSampleOffset (999999) that must never be decoded as
+ *  markers — only bytes within chunkDataStart + chunkSize are eligible. */
+function buildWavWithOversizedCueChunk(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const realCueChunkSize = 4 + 1 * 24; // declares room for exactly 1 cue point
+  const decoyPointCount = 4; // decoy bytes for the 4 extra points numCuePoints (5) lies about
+  const decoyBytes = decoyPointCount * 24;
+  const totalSize = 12 + (8 + 16) + (8 + dataSize) + (8 + realCueChunkSize) + decoyBytes;
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  writeAscii(view, offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, totalSize - 8, true); offset += 4;
+  writeAscii(view, offset, 'WAVE'); offset += 4;
+
+  writeAscii(view, offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * bytesPerSample, true); offset += 4;
+  view.setUint16(offset, bytesPerSample, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+
+  writeAscii(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, dataSize, true); offset += 4;
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+    view.setInt16(offset, clamped, true);
+    offset += 2;
+  }
+
+  writeAscii(view, offset, 'cue '); offset += 4;
+  view.setUint32(offset, realCueChunkSize, true); offset += 4; // declares room for only 1 point
+  view.setUint32(offset, 5, true); offset += 4; // numCuePoints LIES: claims 5
+  // the one cue point that actually fits within the declared chunk size
+  view.setUint32(offset, 1, true); offset += 4; // dwName
+  view.setUint32(offset, 0, true); offset += 4; // dwPosition
+  writeAscii(view, offset, 'data'); offset += 4; // fccChunk
+  view.setUint32(offset, 0, true); offset += 4; // dwChunkStart
+  view.setUint32(offset, 0, true); offset += 4; // dwBlockStart
+  view.setUint32(offset, 5, true); offset += 4; // dwSampleOffset = 5 (the real marker)
+
+  // Decoy bytes, immediately after the DECLARED end of the cue chunk but
+  // still inside view.byteLength.
+  for (let i = 0; i < decoyPointCount; i++) {
+    view.setUint32(offset, 77, true); offset += 4; // decoy dwName
+    view.setUint32(offset, 0, true); offset += 4;
+    writeAscii(view, offset, 'JUNK'); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, 999999, true); offset += 4; // decoy dwSampleOffset — must never surface
+  }
+
+  return buffer;
+}
+
+/** Builds a mono 16-bit PCM WAV whose 'cue ' chunk header lies: it declares a
+ *  chunkSize and numCuePoints that together claim 3 cue points, but the
+ *  buffer physically ends right after the first (and only) full 24-byte
+ *  point. Exercises truncation-at-buffer-end tolerance. */
+function buildWavWithTruncatedCueChunk(samples: Float32Array, sampleRate: number): ArrayBuffer {
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const declaredCueChunkSize = 4 + 3 * 24; // header LIES: claims room for 3 points
+  const physicalCuePayload = 4 + 1 * 24; // only 1 point is physically present
+  const totalSize = 12 + (8 + 16) + (8 + dataSize) + (8 + physicalCuePayload);
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  writeAscii(view, offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, totalSize - 8, true); offset += 4;
+  writeAscii(view, offset, 'WAVE'); offset += 4;
+
+  writeAscii(view, offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint16(offset, 1, true); offset += 2;
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * bytesPerSample, true); offset += 4;
+  view.setUint16(offset, bytesPerSample, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+
+  writeAscii(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, dataSize, true); offset += 4;
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+    view.setInt16(offset, clamped, true);
+    offset += 2;
+  }
+
+  writeAscii(view, offset, 'cue '); offset += 4;
+  view.setUint32(offset, declaredCueChunkSize, true); offset += 4; // lies: says 3 points fit
+  view.setUint32(offset, 3, true); offset += 4; // numCuePoints also claims 3
+  // only 1 real cue point is physically present; the buffer ends right after it
+  view.setUint32(offset, 1, true); offset += 4; // dwName
+  view.setUint32(offset, 0, true); offset += 4; // dwPosition
+  writeAscii(view, offset, 'data'); offset += 4; // fccChunk
+  view.setUint32(offset, 0, true); offset += 4; // dwChunkStart
+  view.setUint32(offset, 0, true); offset += 4; // dwBlockStart
+  view.setUint32(offset, 9, true); offset += 4; // dwSampleOffset
+
+  return buffer; // physically ends here — declaredCueChunkSize claims more
 }
 
 /** Builds a minimal WAV buffer containing only RIFF/WAVE + a fmt chunk (no data), for testing fmt validation. */
