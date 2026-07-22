@@ -145,6 +145,13 @@ const ID_AUDIO = [0xe1];
 const ID_SAMPLINGFREQ = [0xb5];
 const ID_CODECID = [0x86];
 
+// Real Matroska/EBML IDs the sniffer never looks for, used purely as "inert
+// sibling" elements to exercise findEbmlChild's skip-and-advance behavior.
+const ID_VOID = [0xec]; // Void: 1-byte id
+const ID_SEEKHEAD = [0x11, 0x4d, 0x9b, 0x74]; // SeekHead: 4-byte id (Segment child)
+const ID_TRACKNUMBER = [0xd7]; // TrackNumber: 1-byte id (TrackEntry child)
+const ID_CHANNELS = [0x9f]; // Channels: 1-byte id (Audio child)
+
 function vintSize(n: number): number[] {
   if (n > 126) throw new Error('fixture helper only supports 1-byte size vints (n <= 126)');
   return [0x80 | n]; // marker bit (length=1) | 7-bit value
@@ -190,6 +197,54 @@ function webmFloat64(rate: number): number[] {
 // expected result (48000) to prove the Opus override wins regardless of it.
 function webmOpus(): number[] {
   return webmAudio(f32be(8000), 'A_OPUS');
+}
+
+// Tracks > [video TrackEntry (CodecID V_VP8, no Audio child), audio TrackEntry
+// (SamplingFrequency)]. The video entry has no Audio child, so the sniffer's
+// per-entry loop must `continue` past it rather than stopping there.
+function webmVideoThenAudioTrack(rate: number): number[] {
+  const videoEntry = ebmlElement(ID_TRACKENTRY, ebmlElement(ID_CODECID, ascii('V_VP8')));
+  const audioEntry = ebmlElement(
+    ID_TRACKENTRY,
+    ebmlElement(ID_AUDIO, ebmlElement(ID_SAMPLINGFREQ, f32be(rate)))
+  );
+  const tracks = ebmlElement(ID_TRACKS, [...videoEntry, ...audioEntry]);
+  const segment = ebmlElement(ID_SEGMENT, tracks);
+  const header = ebmlElement(ID_EBML, []);
+  return [...header, ...segment];
+}
+
+// Tracks > [audio TrackEntry(rate1), audio TrackEntry(rate2)]. Pins current
+// behavior: the sniffer returns the FIRST TrackEntry's rate.
+function webmTwoAudioTracks(rate1: number, rate2: number): number[] {
+  const entry1 = ebmlElement(ID_TRACKENTRY, ebmlElement(ID_AUDIO, ebmlElement(ID_SAMPLINGFREQ, f32be(rate1))));
+  const entry2 = ebmlElement(ID_TRACKENTRY, ebmlElement(ID_AUDIO, ebmlElement(ID_SAMPLINGFREQ, f32be(rate2))));
+  const tracks = ebmlElement(ID_TRACKS, [...entry1, ...entry2]);
+  const segment = ebmlElement(ID_SEGMENT, tracks);
+  const header = ebmlElement(ID_EBML, []);
+  return [...header, ...segment];
+}
+
+// Inserts an inert sibling element before the target at every walk level
+// `sniffWebm` uses findEbmlChild on: top-level (before Segment), inside
+// Segment (before Tracks), inside TrackEntry (before Audio), and inside Audio
+// (before SamplingFrequency). Exercises findEbmlChild's sibling advancement
+// (`offset = el.contentEnd`) at each of those four call sites in one fixture.
+function webmWithSiblingsAtEveryLevel(rate: number): number[] {
+  const channelsSibling = ebmlElement(ID_CHANNELS, [0x02]);
+  const samplingFreq = ebmlElement(ID_SAMPLINGFREQ, f32be(rate));
+  const audio = ebmlElement(ID_AUDIO, [...channelsSibling, ...samplingFreq]);
+
+  const trackNumberSibling = ebmlElement(ID_TRACKNUMBER, [0x01]);
+  const trackEntry = ebmlElement(ID_TRACKENTRY, [...trackNumberSibling, ...audio]);
+
+  const seekHeadSibling = ebmlElement(ID_SEEKHEAD, zeros(2));
+  const tracks = ebmlElement(ID_TRACKS, trackEntry);
+  const segment = ebmlElement(ID_SEGMENT, [...seekHeadSibling, ...tracks]);
+
+  const header = ebmlElement(ID_EBML, []);
+  const voidSibling = ebmlElement(ID_VOID, zeros(3));
+  return [...header, ...voidSibling, ...segment];
 }
 
 // --- ADTS / AAC ----------------------------------------------------------------
@@ -292,6 +347,15 @@ describe('sniffSampleRate', () => {
     });
     it('returns 48000 for an Opus track regardless of the stored SamplingFrequency', () => {
       expect(sniffSampleRate(toBuf(webmOpus()), 'a.webm')).toBe(48000);
+    });
+    it('skips a leading video TrackEntry (no Audio child) to find the audio entry', () => {
+      expect(sniffSampleRate(toBuf(webmVideoThenAudioTrack(44100)), 'a.webm')).toBe(44100);
+    });
+    it('finds Tracks/Audio/SamplingFrequency past sibling elements at every walk level', () => {
+      expect(sniffSampleRate(toBuf(webmWithSiblingsAtEveryLevel(48000)), 'a.webm')).toBe(48000);
+    });
+    it('returns the FIRST audio TrackEntry rate when two are present', () => {
+      expect(sniffSampleRate(toBuf(webmTwoAudioTracks(44100, 96000)), 'a.webm')).toBe(44100);
     });
     it('returns null for truncated/garbage EBML', () => {
       expect(sniffSampleRate(toBuf([0x1a, 0x45, 0xdf, 0xa3]), 'a.webm')).toBeNull();

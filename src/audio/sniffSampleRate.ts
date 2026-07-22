@@ -147,7 +147,6 @@ interface EbmlElement {
   id: number;
   contentStart: number;
   contentEnd: number; // exclusive; clamped to the enclosing bounded range
-  unknownSize: boolean;
 }
 
 /**
@@ -219,11 +218,11 @@ function readEbmlElement(bytes: Uint8Array, offset: number, limit: number): Ebml
   const contentStart = offset + idInfo.length + sizeInfo.length;
   if (contentStart > limit) return null;
   if (sizeInfo.unknown) {
-    return { id: idInfo.id, contentStart, contentEnd: limit, unknownSize: true };
+    return { id: idInfo.id, contentStart, contentEnd: limit };
   }
   const contentEnd = contentStart + sizeInfo.size;
   if (contentEnd > limit || contentEnd < contentStart) return null; // truncated or overflowed
-  return { id: idInfo.id, contentStart, contentEnd, unknownSize: false };
+  return { id: idInfo.id, contentStart, contentEnd };
 }
 
 /** First direct child with `id` inside [start, end). Null if absent or on any parse doubt. */
