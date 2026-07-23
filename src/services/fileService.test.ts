@@ -14,6 +14,7 @@ import { encodeFlac } from '../audio/flacEncoder';
 import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
 import { decodeWav } from '../audio/wavCodec';
 import { buildId3Chapters } from '../audio/id3Chapters';
+import { buildChapterComments, buildVorbisCommentPayload } from '../audio/chapterTags';
 import * as undoHistory from './undoHistory';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
@@ -76,6 +77,31 @@ function decoded(sampleRate = 44100, channelCount = 2, length = 4) {
     channels: Array.from({ length: channelCount }, () => new Float32Array(length)),
     sampleRate,
   };
+}
+
+/** Build a minimal (but structurally valid) fake `.flac` buffer: 'fLaC' magic
+ * + a dummy 34-byte STREAMINFO block + a VORBIS_COMMENT block carrying
+ * `markers` (via the real, unmocked `chapterTags.ts`). Decode is mocked in
+ * this file, so the STREAMINFO payload's actual contents are never read for
+ * audio — only `readFlacVorbisComment`/`parseChapterComments` (also real and
+ * unmocked) walk this buffer, exactly as `openFilePath` does for a real file. */
+function buildFakeFlacWithMarkers(markers: { positionSample: number; name: string }[], sampleRate: number): ArrayBuffer {
+  const comments = buildChapterComments(markers, sampleRate);
+  const payload = buildVorbisCommentPayload('audition_app', comments);
+  const streamInfo = new Uint8Array(34);
+  const vcHeader = new Uint8Array([0x84, (payload.length >> 16) & 0xff, (payload.length >> 8) & 0xff, payload.length & 0xff]);
+  const out = new Uint8Array(4 + 4 + streamInfo.length + vcHeader.length + payload.length);
+  let offset = 0;
+  out.set([0x66, 0x4c, 0x61, 0x43], offset); // 'fLaC'
+  offset += 4;
+  out.set([0x00, 0x00, 0x00, 0x22], offset); // STREAMINFO header: not-last, type 0, len 34
+  offset += 4;
+  out.set(streamInfo, offset);
+  offset += streamInfo.length;
+  out.set(vcHeader, offset);
+  offset += vcHeader.length;
+  out.set(payload, offset);
+  return out.buffer;
 }
 
 beforeEach(() => {
@@ -214,6 +240,53 @@ describe('openFilePath', () => {
     expect(markers).toHaveLength(1);
     expect(markers[0].positionSample).toBe(100); // clamped to docLength
   });
+
+  it("seeds appStore markers from a FLAC's VORBIS_COMMENT tag (K4), with fresh marker ids", async () => {
+    const fileBytes = buildFakeFlacWithMarkers(
+      [
+        { positionSample: 500, name: 'Verse' },
+        { positionSample: 10, name: 'Intro' },
+      ],
+      44100
+    );
+    installApi({ readFile: jest.fn(async () => fileBytes) });
+    mockDecode.mockResolvedValueOnce(decoded(44100, 2, 10000));
+
+    await openFilePath('D:\\audio\\track.flac');
+
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(2);
+    expect(markers.map((m) => m.positionSample)).toEqual([10, 500]); // kept sorted
+    expect(markers.map((m) => m.name)).toEqual(['Intro', 'Verse']);
+    for (const m of markers) {
+      expect(m.id).toMatch(/^marker-\d+$/);
+    }
+    expect(new Set(markers.map((m) => m.id)).size).toBe(2);
+  });
+
+  it('does not create a markers entry for a FLAC with no VORBIS_COMMENT tag', async () => {
+    installApi({ readFile: jest.fn(async () => new ArrayBuffer(8)) });
+    mockDecode.mockResolvedValueOnce(decoded());
+
+    await openFilePath('D:\\audio\\track.flac');
+
+    const docId = useAppStore.getState().documents[0].id;
+    expect(useAppStore.getState().markers[docId]).toBeUndefined();
+  });
+
+  it('clamps FLAC marker positions parsed from an out-of-range tag to [0, docLength]', async () => {
+    const fileBytes = buildFakeFlacWithMarkers([{ positionSample: 999_999, name: 'TooFar' }], 44100);
+    installApi({ readFile: jest.fn(async () => fileBytes) });
+    mockDecode.mockResolvedValueOnce(decoded(44100, 2, 100)); // doc length = 100 samples
+
+    await openFilePath('D:\\audio\\track.flac');
+
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(1);
+    expect(markers[0].positionSample).toBe(100); // clamped to docLength
+  });
 });
 
 describe('openFilesViaDialog', () => {
@@ -345,7 +418,7 @@ describe('saveDocument', () => {
     await saveDocument(doc.id);
 
     expect(api.showSaveDialog).not.toHaveBeenCalled();
-    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 24);
+    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 24, undefined);
     expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\track.flac', expect.any(ArrayBuffer));
   });
 
@@ -360,7 +433,25 @@ describe('saveDocument', () => {
 
     await saveDocument(doc.id);
 
-    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 16);
+    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 16, undefined);
+  });
+
+  it('passes the active doc markers into encodeFlac when saving a FLAC in place (K4)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\track.flac',
+      dirty: true,
+      name: 'track.flac',
+      sourceFormat: 'flac',
+      sourceBitDepth: 24,
+    });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Hook', positionSample: 9 });
+
+    await saveDocument(doc.id);
+
+    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 24, [
+      { id: 'marker-1', name: 'Hook', positionSample: 9 },
+    ]);
   });
 
   it('re-encodes an OGG source in place via encodeOggOpus (no save-as dialog)', async () => {
@@ -644,6 +735,19 @@ describe('exportDocument', () => {
       { id: 'marker-1', name: 'Bridge', positionSample: 9 },
     ]);
     expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\track.mp3', expect.any(ArrayBuffer));
+  });
+
+  it('includes the doc markers when exporting to FLAC (K4)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.flac') });
+    const doc = seedDoc({ filePath: null, name: 'doc' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Hook', positionSample: 9 });
+
+    await exportDocument(doc.id, { format: 'flac', wavBitDepth: 16, mp3Kbps: 192 });
+
+    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 16, [
+      { id: 'marker-1', name: 'Hook', positionSample: 9 },
+    ]);
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\track.flac', expect.any(ArrayBuffer));
   });
 
   it('writes a WAV at the requested bit depth', async () => {

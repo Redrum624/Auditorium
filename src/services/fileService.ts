@@ -2,6 +2,8 @@ import { createDocument, docLength, nextId, type AudioDocument } from '../audio/
 import { decodeArrayBuffer } from '../audio/decodeAudio';
 import { readFlacStreamInfo } from '../audio/sniffSampleRate';
 import { encodeFlac } from '../audio/flacEncoder';
+import { readFlacVorbisComment } from '../audio/flacMeta';
+import { parseChapterComments } from '../audio/chapterTags';
 import { encodeMp3 } from '../audio/mp3Encoder';
 import { parseId3Chapters } from '../audio/id3Chapters';
 import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
@@ -86,7 +88,7 @@ export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuff
     case 'mp3':
       return encodeMp3(doc.channels, doc.sampleRate, opts.mp3Kbps, store().markers[doc.id]);
     case 'flac':
-      return encodeFlac(doc.channels, doc.sampleRate, 16);
+      return encodeFlac(doc.channels, doc.sampleRate, 16, store().markers[doc.id]);
     case 'ogg':
       // Opus encoding is async (WebCodecs); exportDocument routes 'ogg' through
       // encodeOggOpus directly, so this synchronous path is never reached.
@@ -97,17 +99,18 @@ export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuff
 /** Re-encode a document into its ORIGINAL container for an in-place Save.
  * MP3 → 192 kbps CBR, carrying the doc's markers as an ID3v2.3 chapter tag
  * (CTOC/CHAP + AUDITORIUM_MARKERS TXXX); FLAC → verbatim FLAC at the source
- * bit depth (16 or 24); OGG → Opus-in-Ogg at 128 kbps (async via WebCodecs);
- * wav/undefined → 32-bit-float WAV (the app's canonical lossless container),
- * carrying the doc's markers as cue/adtl chunks. FLAC/OGG have no marker
- * persistence yet (see docs/KNOWN_LIMITATIONS.md). Rejects with
+ * bit depth (16 or 24), carrying the doc's markers as a VORBIS_COMMENT block
+ * (CHAPTERxxx + AUDITORIUM_MARKERS); OGG → Opus-in-Ogg at 128 kbps (async via
+ * WebCodecs); wav/undefined → 32-bit-float WAV (the app's canonical lossless
+ * container), carrying the doc's markers as cue/adtl chunks. OGG has no
+ * marker persistence yet (see docs/KNOWN_LIMITATIONS.md). Rejects with
  * OggEncoderUnavailableError when the Opus encoder is missing (jsdom/no WebCodecs). */
 async function encodeInPlace(doc: AudioDocument): Promise<ArrayBuffer> {
   switch (doc.sourceFormat) {
     case 'mp3':
       return encodeMp3(doc.channels, doc.sampleRate, MP3_SAVE_KBPS, store().markers[doc.id]);
     case 'flac':
-      return encodeFlac(doc.channels, doc.sampleRate, doc.sourceBitDepth === 24 ? 24 : 16);
+      return encodeFlac(doc.channels, doc.sampleRate, doc.sourceBitDepth === 24 ? 24 : 16, store().markers[doc.id]);
     case 'ogg':
       return toArrayBuffer(await encodeOggOpus(doc.channels, doc.sampleRate));
     default:
@@ -171,6 +174,22 @@ export async function openFilePath(path: string): Promise<void> {
         };
       });
       store().setMarkersForDoc(doc.id, markers);
+    }
+  } else if (sourceFormat === 'flac') {
+    const vorbisComment = readFlacVorbisComment(buf);
+    if (vorbisComment) {
+      // FLAC's file rate equals the doc's decoded rate (no resample), so
+      // AUDITORIUM_MARKERS positions pass through unscaled.
+      const chapters = parseChapterComments(vorbisComment.comments, doc.sampleRate);
+      if (chapters.length > 0) {
+        const length = docLength(doc);
+        const markers: Marker[] = chapters.map((c) => ({
+          id: nextId('marker'),
+          name: c.name,
+          positionSample: Math.max(0, Math.min(length, Math.round(c.positionSample))),
+        }));
+        store().setMarkersForDoc(doc.id, markers);
+      }
     }
   }
 }

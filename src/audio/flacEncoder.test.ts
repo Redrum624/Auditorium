@@ -1,5 +1,6 @@
 import { encodeFlac, __flacInternal } from './flacEncoder';
 import { readFlacStreamInfo } from './sniffSampleRate';
+import { parseVorbisCommentPayload, parseChapterComments } from './chapterTags';
 
 // -----------------------------------------------------------------------------
 // Independent primitives — reimplemented here from first principles so the tests
@@ -70,8 +71,11 @@ class BitReader {
   }
 }
 
-/** Full VERBATIM-only FLAC decoder for the test: parses STREAMINFO + every frame,
- * verifies CRC-8/CRC-16, and returns the decoded per-channel integer samples. */
+/** Full VERBATIM-only FLAC decoder for the test: walks the metadata-block
+ * chain (STREAMINFO plus any blocks that follow it — e.g. K4's
+ * VORBIS_COMMENT — independently of the module under test's own writer),
+ * parses STREAMINFO + every frame, verifies CRC-8/CRC-16, and returns the
+ * decoded per-channel integer samples plus any VORBIS_COMMENT block found. */
 function decodeVerbatimFlac(buf: ArrayBuffer): {
   sampleRate: number;
   bitDepth: number;
@@ -80,33 +84,63 @@ function decodeVerbatimFlac(buf: ArrayBuffer): {
   maxBlock: number;
   totalSamples: number;
   md5: string;
+  streamInfoIsLast: boolean;
+  vorbisCommentBlock: Uint8Array | null;
 } {
   const bytes = new Uint8Array(buf);
   expect(String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3])).toBe('fLaC');
 
-  // Metadata block header at byte 4.
-  const lastFlag = bytes[4] >> 7;
-  const blockType = bytes[4] & 0x7f;
-  const blockLen = (bytes[5] << 16) | (bytes[6] << 8) | bytes[7];
-  expect(lastFlag).toBe(1);
-  expect(blockType).toBe(0);
-  expect(blockLen).toBe(34);
+  let sampleRate = 0;
+  let bitDepth = 0;
+  let channels = 0;
+  let minBlock = 0;
+  let maxBlock = 0;
+  let totalSamples = 0;
+  let md5 = '';
+  let streamInfoIsLast = false;
+  let vorbisCommentBlock: Uint8Array | null = null;
+  let sawStreamInfo = false;
 
-  const si = new BitReader(bytes, 8 * 8);
-  const minBlock = si.read(16);
-  const maxBlock = si.read(16);
-  si.read(24); // min frame size
-  si.read(24); // max frame size
-  const sampleRate = si.read(20);
-  const channels = si.read(3) + 1;
-  const bitDepth = si.read(5) + 1;
-  const totHi = si.read(4);
-  const totLo = si.read(32);
-  const totalSamples = totHi * 0x100000000 + totLo;
-  const md5 = toHex(bytes.subarray(8 + 18, 8 + 34));
+  let blockOffset = 4; // first metadata block header starts right after the magic
+  let isLastBlock = false;
+  while (!isLastBlock) {
+    const headerByte = bytes[blockOffset];
+    isLastBlock = (headerByte & 0x80) !== 0;
+    const blockType = headerByte & 0x7f;
+    const blockLen = (bytes[blockOffset + 1] << 16) | (bytes[blockOffset + 2] << 8) | bytes[blockOffset + 3];
+    const dataStart = blockOffset + 4;
+    const dataEnd = dataStart + blockLen;
+
+    if (blockType === 0) {
+      // STREAMINFO must be exactly the first block (FLAC spec requirement).
+      expect(sawStreamInfo).toBe(false);
+      expect(blockOffset).toBe(4);
+      expect(blockLen).toBe(34);
+      sawStreamInfo = true;
+      streamInfoIsLast = isLastBlock;
+
+      const si = new BitReader(bytes, dataStart * 8);
+      minBlock = si.read(16);
+      maxBlock = si.read(16);
+      si.read(24); // min frame size
+      si.read(24); // max frame size
+      sampleRate = si.read(20);
+      channels = si.read(3) + 1;
+      bitDepth = si.read(5) + 1;
+      const totHi = si.read(4);
+      const totLo = si.read(32);
+      totalSamples = totHi * 0x100000000 + totLo;
+      md5 = toHex(bytes.subarray(dataStart + 18, dataStart + 34));
+    } else if (blockType === 4) {
+      vorbisCommentBlock = bytes.subarray(dataStart, dataEnd);
+    }
+
+    blockOffset = dataEnd;
+  }
+  expect(sawStreamInfo).toBe(true);
 
   const out: number[][] = Array.from({ length: channels }, () => []);
-  let off = 8 + 34; // first frame byte
+  let off = blockOffset; // first frame byte, right after the last metadata block
   let decoded = 0;
   while (decoded < totalSamples) {
     const frameStart = off;
@@ -152,7 +186,17 @@ function decodeVerbatimFlac(buf: ArrayBuffer): {
     off = br.bytePos();
   }
 
-  return { sampleRate, bitDepth, channels: out, minBlock, maxBlock, totalSamples, md5 };
+  return {
+    sampleRate,
+    bitDepth,
+    channels: out,
+    minBlock,
+    maxBlock,
+    totalSamples,
+    md5,
+    streamInfoIsLast,
+    vorbisCommentBlock,
+  };
 }
 
 /** Normalize signed zero: quantizing a tiny negative float yields -0, which is
@@ -335,5 +379,87 @@ describe('encodeFlac round-trip (verbatim decode)', () => {
     const buf = encodeFlac([ch], 44100, 16);
     const d = decodeVerbatimFlac(buf);
     expect(d.channels[0]).toEqual([32767, -32768, 32767, -32767, 0]);
+  });
+});
+
+// -----------------------------------------------------------------------------
+// Markers (Task K4 — VORBIS_COMMENT block)
+// -----------------------------------------------------------------------------
+
+describe('encodeFlac markers (K4 — VORBIS_COMMENT block)', () => {
+  it('is byte-identical to v1.2.1 (marker-less encode) when markers is omitted, an empty array, or undefined explicitly', () => {
+    const len = 2000;
+    const channels = [sine(440, 44100, len), sine(660, 44100, len)];
+    const bare = new Uint8Array(encodeFlac(channels, 44100, 16));
+    const explicitUndefined = new Uint8Array(encodeFlac(channels, 44100, 16, undefined));
+    const emptyArray = new Uint8Array(encodeFlac(channels, 44100, 16, []));
+
+    expect(explicitUndefined).toEqual(bare);
+    expect(emptyArray).toEqual(bare);
+    // is-last stays set on STREAMINFO — no VORBIS_COMMENT block inserted.
+    expect(bare[4]).toBe(0x80);
+  });
+
+  it('clears STREAMINFO is-last and inserts an is-last VORBIS_COMMENT (type 4) block when markers are present', () => {
+    const buf = encodeFlac([sine(440, 44100, 1000)], 44100, 16, [{ positionSample: 0, name: 'Intro' }]);
+    const bytes = new Uint8Array(buf);
+    expect(String.fromCharCode(bytes[0], bytes[1], bytes[2], bytes[3])).toBe('fLaC');
+    expect(bytes[4]).toBe(0x00); // STREAMINFO: is-last cleared, type 0
+    expect((bytes[5] << 16) | (bytes[6] << 8) | bytes[7]).toBe(34);
+
+    const vcHeaderOffset = 4 + 4 + 34; // magic + STREAMINFO header + STREAMINFO payload
+    expect(bytes[vcHeaderOffset]).toBe(0x84); // is-last set, type 4 (VORBIS_COMMENT)
+  });
+
+  it('decodes correctly (frames unaffected) with markers present, and the metadata walk recovers them exactly', () => {
+    const len = 4096 + 100; // two frames, exercising the frame loop past the extra metadata block
+    const chL = sine(440, 44100, len, 0.7);
+    const chR = sine(660, 44100, len, 0.4);
+    const markers = [
+      { positionSample: 0, name: 'Start' },
+      { positionSample: 4096, name: 'Café ☕ 日本語 🎵' },
+    ];
+    const buf = encodeFlac([chL, chR], 44100, 16, markers);
+    const d = decodeVerbatimFlac(buf);
+
+    expect(d.streamInfoIsLast).toBe(false);
+    expect(d.sampleRate).toBe(44100);
+    expect(d.totalSamples).toBe(len);
+    expect(d.channels[0].length).toBe(len);
+    for (let i = 0; i < len; i++) {
+      expect(d.channels[0][i]).toBe(nz(__flacInternal.quantize(chL[i], 16)));
+      expect(d.channels[1][i]).toBe(nz(__flacInternal.quantize(chR[i], 16)));
+    }
+
+    expect(d.vorbisCommentBlock).not.toBeNull();
+    const parsedPayload = parseVorbisCommentPayload(d.vorbisCommentBlock!);
+    expect(parsedPayload).not.toBeNull();
+    expect(parsedPayload!.vendor).toBe('audition_app');
+    const recovered = parseChapterComments(parsedPayload!.comments, 44100);
+    expect(recovered).toEqual(markers);
+  });
+
+  it("readFlacStreamInfo (sniffSampleRate.ts) still reads rate/bitDepth correctly when a VORBIS_COMMENT block follows STREAMINFO", () => {
+    const buf = encodeFlac([sine(440, 48000, 500)], 48000, 24, [{ positionSample: 0, name: 'X' }]);
+    expect(readFlacStreamInfo(buf)).toEqual({ sampleRate: 48000, bitDepth: 24 });
+  });
+
+  it('handles time-format edge cases end to end: position 0, past one hour, and fractional-ms rounding', () => {
+    // Marker positions are independent of the (short) audio signal length —
+    // encodeFlac never validates a marker's position against the sample count.
+    const sampleRate = 44100;
+    const pastOneHour = Math.round((3600 + 62.5) * sampleRate); // 1h 1m 2.5s
+    const fractionalMs = Math.round(sampleRate / 3); // does not land on an exact ms boundary
+    const markers = [
+      { positionSample: 0, name: 'Zero' },
+      { positionSample: pastOneHour, name: 'PastHour' },
+      { positionSample: fractionalMs, name: 'Fractional' },
+    ];
+    const buf = encodeFlac([sine(440, sampleRate, 50)], sampleRate, 16, markers);
+    const d = decodeVerbatimFlac(buf);
+    const parsedPayload = parseVorbisCommentPayload(d.vorbisCommentBlock!)!;
+    expect(parsedPayload.comments).toContain('CHAPTER002=01:01:02.500');
+    const recovered = parseChapterComments(parsedPayload.comments, sampleRate);
+    expect(recovered).toEqual(markers);
   });
 });

@@ -19,9 +19,21 @@
  * References: the FLAC format specification (frame header bit layout, CRC
  * polynomials, STREAMINFO field widths). See src/audio/sniffSampleRate.ts for
  * the reverse STREAMINFO bit math this file is the inverse of.
+ *
+ * When `markers` are passed (Task K4), a VORBIS_COMMENT metadata block (type
+ * 4) carrying `chapterTags.ts`'s CHAPTERxxx/AUDITORIUM_MARKERS comments is
+ * inserted between STREAMINFO and the first frame: STREAMINFO's is-last flag
+ * is cleared (`0x80` -> `0x00`) and the new block is flagged is-last instead.
+ * Omitting `markers` (or passing `[]`) reproduces the pre-K4 layout exactly
+ * (STREAMINFO directly followed by frames, is-last set on STREAMINFO).
  */
 
+import { buildChapterComments, buildVorbisCommentPayload, type ChapterMarker } from './chapterTags';
+
 const BLOCK_SIZE = 4096;
+
+/** Vendor string written into the VORBIS_COMMENT block (Task K4). */
+const VORBIS_VENDOR = 'audition_app';
 
 // --- MD5 ---------------------------------------------------------------------
 // Public-domain MD5 (RFC 1321), compact implementation adapted from the widely
@@ -315,8 +327,10 @@ function quantize(sample: number, bitDepth: 16 | 24): number {
 export function encodeFlac(
   channels: Float32Array[],
   sampleRate: number,
-  bitDepth: 16 | 24 = 16
+  bitDepth: 16 | 24 = 16,
+  markers?: ChapterMarker[]
 ): ArrayBuffer {
+  const hasMarkers = !!markers && markers.length > 0;
   const numChannels = channels.length > 0 ? channels.length : 1;
   const totalSamples = channels.length > 0 ? channels[0].length : 0;
   const bytesPerSample = bitDepth / 8;
@@ -354,7 +368,9 @@ export function encodeFlac(
   const maxBlock = Math.max(...blockSizes);
 
   // --- STREAMINFO ---
-  const siHeader = new Uint8Array([0x80, 0x00, 0x00, 0x22]); // last-block, type 0, len 34
+  // is-last is cleared (0x00) when a VORBIS_COMMENT block follows; set (0x80)
+  // when STREAMINFO is the only metadata block, exactly as before K4.
+  const siHeader = new Uint8Array([hasMarkers ? 0x00 : 0x80, 0x00, 0x00, 0x22]); // type 0, len 34
   const si = new BitWriter();
   si.writeBits(minBlock, 16);
   si.writeBits(maxBlock, 16);
@@ -411,9 +427,20 @@ export function encodeFlac(
     frameNumber++;
   }
 
+  // --- VORBIS_COMMENT (optional, Task K4) ---
+  let vorbisBlock: Uint8Array | null = null;
+  if (hasMarkers) {
+    const comments = buildChapterComments(markers!, sampleRate);
+    const payload = buildVorbisCommentPayload(VORBIS_VENDOR, comments);
+    const header = new Uint8Array([0x84, (payload.length >> 16) & 0xff, (payload.length >> 8) & 0xff, payload.length & 0xff]); // last-block, type 4
+    vorbisBlock = new Uint8Array(header.length + payload.length);
+    vorbisBlock.set(header, 0);
+    vorbisBlock.set(payload, header.length);
+  }
+
   // --- Assemble the stream ---
   const magic = new Uint8Array([0x66, 0x4c, 0x61, 0x43]); // 'fLaC'
-  let size = magic.length + siHeader.length + streaminfo.length;
+  let size = magic.length + siHeader.length + streaminfo.length + (vorbisBlock ? vorbisBlock.length : 0);
   for (const f of frames) size += f.length;
   const out = new Uint8Array(size);
   let off = 0;
@@ -423,6 +450,10 @@ export function encodeFlac(
   off += siHeader.length;
   out.set(streaminfo, off);
   off += streaminfo.length;
+  if (vorbisBlock) {
+    out.set(vorbisBlock, off);
+    off += vorbisBlock.length;
+  }
   for (const f of frames) {
     out.set(f, off);
     off += f.length;
