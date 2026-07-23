@@ -292,7 +292,8 @@ interface Mp4Box {
 
 /**
  * Read the sibling boxes in [start, end). Returns null on any parse doubt: a
- * 64-bit largesize (size===1), a malformed (size<8) or truncated box.
+ * malformed (size<8) or truncated box, or a 64-bit largesize that is
+ * truncated, not safely representable as a Number, or overflows the range.
  */
 function readBoxes(bytes: Uint8Array, view: DataView, start: number, end: number): Mp4Box[] | null {
   const boxes: Mp4Box[] = [];
@@ -300,7 +301,20 @@ function readBoxes(bytes: Uint8Array, view: DataView, start: number, end: number
   while (offset + 8 <= end) {
     const size = view.getUint32(offset, false); // MP4 boxes are big-endian
     const type = readAscii(bytes, offset + 4, 4);
-    if (size === 1) return null; // 64-bit size unsupported for simplicity
+    if (size === 1) {
+      // 64-bit largesize: an 8-byte big-endian size follows the 8-byte
+      // size+type header, so the box header is 16 bytes instead of 8.
+      if (offset + 16 > end) return null; // truncated largesize field
+      const largesize = view.getBigUint64(offset + 8, false);
+      if (largesize > BigInt(Number.MAX_SAFE_INTEGER)) return null; // not safely representable
+      const largesizeNum = Number(largesize);
+      if (largesizeNum < 16) return null; // must fit its own 16-byte header
+      const boxEnd = offset + largesizeNum;
+      if (boxEnd > end) return null; // exceeds the enclosing range
+      boxes.push({ type, start: offset, contentStart: offset + 16, end: boxEnd });
+      offset = boxEnd;
+      continue;
+    }
     if (size === 0) {
       // Box extends to the end of the enclosing range.
       boxes.push({ type, start: offset, contentStart: offset + 8, end });

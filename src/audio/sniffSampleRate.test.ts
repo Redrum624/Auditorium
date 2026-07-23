@@ -109,6 +109,18 @@ function box(type: string, content: number[]): number[] {
   return [...be32(8 + content.length), ...ascii(type), ...content];
 }
 
+// 64-bit "largesize" box: size field == 1, then an 8-byte big-endian largesize
+// immediately after the 4-byte type, per ISO/IEC 14496-12 (16-byte header total).
+function be64(n: number | bigint): number[] {
+  const buf = new ArrayBuffer(8);
+  new DataView(buf).setBigUint64(0, BigInt(n), false);
+  return Array.from(new Uint8Array(buf));
+}
+
+function box64(type: string, content: number[]): number[] {
+  return [...be32(1), ...ascii(type), ...be64(16 + content.length), ...content];
+}
+
 function mdhdContent(timescale: number): number[] {
   return [
     0x00, 0x00, 0x00, 0x00, // version 0 + flags
@@ -121,13 +133,71 @@ function mdhdContent(timescale: number): number[] {
   ];
 }
 
-function mp4(timescale: number): number[] {
-  const mdhd = box('mdhd', mdhdContent(timescale));
+// mdhd version 1: creation_time/modification_time widen to u64, so timescale
+// shifts to content offset 20 (4 version+flags + 8 + 8).
+function mdhdContentV1(timescale: number): number[] {
+  return [
+    0x01, 0x00, 0x00, 0x00, // version 1 + flags
+    ...zeros(8), // creation_time (u64)
+    ...zeros(8), // modification_time (u64)
+    ...be32(timescale), // timescale (content offset 20)
+    ...zeros(8), // duration (u64)
+    ...zeros(2), // language
+    ...zeros(2), // pre_defined
+  ];
+}
+
+function mp4WithMdhd(mdhdBytes: number[]): number[] {
+  const mdhd = box('mdhd', mdhdBytes);
   const mdia = box('mdia', mdhd);
   const trak = box('trak', mdia);
   const moov = box('moov', trak);
   const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
   return [...ftyp, ...moov];
+}
+
+function mp4(timescale: number): number[] {
+  return mp4WithMdhd(mdhdContent(timescale));
+}
+
+function mp4V1(timescale: number): number[] {
+  return mp4WithMdhd(mdhdContentV1(timescale));
+}
+
+// moov itself uses a 64-bit largesize header.
+function mp4LargesizeMoov(timescale: number): number[] {
+  const mdhd = box('mdhd', mdhdContent(timescale));
+  const mdia = box('mdia', mdhd);
+  const trak = box('trak', mdia);
+  const moov = box64('moov', trak);
+  const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
+  return [...ftyp, ...moov];
+}
+
+// trak (nested inside a regular moov) uses a 64-bit largesize header.
+function mp4LargesizeTrak(timescale: number): number[] {
+  const mdhd = box('mdhd', mdhdContent(timescale));
+  const mdia = box('mdia', mdhd);
+  const trak = box64('trak', mdia);
+  const moov = box('moov', trak);
+  const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
+  return [...ftyp, ...moov];
+}
+
+// Top-level box declares size==1 with a largesize far beyond the actual
+// buffer (only the 16-byte header is present) — must yield null, not throw.
+function mp4LargesizeExceedsBuffer(): number[] {
+  const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
+  const badBox = [...be32(1), ...ascii('moov'), ...be64(1_000_000)];
+  return [...ftyp, ...badBox];
+}
+
+// Top-level box declares size==1 with a largesize beyond Number.MAX_SAFE_INTEGER
+// — must be rejected without ever converting to an imprecise Number.
+function mp4LargesizeExceedsSafeInteger(): number[] {
+  const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
+  const badBox = [...be32(1), ...ascii('moov'), ...be64(2n ** 60n)];
+  return [...ftyp, ...badBox];
 }
 
 // --- WebM / Matroska (EBML) ---------------------------------------------------
@@ -336,6 +406,21 @@ describe('sniffSampleRate', () => {
     it('returns null when the timescale is out of the audio range', () => {
       expect(sniffSampleRate(toBuf(mp4(999999)), 'a.m4a')).toBeNull();
     });
+    it('reads the mdhd v1 (64-bit creation/modification times) timescale', () => {
+      expect(sniffSampleRate(toBuf(mp4V1(48000)), 'a.m4a')).toBe(48000);
+    });
+    it('reads a 64-bit largesize moov box', () => {
+      expect(sniffSampleRate(toBuf(mp4LargesizeMoov(44100)), 'a.m4a')).toBe(44100);
+    });
+    it('reads a 64-bit largesize trak box', () => {
+      expect(sniffSampleRate(toBuf(mp4LargesizeTrak(44100)), 'a.m4a')).toBe(44100);
+    });
+    it('returns null (never throws) when a largesize exceeds the buffer', () => {
+      expect(sniffSampleRate(toBuf(mp4LargesizeExceedsBuffer()), 'a.m4a')).toBeNull();
+    });
+    it('returns null (never throws) when a largesize exceeds Number.MAX_SAFE_INTEGER', () => {
+      expect(sniffSampleRate(toBuf(mp4LargesizeExceedsSafeInteger()), 'a.m4a')).toBeNull();
+    });
   });
 
   describe('WebM / Matroska (EBML)', () => {
@@ -422,6 +507,8 @@ describe('sniffSampleRate', () => {
         oggVorbis22050,
         oggOpus,
         () => mp4(44100),
+        () => mp4V1(48000),
+        () => mp4LargesizeMoov(44100),
         () => webmFloat32(48000),
         () => webmOpus(),
         () => adtsTwoFrames(3),
