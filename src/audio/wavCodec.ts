@@ -25,6 +25,47 @@ function readAscii(view: DataView, offset: number, length: number): string {
   return s;
 }
 
+/** True when every UTF-16 code unit of `str` is <= U+00FF, i.e. the legacy
+ * charCodeAt-per-byte writer round-trips it losslessly as Latin-1. Surrogate
+ * halves (code units >= 0xD800) always fail this, so any astral character
+ * (emoji, etc.) correctly forces the UTF-8 path. */
+function isLatin1Representable(str: string): boolean {
+  for (let i = 0; i < str.length; i++) {
+    if (str.charCodeAt(i) > 0xff) return false;
+  }
+  return true;
+}
+
+function writeBytes(view: DataView, offset: number, bytes: Uint8Array): void {
+  for (let i = 0; i < bytes.length; i++) {
+    view.setUint8(offset + i, bytes[i]);
+  }
+}
+
+function readBytes(view: DataView, offset: number, length: number): Uint8Array {
+  const bytes = new Uint8Array(length);
+  for (let i = 0; i < length; i++) {
+    bytes[i] = view.getUint8(offset + i);
+  }
+  return bytes;
+}
+
+/** Decodes a labl sub-chunk's text bytes: strict UTF-8 first, Latin-1 fallback
+ * on decode failure. Pure ASCII is identical either way; lone Latin-1 high
+ * bytes are invalid UTF-8 (fallback triggers); valid UTF-8 sequences decode
+ * as intended. Matches the heuristic Audacity uses for the same chunk. */
+function decodeLabelText(view: DataView, offset: number, length: number): string {
+  const bytes = readBytes(view, offset, length);
+  let text: string;
+  try {
+    text = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+  } catch {
+    text = readAscii(view, offset, length);
+  }
+  const nul = text.indexOf('\0');
+  return nul >= 0 ? text.slice(0, nul) : text;
+}
+
 export function encodeWav(
   channels: Float32Array[],
   sampleRate: number,
@@ -49,7 +90,18 @@ export function encodeWav(
   const dataPad = hasMarkers && dataSize % 2 !== 0 ? 1 : 0;
   const cuePayloadSize = hasMarkers ? 4 + markerList.length * 24 : 0; // dwCuePoints + 24B per cue point
   const cueChunkTotal = hasMarkers ? 8 + cuePayloadSize : 0;
-  const labelPayloadSizes = markerList.map((m) => 4 + m.name.length + 1); // dwName + text + NUL
+
+  // Per-file strategy: if EVERY marker name is Latin-1-representable, keep the
+  // legacy single-byte encoding so files with only Latin-1 names stay byte-
+  // identical to the pre-K2 encoder. Otherwise ALL labl texts in this file are
+  // written as UTF-8 — sizes below must then be computed from UTF-8 byte
+  // length, not `name.length` (UTF-16 code units), or the chunk framing and
+  // RIFF total would disagree with what is actually written.
+  const useUtf8Labels = hasMarkers && markerList.some((m) => !isLatin1Representable(m.name));
+  const textEncoder = useUtf8Labels ? new TextEncoder() : null;
+  const labelNameBytes: Uint8Array[] = useUtf8Labels ? markerList.map((m) => textEncoder!.encode(m.name)) : [];
+  const labelByteLengths = markerList.map((m, i) => (useUtf8Labels ? labelNameBytes[i].length : m.name.length));
+  const labelPayloadSizes = labelByteLengths.map((len) => 4 + len + 1); // dwName + text + NUL
   const listPayloadSize = hasMarkers
     ? 4 + labelPayloadSizes.reduce((sum, size) => sum + 8 + size + (size % 2), 0) // 'adtl' + per-label subchunks
     : 0;
@@ -139,8 +191,14 @@ export function encodeWav(
       offset += 4;
       view.setUint32(offset, i + 1, true); // dwName matching the cue point
       offset += 4;
-      writeAscii(view, offset, m.name);
-      offset += m.name.length;
+      if (useUtf8Labels) {
+        const bytes = labelNameBytes[i];
+        writeBytes(view, offset, bytes);
+        offset += bytes.length;
+      } else {
+        writeAscii(view, offset, m.name);
+        offset += m.name.length;
+      }
       view.setUint8(offset, 0); // NUL terminator
       offset += 1;
       if (payloadSize % 2 !== 0) {
@@ -234,10 +292,7 @@ export function decodeWav(buf: ArrayBuffer): {
           if (subId === 'labl' && subDataStart + 4 <= listEnd) {
             const dwName = view.getUint32(subDataStart, true);
             const textLen = Math.max(0, Math.min(subSize - 4, listEnd - (subDataStart + 4)));
-            let text = readAscii(view, subDataStart + 4, textLen);
-            const nul = text.indexOf('\0');
-            if (nul >= 0) text = text.slice(0, nul);
-            labels.set(dwName, text);
+            labels.set(dwName, decodeLabelText(view, subDataStart + 4, textLen));
           }
           // Unrecognized sub-chunks (e.g. 'note', 'ltxt') are skipped — only
           // their framing is needed to find the next sub-chunk.

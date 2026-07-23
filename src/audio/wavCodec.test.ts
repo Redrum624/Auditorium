@@ -369,6 +369,102 @@ describe('decodeWav marker tolerance', () => {
   });
 });
 
+describe('encodeWav / decodeWav Unicode labl (K2)', () => {
+  it('round-trips CJK and emoji marker names exactly', () => {
+    const mono = [sineWave(440, DURATION * 2, SAMPLE_RATE)];
+    const markersIn: WavMarker[] = [
+      { name: '日本語', positionSample: 5 },
+      { name: '🎵🎶', positionSample: 10 },
+    ];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, markersIn);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([
+      { name: '日本語', positionSample: 5 },
+      { name: '🎵🎶', positionSample: 10 },
+    ]);
+  });
+
+  it('mixed file: one ASCII name and one CJK name both round-trip', () => {
+    const mono = [sineWave(440, DURATION * 2, SAMPLE_RATE)];
+    const markersIn: WavMarker[] = [
+      { name: 'Intro', positionSample: 1 },
+      { name: 'サビ', positionSample: 2 },
+    ];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, markersIn);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([
+      { name: 'Intro', positionSample: 1 },
+      { name: 'サビ', positionSample: 2 },
+    ]);
+  });
+
+  it('keeps the cue/LIST tail byte-identical to the pinned v1.2.1 fixture when every marker name is Latin-1-representable', () => {
+    // Pinned bytes captured from the pre-K2 encoder (charCodeAt/writeAscii path)
+    // for markers [{name:'Café ß', positionSample:5}, {name:'Intro', positionSample:10}]
+    // against a mono 16-bit, 441-frame (SAMPLE_RATE * DURATION) buffer. Regenerating
+    // this fixture defeats the purpose of the pin — it must stay a literal byte array.
+    const PINNED_TAIL: number[] = [
+      99, 117, 101, 32, 52, 0, 0, 0, 2, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 100, 97, 116, 97, 0, 0, 0, 0, 0, 0, 0, 0, 5,
+      0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 100, 97, 116, 97, 0, 0, 0, 0, 0, 0, 0, 0, 10, 0, 0, 0, 76, 73, 83, 84, 42, 0,
+      0, 0, 97, 100, 116, 108, 108, 97, 98, 108, 11, 0, 0, 0, 1, 0, 0, 0, 67, 97, 102, 233, 32, 223, 0, 0, 108, 97,
+      98, 108, 10, 0, 0, 0, 2, 0, 0, 0, 73, 110, 116, 114, 111, 0,
+    ];
+    const mono = [sineWave(440, DURATION, SAMPLE_RATE)];
+    const markersIn: WavMarker[] = [
+      { name: 'Café ß', positionSample: 5 }, // Latin-1-representable (é = U+00E9, ß = U+00DF)
+      { name: 'Intro', positionSample: 10 },
+    ];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, markersIn);
+    const dataSize = mono[0].length * 2;
+    const tail = Array.from(new Uint8Array(buf)).slice(44 + dataSize);
+    expect(tail).toEqual(PINNED_TAIL);
+  });
+
+  it('computes cue/LIST/labl chunk sizes from UTF-8 byte length, not UTF-16 code-unit length, for non-Latin-1 names', () => {
+    // '日' is 1 UTF-16 code unit but 3 UTF-8 bytes — a size computed from
+    // name.length instead of byte length would corrupt the chunk framing.
+    const mono = [sineWave(440, DURATION, SAMPLE_RATE)];
+    const buf = encodeWav(mono, SAMPLE_RATE, 16, [{ name: '日', positionSample: 1 }]);
+    const view = new DataView(buf);
+    const dataSize = mono[0].length * 2;
+    let offset = 44 + dataSize;
+
+    expect(readAscii(view, offset, 4)).toBe('cue ');
+    const cueChunkSize = view.getUint32(offset + 4, true);
+    expect(cueChunkSize).toBe(4 + 1 * 24);
+    offset += 8 + cueChunkSize;
+
+    expect(readAscii(view, offset, 4)).toBe('LIST');
+    const listSize = view.getUint32(offset + 4, true);
+    // labelPayloadSize = 4 (dwName) + 3 (UTF-8 bytes for '日') + 1 (NUL) = 8, even -> no pad.
+    // listPayloadSize = 4 ('adtl') + 8 (labl header) + 8 (labl payload) = 20.
+    expect(listSize).toBe(20);
+    expect(readAscii(view, offset + 8, 4)).toBe('adtl');
+
+    const sub = offset + 12;
+    expect(readAscii(view, sub, 4)).toBe('labl');
+    const lablSize = view.getUint32(sub + 4, true);
+    expect(lablSize).toBe(8);
+    expect(view.getUint32(sub + 8, true)).toBe(1); // dwName
+    const textBytes = new Uint8Array(buf, sub + 12, 3);
+    expect(new TextDecoder('utf-8', { fatal: true }).decode(textBytes)).toBe('日');
+
+    // RIFF total size must also agree with what was actually written.
+    expect(view.getUint32(4, true)).toBe(buf.byteLength - 8);
+  });
+
+  it('decodes a legacy Latin-1 high-byte labl fixture (invalid UTF-8) as the Latin-1 reading', () => {
+    // Byte-for-byte what the pre-K2 (charCodeAt) encoder would have written for
+    // the name 'café': 0x63,0x61,0x66,0xE9 — 0xE9 alone (followed by the NUL
+    // terminator) is not a valid UTF-8 sequence, so the strict-UTF-8-first
+    // decode must fail and fall back to the Latin-1 reading.
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithCueBeforeData(samples, SAMPLE_RATE, [{ name: 'café', positionSample: 7 }]);
+    const decoded = decodeWav(buf);
+    expect(decoded.markers).toEqual([{ name: 'café', positionSample: 7 }]);
+  });
+});
+
 describe('decodeWav cue chunk bounded by declared chunk size (H2 hardening)', () => {
   it('ignores decoy cue-point bytes beyond the declared chunk size even though numCuePoints lies about how many points follow', () => {
     const samples = sineWave(440, DURATION, SAMPLE_RATE);
