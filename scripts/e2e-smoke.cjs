@@ -21,6 +21,9 @@ const OUT_WAV = path.join(OUT_DIR, 'out.wav');
 const OUT_FLAC = path.join(OUT_DIR, 'out.flac');
 const OUT_MARKERS_WAV = path.join(OUT_DIR, 'markers.wav');
 const OUT_OGG = path.join(OUT_DIR, 'out.ogg');
+const OUT_MARKERS_MP3 = path.join(OUT_DIR, 'markers.mp3');
+const OUT_MARKERS_FLAC = path.join(OUT_DIR, 'markers.flac');
+const OUT_MARKERS_OGG = path.join(OUT_DIR, 'markers.ogg');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -82,7 +85,17 @@ async function main() {
     });
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
-  for (const f of [OUT_MP3, OUT_WAV, OUT_FLAC, OUT_MARKERS_WAV, OUT_OGG, SHOT]) {
+  for (const f of [
+    OUT_MP3,
+    OUT_WAV,
+    OUT_FLAC,
+    OUT_MARKERS_WAV,
+    OUT_OGG,
+    OUT_MARKERS_MP3,
+    OUT_MARKERS_FLAC,
+    OUT_MARKERS_OGG,
+    SHOT,
+  ]) {
     if (fs.existsSync(f)) fs.rmSync(f);
   }
 
@@ -475,6 +488,147 @@ async function main() {
     assert(oggHeadAfter === 'OggS', 'out.ogg still begins with the OggS magic after re-save');
     const oggSizeAfter = fs.statSync(OUT_OGG).size;
     console.log(`  out.ogg size: ${oggSizeBefore} -> ${oggSizeAfter} bytes (re-encoded in place)`);
+
+    // 7c) MP3 markers round-trip (Task K6 acceptance): add markers (one with a
+    // non-ASCII name), export MP3 (sync exportActive), close, reopen, and
+    // confirm both markers survive at their EXACT source-rate positions via the
+    // sample-accurate `TXXX AUDITORIUM_MARKERS` frame (id3Chapters.ts) — MP3
+    // does not resample, so no rate conversion applies here.
+    console.log('MP3 markers round-trip: add, export, close, reopen...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const mp3M1 = await page.evaluate(() => window.__test.addMarkerToActive(8000, 'Intro'));
+    const mp3M2 = await page.evaluate(() =>
+      window.__test.addMarkerToActive(60000, 'Café ☕ 日本語 🎵')
+    );
+    assert(mp3M1 !== null, 'mp3 marker 1 added to the active document');
+    assert(mp3M2 !== null, 'mp3 marker 2 added to the active document');
+
+    const mp3MarkersOk = await page.evaluate(
+      (out) => window.__test.exportActive({ format: 'mp3', wavBitDepth: 16, mp3Kbps: 192 }, out),
+      OUT_MARKERS_MP3
+    );
+    assert(mp3MarkersOk === true, 'exportActive(mp3, with markers) reported success');
+    assert(fs.existsSync(OUT_MARKERS_MP3), 'markers.mp3 exists on disk');
+
+    await page.evaluate(() => window.__test.closeActive());
+    await page.evaluate((p) => window.__test.openPath(p), OUT_MARKERS_MP3);
+    const mp3MarkersAfter = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  mp3 markers after reopen: ${JSON.stringify(mp3MarkersAfter)}`);
+    assert(mp3MarkersAfter.length === 2, `2 markers survive the MP3 round trip (got ${mp3MarkersAfter.length})`);
+    assert(
+      mp3MarkersAfter[0] &&
+        mp3MarkersAfter[0].positionSample === 8000 &&
+        mp3MarkersAfter[0].name === 'Intro',
+      `mp3 marker 1 round-tripped correctly (${JSON.stringify(mp3MarkersAfter[0])})`
+    );
+    assert(
+      mp3MarkersAfter[1] &&
+        mp3MarkersAfter[1].positionSample === 60000 &&
+        mp3MarkersAfter[1].name === 'Café ☕ 日本語 🎵',
+      `mp3 marker 2 round-tripped correctly with a non-ASCII name (${JSON.stringify(mp3MarkersAfter[1])})`
+    );
+
+    // 7d) FLAC markers round-trip (Task K6 acceptance): add markers (one with a
+    // non-ASCII name), export FLAC, close, reopen, and confirm both markers
+    // survive at their EXACT positions via the VORBIS_COMMENT
+    // AUDITORIUM_MARKERS block (flacMeta.ts / chapterTags.ts) — FLAC keeps the
+    // document's own sample rate (no resample), so positions pass through
+    // unscaled.
+    console.log('FLAC markers round-trip: add, export, close, reopen...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const flacM1 = await page.evaluate(() => window.__test.addMarkerToActive(12000, 'Bridge'));
+    const flacM2 = await page.evaluate(() =>
+      window.__test.addMarkerToActive(70000, 'Résumé ☕ 日本語')
+    );
+    assert(flacM1 !== null, 'flac marker 1 added to the active document');
+    assert(flacM2 !== null, 'flac marker 2 added to the active document');
+
+    const flacMarkersOk = await page.evaluate(
+      (out) => window.__test.exportActive({ format: 'flac', wavBitDepth: 16, mp3Kbps: 192 }, out),
+      OUT_MARKERS_FLAC
+    );
+    assert(flacMarkersOk === true, 'exportActive(flac, with markers) reported success');
+    assert(fs.existsSync(OUT_MARKERS_FLAC), 'markers.flac exists on disk');
+
+    await page.evaluate(() => window.__test.closeActive());
+    await page.evaluate((p) => window.__test.openPath(p), OUT_MARKERS_FLAC);
+    const flacMarkersAfter = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  flac markers after reopen: ${JSON.stringify(flacMarkersAfter)}`);
+    assert(
+      flacMarkersAfter.length === 2,
+      `2 markers survive the FLAC round trip (got ${flacMarkersAfter.length})`
+    );
+    assert(
+      flacMarkersAfter[0] &&
+        flacMarkersAfter[0].positionSample === 12000 &&
+        flacMarkersAfter[0].name === 'Bridge',
+      `flac marker 1 round-tripped correctly (${JSON.stringify(flacMarkersAfter[0])})`
+    );
+    assert(
+      flacMarkersAfter[1] &&
+        flacMarkersAfter[1].positionSample === 70000 &&
+        flacMarkersAfter[1].name === 'Résumé ☕ 日本語',
+      `flac marker 2 round-tripped correctly with a non-ASCII name (${JSON.stringify(flacMarkersAfter[1])})`
+    );
+
+    // 7e) OGG (Opus) markers round-trip (Task K6 acceptance): add markers (one
+    // with a non-ASCII name) at the source (44100 Hz) rate, export via the
+    // async exportActiveOgg hook (which now carries the doc's markers the same
+    // way production exportDocument/encodeInPlace do), close, reopen through a
+    // REAL Chromium Opus decode (48 kHz), and confirm both markers survive with
+    // their positions converted EXACTLY to the file's 48 kHz rate
+    // (markersToOpusRate / AUDITORIUM_MARKERS in the OpusTags block).
+    console.log('OGG markers round-trip: add, export (async Opus), close, reopen at 48 kHz...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const oggMarkerPos1 = 8820; // 0.2s @ 44100 Hz -> 9600 @ 48000 Hz (exact)
+    const oggMarkerPos2 = 39690; // 0.9s @ 44100 Hz -> 43200 @ 48000 Hz (exact)
+    const oggM1 = await page.evaluate(
+      (pos) => window.__test.addMarkerToActive(pos, 'Hook'),
+      oggMarkerPos1
+    );
+    const oggM2 = await page.evaluate(
+      (pos) => window.__test.addMarkerToActive(pos, '日本語 Café 🎵'),
+      oggMarkerPos2
+    );
+    assert(oggM1 !== null, 'ogg marker 1 added to the active document');
+    assert(oggM2 !== null, 'ogg marker 2 added to the active document');
+
+    const oggMarkersOk = await page.evaluate(
+      (out) => window.__test.exportActiveOgg(out, 128_000),
+      OUT_MARKERS_OGG
+    );
+    assert(oggMarkersOk === true, 'exportActiveOgg(with markers) reported success');
+    assert(fs.existsSync(OUT_MARKERS_OGG), 'markers.ogg exists on disk');
+
+    await page.evaluate(() => window.__test.closeActive());
+    await page.evaluate((p) => window.__test.openPath(p), OUT_MARKERS_OGG);
+    const oggMarkersSummary = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      oggMarkersSummary.sampleRate === 48000,
+      `decoded ogg markers file is 48000 Hz (got ${oggMarkersSummary.sampleRate})`
+    );
+    const oggMarkersAfter = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  ogg markers after reopen: ${JSON.stringify(oggMarkersAfter)}`);
+    assert(
+      oggMarkersAfter.length === 2,
+      `2 markers survive the OGG round trip (got ${oggMarkersAfter.length})`
+    );
+    const expectedOggPos1 = Math.round((oggMarkerPos1 * 48000) / 44100);
+    const expectedOggPos2 = Math.round((oggMarkerPos2 * 48000) / 44100);
+    assert(
+      oggMarkersAfter[0] &&
+        oggMarkersAfter[0].positionSample === expectedOggPos1 &&
+        oggMarkersAfter[0].name === 'Hook',
+      `ogg marker 1 round-tripped at the rate-converted position ` +
+        `(expected ${expectedOggPos1}, got ${JSON.stringify(oggMarkersAfter[0])})`
+    );
+    assert(
+      oggMarkersAfter[1] &&
+        oggMarkersAfter[1].positionSample === expectedOggPos2 &&
+        oggMarkersAfter[1].name === '日本語 Café 🎵',
+      `ogg marker 2 round-tripped at the rate-converted position with a non-ASCII name ` +
+        `(expected ${expectedOggPos2}, got ${JSON.stringify(oggMarkersAfter[1])})`
+    );
 
     // 8) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });

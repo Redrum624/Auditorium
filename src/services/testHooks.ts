@@ -410,11 +410,18 @@ export function installTestHooks(): void {
     // (WebCodecs AudioEncoder + the pure-TS Ogg muxer, Task G2) and writes it
     // directly — bypassing exportDocument's native save dialog, which cannot be
     // driven headlessly, the same way exportActive bypasses it for the
-    // synchronous formats.
+    // synchronous formats. Carries the active doc's markers the same way
+    // exportDocument/encodeInPlace do in production (Task K5/K6), so the OGG
+    // marker round-trip smoke can export through this hook.
     exportActiveOgg: async (outPath, bitrate) => {
       const doc = activeDoc();
       if (!doc) return false;
-      const bytes = await encodeOggOpus(doc.channels, doc.sampleRate, bitrate);
+      const bytes = await encodeOggOpus(
+        doc.channels,
+        doc.sampleRate,
+        bitrate,
+        useAppStore.getState().markers[doc.id]
+      );
       const buf = new ArrayBuffer(bytes.byteLength);
       new Uint8Array(buf).set(bytes);
       const result = await window.electronAPI.writeFile(outPath, buf);
