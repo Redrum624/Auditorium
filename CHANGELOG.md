@@ -5,6 +5,18 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-07-22
+
+### Added
+
+- Marker persistence in **every** container, not just WAV. Why: v1.2 could only persist markers in `.wav` and `.audm` sessions; MP3/FLAC/OGG were documented as container-inherent gaps — but published standards exist for all three. MP3 now writes an ID3v2.3 tag with chapter frames (`CTOC` + one `CHAP` per marker with an embedded UTF-16 `TIT2` title — the podcast-chapters standard) prepended to the encoded stream; FLAC inserts a `VORBIS_COMMENT` metadata block and OGG (Opus) extends its OpusTags header, both carrying de-facto-standard `CHAPTERxxx`/`CHAPTERxxxNAME` tags (VLC-compatible). Every format also embeds a private `AUDITORIUM_MARKERS` tag with exact sample offsets, so reopening in Auditorium is sample-accurate even though the interop chapter fields are millisecond-granular. Opening an MP3/FLAC/OGG with chapters — including files tagged by other tools (ID3v2.3 and v2.4, all text encodings) — seeds the marker list. Files saved with zero markers remain byte-identical to v1.2.1 output. How to use: nothing new — drop markers with `M` and Save/Export as before.
+- Unicode WAV marker names. Why: `labl` text was written as Latin-1, corrupting CJK/emoji names on WAV save. Now a file whose marker names all fit Latin-1 is written exactly as before (byte-identical), and any file needing more switches all its labels to UTF-8 (Audacity's convention); reading tries strict UTF-8 first and falls back to Latin-1 for legacy files. Affects: `src/audio/wavCodec.ts`.
+- 64-bit (largesize) MP4 box sniffing. Why: MP4/M4A files using `size == 1` extended boxes fell back to 48 kHz decode; the box walk now reads the 64-bit size (bounds-checked in the BigInt domain) and version-1 `mdhd` headers are covered by a pinned test. Affects: `src/audio/sniffSampleRate.ts`.
+
+### Changed
+
+- `docs/KNOWN_LIMITATIONS.md`: marker persistence is resolved for all containers; the only remaining notes are interop granularity (ms in standard chapter fields), lossy-format generation loss, genuinely unrecognized containers, and the >2-channel downmix law.
+
 ## [1.2.1] - 2026-07-22
 
 ### Fixed

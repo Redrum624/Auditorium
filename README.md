@@ -78,13 +78,14 @@ use `npm run dev`.
 - Per-document undo/redo history, up to 50 steps, browsable in the History panel.
 - Selection by click-drag, double-click (select all), shift-click (extend), `Ctrl+A`, and `Escape` to clear.
 - Zoom and scroll on both the waveform and spectral views (mouse wheel), sharing one cursor/selection/playhead.
-- Session markers: drop with `M`, rename inline, jump to next/previous, list in the Markers panel. Markers persist to disk for `.wav` files (cue/adtl chunks) and `.audm` sessions.
+- Session markers: drop with `M`, rename inline, jump to next/previous, list in the Markers panel. Markers persist to disk in every supported container: `.wav` (cue/adtl chunks, Unicode names), `.mp3` (ID3v2.3 chapter frames), `.flac` (VORBIS_COMMENT chapter tags), `.ogg` (OpusTags chapter comments), and `.audm` sessions — sample-accurate on reopen.
 - **Noise-print workflow**: capture a noise print from a selection, then Noise Reduction subtracts it from the target region.
 - Recording device selection, channel count, and sample rate in the record dialog.
 - **Export**: WAV at 16-bit, 24-bit, or 32-bit float; FLAC (16-bit, lossless); MP3 at 128/192/256/320 kbps (CBR); OGG (Opus) at 96/128/192 kbps.
 - **Format-faithful Save**: Save re-encodes in place into the source container — WAV (32-bit float), MP3 (192 kbps), FLAC (verbatim, at the source bit depth), or OGG (Opus-in-Ogg, 128 kbps). The Properties panel reports the source file's bit depth ("16-bit source → 32-bit float"). If WebCodecs is unavailable, an in-place OGG Save falls back to Save As WAV.
 - **OGG (Opus) export and save**: a pure-TypeScript, RFC 3533/7845-conformant Ogg muxer pairs with the host's WebCodecs `AudioEncoder` — legacy Ogg Vorbis sources re-encode as Opus (not round-tripped as Vorbis).
-- **Native-rate WebM and AAC (ADTS) import**: container-header sniffing now also covers WebM/Matroska (EBML) and raw ADTS/AAC, so these keep their native sample rate on open instead of falling back to 48000 Hz.
+- **Native-rate WebM and AAC (ADTS) import**: container-header sniffing now also covers WebM/Matroska (EBML), raw ADTS/AAC, and 64-bit (largesize) MP4 boxes, so these keep their native sample rate on open instead of falling back to 48000 Hz.
+- **Marker persistence in every format**: WAV cue/adtl (UTF-8 label fallback for non-Latin names), MP3 ID3v2.3 CTOC/CHAP chapters, FLAC and OGG vorbis-comment `CHAPTERxxx` tags (VLC-compatible) — each alongside a sample-accurate private tag so markers reopen exactly where they were dropped.
 - **Spectral log/linear toggle**: the Spectral Frequency Display's frequency axis switches between logarithmic (default) and linear scaling.
 - **Multitrack punch-in recording**: arm one or more tracks with their **R** toggle, position the multitrack cursor, then press **Record** — the take lands as a clip on every track that was armed when it started.
 - **Sessions**: save/open multitrack sessions as `.audm`, and mix down a whole session to a new stereo document.
