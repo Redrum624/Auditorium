@@ -182,7 +182,7 @@ describe('openFilePath', () => {
   it('seeds appStore markers from a decoded WAV, with fresh marker ids', async () => {
     installApi();
     mockDecode.mockResolvedValueOnce({
-      ...decoded(),
+      ...decoded(44100, 2, 10000),
       markers: [
         { name: 'Verse', positionSample: 500 },
         { name: 'Intro', positionSample: 10 },
@@ -206,6 +206,21 @@ describe('openFilePath', () => {
     await openFilePath('D:\\audio\\song.wav');
     const docId = useAppStore.getState().documents[0].id;
     expect(useAppStore.getState().markers[docId]).toBeUndefined();
+  });
+
+  it('clamps WAV cue marker positions parsed from an out-of-range cue point to [0, docLength]', async () => {
+    installApi();
+    mockDecode.mockResolvedValueOnce({
+      ...decoded(44100, 2, 100), // doc length = 100 samples
+      markers: [{ name: 'TooFar', positionSample: 999_999 }],
+    });
+
+    await openFilePath('D:\\audio\\song.wav');
+
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(1);
+    expect(markers[0].positionSample).toBe(100); // clamped to docLength
   });
 
   it('seeds appStore markers from an MP3\'s ID3v2 chapter tag (K3), with fresh marker ids', async () => {

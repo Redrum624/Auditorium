@@ -92,8 +92,9 @@ byte-identical to pre-v1.3 output for every format.
 **Remaining notes (interop granularity, not persistence gaps):** third-party
 tools read the standard chapter fields at millisecond granularity (that is all
 ID3 `CHAP`/vorbis `CHAPTER` timestamps can express); Auditorium itself reopens
-markers sample-exactly via its private tag. Chapter-aware players (e.g. VLC)
-see the vorbis-comment chapters; MP3 chapter support varies by player. Adobe
+markers sample-exactly via its private tag. Chapter-aware players are expected
+to see the vorbis-comment chapters (not independently verified against a
+specific player); MP3 chapter support varies by player. Adobe
 Audition does not read or write MP3/FLAC/OGG markers at all — Auditorium
 exceeds parity here.
 

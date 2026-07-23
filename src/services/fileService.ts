@@ -157,10 +157,11 @@ export async function openFilePath(path: string): Promise<void> {
   });
   store().addDocument(doc);
   if (decoded.markers && decoded.markers.length > 0) {
+    const length = docLength(doc);
     const markers: Marker[] = decoded.markers.map((m) => ({
       id: nextId('marker'),
       name: m.name,
-      positionSample: m.positionSample,
+      positionSample: Math.max(0, Math.min(length, m.positionSample)),
     }));
     store().setMarkersForDoc(doc.id, markers);
   } else if (sourceFormat === 'mp3') {

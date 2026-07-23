@@ -361,6 +361,14 @@ function matchAsciiAt(bytes: Uint8Array, offset: number, str: string): boolean {
  * `parseVorbisCommentPayload`. Bounded to the first 2 MB of `buf`; tolerant of
  * any truncation or corruption along the way — returns `null` rather than
  * throwing.
+ *
+ * Assumes a single-stream (non-multiplexed) Ogg: pages are read in file order
+ * without filtering by serial number, so a multiplexed file (multiple
+ * interleaved logical bitstreams) is not specifically supported. In practice
+ * this is safe rather than silently wrong — a multiplexed stream's second
+ * page in file order won't carry the `"OpusTags"` magic at packet start, so
+ * the magic check above fails closed and this returns `null` instead of
+ * reassembling the wrong stream's markers.
  */
 export function readOpusTags(buf: ArrayBuffer): { vendor: string; comments: string[] } | null {
   try {
@@ -415,11 +423,6 @@ export function readOpusTags(buf: ArrayBuffer): { vendor: string; comments: stri
 
 function writeAscii(out: Uint8Array, offset: number, str: string): void {
   for (let i = 0; i < str.length; i++) out[offset + i] = str.charCodeAt(i);
-}
-
-const textEncoder = new TextEncoder();
-function utf8(str: string): Uint8Array {
-  return textEncoder.encode(str);
 }
 
 function concatChunks(chunks: Uint8Array[], totalBytes: number): Uint8Array {
