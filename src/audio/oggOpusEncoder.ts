@@ -12,6 +12,7 @@
 
 import { resampleChannel } from '../dsp/resample';
 import { muxOpusStream, type EncodedOpusPacket } from './oggPage';
+import { buildChapterComments, type ChapterMarker } from './chapterTags';
 
 /** Thrown when WebCodecs `AudioEncoder`/`AudioData` are unavailable (e.g. jsdom). */
 export class OggEncoderUnavailableError extends Error {
@@ -88,6 +89,19 @@ function webCodecs(): { AudioEncoder: AudioEncoderCtor; AudioData: AudioDataCtor
   return { AudioEncoder: g.AudioEncoder, AudioData: g.AudioData };
 }
 
+/**
+ * Convert marker positions from the source document's sample rate to Opus's
+ * canonical 48 kHz file rate (Task K5), rounding each converted position to
+ * the nearest sample. Exported so the rate-mapping math can be unit-tested
+ * directly — `encodeOggOpus` itself cannot run under jsdom (no WebCodecs).
+ */
+export function markersToOpusRate(markers: ChapterMarker[], sourceRate: number): ChapterMarker[] {
+  return markers.map((m) => ({
+    positionSample: Math.round((m.positionSample * OPUS_RATE) / sourceRate),
+    name: m.name,
+  }));
+}
+
 /** Parse the pre-skip (uint16 LE at offset 10) from an OpusHead description. */
 function parsePreSkip(description: ArrayBuffer | ArrayBufferView): number | null {
   const bytes =
@@ -104,11 +118,19 @@ function parsePreSkip(description: ArrayBuffer | ArrayBufferView): number | null
  * Encode `channels` (1 or 2 Float32 channels, nominally [-1, 1]) to Ogg Opus.
  * Resamples to 48 kHz when `sampleRate` differs. `bitrate` is bits per second.
  * Rejects with {@link OggEncoderUnavailableError} when WebCodecs is missing.
+ *
+ * When `markers` is a non-empty array (Task K5), their positions (given at
+ * `sampleRate`, the SOURCE rate) are converted to the 48 kHz file rate via
+ * `markersToOpusRate` and written into the OpusTags packet as CHAPTERxxx +
+ * AUDITORIUM_MARKERS comments (`chapterTags.ts`'s `buildChapterComments`).
+ * Omitting `markers` (or passing `[]`) reproduces the pre-K5, zero-comment
+ * OpusTags layout exactly.
  */
 export async function encodeOggOpus(
   channels: Float32Array[],
   sampleRate: number,
-  bitrate = 128_000
+  bitrate = 128_000,
+  markers?: ChapterMarker[]
 ): Promise<Uint8Array> {
   const { AudioEncoder, AudioData } = webCodecs();
 
@@ -183,6 +205,9 @@ export async function encodeOggOpus(
   encoder.close();
   if (encodeError) throw encodeError;
 
+  const comments =
+    markers && markers.length > 0 ? buildChapterComments(markersToOpusRate(markers, sampleRate), OPUS_RATE) : [];
+
   return muxOpusStream({
     serial: STREAM_SERIAL,
     channelCount: numberOfChannels,
@@ -191,5 +216,6 @@ export async function encodeOggOpus(
     packets,
     totalSamples,
     vendor: 'audition_app',
+    comments,
   });
 }

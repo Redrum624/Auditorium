@@ -20,6 +20,8 @@ export const HEADER_TYPE = {
   EOS: 0x04,
 } as const;
 
+import { buildVorbisCommentPayload, parseVorbisCommentPayload } from './chapterTags';
+
 const OGG_CRC_POLY = 0x04c11db7;
 
 /** 256-entry lookup table for the Ogg CRC (built once at module load). */
@@ -84,15 +86,21 @@ export function buildOpusHead(opts: {
   return head;
 }
 
-/** Build the OpusTags comment header (RFC 7845 §5.2) with zero user comments. */
-export function buildOpusTags(vendor: string): Uint8Array {
-  const vendorBytes = utf8(vendor);
-  const tags = new Uint8Array(8 + 4 + vendorBytes.length + 4);
-  const dv = new DataView(tags.buffer);
+/**
+ * Build the OpusTags comment header (RFC 7845 §5.2): `"OpusTags"` magic
+ * followed by the vendor/comment-list layout — vendor_length u32 LE + vendor
+ * UTF-8 + comment_count u32 LE + per comment (length u32 LE + UTF-8
+ * "KEY=value"). Note this is NOT Vorbis's comment header proper (no framing
+ * bit follows), but the vendor+comment-list layout is identical, so this
+ * delegates to `chapterTags.ts`'s shared `buildVorbisCommentPayload` (Task
+ * K5). Omitting `comments` (or passing `[]`) reproduces the pre-K5 layout
+ * exactly (zero user comments) — the caller (`muxOpusStream`) relies on this
+ * for its marker-less-output-byte-identical-to-v1.2.1 guarantee. */
+export function buildOpusTags(vendor: string, comments: string[] = []): Uint8Array {
+  const payload = buildVorbisCommentPayload(vendor, comments);
+  const tags = new Uint8Array(8 + payload.length);
   writeAscii(tags, 0, 'OpusTags');
-  dv.setUint32(8, vendorBytes.length, true);
-  tags.set(vendorBytes, 12);
-  dv.setUint32(12 + vendorBytes.length, 0, true); // user comment list length
+  tags.set(payload, 8);
   return tags;
 }
 
@@ -254,13 +262,20 @@ export interface MuxOptions {
   totalSamples?: number;
   vendor?: string;
   maxPageBytes?: number;
+  /** User comments for the OpusTags packet (Task K5) — e.g. marker chapter
+   * tags via `chapterTags.ts`'s `buildChapterComments`. Omitting (or passing
+   * `[]`) reproduces the pre-K5, zero-comment OpusTags layout exactly. */
+  comments?: string[];
 }
 
 /**
  * Mux encoded Opus packets into a complete Ogg Opus bitstream: an OpusHead page
- * (BOS, granule 0), an OpusTags page (granule 0), then audio pages whose granule
- * counts cumulative 48 kHz samples through the last completed packet. The final
- * audio page is EOS with its granule trimmed to preSkip + totalSamples.
+ * (BOS, granule 0), one or more OpusTags pages (granule 0 — the comment packet
+ * may exceed a single page's 255-segment limit when `comments` is large, in
+ * which case it spans pages via the same `paginate` machinery audio packets
+ * use, carrying the CONTINUED flag), then audio pages whose granule counts
+ * cumulative 48 kHz samples through the last completed packet. The final page
+ * (last OpusTags page when there is no audio, else the final audio page) is EOS.
  */
 export function muxOpusStream(opts: MuxOptions): Uint8Array {
   const vendor = opts.vendor ?? 'audition_app';
@@ -269,7 +284,7 @@ export function muxOpusStream(opts: MuxOptions): Uint8Array {
     preSkip: opts.preSkip,
     inputSampleRate: opts.inputSampleRate,
   });
-  const tags = buildOpusTags(vendor);
+  const tags = buildOpusTags(vendor, opts.comments ?? []);
 
   const headPage = buildPage({
     headerType: HEADER_TYPE.BOS,
@@ -280,16 +295,14 @@ export function muxOpusStream(opts: MuxOptions): Uint8Array {
     payload: head,
   });
   const noAudio = opts.packets.length === 0;
-  const tagsPage = buildPage({
-    headerType: noAudio ? HEADER_TYPE.EOS : 0,
-    granule: 0n,
+  const tagsPages = paginate([{ data: tags, granule: 0n }], {
     serial: opts.serial,
-    sequence: 1,
-    segmentTable: segmentsForPacket(tags.length),
-    payload: tags,
+    firstSequence: 1,
+    lastPageEos: noAudio,
+    maxPageBytes: opts.maxPageBytes,
   });
 
-  const parts: Uint8Array[] = [headPage, tagsPage];
+  const parts: Uint8Array[] = [headPage, ...tagsPages];
 
   if (!noAudio) {
     // Each audio packet's granule is the cumulative count of 48 kHz decoder-
@@ -309,7 +322,7 @@ export function muxOpusStream(opts: MuxOptions): Uint8Array {
 
     for (const page of paginate(streamPackets, {
       serial: opts.serial,
-      firstSequence: 2,
+      firstSequence: 1 + tagsPages.length,
       lastPageEos: true,
       maxPageBytes: opts.maxPageBytes,
     })) {
@@ -318,6 +331,84 @@ export function muxOpusStream(opts: MuxOptions): Uint8Array {
   }
 
   return concatChunks(parts, parts.reduce((n, p) => n + p.length, 0));
+}
+
+// --- OpusTags reader (Task K5) ----------------------------------------------
+
+/** Cap on how far into the file we walk looking for the OpusHead/OpusTags
+ * packets. They always sit in the first one or two pages of a well-formed Ogg
+ * Opus file, so this is a defensive bound against a pathological/corrupt
+ * input, not a normal-file limit. */
+const MAX_TAGS_SCAN_BYTES = 2 * 1024 * 1024;
+
+function matchAsciiAt(bytes: Uint8Array, offset: number, str: string): boolean {
+  if (offset + str.length > bytes.length) return false;
+  for (let i = 0; i < str.length; i++) {
+    if (bytes[offset + i] !== str.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+/**
+ * Walk an Ogg bitstream's pages (`"OggS"` capture pattern, 27-byte header,
+ * segment-table lacing) far enough to reassemble the stream's SECOND logical
+ * packet — the OpusTags comment header, which may itself span multiple pages
+ * (a packet whose lacing values run right up to a page's 255-segment limit
+ * continues, un-terminated, onto the next page; reassembly here follows that
+ * termination rule directly rather than trusting the CONTINUED header flag,
+ * so it tolerates a stream where that flag is wrong). Verifies the packet's
+ * `"OpusTags"` magic and parses the rest via `chapterTags.ts`'s
+ * `parseVorbisCommentPayload`. Bounded to the first 2 MB of `buf`; tolerant of
+ * any truncation or corruption along the way — returns `null` rather than
+ * throwing.
+ */
+export function readOpusTags(buf: ArrayBuffer): { vendor: string; comments: string[] } | null {
+  try {
+    const bytes = new Uint8Array(buf);
+    const limit = Math.min(bytes.length, MAX_TAGS_SCAN_BYTES);
+
+    const packets: Uint8Array[] = [];
+    let partial: Uint8Array[] = [];
+    let partialLen = 0;
+
+    let offset = 0;
+    while (offset < limit && packets.length < 2) {
+      if (offset + 27 > bytes.length) return null; // truncated page header
+      if (!matchAsciiAt(bytes, offset, 'OggS')) return null; // lost sync / not Ogg
+
+      const segCount = bytes[offset + 26];
+      const segTableStart = offset + 27;
+      if (segTableStart + segCount > bytes.length) return null; // truncated segment table
+
+      let pagePayloadLen = 0;
+      for (let i = 0; i < segCount; i++) pagePayloadLen += bytes[segTableStart + i];
+      let payloadOffset = segTableStart + segCount;
+      if (payloadOffset + pagePayloadLen > bytes.length) return null; // truncated payload
+
+      for (let i = 0; i < segCount; i++) {
+        const value = bytes[segTableStart + i];
+        partial.push(bytes.subarray(payloadOffset, payloadOffset + value));
+        partialLen += value;
+        payloadOffset += value;
+        if (value < 255) {
+          // A lacing value below 255 always terminates the packet.
+          packets.push(concatChunks(partial, partialLen));
+          partial = [];
+          partialLen = 0;
+          if (packets.length >= 2) break;
+        }
+      }
+
+      offset = segTableStart + segCount + pagePayloadLen;
+    }
+
+    if (packets.length < 2) return null;
+    const tagsPacket = packets[1];
+    if (!matchAsciiAt(tagsPacket, 0, 'OpusTags')) return null;
+    return parseVorbisCommentPayload(tagsPacket.subarray(8));
+  } catch {
+    return null;
+  }
 }
 
 // --- byte helpers ----------------------------------------------------------

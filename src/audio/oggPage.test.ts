@@ -7,9 +7,11 @@ import {
   buildPage,
   paginate,
   muxOpusStream,
+  readOpusTags,
   type StreamPacket,
   type EncodedOpusPacket,
 } from './oggPage';
+import { buildVorbisCommentPayload } from './chapterTags';
 
 // ---------------------------------------------------------------------------
 // Independent reference CRC, computed bit-by-bit straight from the polynomial
@@ -183,7 +185,7 @@ describe('buildOpusHead', () => {
 });
 
 describe('buildOpusTags', () => {
-  it('lays out magic, vendor string, and zero user comments', () => {
+  it('lays out magic, vendor string, and zero user comments when comments is omitted', () => {
     const tags = buildOpusTags('audition_app');
     const dv = new DataView(tags.buffer, tags.byteOffset, tags.byteLength);
     expect(readAscii(tags, 0, 8)).toBe('OpusTags');
@@ -198,6 +200,40 @@ describe('buildOpusTags', () => {
     const tags = buildOpusTags('café'); // é is 2 UTF-8 bytes → 5 bytes total
     const dv = new DataView(tags.buffer, tags.byteOffset, tags.byteLength);
     expect(dv.getUint32(8, true)).toBe(5);
+  });
+
+  // -- Task K5: user comments --------------------------------------------
+
+  it('is byte-identical to v1.2.1 (zero user comments) when comments is omitted, an empty array, or undefined explicitly', () => {
+    const bare = buildOpusTags('audition_app');
+    const explicitUndefined = buildOpusTags('audition_app', undefined);
+    const emptyArray = buildOpusTags('audition_app', []);
+    expect(explicitUndefined).toEqual(bare);
+    expect(emptyArray).toEqual(bare);
+  });
+
+  it('delegates to buildVorbisCommentPayload for the vendor+comment-list layout after the magic', () => {
+    const comments = ['CHAPTER001=00:00:00.000', 'CHAPTER001NAME=Intro', 'AUDITORIUM_MARKERS=[{"s":0,"n":"Intro"}]'];
+    const tags = buildOpusTags('audition_app', comments);
+    const expectedPayload = buildVorbisCommentPayload('audition_app', comments);
+    expect(readAscii(tags, 0, 8)).toBe('OpusTags');
+    expect(tags.subarray(8)).toEqual(expectedPayload);
+  });
+
+  it('lays out a non-empty comment count and per-comment length-prefixed UTF-8 bytes', () => {
+    const tags = buildOpusTags('x', ['A=1', 'B=22']);
+    const dv = new DataView(tags.buffer, tags.byteOffset, tags.byteLength);
+    const vendorLen = dv.getUint32(8, true); // 1
+    let off = 12 + vendorLen;
+    expect(dv.getUint32(off, true)).toBe(2); // comment count
+    off += 4;
+    expect(dv.getUint32(off, true)).toBe(3); // 'A=1'.length
+    off += 4;
+    expect(readAscii(tags, off, 3)).toBe('A=1');
+    off += 3;
+    expect(dv.getUint32(off, true)).toBe(4); // 'B=22'.length
+    off += 4;
+    expect(readAscii(tags, off, 4)).toBe('B=22');
   });
 });
 
@@ -455,7 +491,253 @@ describe('muxOpusStream', () => {
     expect(pages[0].headerType & HEADER_TYPE.BOS).toBe(HEADER_TYPE.BOS);
     expect(pages[pages.length - 1].headerType & HEADER_TYPE.EOS).toBe(HEADER_TYPE.EOS);
   });
+
+  // -- Task K5: OpusTags user comments (marker persistence) ----------------
+
+  it('is byte-identical to v1.2.1 (marker-less encode) when comments is omitted, an empty array, or undefined explicitly', () => {
+    const baseOpts = {
+      serial: 1,
+      channelCount: 2,
+      preSkip: 312,
+      inputSampleRate: 44100,
+      packets: [opkt(100, 960), opkt(100, 960)],
+      vendor: 'audition_app',
+    };
+    const bare = muxOpusStream(baseOpts);
+    const explicitUndefined = muxOpusStream({ ...baseOpts, comments: undefined });
+    const emptyArray = muxOpusStream({ ...baseOpts, comments: [] });
+    expect(explicitUndefined).toEqual(bare);
+    expect(emptyArray).toEqual(bare);
+  });
+
+  it('writes the given comments into the OpusTags page payload', () => {
+    const comments = ['CHAPTER001=00:00:00.000', 'CHAPTER001NAME=Intro', 'AUDITORIUM_MARKERS=[{"s":0,"n":"Intro"}]'];
+    const stream = muxOpusStream({
+      serial: 1,
+      channelCount: 1,
+      preSkip: 312,
+      inputSampleRate: 48000,
+      packets: [opkt(50, 960)],
+      vendor: 'audition_app',
+      comments,
+    });
+    const pages = parsePages(stream);
+    // Reassemble the OpusTags packet (page 1 here — small comments fit on one page).
+    const tagsPage = pages[1];
+    expect(readAscii(tagsPage.payload, 0, 8)).toBe('OpusTags');
+    const dv = new DataView(tagsPage.payload.buffer, tagsPage.payload.byteOffset, tagsPage.payload.byteLength);
+    const vendorLen = dv.getUint32(8, true);
+    const countOff = 12 + vendorLen;
+    expect(dv.getUint32(countOff, true)).toBe(comments.length);
+  });
+
+  it('spans a huge OpusTags packet across pages with the CONTINUED flag, and audio sequencing accounts for the extra page(s)', () => {
+    // ~70 KB of comments — well past the 65025-byte single-page ceiling — forces
+    // the tags packet to split exactly like the oversized-packet paginate test.
+    const hugeComments = Array.from({ length: 700 }, (_, i) => `PADDING${i}=` + 'x'.repeat(90));
+    const stream = muxOpusStream({
+      serial: 3,
+      channelCount: 1,
+      preSkip: 312,
+      inputSampleRate: 48000,
+      packets: [opkt(50, 960), opkt(50, 960)],
+      totalSamples: 1920,
+      vendor: 'audition_app',
+      comments: hugeComments,
+    });
+    const pages = parsePages(stream);
+
+    // Page 0: OpusHead (BOS), sequence 0 — unaffected by the huge tags packet.
+    expect(pages[0].sequence).toBe(0);
+    expect(pages[0].headerType & HEADER_TYPE.BOS).toBe(HEADER_TYPE.BOS);
+
+    // The tags packet spans at least 2 pages (sequences 1, 2, ...): the first
+    // is NOT continued (it starts the packet) and completes no packet
+    // (granule -1); a later one carries the CONTINUED flag.
+    const continuedPages = pages.filter((p) => p.headerType & HEADER_TYPE.CONTINUED);
+    expect(continuedPages.length).toBeGreaterThanOrEqual(1);
+
+    // Reassemble the full OpusTags packet by concatenating payloads from page 1
+    // up through (and including) the last CONTINUED page, then decode it.
+    const tagsPacketPages = [pages[1]];
+    let i = 2;
+    while (i < pages.length && pages[i].headerType & HEADER_TYPE.CONTINUED) {
+      tagsPacketPages.push(pages[i]);
+      i++;
+    }
+    const tagsBytes = concat(tagsPacketPages.map((p) => p.payload));
+    expect(readAscii(tagsBytes, 0, 8)).toBe('OpusTags');
+    const dv = new DataView(tagsBytes.buffer, tagsBytes.byteOffset, tagsBytes.byteLength);
+    const vendorLen = dv.getUint32(8, true);
+    expect(dv.getUint32(12 + vendorLen, true)).toBe(hugeComments.length);
+
+    // Every non-BOS, non-continued-tail page before the audio pages has
+    // granule -1 (0xFF...F) — no packet (the tags packet) completes until the
+    // final tags page.
+    expect(pages[1].granule).toBe(0xffffffffffffffffn);
+
+    // Audio pages start right after the tags packet finishes, with a
+    // contiguous, correct sequence number (proves sequencing was NOT
+    // hardcoded to assume a single-page OpusTags).
+    const audioPageStart = i;
+    expect(pages[audioPageStart].sequence).toBe(audioPageStart);
+    const audioPages = pages.slice(audioPageStart);
+    expect(audioPages[audioPages.length - 1].headerType & HEADER_TYPE.EOS).toBe(HEADER_TYPE.EOS);
+    expect(audioPages[audioPages.length - 1].granule).toBe(BigInt(312 + 1920));
+
+    // Sequence numbers are contiguous across the whole stream.
+    pages.forEach((p, idx) => expect(p.sequence).toBe(idx));
+  });
+
+  it('EOS lands on the (possibly multi-page) OpusTags packet when there is no audio, even with a huge comment list', () => {
+    const hugeComments = Array.from({ length: 700 }, (_, i) => `PADDING${i}=` + 'x'.repeat(90));
+    const stream = muxOpusStream({
+      serial: 4,
+      channelCount: 1,
+      preSkip: 312,
+      inputSampleRate: 48000,
+      packets: [],
+      vendor: 'audition_app',
+      comments: hugeComments,
+    });
+    const pages = parsePages(stream);
+    expect(pages[pages.length - 1].headerType & HEADER_TYPE.EOS).toBe(HEADER_TYPE.EOS);
+    // Only the last page is EOS.
+    for (let idx = 0; idx < pages.length - 1; idx++) {
+      expect(pages[idx].headerType & HEADER_TYPE.EOS).toBe(0);
+    }
+  });
 });
+
+/** `Uint8Array.prototype.buffer` types as `ArrayBufferLike` (ArrayBuffer |
+ * SharedArrayBuffer) since TS 5.7; every Uint8Array here is always backed by a
+ * plain ArrayBuffer, so this narrows the same way `dsp.worker.ts` /
+ * `effectRunner.ts` do at their transfer boundaries. */
+function toBuf(u: Uint8Array): ArrayBuffer {
+  return u.buffer as ArrayBuffer;
+}
+
+describe('readOpusTags', () => {
+  const opkt = (len: number, sampleCount: number): EncodedOpusPacket => ({
+    data: new Uint8Array(len).fill(0x55),
+    sampleCount,
+  });
+
+  it('round-trips vendor + comments through a full muxOpusStream build', () => {
+    const comments = ['CHAPTER001=00:00:00.000', 'CHAPTER001NAME=Intro', 'AUDITORIUM_MARKERS=[{"s":0,"n":"Intro"}]'];
+    const stream = muxOpusStream({
+      serial: 1,
+      channelCount: 1,
+      preSkip: 312,
+      inputSampleRate: 48000,
+      packets: [opkt(50, 960)],
+      vendor: 'audition_app',
+      comments,
+    });
+    const result = readOpusTags(toBuf(stream));
+    expect(result).toEqual({ vendor: 'audition_app', comments });
+  });
+
+  it('round-trips a huge, multi-page OpusTags packet', () => {
+    const hugeComments = Array.from({ length: 700 }, (_, i) => `PADDING${i}=` + 'x'.repeat(90));
+    const stream = muxOpusStream({
+      serial: 3,
+      channelCount: 1,
+      preSkip: 312,
+      inputSampleRate: 48000,
+      packets: [opkt(50, 960), opkt(50, 960)],
+      totalSamples: 1920,
+      vendor: 'audition_app',
+      comments: hugeComments,
+    });
+    const result = readOpusTags(toBuf(stream));
+    expect(result?.vendor).toBe('audition_app');
+    expect(result?.comments).toEqual(hugeComments);
+  });
+
+  it('returns vendor + zero comments for a marker-less (v1.2.1-shaped) stream', () => {
+    const stream = muxOpusStream({
+      serial: 1,
+      channelCount: 2,
+      preSkip: 312,
+      inputSampleRate: 44100,
+      packets: [opkt(100, 960)],
+      vendor: 'audition_app',
+    });
+    const result = readOpusTags(toBuf(stream));
+    expect(result).toEqual({ vendor: 'audition_app', comments: [] });
+  });
+
+  it('returns null when the buffer has no OggS page at all', () => {
+    expect(readOpusTags(toBuf(new Uint8Array([1, 2, 3, 4])))).toBeNull();
+  });
+
+  it('returns null when only one packet (OpusHead) is present — no second packet to read', () => {
+    const head = buildOpusHead({ channelCount: 1, preSkip: 312, inputSampleRate: 48000 });
+    const page = buildPage({
+      headerType: HEADER_TYPE.BOS | HEADER_TYPE.EOS,
+      granule: 0n,
+      serial: 1,
+      sequence: 0,
+      segmentTable: segmentsForPacket(head.length),
+      payload: head,
+    });
+    expect(readOpusTags(toBuf(page))).toBeNull();
+  });
+
+  it('returns null when the second packet is not OpusTags-magic', () => {
+    const head = buildOpusHead({ channelCount: 1, preSkip: 312, inputSampleRate: 48000 });
+    const headPage = buildPage({
+      headerType: HEADER_TYPE.BOS,
+      granule: 0n,
+      serial: 1,
+      sequence: 0,
+      segmentTable: segmentsForPacket(head.length),
+      payload: head,
+    });
+    const bogus = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    const bogusPage = buildPage({
+      headerType: HEADER_TYPE.EOS,
+      granule: 0n,
+      serial: 1,
+      sequence: 1,
+      segmentTable: segmentsForPacket(bogus.length),
+      payload: bogus,
+    });
+    expect(readOpusTags(toBuf(concat([headPage, bogusPage])))).toBeNull();
+  });
+
+  it('never throws and returns null for a randomly truncated valid stream at every byte length', () => {
+    const stream = muxOpusStream({
+      serial: 1,
+      channelCount: 1,
+      preSkip: 312,
+      inputSampleRate: 48000,
+      packets: [opkt(50, 960)],
+      vendor: 'audition_app',
+      comments: ['A=1'],
+    });
+    for (let len = 0; len <= stream.length; len += 7) {
+      const truncated = stream.slice(0, len);
+      expect(() => readOpusTags(toBuf(truncated))).not.toThrow();
+    }
+  });
+
+  it('returns null for a page whose declared segment table runs past the buffer', () => {
+    const bogus = new Uint8Array(30);
+    writeOggHeader(bogus, 0, { segCount: 5 }); // claims 5 segments but buffer ends at 30 (27 + 5 needed = 32)
+    expect(readOpusTags(toBuf(bogus))).toBeNull();
+  });
+});
+
+/** Minimal raw OggS page header writer for corrupt-input tests (no CRC, no
+ * payload) — just enough structure for `readOpusTags`'s bounds checks. */
+function writeOggHeader(out: Uint8Array, offset: number, opts: { segCount: number }): void {
+  out.set([0x4f, 0x67, 0x67, 0x53], offset); // 'OggS'
+  out[offset + 4] = 0; // version
+  out[offset + 5] = 0; // header type
+  out[offset + 26] = opts.segCount;
+}
 
 /** Concatenate an array of pages (helper mirrors the muxer's own concat). */
 function concat(parts: Uint8Array[]): Uint8Array {

@@ -15,6 +15,7 @@ import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncod
 import { decodeWav } from '../audio/wavCodec';
 import { buildId3Chapters } from '../audio/id3Chapters';
 import { buildChapterComments, buildVorbisCommentPayload } from '../audio/chapterTags';
+import { muxOpusStream } from '../audio/oggPage';
 import * as undoHistory from './undoHistory';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
@@ -102,6 +103,25 @@ function buildFakeFlacWithMarkers(markers: { positionSample: number; name: strin
   offset += vcHeader.length;
   out.set(payload, offset);
   return out.buffer;
+}
+
+/** Build a minimal but real Ogg Opus bitstream (via the real, unmocked
+ * `oggPage.ts` `muxOpusStream` — only `oggOpusEncoder.ts` is mocked in this
+ * file) carrying `markers` as an OpusTags block (Task K5). No audio packets
+ * are needed since decode is mocked; `openFilePath` only reads the tags via
+ * `readOpusTags`/`parseChapterComments` (also real and unmocked). */
+function buildFakeOggWithMarkers(markers: { positionSample: number; name: string }[], fileSampleRate: number): ArrayBuffer {
+  const comments = buildChapterComments(markers, fileSampleRate);
+  const stream = muxOpusStream({
+    serial: 1,
+    channelCount: 2,
+    preSkip: 312,
+    inputSampleRate: fileSampleRate,
+    packets: [],
+    vendor: 'audition_app',
+    comments,
+  });
+  return stream.buffer.slice(stream.byteOffset, stream.byteOffset + stream.byteLength) as ArrayBuffer;
 }
 
 beforeEach(() => {
@@ -287,6 +307,54 @@ describe('openFilePath', () => {
     expect(markers).toHaveLength(1);
     expect(markers[0].positionSample).toBe(100); // clamped to docLength
   });
+
+  it("seeds appStore markers from an OGG's OpusTags tag (K5), with fresh marker ids", async () => {
+    const fileBytes = buildFakeOggWithMarkers(
+      [
+        { positionSample: 500, name: 'Verse' },
+        { positionSample: 10, name: 'Intro' },
+      ],
+      48000
+    );
+    installApi({ readFile: jest.fn(async () => fileBytes) });
+    // Real Ogg Opus opens always decode at 48 kHz.
+    mockDecode.mockResolvedValueOnce(decoded(48000, 2, 10000));
+
+    await openFilePath('D:\\audio\\voice.ogg');
+
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(2);
+    expect(markers.map((m) => m.positionSample)).toEqual([10, 500]); // kept sorted
+    expect(markers.map((m) => m.name)).toEqual(['Intro', 'Verse']);
+    for (const m of markers) {
+      expect(m.id).toMatch(/^marker-\d+$/);
+    }
+    expect(new Set(markers.map((m) => m.id)).size).toBe(2);
+  });
+
+  it('does not create a markers entry for an OGG with no OpusTags comments', async () => {
+    installApi({ readFile: jest.fn(async () => new ArrayBuffer(8)) });
+    mockDecode.mockResolvedValueOnce(decoded(48000, 2, 10000));
+
+    await openFilePath('D:\\audio\\voice.ogg');
+
+    const docId = useAppStore.getState().documents[0].id;
+    expect(useAppStore.getState().markers[docId]).toBeUndefined();
+  });
+
+  it('clamps OGG marker positions parsed from an out-of-range tag to [0, docLength]', async () => {
+    const fileBytes = buildFakeOggWithMarkers([{ positionSample: 999_999, name: 'TooFar' }], 48000);
+    installApi({ readFile: jest.fn(async () => fileBytes) });
+    mockDecode.mockResolvedValueOnce(decoded(48000, 2, 100)); // doc length = 100 samples
+
+    await openFilePath('D:\\audio\\voice.ogg');
+
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(1);
+    expect(markers[0].positionSample).toBe(100); // clamped to docLength
+  });
 });
 
 describe('openFilesViaDialog', () => {
@@ -466,9 +534,26 @@ describe('saveDocument', () => {
     await saveDocument(doc.id);
 
     expect(api.showSaveDialog).not.toHaveBeenCalled();
-    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100);
+    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100, undefined, undefined);
     expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\voice.ogg', expect.any(ArrayBuffer));
     expect(useAppStore.getState().documents[0].dirty).toBe(false);
+  });
+
+  it('passes the active doc markers into encodeOggOpus when saving an OGG in place (K5)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Hook', positionSample: 9 });
+
+    await saveDocument(doc.id);
+
+    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100, undefined, [
+      { id: 'marker-1', name: 'Hook', positionSample: 9 },
+    ]);
   });
 
   it('falls back to save-as WAV when the Opus encoder is unavailable', async () => {
@@ -783,9 +868,22 @@ describe('exportDocument', () => {
       oggBitrate: 192_000,
     });
 
-    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100, 192_000);
+    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100, 192_000, undefined);
     expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\track.ogg', expect.any(ArrayBuffer));
     expect(result).toBe('D:\\out\\track.ogg');
+  });
+
+  it('includes the doc markers when exporting to OGG (K5)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.ogg') });
+    const doc = seedDoc({ filePath: null, name: 'doc' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Hook', positionSample: 9 });
+
+    await exportDocument(doc.id, { format: 'ogg', wavBitDepth: 16, mp3Kbps: 128, oggBitrate: 192_000 });
+
+    expect(mockEncodeOgg).toHaveBeenCalledWith(doc.channels, 44100, 192_000, [
+      { id: 'marker-1', name: 'Hook', positionSample: 9 },
+    ]);
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\track.ogg', expect.any(ArrayBuffer));
   });
 
   it('surfaces an error and writes nothing when the Opus encoder is unavailable', async () => {
