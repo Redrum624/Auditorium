@@ -13,6 +13,7 @@ import { encodeMp3 } from '../audio/mp3Encoder';
 import { encodeFlac } from '../audio/flacEncoder';
 import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
 import { decodeWav } from '../audio/wavCodec';
+import { buildId3Chapters } from '../audio/id3Chapters';
 import * as undoHistory from './undoHistory';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
@@ -160,6 +161,59 @@ describe('openFilePath', () => {
     const docId = useAppStore.getState().documents[0].id;
     expect(useAppStore.getState().markers[docId]).toBeUndefined();
   });
+
+  it('seeds appStore markers from an MP3\'s ID3v2 chapter tag (K3), with fresh marker ids', async () => {
+    const tag = buildId3Chapters(
+      [
+        { positionSample: 500, name: 'Verse' },
+        { positionSample: 10, name: 'Intro' },
+      ],
+      44100
+    );
+    const fileBytes = new Uint8Array(tag.length);
+    fileBytes.set(tag, 0);
+    installApi({ readFile: jest.fn(async () => fileBytes.buffer) });
+    mockDecode.mockResolvedValueOnce(decoded(44100, 2, 10000));
+
+    await openFilePath('D:\\audio\\song.mp3');
+
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(2);
+    expect(markers.map((m) => m.positionSample)).toEqual([10, 500]); // kept sorted
+    expect(markers.map((m) => m.name)).toEqual(['Intro', 'Verse']);
+    for (const m of markers) {
+      expect(m.id).toMatch(/^marker-\d+$/);
+    }
+    expect(new Set(markers.map((m) => m.id)).size).toBe(2);
+  });
+
+  it('does not create a markers entry for an MP3 with no ID3 chapter tag', async () => {
+    installApi({ readFile: jest.fn(async () => new ArrayBuffer(8)) });
+    mockDecode.mockResolvedValueOnce(decoded());
+
+    await openFilePath('D:\\audio\\song.mp3');
+
+    const docId = useAppStore.getState().documents[0].id;
+    expect(useAppStore.getState().markers[docId]).toBeUndefined();
+  });
+
+  it('clamps MP3 marker positions parsed from a corrupt/out-of-range tag to [0, docLength]', async () => {
+    // Round-trip a legit tag but exercise the clamp path via an out-of-range
+    // exact sample (larger than the decoded doc's length).
+    const tag = buildId3Chapters([{ positionSample: 999_999, name: 'TooFar' }], 44100);
+    const fileBytes = new Uint8Array(tag.length);
+    fileBytes.set(tag, 0);
+    installApi({ readFile: jest.fn(async () => fileBytes.buffer) });
+    mockDecode.mockResolvedValueOnce(decoded(44100, 2, 100)); // doc length = 100 samples
+
+    await openFilePath('D:\\audio\\song.mp3');
+
+    const docId = useAppStore.getState().documents[0].id;
+    const markers = useAppStore.getState().markers[docId];
+    expect(markers).toHaveLength(1);
+    expect(markers[0].positionSample).toBe(100); // clamped to docLength
+  });
 });
 
 describe('openFilesViaDialog', () => {
@@ -255,10 +309,27 @@ describe('saveDocument', () => {
     await saveDocument(doc.id);
 
     expect(api.showSaveDialog).not.toHaveBeenCalled();
-    expect(mockEncodeMp3).toHaveBeenCalledWith(doc.channels, 44100, 192);
+    expect(mockEncodeMp3).toHaveBeenCalledWith(doc.channels, 44100, 192, undefined);
     expect(mockEncodeFlac).not.toHaveBeenCalled();
     expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\clip.mp3', expect.any(ArrayBuffer));
     expect(useAppStore.getState().documents[0].dirty).toBe(false);
+  });
+
+  it('passes the active doc markers into encodeMp3 when saving an MP3 in place (K3)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\clip.mp3',
+      dirty: true,
+      name: 'clip.mp3',
+      sourceFormat: 'mp3',
+    });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 3 });
+
+    await saveDocument(doc.id);
+
+    expect(mockEncodeMp3).toHaveBeenCalledWith(doc.channels, 44100, 192, [
+      { id: 'marker-1', name: 'Chorus', positionSample: 3 },
+    ]);
   });
 
   it('re-encodes a FLAC source in place at the source bit depth', async () => {
@@ -550,7 +621,7 @@ describe('exportDocument', () => {
 
     const result = await exportDocument(doc.id, { format: 'mp3', wavBitDepth: 16, mp3Kbps: 192 });
 
-    expect(mockEncodeMp3).toHaveBeenCalledWith(doc.channels, 44100, 192);
+    expect(mockEncodeMp3).toHaveBeenCalledWith(doc.channels, 44100, 192, undefined);
     expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\track.mp3', expect.any(ArrayBuffer));
     expect(result).toBe('D:\\out\\track.mp3');
     // Export never touches filePath/dirty.
@@ -560,6 +631,19 @@ describe('exportDocument', () => {
     expect(api.showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'info', message: 'Exported to D:\\out\\track.mp3' })
     );
+  });
+
+  it('includes the doc markers when exporting to MP3 (K3)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\track.mp3') });
+    const doc = seedDoc({ filePath: null, name: 'doc' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Bridge', positionSample: 9 });
+
+    await exportDocument(doc.id, { format: 'mp3', wavBitDepth: 16, mp3Kbps: 192 });
+
+    expect(mockEncodeMp3).toHaveBeenCalledWith(doc.channels, 44100, 192, [
+      { id: 'marker-1', name: 'Bridge', positionSample: 9 },
+    ]);
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\track.mp3', expect.any(ArrayBuffer));
   });
 
   it('writes a WAV at the requested bit depth', async () => {

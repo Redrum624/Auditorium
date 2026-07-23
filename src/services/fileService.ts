@@ -1,8 +1,9 @@
-import { createDocument, nextId, type AudioDocument } from '../audio/AudioDocument';
+import { createDocument, docLength, nextId, type AudioDocument } from '../audio/AudioDocument';
 import { decodeArrayBuffer } from '../audio/decodeAudio';
 import { readFlacStreamInfo } from '../audio/sniffSampleRate';
 import { encodeFlac } from '../audio/flacEncoder';
 import { encodeMp3 } from '../audio/mp3Encoder';
+import { parseId3Chapters } from '../audio/id3Chapters';
 import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
 import { encodeWav, type WavBitDepth } from '../audio/wavCodec';
 import { playbackEngine } from '../audio/PlaybackEngine';
@@ -83,7 +84,7 @@ export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuff
     case 'wav':
       return encodeWav(doc.channels, doc.sampleRate, opts.wavBitDepth, store().markers[doc.id]);
     case 'mp3':
-      return encodeMp3(doc.channels, doc.sampleRate, opts.mp3Kbps);
+      return encodeMp3(doc.channels, doc.sampleRate, opts.mp3Kbps, store().markers[doc.id]);
     case 'flac':
       return encodeFlac(doc.channels, doc.sampleRate, 16);
     case 'ogg':
@@ -94,16 +95,17 @@ export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuff
 }
 
 /** Re-encode a document into its ORIGINAL container for an in-place Save.
- * MP3 → 192 kbps CBR; FLAC → verbatim FLAC at the source bit depth (16 or 24);
- * OGG → Opus-in-Ogg at 128 kbps (async via WebCodecs); wav/undefined →
- * 32-bit-float WAV (the app's canonical lossless container), carrying the doc's
- * markers as cue/adtl chunks. MP3/FLAC/OGG have no standard marker chunk, so
- * their markers are not written (see docs/KNOWN_LIMITATIONS.md). Rejects with
+ * MP3 → 192 kbps CBR, carrying the doc's markers as an ID3v2.3 chapter tag
+ * (CTOC/CHAP + AUDITORIUM_MARKERS TXXX); FLAC → verbatim FLAC at the source
+ * bit depth (16 or 24); OGG → Opus-in-Ogg at 128 kbps (async via WebCodecs);
+ * wav/undefined → 32-bit-float WAV (the app's canonical lossless container),
+ * carrying the doc's markers as cue/adtl chunks. FLAC/OGG have no marker
+ * persistence yet (see docs/KNOWN_LIMITATIONS.md). Rejects with
  * OggEncoderUnavailableError when the Opus encoder is missing (jsdom/no WebCodecs). */
 async function encodeInPlace(doc: AudioDocument): Promise<ArrayBuffer> {
   switch (doc.sourceFormat) {
     case 'mp3':
-      return encodeMp3(doc.channels, doc.sampleRate, MP3_SAVE_KBPS);
+      return encodeMp3(doc.channels, doc.sampleRate, MP3_SAVE_KBPS, store().markers[doc.id]);
     case 'flac':
       return encodeFlac(doc.channels, doc.sampleRate, doc.sourceBitDepth === 24 ? 24 : 16);
     case 'ogg':
@@ -156,6 +158,20 @@ export async function openFilePath(path: string): Promise<void> {
       positionSample: m.positionSample,
     }));
     store().setMarkersForDoc(doc.id, markers);
+  } else if (sourceFormat === 'mp3') {
+    const chapters = parseId3Chapters(buf);
+    if (chapters && chapters.length > 0) {
+      const length = docLength(doc);
+      const markers: Marker[] = chapters.map((c) => {
+        const rawSample = c.exactSample ?? Math.round((c.positionMs / 1000) * doc.sampleRate);
+        return {
+          id: nextId('marker'),
+          name: c.name,
+          positionSample: Math.max(0, Math.min(length, rawSample)),
+        };
+      });
+      store().setMarkersForDoc(doc.id, markers);
+    }
   }
 }
 

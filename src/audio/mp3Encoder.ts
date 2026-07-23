@@ -1,4 +1,5 @@
 import { Mp3Encoder } from '@breezystack/lamejs';
+import { buildId3Chapters, type Id3ChapterMarker } from './id3Chapters';
 
 /** Samples per MP3 granule pair; lamejs expects blocks of this size. */
 const BLOCK_SIZE = 1152;
@@ -20,11 +21,19 @@ function floatToInt16(input: Float32Array): Int16Array {
  * Mono input (1 channel) uses a 1-channel encoder; anything else encodes the
  * first two channels as stereo. Samples are converted to Int16, fed in 1152-
  * sample blocks, then the encoder is flushed and all frames concatenated.
+ *
+ * When `markers` is a non-empty array, an ID3v2.3 chapter tag (`buildId3Chapters`
+ * — CTOC/CHAP interop frames plus the sample-exact `AUDITORIUM_MARKERS` TXXX)
+ * is prepended as the first bytes of the output; both sniffers and Chromium's
+ * `decodeAudioData` already skip leading ID3v2, so the file still opens
+ * identically either way. Omitting `markers` (or passing `[]`) produces output
+ * byte-identical to the pre-K3 encoder — no tag is written.
  */
 export function encodeMp3(
   channels: Float32Array[],
   sampleRate: number,
-  kbps: 128 | 192 | 256 | 320
+  kbps: 128 | 192 | 256 | 320,
+  markers?: Id3ChapterMarker[]
 ): ArrayBuffer {
   const numChannels = channels.length === 1 ? 1 : 2;
   const encoder = new Mp3Encoder(numChannels, sampleRate, kbps);
@@ -34,6 +43,9 @@ export function encodeMp3(
   const length = left.length;
 
   const chunks: Uint8Array[] = [];
+  if (markers && markers.length > 0) {
+    chunks.push(buildId3Chapters(markers, sampleRate));
+  }
   for (let i = 0; i < length; i += BLOCK_SIZE) {
     const leftBlock = left.subarray(i, i + BLOCK_SIZE);
     const encoded = right
