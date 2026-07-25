@@ -13,13 +13,19 @@ function fakeIpcMain() {
   };
 }
 
-function fakeWin() {
+function fakeWin({ crashed = false } = {}) {
   return {
     destroyed: false,
     destroy() {
       this.destroyed = true;
     },
-    webContents: { send: jest.fn() },
+    isDestroyed() {
+      return this.destroyed;
+    },
+    webContents: {
+      send: jest.fn(),
+      isCrashed: () => crashed,
+    },
   };
 }
 
@@ -93,19 +99,6 @@ describe('closeGuard (Task F8 native close guard)', () => {
     expect(win.destroyed).toBe(true);
   });
 
-  test('an unresponsive renderer is not un-closable: the guard destroys after the timeout', () => {
-    jest.useFakeTimers();
-    try {
-      const { guard, win, event } = setup({ timeoutMs: 2000 });
-      guard.handleClose(win, event);
-      expect(win.destroyed).toBe(false);
-      jest.advanceTimersByTime(2001);
-      expect(win.destroyed).toBe(true);
-    } finally {
-      jest.useRealTimers();
-    }
-  });
-
   test('a stray close-response with no pending close is ignored', async () => {
     const { ipcMain, dialog, guard, win } = setup();
     void guard; // guard registered the ipc handler
@@ -163,5 +156,122 @@ describe('closeGuard (Task F8 native close guard)', () => {
     } finally {
       jest.useRealTimers();
     }
+  });
+
+  describe('timeout fail-closed behavior (Task F7)', () => {
+    test('an alive-but-unresponsive renderer gets a Quit/Cancel dialog instead of an immediate destroy', async () => {
+      jest.useFakeTimers();
+      try {
+        const { dialog, guard, win, event } = setup({ timeoutMs: 2000, dialogResponse: 1 }); // Cancel
+        guard.handleClose(win, event);
+        expect(win.destroyed).toBe(false);
+
+        await jest.advanceTimersByTimeAsync(2001);
+
+        expect(dialog.showMessageBox).toHaveBeenCalledWith(
+          win,
+          expect.objectContaining({
+            message: 'The editor is busy (a save or export may be running). Quit anyway?',
+            buttons: ['Quit', 'Cancel'],
+          })
+        );
+        expect(win.destroyed).toBe(false); // Cancel chosen -- window stays alive
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('choosing Quit on the busy dialog destroys the window', async () => {
+      jest.useFakeTimers();
+      try {
+        const { guard, win, event } = setup({ timeoutMs: 2000, dialogResponse: 0 }); // Quit
+        guard.handleClose(win, event);
+        await jest.advanceTimersByTimeAsync(2001);
+        expect(win.destroyed).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('a crashed webContents destroys immediately on timeout, with no dialog', async () => {
+      jest.useFakeTimers();
+      try {
+        const { dialog, guard, win, event } = setup({ timeoutMs: 2000 });
+        win.webContents.isCrashed = () => true;
+        guard.handleClose(win, event);
+        await jest.advanceTimersByTimeAsync(2001);
+        expect(win.destroyed).toBe(true);
+        expect(dialog.showMessageBox).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('a window already destroyed before the timeout fires is left alone (no double-destroy, no dialog)', async () => {
+      jest.useFakeTimers();
+      try {
+        const { dialog, guard, win, event } = setup({ timeoutMs: 2000 });
+        guard.handleClose(win, event);
+        win.destroy(); // simulate the window already gone via some other path
+        await jest.advanceTimersByTimeAsync(2001);
+        expect(dialog.showMessageBox).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('the guard still works normally after a busy-dialog Cancel', async () => {
+      jest.useFakeTimers();
+      try {
+        const { ipcMain, guard, win, event } = setup({ timeoutMs: 2000, dialogResponse: 1 });
+        guard.handleClose(win, event);
+        await jest.advanceTimersByTimeAsync(2001); // busy dialog shown, Cancel chosen
+        expect(win.destroyed).toBe(false);
+
+        const secondEvent = fakeEvent();
+        guard.handleClose(win, secondEvent);
+        expect(secondEvent.prevented).toBe(true);
+        await ipcMain.emit('app:close-response', 0);
+        expect(win.destroyed).toBe(true);
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+  });
+
+  describe('in-flight-save count widens the warn condition (Task F7)', () => {
+    test('a nonzero in-flight-save count shows the dialog even when dirtyCount is 0', async () => {
+      const { ipcMain, dialog, guard, win, event } = setup({ dialogResponse: 1 }); // Cancel
+      guard.handleClose(win, event);
+      await ipcMain.emit('app:close-response', 0, 1);
+      expect(dialog.showMessageBox).toHaveBeenCalledWith(
+        win,
+        expect.objectContaining({ buttons: ['Quit', 'Cancel'] })
+      );
+      expect(win.destroyed).toBe(false); // Cancel chosen
+    });
+
+    test('zero dirty and zero in-flight-saves still closes silently', async () => {
+      const { ipcMain, dialog, guard, win, event } = setup();
+      guard.handleClose(win, event);
+      await ipcMain.emit('app:close-response', 0, 0);
+      expect(win.destroyed).toBe(true);
+      expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    });
+
+    test('an omitted in-flight-save count (legacy single-arg reply) behaves as zero', async () => {
+      const { ipcMain, dialog, guard, win, event } = setup();
+      guard.handleClose(win, event);
+      await ipcMain.emit('app:close-response', 0);
+      expect(win.destroyed).toBe(true);
+      expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    });
+
+    test('Quit on an in-flight-save-only warning (dirty=0) destroys the window', async () => {
+      const { ipcMain, guard, win, event } = setup({ dialogResponse: 0 }); // Quit
+      guard.handleClose(win, event);
+      await ipcMain.emit('app:close-response', 0, 2);
+      expect(win.destroyed).toBe(true);
+    });
   });
 });

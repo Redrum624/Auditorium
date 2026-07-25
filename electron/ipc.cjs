@@ -4,6 +4,8 @@ const { ipcMain, dialog, app } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 const { assertWriteAllowed, assertWriteTargetSafe } = require('./writePathPolicy.cjs');
+const { atomicWriteFile } = require('./atomicWrite.cjs');
+const { isPackagedGateOpen } = require('./prodGate.cjs');
 
 // Paths the renderer is allowed to read via file:read, populated only by
 // dialog:open/dialog:save results (i.e. paths the user explicitly picked in
@@ -16,7 +18,17 @@ const approvedReadPaths = new Set();
 // only, reads are auto-approved and writes are permitted under <cwd>/test-output/
 // (which the production write policy would otherwise reject as inside the app
 // path). Never true in a normal run.
-const IS_TEST = process.env.AUDITORIUM_TEST === '1';
+//
+// F23: also requires the app to be UNPACKAGED, so a packaged production build
+// can never be coerced into this mode just by an env var being set. Evaluated
+// lazily (per call, not at module load) via isPackagedGateOpen so `app` -- a
+// plain string when this module is required outside a real Electron process,
+// e.g. under Jest -- is never dereferenced eagerly. The scripted smoke harness
+// launches `electron .` unpacked, so app.isPackaged is false there and this
+// gate is unaffected.
+function isTestMode() {
+  return isPackagedGateOpen(app && app.isPackaged, process.env.AUDITORIUM_TEST);
+}
 const TEST_OUTPUT_DIR = path.resolve(process.cwd(), 'test-output');
 
 function isUnderTestOutput(resolvedPath) {
@@ -48,7 +60,7 @@ const _testing = { approvePath, isReadApproved, resetApproved };
  */
 function registerIpc(getWin) {
   ipcMain.handle('file:read', async (_event, filePath) => {
-    if (!IS_TEST && !isReadApproved(filePath)) {
+    if (!isTestMode() && !isReadApproved(filePath)) {
       throw new Error('Read not permitted: path was not user-approved');
     }
     return fs.promises.readFile(path.resolve(filePath));
@@ -57,15 +69,18 @@ function registerIpc(getWin) {
   ipcMain.handle('file:write', async (_event, filePath, arrayBuffer) => {
     try {
       const resolved = path.resolve(filePath);
-      if (IS_TEST && isUnderTestOutput(resolved)) {
+      if (isTestMode() && isUnderTestOutput(resolved)) {
         // Test-only escape hatch: writes under test-output/ bypass the write
-        // policy (see IS_TEST comment). Ensure the dir exists first.
+        // policy (see isTestMode's comment). Ensure the dir exists first.
         await fs.promises.mkdir(path.dirname(resolved), { recursive: true });
       } else {
         assertWriteAllowed(filePath);
         assertWriteTargetSafe(resolved);
       }
-      await fs.promises.writeFile(resolved, Buffer.from(arrayBuffer));
+      // F2: never truncate the destination directly -- write to a validated
+      // sibling temp file, fsync it, then rename it over the target so a
+      // failed/interrupted write can never leave a truncated original.
+      await atomicWriteFile(resolved, Buffer.from(arrayBuffer));
       return { ok: true };
     } catch (err) {
       return { ok: false, error: String(err.message) };

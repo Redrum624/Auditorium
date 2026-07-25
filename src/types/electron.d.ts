@@ -7,7 +7,7 @@ export interface ElectronAPI {
   windowMinimize(): void; windowToggleMaximize(): void; windowClose(): void;
   onWindowMaximized(cb: (isMax: boolean) => void): () => void;   // returns unsubscribe
   onCloseRequested(cb: () => void): () => void;                  // returns unsubscribe (Task F8 close guard)
-  respondCloseRequest(dirtyCount: number): void;                 // renderer's reply to 'app:close-requested'
+  respondCloseRequest(dirtyCount: number, inFlightSaveCount: number): void; // renderer's reply to 'app:close-requested'
   getAppVersion(): Promise<string>;
   pathBasename(p: string): string;      // implemented in preload (string ops only, no IPC)
 }

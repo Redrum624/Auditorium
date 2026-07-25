@@ -18,6 +18,7 @@ import TitleBar from './components/Layout/TitleBar';
 import TransportBar from './components/Layout/TransportBar';
 import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
+import { getInFlightSaveCount } from './services/fileService';
 import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
@@ -94,7 +95,7 @@ export default function App() {
     if (!api?.onCloseRequested) return; // jsdom / older preload
     return api.onCloseRequested(() => {
       const dirty = useAppStore.getState().documents.filter((d) => d.dirty).length;
-      api.respondCloseRequest(dirty);
+      api.respondCloseRequest(dirty, getInFlightSaveCount());
     });
   }, []);
 

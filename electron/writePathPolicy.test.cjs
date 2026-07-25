@@ -55,7 +55,7 @@ describe('writePathPolicy', () => {
 
   test('allows paths inside userData (not a forbidden write target)', () => {
     setAppPaths({ appPath: 'D:\\Apps\\Auditorium', userData: 'D:\\Users\\me\\AppData\\Auditorium' });
-    expect(isWriteAllowed('D:\\Users\\me\\AppData\\Auditorium\\settings.json')).toBe(true);
+    expect(isWriteAllowed('D:\\Users\\me\\AppData\\Auditorium\\session.audm')).toBe(true);
   });
 
   test('extension allow-list check is case-insensitive', () => {
@@ -78,12 +78,35 @@ describe('writePathPolicy', () => {
     expect(isWriteAllowed('\\\\.\\C:\\x.wav')).toBe(false);
   });
 
-  test('rejects UNC network paths', () => {
-    expect(isWriteAllowed('\\\\server\\share\\a.wav')).toBe(false);
+  test('accepts a well-formed UNC network path (server + share + file) (F8)', () => {
+    expect(isWriteAllowed('\\\\server\\share\\a.wav')).toBe(true);
+  });
+
+  test('rejects a UNC path with only a server component (no share) (F8)', () => {
+    expect(isWriteAllowed('\\\\server')).toBe(false);
+  });
+
+  test('rejects a UNC path with a trailing-slash server and no share (F8)', () => {
+    expect(isWriteAllowed('\\\\server\\')).toBe(false);
+  });
+
+  test('assertWriteAllowed does not throw for a well-formed UNC path (F8)', () => {
+    expect(() => assertWriteAllowed('\\\\nas\\shared\\music\\out.wav')).not.toThrow();
+  });
+
+  test('a well-formed UNC path inside a forbidden dir is still rejected (containment still runs) (F8)', () => {
+    setAppPaths({ appPath: '\\\\nas\\apps\\Auditorium', userData: null });
+    expect(isWriteAllowed('\\\\nas\\apps\\Auditorium\\evil.wav')).toBe(false);
   });
 
   test('assertWriteAllowed throws for the \\\\?\\ extended-length path prefix', () => {
     expect(() => assertWriteAllowed('\\\\?\\C:\\Windows\\evil.wav')).toThrow();
+  });
+
+  test('rejects extensions removed from the allow-list (F24: .txt, .json, .aud)', () => {
+    expect(isWriteAllowed('D:\\x\\notes.txt')).toBe(false);
+    expect(isWriteAllowed('D:\\x\\config.json')).toBe(false);
+    expect(isWriteAllowed('D:\\x\\legacy.aud')).toBe(false);
   });
 });
 

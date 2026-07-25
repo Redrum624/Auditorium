@@ -31,7 +31,8 @@ const electronAPI = {
     ipcRenderer.on('app:close-requested', listener);
     return () => ipcRenderer.removeListener('app:close-requested', listener);
   },
-  respondCloseRequest: (dirtyCount) => ipcRenderer.send('app:close-response', dirtyCount),
+  respondCloseRequest: (dirtyCount, inFlightSaveCount) =>
+    ipcRenderer.send('app:close-response', dirtyCount, inFlightSaveCount),
 
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 

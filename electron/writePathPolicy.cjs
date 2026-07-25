@@ -3,7 +3,10 @@
 const path = require('node:path');
 const fs = require('node:fs');
 
-const ALLOWED_EXTENSIONS = new Set(['.wav', '.mp3', '.flac', '.ogg', '.aud', '.audm', '.txt', '.json']);
+// Exactly what the app writes via file:write (F24). The atomic-write '.tmp'
+// suffix (atomicWrite.cjs) is handled entirely internally and is never
+// checked against this list -- it's never accepted as renderer input.
+const ALLOWED_EXTENSIONS = new Set(['.wav', '.mp3', '.flac', '.ogg', '.audm']);
 
 let appPaths = { appPath: null, userData: null };
 let currentPlatform = process.platform;
@@ -26,14 +29,30 @@ function _setPlatformForTests(platform) {
 }
 
 /**
- * True when rawPath uses a Windows extended-length prefix (\\?\...), a
- * device-path prefix (\\.\...), or a UNC network path (\\server\share\...).
- * These forms can bypass the drive-letter-rooted containment checks below
- * (e.g. \\?\ paths skip normalization, UNC paths have no drive letter at
- * all), so they are rejected outright before any other check runs.
+ * True when rawPath uses a Windows extended-length prefix (\\?\...) or a
+ * device-path prefix (\\.\...). Both bypass the drive-letter-rooted
+ * containment checks below entirely (\\?\ paths skip normalization; \\.\
+ * paths address a raw device, not a filesystem path at all), so they are
+ * rejected outright before any other check runs. A well-formed UNC network
+ * path (\\server\share\...) is NOT one of these -- see isWellFormedUncPath
+ * (F8): real network shares must remain writable.
  */
-function isExtendedOrUncPath(rawPath) {
-  return rawPath.startsWith('\\\\');
+function isDeviceOrExtendedPath(rawPath) {
+  return rawPath.startsWith('\\\\?\\') || rawPath.startsWith('\\\\.\\');
+}
+
+/**
+ * True for a well-formed UNC network path: \\server\share\... with at least
+ * a server AND a share component. A bare \\server (no share) or a lone \\ is
+ * malformed and rejected outright -- there is no drive-letter root to fall
+ * back to for such a path, so it can't be safely evaluated further (F8).
+ * Callers must check isDeviceOrExtendedPath first; this function does not
+ * exclude \\?\ / \\.\ forms on its own.
+ */
+function isWellFormedUncPath(rawPath) {
+  if (!rawPath.startsWith('\\\\')) return false;
+  const components = rawPath.slice(2).split(/[\\/]+/).filter(Boolean);
+  return components.length >= 2;
 }
 
 function resolveLower(p) {
@@ -72,11 +91,21 @@ function assertWriteAllowed(rawPath) {
     throw new Error('Write denied: path must be a non-empty string');
   }
 
-  // Reject Windows extended-length (\\?\...), device (\\.\...), and UNC
-  // (\\server\share\...) path forms before any other check runs -- these
-  // forms can bypass drive-letter-rooted normalization entirely.
-  if (isExtendedOrUncPath(rawPath)) {
-    throw new Error(`Write denied: extended-length/device/UNC paths are not allowed: ${rawPath}`);
+  // Reject Windows extended-length (\\?\...) and device (\\.\...) path forms
+  // before any other check runs -- these bypass drive-letter-rooted
+  // normalization entirely (F8).
+  if (isDeviceOrExtendedPath(rawPath)) {
+    throw new Error(`Write denied: extended-length/device paths are not allowed: ${rawPath}`);
+  }
+
+  // A well-formed UNC network path (\\server\share\...) is a legitimate save
+  // target (F8: users can open from a NAS, they must be able to save back
+  // too) but has no drive letter, so it skips the drive-letter-root
+  // assertion below; every other check (traversal, extension, forbidden-dir
+  // containment, assertWriteTargetSafe) still runs against it.
+  const isUnc = rawPath.startsWith('\\\\');
+  if (isUnc && !isWellFormedUncPath(rawPath)) {
+    throw new Error(`Write denied: malformed UNC path (need \\\\server\\share\\...): ${rawPath}`);
   }
 
   if (!path.isAbsolute(rawPath)) {
@@ -94,9 +123,12 @@ function assertWriteAllowed(rawPath) {
   }
 
   const resolved = path.resolve(rawPath);
-  const root = path.parse(resolved).root;
-  if (!/^[A-Za-z]:\\$/.test(root)) {
-    throw new Error(`Write denied: path root is not a plain drive letter: ${rawPath}`);
+
+  if (!isUnc) {
+    const root = path.parse(resolved).root;
+    if (!/^[A-Za-z]:\\$/.test(root)) {
+      throw new Error(`Write denied: path root is not a plain drive letter: ${rawPath}`);
+    }
   }
 
   const resolvedLower = resolved.toLowerCase();

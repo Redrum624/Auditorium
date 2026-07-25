@@ -1,20 +1,28 @@
 'use strict';
 
 /**
- * Native close guard (Task F8), replacing the renderer's best-effort
+ * Native close guard (Task F8/F7), replacing the renderer's best-effort
  * `beforeunload` handler with a real native flow:
  *
  *   1. The window's 'close' event is intercepted (`handleClose`): prevented,
  *      and 'app:close-requested' is sent to the renderer.
  *   2. The renderer replies over 'app:close-response' with its count of dirty
- *      (unsaved) documents.
- *   3. Zero dirty → the window is destroyed (destroy() skips the 'close'
+ *      (unsaved) documents and its count of in-flight (mid-encode/write)
+ *      saves.
+ *   3. Both zero → the window is destroyed (destroy() skips the 'close'
  *      event, so there is no re-entry). Otherwise a native Quit/Cancel
  *      message box is shown: Quit destroys, Cancel aborts the close.
  *
- * If the renderer never answers (hung/crashed before its listener mounted),
- * a timeout destroys the window anyway — a close guard must never make the
- * app un-closable.
+ * If the renderer never answers within `timeoutMs` (F7: fail CLOSED, not
+ * open). A renderer that's merely busy in a long synchronous operation (an
+ * encode, an export) can look identical to a hung/crashed one from main's
+ * side — the old unconditional destroy() here discarded that work. Now:
+ *   - webContents actually crashed, or the window is already gone: destroy
+ *     as before (nothing left to ask).
+ *   - otherwise: show a Quit/Cancel dialog treating the unanswered state as
+ *     "busy, unknown dirty count" rather than assuming it's safe to kill.
+ * A close guard must still never make the app permanently un-closable — Quit
+ * on that dialog destroys the window.
  *
  * Dependencies (ipcMain, dialog) are injected so the logic is unit-testable
  * without an Electron runtime (see closeGuard.test.cjs).
@@ -25,42 +33,58 @@ const DEFAULT_TIMEOUT_MS = 2000;
 function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   /** @type {{ win: any, timer: any } | null} */
   let pending = null;
-  // True from the moment the Quit/Cancel dialog is shown until it resolves.
-  // Without this latch, a second 'close' event fired while the native dialog
-  // is up (pending is already null — its round trip finished) would start a
-  // brand-new round trip: a second 'app:close-requested' send and a second
-  // timer, potentially destroying the window out from under the still-open
-  // dialog, or stacking a second dialog once the renderer replies again.
+  // True from the moment ANY Quit/Cancel-style dialog (the dirty-count one or
+  // the timeout busy one) is shown until it resolves. Without this latch, a
+  // second 'close' event fired while a native dialog is up (pending is
+  // already null — its round trip finished) would start a brand-new round
+  // trip: a second 'app:close-requested' send and a second timer, potentially
+  // destroying the window out from under the still-open dialog, or stacking
+  // a second dialog once the renderer replies again.
   let dialogOpen = false;
 
-  ipcMain.on('app:close-response', async (_event, dirtyCount) => {
-    if (!pending) return; // stray/duplicate reply
-    const { win, timer } = pending;
-    pending = null;
-    clearTimeout(timer);
-
-    const n = Number(dirtyCount);
-    if (!Number.isFinite(n) || n <= 0) {
-      win.destroy();
-      return;
-    }
+  /** Shows a Quit/Cancel dialog and destroys the window on Quit. Shared by
+   * the normal dirty-count reply and the F7 timeout busy-dialog path. */
+  async function confirmQuit(win, message) {
     dialogOpen = true;
     try {
       const result = await dialog.showMessageBox(win, {
         type: 'warning',
         title: 'Unsaved changes',
-        message: `${n} file(s) have unsaved changes.`,
+        message,
         buttons: ['Quit', 'Cancel'],
         defaultId: 1,
         cancelId: 1,
       });
       if (result.response === 0) {
-        win.destroy(); // Quit — discard unsaved changes
+        win.destroy(); // Quit — discard unsaved/in-flight work
       }
       // Cancel: do nothing; the prevented close already kept the window alive.
     } finally {
       dialogOpen = false;
     }
+  }
+
+  ipcMain.on('app:close-response', async (_event, dirtyCount, inFlightSaveCount) => {
+    if (!pending) return; // stray/duplicate reply
+    const { win, timer } = pending;
+    pending = null;
+    clearTimeout(timer);
+
+    const dirty = Number(dirtyCount);
+    const inFlight = Number(inFlightSaveCount);
+    const dirtyN = Number.isFinite(dirty) && dirty > 0 ? dirty : 0;
+    const inFlightN = Number.isFinite(inFlight) && inFlight > 0 ? inFlight : 0;
+
+    if (dirtyN <= 0 && inFlightN <= 0) {
+      win.destroy();
+      return;
+    }
+
+    const message =
+      dirtyN > 0
+        ? `${dirtyN} file(s) have unsaved changes.`
+        : 'A save is still in progress.';
+    await confirmQuit(win, message);
   });
 
   /** Wire to `win.on('close', (event) => guard.handleClose(win, event))`. */
@@ -70,9 +94,24 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
     event.preventDefault();
     if (pending || dialogOpen) return; // a round trip or dialog is already in flight
     const timer = setTimeout(() => {
-      // Renderer unresponsive — close anyway rather than trap the user.
       pending = null;
-      win.destroy();
+      if (typeof win.isDestroyed === 'function' && win.isDestroyed()) {
+        return; // already gone via some other path
+      }
+      const crashed =
+        typeof win.webContents?.isCrashed === 'function' && win.webContents.isCrashed();
+      if (crashed) {
+        win.destroy(); // truly gone -- nothing left to ask
+        return;
+      }
+      // F7: fail CLOSED. The renderer hasn't answered but its webContents is
+      // still alive -- it may just be busy in a long synchronous operation
+      // (encode/export), not dead. Ask instead of assuming it's safe to
+      // discard its work.
+      void confirmQuit(
+        win,
+        'The editor is busy (a save or export may be running). Quit anyway?'
+      );
     }, timeoutMs);
     pending = { win, timer };
     win.webContents.send('app:close-requested');

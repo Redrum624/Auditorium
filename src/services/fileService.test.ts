@@ -5,6 +5,7 @@ import {
   exportDocument,
   newDocument,
   closeDocumentFlow,
+  getInFlightSaveCount,
 } from './fileService';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { docLength, createDocument } from '../audio/AudioDocument';
@@ -906,6 +907,26 @@ describe('saveDocument — async in-place save races (Task H1)', () => {
       expect.objectContaining({ title: 'Save in progress' })
     );
     expect(useAppStore.getState().documents[0].dirty).toBe(false);
+  });
+
+  it('getInFlightSaveCount reflects a save mid-encode/write and drops back to 0 once it settles (Task M4/F7)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+    const { resolve } = controllableEncode();
+
+    expect(getInFlightSaveCount()).toBe(0);
+    const savePromise = saveDocument(doc.id);
+    expect(getInFlightSaveCount()).toBe(1);
+
+    resolve(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await savePromise;
+
+    expect(getInFlightSaveCount()).toBe(0);
   });
 
   it('allows a save after a prior save for the same doc has completed', async () => {

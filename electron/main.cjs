@@ -4,6 +4,7 @@ const { registerIpc } = require('./ipc.cjs');
 const { createCloseGuard } = require('./closeGuard.cjs');
 const { setAppPaths } = require('./writePathPolicy.cjs');
 const { isMediaAllowed } = require('./permissionPolicy.cjs');
+const { isPackagedGateOpen } = require('./prodGate.cjs');
 
 app.setName('audition_app');
 
@@ -32,7 +33,11 @@ function createWindow() {
       // TEST-ONLY: forward the smoke-harness flag into the sandboxed preload via
       // process.argv (the documented channel for sandboxed preloads). Empty in
       // any normal run, so the renderer never installs test hooks in production.
-      additionalArguments: process.env.AUDITORIUM_TEST === '1' ? ['--auditorium-test'] : []
+      // F23: also gated on !app.isPackaged, so a packaged build can never be
+      // coerced into installing test hooks just by an env var being set.
+      additionalArguments: isPackagedGateOpen(app.isPackaged, process.env.AUDITORIUM_TEST)
+        ? ['--auditorium-test']
+        : []
     }
   });
 
@@ -40,7 +45,9 @@ function createWindow() {
     win.show();
   });
 
-  if (process.env.VITE_DEV_SERVER === '1') {
+  // F23: also gated on !app.isPackaged, so a packaged build always loads the
+  // built bundle even if VITE_DEV_SERVER somehow ended up set in its env.
+  if (isPackagedGateOpen(app.isPackaged, process.env.VITE_DEV_SERVER)) {
     win.loadURL('http://localhost:3005');
   } else {
     win.loadFile(path.join(__dirname, '..', 'dist', 'index.html'));

@@ -80,6 +80,14 @@ function errorMessage(err: unknown): string {
  * the first. Guarded at the top of the exported saveDocument. */
 const inFlightSaves = new Set<string>();
 
+/** Number of documents currently mid-save (encode + write awaits). The close
+ * guard's renderer-side reply (App.tsx) includes this alongside the dirty
+ * count so a Save that's actually in flight still warns on close even when
+ * the doc it's saving happens to read as clean at that instant (Task M4/F7). */
+export function getInFlightSaveCount(): number {
+  return inFlightSaves.size;
+}
+
 /** Encode a document to bytes for the given export options. Exported so the
  * (test-only) test hooks can reuse the exact same encoding path. */
 export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuffer {

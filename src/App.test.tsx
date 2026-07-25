@@ -4,10 +4,23 @@ import { useAppStore, makeInitialState } from './stores/appStore';
 import { createDocument } from './audio/AudioDocument';
 import { playbackEngine } from './audio/PlaybackEngine';
 import { multitrackPlayer } from './multitrack/MultitrackPlayer';
+import { getInFlightSaveCount } from './services/fileService';
+
+// Real fileService, except getInFlightSaveCount is swapped for a controllable
+// mock so the close-guard reply tests below (Task M4/F7) can force it to a
+// specific value without driving a real save through the encoder pipeline.
+jest.mock('./services/fileService', () => ({
+  ...jest.requireActual('./services/fileService'),
+  getInFlightSaveCount: jest.fn(() => 0),
+}));
+const mockGetInFlightSaveCount = getInFlightSaveCount as jest.MockedFunction<
+  typeof getInFlightSaveCount
+>;
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   delete (window as { electronAPI?: unknown }).electronAPI;
+  mockGetInFlightSaveCount.mockReturnValue(0);
 });
 
 describe('App', () => {
@@ -58,7 +71,7 @@ describe('native close guard renderer side (Task F8)', () => {
     render(<App />);
     act(() => api.fireCloseRequest());
 
-    expect(api.respondCloseRequest).toHaveBeenCalledWith(2);
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(2, 0);
   });
 
   it('responds 0 when nothing is dirty', () => {
@@ -68,7 +81,7 @@ describe('native close guard renderer side (Task F8)', () => {
     render(<App />);
     act(() => api.fireCloseRequest());
 
-    expect(api.respondCloseRequest).toHaveBeenCalledWith(0);
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(0, 0);
   });
 
   it('reads the dirty count at request time, not mount time', () => {
@@ -82,7 +95,18 @@ describe('native close guard renderer side (Task F8)', () => {
     });
     act(() => api.fireCloseRequest());
 
-    expect(api.respondCloseRequest).toHaveBeenCalledWith(1);
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(1, 0);
+  });
+
+  it('also reports a nonzero in-flight-save count alongside the dirty count (Task M4/F7)', () => {
+    const api = installCloseApi();
+    addDoc(false); // nothing dirty ...
+    mockGetInFlightSaveCount.mockReturnValue(1); // ... but a save is mid-flight
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(0, 1);
   });
 
   it('unsubscribes on unmount', () => {
