@@ -510,6 +510,51 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
     undo(doc.id);
     expect(useAppStore.getState().markers[doc.id]).toEqual(before);
   });
+
+  it('stretch [s,e) to length L (Task M3 fix round 2): before keeps, inside maps proportionally, at/after e shifts', () => {
+    const doc = addDoc([ramp(10)]);
+    // start=2, end=6 (regionLen=4), length=8 (ratio=2).
+    setMarkers(doc.id, [1, 2, 5, 6, 9]);
+    const before = useAppStore.getState().markers[doc.id];
+
+    applyEdit(
+      'Stretch',
+      doc.id,
+      (d) => ({ ...d, channels: d.channels.map(() => new Float32Array(14)) }), // 10-4+8=14
+      undefined,
+      { type: 'stretch', start: 2, end: 6, length: 8 }
+    );
+
+    // 1 < start(2): kept as-is.
+    // 2 === start: maps to exactly `start` (2 + round(0*2) = 2).
+    // 5 === end-1: maps INSIDE the stretched region (2 + round((5-2)*2) = 8).
+    // 6 === end: shifts by L-(e-s)=8-4=4 -> 10.
+    // 9 > end: shifts by 4 -> 13.
+    expect(markerPositions(doc.id)).toEqual([1, 2, 8, 10, 13]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+
+    redo(doc.id);
+    expect(markerPositions(doc.id)).toEqual([1, 2, 8, 10, 13]);
+  });
+
+  it('a delete that drops ALL markers still writes the empty list (and undo restores it) — pins the OR guard, not AND (Minor 1 pin)', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [2, 3, 4]); // all inside the region about to be deleted
+    const before = useAppStore.getState().markers[doc.id];
+    useAppStore.getState().setSelection({ start: 0, end: 10 }); // whole doc: every marker drops
+
+    deleteSelection();
+
+    // pre non-empty, post empty: the guard (currentMarkers.length>0 || remapped.length>0)
+    // must still fire on the `currentMarkers` side alone, so the empty result is
+    // actually written (not skipped, which would break the undo below).
+    expect(useAppStore.getState().markers[doc.id]).toEqual([]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
 });
 
 describe('silenceSelection', () => {

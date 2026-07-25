@@ -70,12 +70,13 @@ export async function runEffectOnSelection(
             (d) => replaceRegion(d, start, end, resultChannels),
             { selection: { start, end: start + resultLen }, cursorSample: start },
             // Most effects are equal-length (no remap needed), but length-changing
-            // ones (Time Stretch, Pitch Shift) move everything after the region —
-            // and everything strictly inside it stops existing at its old position.
-            // Same 'replace' rule as pasteAtCursor's replace-selection path (Task
-            // M3 fix round 1): markers this region's length change would otherwise
-            // leave stale (or past-EOF on disk) ride the same undo entry.
-            { type: 'replace', start, end, length: resultLen }
+            // ones (Time Stretch, Pitch Shift) TRANSFORM the region rather than
+            // replacing it with unrelated content, so interior markers ride the
+            // stretch proportionally instead of dropping (Task M3 fix round 2 —
+            // 'replace' was ruled wrong here: it drops every interior marker,
+            // including all of them on a whole-file Time Stretch). Markers at/
+            // after the region still shift by the same length delta either way.
+            { type: 'stretch', start, end, length: resultLen }
           );
           onProgress?.(1);
         } catch (err) {

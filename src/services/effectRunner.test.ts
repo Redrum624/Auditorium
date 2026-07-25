@@ -85,7 +85,7 @@ describe('runEffectOnSelection', () => {
     expect(s.selection).toEqual({ start: 0, end: 5 });
   });
 
-  it('remaps markers through a length-changing effect (Time Stretch/Pitch Shift shape), and undo restores them (Task M3 fix round 1)', async () => {
+  it('proportionally stretches markers through a length-changing effect (Time Stretch/Pitch Shift shape), and undo/redo restore them (Task M3 fix round 2)', async () => {
     registerEffect({
       id: 'test-third',
       name: 'Shrink To Third',
@@ -101,7 +101,7 @@ describe('runEffectOnSelection', () => {
     useAppStore.getState().setSelection({ start: 2, end: 8 }); // region length 6 -> resultLen 2
     useAppStore.getState().setMarkersForDoc(docId, [
       { id: 'm0', name: 'before', positionSample: 0 }, // < start: kept
-      { id: 'm1', name: 'inside', positionSample: 5 }, // in [2,8): dropped
+      { id: 'm1', name: 'inside', positionSample: 5 }, // in [2,8): stretched proportionally
       { id: 'm2', name: 'atEnd', positionSample: 8 }, // === end: shifts
       { id: 'm3', name: 'after', positionSample: 9 }, // > end: shifts
     ]);
@@ -109,18 +109,57 @@ describe('runEffectOnSelection', () => {
 
     await runEffectOnSelection('test-third', {});
 
-    // resultLen=2 (ceil(6/3)), shift = resultLen - (end-start) = 2 - 6 = -4.
+    // resultLen=2 (ceil(6/3)); region is TRANSFORMED not replaced, so the
+    // interior marker rides the stretch instead of dropping (fix round 2):
+    // 5 -> start + round((5-2) * 2/6) = 2 + round(1) = 3.
+    // 8 (===end) and 9 (>end) shift by resultLen-(end-start) = 2-6 = -4 -> 4, 5.
     const positions = useAppStore
       .getState()
       .markers[docId].map((m) => m.positionSample);
-    expect(positions).toEqual([0, 4, 5]); // 0 kept; 5 dropped; 8->4; 9->5
+    expect(positions).toEqual([0, 3, 4, 5]); // 0 kept; 5->3 (proportional); 8->4; 9->5
 
     undo(docId);
     expect(useAppStore.getState().markers[docId]).toEqual(before);
 
     redo(docId);
     const redone = useAppStore.getState().markers[docId].map((m) => m.positionSample);
-    expect(redone).toEqual([0, 4, 5]);
+    expect(redone).toEqual([0, 3, 4, 5]);
+  });
+
+  it('stretches every marker proportionally on a whole-document length-changing effect — the scenario that motivated the ruling (Task M3 fix round 2)', async () => {
+    registerEffect({
+      id: 'test-double',
+      name: 'Double',
+      category: 'Utility',
+      params: [],
+      // Whole-document length-changing effect (no selection): doubles the length.
+      process: (channels) => ({
+        channels: channels.map((c) => {
+          const out = new Float32Array(c.length * 2);
+          out.set(c, 0);
+          out.set(c, c.length);
+          return out;
+        }),
+      }),
+    });
+    const docId = seedDoc([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]); // length 10, no selection -> region [0,10)
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'm0', name: 'a', positionSample: 0 },
+      { id: 'm1', name: 'b', positionSample: 3 },
+      { id: 'm2', name: 'c', positionSample: 7 },
+      { id: 'm3', name: 'd', positionSample: 9 },
+    ]);
+    const before = useAppStore.getState().markers[docId];
+
+    await runEffectOnSelection('test-double', {});
+
+    // Whole doc is the "region": every marker is interior and maps pos*2 —
+    // NONE drop, unlike the old 'replace' semantics that would have lost all 4.
+    const positions = useAppStore.getState().markers[docId].map((m) => m.positionSample);
+    expect(positions).toEqual([0, 6, 14, 18]);
+
+    undo(docId);
+    expect(useAppStore.getState().markers[docId]).toEqual(before);
   });
 
   it('passes extra through to the worker-side channel (__effectExtra) and cleans it up', async () => {

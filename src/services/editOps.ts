@@ -36,13 +36,24 @@ interface AfterState {
  *   [Amended 2026-07-25, M3 review: the original half-open [s,e) reading
  *   silently dropped end-of-file markers on trim.]
  * - rescale (sample-rate conversion): round(pos * toRate/fromRate).
+ * - stretch region [s,e) to length L (length-changing effects — Time Stretch,
+ *   Pitch Shift): < s keep; in [s,e) map PROPORTIONALLY,
+ *   s + round((pos-s) * L/(e-s)) — the audio inside is TRANSFORMED, not
+ *   replaced with unrelated content, so interior markers ride the stretch
+ *   instead of dropping; >= e shift by L-(e-s). Degenerate e===s (empty
+ *   region) falls through to the >= e shift for every pos, since no pos can
+ *   satisfy `s <= pos < e` when e===s. [Amended 2026-07-25 (fix round 2):
+ *   effectRunner originally used 'replace' here, which drops every interior
+ *   marker — including all of them on a whole-file Time Stretch. Reviewed and
+ *   ruled proportional.]
  */
 export type MarkerRemap =
   | { type: 'delete'; start: number; end: number }
   | { type: 'insert'; start: number; length: number }
   | { type: 'replace'; start: number; end: number; length: number }
   | { type: 'trim'; start: number; end: number }
-  | { type: 'rescale'; fromRate: number; toRate: number };
+  | { type: 'rescale'; fromRate: number; toRate: number }
+  | { type: 'stretch'; start: number; end: number; length: number };
 
 /** Maps a single marker position per `remap`'s rule; `null` means "drop". */
 function remapPosition(pos: number, remap: MarkerRemap): number | null {
@@ -64,6 +75,12 @@ function remapPosition(pos: number, remap: MarkerRemap): number | null {
       return pos - remap.start;
     case 'rescale':
       return Math.round(pos * (remap.toRate / remap.fromRate));
+    case 'stretch':
+      if (pos < remap.start) return pos;
+      if (pos < remap.end) {
+        return remap.start + Math.round((pos - remap.start) * (remap.length / (remap.end - remap.start)));
+      }
+      return pos + (remap.length - (remap.end - remap.start));
   }
 }
 
