@@ -81,7 +81,14 @@ function doneBytes(stacks: Stacks): number {
  * simply becomes forever unreachable — `undo()` can't pop past an evicted
  * entry, so `position` can never fall back to that savePoint again — and
  * `dirty` correctly stays true rather than ever falsely reporting clean
- * (Task M9 / F15; see undoHistory.test.ts's byte-budget + save-point tests). */
+ * (Task M9 / F15; see undoHistory.test.ts's byte-budget + save-point tests).
+ *
+ * This only sums `done` — entries parked in `undone` after a run of `undo()`
+ * calls stay retained un-metered until the next `pushUndo` clears the redo
+ * stack. That's bounded by the same peak regardless: `undone` only ever holds
+ * entries that were already in `done` (and therefore already budget-approved)
+ * before the user started undoing, so moving them to `undone` cannot exceed
+ * memory that wasn't already accounted for (Task M9 fix round 1 / MINOR 3). */
 function evictOverBudget(stacks: Stacks): void {
   while (
     stacks.done.length > 1 &&

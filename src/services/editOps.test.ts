@@ -10,6 +10,7 @@ import {
 } from './editOps';
 import { getClipboard, setClipboard, clearClipboard } from './clipboard';
 import { undo, redo, getHistory, markSavePoint } from './undoHistory';
+import * as undoHistory from './undoHistory';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength, deleteRegion, type AudioDocument } from '../audio/AudioDocument';
 import * as resampleModule from '../dsp/resample';
@@ -87,6 +88,71 @@ describe('applyEdit', () => {
 
   it('throws when the target document is not in the store', () => {
     expect(() => applyEdit('x', 'doc-missing', (d) => d)).toThrow();
+  });
+});
+
+describe('applyEdit — undo entry bytes accounting (Task M9 fix round 1 / MINOR 1)', () => {
+  const SAMPLE_RATE = 44100;
+  const DURATION_SECONDS = 600; // 10 minutes
+  const CHANNEL_COUNT = 2;
+  const LENGTH = SAMPLE_RATE * DURATION_SECONDS; // 26,460,000 samples/channel
+  const DOC_BYTES = LENGTH * 4 * CHANNEL_COUNT; // 211,680,000 bytes (~201.9 MiB)
+
+  function makeBigDoc(): AudioDocument {
+    const doc = createDocument({
+      name: 'big.wav',
+      sampleRate: SAMPLE_RATE,
+      channels: Array.from({ length: CHANNEL_COUNT }, () => new Float32Array(LENGTH)),
+    });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  /** A same-length "edit": a fresh channel copy, exactly what every real
+   * AudioDocument mutator allocates, so DOC_BYTES stays constant across
+   * repeated pushes (isolates the accounting from length-change effects). */
+  function identityEdit(d: AudioDocument): AudioDocument {
+    return { ...d, channels: d.channels.map((c) => c.slice()), dirty: true };
+  }
+
+  it('charges only the post-edit snapshot, not pre + post (which double-counts the shared preDoc/newDoc chain)', () => {
+    const doc = makeBigDoc();
+    const pushSpy = jest.spyOn(undoHistory, 'pushUndo');
+
+    applyEdit('Edit', doc.id, identityEdit);
+
+    expect(pushSpy).toHaveBeenCalledTimes(1);
+    expect(pushSpy.mock.calls[0][0].bytes).toBe(DOC_BYTES); // not 2 * DOC_BYTES
+    pushSpy.mockRestore();
+  });
+
+  it('pins the retained undo depth for a 10-minute stereo 44.1 kHz document at 3, not the pre-fix 1', () => {
+    const doc = makeBigDoc();
+
+    // 4 same-length edits: 4 * DOC_BYTES (~808 MB) exceeds the 800 MB budget
+    // by just over one document's worth, so exactly the oldest entry is
+    // evicted, leaving 3. The old pre+post accounting charged roughly 2x per
+    // entry, which would have collapsed this same scenario to a depth of 1.
+    for (let i = 0; i < 4; i++) {
+      applyEdit(`Edit ${i}`, doc.id, identityEdit);
+    }
+
+    expect(getHistory(doc.id).done).toHaveLength(3);
+  });
+
+  it('a marker-undo entry (0 bytes) interspersed between two large audio edits does not itself evict an audio entry the corrected accounting should have kept', () => {
+    const doc = makeBigDoc();
+
+    applyEdit('Edit A', doc.id, identityEdit); // charges DOC_BYTES
+    const before = useAppStore.getState().markers[doc.id] ?? [];
+    useAppStore.getState().addMarker(doc.id, { id: 'm-1', name: 'Marker', positionSample: 0 });
+    const after = useAppStore.getState().markers[doc.id];
+    pushMarkerUndo('Add Marker', doc.id, before, after); // charges 0
+    applyEdit('Edit B', doc.id, identityEdit); // running total: 2 * DOC_BYTES (~404 MB) <= 800 MB
+
+    // Nothing evicted — a 0-byte marker entry sitting between two full-size
+    // audio edits must not be mistaken for carrying its own doc-sized cost.
+    expect(getHistory(doc.id).done).toEqual(['Edit A', 'Add Marker', 'Edit B']);
   });
 });
 

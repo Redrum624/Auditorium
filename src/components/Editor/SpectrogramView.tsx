@@ -196,14 +196,20 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
       const start = Math.max(0, Math.floor(scrollSample));
       const end = Math.min(length, Math.ceil(scrollSample + cssWidth * spp));
       if (end <= start) return;
-      // Mix down only the visible range padded by one FFT window on each side
-      // (the last few columns' FFT windows read up to `fftSize` samples past
-      // their nominal start/before their end) — NOT the whole document. Mixing
-      // the full doc.channels here on every debounced zoom/scroll gesture
-      // allocated a fresh full-length Float32Array (1.38 GB for a 2-hour
-      // stereo file) on the main thread regardless of how little was visible
-      // (Task M9 / F17). `startSample`/`endSample` sent to the worker are
-      // re-based to the slice's own origin (0), not the document's.
+      // Mix down only the visible range padded by one FFT window — NOT the
+      // whole document. The RIGHT-side pad (`end + fftSize`) is load-bearing:
+      // the last few columns' FFT windows read up to `fftSize` samples past
+      // their OWN start (spectrogramCore only ever reads forward from a
+      // column's start, e.g. the final column's window can extend past
+      // `endSample` when the zoom is tight). The LEFT-side pad
+      // (`start - fftSize`) is currently dead — no column ever reads before
+      // `startSample` — kept as defensive headroom for a future centered-
+      // window FFT (Task M9 / F17; comment corrected fix round 1 / MINOR 2).
+      // Mixing the full doc.channels here on every debounced zoom/scroll
+      // gesture allocated a fresh full-length Float32Array (1.38 GB for a
+      // 2-hour stereo file) on the main thread regardless of how little was
+      // visible. `startSample`/`endSample` sent to the worker are re-based to
+      // the slice's own origin (0), not the document's.
       const sliceStart = Math.max(0, start - FFT_SIZE);
       const sliceEnd = Math.min(length, end + FFT_SIZE);
       const mono = mixDown(cloneRegion(doc, sliceStart, sliceEnd));
@@ -225,7 +231,16 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
       );
     }, DEBOUNCE_MS);
     return () => clearTimeout(t);
-  }, [doc, doc.channels, doc.sampleRate, length, zoom, size, scale]);
+    // Keyed on `doc.id`/`doc.channels`/`doc.sampleRate` rather than the whole
+    // `doc` object, so a metadata-only doc replacement (dirty/name/filePath/
+    // sourceBitDepth — what every marker add/rename/delete produces via
+    // appStore's markDirty) doesn't re-trigger a slice + FFT recompute, same
+    // narrowing as TransportBar's reload effect (Task M9 / F13, applied here
+    // fix round 1 / MINOR 7). The effect body still closes over the current
+    // render's `doc`, so this can only fire the effect LESS often, never with
+    // stale data.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [doc.id, doc.channels, doc.sampleRate, length, zoom, size, scale]);
 
   // Paint the latest magnitudes plus selection/cursor/playhead overlays.
   useEffect(() => {

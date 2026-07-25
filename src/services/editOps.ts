@@ -167,9 +167,18 @@ export function applyEdit(
   pushUndo({
     label,
     docId,
-    // Both the pre- and post-edit channel arrays are retained by this entry's
-    // closures for as long as it survives in done/undone (Task M9 / F15).
-    bytes: docBytes(preDoc) + docBytes(newDoc),
+    // Charge only the post-edit snapshot (Task M9 fix round 1 / MINOR 1).
+    // `preDoc` is not independent memory: it IS the previous entry's `newDoc`
+    // object (the store doc `applyEdit` read at the top of this call) — the
+    // whole chain of edits shares one doc reference per step, each entry's
+    // `preDoc` being the prior entry's `newDoc`. Charging `docBytes(preDoc) +
+    // docBytes(newDoc)` therefore double-counted every entry in the middle of
+    // the chain (each retained array was billed once as a `newDoc` and again
+    // as the NEXT entry's `preDoc`), roughly halving the effective budget —
+    // collapsing undo depth to 1 for any document above ~9-10 minutes of
+    // stereo 44.1 kHz, at which point a single marker edit (0 bytes, but still
+    // one more push) could evict the last remaining audio undo step.
+    bytes: docBytes(newDoc),
     undo() {
       const s = useAppStore.getState();
       s.updateDocument(preDoc);

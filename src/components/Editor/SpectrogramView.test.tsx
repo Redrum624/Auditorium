@@ -131,3 +131,33 @@ describe('SpectrogramView viewport slicing (Task M9 / F17)', () => {
     expect(msg!.channel.length).toBeLessThan(doc.channels[0].length);
   });
 });
+
+describe('SpectrogramView compute-effect narrowing (Task M9 fix round 1 / MINOR 7)', () => {
+  it('does not recompute on a metadata-only doc replacement (dirty/name/...), same id/channels/sampleRate', async () => {
+    const doc = seedDoc();
+    const { rerender } = render(<SpectrogramView doc={doc} />);
+    await flushCompute();
+    _resetSpectrogramWorkerCapture();
+
+    // Exactly what every marker add/rename/delete produces via appStore's
+    // markDirty (Task M1): a new doc object, same id/channels/sampleRate.
+    const metadataOnly = { ...doc, dirty: true, name: 'renamed.wav' };
+    rerender(<SpectrogramView doc={metadataOnly} />);
+    await flushCompute();
+
+    expect(_getLastComputeMessage()).toBeNull(); // no new compute request posted
+  });
+
+  it('does recompute when the channels array reference changes (a real audio edit)', async () => {
+    const doc = seedDoc();
+    const { rerender } = render(<SpectrogramView doc={doc} />);
+    await flushCompute();
+    _resetSpectrogramWorkerCapture();
+
+    const edited = { ...doc, channels: [doc.channels[0].slice()] };
+    rerender(<SpectrogramView doc={edited} />);
+    await flushCompute();
+
+    expect(_getLastComputeMessage()).not.toBeNull();
+  });
+});

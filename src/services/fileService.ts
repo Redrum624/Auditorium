@@ -524,8 +524,13 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
     // choice === 1 ("Don't Save"): discard and close.
   }
 
-  // Read BEFORE closeDocument() mutates the store, so "no documents remain"
-  // below reflects the post-close state (checked after) rather than this one.
+  // `loadedDocumentId` itself isn't touched by closeDocument() (only load()/
+  // unload()/dispose() ever change it), so reading it before vs. after the
+  // close wouldn't change `wasLoaded` either way. What's deliberate is the
+  // OTHER half of the condition below — `documents.length === 0` — which is
+  // checked AFTER closeDocument() runs, so it reflects the POST-close
+  // document count rather than the pre-close one (Task M9 fix round 1 /
+  // MINOR 4 — corrects a misleading "read BEFORE" comment here).
   const wasLoaded = playbackEngine.loadedDocumentId === docId;
 
   store().closeDocument(docId);
