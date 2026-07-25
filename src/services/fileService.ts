@@ -19,9 +19,11 @@ import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCac
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
   wavBitDepth: WavBitDepth;
-  /** Imported from mp3Encoder.ts (single source of truth): valid only at
-   * kbps >= 128 per getLameOutputRate's documented precondition — do not
-   * widen this below 128 without first revisiting that function. */
+  /** Imported from mp3Encoder.ts (single source of truth) — the CBR bitrates
+   * this app's UI offers for MP3 encode. `encodeMp3` measures its marker
+   * rescale from the real encoded output rather than predicting it from
+   * `kbps`, so this type is just the app's current UI options, not a
+   * correctness constraint (Task M6 fix round 2 / IMPORTANT A). */
   mp3Kbps: Mp3Kbps;
   /** Opus bitrate in bits/second; only used when format is 'ogg'. */
   oggBitrate?: 96_000 | 128_000 | 192_000;

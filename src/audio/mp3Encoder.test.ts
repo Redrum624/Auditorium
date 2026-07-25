@@ -3,26 +3,8 @@
  */
 // Uses the REAL @breezystack/lamejs encoder. The jsdom environment can choke on
 // lamejs's module shape, so this file forces the node environment.
-import { encodeMp3, getLameOutputRate, type Mp3Kbps } from './mp3Encoder';
+import { encodeMp3, readEncodedFrameSampleRate, type Mp3Kbps } from './mp3Encoder';
 import { buildId3Chapters, parseId3Chapters } from './id3Chapters';
-
-// Compile-time guard (Fix round 1 / IMPORTANT 2): getLameOutputRate's tier
-// table is only verified correct for kbps >= 128 (measured directly against
-// the real encoder: kbps=64/96/112 all give DIFFERENT output rates than this
-// table predicts — see getLameOutputRate's doc comment). If Mp3Kbps is ever
-// widened to include one of these known-broken low bitrates, the following
-// lines fail to TYPECHECK (not just fail a runtime assertion), which fails
-// both `npm run typecheck` and this test file's ts-jest compile step — the
-// only way to catch a type-level regression that no runtime test can see.
-type RejectsKnownBrokenKbps<K extends number> = K extends Mp3Kbps
-  ? ['Mp3Kbps must not include this bitrate — getLameOutputRate is documented wrong below 128 kbps', K]
-  : true;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _kbpsFloorGuard64: RejectsKnownBrokenKbps<64> = true;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _kbpsFloorGuard96: RejectsKnownBrokenKbps<96> = true;
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const _kbpsFloorGuard112: RejectsKnownBrokenKbps<112> = true;
 
 function sine(freq: number, sampleRate: number, seconds: number): Float32Array {
   const length = Math.round(sampleRate * seconds);
@@ -130,20 +112,78 @@ describe('encodeMp3', () => {
     });
   });
 
-  describe('getLameOutputRate (F6 — pins the vendored lamejs output-rate mapping)', () => {
-    it.each([
+  describe('readEncodedFrameSampleRate (unit)', () => {
+    it('returns null for bytes that are not a valid frame sync', () => {
+      expect(readEncodedFrameSampleRate(new Uint8Array([0, 0, 0]))).toBeNull();
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, 0x00, 0x00]))).toBeNull(); // sync byte 2 not 111xxxxx
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, 0xe0]))).toBeNull(); // too short (< 3 bytes)
+    });
+
+    it('reads MPEG1/2/2.5 sample rates from synthetic frame headers', () => {
+      // byte1 bits (MSB..LSB): 111 VV LL P (V=version, LL=layer=01/LayerIII, P=protection=1/no-CRC).
+      const MPEG1_BYTE1 = 0xfb; // version=11
+      const MPEG2_BYTE1 = 0xf3; // version=10
+      const MPEG25_BYTE1 = 0xe3; // version=00
+      // byte2 bits: BBBB RR P X (B=bitrate index, RR=sample-rate index at bits 3-2).
+      const rateByte = (r: number) => (r << 2) & 0xff;
+
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG1_BYTE1, rateByte(0)]))).toBe(44100);
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG1_BYTE1, rateByte(1)]))).toBe(48000);
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG1_BYTE1, rateByte(2)]))).toBe(32000);
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG1_BYTE1, rateByte(3)]))).toBeNull(); // reserved
+
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG2_BYTE1, rateByte(0)]))).toBe(22050);
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG2_BYTE1, rateByte(1)]))).toBe(24000);
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG2_BYTE1, rateByte(2)]))).toBe(16000);
+
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG25_BYTE1, rateByte(0)]))).toBe(11025);
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG25_BYTE1, rateByte(1)]))).toBe(12000);
+      expect(readEncodedFrameSampleRate(new Uint8Array([0xff, MPEG25_BYTE1, rateByte(2)]))).toBe(8000);
+    });
+  });
+
+  describe('marker rate rescale is MEASURED from the real encoded frame, not predicted from a table (Fix round 2 / IMPORTANT A)', () => {
+    // Every value below was measured against the REAL lamejs encoder (see the
+    // task report for the verification script), not assumed. The first four
+    // are exactly the non-standard/native import rates decodeAudio.ts
+    // deliberately preserves (it never forces a document onto a "standard"
+    // rate) where the previous table-mirroring approach (getLameOutputRate,
+    // now removed) was measurably wrong by 8-27%. The remaining four are the
+    // original F6 standard-rate cases. Each is checked at TWO bitrates,
+    // including 96 kbps — below the old table's documented "valid only at
+    // kbps >= 128" floor — to prove the new approach is correct regardless of
+    // bitrate (it doesn't consult kbps at all; it reads the real output).
+    const CASES: Array<[inRate: number, expectedOutRate: number]> = [
+      [22254, 24000], // classic Mac
+      [18900, 22050], // CD-ROM XA
+      [8012, 11025], // telephony
+      [11127, 12000],
+      [96000, 48000],
+      [88200, 48000],
       [44100, 44100],
       [48000, 48000],
-      [32000, 32000],
-      [22050, 22050],
-      [96000, 48000],
-      // Real vendored behavior, NOT the brief's initial guess of 44100: 88200
-      // exceeds the >=48000 tier so it clamps to the ceiling rather than
-      // falling through — see the getLameOutputRate doc comment for the
-      // exact vendored-source derivation.
-      [88200, 48000],
-    ])('%i -> %i', (inRate, expected) => {
-      expect(getLameOutputRate(inRate)).toBe(expected);
+    ];
+
+    it.each(CASES.flatMap(([inRate, outRate]) => [
+      [inRate, outRate, 192] as const,
+      [inRate, outRate, 96] as const, // below Mp3Kbps's UI floor — cast below
+    ]))('in=%i -> real encoded rate %i, marker rescaled correctly, at %ikbps', (inRate, expectedOutRate, kbps) => {
+      const channels = [sine(440, inRate, 0.05)];
+      const posSample = Math.round(inRate * 0.02); // an arbitrary marker position at the doc's rate
+      const markers = [{ positionSample: posSample, name: 'M' }];
+      // 96 kbps isn't one of this app's UI-offered Mp3Kbps values, but nothing
+      // stops a caller from passing it (lamejs itself accepts any bitrate) —
+      // cast is deliberate, to exercise the encoder outside its normal type,
+      // not a production code path.
+      const buf = encodeMp3(channels, inRate, kbps as Mp3Kbps, markers);
+      const bytes = new Uint8Array(buf);
+
+      const tagEnd = id3TagLength(bytes);
+      expect(frameSampleRate(bytes, tagEnd)).toBe(expectedOutRate);
+
+      const parsed = parseId3Chapters(buf);
+      expect(parsed).not.toBeNull();
+      expect(parsed![0].exactSample).toBe(Math.round((posSample * expectedOutRate) / inRate));
     });
   });
 
