@@ -150,6 +150,18 @@ function isDollarSuffixedShare(share) {
  */
 function isLocalAliasOrAdminShareUncPath(uncPath) {
   const [host, share] = uncPath.slice(2).split(/[\\/]+/).filter(Boolean);
+  // Defense in depth (review fix round 4): a literal '?' or 'UNC' as the
+  // first component means this is actually a \\?\UNC\server\share\...
+  // extended-length re-entry into UNC-space, not a plain \\server\share\...
+  // path -- the REAL host/share sit two positions further in, which this
+  // function's positional host/share assumption can't see. The
+  // device/extended-path re-check in assertWriteAllowed should already have
+  // rejected this shape outright before this function is ever reached; this
+  // is a backstop against the positional assumption silently drifting again
+  // if that ordering ever changes, or a new caller doesn't guarantee it.
+  if (host === '?' || host.toLowerCase() === 'unc') {
+    return true;
+  }
   return isLocalAliasHost(host) || isDollarSuffixedShare(share);
 }
 
@@ -206,6 +218,28 @@ function assertWriteAllowed(rawPath) {
   // closes that gap: the check that runs always matches the path that
   // actually gets written.
   const resolved = path.resolve(rawPath);
+
+  // SECOND device/extended-path check, now against the RESOLVED path (review
+  // fix round 4, CRITICAL reopen): a \\?\... or \\.\... prefix spelled with
+  // forward or mixed separators (e.g. '//?/UNC/localhost/C$/Windows/Temp/x.wav')
+  // evades the raw-string check above -- which only recognizes the literal
+  // backslash spelling -- but Node's path.resolve normalizes it right back
+  // into a genuine \\?\... string. That resolved string then satisfies the
+  // isUnc check below (it starts with '\\\\'), skipping the drive-letter-root
+  // assertion, while the \\?\ prefix ALSO defeats the plain forbidden-dir
+  // containment further down (the resolved string doesn't textually match
+  // 'C:\Windows\...' etc. at all -- it's shaped '\\?\C:\Windows\...' or
+  // '\\?\UNC\host\share\...') and the local-alias/$-share check (whose real
+  // host/share sit two positions further in, past the literal '?'/'UNC'
+  // markers -- see isLocalAliasOrAdminShareUncPath's own defensive check for
+  // that shape). Re-run the exact same device/extended check the raw string
+  // already had to run, this time against what actually gets written --
+  // this alone catches every \\?\... re-entry regardless of what it points
+  // to, benign-looking or not.
+  if (isDeviceOrExtendedPath(resolved)) {
+    throw new Error(`Write denied: extended-length/device paths are not allowed: ${rawPath}`);
+  }
+
   const isUnc = resolved.startsWith('\\\\');
 
   // An INCOMPLETE UNC path (no share component, e.g. '\\\\server' or

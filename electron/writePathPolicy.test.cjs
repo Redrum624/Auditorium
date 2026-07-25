@@ -222,6 +222,69 @@ describe('writePathPolicy', () => {
     });
   });
 
+  describe('\\\\?\\UNC\\ extended-length re-entry defeats the raw device-path check (review fix round 4, CRITICAL reopen)', () => {
+    test('rejects //?/UNC/localhost/C$/Windows/Temp/x.wav (forward-slash extended-length UNC re-entry)', () => {
+      expect(isWriteAllowed('//?/UNC/localhost/C$/Windows/Temp/p4-probe.wav')).toBe(false);
+    });
+
+    test('rejects //?/UNC/[::1]/ADMIN$/Temp/x.wav', () => {
+      expect(isWriteAllowed('//?/UNC/[::1]/ADMIN$/Temp/p4-probe.wav')).toBe(false);
+    });
+
+    test("rejects //?/UNC/<this machine's own hostname>/C$/Windows/Temp/x.wav", () => {
+      const hostname = os.hostname();
+      expect(isWriteAllowed(`//?/UNC/${hostname}/C$/Windows/Temp/p4-probe.wav`)).toBe(false);
+    });
+
+    test('rejects //?/C:/Users/.../x.wav -- a benign-looking destination is STILL denied (the \\\\?\\ prefix itself is the leak, regardless of target)', () => {
+      expect(isWriteAllowed('//?/C:/Users/someuser/AppData/Local/Temp/p4-probe.wav')).toBe(false);
+    });
+
+    test('rejects //?/UNC/localhost/C$/Program Files/Auditorium/resources/x.audm', () => {
+      expect(
+        isWriteAllowed('//?/UNC/localhost/C$/Program Files/Auditorium/resources/x.audm')
+      ).toBe(false);
+    });
+
+    test('rejects the mixed-separator spelling \\/?\\UNC\\localhost\\C$\\x.wav', () => {
+      expect(isWriteAllowed('\\/?\\UNC\\localhost\\C$\\x.wav')).toBe(false);
+    });
+
+    test('rejects //?/UNC/[::1]/ADMIN$/x.wav (second mixed spelling variant)', () => {
+      expect(isWriteAllowed('//?/UNC/[::1]/ADMIN$/x.wav')).toBe(false);
+    });
+
+    test('the canonical raw \\\\?\\... form still stays rejected as before (unaffected regression check)', () => {
+      expect(isWriteAllowed('\\\\?\\C:\\Users\\someuser\\AppData\\Local\\Temp\\x.wav')).toBe(false);
+    });
+
+    test('isLocalAliasOrAdminShareUncPath treats a literal "?" or "UNC" host as unsafe (defense in depth, independent of the device-path re-check)', () => {
+      // Exercised indirectly through assertWriteAllowed with a path shaped so
+      // it would reach the local-alias check even if the device/extended
+      // re-check above were somehow bypassed or skipped by a future change.
+      expect(isWriteAllowed('\\\\?\\UNC\\localhost\\C$\\evil.wav')).toBe(false);
+    });
+
+    test('round-2/round-3 matrix still holds: alias/$-share/mixed-separator/degenerate attack forms remain rejected', () => {
+      expect(isWriteAllowed('\\\\localhost\\C$\\Windows\\evil.wav')).toBe(false);
+      expect(isWriteAllowed('\\\\[::1]\\ADMIN$\\Temp\\m4-probe.wav')).toBe(false);
+      expect(isWriteAllowed('\\\\0--1.ipv6-literal.net\\C$\\evil.wav')).toBe(false);
+      expect(isWriteAllowed('\\\\NAS\\backup$\\evil.wav')).toBe(false);
+      expect(isWriteAllowed('\\/localhost\\C$\\x.wav')).toBe(false);
+      expect(isWriteAllowed('/\\localhost\\C$\\x.wav')).toBe(false);
+      expect(isWriteAllowed('\\\\server.wav')).toBe(false);
+    });
+
+    test('all positives still pass', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav')).toBe(true);
+      expect(isWriteAllowed('\\\\nas\\shared\\music\\out.wav')).toBe(true);
+      expect(isWriteAllowed('\\\\192.168.1.50\\media\\take.mp3')).toBe(true);
+      expect(isWriteAllowed('\\\\studio-nas.local\\projects\\session.audm')).toBe(true);
+      expect(isWriteAllowed('D:\\music\\out.wav')).toBe(true);
+      expect(isWriteAllowed('\\\\NAS\\ba$ckup\\take.wav')).toBe(true);
+    });
+  });
+
   test('rejects extensions removed from the allow-list (F24: .txt, .json, .aud)', () => {
     expect(isWriteAllowed('D:\\x\\notes.txt')).toBe(false);
     expect(isWriteAllowed('D:\\x\\config.json')).toBe(false);
