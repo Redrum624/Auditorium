@@ -69,6 +69,34 @@ describe('convertSampleRate', () => {
   });
 });
 
+describe('convertSampleRate marker rescale (Task M3 / F4)', () => {
+  it('rescales every marker position by round(pos * toRate/fromRate)', () => {
+    const doc = seedDoc({ sampleRate: 44100, channels: [sine(440, 44100, 44100)] });
+    useAppStore.getState().setMarkersForDoc(doc.id, [
+      { id: 'm1', name: 'A', positionSample: 0 },
+      { id: 'm2', name: 'B', positionSample: 22050 },
+      { id: 'm3', name: 'C', positionSample: 44100 },
+    ]);
+
+    convertSampleRate(doc.id, 22050);
+
+    const positions = useAppStore.getState().markers[doc.id].map((m) => m.positionSample);
+    expect(positions).toEqual([0, 11025, 22050]);
+  });
+
+  it('undo restores the exact pre-resample marker list alongside the channels/sampleRate', () => {
+    const doc = seedDoc({ sampleRate: 44100, channels: [sine(440, 44100, 44100)] });
+    const before = [{ id: 'm1', name: 'A', positionSample: 22050 }];
+    useAppStore.getState().setMarkersForDoc(doc.id, before);
+
+    convertSampleRate(doc.id, 22050);
+    expect(useAppStore.getState().markers[doc.id]).toEqual([{ id: 'm1', name: 'A', positionSample: 11025 }]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
+});
+
 describe('convertChannels', () => {
   it('stereo -> mono -> stereo round trip preserves the length', () => {
     const n = 500;

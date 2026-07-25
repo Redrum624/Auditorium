@@ -335,6 +335,105 @@ describe('save-point-derived dirty (Task M2 / F9)', () => {
   });
 });
 
+describe('marker remap on destructive edits (Task M3 / F4)', () => {
+  function setMarkers(docId: string, positions: number[]): void {
+    const list = positions.map((p, i) => ({ id: `m${i}`, name: `M${i}`, positionSample: p }));
+    useAppStore.getState().setMarkersForDoc(docId, list);
+  }
+
+  function markerPositions(docId: string): number[] {
+    return (useAppStore.getState().markers[docId] ?? []).map((m) => m.positionSample);
+  }
+
+  it('delete [s,e): before keep, inside [s,e) drop, at/after e shift left by (e-s)', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [0, 1, 2, 4, 5, 8]);
+    const before = useAppStore.getState().markers[doc.id];
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    deleteSelection();
+
+    // 0,1 kept as-is; 2,4 dropped (inside [2,5)); 5->2 and 8->5 (>= e shift by -3).
+    expect(markerPositions(doc.id)).toEqual([0, 1, 2, 5]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+
+    redo(doc.id);
+    expect(markerPositions(doc.id)).toEqual([0, 1, 2, 5]);
+  });
+
+  it('insert at p, length L: markers >= p shift right by L', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [0, 2, 3, 7]);
+    const before = useAppStore.getState().markers[doc.id];
+    setClipboard({ channels: [new Float32Array([100, 200])], sampleRate: 44100 }); // L=2
+    useAppStore.getState().setCursor(3);
+
+    pasteAtCursor();
+
+    // 0,2 < p(3) kept; 3,7 >= p shift by +2.
+    expect(markerPositions(doc.id)).toEqual([0, 2, 5, 9]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
+
+  it('replace [s,e) with length L: before keep, inside drop, at/after e shift by L-(e-s)', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [0, 1, 2, 4, 5, 8]);
+    const before = useAppStore.getState().markers[doc.id];
+    setClipboard({ channels: [new Float32Array([100, 200])], sampleRate: 44100 }); // L=2
+    useAppStore.getState().setSelection({ start: 2, end: 5 }); // e-s=3, shift = 2-3=-1
+
+    pasteAtCursor();
+
+    expect(markerPositions(doc.id)).toEqual([0, 1, 4, 7]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
+
+  it('trim to [s,e): outside drop, inside shift left by s', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [0, 2, 3, 4, 5, 8]);
+    const before = useAppStore.getState().markers[doc.id];
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    trimToSelection();
+
+    // 0 dropped (<s); 2,3,4 kept shifted by -2 -> 0,1,2; 5,8 dropped (>=e).
+    expect(markerPositions(doc.id)).toEqual([0, 1, 2]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
+
+  it('clamps a marker sitting exactly at the old docLength so it lands exactly at newLength, never beyond', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [10]); // edge marker at docLength (e.g. from a clamped-on-read import)
+    useAppStore.getState().setSelection({ start: 2, end: 5 }); // delete 3 samples -> newLength 7
+
+    deleteSelection();
+
+    expect(markerPositions(doc.id)).toEqual([7]); // 10 - 3 = 7 = newLength exactly
+  });
+
+  it('equal-length transforms (silence) leave markers completely untouched', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [1, 4, 8]);
+    const before = useAppStore.getState().markers[doc.id];
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    silenceSelection();
+
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
+});
+
 describe('silenceSelection', () => {
   it('zeroes the region in place, preserving length, outside data and the selection', () => {
     const doc = addDoc([ramp(10), ramp(10, 10)]);

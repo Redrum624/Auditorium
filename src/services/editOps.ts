@@ -18,18 +18,83 @@ interface AfterState {
 }
 
 /**
+ * Declarative description of how a length/timeline-changing edit moves marker
+ * positions (Task M3 / F4), derived by each editOps call site from the same
+ * region args it passes to the AudioDocument mutator. `applyEdit` turns this
+ * into a full before/after marker-list remap that rides inside the SAME undo
+ * entry as the document swap. Omit entirely for equal-length transforms
+ * (effects, reverse, in-place silence, ...) — markers stay untouched and no
+ * marker snapshot is taken.
+ *
+ * Rules (all in PRE-edit sample coordinates, region args are [start, end)):
+ * - delete [s,e): < s keep; in [s,e) drop; >= e shift left by (e-s).
+ * - insert at `start` of `length` L: < start keep; >= start shift right by L.
+ * - replace [s,e) with length L: < s keep; in [s,e) drop; >= e shift by L-(e-s).
+ * - trim to [s,e): outside [s,e) drop; inside shift left by s.
+ * - rescale (sample-rate conversion): round(pos * toRate/fromRate).
+ */
+export type MarkerRemap =
+  | { type: 'delete'; start: number; end: number }
+  | { type: 'insert'; start: number; length: number }
+  | { type: 'replace'; start: number; end: number; length: number }
+  | { type: 'trim'; start: number; end: number }
+  | { type: 'rescale'; fromRate: number; toRate: number };
+
+/** Maps a single marker position per `remap`'s rule; `null` means "drop". */
+function remapPosition(pos: number, remap: MarkerRemap): number | null {
+  switch (remap.type) {
+    case 'delete':
+      if (pos < remap.start) return pos;
+      if (pos < remap.end) return null;
+      return pos - (remap.end - remap.start);
+    case 'insert':
+      return pos < remap.start ? pos : pos + remap.length;
+    case 'replace':
+      if (pos < remap.start) return pos;
+      if (pos < remap.end) return null;
+      return pos + (remap.length - (remap.end - remap.start));
+    case 'trim':
+      if (pos < remap.start || pos >= remap.end) return null;
+      return pos - remap.start;
+    case 'rescale':
+      return Math.round(pos * (remap.toRate / remap.fromRate));
+  }
+}
+
+/** Applies `remapPosition` to every marker, dropping `null` results and
+ * clamping surviving positions to `[0, newLength]` so a saved file can never
+ * carry a cue point past the (possibly shorter) data length. Relative order is
+ * preserved by construction (every branch above is monotonic in `pos`), and
+ * `setMarkersForDoc` re-sorts regardless. */
+function remapMarkers(markers: Marker[], remap: MarkerRemap, newLength: number): Marker[] {
+  const result: Marker[] = [];
+  for (const m of markers) {
+    const mapped = remapPosition(m.positionSample, remap);
+    if (mapped === null) continue;
+    result.push({ ...m, positionSample: Math.max(0, Math.min(newLength, mapped)) });
+  }
+  return result;
+}
+
+/**
  * THE single write path for destructive edits (effects in later tasks reuse it).
  * Reads `docId` from the store, applies the pure `fn` to produce a new document,
  * commits it, applies any `after` selection/cursor, then records an undo entry
  * that swaps the whole pre-/post-edit document (and selection/cursor) back and
  * forth. `fn` MUST NOT mutate its input — trust the AudioDocument helpers, which
  * always allocate new channel arrays.
+ *
+ * `remap`, when given, additionally recomputes the doc's marker list (Task M3 /
+ * F4) and folds it into the SAME undo entry: pre/post marker-list snapshots are
+ * captured here in the closure and restored via `setMarkersForDoc` on undo/redo,
+ * exactly like the document/selection/cursor swap above.
  */
 export function applyEdit(
   label: string,
   docId: string,
   fn: (doc: AudioDocument) => AudioDocument,
-  after?: AfterState
+  after?: AfterState,
+  remap?: MarkerRemap
 ): void {
   const store = useAppStore.getState();
   const preDoc = store.documents.find((d) => d.id === docId);
@@ -44,6 +109,14 @@ export function applyEdit(
     if (after.cursorSample !== undefined) store.setCursor(after.cursorSample);
   }
 
+  let preMarkers: Marker[] | undefined;
+  let postMarkers: Marker[] | undefined;
+  if (remap) {
+    preMarkers = useAppStore.getState().markers[docId] ?? [];
+    postMarkers = remapMarkers(preMarkers, remap, docLength(newDoc));
+    useAppStore.getState().setMarkersForDoc(docId, postMarkers);
+  }
+
   // Snapshot the resulting UI state so redo restores it exactly.
   const postSelection = useAppStore.getState().selection;
   const postCursor = useAppStore.getState().cursorSample;
@@ -56,12 +129,14 @@ export function applyEdit(
       s.updateDocument(preDoc);
       s.setSelection(preSelection);
       s.setCursor(preCursor);
+      if (preMarkers) s.setMarkersForDoc(docId, preMarkers);
     },
     redo() {
       const s = useAppStore.getState();
       s.updateDocument(newDoc);
       s.setSelection(postSelection);
       s.setCursor(postCursor);
+      if (postMarkers) s.setMarkersForDoc(docId, postMarkers);
     },
   });
 }
@@ -101,10 +176,13 @@ export function cutSelection(): void {
   if (!doc || !selection) return;
   const { start, end } = selection;
   setClipboard({ channels: cloneRegion(doc, start, end), sampleRate: doc.sampleRate });
-  applyEdit('Cut', doc.id, (d) => deleteRegion(d, start, end), {
-    selection: null,
-    cursorSample: start,
-  });
+  applyEdit(
+    'Cut',
+    doc.id,
+    (d) => deleteRegion(d, start, end),
+    { selection: null, cursorSample: start },
+    { type: 'delete', start, end }
+  );
 }
 
 /** Copies the selection to the clipboard without changing the document. */
@@ -137,15 +215,21 @@ export function pasteAtCursor(): void {
 
   if (selection) {
     const { start, end } = selection;
-    applyEdit('Paste', doc.id, (d) => replaceRegion(d, start, end, data), {
-      selection: null,
-      cursorSample: start + insertLength,
-    });
+    applyEdit(
+      'Paste',
+      doc.id,
+      (d) => replaceRegion(d, start, end, data),
+      { selection: null, cursorSample: start + insertLength },
+      { type: 'replace', start, end, length: insertLength }
+    );
   } else {
-    applyEdit('Paste', doc.id, (d) => insertAt(d, cursorSample, data), {
-      selection: null,
-      cursorSample: cursorSample + insertLength,
-    });
+    applyEdit(
+      'Paste',
+      doc.id,
+      (d) => insertAt(d, cursorSample, data),
+      { selection: null, cursorSample: cursorSample + insertLength },
+      { type: 'insert', start: cursorSample, length: insertLength }
+    );
   }
 }
 
@@ -155,10 +239,13 @@ export function deleteSelection(): void {
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
   const { start, end } = selection;
-  applyEdit('Delete', doc.id, (d) => deleteRegion(d, start, end), {
-    selection: null,
-    cursorSample: start,
-  });
+  applyEdit(
+    'Delete',
+    doc.id,
+    (d) => deleteRegion(d, start, end),
+    { selection: null, cursorSample: start },
+    { type: 'delete', start, end }
+  );
 }
 
 /** Keeps only the selected region, dropping everything else. Requires a selection. */
@@ -171,7 +258,8 @@ export function trimToSelection(): void {
     'Trim',
     doc.id,
     (d) => replaceRegion(d, 0, docLength(d), cloneRegion(d, start, end)),
-    { selection: null, cursorSample: 0 }
+    { selection: null, cursorSample: 0 },
+    { type: 'trim', start, end }
   );
 }
 

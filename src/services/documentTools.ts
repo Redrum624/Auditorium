@@ -14,6 +14,9 @@ import { applyEdit } from './editOps';
  * Resamples every channel of the document to `toRate` and swaps `doc.sampleRate`.
  * No-op when the document is already at the target rate. The selection/cursor are
  * cleared because their sample positions no longer correspond after resampling.
+ * Markers are rescaled in lockstep (`round(pos * toRate/fromRate)`, Task M3 / F4)
+ * via the `{ type: 'rescale' }` descriptor passed to `applyEdit`, so they land on
+ * the new sample clock and undo restores the pre-resample positions exactly.
  */
 export function convertSampleRate(docId: string, toRate: number): void {
   const doc = useAppStore.getState().documents.find((d) => d.id === docId);
@@ -29,7 +32,8 @@ export function convertSampleRate(docId: string, toRate: number): void {
       sampleRate: toRate,
       dirty: true,
     }),
-    { selection: null, cursorSample: 0 }
+    { selection: null, cursorSample: 0 },
+    { type: 'rescale', fromRate, toRate }
   );
 }
 

@@ -17,7 +17,7 @@ import { buildId3Chapters } from '../audio/id3Chapters';
 import { buildChapterComments, buildVorbisCommentPayload } from '../audio/chapterTags';
 import { muxOpusStream } from '../audio/oggPage';
 import * as undoHistory from './undoHistory';
-import { pushMarkerUndo } from './editOps';
+import { pushMarkerUndo, deleteSelection } from './editOps';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
@@ -637,6 +637,21 @@ describe('saveDocument', () => {
     const [, data] = api.writeFile.mock.calls[0];
     const decodedBack = decodeWav(data as ArrayBuffer);
     expect(decodedBack.markers).toEqual([{ name: 'Hook', positionSample: 7 }]);
+  });
+
+  it('writes remapped marker positions after a destructive edit (Task M3 / F4)', async () => {
+    const api = installApi();
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 8 });
+    useAppStore.getState().setSelection({ start: 2, end: 5 }); // delete 3 samples
+
+    deleteSelection(); // marker at 8 (>= e=5) shifts left by (e-s)=3 -> 5
+
+    await saveDocument(doc.id);
+
+    const [, data] = api.writeFile.mock.calls[0];
+    const decodedBack = decodeWav(data as ArrayBuffer);
+    expect(decodedBack.markers).toEqual([{ name: 'Chorus', positionSample: 5 }]);
   });
 
   it('shows an error and keeps dirty when the write fails', async () => {
