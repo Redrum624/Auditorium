@@ -159,6 +159,21 @@ describe('MarkersPanel', () => {
       expect(useAppStore.getState().markers[doc.id][0].name).toBe('Intro');
     });
 
+    it('committing a rename with the same (trimmed) name is a no-op: no undo entry, no rename call', () => {
+      const doc = addDoc();
+      useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Intro', positionSample: 0 });
+
+      render(<MarkersPanel />);
+      fireEvent.doubleClick(screen.getByText('Intro'));
+      const input = screen.getByDisplayValue('Intro');
+      // Trailing whitespace trims down to the same name as the marker already has.
+      fireEvent.change(input, { target: { value: '  Intro  ' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+
+      expect(useAppStore.getState().markers[doc.id][0].name).toBe('Intro');
+      expect(getHistory(doc.id).done).toEqual([]);
+    });
+
     it('deleting a marker is undoable and shows up in the history as "Delete Marker"', () => {
       const doc = addDoc();
       useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Intro', positionSample: 0 });

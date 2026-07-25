@@ -19,6 +19,7 @@ import { convertSampleRate } from './documentTools';
 import { copySelection, pasteAtCursor } from './editOps';
 import { getClipboard } from './clipboard';
 import { getSpectralScale, toggleSpectralScale, type SpectralScale } from './spectralScale';
+import { markSavePoint } from './undoHistory';
 import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 
@@ -160,6 +161,7 @@ export function installTestHooks(): void {
       const result = await window.electronAPI.writeFile(outPath, data);
       if (result.ok) {
         useAppStore.getState().updateDocument({ ...doc, filePath: outPath, dirty: false });
+        markSavePoint(doc.id);
       }
       return result.ok;
     },

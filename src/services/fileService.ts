@@ -13,7 +13,7 @@ import { playbackEngine } from '../audio/PlaybackEngine';
 import { useAppStore, type Marker } from '../stores/appStore';
 import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { invalidatePeaks } from './peaksCache';
-import { clearHistory, markSavePoint } from './undoHistory';
+import { clearHistory, markSavePoint, invalidateSavePoint } from './undoHistory';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
 export interface ExportOptions {
@@ -317,6 +317,12 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
     if (findDoc(docId) === current) {
       store().updateDocument({ ...current, dirty: false });
       markSavePoint(docId);
+    } else {
+      // The write already happened (using the pre-await snapshot), but a
+      // concurrent edit landed during the encode/write, so the save point
+      // we'd otherwise keep no longer corresponds to what's on disk — make
+      // it permanently unreachable (Task M2 finding 2).
+      invalidateSavePoint(docId);
     }
     return;
   }
@@ -365,6 +371,10 @@ async function saveAsWav(docId: string): Promise<void> {
       dirty: false,
     });
     markSavePoint(docId);
+  } else {
+    // Same reasoning as the in-place branch: the write already landed, but a
+    // concurrent edit invalidates the save point it would otherwise mark.
+    invalidateSavePoint(docId);
   }
 }
 

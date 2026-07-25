@@ -47,7 +47,8 @@ export default function MarkersPanel() {
 
   const commitRename = (markerId: string) => {
     const name = draft.trim();
-    if (name) {
+    const current = markers.find((m) => m.id === markerId);
+    if (name && current && name !== current.name) {
       const before = useAppStore.getState().markers[activeDocumentId] ?? [];
       renameMarker(activeDocumentId, markerId, name);
       const after = useAppStore.getState().markers[activeDocumentId] ?? [];

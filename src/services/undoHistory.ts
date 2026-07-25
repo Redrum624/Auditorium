@@ -78,15 +78,22 @@ function getStacks(docId: string): Stacks {
 /** Overwrites the live document's `dirty` flag (immutably) with the value
  * derived from this history's `position`/`savePoint`, replacing whatever the
  * just-applied undo/redo entry's own snapshot carried. No-op if the document
- * isn't in the store (e.g. it was already closed) or the flag already matches. */
+ * isn't in the store (e.g. it was already closed). Always replaces the doc
+ * object — even when the derived value equals the current `dirty` — so the
+ * doc's identity changes on every undo/redo. That identity change is load-
+ * bearing: fileService's in-flight-save staleness check compares
+ * `findDoc(docId) === current` by reference, and a marker-only undo/redo
+ * (whose entry only touches the separate `markers` map, never `documents`)
+ * would otherwise leave the doc's reference completely untouched whenever
+ * dirty-before equals dirty-after (the common case: doc already dirty from
+ * an earlier edit, undo a marker op, still dirty) — masking the marker
+ * change from a concurrent in-flight save (Task M2 finding 1). */
 function applyDerivedDirty(docId: string, stacks: Stacks): void {
   const store = useAppStore.getState();
   const doc = store.documents.find((d) => d.id === docId);
   if (!doc) return;
   const dirty = stacks.position !== stacks.savePoint;
-  if (doc.dirty !== dirty) {
-    store.updateDocument({ ...doc, dirty });
-  }
+  store.updateDocument({ ...doc, dirty });
 }
 
 /** Records a new applied edit and clears that document's redo stack. If the
@@ -139,6 +146,18 @@ export function redo(docId: string): void {
 export function markSavePoint(docId: string): void {
   const stacks = getStacks(docId);
   stacks.savePoint = stacks.position;
+}
+
+/** Makes the current save point permanently unreachable — call from the
+ * staleness-REJECTED branch of a save (fileService: `findDoc(docId) !==
+ * current`). The write to disk already happened using the pre-await
+ * snapshot, so the old save point no longer corresponds to what's on disk;
+ * without this, undoing back to that position would wrongly derive `dirty
+ * = false` against bytes that were never actually written (Task M2 finding
+ * 2). */
+export function invalidateSavePoint(docId: string): void {
+  const stacks = getStacks(docId);
+  stacks.savePoint = -1;
 }
 
 export function canUndo(docId: string): boolean {

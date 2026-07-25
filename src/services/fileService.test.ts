@@ -17,6 +17,7 @@ import { buildId3Chapters } from '../audio/id3Chapters';
 import { buildChapterComments, buildVorbisCommentPayload } from '../audio/chapterTags';
 import { muxOpusStream } from '../audio/oggPage';
 import * as undoHistory from './undoHistory';
+import { pushMarkerUndo } from './editOps';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
@@ -758,6 +759,73 @@ describe('saveDocument — async in-place save races (Task H1)', () => {
     await savePromise;
 
     expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('undoing back to an old save point after a staleness-rejected save still derives dirty (Task M2 finding 2)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+
+    undoHistory.pushUndo({ label: 'Edit A', docId: doc.id, undo() {}, redo() {} }); // position 1
+    undoHistory.markSavePoint(doc.id); // savePoint = 1 — an earlier, real save
+    undoHistory.pushUndo({ label: 'Edit B', docId: doc.id, undo() {}, redo() {} }); // position 2, dirty again
+
+    const { resolve } = controllableEncode();
+    const savePromise = saveDocument(doc.id);
+
+    // A further edit lands mid-encode, so the staleness check rejects this
+    // save attempt — but the write to disk already happened.
+    const edited = { ...useAppStore.getState().documents[0], channels: [new Float32Array(3)], dirty: true };
+    useAppStore.getState().updateDocument(edited);
+
+    resolve(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await savePromise;
+
+    // Undo back down to position 1 — the OLD save point. It must NOT derive
+    // clean: disk now holds bytes from the just-written (rejected) save
+    // attempt, which don't match what existed at the old save point.
+    undoHistory.undo(doc.id);
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
+  });
+
+  it('keeps a marker undo mid-save dirty and does not mark the save point (Task M2 finding 1)', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+
+    // Simulate a prior unsaved audio edit (position advances past the
+    // never-marked save point), then add a marker on top of it — the
+    // common shape during an in-flight save: the doc is already dirty both
+    // before and after the marker op is undone.
+    undoHistory.pushUndo({ label: 'Prior Edit', docId: doc.id, undo() {}, redo() {} }); // position 1
+
+    const before = useAppStore.getState().markers[doc.id] ?? [];
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 3 });
+    const after = useAppStore.getState().markers[doc.id];
+    pushMarkerUndo('Add Marker', doc.id, before, after); // position 2
+
+    const markSpy = jest.spyOn(undoHistory, 'markSavePoint');
+    const { resolve } = controllableEncode();
+    const savePromise = saveDocument(doc.id);
+
+    // Undo the marker add while the encode is still in flight.
+    undoHistory.undo(doc.id);
+
+    resolve(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await savePromise;
+
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
+    expect(useAppStore.getState().markers[doc.id]).toEqual([]);
+    expect(markSpy).not.toHaveBeenCalled();
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
   });
 
   it('keeps a mid-save marker add\'s dirty flag and the new marker in the store (Task M1)', async () => {
