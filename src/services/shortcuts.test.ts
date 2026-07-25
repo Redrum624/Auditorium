@@ -1,6 +1,12 @@
-import { popDialog, pushDialog } from './dialogBus';
+import { createElement, StrictMode } from 'react';
+import { render } from '@testing-library/react';
+import { nextDialogToken, popDialog, pushDialog } from './dialogBus';
 import * as menuActionsModule from './menuActions';
 import { comboFromEvent, installShortcuts, SHORTCUT_TABLE } from './shortcuts';
+import DialogShell from '../components/Dialogs/DialogShell';
+
+// This file is .ts (not .tsx), so StrictMode-wrapped element trees below are
+// built with createElement rather than JSX syntax.
 
 function keydown(init: KeyboardEventInit): KeyboardEvent {
   return new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init });
@@ -185,30 +191,43 @@ describe('installShortcuts', () => {
   });
 
   describe('dialog-open gate (Task M7/F10)', () => {
+    // Cleanup lives in afterEach (fix round 1), not at the end of each test
+    // body: a failing expect() throws and skips a trailing popDialog() call,
+    // leaking the token into dialogBus's module-level stack and cascading
+    // false "dialog still open" failures into every later test in this file.
+    let openToken: number | null = null;
+
+    afterEach(() => {
+      if (openToken !== null) {
+        popDialog(openToken);
+        openToken = null;
+      }
+    });
+
     it('does nothing for a shortcut while a dialog is open, even for a combo normally mapped', () => {
       const runCommandSpy = jest
         .spyOn(menuActionsModule, 'runCommand')
         .mockResolvedValue(undefined);
       uninstall = installShortcuts(window);
-      const token = pushDialog();
+      openToken = nextDialogToken();
+      pushDialog(openToken);
 
       window.dispatchEvent(keydown({ key: 'o', ctrlKey: true })); // ctrl+o -> file.open
 
       expect(runCommandSpy).not.toHaveBeenCalled();
-      popDialog(token);
     });
 
     it('does not call preventDefault while a dialog is open (so the key still does its native thing, e.g. nothing)', () => {
       jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
       uninstall = installShortcuts(window);
-      const token = pushDialog();
+      openToken = nextDialogToken();
+      pushDialog(openToken);
 
       const event = keydown({ key: 'z', ctrlKey: true });
       const preventSpy = jest.spyOn(event, 'preventDefault');
       window.dispatchEvent(event);
 
       expect(preventSpy).not.toHaveBeenCalled();
-      popDialog(token);
     });
 
     it('resumes dispatching once the dialog closes', () => {
@@ -216,11 +235,40 @@ describe('installShortcuts', () => {
         .spyOn(menuActionsModule, 'runCommand')
         .mockResolvedValue(undefined);
       uninstall = installShortcuts(window);
-      const token = pushDialog();
-      popDialog(token);
+      const token = nextDialogToken();
+      pushDialog(token);
+      popDialog(token); // closed within the test itself; afterEach has nothing to do
 
       window.dispatchEvent(keydown({ key: 'o', ctrlKey: true }));
 
+      expect(runCommandSpy).toHaveBeenCalledWith('file.open');
+    });
+
+    it('is respected for a real StrictMode-rendered dialog, and lifts cleanly on unmount (fix round 1 regression)', () => {
+      // Regression coverage for the StrictMode double-invoke bug (fix round
+      // 1): a real DialogShell mount used to leak a token under <StrictMode>,
+      // leaving hasOpenDialog() permanently true and every shortcut dead
+      // after the dialog closed. Exercises the gate end-to-end through an
+      // actual component instead of manual pushDialog/popDialog calls.
+      const runCommandSpy = jest
+        .spyOn(menuActionsModule, 'runCommand')
+        .mockResolvedValue(undefined);
+      uninstall = installShortcuts(window);
+
+      const { unmount } = render(
+        createElement(
+          StrictMode,
+          null,
+          createElement(DialogShell, { title: 'Test', onClose: () => {}, children: 'content' })
+        )
+      );
+
+      window.dispatchEvent(keydown({ key: 'o', ctrlKey: true }));
+      expect(runCommandSpy).not.toHaveBeenCalled();
+
+      unmount();
+
+      window.dispatchEvent(keydown({ key: 'o', ctrlKey: true }));
       expect(runCommandSpy).toHaveBeenCalledWith('file.open');
     });
   });

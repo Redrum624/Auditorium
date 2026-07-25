@@ -52,26 +52,24 @@ export default function EffectDialog({
   // the CURRENT value at cleanup time, not the value captured when the effect
   // was installed (mount, when previewing was still false).
   const previewingRef = useRef(false);
-  // Kept as a ref (not read in the effect body via closure over `engine`
-  // directly) so this stays a stable, mount/unmount-only effect regardless of
-  // whether `def` resolves — it must run before the `if (!def) return null;`
-  // below, since hooks can't be called conditionally.
-  const engineRef = useRef(engine);
-  engineRef.current = engine;
 
   // F11: Escape/backdrop/Cancel all unmount this dialog without going through
   // the explicit "Stop Preview" button. If a preview was left running, restore
   // the engine to the real active document on unmount — exactly stopPreview's
   // logic — instead of leaving it holding the throwaway preview document
-  // (silently playing, in Escape's case).
+  // (silently playing, in Escape's case). Declared before the `if (!def)
+  // return null;` below since hooks can't be called conditionally; `engine` is
+  // a stable prop (module singleton by default) so this runs once in practice,
+  // but depending on it directly (no ref indirection) keeps the effect honest
+  // if it ever weren't.
   useEffect(() => {
     return () => {
       if (!previewingRef.current) return;
-      engineRef.current.stop();
+      engine.stop();
       const doc = activeDoc();
-      if (doc) engineRef.current.load(doc);
+      if (doc) engine.load(doc);
     };
-  }, []);
+  }, [engine]);
 
   // Noise Reduction needs a captured noise print, delivered to the worker via the
   // `extra` side channel; without one, Apply is disabled and a hint is shown.

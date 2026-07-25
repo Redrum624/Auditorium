@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from 'react';
-import { isTopDialog, popDialog, pushDialog } from '../../services/dialogBus';
+import { isTopDialog, nextDialogToken, popDialog, pushDialog } from '../../services/dialogBus';
 
 /**
  * Modal overlay chrome shared by the app's dialogs. Renders a dimmed full-screen
@@ -27,8 +27,14 @@ export default function DialogShell({
   children: ReactNode;
   dismissable?: boolean;
 }) {
-  const [token] = useState(() => pushDialog());
-  useEffect(() => () => popDialog(token), [token]);
+  // Minting the token is a pure counter bump (safe under StrictMode's
+  // double-render); registering it on the stack happens only from the effect
+  // below, whose mount/cleanup are always paired 1:1 — see dialogBus.ts.
+  const [token] = useState(nextDialogToken);
+  useEffect(() => {
+    pushDialog(token);
+    return () => popDialog(token);
+  }, [token]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {

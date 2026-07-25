@@ -57,29 +57,45 @@ export function openRecordDialog(): void {
 }
 
 // --- Open-dialog stack (Task M7: F10/F25) ---------------------------------
-// DialogShell pushes a token when it mounts and pops it on unmount, LIFO by
-// mount order. shortcuts.ts calls `hasOpenDialog()` to bail out of every
-// global shortcut while ANY dialog is open (F10): ExportDialog/EffectDialog/
-// ConvertDialog resolve their target document from the LIVE activeDocumentId
-// at confirm time, so a shortcut firing behind an open dialog (e.g. Ctrl+O
-// while Export is open) would silently act on/replace the wrong document.
-// DialogShell's own Escape handler calls `isTopDialog(token)` so with two
-// dialogs stacked, one Escape press closes only the topmost (F25) — each
-// DialogShell installs its own document keydown listener and stopPropagation
-// cannot stop sibling listeners, so the ordering has to be an explicit stack
-// check instead.
+// DialogShell registers a token when it mounts and unregisters it on unmount,
+// LIFO by mount order. shortcuts.ts calls `hasOpenDialog()` to bail out of
+// every global shortcut while ANY dialog is open (F10): ExportDialog/
+// EffectDialog/ConvertDialog resolve their target document from the LIVE
+// activeDocumentId at confirm time, so a shortcut firing behind an open
+// dialog (e.g. Ctrl+O while Export is open) would silently act on/replace the
+// wrong document. DialogShell's own Escape handler calls `isTopDialog(token)`
+// so with two dialogs stacked, one Escape press closes only the topmost
+// (F25) — each DialogShell installs its own document keydown listener and
+// stopPropagation cannot stop sibling listeners, so the ordering has to be an
+// explicit stack check instead.
+//
+// Minting (`nextDialogToken`) and registering (`pushDialog`) are DELIBERATELY
+// split (fix round 1): minting is a pure counter bump safe to call from a
+// `useState` lazy initializer, which React (StrictMode, Suspense, an aborted
+// concurrent render) may invoke more than once or discard entirely — it never
+// touches the stack, so an extra/discarded call can't leak anything.
+// Registering pushes onto the actual stack and must only ever happen from an
+// effect, whose mount/cleanup are always paired 1:1 (including StrictMode's
+// dev-only mount→cleanup→remount probe) — that pairing is what keeps the
+// stack's push/pop count balanced no matter how many times render ran.
 
-let nextDialogToken = 1;
+let dialogTokenCounter = 0;
 const openDialogStack: number[] = [];
 
-/** Registers a newly-opened dialog on top of the stack; returns its token. */
-export function pushDialog(): number {
-  const token = nextDialogToken++;
-  openDialogStack.push(token);
-  return token;
+/** Mints a new unique dialog token WITHOUT touching the stack. Pure — safe to
+ * call during render (e.g. a `useState` lazy initializer). */
+export function nextDialogToken(): number {
+  return ++dialogTokenCounter;
 }
 
-/** Unregisters a dialog (called on unmount). No-ops if already removed. */
+/** Registers `token` (from `nextDialogToken`) on top of the stack. Call ONLY
+ * from a mount effect, paired with `popDialog(token)` in its cleanup. */
+export function pushDialog(token: number): void {
+  openDialogStack.push(token);
+}
+
+/** Unregisters a dialog (called from the same effect's cleanup). No-ops if
+ * already removed. */
 export function popDialog(token: number): void {
   const index = openDialogStack.indexOf(token);
   if (index !== -1) openDialogStack.splice(index, 1);

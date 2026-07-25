@@ -97,16 +97,32 @@ export default function RecordDialog({
 
   const stopRecording = async () => {
     clearTimer();
-    const { channels: recorded, sampleRate: actualRate } = await engine.stop();
-    setRecording(false);
-    setLevel(MIN_DB);
-    const doc = createDocument({
-      name: `Recording ${nextId('recording').split('-')[1]}`,
-      sampleRate: actualRate,
-      channels: recorded,
-    });
-    useAppStore.getState().addDocument(doc);
-    onClose();
+    // F12 raises the stakes on a silent failure here: if engine.stop() rejects
+    // without this catch, `recording` never flips back to false, so the
+    // Escape/backdrop veto stays latched (Close still works, but the user
+    // gets no feedback at all about why the take vanished). Surface the error
+    // and always clear `recording` so the dialog returns to a normal,
+    // dismissable state.
+    try {
+      const { channels: recorded, sampleRate: actualRate } = await engine.stop();
+      const doc = createDocument({
+        name: `Recording ${nextId('recording').split('-')[1]}`,
+        sampleRate: actualRate,
+        channels: recorded,
+      });
+      useAppStore.getState().addDocument(doc);
+      onClose();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      void window.electronAPI?.showMessageBox({
+        type: 'error',
+        title: 'Recording failed',
+        message: `Could not finish recording: ${message}`,
+      });
+    } finally {
+      setRecording(false);
+      setLevel(MIN_DB);
+    }
   };
 
   const toggleRecord = () => {
