@@ -12,6 +12,8 @@ import { nextId, useAppStore } from '../stores/appStore';
 import { createClip } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { mixdownSession as renderMixdown } from '../multitrack/mixdown';
+import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
+import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { encodeExport, openFilePath, saveDocument, type ExportOptions } from './fileService';
@@ -30,6 +32,7 @@ export interface TestStateSummary {
   sampleRate: number | null;
   channels: number | null;
   filePath: string | null;
+  dirty: boolean | null;
 }
 
 export interface TestApi {
@@ -88,6 +91,13 @@ export interface TestApi {
   closeActive(): void;
   exportActiveOgg(outPath: string, bitrate?: number): Promise<boolean>;
   saveActiveInPlace(): Promise<{ ok: boolean; dirty: boolean | null; filePath: string | null }>;
+  // --- v1.4 flows ---------------------------------------------------------
+  saveSessionAs(outPath: string): Promise<boolean>;
+  openSessionFrom(path: string): Promise<{
+    docCount: number;
+    trackCount: number;
+    droppedClipCount: number;
+  }>;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -138,6 +148,7 @@ export function installTestHooks(): void {
         sampleRate: doc?.sampleRate ?? null,
         channels: doc?.channels.length ?? null,
         filePath: doc?.filePath ?? null,
+        dirty: doc?.dirty ?? null,
       };
     },
 
@@ -445,6 +456,60 @@ export function installTestHooks(): void {
       }
       const after = activeDoc();
       return { ok: true, dirty: after?.dirty ?? null, filePath: after?.filePath ?? null };
+    },
+
+    // --- v1.4 flows -----------------------------------------------------
+
+    // Serializes the current session to .audm v3 (Task M5/F3) and writes it
+    // directly, bypassing saveSessionViaDialog's native showSaveDialog +
+    // success showMessageBox (neither of which can be driven headlessly).
+    // Mirrors production's serializeSessionV3 call exactly (same session,
+    // docs, and markers sources) so the smoke proves the real writer.
+    saveSessionAs: async (outPath) => {
+      const session = useSessionStore.getState().session;
+      const docs = useAppStore.getState().documents;
+      const markers = useAppStore.getState().markers;
+      let bytes: Uint8Array<ArrayBuffer>;
+      try {
+        ({ bytes } = serializeSessionV3(session, docs, markers));
+      } catch {
+        return false;
+      }
+      const result = await window.electronAPI.writeFile(outPath, bytes.buffer);
+      return result.ok;
+    },
+
+    // Reads and parses a .audm file via the real dispatcher (parseSessionFileBytes,
+    // which sniffs the v3 AUDM3 magic vs. legacy JSON) and applies it to the
+    // store the same way openSessionViaDialog does, bypassing its native
+    // showOpenDialog + info showMessageBox. Returns a small summary so the
+    // smoke harness can assert the round trip without a separate "list all
+    // docs" hook — the reopened document(s) are also addDocument'd, so the
+    // last one is active and getStateSummary()/getActiveMarkers() read it back.
+    openSessionFrom: async (path) => {
+      const buf = await window.electronAPI.readFile(path);
+      const result = parseSessionFileBytes(buf);
+      for (const doc of result.documents) {
+        useAppStore.getState().addDocument(doc);
+      }
+      for (const [docId, markerList] of Object.entries(result.markers)) {
+        useAppStore.getState().setMarkersForDoc(docId, markerList);
+      }
+      useSessionStore.setState({
+        session: result.session,
+        selectedClipId: null,
+        mtCursorSample: 0,
+        mtZoom: { samplesPerPixel: 512, scrollSample: 0 },
+        mtPlayState: 'stopped',
+        mtPlayheadSample: 0,
+      });
+      clearClipWaveformCache();
+      useAppStore.getState().setView('multitrack');
+      return {
+        docCount: result.documents.length,
+        trackCount: result.session.tracks.length,
+        droppedClipCount: result.droppedClipCount,
+      };
     },
   };
 

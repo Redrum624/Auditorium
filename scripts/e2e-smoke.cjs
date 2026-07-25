@@ -24,6 +24,7 @@ const OUT_OGG = path.join(OUT_DIR, 'out.ogg');
 const OUT_MARKERS_MP3 = path.join(OUT_DIR, 'markers.mp3');
 const OUT_MARKERS_FLAC = path.join(OUT_DIR, 'markers.flac');
 const OUT_MARKERS_OGG = path.join(OUT_DIR, 'markers.ogg');
+const OUT_SESSION = path.join(OUT_DIR, 'session.audm');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -94,6 +95,7 @@ async function main() {
     OUT_MARKERS_MP3,
     OUT_MARKERS_FLAC,
     OUT_MARKERS_OGG,
+    OUT_SESSION,
     SHOT,
   ]) {
     if (fs.existsSync(f)) fs.rmSync(f);
@@ -630,7 +632,114 @@ async function main() {
         `(expected ${expectedOggPos2}, got ${JSON.stringify(oggMarkersAfter[1])})`
     );
 
-    // 8) Screenshot ---------------------------------------------------------
+    // 8) Session v3 round-trip (Task M5/F3 acceptance): build a multitrack
+    // session containing one document with markers, Save Session to a .audm
+    // path (via a headless-safe test hook that drives the real
+    // serializeSessionV3 writer, bypassing the native save dialog), confirm
+    // the file begins with the v3 binary magic (not the old base64 JSON), then
+    // reopen it (via the real parseSessionFileBytes dispatcher) and confirm
+    // the document AND its markers survive. This is the flow whose silent
+    // failure past ~17 minutes of audio was the critical bug M5 fixed.
+    console.log('Session v3 round-trip: build session, save, reopen...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const sessM1 = await page.evaluate(() =>
+      window.__test.addMarkerToActive(15000, 'Session Verse')
+    );
+    const sessM2 = await page.evaluate(() =>
+      window.__test.addMarkerToActive(50000, 'Session Chorus')
+    );
+    assert(sessM1 !== null, 'session marker 1 added to the active document');
+    assert(sessM2 !== null, 'session marker 2 added to the active document');
+
+    await page.evaluate(() => window.__test.newSession(44100));
+    const sessClip = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
+    assert(sessClip !== null, 'session clip inserted onto track 0');
+
+    const sessionSaveOk = await page.evaluate(
+      (out) => window.__test.saveSessionAs(out),
+      OUT_SESSION
+    );
+    assert(sessionSaveOk === true, 'saveSessionAs(.audm) reported success');
+    assert(fs.existsSync(OUT_SESSION), 'session.audm exists on disk');
+    const sessionHead = fs.readFileSync(OUT_SESSION).subarray(0, 6);
+    assert(
+      sessionHead.toString('latin1') === 'AUDM3\n',
+      `session.audm begins with the v3 binary magic AUDM3\\n (got ${JSON.stringify(sessionHead.toString('latin1'))})`
+    );
+
+    const sessionOpen = await page.evaluate(
+      (p) => window.__test.openSessionFrom(p),
+      OUT_SESSION
+    );
+    console.log(`  reopened session: ${JSON.stringify(sessionOpen)}`);
+    assert(sessionOpen.docCount === 1, `reopened session recreated 1 document (got ${sessionOpen.docCount})`);
+    assert(sessionOpen.trackCount >= 1, `reopened session has at least 1 track (got ${sessionOpen.trackCount})`);
+    assert(
+      sessionOpen.droppedClipCount === 0,
+      `reopened session dropped no clips (got ${sessionOpen.droppedClipCount})`
+    );
+
+    // The just-reopened document (addDocument'd inside openSessionFrom) is
+    // the active one — confirm its audio AND its markers came back from disk.
+    const sessionDocSummary = await page.evaluate(() => window.__test.getStateSummary());
+    console.log(`  reopened document: ${JSON.stringify(sessionDocSummary)}`);
+    assert(
+      sessionDocSummary.length === 88200,
+      `reopened session document has the tone's length (got ${sessionDocSummary.length})`
+    );
+    assert(
+      sessionDocSummary.sampleRate === 44100,
+      `reopened session document is 44100 Hz (got ${sessionDocSummary.sampleRate})`
+    );
+    const sessionMarkersAfter = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  session markers after reopen: ${JSON.stringify(sessionMarkersAfter)}`);
+    assert(
+      sessionMarkersAfter.length === 2,
+      `2 markers survive the session round trip (got ${sessionMarkersAfter.length})`
+    );
+    assert(
+      sessionMarkersAfter[0] &&
+        sessionMarkersAfter[0].positionSample === 15000 &&
+        sessionMarkersAfter[0].name === 'Session Verse',
+      `session marker 1 round-tripped correctly (${JSON.stringify(sessionMarkersAfter[0])})`
+    );
+    assert(
+      sessionMarkersAfter[1] &&
+        sessionMarkersAfter[1].positionSample === 50000 &&
+        sessionMarkersAfter[1].name === 'Session Chorus',
+      `session marker 2 round-tripped correctly (${JSON.stringify(sessionMarkersAfter[1])})`
+    );
+
+    // 9) Marker-dirty close prompt (Task M1/F1 acceptance): a freshly opened
+    // document is clean; adding a marker through the app's own store action
+    // (the same addMarker path MarkersPanel/menuActions use) must dirty it —
+    // that dirty flag is exactly what gates the "Unsaved changes" close
+    // prompt (fileService.ts's closeDocumentFlow checks doc.dirty). Asserting
+    // the real native confirm dialog itself isn't practical in this headless
+    // harness (Electron's dialog.showMessageBox blocks on a real modal with
+    // no scriptable driver here), so this asserts the dirty state that gates
+    // it, which is what M1 actually changed.
+    console.log('Marker-dirty flow: fresh doc + marker -> dirty (Task M1)...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const cleanSummary = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      cleanSummary.dirty === false,
+      `freshly opened document is clean before any edit (dirty=${cleanSummary.dirty})`
+    );
+    const dirtyMarkerId = await page.evaluate(() =>
+      window.__test.addMarkerToActive(30000, 'Dirty Check')
+    );
+    assert(dirtyMarkerId !== null, 'marker added for the dirty-check flow');
+    const dirtySummary = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      dirtySummary.dirty === true,
+      `adding a marker dirties the document, gating the unsaved-changes close prompt (dirty=${dirtySummary.dirty})`
+    );
+    // Persist so this now-dirty document doesn't trip the unsaved-changes
+    // beforeunload prompt at teardown.
+    await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
+    // 10) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 
