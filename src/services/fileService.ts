@@ -330,7 +330,17 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
     // dirty; the file on disk now holds the older snapshot, same semantics as
     // "save, then edit". Never write the pre-await snapshot's channels back.
     if (findDoc(docId) === current) {
-      store().updateDocument({ ...current, dirty: false });
+      // encodeInPlace's default branch (sourceFormat 'wav' or undefined) always
+      // writes a fresh 32-bit-float WAV, regardless of what sourceBitDepth used
+      // to say — retag it here the same way saveAsWav already does, so
+      // Properties (and a later re-open of this same path) reports the truth
+      // about what's actually on disk instead of a stale source depth (F14).
+      const updated: AudioDocument = { ...current, dirty: false };
+      if (current.sourceFormat !== 'mp3' && current.sourceFormat !== 'flac' && current.sourceFormat !== 'ogg') {
+        updated.sourceFormat = 'wav';
+        updated.sourceBitDepth = 32;
+      }
+      store().updateDocument(updated);
       markSavePoint(docId);
     } else {
       // The write already happened (using the pre-await snapshot), but a
@@ -355,12 +365,23 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
 async function saveAsWav(docId: string): Promise<void> {
   const doc = findDoc(docId);
   if (!doc) return;
-  const defaultName = isWavPath(doc.name) ? doc.name : `${doc.name}.wav`;
-  const targetPath = await api().showSaveDialog({
-    defaultPath: defaultName,
+  // Replace the source extension rather than appending (F21 — mirrors
+  // exportDocument's defaultName), so `song.mp3` defaults to `song.wav`
+  // instead of `song.mp3.wav`.
+  const baseName = doc.name.replace(/\.[^.]+$/, '');
+  let targetPath = await api().showSaveDialog({
+    defaultPath: `${baseName}.wav`,
     filters: [{ name: 'Waveform Audio', extensions: ['wav'] }],
   });
   if (!targetPath) return; // cancelled
+  // The dialog can return a path with a different (or no) extension if the
+  // user retypes the filename (e.g. `take.flac`); enforce `.wav` on the
+  // actual write target the same way exportDocument enforces its format
+  // extension, so RIFF bytes never land under a non-wav name and mislead a
+  // later in-place Save into overwriting it with more WAV bytes (F21).
+  if (!isWavPath(targetPath)) {
+    targetPath += '.wav';
+  }
 
   // Re-read the latest doc in case it changed while the dialog was open.
   const current = findDoc(docId);

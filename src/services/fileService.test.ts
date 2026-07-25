@@ -669,6 +669,78 @@ describe('saveDocument', () => {
     expect(decodedBack.markers).toEqual([{ name: 'Chorus', positionSample: 5 }]);
   });
 
+  it('retags sourceBitDepth to 32 after an in-place WAV save of a 16-bit source (F14)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\song.wav',
+      dirty: true,
+      name: 'song.wav',
+      sourceFormat: 'wav',
+      sourceBitDepth: 16,
+    });
+
+    await saveDocument(doc.id);
+
+    const saved = useAppStore.getState().documents[0];
+    expect(saved.sourceBitDepth).toBe(32);
+    expect(saved.sourceFormat).toBe('wav');
+    expect(saved.dirty).toBe(false);
+  });
+
+  it('retags an undefined-provenance WAV in-place save to sourceFormat wav / bitDepth 32 (F14)', async () => {
+    installApi();
+    // Mirrors the pre-existing "writes a valid 32-bit-float WAV..." test above:
+    // seedDoc with no sourceFormat/sourceBitDepth still routes through the
+    // encodeInPlace default (WAV) branch, so it must retag the same way.
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+
+    await saveDocument(doc.id);
+
+    const saved = useAppStore.getState().documents[0];
+    expect(saved.sourceBitDepth).toBe(32);
+    expect(saved.sourceFormat).toBe('wav');
+  });
+
+  it('does not retag sourceBitDepth for an in-place MP3 save (F14 scope)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\clip.mp3',
+      dirty: true,
+      name: 'clip.mp3',
+      sourceFormat: 'mp3',
+    });
+
+    await saveDocument(doc.id);
+
+    const saved = useAppStore.getState().documents[0];
+    expect(saved.sourceFormat).toBe('mp3');
+    expect(saved.sourceBitDepth).toBeUndefined();
+  });
+
+  it('defaults the save-as filename by replacing the extension, not appending (F21)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => null) }); // cancel; just inspect defaultPath
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'song.mp3' });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ defaultPath: 'song.wav' })
+    );
+  });
+
+  it('appends .wav to a non-wav path returned by the save-as dialog and retags provenance (F21)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\take.flac') });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'take' });
+
+    await saveDocument(doc.id);
+
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\take.flac.wav', expect.any(ArrayBuffer));
+    const saved = useAppStore.getState().documents[0];
+    expect(saved.filePath).toBe('D:\\out\\take.flac.wav');
+    expect(saved.name).toBe('take.flac.wav');
+    expect(saved.sourceFormat).toBe('wav');
+  });
+
   it('shows an error and keeps dirty when the write fails', async () => {
     const api = installApi({ writeFile: jest.fn(async () => ({ ok: false, error: 'disk full' })) });
     const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
