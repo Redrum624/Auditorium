@@ -438,20 +438,41 @@ function registerFileCommands(): void {
 /** Registers the multitrack session commands (Task 21): `session.save` writes
  * the current session as .audm and is only enabled while the multitrack view
  * is active (there's nothing meaningful to save otherwise); `session.open` is
- * always available and switches the view to 'multitrack' on success. */
+ * always available and switches the view to 'multitrack' on success.
+ *
+ * F3 defense-in-depth: `runCommand` has no try/catch of its own, and before
+ * this a thrown/rejected save or open propagated straight out through
+ * MenuBar's onClick with nothing visible to the user (no .audm written, no
+ * error). `saveSessionViaDialog`/`openSessionViaDialog` already catch their
+ * own known failure points, but this wrapper ensures ANY escaping error —
+ * known or not — still ends up in front of the user instead of vanishing. */
 function registerSessionCommands(): void {
   registerCommands([
     {
       id: 'session.save',
       label: 'Save Session…',
       enabled: (s) => s.view === 'multitrack',
-      run: async () => saveSessionViaDialog(),
+      run: async () => {
+        try {
+          await saveSessionViaDialog();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Save Session failed', message });
+        }
+      },
     },
     {
       id: 'session.open',
       label: 'Open Session…',
       enabled: () => true,
-      run: async () => openSessionViaDialog(),
+      run: async () => {
+        try {
+          await openSessionViaDialog();
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Open Session failed', message });
+        }
+      },
     },
   ]);
 }

@@ -3,10 +3,19 @@ import type { MenuCommand, MenuSection } from './menuActions';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { getSpectralScale, toggleSpectralScale } from './spectralScale';
+import * as sessionFileModule from '../multitrack/sessionFile';
+
+jest.mock('../multitrack/sessionFile');
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
 });
+
+function installShowMessageBox(): jest.Mock {
+  const showMessageBox = jest.fn(async () => 0);
+  (window as unknown as { electronAPI: { showMessageBox: jest.Mock } }).electronAPI = { showMessageBox };
+  return showMessageBox;
+}
 
 function openDoc() {
   const doc = createDocument({ name: 'a', sampleRate: 44100, channels: [new Float32Array(1000)] });
@@ -353,5 +362,36 @@ describe('view.spectralScale (Task F4)', () => {
 
     await runCommand('view.spectralScale');
     expect(getSpectralScale()).toBe('log');
+  });
+});
+
+describe('session.save / session.open error surfacing (F3 defense-in-depth)', () => {
+  it('session.save shows an error message box when saveSessionViaDialog rejects, instead of an uncaught rejection', async () => {
+    const showMessageBox = installShowMessageBox();
+    (sessionFileModule.saveSessionViaDialog as jest.MockedFunction<typeof sessionFileModule.saveSessionViaDialog>)
+      .mockRejectedValueOnce(new Error('serialize failed: payload too large'));
+    useAppStore.setState({ view: 'multitrack' });
+
+    await expect(runCommand('session.save')).resolves.toBeUndefined();
+
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        title: 'Save Session failed',
+        message: 'serialize failed: payload too large',
+      })
+    );
+  });
+
+  it('session.open shows an error message box when openSessionViaDialog rejects, instead of an uncaught rejection', async () => {
+    const showMessageBox = installShowMessageBox();
+    (sessionFileModule.openSessionViaDialog as jest.MockedFunction<typeof sessionFileModule.openSessionViaDialog>)
+      .mockRejectedValueOnce(new Error('parse failed: corrupt file'));
+
+    await expect(runCommand('session.open')).resolves.toBeUndefined();
+
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Open Session failed', message: 'parse failed: corrupt file' })
+    );
   });
 });

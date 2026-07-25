@@ -1,7 +1,15 @@
 import { createDocument, nextId, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState, type Marker } from '../stores/appStore';
 import { createClip, createTrack, type Session } from './session';
-import { openSessionViaDialog, parseSessionFile, saveSessionViaDialog, serializeSession } from './sessionFile';
+import {
+  openSessionViaDialog,
+  parseSessionFile,
+  parseSessionFileBytes,
+  parseSessionFileV3,
+  saveSessionViaDialog,
+  serializeSession,
+  serializeSessionV3,
+} from './sessionFile';
 import { useSessionStore } from './sessionStore';
 import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 
@@ -37,6 +45,19 @@ function sine(n: number, freq = 440, sr = 44100, amplitude = 0.5): Float32Array 
 
 function trackJson(id: string, clips: object[] = []) {
   return { id, name: 'T', volumeDb: 0, pan: 0, muted: false, solo: false, armed: false, clips };
+}
+
+/** Hand-builds a v3 buffer from arbitrary metadata + payload bytes, bypassing
+ * `serializeSessionV3` entirely — used to exercise corrupt/truncated inputs
+ * that a well-formed writer would never produce. */
+function buildV3Buffer(meta: object, payload: Uint8Array = new Uint8Array(0)): ArrayBuffer {
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(meta));
+  const out = new Uint8Array(10 + jsonBytes.byteLength + payload.byteLength);
+  out.set(new TextEncoder().encode('AUDM3\n'), 0);
+  new DataView(out.buffer).setUint32(6, jsonBytes.byteLength, true);
+  out.set(jsonBytes, 10);
+  out.set(payload, 10 + jsonBytes.byteLength);
+  return out.buffer;
 }
 
 beforeEach(() => {
@@ -93,7 +114,7 @@ describe('serializeSession', () => {
   });
 });
 
-describe('serializeSession -> parseSessionFile round trip', () => {
+describe('serializeSession -> parseSessionFile round trip (.audm v1/v2 — legacy, unchanged by the v3 work)', () => {
   it('preserves track params, clip geometry, and 32-bit-float audio content exactly', () => {
     const doc = createDocument({
       name: 'song.wav',
@@ -200,8 +221,255 @@ describe('serializeSession -> parseSessionFile round trip', () => {
   });
 });
 
-describe('markers (.audm v2)', () => {
-  it('serializeSession embeds markers only for docs referenced by a clip', () => {
+describe('serializeSessionV3 -> parseSessionFileV3 round trip (.audm v3)', () => {
+  it('round-trips track params, clip geometry, multi-doc audio, and markers, with byte-level offsets verified', () => {
+    const docA = createDocument({ name: 'a.wav', sampleRate: 48000, channels: [sine(2000, 440), sine(2000, 220)] });
+    const docB = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(500, 110)] });
+    const trackA = { ...createTrack('Lead'), volumeDb: -6, pan: 0.3, muted: true, solo: false, armed: true };
+    const trackB = createTrack('Rhythm');
+    const clipA = createClip({
+      documentId: docA.id,
+      startSample: 500,
+      offsetSample: 100,
+      lengthSample: 800,
+      gainDb: -3,
+    });
+    const clipB = createClip({ documentId: docB.id, startSample: 0, offsetSample: 0, lengthSample: 500 });
+    trackA.clips = [clipA];
+    trackB.clips = [clipB];
+    const session: Session = { name: 'V3 Session', sampleRate: 48000, tracks: [trackA, trackB] };
+    const markersByDoc: Record<string, Marker[]> = {
+      [docA.id]: [{ id: 'm-1', name: 'Hook', positionSample: 50 }],
+      [docB.id]: [{ id: 'm-2', name: 'Drop', positionSample: 10 }],
+    };
+
+    const { bytes, droppedClipCount } = serializeSessionV3(session, [docA, docB], markersByDoc);
+
+    expect(droppedClipCount).toBe(0);
+
+    // --- byte-level structure ---
+    expect(bytes).toBeInstanceOf(Uint8Array);
+    expect(new TextDecoder().decode(bytes.subarray(0, 6))).toBe('AUDM3\n');
+    const view = new DataView(bytes.buffer);
+    const jsonByteLength = view.getUint32(6, true);
+    const jsonText = new TextDecoder().decode(bytes.subarray(10, 10 + jsonByteLength));
+    const rawMeta = JSON.parse(jsonText) as {
+      formatVersion: number;
+      audio: { docId: string; channels: { offset: number; byteLength: number }[] }[];
+    };
+    expect(rawMeta.formatVersion).toBe(3);
+    expect(rawMeta.audio).toHaveLength(2);
+    const payloadStart = 10 + jsonByteLength;
+    const totalPayloadBytes = rawMeta.audio.reduce(
+      (sum, a) => sum + a.channels.reduce((s, c) => s + c.byteLength, 0),
+      0
+    );
+    expect(bytes.byteLength).toBe(payloadStart + totalPayloadBytes);
+
+    // Spot-check a recorded offset actually points at the matching float sample.
+    const metaA = rawMeta.audio.find((a) => a.docId === docA.id)!;
+    const ch0Offset = metaA.channels[0].offset;
+    expect(view.getFloat32(payloadStart + ch0Offset, true)).toBeCloseTo(docA.channels[0][0], 5);
+    const ch1Offset = metaA.channels[1].offset;
+    expect(view.getFloat32(payloadStart + ch1Offset, true)).toBeCloseTo(docA.channels[1][0], 5);
+
+    // --- functional round trip ---
+    const { session: restored, documents, markers } = parseSessionFileV3(bytes.buffer);
+    expect(restored.name).toBe('V3 Session');
+    expect(restored.sampleRate).toBe(48000);
+
+    const restoredTrackA = restored.tracks[0];
+    expect(restoredTrackA.volumeDb).toBe(-6);
+    expect(restoredTrackA.pan).toBe(0.3);
+    expect(restoredTrackA.muted).toBe(true);
+    expect(restoredTrackA.armed).toBe(true);
+    const restoredClipA = restoredTrackA.clips[0];
+    expect(restoredClipA.startSample).toBe(500);
+    expect(restoredClipA.offsetSample).toBe(100);
+    expect(restoredClipA.lengthSample).toBe(800);
+    expect(restoredClipA.gainDb).toBe(-3);
+
+    expect(documents).toHaveLength(2);
+    const restoredDocA = documents.find((d) => d.id === restoredClipA.documentId)!;
+    expect(restoredDocA.name).toBe('a.wav');
+    expect(restoredDocA.sampleRate).toBe(48000);
+    expect(restoredDocA.channels).toHaveLength(2);
+    expect(restoredDocA.channels[0]).toEqual(docA.channels[0]);
+    expect(restoredDocA.channels[1]).toEqual(docA.channels[1]);
+
+    const restoredDocB = documents.find((d) => d.name === 'b.wav')!;
+    expect(restoredDocB.channels[0]).toEqual(docB.channels[0]);
+
+    // Fresh doc ids, never the source's.
+    expect(documents.some((d) => d.id === docA.id)).toBe(false);
+    expect(documents.some((d) => d.id === docB.id)).toBe(false);
+
+    expect(markers[restoredDocA.id].map((m) => m.name)).toEqual(['Hook']);
+    expect(markers[restoredDocB.id].map((m) => m.name)).toEqual(['Drop']);
+  });
+
+  it('drops clips whose source document is not currently open and reports the count', () => {
+    const openDoc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const closedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    const keptClip = createClip({ documentId: openDoc.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    const orphanClip = createClip({ documentId: closedDoc.id, startSample: 200, offsetSample: 0, lengthSample: 100 });
+    track.clips = [keptClip, orphanClip];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes, droppedClipCount } = serializeSessionV3(session, [openDoc]);
+    const { session: restored, documents } = parseSessionFileV3(bytes.buffer);
+
+    expect(droppedClipCount).toBe(1);
+    expect(restored.tracks[0].clips).toHaveLength(1);
+    expect(documents).toHaveLength(1);
+    expect(documents[0].name).toBe('a.wav');
+  });
+
+  it('omits the markers key entirely when no referenced doc has any', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes } = serializeSessionV3(session, [doc], {});
+    const view = new DataView(bytes.buffer);
+    const jsonByteLength = view.getUint32(6, true);
+    const parsed = JSON.parse(new TextDecoder().decode(bytes.subarray(10, 10 + jsonByteLength)));
+
+    expect(parsed.markers).toBeUndefined();
+  });
+});
+
+describe('serializeSessionV3 structural guarantee (F3): never builds a full-file string', () => {
+  it('never calls btoa or String.fromCharCode, and keeps the JSON metadata tiny regardless of audio payload size', () => {
+    const fromCharCodeSpy = jest.spyOn(String, 'fromCharCode');
+    const btoaSpy = jest.spyOn(window, 'btoa');
+    const n = 500_000; // 3 channels * 500,000 samples * 4 bytes = 6MB of payload
+    const doc = createDocument({
+      name: 'big.wav',
+      sampleRate: 48000,
+      channels: [sine(n, 440), sine(n, 220), sine(n, 110)],
+    });
+    const track = createTrack('Big');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: n })];
+    const session: Session = { name: 'Big Session', sampleRate: 48000, tracks: [track] };
+
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    expect(fromCharCodeSpy).not.toHaveBeenCalled();
+    expect(btoaSpy).not.toHaveBeenCalled();
+
+    const view = new DataView(bytes.buffer);
+    const jsonByteLength = view.getUint32(6, true);
+    // The JSON slice holds only metadata (ids, sample rates, offsets, byte
+    // lengths) — it must stay small no matter how large the embedded audio
+    // is, proving the audio itself was never turned into a JSON/base64 string.
+    expect(jsonByteLength).toBeLessThan(2000);
+    expect(bytes.byteLength).toBeGreaterThan(n * 3 * 4);
+
+    fromCharCodeSpy.mockRestore();
+    btoaSpy.mockRestore();
+  });
+});
+
+describe('parseSessionFileV3 corrupt/truncated handling', () => {
+  it('throws for a buffer shorter than the v3 header', () => {
+    const buf = new ArrayBuffer(4);
+    expect(() => parseSessionFileV3(buf)).toThrow(/AUDM3|header/i);
+  });
+
+  it('throws when the buffer does not start with the AUDM3 magic', () => {
+    const buf = new ArrayBuffer(20);
+    expect(() => parseSessionFileV3(buf)).toThrow(/AUDM3|header/i);
+  });
+
+  it('throws when the declared JSON length runs past the end of the file (truncated JSON)', () => {
+    const jsonBytes = new TextEncoder().encode(
+      JSON.stringify({ formatVersion: 3, session: { name: 'x', sampleRate: 44100, tracks: [] }, audio: [] })
+    );
+    const out = new Uint8Array(10 + jsonBytes.byteLength);
+    out.set(new TextEncoder().encode('AUDM3\n'), 0);
+    new DataView(out.buffer).setUint32(6, jsonBytes.byteLength + 100, true); // claims more JSON than exists
+    out.set(jsonBytes, 10);
+
+    expect(() => parseSessionFileV3(out.buffer)).toThrow(/truncated/i);
+  });
+
+  it('throws for invalid JSON metadata', () => {
+    const badJson = new TextEncoder().encode('{not valid json');
+    const out = new Uint8Array(10 + badJson.byteLength);
+    out.set(new TextEncoder().encode('AUDM3\n'), 0);
+    new DataView(out.buffer).setUint32(6, badJson.byteLength, true);
+    out.set(badJson, 10);
+
+    expect(() => parseSessionFileV3(out.buffer)).toThrow(/invalid JSON/i);
+  });
+
+  it('throws for an unsupported formatVersion inside an otherwise-valid v3 header', () => {
+    const buf = buildV3Buffer({ formatVersion: 4, session: { name: 'x', sampleRate: 44100, tracks: [] }, audio: [] });
+    expect(() => parseSessionFileV3(buf)).toThrow(/version/i);
+  });
+
+  it('throws when the audio index is missing', () => {
+    const buf = buildV3Buffer({ formatVersion: 3, session: { name: 'x', sampleRate: 44100, tracks: [] } });
+    expect(() => parseSessionFileV3(buf)).toThrow(/audio index/i);
+  });
+
+  it('throws when a channel byteLength does not match its declared sample length', () => {
+    const payload = new Uint8Array(16); // 4 float32 samples worth of bytes
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', name: 'a', sampleRate: 44100, length: 10, channels: [{ offset: 0, byteLength: 16 }] }],
+    };
+    const buf = buildV3Buffer(meta, payload);
+
+    expect(() => parseSessionFileV3(buf)).toThrow(/byte length/i);
+  });
+
+  it('throws when a channel offset/length runs past the end of the payload (truncated audio)', () => {
+    const payload = new Uint8Array(16);
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', name: 'a', sampleRate: 44100, length: 4, channels: [{ offset: 8, byteLength: 16 }] }],
+    };
+    const buf = buildV3Buffer(meta, payload);
+
+    expect(() => parseSessionFileV3(buf)).toThrow(/out of range/i);
+  });
+});
+
+describe('parseSessionFileBytes (sniff-and-dispatch)', () => {
+  it('dispatches to the v3 binary parser when the AUDM3 magic is present', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(50)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 50 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    const result = parseSessionFileBytes(bytes.buffer);
+
+    expect(result.documents[0].channels[0]).toEqual(doc.channels[0]);
+  });
+
+  it('falls back to the legacy JSON parser for a v1/v2 buffer with no AUDM3 magic', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(50)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 50 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const { json } = serializeSession(session, [doc]);
+    const buf = new TextEncoder().encode(json).buffer;
+
+    const result = parseSessionFileBytes(buf);
+
+    expect(result.documents[0].channels[0]).toEqual(doc.channels[0]);
+  });
+});
+
+describe('markers (.audm)', () => {
+  it('serializeSession (legacy v2) embeds markers only for docs referenced by a clip', () => {
     const referenced = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
     const unreferenced = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(100)] });
     const track = createTrack('T');
@@ -219,18 +487,6 @@ describe('markers (.audm v2)', () => {
     expect(parsed.markers).toEqual({
       [referenced.id]: [{ id: 'm-1', name: 'Hook', positionSample: 5 }],
     });
-  });
-
-  it('serializeSession omits the markers key entirely when no referenced doc has any', () => {
-    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
-    const track = createTrack('T');
-    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 })];
-    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
-
-    const { json } = serializeSession(session, [doc], {});
-    const parsed = JSON.parse(json);
-
-    expect(parsed.markers).toBeUndefined();
   });
 
   it('round-trips marker names/positions through parseSessionFile, remapped to the fresh doc id, with fresh marker ids', () => {
@@ -274,7 +530,7 @@ describe('markers (.audm v2)', () => {
     expect(markers).toEqual({});
   });
 
-  it('openSessionViaDialog seeds the appStore markers for the recreated document', async () => {
+  it('openSessionViaDialog seeds the appStore markers for the recreated document (legacy v1/v2 fixture)', async () => {
     const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     const track = createTrack('T');
     track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
@@ -293,12 +549,10 @@ describe('markers (.audm v2)', () => {
 
     const appState = useAppStore.getState();
     const newDocId = appState.documents[0].id;
-    expect(appState.markers[newDocId]).toEqual([
-      expect.objectContaining({ name: 'Drop', positionSample: 3 }),
-    ]);
+    expect(appState.markers[newDocId]).toEqual([expect.objectContaining({ name: 'Drop', positionSample: 3 })]);
   });
 
-  it('saveSessionViaDialog includes the current appStore markers for referenced docs', async () => {
+  it('saveSessionViaDialog (v3) includes the current appStore markers for referenced docs', async () => {
     const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
     const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     useAppStore.getState().addDocument(doc);
@@ -311,15 +565,14 @@ describe('markers (.audm v2)', () => {
     await saveSessionViaDialog();
 
     const [, data] = api.writeFile.mock.calls[0];
-    const parsed = JSON.parse(new TextDecoder().decode(data as ArrayBuffer));
-    expect(parsed.markers).toEqual({
-      [doc.id]: [{ id: 'm-1', name: 'Peak', positionSample: 2 }],
-    });
+    const { documents, markers } = parseSessionFileV3(data as ArrayBuffer);
+    const newDocId = documents[0].id;
+    expect(markers[newDocId]).toEqual([expect.objectContaining({ name: 'Peak', positionSample: 2 })]);
   });
 });
 
 describe('saveSessionViaDialog', () => {
-  it('writes the serialized session (only referenced docs) to the picked .audm path', async () => {
+  it('writes a v3 binary .audm file (only referenced docs) to the picked path', async () => {
     const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
     const doc: AudioDocument = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     useAppStore.getState().addDocument(doc);
@@ -335,11 +588,13 @@ describe('saveSessionViaDialog', () => {
     expect(api.writeFile).toHaveBeenCalledTimes(1);
     const [path, data] = api.writeFile.mock.calls[0];
     expect(path).toBe('D:\\out\\session.audm');
-    const text = new TextDecoder().decode(data as ArrayBuffer);
-    const parsed = JSON.parse(text);
-    expect(parsed.formatVersion).toBe(2);
-    expect(parsed.documents).toHaveLength(1);
-    expect(parsed.session.tracks[0].clips[0].lengthSample).toBe(10);
+    const bytes = new Uint8Array(data as ArrayBuffer);
+    expect(new TextDecoder().decode(bytes.subarray(0, 6))).toBe('AUDM3\n');
+
+    const { session, documents } = parseSessionFileV3(data as ArrayBuffer);
+    expect(session.tracks[0].clips[0].lengthSample).toBe(10);
+    expect(documents).toHaveLength(1);
+    expect(documents[0].channels[0]).toEqual(doc.channels[0]);
   });
 
   it('is a no-op when the save dialog is cancelled', async () => {
@@ -348,6 +603,22 @@ describe('saveSessionViaDialog', () => {
     await saveSessionViaDialog();
 
     expect(api.writeFile).not.toHaveBeenCalled();
+  });
+
+  it('shows a success message box when the save succeeds and no clips were dropped (F3: success is never silent)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(doc);
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+
+    await saveSessionViaDialog();
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', title: 'Save Session', message: 'Session saved.' })
+    );
   });
 
   it('shows an error message box when the write fails', async () => {
@@ -359,11 +630,35 @@ describe('saveSessionViaDialog', () => {
     await saveSessionViaDialog();
 
     expect(api.showMessageBox).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'error', message: 'disk full' })
+      expect.objectContaining({ type: 'error', title: 'Save Session failed', message: 'disk full' })
     );
   });
 
-  it('warns via an info message box when saved clips referenced closed source files', async () => {
+  it('shows an error message box when serialization itself throws, and never calls writeFile (F3 defense-in-depth)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(doc);
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+    // Simulate any unexpected serialize-time failure (the old base64 path
+    // could throw a RangeError here past ~402MB of embedded audio with
+    // nothing on the call path catching it — this proves the new try/catch
+    // surfaces ANY such failure instead of an uncaught rejection).
+    useAppStore.setState((s) => ({
+      documents: s.documents.map((d) => (d.id === doc.id ? { ...d, channels: [null as unknown as Float32Array] } : d)),
+    }));
+
+    await saveSessionViaDialog();
+
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Save Session failed' })
+    );
+  });
+
+  it('warns via an info message box (extended with the success confirmation) when saved clips referenced closed source files', async () => {
     const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
     const openDoc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     const closedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
@@ -383,32 +678,20 @@ describe('saveSessionViaDialog', () => {
 
     expect(api.writeFile).toHaveBeenCalledTimes(1);
     const [, data] = api.writeFile.mock.calls[0];
-    const text = new TextDecoder().decode(data as ArrayBuffer);
-    const parsed = JSON.parse(text);
-    expect(parsed.session.tracks[0].clips).toHaveLength(1);
+    const { session } = parseSessionFileV3(data as ArrayBuffer);
+    expect(session.tracks[0].clips).toHaveLength(1);
 
     expect(api.showMessageBox).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'info', message: '1 clip(s) referenced closed files and were not saved.' })
+      expect.objectContaining({
+        type: 'info',
+        message: 'Session saved. 1 clip(s) referenced closed files and were not saved.',
+      })
     );
-  });
-
-  it('does not show a message box when no clips were dropped', async () => {
-    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
-    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
-    useAppStore.getState().addDocument(doc);
-    const trackId = useSessionStore.getState().session.tracks[0].id;
-    useSessionStore
-      .getState()
-      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
-
-    await saveSessionViaDialog();
-
-    expect(api.showMessageBox).not.toHaveBeenCalled();
   });
 });
 
 describe('openSessionViaDialog', () => {
-  it('recreates docs, remaps clip documentIds, replaces the session, and switches to multitrack view', async () => {
+  it('recreates docs, remaps clip documentIds, replaces the session, and switches to multitrack view (legacy v1/v2 fixture)', async () => {
     const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     const track = createTrack('Loaded Track');
     track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
@@ -432,6 +715,32 @@ describe('openSessionViaDialog', () => {
     expect(appState.view).toBe('multitrack');
     const restoredClip = sessionState.session.tracks[0].clips[0];
     expect(appState.documents.some((d) => d.id === restoredClip.documentId)).toBe(true);
+  });
+
+  it('recreates docs, remaps clip documentIds, replaces the session, and switches to multitrack view (.audm v3 file)', async () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('Loaded Track');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const session: Session = { name: 'Loaded Session', sampleRate: 44100, tracks: [track] };
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\session.audm']),
+      readFile: jest.fn(async () => bytes.buffer),
+    });
+
+    await openSessionViaDialog();
+
+    expect(api.readFile).toHaveBeenCalledWith('D:\\in\\session.audm');
+    const sessionState = useSessionStore.getState();
+    expect(sessionState.session.name).toBe('Loaded Session');
+
+    const appState = useAppStore.getState();
+    expect(appState.view).toBe('multitrack');
+    const restoredClip = sessionState.session.tracks[0].clips[0];
+    const restoredDoc = appState.documents.find((d) => d.id === restoredClip.documentId);
+    expect(restoredDoc).toBeDefined();
+    expect(restoredDoc!.channels[0]).toEqual(doc.channels[0]);
   });
 
   it('clears the mini-waveform cache (F9) — a loaded session invalidates every stale clip bitmap', async () => {
@@ -498,6 +807,47 @@ describe('openSessionViaDialog', () => {
     );
     expect(useSessionStore.getState().session).toBe(before);
     expect(useAppStore.getState().view).not.toBe('multitrack');
+  });
+
+  it('shows an error message box and leaves the current session untouched on a corrupt/truncated .audm v3 file', async () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(50)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 50 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const { bytes } = serializeSessionV3(session, [doc]);
+    const truncated = bytes.slice(0, bytes.byteLength - 20); // cut off the tail of the audio payload
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\truncated.audm']),
+      readFile: jest.fn(async () => truncated.buffer),
+    });
+    const before = useSessionStore.getState().session;
+
+    await openSessionViaDialog();
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ type: 'error' }));
+    expect(useSessionStore.getState().session).toBe(before);
+    expect(useAppStore.getState().view).not.toBe('multitrack');
+  });
+
+  it('shows a clean error (not a crash) when a legacy file is too large to decode as a single JS string (V8 string-cap safety)', async () => {
+    const decodeSpy = jest.spyOn(TextDecoder.prototype, 'decode').mockImplementationOnce(() => {
+      throw new RangeError('Invalid string length');
+    });
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\huge.audm']),
+      readFile: jest.fn(async () => new ArrayBuffer(16)), // content is irrelevant; decode() is mocked to throw
+    });
+    const before = useSessionStore.getState().session;
+
+    await openSessionViaDialog();
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', message: expect.stringContaining('Invalid string length') })
+    );
+    expect(useSessionStore.getState().session).toBe(before);
+    expect(useAppStore.getState().view).not.toBe('multitrack');
+
+    decodeSpy.mockRestore();
   });
 
   it('shows an info message box and drops clips when opened clips reference no embedded document', async () => {
