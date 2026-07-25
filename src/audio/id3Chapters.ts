@@ -21,6 +21,12 @@ export interface ParsedId3Chapter {
 
 const TXXX_DESCRIPTION = 'AUDITORIUM_MARKERS';
 
+/** CTOC/CHAP interop frames are capped at this many markers — CTOC's entry
+ * count is a single byte, so anything beyond this would silently declare the
+ * wrong count (Task M6 / F22). TXXX AUDITORIUM_MARKERS (the source of truth
+ * on read) always carries the full list regardless of marker count. */
+const CTOC_CHAP_CAP = 255;
+
 // ---- byte helpers -----------------------------------------------------
 
 function concatBytes(chunks: Uint8Array[]): Uint8Array {
@@ -155,11 +161,19 @@ function buildTxxxPayload(json: string): Uint8Array {
  * (interop chapter fields, millisecond-rounded) plus a private
  * `TXXX AUDITORIUM_MARKERS` frame (sample-exact JSON, the source of truth on
  * read). No unsynchronisation, no extended header, no padding.
+ *
+ * CTOC/CHAP are capped at the first `CTOC_CHAP_CAP` (255) markers BY POSITION
+ * (Task M6 / F22) — CTOC's entry count is a single byte, so beyond that it
+ * would declare a count that doesn't match the emitted child list. TXXX is
+ * never capped or reordered: it always carries every marker, in input order.
  */
 export function buildId3Chapters(markers: Id3ChapterMarker[], sampleRate: number): Uint8Array {
-  const frames: Uint8Array[] = [buildFrame('CTOC', buildCtocPayload(markers.length))];
+  const interopMarkers = [...markers]
+    .sort((a, b) => a.positionSample - b.positionSample)
+    .slice(0, CTOC_CHAP_CAP);
+  const frames: Uint8Array[] = [buildFrame('CTOC', buildCtocPayload(interopMarkers.length))];
 
-  markers.forEach((m, i) => {
+  interopMarkers.forEach((m, i) => {
     const startMs = Math.round((m.positionSample / sampleRate) * 1000);
     const tit2 = buildTit2Frame(m.name);
     frames.push(buildFrame('CHAP', buildChapPayload(i, startMs, tit2)));

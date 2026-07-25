@@ -181,6 +181,56 @@ describe('buildId3Chapters — byte-level layout (ID3v2.3)', () => {
   });
 });
 
+describe('buildId3Chapters — CTOC/CHAP interop cap at 255 markers (F22)', () => {
+  it('caps CTOC entry count and emitted CHAP frames at 255 for 256 markers, while TXXX still carries all 256', () => {
+    const markers = Array.from({ length: 256 }, (_, i) => ({ positionSample: i * 100, name: `M${i}` }));
+    const tag = buildId3Chapters(markers, 44100);
+    const frames = walkFrames(tag, 10, tag.length);
+
+    const ctoc = frames.find((f) => f.id === 'CTOC')!;
+    expect(tag[ctoc.start + 5]).toBe(255); // entry count byte now matches the emitted child count
+
+    const chaps = frames.filter((f) => f.id === 'CHAP');
+    expect(chaps).toHaveLength(255);
+    expect(readAscii(tag, chaps[0].start, 4)).toBe('chp0');
+    expect(readAscii(tag, chaps[254].start, 6)).toBe('chp254'); // 255th (last emitted) marker
+
+    const txxxFrames = frames.filter((f) => f.id === 'TXXX');
+    expect(txxxFrames).toHaveLength(1);
+
+    const parsed = parseId3Chapters(new Uint8Array(tag).buffer);
+    expect(parsed).not.toBeNull();
+    expect(parsed).toHaveLength(256); // TXXX (source of truth) is never capped
+    expect(parsed!.map((m) => m.exactSample)).toEqual(markers.map((m) => m.positionSample));
+  });
+
+  it('selects the interop CHAP subset by POSITION, not input array order', () => {
+    // 257 markers at positions 0..256 (in samples), fed in a shuffled (not
+    // position-sorted) order. The emitted CHAP set must still be exactly the
+    // 255 LOWEST positions (0..254), not "whichever 255 came first in the array".
+    const inOrder = Array.from({ length: 257 }, (_, i) => ({ positionSample: i, name: `M${i}` }));
+    const shuffled = [...inOrder].sort((a, b) => (a.positionSample % 7) - (b.positionSample % 7));
+    expect(shuffled).not.toEqual(inOrder); // sanity: the shuffle actually reordered it
+
+    const tag = buildId3Chapters(shuffled, 44100);
+    const frames = walkFrames(tag, 10, tag.length);
+    const chaps = frames.filter((f) => f.id === 'CHAP');
+    expect(chaps).toHaveLength(255);
+
+    // Decode each CHAP's start ms and confirm the emitted set is exactly
+    // positions 0..254 (the 255 lowest), regardless of input order. The
+    // element id ("chp0".."chp254") is variable-length (NUL-terminated), so
+    // find its terminator rather than assuming a fixed offset.
+    const startMses = chaps.map((c) => {
+      let i = c.start;
+      while (tag[i] !== 0) i++;
+      return readU32BE(tag, i + 1);
+    });
+    const expectedMs = Array.from({ length: 255 }, (_, i) => Math.round((i / 44100) * 1000));
+    expect([...startMses].sort((a, b) => a - b)).toEqual(expectedMs);
+  });
+});
+
 describe('buildId3Chapters → parseId3Chapters round-trip', () => {
   it('round-trips Unicode names and exact sample positions via the TXXX (preferred) path', () => {
     const markers = [

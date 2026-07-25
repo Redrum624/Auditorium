@@ -355,17 +355,27 @@ export function encodeFlac(
   }
   const md5sig = md5(pcm);
 
-  // Determine per-frame block sizes to fill min/max blocksize honestly.
-  const blockSizes: number[] = [];
-  if (totalSamples === 0) {
-    blockSizes.push(0);
-  } else {
-    for (let start = 0; start < totalSamples; start += BLOCK_SIZE) {
-      blockSizes.push(Math.min(BLOCK_SIZE, totalSamples - start));
-    }
-  }
-  const minBlock = Math.min(...blockSizes);
-  const maxBlock = Math.max(...blockSizes);
+  // STREAMINFO min/max blocksize (Task M6 / F18), per RFC 9639 / libFLAC.
+  // Every frame below uses the FIXED blocking strategy at a constant
+  // BLOCK_SIZE, except possibly a shorter final frame — that trailing partial
+  // frame is a formality, not a second genuine blocksize, so an honest
+  // STREAMINFO EXCLUDES it from min/max: whenever at least one full
+  // BLOCK_SIZE frame exists (totalSamples >= BLOCK_SIZE), min=max=BLOCK_SIZE.
+  // (The old code included the tail frame, so min != max on almost every
+  // real file.) When the whole stream fits in a single frame shorter than
+  // BLOCK_SIZE, min=max=that frame's actual size, floored at 16 — FLAC's
+  // minimum legal block size; anything below it is spec-invalid and
+  // ffmpeg/Chromium reject it outright (a very short saved document couldn't
+  // even reopen its own file before this fix).
+  //
+  // Computed as a direct O(1) comparison rather than Math.min/max(...spread)
+  // over a per-block array: every block except possibly the last is exactly
+  // BLOCK_SIZE by construction, so "does a full block exist" reduces to a
+  // single threshold check. The old per-block array could exceed 65,536
+  // entries (~268M samples at BLOCK_SIZE) and blow the JS engine's
+  // argument-spread limit with a RangeError.
+  const minBlock = totalSamples >= BLOCK_SIZE ? BLOCK_SIZE : Math.max(totalSamples, 16);
+  const maxBlock = totalSamples >= BLOCK_SIZE ? BLOCK_SIZE : minBlock;
 
   // --- STREAMINFO ---
   // is-last is cleared (0x00) when a VORBIS_COMMENT block follows; set (0x80)

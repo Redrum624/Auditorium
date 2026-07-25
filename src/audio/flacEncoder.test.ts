@@ -307,13 +307,17 @@ describe('encodeFlac STREAMINFO', () => {
     expect(decodeVerbatimFlac(buf).bitDepth).toBe(24);
   });
 
-  it('sets min/max block size to the true per-frame min and max (short last frame)', () => {
-    // 4096*2 + 100 => three frames of 4096, 4096, 100.
+  it('excludes the trailing partial frame from STREAMINFO min/max blocksize when a full block exists (F18)', () => {
+    // 4096*2 + 100 => three frames of 4096, 4096, 100. The frames use the FIXED
+    // blocking strategy, so per RFC 9639/libFLAC the honest STREAMINFO reports
+    // the nominal 4096 blocksize for BOTH min and max — the 100-sample tail
+    // frame is a formality, not a second distinct blocksize (this was F18: the
+    // old code set minBlock=100, giving min != max on almost every real file).
     const len = 4096 * 2 + 100;
     const buf = encodeFlac([sine(440, 44100, len)], 44100, 16);
     const d = decodeVerbatimFlac(buf);
     expect(d.maxBlock).toBe(4096);
-    expect(d.minBlock).toBe(100);
+    expect(d.minBlock).toBe(4096);
   });
 
   it('uses min==max block size when the length is an exact multiple of 4096', () => {
@@ -322,6 +326,28 @@ describe('encodeFlac STREAMINFO', () => {
     const d = decodeVerbatimFlac(buf);
     expect(d.minBlock).toBe(4096);
     expect(d.maxBlock).toBe(4096);
+  });
+
+  it('reports min=max=the actual block size for a single short stream under 4096 samples (F18)', () => {
+    const len = 1000;
+    const buf = encodeFlac([sine(440, 44100, len)], 44100, 16);
+    const d = decodeVerbatimFlac(buf);
+    expect(d.minBlock).toBe(1000);
+    expect(d.maxBlock).toBe(1000);
+    expect(d.totalSamples).toBe(1000);
+  });
+
+  it('floors STREAMINFO min/max blocksize at 16 (the spec minimum) for a stream shorter than 16 samples, and it still decodes cleanly (F18)', () => {
+    const len = 8;
+    const buf = encodeFlac([sine(440, 44100, len)], 44100, 16);
+    const d = decodeVerbatimFlac(buf);
+    // STREAMINFO's advisory min/max is floored at 16 (below this is spec-
+    // invalid and ffmpeg/Chromium reject it outright); the frame itself still
+    // declares and encodes the true (8-sample) block.
+    expect(d.minBlock).toBe(16);
+    expect(d.maxBlock).toBe(16);
+    expect(d.totalSamples).toBe(8);
+    expect(d.channels[0].length).toBe(8);
   });
 
   it("STREAMINFO MD5 equals the MD5 of the interleaved little-endian PCM", () => {

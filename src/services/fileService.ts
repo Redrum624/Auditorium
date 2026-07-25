@@ -120,7 +120,9 @@ async function encodeInPlace(doc: AudioDocument): Promise<ArrayBuffer> {
     case 'mp3':
       return encodeMp3(doc.channels, doc.sampleRate, MP3_SAVE_KBPS, store().markers[doc.id]);
     case 'flac':
-      return encodeFlac(doc.channels, doc.sampleRate, doc.sourceBitDepth === 24 ? 24 : 16, store().markers[doc.id]);
+      // Round UP rather than truncating: a 20-bit source must not silently
+      // lose precision down to 16 (Task M6 / F20).
+      return encodeFlac(doc.channels, doc.sampleRate, (doc.sourceBitDepth ?? 0) > 16 ? 24 : 16, store().markers[doc.id]);
     case 'ogg':
       return toArrayBuffer(await encodeOggOpus(doc.channels, doc.sampleRate, undefined, store().markers[doc.id]));
     default:

@@ -507,7 +507,7 @@ describe('saveDocument', () => {
     expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\track.flac', expect.any(ArrayBuffer));
   });
 
-  it('re-encodes a 16-bit FLAC source at 16-bit (default when depth is not 24)', async () => {
+  it('re-encodes a 16-bit FLAC source at 16-bit (default when depth is not above 16)', async () => {
     installApi();
     const doc = seedDoc({
       filePath: 'D:\\audio\\track.flac',
@@ -519,6 +519,20 @@ describe('saveDocument', () => {
     await saveDocument(doc.id);
 
     expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 16, undefined);
+  });
+
+  it('rounds a 20-bit FLAC source UP to 24-bit instead of truncating to 16 (F20)', async () => {
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\track.flac',
+      name: 'track.flac',
+      sourceFormat: 'flac',
+      sourceBitDepth: 20,
+    });
+
+    await saveDocument(doc.id);
+
+    expect(mockEncodeFlac).toHaveBeenCalledWith(doc.channels, 44100, 24, undefined);
   });
 
   it('passes the active doc markers into encodeFlac when saving a FLAC in place (K4)', async () => {
