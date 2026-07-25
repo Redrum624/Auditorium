@@ -374,6 +374,11 @@ export function encodeFlac(
   // single threshold check. The old per-block array could exceed 65,536
   // entries (~268M samples at BLOCK_SIZE) and blow the JS engine's
   // argument-spread limit with a RangeError.
+  //
+  // A 0-sample (empty) stream falls out of the same "single short frame"
+  // branch (`Math.max(0, 16)`), so it now also reports 16/16 instead of the
+  // old code's 0/0 — an incidental improvement (min_blocksize 0 is spec-
+  // invalid too) rather than something separately special-cased.
   const minBlock = totalSamples >= BLOCK_SIZE ? BLOCK_SIZE : Math.max(totalSamples, 16);
   const maxBlock = totalSamples >= BLOCK_SIZE ? BLOCK_SIZE : minBlock;
 

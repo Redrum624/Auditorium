@@ -234,9 +234,9 @@ describe('buildId3Chapters — CTOC/CHAP interop cap at 255 markers (F22)', () =
 describe('buildId3Chapters → parseId3Chapters round-trip', () => {
   it('round-trips Unicode names and exact sample positions via the TXXX (preferred) path', () => {
     const markers = [
-      { positionSample: 44100, name: 'Café ☕ 日本語' },
-      { positionSample: 132300, name: '🎵 Emoji Marker' },
-      { positionSample: 0, name: 'Start' },
+      { positionSample: 44100, name: 'Café ☕ 日本語' }, // 1000ms
+      { positionSample: 132300, name: '🎵 Emoji Marker' }, // 3000ms
+      { positionSample: 0, name: 'Start' }, // 0ms
     ];
     const tag = buildId3Chapters(markers, 44100);
     const copy = new Uint8Array(tag); // standalone ArrayBuffer, independent of tag's own buffer
@@ -245,6 +245,48 @@ describe('buildId3Chapters → parseId3Chapters round-trip', () => {
     expect(parsed).toHaveLength(3);
     expect(parsed!.map((m) => m.name)).toEqual(markers.map((m) => m.name));
     expect(parsed!.map((m) => m.exactSample)).toEqual(markers.map((m) => m.positionSample));
+    // positionMs must line up with the SAME (input-order) entry, not with
+    // whatever entry the position-sorted CHAP emission happened to put at
+    // that index (Fix round 1 regression — see the two dedicated tests below).
+    expect(parsed!.map((m) => m.positionMs)).toEqual([1000, 3000, 0]);
+  });
+
+  it('pairs each TXXX entry with the correct positionMs even when input is not position-sorted (Fix round 1)', () => {
+    // buildId3Chapters's F22 cap sorts BY POSITION for CHAP emission (chp0 =
+    // lowest position), while TXXX keeps input order. parseId3Chapters must
+    // re-rank TXXX entries the same way before pairing positionMs by index —
+    // pairing by raw TXXX (input) index against position-sorted CHAP silently
+    // rotated every positionMs. This uses markers already sorted by position
+    // deliberately shuffled to input order Café/Emoji/Start (44100/132300/0)
+    // — CHAP emission order is Start(chp0)/Café(chp1)/Emoji(chp2).
+    const markers = [
+      { positionSample: 44100, name: 'Café ☕ 日本語' },
+      { positionSample: 132300, name: '🎵 Emoji Marker' },
+      { positionSample: 0, name: 'Start' },
+    ];
+    const tag = buildId3Chapters(markers, 44100);
+    const parsed = parseId3Chapters(new Uint8Array(tag).buffer);
+    expect(parsed).not.toBeNull();
+    // Entries stay in TXXX (input) order: Café, Emoji, Start.
+    expect(parsed!.map((m) => m.name)).toEqual(['Café ☕ 日本語', '🎵 Emoji Marker', 'Start']);
+    expect(parsed!.map((m) => m.positionMs)).toEqual([1000, 3000, 0]);
+  });
+
+  it('falls back to positionMs 0 for TXXX entries beyond the 255-marker CHAP cap (F22 x Fix round 1)', () => {
+    const markers = Array.from({ length: 300 }, (_, i) => ({ positionSample: i * 1000, name: `M${i}` }));
+    const tag = buildId3Chapters(markers, 44100);
+    const parsed = parseId3Chapters(new Uint8Array(tag).buffer);
+    expect(parsed).not.toBeNull();
+    expect(parsed).toHaveLength(300);
+    // The 255 lowest positions (indices 0..254, already input-sorted here)
+    // got a CHAP frame, so they carry a real (nonzero, except index 0) ms.
+    for (let i = 0; i < 255; i++) {
+      expect(parsed![i].positionMs).toBe(Math.round(((i * 1000) / 44100) * 1000));
+    }
+    // Everything past the cap has no CHAP counterpart, so it falls back to 0.
+    for (let i = 255; i < 300; i++) {
+      expect(parsed![i].positionMs).toBe(0);
+    }
   });
 
   it('round-trips through a CHAP-only tag (TXXX stripped) using ms → name pairs, title from TIT2', () => {

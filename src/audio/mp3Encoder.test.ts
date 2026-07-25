@@ -3,8 +3,26 @@
  */
 // Uses the REAL @breezystack/lamejs encoder. The jsdom environment can choke on
 // lamejs's module shape, so this file forces the node environment.
-import { encodeMp3, getLameOutputRate } from './mp3Encoder';
+import { encodeMp3, getLameOutputRate, type Mp3Kbps } from './mp3Encoder';
 import { buildId3Chapters, parseId3Chapters } from './id3Chapters';
+
+// Compile-time guard (Fix round 1 / IMPORTANT 2): getLameOutputRate's tier
+// table is only verified correct for kbps >= 128 (measured directly against
+// the real encoder: kbps=64/96/112 all give DIFFERENT output rates than this
+// table predicts — see getLameOutputRate's doc comment). If Mp3Kbps is ever
+// widened to include one of these known-broken low bitrates, the following
+// lines fail to TYPECHECK (not just fail a runtime assertion), which fails
+// both `npm run typecheck` and this test file's ts-jest compile step — the
+// only way to catch a type-level regression that no runtime test can see.
+type RejectsKnownBrokenKbps<K extends number> = K extends Mp3Kbps
+  ? ['Mp3Kbps must not include this bitrate — getLameOutputRate is documented wrong below 128 kbps', K]
+  : true;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _kbpsFloorGuard64: RejectsKnownBrokenKbps<64> = true;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _kbpsFloorGuard96: RejectsKnownBrokenKbps<96> = true;
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+const _kbpsFloorGuard112: RejectsKnownBrokenKbps<112> = true;
 
 function sine(freq: number, sampleRate: number, seconds: number): Float32Array {
   const length = Math.round(sampleRate * seconds);

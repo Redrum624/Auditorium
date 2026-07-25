@@ -400,8 +400,19 @@ function parseId3ChaptersInner(buf: ArrayBuffer): ParsedId3Chapter[] | null {
   }
 
   if (txxxEntries) {
-    return txxxEntries.map((e, i) => ({
-      positionMs: chapList[i]?.positionMs ?? 0,
+    // chapList is in CHAP-EMISSION order, which is the first CTOC_CHAP_CAP
+    // TXXX entries sorted BY POSITION (buildId3Chapters), not TXXX's own
+    // (input) order — those only coincide when the writer's input already
+    // happened to be position-sorted. Re-rank txxxEntries by `s` to recover
+    // the emission order before pairing positionMs by index (Task M6 fix
+    // round 1): entries beyond CHAP's cap (or a v2.3/v2.4 CHAP-less TXXX
+    // beyond the 255 that were ever written) correctly fall back to 0.
+    const byPosition = [...txxxEntries].sort((a, b) => a.s - b.s);
+    const positionMsByEntry = new Map<RawMarkerJson, number>(
+      byPosition.map((e, i) => [e, chapList[i]?.positionMs ?? 0])
+    );
+    return txxxEntries.map((e) => ({
+      positionMs: positionMsByEntry.get(e) ?? 0,
       name: e.n,
       exactSample: Math.round(e.s),
     }));

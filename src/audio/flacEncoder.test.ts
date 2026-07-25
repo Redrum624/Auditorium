@@ -350,6 +350,14 @@ describe('encodeFlac STREAMINFO', () => {
     expect(d.channels[0].length).toBe(8);
   });
 
+  it('floors STREAMINFO min/max blocksize at 16 for an empty (0-sample) stream too — an improvement over the previous 0/0 (F18 addendum)', () => {
+    const buf = encodeFlac([new Float32Array(0)], 44100, 16);
+    const d = decodeVerbatimFlac(buf);
+    expect(d.totalSamples).toBe(0);
+    expect(d.minBlock).toBe(16);
+    expect(d.maxBlock).toBe(16);
+  });
+
   it("STREAMINFO MD5 equals the MD5 of the interleaved little-endian PCM", () => {
     const len = 2000;
     const chL = sine(440, 44100, len);

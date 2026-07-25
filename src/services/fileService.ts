@@ -4,7 +4,7 @@ import { readFlacStreamInfo } from '../audio/sniffSampleRate';
 import { encodeFlac } from '../audio/flacEncoder';
 import { readFlacVorbisComment } from '../audio/flacMeta';
 import { parseChapterComments } from '../audio/chapterTags';
-import { encodeMp3 } from '../audio/mp3Encoder';
+import { encodeMp3, type Mp3Kbps } from '../audio/mp3Encoder';
 import { parseId3Chapters } from '../audio/id3Chapters';
 import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
 import { readOpusTags } from '../audio/oggPage';
@@ -19,7 +19,10 @@ import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCac
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
   wavBitDepth: WavBitDepth;
-  mp3Kbps: 128 | 192 | 256 | 320;
+  /** Imported from mp3Encoder.ts (single source of truth): valid only at
+   * kbps >= 128 per getLameOutputRate's documented precondition — do not
+   * widen this below 128 without first revisiting that function. */
+  mp3Kbps: Mp3Kbps;
   /** Opus bitrate in bits/second; only used when format is 'ogg'. */
   oggBitrate?: 96_000 | 128_000 | 192_000;
 }
