@@ -1,35 +1,55 @@
-import { useEffect, type ReactNode } from 'react';
+import { useEffect, useState, type ReactNode } from 'react';
+import { isTopDialog, popDialog, pushDialog } from '../../services/dialogBus';
 
 /**
  * Modal overlay chrome shared by the app's dialogs. Renders a dimmed full-screen
  * backdrop with a centered panel. Escape and a backdrop click both cancel via
- * `onClose`. Focus trapping is intentionally out of scope for v1.
+ * `onClose`, unless `dismissable` is false (Task M7/F12: a dialog can veto
+ * dismissal — e.g. RecordDialog while actively recording — so neither Escape
+ * nor a stray backdrop click can discard in-progress work).
+ *
+ * Every instance registers itself in a module-level open-dialog stack
+ * (dialogBus) on mount and unregisters on unmount. shortcuts.ts consults the
+ * stack to bail out of global shortcuts while any dialog is open (F10); this
+ * shell's own Escape handler consults it to close only the TOPMOST of several
+ * stacked dialogs (F25) — each shell owns its own document keydown listener,
+ * so stopPropagation alone cannot stop a sibling shell from also reacting.
+ * Focus trapping is intentionally out of scope for v1.
  */
 export default function DialogShell({
   title,
   onClose,
   children,
+  dismissable = true,
 }: {
   title: string;
   onClose: () => void;
   children: ReactNode;
+  dismissable?: boolean;
 }) {
+  const [token] = useState(() => pushDialog());
+  useEffect(() => () => popDialog(token), [token]);
+
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        e.stopPropagation();
-        onClose();
-      }
+      if (e.key !== 'Escape') return;
+      if (!dismissable || !isTopDialog(token)) return;
+      e.stopPropagation();
+      onClose();
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  }, [onClose, dismissable, token]);
+
+  const dismissViaBackdrop = () => {
+    if (dismissable) onClose();
+  };
 
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
       data-testid="dialog-overlay"
-      onMouseDown={onClose}
+      onMouseDown={dismissViaBackdrop}
     >
       <div
         role="dialog"

@@ -1,3 +1,4 @@
+import { hasOpenDialog } from './dialogBus';
 import { runCommand } from './menuActions';
 
 export interface Shortcut {
@@ -61,11 +62,17 @@ const COMBO_TO_COMMAND: Map<string, string> = new Map(
 
 /** Installs a single keydown listener on `target` that maps SHORTCUT_TABLE
  * combos to `runCommand`. Skips input/textarea/select/contentEditable focus
- * targets and IME composition so typing is never hijacked. Returns an
- * uninstaller that removes the listener. */
+ * targets and IME composition so typing is never hijacked, and bails entirely
+ * while any dialog is open (F10) — with a dialog open, focus commonly sits on
+ * body or a plain BUTTON, so without this gate ctrl+n/ctrl+o/ctrl+e/ctrl+s/m/
+ * space/delete would still fire behind it; several dialogs resolve their
+ * target document from the live activeDocumentId at confirm time, so e.g.
+ * Ctrl+O while Export is open would make Export write the wrong document.
+ * Returns an uninstaller that removes the listener. */
 export function installShortcuts(target: Window): () => void {
   const handleKeydown = (e: KeyboardEvent): void => {
     if (e.isComposing) return;
+    if (hasOpenDialog()) return;
     if (isEditableTarget(e.target)) return;
 
     const combo = comboFromEvent(e);

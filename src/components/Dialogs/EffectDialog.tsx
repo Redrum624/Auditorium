@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { cloneRegion, createDocument, docLength } from '../../audio/AudioDocument';
-import { playbackEngine } from '../../audio/PlaybackEngine';
+import { playbackEngine, type PlaybackEngine } from '../../audio/PlaybackEngine';
 import { getEffect } from '../../effects/EffectRegistry';
 import type { EffectParamDef, EffectParamValue } from '../../effects/types';
 import { runEffectOnSelection } from '../../services/effectRunner';
@@ -31,9 +31,14 @@ function activeDoc() {
 export default function EffectDialog({
   effectId,
   onClose,
+  engine = playbackEngine,
 }: {
   effectId: string;
   onClose: () => void;
+  /** Injectable for tests (like RecordDialog's `engine` prop); defaults to the
+   * app's shared singleton, which is exactly what makes F11 a real hazard —
+   * Preview auditions through the SAME engine the transport/waveform use. */
+  engine?: PlaybackEngine;
 }) {
   const def = getEffect(effectId);
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
@@ -43,6 +48,30 @@ export default function EffectDialog({
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [previewing, setPreviewing] = useState(false);
+  // Mirrors `previewing` for the unmount-cleanup effect below, which must read
+  // the CURRENT value at cleanup time, not the value captured when the effect
+  // was installed (mount, when previewing was still false).
+  const previewingRef = useRef(false);
+  // Kept as a ref (not read in the effect body via closure over `engine`
+  // directly) so this stays a stable, mount/unmount-only effect regardless of
+  // whether `def` resolves — it must run before the `if (!def) return null;`
+  // below, since hooks can't be called conditionally.
+  const engineRef = useRef(engine);
+  engineRef.current = engine;
+
+  // F11: Escape/backdrop/Cancel all unmount this dialog without going through
+  // the explicit "Stop Preview" button. If a preview was left running, restore
+  // the engine to the real active document on unmount — exactly stopPreview's
+  // logic — instead of leaving it holding the throwaway preview document
+  // (silently playing, in Escape's case).
+  useEffect(() => {
+    return () => {
+      if (!previewingRef.current) return;
+      engineRef.current.stop();
+      const doc = activeDoc();
+      if (doc) engineRef.current.load(doc);
+    };
+  }, []);
 
   // Noise Reduction needs a captured noise print, delivered to the worker via the
   // `extra` side channel; without one, Apply is disabled and a hint is shown.
@@ -65,6 +94,9 @@ export default function EffectDialog({
 
   const apply = async () => {
     if (!canApply) return;
+    // F11: never leave the engine holding the throwaway preview document
+    // while the (possibly slow, worker-based) real edit runs.
+    if (previewing) stopPreview();
     setBusy(true);
     setProgress(0);
     try {
@@ -79,8 +111,6 @@ export default function EffectDialog({
   };
 
   const startPreview = () => {
-    // No Web Audio (jsdom) -> preview is a no-op.
-    if (typeof AudioContext === 'undefined') return;
     const doc = activeDoc();
     if (!doc) return;
     const { selection } = useAppStore.getState();
@@ -93,15 +123,17 @@ export default function EffectDialog({
       sampleRate: doc.sampleRate,
       channels: result.channels,
     });
-    playbackEngine.load(temp);
-    playbackEngine.play(0);
+    engine.load(temp);
+    engine.play(0);
+    previewingRef.current = true;
     setPreviewing(true);
   };
 
   const stopPreview = () => {
-    playbackEngine.stop();
+    engine.stop();
     const doc = activeDoc();
-    if (doc) playbackEngine.load(doc);
+    if (doc) engine.load(doc);
+    previewingRef.current = false;
     setPreviewing(false);
   };
 

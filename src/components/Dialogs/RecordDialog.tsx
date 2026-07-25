@@ -114,7 +114,10 @@ export default function RecordDialog({
   };
 
   return (
-    <DialogShell title="Record" onClose={onClose}>
+    // dismissable=false while recording (Task M7/F12): Escape and a stray
+    // backdrop click must never discard an in-progress take. The explicit
+    // Stop (toggle) and Close buttons remain the only ways out.
+    <DialogShell title="Record" onClose={onClose} dismissable={!recording}>
       <div className="flex flex-col gap-3">
         <div>
           <label className={LABEL} htmlFor="record-device">

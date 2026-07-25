@@ -1,4 +1,4 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import MarkersPanel from './MarkersPanel';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
@@ -140,6 +140,56 @@ describe('MarkersPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /delete intro/i }));
 
     expect(useAppStore.getState().markers[doc.id]).toHaveLength(0);
+  });
+
+  describe('rename state across document switches (Task M7/F26)', () => {
+    it('exits an in-progress rename when the active document changes, instead of silently resuming it on return', () => {
+      const docA = addDoc();
+      useAppStore.getState().addMarker(docA.id, { id: 'marker-1', name: 'Intro', positionSample: 0 });
+      const docB = addDoc(); // becomes active
+      useAppStore.getState().addMarker(docB.id, { id: 'marker-2', name: 'Verse', positionSample: 0 });
+      useAppStore.getState().setActiveDocument(docA.id);
+
+      render(<MarkersPanel />);
+      fireEvent.doubleClick(screen.getByText('Intro'));
+      expect(screen.getByDisplayValue('Intro')).toBeInTheDocument();
+
+      // Switch away and back WITHOUT ever pressing Enter/Escape/blur.
+      act(() => useAppStore.getState().setActiveDocument(docB.id));
+      act(() => useAppStore.getState().setActiveDocument(docA.id));
+
+      // The switch must have exited edit mode, not silently carried it across
+      // documents — the input must not reappear on return.
+      expect(screen.queryByDisplayValue('Intro')).not.toBeInTheDocument();
+      expect(screen.getByText('Intro')).toBeInTheDocument();
+    });
+  });
+
+  describe('go-to and multitrack view (Task M7/F27)', () => {
+    it('switches out of multitrack view so the cursor/zoom jump is visible', () => {
+      const doc = addDoc();
+      useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Intro', positionSample: 50000 });
+      useAppStore.setState({ view: 'multitrack' });
+
+      render(<MarkersPanel />);
+      fireEvent.click(screen.getByRole('button', { name: /go to intro/i }));
+
+      const state = useAppStore.getState();
+      expect(state.view).toBe('waveform');
+      expect(state.cursorSample).toBe(50000);
+    });
+
+    it('leaves the view alone when already in waveform', () => {
+      const doc = addDoc();
+      useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Intro', positionSample: 50000 });
+      expect(useAppStore.getState().view).toBe('waveform');
+
+      render(<MarkersPanel />);
+      fireEvent.click(screen.getByRole('button', { name: /go to intro/i }));
+
+      expect(useAppStore.getState().view).toBe('waveform');
+      expect(useAppStore.getState().cursorSample).toBe(50000);
+    });
   });
 
   describe('marker undo (Task M2 / F5)', () => {

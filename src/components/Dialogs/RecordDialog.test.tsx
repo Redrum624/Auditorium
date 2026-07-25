@@ -101,6 +101,60 @@ describe('RecordDialog', () => {
     expect(screen.getByRole('button', { name: 'Start recording' })).toBeInTheDocument();
   });
 
+  describe('dismissal veto while recording (Task M7/F12)', () => {
+    it('Escape does not dismiss or discard the take while recording', async () => {
+      const fake = new FakeEngine();
+      const onClose = jest.fn();
+      render(<RecordDialog onClose={onClose} engine={asEngine(fake)} />);
+      fireEvent.click(screen.getByTestId('record-toggle')); // start
+      await screen.findByRole('button', { name: 'Stop recording' });
+
+      fireEvent.keyDown(document, { key: 'Escape' });
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(fake.stop).not.toHaveBeenCalled();
+      expect(screen.getByRole('button', { name: 'Stop recording' })).toBeInTheDocument();
+    });
+
+    it('a backdrop mousedown does not dismiss or discard the take while recording', async () => {
+      const fake = new FakeEngine();
+      const onClose = jest.fn();
+      render(<RecordDialog onClose={onClose} engine={asEngine(fake)} />);
+      fireEvent.click(screen.getByTestId('record-toggle')); // start
+      await screen.findByRole('button', { name: 'Stop recording' });
+
+      fireEvent.mouseDown(screen.getByTestId('dialog-overlay'));
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(fake.stop).not.toHaveBeenCalled();
+    });
+
+    it('the explicit Stop button still commits the take after a vetoed Escape', async () => {
+      const fake = new FakeEngine();
+      const onClose = jest.fn();
+      render(<RecordDialog onClose={onClose} engine={asEngine(fake)} />);
+      fireEvent.click(screen.getByTestId('record-toggle')); // start
+      await screen.findByRole('button', { name: 'Stop recording' });
+      fireEvent.keyDown(document, { key: 'Escape' }); // vetoed, no-op
+
+      fireEvent.click(screen.getByTestId('record-toggle')); // stop
+
+      await waitFor(() => expect(fake.stop).toHaveBeenCalled());
+      await waitFor(() => expect(onClose).toHaveBeenCalled());
+      expect(useAppStore.getState().documents).toHaveLength(1);
+    });
+
+    it('Escape dismisses normally while not recording (veto is scoped to active recording only)', () => {
+      const fake = new FakeEngine();
+      const onClose = jest.fn();
+      render(<RecordDialog onClose={onClose} engine={asEngine(fake)} />);
+
+      fireEvent.keyDown(document, { key: 'Escape' });
+
+      expect(onClose).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('updates the live level bar from engine.onLevel', async () => {
     const fake = new FakeEngine();
     render(<RecordDialog onClose={() => {}} engine={asEngine(fake)} />);

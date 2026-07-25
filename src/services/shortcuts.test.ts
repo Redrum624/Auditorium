@@ -1,3 +1,4 @@
+import { popDialog, pushDialog } from './dialogBus';
 import * as menuActionsModule from './menuActions';
 import { comboFromEvent, installShortcuts, SHORTCUT_TABLE } from './shortcuts';
 
@@ -181,5 +182,46 @@ describe('installShortcuts', () => {
     window.dispatchEvent(keydown({ key: 'z', ctrlKey: true }));
 
     expect(runCommandSpy).not.toHaveBeenCalled();
+  });
+
+  describe('dialog-open gate (Task M7/F10)', () => {
+    it('does nothing for a shortcut while a dialog is open, even for a combo normally mapped', () => {
+      const runCommandSpy = jest
+        .spyOn(menuActionsModule, 'runCommand')
+        .mockResolvedValue(undefined);
+      uninstall = installShortcuts(window);
+      const token = pushDialog();
+
+      window.dispatchEvent(keydown({ key: 'o', ctrlKey: true })); // ctrl+o -> file.open
+
+      expect(runCommandSpy).not.toHaveBeenCalled();
+      popDialog(token);
+    });
+
+    it('does not call preventDefault while a dialog is open (so the key still does its native thing, e.g. nothing)', () => {
+      jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
+      uninstall = installShortcuts(window);
+      const token = pushDialog();
+
+      const event = keydown({ key: 'z', ctrlKey: true });
+      const preventSpy = jest.spyOn(event, 'preventDefault');
+      window.dispatchEvent(event);
+
+      expect(preventSpy).not.toHaveBeenCalled();
+      popDialog(token);
+    });
+
+    it('resumes dispatching once the dialog closes', () => {
+      const runCommandSpy = jest
+        .spyOn(menuActionsModule, 'runCommand')
+        .mockResolvedValue(undefined);
+      uninstall = installShortcuts(window);
+      const token = pushDialog();
+      popDialog(token);
+
+      window.dispatchEvent(keydown({ key: 'o', ctrlKey: true }));
+
+      expect(runCommandSpy).toHaveBeenCalledWith('file.open');
+    });
   });
 });

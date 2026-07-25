@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Flag, X } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import type { Marker } from '../../stores/appStore';
@@ -29,13 +29,24 @@ export default function MarkersPanel() {
     activeDocumentId ? (s.markers[activeDocumentId] ?? NO_MARKERS) : NO_MARKERS
   );
   const zoom = useAppStore((s) => s.zoom);
+  const view = useAppStore((s) => s.view);
   const setCursor = useAppStore((s) => s.setCursor);
   const setZoom = useAppStore((s) => s.setZoom);
+  const setView = useAppStore((s) => s.setView);
   const renameMarker = useAppStore((s) => s.renameMarker);
   const removeMarker = useAppStore((s) => s.removeMarker);
 
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+
+  // F26: an in-progress rename must not silently survive a document switch —
+  // without this, switching away mid-edit and back reopens the SAME editor
+  // with its stale (possibly uncommitted) draft, as if the user had never
+  // left, instead of the switch cleanly exiting edit mode.
+  useEffect(() => {
+    setEditingId(null);
+    setDraft('');
+  }, [activeDocumentId]);
 
   if (!doc || !activeDocumentId) {
     return <div className="p-2 text-sm text-[#8b8b92]">No document open.</div>;
@@ -58,6 +69,12 @@ export default function MarkersPanel() {
   };
 
   const goTo = (positionSample: number) => {
+    // F27: the cursor/zoom jump below is invisible while multitrack view is
+    // active (it only affects the waveform/spectral editor's state) — switch
+    // back to waveform first so "Go to" is always visible, not a silent
+    // no-op. The marker's document is already active (this panel only lists
+    // markers for activeDocumentId), so no document switch is needed.
+    if (view === 'multitrack') setView('waveform');
     setCursor(positionSample);
     // The panel doesn't know the viewport's pixel width (only WaveformView /
     // SpectrogramView do), so centering is approximated for a ~800px-wide
