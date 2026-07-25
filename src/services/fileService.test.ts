@@ -1334,6 +1334,61 @@ describe('closeDocumentFlow', () => {
     expect(useAppStore.getState().documents).toHaveLength(1);
   });
 
+  describe('PlaybackEngine lifecycle (Task M9 / F16)', () => {
+    afterEach(() => {
+      // The real playbackEngine singleton persists across this whole test
+      // file; leave it in a clean state for later suites/tests.
+      playbackEngine.unload();
+    });
+
+    it('calls engine.unload (not just stop) when the closed doc is the one currently loaded', async () => {
+      installApi();
+      const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+      playbackEngine.load(doc);
+      const unloadSpy = jest.spyOn(playbackEngine, 'unload');
+      const stopSpy = jest.spyOn(playbackEngine, 'stop');
+
+      await closeDocumentFlow(doc.id);
+
+      expect(unloadSpy).toHaveBeenCalledTimes(1);
+      expect(stopSpy).toHaveBeenCalled(); // unload() stops internally
+    });
+
+    it('calls engine.unload when no documents remain, even if a different (or no) doc was loaded', async () => {
+      installApi();
+      const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+      // Nothing was ever loaded into the engine (loadedDocumentId is null) —
+      // closing the LAST open document must still release it defensively.
+      const unloadSpy = jest.spyOn(playbackEngine, 'unload');
+
+      await closeDocumentFlow(doc.id);
+
+      expect(unloadSpy).toHaveBeenCalledTimes(1);
+      expect(useAppStore.getState().documents).toHaveLength(0);
+    });
+
+    it('calls plain stop() (not unload) when closing a background doc while a DIFFERENT doc stays loaded and open', async () => {
+      installApi();
+      const keep = seedDoc({ filePath: 'D:\\keep.wav', dirty: false, name: 'keep.wav' });
+      const other = createDocument({
+        name: 'other.wav',
+        sampleRate: 44100,
+        channels: [new Float32Array(10)],
+        filePath: 'D:\\other.wav',
+      });
+      useAppStore.getState().addDocument(other);
+      playbackEngine.load(keep); // the engine has `keep` loaded, not `other`
+      const unloadSpy = jest.spyOn(playbackEngine, 'unload');
+      const stopSpy = jest.spyOn(playbackEngine, 'stop');
+
+      await closeDocumentFlow(other.id);
+
+      expect(unloadSpy).not.toHaveBeenCalled();
+      expect(stopSpy).toHaveBeenCalled();
+      expect(useAppStore.getState().documents.map((d) => d.id)).toEqual([keep.id]);
+    });
+  });
+
   describe('noise profile lifetime (Task F8)', () => {
     afterEach(() => clearNoiseProfile());
 

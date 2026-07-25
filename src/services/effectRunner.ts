@@ -103,6 +103,21 @@ export async function runEffectOnSelection(
       resolve();
     };
 
+    // A worker that fails to even LOAD (missing/unparsable script, blocked by
+    // CSP, ...) never reaches the `onmessage` handler above — without this,
+    // the promise would never settle, hanging the Apply call forever and
+    // leaking the worker (Task M9 / F28). Mirrors the in-band 'error' branch:
+    // terminate + discard the worker, surface via the same error dialog.
+    worker.onerror = (ev: ErrorEvent) => {
+      worker.terminate();
+      void window.electronAPI?.showMessageBox({
+        type: 'error',
+        title: 'Effect failed',
+        message: ev.message || 'DSP worker failed to load',
+      });
+      resolve();
+    };
+
     const transfer = regionChannels.map((c) => c.buffer as ArrayBuffer);
     worker.postMessage(
       { type: 'run', id: runId, effectId, channels: regionChannels, sampleRate, params, extra },

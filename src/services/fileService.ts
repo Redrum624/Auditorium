@@ -524,6 +524,10 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
     // choice === 1 ("Don't Save"): discard and close.
   }
 
+  // Read BEFORE closeDocument() mutates the store, so "no documents remain"
+  // below reflects the post-close state (checked after) rather than this one.
+  const wasLoaded = playbackEngine.loadedDocumentId === docId;
+
   store().closeDocument(docId);
   clearHistory(docId);
   invalidatePeaks(docId);
@@ -532,5 +536,14 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   // (every clip sourced from it); clearing the whole cache is cheap and
   // avoids leaking the doc's channels arrays via a retained cache entry (F9).
   clearClipWaveformCache();
-  playbackEngine.stop();
+  // unload() (not just stop()) when the closed doc is the one actually loaded
+  // into the engine, or when no documents remain open at all — otherwise the
+  // engine's full AudioBuffer for the closed doc stays resident for the rest
+  // of the session (Task M9 / F16). A plain stop() still covers every other
+  // case (closing a background doc while a different one stays loaded).
+  if (wasLoaded || store().documents.length === 0) {
+    playbackEngine.unload();
+  } else {
+    playbackEngine.stop();
+  }
 }

@@ -1,6 +1,6 @@
 import { computeSpectrogramColumns } from '../workers/spectrogramCore';
 
-interface ComputeMessage {
+export interface ComputeMessage {
   type: 'compute';
   id: number;
   channel: Float32Array;
@@ -22,6 +22,20 @@ export function _setSpectrogramWorkerError(message: string | null): void {
   injectedError = message;
 }
 
+// Test-only capture (Task M9 / F17): the most recent 'compute' message posted
+// to any FakeSpectrogramWorker instance, so tests can assert on the ACTUAL
+// slice/offsets SpectrogramView sent (e.g. that it no longer mixes down the
+// whole document on every viewport change). Reset it in afterEach.
+let lastComputeMessage: ComputeMessage | null = null;
+
+export function _getLastComputeMessage(): ComputeMessage | null {
+  return lastComputeMessage;
+}
+
+export function _resetSpectrogramWorkerCapture(): void {
+  lastComputeMessage = null;
+}
+
 /**
  * Test double for the spectrogram worker: computes the magnitude grid
  * SYNCHRONOUSLY on the main thread behind a microtask, emitting the same `done`
@@ -39,6 +53,7 @@ class FakeSpectrogramWorker {
   postMessage(message: unknown, _transfer?: Transferable[]): void {
     const msg = message as ComputeMessage;
     if (this.terminated || !msg || msg.type !== 'compute') return;
+    lastComputeMessage = msg;
     queueMicrotask(() => {
       if (this.terminated) return;
       try {

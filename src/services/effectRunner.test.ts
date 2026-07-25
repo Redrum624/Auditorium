@@ -4,6 +4,11 @@ import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { canUndo, undo, redo } from './undoHistory';
+import {
+  _setDspWorkerLoadFailure,
+  _getDspWorkerTerminateCount,
+  _resetDspWorkerTestState,
+} from '../__mocks__/createDspWorkerMock';
 
 // App.tsx registers effects at startup; mirror that so the renderer-side lookup
 // in runEffectOnSelection (used for the undo label + guard) finds the built-ins.
@@ -36,6 +41,12 @@ function activeChannel(): Float32Array {
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  _resetDspWorkerTestState();
+});
+
+afterEach(() => {
+  _resetDspWorkerTestState();
+  delete (window as { electronAPI?: unknown }).electronAPI;
 });
 
 describe('runEffectOnSelection', () => {
@@ -202,6 +213,25 @@ describe('runEffectOnSelection', () => {
     // 'document not found' in the done branch.
     await expect(runEffectOnSelection('test-close-doc', {})).resolves.toBeUndefined();
     expect(canUndo(docId)).toBe(false);
+  });
+
+  it('settles (no hang) and surfaces an error when the worker fails to load (onerror), instead of hanging the Apply promise forever (Task M9 / F28)', async () => {
+    const showMessageBox = jest.fn(async () => 0);
+    (window as unknown as { electronAPI: { showMessageBox: typeof showMessageBox } }).electronAPI = {
+      showMessageBox,
+    };
+    _setDspWorkerLoadFailure('DSP worker script failed to load');
+    const values = [0.1, 0.2, 0.3];
+    const docId = seedDoc(values);
+
+    await expect(runEffectOnSelection('amplify', { gainDb: 6 })).resolves.toBeUndefined();
+
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Effect failed' })
+    );
+    expect(_getDspWorkerTerminateCount()).toBe(1); // the failed worker was discarded
+    expect(canUndo(docId)).toBe(false); // no edit was applied
+    expect(Array.from(activeChannel())).toEqual(f32(values));
   });
 
   it('applies no edit when the effect throws (error path)', async () => {

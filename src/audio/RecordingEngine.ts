@@ -246,6 +246,12 @@ export class RecordingEngine {
 
     const sampleRate = ctx?.sampleRate ?? 44100;
     const channels = this.concatChannels();
+    // Release the accumulated raw per-batch arrays now that they've been
+    // copied into `channels` — otherwise the previous take's chunks stayed
+    // retained via `this.chunks` until the next start() call reset it, i.e.
+    // for the rest of the session if the user never records again (Task M9 /
+    // F29).
+    this.chunks = [];
 
     this.disposeGraph();
     // Stop tracks (releases the mic) and close the context.

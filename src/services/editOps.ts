@@ -17,6 +17,15 @@ interface AfterState {
   cursorSample?: number;
 }
 
+/** Sum of a document's channel byteLengths — the estimated memory an
+ * `applyEdit` undo entry retains for ONE of its two snapshots (Task M9 / F15;
+ * see `UndoEntry.bytes` in undoHistory.ts). */
+function docBytes(doc: AudioDocument): number {
+  let total = 0;
+  for (const channel of doc.channels) total += channel.byteLength;
+  return total;
+}
+
 /**
  * Declarative description of how a length/timeline-changing edit moves marker
  * positions (Task M3 / F4), derived by each editOps call site from the same
@@ -158,6 +167,9 @@ export function applyEdit(
   pushUndo({
     label,
     docId,
+    // Both the pre- and post-edit channel arrays are retained by this entry's
+    // closures for as long as it survives in done/undone (Task M9 / F15).
+    bytes: docBytes(preDoc) + docBytes(newDoc),
     undo() {
       const s = useAppStore.getState();
       s.updateDocument(preDoc);
@@ -184,6 +196,10 @@ export function applyEdit(
  * appStore), and undoHistory re-derives `dirty` from position vs. save point
  * after applying this entry — restoration must not independently dirty or
  * clean the document.
+ *
+ * No `bytes` is attached (Task M9 / F15): `before`/`after` are plain marker
+ * lists, never a channel array, so their retained cost is negligible next to
+ * `MAX_UNDO_BYTES` and isn't counted toward the per-doc budget.
  */
 export function pushMarkerUndo(label: string, docId: string, before: Marker[], after: Marker[]): void {
   pushUndo({

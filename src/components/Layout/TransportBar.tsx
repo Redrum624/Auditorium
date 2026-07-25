@@ -71,10 +71,22 @@ export default function TransportBar() {
   useEffect(() => multitrackRecorder.onChange(setMtRecording), []);
   const recordEnabled = canRecord();
 
-  // Load the active document into the engine whenever its identity changes.
+  // Load the active document into the engine whenever its identity (id),
+  // audio data (channels array reference), or sample rate changes — but NOT on
+  // a metadata-only replacement (dirty/name/filePath/sourceBitDepth), which
+  // still swaps the store's doc object (every mutator, including the marker
+  // actions' `markDirty`, always replaces it) without touching the audio.
+  // PlaybackEngine.load() always starts with stop() + a full AudioBuffer copy,
+  // so keying on the whole `doc` object here would restart playback and
+  // re-copy the entire PCM on every such replacement — since M1, that includes
+  // every marker add/rename/delete (Task M9 / F13). Narrowing this key can only
+  // fire the effect LESS often than the old `[doc]`, never more (M7 review), so
+  // it's safe from that direction.
   useEffect(() => {
     if (doc) playbackEngine.load(doc);
-  }, [doc]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- deliberately
+    // narrower than `[doc]`; see comment above.
+  }, [doc?.id, doc?.channels, doc?.sampleRate]);
 
   // Mirror PlaybackEngine state transitions into the app store (covers natural end).
   useEffect(() => {

@@ -51,6 +51,11 @@ export class PlaybackEngine {
   private buffer: AudioBuffer | null = null;
   private meta: { sampleRate: number; length: number; channelCount: number } | null = null;
   private source: AudioBufferSourceNode | null = null;
+  /** `id` of the AudioDocument last passed to `load()`, cleared by `unload()`/
+   * `dispose()`. Lets callers (fileService's closeDocumentFlow) tell whether
+   * the document they're closing is the one currently resident in the engine
+   * (Task M9 / F16). */
+  private loadedDocId: string | null = null;
 
   private _state: PlaybackState = 'stopped';
   /** Sample the current source was started from (stop/end return here). */
@@ -76,6 +81,12 @@ export class PlaybackEngine {
     return this._state;
   }
 
+  /** `id` of the document currently resident in the engine (buffer + meta), or
+   * `null` once unloaded/disposed. */
+  get loadedDocumentId(): string | null {
+    return this.loadedDocId;
+  }
+
   /** (Re)prepare the playback buffer for `doc`, stopping any current playback. */
   load(doc: AudioDocument): void {
     this.stop();
@@ -83,6 +94,7 @@ export class PlaybackEngine {
     const length = docLength(doc);
     const channelCount = doc.channels.length;
     this.meta = { sampleRate: doc.sampleRate, length, channelCount };
+    this.loadedDocId = doc.id;
     this.position = 0;
     this.startSample = 0;
     if (!ctx) {
@@ -206,6 +218,24 @@ export class PlaybackEngine {
     };
   }
 
+  /** Stops playback and releases the loaded buffer/meta (the retained
+   * AudioBuffer's PCM) while keeping the AudioContext — and its gain/splitter/
+   * analyser graph — alive for a subsequent `load()`. `stop()` alone leaves
+   * `buffer`/`meta` populated (only `dispose()` released them, and `dispose()`
+   * has no production callers), so the last-closed document's full decoded
+   * audio stayed resident in memory for the rest of the session (Task M9 /
+   * F16). Call this instead of `stop()` when the document being closed is the
+   * one currently loaded (or when no documents remain open at all). */
+  unload(): void {
+    this.stop();
+    this.buffer = null;
+    this.meta = null;
+    this.loadedDocId = null;
+    this.position = 0;
+    this.startSample = 0;
+    this.endSample = 0;
+  }
+
   dispose(): void {
     this.teardownSource();
     this.stopLevelPolling();
@@ -222,6 +252,7 @@ export class PlaybackEngine {
     this.ctx = null;
     this.buffer = null;
     this.meta = null;
+    this.loadedDocId = null;
   }
 
   // --- internals ----------------------------------------------------------

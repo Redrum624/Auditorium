@@ -2,6 +2,7 @@ import { render, screen, fireEvent, act } from '@testing-library/react';
 import TransportBar from './TransportBar';
 import LevelMeter from './LevelMeter';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
+import { playbackEngine } from '../../audio/PlaybackEngine';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
@@ -74,6 +75,67 @@ describe('TransportBar', () => {
 
     // Restore session store for later suites.
     act(() => useSessionStore.getState().newSession(44100));
+  });
+
+  describe('reload effect narrowing (Task M9 / F13)', () => {
+    it('does not reload the engine for a metadata-only doc replacement (dirty/name/filePath/sourceBitDepth)', () => {
+      const doc = makeDoc();
+      useAppStore.getState().addDocument(doc);
+      render(<TransportBar />);
+
+      const loadSpy = jest.spyOn(playbackEngine, 'load');
+      loadSpy.mockClear(); // drop the mount-time load(); we only care about the update below
+
+      // Exactly what every marker add/rename/delete does via appStore's
+      // markDirty (Task M1): a new doc object, same id/channels/sampleRate.
+      act(() => {
+        useAppStore.getState().updateDocument({
+          ...doc,
+          dirty: true,
+          name: 'renamed.wav',
+          filePath: 'D:\\renamed.wav',
+          sourceBitDepth: 24,
+        });
+      });
+
+      expect(loadSpy).not.toHaveBeenCalled();
+      loadSpy.mockRestore();
+    });
+
+    it('does reload the engine when the channels array reference changes (a real audio edit)', () => {
+      const doc = makeDoc();
+      useAppStore.getState().addDocument(doc);
+      render(<TransportBar />);
+
+      const loadSpy = jest.spyOn(playbackEngine, 'load');
+      loadSpy.mockClear();
+
+      act(() => {
+        useAppStore.getState().updateDocument({
+          ...doc,
+          channels: [new Float32Array(4096), new Float32Array(4096)],
+        });
+      });
+
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+      loadSpy.mockRestore();
+    });
+
+    it('does reload the engine when a different document becomes active (id changes)', () => {
+      const docA = makeDoc();
+      useAppStore.getState().addDocument(docA);
+      render(<TransportBar />);
+
+      const loadSpy = jest.spyOn(playbackEngine, 'load');
+      loadSpy.mockClear();
+
+      const docB = makeDoc();
+      act(() => useAppStore.getState().addDocument(docB));
+
+      expect(loadSpy).toHaveBeenCalledTimes(1);
+      expect(loadSpy).toHaveBeenCalledWith(docB);
+      loadSpy.mockRestore();
+    });
   });
 
   it('toggles the loop flag in the store when the loop button is clicked', () => {

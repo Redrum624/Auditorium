@@ -12,6 +12,27 @@ interface RunMessage {
   extra?: unknown;
 }
 
+// Test-only fault injection (Task M9 / F28): when set, every FakeDspWorker
+// instance fires `onerror` instead of ever processing the 'run' message —
+// simulating a worker that fails to even LOAD (missing/unparsable script,
+// blocked by CSP, ...), which never reaches `onmessage`. Lets effectRunner's
+// onerror wiring be exercised deterministically. Reset both in afterEach.
+let loadFailureMessage: string | null = null;
+let terminateCallCount = 0;
+
+export function _setDspWorkerLoadFailure(message: string | null): void {
+  loadFailureMessage = message;
+}
+
+export function _getDspWorkerTerminateCount(): number {
+  return terminateCallCount;
+}
+
+export function _resetDspWorkerTestState(): void {
+  loadFailureMessage = null;
+  terminateCallCount = 0;
+}
+
 /**
  * Test double for the DSP worker: runs the registered effect SYNCHRONOUSLY on the
  * main thread behind a microtask, emitting the same message objects as the real
@@ -20,12 +41,20 @@ interface RunMessage {
  */
 class FakeDspWorker {
   onmessage: ((e: MessageEvent) => void) | null = null;
-  onerror: ((e: unknown) => void) | null = null;
+  onerror: ((e: ErrorEvent) => void) | null = null;
   private terminated = false;
 
   postMessage(message: unknown, _transfer?: Transferable[]): void {
     const msg = message as RunMessage;
     if (this.terminated || !msg || msg.type !== 'run') return;
+    if (loadFailureMessage !== null) {
+      const failure = loadFailureMessage;
+      queueMicrotask(() => {
+        if (this.terminated) return;
+        this.onerror?.({ message: failure } as ErrorEvent);
+      });
+      return;
+    }
     registerAllEffects();
     queueMicrotask(() => {
       if (this.terminated) return;
@@ -61,6 +90,7 @@ class FakeDspWorker {
 
   terminate(): void {
     this.terminated = true;
+    terminateCallCount++;
   }
 
   addEventListener(): void {}

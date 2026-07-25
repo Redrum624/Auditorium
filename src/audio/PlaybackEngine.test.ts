@@ -361,6 +361,63 @@ describe('PlaybackEngine', () => {
     });
   });
 
+  describe('unload (Task M9 / F16)', () => {
+    it('reports the loaded document id via loadedDocumentId, cleared once unloaded', () => {
+      const { engine } = makeEngine();
+      expect(engine.loadedDocumentId).toBeNull();
+      const doc = makeDoc();
+      engine.load(doc);
+      expect(engine.loadedDocumentId).toBe(doc.id);
+      engine.unload();
+      expect(engine.loadedDocumentId).toBeNull();
+    });
+
+    it('keeps the AudioContext across unload — ensureContext is not re-invoked on the next load', () => {
+      const ctx = new FakeAudioContext();
+      const createContext = jest.fn(() => ctx as unknown as AudioContext);
+      const engine = new PlaybackEngine({ createContext });
+
+      engine.load(makeDoc());
+      expect(createContext).toHaveBeenCalledTimes(1);
+
+      engine.unload();
+      engine.load(makeDoc());
+      expect(createContext).toHaveBeenCalledTimes(1); // still cached — never recreated
+    });
+
+    it('stops active playback and releases the buffer/meta so play() no-ops afterward', () => {
+      const { engine, ctx } = makeEngine();
+      engine.load(makeDoc({ sampleRate: 1000 }));
+      engine.play(100, {});
+      expect(engine.state).toBe('playing');
+
+      engine.unload();
+
+      expect(engine.state).toBe('stopped');
+      const sourceCountBefore = ctx.sources.length;
+      engine.play(0, {}); // buffer/meta were released -> no-op, no new source
+      expect(engine.state).toBe('stopped');
+      expect(ctx.sources.length).toBe(sourceCountBefore);
+    });
+
+    it('resets the reported position to 0', () => {
+      const { engine, ctx } = makeEngine();
+      engine.load(makeDoc({ sampleRate: 1000 }));
+      engine.play(300, {});
+      ctx.advance(0.2);
+
+      engine.unload();
+
+      expect(engine.getPositionSample()).toBe(0);
+    });
+
+    it('is safe to call when nothing was ever loaded', () => {
+      const { engine } = makeEngine();
+      expect(() => engine.unload()).not.toThrow();
+      expect(engine.state).toBe('stopped');
+    });
+  });
+
   describe('no AudioContext available', () => {
     it('no-ops safely when the context cannot be created', () => {
       const engine = new PlaybackEngine({ createContext: () => null as unknown as AudioContext });

@@ -209,6 +209,27 @@ describe('RecordingEngine', () => {
     });
   });
 
+  describe('chunk release after stop (Task M9 / F29)', () => {
+    it('releases the accumulated per-batch chunk arrays once stop() has resolved the channels, instead of retaining them until the next start()', async () => {
+      const { engine, node } = setup();
+      await engine.start({ channels: 1, sampleRate: 44100 });
+      node.port.emit({ channels: [f32([1, 2, 3])], final: false });
+      respondToFlush(node, [f32([4, 5])]);
+
+      const result = await engine.stop();
+
+      // The public RecordResult already carries an independent copy of the
+      // merged samples — this white-box check on the private `chunks` field is
+      // what actually distinguishes "released now" from "released lazily by
+      // the next start()" (which would make this pass either way, since
+      // start() also resets `chunks`), directly verifying the retained-arrays
+      // leak (F29) is fixed rather than merely inferring it indirectly.
+      const internal = engine as unknown as { chunks: Float32Array[][] };
+      expect(internal.chunks).toEqual([]);
+      expect(Array.from(result.channels[0])).toEqual([1, 2, 3, 4, 5]); // unaffected
+    });
+  });
+
   describe('teardown on stop', () => {
     it('stops the media tracks and closes the context (releasing the mic)', async () => {
       const { engine, node, ctx, stream } = setup();

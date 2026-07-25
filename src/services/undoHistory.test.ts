@@ -8,6 +8,7 @@ import {
   clearHistory,
   markSavePoint,
   UNDO_LIMIT,
+  MAX_UNDO_BYTES,
   type UndoEntry,
 } from './undoHistory';
 import { useAppStore, makeInitialState } from '../stores/appStore';
@@ -25,6 +26,20 @@ function makeEntry(docId: string, label: string, log: string[]): UndoEntry {
   return {
     label,
     docId,
+    undo: () => log.push(`undo:${label}`),
+    redo: () => log.push(`redo:${label}`),
+  };
+}
+
+/** Like `makeEntry` but with a declared `bytes` size — `bytes` is a plain
+ * number, not a real allocation, so these can exercise the REAL, fixed
+ * MAX_UNDO_BYTES (800 MB) budget with fabricated sizes instead of actually
+ * allocating hundreds of megabytes per entry (Task M9 / F15). */
+function makeSizedEntry(docId: string, label: string, bytes: number, log: string[]): UndoEntry {
+  return {
+    label,
+    docId,
+    bytes,
     undo: () => log.push(`undo:${label}`),
     redo: () => log.push(`redo:${label}`),
   };
@@ -109,6 +124,60 @@ describe('UNDO_LIMIT eviction', () => {
     expect(log[0]).toBe(`undo:${UNDO_LIMIT}`);
     expect(log[log.length - 1]).toBe('undo:1');
     expect(log).not.toContain('undo:0');
+  });
+});
+
+describe('MAX_UNDO_BYTES eviction (Task M9 / F15)', () => {
+  it('is 800 MB', () => {
+    expect(MAX_UNDO_BYTES).toBe(800 * 1024 * 1024);
+  });
+
+  it('evicts the oldest entry once the running total exceeds the budget, keeping the newest', () => {
+    const docId = freshDocId();
+    const log: string[] = [];
+    // 300 MB * 3 = 900 MB > 800 MB budget: pushing C must evict A (the oldest).
+    pushUndo(makeSizedEntry(docId, 'A', 300 * 1024 * 1024, log));
+    pushUndo(makeSizedEntry(docId, 'B', 300 * 1024 * 1024, log));
+    pushUndo(makeSizedEntry(docId, 'C', 300 * 1024 * 1024, log));
+
+    expect(getHistory(docId).done).toEqual(['B', 'C']);
+
+    undo(docId);
+    undo(docId);
+    expect(log).toEqual(['undo:C', 'undo:B']);
+    expect(canUndo(docId)).toBe(false); // 'A' was evicted — cannot undo past 'B'
+  });
+
+  it('always keeps at least one entry even when it alone exceeds the budget', () => {
+    const docId = freshDocId();
+    const log: string[] = [];
+    pushUndo(makeSizedEntry(docId, 'Huge', 2 * 1024 * 1024 * 1024, log)); // 2 GB alone
+    expect(getHistory(docId).done).toEqual(['Huge']);
+    expect(canUndo(docId)).toBe(true);
+  });
+
+  it('entries with no declared bytes (e.g. marker-only undo entries) do not count toward the budget', () => {
+    const docId = freshDocId();
+    const log: string[] = [];
+    for (let i = 0; i < 5; i++) {
+      pushUndo({
+        label: String(i),
+        docId,
+        undo: () => log.push(`undo:${i}`),
+        redo: () => log.push(`redo:${i}`),
+      });
+    }
+    expect(getHistory(docId).done).toEqual(['0', '1', '2', '3', '4']); // none evicted
+  });
+
+  it('a mix of sized and unsized entries only counts the sized ones toward the budget', () => {
+    const docId = freshDocId();
+    const log: string[] = [];
+    pushUndo(makeSizedEntry(docId, 'A', 500 * 1024 * 1024, log));
+    pushUndo({ label: 'marker-op', docId, undo: () => {}, redo: () => {} }); // 0 bytes
+    pushUndo(makeSizedEntry(docId, 'B', 500 * 1024 * 1024, log)); // total 1000MB > 800MB -> evict 'A'
+
+    expect(getHistory(docId).done).toEqual(['marker-op', 'B']);
   });
 });
 
@@ -211,6 +280,50 @@ describe('save-point-derived dirty (Task M2 / F9)', () => {
     undo(docId); // position 1
     expect(liveDirty(docId)).toBe(true);
     redo(docId); // position 2 — can never match the invalidated savePoint again
+    expect(liveDirty(docId)).toBe(true);
+  });
+
+  it('a byte-budget eviction that discards a DIFFERENT (older) entry still lets undo derive clean at a savePoint that remains reachable (Task M9 / F15)', () => {
+    const docId = seedStoreDoc();
+    const log: string[] = [];
+
+    pushUndo(makeSizedEntry(docId, 'A', 500 * 1024 * 1024, log)); // position 1
+    markSavePoint(docId); // savePoint = 1 (the state right after A)
+    expect(liveDirty(docId)).toBe(false);
+
+    // A + B = 1000 MB > 800 MB budget: pushing B evicts A's entry, but B's OWN
+    // undo closure still independently captured A's post-edit doc as ITS
+    // pre-edit snapshot — evicting A's array entry doesn't touch that closure.
+    pushUndo(makeSizedEntry(docId, 'B', 500 * 1024 * 1024, log)); // position 2
+    expect(getHistory(docId).done).toEqual(['B']);
+
+    undo(docId); // pops B — restores exactly the byte state that was saved
+    expect(liveDirty(docId)).toBe(false); // position(1) === savePoint(1): still correct
+    expect(canUndo(docId)).toBe(false); // A's entry is gone — cannot undo further back
+  });
+
+  it('a savePoint recorded before an eviction that discards ITS OWN entry becomes permanently unreachable — dirty forever, never falsely clean (Task M9 / F15)', () => {
+    const docId = seedStoreDoc();
+    const log: string[] = [];
+
+    pushUndo(makeSizedEntry(docId, 'A', 100 * 1024 * 1024, log)); // position 1
+    markSavePoint(docId); // savePoint = 1 (the state right after A)
+    expect(liveDirty(docId)).toBe(false);
+
+    pushUndo(makeSizedEntry(docId, 'B', 100 * 1024 * 1024, log)); // position 2
+    // A + B + C = 1200 MB > 800 MB, and evicting only 'A' would still leave
+    // B+C = 1100 MB over budget, so BOTH 'A' and 'B' are evicted here — taking
+    // the savePoint's own entry (A) down with it.
+    pushUndo(makeSizedEntry(docId, 'C', 1000 * 1024 * 1024, log)); // position 3
+    expect(getHistory(docId).done).toEqual(['C']);
+
+    undo(docId); // pops C — the only entry left; restores the state after B
+    expect(canUndo(docId)).toBe(false); // A and B are both gone
+
+    // The live document is now the state after B, NOT the state saved at
+    // position 1 (after A) — that A-state can never be reconstructed again
+    // since its undo closure was evicted, so dirty must stay true forever
+    // relative to this savePoint instead of silently reporting clean.
     expect(liveDirty(docId)).toBe(true);
   });
 

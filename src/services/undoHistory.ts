@@ -3,12 +3,25 @@ import { useAppStore } from '../stores/appStore';
 
 /** A single reversible edit. `undo`/`redo` are closures captured by `applyEdit`
  * (whole-document edits) or `pushMarkerUndo` (marker add/rename/delete) that
- * swap the whole pre-/post-edit state back into the store (channels are
- * immutable-by-convention, so a document swap is O(1) in memory). Entries never
+ * swap the whole pre-/post-edit state back into the store — the swap ITSELF is
+ * O(1) (a reference assignment), but the entry is NOT O(1) in memory: each
+ * whole-document entry's closures keep the pre- AND post-edit channel arrays
+ * alive for as long as the entry survives in `done`/`undone`, so retaining many
+ * entries of a large document costs memory proportional to the document's size
+ * (Task M9 / F15 — corrects the previous, misleading claim that a swap being
+ * O(1) to perform meant the entries were cheap to retain). `bytes` estimates
+ * that retained cost so `MAX_UNDO_BYTES` eviction can bound it. Entries never
  * carry their own dirty bookkeeping — see `position`/`savePoint` below. */
 export interface UndoEntry {
   label: string;
   docId: string;
+  /** Estimated bytes retained by this entry's undo/redo closures — the sum of
+   * the channel byteLengths of every AudioDocument snapshot they keep alive
+   * (both pre- and post-edit, for whole-document edits via `applyEdit`).
+   * Omitted (treated as 0) for entries that only capture small marker-list
+   * snapshots (`pushMarkerUndo`) — those never hold a channel array, so they
+   * are not counted toward `MAX_UNDO_BYTES` (Task M9 / F15). */
+  bytes?: number;
   undo(): void;
   redo(): void;
 }
@@ -37,6 +50,46 @@ const histories = new Map<string, Stacks>();
 /** Maximum number of applied edits retained per document; the oldest is evicted
  * once the limit is exceeded. */
 export const UNDO_LIMIT = 50;
+
+/** Maximum total retained bytes (summed `UndoEntry.bytes`) per document's
+ * `done` stack; the oldest entries are evicted — beyond the newest, which is
+ * always kept — once this is exceeded, exactly like `UNDO_LIMIT` (Task M9 /
+ * F15). Without this, 50 retained entries of a 2-hour stereo file (each
+ * holding its own pre- and post-edit channel copies) would pin roughly 11 GB
+ * of PCM; entry-count alone doesn't bound memory, size does. */
+export const MAX_UNDO_BYTES = 800 * 1024 * 1024;
+
+/** Sum of `bytes` (0 for entries that omit it) currently retained in `done`. */
+function doneBytes(stacks: Stacks): number {
+  let total = 0;
+  for (const entry of stacks.done) total += entry.bytes ?? 0;
+  return total;
+}
+
+/** Evicts the oldest `done` entries beyond `UNDO_LIMIT` and/or `MAX_UNDO_BYTES`,
+ * always keeping at least one — the edit just applied must remain undoable
+ * even if it alone exceeds the byte budget.
+ *
+ * Eviction never touches `position`/`savePoint`: both are pure counters, not
+ * indices into `done` (see the comments above), so removing entries from the
+ * front only shrinks how far back `undo()` can reach (`done.length` drops, so
+ * `canUndo()` goes false sooner) — it can never make a still-REACHABLE
+ * position replay the wrong bytes, because every remaining entry's undo/redo
+ * closure is self-contained (captured at ITS OWN push time, independent of
+ * whether a neighboring entry's object is still in the array). A savePoint
+ * whose position lies before the new eviction floor (`position - done.length`)
+ * simply becomes forever unreachable — `undo()` can't pop past an evicted
+ * entry, so `position` can never fall back to that savePoint again — and
+ * `dirty` correctly stays true rather than ever falsely reporting clean
+ * (Task M9 / F15; see undoHistory.test.ts's byte-budget + save-point tests). */
+function evictOverBudget(stacks: Stacks): void {
+  while (
+    stacks.done.length > 1 &&
+    (stacks.done.length > UNDO_LIMIT || doneBytes(stacks) > MAX_UNDO_BYTES)
+  ) {
+    stacks.done.shift();
+  }
+}
 
 // --- change notification (for HistoryPanel via useSyncExternalStore) ---------
 // The history lives outside zustand, so components subscribe to this version
@@ -106,9 +159,7 @@ export function pushUndo(entry: UndoEntry): void {
   stacks.done.push(entry);
   stacks.undone = [];
   stacks.position += 1;
-  if (stacks.done.length > UNDO_LIMIT) {
-    stacks.done.splice(0, stacks.done.length - UNDO_LIMIT);
-  }
+  evictOverBudget(stacks);
   bumpVersion();
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import type { AudioDocument } from '../../audio/AudioDocument';
-import { docLength, mixDown } from '../../audio/AudioDocument';
+import { cloneRegion, docLength, mixDown } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
 import { useSpectralScale } from '../../services/spectralScale';
@@ -196,7 +196,17 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
       const start = Math.max(0, Math.floor(scrollSample));
       const end = Math.min(length, Math.ceil(scrollSample + cssWidth * spp));
       if (end <= start) return;
-      const mono = mixDown(doc.channels);
+      // Mix down only the visible range padded by one FFT window on each side
+      // (the last few columns' FFT windows read up to `fftSize` samples past
+      // their nominal start/before their end) — NOT the whole document. Mixing
+      // the full doc.channels here on every debounced zoom/scroll gesture
+      // allocated a fresh full-length Float32Array (1.38 GB for a 2-hour
+      // stereo file) on the main thread regardless of how little was visible
+      // (Task M9 / F17). `startSample`/`endSample` sent to the worker are
+      // re-based to the slice's own origin (0), not the document's.
+      const sliceStart = Math.max(0, start - FFT_SIZE);
+      const sliceEnd = Math.min(length, end + FFT_SIZE);
+      const mono = mixDown(cloneRegion(doc, sliceStart, sliceEnd));
       const id = ++reqIdRef.current;
       worker.postMessage(
         {
@@ -204,8 +214,8 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
           id,
           channel: mono,
           sampleRate: doc.sampleRate,
-          startSample: start,
-          endSample: end,
+          startSample: start - sliceStart,
+          endSample: end - sliceStart,
           width,
           height,
           fftSize: FFT_SIZE,
