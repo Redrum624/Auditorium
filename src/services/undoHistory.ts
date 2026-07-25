@@ -15,12 +15,18 @@ import { useAppStore } from '../stores/appStore';
 export interface UndoEntry {
   label: string;
   docId: string;
-  /** Estimated bytes retained by this entry's undo/redo closures — the sum of
-   * the channel byteLengths of every AudioDocument snapshot they keep alive
-   * (both pre- and post-edit, for whole-document edits via `applyEdit`).
-   * Omitted (treated as 0) for entries that only capture small marker-list
-   * snapshots (`pushMarkerUndo`) — those never hold a channel array, so they
-   * are not counted toward `MAX_UNDO_BYTES` (Task M9 / F15). */
+  /** Estimated bytes this entry's eviction from `done` would actually free —
+   * for a whole-document edit via `applyEdit`, the channel byteLengths of its
+   * PRE-edit snapshot only (Task M9 fix round 2 / MINOR 1). The post-edit
+   * snapshot is NOT this entry's own memory to free: it's either the live
+   * document (held by the store regardless of undo history) or the NEXT
+   * entry's own pre-edit snapshot (same object) — either way, something else
+   * already keeps it alive, so charging it here would double-count it, or
+   * (charging only the post-edit side, round 1's mistake) charge the wrong
+   * end entirely for a size-changing edit. Omitted (treated as 0) for entries
+   * that only capture small marker-list snapshots (`pushMarkerUndo`) — those
+   * never hold a channel array, so they are not counted toward
+   * `MAX_UNDO_BYTES` (Task M9 / F15). */
   bytes?: number;
   undo(): void;
   redo(): void;
@@ -55,8 +61,9 @@ export const UNDO_LIMIT = 50;
  * `done` stack; the oldest entries are evicted — beyond the newest, which is
  * always kept — once this is exceeded, exactly like `UNDO_LIMIT` (Task M9 /
  * F15). Without this, 50 retained entries of a 2-hour stereo file (each
- * holding its own pre- and post-edit channel copies) would pin roughly 11 GB
- * of PCM; entry-count alone doesn't bound memory, size does. */
+ * pinning its own pre-edit document snapshot in addition to the live
+ * document) would pin roughly 11 GB of PCM; entry-count alone doesn't bound
+ * memory, size does. */
 export const MAX_UNDO_BYTES = 800 * 1024 * 1024;
 
 /** Sum of `bytes` (0 for entries that omit it) currently retained in `done`. */

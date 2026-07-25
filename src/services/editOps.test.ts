@@ -91,31 +91,41 @@ describe('applyEdit', () => {
   });
 });
 
-describe('applyEdit — undo entry bytes accounting (Task M9 fix round 1 / MINOR 1)', () => {
+describe('applyEdit — undo entry bytes accounting (Task M9 fix round 1 + round 2 / MINOR 1)', () => {
   const SAMPLE_RATE = 44100;
-  const DURATION_SECONDS = 600; // 10 minutes
   const CHANNEL_COUNT = 2;
+  const DURATION_SECONDS = 600; // 10 minutes
   const LENGTH = SAMPLE_RATE * DURATION_SECONDS; // 26,460,000 samples/channel
   const DOC_BYTES = LENGTH * 4 * CHANNEL_COUNT; // 211,680,000 bytes (~201.9 MiB)
 
-  function makeBigDoc(): AudioDocument {
+  // A mid-test assertion failure must not leak a spy into later tests in this
+  // file (Task M9 fix round 2 / MINOR — was an inline `pushSpy.mockRestore()`).
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  function makeDocOfLength(length: number): AudioDocument {
     const doc = createDocument({
-      name: 'big.wav',
+      name: 'doc.wav',
       sampleRate: SAMPLE_RATE,
-      channels: Array.from({ length: CHANNEL_COUNT }, () => new Float32Array(LENGTH)),
+      channels: Array.from({ length: CHANNEL_COUNT }, () => new Float32Array(length)),
     });
     useAppStore.getState().addDocument(doc);
     return doc;
   }
 
+  function makeBigDoc(): AudioDocument {
+    return makeDocOfLength(LENGTH);
+  }
+
   /** A same-length "edit": a fresh channel copy, exactly what every real
-   * AudioDocument mutator allocates, so DOC_BYTES stays constant across
+   * AudioDocument mutator allocates, so byte size stays constant across
    * repeated pushes (isolates the accounting from length-change effects). */
   function identityEdit(d: AudioDocument): AudioDocument {
     return { ...d, channels: d.channels.map((c) => c.slice()), dirty: true };
   }
 
-  it('charges only the post-edit snapshot, not pre + post (which double-counts the shared preDoc/newDoc chain)', () => {
+  it('charges only the PRE-edit snapshot, not both sides (which double-counts the shared preDoc/newDoc chain)', () => {
     const doc = makeBigDoc();
     const pushSpy = jest.spyOn(undoHistory, 'pushUndo');
 
@@ -123,15 +133,17 @@ describe('applyEdit — undo entry bytes accounting (Task M9 fix round 1 / MINOR
 
     expect(pushSpy).toHaveBeenCalledTimes(1);
     expect(pushSpy.mock.calls[0][0].bytes).toBe(DOC_BYTES); // not 2 * DOC_BYTES
-    pushSpy.mockRestore();
   });
 
-  it('pins the retained undo depth for a 10-minute stereo 44.1 kHz document at 3, not the pre-fix 1', () => {
+  it('pins the retained undo depth for a 10-minute stereo 44.1 kHz document at 3, not the pre-round-1-fix 1', () => {
     const doc = makeBigDoc();
 
     // 4 same-length edits: 4 * DOC_BYTES (~808 MB) exceeds the 800 MB budget
     // by just over one document's worth, so exactly the oldest entry is
-    // evicted, leaving 3. The old pre+post accounting charged roughly 2x per
+    // evicted, leaving 3. For CONSTANT-size edits, charging the pre-edit
+    // snapshot (round 2) totals the exact same as charging the post-edit
+    // snapshot (round 1) — this depth-3 result is unchanged by round 2. The
+    // original pre+round-1-fix accounting (both sides) charged roughly 2x per
     // entry, which would have collapsed this same scenario to a depth of 1.
     for (let i = 0; i < 4; i++) {
       applyEdit(`Edit ${i}`, doc.id, identityEdit);
@@ -153,6 +165,65 @@ describe('applyEdit — undo entry bytes accounting (Task M9 fix round 1 / MINOR
     // Nothing evicted — a 0-byte marker entry sitting between two full-size
     // audio edits must not be mistaken for carrying its own doc-sized cost.
     expect(getHistory(doc.id).done).toEqual(['Edit A', 'Add Marker', 'Edit B']);
+  });
+
+  describe('size-changing edit (Trim to Selection large -> small): the regression round 1 missed (Task M9 fix round 2)', () => {
+    // 40 minutes stereo 44.1 kHz: big enough that its OWN byte size alone
+    // exceeds MAX_UNDO_BYTES (800 MB) — the reviewer's illustrative scenario
+    // used a 60-minute (~1.27 GB) recording trimmed to 30 s; this is the same
+    // shape at a lighter, still-realistic scale.
+    const BIG_LENGTH = SAMPLE_RATE * 2400; // 105,840,000 samples/channel
+    const BIG_BYTES = BIG_LENGTH * 4 * CHANNEL_COUNT; // 846,720,000 bytes (~807.5 MiB)
+
+    it('sanity: the big document alone exceeds MAX_UNDO_BYTES', () => {
+      expect(BIG_BYTES).toBeGreaterThan(undoHistory.MAX_UNDO_BYTES);
+    });
+
+    it('charges the large PRE-edit snapshot on a Trim-like edit, not the tiny post-edit result', () => {
+      const doc = makeDocOfLength(BIG_LENGTH);
+      const pushSpy = jest.spyOn(undoHistory, 'pushUndo');
+
+      applyEdit('Trim', doc.id, (d) => ({
+        ...d,
+        channels: d.channels.map(() => new Float32Array(10)),
+        dirty: true,
+      }));
+
+      expect(pushSpy.mock.calls[0][0].bytes).toBe(BIG_BYTES); // NOT ~80 (10 samples * 2ch * 4B)
+    });
+
+    it('evicts the Trim entry once the running total exceeds budget — RED against a newDoc charge, which would have kept it "cheap" indefinitely', () => {
+      const doc = makeDocOfLength(BIG_LENGTH);
+
+      // "Trim to Selection" down to a tiny clip: this entry's preDoc is the
+      // full BIG original — that's what ACTUALLY stays pinned once it's
+      // retired into undo history, since the live document becomes the tiny
+      // result instead. A `docBytes(newDoc)` charge (round 1's bug) would
+      // have billed this entry ~80 bytes, letting it survive up to
+      // UNDO_LIMIT (50) subsequent small edits while still secretly pinning
+      // the ~808 MB original — a real regression against pre-M9 behavior.
+      applyEdit('Trim', doc.id, (d) => ({
+        ...d,
+        channels: d.channels.map(() => new Float32Array(10)),
+        dirty: true,
+      }));
+      expect(getHistory(doc.id).done).toEqual(['Trim']); // alone: still kept (>= 1 rule)
+
+      // Several small follow-up edits on the now-tiny document (negligible
+      // bytes each). 'Trim' alone already exceeds the 800 MB budget, so it
+      // must be evicted as soon as anything else is pushed on top.
+      for (let i = 0; i < 3; i++) {
+        applyEdit(`Small ${i}`, doc.id, (d) => ({
+          ...d,
+          channels: d.channels.map((c) => c.slice()),
+          dirty: true,
+        }));
+      }
+
+      const done = getHistory(doc.id).done;
+      expect(done).not.toContain('Trim');
+      expect(done).toEqual(['Small 0', 'Small 1', 'Small 2']);
+    });
   });
 });
 

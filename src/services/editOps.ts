@@ -167,18 +167,26 @@ export function applyEdit(
   pushUndo({
     label,
     docId,
-    // Charge only the post-edit snapshot (Task M9 fix round 1 / MINOR 1).
+    // Charge only the PRE-edit snapshot (Task M9 fix round 2 / MINOR 1 —
+    // round 1 charged `newDoc`, which is the wrong end of the pair).
     // `preDoc` is not independent memory: it IS the previous entry's `newDoc`
     // object (the store doc `applyEdit` read at the top of this call) — the
     // whole chain of edits shares one doc reference per step, each entry's
-    // `preDoc` being the prior entry's `newDoc`. Charging `docBytes(preDoc) +
-    // docBytes(newDoc)` therefore double-counted every entry in the middle of
-    // the chain (each retained array was billed once as a `newDoc` and again
-    // as the NEXT entry's `preDoc`), roughly halving the effective budget —
-    // collapsing undo depth to 1 for any document above ~9-10 minutes of
-    // stereo 44.1 kHz, at which point a single marker edit (0 bytes, but still
-    // one more push) could evict the last remaining audio undo step.
-    bytes: docBytes(newDoc),
+    // `preDoc` being the prior entry's `newDoc`. Charging BOTH sides
+    // double-counted every entry in the middle of the chain (round 1's bug).
+    // But charging only `newDoc` (round 1's fix) charges the WRONG side:
+    // evicting the oldest entry E_i frees its `preDoc` (D_{i-1}) — the NEXT
+    // entry still holds a reference to `newDoc` (D_i) as ITS OWN `preDoc`, so
+    // D_i stays alive regardless of E_i's eviction. `docBytes(preDoc)` is the
+    // exactly-correct marginal charge: evicting the oldest k entries frees
+    // precisely the sum of their `preDoc` bytes, no more and no less — for
+    // constant-size edits this coincides with a `newDoc` charge (same number
+    // either way), but for a size-CHANGING edit (e.g. Trim to Selection on a
+    // large document down to a small one) `docBytes(newDoc)` would have
+    // billed the entry as nearly free while it single-handedly keeps the full
+    // large original pinned via its `preDoc` reference — letting it survive
+    // far more subsequent edits than its actual retained cost should allow.
+    bytes: docBytes(preDoc),
     undo() {
       const s = useAppStore.getState();
       s.updateDocument(preDoc);
