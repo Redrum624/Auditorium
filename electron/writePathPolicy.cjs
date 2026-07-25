@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
 
 // Exactly what the app writes via file:write (F24). The atomic-write '.tmp'
 // suffix (atomicWrite.cjs) is handled entirely internally and is never
@@ -55,6 +56,48 @@ function isWellFormedUncPath(rawPath) {
   return components.length >= 2;
 }
 
+// Hosts that always mean "this machine," regardless of what a hostname
+// string superficially looks like. '.' is included for documentation/
+// defense-in-depth even though a UNC path literally starting \\.\ is already
+// intercepted by isDeviceOrExtendedPath before this is ever consulted.
+const LOCAL_ALIAS_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '.']);
+
+/** True when `host` (the first UNC path component) resolves to THIS machine
+ * -- a fixed alias, or this machine's own hostname. Case-insensitive. */
+function isLocalAliasHost(host) {
+  const h = host.toLowerCase();
+  return LOCAL_ALIAS_HOSTS.has(h) || h === os.hostname().toLowerCase();
+}
+
+/** True when `share` (the second UNC path component) is a Windows
+ * administrative share (C$, D$, ...) -- these always map straight to a local
+ * drive root, so they must be rejected regardless of the host name: there is
+ * no way to tell a "remote-looking" host apart from a hosts-file alias, VPN
+ * loopback, or SMB-loopback-to-self for this specific check. */
+function isAdminSharePattern(share) {
+  return /^[A-Za-z]\$$/.test(share);
+}
+
+/**
+ * CRITICAL (F8 review fix): a UNC path can name THIS machine under a loopback
+ * alias (\\localhost\..., \\127.0.0.1\..., \\<own-hostname>\...) or reach a
+ * local drive root directly via an administrative share (\\anyhost\C$\...).
+ * Both forms resolve to the exact same filesystem the drive-letter checks
+ * already protect, but as a UNC string they match none of the forbidden-dir
+ * prefixes (which are drive-letter-rooted) -- and `fs.realpathSync.native`
+ * returns the UNC form unchanged, so assertWriteTargetSafe's realpath
+ * containment re-check doesn't catch it either. A real network share is
+ * never \\localhost and never needs an admin share, so both forms are
+ * rejected outright rather than attempting to map them back to a drive
+ * letter for containment (simpler and strictly safer). Callers must already
+ * know rawPath is a well-formed UNC path (isWellFormedUncPath) before calling
+ * this.
+ */
+function isLocalAliasOrAdminShareUncPath(rawPath) {
+  const [host, share] = rawPath.slice(2).split(/[\\/]+/).filter(Boolean);
+  return isLocalAliasHost(host) || isAdminSharePattern(share);
+}
+
 function resolveLower(p) {
   return path.resolve(p).toLowerCase();
 }
@@ -106,6 +149,15 @@ function assertWriteAllowed(rawPath) {
   const isUnc = rawPath.startsWith('\\\\');
   if (isUnc && !isWellFormedUncPath(rawPath)) {
     throw new Error(`Write denied: malformed UNC path (need \\\\server\\share\\...): ${rawPath}`);
+  }
+
+  // CRITICAL (F8 review fix): reject a UNC path that loops back to this
+  // machine (localhost/127.0.0.1/::1/own-hostname) or uses an administrative
+  // share (C$, D$, ...) BEFORE containment -- see isLocalAliasOrAdminShareUncPath.
+  if (isUnc && isLocalAliasOrAdminShareUncPath(rawPath)) {
+    throw new Error(
+      `Write denied: UNC path resolves to a local machine or admin share, not a real network location: ${rawPath}`
+    );
   }
 
   if (!path.isAbsolute(rawPath)) {

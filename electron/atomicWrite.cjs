@@ -2,6 +2,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 
 // Monotonic per-process counter so two concurrent writes to the SAME target
 // (e.g. an accidental double Save) never share a temp filename.
@@ -12,12 +13,19 @@ let seq = 0;
  * absolute path; callers must run the write-policy checks (writePathPolicy.cjs)
  * BEFORE calling this (F2).
  *
- * Writes to a sibling temp file `<basename>.<pid>.<seq>.tmp` in the SAME
- * directory as resolvedPath (so the final rename is same-volume and atomic),
- * fsyncs it, closes it, then renames it over the target -- Node's fs.rename
- * replaces an existing destination file on Windows in one filesystem
- * operation, so there is never a truncated (O_TRUNC) window where the
- * original is gone but the new data isn't fully on disk yet.
+ * Writes to a sibling temp file `<basename>.<pid>.<seq>.<random>.tmp` in the
+ * SAME directory as resolvedPath (so the final rename is same-volume and
+ * atomic), fsyncs it, closes it, then renames it over the target -- Node's
+ * fs.rename replaces an existing destination file on Windows in one
+ * filesystem operation, so there is never a truncated (O_TRUNC) window where
+ * the original is gone but the new data isn't fully on disk yet.
+ *
+ * The temp file is opened with the exclusive 'wx' flag (O_CREAT | O_EXCL),
+ * not plain 'w': 'w' would silently open (and follow) a symlink pre-planted
+ * at the temp path, while 'wx' fails closed if ANYTHING already exists there
+ * (file or symlink). The random suffix (on top of pid+seq) means the name
+ * can't be guessed in advance, so there's nothing for an attacker to
+ * pre-plant a symlink at in the first place (review fix round 1, MINOR 3).
  *
  * On ANY failure (open/write/fsync/rename), the temp file is removed
  * (best-effort -- a cleanup failure never masks the original error) and the
@@ -35,11 +43,15 @@ let seq = 0;
  */
 async function atomicWriteFile(resolvedPath, data, fsImpl = fs.promises) {
   const dir = path.dirname(resolvedPath);
-  const tempPath = path.join(dir, `${path.basename(resolvedPath)}.${process.pid}.${++seq}.tmp`);
+  const randomSuffix = crypto.randomBytes(4).toString('hex');
+  const tempPath = path.join(
+    dir,
+    `${path.basename(resolvedPath)}.${process.pid}.${++seq}.${randomSuffix}.tmp`
+  );
 
   let fh = null;
   try {
-    fh = await fsImpl.open(tempPath, 'w');
+    fh = await fsImpl.open(tempPath, 'wx');
     await fh.writeFile(data);
     await fh.sync();
     await fh.close();

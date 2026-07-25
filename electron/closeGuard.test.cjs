@@ -17,6 +17,12 @@ function fakeWin({ crashed = false } = {}) {
   return {
     destroyed: false,
     destroy() {
+      // Mirrors real Electron: calling destroy() on an already-destroyed
+      // BrowserWindow throws "Object has been destroyed" -- this is exactly
+      // the crash IMPORTANT 2 (review fix round 1) guards against.
+      if (this.destroyed) {
+        throw new Error('Object has been destroyed');
+      }
       this.destroyed = true;
     },
     isDestroyed() {
@@ -216,6 +222,40 @@ describe('closeGuard (Task F8 native close guard)', () => {
         await jest.advanceTimersByTimeAsync(2001);
         expect(dialog.showMessageBox).not.toHaveBeenCalled();
       } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('a window destroyed by another path while the busy dialog is open: a later Quit resolution neither throws nor produces an unhandled rejection (review fix round 1, IMPORTANT 2)', async () => {
+      jest.useFakeTimers();
+      const unhandled = [];
+      const onUnhandledRejection = (err) => unhandled.push(err);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        let resolveDialog;
+        const dialogPromise = new Promise((resolve) => {
+          resolveDialog = resolve;
+        });
+        const ipcMain = fakeIpcMain();
+        const dialog = { showMessageBox: jest.fn(() => dialogPromise) };
+        const guard = createCloseGuard({ ipcMain, dialog, timeoutMs: 2000 });
+        const win = fakeWin();
+        const event = fakeEvent();
+
+        guard.handleClose(win, event);
+        await jest.advanceTimersByTimeAsync(2001); // busy dialog now showing (unresolved)
+        expect(dialog.showMessageBox).toHaveBeenCalledTimes(1);
+
+        win.destroy(); // window closed via some OTHER path while the dialog is up
+        expect(win.destroyed).toBe(true);
+
+        resolveDialog({ response: 0 }); // Quit chosen after the window is already gone
+        jest.useRealTimers();
+        await new Promise((resolve) => setTimeout(resolve, 0)); // flush real microtasks/macrotasks
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
         jest.useRealTimers();
       }
     });

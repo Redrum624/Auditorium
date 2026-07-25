@@ -1,5 +1,6 @@
 'use strict';
 
+const os = require('node:os');
 const path = require('node:path');
 const {
   isWriteAllowed,
@@ -101,6 +102,44 @@ describe('writePathPolicy', () => {
 
   test('assertWriteAllowed throws for the \\\\?\\ extended-length path prefix', () => {
     expect(() => assertWriteAllowed('\\\\?\\C:\\Windows\\evil.wav')).toThrow();
+  });
+
+  describe('UNC local-alias / admin-share loopback rejection (F8 review fix, CRITICAL 1)', () => {
+    test('rejects \\\\localhost\\C$\\... (admin share via localhost loopback)', () => {
+      expect(isWriteAllowed('\\\\localhost\\C$\\Windows\\evil.wav')).toBe(false);
+    });
+
+    test('rejects \\\\127.0.0.1\\C$\\... (admin share via IPv4 loopback)', () => {
+      expect(
+        isWriteAllowed('\\\\127.0.0.1\\C$\\Program Files\\Auditorium\\resources\\x.audm')
+      ).toBe(false);
+    });
+
+    test('rejects \\\\.\\... (already covered by the device-path check, still rejected)', () => {
+      expect(isWriteAllowed('\\\\.\\C$\\Windows\\evil.wav')).toBe(false);
+    });
+
+    test('rejects a UNC path whose host is this machine\'s own hostname', () => {
+      const hostname = os.hostname();
+      expect(isWriteAllowed(`\\\\${hostname}\\C$\\Windows\\evil.wav`)).toBe(false);
+    });
+
+    test('rejects an admin share ($-suffixed) even on a remote-looking host name', () => {
+      expect(isWriteAllowed('\\\\SomeRemoteServer\\C$\\Windows\\evil.wav')).toBe(false);
+    });
+
+    test('rejects \\\\localhost\\... even for a normal (non-admin) share name', () => {
+      expect(isWriteAllowed('\\\\localhost\\music\\take.wav')).toBe(false);
+    });
+
+    test('host matching is case-insensitive (LOCALHOST, C$ variants)', () => {
+      expect(isWriteAllowed('\\\\LOCALHOST\\c$\\Windows\\evil.wav')).toBe(false);
+      expect(isWriteAllowed('\\\\Server\\C$\\evil.wav')).toBe(false);
+    });
+
+    test('a genuine remote NAS share (non-admin share, non-local-alias host) still passes', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav')).toBe(true);
+    });
   });
 
   test('rejects extensions removed from the allow-list (F24: .txt, .json, .aud)', () => {

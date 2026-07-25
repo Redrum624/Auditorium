@@ -55,7 +55,10 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
         defaultId: 1,
         cancelId: 1,
       });
-      if (result.response === 0) {
+      // The window may have been destroyed via some OTHER path while this
+      // dialog was awaiting a response (review fix round 1, IMPORTANT 2) --
+      // calling destroy() again would throw "Object has been destroyed".
+      if (result.response === 0 && !win.isDestroyed?.()) {
         win.destroy(); // Quit — discard unsaved/in-flight work
       }
       // Cancel: do nothing; the prevented close already kept the window alive.
@@ -107,11 +110,14 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
       // F7: fail CLOSED. The renderer hasn't answered but its webContents is
       // still alive -- it may just be busy in a long synchronous operation
       // (encode/export), not dead. Ask instead of assuming it's safe to
-      // discard its work.
+      // discard its work. This is a genuinely fire-and-forget call (a
+      // setTimeout callback can't be awaited) -- .catch keeps any failure
+      // (e.g. a destroyed-window race, review fix round 1 IMPORTANT 2) from
+      // becoming an unhandled promise rejection.
       void confirmQuit(
         win,
         'The editor is busy (a save or export may be running). Quit anyway?'
-      );
+      ).catch(() => {});
     }, timeoutMs);
     pending = { win, timer };
     win.webContents.send('app:close-requested');

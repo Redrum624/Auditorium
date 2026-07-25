@@ -11,13 +11,19 @@
  *
  * `isPackaged` is passed in (not read from `app` here) so this module stays
  * electron-free and unit-testable in plain Node, matching permissionPolicy.cjs.
- * An undefined isPackaged (the shape require('electron') degrades to outside
- * a real Electron process, e.g. under Jest) is treated as "not packaged" --
- * harmless in tests/dev, and never reachable in a real packaged build, where
- * app.isPackaged is always a real boolean.
+ *
+ * Fails CLOSED on anything other than a known, real "unpackaged" state
+ * (review fix round 1, MINOR 4): the gate opens ONLY when isPackaged is
+ * strictly `false`. A real Electron process (main.cjs, or the scripted/
+ * Playwright smoke harness launching `electron .` unpacked) always reports a
+ * genuine boolean here, so this never affects production or the smoke
+ * harness. An undefined/null isPackaged -- e.g. the shape require('electron')
+ * degrades to outside a real Electron process, such as under Jest without an
+ * explicit electron mock -- is an UNKNOWN state and must not be treated as
+ * safely unpackaged just because it happens to be falsy.
  */
 function isPackagedGateOpen(isPackaged, envValue) {
-  return envValue === '1' && !isPackaged;
+  return envValue === '1' && isPackaged === false;
 }
 
 module.exports = { isPackagedGateOpen };

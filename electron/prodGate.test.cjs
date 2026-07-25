@@ -25,7 +25,19 @@ describe('prodGate.isPackagedGateOpen (F23)', () => {
     expect(isPackagedGateOpen(true, undefined)).toBe(false);
   });
 
-  test('treats an undefined isPackaged as unpackaged (the require("electron") string-stub shape outside a real Electron process, e.g. under Jest)', () => {
-    expect(isPackagedGateOpen(undefined, '1')).toBe(true);
+  test('fails CLOSED for an undefined isPackaged (unknown state) even with the env flag set (review fix round 1, MINOR 4)', () => {
+    // isPackaged is only ever a real boolean in a genuine Electron process
+    // (main.cjs) or an explicit test double; an undefined/unknown value
+    // (e.g. the require("electron") string-stub shape outside a real
+    // Electron process) must never be treated as "safely unpackaged".
+    expect(isPackagedGateOpen(undefined, '1')).toBe(false);
+    expect(isPackagedGateOpen(null, '1')).toBe(false);
+  });
+
+  test('stays open for the real smoke-harness shape: isPackaged strictly false', () => {
+    // The scripted/Playwright smoke harness launches `electron .` unpacked,
+    // so the real app object reports isPackaged === false -- this exact
+    // known-good state must still open the gate.
+    expect(isPackagedGateOpen(false, '1')).toBe(true);
   });
 });

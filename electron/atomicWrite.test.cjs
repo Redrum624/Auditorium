@@ -53,6 +53,38 @@ describe('atomicWriteFile (F2)', () => {
     expect(capturedTempPath.endsWith('.tmp')).toBe(true);
   });
 
+  test('opens the temp file with the exclusive "wx" flag, not "w" (review fix round 1, MINOR 3: refuses to open through a pre-planted file/symlink at a predictable name)', async () => {
+    const target = path.join(dir, 'out.wav');
+    let capturedFlag = null;
+    const fsImpl = {
+      open: async (p, flag) => {
+        capturedFlag = flag;
+        return fsp.open(p, flag);
+      },
+      unlink: fsp.unlink,
+      rename: fsp.rename,
+    };
+    await atomicWriteFile(target, Buffer.from('x'), fsImpl);
+    expect(capturedFlag).toBe('wx');
+  });
+
+  test('the temp filename includes an unpredictable random component in addition to pid/seq (review fix round 1, MINOR 3)', async () => {
+    const target = path.join(dir, 'out.wav');
+    let capturedTempPath = null;
+    const fsImpl = {
+      open: async (p, flag) => {
+        capturedTempPath = p;
+        return fsp.open(p, flag);
+      },
+      unlink: fsp.unlink,
+      rename: fsp.rename,
+    };
+    await atomicWriteFile(target, Buffer.from('x'), fsImpl);
+    const base = path.basename(capturedTempPath);
+    expect(base).toMatch(/^out\.wav\.\d+\.\d+\.[0-9a-f]{8}\.tmp$/);
+    expect(path.dirname(capturedTempPath)).toBe(dir); // still the same parent dir
+  });
+
   test('a rename failure leaves the original file untouched and cleans up the temp file', async () => {
     const target = path.join(dir, 'out.wav');
     fs.writeFileSync(target, 'ORIGINAL');
