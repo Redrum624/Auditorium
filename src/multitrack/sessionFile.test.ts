@@ -339,6 +339,19 @@ describe('serializeSessionV3 -> parseSessionFileV3 round trip (.audm v3)', () =>
 
     expect(parsed.markers).toBeUndefined();
   });
+
+  it('throws a clear error at save time (rather than silently writing a file its own reader would reject) if the all-channels-same-length invariant is ever broken', () => {
+    const doc = createDocument({ name: 'broken.wav', sampleRate: 44100, channels: [sine(100), sine(100)] });
+    // AudioDocument guarantees all channels share one length; simulate that
+    // invariant having been violated by some future bug rather than trying to
+    // reach this state through the real mutators (which all preserve it).
+    const corrupted: AudioDocument = { ...doc, channels: [doc.channels[0], doc.channels[1].slice(0, 50)] };
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    expect(() => serializeSessionV3(session, [corrupted])).toThrow(/differing length/i);
+  });
 });
 
 describe('serializeSessionV3 structural guarantee (F3): never builds a full-file string', () => {
@@ -438,6 +451,56 @@ describe('parseSessionFileV3 corrupt/truncated handling', () => {
     const buf = buildV3Buffer(meta, payload);
 
     expect(() => parseSessionFileV3(buf)).toThrow(/out of range/i);
+  });
+
+  it('throws a descriptive error (not a raw RangeError) for a non-integer declared sample length', () => {
+    // length: 0.5 * 4 bytes/sample = 2, so a naive `byteLength !== length * 4`
+    // check alone would accept this and crash later trying to build a
+    // Float32Array from a 2-byte buffer.
+    const payload = new Uint8Array(2);
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', name: 'a', sampleRate: 44100, length: 0.5, channels: [{ offset: 0, byteLength: 2 }] }],
+    };
+    const buf = buildV3Buffer(meta, payload);
+
+    expect(() => parseSessionFileV3(buf)).toThrow(/invalid sample length/i);
+  });
+
+  it('throws a descriptive error for a negative declared sample length', () => {
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', name: 'a', sampleRate: 44100, length: -1, channels: [] }],
+    };
+    const buf = buildV3Buffer(meta);
+
+    expect(() => parseSessionFileV3(buf)).toThrow(/invalid sample length/i);
+  });
+
+  it('throws a descriptive error (not a raw TypeError) when an audio index entry has no channel list', () => {
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', name: 'a', sampleRate: 44100, length: 10 }], // channels omitted entirely
+    };
+    const buf = buildV3Buffer(meta);
+
+    expect(() => parseSessionFileV3(buf)).toThrow(/channel list/i);
+  });
+
+  it('falls back to "Untitled" instead of `undefined` when an audio index entry has no name', () => {
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', sampleRate: 44100, length: 0, channels: [] }], // name omitted entirely
+    };
+    const buf = buildV3Buffer(meta);
+
+    const { documents } = parseSessionFileV3(buf);
+
+    expect(documents[0].name).toBe('Untitled');
   });
 });
 
@@ -595,6 +658,34 @@ describe('saveSessionViaDialog', () => {
     expect(session.tracks[0].clips[0].lengthSample).toBe(10);
     expect(documents).toHaveLength(1);
     expect(documents[0].channels[0]).toEqual(doc.channels[0]);
+  });
+
+  it('hands writeFile the buffer straight from serialization with no defensive full-buffer copy (IMPORTANT 1: a reintroduced copy would double peak renderer memory)', async () => {
+    // ipcRenderer.invoke (preload.cjs) structured-clones its argument rather
+    // than detaching it, so an extra `new ArrayBuffer(n); .set(bytes)` copy
+    // before writeFile would hold 3 live copies of the session's audio at
+    // once instead of 2 — halving the largest session save() can handle
+    // before OOM, i.e. reintroducing exactly the ceiling this task exists to
+    // raise. There is no external handle on serializeSessionV3's internal
+    // `bytes` to compare by reference, so this pins the property indirectly:
+    // `serializeSessionV3` assembles its output with exactly one
+    // `Uint8Array#set` call per part (magic header, JSON metadata, one call
+    // per channel chunk — 3 total for this single-mono-channel session). A
+    // `toArrayBuffer`-style defensive copy would add exactly one more,
+    // full-buffer `.set()` call before the write.
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(doc);
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+    const setSpy = jest.spyOn(Uint8Array.prototype, 'set');
+
+    await saveSessionViaDialog();
+
+    expect(setSpy).toHaveBeenCalledTimes(3);
+    setSpy.mockRestore();
   });
 
   it('is a no-op when the save dialog is cancelled', async () => {

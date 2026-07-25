@@ -55,7 +55,12 @@ interface AudioChannelMeta {
 interface AudioDocMeta {
   docId: string;
   /** Kept beyond the minimal v3 shape so a round-tripped document keeps its
-   * Files-panel display name instead of falling back to a generic label. */
+   * Files-panel display name instead of falling back to a generic label.
+   * Always written by `serializeSessionV3`; typed as required so well-formed
+   * files don't need an `?? 'Untitled'` fallback at every use, but the parser
+   * still defends against a hand-built/foreign file omitting it (see
+   * `parseSessionFileV3`) since nothing here is runtime-validated against
+   * this type. */
   name: string;
   sampleRate: number;
   length: number; // samples per channel
@@ -95,14 +100,6 @@ function base64ToBuffer(b64: string): ArrayBuffer {
   const bytes = new Uint8Array(binary.length);
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   return bytes.buffer;
-}
-
-/** Copies a Uint8Array into a standalone ArrayBuffer for the IPC writeFile call
- * (which detaches/transfers the buffer). */
-function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
-  const out = new ArrayBuffer(bytes.byteLength);
-  new Uint8Array(out).set(bytes);
-  return out;
 }
 
 /**
@@ -196,6 +193,13 @@ export function serializeSession(
  *
  * Same "only referenced docs, drop clips from closed documents" behavior as
  * `serializeSession` (see `computeReferenced`).
+ *
+ * The returned `bytes` is always a *fresh* zero-offset `Uint8Array` sized to
+ * exactly its own content (`bytes.byteLength === bytes.buffer.byteLength`) —
+ * `saveSessionViaDialog` relies on this to hand `bytes.buffer` straight to
+ * `writeFile` with no defensive copy (see its comment for why that copy would
+ * matter). Don't change this function to return a subarray/view over some
+ * larger buffer without updating that call site too.
  */
 export function serializeSessionV3(
   session: Session,
@@ -208,14 +212,25 @@ export function serializeSessionV3(
   const channelChunks: Uint8Array[] = [];
   let payloadLength = 0;
   for (const d of docs.filter((doc) => referencedIds.has(doc.id))) {
+    const length = docLength(d); // channels[0].length — see the invariant check below
     const channels: AudioChannelMeta[] = [];
     for (const channel of d.channels) {
+      // The reader validates every channel's byteLength against this single
+      // `length` value (documents are invariantly all-channels-same-length —
+      // see AudioDocument.ts), so a writer that ever saw that invariant
+      // broken must fail loudly here rather than silently emit a file its
+      // own reader would then reject with nothing noticing at save time.
+      if (channel.length !== length) {
+        throw new Error(
+          `Cannot save session: document "${d.name}" (${d.id}) has channels of differing length (${length} vs ${channel.length}), which should never happen`
+        );
+      }
       const bytes = new Uint8Array(channel.buffer, channel.byteOffset, channel.byteLength);
       channels.push({ offset: payloadLength, byteLength: bytes.byteLength });
       channelChunks.push(bytes);
       payloadLength += bytes.byteLength;
     }
-    audio.push({ docId: d.id, name: d.name, sampleRate: d.sampleRate, length: docLength(d), channels });
+    audio.push({ docId: d.id, name: d.name, sampleRate: d.sampleRate, length, channels });
   }
 
   const fileShape: SessionFileShapeV3 = {
@@ -374,10 +389,13 @@ function hasV3Magic(bytes: Uint8Array): boolean {
  * malformed/truncated buffer propagate as something opaque) for: a header
  * that's cut short, a JSON slice that runs past the end of the file, JSON
  * that doesn't parse, a formatVersion other than 3, a missing/malformed
- * `audio` index, a channel whose declared byteLength disagrees with its
- * declared sample count, or a channel offset/length that runs past the end of
- * the payload — i.e. any corrupt-or-truncated v3 file yields a clean error
- * instead of a crash.
+ * `audio` index, a non-integer/negative declared sample `length`, a missing
+ * per-doc channel list, a channel whose declared byteLength disagrees with
+ * its declared sample count, or a channel offset/length that runs past the
+ * end of the payload — i.e. any corrupt-or-truncated v3 file (or a hostile
+ * hand-built one) yields a clean error instead of a crash. A missing `name`
+ * on an otherwise-valid entry falls back to 'Untitled' rather than crashing
+ * or leaving the Files panel showing `undefined`.
  */
 export function parseSessionFileV3(buf: ArrayBuffer): {
   session: Session;
@@ -417,6 +435,12 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
 
   const idMap = new Map<string, string>();
   const documents: AudioDocument[] = parsed.audio.map((meta) => {
+    if (!Number.isInteger(meta.length) || meta.length < 0) {
+      throw new Error('Corrupt .audm file: audio index has an invalid sample length');
+    }
+    if (!Array.isArray(meta.channels)) {
+      throw new Error('Corrupt .audm file: audio index entry is missing its channel list');
+    }
     const channels: Float32Array[] = meta.channels.map((chMeta) => {
       if (chMeta.byteLength !== meta.length * 4) {
         throw new Error('Corrupt .audm file: channel byte length does not match declared sample count');
@@ -429,7 +453,9 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
       // Copy into a fresh, zero-offset buffer — see doc comment above.
       return new Float32Array(buf.slice(payloadStart + start, payloadStart + end));
     });
-    const doc = createDocument({ name: meta.name, sampleRate: meta.sampleRate, channels });
+    // Fall back to a generic label rather than `undefined` for a v3 file
+    // whose audio index entry lacks a `name` (e.g. hand-built/foreign writer).
+    const doc = createDocument({ name: meta.name ?? 'Untitled', sampleRate: meta.sampleRate, channels });
     idMap.set(meta.docId, doc.id);
     return doc;
   });
@@ -490,7 +516,7 @@ export async function saveSessionViaDialog(): Promise<void> {
   });
   if (!targetPath) return; // cancelled
 
-  let bytes: Uint8Array;
+  let bytes: Uint8Array<ArrayBuffer>;
   let droppedClipCount: number;
   try {
     ({ bytes, droppedClipCount } = serializeSessionV3(session, docs, useAppStore.getState().markers));
@@ -502,7 +528,16 @@ export async function saveSessionViaDialog(): Promise<void> {
 
   let result: { ok: true } | { ok: false; error: string };
   try {
-    result = await api().writeFile(targetPath, toArrayBuffer(bytes));
+    // `bytes` is `serializeSessionV3`'s freshly-allocated Uint8Array — byteOffset
+    // 0, byteLength === bytes.buffer.byteLength, and dead after this call — so
+    // `bytes.buffer` IS the whole file with nothing to trim. Passing it directly
+    // (no `toArrayBuffer` copy) matters here specifically: `writeFile` is a plain
+    // `ipcRenderer.invoke` (preload.cjs), which structured-clones its argument
+    // rather than transferring/detaching it, so an extra defensive copy would
+    // hold 3 live copies of the session's audio at once instead of 2 — halving
+    // the largest session save() can handle before OOM, i.e. re-introducing the
+    // very ceiling this task exists to raise.
+    result = await api().writeFile(targetPath, bytes.buffer);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     await api().showMessageBox({ type: 'error', title: 'Save Session failed', message });
