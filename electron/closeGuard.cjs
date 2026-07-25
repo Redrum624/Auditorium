@@ -42,6 +42,14 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   // a second dialog once the renderer replies again.
   let dialogOpen = false;
 
+  /** Fail-safe destroy, guarded against an already-destroyed window (real
+   * Electron throws "Object has been destroyed" on a second destroy() call). */
+  function destroyIfAlive(win) {
+    if (!win.isDestroyed?.()) {
+      win.destroy();
+    }
+  }
+
   /** Shows a Quit/Cancel dialog and destroys the window on Quit. Shared by
    * the normal dirty-count reply and the F7 timeout busy-dialog path. */
   async function confirmQuit(win, message) {
@@ -87,7 +95,12 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
       dirtyN > 0
         ? `${dirtyN} file(s) have unsaved changes.`
         : 'A save is still in progress.';
-    await confirmQuit(win, message);
+    // ipcMain.on doesn't await (or catch a rejection from) this listener's
+    // returned promise, so an uncaught confirmQuit failure here would become
+    // an unhandled rejection exactly like the timeout path below (review fix
+    // round 2, MINOR 4). Fail safe by destroying the window rather than
+    // leaving it stuck un-closable (MINOR 5).
+    await confirmQuit(win, message).catch(() => destroyIfAlive(win));
   });
 
   /** Wire to `win.on('close', (event) => guard.handleClose(win, event))`. */
@@ -113,11 +126,14 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
       // discard its work. This is a genuinely fire-and-forget call (a
       // setTimeout callback can't be awaited) -- .catch keeps any failure
       // (e.g. a destroyed-window race, review fix round 1 IMPORTANT 2) from
-      // becoming an unhandled promise rejection.
+      // becoming an unhandled promise rejection, and fails safe by destroying
+      // the window instead of silently no-op'ing: a persistently rejecting
+      // dialog must never leave an un-closable window (review fix round 2,
+      // MINOR 5) -- there's no native menu or frame to force-quit from.
       void confirmQuit(
         win,
         'The editor is busy (a save or export may be running). Quit anyway?'
-      ).catch(() => {});
+      ).catch(() => destroyIfAlive(win));
     }, timeoutMs);
     pending = { win, timer };
     win.webContents.send('app:close-requested');

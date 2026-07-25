@@ -60,42 +60,87 @@ function isWellFormedUncPath(rawPath) {
 // string superficially looks like. '.' is included for documentation/
 // defense-in-depth even though a UNC path literally starting \\.\ is already
 // intercepted by isDeviceOrExtendedPath before this is ever consulted.
-const LOCAL_ALIAS_HOSTS = new Set(['localhost', '127.0.0.1', '::1', '.']);
+const LOCAL_ALIAS_HOSTS = new Set(['localhost', '.', '::1']);
 
-/** True when `host` (the first UNC path component) resolves to THIS machine
- * -- a fixed alias, or this machine's own hostname. Case-insensitive. */
-function isLocalAliasHost(host) {
-  const h = host.toLowerCase();
-  return LOCAL_ALIAS_HOSTS.has(h) || h === os.hostname().toLowerCase();
+/**
+ * Normalizes a raw UNC host component before the alias lookup (review fix
+ * round 2, GAP A): strips IPv6 bracket-literal notation (\\[::1]\...),
+ * strips a single trailing dot (FQDN root-dot notation, \\localhost.\...),
+ * and lowercases. '127.0.0.1' alone is NOT sufficient -- see
+ * isLocal127Address below for the full 127.0.0.0/8 range.
+ */
+function normalizeUncHost(rawHost) {
+  let host = rawHost;
+  if (host.startsWith('[') && host.endsWith(']')) {
+    host = host.slice(1, -1);
+  }
+  if (host.endsWith('.')) {
+    host = host.slice(0, -1);
+  }
+  return host.toLowerCase();
 }
 
-/** True when `share` (the second UNC path component) is a Windows
- * administrative share (C$, D$, ...) -- these always map straight to a local
- * drive root, so they must be rejected regardless of the host name: there is
- * no way to tell a "remote-looking" host apart from a hosts-file alias, VPN
- * loopback, or SMB-loopback-to-self for this specific check. */
-function isAdminSharePattern(share) {
-  return /^[A-Za-z]\$$/.test(share);
+/** True for any 127.0.0.0/8 loopback literal (127.0.0.1, 127.0.0.2, ...),
+ * not just the single 127.0.0.1 address. */
+function isLocal127Address(host) {
+  return /^127(?:\.\d{1,3}){3}$/.test(host);
+}
+
+/** True for Windows' UNC encoding of an IPv6 literal address
+ * (<address-with-dashes-for-colons>.ipv6-literal.net) -- ANY address in this
+ * form is treated as local, not just the loopback one, since this app has no
+ * legitimate use for addressing a share by raw IPv6 literal. */
+function isIpv6LiteralHost(host) {
+  return host.endsWith('.ipv6-literal.net');
+}
+
+/** True when `host` (the first UNC path component, already normalized)
+ * resolves to THIS machine -- a fixed alias, this machine's own hostname, a
+ * 127.0.0.0/8 loopback literal, or an ipv6-literal.net encoding. */
+function isLocalAliasHost(rawHost) {
+  const host = normalizeUncHost(rawHost);
+  return (
+    LOCAL_ALIAS_HOSTS.has(host) ||
+    host === os.hostname().toLowerCase() ||
+    isLocal127Address(host) ||
+    isIpv6LiteralHost(host)
+  );
 }
 
 /**
- * CRITICAL (F8 review fix): a UNC path can name THIS machine under a loopback
- * alias (\\localhost\..., \\127.0.0.1\..., \\<own-hostname>\...) or reach a
- * local drive root directly via an administrative share (\\anyhost\C$\...).
+ * True when `share` (the second UNC path component) ends in '$' -- ANY
+ * dollar-suffixed share (C$, D$, ADMIN$, IPC$, or a custom hidden share),
+ * regardless of host (review fix round 2, GAP B: the original pattern only
+ * matched single-LETTER admin shares like C$/D$, missing ADMIN$ and IPC$,
+ * which are real shares on a real Windows machine). No legitimate audio/
+ * session save target is a '$'-suffixed share, so rejecting all of them is
+ * strictly safe, not merely a narrower "admin share" heuristic.
+ */
+function isDollarSuffixedShare(share) {
+  return /\$$/.test(share);
+}
+
+/**
+ * CRITICAL (F8 review fix, rounds 1-2): a UNC path can name THIS machine
+ * under a loopback alias (\\localhost\..., \\127.0.0.1\..., \\[::1]\...,
+ * \\0--1.ipv6-literal.net\..., \\<own-hostname>\...) or reach a local drive
+ * root directly via a '$'-suffixed share (\\anyhost\C$\..., \\anyhost\ADMIN$\...).
  * Both forms resolve to the exact same filesystem the drive-letter checks
  * already protect, but as a UNC string they match none of the forbidden-dir
  * prefixes (which are drive-letter-rooted) -- and `fs.realpathSync.native`
  * returns the UNC form unchanged, so assertWriteTargetSafe's realpath
  * containment re-check doesn't catch it either. A real network share is
- * never \\localhost and never needs an admin share, so both forms are
+ * never a local-alias host and never a '$'-suffixed share, so both forms are
  * rejected outright rather than attempting to map them back to a drive
- * letter for containment (simpler and strictly safer). Callers must already
- * know rawPath is a well-formed UNC path (isWellFormedUncPath) before calling
- * this.
+ * letter for containment (simpler and strictly safer). The two checks are
+ * independent -- either one alone is sufficient to catch a given attack
+ * spelling; this function ORs them for defense in depth. Callers must
+ * already know rawPath is a well-formed UNC path (isWellFormedUncPath)
+ * before calling this.
  */
 function isLocalAliasOrAdminShareUncPath(rawPath) {
   const [host, share] = rawPath.slice(2).split(/[\\/]+/).filter(Boolean);
-  return isLocalAliasHost(host) || isAdminSharePattern(share);
+  return isLocalAliasHost(host) || isDollarSuffixedShare(share);
 }
 
 function resolveLower(p) {

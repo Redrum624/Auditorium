@@ -142,6 +142,50 @@ describe('writePathPolicy', () => {
     });
   });
 
+  describe('UNC loopback bypass, round 2 (review fix round 2: bracketed IPv6, ipv6-literal.net, 127.0.0.0/8, ADMIN$/IPC$)', () => {
+    test('rejects \\\\[::1]\\ADMIN$\\... (bracketed IPv6 loopback + ADMIN$ share, the actual demonstrated bypass)', () => {
+      expect(isWriteAllowed('\\\\[::1]\\ADMIN$\\Temp\\m4-probe.wav')).toBe(false);
+    });
+
+    test('rejects \\\\[::1]\\C$\\...', () => {
+      expect(isWriteAllowed('\\\\[::1]\\C$\\Windows\\evil.wav')).toBe(false);
+    });
+
+    test('rejects the Windows IPv6-literal UNC encoding \\\\0--1.ipv6-literal.net\\C$\\...', () => {
+      expect(isWriteAllowed('\\\\0--1.ipv6-literal.net\\C$\\evil.wav')).toBe(false);
+    });
+
+    test('rejects a trailing-dot localhost \\\\localhost.\\C$\\...', () => {
+      expect(isWriteAllowed('\\\\localhost.\\C$\\evil.wav')).toBe(false);
+    });
+
+    test('rejects any 127.0.0.0/8 loopback address, not just 127.0.0.1', () => {
+      expect(isWriteAllowed('\\\\127.0.0.2\\C$\\evil.wav')).toBe(false);
+    });
+
+    test('rejects \\\\LOCALHOST\\admin$\\... (case-insensitive host, lowercase admin$)', () => {
+      expect(isWriteAllowed('\\\\LOCALHOST\\admin$\\evil.wav')).toBe(false);
+    });
+
+    test('rejects any $-suffixed share on a genuinely remote host (IPC$, and a plain backup$) -- rule 1 alone must be sufficient', () => {
+      expect(isWriteAllowed('\\\\NAS\\backup$\\evil.wav')).toBe(false);
+      expect(isWriteAllowed('\\\\SomeRemoteServer\\IPC$\\evil.wav')).toBe(false);
+    });
+
+    test('positive: genuine remote shares (hostname, dotted IPv4, FQDN) still pass, including paths with spaces', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav')).toBe(true);
+      expect(isWriteAllowed('\\\\nas\\shared\\music\\out.wav')).toBe(true);
+      expect(isWriteAllowed('\\\\192.168.1.50\\media\\take.mp3')).toBe(true);
+      expect(isWriteAllowed('\\\\studio-nas.local\\projects\\session.audm')).toBe(true);
+      expect(isWriteAllowed('\\\\NAS\\music\\My Song.wav')).toBe(true); // spaces in a path segment
+      expect(isWriteAllowed('\\\\studio-nas.local\\projects\\session name.audm')).toBe(true);
+    });
+
+    test('positive: a share name containing (but not ending in) a dollar sign is not treated as an admin share', () => {
+      expect(isWriteAllowed('\\\\NAS\\ba$ckup\\take.wav')).toBe(true);
+    });
+  });
+
   test('rejects extensions removed from the allow-list (F24: .txt, .json, .aud)', () => {
     expect(isWriteAllowed('D:\\x\\notes.txt')).toBe(false);
     expect(isWriteAllowed('D:\\x\\config.json')).toBe(false);

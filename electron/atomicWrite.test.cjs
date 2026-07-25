@@ -119,6 +119,22 @@ describe('atomicWriteFile (F2)', () => {
     expect(fs.readdirSync(dir)).toEqual([]);
   });
 
+  test('an open failure does not attempt to unlink anything -- nothing was created by us (review fix round 2, MINOR 3)', async () => {
+    const target = path.join(dir, 'out.wav');
+    const unlinkSpy = jest.fn((...args) => fsp.unlink(...args));
+    const fsImpl = {
+      open: async () => {
+        throw new Error('injected open failure');
+      },
+      unlink: unlinkSpy,
+      rename: fsp.rename,
+    };
+    await expect(atomicWriteFile(target, Buffer.from('x'), fsImpl)).rejects.toThrow(
+      'injected open failure'
+    );
+    expect(unlinkSpy).not.toHaveBeenCalled();
+  });
+
   test('a fsync failure closes the handle, leaves the original untouched, and cleans up the temp file', async () => {
     const target = path.join(dir, 'out.wav');
     fs.writeFileSync(target, 'ORIGINAL');

@@ -314,4 +314,77 @@ describe('closeGuard (Task F8 native close guard)', () => {
       expect(win.destroyed).toBe(true);
     });
   });
+
+  describe('a rejecting dialog fails safe on BOTH call sites (review fix round 2, MINOR 4/5)', () => {
+    test('normal dirty-count reply path: a rejecting dialog does not produce an unhandled rejection and destroys the window instead of leaving it stuck', async () => {
+      const unhandled = [];
+      const onUnhandledRejection = (err) => unhandled.push(err);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const ipcMain = fakeIpcMain();
+        const dialog = {
+          showMessageBox: jest.fn(async () => {
+            throw new Error('native dialog failed');
+          }),
+        };
+        const guard = createCloseGuard({ ipcMain, dialog });
+        const win = fakeWin();
+        const event = fakeEvent();
+
+        guard.handleClose(win, event);
+        await ipcMain.emit('app:close-response', 2, 0); // dirty > 0 -> confirmQuit path
+
+        expect(win.destroyed).toBe(true); // fail-safe: quitting always terminates
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+      }
+    });
+
+    test('busy-timeout path: a rejecting dialog does not produce an unhandled rejection and destroys the window instead of leaving it un-closable', async () => {
+      jest.useFakeTimers();
+      const unhandled = [];
+      const onUnhandledRejection = (err) => unhandled.push(err);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const ipcMain = fakeIpcMain();
+        const dialog = {
+          showMessageBox: jest.fn(async () => {
+            throw new Error('native dialog failed');
+          }),
+        };
+        const guard = createCloseGuard({ ipcMain, dialog, timeoutMs: 2000 });
+        const win = fakeWin();
+        const event = fakeEvent();
+
+        guard.handleClose(win, event);
+        await jest.advanceTimersByTimeAsync(2001);
+        jest.useRealTimers();
+        await new Promise((resolve) => setTimeout(resolve, 0)); // flush the rejection's .catch
+
+        expect(win.destroyed).toBe(true); // fail-safe: quitting always terminates
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+        jest.useRealTimers();
+      }
+    });
+
+    test('a rejecting dialog on an already-destroyed window does not throw a second time', async () => {
+      const ipcMain = fakeIpcMain();
+      const dialog = {
+        showMessageBox: jest.fn(async () => {
+          throw new Error('native dialog failed');
+        }),
+      };
+      const guard = createCloseGuard({ ipcMain, dialog });
+      const win = fakeWin();
+      win.destroy(); // already gone before the reply arrives
+      const event = fakeEvent();
+
+      guard.handleClose(win, event);
+      await expect(ipcMain.emit('app:close-response', 2, 0)).resolves.toBeUndefined();
+      expect(win.destroyed).toBe(true);
+    });
+  });
 });

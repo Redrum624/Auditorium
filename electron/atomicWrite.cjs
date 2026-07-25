@@ -30,6 +30,10 @@ let seq = 0;
  * On ANY failure (open/write/fsync/rename), the temp file is removed
  * (best-effort -- a cleanup failure never masks the original error) and the
  * target is left completely untouched; the triggering error is rethrown.
+ * The cleanup unlink only runs if OUR open() call actually succeeded (review
+ * fix round 2, MINOR 3): if open() itself is what failed, nothing was created
+ * by this call, and unconditionally unlinking the (guessed/unwritten) temp
+ * path could otherwise delete an unrelated pre-existing entry we never touched.
  *
  * The temp path is derived purely from resolvedPath's own directory and
  * basename -- never from separate renderer-supplied input -- so it can't be
@@ -50,8 +54,10 @@ async function atomicWriteFile(resolvedPath, data, fsImpl = fs.promises) {
   );
 
   let fh = null;
+  let created = false;
   try {
     fh = await fsImpl.open(tempPath, 'wx');
+    created = true; // open() succeeded -- WE own this path now, safe to clean up
     await fh.writeFile(data);
     await fh.sync();
     await fh.close();
@@ -61,7 +67,9 @@ async function atomicWriteFile(resolvedPath, data, fsImpl = fs.promises) {
     if (fh) {
       await fh.close().catch(() => {});
     }
-    await fsImpl.unlink(tempPath).catch(() => {});
+    if (created) {
+      await fsImpl.unlink(tempPath).catch(() => {});
+    }
     throw err;
   }
 }
