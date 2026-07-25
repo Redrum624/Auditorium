@@ -387,4 +387,66 @@ describe('closeGuard (Task F8 native close guard)', () => {
       expect(win.destroyed).toBe(true);
     });
   });
+
+  describe('a throwing destroy() inside the fail-safe .catch does not itself create an unhandled rejection (review fix round 3, MINOR B)', () => {
+    test('normal dirty-count reply path: destroy() throws a non-"already destroyed" error', async () => {
+      const unhandled = [];
+      const onUnhandledRejection = (err) => unhandled.push(err);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const ipcMain = fakeIpcMain();
+        const dialog = {
+          showMessageBox: jest.fn(async () => {
+            throw new Error('native dialog failed');
+          }),
+        };
+        const guard = createCloseGuard({ ipcMain, dialog });
+        const win = fakeWin();
+        win.isDestroyed = () => false; // not destroyed -- destroyIfAlive WILL attempt destroy()
+        win.destroy = () => {
+          throw new Error('some other native destroy failure');
+        };
+        const event = fakeEvent();
+
+        guard.handleClose(win, event);
+        await expect(ipcMain.emit('app:close-response', 2, 0)).resolves.toBeUndefined();
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+      }
+    });
+
+    test('busy-timeout path: destroy() throws a non-"already destroyed" error', async () => {
+      jest.useFakeTimers();
+      const unhandled = [];
+      const onUnhandledRejection = (err) => unhandled.push(err);
+      process.on('unhandledRejection', onUnhandledRejection);
+      try {
+        const ipcMain = fakeIpcMain();
+        const dialog = {
+          showMessageBox: jest.fn(async () => {
+            throw new Error('native dialog failed');
+          }),
+        };
+        const guard = createCloseGuard({ ipcMain, dialog, timeoutMs: 2000 });
+        const win = fakeWin();
+        win.isDestroyed = () => false;
+        win.destroy = () => {
+          throw new Error('some other native destroy failure');
+        };
+        const event = fakeEvent();
+
+        guard.handleClose(win, event);
+        await jest.advanceTimersByTimeAsync(2001);
+        jest.useRealTimers();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandledRejection);
+        jest.useRealTimers();
+      }
+    });
+  });
 });

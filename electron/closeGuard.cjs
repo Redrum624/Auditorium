@@ -99,8 +99,18 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
     // returned promise, so an uncaught confirmQuit failure here would become
     // an unhandled rejection exactly like the timeout path below (review fix
     // round 2, MINOR 4). Fail safe by destroying the window rather than
-    // leaving it stuck un-closable (MINOR 5).
-    await confirmQuit(win, message).catch(() => destroyIfAlive(win));
+    // leaving it stuck un-closable (MINOR 5). The inner try/catch (review fix
+    // round 3, MINOR B) guards against destroy() ITSELF throwing for some
+    // reason other than "already destroyed" (destroyIfAlive only guards
+    // that one case) -- an uncaught throw here would just re-create the
+    // exact unhandled rejection this .catch exists to prevent.
+    await confirmQuit(win, message).catch(() => {
+      try {
+        destroyIfAlive(win);
+      } catch {
+        /* swallow: this IS the last-resort fail-safe path */
+      }
+    });
   });
 
   /** Wire to `win.on('close', (event) => guard.handleClose(win, event))`. */
@@ -129,11 +139,21 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
       // becoming an unhandled promise rejection, and fails safe by destroying
       // the window instead of silently no-op'ing: a persistently rejecting
       // dialog must never leave an un-closable window (review fix round 2,
-      // MINOR 5) -- there's no native menu or frame to force-quit from.
+      // MINOR 5) -- there's no native menu or frame to force-quit from. The
+      // inner try/catch (review fix round 3, MINOR B) guards against
+      // destroy() itself throwing for some reason other than "already
+      // destroyed" -- an uncaught throw here would just re-create the exact
+      // unhandled rejection this .catch exists to prevent.
       void confirmQuit(
         win,
         'The editor is busy (a save or export may be running). Quit anyway?'
-      ).catch(() => destroyIfAlive(win));
+      ).catch(() => {
+        try {
+          destroyIfAlive(win);
+        } catch {
+          /* swallow: this IS the last-resort fail-safe path */
+        }
+      });
     }, timeoutMs);
     pending = { win, timer };
     win.webContents.send('app:close-requested');

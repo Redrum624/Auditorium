@@ -48,12 +48,22 @@ function isDeviceOrExtendedPath(rawPath) {
  * malformed and rejected outright -- there is no drive-letter root to fall
  * back to for such a path, so it can't be safely evaluated further (F8).
  * Callers must check isDeviceOrExtendedPath first; this function does not
- * exclude \\?\ / \\.\ forms on its own.
+ * exclude \\?\ / \\.\ forms on its own. Takes the RESOLVED path (see
+ * assertWriteAllowed) -- callers must have already confirmed it starts with
+ * '\\\\' before calling this.
  */
-function isWellFormedUncPath(rawPath) {
-  if (!rawPath.startsWith('\\\\')) return false;
-  const components = rawPath.slice(2).split(/[\\/]+/).filter(Boolean);
+function isWellFormedUncPath(uncPath) {
+  const components = uncPath.slice(2).split(/[\\/]+/).filter(Boolean);
   return components.length >= 2;
+}
+
+/**
+ * True when rawPath's first two characters are BOTH path separators (any mix
+ * of '\' and '/') -- i.e. it superficially looks like it starts a UNC path,
+ * before any resolution/normalization happens.
+ */
+function rawStartsWithUncPrefix(rawPath) {
+  return /^[\\/]{2}/.test(rawPath);
 }
 
 // Hosts that always mean "this machine," regardless of what a hostname
@@ -134,12 +144,12 @@ function isDollarSuffixedShare(share) {
  * rejected outright rather than attempting to map them back to a drive
  * letter for containment (simpler and strictly safer). The two checks are
  * independent -- either one alone is sufficient to catch a given attack
- * spelling; this function ORs them for defense in depth. Callers must
- * already know rawPath is a well-formed UNC path (isWellFormedUncPath)
- * before calling this.
+ * spelling; this function ORs them for defense in depth. Takes the RESOLVED
+ * path (see assertWriteAllowed) -- callers must already know it's a
+ * well-formed UNC path (isWellFormedUncPath) before calling this.
  */
-function isLocalAliasOrAdminShareUncPath(rawPath) {
-  const [host, share] = rawPath.slice(2).split(/[\\/]+/).filter(Boolean);
+function isLocalAliasOrAdminShareUncPath(uncPath) {
+  const [host, share] = uncPath.slice(2).split(/[\\/]+/).filter(Boolean);
   return isLocalAliasHost(host) || isDollarSuffixedShare(share);
 }
 
@@ -186,20 +196,46 @@ function assertWriteAllowed(rawPath) {
     throw new Error(`Write denied: extended-length/device paths are not allowed: ${rawPath}`);
   }
 
+  // Resolve BEFORE deciding whether this is a UNC path (review fix round 3,
+  // MINOR A): a raw '\\\\'-prefix check misses mixed-separator forms like
+  // '\/localhost\C$\...' or '/\localhost\C$\...', which Node still resolves
+  // to a genuine '\\localhost\C$\...' UNC path -- those forms used to skip
+  // the local-alias/$-share checks entirely and fail closed only by
+  // accident (via the unrelated, misleading drive-letter-root assertion).
+  // Deriving isUnc from the SAME resolved string every later check uses
+  // closes that gap: the check that runs always matches the path that
+  // actually gets written.
+  const resolved = path.resolve(rawPath);
+  const isUnc = resolved.startsWith('\\\\');
+
+  // An INCOMPLETE UNC path (no share component, e.g. '\\\\server' or
+  // '\\\\server.wav') is not a valid UNC root at all: Node's path.resolve
+  // silently discards the '\\\\' entirely and re-resolves it as an ordinary
+  // same-drive path (e.g. 'D:\\server.wav') instead of leaving it UNC-shaped.
+  // Left unchecked, that would let raw input that LOOKS like a UNC reference
+  // quietly fall through as a normal drive-letter write. Reject outright
+  // whenever the raw string looked like it was starting a UNC path but the
+  // resolved form isn't UNC anymore.
+  if (rawStartsWithUncPrefix(rawPath) && !isUnc) {
+    throw new Error(`Write denied: malformed UNC path (need \\\\server\\share\\...): ${rawPath}`);
+  }
+
   // A well-formed UNC network path (\\server\share\...) is a legitimate save
   // target (F8: users can open from a NAS, they must be able to save back
   // too) but has no drive letter, so it skips the drive-letter-root
   // assertion below; every other check (traversal, extension, forbidden-dir
-  // containment, assertWriteTargetSafe) still runs against it.
-  const isUnc = rawPath.startsWith('\\\\');
-  if (isUnc && !isWellFormedUncPath(rawPath)) {
+  // containment, assertWriteTargetSafe) still runs against it. (This check is
+  // a defensive backstop: empirically, resolve() never leaves a '\\\\'-prefixed
+  // result with fewer than 2 real components -- see the check above -- but
+  // fail-closed philosophy keeps it rather than assume that's exhaustive.)
+  if (isUnc && !isWellFormedUncPath(resolved)) {
     throw new Error(`Write denied: malformed UNC path (need \\\\server\\share\\...): ${rawPath}`);
   }
 
   // CRITICAL (F8 review fix): reject a UNC path that loops back to this
   // machine (localhost/127.0.0.1/::1/own-hostname) or uses an administrative
   // share (C$, D$, ...) BEFORE containment -- see isLocalAliasOrAdminShareUncPath.
-  if (isUnc && isLocalAliasOrAdminShareUncPath(rawPath)) {
+  if (isUnc && isLocalAliasOrAdminShareUncPath(resolved)) {
     throw new Error(
       `Write denied: UNC path resolves to a local machine or admin share, not a real network location: ${rawPath}`
     );
@@ -218,8 +254,6 @@ function assertWriteAllowed(rawPath) {
   if (!ALLOWED_EXTENSIONS.has(ext)) {
     throw new Error(`Write denied: extension not in the allow-list: ${ext || '(none)'}`);
   }
-
-  const resolved = path.resolve(rawPath);
 
   if (!isUnc) {
     const root = path.parse(resolved).root;

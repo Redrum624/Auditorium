@@ -186,6 +186,42 @@ describe('writePathPolicy', () => {
     });
   });
 
+  describe('isUnc derived from the RESOLVED path, not the raw string (review fix round 3, MINOR A)', () => {
+    test('rejects a mixed-separator UNC-admin-share form (backslash+forwardslash) that resolves to \\\\localhost\\C$\\...', () => {
+      expect(() => assertWriteAllowed('\\/localhost\\C$\\x.wav')).toThrow(
+        /local machine or admin share/
+      );
+    });
+
+    test('rejects a mixed-separator UNC-admin-share form (forwardslash+backslash) that resolves to \\\\localhost\\C$\\...', () => {
+      expect(() => assertWriteAllowed('/\\localhost\\C$\\x.wav')).toThrow(
+        /local machine or admin share/
+      );
+    });
+
+    test('the rejection is the local-alias/admin-share reason, not the misleading drive-letter-root reason', () => {
+      expect(() => assertWriteAllowed('\\/localhost\\C$\\x.wav')).not.toThrow(
+        /drive letter/
+      );
+    });
+
+    test('existing positives still pass after deriving isUnc from the resolved path', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav')).toBe(true);
+      expect(isWriteAllowed('D:\\music\\out.wav')).toBe(true);
+      expect(isWriteAllowed('\\\\studio-nas.local\\projects\\session.audm')).toBe(true);
+    });
+
+    test('an incomplete UNC path (no share) with a valid extension is still rejected, not silently reinterpreted as an ordinary same-drive write', () => {
+      // path.resolve('\\\\server.wav') silently discards the UNC prefix and
+      // returns an ordinary drive-relative path (e.g. 'D:\\server.wav'),
+      // which would otherwise sail through the normal drive-letter checks
+      // with a valid extension. This must stay rejected as malformed UNC.
+      expect(isWriteAllowed('\\\\server.wav')).toBe(false);
+      expect(isWriteAllowed('\\\\localhost.wav')).toBe(false);
+      expect(() => assertWriteAllowed('\\\\server.wav')).toThrow(/malformed UNC/);
+    });
+  });
+
   test('rejects extensions removed from the allow-list (F24: .txt, .json, .aud)', () => {
     expect(isWriteAllowed('D:\\x\\notes.txt')).toBe(false);
     expect(isWriteAllowed('D:\\x\\config.json')).toBe(false);
