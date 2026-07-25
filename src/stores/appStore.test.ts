@@ -277,6 +277,101 @@ describe('markers', () => {
     expect(markers[0].positionSample).toBe(500);
   });
 
+  describe('dirty tracking (Task M1)', () => {
+    it('addMarker sets the owning document dirty and replaces its object', () => {
+      const doc = makeDoc(1000);
+      useAppStore.getState().addDocument(doc);
+      expect(useAppStore.getState().documents[0].dirty).toBe(false);
+
+      useAppStore.getState().addMarker(doc.id, m('m-1', 500));
+
+      const updated = useAppStore.getState().documents[0];
+      expect(updated.dirty).toBe(true);
+      expect(updated).not.toBe(doc);
+    });
+
+    it('removeMarker sets the owning document dirty and replaces its object', () => {
+      const doc = makeDoc(1000);
+      useAppStore.getState().addDocument(doc);
+      useAppStore.getState().addMarker(doc.id, m('m-1', 500));
+      const afterAdd = useAppStore.getState().documents[0];
+      useAppStore.getState().updateDocument({ ...afterAdd, dirty: false }); // simulate a save clearing dirty
+
+      useAppStore.getState().removeMarker(doc.id, 'm-1');
+
+      const updated = useAppStore.getState().documents[0];
+      expect(updated.dirty).toBe(true);
+      expect(updated).not.toBe(afterAdd);
+      expect(useAppStore.getState().markers[doc.id]).toEqual([]);
+    });
+
+    it('renameMarker sets the owning document dirty and replaces its object', () => {
+      const doc = makeDoc(1000);
+      useAppStore.getState().addDocument(doc);
+      useAppStore.getState().addMarker(doc.id, m('m-1', 500, 'old'));
+      const afterAdd = useAppStore.getState().documents[0];
+      useAppStore.getState().updateDocument({ ...afterAdd, dirty: false }); // simulate a save clearing dirty
+
+      useAppStore.getState().renameMarker(doc.id, 'm-1', 'new name');
+
+      const updated = useAppStore.getState().documents[0];
+      expect(updated.dirty).toBe(true);
+      expect(updated).not.toBe(afterAdd);
+    });
+
+    it('removeMarker is a no-op (no dirty) for a marker id that does not exist', () => {
+      const doc = makeDoc(1000);
+      useAppStore.getState().addDocument(doc);
+      useAppStore.getState().addMarker(doc.id, m('m-1', 500));
+      useAppStore.getState().updateDocument({ ...useAppStore.getState().documents[0], dirty: false });
+      const before = useAppStore.getState().documents[0];
+
+      useAppStore.getState().removeMarker(doc.id, 'nonexistent');
+
+      const after = useAppStore.getState().documents[0];
+      expect(after).toBe(before);
+      expect(after.dirty).toBe(false);
+    });
+
+    it('removeMarker is a no-op (no dirty) for a document with no markers entry at all', () => {
+      const doc = makeDoc(1000);
+      useAppStore.getState().addDocument(doc);
+      const before = useAppStore.getState().documents[0];
+
+      useAppStore.getState().removeMarker(doc.id, 'nonexistent');
+
+      const after = useAppStore.getState().documents[0];
+      expect(after).toBe(before);
+      expect(after.dirty).toBe(false);
+    });
+
+    it('renameMarker is a no-op (no dirty) for a marker id that does not exist', () => {
+      const doc = makeDoc(1000);
+      useAppStore.getState().addDocument(doc);
+      useAppStore.getState().addMarker(doc.id, m('m-1', 500, 'old'));
+      useAppStore.getState().updateDocument({ ...useAppStore.getState().documents[0], dirty: false });
+      const before = useAppStore.getState().documents[0];
+
+      useAppStore.getState().renameMarker(doc.id, 'nonexistent', 'new name');
+
+      const after = useAppStore.getState().documents[0];
+      expect(after).toBe(before);
+      expect(after.dirty).toBe(false);
+    });
+
+    it('setMarkersForDoc (bulk seeding) does not dirty or replace the document object', () => {
+      const doc = makeDoc(1000);
+      useAppStore.getState().addDocument(doc);
+      const before = useAppStore.getState().documents[0];
+
+      useAppStore.getState().setMarkersForDoc(doc.id, [m('m-1', 100), m('m-2', 200)]);
+
+      const after = useAppStore.getState().documents[0];
+      expect(after).toBe(before);
+      expect(after.dirty).toBe(false);
+    });
+  });
+
   it('setMarkersForDoc replaces the whole list for a doc, sorted by positionSample', () => {
     const doc = makeDoc(1000);
     useAppStore.getState().addDocument(doc);

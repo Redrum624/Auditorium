@@ -72,6 +72,15 @@ function activationReset(doc: AudioDocument | null): Pick<
   };
 }
 
+/** Replace the document with `docId` (if present) with a copy marked dirty —
+ * the same immutable replace-by-id shape as `updateDocument`, used by the
+ * marker actions so a marker-only edit is visible to every dirty consumer
+ * (close prompt, quit-guard count, FilesPanel `*`) and to the H1 async-save
+ * staleness check, which relies on reference equality against the doc object. */
+function markDirty(documents: AudioDocument[], docId: string): AudioDocument[] {
+  return documents.map((d) => (d.id === docId ? { ...d, dirty: true } : d));
+}
+
 export const useAppStore = create<AppState & AppActions>()((set) => ({
   ...makeInitialState(),
 
@@ -145,25 +154,34 @@ export const useAppStore = create<AppState & AppActions>()((set) => ({
       const list = [...(s.markers[docId] ?? []), m].sort(
         (a, b) => a.positionSample - b.positionSample
       );
-      return { markers: { ...s.markers, [docId]: list } };
+      return {
+        markers: { ...s.markers, [docId]: list },
+        documents: markDirty(s.documents, docId),
+      };
     });
   },
 
   removeMarker(docId, markerId) {
     set((s) => {
       const existing = s.markers[docId];
-      if (!existing) return s;
+      if (!existing || !existing.some((m) => m.id === markerId)) return s; // no-op
       const list = existing.filter((m) => m.id !== markerId);
-      return { markers: { ...s.markers, [docId]: list } };
+      return {
+        markers: { ...s.markers, [docId]: list },
+        documents: markDirty(s.documents, docId),
+      };
     });
   },
 
   renameMarker(docId, markerId, name) {
     set((s) => {
       const existing = s.markers[docId];
-      if (!existing) return s;
+      if (!existing || !existing.some((m) => m.id === markerId)) return s; // no-op
       const list = existing.map((m) => (m.id === markerId ? { ...m, name } : m));
-      return { markers: { ...s.markers, [docId]: list } };
+      return {
+        markers: { ...s.markers, [docId]: list },
+        documents: markDirty(s.documents, docId),
+      };
     });
   },
 

@@ -698,6 +698,33 @@ describe('saveDocument — async in-place save races (Task H1)', () => {
     expect(api.writeFile).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps a mid-save marker add\'s dirty flag and the new marker in the store (Task M1)', async () => {
+    const api = installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+    const { resolve } = controllableEncode();
+
+    const savePromise = saveDocument(doc.id);
+
+    // A marker edit lands while the encode is in flight: addMarker now
+    // replaces the store's doc object too (Task M1), so the H1 staleness
+    // check picks it up the same way an audio edit would.
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 3 });
+
+    resolve(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await savePromise;
+
+    expect(useAppStore.getState().documents[0].dirty).toBe(true); // stays dirty
+    expect(useAppStore.getState().markers[doc.id]).toEqual([
+      { id: 'marker-1', name: 'Chorus', positionSample: 3 },
+    ]);
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+  });
+
   it('clears dirty normally when nothing edits the doc during the async encode', async () => {
     const api = installApi();
     const doc = seedDoc({
@@ -1024,6 +1051,21 @@ describe('closeDocumentFlow', () => {
 
     expect(api.writeFile).toHaveBeenCalledTimes(1);
     expect(useAppStore.getState().documents).toHaveLength(0);
+  });
+
+  it('prompts to save for a marker-only edit, no audio change (Task M1)', async () => {
+    const api = installApi({ showMessageBox: jest.fn(async () => 1) }); // Don't Save
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+
+    useAppStore.getState().addMarker(doc.id, { id: 'm-1', name: 'Marker', positionSample: 3 });
+
+    await closeDocumentFlow(doc.id);
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ title: 'Unsaved changes' })
+    );
+    expect(useAppStore.getState().documents).toHaveLength(0); // Don't Save still closes
   });
 
   it('aborts the close if the Save is cancelled', async () => {
