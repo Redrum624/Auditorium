@@ -3,6 +3,7 @@ import { Flag, X } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import type { Marker } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
+import { pushMarkerUndo } from '../../services/editOps';
 
 // Stable empty-array reference: `s.markers[id] ?? []` would otherwise
 // allocate a NEW array on every selector call when the doc has no markers,
@@ -46,7 +47,12 @@ export default function MarkersPanel() {
 
   const commitRename = (markerId: string) => {
     const name = draft.trim();
-    if (name) renameMarker(activeDocumentId, markerId, name);
+    if (name) {
+      const before = useAppStore.getState().markers[activeDocumentId] ?? [];
+      renameMarker(activeDocumentId, markerId, name);
+      const after = useAppStore.getState().markers[activeDocumentId] ?? [];
+      pushMarkerUndo('Rename Marker', activeDocumentId, before, after);
+    }
     setEditingId(null);
   };
 
@@ -108,7 +114,12 @@ export default function MarkersPanel() {
               type="button"
               aria-label={`Delete ${m.name}`}
               title="Delete marker"
-              onClick={() => removeMarker(activeDocumentId, m.id)}
+              onClick={() => {
+                const before = useAppStore.getState().markers[activeDocumentId] ?? [];
+                removeMarker(activeDocumentId, m.id);
+                const after = useAppStore.getState().markers[activeDocumentId] ?? [];
+                pushMarkerUndo('Delete Marker', activeDocumentId, before, after);
+              }}
               className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#8b8b92] opacity-0 transition-opacity hover:bg-[#3a3a42] hover:text-[#d4d4d8] group-hover:opacity-100"
             >
               <X size={14} />

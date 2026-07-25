@@ -6,9 +6,12 @@ import {
   canRedo,
   getHistory,
   clearHistory,
+  markSavePoint,
   UNDO_LIMIT,
   type UndoEntry,
 } from './undoHistory';
+import { useAppStore, makeInitialState } from '../stores/appStore';
+import { createDocument } from '../audio/AudioDocument';
 
 // The history stacks are module-level and keyed by docId, so every test uses a
 // fresh, unique docId to stay isolated from the others.
@@ -157,5 +160,74 @@ describe('clearHistory', () => {
     expect(getHistory(docId)).toEqual({ done: [], undone: [] });
     expect(canUndo(docId)).toBe(false);
     expect(canRedo(docId)).toBe(false);
+  });
+});
+
+describe('save-point-derived dirty (Task M2 / F9)', () => {
+  function seedStoreDoc(): string {
+    const doc = createDocument({ name: 'hist-test', sampleRate: 44100, channels: [new Float32Array(4)] });
+    useAppStore.getState().addDocument(doc);
+    return doc.id;
+  }
+
+  function liveDirty(docId: string): boolean {
+    return useAppStore.getState().documents.find((d) => d.id === docId)!.dirty;
+  }
+
+  beforeEach(() => {
+    useAppStore.setState(makeInitialState());
+  });
+
+  it('undo after markSavePoint leaves the live doc dirty; redo returns to clean at the save point', () => {
+    const docId = seedStoreDoc();
+    const log: string[] = [];
+
+    pushUndo(makeEntry(docId, 'Edit', log)); // position 0 -> 1
+    markSavePoint(docId); // savePoint = 1 (simulates a save right after the edit)
+    expect(liveDirty(docId)).toBe(false); // freshly seeded doc starts clean
+
+    undo(docId); // position 1 -> 0, savePoint stays 1
+    expect(liveDirty(docId)).toBe(true); // position(0) !== savePoint(1): dirty
+
+    redo(docId); // position 0 -> 1, back at the save point
+    expect(liveDirty(docId)).toBe(false);
+  });
+
+  it('a pushUndo after undo invalidates a savePoint left in the truncated redo future', () => {
+    const docId = seedStoreDoc();
+    const log: string[] = [];
+
+    pushUndo(makeEntry(docId, 'A', log)); // position 1
+    pushUndo(makeEntry(docId, 'B', log)); // position 2
+    markSavePoint(docId); // savePoint = 2
+
+    undo(docId); // position 1; dirty because 1 !== 2
+    expect(liveDirty(docId)).toBe(true);
+
+    // A brand-new edit here destroys B's redo entry — the savePoint (2) lived
+    // in that now-truncated future, so it becomes permanently unreachable.
+    pushUndo(makeEntry(docId, 'C', log)); // position 2
+
+    undo(docId); // position 1
+    expect(liveDirty(docId)).toBe(true);
+    redo(docId); // position 2 — can never match the invalidated savePoint again
+    expect(liveDirty(docId)).toBe(true);
+  });
+
+  it('clearHistory resets position and savePoint so a later push/save starts clean again', () => {
+    const docId = seedStoreDoc();
+    const log: string[] = [];
+
+    pushUndo(makeEntry(docId, 'A', log));
+    markSavePoint(docId);
+    clearHistory(docId);
+
+    pushUndo(makeEntry(docId, 'X', log)); // position should restart at 1, not 2
+    markSavePoint(docId); // savePoint = 1
+
+    undo(docId); // position 0
+    expect(liveDirty(docId)).toBe(true);
+    redo(docId); // position 1, back at the (fresh) save point
+    expect(liveDirty(docId)).toBe(false);
   });
 });

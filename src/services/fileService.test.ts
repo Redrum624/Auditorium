@@ -651,6 +651,48 @@ describe('saveDocument', () => {
   });
 });
 
+describe('saveDocument — markSavePoint wiring (Task M2 / F9)', () => {
+  it('marks the save point after a successful in-place save', async () => {
+    installApi();
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+    const spy = jest.spyOn(undoHistory, 'markSavePoint');
+
+    await saveDocument(doc.id);
+
+    expect(spy).toHaveBeenCalledWith(doc.id);
+  });
+
+  it('marks the save point after a successful save-as', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\new.wav') });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Untitled 1' });
+    const spy = jest.spyOn(undoHistory, 'markSavePoint');
+
+    await saveDocument(doc.id);
+
+    expect(spy).toHaveBeenCalledWith(doc.id);
+  });
+
+  it('does not mark the save point when the write fails', async () => {
+    installApi({ writeFile: jest.fn(async () => ({ ok: false, error: 'disk full' })) });
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+    const spy = jest.spyOn(undoHistory, 'markSavePoint');
+
+    await saveDocument(doc.id);
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('does not mark the save point when the save-as dialog is cancelled', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => null) });
+    const doc = seedDoc({ filePath: null, dirty: true });
+    const spy = jest.spyOn(undoHistory, 'markSavePoint');
+
+    await saveDocument(doc.id);
+
+    expect(spy).not.toHaveBeenCalled();
+  });
+});
+
 describe('saveDocument — async in-place save races (Task H1)', () => {
   function controllableEncode(): { resolve: (bytes: Uint8Array) => void; reject: (err: unknown) => void } {
     let resolveFn!: (bytes: Uint8Array) => void;
@@ -696,6 +738,26 @@ describe('saveDocument — async in-place save races (Task H1)', () => {
     expect(live.channels).toBe(editedChannels); // newer channels preserved, not clobbered
     expect(live.dirty).toBe(true); // stays dirty — disk holds an older snapshot
     expect(api.writeFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not mark the save point when a mid-save edit fails the staleness check (Task M2)', async () => {
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+    });
+    const spy = jest.spyOn(undoHistory, 'markSavePoint');
+    const { resolve } = controllableEncode();
+
+    const savePromise = saveDocument(doc.id);
+    const edited = { ...useAppStore.getState().documents[0], channels: [new Float32Array(3)], dirty: true };
+    useAppStore.getState().updateDocument(edited);
+
+    resolve(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await savePromise;
+
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it('keeps a mid-save marker add\'s dirty flag and the new marker in the store (Task M1)', async () => {

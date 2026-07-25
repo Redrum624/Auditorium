@@ -13,7 +13,7 @@ import { playbackEngine } from '../audio/PlaybackEngine';
 import { useAppStore, type Marker } from '../stores/appStore';
 import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { invalidatePeaks } from './peaksCache';
-import { clearHistory } from './undoHistory';
+import { clearHistory, markSavePoint } from './undoHistory';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
 export interface ExportOptions {
@@ -244,16 +244,19 @@ export async function openFilesViaDialog(): Promise<void> {
  * Ogg at 128 kbps (`encodeInPlace`). If the Opus encoder is unavailable (no
  * WebCodecs) an in-place `.ogg` Save falls back to the save-as WAV dialog.
  * Otherwise (no path, or Save As) prompt a save-as dialog which always writes
- * WAV. On success name/filePath update and dirty clears — without an undo entry.
- * A cancelled dialog is a no-op; a failed write, or a non-`OggEncoderUnavailableError`
- * encode failure, surfaces an error message box and leaves the doc dirty.
+ * WAV. On success name/filePath update and dirty clears — without an undo entry
+ * — and `markSavePoint(docId)` records this history position as the doc's save
+ * point, so a later undo past it derives `dirty` correctly instead of trusting
+ * a stale snapshot flag (Task M2 / F9). A cancelled dialog is a no-op; a failed
+ * write, or a non-`OggEncoderUnavailableError` encode failure, surfaces an
+ * error message box and leaves the doc dirty (and the save point untouched).
  *
  * A second call for the same `docId` while one is already mid-encode/write
  * (the OGG branch is async) does not start a second write; it surfaces
  * "Save in progress" and returns (Task H1). If any store-observable edit lands
  * on the doc during an in-flight save's encode/write, the save's post-write
  * bookkeeping never clobbers it: the live doc keeps its newer channels and
- * stays dirty (Task H1).
+ * stays dirty, and the save point is NOT marked (Task H1, Task M2).
  */
 export async function saveDocument(docId: string, as = false): Promise<void> {
   if (inFlightSaves.has(docId)) {
@@ -313,6 +316,7 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
     // "save, then edit". Never write the pre-await snapshot's channels back.
     if (findDoc(docId) === current) {
       store().updateDocument({ ...current, dirty: false });
+      markSavePoint(docId);
     }
     return;
   }
@@ -360,6 +364,7 @@ async function saveAsWav(docId: string): Promise<void> {
       sourceBitDepth: 32,
       dirty: false,
     });
+    markSavePoint(docId);
   }
 }
 

@@ -1,6 +1,6 @@
 import { render, screen, fireEvent } from '@testing-library/react';
 import HistoryPanel from './HistoryPanel';
-import { deleteSelection, silenceSelection } from '../../services/editOps';
+import { deleteSelection, silenceSelection, pushMarkerUndo } from '../../services/editOps';
 import { clearHistory } from '../../services/undoHistory';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, docLength, type AudioDocument } from '../../audio/AudioDocument';
@@ -58,5 +58,14 @@ describe('HistoryPanel', () => {
     // 'Delete' is now an undone (grayed) entry; clicking it redoes.
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     expect(docLength(useAppStore.getState().documents[0])).toBe(7);
+  });
+
+  it('lists marker undo labels alongside edit labels (Task M2 / F5)', () => {
+    const doc = addDoc(10);
+    clearHistory(doc.id);
+    pushMarkerUndo('Add Marker', doc.id, [], [{ id: 'marker-1', name: 'M', positionSample: 0 }]);
+
+    render(<HistoryPanel />);
+    expect(screen.getByRole('button', { name: 'Add Marker' })).toBeInTheDocument();
   });
 });

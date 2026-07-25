@@ -6,7 +6,7 @@ import {
   insertAt,
   docLength,
 } from '../audio/AudioDocument';
-import type { SelectionRange } from '../stores/appStore';
+import type { Marker, SelectionRange } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 import { pushUndo } from './undoHistory';
 import { getClipboard, setClipboard } from './clipboard';
@@ -62,6 +62,29 @@ export function applyEdit(
       s.updateDocument(newDoc);
       s.setSelection(postSelection);
       s.setCursor(postCursor);
+    },
+  });
+}
+
+/**
+ * Records an undo entry for a marker-list mutation (add/rename/delete —
+ * Task M2 / F5): the undo/redo closures replace the WHOLE marker list for
+ * `docId` with the captured `before`/`after` snapshots via `setMarkersForDoc`,
+ * which never touches `dirty` itself. That's intentional: the marker action
+ * that produced `after` already dirtied the doc on the way in (`markDirty` in
+ * appStore), and undoHistory re-derives `dirty` from position vs. save point
+ * after applying this entry — restoration must not independently dirty or
+ * clean the document.
+ */
+export function pushMarkerUndo(label: string, docId: string, before: Marker[], after: Marker[]): void {
+  pushUndo({
+    label,
+    docId,
+    undo() {
+      useAppStore.getState().setMarkersForDoc(docId, before);
+    },
+    redo() {
+      useAppStore.getState().setMarkersForDoc(docId, after);
     },
   });
 }

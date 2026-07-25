@@ -1,7 +1,7 @@
 import { registerCommands, runCommand, getMenuSections } from './menuActions';
 import type { MenuCommand, MenuSection } from './menuActions';
 import { useAppStore, makeInitialState } from '../stores/appStore';
-import { createDocument } from '../audio/AudioDocument';
+import { createDocument, docLength } from '../audio/AudioDocument';
 import { getSpectralScale, toggleSpectralScale } from './spectralScale';
 
 beforeEach(() => {
@@ -266,6 +266,53 @@ describe('marker commands (Task 23)', () => {
       await runCommand('marker.prev');
       expect(useAppStore.getState().cursorSample).toBe(100);
     });
+  });
+});
+
+describe('marker.add undo (Task M2 / F5)', () => {
+  it('Ctrl+Z after marker.add removes the marker, not a prior audio edit', async () => {
+    const doc = openDoc(); // length 1000
+    useAppStore.getState().setSelection({ start: 0, end: 10 });
+    await runCommand('edit.delete'); // audio edit: length 1000 -> 990
+    expect(docLength(useAppStore.getState().documents[0])).toBe(990);
+
+    useAppStore.getState().setCursor(500);
+    await runCommand('marker.add');
+    expect(useAppStore.getState().markers[doc.id]).toHaveLength(1);
+
+    await runCommand('edit.undo'); // undoes the marker add
+    expect(useAppStore.getState().markers[doc.id] ?? []).toHaveLength(0);
+    expect(docLength(useAppStore.getState().documents[0])).toBe(990); // audio edit untouched
+
+    await runCommand('edit.undo'); // now undoes the audio edit
+    expect(docLength(useAppStore.getState().documents[0])).toBe(1000);
+  });
+
+  it('marker.add dirties the doc; undo recomputes dirty back to clean (derived, not left stale)', async () => {
+    const doc = openDoc();
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+
+    useAppStore.getState().setCursor(300);
+    await runCommand('marker.add');
+    expect(useAppStore.getState().markers[doc.id]).toHaveLength(1);
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
+
+    await runCommand('edit.undo'); // setMarkersForDoc alone doesn't touch dirty
+    expect(useAppStore.getState().documents[0].dirty).toBe(false); // derived override must recompute it
+  });
+
+  it('marker.add undo/redo round-trips through Ctrl+Z / Ctrl+Y', async () => {
+    const doc = openDoc();
+    useAppStore.getState().setCursor(200);
+    await runCommand('marker.add');
+    const markerId = useAppStore.getState().markers[doc.id][0].id;
+
+    await runCommand('edit.undo');
+    expect(useAppStore.getState().markers[doc.id] ?? []).toHaveLength(0);
+
+    await runCommand('edit.redo');
+    expect(useAppStore.getState().markers[doc.id]).toHaveLength(1);
+    expect(useAppStore.getState().markers[doc.id][0].id).toBe(markerId);
   });
 });
 

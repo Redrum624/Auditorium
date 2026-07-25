@@ -6,9 +6,10 @@ import {
   deleteSelection,
   trimToSelection,
   silenceSelection,
+  pushMarkerUndo,
 } from './editOps';
 import { getClipboard, setClipboard, clearClipboard } from './clipboard';
-import { undo, redo, getHistory } from './undoHistory';
+import { undo, redo, getHistory, markSavePoint } from './undoHistory';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength, deleteRegion, type AudioDocument } from '../audio/AudioDocument';
 import * as resampleModule from '../dsp/resample';
@@ -272,6 +273,65 @@ describe('trimToSelection', () => {
 
     undo(doc.id);
     expect(activeDoc().channels[0]).toBe(originalChannel);
+  });
+});
+
+describe('pushMarkerUndo (Task M2 / F5)', () => {
+  it('records an undo entry whose undo/redo restore the captured marker snapshots via setMarkersForDoc', () => {
+    const doc = addDoc([ramp(5)]);
+    useAppStore.getState().setMarkersForDoc(doc.id, [{ id: 'm1', name: 'A', positionSample: 1 }]);
+    const before = useAppStore.getState().markers[doc.id];
+    const after = [...before, { id: 'm2', name: 'B', positionSample: 2 }];
+    useAppStore.getState().setMarkersForDoc(doc.id, after);
+
+    pushMarkerUndo('Add Marker', doc.id, before, after);
+    expect(getHistory(doc.id).done).toEqual(['Add Marker']);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+
+    redo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(after);
+  });
+});
+
+describe('save-point-derived dirty (Task M2 / F9)', () => {
+  it('undo after a save leaves the doc dirty; redo returns to clean exactly at the save point', () => {
+    const doc = addDoc([ramp(10)]);
+    expect(doc.dirty).toBe(false);
+
+    applyEdit('Delete', doc.id, (d) => deleteRegion(d, 0, 2)); // length 10 -> 8
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
+
+    // Simulate what fileService does on a successful save: mark the save
+    // point and clear dirty directly (the same two things it does together).
+    markSavePoint(doc.id);
+    useAppStore.getState().updateDocument({ ...useAppStore.getState().documents[0], dirty: false });
+
+    undo(doc.id);
+    expect(useAppStore.getState().documents[0].dirty).toBe(true); // waveform now differs from disk
+    expect(docLength(useAppStore.getState().documents[0])).toBe(10);
+
+    redo(doc.id);
+    expect(useAppStore.getState().documents[0].dirty).toBe(false); // back at the save point, clean
+    expect(docLength(useAppStore.getState().documents[0])).toBe(8);
+  });
+
+  it('edit -> undo -> new edit -> save -> undo lands on a pre-edit state that is not the save point: dirty', () => {
+    const doc = addDoc([ramp(10)]);
+
+    applyEdit('Delete1', doc.id, (d) => deleteRegion(d, 0, 1)); // length 9
+    undo(doc.id); // back to the pristine length-10 doc
+    expect(docLength(useAppStore.getState().documents[0])).toBe(10);
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+
+    applyEdit('Delete2', doc.id, (d) => deleteRegion(d, 0, 2)); // length 8; truncates Delete1's redo
+    markSavePoint(doc.id);
+    useAppStore.getState().updateDocument({ ...useAppStore.getState().documents[0], dirty: false });
+
+    undo(doc.id); // back to the pre-Delete2 (pristine) state, which is NOT the save point
+    expect(docLength(useAppStore.getState().documents[0])).toBe(10);
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
   });
 });
 

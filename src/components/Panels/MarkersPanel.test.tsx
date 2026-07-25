@@ -2,6 +2,7 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import MarkersPanel from './MarkersPanel';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
+import { undo, getHistory } from '../../services/undoHistory';
 
 function addDoc(): AudioDocument {
   const doc = createDocument({
@@ -139,5 +140,37 @@ describe('MarkersPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: /delete intro/i }));
 
     expect(useAppStore.getState().markers[doc.id]).toHaveLength(0);
+  });
+
+  describe('marker undo (Task M2 / F5)', () => {
+    it('renaming a marker is undoable and shows up in the history as "Rename Marker"', () => {
+      const doc = addDoc();
+      useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Intro', positionSample: 0 });
+
+      render(<MarkersPanel />);
+      fireEvent.doubleClick(screen.getByText('Intro'));
+      const input = screen.getByDisplayValue('Intro');
+      fireEvent.change(input, { target: { value: 'Chorus' } });
+      fireEvent.keyDown(input, { key: 'Enter' });
+      expect(useAppStore.getState().markers[doc.id][0].name).toBe('Chorus');
+      expect(getHistory(doc.id).done).toEqual(['Rename Marker']);
+
+      undo(doc.id);
+      expect(useAppStore.getState().markers[doc.id][0].name).toBe('Intro');
+    });
+
+    it('deleting a marker is undoable and shows up in the history as "Delete Marker"', () => {
+      const doc = addDoc();
+      useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Intro', positionSample: 0 });
+
+      render(<MarkersPanel />);
+      fireEvent.click(screen.getByRole('button', { name: /delete intro/i }));
+      expect(useAppStore.getState().markers[doc.id]).toHaveLength(0);
+      expect(getHistory(doc.id).done).toEqual(['Delete Marker']);
+
+      undo(doc.id);
+      expect(useAppStore.getState().markers[doc.id]).toHaveLength(1);
+      expect(useAppStore.getState().markers[doc.id][0].name).toBe('Intro');
+    });
   });
 });

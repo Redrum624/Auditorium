@@ -10,6 +10,7 @@ import {
   copySelection,
   pasteAtCursor,
   deleteSelection,
+  pushMarkerUndo,
 } from './editOps';
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { getClipboard } from './clipboard';
@@ -663,11 +664,14 @@ function registerMarkerCommands(): void {
       shortcut: 'M',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => {
-        const { activeDocumentId, cursorSample, addMarker } = useAppStore.getState();
+        const { activeDocumentId, cursorSample, markers, addMarker } = useAppStore.getState();
         if (!activeDocumentId) return;
+        const before = markers[activeDocumentId] ?? [];
         const id = nextId('marker');
         const n = id.split('-')[1];
         addMarker(activeDocumentId, { id, name: `Marker ${n}`, positionSample: cursorSample });
+        const after = useAppStore.getState().markers[activeDocumentId] ?? [];
+        pushMarkerUndo('Add Marker', activeDocumentId, before, after);
       },
     },
     {
