@@ -44,7 +44,11 @@ click the ✕ to close it (you'll be prompted to save if it's dirty).
 Closing the **app window** with unsaved changes is guarded natively: the app
 counts your dirty documents and shows a confirmation ("N file(s) have unsaved
 changes.") with **Quit** (discard everything and exit) and **Cancel** (keep
-the app open). With no unsaved changes the window closes immediately.
+the app open). With no unsaved changes the window closes immediately. If the
+app is still busy with a save or export when you try to close, it no longer
+force-closes after a short timeout — it asks instead ("The editor is busy (a
+save or export may be running). Quit anyway?"), so an in-progress write is
+never killed silently.
 
 ## Editing
 
@@ -59,10 +63,17 @@ current cursor. `Ctrl+A` selects all; `Escape` clears the selection.
 
 Standard editing acts on the current selection: `Ctrl+X` cut, `Ctrl+C` copy,
 `Ctrl+V` paste at the cursor, `Delete` removes the selection. Undo/redo
-(`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) keeps up to 50 steps per file (oldest
-dropped beyond that) and is tracked per document — the **History** tab in the
-right sidebar lists every applied edit; click any entry to jump the
-document's state to that point.
+(`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) keeps up to 50 steps per document,
+within an 800 MB per-document memory budget — whichever limit is hit first
+evicts the oldest step (a large document's effective depth can be well under
+50) — and is tracked per document — the **History** tab in the right sidebar
+lists every applied edit; click any entry to jump the document's state to
+that point. Marker add/rename/delete are undoable too (labelled `Add Marker`
+/ `Rename Marker` / `Delete Marker` in the History panel), and destructive
+edits that change the timeline (delete, paste, trim, replace, sample-rate
+conversion, and length-changing effects like Time Stretch/Pitch Shift) remap
+or drop affected markers in the same undo step, so undo restores their exact
+pre-edit positions.
 
 ### Markers
 
@@ -75,12 +86,31 @@ button removes it. **Edit → Next Marker** / **Previous Marker** jump the
 cursor to the closest marker after/before it (no wraparound). On the waveform
 and spectral canvases, each marker draws as a small orange triangle flag with
 a dashed vertical line through the full height of the view, with its name
-labeled next to the flag when there's enough horizontal room. Markers persist
-to disk: a `.wav` document's markers are written into standard cue/adtl chunks
-on in-place Save, Save As, and Export, and read back the next time that file is
-opened; a multitrack session's markers are embedded in the `.audm` file. MP3
-and FLAC have no standard marker chunk, so markers still don't survive a Save
-or Export to either of those (see Known Limitations).
+labeled next to the flag when there's enough horizontal room.
+
+Markers persist to disk in every supported container — `.wav` (cue/adtl
+chunks), `.mp3` (ID3v2.3 chapter frames), `.flac` (VORBIS_COMMENT chapter
+tags), and `.ogg` (OpusTags chapter comments) — on in-place Save, Save As, and
+Export, and read back sample-accurately the next time the file is opened; a
+multitrack session's markers are embedded in the `.audm` file. Adding,
+renaming, or deleting a marker marks the document dirty (the Files-panel `*`,
+the close/quit prompts) and is undoable from the History panel. Destructive
+edits that change the timeline — delete, paste, trim, replace, sample-rate
+conversion, and length-changing effects like Time Stretch/Pitch Shift — remap
+marker positions along with the audio rather than leaving them stranded;
+positions are always clamped to the document length, so a marker can never be
+saved past the end of the file.
+
+### Convert Sample Rate / Convert Channels
+
+**Edit → Convert Sample Rate…** resamples every channel of the active
+document to a chosen rate (22050/44100/48000/96000 Hz) and updates its
+sample rate; markers are rescaled in lockstep so they land on the new sample
+clock. **Edit → Convert Channels…** converts between Mono and Stereo (stereo
+→ mono averages the two channels; mono → stereo duplicates the single
+channel). Both dialogs open pre-selected to the active document's current
+rate/channel count, apply to the whole document, and are undoable as a single
+History-panel step.
 
 ### The right sidebar (History | Markers | Properties)
 
@@ -97,9 +127,9 @@ The right sidebar is a three-tab strip; **History** is the default tab.
   as 32-bit float, but for WAV/FLAC sources the original file's bit depth is
   recorded on import and shown alongside it, e.g. `16-bit source → 32-bit
   float`; MP3/OGG sources (which carry no meaningful source depth) show
-  `32-bit float (internal)`. Save writes the document back at its source
-  format and depth for `.wav`, `.mp3`, and `.flac` (see *Format-faithful
-  Save* in the README). In the multitrack
+  `32-bit float (internal)`. Save writes the document back into its source
+  container for `.wav`, `.mp3`, `.flac`, and `.ogg` (see *Format-faithful
+  Save* below for the exact depth/bitrate each format writes). In the multitrack
   view it shows the selected clip's source document, track, start/offset/
   length, and an editable **Gain (dB)** field (−24..+24, committed on
   `Enter` or when the field loses focus; `Escape` reverts your typing to the
@@ -194,8 +224,12 @@ document open. A session has a name, a sample rate, and any number of tracks.
   offline to a new stereo document (added to the Files panel), respecting
   mute/solo/volume/pan/gain.
 - **Sessions**: **File → Save Session…** / **Open Session…** persist the
-  session (tracks, clips, and their source document references) to a `.audm`
-  file.
+  session (tracks, clips, their source document references, embedded audio,
+  and markers) to a `.audm` file. Sessions are written in format v3, a binary
+  layout (JSON header + raw audio payload, no base64) that removes the old
+  v1/v2 format's silent failure on large embedded audio; Save Session now
+  reports success or failure explicitly instead of failing quietly. Older
+  `.audm` files (v1/v2) still open normally.
 
 An empty session (no clips on any track) shows an inline hint pointing at
 Insert Active File; the main editor area shows "Open an audio file (Ctrl+O)
@@ -209,18 +243,25 @@ without changing the open document's path or dirty state:
 
 - **WAV**: 16-bit, 24-bit, or 32-bit float.
 - **FLAC**: 16-bit, lossless (verbatim — no quality setting).
-- **MP3**: 128/192/256/320 kbps (constant bitrate only — see Known
-  Limitations for the VBR gap).
+- **MP3**: 128/192/256/320 kbps (constant bitrate only).
 - **OGG (Opus)**: 96/128/192 kbps.
 
 **File → Save** (`Ctrl+S`) is **format-faithful**: for a document opened from
 `.wav`, `.mp3`, `.flac`, or `.ogg` it re-encodes in place into that same
-container — WAV as 32-bit float, MP3 at 192 kbps, FLAC as verbatim FLAC at the
-source bit depth, OGG as Opus-in-Ogg at 128 kbps (if the host has no WebCodecs
-Opus encoder, an in-place OGG Save falls back to the Save As… dialog instead).
-Documents opened from other exotic containers (M4A, AAC, WebM, or anything
-unrecognized), and brand-new untitled documents, always use a **Save As…**
-dialog that writes WAV (32-bit float). **Save As…** always writes WAV.
+container — WAV as 32-bit float (Properties updates to reflect this), MP3 at
+192 kbps, FLAC at 16-bit or 24-bit (rounded up from the source depth — a
+20-bit source saves as 24-bit, never truncated to 16), OGG as Opus-in-Ogg at
+128 kbps (if the host has no WebCodecs Opus encoder, an in-place OGG Save
+falls back to the Save As… dialog instead). Documents opened from other
+exotic containers (M4A, AAC, WebM, or anything unrecognized), and brand-new
+untitled documents, always use a **Save As…** dialog that writes WAV (32-bit
+float, replacing the source extension in the suggested name — `song.mp3`
+defaults to `song.wav`). **Save As…** always writes WAV.
+
+Every in-place save (Save, and the format-faithful re-encodes above) writes
+to a temporary file next to the target and only replaces it once the write is
+complete, so an interrupted or failed save can no longer corrupt or truncate
+the original file on disk.
 
 ## Shortcuts reference
 

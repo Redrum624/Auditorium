@@ -19,8 +19,9 @@ const NO_MARKERS: Marker[] = [];
  * rename could open (review finding). Instead the time readout is an explicit
  * "Go to" button that moves the cursor and re-centers the view; double-
  * clicking the name switches it to an inline input (Enter/blur commits,
- * Escape cancels); the trailing ✕ removes the marker. Markers are
- * session-only — see docs/KNOWN_LIMITATIONS.md.
+ * Escape cancels); the trailing ✕ removes the marker. Markers persist to
+ * disk in every supported container (WAV/MP3/FLAC/OGG) and in `.audm`
+ * sessions, and add/rename/delete are undoable — see docs/KNOWN_LIMITATIONS.md.
  */
 export default function MarkersPanel() {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);

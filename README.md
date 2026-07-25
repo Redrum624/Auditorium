@@ -1,7 +1,5 @@
 # Auditorium
 
-<!-- Screenshot captured from the running app in Task 25 (release smoke). Until
-     then docs/screenshot.png is a placeholder. -->
 ![Auditorium](docs/screenshot.png)
 
 ![Spectral view](docs/screenshot-spectral.png)
@@ -75,20 +73,23 @@ use `npm run dev`.
 **Editing & workflow:**
 
 - Cut, copy, paste, and delete on sample-accurate `[start, end)` selections.
-- Per-document undo/redo history, up to 50 steps, browsable in the History panel.
+- Per-document undo/redo history, up to 50 steps within an 800 MB per-document memory budget (oldest step evicted once either limit is hit), browsable in the History panel; marker add/rename/delete are undoable too (`Add Marker`/`Rename Marker`/`Delete Marker`).
 - Selection by click-drag, double-click (select all), shift-click (extend), `Ctrl+A`, and `Escape` to clear.
 - Zoom and scroll on both the waveform and spectral views (mouse wheel), sharing one cursor/selection/playhead.
-- Session markers: drop with `M`, rename inline, jump to next/previous, list in the Markers panel. Markers persist to disk in every supported container: `.wav` (cue/adtl chunks, Unicode names), `.mp3` (ID3v2.3 chapter frames), `.flac` (VORBIS_COMMENT chapter tags), `.ogg` (OpusTags chapter comments), and `.audm` sessions — sample-accurate on reopen.
+- Session markers: drop with `M`, rename inline, jump to next/previous, list in the Markers panel. Markers persist to disk in every supported container: `.wav` (cue/adtl chunks, Unicode names), `.mp3` (ID3v2.3 chapter frames), `.flac` (VORBIS_COMMENT chapter tags), `.ogg` (OpusTags chapter comments), and `.audm` sessions — sample-accurate on reopen. Destructive edits (delete, paste, trim, replace, sample-rate conversion, length-changing effects) remap or drop marker positions along with the audio, clamped to the document length.
+- **Convert Sample Rate / Convert Channels**: `Edit → Convert Sample Rate…` resamples the whole document to a chosen rate (22050/44100/48000/96000 Hz), rescaling markers in lockstep; `Edit → Convert Channels…` converts Mono ↔ Stereo. Both are undoable.
+- Loop-playback toggle on the transport bar (`transport.toggleLoop`).
 - **Noise-print workflow**: capture a noise print from a selection, then Noise Reduction subtracts it from the target region.
 - Recording device selection, channel count, and sample rate in the record dialog.
 - **Export**: WAV at 16-bit, 24-bit, or 32-bit float; FLAC (16-bit, lossless); MP3 at 128/192/256/320 kbps (CBR); OGG (Opus) at 96/128/192 kbps.
-- **Format-faithful Save**: Save re-encodes in place into the source container — WAV (32-bit float), MP3 (192 kbps), FLAC (verbatim, at the source bit depth), or OGG (Opus-in-Ogg, 128 kbps). The Properties panel reports the source file's bit depth ("16-bit source → 32-bit float"). If WebCodecs is unavailable, an in-place OGG Save falls back to Save As WAV.
+- **Format-faithful Save**: Save re-encodes in place into the source container — WAV (32-bit float; the document's bit-depth metadata is retagged to 32-bit float afterward so Properties reports the truth about the file on disk), MP3 (192 kbps), FLAC (16-bit or 24-bit, rounded up from the source depth — a 20-bit source saves as 24-bit, never truncated), or OGG (Opus-in-Ogg, 128 kbps). The Properties panel reports the source file's bit depth ("16-bit source → 32-bit float"). If WebCodecs is unavailable, an in-place OGG Save falls back to Save As WAV. Save As always writes WAV and replaces the source extension in the suggested name (`song.mp3` → `song.wav`).
+- **Atomic in-place saves**: every in-place Save writes to a sibling temp file and only replaces the original once the write completes, so an interrupted or failed save can't corrupt or truncate the file on disk.
 - **OGG (Opus) export and save**: a pure-TypeScript, RFC 3533/7845-conformant Ogg muxer pairs with the host's WebCodecs `AudioEncoder` — legacy Ogg Vorbis sources re-encode as Opus (not round-tripped as Vorbis).
 - **Native-rate WebM and AAC (ADTS) import**: container-header sniffing now also covers WebM/Matroska (EBML), raw ADTS/AAC, and 64-bit (largesize) MP4 boxes, so these keep their native sample rate on open instead of falling back to 48000 Hz.
 - **Marker persistence in every format**: WAV cue/adtl (UTF-8 label fallback for non-Latin names), MP3 ID3v2.3 CTOC/CHAP chapters, FLAC and OGG vorbis-comment `CHAPTERxxx` tags (readable by chapter-aware players; support varies by player and container) — each alongside a sample-accurate private tag so markers reopen exactly where they were dropped.
 - **Spectral log/linear toggle**: the Spectral Frequency Display's frequency axis switches between logarithmic (default) and linear scaling.
 - **Multitrack punch-in recording**: arm one or more tracks with their **R** toggle, position the multitrack cursor, then press **Record** — the take lands as a clip on every track that was armed when it started.
-- **Sessions**: save/open multitrack sessions as `.audm`, and mix down a whole session to a new stereo document.
+- **Sessions**: save/open multitrack sessions as `.audm` (format v3 — a binary layout with no size-limited base64 encoding, so Save Session no longer fails silently on large embedded audio; older v1/v2 session files still open), and mix down a whole session to a new stereo document.
 - Keyboard shortcuts throughout — see [`KEYBOARD_SHORTCUTS.md`](KEYBOARD_SHORTCUTS.md) for the full table.
 
 See the [User Guide](docs/USER_GUIDE.md) for a full walkthrough and

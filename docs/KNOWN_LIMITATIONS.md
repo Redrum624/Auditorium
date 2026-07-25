@@ -61,14 +61,15 @@ file restores them exactly.
 modern default. A native Vorbis encoder (to keep Vorbis sources as Vorbis) is a
 possible future refinement but not needed for round-tripping.
 
-## Markers persist in every container (resolved)
+## Markers persist in every container, remap under edits, and are undoable (resolved)
 
-**Area:** Markers (`src/stores/appStore.ts` `markers`, `src/audio/wavCodec.ts`,
-`src/audio/id3Chapters.ts`, `src/audio/chapterTags.ts`/`flacMeta.ts`,
-`src/audio/oggPage.ts`, `src/multitrack/sessionFile.ts`)
+**Area:** Markers (`src/stores/appStore.ts` `markers`, `src/services/editOps.ts`,
+`src/services/undoHistory.ts`, `src/audio/wavCodec.ts`, `src/audio/id3Chapters.ts`,
+`src/audio/chapterTags.ts`/`flacMeta.ts`, `src/audio/oggPage.ts`,
+`src/multitrack/sessionFile.ts`)
 
-**v1.3 behavior:** Markers round-trip through **all four supported containers**
-plus sessions, sample-accurately:
+**v1.3/v1.4 behavior:** Markers round-trip through **all four supported
+containers** plus sessions, sample-accurately:
 
 - **WAV** — standard `cue `/`LIST`-`adtl` chunk pair (Audacity/Audition-
   compatible). Since v1.3, `labl` names are no longer limited to Latin-1: if
@@ -77,17 +78,32 @@ plus sessions, sample-accurately:
   fallback for legacy files — CJK and emoji names round-trip intact.
 - **MP3** — an ID3v2.3 tag with standard chapter frames (`CTOC` + one `CHAP`
   per marker with an embedded UTF-16 `TIT2` title, podcast-chapter style) plus
-  a `TXXX AUDITORIUM_MARKERS` frame carrying exact sample offsets.
+  a `TXXX AUDITORIUM_MARKERS` frame carrying exact sample offsets. As of v1.4
+  the `CTOC`/`CHAP` interop frames cap at the first 255 markers by position
+  (the `CTOC` child count always matches); the private `TXXX` tag still
+  carries the full list regardless of count, so Auditorium itself never loses
+  a marker — only third-party chapter readers see the 255 cap.
 - **FLAC** — a `VORBIS_COMMENT` metadata block with de-facto-standard
   `CHAPTERxxx`/`CHAPTERxxxNAME` tags plus the same sample-accurate private tag.
 - **OGG (Opus)** — the same chapter comments in the OpusTags header (at the
   file's 48 kHz clock).
-- **`.audm` sessions** (`formatVersion: 2`) — a `markers` map per referenced
-  document; v1 session files still load with zero markers.
+- **`.audm` sessions** (v3, still reads v1/v2) — a `markers` map per
+  referenced document; v1 session files still load with zero markers.
 
 Opening any of these seeds the store with fresh marker ids; in-place Save,
 Save As, and Export all write markers back. Files saved with **no** markers are
 byte-identical to pre-v1.3 output for every format.
+
+**v1.4 additions:** adding, renaming, or deleting a marker now dirties the
+owning document (Files-panel `*`, close/quit prompts, the async-save
+staleness check) and is undoable from the History panel (`Add Marker` /
+`Rename Marker` / `Delete Marker`). Destructive edits that change the
+timeline — delete, insert/paste, trim, replace, sample-rate conversion, and
+length-changing effects (Time Stretch, Pitch Shift) — remap or drop marker
+positions atomically with the audio, in the same undo step; interior markers
+under a length-changing effect map proportionally rather than being dropped.
+Positions are always clamped to `[0, document length]`, so a marker can never
+be written to disk past the end of the file.
 
 **Remaining notes (interop granularity, not persistence gaps):** third-party
 tools read the standard chapter fields at millisecond granularity (that is all
@@ -97,5 +113,103 @@ to see the vorbis-comment chapters (not independently verified against a
 specific player); MP3 chapter support varies by player. Adobe
 Audition does not read or write MP3/FLAC/OGG markers at all — Auditorium
 exceeds parity here.
+
+**Intended behavior:** No further work planned — this is complete.
+
+## In-place saves are atomic (resolved)
+
+**Area:** File writes (`electron/ipc.cjs`, `electron/atomicWrite.cjs`)
+
+**v1.4 behavior:** Every `file:write` (in-place Save, format-faithful
+re-encode, Save Session) writes to a sibling temp file (`<target>.<pid>.<seq>.tmp`,
+same directory as the target — so the follow-up rename stays on one volume),
+fsyncs it, closes it, then renames it over the target. A failure at any step
+(encode error, disk full, permission denied) unlinks the temp file and leaves
+the original untouched — an interrupted or failed save can no longer destroy
+or truncate the file that was already on disk.
+
+**Intended behavior:** No further work planned — this is complete.
+
+## Undo history is bounded by bytes as well as by step count
+
+**Area:** Undo/redo (`src/services/undoHistory.ts`)
+
+**v1.4 behavior:** Undo keeps up to 50 steps per document, but also enforces
+an 800 MB per-document memory budget (`MAX_UNDO_BYTES`) computed from the
+captured channel data of each entry; whichever limit is hit first evicts the
+oldest step (at least one entry is always kept, even if it alone exceeds the
+budget). In practice the byte budget binds well before the 50-step count on
+large documents — a 10-minute stereo 44.1 kHz document's whole-document
+snapshots run roughly 200 MB each, so its effective undo depth is around 3-4
+steps, not 50; a very large document (e.g. long high-res multitrack sources)
+can be down to a single step.
+
+**Intended behavior:** No further work planned — this is the intended
+memory/depth trade-off for a browser-engine-hosted editor with no swap to
+disk.
+
+## Session files are format v3 (binary); very large legacy sessions may not load
+
+**Area:** Multitrack sessions (`src/multitrack/sessionFile.ts`)
+
+**v1.4 behavior:** `.audm` sessions are now written in **format v3**: an
+`AUDM3\n` magic, a JSON header, and the embedded audio as raw Float32 bytes
+assembled into one buffer — no monolithic JSON string and no base64 payload
+are ever built. This removes the v1/v2 format's silent failure once embedded
+audio's base64 encoding pushed the session's JSON past the JS engine's string
+length cap (roughly 17 minutes of embedded audio in the old format); Save
+Session now surfaces both success and failure explicitly instead of failing
+quietly. v3 sessions load exactly like v1/v2 wrote them; v1/v2 files still
+open normally.
+
+**Remaining limitation:** a **legacy v1/v2** session file whose JSON already
+exceeds the JS string cap (built by a pre-v1.4 Auditorium, or by another tool)
+still cannot be loaded — Open Session now reports a clear error instead of
+crashing, but the file itself is unreadable either way. Resaving as v3 (once
+it can be opened at all) avoids the ceiling entirely, since v3 never builds
+that string. There is no migration path for a legacy session that is already
+too large to open.
+
+**Intended behavior:** No further work planned for v3 itself; a v1/v2-specific
+recovery tool (partial-parse salvage) is not planned.
+
+## Closing while busy asks instead of force-quitting
+
+**Area:** Window close guard (`electron/closeGuard.cjs`)
+
+**v1.4 behavior:** The native close handler waits up to 2 seconds for the
+renderer to report its dirty-document count. Previously, a renderer that
+was merely busy (not crashed) but slow to reply within that window was
+force-destroyed. Now the guard fails closed: it only force-destroys when the
+`webContents` is actually crashed or already destroyed; otherwise it shows a
+native confirm — "The editor is busy (a save or export may be running). Quit
+anyway?" — since a busy renderer's true dirty count, and whether a save is
+mid-flight, are both unknown at that point.
+
+**Intended behavior:** No further work planned — this is complete.
+
+## UNC network-share saves are allowed; local-alias and admin shares are refused
+
+**Area:** Write-path policy (`electron/writePathPolicy.cjs`)
+
+**v1.4 behavior:** A well-formed UNC path (`\\server\share\...`, at least a
+server and a share component) is now an allowed save target — users can open
+a file from a NAS/network share and save back to it — subject to the same
+forbidden-directory containment and symlink/TOCTOU checks as any other write.
+Rejected by design, regardless of well-formedness:
+
+- Windows extended-length (`\\?\...`) and device (`\\.\...`) path prefixes,
+  including when spelled with mixed/forward slashes that `path.resolve`
+  would otherwise normalize back into one of those forms.
+- UNC paths that loop back to this machine under a local alias — `localhost`,
+  `127.0.0.0/8` literals, `::1`/`[::1]`, `<hostname>.ipv6-literal.net`
+  encodings, or this machine's own hostname.
+- Any `$`-suffixed share (`C$`, `ADMIN$`, `IPC$`, or a custom hidden share),
+  on any host — these reach a local drive root directly and match none of the
+  drive-letter-rooted forbidden-directory prefixes otherwise.
+
+Both loopback-alias and `$`-share forms resolve to the same filesystem the
+drive-letter checks already protect, so they're rejected outright rather than
+mapped back to a drive letter for containment.
 
 **Intended behavior:** No further work planned — this is complete.
