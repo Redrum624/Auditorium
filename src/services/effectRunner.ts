@@ -68,7 +68,14 @@ export async function runEffectOnSelection(
             `Effect: ${def.name}`,
             docId,
             (d) => replaceRegion(d, start, end, resultChannels),
-            { selection: { start, end: start + resultLen }, cursorSample: start }
+            { selection: { start, end: start + resultLen }, cursorSample: start },
+            // Most effects are equal-length (no remap needed), but length-changing
+            // ones (Time Stretch, Pitch Shift) move everything after the region —
+            // and everything strictly inside it stops existing at its old position.
+            // Same 'replace' rule as pasteAtCursor's replace-selection path (Task
+            // M3 fix round 1): markers this region's length change would otherwise
+            // leave stale (or past-EOF on disk) ride the same undo entry.
+            { type: 'replace', start, end, length: resultLen }
           );
           onProgress?.(1);
         } catch (err) {

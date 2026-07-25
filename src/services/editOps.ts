@@ -30,7 +30,11 @@ interface AfterState {
  * - delete [s,e): < s keep; in [s,e) drop; >= e shift left by (e-s).
  * - insert at `start` of `length` L: < start keep; >= start shift right by L.
  * - replace [s,e) with length L: < s keep; in [s,e) drop; >= e shift by L-(e-s).
- * - trim to [s,e): outside [s,e) drop; inside shift left by s.
+ * - trim to [s,e]: END-INCLUSIVE — outside [s,e] drops; inside (including a
+ *   marker sitting exactly at `e`) shifts left by s, so a marker at exactly the
+ *   old docLength survives a select-all trim landing at the new length exactly.
+ *   [Amended 2026-07-25, M3 review: the original half-open [s,e) reading
+ *   silently dropped end-of-file markers on trim.]
  * - rescale (sample-rate conversion): round(pos * toRate/fromRate).
  */
 export type MarkerRemap =
@@ -54,7 +58,9 @@ function remapPosition(pos: number, remap: MarkerRemap): number | null {
       if (pos < remap.end) return null;
       return pos + (remap.length - (remap.end - remap.start));
     case 'trim':
-      if (pos < remap.start || pos >= remap.end) return null;
+      // End-inclusive by plan ruling (2026-07-25): a marker at exactly `end`
+      // survives, landing at exactly the new length (end - start).
+      if (pos < remap.start || pos > remap.end) return null;
       return pos - remap.start;
     case 'rescale':
       return Math.round(pos * (remap.toRate / remap.fromRate));
@@ -112,9 +118,20 @@ export function applyEdit(
   let preMarkers: Marker[] | undefined;
   let postMarkers: Marker[] | undefined;
   if (remap) {
-    preMarkers = useAppStore.getState().markers[docId] ?? [];
-    postMarkers = remapMarkers(preMarkers, remap, docLength(newDoc));
-    useAppStore.getState().setMarkersForDoc(docId, postMarkers);
+    const currentMarkers = useAppStore.getState().markers[docId] ?? [];
+    const remapped = remapMarkers(currentMarkers, remap, docLength(newDoc));
+    // Skip the store write (and the undo/redo marker restore below) when the
+    // doc has no markers at all: remapMarkers can only drop/shift existing
+    // entries, never invent one, so an empty `currentMarkers` always yields an
+    // empty `remapped` too. Without this guard, every destructive edit of a
+    // marker-less doc would still call setMarkersForDoc(docId, []), seeding a
+    // brand-new `markers` object (and an explicit empty-array entry where none
+    // existed) on every edit — pure churn (Task M3 fix round 1, Minor 1).
+    if (currentMarkers.length > 0 || remapped.length > 0) {
+      preMarkers = currentMarkers;
+      postMarkers = remapped;
+      useAppStore.getState().setMarkersForDoc(docId, remapped);
+    }
   }
 
   // Snapshot the resulting UI state so redo restores it exactly.

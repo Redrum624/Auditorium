@@ -377,6 +377,9 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
 
     undo(doc.id);
     expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+
+    redo(doc.id);
+    expect(markerPositions(doc.id)).toEqual([0, 2, 5, 9]);
   });
 
   it('replace [s,e) with length L: before keep, inside drop, at/after e shift by L-(e-s)', () => {
@@ -394,7 +397,40 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
     expect(useAppStore.getState().markers[doc.id]).toEqual(before);
   });
 
-  it('trim to [s,e): outside drop, inside shift left by s', () => {
+  it('replace [s,e) with length L === e-s (net-zero shift): before keep, inside STILL drops, after unaffected', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [0, 1, 3, 5, 8]);
+    const before = useAppStore.getState().markers[doc.id];
+    setClipboard({ channels: [new Float32Array([100, 200, 300])], sampleRate: 44100 }); // L=3
+    useAppStore.getState().setSelection({ start: 2, end: 5 }); // e-s=3 === L: shift is 0
+
+    pasteAtCursor();
+
+    // 0,1 kept; 3 dropped (inside [2,5) even though the shift would be zero);
+    // 5,8 shift by L-(e-s)=0, i.e. unchanged.
+    expect(markerPositions(doc.id)).toEqual([0, 1, 5, 8]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
+
+  it('paste with a clipboard sample-rate mismatch shifts markers by the RESAMPLED length, not the original clip length', () => {
+    const doc = addDoc([new Float32Array(1000)]); // 44100 Hz doc
+    setMarkers(doc.id, [3]); // sits before the cursor
+    const clipRate = 22050;
+    const clipLen = Math.round(clipRate * 0.1); // 0.1s @ 22050 = 2205 samples
+    setClipboard({ channels: [new Float32Array(clipLen)], sampleRate: clipRate });
+    useAppStore.getState().setCursor(3); // marker sits exactly at p: shifts too ('>= p')
+
+    pasteAtCursor();
+
+    const insertedLength = docLength(activeDoc()) - 1000;
+    // Sanity: the resample really changed the length (upsampled to the 44100 doc rate).
+    expect(insertedLength).not.toBe(clipLen);
+    expect(markerPositions(doc.id)).toEqual([3 + insertedLength]);
+  });
+
+  it('trim to [s,e] (END-INCLUSIVE): outside drops, inside (incl. a marker at exactly e) shifts left by s', () => {
     const doc = addDoc([ramp(10)]);
     setMarkers(doc.id, [0, 2, 3, 4, 5, 8]);
     const before = useAppStore.getState().markers[doc.id];
@@ -402,11 +438,53 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
 
     trimToSelection();
 
-    // 0 dropped (<s); 2,3,4 kept shifted by -2 -> 0,1,2; 5,8 dropped (>=e).
-    expect(markerPositions(doc.id)).toEqual([0, 1, 2]);
+    // 0 dropped (<s); 2,3,4,5 kept shifted by -2 -> 0,1,2,3 (5===e survives per the
+    // amended end-inclusive rule); 8 dropped (>e).
+    expect(markerPositions(doc.id)).toEqual([0, 1, 2, 3]);
 
     undo(doc.id);
     expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+
+    redo(doc.id);
+    expect(markerPositions(doc.id)).toEqual([0, 1, 2, 3]);
+  });
+
+  it('trim: a marker sitting exactly at e survives, landing at exactly the new length', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [5]);
+    useAppStore.getState().setSelection({ start: 2, end: 5 }); // newLength = 5-2 = 3
+
+    trimToSelection();
+
+    expect(markerPositions(doc.id)).toEqual([3]); // 5 - 2 = 3 = newLength exactly
+  });
+
+  it('select-all trim (selection spans the whole document) is a marker no-op', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [0, 5, 10]); // includes an edge marker at exactly docLength
+    useAppStore.getState().setSelection({ start: 0, end: docLength(doc) });
+
+    trimToSelection();
+
+    // Trimming to the whole document changes nothing: start=0 (no shift) and
+    // every marker (even the one at docLength, the inclusive end) survives.
+    expect(markerPositions(doc.id)).toEqual([0, 5, 10]);
+  });
+
+  it('does not touch the markers store entry for a marker-less doc (no churn, Minor 1)', () => {
+    const doc = addDoc([ramp(10)]);
+    expect(useAppStore.getState().markers[doc.id]).toBeUndefined();
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    deleteSelection();
+
+    expect(useAppStore.getState().markers[doc.id]).toBeUndefined();
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toBeUndefined();
+
+    redo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toBeUndefined();
   });
 
   it('clamps a marker sitting exactly at the old docLength so it lands exactly at newLength, never beyond', () => {

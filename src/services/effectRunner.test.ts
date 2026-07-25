@@ -3,7 +3,7 @@ import { registerEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
-import { canUndo, undo } from './undoHistory';
+import { canUndo, undo, redo } from './undoHistory';
 
 // App.tsx registers effects at startup; mirror that so the renderer-side lookup
 // in runEffectOnSelection (used for the undo label + guard) finds the built-ins.
@@ -83,6 +83,44 @@ describe('runEffectOnSelection', () => {
     const doc = s.documents.find((d) => d.id === s.activeDocumentId)!;
     expect(docLength(doc)).toBe(5);
     expect(s.selection).toEqual({ start: 0, end: 5 });
+  });
+
+  it('remaps markers through a length-changing effect (Time Stretch/Pitch Shift shape), and undo restores them (Task M3 fix round 1)', async () => {
+    registerEffect({
+      id: 'test-third',
+      name: 'Shrink To Third',
+      category: 'Utility',
+      params: [],
+      // Simulates a length-changing effect (time-stretch/pitch-shift) applied to
+      // the SELECTED region only: shrinks the region to 1/3 its length.
+      process: (channels) => ({
+        channels: channels.map((c) => c.slice(0, Math.ceil(c.length / 3))),
+      }),
+    });
+    const docId = seedDoc([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    useAppStore.getState().setSelection({ start: 2, end: 8 }); // region length 6 -> resultLen 2
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'm0', name: 'before', positionSample: 0 }, // < start: kept
+      { id: 'm1', name: 'inside', positionSample: 5 }, // in [2,8): dropped
+      { id: 'm2', name: 'atEnd', positionSample: 8 }, // === end: shifts
+      { id: 'm3', name: 'after', positionSample: 9 }, // > end: shifts
+    ]);
+    const before = useAppStore.getState().markers[docId];
+
+    await runEffectOnSelection('test-third', {});
+
+    // resultLen=2 (ceil(6/3)), shift = resultLen - (end-start) = 2 - 6 = -4.
+    const positions = useAppStore
+      .getState()
+      .markers[docId].map((m) => m.positionSample);
+    expect(positions).toEqual([0, 4, 5]); // 0 kept; 5 dropped; 8->4; 9->5
+
+    undo(docId);
+    expect(useAppStore.getState().markers[docId]).toEqual(before);
+
+    redo(docId);
+    const redone = useAppStore.getState().markers[docId].map((m) => m.positionSample);
+    expect(redone).toEqual([0, 4, 5]);
   });
 
   it('passes extra through to the worker-side channel (__effectExtra) and cleans it up', async () => {
