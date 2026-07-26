@@ -12,18 +12,22 @@
  * track, more than the rest of this pipeline combined) and not a single
  * boxcar or triangular kernel either (those leave -6.5 dB / -13 dB at the
  * 7-8 kHz fold; the triple cascade gives ~-23 dB there, see
- * `decimateMono`'s doc comment for the full analysis).
+ * `decimateMono`'s doc comment for the full analysis). The two intermediate
+ * filter stages ping-pong between two scratch buffers and the third stage
+ * writes directly into the (much shorter) decimated output, so this never
+ * holds more than two full-length temporaries live at once — not three.
  *
- * The cascade is built to have EXACT zero group delay so decimated index `j`
- * maps to original sample `j*D`, not `j*D + <some causal filter delay>`:
- * every downstream feature (beat positions, bar boundaries, splice points)
- * inherits this mapping, so an off-by-one here silently shifts every beat.
- * See `tripleBoxcarZeroDelay` for the construction and its correctness
- * argument (odd D: perfectly symmetric single-stage boxcars, zero bias by
- * construction; even D: a 2-1 split of the two minimal-asymmetry directions,
- * giving a combined bias of exactly +/-0.5 original samples, which — for an
- * impulse placed exactly on the decimation grid — always leaves the on-grid
- * sample as the unique argmax of the (symmetric, unimodal) composite kernel).
+ * The cascade's group delay is zero in the following precise sense: for an
+ * impulse that lands exactly ON the decimation grid (original sample `j*D`
+ * for some integer `j` — which is what matters, since every consumer indexes
+ * the decimated signal at `j*D`), decimated sample `j` is GUARANTEED to be
+ * the argmax, exactly, not approximately. For an impulse elsewhere, the
+ * residual bias is at most +/-0.5 original samples, provably the minimum
+ * possible for an even-length composite kernel (odd `D` has zero bias with
+ * no caveat at all). Every downstream feature (beat positions, bar
+ * boundaries, splice points) inherits the on-grid mapping, so an off-by-one
+ * here would silently shift every beat. See `tripleBoxcarZeroDelay` for the
+ * construction and its correctness argument.
  *
  * ## Onset envelope (`onsetEnvelope`)
  *
@@ -39,28 +43,43 @@
  * on top of it, so there was nothing private to extract, only a pattern to
  * repeat).
  *
- * Frames are CENTERED at `t*ONSET_HOP` (window = `[t*hop - fftSize/2, t*hop
- * + fftSize/2)`, zero-padded at both ends), matching the Ellis 2007 /
- * librosa `onset_strength(center=True)` convention this design's downstream
- * beat-tracking stage (Ellis DP) is built on — NOT the plain
- * `start = t*hop` convention `stft.ts`/`spectrogramCore.ts` use for their own
- * (unrelated) arbitrary-region spectrogram purposes. This matters: with
- * log-compressed flux (`L = log(1 + LOG_COMPRESSION*E)`), the concavity of
- * `log` means the flux from "silence to half-energy" (as an isolated
- * transient FIRST enters the analysis window) is always larger than the
- * subsequent "half to full energy" step as the window centers on it — so a
- * spectral-flux onset detector always fires ~1 hop BEFORE a frame's nominal
- * center for a sharp, isolated attack. Centered framing is what makes frame
- * index `t` line up with "attack near sample `t*hop`" the way callers
- * expect; it is also independently corroborated by this design's own later
- * sample-domain refinement constant `beatSample ~= (f*256 + 256)*D`
- * (`v15-architecture.md`) — the `+256` (`+1 hop`) is exactly this same
- * "flux peaks 1 hop early" correction, derived independently here from
- * first principles (see `task-T1-report.md` for the full derivation and the
- * numeric proof that the plain `start = t*hop` convention places the
- * impulse-response argmax 3 frames away from the brief's specified
- * "frame 5 +/- 1", outside tolerance, while centered framing lands it at
- * frame 4, inside tolerance).
+ * Frames are CENTRED at `t*ONSET_HOP` (window = `[t*hop - fftSize/2, t*hop
+ * + fftSize/2)`, zero-padded at both ends), matching the Ellis 2007 / librosa
+ * `onset_strength(center=True)` convention this design's downstream
+ * beat-tracking stage (Ellis DP) is built on — NOT the plain `start = t*hop`
+ * convention `stft.ts`/`spectrogramCore.ts` use for their own (unrelated)
+ * arbitrary-region spectrogram purposes.
+ *
+ * ODF FRAME ATTRIBUTION CONTRACT (load-bearing for T2/T3): frame `f`'s
+ * *window* is centred at decimated sample `f*ONSET_HOP`, but its *flux peak*
+ * is NOT — because `L = log(1 + LOG_COMPRESSION*E)` is concave, the flux
+ * from "silence -> half-window-weight energy" as a sharp attack FIRST enters
+ * a frame's Hann window is always bigger than the subsequent "half -> full
+ * weight" step as the window centres on it. So for an isolated attack at
+ * decimated sample `k*ONSET_HOP`, `argmax(odf) === k-1` EXACTLY (verified for
+ * k=3,5,8,13,20,40, both single-sample impulses and multi-sample bursts —
+ * never off by even one frame away from an array edge). The correct
+ * frame-index -> sample mapping a consumer MUST use is therefore:
+ *
+ *     attackSample = (f + 1) * ONSET_HOP             (decimated-domain samples)
+ *     attackSample = (f * ONSET_HOP + ONSET_HOP) * D  (original-domain samples)
+ *
+ * NOT `f * ONSET_HOP` — that reads every attack 1 hop (23.2 ms at the
+ * canonical 11025 Hz / 256-hop rate) too early, which the design's own
+ * render-time +/-10 ms NCC micro-alignment cannot repair. This is exactly
+ * `v15-architecture.md`'s Stage-7 refinement constant
+ * `beatSample ~= (f*256 + 256)*D` — the `+256` (`+1 hop`) is this same
+ * correction, independently corroborating centred framing (see
+ * `task-T1-report.md`, "## Fix round 1" for the full derivation).
+ *
+ * `odf` and `odfLow` share ONE normalisation scale — `odf`'s own standard
+ * deviation, not `odfLow`'s. Normalising each envelope to ITS OWN unit std
+ * independently destroys the very ratio `odfLow` exists to carry: on
+ * bass-free material `odfLow`'s raw values are small but non-zero (band-edge
+ * leakage), and independently rescaling that near-silent signal up to unit
+ * std can make it read LARGER than `odf`, which downstream downbeat
+ * detection would misread as strong kick evidence. Sharing `odf`'s scale
+ * keeps `odfLow` small when there is genuinely little sub-200-Hz energy.
  */
 
 import { fft } from './fft';
@@ -94,6 +113,9 @@ export const MIN_ANALYSIS_SECONDS = 5;
 /** Longest audio processed in one pass (seconds); longer inputs are clipped by the caller. */
 export const MAX_ANALYSIS_SECONDS = 600;
 
+/** onProgress fires once every this many frames — same convention as wsola.ts:35. */
+const PROGRESS_FRAME_BATCH = 32;
+
 // ---------------------------------------------------------------------------
 // decimateMono
 // ---------------------------------------------------------------------------
@@ -109,75 +131,109 @@ function clamp(v: number, lo: number, hi: number): number {
 }
 
 /**
- * Sliding-window sum over `[i - left, i + right]` (zero-padded outside the
- * array), computed incrementally (one add + one subtract per output sample)
- * so the whole pass is O(n) regardless of window width. Never mutates `src`.
+ * Sliding-window sum of `src` over `[i - left, i + right]` (zero-padded
+ * outside the array), written into the caller-provided `dst` (same length,
+ * must not alias `src`). Computed incrementally (one add + one subtract per
+ * output sample) so the pass is O(n) regardless of window width.
  */
-function centeredSum(src: Float32Array, left: number, right: number): Float32Array {
+function centeredSumInto(src: Float32Array, dst: Float32Array, left: number, right: number): void {
   const n = src.length;
-  const out = new Float32Array(n);
-  if (n === 0) return out;
+  if (n === 0) return;
   let sum = 0;
   for (let k = -left; k <= right; k++) {
     if (k >= 0 && k < n) sum += src[k];
   }
-  out[0] = sum;
+  dst[0] = sum;
   for (let i = 1; i < n; i++) {
     const add = i + right;
     const rem = i - left - 1;
     if (add >= 0 && add < n) sum += src[add];
     if (rem >= 0 && rem < n) sum -= src[rem];
-    out[i] = sum;
+    dst[i] = sum;
   }
-  return out;
 }
 
 /**
- * Triple-cascaded length-D boxcar with EXACT zero group delay by
- * construction (unnormalized: caller divides by `D^3`).
+ * Same sliding-window sum as `centeredSumInto`, but only WRITES every
+ * `factor`-th sample (scaled by `norm`) into `dst`, which is sized for the
+ * decimated output rather than the full input length. The running sum still
+ * has to be advanced one sample at a time (the recurrence is sequential),
+ * but this avoids allocating a third full-length temporary for the final
+ * cascade stage — `dst` is `~1/factor` the size instead.
+ */
+function centeredSumStrided(
+  src: Float32Array,
+  dst: Float32Array,
+  left: number,
+  right: number,
+  factor: number,
+  norm: number
+): void {
+  const n = src.length;
+  if (n === 0) return;
+  let sum = 0;
+  for (let k = -left; k <= right; k++) {
+    if (k >= 0 && k < n) sum += src[k];
+  }
+  let j = 0;
+  if (0 % factor === 0) dst[j++] = sum * norm;
+  for (let i = 1; i < n; i++) {
+    const add = i + right;
+    const rem = i - left - 1;
+    if (add >= 0 && add < n) sum += src[add];
+    if (rem >= 0 && rem < n) sum -= src[rem];
+    if (i % factor === 0) dst[j++] = sum * norm;
+  }
+}
+
+/**
+ * Per-stage `[left, right]` window half-widths for the triple-cascaded
+ * length-D boxcar with zero group delay by construction (see the module doc
+ * comment for the precise "exact for on-grid events" guarantee).
  *
  * - D odd: a length-D boxcar has a single well-defined integer centre
  *   (`left = right = (D-1)/2`), so applying the SAME perfectly symmetric
- *   window in all 3 stages gives a combined kernel that is exactly
- *   symmetric about lag 0 — zero bias, exactly, no approximation.
- * - D even: no single-stage boxcar of length D can be centered on an
- *   integer sample (the natural split is `D/2` vs `D/2-1`, off by 0.5
- *   either direction). Applying that split the SAME way in all 3 stages
- *   would accumulate a 1.5-sample bias (three halves in the same
- *   direction) — enough to occasionally pick the wrong neighbouring
- *   decimated sample. Instead this uses a 2-1 split: two stages biased one
- *   way and one stage biased the other, so the combined bias is exactly
- *   +/-0.5 samples (the minimum possible, not the maximum). For an impulse
- *   placed exactly on the decimation grid, the true (fractional) kernel
- *   peak then sits exactly half way between two adjacent samples, one of
- *   which is always the grid point itself — so the grid sample is
- *   guaranteed to be (one of) the maxima, giving an exact, not merely
- *   close, decimated-index mapping. Verified for D=2 and D=4 by direct
- *   impulse-response simulation (see `task-T1-report.md`).
+ *   window in all 3 stages gives a combined kernel that is exactly symmetric
+ *   about lag 0 — zero bias, exactly, no approximation.
+ * - D even: no single-stage boxcar of length D can be centred on an integer
+ *   sample (the natural split is `D/2` vs `D/2-1`, off by 0.5 either
+ *   direction). Applying that split the SAME way in all 3 stages would
+ *   accumulate a 1.5-sample bias (three halves in the same direction) —
+ *   enough to occasionally pick the wrong neighbouring decimated sample
+ *   (verified: this fails for D=2). Instead this uses a 2-1 split: two
+ *   stages biased one way and one stage biased the other, so the combined
+ *   bias is exactly +/-0.5 samples (the minimum possible, not the maximum).
+ *   For an impulse placed exactly on the decimation grid, the true
+ *   (fractional) kernel peak then sits exactly half way between two
+ *   adjacent samples, one of which is always the grid point itself — so the
+ *   grid sample is guaranteed to be (one of) the maxima. Verified for D=2
+ *   and D=4 by direct impulse-response simulation (see `task-T1-report.md`).
  */
-function tripleBoxcarZeroDelay(x: Float32Array, D: number): Float32Array {
-  let s1: [number, number];
-  let s2: [number, number];
-  let s3: [number, number];
+function boxcarStageWindows(D: number): [number, number][] {
   if (D % 2 === 1) {
     const h = (D - 1) / 2;
-    s1 = s2 = s3 = [h, h];
-  } else {
-    const lo = D / 2 - 1;
-    const hi = D / 2;
-    s1 = [lo, hi];
-    s2 = [lo, hi];
-    s3 = [hi, lo];
+    return [
+      [h, h],
+      [h, h],
+      [h, h],
+    ];
   }
-  const y1 = centeredSum(x, s1[0], s1[1]);
-  const y2 = centeredSum(y1, s2[0], s2[1]);
-  return centeredSum(y2, s3[0], s3[1]);
+  const lo = D / 2 - 1;
+  const hi = D / 2;
+  return [
+    [lo, hi],
+    [lo, hi],
+    [hi, lo],
+  ];
 }
 
 /**
  * Decimates `mono` toward `TARGET_ANALYSIS_RATE` by an integer factor
  * `D = clamp(round(sampleRate / TARGET_ANALYSIS_RATE), 1, 8)`, anti-aliasing
- * with `tripleBoxcarZeroDelay` first. Never mutates `mono`.
+ * with a triple-cascaded boxcar first (`boxcarStageWindows`). Never mutates
+ * `mono`. Allocates only two full-length scratch buffers (not three): the
+ * final cascade stage writes its strided (every-`D`-th) result straight into
+ * the decimated-size output via `centeredSumStrided`.
  */
 export function decimateMono(mono: Float32Array, sampleRate: number): DecimateResult {
   const factor = clamp(Math.round(sampleRate / TARGET_ANALYSIS_RATE), 1, 8);
@@ -188,13 +244,18 @@ export function decimateMono(mono: Float32Array, sampleRate: number): DecimateRe
     return { signal: copy, rate: sampleRate, factor };
   }
 
-  const filtered = tripleBoxcarZeroDelay(mono, factor);
-  const outLen = mono.length > 0 ? Math.floor((mono.length - 1) / factor) + 1 : 0;
+  const [s1, s2, s3] = boxcarStageWindows(factor);
+  const n = mono.length;
+  const bufA = new Float32Array(n);
+  const bufB = new Float32Array(n);
+  centeredSumInto(mono, bufA, s1[0], s1[1]);
+  centeredSumInto(bufA, bufB, s2[0], s2[1]);
+
+  const outLen = n > 0 ? Math.floor((n - 1) / factor) + 1 : 0;
   const signal = new Float32Array(outLen);
   const norm = 1 / (factor * factor * factor);
-  for (let j = 0; j < outLen; j++) {
-    signal[j] = filtered[j * factor] * norm;
-  }
+  centeredSumStrided(bufB, signal, s3[0], s3[1], factor, norm);
+
   return { signal, rate: sampleRate / factor, factor };
 }
 
@@ -205,8 +266,14 @@ export function decimateMono(mono: Float32Array, sampleRate: number): DecimateRe
 export interface OnsetEnvelopeResult {
   odf: Float32Array;
   odfLow: Float32Array;
-  /** numFrames * numBands, row-major (band table may have fewer than BANDS entries if dedup drops any). */
+  /** numFrames * numBands, row-major. */
   bands: Float32Array;
+  /** Number of columns in `bands` this call actually produced — usually
+   * `BANDS`, but can be less at unusually low decimated rates where dedup
+   * drops a band (e.g. 23 at rate=24000, reached via a 192 kHz source
+   * clamped to D=8). Callers must use THIS, not the `BANDS` constant, when
+   * re-deriving rows from a cached `bands` matrix. */
+  numBands: number;
   odfRate: number;
   numFrames: number;
 }
@@ -222,11 +289,14 @@ export interface BandTable {
  * built from `BANDS+1` log-spaced edge frequencies (giving exactly `BANDS`
  * consecutive-pair intervals, rather than `BANDS` edges giving `BANDS-1`
  * intervals plus an oddly-sized leftover band). Bands whose two edges round
- * to the same FFT bin (only possible at unusually low decimated rates) are
- * dropped. Verified at rate=11025, ONSET_FFT=1024: all 24 bands survive with
- * bin widths >= 1 (down to 2 bins at the 80 Hz floor). Exported (in addition
- * to `onsetEnvelope` using it internally) so the band-edge/centre invariants
- * are independently testable, and for later tasks that need the same table.
+ * to the same FFT bin are dropped — at rate=11025 (the canonical decimated
+ * rate) all 24 survive, narrowest band 1 bin wide (not the ">=1.2 bins"
+ * the architecture doc estimated before checking integer rounding); at
+ * unusually low decimated rates (e.g. 24000, reached from a 192 kHz source
+ * clamped to D=8) one band is dropped, giving 23 — see `OnsetEnvelopeResult.
+ * numBands`. Exported (in addition to `onsetEnvelope` using it internally)
+ * so the band-edge/centre invariants are independently testable, and for
+ * later tasks that need the same table.
  */
 export function computeBandTable(rate: number): BandTable {
   const bandHigh = Math.min(BAND_HIGH_HZ, 0.32 * rate);
@@ -286,45 +356,39 @@ function centeredMovingAverage(x: Float32Array, halfWidth: number): Float32Array
   return out;
 }
 
-/**
- * Subtracts a centred `LOCAL_MEAN_SEC`-wide moving average, half-wave
- * rectifies, then normalises to unit standard deviation. Returns an
- * all-zero envelope (never NaN) when the input has effectively no variance.
- */
-function postProcessEnvelope(raw: Float32Array, odfRate: number): Float32Array {
+/** Subtracts a centred `LOCAL_MEAN_SEC`-wide moving average and half-wave
+ * rectifies. Does NOT normalise — see `onsetEnvelope`, which normalises
+ * `odf` and `odfLow` together against a SHARED scale. */
+function localMeanRectify(raw: Float32Array, halfWidth: number): Float32Array {
   const n = raw.length;
-  const halfWidth = Math.round(0.5 * LOCAL_MEAN_SEC * odfRate);
   const avg = centeredMovingAverage(raw, halfWidth);
-
-  const rectified = new Float32Array(n);
+  const out = new Float32Array(n);
   for (let t = 0; t < n; t++) {
     const v = raw[t] - avg[t];
-    rectified[t] = v > 0 ? v : 0;
+    out[t] = v > 0 ? v : 0;
   }
+  return out;
+}
 
+function stdOf(x: Float32Array): number {
+  const n = x.length;
   let mean = 0;
-  for (let t = 0; t < n; t++) mean += rectified[t];
+  for (let t = 0; t < n; t++) mean += x[t];
   mean /= n > 0 ? n : 1;
-
   let variance = 0;
   for (let t = 0; t < n; t++) {
-    const d = rectified[t] - mean;
+    const d = x[t] - mean;
     variance += d * d;
   }
   variance /= n > 0 ? n : 1;
-  const std = Math.sqrt(variance);
-
-  if (std < 1e-9) return new Float32Array(n);
-
-  const out = new Float32Array(n);
-  for (let t = 0; t < n; t++) out[t] = rectified[t] / std;
-  return out;
+  return Math.sqrt(variance);
 }
 
 /**
  * Streaming log-band spectral-flux onset-strength envelope. Frames are
- * CENTRED at `t*ONSET_HOP` (see the module doc comment for why). `signal`
- * and its contents are never mutated.
+ * CENTRED at `t*ONSET_HOP` (see the module doc comment for the ODF frame
+ * attribution contract this implies). `signal` and its contents are never
+ * mutated.
  */
 export function onsetEnvelope(
   signal: Float32Array,
@@ -332,7 +396,12 @@ export function onsetEnvelope(
   onProgress?: (fraction: number) => void
 ): OnsetEnvelopeResult {
   const len = signal.length;
-  const numFrames = Math.max(1, Math.floor((len - ONSET_FFT) / ONSET_HOP) + 1);
+  // floor(len/hop)+1 frames fully cover the signal under centred framing
+  // (matches v15-architecture.md's own "~12,920 frames for a 5-minute
+  // track" worked example at rate=11025; the start-aligned
+  // floor((len-fft)/hop)+1 formula leaves the final ~50-70ms of every
+  // track outside every frame's window once framing is centred).
+  const numFrames = Math.max(1, Math.floor(len / ONSET_HOP) + 1);
   const odfRate = rate / ONSET_HOP;
 
   const table = computeBandTable(rate);
@@ -381,11 +450,30 @@ export function onsetEnvelope(
     rawOdf[t] = t === 0 ? 0 : flux;
     rawOdfLow[t] = t === 0 ? 0 : fluxLow;
 
-    if (onProgress) onProgress(Math.min(0.9, ((t + 1) / numFrames) * 0.9));
+    if (onProgress && (t % PROGRESS_FRAME_BATCH === 0 || t === numFrames - 1)) {
+      onProgress(Math.min(0.9, ((t + 1) / numFrames) * 0.9));
+    }
   }
 
-  const odf = postProcessEnvelope(rawOdf, odfRate);
-  const odfLow = postProcessEnvelope(rawOdfLow, odfRate);
+  const halfWidth = Math.round(0.5 * LOCAL_MEAN_SEC * odfRate);
+  const odfRect = localMeanRectify(rawOdf, halfWidth);
+  const odfLowRect = localMeanRectify(rawOdfLow, halfWidth);
 
-  return { odf, odfLow, bands: bandsMatrix, odfRate, numFrames };
+  // odf and odfLow are normalised against ONE shared scale -- odf's own std
+  // -- not their own individual stds; see the module doc comment for why
+  // (an independent-std normalisation would erase the very odfLow/odf ratio
+  // downbeat detection reads as kick evidence). std < 1e-9 short-circuits
+  // BOTH to all-zero, matching the brief's "caller short-circuits to
+  // bpm: null" contract.
+  const scale = stdOf(odfRect);
+  const odf = new Float32Array(numFrames);
+  const odfLow = new Float32Array(numFrames);
+  if (scale >= 1e-9) {
+    for (let t = 0; t < numFrames; t++) {
+      odf[t] = odfRect[t] / scale;
+      odfLow[t] = odfLowRect[t] / scale;
+    }
+  }
+
+  return { odf, odfLow, bands: bandsMatrix, numBands, odfRate, numFrames };
 }

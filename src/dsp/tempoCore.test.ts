@@ -116,6 +116,36 @@ describe('decimateMono', () => {
     expect(Math.abs(maxI - 1000)).toBeLessThanOrEqual(1);
   });
 
+  it('2b. ZERO GROUP DELAY (exact pin, not +/-1): D=4 and D=2 impulses decimate to EXACTLY index 1000', () => {
+    const inputD4 = new Float32Array(8000);
+    inputD4[4000] = 1;
+    const r4 = decimateMono(inputD4, 44100);
+    expect(r4.factor).toBe(4);
+    let maxI4 = 0;
+    let maxV4 = -Infinity;
+    for (let i = 0; i < r4.signal.length; i++) {
+      if (r4.signal[i] > maxV4) {
+        maxV4 = r4.signal[i];
+        maxI4 = i;
+      }
+    }
+    expect(maxI4).toBe(1000);
+
+    const inputD2 = new Float32Array(4000);
+    inputD2[2000] = 1;
+    const r2 = decimateMono(inputD2, 22050);
+    expect(r2.factor).toBe(2);
+    let maxI2 = 0;
+    let maxV2 = -Infinity;
+    for (let i = 0; i < r2.signal.length; i++) {
+      if (r2.signal[i] > maxV2) {
+        maxV2 = r2.signal[i];
+        maxI2 = i;
+      }
+    }
+    expect(maxI2).toBe(1000);
+  });
+
   it('3. RATE MAPPING: factor/rate for 44100, 48000, 22050, and D=1 passthrough for 16000', () => {
     expect(decimateMono(new Float32Array(100), 44100)).toMatchObject({ factor: 4, rate: 11025 });
     expect(decimateMono(new Float32Array(100), 48000)).toMatchObject({ factor: 4, rate: 12000 });
@@ -154,6 +184,27 @@ describe('onsetEnvelope', () => {
     expect(Math.abs(maxT - 5)).toBeLessThanOrEqual(1);
   }, 15000);
 
+  it('4b. ODF FRAME ATTRIBUTION (exact pin, not +/-1): a burst at decimated sample k*ONSET_HOP puts argmax(odf) at EXACTLY frame k-1', () => {
+    // A multi-sample burst (not just a single-sample impulse), away from
+    // both array edges, at two different k -- pins the frame-attribution
+    // contract stated in the module doc comment: attackSample = (f+1)*hop,
+    // not f*hop.
+    for (const k of [20, 40]) {
+      const signal = new Float32Array((k + 15) * ONSET_HOP + ONSET_FFT);
+      for (let i = 0; i < 4; i++) signal[k * ONSET_HOP + i] = 1;
+      const { odf } = onsetEnvelope(signal, TARGET_ANALYSIS_RATE);
+      let maxT = 0;
+      let maxV = -Infinity;
+      for (let t = 0; t < odf.length; t++) {
+        if (odf[t] > maxV) {
+          maxV = odf[t];
+          maxT = t;
+        }
+      }
+      expect(maxT).toBe(k - 1);
+    }
+  }, 15000);
+
   it('5. ODF PEAKINESS: clickTrain(120, 8) decimated has max(odf) > 5*mean(odf)', () => {
     const clicks = clickTrain(120, 8);
     const { signal, rate } = decimateMono(clicks, 44100);
@@ -180,9 +231,58 @@ describe('onsetEnvelope', () => {
 
     // The bands matrix returned by onsetEnvelope is sized off this same table.
     const signal = new Float32Array(ONSET_FFT + ONSET_HOP);
-    const { bands, numFrames } = onsetEnvelope(signal, TARGET_ANALYSIS_RATE);
-    expect(bands.length).toBe(numFrames * BANDS);
+    const { bands, numFrames, numBands } = onsetEnvelope(signal, TARGET_ANALYSIS_RATE);
+    expect(numBands).toBe(BANDS);
+    expect(bands.length).toBe(numFrames * numBands);
   });
+
+  it('6b. numBands is NOT always 24: rate 24000 (192 kHz source clamped to D=8) drops one band, and the caller can see it', () => {
+    const signal = new Float32Array(ONSET_FFT + ONSET_HOP);
+    const { bands, numFrames, numBands } = onsetEnvelope(signal, 24000);
+    expect(numBands).toBe(23);
+    expect(numBands).not.toBe(BANDS);
+    expect(bands.length).toBe(numFrames * numBands);
+  });
+
+  it('6c. odfLow shares odf\'s normalisation scale: the odfLow/odf ratio discriminates bass-present from bass-free material', () => {
+    // Hann-shaped tone bursts (smooth on/off, unlike a raw click) so each
+    // burst's spectrum stays concentrated near its own frequency instead of
+    // splattering broadband energy into the low bands regardless of pitch.
+    function tonePulseTrain(freq: number, bpm: number, seconds: number, sr: number): Float32Array {
+      const n = Math.round(seconds * sr);
+      const out = new Float32Array(n);
+      const interval = Math.round((60 / bpm) * sr);
+      const burstLen = Math.round(0.08 * sr);
+      const env = new Float32Array(burstLen);
+      for (let i = 0; i < burstLen; i++) env[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / (burstLen - 1)));
+      for (let start = 0; start < n; start += interval) {
+        for (let i = 0; i < burstLen && start + i < n; i++) {
+          out[start + i] = env[i] * Math.sin((2 * Math.PI * freq * i) / sr);
+        }
+      }
+      return out;
+    }
+    const maxOf = (x: Float32Array): number => {
+      let m = -Infinity;
+      for (let i = 0; i < x.length; i++) if (x[i] > m) m = x[i];
+      return m;
+    };
+
+    const bassPresent = tonePulseTrain(100, 120, 4, TARGET_ANALYSIS_RATE); // kick-like low bursts
+    const bassFree = tonePulseTrain(4000, 120, 4, TARGET_ANALYSIS_RATE); // high bursts, no sub-200Hz energy
+
+    const a = onsetEnvelope(bassPresent, TARGET_ANALYSIS_RATE);
+    const b = onsetEnvelope(bassFree, TARGET_ANALYSIS_RATE);
+    const ratioBassPresent = maxOf(a.odfLow) / maxOf(a.odf);
+    const ratioBassFree = maxOf(b.odfLow) / maxOf(b.odf);
+
+    // The bass-free ratio must stay small in absolute terms (not just
+    // "smaller than bass-present") -- this is what a shared normalisation
+    // scale buys: an independently-normalised odfLow would read LARGER than
+    // odf here (reproduced separately -- see task-T1-report.md).
+    expect(ratioBassFree).toBeLessThan(0.05);
+    expect(ratioBassPresent).toBeGreaterThan(10 * ratioBassFree);
+  }, 15000);
 
   it('7. DEGENERATE: all-zeros 20s -> odf is all zeros, no NaN', () => {
     const signal = new Float32Array(20 * TARGET_ANALYSIS_RATE);
