@@ -6,7 +6,6 @@
 // atomicWrite.test.cjs) cover each piece individually; this proves the wiring
 // between them behaves correctly end to end (F2).
 
-const os = require('node:os');
 const fs = require('node:fs');
 const path = require('node:path');
 
@@ -37,7 +36,15 @@ describe('ipc.cjs file:write end-to-end (F2 atomic write wiring)', () => {
   let dir;
 
   beforeEach(() => {
-    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auditorium-ipc-write-'));
+    // Deliberately NOT os.tmpdir(): on some Windows configurations TEMP resolves
+    // under C:\Windows\Temp, which writePathPolicy correctly refuses as a
+    // protected directory -- so these tests would fail on the app's own policy
+    // rather than on the behaviour they mean to exercise. A repo-local scratch
+    // dir is never protected. (atomicWrite.test.cjs can still use os.tmpdir()
+    // because it calls atomicWriteFile directly, below the policy layer.)
+    const base = path.join(process.cwd(), 'test-output');
+    fs.mkdirSync(base, { recursive: true });
+    dir = fs.mkdtempSync(path.join(base, 'auditorium-ipc-write-'));
   });
 
   afterEach(() => {
