@@ -1,0 +1,151 @@
+import { analyzeTempo } from '../dsp/tempoCore';
+import type { TempoAnalysis } from '../dsp/tempoCore';
+
+export interface AnalyzeMessage {
+  type: 'analyze';
+  id: number;
+  level: 'tempo' | 'remix';
+  mono: Float32Array;
+  sampleRate: number;
+  minBpm: number;
+  maxBpm: number;
+  beatsPerBar: number;
+  downbeatShiftBeats: number;
+}
+
+// Test-only fault injection: when set, every 'analyze' request replies with
+// an `error` message instead of computing (mirrors
+// createSpectrogramWorkerMock's `_setSpectrogramWorkerError`). Reset in
+// afterEach via `_resetTempoWorkerTestState`.
+let injectedError: string | null = null;
+
+export function _setTempoWorkerError(message: string | null): void {
+  injectedError = message;
+}
+
+// Test-only fault injection: when set, every FakeTempoWorker instance fires
+// `onerror` instead of ever processing the 'analyze' message — simulating a
+// worker that fails to even LOAD (mirrors createDspWorkerMock's
+// `_setDspWorkerLoadFailure`). Reset in afterEach via
+// `_resetTempoWorkerTestState`.
+let loadFailureMessage: string | null = null;
+
+export function _setTempoWorkerLoadFailure(message: string | null): void {
+  loadFailureMessage = message;
+}
+
+// Test-only capture: the most recent 'analyze' message posted to any
+// FakeTempoWorker instance (mirrors createSpectrogramWorkerMock's
+// `_getLastComputeMessage`).
+let lastMessage: AnalyzeMessage | null = null;
+
+export function _getLastTempoMessage(): AnalyzeMessage | null {
+  return lastMessage;
+}
+
+// Test-only capture: total terminate() calls across all FakeTempoWorker
+// instances (mirrors createDspWorkerMock's `_getDspWorkerTerminateCount`).
+let terminateCallCount = 0;
+
+export function _getTempoWorkerTerminateCount(): number {
+  return terminateCallCount;
+}
+
+export function _resetTempoWorkerTestState(): void {
+  injectedError = null;
+  loadFailureMessage = null;
+  lastMessage = null;
+  terminateCallCount = 0;
+}
+
+// Same throttle interval and shape as the real tempo.worker.ts.
+const PROGRESS_INTERVAL_MS = 50;
+
+/**
+ * T9 will replace this with a real call into `remixFeatures.ts`. Stubbed here
+ * so `level:'remix'` is wired through the mock protocol without depending on
+ * T9 landing first — mirrors the identical stub in tempo.worker.ts exactly,
+ * so the mock and the real worker agree on 'remix' behaviour today (both
+ * throw 'not implemented').
+ */
+function deriveRemixFeatures(_tempo: TempoAnalysis, _msg: AnalyzeMessage): never {
+  throw new Error('not implemented');
+}
+
+/**
+ * Test double for the tempo worker: runs `analyzeTempo` (the SAME pure core
+ * the real tempo.worker.ts calls) SYNCHRONOUSLY on the main thread behind a
+ * microtask, emitting the same message shapes as the real worker — throttled
+ * `progress`, then `done` or `error` — with a `terminated` guard so a
+ * terminated instance never emits again. Lets tempoAnalysis.ts (Task T4) be
+ * exercised end-to-end without a real Worker.
+ */
+class FakeTempoWorker {
+  onmessage: ((e: MessageEvent) => void) | null = null;
+  onerror: ((e: ErrorEvent) => void) | null = null;
+  private terminated = false;
+
+  postMessage(message: unknown, _transfer?: Transferable[]): void {
+    const msg = message as AnalyzeMessage;
+    if (this.terminated || !msg || msg.type !== 'analyze') return;
+    lastMessage = msg;
+
+    if (loadFailureMessage !== null) {
+      const failure = loadFailureMessage;
+      queueMicrotask(() => {
+        if (this.terminated) return;
+        this.onerror?.({ message: failure } as ErrorEvent);
+      });
+      return;
+    }
+
+    queueMicrotask(() => {
+      if (this.terminated) return;
+      try {
+        if (injectedError !== null) throw new Error(injectedError);
+
+        let lastProgress = 0;
+        const onProgress = (fraction: number) => {
+          const now = Date.now();
+          if (now - lastProgress >= PROGRESS_INTERVAL_MS) {
+            lastProgress = now;
+            this.emit({ type: 'progress', id: msg.id, fraction });
+          }
+        };
+
+        const tempo = analyzeTempo(
+          msg.mono,
+          msg.sampleRate,
+          { minBpm: msg.minBpm, maxBpm: msg.maxBpm },
+          onProgress
+        );
+        const analysis: TempoAnalysis = msg.level === 'remix' ? deriveRemixFeatures(tempo, msg) : tempo;
+
+        this.emit({ type: 'done', id: msg.id, level: msg.level, analysis });
+      } catch (err) {
+        this.emit({
+          type: 'error',
+          id: msg.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    });
+  }
+
+  private emit(data: unknown): void {
+    if (this.terminated) return;
+    this.onmessage?.({ data } as MessageEvent);
+  }
+
+  terminate(): void {
+    this.terminated = true;
+    terminateCallCount++;
+  }
+
+  addEventListener(): void {}
+  removeEventListener(): void {}
+}
+
+export function createTempoWorker(): Worker {
+  return new FakeTempoWorker() as unknown as Worker;
+}

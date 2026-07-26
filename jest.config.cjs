@@ -18,7 +18,8 @@ module.exports = {
         '\\.(css)$': 'identity-obj-proxy',
         '^@breezystack/lamejs$': '<rootDir>/node_modules/@breezystack/lamejs/dist/lamejs.js',
         '^.+/createDspWorker$': '<rootDir>/src/__mocks__/createDspWorkerMock.ts',
-        '^.+/createSpectrogramWorker$': '<rootDir>/src/__mocks__/createSpectrogramWorkerMock.ts'
+        '^.+/createSpectrogramWorker$': '<rootDir>/src/__mocks__/createSpectrogramWorkerMock.ts',
+        '^.+/createTempoWorker$': '<rootDir>/src/__mocks__/createTempoWorkerMock.ts'
       },
       setupFilesAfterEnv: ['<rootDir>/src/setupTests.ts']
     },

@@ -1,0 +1,262 @@
+// Verifies the Jest moduleNameMapper swaps createTempoWorker for the
+// synchronous mock (src/__mocks__/createTempoWorkerMock.ts), that the mock's
+// `done` payload is bit-for-bit consistent with the shared pure core
+// (analyzeTempo) — the only guard against mock/worker protocol drift
+// (createSpectrogramWorker.test.ts:44-54 pattern) — and that every worker
+// error path (in-band error, load failure, post-terminate silence) behaves
+// per the v1.4 lesson at effectRunner.ts:106-119.
+import { createTempoWorker } from './createTempoWorker';
+import { analyzeTempo, MIN_BPM, MAX_BPM } from '../dsp/tempoCore';
+import type { TempoAnalysis } from '../dsp/tempoCore';
+import {
+  _setTempoWorkerError,
+  _setTempoWorkerLoadFailure,
+  _getLastTempoMessage,
+  _getTempoWorkerTerminateCount,
+  _resetTempoWorkerTestState,
+} from '../__mocks__/createTempoWorkerMock';
+
+interface ProgressMsg {
+  type: 'progress';
+  id: number;
+  fraction: number;
+}
+interface DoneMsg {
+  type: 'done';
+  id: number;
+  level: 'tempo' | 'remix';
+  analysis: TempoAnalysis;
+}
+interface ErrorMsg {
+  type: 'error';
+  id: number;
+  message: string;
+}
+type Reply = ProgressMsg | DoneMsg | ErrorMsg;
+
+/** A unit-impulse click train at `bpm` beats/minute over `seconds`, first
+ * click at sample 0 (mirrors tempoCore.test.ts's local generator — this
+ * repo re-declares such helpers per test file rather than sharing one). */
+function clickTrain(bpm: number, seconds: number, sr = 44100): Float32Array {
+  const n = Math.round(seconds * sr);
+  const out = new Float32Array(n);
+  const interval = Math.round((60 / bpm) * sr);
+  for (let i = 0; i < n; i += interval) out[i] = 1;
+  return out;
+}
+
+/** Drives the worker for one 'analyze' request and resolves with every reply
+ * received (progress*, then exactly one of done/error), in arrival order. */
+function runAnalyze(
+  worker: Worker,
+  mono: Float32Array,
+  sampleRate: number,
+  id = 1,
+  level: 'tempo' | 'remix' = 'tempo'
+): Promise<Reply[]> {
+  const received: Reply[] = [];
+  return new Promise((resolve) => {
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data as Reply;
+      received.push(msg);
+      if (msg.type === 'done' || msg.type === 'error') resolve(received);
+    };
+    worker.postMessage(
+      {
+        type: 'analyze',
+        id,
+        level,
+        mono,
+        sampleRate,
+        minBpm: MIN_BPM,
+        maxBpm: MAX_BPM,
+        beatsPerBar: 4,
+        downbeatShiftBeats: 0,
+      },
+      [mono.buffer]
+    );
+  });
+}
+
+afterEach(() => {
+  _resetTempoWorkerTestState();
+});
+
+describe('createTempoWorker equivalence (acceptance 1)', () => {
+  it('mock done payload is deep-equal to analyzeTempo called directly, field by field', async () => {
+    const SR = 44100;
+    const mono = clickTrain(120, 8, SR);
+    const monoForDirectCall = clickTrain(120, 8, SR); // separate buffer: the worker's copy gets transferred away
+
+    const worker = createTempoWorker();
+    const replies = await runAnalyze(worker, mono, SR, 7, 'tempo');
+    const done = replies[replies.length - 1] as DoneMsg;
+
+    expect(done.type).toBe('done');
+    expect(done.id).toBe(7);
+    expect(done.level).toBe('tempo');
+
+    const expected = analyzeTempo(monoForDirectCall, SR, { minBpm: MIN_BPM, maxBpm: MAX_BPM });
+
+    expect(done.analysis.bpm).toBe(expected.bpm);
+    expect(done.analysis.confidence).toBe(expected.confidence);
+    expect(done.analysis.salience).toBe(expected.salience);
+    expect(done.analysis.peakRatio).toBe(expected.peakRatio);
+    expect(done.analysis.ibiCv).toBe(expected.ibiCv);
+    expect(done.analysis.truncated).toBe(expected.truncated);
+    expect(done.analysis.analyzedEndSample).toBe(expected.analyzedEndSample);
+    expect(Array.from(done.analysis.beatSamples)).toEqual(Array.from(expected.beatSamples));
+
+    worker.terminate();
+  });
+});
+
+describe('createTempoWorker level:"remix" stub (protocol must accommodate both levels)', () => {
+  it('replies {type:"error", message:"not implemented"} until T9 lands, without crashing the worker', async () => {
+    const worker = createTempoWorker();
+    const mono = clickTrain(120, 8, 44100);
+    const replies = await runAnalyze(worker, mono, 44100, 8, 'remix');
+
+    // analyzeTempo (level 'tempo' work) still runs and may emit progress
+    // before deriveRemixFeatures throws — only the terminal reply is
+    // constrained: no 'done' ever arrives, and the run ends in exactly one
+    // 'error'.
+    expect(replies.filter((r) => r.type === 'done').length).toBe(0);
+    expect(replies.filter((r) => r.type === 'error').length).toBe(1);
+    expect(replies[replies.length - 1]).toEqual({ type: 'error', id: 8, message: 'not implemented' });
+
+    worker.terminate();
+  });
+});
+
+describe('createTempoWorker progress throttle (acceptance 2)', () => {
+  it('progress messages are monotonic non-decreasing, in [0,1], and fewer than 40 for an 8s fixture', async () => {
+    const SR = 44100;
+    const mono = clickTrain(120, 8, SR);
+    const worker = createTempoWorker();
+    const replies = await runAnalyze(worker, mono, SR, 1, 'tempo');
+    const progress = replies.filter((r): r is ProgressMsg => r.type === 'progress');
+
+    expect(progress.length).toBeGreaterThan(0);
+    expect(progress.length).toBeLessThan(40);
+    for (const p of progress) {
+      expect(p.fraction).toBeGreaterThanOrEqual(0);
+      expect(p.fraction).toBeLessThanOrEqual(1);
+    }
+    for (let i = 1; i < progress.length; i++) {
+      expect(progress[i].fraction).toBeGreaterThanOrEqual(progress[i - 1].fraction);
+    }
+
+    worker.terminate();
+  });
+});
+
+describe('createTempoWorker error handling (acceptance 3, 4, 5)', () => {
+  it('_setTempoWorkerError -> exactly one {type:"error"} reply and no "done"', async () => {
+    _setTempoWorkerError('boom');
+    const worker = createTempoWorker();
+    const mono = clickTrain(120, 8, 44100);
+    const replies = await runAnalyze(worker, mono, 44100, 3, 'tempo');
+
+    expect(replies.length).toBe(1);
+    expect(replies[0]).toEqual({ type: 'error', id: 3, message: 'boom' });
+
+    worker.terminate();
+  });
+
+  it('_setTempoWorkerLoadFailure -> onerror fires and onmessage is never called', async () => {
+    _setTempoWorkerLoadFailure('nope');
+    const worker = createTempoWorker();
+    const onmessage = jest.fn();
+    worker.onmessage = onmessage;
+
+    const errored = await new Promise<ErrorEvent>((resolve) => {
+      worker.onerror = (ev) => resolve(ev as ErrorEvent);
+      worker.postMessage(
+        {
+          type: 'analyze',
+          id: 4,
+          level: 'tempo',
+          mono: clickTrain(120, 8, 44100),
+          sampleRate: 44100,
+          minBpm: MIN_BPM,
+          maxBpm: MAX_BPM,
+          beatsPerBar: 4,
+          downbeatShiftBeats: 0,
+        },
+        []
+      );
+    });
+
+    expect(errored.message).toBe('nope');
+    expect(onmessage).not.toHaveBeenCalled();
+
+    worker.terminate();
+  });
+
+  it('after terminate(), a subsequent postMessage produces no callbacks at all', async () => {
+    const worker = createTempoWorker();
+    const onmessage = jest.fn();
+    const onerror = jest.fn();
+    worker.onmessage = onmessage;
+    worker.onerror = onerror;
+
+    worker.terminate();
+    worker.postMessage(
+      {
+        type: 'analyze',
+        id: 5,
+        level: 'tempo',
+        mono: clickTrain(120, 8, 44100),
+        sampleRate: 44100,
+        minBpm: MIN_BPM,
+        maxBpm: MAX_BPM,
+        beatsPerBar: 4,
+        downbeatShiftBeats: 0,
+      },
+      []
+    );
+
+    // Flush any pending microtasks the (terminated) worker might otherwise
+    // have scheduled.
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(onmessage).not.toHaveBeenCalled();
+    expect(onerror).not.toHaveBeenCalled();
+  });
+});
+
+describe('createTempoWorker jest wiring (acceptance 7)', () => {
+  it('constructs without throwing under jsdom — only possible via the moduleNameMapper redirect', () => {
+    // If jest.config.cjs's '^.+/createTempoWorker$' mapper entry were missing,
+    // this import would resolve to the REAL createTempoWorker.ts, whose body
+    // calls `new Worker(new URL(...), ...)` — jsdom has no Worker
+    // implementation, so this would throw (or fail even earlier, since
+    // ts-jest cannot compile `import.meta.url` under this project's
+    // `module: 'commonjs'` transform option). The failure would NOT look
+    // like a jest-config problem; it would look like an unrelated Worker/
+    // compile error surfacing from deep inside whatever test happened to
+    // import createTempoWorker first.
+    let worker: Worker | undefined;
+    expect(() => {
+      worker = createTempoWorker();
+    }).not.toThrow();
+    expect(typeof worker!.postMessage).toBe('function');
+    expect(typeof worker!.terminate).toBe('function');
+    worker!.terminate();
+  });
+
+  it('captures the last posted message and counts terminate() calls (mock test-hook sanity)', async () => {
+    const worker = createTempoWorker();
+    const mono = clickTrain(120, 8, 44100);
+    await runAnalyze(worker, mono, 44100, 9, 'tempo');
+    const last = _getLastTempoMessage();
+    expect(last?.id).toBe(9);
+    expect(last?.level).toBe('tempo');
+
+    expect(_getTempoWorkerTerminateCount()).toBe(0);
+    worker.terminate();
+    expect(_getTempoWorkerTerminateCount()).toBe(1);
+  });
+});
