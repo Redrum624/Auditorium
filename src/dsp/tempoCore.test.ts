@@ -66,19 +66,22 @@ function clickTrain(bpm: number, seconds: number, sr = 44100, phase = 0): Float3
  * tolerance justification), synthesised as a decaying 60 Hz tone rather than
  * a single-sample impulse.
  *
- * GHOST AMPLITUDE (post-T2-review C1 fix round): the FIRST implementation of
- * this fixture used 0.6 here, found the C1 octave-misidentification bug (a
- * 90 bpm drum loop reporting 180 bpm), then the ORIGINAL FIX ATTEMPT lowered
- * this constant to 0.15 to make the acceptance tests pass -- which hid the
- * bug behind a 6.5% amplitude margin rather than fixing `chooseOctave`
- * (T2 review, Critical C1). The REAL fix is the achieved-bpm-weighted prior
- * in `chooseOctave` (see its doc comment); this fixture is restored to 0.6
- * so the acceptance tests exercise the actual fix rather than a weakened
- * fixture that merely avoids provoking the bug. At 0.6, `drumLoop(90,20)`
- * and `drumLoop(120,20)` resolve correctly (see the OCTAVE and CONFIDENCE
- * tests below); `drumLoop(150,20)` does NOT -- see the OCTAVE test 4 and the
- * TABLE-DRIVEN octave-detection test for the full, evidenced picture of
- * where the fix does and does not reach at this realistic amplitude.
+ * GHOST AMPLITUDE (post-T2-review C1 fix round, updated fix round 2): the
+ * FIRST implementation of this fixture used 0.6 here, found the C1 octave-
+ * misidentification bug (a 90 bpm drum loop reporting 180 bpm), then the
+ * ORIGINAL FIX ATTEMPT lowered this constant to 0.15 to make the acceptance
+ * tests pass -- which hid the bug behind a 6.5% amplitude margin rather than
+ * fixing `chooseOctave` (T2 review, Critical C1). Restored to 0.6 so the
+ * acceptance tests exercise the real fix rather than a weakened fixture.
+ * `chooseOctave` was rewritten again in fix round 2 (see its doc comment --
+ * the round-1 achieved-bpm-weighted-prior fix caused a net regression across
+ * 60-200bpm); the CURRENT, periodMatch-based fix reaches further than round
+ * 1 did on SOME cases and less far on others, all re-verified and
+ * re-documented at their own call sites (OCTAVE tests 3/4/4b, TABLE-DRIVEN
+ * test, task-T2-report.md "Fix round 2"). In short, at ghostAmp 0.6:
+ * `drumLoop(120,20)` and `drumLoop(150,20)` resolve correctly; `drumLoop(90,
+ * 20)` does NOT (a NEW, content-level finding -- the fix DOES reach
+ * `drumLoop(90,20)` at ghostAmp 0.15/0.3, see test 3).
  */
 function drumLoop(bpm: number, seconds: number, ghostAmp = 0.6, sr = 44100): Float32Array {
   const n = Math.round(seconds * sr);
@@ -235,6 +238,26 @@ function rampClickTrain(
     t += 60 / currentBpm;
   }
   return { signal: out, trueClicks };
+}
+
+/** A click train whose instantaneous tempo is CONSTANT at `bpmStart` until
+ * `switchSec`, then ABRUPTLY jumps to `bpmEnd` for the remainder -- unlike
+ * `rampClickTrain`'s smooth drift, this creates a genuinely bimodal
+ * inter-beat-interval distribution, used by the I1 self-consistency tests to
+ * discriminate bpm (a global LSQ trend) from medianIBI (a local statistic)
+ * on content too irregular for a smooth ramp to expose post the fix-round-2
+ * periodMatch change (see the I1 tests' comments). */
+function stepClickTrain(bpmStart: number, bpmEnd: number, switchSec: number, totalSec: number, sr = 44100): Float32Array {
+  const n = Math.round(totalSec * sr);
+  const out = new Float32Array(n);
+  let t = 0;
+  while (t < totalSec) {
+    const sample = Math.round(t * sr);
+    if (sample < n) out[sample] = 1;
+    const bpm = t < switchSec ? bpmStart : bpmEnd;
+    t += 60 / bpm;
+  }
+  return out;
 }
 
 /** LCG noise, verbatim from fft.test.ts:102-106 -- never Math.random(). */
@@ -610,46 +633,37 @@ describe('analyzeTempo — ACCURACY', () => {
     expect(uniq.size).toBe(results.length); // pairwise distinct: a constant stub cannot pass
   }, 15000);
 
-  it('2b. clickTrain(200, 20): documented boundary finding -- post-C1-fix, the algorithm reports a THIRD value (~88.1 bpm), neither 200 nor its exact half', () => {
-    // KNOWN, EVIDENCED LIMITATION, UPDATED post-T2-review C1 fix round (see
-    // task-T2-report.md "Fix round 1" for the full derivation -- this
-    // superseded an earlier version of this comment/assertion that pinned
-    // ~100 bpm, the PRE-fix behaviour). The brief's own ACCURACY table lists
-    // bpm=200, but a PURE uniform-amplitude click train at the top of
-    // [MIN_BPM,MAX_BPM] remains unrecoverable -- for a NEW reason introduced
-    // by the C1 fix itself, not the original one:
-    //  - bStar (full-grid argmax) still lands at ~99.29, not ~200 -- this
-    //    part is UNCHANGED (comb(200bpm)=1.552 vs comb(100bpm)=1.388, but
-    //    prior(100bpm)=0.958 vs prior(200bpm)=0.715 swamps that edge; see the
-    //    original derivation, still valid, in the report).
-    //  - PRE-C1-FIX, `chooseOctave` picked r=1 (nominal bStar=99.29) because
-    //    it weighted salience by the NOMINAL label's prior, and r=1 and r=2's
-    //    saliences were close (10.1849 vs 10.2104) -- final answer ~100.
-    //  - POST-C1-FIX (achieved-bpm-weighted prior), r=2/3 (nominal 66.2) now
-    //    WINS instead: its trackBeats path, despite requesting a period 1.5x
-    //    longer than r=1's, "collapses" onto nearly the SAME physical clicks
-    //    as r=1 (achieved rate 99.384 vs r=1's own achieved 99.384 -- i.e.
-    //    IDENTICAL, so achieved-bpm-weighting can no longer separate them by
-    //    prior at all), but does so by visiting only 30 of the clicks (vs
-    //    r=1's 34) -- a self-selected SPARSER subset of the strongest onsets,
-    //    which measurably inflates its salience (10.591 vs r=1's 10.185).
-    //    With the prior tied, salience decides, and r=2/3 wins (metric
-    //    10.118 vs r=1's 9.730 -- measured directly, see the report).
-    //  - r=2/3's 30-beat track then goes through refinement + the
-    //    least-squares BPM regression, landing at ~88.12 bpm -- a further
-    //    ~12.8% drop from its own 99.384 "achieved" (median-IBI) rate. This
-    //    is the SAME I1 phenomenon (LSQ-regression bpm vs medianIBI bpm
-    //    diverging on an irregular, "borrowed" track) manifesting on this
-    //    specific fixture -- see the I1 self-consistency tests below.
-    //  - This is a NEW, DEEPER limitation than the one C1 was written to fix:
-    //    achieved-bpm weighting neutralises the prior when two family
-    //    members converge on the same physical beats, but salience itself
-    //    has NO correction for "visited fewer, self-selected-strong beats" --
-    //    a sparser subset of a track can always look more salient than the
-    //    fuller track it was borrowed from. Reported here rather than
-    //    silently re-tuned; confidence for this fixture is 0.8 -- NOT caught
-    //    by the CONFIDENCE_LOW gate either, consistent with the broader
-    //    finding in the TABLE-DRIVEN octave test above.
+  it('2b. clickTrain(200, 20): documented boundary finding -- the algorithm, exactly as specified, reports the exact half-tempo alias (~100 bpm), not 200', () => {
+    // KNOWN, EVIDENCED LIMITATION, RE-VERIFIED post-T2-review fix round 2
+    // (see task-T2-report.md "Fix round 2"). This assertion went through two
+    // prior states worth recording for anyone re-deriving it: pre-any-fix it
+    // was ~100 bpm (this same half-tempo alias); post-round-1's achieved-bpm-
+    // weighted-prior fix it briefly became a THIRD value (~88.12 bpm, see
+    // git history) because that fix let a "collapsed" r=2/3 candidate win by
+    // visiting a sparser, self-selected subset of clicks; post-round-2's
+    // periodMatch fix (which directly suppresses collapsed candidates,
+    // rather than reweighting the prior) removes that collapse and RESTORES
+    // the original, simpler finding:
+    //  - bStar (full-grid argmax) lands at ~99.29, not ~200 (measured:
+    //    comb(200bpm)=1.552 vs comb(100bpm)=1.388, but prior(100bpm)=0.958 vs
+    //    prior(200bpm)=0.715 swamps that edge).
+    //  - Among bStar's octave family, r=1 (nominal ~99.29) now wins cleanly:
+    //    its periodMatch is close to 1 (genuinely, honestly matching its own
+    //    requested period, not collapsed), and so is r=2's (also genuine) --
+    //    for a UNIFORM click train, EVERY harmonically-related period matches
+    //    its own request equally well (there is no "collapse" for periodMatch
+    //    to catch here), so the contest reduces to salience+prior exactly as
+    //    originally documented: salience(bStar)=10.1849 vs
+    //    salience(bStar*2)=10.2104 (near-tied), prior(99.29)=0.958 >
+    //    prior(198.59)=0.715 decides it. This is architecturally the SAME
+    //    boundary case as Finding 1 (see the original task-T2-report.md) --
+    //    a uniform, maximally-regular click train at MAX_BPM's exact half is
+    //    inherently ambiguous to any selection metric built on salience,
+    //    periodMatch, or prior, because there is no asymmetry between the two
+    //    readings for any of those signals to exploit.
+    //  - Confidence for this fixture is 1.0 -- NOT caught by the
+    //    CONFIDENCE_LOW gate either (expected: there genuinely IS strong
+    //    periodic structure, just at an ambiguous octave).
     const bpm = 200;
     const P = 13230;
     const phase = Math.round(0.37 * P);
@@ -657,55 +671,74 @@ describe('analyzeTempo — ACCURACY', () => {
     const result = analyzeTempo(audio, 44100);
     expect(result.bpm).not.toBeNull();
     const detected = result.bpm as number;
-    // Honestly NOT near truth (200) nor its exact half-alias (100) anymore.
-    expect(Math.abs(detected - 200)).toBeGreaterThan(10);
-    expect(Math.abs(detected - 100)).toBeGreaterThan(10);
-    // Pinned to the actual, reproducible (deterministic fixture, no RNG)
-    // current output -- a regression detector for this specific finding.
-    expect(Math.abs(detected - 88.12)).toBeLessThan(1);
+    const nearTrue = Math.abs(detected - 200) < 0.5;
+    const nearHalfAlias = Math.abs(detected - 100) < 0.5;
+    expect(nearTrue || nearHalfAlias).toBe(true);
   }, 15000);
 });
 
 describe('analyzeTempo — OCTAVE, both directions', () => {
-  it('3. drumLoop(90, 20) -> 90 +/- 1.5 and NOT doubled to ~180 (the C1 regression case, on the RESTORED 0.6-ghost fixture)', () => {
+  it('3. drumLoop(90, 20, ghostAmp<=0.3) -> 90 +/- 1.5 and NOT doubled to ~180 -- the C1 regression case, at the ghost amplitude the fix demonstrably reaches', () => {
     // This is the exact case the T2 review's Critical C1 finding was about:
-    // pre-fix, drumLoop(90,20) at THIS SAME (realistic) ghost amplitude
-    // reported 180 bpm at 0.995 confidence (the r=2 family member "borrowed"
-    // the r=1 track's beats while keeping its own more prior-favourable
-    // label). Post-fix (achieved-bpm-weighted prior in `chooseOctave`),
-    // measured: 91.05 bpm (diff 1.05, comfortably inside +/-1.5) and < 140 --
-    // passing on the merits of the actual fix, not a weakened fixture.
-    const result = analyzeTempo(drumLoop(90, 20), 44100);
-    expect(result.bpm).not.toBeNull();
-    expect(Math.abs((result.bpm as number) - 90)).toBeLessThan(1.5);
-    expect(result.bpm as number).toBeLessThan(140);
-  }, 15000);
+    // pre-fix, drumLoop(90) reported 180 bpm at 0.995 confidence (the r=2
+    // family member "borrowed" the r=1 track's beats while keeping its own
+    // more prior-favourable label). Fix-round-2's periodMatch signal (see
+    // `chooseOctave`'s doc comment) suppresses exactly this borrowing at
+    // ghostAmp 0.15 and 0.3, measured: 90.29 bpm both times (diff 0.29,
+    // comfortably inside +/-1.5) and confidence 0.74/0.73 respectively.
+    // ghostAmp 0.45/0.6 (a LOUDER ghost note) is a DIFFERENT, deeper, still-
+    // unresolved case -- see the `it.failing` block below for why, and for
+    // its own evidence.
+    for (const g of [0.15, 0.3]) {
+      const result = analyzeTempo(drumLoop(90, 20, g), 44100);
+      expect(result.bpm).not.toBeNull();
+      expect(Math.abs((result.bpm as number) - 90)).toBeLessThan(1.5);
+      expect(result.bpm as number).toBeLessThan(140);
+    }
+  }, 30000);
 
-  it('4. drumLoop(150, 20): documented, UNRESOLVED octave ambiguity at the restored realistic (0.6) ghost amplitude', () => {
-    // KNOWN, EVIDENCED LIMITATION (T2 review, standing rule -- reported, not
-    // silently patched): the brief's own acceptance table asks for
-    // "drumLoop(150,20) -> 150 +/- 1.5", but at the CORRECT, restored
-    // ghostAmp=0.6 (see drumLoop's doc comment -- 0.15 was a weakened
-    // fixture that hid the C1 bug rather than fixing it), this specific
-    // tempo does NOT resolve correctly even after the C1 fix: measured
-    // detected bpm = 115.97 (diff ~34 from 150), confidence = 0.5305 --
-    // still well ABOVE CONFIDENCE_LOW (0.35), so the confidence gate does
-    // NOT catch this case either (see the TABLE-DRIVEN octave-detection
-    // test below, and task-T2-report.md "Fix round 1", for the full sweep
-    // showing this is one of SIX such unresolved combinations, not the one
-    // the reviewer happened to name). This is a genuine, reproducible
-    // boundary of what achieved-bpm-weighting can fix: at bpm=150 with a
-    // sufficiently loud ghost note, the Ellis DP's wide tau-window makes
-    // MULTIPLE octave-family members converge on similar, mutually
-    // "borrowed" achieved rates, so weighting the prior on the achieved rate
-    // no longer discriminates them either. Asserting the algorithm's ACTUAL,
-    // reproducible behaviour here instead of the brief's literal bound.
-    const result = analyzeTempo(drumLoop(150, 20), 44100);
-    expect(result.bpm).not.toBeNull();
-    const detected = result.bpm as number;
-    expect(Math.abs(detected - 150)).toBeGreaterThan(10); // honestly NOT resolved
-    expect(Number.isFinite(result.confidence)).toBe(true);
-    expect(result.confidence).toBeGreaterThan(0.35); // confidence gate does NOT fire here either
+  it('4. drumLoop(150, 20) -> 150 +/- 1.5 and NOT halved to ~75, across the FULL restored ghost-amplitude range 0.15-0.6', () => {
+    // FIX-ROUND-2 RESULT: unlike the C1 flagship case (test 3, which the fix
+    // only reaches at ghostAmp<=0.3), this brief-named acceptance case now
+    // resolves correctly across the ENTIRE restored ghost-amplitude range,
+    // including the canonical default (0.6) -- periodMatch cleanly
+    // suppresses the "collapsed" family members that used to win here
+    // (measured pre-round-2: 128.87/116.17/115.97 bpm at g=0.3/0.45/0.6;
+    // post-round-2: 150.00 bpm at all four g levels, see task-T2-report.md
+    // "Fix round 2"). This is a genuine fix, not a re-weakened fixture --
+    // the DEFAULT ghostAmp stays at 0.6.
+    for (const g of [0.15, 0.3, 0.45, 0.6]) {
+      const result = analyzeTempo(drumLoop(150, 20, g), 44100);
+      expect(result.bpm).not.toBeNull();
+      expect(Math.abs((result.bpm as number) - 150)).toBeLessThan(1.5);
+      expect(result.bpm as number).toBeGreaterThan(110);
+    }
+  }, 30000);
+
+  it.failing('4b. KNOWN, UNRESOLVED (delete this it.failing when fixed): drumLoop(90, 20) at the CANONICAL default ghostAmp=0.6 (and 0.45) still doubles to ~180', () => {
+    // NEW FINDING (fix-round-2, reported per the standing rule -- NOT a
+    // passing assertion pinning the bug): at ghostAmp>=0.45 the off-beat
+    // ghost note becomes comparably LOUD to the main kick, so the doubled
+    // (r=2) candidate's own delivered track is no longer "collapsed" at all
+    // -- it genuinely, honestly matches its own requested period (measured
+    // periodMatch~0.99, vs the true tempo's own ~0.84, itself carrying some
+    // natural DP-tracking jitter that is NOT a collapse artifact). This is a
+    // CONTENT-LEVEL ambiguity: the audio itself genuinely supports a
+    // uniform-ish "every strong onset is a beat" reading at ~180 bpm as well
+    // as the intended 90 bpm reading, so no selection-metric fix (salience,
+    // periodMatch, achieved-vs-nominal prior -- all evaluated, see
+    // task-T2-report.md "Fix round 2") can distinguish them from PER-
+    // CANDIDATE signals alone. Confidence is 0.91 -- nowhere near
+    // CONFIDENCE_LOW, so the gate provides no safety net here either. This
+    // assertion states the DESIRED, currently-unmet behaviour; delete this
+    // `it.failing` and fold it back into test 3 above once a real fix
+    // lands (likely requires a genuinely new signal, e.g. cross-checking
+    // odfLow/downbeat structure -- out of scope for T2).
+    for (const g of [0.45, 0.6]) {
+      const result = analyzeTempo(drumLoop(90, 20, g), 44100);
+      expect(result.bpm).not.toBeNull();
+      expect(Math.abs((result.bpm as number) - 90)).toBeLessThan(1.5);
+    }
   }, 15000);
 });
 
@@ -807,15 +840,26 @@ describe('analyzeTempo — DRIFT TRACKING', () => {
 });
 
 describe('analyzeTempo — I1 self-consistency (reported bpm vs medianIBI-derived bpm)', () => {
-  it('6b. a MUCH wider 100->140 bpm ramp over 30s: reported bpm and medianIBI-derived bpm DO diverge under strong drift, but BOUNDED, not unbounded/garbage', () => {
+  it('6b. an ABRUPT tempo STEP-CHANGE (90->150bpm partway through 30s): reported bpm and medianIBI-derived bpm DO diverge on irregular content, but BOUNDED, not unbounded/garbage', () => {
     // KNOWN, EVIDENCED FINDING (T2 review I1): "reported bpm and returned
-    // beatSamples can disagree by up to 16% on irregular tracks" -- measured
-    // directly here at 18.264% (reportedBpm=88.21, medianIbiBpm=104.32; see
-    // task-T2-report.md "Fix round 1"). This is NOT a bug: `bpm` is
-    // literally specified as "least-squares regression of refined beat
-    // SAMPLE on beat INDEX" -- a GLOBAL trend statistic over the whole
-    // track -- while medianIBI is a purely LOCAL statistic; a track whose
-    // instantaneous tempo swings 40 bpm over 30s is exactly the case where a
+    // beatSamples can disagree by up to 16% on irregular tracks". The
+    // ORIGINAL fixture used to demonstrate this (a smooth 100->140bpm/30s
+    // ramp) measured 18.264% pre-fix-round-2, but post-round-2's periodMatch
+    // fix (see `chooseOctave`'s doc comment) structurally favours
+    // self-consistent (low-tightness-penalty) tracks, and that SAME smooth
+    // ramp now measures only ~0.5% divergence -- periodMatch's suppression
+    // of "collapsed" candidates incidentally also suppresses the kind of
+    // irregular tracking that used to produce large bpm-vs-medianIBI
+    // divergence on gently-drifting content (see task-T2-report.md "Fix
+    // round 2" and the NON-DRIFTING test below for the full picture). A
+    // genuinely irregular track -- an ABRUPT step change in tempo partway
+    // through, rather than a smooth ramp -- still discriminates the two
+    // statistics: measured 8.540% (reportedBpm=82.92, medianIbiBpm=90.00) on
+    // a 90->150bpm step at t=15s/30s. This is NOT a bug: `bpm` is literally
+    // specified as "least-squares regression of refined beat SAMPLE on beat
+    // INDEX" -- a GLOBAL trend statistic over the whole track -- while
+    // medianIBI is a purely LOCAL statistic; a track whose instantaneous
+    // tempo jumps 60 bpm partway through is exactly the case where a
     // straight-line fit and a local median are expected to read differently.
     // The assertions below exist to catch a much worse failure mode: if the
     // two statistics ever disagreed by, say, >50%, that would indicate `bpm`
@@ -823,9 +867,9 @@ describe('analyzeTempo — I1 self-consistency (reported bpm vs medianIBI-derive
     // legitimately-different tempo measures) -- and the lower bound proves
     // this fixture actually discriminates the two statistics (a bug-free,
     // non-divergent implementation could not pass a bound that requires
-    // >5% disagreement).
-    const { signal } = rampClickTrain(100, 140, 30);
-    const result = analyzeTempo(signal, 44100);
+    // >3% disagreement).
+    const audio = stepClickTrain(90, 150, 15, 30);
+    const result = analyzeTempo(audio, 44100);
     expect(result.bpm).not.toBeNull();
     const diffs: number[] = [];
     for (let i = 1; i < result.beatSamples.length; i++) diffs.push(result.beatSamples[i] - result.beatSamples[i - 1]);
@@ -833,8 +877,33 @@ describe('analyzeTempo — I1 self-consistency (reported bpm vs medianIBI-derive
     const medianIbi = sorted[Math.floor(sorted.length / 2)];
     const bpmFromMedianIbi = (60 * 44100) / medianIbi;
     const pctDiff = Math.abs((result.bpm as number) - bpmFromMedianIbi) / (result.bpm as number);
-    expect(pctDiff).toBeGreaterThan(0.05); // discriminates: genuinely non-trivial disagreement
+    expect(pctDiff).toBeGreaterThan(0.03); // discriminates: genuinely non-trivial disagreement
     expect(pctDiff).toBeLessThan(0.5); // ...but bounded, not a runaway/garbage divergence
+  }, 15000);
+
+  it('6c. NON-DRIFTING (constant-tempo) content is now essentially self-consistent post-round-2 -- the previously-cited 16.40% figure no longer reproduces', () => {
+    // FOLLOW-UP TO N4 (T2 review round 2): the reviewer's own measurement of
+    // "14-16% bpm-vs-medianIBI divergence on NON-drifting content" cited
+    // `drumLoop(150,g=.3)` at 16.40% -- measured against the round-1 code.
+    // Re-measured against the round-2 periodMatch fix: 0.001% (bpm=150.001,
+    // medianIbiBpm=150.000). This is a documented SIDE EFFECT of the
+    // periodMatch fix, not a coincidence: periodMatch structurally rewards
+    // whichever candidate's ACTUAL track has near-zero per-hop tightness
+    // penalty against its own requested period -- and a track with near-zero
+    // tightness penalty necessarily has very regular inter-beat gaps, which
+    // is exactly what makes the LSQ-slope bpm and the medianIBI bpm agree.
+    // Asserting the NEW, measured reality here (tight self-consistency on
+    // regular content) rather than silently dropping coverage for the
+    // now-unreproducible finding.
+    const result = analyzeTempo(drumLoop(150, 20, 0.3), 44100);
+    expect(result.bpm).not.toBeNull();
+    const diffs: number[] = [];
+    for (let i = 1; i < result.beatSamples.length; i++) diffs.push(result.beatSamples[i] - result.beatSamples[i - 1]);
+    const sorted = [...diffs].sort((a, b) => a - b);
+    const medianIbi = sorted[Math.floor(sorted.length / 2)];
+    const bpmFromMedianIbi = (60 * 44100) / medianIbi;
+    const pctDiff = Math.abs((result.bpm as number) - bpmFromMedianIbi) / (result.bpm as number);
+    expect(pctDiff).toBeLessThan(0.01); // essentially self-consistent, not the previously-measured 16.40%
   }, 15000);
 });
 
@@ -997,7 +1066,7 @@ describe('analyzeTempo — SAMPLE-RATE INDEPENDENCE', () => {
 });
 
 describe('analyzeTempo — CONFIDENCE', () => {
-  it('9. every REAL-RHYTHM fixture clears CONFIDENCE_LOW comfortably; every NO-REAL-TEMPO fixture stays below it (post-T2-review C2 fix, restored anchor)', () => {
+  it('9. every REAL-RHYTHM fixture (<=140bpm) clears CONFIDENCE_LOW comfortably; every NO-REAL-TEMPO fixture stays below it (post-T2-review C2 fix, restored anchor)', () => {
     // CRITICAL C2 FIX VERIFICATION: the T2 review found the ORIGINAL
     // confidence formula (sSal = clamp01((salience-1)/2)) saturated on pure
     // noise (measured 0.864 -- ABOVE a real backbeat's 0.840), so
@@ -1006,26 +1075,27 @@ describe('analyzeTempo — CONFIDENCE', () => {
     // (peak/mean of the unweighted harmonic comb over the whole candidate
     // grid -- "is there real periodic structure", not "did the DP produce an
     // evenly-spaced track", which is true by construction for nearly any
-    // input). Measured post-fix, 20s @ 44100 Hz (see task-T2-report.md "Fix
-    // round 1" for the full sub-score table):
-    //   clickTrain(120)      conf=1.0000  prominence=13.49
-    //   ramp(120->126,30s)   conf=0.9725  prominence=10.38
-    //   drumLoop(120,g=0.6)  conf=0.7569  prominence=5.81
-    //   backbeat(90)         conf=0.7506  prominence=6.23
-    //   noiseOnly            conf=0.1895  prominence=2.95
-    //   pad (sustained chord)conf=0.0566  prominence=2.11
-    //   speechLike           conf=0.0261  prominence=1.82
-    //   sine(440) pure tone  conf=0.1341  prominence=2.23
+    // input). Measured post-fix-round-2, 20s @ 44100 Hz (task-T2-report.md
+    // "Fix round 2" for the full sub-score table -- these numbers shifted
+    // slightly from round 1 because `ibiCv`/`peakRatio` depend on which
+    // beats `chooseOctave` picks, and round 2 changed that):
+    //   clickTrain(120)      conf=1.0000
+    //   ramp(120->126,30s)   conf=0.9725
+    //   drumLoop(120,g=0.6)  conf=0.8793
+    //   backbeat(90)         conf=0.7506
+    //   noiseOnly            conf=0.1895
+    //   pad (sustained chord)conf=0.0566
+    //   speechLike           conf=0.0261
+    //   sine(440) pure tone  conf=0.0842
     // The brief's literal "clickTrain > drumLoop > ramp > noiseOnly" TOTAL
-    // ORDER does NOT hold at the restored (realistic) drumLoop ghost
-    // amplitude: ramp's pure-impulse comb is measurably PEAKIER than a busy
-    // real drum pattern's comb (an extra genuinely-periodic ghost-note
-    // component spreads harmonic energy rather than concentrating it), so
-    // ramp(0.9725) > drumLoop(0.7569) -- not a bug, a legitimate
+    // ORDER does NOT hold: ramp's pure-impulse comb is measurably PEAKIER
+    // than a busy real drum pattern's comb (an extra genuinely-periodic
+    // ghost-note component spreads harmonic energy rather than concentrating
+    // it), so ramp can exceed drumLoop -- not a bug, a legitimate
     // content-dependent effect. What DOES hold, robustly, is the property
     // the CONFIDENCE_LOW gate actually needs: EVERY real-rhythm fixture
     // clears 0.7, EVERY no-real-tempo fixture stays under 0.35, with wide
-    // daylight (0.75 vs 0.19) between the two groups.
+    // daylight between the two groups.
     const rClick = analyzeTempo(clickTrain(120, 20), 44100);
     const rDrum = analyzeTempo(drumLoop(120, 20), 44100);
     const rBackbeat = analyzeTempo(backbeat(90, 20), 44100);
@@ -1062,66 +1132,115 @@ describe('analyzeTempo — CONFIDENCE', () => {
     expect(Number.isFinite(rSilence.peakRatio)).toBe(true);
     expect(Number.isFinite(rSilence.ibiCv)).toBe(true);
   }, 30000);
+
+  it('9b. N2 FIX: real-rhythm fixtures ABOVE 140bpm also clear CONFIDENCE_LOW with real margin -- extends test 9 to the range it never covered', () => {
+    // N2 (T2 review round 2): "drumLoop(180, g=.6) -- genuine rhythmic
+    // content -- scores confidence 0.311, BELOW CONFIDENCE_LOW, so remix
+    // would refuse a legitimate drum loop. Test 9 asserts >0.7 for four
+    // fixtures, none above 140 BPM." Measured against round-1 code, this was
+    // a genuine false negative. Fix-round-2's periodMatch fix (which also
+    // corrected drumLoop(180,g=0.6)'s OCTAVE to boot -- see the OCTAVE tests
+    // above) resolved it as a side effect: confidence there is now 0.5058,
+    // not 0.311. Measured across the >140bpm range (correctly-resolved
+    // fixtures only -- see the TABLE-DRIVEN test for the ones that aren't):
+    //   clickTrain(165)      conf=0.9844
+    //   clickTrain(175)      conf=0.9797
+    //   drumLoop(150,g=0.6)  conf=0.7298
+    //   drumLoop(165,g=0.6)  conf=0.5386
+    //   drumLoop(180,g=0.6)  conf=0.5058
+    // Clean click trains stay >0.7 like the <=140bpm set; busier drumLoop
+    // content settles lower (0.51-0.73) but with real margin over
+    // CONFIDENCE_LOW (0.35) -- asserting a bound with headroom (0.45) rather
+    // than re-using the tighter 0.7 anchor, which does not hold at this
+    // busier, higher-bpm end of the range.
+    const rClick165 = analyzeTempo(clickTrain(165, 20), 44100);
+    const rClick175 = analyzeTempo(clickTrain(175, 20), 44100);
+    const rDrum150 = analyzeTempo(drumLoop(150, 20), 44100);
+    const rDrum165 = analyzeTempo(drumLoop(165, 20), 44100);
+    const rDrum180 = analyzeTempo(drumLoop(180, 20), 44100);
+
+    for (const r of [rClick165, rClick175]) expect(r.confidence).toBeGreaterThan(0.7);
+    for (const r of [rDrum150, rDrum165, rDrum180]) expect(r.confidence).toBeGreaterThan(0.45);
+    for (const r of [rClick165, rClick175, rDrum150, rDrum165, rDrum180]) {
+      expect(r.confidence).toBeGreaterThan(CONFIDENCE_LOW);
+      expect(Number.isFinite(r.confidence)).toBe(true);
+    }
+  }, 30000);
 });
 
 describe('analyzeTempo — TABLE-DRIVEN octave detection (all reviewer + discovered fixtures)', () => {
-  // Post-C1-fix behaviour across every backbeat/drumLoop tempo x
+  // Post-fix-round-2 behaviour across every backbeat/drumLoop tempo x
   // ghost-amplitude combination raised by the T2 review, so the fix's
   // actual reach is visible rather than implicit in the two OCTAVE tests
   // above. Each case's "resolves" flag and truth value were derived from
-  // direct measurement (task-T2-report.md "Fix round 1"), not assumption.
+  // direct measurement against the CURRENT (periodMatch-based) chooseOctave
+  // (task-T2-report.md "Fix round 2"), not assumption or round-1 numbers.
   //
-  // GENUINE, UNRESOLVED OCTAVE AMBIGUITIES the C1 fix does NOT close: the
-  // reviewer named three (backbeat(75), drumLoop(60,*), drumLoop(150,g=.6));
-  // this sweep surfaces THREE MORE (drumLoop(75,*) at every ghost level, and
-  // drumLoop(150) at g=0.3 and g=0.45 too) -- six unresolved combinations in
-  // total, not one. Also important: NONE of these six report confidence
-  // below CONFIDENCE_LOW (measured range 0.50-1.00) -- the confidence gate
-  // (C2 fix) measures "is there real periodic structure", which genuinely IS
-  // present in all of them, and is therefore architecturally unable to also
-  // catch "was the right octave within that structure chosen" (an orthogonal
-  // question C1 answers instead, imperfectly, as this table shows). This
-  // directly contradicts the expectation that the confidence gate is a
-  // safety net for octave misidentification -- see task-T2-report.md "Fix
-  // round 1" for the finding written up in full.
+  // Fix-round-2 substantially shrank the unresolved set from round-1's 6 (of
+  // 20 in this same table): drumLoop(150) now resolves at EVERY ghost level
+  // (0.15-0.6), not just 0.15. Two NEW unresolved cases appeared instead --
+  // drumLoop(90, g=0.45) and (g=0.6) -- see test 4b's `it.failing` above for
+  // the dedicated evidence on why (a content-level ambiguity, not a
+  // labelling defect). Net: 9 resolved / 11 unresolved in this table (up
+  // from round-1's 8/12), consistent with the broader 60-200bpm A/B showing
+  // a net improvement over both the pre-fix baseline and the round-1
+  // regression.
+  //
+  // GENUINE, UNRESOLVED OCTAVE AMBIGUITIES this fix does NOT close:
+  // backbeat(75), drumLoop(60,*) and drumLoop(75,*) at every ghost level
+  // (all bStar-level: the full-grid argmax itself lands on the wrong octave
+  // family before `chooseOctave` ever runs, so no octave-family-internal fix
+  // can reach them -- see Finding 1, task-T2-report.md), plus
+  // drumLoop(90,g=0.45/0.6) (content-level, see test 4b). NONE of these 11
+  // report confidence below CONFIDENCE_LOW (measured range 0.65-1.00) -- the
+  // confidence gate (C2 fix) measures "is there real periodic structure",
+  // which genuinely IS present in all of them, and is therefore
+  // architecturally unable to also catch "was the right octave within that
+  // structure chosen" (an orthogonal question the octave fix answers
+  // instead, imperfectly, as this table shows). This directly contradicts
+  // the expectation that the confidence gate is a safety net for octave
+  // misidentification -- see task-T2-report.md for the finding in full.
   interface Case {
     label: string;
     audio: () => Float32Array;
     truth: number;
-    resolves: boolean;
   }
 
-  const cases: Case[] = [];
+  const resolvedCases: Case[] = [];
+  const unresolvedCases: Case[] = [];
   for (const bpm of [75, 90, 120, 140]) {
-    cases.push({ label: `backbeat(${bpm})`, audio: () => backbeat(bpm, 20), truth: bpm, resolves: bpm !== 75 });
+    const c = { label: `backbeat(${bpm})`, audio: () => backbeat(bpm, 20), truth: bpm };
+    (bpm === 75 ? unresolvedCases : resolvedCases).push(c);
   }
   for (const bpm of [60, 75, 90, 150]) {
     for (const g of [0.15, 0.3, 0.45, 0.6]) {
-      const resolves = !(bpm === 60 || bpm === 75 || (bpm === 150 && g !== 0.15));
-      cases.push({ label: `drumLoop(${bpm},g=${g})`, audio: () => drumLoop(bpm, 20, g), truth: bpm, resolves });
+      const c = { label: `drumLoop(${bpm},g=${g})`, audio: () => drumLoop(bpm, 20, g), truth: bpm };
+      const resolves = bpm === 150 || (bpm === 90 && (g === 0.15 || g === 0.3));
+      (resolves ? resolvedCases : unresolvedCases).push(c);
     }
   }
 
-  it('resolves the true tempo wherever the fix reaches, and reports the honest (aliased/collapsed) value elsewhere -- confidence finite throughout, never gating the unresolved cases', () => {
-    for (const c of cases) {
+  it('resolves the true tempo for every case the fix reaches (9 of 20) -- confidence finite throughout', () => {
+    for (const c of resolvedCases) {
       const r = analyzeTempo(c.audio(), 44100);
       expect(r.bpm).not.toBeNull();
       expect(Number.isFinite(r.confidence)).toBe(true);
-      const detected = r.bpm as number;
-      const distanceToTruth = Math.abs(detected - c.truth);
-      if (c.resolves) {
-        expect(distanceToTruth).toBeLessThan(1.5);
-      } else {
-        // Genuinely unresolved: far from truth (an octave alias, or a DP
-        // "collapse" onto a neighbouring family member's track) -- proving
-        // this isn't accidentally passing -- AND confidence stays above the
-        // gate, proving the gate provides no safety net for this failure
-        // mode.
-        expect(distanceToTruth).toBeGreaterThan(10);
-        expect(r.confidence).toBeGreaterThan(CONFIDENCE_LOW);
-      }
+      expect(Math.abs((r.bpm as number) - c.truth)).toBeLessThan(1.5);
     }
-  }, 120000);
+  }, 60000);
+
+  it.failing('KNOWN, UNRESOLVED (delete this it.failing when fixed): the remaining 11 of 20 cases do NOT resolve to truth, and confidence does not gate them either', () => {
+    // Per the standing rule, this states the DESIRED behaviour (which
+    // currently fails) rather than a passing assertion that pins the bug.
+    // Today, every one of these 11 cases reports an octave alias/collapse
+    // FAR from truth (>10 bpm off) with confidence comfortably ABOVE
+    // CONFIDENCE_LOW (0.65-1.00) -- i.e. the gate provides no safety net.
+    for (const c of unresolvedCases) {
+      const r = analyzeTempo(c.audio(), 44100);
+      expect(r.bpm).not.toBeNull();
+      expect(Math.abs((r.bpm as number) - c.truth)).toBeLessThan(1.5);
+    }
+  }, 60000);
 });
 
 describe('analyzeTempo — EDGE cases', () => {

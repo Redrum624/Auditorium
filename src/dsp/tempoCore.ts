@@ -660,10 +660,26 @@ function combProminence(candidates: TempoCandidate[]): number {
  * `CONFIDENCE_LOW` as an ACCEPTANCE ANCHOR -- the internal divisors inside
  * `sSal`/`sPeak` are prose, not named constants, and the original `sSal`
  * formula turned out to saturate on noise (see the review). These three
- * were calibrated against a 7-content-type sweep -- clickTrain, drumLoop,
- * backbeat (real rhythm, prominence >= 5.8) vs. noise, pad, speech-like,
- * pure sine (no real tempo, prominence <= 2.95) -- see task-T2-report.md
- * "Fix round 1" for the full measurement table this was derived from.
+ * were calibrated against an 8-content-type sweep -- clickTrain, drumLoop,
+ * backbeat, ramp (real rhythm, prominence >= 5.8) vs. LCG noise, pad,
+ * speech-like, pure sine (no real tempo, prominence <= 2.95) -- see
+ * task-T2-report.md "Fix round 1"/"Fix round 2" for the full measurement
+ * tables this was derived from.
+ *
+ * CALIBRATED-TO-FIXTURE, NOT PROVEN ROBUST (N5, T2 review round 2):
+ * `PROMINENCE_FLOOR=3` sits close enough to this repo's own LCG noise
+ * generator's measured prominence (2.95-2.99 depending on exact fixture
+ * length/seed) that it is fitted to, rather than comfortably clear of, that
+ * boundary -- an independently-synthesised pink-noise-like fixture measured
+ * prominence 3.09 (ABOVE the floor) during this review round, though its
+ * full confidence still landed under CONFIDENCE_LOW (0.267) once sPeak/sReg
+ * were factored in. Content types NOT in the calibration sweep -- pink
+ * noise, applause, and other broadband-but-not-white non-rhythmic material
+ * -- are NOT verified to stay reliably below this floor; this constant
+ * should be treated as tuned against the specific fixture bank cited above,
+ * not as a universally-safe boundary, until it is re-validated against a
+ * wider non-rhythm content bank (out of scope for T2 -- flagging for
+ * whoever owns the confidence gate next).
  */
 const PROMINENCE_FLOOR = 3;
 const PROMINENCE_SCALE = 3;
@@ -795,61 +811,119 @@ function salienceOf(odf: Float32Array, beatFrames: Int32Array): number {
   return overallMean > 1e-12 ? beatMean / overallMean : 0;
 }
 
-function medianOfNumbers(x: number[]): number {
-  const n = x.length;
-  if (n === 0) return 0;
-  const sorted = [...x].sort((a, b) => a - b);
-  const mid = Math.floor(n / 2);
-  return n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-}
-
-/**
- * The bpm `trackBeats` ACTUALLY delivered, from the median inter-beat frame
- * gap of its own returned track -- as opposed to the NOMINAL candidate bpm
- * (`bStar*r`) that was merely the requested period. `null` when there are
- * too few beats to measure a gap.
- */
-function achievedBpm(beatFrames: Int32Array, odfRate: number): number | null {
-  if (beatFrames.length < 2) return null;
-  const diffs: number[] = new Array(beatFrames.length - 1);
-  for (let i = 1; i < beatFrames.length; i++) diffs[i - 1] = beatFrames[i] - beatFrames[i - 1];
-  const med = medianOfNumbers(diffs);
-  return med > 0 ? (60 * odfRate) / med : null;
-}
-
 interface OctaveChoice {
-  bpm: number;
   periodFrames: number;
   beatFrames: Int32Array;
   salience: number;
 }
 
 /**
+ * Mean (deliberately NOT summed -- beat-count sensitivity is exactly the
+ * defect being avoided, see `chooseOctave`'s doc comment) per-hop Ellis-DP
+ * tightness penalty of the ACTUAL track `beatFrames` against the period `P`
+ * it was requested at. Answers "does this candidate's own delivered beats
+ * actually match the period IT ITSELF asked for" -- near 0 for a genuine,
+ * non-"collapsed" track (every hop's gap sits close to `P`, so
+ * `ln(gap/P) approx 0`); large when the DP's wide tau-window let it
+ * "collapse" onto some OTHER octave-family member's real periodicity while
+ * nominally requesting a period that periodicity doesn't match at all.
+ */
+function meanTightnessPenalty(beatFrames: Int32Array, P: number): number {
+  if (beatFrames.length < 2) return Infinity;
+  let sum = 0;
+  let n = 0;
+  for (let i = 1; i < beatFrames.length; i++) {
+    const gap = beatFrames[i] - beatFrames[i - 1];
+    const logRatio = Math.log(gap / P);
+    sum += TIGHTNESS * logRatio * logRatio;
+    n++;
+  }
+  return sum / n;
+}
+
+/**
+ * Calibrated post-T2-review-round-2: how sharply `periodMatch =
+ * exp(-meanTightnessPenalty)` is weighted in `chooseOctave`'s selection
+ * metric. A/B-measured against `PERIOD_MATCH_POWER` in {1..4} on a 60-200
+ * bpm, 41-fixture bank (task-T2-report.md "Fix round 2"): 1 under-corrects
+ * (26/41 correct, barely above not using periodMatch at all), 2 is the
+ * measured optimum (28/41), 3 and 4 over-correct (27/41 each) and start
+ * losing fixtures the lower power still got right.
+ */
+const PERIOD_MATCH_POWER = 2;
+
+/**
  * OCTAVE DISAMBIGUATION: `bStar` (the prior-weighted score's argmax) only
  * fixes an OCTAVE FAMILY, not necessarily the perceptually "correct" member
  * of it. For each `r` in `OCTAVE_FAMILY` with `bStar*r` in range, runs the
- * full beat DP at that period and scores `salience(b)*prior(b)`.
+ * full beat DP at that period and scores `salience(b) * periodMatch(b)^2 *
+ * prior(bpmR)`.
  *
- * CRITICAL FIX (post-T2-review C1): the prior is weighted on the ACHIEVED
- * beat rate (`60*odfRate/median(diff(beatFrames))`), not the nominal
- * `bpmR = bStar*r` label. `trackBeats`'s tau-window is wide enough
- * (`[t-2P, t-P/2]`) that a candidate period which doesn't correspond to any
- * real periodicity in the content routinely gets IGNORED -- the DP just
- * follows whichever real onset rhythm is reachable, "borrowing" a
- * neighbouring octave-family member's actual track while still carrying its
- * own (possibly more prior-favourable) nominal label. Weighting the prior on
- * the nominal label then rewards that borrowed, unrepresentative label
- * rather than the track that was actually delivered. Weighting on the
- * ACHIEVED rate closes this: a "1.5x" candidate that silently collapses onto
- * the same physical beats as the "2x" candidate now carries the SAME
- * (achieved-rate) prior as that 2x candidate, so it can no longer win purely
- * by quoting a nominal label closer to `PRIOR_CENTER_BPM`. Measured on a
- * kick/snare/hihat backbeat pattern at true tempo 90 bpm (see
- * task-T2-report.md "Fix round 1"): before this fix, the r=1.5 family member
- * (nominal 134.8, but its DP output actually tracks the SAME beats as r=2,
- * achieved ~184.6) won on metric 10.50 vs the correct r=1 track's 10.38 --
- * purely because prior(134.8) > prior(89.9). After weighting on achieved
- * rate, r=1's own achieved-rate prior wins decisively.
+ * FIX-ROUND-2 REWRITE of the round-1 C1 fix (which weighted `prior` on the
+ * ACHIEVED beat rate instead of the nominal `bpmR` label): that fix closed
+ * the original C1 regression (a 90 bpm backbeat/drumLoop misreported at
+ * 180 bpm) but, per an independent reviewer A/B over 60-200 bpm (25
+ * fixtures: 17/25 correct pre-fix, 11/25 post -- a NET REGRESSION), broke 7
+ * previously-correct fixtures in the 165-200 bpm band. ROOT CAUSE (reviewer-
+ * verified): `salienceOf` is `mean(odf at beats)` with NO normalisation for
+ * how many beats were actually visited, so a family member that "collapses"
+ * -- the Ellis DP's wide `[t-2P,t-P/2]` tau-window lets it silently follow a
+ * NEIGHBOURING family member's real track while still nominally requesting
+ * a period that track doesn't match -- and thereby cherry-picks a sparser,
+ * higher-average-onset-strength subset ALWAYS outscores the fuller, honest
+ * track it borrowed from. Pre-round-1, weighting the prior on the NOMINAL
+ * label accidentally opposed this bias in some cases (a collapsed candidate
+ * often has a nominal label further from `PRIOR_CENTER_BPM`, so the prior
+ * penalised it even though salience didn't); weighting on the achieved rate
+ * (round 1) removed that accidental opposition, letting the sparse-subset
+ * bias decide alone -- and on the 165-200 bpm band specifically, the
+ * collapsed candidate's accidental "borrow" often happened to land on the
+ * CORRECT tempo, so removing that accident cost real correctness.
+ *
+ * The fix-round-2 fix targets the mechanism directly instead of arguing
+ * about which bpm label to weight the prior on: `periodMatch` (via
+ * `meanTightnessPenalty`) directly measures whether a candidate's own
+ * delivered track matches the period IT REQUESTED. A collapsed candidate's
+ * hops systematically deviate from its own requested `P` (that is
+ * definitionally what "collapsed onto a different family member's track"
+ * means), so `periodMatch` is close to 1 for a genuine track and
+ * substantially below 1 for a collapsed one -- catching the borrowing
+ * directly, rather than trying to patch it via which bpm the prior sees.
+ * Measured on the flagship backbeat/drumLoop(90, ghostAmp<=0.3) case: r=1.5
+ * (collapsed onto r=2's real beats) scores periodMatch~0.60 vs r=1's
+ * (genuine) ~0.84 -- squared, a penalty the prior alone could not reliably
+ * provide. The bpm label the prior weights on (nominal vs. achieved) turned
+ * out NOT to matter once periodMatch suppresses collapse -- measured
+ * IDENTICAL results either way on the fix-round-2 A/B bank -- so this
+ * reverts to the simpler NOMINAL label per the reviewer's own fallback
+ * guidance. (A dynamic-programming-objective-based alternative to salience,
+ * and a duplicate-track-detection-based alternative to periodMatch, were
+ * both evaluated and measured no better or worse overall -- see
+ * task-T2-report.md "Fix round 2" for the comparison.)
+ *
+ * REMAINING, EVIDENCED LIMITATIONS (both reported, not silently patched):
+ * (1) `periodMatch` cannot help when MULTIPLE octave-family members each
+ * GENUINELY (non-collapsed) match their own requested period -- e.g. a
+ * uniform click train, or a backbeat/drumLoop pattern whose hi-hats create
+ * real energy at the half-period too, in the 165-200 bpm range, where
+ * `bStar` often lands on the tempo's exact HALF and both the true tempo
+ * (r=2) and a mid-family "collapsed-but-lucky" member (r=1.5, nominal close
+ * to `PRIOR_CENTER_BPM`) are candidates. Suppressing r=1.5's collapse
+ * (correctly) removes ITS accidental, label-driven correctness, exposing a
+ * direct r=1-vs-r=2 tie that the prior breaks toward the slower (wrong)
+ * side -- the SAME architectural limitation as the pre-existing bpm=200
+ * boundary case (task-T2-report.md, Finding 1), now also observed at
+ * bpm=180 on click trains and at 165/180 on backbeat. (2) At a
+ * SUFFICIENTLY LOUD ghost note (measured: drumLoop ghostAmp>=0.45), the
+ * off-beat becomes comparably strong to the main beat, so the DOUBLED
+ * candidate's own track is no longer really "collapsed" at all -- it is
+ * genuinely, honestly tracking a real doubled periodicity the content now
+ * actually contains -- and `periodMatch` (correctly) does not penalise it.
+ * This is a content-level ambiguity, not a labelling defect: even a
+ * omniscient "did this candidate collapse" oracle could not resolve it,
+ * because the doubled candidate did NOT collapse. See task-T2-report.md
+ * "Fix round 2" for the measured backbeat/drumLoop(90, ghostAmp in
+ * {0.45,0.6}) case this affects.
  *
  * `r=1` (bStar unchanged) is always a member of the family and always in
  * range (bStar itself came from the same [minBpm,maxBpm] search), so this
@@ -860,8 +934,7 @@ function chooseOctave(
   bStar: number,
   periodFramesRefined: number,
   minBpm: number,
-  maxBpm: number,
-  odfRate: number
+  maxBpm: number
 ): OctaveChoice {
   let best: OctaveChoice | null = null;
   let bestMetric = -Infinity;
@@ -871,12 +944,11 @@ function chooseOctave(
     const periodR = periodFramesRefined / r;
     const beatFrames = trackBeats(odf, periodR);
     const salience = salienceOf(odf, beatFrames);
-    const achieved = achievedBpm(beatFrames, odfRate);
-    const priorBpm = achieved ?? bpmR; // too few beats to measure achieved rate: fall back to nominal
-    const metric = salience * priorWeight(priorBpm);
+    const periodMatch = Math.exp(-meanTightnessPenalty(beatFrames, periodR));
+    const metric = salience * Math.pow(periodMatch, PERIOD_MATCH_POWER) * priorWeight(bpmR);
     if (metric > bestMetric) {
       bestMetric = metric;
-      best = { bpm: achieved ?? bpmR, periodFrames: periodR, beatFrames, salience };
+      best = { periodFrames: periodR, beatFrames, salience };
     }
   }
   // r=1 is always a valid member (see doc comment), so `best` is never null.
@@ -1097,7 +1169,7 @@ export function analyzeTempo(
   const periodFramesRefined = refinePeriodFrames(acf, rawPeriodFrames);
   onProgress?.(0.85);
 
-  const octave = chooseOctave(odf, bStar, periodFramesRefined, minBpm, maxBpm, odfRate);
+  const octave = chooseOctave(odf, bStar, periodFramesRefined, minBpm, maxBpm);
   const beatFrames = octave.beatFrames;
   if (beatFrames.length < 2) {
     return emptyTempoAnalysis(analyzedEndSample, truncated);
