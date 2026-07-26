@@ -90,10 +90,69 @@ function normalizeUncHost(rawHost) {
   return host.toLowerCase();
 }
 
-/** True for any 127.0.0.0/8 loopback literal (127.0.0.1, 127.0.0.2, ...),
- * not just the single 127.0.0.1 address. */
+/**
+ * Parses one dot-separated component of an abbreviated-IPv4 host string
+ * using Windows' inet_addr numeral rules: a leading '0x'/'0X' is hex, a
+ * leading '0' followed by more digits is legacy C-style octal (Windows'
+ * inet_addr accepts this -- e.g. '0177' === 127 decimal), anything else is
+ * plain decimal. Returns null when `str` isn't a valid numeral under any of
+ * those rules (e.g. contains a letter outside a hex body, or an invalid
+ * octal digit like '8'/'9') -- the caller treats that as "not an address at
+ * all" rather than guessing.
+ */
+function parseAbbreviatedIPv4Component(str) {
+  if (/^0x[0-9a-f]+$/i.test(str)) {
+    return parseInt(str, 16);
+  }
+  if (/^0[0-7]+$/.test(str)) {
+    return parseInt(str, 8);
+  }
+  if (/^(?:0|[1-9]\d*)$/.test(str)) {
+    return parseInt(str, 10);
+  }
+  return null;
+}
+
+/**
+ * True when `host` names a loopback (127.0.0.0/8) address under Windows'
+ * ABBREVIATED IPv4 host rules (review fix round 5, GAP: the prior check only
+ * matched the exact 4-octet dotted form, so '\\127.1\...' -- which Windows'
+ * inet_addr expands to 127.0.0.1 -- sailed through unrecognized). Like
+ * classic BSD inet_aton, Windows accepts 1-, 2-, 3- and 4-part dotted host
+ * forms: every part before the last is exactly one octet, and the LAST part
+ * absorbs however many octets the earlier parts didn't claim (so 'a.b' is
+ * octet1=a, octets2-4=b as a 24-bit value; a bare single numeral is the
+ * entire 32-bit address in one go). Each part may be decimal, octal
+ * (leading zero), or hex (leading 0x) -- see parseAbbreviatedIPv4Component.
+ * A host with more than 4 dot-separated parts, or any part that fails to
+ * parse or is out of range for its position, is not a valid abbreviated
+ * IPv4 address at all and is left alone as an ordinary hostname -- this is
+ * what correctly excludes '127.0.0.1.example.com' (5 parts) from matching.
+ */
 function isLocal127Address(host) {
-  return /^127(?:\.\d{1,3}){3}$/.test(host);
+  const parts = host.split('.');
+  if (parts.length === 0 || parts.length > 4) return false;
+
+  const values = parts.map(parseAbbreviatedIPv4Component);
+  if (values.some((v) => v === null)) return false;
+
+  // Every part but the last is exactly one octet (0-255).
+  for (let i = 0; i < values.length - 1; i++) {
+    if (values[i] < 0 || values[i] > 255) return false;
+  }
+
+  // The last part absorbs whatever bits the earlier parts didn't claim: all
+  // 32 bits for a single bare numeral, down to just the low 8 for the
+  // standard 4-part dotted form.
+  const lastBits = 32 - (values.length - 1) * 8;
+  const last = values[values.length - 1];
+  if (last < 0 || last > 2 ** lastBits - 1) return false;
+
+  // Only the resulting address's first octet matters for 127.0.0.0/8
+  // membership: for a 2-4 part form the first part IS that octet already;
+  // for the 1-part form it's the top 8 bits of the 32-bit value.
+  const firstOctet = values.length === 1 ? Math.floor(values[0] / 2 ** 24) : values[0];
+  return firstOctet === 127;
 }
 
 /** True for Windows' UNC encoding of an IPv6 literal address

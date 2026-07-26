@@ -453,6 +453,28 @@ describe('parseSessionFileV3 corrupt/truncated handling', () => {
     expect(() => parseSessionFileV3(buf)).toThrow(/out of range/i);
   });
 
+  it.each([
+    ['null', null],
+    ['fractional (0.5)', 0.5],
+    ['negative (-1)', -1],
+    ['a string ("0")', '0'],
+  ])('throws a descriptive error (not a silent misread) for a channel offset that is %s', (_label, offset) => {
+    // A hand-corrupted `offset` must be rejected outright: `null < 0` is
+    // `false` and `null + byteLength` silently coerces, so without an
+    // explicit integer/non-negative guard this would misread payload bytes
+    // from the wrong slice instead of throwing (final-review fix, matching
+    // the guards already applied to `length`/`channels` above).
+    const payload = new Uint8Array(16);
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', name: 'a', sampleRate: 44100, length: 4, channels: [{ offset, byteLength: 16 }] }],
+    };
+    const buf = buildV3Buffer(meta, payload);
+
+    expect(() => parseSessionFileV3(buf)).toThrow(/out of range/i);
+  });
+
   it('throws a descriptive error (not a raw RangeError) for a non-integer declared sample length', () => {
     // length: 0.5 * 4 bytes/sample = 2, so a naive `byteLength !== length * 4`
     // check alone would accept this and crash later trying to build a
@@ -613,6 +635,45 @@ describe('markers (.audm)', () => {
     const appState = useAppStore.getState();
     const newDocId = appState.documents[0].id;
     expect(appState.markers[newDocId]).toEqual([expect.objectContaining({ name: 'Drop', positionSample: 3 })]);
+  });
+
+  it('clamps a marker position that exceeds the recreated document length to the document length (legacy v1/v2 path)', () => {
+    // Simulates a stale/hand-edited .audm: the marker was valid when the
+    // session was saved but now sits past the (recreated) document's actual
+    // length. The WAV/MP3/FLAC/OGG open paths already clamp seeded markers
+    // to [0, docLength] (fileService's seeding chain); the session path must
+    // match (final-review fix).
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const markersByDoc: Record<string, Marker[]> = {
+      [doc.id]: [{ id: 'm-1', name: 'Stray', positionSample: 5 }],
+    };
+
+    const { json } = serializeSession(session, [doc], markersByDoc);
+    const fileObj = JSON.parse(json);
+    fileObj.markers[doc.id][0].positionSample = 9999; // hand-edited out-of-range marker
+    const { documents, markers } = parseSessionFile(JSON.stringify(fileObj));
+
+    const newDocId = documents[0].id;
+    expect(markers[newDocId][0].positionSample).toBe(10); // clamped to the recreated doc's length
+  });
+
+  it('clamps a marker position that exceeds the recreated document length to the document length (v3 path)', () => {
+    const payload = new Uint8Array(40); // 10 float32 samples
+    const meta = {
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [{ docId: 'doc-1', name: 'a', sampleRate: 44100, length: 10, channels: [{ offset: 0, byteLength: 40 }] }],
+      markers: { 'doc-1': [{ id: 'm-1', name: 'Stray', positionSample: 999 }] },
+    };
+    const buf = buildV3Buffer(meta, payload);
+
+    const { documents, markers } = parseSessionFileV3(buf);
+
+    const newDocId = documents[0].id;
+    expect(markers[newDocId][0].positionSample).toBe(10); // clamped to the recreated doc's length
   });
 
   it('saveSessionViaDialog (v3) includes the current appStore markers for referenced docs', async () => {

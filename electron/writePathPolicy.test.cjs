@@ -285,6 +285,40 @@ describe('writePathPolicy', () => {
     });
   });
 
+  describe('abbreviated-IPv4 loopback forms (review fix round 5: Windows expands 127.1 etc. to 127.0.0.1)', () => {
+    test('rejects \\\\127.1\\... (2-part abbreviated form -> 127.0.0.1)', () => {
+      expect(isWriteAllowed('\\\\127.1\\share\\a.wav')).toBe(false);
+    });
+
+    test('rejects \\\\127.0.1\\... (3-part abbreviated form -> 127.0.0.1)', () => {
+      expect(isWriteAllowed('\\\\127.0.1\\share\\a.wav')).toBe(false);
+    });
+
+    test('rejects \\\\2130706433\\... (bare 32-bit decimal form of 127.0.0.1)', () => {
+      expect(isWriteAllowed('\\\\2130706433\\share\\a.wav')).toBe(false);
+    });
+
+    test('rejects \\\\0177.0.0.1\\... (octal first octet -> 127.0.0.1; Windows\' inet_addr accepts C-style octal)', () => {
+      expect(isWriteAllowed('\\\\0177.0.0.1\\share\\a.wav')).toBe(false);
+    });
+
+    test('positive: a remote host that merely STARTS WITH "127." is not loopback (5 dotted parts, not a valid abbreviated address)', () => {
+      expect(isWriteAllowed('\\\\127.0.0.1.example.com\\audio\\take.wav')).toBe(true);
+    });
+
+    test('positive: an ordinary dotted-IPv4 remote host still passes', () => {
+      expect(isWriteAllowed('\\\\192.168.1.50\\media\\take.mp3')).toBe(true);
+    });
+
+    test('positive: a plain NetBIOS hostname still passes', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav')).toBe(true);
+    });
+
+    test('positive: another ordinary dotted-IPv4 remote host still passes', () => {
+      expect(isWriteAllowed('\\\\10.0.0.5\\audio\\take.flac')).toBe(true);
+    });
+  });
+
   test('rejects extensions removed from the allow-list (F24: .txt, .json, .aud)', () => {
     expect(isWriteAllowed('D:\\x\\notes.txt')).toBe(false);
     expect(isWriteAllowed('D:\\x\\config.json')).toBe(false);

@@ -281,12 +281,19 @@ function seedDocCounterFromRawClips(rawSession: { tracks: { clips: { documentId:
  * id counters past the file's ids, and remaps `rawMarkers` (old docId ->
  * Marker[]) onto the fresh doc ids with fresh marker ids of their own. See
  * `parseSessionFile`'s original doc comment for the full rationale.
+ *
+ * Seeded marker positions are clamped to `[0, docLength]` (final-review fix:
+ * a stale or hand-edited .audm can carry a marker past the recreated
+ * document's actual length) -- matching the clamp already applied to markers
+ * parsed from a WAV/MP3/FLAC/OGG file's own embedded cue points/tags (see
+ * fileService's seeding chain).
  */
 function finalizeParsedSession(
   parsedSession: Session,
   idMap: Map<string, string>,
   recreatedIds: Set<string>,
-  rawMarkers: Record<string, Marker[]> | undefined
+  rawMarkers: Record<string, Marker[]> | undefined,
+  documents: AudioDocument[]
 ): { session: Session; droppedClipCount: number; markers: Record<string, Marker[]> } {
   let droppedClipCount = 0;
   const session: Session = {
@@ -311,13 +318,20 @@ function finalizeParsedSession(
   bumpIdCounter('track', maxIdSuffix(trackIds, 'track') + 1);
   bumpIdCounter('clip', maxIdSuffix(clipIds, 'clip') + 1);
 
+  const docLengths = new Map(documents.map((d) => [d.id, docLength(d)]));
+
   const markers: Record<string, Marker[]> = {};
   if (rawMarkers) {
     for (const [oldDocId, list] of Object.entries(rawMarkers)) {
       const newDocId = idMap.get(oldDocId);
       if (!newDocId) continue; // stale reference to a doc that wasn't recreated
+      const length = docLengths.get(newDocId) ?? 0;
       markers[newDocId] = list
-        .map((m) => ({ id: nextId('marker'), name: m.name, positionSample: m.positionSample }))
+        .map((m) => ({
+          id: nextId('marker'),
+          name: m.name,
+          positionSample: Math.max(0, Math.min(length, m.positionSample)),
+        }))
         .sort((a, b) => a.positionSample - b.positionSample);
     }
   }
@@ -361,7 +375,8 @@ export function parseSessionFile(text: string): {
     parsed.session,
     idMap,
     recreatedIds,
-    parsed.markers
+    parsed.markers,
+    documents
   );
 
   return { session, documents, droppedClipCount, markers };
@@ -445,9 +460,19 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
       if (chMeta.byteLength !== meta.length * 4) {
         throw new Error('Corrupt .audm file: channel byte length does not match declared sample count');
       }
+      // Final-review fix: require an integer, non-negative offset before
+      // using it in arithmetic below -- `null < 0` is `false` and
+      // `null + byteLength` silently coerces to `byteLength`, so a
+      // hand-corrupted `offset: null` (or a fractional/string one) would
+      // otherwise misread payload bytes from the wrong slice instead of
+      // being reported as corrupt (matching the guards already applied to
+      // `length`/`channels` above).
+      if (!Number.isInteger(chMeta.offset) || chMeta.offset < 0) {
+        throw new Error('Corrupt .audm file: audio payload offset/length out of range');
+      }
       const start = chMeta.offset;
       const end = start + chMeta.byteLength;
-      if (start < 0 || end > payloadLength) {
+      if (end > payloadLength) {
         throw new Error('Corrupt .audm file: audio payload offset/length out of range');
       }
       // Copy into a fresh, zero-offset buffer — see doc comment above.
@@ -465,7 +490,8 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
     parsed.session,
     idMap,
     recreatedIds,
-    parsed.markers
+    parsed.markers,
+    documents
   );
 
   return { session, documents, droppedClipCount, markers };
