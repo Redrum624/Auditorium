@@ -1,8 +1,21 @@
-import { docLength } from '../../audio/AudioDocument';
+import { docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
+import { getTempo, useTempoVersion } from '../../services/tempoAnalysis';
+
+/** '♩ 128.4' for a fresh result, '♩ 128.4*' when stale, '♩ —' with no
+ * document, no cached entry, or a null bpm (too short / no rhythm detected —
+ * this compact readout doesn't have room for the reason; PropertiesPanel's
+ * Tempo section shows it). Decision #3: a CACHED READ ONLY — never calls
+ * `runTempoAnalysis`, so opening a file costs nothing. */
+function tempoReadout(doc: AudioDocument | null): string {
+  const entry = doc ? getTempo(doc) : null;
+  if (!entry || entry.bpm === null) return '♩ —';
+  return `♩ ${entry.bpm.toFixed(1)}${entry.stale ? '*' : ''}`;
+}
 
 export default function StatusBar() {
+  useTempoVersion();
   const documents = useAppStore((s) => s.documents);
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
   const cursorSample = useAppStore((s) => s.cursorSample);
@@ -27,6 +40,7 @@ export default function StatusBar() {
           ? `${doc.sampleRate} Hz · ${doc.channels.length}ch · ${docLength(doc)} smp`
           : 'no document'}
       </span>
+      <span>{tempoReadout(doc)}</span>
       <span className="ml-auto">spp: {zoom.samplesPerPixel}</span>
     </div>
   );

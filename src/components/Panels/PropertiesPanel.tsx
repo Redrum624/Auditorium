@@ -1,18 +1,28 @@
 import { useRef, useState } from 'react';
-import { docLength } from '../../audio/AudioDocument';
+import { docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import type { Clip } from '../../multitrack/session';
 import { formatTime } from '../../utils/timeFormat';
+import {
+  getTempo,
+  isTempoRunning,
+  getTempoProgress,
+  runTempoAnalysis,
+  regridTempo,
+  useTempoVersion,
+  type TempoEntry,
+} from '../../services/tempoAnalysis';
+import { CONFIDENCE_LOW, MIN_ANALYSIS_SECONDS } from '../../dsp/tempoCore';
 
 const GAIN_MIN = -24;
 const GAIN_MAX = 24;
 
-function Row({ label, value }: { label: string; value: string }) {
+function Row({ label, value, muted }: { label: string; value: string; muted?: boolean }) {
   return (
     <div className="flex items-baseline justify-between gap-3 px-2 py-1 text-xs">
       <span className="shrink-0 text-[#8b8b92]">{label}</span>
-      <span className="min-w-0 truncate text-right text-[#d4d4d8]">{value}</span>
+      <span className={`min-w-0 truncate text-right ${muted ? 'text-[#8b8b92]' : 'text-[#d4d4d8]'}`}>{value}</span>
     </div>
   );
 }
@@ -21,6 +31,165 @@ function SectionLabel({ children }: { children: string }) {
   return (
     <div className="mt-2 border-t border-[#3a3a42] px-2 pt-2 text-xs font-semibold uppercase tracking-wide text-[#8b8b92]">
       {children}
+    </div>
+  );
+}
+
+function formatBpm(bpm: number): string {
+  return `${bpm.toFixed(1)} BPM`;
+}
+
+/** Builds the Tempo row's display string: the BPM (or a '—' + reason when
+ * `bpm` is null), with '(stale)'/'(first 10 min)' appended per Decision #4 /
+ * Ruling 2.11. `analyzedSeconds` distinguishes the two null reasons — 'too
+ * short' below `MIN_ANALYSIS_SECONDS`, else 'no rhythm detected' (every other
+ * degenerate-analysis guard in `tempoCore.ts`). */
+function formatTempoValue(entry: TempoEntry, analyzedSeconds: number): string {
+  let value =
+    entry.bpm === null
+      ? `— (${analyzedSeconds < MIN_ANALYSIS_SECONDS ? 'too short' : 'no rhythm detected'})`
+      : formatBpm(entry.bpm);
+  if (entry.stale) value += ' (stale)';
+  if (entry.truncated) value += ' (first 10 min)';
+  return value;
+}
+
+/**
+ * Feature 1 UI (Task T5): tempo readout + Detect/Re-analyze + the x2//2
+ * octave-correction control. Per the plan amendment (post-T4-review
+ * measurement: a 60 BPM loop misdetected as 120 scored the HIGHEST
+ * confidence in the whole fixture bank), confidence cannot gate octave
+ * errors — so the x2//2 control is mandatory here and exempt from the
+ * release's otherwise-minimal UI ruling.
+ *
+ * Calls `useTempoVersion()` FIRST (module-level reactivity — HistoryPanel.tsx
+ * :11 precedent) so a run start/progress/completion/invalidation event
+ * re-renders this section; `getTempo(doc)` is read fresh every render (never
+ * memoized on the entry reference — an edit flips only `.stale` in place on
+ * the SAME object).
+ *
+ * The x2//2 buttons call `regridTempo`, never a local BPM relabel (T2
+ * carry-forward): at a half-tempo detection `beatSamples` physically
+ * contains only every other beat, so relabelling alone would show the right
+ * number while the remix planner (a later feature) splices on a
+ * half-density grid. `regridTempo` resolves `null` when the corrected period
+ * is degenerate, leaving the previous (still-good) grid in the cache
+ * untouched — surfaced here as an inline notice rather than silently
+ * reverting with no explanation.
+ */
+function TempoSection({ doc }: { doc: AudioDocument }) {
+  useTempoVersion();
+  const [correctionFailed, setCorrectionFailed] = useState(false);
+  // `regridTempo`'s own promise resolving is this component's most direct
+  // signal that the correction it just requested has settled — rather than
+  // relying solely on the separate `useTempoVersion()` subscription noticing
+  // the cache write, force a render right here so `getTempo(doc)` is re-read
+  // immediately. A monotonic counter (not a boolean) so this never bails out
+  // on React's same-value state optimization when the outcome repeats.
+  const [, forceRerender] = useState(0);
+
+  const running = isTempoRunning(doc.id);
+  const entry = getTempo(doc);
+
+  async function correct(newPeriodFrames: number): Promise<void> {
+    setCorrectionFailed(false);
+    const result = await regridTempo(doc.id, newPeriodFrames);
+    setCorrectionFailed(result === null);
+    forceRerender((n) => n + 1);
+  }
+
+  // Detect/Re-analyze replace the cache row with a brand-new entry (unlike a
+  // stale flip, which mutates the SAME object in place) — clear a leftover
+  // correction-failed notice so it can't linger over an unrelated fresh run.
+  function detectOrReanalyze(): void {
+    setCorrectionFailed(false);
+    void runTempoAnalysis(doc);
+  }
+
+  return (
+    <div className="flex flex-col" data-testid="properties-tempo">
+      <SectionLabel>Tempo</SectionLabel>
+
+      {running ? (
+        <div className="mx-2 my-1 h-1.5 overflow-hidden rounded bg-[#2e2e34]">
+          <div
+            data-testid="tempo-progress"
+            className="h-full bg-[#26c6da] transition-[width]"
+            style={{ width: `${Math.round((getTempoProgress(doc.id) ?? 0) * 100)}%` }}
+          />
+        </div>
+      ) : entry ? (
+        <>
+          <div className="flex items-baseline justify-between gap-3 px-2 py-1 text-xs">
+            <span className="shrink-0 text-[#8b8b92]">Tempo</span>
+            <span className="flex min-w-0 items-baseline justify-end gap-2">
+              <span className="truncate text-right text-[#d4d4d8]">
+                {formatTempoValue(entry, entry.analyzedEndSample / doc.sampleRate)}
+              </span>
+              {entry.bpm !== null && !entry.stale && (
+                <span className="flex shrink-0 gap-1">
+                  <button
+                    type="button"
+                    data-testid="tempo-halve-button"
+                    title="Halve tempo (/2) — re-tracks the beat grid"
+                    onClick={() => void correct(entry.periodFrames * 2)}
+                    className="rounded border border-[#3a3a42] px-1 text-[#d4d4d8] hover:border-[#26c6da]"
+                  >
+                    /2
+                  </button>
+                  <button
+                    type="button"
+                    data-testid="tempo-double-button"
+                    title="Double tempo (x2) — re-tracks the beat grid"
+                    onClick={() => void correct(entry.periodFrames / 2)}
+                    className="rounded border border-[#3a3a42] px-1 text-[#d4d4d8] hover:border-[#26c6da]"
+                  >
+                    x2
+                  </button>
+                </span>
+              )}
+            </span>
+          </div>
+          <Row
+            label="Confidence"
+            value={
+              entry.confidence < CONFIDENCE_LOW
+                ? `${Math.round(entry.confidence * 100)}% · low`
+                : `${Math.round(entry.confidence * 100)}%`
+            }
+            muted={entry.confidence < CONFIDENCE_LOW}
+          />
+          <Row label="Beats" value={entry.beatSamples.length.toLocaleString()} />
+          {correctionFailed && (
+            <div data-testid="tempo-correction-failed" className="px-2 pb-1 text-xs text-[#e0a458]">
+              Correction failed — grid unchanged.
+            </div>
+          )}
+          {entry.stale && (
+            <div className="px-2 py-1">
+              <button
+                type="button"
+                data-testid="tempo-reanalyze-button"
+                onClick={detectOrReanalyze}
+                className="w-full rounded bg-[#26c6da] px-2 py-1 text-xs font-medium text-[#1a1a1e] hover:opacity-90"
+              >
+                Re-analyze
+              </button>
+            </div>
+          )}
+        </>
+      ) : (
+        <div className="px-2 py-1">
+          <button
+            type="button"
+            data-testid="tempo-analyze-button"
+            onClick={detectOrReanalyze}
+            className="w-full rounded bg-[#26c6da] px-2 py-1 text-xs font-medium text-[#1a1a1e] hover:opacity-90"
+          >
+            Detect Tempo
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -58,6 +227,8 @@ function DocumentProperties() {
       <Row label="Duration" value={formatTime(length, doc.sampleRate)} />
       <Row label="Samples" value={length.toLocaleString()} />
       <Row label="Dirty" value={doc.dirty ? 'Yes' : 'No'} />
+
+      <TempoSection key={doc.id} doc={doc} />
 
       {hasSelection && (
         <>

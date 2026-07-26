@@ -4,11 +4,18 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { getSpectralScale, toggleSpectralScale } from './spectralScale';
 import * as sessionFileModule from '../multitrack/sessionFile';
+import { runTempoAnalysis } from './tempoAnalysis';
 
 jest.mock('../multitrack/sessionFile');
+jest.mock('./tempoAnalysis', () => ({
+  runTempoAnalysis: jest.fn(async () => null),
+}));
+
+const mockRunTempoAnalysis = runTempoAnalysis as jest.MockedFunction<typeof runTempoAnalysis>;
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  mockRunTempoAnalysis.mockClear();
 });
 
 function installShowMessageBox(): jest.Mock {
@@ -393,5 +400,36 @@ describe('session.save / session.open error surfacing (F3 defense-in-depth)', ()
     expect(showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', title: 'Open Session failed', message: 'parse failed: corrupt file' })
     );
+  });
+});
+
+describe('tempo.detect (Task T5)', () => {
+  it('Effects section contains tempo.detect immediately after noise.capture', () => {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    const ids = commandIds(effects.items);
+    expect(ids.indexOf('tempo.detect')).toBe(ids.indexOf('noise.capture') + 1);
+  });
+
+  function findEffectsCmd(id: string): MenuCommand {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  it('is disabled with no active document and enabled with one', () => {
+    expect(findEffectsCmd('tempo.detect').enabled(useAppStore.getState())).toBe(false);
+
+    openDoc();
+    expect(findEffectsCmd('tempo.detect').enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("tempo.detect") with no document is a no-op: runTempoAnalysis is never called', async () => {
+    await runCommand('tempo.detect');
+    expect(mockRunTempoAnalysis).not.toHaveBeenCalled();
+  });
+
+  it('runCommand("tempo.detect") with an active document calls runTempoAnalysis with it', async () => {
+    const doc = openDoc();
+    await runCommand('tempo.detect');
+    expect(mockRunTempoAnalysis).toHaveBeenCalledWith(doc);
   });
 });

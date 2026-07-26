@@ -1,9 +1,52 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import PropertiesPanel from './PropertiesPanel';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { createClip } from '../../multitrack/session';
+import {
+  getTempo,
+  isTempoRunning,
+  getTempoProgress,
+  runTempoAnalysis,
+  regridTempo,
+  useTempoVersion,
+} from '../../services/tempoAnalysis';
+import type { TempoEntry } from '../../services/tempoAnalysis';
+
+jest.mock('../../services/tempoAnalysis', () => ({
+  getTempo: jest.fn(() => null),
+  isTempoRunning: jest.fn(() => false),
+  getTempoProgress: jest.fn(() => null),
+  runTempoAnalysis: jest.fn(async () => null),
+  regridTempo: jest.fn(async () => null),
+  useTempoVersion: jest.fn(() => 0),
+}));
+
+const mockGetTempo = getTempo as jest.MockedFunction<typeof getTempo>;
+const mockIsTempoRunning = isTempoRunning as jest.MockedFunction<typeof isTempoRunning>;
+const mockGetTempoProgress = getTempoProgress as jest.MockedFunction<typeof getTempoProgress>;
+const mockRunTempoAnalysis = runTempoAnalysis as jest.MockedFunction<typeof runTempoAnalysis>;
+const mockRegridTempo = regridTempo as jest.MockedFunction<typeof regridTempo>;
+void useTempoVersion; // imported only so the mock factory's shape stays type-checked
+
+function makeTempoEntry(overrides: Partial<TempoEntry> = {}): TempoEntry {
+  return {
+    bpm: 128.4,
+    confidence: 0.72,
+    beatSamples: new Int32Array(642),
+    salience: 1,
+    peakRatio: 1,
+    ibiCv: 0.02,
+    truncated: false,
+    analyzedEndSample: 20 * 44100, // 20s of analysed audio by default
+    odf: new Float32Array(0),
+    periodFrames: 200,
+    decimationFactor: 4,
+    stale: false,
+    ...overrides,
+  };
+}
 
 function addDoc(
   opts?: Partial<{ channels: number; filePath: string | null; sourceBitDepth: number }>
@@ -24,6 +67,11 @@ function addDoc(
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(44100);
+  mockGetTempo.mockReset().mockReturnValue(null);
+  mockIsTempoRunning.mockReset().mockReturnValue(false);
+  mockGetTempoProgress.mockReset().mockReturnValue(null);
+  mockRunTempoAnalysis.mockReset().mockResolvedValue(null);
+  mockRegridTempo.mockReset().mockResolvedValue(null);
 });
 
 describe('PropertiesPanel (waveform/spectral view)', () => {
@@ -216,5 +264,179 @@ describe('PropertiesPanel (multitrack view)', () => {
 
     expect(clipGain(clip.id)).toBe(24); // store clamps to +24
     expect(gainInput.value).toBe('24'); // draft reflects the clamp
+  });
+});
+
+describe('PropertiesPanel — Tempo section (Task T5)', () => {
+  it('has a properties-tempo container', () => {
+    addDoc();
+    render(<PropertiesPanel />);
+    expect(screen.getByTestId('properties-tempo')).toBeInTheDocument();
+  });
+
+  it('empty state: renders tempo-analyze-button; clicking it calls runTempoAnalysis with the active doc', () => {
+    const doc = addDoc();
+    render(<PropertiesPanel />);
+
+    const button = screen.getByTestId('tempo-analyze-button');
+    expect(button).toBeInTheDocument();
+    fireEvent.click(button);
+
+    expect(mockRunTempoAnalysis).toHaveBeenCalledWith(doc);
+  });
+
+  it('a seeded entry renders BPM, confidence and beat count', () => {
+    addDoc();
+    mockGetTempo.mockReturnValue(makeTempoEntry({ bpm: 128.4, confidence: 0.72, beatSamples: new Int32Array(642) }));
+    render(<PropertiesPanel />);
+
+    expect(screen.getByText('128.4 BPM')).toBeInTheDocument();
+    expect(screen.getByText('72%')).toBeInTheDocument();
+    expect(screen.getByText('642')).toBeInTheDocument();
+  });
+
+  it('confidence below CONFIDENCE_LOW (0.35) renders "18% · low" in the muted class', () => {
+    addDoc();
+    mockGetTempo.mockReturnValue(makeTempoEntry({ confidence: 0.18 }));
+    render(<PropertiesPanel />);
+
+    const confidenceValue = screen.getByText('18% · low');
+    expect(confidenceValue).toBeInTheDocument();
+    expect(confidenceValue.className).toContain('text-[#8b8b92]');
+  });
+
+  it('a stale entry appends "(stale)" to the tempo value and shows a Re-analyze button', () => {
+    const doc = addDoc();
+    mockGetTempo.mockReturnValue(makeTempoEntry({ stale: true }));
+    render(<PropertiesPanel />);
+
+    expect(screen.getByText(/\(stale\)/)).toBeInTheDocument();
+    const reanalyze = screen.getByTestId('tempo-reanalyze-button');
+    expect(reanalyze).toBeInTheDocument();
+
+    fireEvent.click(reanalyze);
+    expect(mockRunTempoAnalysis).toHaveBeenCalledWith(doc);
+  });
+
+  it('bpm null with 2s analysed renders "—" and "too short"', () => {
+    addDoc();
+    mockGetTempo.mockReturnValue(
+      makeTempoEntry({ bpm: null, analyzedEndSample: 2 * 44100, beatSamples: new Int32Array(0) })
+    );
+    render(<PropertiesPanel />);
+
+    const tempoSection = within(screen.getByTestId('properties-tempo'));
+    expect(tempoSection.getByText(/—/)).toBeInTheDocument();
+    expect(tempoSection.getByText(/too short/)).toBeInTheDocument();
+  });
+
+  it('bpm null with 20s analysed renders "—" and "no rhythm detected"', () => {
+    addDoc();
+    mockGetTempo.mockReturnValue(
+      makeTempoEntry({ bpm: null, analyzedEndSample: 20 * 44100, beatSamples: new Int32Array(0) })
+    );
+    render(<PropertiesPanel />);
+
+    const tempoSection = within(screen.getByTestId('properties-tempo'));
+    expect(tempoSection.getByText(/—/)).toBeInTheDocument();
+    expect(tempoSection.getByText(/no rhythm detected/)).toBeInTheDocument();
+  });
+
+  it('truncated:true appends "(first 10 min)"', () => {
+    addDoc();
+    mockGetTempo.mockReturnValue(makeTempoEntry({ truncated: true }));
+    render(<PropertiesPanel />);
+
+    expect(screen.getByText(/\(first 10 min\)/)).toBeInTheDocument();
+  });
+
+  it('isTempoRunning true renders tempo-progress with the expected width and no analyze button', () => {
+    addDoc();
+    mockIsTempoRunning.mockReturnValue(true);
+    mockGetTempoProgress.mockReturnValue(0.4);
+    render(<PropertiesPanel />);
+
+    const bar = screen.getByTestId('tempo-progress');
+    expect(bar).toHaveStyle({ width: '40%' });
+    expect(screen.queryByTestId('tempo-analyze-button')).not.toBeInTheDocument();
+  });
+
+  describe('octave correction control (x2 / /2)', () => {
+    it('renders x2 and /2 buttons beside a valid BPM result', () => {
+      addDoc();
+      mockGetTempo.mockReturnValue(makeTempoEntry({ periodFrames: 200 }));
+      render(<PropertiesPanel />);
+
+      expect(screen.getByTestId('tempo-double-button')).toBeInTheDocument();
+      expect(screen.getByTestId('tempo-halve-button')).toBeInTheDocument();
+    });
+
+    it('does NOT render x2//2 buttons when bpm is null (nothing to correct)', () => {
+      addDoc();
+      mockGetTempo.mockReturnValue(makeTempoEntry({ bpm: null, beatSamples: new Int32Array(0) }));
+      render(<PropertiesPanel />);
+
+      expect(screen.queryByTestId('tempo-double-button')).not.toBeInTheDocument();
+      expect(screen.queryByTestId('tempo-halve-button')).not.toBeInTheDocument();
+    });
+
+    it('x2 calls regridTempo with HALF the current periodFrames (re-tracks, does not relabel)', async () => {
+      const doc = addDoc();
+      mockGetTempo.mockReturnValue(makeTempoEntry({ periodFrames: 200 }));
+      render(<PropertiesPanel />);
+
+      fireEvent.click(screen.getByTestId('tempo-double-button'));
+
+      await waitFor(() => expect(mockRegridTempo).toHaveBeenCalledWith(doc.id, 100));
+    });
+
+    it('/2 calls regridTempo with DOUBLE the current periodFrames (re-tracks, does not relabel)', async () => {
+      const doc = addDoc();
+      mockGetTempo.mockReturnValue(makeTempoEntry({ periodFrames: 200 }));
+      render(<PropertiesPanel />);
+
+      fireEvent.click(screen.getByTestId('tempo-halve-button'));
+
+      await waitFor(() => expect(mockRegridTempo).toHaveBeenCalledWith(doc.id, 400));
+    });
+
+    it('a successful correction shows the NEWLY re-tracked beat count, not just a relabeled BPM', async () => {
+      const doc = addDoc();
+      const before = makeTempoEntry({ bpm: 64.2, periodFrames: 400, beatSamples: new Int32Array(320) });
+      const after = makeTempoEntry({ bpm: 128.4, periodFrames: 200, beatSamples: new Int32Array(640) });
+      mockGetTempo.mockReturnValue(before);
+      mockRegridTempo.mockImplementation(async () => {
+        // Simulate the real cache being overwritten by the worker's 'done'
+        // reply before this promise resolves — genuine re-tracking, not a
+        // display-only relabel of `before`.
+        mockGetTempo.mockReturnValue(after);
+        return after;
+      });
+
+      render(<PropertiesPanel />);
+      expect(screen.getByText('320')).toBeInTheDocument(); // pre-correction beat count
+
+      fireEvent.click(screen.getByTestId('tempo-double-button'));
+
+      await waitFor(() => expect(screen.getByText('640')).toBeInTheDocument());
+      expect(screen.getByText('128.4 BPM')).toBeInTheDocument();
+      expect(screen.queryByText('320')).not.toBeInTheDocument();
+    });
+
+    it('a degenerate (null) correction result is surfaced and the previous grid is left showing', async () => {
+      const doc = addDoc();
+      const entry = makeTempoEntry({ periodFrames: 200, beatSamples: new Int32Array(642) });
+      mockGetTempo.mockReturnValue(entry);
+      mockRegridTempo.mockResolvedValue(null); // the entry is unchanged in the cache
+
+      render(<PropertiesPanel />);
+      fireEvent.click(screen.getByTestId('tempo-double-button'));
+
+      expect(mockRegridTempo).toHaveBeenCalledWith(doc.id, 100);
+      await waitFor(() => expect(screen.getByTestId('tempo-correction-failed')).toBeInTheDocument());
+      // The previous, still-good grid keeps showing — never blanked or relabeled.
+      expect(screen.getByText('642')).toBeInTheDocument();
+      expect(screen.getByText('128.4 BPM')).toBeInTheDocument();
+    });
   });
 });

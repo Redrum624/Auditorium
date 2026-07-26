@@ -25,6 +25,7 @@ import {
 import { getAllEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
 import { toggleSpectralScale } from './spectralScale';
+import { runTempoAnalysis } from './tempoAnalysis';
 
 export interface MenuCommand {
   id: string;
@@ -119,10 +120,12 @@ function fallbackCommand(id: string): MenuCommand {
  * effect is registered. */
 function effectsSectionItemIds(): (string | 'separator')[] {
   const effects = getAllEffects();
-  if (effects.length === 0) return ['noise.capture', 'separator', 'effects.none'];
+  if (effects.length === 0) return ['noise.capture', 'tempo.detect', 'separator', 'effects.none'];
   // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
-  // Noise Reduction effect), above the category-grouped effect list.
-  const ids: (string | 'separator')[] = ['noise.capture', 'separator'];
+  // Noise Reduction effect), above the category-grouped effect list. 'Detect
+  // Tempo' (Task T5) joins it there rather than widening the closed
+  // MenuSection['title'] union for a single analysis command (Plan Ruling 5).
+  const ids: (string | 'separator')[] = ['noise.capture', 'tempo.detect', 'separator'];
   let lastCategory: string | null = null;
   for (const e of effects) {
     if (e.category !== lastCategory) {
@@ -722,6 +725,25 @@ function registerMarkerCommands(): void {
   ]);
 }
 
+/** Registers the Task T5 tempo command: `tempo.detect` joins `noise.capture`
+ * in the Effects menu (Plan Ruling 5) rather than widening the closed
+ * `MenuSection['title']` union for one item. Fires `runTempoAnalysis`, which
+ * itself never throws/rejects and surfaces its own failure dialog — no
+ * try/catch needed here, matching `effect.<id>`'s run() above. */
+function registerTempoCommands(): void {
+  registerCommands([
+    {
+      id: 'tempo.detect',
+      label: 'Detect Tempo',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => {
+        const d = activeDoc(useAppStore.getState());
+        if (d) await runTempoAnalysis(d);
+      },
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -731,3 +753,4 @@ registerDocumentToolCommands();
 registerNoiseAndViewCommands();
 registerMultitrackCommands();
 registerMarkerCommands();
+registerTempoCommands();
