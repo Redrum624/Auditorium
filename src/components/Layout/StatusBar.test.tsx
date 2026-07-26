@@ -4,6 +4,7 @@ import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { getTempo, runTempoAnalysis, useTempoVersion } from '../../services/tempoAnalysis';
 import type { TempoEntry } from '../../services/tempoAnalysis';
+import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 
 jest.mock('../../services/tempoAnalysis', () => ({
   getTempo: jest.fn(() => null),
@@ -81,5 +82,36 @@ describe('StatusBar — tempo readout (Task T5)', () => {
     render(<StatusBar />);
 
     expect(mockRunTempoAnalysis).not.toHaveBeenCalled();
+  });
+
+  describe('low-confidence uncertainty marker (Fix round 1)', () => {
+    it('appends "?" and a title when confidence is below CONFIDENCE_LOW', () => {
+      addDoc();
+      mockGetTempo.mockReturnValue(makeTempoEntry({ bpm: 128.4, confidence: CONFIDENCE_LOW - 0.01 }));
+      render(<StatusBar />);
+
+      const readout = screen.getByText('♩ 128.4?');
+      expect(readout).toBeInTheDocument();
+      expect(readout.title.toLowerCase()).toContain('low confidence');
+    });
+
+    it('does NOT append "?" when confidence is at or above CONFIDENCE_LOW', () => {
+      addDoc();
+      mockGetTempo.mockReturnValue(makeTempoEntry({ bpm: 128.4, confidence: CONFIDENCE_LOW }));
+      render(<StatusBar />);
+
+      expect(screen.getByText('♩ 128.4')).toBeInTheDocument();
+      expect(screen.queryByText('♩ 128.4?')).not.toBeInTheDocument();
+    });
+
+    it('combines with the stale marker: "♩ 128.4*?"', () => {
+      addDoc();
+      mockGetTempo.mockReturnValue(
+        makeTempoEntry({ bpm: 128.4, stale: true, confidence: CONFIDENCE_LOW - 0.01 })
+      );
+      render(<StatusBar />);
+
+      expect(screen.getByText('♩ 128.4*?')).toBeInTheDocument();
+    });
   });
 });

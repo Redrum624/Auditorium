@@ -35,6 +35,32 @@ function SectionLabel({ children }: { children: string }) {
   );
 }
 
+/** Shared 'Detect Tempo' / 'Re-analyze' full-width button (Fix round 1
+ * simplification — the two were identical JSX differing only in
+ * testid/label). */
+function TempoActionButton({
+  testId,
+  label,
+  onClick,
+}: {
+  testId: string;
+  label: string;
+  onClick: () => void;
+}) {
+  return (
+    <div className="px-2 py-1">
+      <button
+        type="button"
+        data-testid={testId}
+        onClick={onClick}
+        className="w-full rounded bg-[#26c6da] px-2 py-1 text-xs font-medium text-[#1a1a1e] hover:opacity-90"
+      >
+        {label}
+      </button>
+    </div>
+  );
+}
+
 function formatBpm(bpm: number): string {
   return `${bpm.toFixed(1)} BPM`;
 }
@@ -166,29 +192,11 @@ function TempoSection({ doc }: { doc: AudioDocument }) {
             </div>
           )}
           {entry.stale && (
-            <div className="px-2 py-1">
-              <button
-                type="button"
-                data-testid="tempo-reanalyze-button"
-                onClick={detectOrReanalyze}
-                className="w-full rounded bg-[#26c6da] px-2 py-1 text-xs font-medium text-[#1a1a1e] hover:opacity-90"
-              >
-                Re-analyze
-              </button>
-            </div>
+            <TempoActionButton testId="tempo-reanalyze-button" label="Re-analyze" onClick={detectOrReanalyze} />
           )}
         </>
       ) : (
-        <div className="px-2 py-1">
-          <button
-            type="button"
-            data-testid="tempo-analyze-button"
-            onClick={detectOrReanalyze}
-            className="w-full rounded bg-[#26c6da] px-2 py-1 text-xs font-medium text-[#1a1a1e] hover:opacity-90"
-          >
-            Detect Tempo
-          </button>
-        </div>
+        <TempoActionButton testId="tempo-analyze-button" label="Detect Tempo" onClick={detectOrReanalyze} />
       )}
     </div>
   );
