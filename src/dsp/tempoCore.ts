@@ -1127,6 +1127,29 @@ export interface TempoAnalysis {
    * (sampleRate)`, a pure function of `sampleRate` alone, but retained
    * directly so `deriveGrid` doesn't need to re-derive it from context. */
   decimationFactor: number;
+  /** The onset stage's full log-band matrix (`onsetEnvelope`'s `bands`,
+   * `numFrames * numBands` row-major), retained -- per
+   * `v15-architecture.md`'s "Where the result is cached" section -- so a
+   * remix-level per-boundary descriptor pass (T9's `deriveRemixFeatures`)
+   * reads timbre/level directly off it instead of re-running the onset FFT.
+   * GAP CLOSED BY T9 (was previously computed by `onsetEnvelope` and then
+   * silently discarded by `analyzeTempo`'s destructure, even though the
+   * architecture doc already described it as retained -- see the T9 task
+   * report for the full evidence trail): every `analyzeTempo` return path now
+   * threads it through. `deriveGrid` (the 'regrid' fast path) has no onset
+   * data to source this from and returns an EMPTY array here -- documented at
+   * its own call site, matching how it already leaves `confidence`/
+   * `peakRatio` at 0 for the same reason. */
+  bands: Float32Array;
+  /** Number of columns in `bands` (see `OnsetEnvelopeResult.numBands` --
+   * usually 24, can be less at unusually low decimated rates). 0 when `bands`
+   * is empty (the `deriveGrid` path, or a too-short-audio guard). */
+  numBands: number;
+  /** The onset stage's low-band-restricted flux envelope (`onsetEnvelope`'s
+   * `odfLow`, same length and shared normalisation scale as `odf`), retained
+   * for the same reason as `bands` -- T9's downbeat-phase detector needs it
+   * and must not re-run the onset pass to get it. Empty from `deriveGrid`. */
+  odfLow: Float32Array;
 }
 
 function emptyTempoAnalysis(
@@ -1134,7 +1157,10 @@ function emptyTempoAnalysis(
   truncated: boolean,
   odf: Float32Array = new Float32Array(0),
   periodFrames = 0,
-  decimationFactor = 1
+  decimationFactor = 1,
+  bands: Float32Array = new Float32Array(0),
+  numBands = 0,
+  odfLow: Float32Array = new Float32Array(0)
 ): TempoAnalysis {
   return {
     bpm: null,
@@ -1148,6 +1174,9 @@ function emptyTempoAnalysis(
     odf,
     periodFrames,
     decimationFactor,
+    bands,
+    numBands,
+    odfLow,
   };
 }
 
@@ -1232,7 +1261,7 @@ export function analyzeTempo(
   const { signal, rate, factor: D } = decimateMono(analyzed, sampleRate);
   onProgress?.(0.05);
 
-  const { odf, numFrames, odfRate } = onsetEnvelope(signal, rate, (f) => {
+  const { odf, bands, numBands, odfLow, numFrames, odfRate } = onsetEnvelope(signal, rate, (f) => {
     onProgress?.(0.05 + (f / 0.9) * 0.7);
   });
   onProgress?.(0.75);
@@ -1242,7 +1271,7 @@ export function analyzeTempo(
   if (!(odfMax > 0)) {
     // All-zero / silent / pure-DC ODF (T1's onsetEnvelope already collapses
     // these to all-zero via its own std<1e-9 short-circuit).
-    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, 0, D);
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, 0, D, bands, numBands, odfLow);
   }
 
   const acf = autocorrelate(odf);
@@ -1256,7 +1285,7 @@ export function analyzeTempo(
   const octave = chooseOctave(odf, bStar, periodFramesRefined, minBpm, maxBpm);
   const beatFrames = octave.beatFrames;
   if (beatFrames.length < 2) {
-    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, octave.periodFrames, D);
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, octave.periodFrames, D, bands, numBands, odfLow);
   }
 
   // Mathematically the `null` (slope <= 0) branch below is unreachable given
@@ -1267,7 +1296,7 @@ export function analyzeTempo(
   // rather than a bpm:null result carrying non-empty beatSamples.
   const refined = refineAndMeasure(odf, beatFrames, analyzed, sampleRate, D);
   if (!refined) {
-    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, octave.periodFrames, D);
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, octave.periodFrames, D, bands, numBands, odfLow);
   }
   const { beatSamples, bpm, ibiCv } = refined;
 
@@ -1308,6 +1337,9 @@ export function analyzeTempo(
     odf,
     periodFrames: octave.periodFrames,
     decimationFactor: D,
+    bands,
+    numBands,
+    odfLow,
   };
 }
 
@@ -1377,5 +1409,12 @@ export function deriveGrid(mono: Float32Array, sampleRate: number, odf: Float32A
     odf,
     periodFrames,
     decimationFactor: D,
+    // deriveGrid never re-runs the onset pass -- see the doc comment above:
+    // it has no `bands`/`odfLow` to source these from, so a regrid always
+    // reports them empty (same "genuinely doesn't have the data" precedent
+    // as confidence/peakRatio above).
+    bands: new Float32Array(0),
+    numBands: 0,
+    odfLow: new Float32Array(0),
   };
 }

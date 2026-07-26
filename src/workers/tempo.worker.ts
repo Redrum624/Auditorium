@@ -1,12 +1,14 @@
-import { analyzeTempo, deriveGrid } from '../dsp/tempoCore';
+import { analyzeTempo, deriveGrid, decimateMono } from '../dsp/tempoCore';
 import type { TempoAnalysis } from '../dsp/tempoCore';
+import { chromaEnvelope, deriveRemixFeatures } from '../dsp/remixFeatures';
+import type { RemixAnalysis } from '../dsp/remixFeatures';
 
 // Protocol (Task T3, v15-architecture.md "Module map"): the renderer posts an
 // `analyze` request with a transferred mono mixdown; the worker replies
-// `done` with a transferred TempoAnalysis (or, at level 'remix' once T9
-// lands, a RemixAnalysis), throttled `progress` messages along the way, or
-// `error` with the failure message when analysis throws — never letting a
-// throw escape uncaught (mirrors spectrogram.worker.ts's try/catch shape).
+// `done` with a transferred TempoAnalysis (or, at level 'remix', a
+// RemixAnalysis), throttled `progress` messages along the way, or `error`
+// with the failure message when analysis throws — never letting a throw
+// escape uncaught (mirrors spectrogram.worker.ts's try/catch shape).
 //
 // `level:'regrid'` (Task T4 Plan Ruling 4, added post-T4-review): carries the
 // RETAINED `odf` (from a prior 'tempo'/'remix' analysis) and a caller-chosen
@@ -42,16 +44,6 @@ const ctx = self as unknown as {
 // woken once per onset frame (up to ~12,920 times for a 5-minute track).
 const PROGRESS_INTERVAL_MS = 50;
 
-/**
- * T9 will replace this with a real call into `remixFeatures.ts` (chroma pass,
- * bar boundaries, per-boundary descriptors, clusters). Stubbed here so
- * `level:'remix'` is wired all the way through the protocol without this task
- * depending on T9 landing first — this task is independently mergeable.
- */
-function deriveRemixFeatures(_tempo: TempoAnalysis, _msg: AnalyzeMessage): never {
-  throw new Error('not implemented');
-}
-
 ctx.onmessage = (e) => {
   const msg = e.data;
   if (!msg || msg.type !== 'analyze') return;
@@ -65,7 +57,7 @@ ctx.onmessage = (e) => {
       }
     };
 
-    let analysis: TempoAnalysis;
+    let analysis: TempoAnalysis | RemixAnalysis;
     if (msg.level === 'regrid') {
       if (!msg.odf || msg.periodFrames === undefined) {
         throw new Error('regrid request missing odf/periodFrames');
@@ -78,13 +70,52 @@ ctx.onmessage = (e) => {
         { minBpm: msg.minBpm, maxBpm: msg.maxBpm },
         onProgress
       );
-      analysis = msg.level === 'remix' ? deriveRemixFeatures(tempo, msg) : tempo;
+      if (msg.level === 'remix') {
+        // Second streaming pass (T9): re-decimates the SAME analyzed range
+        // analyzeTempo just used (same D, same rate, same signal length) so
+        // the chroma-frame and onset-frame timelines share one consistent
+        // decimated-signal basis, then adds chroma + downbeat/boundaries/
+        // descriptors/clusters. See remixFeatures.ts's `analyzeRemix` doc
+        // comment — this inlines that same two-step shape rather than
+        // calling it directly so progress can be composed across both
+        // passes (0->0.7 onset, 0.7->1.0 chroma) instead of resetting.
+        const analyzed = msg.mono.subarray(0, tempo.analyzedEndSample);
+        const { signal, rate } = decimateMono(analyzed, msg.sampleRate);
+        const chroma = chromaEnvelope(signal, rate, (f) => onProgress(0.7 + f * 0.3));
+        analysis = deriveRemixFeatures(tempo, chroma, {
+          beatsPerBar: msg.beatsPerBar,
+          downbeatShiftBeats: msg.downbeatShiftBeats,
+        });
+      } else {
+        analysis = tempo;
+      }
     }
 
-    ctx.postMessage(
-      { type: 'done', id: msg.id, level: msg.level, analysis },
-      [analysis.beatSamples.buffer as ArrayBuffer, analysis.odf.buffer as ArrayBuffer]
-    );
+    // Every typed array on `analysis` is TRANSFERRED, never structure-cloned
+    // -- `bands`/`odfLow` are now part of the base TempoAnalysis shape (this
+    // task's tempoCore.ts widening) so they are always included; the
+    // remix-only arrays are added only when present.
+    const transfer: ArrayBuffer[] = [
+      analysis.beatSamples.buffer as ArrayBuffer,
+      analysis.odf.buffer as ArrayBuffer,
+      analysis.bands.buffer as ArrayBuffer,
+      analysis.odfLow.buffer as ArrayBuffer,
+    ];
+    if (msg.level === 'remix') {
+      const remix = analysis as RemixAnalysis;
+      transfer.push(
+        remix.chroma.buffer as ArrayBuffer,
+        remix.barBoundary.buffer as ArrayBuffer,
+        remix.T.buffer as ArrayBuffer,
+        remix.C.buffer as ArrayBuffer,
+        remix.L.buffer as ArrayBuffer,
+        remix.R.buffer as ArrayBuffer,
+        remix.S.buffer as ArrayBuffer,
+        remix.cluster.buffer as ArrayBuffer
+      );
+    }
+
+    ctx.postMessage({ type: 'done', id: msg.id, level: msg.level, analysis }, transfer);
   } catch (err) {
     ctx.postMessage({
       type: 'error',

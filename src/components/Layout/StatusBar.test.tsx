@@ -29,6 +29,9 @@ function makeTempoEntry(overrides: Partial<TempoEntry> = {}): TempoEntry {
     odf: new Float32Array(0),
     periodFrames: 200,
     decimationFactor: 4,
+    bands: new Float32Array(0),
+    numBands: 0,
+    odfLow: new Float32Array(0),
     stale: false,
     ...overrides,
   };
