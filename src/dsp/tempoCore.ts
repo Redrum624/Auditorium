@@ -228,6 +228,16 @@ function boxcarStageWindows(D: number): [number, number][] {
 }
 
 /**
+ * `D = clamp(round(sampleRate / TARGET_ANALYSIS_RATE), 1, 8)` — a pure
+ * function of `sampleRate` alone (no audio content involved), so `deriveGrid`
+ * (Task T4 Plan Ruling 4) can recompute the SAME factor `decimateMono` would
+ * have used without needing it passed across the worker boundary.
+ */
+export function computeDecimationFactor(sampleRate: number): number {
+  return clamp(Math.round(sampleRate / TARGET_ANALYSIS_RATE), 1, 8);
+}
+
+/**
  * Decimates `mono` toward `TARGET_ANALYSIS_RATE` by an integer factor
  * `D = clamp(round(sampleRate / TARGET_ANALYSIS_RATE), 1, 8)`, anti-aliasing
  * with a triple-cascaded boxcar first (`boxcarStageWindows`). Never mutates
@@ -236,7 +246,7 @@ function boxcarStageWindows(D: number): [number, number][] {
  * the decimated-size output via `centeredSumStrided`.
  */
 export function decimateMono(mono: Float32Array, sampleRate: number): DecimateResult {
-  const factor = clamp(Math.round(sampleRate / TARGET_ANALYSIS_RATE), 1, 8);
+  const factor = computeDecimationFactor(sampleRate);
 
   if (factor === 1) {
     const copy = new Float32Array(mono.length);
@@ -1102,9 +1112,30 @@ export interface TempoAnalysis {
   ibiCv: number;
   truncated: boolean;
   analyzedEndSample: number;
+  /** Post-processed onset envelope (unit-std-normalised, half-wave rectified
+   * -- the exact array `trackBeats` consumes), retained so a LATER octave
+   * correction can re-run `trackBeats` at a corrected period without
+   * re-decimating/re-FFT-ing/re-ACF-ing (Task T4 Plan Ruling 4 -- see
+   * `deriveGrid`). ~52 KB for a 5-minute track at 43 fps. */
+  odf: Float32Array;
+  /** The refined period (in ODF frames) that actually produced `beatSamples`
+   * -- `octave.periodFrames` from `chooseOctave`, or the period `deriveGrid`
+   * was called with for a regridded entry. This is what a x2/(division)2
+   * correction control doubles/halves and feeds back into `deriveGrid`. */
+  periodFrames: number;
+  /** The decimation factor `D` used to produce `odf` -- `computeDecimationFactor
+   * (sampleRate)`, a pure function of `sampleRate` alone, but retained
+   * directly so `deriveGrid` doesn't need to re-derive it from context. */
+  decimationFactor: number;
 }
 
-function emptyTempoAnalysis(analyzedEndSample: number, truncated: boolean): TempoAnalysis {
+function emptyTempoAnalysis(
+  analyzedEndSample: number,
+  truncated: boolean,
+  odf: Float32Array = new Float32Array(0),
+  periodFrames = 0,
+  decimationFactor = 1
+): TempoAnalysis {
   return {
     bpm: null,
     confidence: 0,
@@ -1114,7 +1145,60 @@ function emptyTempoAnalysis(analyzedEndSample: number, truncated: boolean): Temp
     ibiCv: 0,
     truncated,
     analyzedEndSample,
+    odf,
+    periodFrames,
+    decimationFactor,
   };
+}
+
+interface RefinedBeats {
+  beatSamples: Int32Array;
+  bpm: number;
+  ibiCv: number;
+}
+
+/**
+ * Two-stage sample-accurate refinement (parabolic sub-frame + sample-domain
+ * energy-derivative search) applied to a set of ODF-frame beat positions,
+ * followed by least-squares BPM regression and inter-beat-interval CV.
+ * Shared between `analyzeTempo`'s own tail and `deriveGrid` (Task T4 Plan
+ * Ruling 4) so a period correction reuses EXACTLY the refinement math a full
+ * analysis uses, rather than a re-derived copy that could silently drift
+ * from it. Returns `null` for a degenerate beat set (fewer than 2 beats, or
+ * a non-positive regression slope -- mathematically unreachable given >=2
+ * STRICTLY increasing refined samples, kept as a defensive guard matching
+ * the one `analyzeTempo` already had before this was extracted).
+ */
+function refineAndMeasure(
+  odf: Float32Array,
+  beatFrames: Int32Array,
+  analyzed: Float32Array,
+  sampleRate: number,
+  D: number
+): RefinedBeats | null {
+  if (beatFrames.length < 2) return null;
+
+  const refinedSamples: number[] = new Array(beatFrames.length);
+  for (let i = 0; i < beatFrames.length; i++) {
+    const f = parabolicSubFrame(odf, beatFrames[i]);
+    const coarseSample = Math.round((f * ONSET_HOP + ONSET_FFT * ONSET_ATTRIBUTION_FRAC) * D);
+    refinedSamples[i] = refineSampleDomain(analyzed, coarseSample, D);
+  }
+  enforceStrictlyIncreasing(refinedSamples);
+
+  const slope = leastSquaresSlope(refinedSamples);
+  if (!(slope > 0)) return null;
+  const bpm = (60 * sampleRate) / slope;
+
+  const diffs: number[] = new Array(refinedSamples.length - 1);
+  for (let i = 1; i < refinedSamples.length; i++) diffs[i - 1] = refinedSamples[i] - refinedSamples[i - 1];
+  const diffMean = meanOf(diffs);
+  let variance = 0;
+  for (let i = 0; i < diffs.length; i++) variance += (diffs[i] - diffMean) * (diffs[i] - diffMean);
+  variance /= diffs.length > 0 ? diffs.length : 1;
+  const ibiCv = diffMean > 0 ? Math.sqrt(variance) / diffMean : 0;
+
+  return { beatSamples: Int32Array.from(refinedSamples), bpm, ibiCv };
 }
 
 /**
@@ -1158,7 +1242,7 @@ export function analyzeTempo(
   if (!(odfMax > 0)) {
     // All-zero / silent / pure-DC ODF (T1's onsetEnvelope already collapses
     // these to all-zero via its own std<1e-9 short-circuit).
-    return emptyTempoAnalysis(analyzedEndSample, truncated);
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, 0, D);
   }
 
   const acf = autocorrelate(odf);
@@ -1172,36 +1256,20 @@ export function analyzeTempo(
   const octave = chooseOctave(odf, bStar, periodFramesRefined, minBpm, maxBpm);
   const beatFrames = octave.beatFrames;
   if (beatFrames.length < 2) {
-    return emptyTempoAnalysis(analyzedEndSample, truncated);
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, octave.periodFrames, D);
   }
 
-  const refinedSamples: number[] = new Array(beatFrames.length);
-  for (let i = 0; i < beatFrames.length; i++) {
-    const f = parabolicSubFrame(odf, beatFrames[i]);
-    const coarseSample = Math.round((f * ONSET_HOP + ONSET_FFT * ONSET_ATTRIBUTION_FRAC) * D);
-    refinedSamples[i] = refineSampleDomain(analyzed, coarseSample, D);
+  // Mathematically the `null` (slope <= 0) branch below is unreachable given
+  // >=2 STRICTLY increasing refined samples paired with evenly-spaced
+  // indices (the least-squares slope of a strictly monotonic sequence is
+  // always positive) -- kept as a defensive guard, but post-T2-review it
+  // must return the SAME null-bpm/empty-beats invariant as every other guard
+  // rather than a bpm:null result carrying non-empty beatSamples.
+  const refined = refineAndMeasure(odf, beatFrames, analyzed, sampleRate, D);
+  if (!refined) {
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, octave.periodFrames, D);
   }
-  enforceStrictlyIncreasing(refinedSamples);
-
-  const slope = leastSquaresSlope(refinedSamples);
-  if (!(slope > 0)) {
-    // Mathematically this branch is unreachable given >=2 STRICTLY
-    // increasing samples paired with evenly-spaced indices (the
-    // least-squares slope of a strictly monotonic sequence is always
-    // positive) -- kept as a defensive guard, but post-T2-review it must
-    // return the SAME null-bpm/empty-beats invariant as every other guard
-    // rather than a bpm:null result carrying non-empty beatSamples.
-    return emptyTempoAnalysis(analyzedEndSample, truncated);
-  }
-  const bpm = (60 * sampleRate) / slope;
-
-  const diffs: number[] = new Array(refinedSamples.length - 1);
-  for (let i = 1; i < refinedSamples.length; i++) diffs[i - 1] = refinedSamples[i] - refinedSamples[i - 1];
-  const diffMean = meanOf(diffs);
-  let variance = 0;
-  for (let i = 0; i < diffs.length; i++) variance += (diffs[i] - diffMean) * (diffs[i] - diffMean);
-  variance /= diffs.length > 0 ? diffs.length : 1;
-  const ibiCv = diffMean > 0 ? Math.sqrt(variance) / diffMean : 0;
+  const { beatSamples, bpm, ibiCv } = refined;
 
   const secondBest = secondBestOutsideFamily(candidates, bStar);
   const rawPeakRatio = secondBest > 0 ? bestScore / secondBest : 0;
@@ -1231,11 +1299,83 @@ export function analyzeTempo(
   return {
     bpm,
     confidence,
-    beatSamples: Int32Array.from(refinedSamples),
+    beatSamples,
     salience: octave.salience,
     peakRatio,
     ibiCv,
     truncated,
     analyzedEndSample,
+    odf,
+    periodFrames: octave.periodFrames,
+    decimationFactor: D,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// deriveGrid -- regrid path (Task T4 Plan Ruling 4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Re-tracks the beat grid at a caller-specified `periodFrames` WITHOUT a
+ * full re-analysis: no decimation, no FFT, no ACF, no tempo-candidate/octave
+ * search -- just `trackBeats` (Ellis DP) at the given period, followed by
+ * the SAME two-stage sample-accurate refinement `analyzeTempo` uses
+ * (`refineAndMeasure`). This is the function the plan's octave-correction
+ * carry-forward requires: the x2/(divide)2 control MUST call this to
+ * physically re-track the grid at half/double the period, not merely
+ * relabel the displayed BPM -- relabelling alone would leave `beatSamples`
+ * at the WRONG density (half or double the true beat count) while
+ * displaying the corrected number, which is exactly the failure mode the
+ * carry-forward forbids.
+ *
+ * `D` (the decimation factor) is recomputed via `computeDecimationFactor
+ * (sampleRate)` -- a pure function of `sampleRate` alone -- rather than
+ * threaded across the worker boundary as a separate field, keeping the
+ * `level:'regrid'` worker message to exactly `{mono, sampleRate, odf,
+ * periodFrames}` per the plan. `analyzedEndSample`/`truncated` are
+ * similarly re-derived the same way `analyzeTempo` computes them, from
+ * `mono.length` and `sampleRate` alone.
+ *
+ * `confidence` and `peakRatio` are set to 0 here -- this function genuinely
+ * has no ACF/candidate data to compute them from (that is the whole point:
+ * it never touches the ACF). The caller (`tempoAnalysis.ts`'s
+ * `regridTempo`) carries those two fields over from the entry being
+ * corrected instead, since a period correction changes which octave-family
+ * member is displayed, not whether the content has real periodic structure
+ * or how the winning family competed against alternatives.
+ *
+ * Never mutates `mono` or `odf`. Does not throw; a degenerate `periodFrames`
+ * (too few beats, or fewer than 2 in `odf`'s length) returns the same
+ * null-bpm/empty-beats shape `analyzeTempo`'s own guards return.
+ */
+export function deriveGrid(mono: Float32Array, sampleRate: number, odf: Float32Array, periodFrames: number): TempoAnalysis {
+  const D = computeDecimationFactor(sampleRate);
+  const maxSamples = Math.round(MAX_ANALYSIS_SECONDS * sampleRate);
+  const truncated = mono.length > maxSamples;
+  const analyzedEndSample = truncated ? maxSamples : mono.length;
+  const analyzed = mono.subarray(0, analyzedEndSample);
+
+  const beatFrames = trackBeats(odf, periodFrames);
+  if (beatFrames.length < 2) {
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, periodFrames, D);
+  }
+
+  const refined = refineAndMeasure(odf, beatFrames, analyzed, sampleRate, D);
+  if (!refined) {
+    return emptyTempoAnalysis(analyzedEndSample, truncated, odf, periodFrames, D);
+  }
+
+  return {
+    bpm: refined.bpm,
+    confidence: 0,
+    beatSamples: refined.beatSamples,
+    salience: salienceOf(odf, beatFrames),
+    peakRatio: 0,
+    ibiCv: refined.ibiCv,
+    truncated,
+    analyzedEndSample,
+    odf,
+    periodFrames,
+    decimationFactor: D,
   };
 }

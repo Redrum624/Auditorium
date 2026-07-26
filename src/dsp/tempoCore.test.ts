@@ -1,5 +1,7 @@
 import {
   decimateMono,
+  computeDecimationFactor,
+  deriveGrid,
   onsetEnvelope,
   computeBandTable,
   TARGET_ANALYSIS_RATE,
@@ -1265,4 +1267,128 @@ describe('analyzeTempo — PURITY', () => {
     analyzeTempo(audio, 44100);
     expectUnmutated(audio, before);
   }, 15000);
+});
+
+describe('analyzeTempo — retained odf/periodFrames/decimationFactor (Task T4 Plan Ruling 4)', () => {
+  it('returns a non-empty odf, the winning octave\'s periodFrames, and the decimation factor computeDecimationFactor(sampleRate) would produce', () => {
+    const audio = clickTrain(120, 20);
+    const result = analyzeTempo(audio, 44100);
+
+    expect(result.bpm).not.toBeNull();
+    expect(result.odf.length).toBeGreaterThan(0);
+    expect(result.periodFrames).toBeGreaterThan(0);
+    expect(result.decimationFactor).toBe(computeDecimationFactor(44100));
+
+    // periodFrames must be internally consistent with the reported bpm: the
+    // ODF frame rate implied by periodFrames * bpm/60 should match the
+    // decimated analysis rate (TARGET_ANALYSIS_RATE / ONSET_HOP), within the
+    // period-refinement's own documented small bias.
+    const impliedOdfRate = (result.periodFrames * result.bpm!) / 60;
+    const expectedOdfRate = TARGET_ANALYSIS_RATE / ONSET_HOP;
+    expect(impliedOdfRate).toBeCloseTo(expectedOdfRate, 0);
+  }, 15000);
+
+  it('degenerate guards (too-short / all-zero / no-beats) still return a finite, non-throwing odf/periodFrames/decimationFactor shape', () => {
+    const tooShort = analyzeTempo(new Float32Array(44100), 44100); // 1s < MIN_ANALYSIS_SECONDS
+    expect(tooShort.bpm).toBeNull();
+    expect(tooShort.odf.length).toBe(0);
+    expect(tooShort.periodFrames).toBe(0);
+    expect(tooShort.decimationFactor).toBe(1);
+
+    const silent = analyzeTempo(new Float32Array(20 * 44100), 44100); // all-zero, long enough
+    expect(silent.bpm).toBeNull();
+    expect(Number.isFinite(silent.periodFrames)).toBe(true);
+    expect(Number.isFinite(silent.decimationFactor)).toBe(true);
+  }, 15000);
+});
+
+describe('deriveGrid — regrid path (Task T4 Plan Ruling 4)', () => {
+  it('re-tracking at HALF the original period produces roughly TWICE the beat count, and every original beat position survives in the finer grid', () => {
+    const sr = 44100;
+    const audio = clickTrain(120, 20, sr);
+    const original = analyzeTempo(audio, sr);
+    expect(original.bpm).not.toBeNull();
+    expect(original.beatSamples.length).toBeGreaterThan(10);
+
+    // Simulate the x2 octave correction: the true content is twice as dense
+    // as detected, so the corrected period is HALF the original.
+    const regridded = deriveGrid(audio, sr, original.odf, original.periodFrames / 2);
+
+    expect(regridded.bpm).not.toBeNull();
+    // Bpm should be close to double (the whole point of the carry-forward:
+    // NOT a relabel, an actual re-track at the halved period).
+    expect(regridded.bpm! / original.bpm!).toBeGreaterThan(1.8);
+    expect(regridded.bpm! / original.bpm!).toBeLessThan(2.2);
+
+    // Beat count should be close to double too (proves density, not just a
+    // relabelled bpm number on the SAME sparse grid).
+    expect(regridded.beatSamples.length).toBeGreaterThan(original.beatSamples.length * 1.7);
+    expect(regridded.beatSamples.length).toBeLessThan(original.beatSamples.length * 2.3);
+
+    // Every ORIGINAL beat position must be closely matched by some position
+    // in the regridded (finer) grid -- i.e. the finer grid is a genuine
+    // refinement containing the original beats, not an unrelated beat set.
+    const toleranceSamples = (original.periodFrames * ONSET_HOP * original.decimationFactor) / 2;
+    for (const orig of original.beatSamples) {
+      let nearest = Infinity;
+      for (const cand of regridded.beatSamples) {
+        const d = Math.abs(cand - orig);
+        if (d < nearest) nearest = d;
+      }
+      expect(nearest).toBeLessThan(toleranceSamples);
+    }
+
+    expect(regridded.odf).toBe(original.odf); // odf passed through unchanged, not recomputed
+    expect(regridded.periodFrames).toBeCloseTo(original.periodFrames / 2, 5);
+    expect(regridded.decimationFactor).toBe(original.decimationFactor);
+  }, 20000);
+
+  it('re-tracking at DOUBLE the original period produces roughly HALF the beat count', () => {
+    const sr = 44100;
+    const audio = clickTrain(120, 20, sr);
+    const original = analyzeTempo(audio, sr);
+    expect(original.bpm).not.toBeNull();
+
+    const regridded = deriveGrid(audio, sr, original.odf, original.periodFrames * 2);
+
+    expect(regridded.bpm).not.toBeNull();
+    expect(original.bpm! / regridded.bpm!).toBeGreaterThan(1.8);
+    expect(original.bpm! / regridded.bpm!).toBeLessThan(2.2);
+    expect(regridded.beatSamples.length).toBeLessThan(original.beatSamples.length * 0.65);
+  }, 20000);
+
+  it('never mutates mono or odf', () => {
+    const sr = 44100;
+    const audio = clickTrain(120, 20, sr);
+    const original = analyzeTempo(audio, sr);
+    const audioBefore = snapshot(audio);
+    const odfBefore = Array.from(original.odf);
+
+    deriveGrid(audio, sr, original.odf, original.periodFrames / 2);
+
+    expectUnmutated(audio, audioBefore);
+    expect(Array.from(original.odf)).toEqual(odfBefore);
+  });
+
+  it('confidence and peakRatio are 0 -- deriveGrid has no ACF/candidate data to compute them from (the caller carries those over)', () => {
+    const sr = 44100;
+    const audio = clickTrain(120, 20, sr);
+    const original = analyzeTempo(audio, sr);
+
+    const regridded = deriveGrid(audio, sr, original.odf, original.periodFrames / 2);
+
+    expect(regridded.confidence).toBe(0);
+    expect(regridded.peakRatio).toBe(0);
+  });
+
+  it('a degenerate periodFrames (too large for the odf length) returns the null-bpm/empty-beats shape without throwing', () => {
+    const sr = 44100;
+    const audio = clickTrain(120, 20, sr);
+    const original = analyzeTempo(audio, sr);
+
+    const result = deriveGrid(audio, sr, original.odf, original.odf.length * 100);
+
+    expect(result.bpm).toBeNull();
+    expect(result.beatSamples.length).toBe(0);
+  });
 });

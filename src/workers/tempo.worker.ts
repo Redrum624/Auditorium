@@ -1,4 +1,4 @@
-import { analyzeTempo } from '../dsp/tempoCore';
+import { analyzeTempo, deriveGrid } from '../dsp/tempoCore';
 import type { TempoAnalysis } from '../dsp/tempoCore';
 
 // Protocol (Task T3, v15-architecture.md "Module map"): the renderer posts an
@@ -7,16 +7,28 @@ import type { TempoAnalysis } from '../dsp/tempoCore';
 // lands, a RemixAnalysis), throttled `progress` messages along the way, or
 // `error` with the failure message when analysis throws — never letting a
 // throw escape uncaught (mirrors spectrogram.worker.ts's try/catch shape).
+//
+// `level:'regrid'` (Task T4 Plan Ruling 4, added post-T4-review): carries the
+// RETAINED `odf` (from a prior 'tempo'/'remix' analysis) and a caller-chosen
+// `periodFrames` instead of `minBpm`/`maxBpm` — runs ONLY `deriveGrid`
+// (trackBeats + sample-domain refinement), skipping decimation/FFT/ACF/
+// octave-search entirely (~50ms vs ~3s for a full analysis). This is what the
+// x2/(divide)2 octave-correction control must call so it physically
+// re-tracks the grid at the corrected period rather than relabelling the
+// displayed BPM over an unchanged (wrong-density) `beatSamples`.
 interface AnalyzeMessage {
   type: 'analyze';
   id: number;
-  level: 'tempo' | 'remix';
+  level: 'tempo' | 'remix' | 'regrid';
   mono: Float32Array;
   sampleRate: number;
   minBpm: number;
   maxBpm: number;
   beatsPerBar: number;
   downbeatShiftBeats: number;
+  /** Only present/used when level === 'regrid'. */
+  odf?: Float32Array;
+  periodFrames?: number;
 }
 
 // Narrow cast so this compiles under the DOM lib without the conflicting
@@ -53,18 +65,25 @@ ctx.onmessage = (e) => {
       }
     };
 
-    const tempo = analyzeTempo(
-      msg.mono,
-      msg.sampleRate,
-      { minBpm: msg.minBpm, maxBpm: msg.maxBpm },
-      onProgress
-    );
-
-    const analysis: TempoAnalysis = msg.level === 'remix' ? deriveRemixFeatures(tempo, msg) : tempo;
+    let analysis: TempoAnalysis;
+    if (msg.level === 'regrid') {
+      if (!msg.odf || msg.periodFrames === undefined) {
+        throw new Error('regrid request missing odf/periodFrames');
+      }
+      analysis = deriveGrid(msg.mono, msg.sampleRate, msg.odf, msg.periodFrames);
+    } else {
+      const tempo = analyzeTempo(
+        msg.mono,
+        msg.sampleRate,
+        { minBpm: msg.minBpm, maxBpm: msg.maxBpm },
+        onProgress
+      );
+      analysis = msg.level === 'remix' ? deriveRemixFeatures(tempo, msg) : tempo;
+    }
 
     ctx.postMessage(
       { type: 'done', id: msg.id, level: msg.level, analysis },
-      [analysis.beatSamples.buffer as ArrayBuffer]
+      [analysis.beatSamples.buffer as ArrayBuffer, analysis.odf.buffer as ArrayBuffer]
     );
   } catch (err) {
     ctx.postMessage({

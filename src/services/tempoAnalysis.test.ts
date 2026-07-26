@@ -6,6 +6,7 @@ import {
   getTempoProgress,
   runTempoAnalysis,
   runRemixAnalysis,
+  regridTempo,
   invalidateTempo,
   invalidateRemix,
   clearAllTempo,
@@ -17,6 +18,7 @@ import {
 import { createDocument, replaceRegion, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { applyEdit } from './editOps';
+import * as createTempoWorkerModule from '../workers/createTempoWorker';
 import {
   _setTempoWorkerError,
   _setTempoWorkerLoadFailure,
@@ -209,6 +211,68 @@ describe('runTempoAnalysis — concurrency and worker choreography (acceptance f
   });
 });
 
+describe('startRun — synchronous setup throws (I1, T4 review fix round 1)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('createTempoWorker() throwing synchronously resolves null, shows the failure dialog, and leaves no stuck progress/currentRunId', async () => {
+    const showMessageBox = installShowMessageBox();
+    jest.spyOn(createTempoWorkerModule, 'createTempoWorker').mockImplementationOnce(() => {
+      throw new Error('worker construction boom');
+    });
+    const doc = seedDoc([clickTrain(120, 8)]);
+
+    const result = await runTempoAnalysis(doc);
+
+    expect(result).toBeNull();
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        title: 'Tempo analysis failed',
+        message: 'worker construction boom',
+      })
+    );
+    expect(getTempo(doc)).toBeNull(); // nothing cached
+    expect(isTempoRunning(doc.id)).toBe(false);
+    expect(getTempoProgress(doc.id)).toBeNull(); // not stuck at 0 forever
+  });
+
+  it('worker.postMessage throwing synchronously resolves null (not a rejected promise), shows the failure dialog, terminates the worker, and leaves no stuck progress/currentRunId', async () => {
+    const showMessageBox = installShowMessageBox();
+    let terminateCalls = 0;
+    const fakeWorker = {
+      onmessage: null as ((e: MessageEvent) => void) | null,
+      onerror: null as ((e: ErrorEvent) => void) | null,
+      postMessage: () => {
+        throw new Error('postMessage boom');
+      },
+      terminate: () => {
+        terminateCalls++;
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    jest
+      .spyOn(createTempoWorkerModule, 'createTempoWorker')
+      .mockImplementationOnce(() => fakeWorker as unknown as Worker);
+    const doc = seedDoc([clickTrain(120, 8)]);
+
+    // Must resolve, never reject — a synchronous throw inside a `new
+    // Promise` executor otherwise silently rejects the returned promise
+    // instead of settling it per the "always resolves" contract.
+    await expect(runTempoAnalysis(doc)).resolves.toBeNull();
+
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Tempo analysis failed', message: 'postMessage boom' })
+    );
+    expect(terminateCalls).toBe(1);
+    expect(getTempo(doc)).toBeNull();
+    expect(isTempoRunning(doc.id)).toBe(false);
+    expect(getTempoProgress(doc.id)).toBeNull();
+  });
+});
+
 describe('runTempoAnalysis — LRU and buffer-transfer safety (acceptance j-k)', () => {
   it('(j) LRU: analysing 5 documents keeps only the newest 4, oldest evicted', async () => {
     const docs = Array.from({ length: 5 }, () => seedDoc([new Float32Array(50)]));
@@ -306,6 +370,124 @@ describe('level policy', () => {
   });
 });
 
+describe('regridTempo — end-to-end (Task T4 Plan Ruling 4)', () => {
+  it('a half-tempo detection regridded to double the period produces a beat grid with TWICE the beat count at the correct positions — not a relabel', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+    expect(original!.bpm).not.toBeNull();
+    const originalBeatCount = original!.beatSamples.length;
+    const originalBpm = original!.bpm!;
+
+    // Simulate the x2 correction: the true content is twice as dense as
+    // detected -- the corrected period is HALF the original.
+    const regridded = await regridTempo(doc.id, original!.periodFrames / 2);
+
+    expect(regridded).not.toBeNull();
+    expect(regridded!.bpm).not.toBeNull();
+    // Bpm close to double -- proves an actual re-track at the halved
+    // period, not merely a relabelled number over the SAME sparse grid.
+    expect(regridded!.bpm! / originalBpm).toBeGreaterThan(1.8);
+    expect(regridded!.bpm! / originalBpm).toBeLessThan(2.2);
+    // Beat COUNT close to double -- the whole point of the carry-forward.
+    expect(regridded!.beatSamples.length).toBeGreaterThan(originalBeatCount * 1.7);
+    expect(regridded!.beatSamples.length).toBeLessThan(originalBeatCount * 2.3);
+    expect(Array.from(regridded!.beatSamples)).not.toEqual(Array.from(original!.beatSamples));
+
+    // The corrected entry is now what getTempo/the cache serve.
+    expect(getTempo(doc)).toBe(regridded);
+    expect(regridded!.stale).toBe(false);
+
+    // deriveGrid has no ACF/candidate data -- these 4 fields are carried
+    // over from the entry being corrected, not fabricated/zeroed.
+    expect(regridded!.confidence).toBe(original!.confidence);
+    expect(regridded!.peakRatio).toBe(original!.peakRatio);
+    expect(regridded!.truncated).toBe(original!.truncated);
+    expect(regridded!.analyzedEndSample).toBe(original!.analyzedEndSample);
+  }, 20000);
+
+  it('re-tracking at DOUBLE the period produces roughly HALF the beat count (the ÷2 direction)', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+
+    const regridded = await regridTempo(doc.id, original!.periodFrames * 2);
+
+    expect(regridded).not.toBeNull();
+    expect(original!.bpm! / regridded!.bpm!).toBeGreaterThan(1.8);
+    expect(original!.bpm! / regridded!.bpm!).toBeLessThan(2.2);
+    expect(regridded!.beatSamples.length).toBeLessThan(original!.beatSamples.length * 0.65);
+  }, 20000);
+
+  it('refuses (resolves null) when there is no cached entry for the doc', async () => {
+    const doc = seedDoc([clickTrain(120, 8)]);
+    const result = await regridTempo(doc.id, 20);
+    expect(result).toBeNull();
+  });
+
+  it('refuses (resolves null) when the cached entry is stale', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+
+    applyEdit('Silence', doc.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
+
+    const result = await regridTempo(doc.id, original!.periodFrames / 2);
+    expect(result).toBeNull();
+  });
+
+  it('refuses (resolves null) when the document has been closed', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+
+    useAppStore.getState().closeDocument(doc.id);
+
+    const result = await regridTempo(doc.id, original!.periodFrames / 2);
+    expect(result).toBeNull();
+  }, 20000);
+
+  it('preserves a level:"remix" row\'s level through a regrid (must not force it back to "tempo")', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+    _promoteToRemixLevelForTest(doc.id);
+    expect(getRemixAnalysis(doc)).not.toBeNull(); // sanity: now level:'remix' and fresh
+
+    const regridded = await regridTempo(doc.id, original!.periodFrames / 2);
+
+    expect(regridded).not.toBeNull();
+    expect(getRemixAnalysis(doc)).not.toBeNull(); // still level:'remix' after the regrid
+  }, 20000);
+
+  it('bumps the version and reports running via isTempoRunning while in flight', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+    const vBefore = getTempoVersion();
+
+    const regridPromise = regridTempo(doc.id, original!.periodFrames);
+    expect(isTempoRunning(doc.id)).toBe(true);
+
+    await regridPromise;
+
+    expect(getTempoVersion()).toBeGreaterThan(vBefore);
+    expect(isTempoRunning(doc.id)).toBe(false);
+  }, 20000);
+
+  it('two concurrent regridTempo calls for the same doc share ONE promise', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+
+    const p1 = regridTempo(doc.id, original!.periodFrames / 2);
+    const p2 = regridTempo(doc.id, original!.periodFrames / 2);
+
+    expect(p1).toBe(p2);
+    await Promise.all([p1, p2]);
+  }, 20000);
+});
+
 describe('isTempoRunning / getTempoProgress', () => {
   it('reflect an in-flight run and clear once it settles', async () => {
     const doc = seedDoc([clickTrain(120, 8)]);
@@ -345,5 +527,34 @@ describe('useTempoVersion (acceptance m)', () => {
 
     act(() => invalidateTempo(doc.id));
     expect(result.current).toBeGreaterThan(vDone);
+  });
+
+  it('(C1, tightened) isTempoRunning is already false by the time the LAST version bump lands — a render gated purely on useTempoVersion() must never see a permanently-stuck "running" state', async () => {
+    const doc = seedDoc([clickTrain(120, 8)]);
+    // Reads BOTH the version and isTempoRunning INSIDE the same render, so
+    // each captured value reflects exactly what a consumer gated purely on
+    // useTempoVersion() would see at that render -- not a fresh out-of-band
+    // call made later by the test.
+    const { result } = renderHook(() => ({
+      version: useTempoVersion(),
+      running: isTempoRunning(doc.id),
+    }));
+
+    let runPromise!: Promise<unknown>;
+    act(() => {
+      runPromise = runTempoAnalysis(doc);
+    });
+    expect(result.current.running).toBe(true);
+
+    await act(async () => {
+      await runPromise;
+    });
+
+    // Before the C1 fix: settle()'s bump (still inside startRun, before
+    // .finally() deletes the dedupe entry) was the LAST bump for this run,
+    // so this render would be permanently stuck reporting running:true even
+    // though isTempoRunning(doc.id) called fresh (below) already says false.
+    expect(result.current.running).toBe(false);
+    expect(isTempoRunning(doc.id)).toBe(false); // sanity: matches out-of-band
   });
 });

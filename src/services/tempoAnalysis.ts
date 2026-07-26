@@ -89,17 +89,25 @@
  * second protocol path through the worker) — not worth it for a once-per-
  * document cost behind an existing progress bar.
  *
- * ## T2 carry-forward (octave correction)
+ * ## T2 carry-forward (octave correction) — Plan Ruling 4 (2026-07-26, post-T4-review)
  *
  * The brief's binding carry-forward — an x2//2 octave-correction control must
  * re-run `trackBeats` at the corrected period, never just relabel the
- * displayed BPM — concerns a UI control this task does not build (it lands
- * with whichever later task adds the correction control, consuming the
- * retained `bands` off a level:'remix' `RemixAnalysis` to re-run
- * `deriveGrid`). Nothing in this module forecloses that: the cache retains
- * the WHOLE worker-computed `analysis` object per document (not just a
- * flattened bpm/beats view), so a later task has everything it needs. See
- * task-T4-report.md for the explicit note.
+ * displayed BPM — was originally closed here with an assertion the T4 review
+ * proved FALSE: `TempoAnalysis` did not retain `odf`/`periodFrames`, and no
+ * `deriveGrid` function existed anywhere in the repo, so the correction
+ * control would have been forced into exactly the relabel the carry-forward
+ * forbids. Fixed by Plan Ruling 4 as a cross-task amendment: `analyzeTempo`
+ * (`tempoCore.ts`) now additionally returns `odf`/`periodFrames`/
+ * `decimationFactor`; the worker transfers them in its `done` payload and
+ * this module's cache retains them (they are ordinary fields on the SAME
+ * retained `analysis` object, so no cache-shape change was needed once
+ * `TempoAnalysis` itself carried them); `tempo.worker.ts` gained a
+ * `level:'regrid'` message that runs ONLY `tempoCore.ts`'s `deriveGrid`
+ * (`trackBeats` + the two-stage sample-domain refinement — no decimation, no
+ * FFT, no ACF, no octave search); and this module exposes `regridTempo`
+ * below, which consumers (the eventual octave-correction control) MUST call
+ * for x2//2 — relabelling remains forbidden.
  *
  * ## Reactivity
  *
@@ -109,6 +117,26 @@
  * `noiseProfile.ts`, `undoHistory.useHistoryVersion`). Bumped on run start, on
  * each (already 50ms worker-side-throttled) progress message, on completion
  * (success OR failure), and on invalidation.
+ *
+ * **`useTempoVersion()` does NOT bump on an audio edit** (I2, T4 review fix
+ * round 1) — measured: version stays unchanged across an `applyEdit`, and
+ * `getTempo(doc)` returns the SAME object reference with only `.stale`
+ * flipped in place. This is a deliberate choice, not an oversight: this
+ * module has no subscription to `useAppStore` (adding one would mean
+ * watching every open document's channel identity on every store change, a
+ * cost this cache-only module shouldn't own), and every real consumer this
+ * release ships (T5's PropertiesPanel/StatusBar) already reads `doc` from a
+ * LIVE `useAppStore` subscription for the document's other fields (name,
+ * dirty, ...), which itself re-renders on every edit — so the component
+ * re-runs `getTempo(doc)` with the fresh `doc` object on its OWN store-driven
+ * re-render, and `.stale` recomputes correctly at that point.
+ * `useTempoVersion()`'s job is narrower: catching the events that DON'T
+ * naturally correlate with a `useAppStore` change (run start/progress/
+ * completion, invalidation). A FUTURE consumer that captures a `doc`
+ * reference once and relies SOLELY on `useTempoVersion()` (never re-reading
+ * `doc` from a live store subscription) would miss a staleness flip until
+ * some other event bumps the version — this is the sharp edge to know about
+ * if a future task adds such a consumer.
  */
 
 import { useSyncExternalStore } from 'react';
@@ -152,7 +180,17 @@ interface CacheEntry {
    * is cached. `getTempo` mutates `.stale` on THIS SAME object and returns it
    * by reference every call — never reallocates — so a caller holding a
    * reference across a metadata-only document replacement (rename, dirty
-   * flip, marker add) sees reference equality (acceptance b). */
+   * flip, marker add) sees reference equality (acceptance b). NOTE (T4
+   * review, minor): `tempoEntry` is a SHALLOW spread of `analysis` (`{
+   * ...analysis, stale: false }`), so `tempoEntry.beatSamples`/`.odf` and
+   * `entry.analysis.beatSamples`/`.odf` are the SAME underlying typed
+   * arrays, not independent copies — `getTempo` and `getRemixAnalysis`
+   * therefore hand out two different wrapper objects that share the same
+   * typed-array data. Harmless today (neither this module nor any known
+   * consumer mutates a returned `beatSamples`/`odf` in place — every
+   * mutator in `AudioDocument.ts` and `tempoCore.ts` allocates fresh
+   * arrays), but a future consumer must not assume the two are
+   * independently safe to mutate. */
   tempoEntry: TempoEntry;
 }
 
@@ -287,6 +325,7 @@ const progress = new Map<string, number>();
 const currentRunId = new Map<string, number>();
 const inFlightTempo = new Map<string, Promise<TempoEntry | null>>();
 const inFlightRemix = new Map<string, Promise<RemixAnalysis | null>>();
+const inFlightRegrid = new Map<string, Promise<TempoEntry | null>>();
 
 /** Drops the cached entry for `docId` (any level) and its progress/run-id
  * bookkeeping, then bumps the version. MANDATORY in `closeDocumentFlow` —
@@ -308,7 +347,16 @@ export function invalidateTempo(docId: string): void {
  * whether the tempo readout should also reset (v15-architecture.md's
  * Invalidation section: "`invalidateRemix(docId)` alongside it for BOTH the
  * remix document and its source"). Called unconditionally alongside
- * `invalidateTempo` in `closeDocumentFlow` per the task's flagged risk #1. */
+ * `invalidateTempo` in `closeDocumentFlow` per the task's flagged risk #1.
+ *
+ * DELIBERATELY does NOT touch `progress`/`currentRunId` (T4 review, minor —
+ * asymmetric with `invalidateTempo` on purpose, not an oversight): those two
+ * maps track an IN-FLIGHT RUN for `docId`, not cache content, and this
+ * function's whole contract is "narrower than invalidateTempo" — a
+ * level:'tempo' row (and any run legitimately still updating it) must
+ * survive a call that only means "drop the remix-specific data". Clearing
+ * run bookkeeping here could wipe state for an unrelated, still-valid
+ * in-flight tempo/remix run for the same document. */
 export function invalidateRemix(docId: string): void {
   const entry = cache.get(docId);
   if (entry && entry.level === 'remix') {
@@ -324,6 +372,7 @@ export function clearAllTempo(): void {
   currentRunId.clear();
   inFlightTempo.clear();
   inFlightRemix.clear();
+  inFlightRegrid.clear();
   bumpVersion();
 }
 
@@ -340,9 +389,9 @@ export function clearAllRemix(): void {
 // Run bookkeeping
 // ---------------------------------------------------------------------------
 
-/** True while ANY analysis (tempo or remix level) is in flight for `docId`. */
+/** True while ANY analysis (tempo, remix, or regrid) is in flight for `docId`. */
 export function isTempoRunning(docId: string): boolean {
-  return inFlightTempo.has(docId) || inFlightRemix.has(docId);
+  return inFlightTempo.has(docId) || inFlightRemix.has(docId) || inFlightRegrid.has(docId);
 }
 
 /** The most recent progress fraction reported for `docId`'s in-flight run, or
@@ -353,9 +402,11 @@ export function getTempoProgress(docId: string): number | null {
 
 let nextRunId = 1;
 
+type RunLevel = 'tempo' | 'remix' | 'regrid';
+
 type WorkerReply =
   | { type: 'progress'; id: number; fraction: number }
-  | { type: 'done'; id: number; level: 'tempo' | 'remix'; analysis: TempoAnalysis | RemixAnalysis }
+  | { type: 'done'; id: number; level: RunLevel; analysis: TempoAnalysis | RemixAnalysis }
   | { type: 'error'; id: number; message: string };
 
 function showFailure(message: string): void {
@@ -366,20 +417,55 @@ function showFailure(message: string): void {
   });
 }
 
+/** Only present when `level === 'regrid'`: the retained onset envelope from
+ * a prior analysis, and the caller-corrected period to re-track it at. */
+interface RegridInput {
+  odf: Float32Array;
+  periodFrames: number;
+}
+
+/** Only present when `level === 'regrid'`: the four fields `deriveGrid`
+ * cannot compute (it never touches the ACF/candidates) and `truncated`/
+ * `analyzedEndSample`, carried over from the entry being corrected and
+ * merged into the worker's raw result before it is cached. See
+ * `regridTempo`'s doc comment for why this carry-over is correct. */
+interface RegridCarry {
+  confidence: number;
+  peakRatio: number;
+  truncated: boolean;
+  analyzedEndSample: number;
+}
+
 /**
- * Shared worker choreography for both `runTempoAnalysis` and
- * `runRemixAnalysis`. Returns the PUBLIC, doc-shaped result for `level`
- * (`TempoEntry | null` for 'tempo', `RemixAnalysis | null` for 'remix') —
- * read fresh off the cache via `getTempo`/`getRemixAnalysis` against the LIVE
- * document, never the raw worker payload — so a superseded or doc-closed-
- * mid-run outcome resolves to whatever is currently true rather than to a
- * value that may already be wrong by the time the caller sees it.
+ * Shared worker choreography for `runTempoAnalysis`, `runRemixAnalysis` and
+ * `regridTempo`. Returns the PUBLIC, doc-shaped result for `level`
+ * (`TempoEntry | null` for 'tempo'/'regrid', `RemixAnalysis | null` for
+ * 'remix') — read fresh off the cache via `getTempo`/`getRemixAnalysis`
+ * against the LIVE document, never the raw worker payload — so a superseded
+ * or doc-closed-mid-run outcome resolves to whatever is currently true
+ * rather than to a value that may already be wrong by the time the caller
+ * sees it.
+ *
+ * I1 (T4 review fix round 1): `createTempoWorker()` and `worker.postMessage`
+ * are BOTH wrapped in their own try/catch. A throw from `createTempoWorker()`
+ * would otherwise propagate synchronously out of this function (never
+ * returning a promise at all — breaking "the promise always resolves" for
+ * every caller), and a throw from `postMessage` inside the executor would
+ * otherwise silently REJECT the returned promise instead of resolving null
+ * (a `new Promise` executor's throw is caught by the Promise machinery, not
+ * by a `try` wrapped around the `new Promise(...)` call itself — that
+ * pattern would never fire). Both paths now route through the same
+ * `abortSetup` cleanup as every other failure: clear `progress`/
+ * `currentRunId` for this run, bump the version, show the same error dialog,
+ * and resolve null.
  */
 function startRun(
   doc: AudioDocument,
-  level: 'tempo' | 'remix',
+  level: RunLevel,
   params: RemixAnalysisParams | undefined,
-  onProgress: ((fraction: number) => void) | undefined
+  onProgress: ((fraction: number) => void) | undefined,
+  regridInput?: RegridInput,
+  regridCarry?: RegridCarry
 ): Promise<TempoEntry | RemixAnalysis | null> {
   const docId = doc.id;
 
@@ -398,54 +484,88 @@ function startRun(
   progress.set(docId, 0);
   bumpVersion();
 
-  const worker = createTempoWorker();
+  function abortSetup(err: unknown): null {
+    progress.delete(docId);
+    if (currentRunId.get(docId) === runId) currentRunId.delete(docId);
+    bumpVersion();
+    showFailure(err instanceof Error ? err.message : String(err));
+    return null;
+  }
 
-  return new Promise((resolve) => {
-    function readLive(): TempoEntry | RemixAnalysis | null {
-      const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
-      if (!liveDoc) return null;
-      return level === 'tempo' ? getTempo(liveDoc) : getRemixAnalysis(liveDoc);
-    }
+  let worker: Worker;
+  try {
+    worker = createTempoWorker();
+  } catch (err) {
+    return Promise.resolve(abortSetup(err));
+  }
 
-    function settle(): void {
-      progress.delete(docId);
+  function readLive(): TempoEntry | RemixAnalysis | null {
+    const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
+    if (!liveDoc) return null;
+    return level === 'remix' ? getRemixAnalysis(liveDoc) : getTempo(liveDoc);
+  }
+
+  let resolveRun!: (result: TempoEntry | RemixAnalysis | null) => void;
+  const runPromise = new Promise<TempoEntry | RemixAnalysis | null>((resolve) => {
+    resolveRun = resolve;
+  });
+
+  function settle(): void {
+    progress.delete(docId);
+    bumpVersion();
+    resolveRun(readLive());
+  }
+
+  worker.onmessage = (e: MessageEvent) => {
+    const msg = e.data as WorkerReply;
+    const isCurrent = msg.id === currentRunId.get(docId);
+
+    if (msg.type === 'progress') {
+      if (!isCurrent) return;
+      progress.set(docId, msg.fraction);
       bumpVersion();
-      resolve(readLive());
+      onProgress?.(msg.fraction);
+      return;
     }
 
-    worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data as WorkerReply;
-      const isCurrent = msg.id === currentRunId.get(docId);
-
-      if (msg.type === 'progress') {
-        if (!isCurrent) return;
-        progress.set(docId, msg.fraction);
-        bumpVersion();
-        onProgress?.(msg.fraction);
-        return;
-      }
-
-      worker.terminate();
-      if (msg.type === 'done') {
-        if (isCurrent) {
-          const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
-          if (liveDoc) writeCache(docId, channelRefs, sampleRate, level, msg.analysis);
+    worker.terminate();
+    if (msg.type === 'done') {
+      if (isCurrent) {
+        const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
+        if (liveDoc) {
+          // A 'regrid' write must not force the cache row's level back to
+          // 'tempo' — it only replaces the numeric grid, so a level:'remix'
+          // row being corrected stays level:'remix' (Plan Ruling 4).
+          const cacheLevel = level === 'regrid' ? (cache.get(docId)?.level ?? 'tempo') : level;
+          // `deriveGrid` (the 'regrid' worker path) has no ACF/candidate
+          // data, so confidence/peakRatio/truncated/analyzedEndSample are
+          // merged in from the entry being corrected BEFORE writing —
+          // `regridTempo`'s doc comment explains why this carry-over is
+          // correct rather than a fabricated/zeroed value reaching the cache.
+          const analysis = regridCarry ? { ...msg.analysis, ...regridCarry } : msg.analysis;
+          writeCache(docId, channelRefs, sampleRate, cacheLevel, analysis);
         }
-      } else if (isCurrent) {
-        // error
-        showFailure(msg.message);
       }
-      settle();
-    };
+    } else if (msg.type === 'error') {
+      if (isCurrent) showFailure(msg.message);
+    } else {
+      // Defensive (Minor 3, T4 review): an unexpected/corrupted reply shape
+      // must not surface a dialog with `message: undefined` by falling
+      // through to the 'error' branch above with no `message` field.
+      if (isCurrent) showFailure(`Unexpected worker reply: ${String((msg as { type?: unknown }).type)}`);
+    }
+    settle();
+  };
 
-    worker.onerror = (ev: ErrorEvent) => {
-      worker.terminate();
-      if (runId === currentRunId.get(docId)) {
-        showFailure(ev.message || 'Tempo worker failed to load');
-      }
-      settle();
-    };
+  worker.onerror = (ev: ErrorEvent) => {
+    worker.terminate();
+    if (runId === currentRunId.get(docId)) {
+      showFailure(ev.message || 'Tempo worker failed to load');
+    }
+    settle();
+  };
 
+  try {
     const transfer = [mono.buffer as ArrayBuffer];
     worker.postMessage(
       {
@@ -458,10 +578,21 @@ function startRun(
         maxBpm: params?.maxBpm ?? MAX_BPM,
         beatsPerBar: params?.beatsPerBar ?? DEFAULT_BEATS_PER_BAR,
         downbeatShiftBeats: params?.downbeatShiftBeats ?? DEFAULT_DOWNBEAT_SHIFT_BEATS,
+        odf: regridInput?.odf,
+        periodFrames: regridInput?.periodFrames,
       },
       transfer
     );
-  });
+  } catch (err) {
+    try {
+      worker.terminate();
+    } catch {
+      /* best-effort — the worker never successfully posted, nothing more to clean up */
+    }
+    resolveRun(abortSetup(err));
+  }
+
+  return runPromise;
 }
 
 /**
@@ -482,7 +613,17 @@ export function runTempoAnalysis(doc: AudioDocument): Promise<TempoEntry | null>
   if (running) return running;
 
   const promise = (startRun(doc, 'tempo', undefined, undefined) as Promise<TempoEntry | null>).finally(() => {
-    inFlightTempo.delete(docId);
+    // C1 (T4 review fix round 1): the LAST version bump for this run must
+    // land AFTER the dedupe entry is cleared, or `isTempoRunning(docId)`
+    // reports `true` forever to any `useTempoVersion()`-gated consumer (the
+    // bump inside `startRun`'s `settle()` fires while this entry is still in
+    // the map, and nothing bumped again afterward). Minor 2: only delete
+    // when the map still points at THIS promise — otherwise a delayed
+    // `.finally` from a run already superseded by `clearAllTempo()` (or, in
+    // principle, a fresh run for the same doc) could delete a NEWER run's
+    // dedupe entry out from under it.
+    if (inFlightTempo.get(docId) === promise) inFlightTempo.delete(docId);
+    bumpVersion();
   });
   inFlightTempo.set(docId, promise);
   return promise;
@@ -509,9 +650,71 @@ export function runRemixAnalysis(
   if (running) return running;
 
   const promise = (startRun(doc, 'remix', params, onProgress) as Promise<RemixAnalysis | null>).finally(() => {
-    inFlightRemix.delete(docId);
+    // See runTempoAnalysis's matching comment (C1 + Minor 2).
+    if (inFlightRemix.get(docId) === promise) inFlightRemix.delete(docId);
+    bumpVersion();
   });
   inFlightRemix.set(docId, promise);
+  return promise;
+}
+
+/**
+ * Re-tracks the beat grid at `newPeriodFrames` (ODF frames) without a full
+ * re-analysis — Plan Ruling 4 (2026-07-26): the x2/(divide)2 octave-
+ * correction control MUST call this, never just relabel the displayed BPM,
+ * because `beatSamples` at a half-tempo detection physically contains only
+ * every other beat and the remix planner splices on those positions.
+ *
+ * Requires a FRESH cached entry (any level) to already exist for `docId` —
+ * there is nothing to correct otherwise, so this refuses (resolves null) on a
+ * missing or stale entry, matching the hard-rule spirit of
+ * `getRemixAnalysis`. Re-snapshots the mono mixdown from the LIVE document
+ * and dispatches a `level:'regrid'` worker request carrying the RETAINED
+ * `odf` and `newPeriodFrames` — no decimation, no FFT, no ACF, no octave
+ * search (~50 ms against a ~3 s full analysis). `confidence`/`peakRatio`/
+ * `truncated`/`analyzedEndSample` are carried over from the entry being
+ * corrected (see `tempoCore.ts`'s `deriveGrid` doc comment for why: a period
+ * correction doesn't change whether the content has real periodic structure
+ * or how the winning octave competed against alternatives, only which family
+ * member is displayed/spliced on) — done in `startRun`'s `'done'` handler by
+ * merging those four fields from the row's PRE-write state before
+ * `writeCache` runs.
+ */
+export function regridTempo(docId: string, newPeriodFrames: number): Promise<TempoEntry | null> {
+  const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
+  if (!liveDoc) return Promise.resolve(null);
+
+  // Reuses getTempo's own identity-based staleness check rather than
+  // re-implementing it against the raw cache row — also gives us
+  // confidence/peakRatio/truncated/analyzedEndSample/odf directly off the
+  // returned TempoEntry, since it is a superset view of the same analysis.
+  const currentEntry = getTempo(liveDoc);
+  if (!currentEntry || currentEntry.stale) return Promise.resolve(null);
+
+  const running = inFlightRegrid.get(docId);
+  if (running) return running;
+
+  const carry: RegridCarry = {
+    confidence: currentEntry.confidence,
+    peakRatio: currentEntry.peakRatio,
+    truncated: currentEntry.truncated,
+    analyzedEndSample: currentEntry.analyzedEndSample,
+  };
+
+  const promise = (
+    startRun(
+      liveDoc,
+      'regrid',
+      undefined,
+      undefined,
+      { odf: currentEntry.odf, periodFrames: newPeriodFrames },
+      carry
+    ) as Promise<TempoEntry | null>
+  ).finally(() => {
+    if (inFlightRegrid.get(docId) === promise) inFlightRegrid.delete(docId);
+    bumpVersion();
+  });
+  inFlightRegrid.set(docId, promise);
   return promise;
 }
 

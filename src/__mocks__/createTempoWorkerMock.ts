@@ -1,16 +1,19 @@
-import { analyzeTempo } from '../dsp/tempoCore';
+import { analyzeTempo, deriveGrid } from '../dsp/tempoCore';
 import type { TempoAnalysis } from '../dsp/tempoCore';
 
 export interface AnalyzeMessage {
   type: 'analyze';
   id: number;
-  level: 'tempo' | 'remix';
+  level: 'tempo' | 'remix' | 'regrid';
   mono: Float32Array;
   sampleRate: number;
   minBpm: number;
   maxBpm: number;
   beatsPerBar: number;
   downbeatShiftBeats: number;
+  /** Only present/used when level === 'regrid'. */
+  odf?: Float32Array;
+  periodFrames?: number;
 }
 
 // Test-only fault injection: when set, every 'analyze' request replies with
@@ -104,22 +107,30 @@ class FakeTempoWorker {
       try {
         if (injectedError !== null) throw new Error(injectedError);
 
-        let lastProgress = 0;
-        const onProgress = (fraction: number) => {
-          const now = Date.now();
-          if (now - lastProgress >= PROGRESS_INTERVAL_MS) {
-            lastProgress = now;
-            this.emit({ type: 'progress', id: msg.id, fraction });
+        let analysis: TempoAnalysis;
+        if (msg.level === 'regrid') {
+          if (!msg.odf || msg.periodFrames === undefined) {
+            throw new Error('regrid request missing odf/periodFrames');
           }
-        };
+          analysis = deriveGrid(msg.mono, msg.sampleRate, msg.odf, msg.periodFrames);
+        } else {
+          let lastProgress = 0;
+          const onProgress = (fraction: number) => {
+            const now = Date.now();
+            if (now - lastProgress >= PROGRESS_INTERVAL_MS) {
+              lastProgress = now;
+              this.emit({ type: 'progress', id: msg.id, fraction });
+            }
+          };
 
-        const tempo = analyzeTempo(
-          msg.mono,
-          msg.sampleRate,
-          { minBpm: msg.minBpm, maxBpm: msg.maxBpm },
-          onProgress
-        );
-        const analysis: TempoAnalysis = msg.level === 'remix' ? deriveRemixFeatures(tempo, msg) : tempo;
+          const tempo = analyzeTempo(
+            msg.mono,
+            msg.sampleRate,
+            { minBpm: msg.minBpm, maxBpm: msg.maxBpm },
+            onProgress
+          );
+          analysis = msg.level === 'remix' ? deriveRemixFeatures(tempo, msg) : tempo;
+        }
 
         this.emit({ type: 'done', id: msg.id, level: msg.level, analysis });
       } catch (err) {

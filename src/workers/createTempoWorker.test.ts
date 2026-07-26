@@ -6,7 +6,7 @@
 // error path (in-band error, load failure, post-terminate silence) behaves
 // per the v1.4 lesson at effectRunner.ts:106-119.
 import { createTempoWorker } from './createTempoWorker';
-import { analyzeTempo, MIN_BPM, MAX_BPM } from '../dsp/tempoCore';
+import { analyzeTempo, deriveGrid, MIN_BPM, MAX_BPM } from '../dsp/tempoCore';
 import type { TempoAnalysis } from '../dsp/tempoCore';
 import {
   _setTempoWorkerError,
@@ -24,7 +24,7 @@ interface ProgressMsg {
 interface DoneMsg {
   type: 'done';
   id: number;
-  level: 'tempo' | 'remix';
+  level: 'tempo' | 'remix' | 'regrid';
   analysis: TempoAnalysis;
 }
 interface ErrorMsg {
@@ -52,7 +52,7 @@ function runAnalyze(
   mono: Float32Array,
   sampleRate: number,
   id = 1,
-  level: 'tempo' | 'remix' = 'tempo'
+  level: 'tempo' | 'remix' | 'regrid' = 'tempo'
 ): Promise<Reply[]> {
   const received: Reply[] = [];
   return new Promise((resolve) => {
@@ -124,6 +124,78 @@ describe('createTempoWorker level:"remix" stub (protocol must accommodate both l
     expect(replies.filter((r) => r.type === 'done').length).toBe(0);
     expect(replies.filter((r) => r.type === 'error').length).toBe(1);
     expect(replies[replies.length - 1]).toEqual({ type: 'error', id: 8, message: 'not implemented' });
+
+    worker.terminate();
+  });
+});
+
+describe('createTempoWorker level:"regrid" (Task T4 Plan Ruling 4)', () => {
+  it('mock done payload is deep-equal to deriveGrid called directly, field by field, and skips the full pipeline (no progress messages)', async () => {
+    const SR = 44100;
+    const mono = clickTrain(120, 8, SR);
+    const original = analyzeTempo(mono, SR, { minBpm: MIN_BPM, maxBpm: MAX_BPM });
+    expect(original.bpm).not.toBeNull();
+
+    const monoForRegrid = clickTrain(120, 8, SR); // separate buffer: transferred away by postMessage
+    const monoForDirectCall = clickTrain(120, 8, SR);
+    const newPeriodFrames = original.periodFrames / 2;
+
+    const worker = createTempoWorker();
+    const received: Reply[] = [];
+    const done = await new Promise<DoneMsg>((resolve) => {
+      worker.onmessage = (e: MessageEvent) => {
+        const msg = e.data as Reply;
+        received.push(msg);
+        if (msg.type === 'done' || msg.type === 'error') resolve(msg as DoneMsg);
+      };
+      worker.postMessage(
+        {
+          type: 'analyze',
+          id: 11,
+          level: 'regrid',
+          mono: monoForRegrid,
+          sampleRate: SR,
+          minBpm: MIN_BPM,
+          maxBpm: MAX_BPM,
+          beatsPerBar: 4,
+          downbeatShiftBeats: 0,
+          odf: original.odf,
+          periodFrames: newPeriodFrames,
+        },
+        [monoForRegrid.buffer]
+      );
+    });
+
+    expect(done.type).toBe('done');
+    expect(done.level).toBe('regrid');
+    // No progress messages -- deriveGrid skips decimation/FFT/ACF/octave-search.
+    expect(received.filter((r) => r.type === 'progress').length).toBe(0);
+
+    const expected = deriveGrid(monoForDirectCall, SR, original.odf, newPeriodFrames);
+    expect(done.analysis.bpm).toBe(expected.bpm);
+    expect(done.analysis.ibiCv).toBe(expected.ibiCv);
+    expect(done.analysis.salience).toBe(expected.salience);
+    expect(done.analysis.periodFrames).toBe(expected.periodFrames);
+    expect(done.analysis.decimationFactor).toBe(expected.decimationFactor);
+    expect(Array.from(done.analysis.beatSamples)).toEqual(Array.from(expected.beatSamples));
+    // The whole point of the regrid path: roughly double the beat count of
+    // the original (un-corrected) analysis.
+    expect(done.analysis.beatSamples.length).toBeGreaterThan(original.beatSamples.length * 1.7);
+
+    worker.terminate();
+  });
+
+  it('errors cleanly (not a crash) when odf/periodFrames are missing from a regrid request', async () => {
+    const worker = createTempoWorker();
+    const mono = clickTrain(120, 8, 44100);
+    const replies = await runAnalyze(worker, mono, 44100, 12, 'regrid');
+
+    expect(replies.filter((r) => r.type === 'done').length).toBe(0);
+    expect(replies[replies.length - 1]).toEqual({
+      type: 'error',
+      id: 12,
+      message: 'regrid request missing odf/periodFrames',
+    });
 
     worker.terminate();
   });
