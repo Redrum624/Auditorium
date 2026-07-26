@@ -702,7 +702,18 @@ export function runRemixAnalysis(
  * **Valid domain of `newPeriodFrames`** (N1, T4 review fix round 2): a
  * finite, positive number of ODF frames — typically the entry's own
  * `periodFrames` halved/doubled for a x2/(divide)2 correction, or computed
- * from a user-provided BPM/time-signature/downbeat override. This function
+ * from a user-provided BPM or time-signature override.
+ *
+ * NOT downbeat overrides. A downbeat shift changes the PHASE of the bar
+ * grid, not the beat PERIOD, and neither this function nor `deriveGrid`
+ * takes a phase parameter (`regridTempo` deliberately passes
+ * `params: undefined`, so `downbeatShiftBeats` is never forwarded here).
+ * Re-tracking at an unchanged period would return the identical grid.
+ * Downbeat selection belongs to bar derivation in the remix feature, which
+ * chooses which tracked beat starts bar 1 — it is a consumer of
+ * `beatSamples`, not a reason to recompute it. See Plan Ruling 4.
+ *
+ * This function
  * does NOT validate that the value is a SENSIBLE period for the content
  * (e.g. wildly out of the 60-200 BPM range `odf`'s length implies) —
  * `0`/negative/`NaN`/`Infinity` are rejected up front (resolve null, no
