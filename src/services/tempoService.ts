@@ -274,6 +274,22 @@ function addBeatMarkersAfterStretch(
  * is a real, free success signal at THIS layer, without inventing one on
  * top of the reused primitive. Both the beat-marker call and the `{ok:true}`
  * are gated on it.
+ *
+ * FIX ROUND 2 (reviewer finding): comparing the whole DOCUMENT reference
+ * (`postDoc !== doc`) false-POSITIVES — `markDirty` (appStore.ts), and
+ * therefore `addMarker`/`renameMarker`/`removeMarker`/a save-point clean,
+ * all return `{...doc, dirty: true}`: a NEW document object with the SAME
+ * `channels` array. Any one of those ordinary actions firing during the
+ * `await` (exactly when a long stretch gives a user time to, say, drop a
+ * marker at the cursor) makes `postDoc !== doc` true even though the stretch
+ * itself failed, resurrecting the original corruption through a narrower
+ * door. Comparing `channels` instead discriminates perfectly: `replaceRegion`
+ * (`AudioDocument.ts`) unconditionally allocates a FRESH `channels` array for
+ * every genuine edit — including a ratio so close to 1.0 that
+ * `round(N*ratio) === N` (an identity-LENGTH edit that would false-negative
+ * a `docLength` comparison, which is why that alternative was rejected) —
+ * while every metadata-only replacement preserves the same `channels`
+ * reference.
  */
 export async function applyTempoChange(
   req: ApplyTempoChangeRequest,
@@ -294,7 +310,7 @@ export async function applyTempoChange(
   await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, onProgress);
 
   const postDoc = useAppStore.getState().documents.find((d) => d.id === docId);
-  const applied = postDoc !== undefined && postDoc !== doc;
+  const applied = postDoc !== undefined && postDoc.channels !== doc.channels;
   if (!applied) return { ok: false };
 
   if (req.addBeatMarkers && req.firstBeatSample != null) {

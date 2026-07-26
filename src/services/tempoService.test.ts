@@ -358,6 +358,43 @@ describe('applyTempoChange — the stretch never lands (fix round 1, CRITICAL)',
     expect(getHistory(docId).done.length).toBe(historyBefore);
     expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
   }, 15000);
+
+  it('PROBE-e1: still reports failure when an unrelated store action (add marker) fires during the failing stretch', async () => {
+    // markDirty (appStore.ts) — and therefore addMarker/renameMarker/
+    // removeMarker/a save-point clean — returns {...doc, dirty:true}: a NEW
+    // document object with the SAME `channels` reference. Comparing the
+    // whole document reference (fix round 1's original check) would read
+    // this as "the stretch applied" even though it never did (fix round 2,
+    // reviewer finding). A long stretch is exactly when a user has time to
+    // do one of these ordinary actions.
+    const seconds = 4;
+    const doc = seedDoc([sine(220, seconds)]);
+    const docId = doc.id;
+    const lenBefore = docLength(liveDoc(docId));
+    const historyBefore = getHistory(docId).done.length;
+
+    _setDspWorkerLoadFailure('boom');
+    const promise = applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 60, // ratio 2
+      addBeatMarkers: true,
+      firstBeatSample: 1000,
+    });
+
+    // Interleaved DURING the await, before the (failing) worker's own
+    // microtask has a chance to run: an ordinary, unrelated marker add.
+    useAppStore.getState().addMarker(docId, { id: 'user-marker', name: 'User Marker', positionSample: 500 });
+
+    const result = await promise;
+
+    expect(result.ok).toBe(false);
+    expect(docLength(liveDoc(docId))).toBe(lenBefore);
+    expect(getHistory(docId).done.length).toBe(historyBefore);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+    // The user's own concurrent action is not what this test is about losing
+    // — only about not reporting a corrupted stretch as a success.
+    expect(liveMarkers(docId).some((m) => m.id === 'user-marker')).toBe(true);
+  });
 });
 
 describe('tempoQualityBand', () => {
