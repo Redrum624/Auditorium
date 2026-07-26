@@ -268,7 +268,7 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
     } else if (check.reason === 'out-of-range') {
       const targetMin = Math.round(sourceNum / MAX_RATIO);
       const targetMax = Math.round(sourceNum / MIN_RATIO);
-      qualityText = `Out of range: 0.25x–4x only (source ${sourceNum} BPM ⇒ target ${targetMin}–${targetMax} BPM)`;
+      qualityText = `Out of range: ${MIN_RATIO}x–${MAX_RATIO}x only (source ${sourceNum} BPM ⇒ target ${targetMin}–${targetMax} BPM)`;
       qualityClass = 'text-[#ef5350]';
     }
   } else if (ratio !== null) {
@@ -492,8 +492,7 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
           <button
             type="button"
             onClick={onClose}
-            disabled={busy}
-            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42] disabled:opacity-50"
+            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42]"
           >
             Cancel
           </button>

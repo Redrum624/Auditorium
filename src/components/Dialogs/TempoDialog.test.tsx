@@ -302,5 +302,31 @@ describe('TempoDialog', () => {
 
       expect(screen.getByTestId('tempo-beat-markers')).toBeDisabled();
     });
+
+    it('a failed x2 correction (regridTempo resolves null) leaves the grid and Source unchanged and shows the failure note', async () => {
+      seedDoc();
+      mockGetTempo.mockReturnValue(makeEntry({ bpm: 100, periodFrames: 40, confidence: 0.9 }));
+      mockRegridTempo.mockResolvedValue(null);
+      render(<TempoDialog onClose={jest.fn()} />);
+
+      fireEvent.click(screen.getByTestId('tempo-double-button'));
+
+      await waitFor(() => expect(screen.getByTestId('tempo-correction-failed')).toBeInTheDocument());
+      expect((screen.getByTestId('tempo-source') as HTMLInputElement).value).toBe('100');
+      expect(screen.getByTestId('tempo-detected')).toHaveTextContent('100');
+    });
+
+    it('Re-detect from selection calls detectRegionTempo and updates Source, including with no selection (whole-file fallback)', () => {
+      seedDoc();
+      mockGetTempo.mockReturnValue(makeEntry({ bpm: 100, confidence: 0.9 }));
+      mockDetectRegionTempo.mockReturnValue({ bpm: 133, confidence: 0.6 });
+      render(<TempoDialog onClose={jest.fn()} />);
+
+      fireEvent.click(screen.getByTestId('tempo-redetect-button'));
+
+      expect(mockDetectRegionTempo).toHaveBeenCalledTimes(1);
+      expect((screen.getByTestId('tempo-source') as HTMLInputElement).value).toBe('133');
+      expect(screen.getByTestId('tempo-detected')).toHaveTextContent('133');
+    });
   });
 });
