@@ -121,11 +121,43 @@ export function checkTempoChange(req: TempoChangeRequest): TempoCheckResult {
   return { ok: true, ratio };
 }
 
+/** Ratio boundaries for `tempoQualityBand`, exactly as ruled in the T7 brief
+ * (fix round 1, reviewer minor: exported as data rather than left as prose
+ * only, so the T8 UI's copy cannot drift from this ruling). */
+export const QUALITY_TRANSPARENT_MIN_RATIO = 0.88;
+export const QUALITY_TRANSPARENT_MAX_RATIO = 1.14;
+export const QUALITY_GOOD_MIN_RATIO = 0.5;
+export const QUALITY_GOOD_MAX_RATIO = 2;
+
+export type TempoQualityBand = 'transparent' | 'good' | 'extreme';
+
+/**
+ * Labels a (valid, already `checkTempoChange`-accepted) ratio by expected
+ * audible quality: `[0.88, 1.14]` (~+/-12% BPM change) 'transparent'; the
+ * rest of `[0.5, 2]` 'good' with mild transient smearing; everything else
+ * inside `[MIN_RATIO, MAX_RATIO]` 'extreme', with audible artifacts. This
+ * WSOLA has no crossfade into the surrounding, un-stretched audio and no
+ * transient detection (`wsola.ts`), so a selection-scoped stretch always
+ * produces a seam at both region edges, and at the larger ratios many
+ * synthesis frames reuse near-identical spans (flanging on sustained tones)
+ * — a limitation of the underlying DSP, not something this label can fix.
+ */
+export function tempoQualityBand(ratio: number): TempoQualityBand {
+  if (ratio >= QUALITY_TRANSPARENT_MIN_RATIO && ratio <= QUALITY_TRANSPARENT_MAX_RATIO) return 'transparent';
+  if (ratio >= QUALITY_GOOD_MIN_RATIO && ratio <= QUALITY_GOOD_MAX_RATIO) return 'good';
+  return 'extreme';
+}
+
 /**
  * Candidate beat-marker positions inside the POST-stretch region:
  * `newFirstBeat + round(i*spacing)` while `< start + round((end-start)*ratio)`,
  * each clamped to `[0, newLen]`, capped at `MAX_BEAT_MARKERS`. Returns the
  * capped list and whether the true (uncapped) count would have exceeded it.
+ *
+ * `firstBeatSample` is clamped to `>= start` first (fix round 1, reviewer
+ * finding): an un-clamped value below `start` maps to a negative offset,
+ * which then piles multiple early candidates onto the same `Math.max(0, ...)`
+ * floor instead of describing beats inside the region.
  */
 function computeBeatMarkerPositions(
   start: number,
@@ -136,7 +168,8 @@ function computeBeatMarkerPositions(
   firstBeatSample: number,
   newLen: number
 ): { positions: number[]; truncated: boolean } {
-  const newFirstBeat = start + Math.round((firstBeatSample - start) * ratio);
+  const clampedFirstBeat = Math.max(start, firstBeatSample);
+  const newFirstBeat = start + Math.round((clampedFirstBeat - start) * ratio);
   const spacing = (60 / targetBpm) * sampleRate;
   const regionEnd = start + Math.round((end - start) * ratio);
 
@@ -183,9 +216,21 @@ function addBeatMarkersAfterStretch(
 
   const store = useAppStore.getState();
   const before: Marker[] = store.markers[docId] ?? [];
-  for (let i = 0; i < positions.length; i++) {
-    store.addMarker(docId, { id: nextId('marker'), name: `Beat ${i + 1}`, positionSample: positions[i] });
-  }
+  // A single combined write via `setMarkersForDoc` (fix round 1, reviewer
+  // finding), not up to MAX_BEAT_MARKERS sequential `addMarker` calls: each
+  // `addMarker` rebuilds + sorts the WHOLE list, marks the document dirty and
+  // notifies subscribers on its own — the right cost for one user action, but
+  // O(n^2 log n) and n renders for a bulk write. Every other bulk marker
+  // write in this repo (`fileService.ts`, `sessionFile.ts`) already uses
+  // `setMarkersForDoc` for exactly this reason. `setMarkersForDoc` does not
+  // itself mark the document dirty, but the stretch's own `applyEdit` already
+  // did on the success path this function is only reached from.
+  const added: Marker[] = positions.map((positionSample, i) => ({
+    id: nextId('marker'),
+    name: `Beat ${i + 1}`,
+    positionSample,
+  }));
+  store.setMarkersForDoc(docId, [...before, ...added]);
   const after: Marker[] = useAppStore.getState().markers[docId] ?? [];
   pushMarkerUndo('Add Beat Markers', docId, before, after);
 
@@ -210,6 +255,25 @@ function addBeatMarkersAfterStretch(
  * proportionally (the M3 fix-round-2 ruling; `'replace'` would drop every
  * interior marker). The History label reads `Effect: Time Stretch`
  * (hardcoded at `effectRunner.ts:68`) — accepted, not worked around.
+ *
+ * `runEffectOnSelection` never signals success/failure through its return
+ * value (`Promise<void>`, always resolves) — a worker load failure, the
+ * document being closed mid-run, an effect that throws, or effects simply
+ * never having been registered all resolve exactly like success, having
+ * shown their own error dialog. FIX ROUND 1 (reviewer finding, CRITICAL):
+ * the ORIGINAL version of this function returned `{ok:true}` and (when
+ * `addBeatMarkers` was set) wrote a beat grid unconditionally after that
+ * `await`, regardless of whether the stretch actually applied — reachable
+ * via `_setDspWorkerLoadFailure` in tests, and writing a marker grid
+ * describing the REQUESTED tempo change onto audio that never changed length
+ * at all, plus a spurious 'Add Beat Markers' undo entry, while reporting
+ * success. `applyEdit` (`editOps.ts`) always replaces the store's document
+ * OBJECT on success and is never called at all on any failure path
+ * (`effectRunner.ts`'s 'error'/onerror branches return before ever calling
+ * it) — so comparing the document reference before and after the `await`
+ * is a real, free success signal at THIS layer, without inventing one on
+ * top of the reused primitive. Both the beat-marker call and the `{ok:true}`
+ * are gated on it.
  */
 export async function applyTempoChange(
   req: ApplyTempoChangeRequest,
@@ -228,6 +292,10 @@ export async function applyTempoChange(
   const end = selection ? selection.end : docLength(doc);
 
   await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, onProgress);
+
+  const postDoc = useAppStore.getState().documents.find((d) => d.id === docId);
+  const applied = postDoc !== undefined && postDoc !== doc;
+  if (!applied) return { ok: false };
 
   if (req.addBeatMarkers && req.firstBeatSample != null) {
     addBeatMarkersAfterStretch(docId, start, end, ratio, req.targetBpm, sampleRate, req.firstBeatSample);

@@ -3,7 +3,12 @@ import {
   checkTempoChange,
   applyTempoChange,
   detectRegionTempo,
+  tempoQualityBand,
   MAX_BEAT_MARKERS,
+  QUALITY_TRANSPARENT_MIN_RATIO,
+  QUALITY_TRANSPARENT_MAX_RATIO,
+  QUALITY_GOOD_MIN_RATIO,
+  QUALITY_GOOD_MAX_RATIO,
 } from './tempoService';
 import { createDocument, docLength, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
@@ -14,7 +19,7 @@ import { MIN_RATIO, MAX_RATIO } from '../dsp/wsola';
 import { resampleChannel } from '../dsp/resample';
 import { fft } from '../dsp/fft';
 import { registerAllEffects } from '../effects/registerAll';
-import { _resetDspWorkerTestState } from '../__mocks__/createDspWorkerMock';
+import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
 
 // App.tsx registers effects at startup; tempoService's applyTempoChange goes
 // through runEffectOnSelection('time-stretch', ...), which looks the effect
@@ -191,12 +196,15 @@ describe('applyTempoChange — pitch preservation', () => {
     const zcr = zeroCrossingRate(out);
     expect(Math.abs(zcr - 882) / 882).toBeLessThan(0.08);
 
-    // Discriminating control: a naive resample-based "stretch" to the same
-    // ratio changes pitch along with duration — it must NOT read anywhere
-    // near 441 Hz, proving the test actually bites (a resample-based
-    // implementation could never pass the assertions above).
+    // Discriminating control: a naive "resample to slow down" implementation
+    // targeting the SAME 1.5x duration as the WSOLA output above (fix round
+    // 1: `SR * 1.5`, not `SR / 1.5` — the latter produces a SHORTER buffer,
+    // modelling a speed-UP rather than the slow-down under test here) drags
+    // the pitch down proportionally instead of preserving it — it must NOT
+    // read anywhere near 441 Hz, proving the test actually bites (a
+    // resample-based implementation could never pass the assertions above).
     const fixture = amSine(441, 120, seconds);
-    const control = resampleChannel(fixture, SR, SR / 1.5);
+    const control = resampleChannel(fixture, SR, SR * 1.5);
     const controlInterior = interiorSlice(control, 0.2, 0.8);
     const controlFreq = dominantFreq(controlInterior, SR, Math.min(16384, controlInterior.length));
     expect(Math.abs(controlFreq - 441) / 441).toBeGreaterThan(0.2);
@@ -303,6 +311,68 @@ describe('applyTempoChange — optional beat markers', () => {
     expect(showMessageBox).toHaveBeenCalledTimes(1);
     expect(showMessageBox.mock.calls[0][0]).toMatchObject({ type: 'info' });
   }, 15000);
+
+  it('clamps a firstBeatSample below the region start instead of piling markers onto sample 0', async () => {
+    const seconds = 4;
+    const doc = seedDoc([sine(220, seconds)]);
+    const docId = doc.id;
+    useAppStore.getState().setSelection({ start: 20000, end: 20000 + 40000 });
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 60, // ratio 2
+      addBeatMarkers: true,
+      firstBeatSample: 500, // below the region's own start (20000)
+    });
+    expect(result.ok).toBe(true);
+
+    const markers = liveMarkers(docId)
+      .filter((m) => m.name.startsWith('Beat '))
+      .sort((a, b) => a.positionSample - b.positionSample);
+    expect(markers.length).toBeGreaterThan(1);
+    // Exactly one marker at the (clamped) region start — not several piled
+    // onto 0 by an un-clamped negative offset.
+    expect(markers[0].positionSample).toBe(20000);
+    expect(markers.filter((m) => m.positionSample === 0)).toHaveLength(0);
+  }, 15000);
+});
+
+describe('applyTempoChange — the stretch never lands (fix round 1, CRITICAL)', () => {
+  it('reports failure and adds no beat markers / no undo entry when the DSP worker fails to load', async () => {
+    const seconds = 4;
+    const doc = seedDoc([sine(220, seconds)]);
+    const docId = doc.id;
+    const lenBefore = docLength(liveDoc(docId));
+    const historyBefore = getHistory(docId).done.length;
+
+    _setDspWorkerLoadFailure('boom');
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 60, // ratio 2
+      addBeatMarkers: true,
+      firstBeatSample: 1000,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(docLength(liveDoc(docId))).toBe(lenBefore);
+    expect(getHistory(docId).done.length).toBe(historyBefore);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+  }, 15000);
+});
+
+describe('tempoQualityBand', () => {
+  it('labels the ruled bands exactly (data, not prose-only, so the UI copy cannot drift)', () => {
+    expect(tempoQualityBand(1)).toBe('transparent');
+    expect(tempoQualityBand(QUALITY_TRANSPARENT_MIN_RATIO)).toBe('transparent');
+    expect(tempoQualityBand(QUALITY_TRANSPARENT_MAX_RATIO)).toBe('transparent');
+    expect(tempoQualityBand(0.6)).toBe('good');
+    expect(tempoQualityBand(QUALITY_GOOD_MIN_RATIO)).toBe('good');
+    expect(tempoQualityBand(QUALITY_GOOD_MAX_RATIO)).toBe('good');
+    expect(tempoQualityBand(MIN_RATIO)).toBe('extreme');
+    expect(tempoQualityBand(MAX_RATIO)).toBe('extreme');
+    expect(tempoQualityBand(0.3)).toBe('extreme');
+    expect(tempoQualityBand(3)).toBe('extreme');
+  });
 });
 
 describe('checkTempoChange / applyTempoChange — guards', () => {
