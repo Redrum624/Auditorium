@@ -106,6 +106,18 @@ describe('createTempoWorker equivalence (acceptance 1)', () => {
     expect(done.analysis.truncated).toBe(expected.truncated);
     expect(done.analysis.analyzedEndSample).toBe(expected.analyzedEndSample);
     expect(Array.from(done.analysis.beatSamples)).toEqual(Array.from(expected.beatSamples));
+    // N2 (T4 review fix round 2): `odf`/`periodFrames`/`decimationFactor` are
+    // the fields Plan Ruling 4 added specifically so the regrid path can
+    // retain them — `odf` in particular is the newly-TRANSFERRED field
+    // (tempo.worker.ts's `done` transfer list now includes
+    // `analysis.odf.buffer` alongside `beatSamples.buffer`), which the mock
+    // (no real Worker, no real structured-clone/transfer) cannot exercise
+    // directly, making this field-equality check the only guard against the
+    // mock and the real worker silently disagreeing on `odf`'s shape/content.
+    expect(done.analysis.periodFrames).toBe(expected.periodFrames);
+    expect(done.analysis.decimationFactor).toBe(expected.decimationFactor);
+    expect(done.analysis.odf.length).toBeGreaterThan(0);
+    expect(Array.from(done.analysis.odf)).toEqual(Array.from(expected.odf));
 
     worker.terminate();
   });
@@ -178,6 +190,8 @@ describe('createTempoWorker level:"regrid" (Task T4 Plan Ruling 4)', () => {
     expect(done.analysis.periodFrames).toBe(expected.periodFrames);
     expect(done.analysis.decimationFactor).toBe(expected.decimationFactor);
     expect(Array.from(done.analysis.beatSamples)).toEqual(Array.from(expected.beatSamples));
+    // N2: odf must round-trip unchanged through the regrid request too.
+    expect(Array.from(done.analysis.odf)).toEqual(Array.from(original.odf));
     // The whole point of the regrid path: roughly double the beat count of
     // the original (un-corrected) analysis.
     expect(done.analysis.beatSamples.length).toBeGreaterThan(original.beatSamples.length * 1.7);

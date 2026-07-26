@@ -510,10 +510,18 @@ function startRun(
     resolveRun = resolve;
   });
 
+  // N1 (T4 review fix round 2): set when a 'regrid' request yields a
+  // degenerate result (bpm:null or <2 beats — e.g. an out-of-range/zero/
+  // negative/NaN `periodFrames`). `settle()` then resolves null explicitly
+  // rather than falling through to `readLive()`, which would otherwise
+  // silently return the OLD (untouched, still-good) cache entry — easy to
+  // misread as "the correction succeeded and this is the result."
+  let degenerateRegrid = false;
+
   function settle(): void {
     progress.delete(docId);
     bumpVersion();
-    resolveRun(readLive());
+    resolveRun(degenerateRegrid ? null : readLive());
   }
 
   worker.onmessage = (e: MessageEvent) => {
@@ -531,19 +539,30 @@ function startRun(
     worker.terminate();
     if (msg.type === 'done') {
       if (isCurrent) {
-        const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
-        if (liveDoc) {
-          // A 'regrid' write must not force the cache row's level back to
-          // 'tempo' — it only replaces the numeric grid, so a level:'remix'
-          // row being corrected stays level:'remix' (Plan Ruling 4).
-          const cacheLevel = level === 'regrid' ? (cache.get(docId)?.level ?? 'tempo') : level;
-          // `deriveGrid` (the 'regrid' worker path) has no ACF/candidate
-          // data, so confidence/peakRatio/truncated/analyzedEndSample are
-          // merged in from the entry being corrected BEFORE writing —
-          // `regridTempo`'s doc comment explains why this carry-over is
-          // correct rather than a fabricated/zeroed value reaching the cache.
-          const analysis = regridCarry ? { ...msg.analysis, ...regridCarry } : msg.analysis;
-          writeCache(docId, channelRefs, sampleRate, cacheLevel, analysis);
+        // N1: a degenerate regrid must not overwrite a good cache row, and
+        // must never carry confidence/peakRatio onto an empty result (that
+        // reads as "full confidence in a null BPM with zero beats" — the
+        // exact silent-wrong-output class the staleness gate exists to
+        // prevent). Skip the cache write entirely; settle() resolves null.
+        const isDegenerateRegrid =
+          level === 'regrid' && (msg.analysis.bpm === null || msg.analysis.beatSamples.length < 2);
+        if (isDegenerateRegrid) {
+          degenerateRegrid = true;
+        } else {
+          const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
+          if (liveDoc) {
+            // A 'regrid' write must not force the cache row's level back to
+            // 'tempo' — it only replaces the numeric grid, so a level:'remix'
+            // row being corrected stays level:'remix' (Plan Ruling 4).
+            const cacheLevel = level === 'regrid' ? (cache.get(docId)?.level ?? 'tempo') : level;
+            // `deriveGrid` (the 'regrid' worker path) has no ACF/candidate
+            // data, so confidence/peakRatio/truncated/analyzedEndSample are
+            // merged in from the entry being corrected BEFORE writing —
+            // `regridTempo`'s doc comment explains why this carry-over is
+            // correct rather than a fabricated/zeroed value reaching the cache.
+            const analysis = regridCarry ? { ...msg.analysis, ...regridCarry } : msg.analysis;
+            writeCache(docId, channelRefs, sampleRate, cacheLevel, analysis);
+          }
         }
       }
     } else if (msg.type === 'error') {
@@ -679,8 +698,24 @@ export function runRemixAnalysis(
  * member is displayed/spliced on) — done in `startRun`'s `'done'` handler by
  * merging those four fields from the row's PRE-write state before
  * `writeCache` runs.
+ *
+ * **Valid domain of `newPeriodFrames`** (N1, T4 review fix round 2): a
+ * finite, positive number of ODF frames — typically the entry's own
+ * `periodFrames` halved/doubled for a x2/(divide)2 correction, or computed
+ * from a user-provided BPM/time-signature/downbeat override. This function
+ * does NOT validate that the value is a SENSIBLE period for the content
+ * (e.g. wildly out of the 60-200 BPM range `odf`'s length implies) —
+ * `0`/negative/`NaN`/`Infinity` are rejected up front (resolve null, no
+ * worker round-trip), but an otherwise well-formed, merely out-of-range
+ * value is only caught AFTER `deriveGrid` runs: when the result is
+ * degenerate (`bpm === null` or fewer than 2 beats), the existing cache row
+ * is left COMPLETELY untouched and this resolves null — it never overwrites
+ * a good row with an empty one, and never carries `confidence`/`peakRatio`
+ * onto a result that doesn't deserve them.
  */
 export function regridTempo(docId: string, newPeriodFrames: number): Promise<TempoEntry | null> {
+  if (!(newPeriodFrames > 0) || !Number.isFinite(newPeriodFrames)) return Promise.resolve(null);
+
   const liveDoc = useAppStore.getState().documents.find((d) => d.id === docId);
   if (!liveDoc) return Promise.resolve(null);
 

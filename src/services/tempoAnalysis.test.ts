@@ -488,6 +488,44 @@ describe('regridTempo — end-to-end (Task T4 Plan Ruling 4)', () => {
   }, 20000);
 });
 
+describe('regridTempo — degenerate periodFrames (N1, T4 review fix round 2)', () => {
+  it('an out-of-range (but positive, finite) period resolves null and leaves the prior good entry COMPLETELY unchanged', async () => {
+    const doc = seedDoc([clickTrain(120, 20)]);
+    const original = await runTempoAnalysis(doc);
+    expect(original).not.toBeNull();
+    expect(original!.bpm).not.toBeNull();
+
+    // Wildly out of range for a 20 s fixture's odf length -- trackBeats
+    // finds fewer than 2 beats at this period.
+    const result = await regridTempo(doc.id, original!.odf.length * 100);
+
+    expect(result).toBeNull(); // never the stale-looking "old entry returned as if it succeeded"
+    // The cache row itself must be BYTE-IDENTICAL to before -- same object
+    // reference, not just equal values -- proving writeCache never ran.
+    expect(getTempo(doc)).toBe(original);
+    expect(getTempo(doc)!.bpm).toBe(original!.bpm);
+    expect(getTempo(doc)!.confidence).toBe(original!.confidence);
+    expect(getTempo(doc)!.beatSamples.length).toBe(original!.beatSamples.length);
+  }, 20000);
+
+  it.each([0, -1, -100, NaN, Infinity, -Infinity])(
+    'periodFrames=%p is rejected up front (resolves null, no worker round-trip, prior entry untouched)',
+    async (badPeriod) => {
+      const doc = seedDoc([clickTrain(120, 20)]);
+      const original = await runTempoAnalysis(doc);
+      expect(original).not.toBeNull();
+      _resetTempoWorkerTestState(); // isolate the terminate-count assertion below
+
+      const result = await regridTempo(doc.id, badPeriod);
+
+      expect(result).toBeNull();
+      expect(getTempo(doc)).toBe(original); // untouched
+      expect(_getTempoWorkerTerminateCount()).toBe(0); // rejected before any worker was even created
+    },
+    20000
+  );
+});
+
 describe('isTempoRunning / getTempoProgress', () => {
   it('reflect an in-flight run and clear once it settles', async () => {
     const doc = seedDoc([clickTrain(120, 8)]);
