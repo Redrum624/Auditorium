@@ -589,14 +589,21 @@ export function acfAt(acf: Float32Array, lag: number): number {
 export interface TempoCandidate {
   bpm: number;
   score: number;
+  /** Unweighted harmonic-comb strength (no prior applied) -- exposed so the
+   * confidence measure can compute peak PROMINENCE on the raw comb (see
+   * `combProminence`), separately from the prior-weighted `score`. */
+  comb: number;
 }
 
 /**
  * Scores a log-spaced grid of tempo candidates (`b = minBpm * 1.005^i`, ~241
- * candidates over the default 60-200 BPM range) by harmonic comb strength on
- * the autocorrelation times a log-Gaussian prior centred on
- * `PRIOR_CENTER_BPM`. Sorted descending by score -- `[0]` is the winning
- * OCTAVE (not yet period-refined; see `refinePeriodFrames`).
+ * candidates over the default 60-200 BPM range, with `maxBpm` itself always
+ * appended as the final candidate even when the multiplicative step
+ * overshoots it -- otherwise the grid's last point lands at ~199.6, never
+ * reaching `MAX_BPM` exactly) by harmonic comb strength on the
+ * autocorrelation times a log-Gaussian prior centred on `PRIOR_CENTER_BPM`.
+ * Sorted descending by score -- `[0]` is the winning OCTAVE (not yet
+ * period-refined; see `refinePeriodFrames`).
  */
 export function scoreTempoCandidates(
   acf: Float32Array,
@@ -605,17 +612,62 @@ export function scoreTempoCandidates(
   maxBpm: number = MAX_BPM
 ): TempoCandidate[] {
   const candidates: TempoCandidate[] = [];
+  let lastBpm = minBpm;
   for (let bpm = minBpm; bpm <= maxBpm; bpm *= CANDIDATE_STEP) {
     const periodFrames = (60 * odfRate) / bpm;
     let comb = 0;
     for (let m = 1; m <= HARMONIC_WEIGHTS.length; m++) {
       comb += HARMONIC_WEIGHTS[m - 1] * acfAt(acf, m * periodFrames);
     }
-    candidates.push({ bpm, score: comb * priorWeight(bpm) });
+    candidates.push({ bpm, score: comb * priorWeight(bpm), comb });
+    lastBpm = bpm;
+  }
+  if (lastBpm < maxBpm) {
+    const periodFrames = (60 * odfRate) / maxBpm;
+    let comb = 0;
+    for (let m = 1; m <= HARMONIC_WEIGHTS.length; m++) {
+      comb += HARMONIC_WEIGHTS[m - 1] * acfAt(acf, m * periodFrames);
+    }
+    candidates.push({ bpm: maxBpm, score: comb * priorWeight(maxBpm), comb });
   }
   candidates.sort((a, b) => b.score - a.score);
   return candidates;
 }
+
+/**
+ * Peak PROMINENCE of the RAW (unweighted, no prior, no octave-family
+ * exclusion) harmonic comb over the whole candidate grid: `max(comb) /
+ * mean(comb)`. Answers "is there real periodic structure at all" rather than
+ * "did the DP produce an evenly-spaced track on ODF peaks" (which is true by
+ * construction for almost any content -- see `analyzeTempo`'s confidence
+ * calculation for why this replaced a salience-based term).
+ */
+function combProminence(candidates: TempoCandidate[]): number {
+  if (candidates.length === 0) return 0;
+  let maxComb = -Infinity;
+  let sum = 0;
+  for (const c of candidates) {
+    if (c.comb > maxComb) maxComb = c.comb;
+    sum += c.comb;
+  }
+  const mean = sum / candidates.length;
+  return mean > 1e-12 ? maxComb / mean : 0;
+}
+
+/**
+ * Confidence sub-score calibration (post-T2-review C2 fix). Unlike
+ * MIN_BPM/TIGHTNESS/etc., the brief's confidence formula only pins
+ * `CONFIDENCE_LOW` as an ACCEPTANCE ANCHOR -- the internal divisors inside
+ * `sSal`/`sPeak` are prose, not named constants, and the original `sSal`
+ * formula turned out to saturate on noise (see the review). These three
+ * were calibrated against a 7-content-type sweep -- clickTrain, drumLoop,
+ * backbeat (real rhythm, prominence >= 5.8) vs. noise, pad, speech-like,
+ * pure sine (no real tempo, prominence <= 2.95) -- see task-T2-report.md
+ * "Fix round 1" for the full measurement table this was derived from.
+ */
+const PROMINENCE_FLOOR = 3;
+const PROMINENCE_SCALE = 3;
+const PEAK_RATIO_SCALE = 2;
 
 /** 3-point parabolic vertex offset for samples `(yMinus, y0, yPlus)` centred on `y0`. */
 function parabolicOffset(yMinus: number, y0: number, yPlus: number): number {
@@ -743,6 +795,28 @@ function salienceOf(odf: Float32Array, beatFrames: Int32Array): number {
   return overallMean > 1e-12 ? beatMean / overallMean : 0;
 }
 
+function medianOfNumbers(x: number[]): number {
+  const n = x.length;
+  if (n === 0) return 0;
+  const sorted = [...x].sort((a, b) => a - b);
+  const mid = Math.floor(n / 2);
+  return n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
+/**
+ * The bpm `trackBeats` ACTUALLY delivered, from the median inter-beat frame
+ * gap of its own returned track -- as opposed to the NOMINAL candidate bpm
+ * (`bStar*r`) that was merely the requested period. `null` when there are
+ * too few beats to measure a gap.
+ */
+function achievedBpm(beatFrames: Int32Array, odfRate: number): number | null {
+  if (beatFrames.length < 2) return null;
+  const diffs: number[] = new Array(beatFrames.length - 1);
+  for (let i = 1; i < beatFrames.length; i++) diffs[i - 1] = beatFrames[i] - beatFrames[i - 1];
+  const med = medianOfNumbers(diffs);
+  return med > 0 ? (60 * odfRate) / med : null;
+}
+
 interface OctaveChoice {
   bpm: number;
   periodFrames: number;
@@ -754,11 +828,31 @@ interface OctaveChoice {
  * OCTAVE DISAMBIGUATION: `bStar` (the prior-weighted score's argmax) only
  * fixes an OCTAVE FAMILY, not necessarily the perceptually "correct" member
  * of it. For each `r` in `OCTAVE_FAMILY` with `bStar*r` in range, runs the
- * full beat DP at that period and scores `salience(b)*prior(b)`: halving
- * keeps only strong on-beats so salience rises, doubling adds empty
- * off-beats so it falls, and the prior counterbalances the resulting slow
- * bias. `r=1` (bStar unchanged) is always a member of the family and always
- * in range (bStar itself came from the same [minBpm,maxBpm] search), so this
+ * full beat DP at that period and scores `salience(b)*prior(b)`.
+ *
+ * CRITICAL FIX (post-T2-review C1): the prior is weighted on the ACHIEVED
+ * beat rate (`60*odfRate/median(diff(beatFrames))`), not the nominal
+ * `bpmR = bStar*r` label. `trackBeats`'s tau-window is wide enough
+ * (`[t-2P, t-P/2]`) that a candidate period which doesn't correspond to any
+ * real periodicity in the content routinely gets IGNORED -- the DP just
+ * follows whichever real onset rhythm is reachable, "borrowing" a
+ * neighbouring octave-family member's actual track while still carrying its
+ * own (possibly more prior-favourable) nominal label. Weighting the prior on
+ * the nominal label then rewards that borrowed, unrepresentative label
+ * rather than the track that was actually delivered. Weighting on the
+ * ACHIEVED rate closes this: a "1.5x" candidate that silently collapses onto
+ * the same physical beats as the "2x" candidate now carries the SAME
+ * (achieved-rate) prior as that 2x candidate, so it can no longer win purely
+ * by quoting a nominal label closer to `PRIOR_CENTER_BPM`. Measured on a
+ * kick/snare/hihat backbeat pattern at true tempo 90 bpm (see
+ * task-T2-report.md "Fix round 1"): before this fix, the r=1.5 family member
+ * (nominal 134.8, but its DP output actually tracks the SAME beats as r=2,
+ * achieved ~184.6) won on metric 10.50 vs the correct r=1 track's 10.38 --
+ * purely because prior(134.8) > prior(89.9). After weighting on achieved
+ * rate, r=1's own achieved-rate prior wins decisively.
+ *
+ * `r=1` (bStar unchanged) is always a member of the family and always in
+ * range (bStar itself came from the same [minBpm,maxBpm] search), so this
  * always returns a result.
  */
 function chooseOctave(
@@ -766,7 +860,8 @@ function chooseOctave(
   bStar: number,
   periodFramesRefined: number,
   minBpm: number,
-  maxBpm: number
+  maxBpm: number,
+  odfRate: number
 ): OctaveChoice {
   let best: OctaveChoice | null = null;
   let bestMetric = -Infinity;
@@ -776,10 +871,12 @@ function chooseOctave(
     const periodR = periodFramesRefined / r;
     const beatFrames = trackBeats(odf, periodR);
     const salience = salienceOf(odf, beatFrames);
-    const metric = salience * priorWeight(bpmR);
+    const achieved = achievedBpm(beatFrames, odfRate);
+    const priorBpm = achieved ?? bpmR; // too few beats to measure achieved rate: fall back to nominal
+    const metric = salience * priorWeight(priorBpm);
     if (metric > bestMetric) {
       bestMetric = metric;
-      best = { bpm: bpmR, periodFrames: periodR, beatFrames, salience };
+      best = { bpm: achieved ?? bpmR, periodFrames: periodR, beatFrames, salience };
     }
   }
   // r=1 is always a valid member (see doc comment), so `best` is never null.
@@ -856,7 +953,14 @@ function refineSampleDomain(mono: Float32Array, coarseSample: number, D: number)
     const idxPrev = idx - win;
     if (idxPrev < 0) continue;
     const deriv = eValues[idx] - eValues[idxPrev];
-    if (deriv > bestVal) {
+    // `>=`, not `>` (post-T2-review I2 fix): for a sharp attack the
+    // derivative is a flat PLATEAU across `win` consecutive positions ending
+    // exactly AT the true attack sample (see the worked proof in
+    // task-T2-report.md), so ties must resolve to the LATEST (rightmost)
+    // position, matching the T1 carry-forward's own "always late, never
+    // early" finding -- a strict `>` instead keeps the FIRST (leftmost)
+    // position on the plateau, landing `win-1` samples too early.
+    if (deriv >= bestVal) {
       bestVal = deriv;
       bestP = p;
     }
@@ -993,7 +1097,7 @@ export function analyzeTempo(
   const periodFramesRefined = refinePeriodFrames(acf, rawPeriodFrames);
   onProgress?.(0.85);
 
-  const octave = chooseOctave(odf, bStar, periodFramesRefined, minBpm, maxBpm);
+  const octave = chooseOctave(odf, bStar, periodFramesRefined, minBpm, maxBpm, odfRate);
   const beatFrames = octave.beatFrames;
   if (beatFrames.length < 2) {
     return emptyTempoAnalysis(analyzedEndSample, truncated);
@@ -1008,7 +1112,16 @@ export function analyzeTempo(
   enforceStrictlyIncreasing(refinedSamples);
 
   const slope = leastSquaresSlope(refinedSamples);
-  const bpm = slope > 0 ? (60 * sampleRate) / slope : null;
+  if (!(slope > 0)) {
+    // Mathematically this branch is unreachable given >=2 STRICTLY
+    // increasing samples paired with evenly-spaced indices (the
+    // least-squares slope of a strictly monotonic sequence is always
+    // positive) -- kept as a defensive guard, but post-T2-review it must
+    // return the SAME null-bpm/empty-beats invariant as every other guard
+    // rather than a bpm:null result carrying non-empty beatSamples.
+    return emptyTempoAnalysis(analyzedEndSample, truncated);
+  }
+  const bpm = (60 * sampleRate) / slope;
 
   const diffs: number[] = new Array(refinedSamples.length - 1);
   for (let i = 1; i < refinedSamples.length; i++) diffs[i - 1] = refinedSamples[i] - refinedSamples[i - 1];
@@ -1022,10 +1135,24 @@ export function analyzeTempo(
   const rawPeakRatio = secondBest > 0 ? bestScore / secondBest : 0;
   const peakRatio = Number.isFinite(rawPeakRatio) ? rawPeakRatio : 0;
 
-  const sSal = clamp01((octave.salience - 1) / 2);
-  const sPeak = clamp01((peakRatio - 1) / 0.5);
+  // CRITICAL FIX (post-T2-review C2): the original sSal = clamp01((salience-1)/2)
+  // answers "did the DP produce an evenly-spaced track on ODF peaks", which
+  // is true almost by construction for ANY non-degenerate content (the DP's
+  // tightness penalty structurally forces a low-IBI-CV track regardless of
+  // whether the underlying peaks are musically meaningful) -- measured
+  // salience=4.76 on pure LCG noise, comfortably past this term's own
+  // saturation point (salience=3). Replaced with peak PROMINENCE of the
+  // unweighted comb over the whole candidate grid (`max(comb)/mean(comb)`,
+  // no prior, no octave-family exclusion), which answers "is there real
+  // periodic structure at all" instead. sPeak's divisor was widened
+  // (0.5 -> PEAK_RATIO_SCALE) for the same reason: it also saturated on
+  // noise's peakRatio (a ratio of two prior-weighted scores on a near-flat
+  // acf, which turns out not to require much daylight to exceed 1.5).
+  const prominence = combProminence(candidates);
+  const sProm = clamp01((prominence - PROMINENCE_FLOOR) / PROMINENCE_SCALE);
+  const sPeak = clamp01((peakRatio - 1) / PEAK_RATIO_SCALE);
   const sReg = clamp01(1 - ibiCv / 0.1);
-  const confidence = 0.5 * sSal + 0.3 * sPeak + 0.2 * sReg;
+  const confidence = 0.5 * sProm + 0.3 * sPeak + 0.2 * sReg;
 
   onProgress?.(1);
 
