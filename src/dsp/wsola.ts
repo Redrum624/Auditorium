@@ -28,9 +28,11 @@ const FRAME_MS = 40;
 const SEARCH_MS = 10;
 /** Length (ms) of the leading span compared by normalized cross-correlation. */
 const COMPARE_MS = 10;
-/** ratio is clamped to this inclusive range. */
-const MIN_RATIO = 0.25;
-const MAX_RATIO = 4;
+/** ratio is clamped to this inclusive range. Exported so callers (e.g.
+ * `tempoService.ts`'s `checkTempoChange`) can refuse an out-of-range ratio
+ * explicitly instead of relying on `planStretch`'s silent clamp below. */
+export const MIN_RATIO = 0.25;
+export const MAX_RATIO = 4;
 /** onProgress fires once every this many synthesis frames. */
 const PROGRESS_FRAME_BATCH = 32;
 
