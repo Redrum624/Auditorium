@@ -82,7 +82,7 @@
  * keeps `odfLow` small when there is genuinely little sub-200-Hz energy.
  */
 
-import { fft } from './fft';
+import { fft, ifft, nextPow2 } from './fft';
 import { hann } from './windows';
 
 // ---------------------------------------------------------------------------
@@ -476,4 +476,567 @@ export function onsetEnvelope(
   }
 
   return { odf, odfLow, bands: bandsMatrix, numBands, odfRate, numFrames };
+}
+
+// ---------------------------------------------------------------------------
+// Tempo estimation, Ellis beat-tracking DP, sample-accurate refinement
+// (v1.5 feature set, part 2).
+//
+// ## Sample-domain refinement window: asymmetric and forward-biased, on purpose
+//
+// T1's ODF FRAME ATTRIBUTION CONTRACT (see module doc comment above) measured
+// the frame->sample mapping `(f+1)*ONSET_HOP*D` as a FLOOR, not a point
+// estimate: sub-hop sweeps showed attacks at original samples
+// 7680/7744/7808/7872 (all within one decimated hop of each other) map to the
+// SAME frame. So the true attack lies anywhere in
+// `[(f+1)*ONSET_HOP*D, (f+2)*ONSET_HOP*D)` -- mean bias -11.6 ms, worst
+// -23.2 ms, ALWAYS late of the coarse estimate, never early. A symmetric
+// +/-512-sample search window would therefore only cover the first half of
+// the true uncertainty and leave every beat systematically early. The search
+// window below is deliberately `[-D*ONSET_HOP/4, +D*ONSET_HOP]` (= [-256,
+// +1024] original samples at the canonical 44.1 kHz / D=4 rate), not a
+// symmetric +/-512 -- see `refineSampleDomain`.
+// ---------------------------------------------------------------------------
+
+export const MIN_BPM = 60;
+export const MAX_BPM = 200;
+export const CANDIDATE_STEP = 1.005;
+export const HARMONIC_WEIGHTS = [1, 0.5, 0.25];
+export const PRIOR_CENTER_BPM = 120;
+export const PRIOR_SIGMA_OCT = 0.9;
+export const OCTAVE_FAMILY = [1 / 3, 1 / 2, 2 / 3, 1, 3 / 2, 2, 3];
+export const TIGHTNESS = 6;
+export const ONSET_ATTRIBUTION_FRAC = 0.25;
+export const REFINE_ENERGY_WIN = 256;
+export const CONFIDENCE_LOW = 0.35;
+
+function clamp01(v: number): number {
+  return v < 0 ? 0 : v > 1 ? 1 : v;
+}
+
+function meanOf(x: ArrayLike<number>): number {
+  const n = x.length;
+  if (n === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < n; i++) s += x[i];
+  return s / n;
+}
+
+/** Log-Gaussian tempo prior centred on `PRIOR_CENTER_BPM`, width `PRIOR_SIGMA_OCT` octaves. */
+function priorWeight(bpm: number): number {
+  const z = Math.log2(bpm / PRIOR_CENTER_BPM) / PRIOR_SIGMA_OCT;
+  return Math.exp(-0.5 * z * z);
+}
+
+// ---------------------------------------------------------------------------
+// autocorrelate / acfAt
+// ---------------------------------------------------------------------------
+
+/**
+ * Wiener-Khinchin autocorrelation of `odf`: pad to `nextPow2(2*N)`, forward
+ * FFT, replace with the power spectrum, inverse FFT, take the first `N` real
+ * values. UNBIASED normalisation (`acf[l] /= (N-l)`, then `/= acf[0]`) is
+ * load-bearing -- the raw (biased) ACF's triangular taper suppresses long
+ * lags and manufactures fast-tempo octave errors before the disambiguator
+ * (`chooseOctave`) ever runs. Never mutates `odf`.
+ */
+export function autocorrelate(odf: Float32Array): Float32Array {
+  const N = odf.length;
+  if (N === 0) return new Float32Array(0);
+
+  const M = nextPow2(2 * N);
+  const re = new Float32Array(M);
+  const im = new Float32Array(M);
+  re.set(odf);
+  fft(re, im);
+  for (let k = 0; k < M; k++) {
+    re[k] = re[k] * re[k] + im[k] * im[k];
+    im[k] = 0;
+  }
+  ifft(re, im);
+
+  const acf = new Float32Array(N);
+  for (let l = 0; l < N; l++) acf[l] = re[l] / (N - l);
+
+  const a0 = acf[0];
+  if (!(a0 > 1e-20)) {
+    // Degenerate (all-zero / silent) ODF: acf[0] would be ~0, and dividing by
+    // it would manufacture NaN out of a legitimately-zero signal. The caller
+    // guards on this upstream (odf all-zero -> bpm: null), but autocorrelate
+    // itself must still return finite values per its own contract.
+    return new Float32Array(N);
+  }
+  for (let l = 0; l < N; l++) acf[l] /= a0;
+  return acf;
+}
+
+/** Linear interpolation of `acf` at a fractional lag; clamps outside `[0, N-1]`. */
+export function acfAt(acf: Float32Array, lag: number): number {
+  const N = acf.length;
+  if (N === 0) return 0;
+  if (N === 1) return acf[0];
+  if (lag <= 0) return acf[0];
+  if (lag >= N - 1) return acf[N - 1];
+  const i0 = Math.floor(lag);
+  const frac = lag - i0;
+  return acf[i0] * (1 - frac) + acf[i0 + 1] * frac;
+}
+
+// ---------------------------------------------------------------------------
+// scoreTempoCandidates / period refinement
+// ---------------------------------------------------------------------------
+
+export interface TempoCandidate {
+  bpm: number;
+  score: number;
+}
+
+/**
+ * Scores a log-spaced grid of tempo candidates (`b = minBpm * 1.005^i`, ~241
+ * candidates over the default 60-200 BPM range) by harmonic comb strength on
+ * the autocorrelation times a log-Gaussian prior centred on
+ * `PRIOR_CENTER_BPM`. Sorted descending by score -- `[0]` is the winning
+ * OCTAVE (not yet period-refined; see `refinePeriodFrames`).
+ */
+export function scoreTempoCandidates(
+  acf: Float32Array,
+  odfRate: number,
+  minBpm: number = MIN_BPM,
+  maxBpm: number = MAX_BPM
+): TempoCandidate[] {
+  const candidates: TempoCandidate[] = [];
+  for (let bpm = minBpm; bpm <= maxBpm; bpm *= CANDIDATE_STEP) {
+    const periodFrames = (60 * odfRate) / bpm;
+    let comb = 0;
+    for (let m = 1; m <= HARMONIC_WEIGHTS.length; m++) {
+      comb += HARMONIC_WEIGHTS[m - 1] * acfAt(acf, m * periodFrames);
+    }
+    candidates.push({ bpm, score: comb * priorWeight(bpm) });
+  }
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
+}
+
+/** 3-point parabolic vertex offset for samples `(yMinus, y0, yPlus)` centred on `y0`. */
+function parabolicOffset(yMinus: number, y0: number, yPlus: number): number {
+  const denom = yMinus - 2 * y0 + yPlus;
+  if (denom === 0) return 0;
+  return (0.5 * (yMinus - yPlus)) / denom;
+}
+
+/**
+ * Refines a period ESTIMATE (in ODF frames) by 3-point parabolic
+ * interpolation on the RAW `acf` around `round(periodFrames)` -- never on the
+ * prior-weighted score (audio-judge F7): the log-Gaussian prior has nonzero
+ * slope at its peak and would otherwise bias the refined period by ~0.06%,
+ * feeding directly into every splice position downstream. The octave itself
+ * must already be decided before calling this -- this function only sharpens
+ * the period within +/-0.5 frames of the integer guess.
+ *
+ * The fit is done in the LOG domain (log(acf[p-1]), log(acf[p]),
+ * log(acf[p+1])) when all three are positive, falling back to the plain
+ * linear-domain fit otherwise (e.g. a lag where the unbiased acf has gone
+ * slightly negative). This is still "3-point parabolic interpolation on the
+ * raw acf" -- no score/prior value enters it anywhere -- just applied after
+ * a monotonic (log) transform of those same raw samples. It matters because
+ * the acf's peak shape around a real click-train period is measurably
+ * SKEWED, not symmetric (inherited from T1's own documented asymmetric
+ * per-attack flux profile: "argmax(odf) === k-1 EXACTLY", never centred).
+ * Measured on clickTrain(150,20)'s true 17.2266-frame period: linear-domain
+ * fit recovers offset 0.1145 (true 0.2266, bias ~115 samples); log-domain
+ * recovers 0.2310 (bias ~4.5 samples) -- roughly 25x tighter, though still
+ * not quite inside the brief's <4-sample bound (see task report).
+ */
+export function refinePeriodFrames(acf: Float32Array, periodFrames: number): number {
+  const p = Math.round(periodFrames);
+  if (p <= 0 || p >= acf.length - 1) return periodFrames;
+  const yMinus = acf[p - 1];
+  const y0 = acf[p];
+  const yPlus = acf[p + 1];
+  const canLog = yMinus > 0 && y0 > 0 && yPlus > 0;
+  const offset = canLog
+    ? parabolicOffset(Math.log(yMinus), Math.log(y0), Math.log(yPlus))
+    : parabolicOffset(yMinus, y0, yPlus);
+  const clamped = Math.max(-0.5, Math.min(0.5, offset));
+  return p + clamped;
+}
+
+// ---------------------------------------------------------------------------
+// trackBeats -- Ellis (2007) beat-tracking dynamic program
+// ---------------------------------------------------------------------------
+
+/**
+ * Ellis (2007) beat tracking DP with fractional period `P` (in ODF frames).
+ * `C[t] = odf[t] + max(0, max_{tau in [t-2P, t-P/2]} (C[tau] -
+ * TIGHTNESS*(ln((t-tau)/P))^2))`; `TIGHTNESS=6` is Ellis's published value
+ * for a unit-std onset envelope (T1's `onsetEnvelope` already normalises to
+ * unit std) and is not a free parameter. The `max(0, ...)` floor (present in
+ * Ellis's original recursion, implicit rather than spelled out in the task
+ * brief's simplified formula) lets a frame start a fresh beat sequence with
+ * no predecessor rather than forcing every frame to inherit an arbitrarily
+ * bad predecessor cost -- without it there is no way to represent "no valid
+ * tau exists yet" for frames before the first `~P/2` frames of the track,
+ * and the whole recursion is undefined there. Backtrace starts from
+ * `argmax C[t]` over the last `~2P` frames and follows `back` pointers to
+ * `-1`. This DP FOLLOWS tempo drift -- unlike a rigid isochronous grid, it
+ * finds the actual maximum-consistency path through the observed onset
+ * strength. Cost O(N*1.5P), matching the `tau` window width.
+ */
+export function trackBeats(odf: Float32Array, periodFrames: number): Int32Array {
+  const N = odf.length;
+  if (N === 0 || !(periodFrames > 0)) return new Int32Array(0);
+
+  const P = periodFrames;
+  const C = new Float64Array(N);
+  const back = new Int32Array(N).fill(-1);
+
+  for (let t = 0; t < N; t++) {
+    const lowTau = Math.max(0, Math.ceil(t - 2 * P));
+    const highTau = Math.min(t - 1, Math.floor(t - P / 2));
+    let best = -Infinity;
+    let bestTau = -1;
+    for (let tau = lowTau; tau <= highTau; tau++) {
+      const ratio = (t - tau) / P;
+      const logRatio = Math.log(ratio);
+      const val = C[tau] - TIGHTNESS * logRatio * logRatio;
+      if (val > best) {
+        best = val;
+        bestTau = tau;
+      }
+    }
+    if (best > 0) {
+      C[t] = odf[t] + best;
+      back[t] = bestTau;
+    } else {
+      C[t] = odf[t];
+      back[t] = -1;
+    }
+  }
+
+  const searchStart = Math.max(0, N - Math.ceil(2 * P));
+  let tStar = searchStart;
+  let bestC = -Infinity;
+  for (let t = searchStart; t < N; t++) {
+    if (C[t] > bestC) {
+      bestC = C[t];
+      tStar = t;
+    }
+  }
+
+  const beats: number[] = [];
+  let cur = tStar;
+  while (cur !== -1) {
+    beats.push(cur);
+    cur = back[cur];
+  }
+  beats.reverse();
+  return Int32Array.from(beats);
+}
+
+/** `mean(odf at beat frames) / mean(odf overall)` -- the octave-disambiguation salience metric. */
+function salienceOf(odf: Float32Array, beatFrames: Int32Array): number {
+  if (beatFrames.length === 0) return 0;
+  let s = 0;
+  for (let i = 0; i < beatFrames.length; i++) s += odf[beatFrames[i]];
+  const beatMean = s / beatFrames.length;
+  const overallMean = meanOf(odf);
+  return overallMean > 1e-12 ? beatMean / overallMean : 0;
+}
+
+interface OctaveChoice {
+  bpm: number;
+  periodFrames: number;
+  beatFrames: Int32Array;
+  salience: number;
+}
+
+/**
+ * OCTAVE DISAMBIGUATION: `bStar` (the prior-weighted score's argmax) only
+ * fixes an OCTAVE FAMILY, not necessarily the perceptually "correct" member
+ * of it. For each `r` in `OCTAVE_FAMILY` with `bStar*r` in range, runs the
+ * full beat DP at that period and scores `salience(b)*prior(b)`: halving
+ * keeps only strong on-beats so salience rises, doubling adds empty
+ * off-beats so it falls, and the prior counterbalances the resulting slow
+ * bias. `r=1` (bStar unchanged) is always a member of the family and always
+ * in range (bStar itself came from the same [minBpm,maxBpm] search), so this
+ * always returns a result.
+ */
+function chooseOctave(
+  odf: Float32Array,
+  bStar: number,
+  periodFramesRefined: number,
+  minBpm: number,
+  maxBpm: number
+): OctaveChoice {
+  let best: OctaveChoice | null = null;
+  let bestMetric = -Infinity;
+  for (const r of OCTAVE_FAMILY) {
+    const bpmR = bStar * r;
+    if (bpmR < minBpm || bpmR > maxBpm) continue;
+    const periodR = periodFramesRefined / r;
+    const beatFrames = trackBeats(odf, periodR);
+    const salience = salienceOf(odf, beatFrames);
+    const metric = salience * priorWeight(bpmR);
+    if (metric > bestMetric) {
+      bestMetric = metric;
+      best = { bpm: bpmR, periodFrames: periodR, beatFrames, salience };
+    }
+  }
+  // r=1 is always a valid member (see doc comment), so `best` is never null.
+  return best as OctaveChoice;
+}
+
+// ---------------------------------------------------------------------------
+// Two-stage beat refinement
+// ---------------------------------------------------------------------------
+
+/**
+ * Stage (a): parabolic sub-frame fit on `(odf[t-1], odf[t], odf[t+1])`, only
+ * applied when `odf[t]` is a local max AND the vertex offset falls in
+ * `(-0.5, 0.5)`. This is a SANITY CHECK on the ODF peak shape, not the
+ * mechanism that removes the T1 frame-attribution bias (that is stage (b),
+ * `refineSampleDomain`) -- per the T1 carry-forward, conflating the two would
+ * be wrong.
+ */
+function parabolicSubFrame(odf: Float32Array, t: number): number {
+  const n = odf.length;
+  if (t <= 0 || t >= n - 1) return t;
+  const yMinus = odf[t - 1];
+  const y0 = odf[t];
+  const yPlus = odf[t + 1];
+  if (!(y0 >= yMinus && y0 >= yPlus)) return t;
+  const offset = parabolicOffset(yMinus, y0, yPlus);
+  return offset > -0.5 && offset < 0.5 ? t + offset : t;
+}
+
+/** Short-time energy `sum(mono[start..start+win)^2)`, zero-padded outside `mono`. */
+function shortTimeEnergy(mono: Float32Array, start: number, win: number): number {
+  const n = mono.length;
+  const lo = Math.max(0, start);
+  const hi = Math.min(n, start + win);
+  let sum = 0;
+  for (let i = lo; i < hi; i++) sum += mono[i] * mono[i];
+  return sum;
+}
+
+/**
+ * Stage (b), sample-domain refinement (T1 carry-forward): the coarse
+ * frame-derived sample is a FLOOR of the true attack (see the module-level
+ * doc comment above this section), so this searches the asymmetric,
+ * forward-biased window `[-D*ONSET_HOP/4, +D*ONSET_HOP]` original samples
+ * (= [-256, +1024] at 44.1 kHz / D=4) around `coarseSample` for the maximum
+ * of the `REFINE_ENERGY_WIN`-sample short-time energy DERIVATIVE
+ * `E[i]-E[i-REFINE_ENERGY_WIN]` on the FULL-RATE mono, computed via an O(1)
+ * sliding-window update per candidate position (never re-summing the whole
+ * window). Boundary-clamped into `[0, mono.length-1]`.
+ */
+function refineSampleDomain(mono: Float32Array, coarseSample: number, D: number): number {
+  const win = REFINE_ENERGY_WIN;
+  const searchLo = -Math.floor((D * ONSET_HOP) / 4);
+  const searchHi = D * ONSET_HOP;
+  const n = mono.length;
+
+  const pStart = coarseSample + searchLo - win;
+  const pEnd = coarseSample + searchHi;
+  const eValues = new Float64Array(pEnd - pStart + 1);
+  let sum = shortTimeEnergy(mono, pStart, win);
+  eValues[0] = sum;
+  for (let p = pStart + 1, idx = 1; p <= pEnd; p++, idx++) {
+    const outIdx = p - 1;
+    const inIdx = p - 1 + win;
+    if (outIdx >= 0 && outIdx < n) sum -= mono[outIdx] * mono[outIdx];
+    if (inIdx >= 0 && inIdx < n) sum += mono[inIdx] * mono[inIdx];
+    eValues[idx] = sum;
+  }
+
+  let bestP = coarseSample;
+  let bestVal = -Infinity;
+  for (let p = coarseSample + searchLo; p <= coarseSample + searchHi; p++) {
+    const idx = p - pStart;
+    const idxPrev = idx - win;
+    if (idxPrev < 0) continue;
+    const deriv = eValues[idx] - eValues[idxPrev];
+    if (deriv > bestVal) {
+      bestVal = deriv;
+      bestP = p;
+    }
+  }
+  return Math.max(0, Math.min(n > 0 ? n - 1 : 0, bestP));
+}
+
+function enforceStrictlyIncreasing(samples: number[]): void {
+  for (let i = 1; i < samples.length; i++) {
+    if (samples[i] <= samples[i - 1]) samples[i] = samples[i - 1] + 1;
+  }
+}
+
+function leastSquaresSlope(ys: number[]): number {
+  const n = ys.length;
+  if (n < 2) return 0;
+  const meanX = (n - 1) / 2;
+  const meanY = meanOf(ys);
+  let num = 0;
+  let den = 0;
+  for (let i = 0; i < n; i++) {
+    const dx = i - meanX;
+    num += dx * (ys[i] - meanY);
+    den += dx * dx;
+  }
+  return den > 0 ? num / den : 0;
+}
+
+function isWithinOctaveFamily(ratio: number): boolean {
+  for (const r of OCTAVE_FAMILY) {
+    if (Math.abs(ratio - r) <= 0.05 * r) return true;
+  }
+  return false;
+}
+
+/**
+ * The first candidate (by descending score) whose bpm ratio to `bStar` is
+ * NOT within 5% of any `OCTAVE_FAMILY` member -- i.e. the strongest
+ * genuinely-competing (non-harmonically-related) tempo hypothesis. Falls
+ * back to a tiny positive epsilon (never 0) in the practically-unreachable
+ * case where the whole ~241-candidate grid is octave-related to `bStar`, so
+ * `peakRatio` stays finite rather than becoming `Infinity`.
+ */
+function secondBestOutsideFamily(candidates: TempoCandidate[], bStar: number): number {
+  for (let i = 1; i < candidates.length; i++) {
+    const ratio = candidates[i].bpm / bStar;
+    if (!isWithinOctaveFamily(ratio)) return candidates[i].score;
+  }
+  return 1e-9;
+}
+
+// ---------------------------------------------------------------------------
+// analyzeTempo -- full pipeline
+// ---------------------------------------------------------------------------
+
+export interface AnalyzeTempoOptions {
+  minBpm?: number;
+  maxBpm?: number;
+}
+
+export interface TempoAnalysis {
+  bpm: number | null;
+  confidence: number;
+  beatSamples: Int32Array;
+  salience: number;
+  peakRatio: number;
+  ibiCv: number;
+  truncated: boolean;
+  analyzedEndSample: number;
+}
+
+function emptyTempoAnalysis(analyzedEndSample: number, truncated: boolean): TempoAnalysis {
+  return {
+    bpm: null,
+    confidence: 0,
+    beatSamples: new Int32Array(0),
+    salience: 0,
+    peakRatio: 0,
+    ibiCv: 0,
+    truncated,
+    analyzedEndSample,
+  };
+}
+
+/**
+ * Full tempo pipeline: decimate -> onset envelope -> autocorrelation ->
+ * tempo-candidate scoring + octave-disambiguated period -> Ellis beat DP ->
+ * two-stage sample-accurate refinement -> least-squares BPM regression ->
+ * confidence. Progress is composed 0->0.05 (decimate), 0.05->0.75 (onset
+ * envelope), 0.75->0.85 (tempo candidate scoring + period refinement),
+ * 0.85->1.0 (octave DP + beat refinement). Never throws; every guard path
+ * returns finite fields. Does not mutate `mono`.
+ */
+export function analyzeTempo(
+  mono: Float32Array,
+  sampleRate: number,
+  opts?: AnalyzeTempoOptions,
+  onProgress?: (fraction: number) => void
+): TempoAnalysis {
+  const minBpm = opts?.minBpm ?? MIN_BPM;
+  const maxBpm = opts?.maxBpm ?? MAX_BPM;
+
+  const maxSamples = Math.round(MAX_ANALYSIS_SECONDS * sampleRate);
+  const truncated = mono.length > maxSamples;
+  const analyzedEndSample = truncated ? maxSamples : mono.length;
+  const analyzed = mono.subarray(0, analyzedEndSample);
+
+  if (analyzedEndSample / sampleRate < MIN_ANALYSIS_SECONDS) {
+    return emptyTempoAnalysis(analyzedEndSample, truncated);
+  }
+
+  onProgress?.(0);
+  const { signal, rate, factor: D } = decimateMono(analyzed, sampleRate);
+  onProgress?.(0.05);
+
+  const { odf, numFrames, odfRate } = onsetEnvelope(signal, rate, (f) => {
+    onProgress?.(0.05 + (f / 0.9) * 0.7);
+  });
+  onProgress?.(0.75);
+
+  let odfMax = 0;
+  for (let t = 0; t < numFrames; t++) if (odf[t] > odfMax) odfMax = odf[t];
+  if (!(odfMax > 0)) {
+    // All-zero / silent / pure-DC ODF (T1's onsetEnvelope already collapses
+    // these to all-zero via its own std<1e-9 short-circuit).
+    return emptyTempoAnalysis(analyzedEndSample, truncated);
+  }
+
+  const acf = autocorrelate(odf);
+  const candidates = scoreTempoCandidates(acf, odfRate, minBpm, maxBpm);
+  const bStar = candidates[0].bpm;
+  const bestScore = candidates[0].score;
+  const rawPeriodFrames = (60 * odfRate) / bStar;
+  const periodFramesRefined = refinePeriodFrames(acf, rawPeriodFrames);
+  onProgress?.(0.85);
+
+  const octave = chooseOctave(odf, bStar, periodFramesRefined, minBpm, maxBpm);
+  const beatFrames = octave.beatFrames;
+  if (beatFrames.length < 2) {
+    return emptyTempoAnalysis(analyzedEndSample, truncated);
+  }
+
+  const refinedSamples: number[] = new Array(beatFrames.length);
+  for (let i = 0; i < beatFrames.length; i++) {
+    const f = parabolicSubFrame(odf, beatFrames[i]);
+    const coarseSample = Math.round((f * ONSET_HOP + ONSET_FFT * ONSET_ATTRIBUTION_FRAC) * D);
+    refinedSamples[i] = refineSampleDomain(analyzed, coarseSample, D);
+  }
+  enforceStrictlyIncreasing(refinedSamples);
+
+  const slope = leastSquaresSlope(refinedSamples);
+  const bpm = slope > 0 ? (60 * sampleRate) / slope : null;
+
+  const diffs: number[] = new Array(refinedSamples.length - 1);
+  for (let i = 1; i < refinedSamples.length; i++) diffs[i - 1] = refinedSamples[i] - refinedSamples[i - 1];
+  const diffMean = meanOf(diffs);
+  let variance = 0;
+  for (let i = 0; i < diffs.length; i++) variance += (diffs[i] - diffMean) * (diffs[i] - diffMean);
+  variance /= diffs.length > 0 ? diffs.length : 1;
+  const ibiCv = diffMean > 0 ? Math.sqrt(variance) / diffMean : 0;
+
+  const secondBest = secondBestOutsideFamily(candidates, bStar);
+  const rawPeakRatio = secondBest > 0 ? bestScore / secondBest : 0;
+  const peakRatio = Number.isFinite(rawPeakRatio) ? rawPeakRatio : 0;
+
+  const sSal = clamp01((octave.salience - 1) / 2);
+  const sPeak = clamp01((peakRatio - 1) / 0.5);
+  const sReg = clamp01(1 - ibiCv / 0.1);
+  const confidence = 0.5 * sSal + 0.3 * sPeak + 0.2 * sReg;
+
+  onProgress?.(1);
+
+  return {
+    bpm,
+    confidence,
+    beatSamples: Int32Array.from(refinedSamples),
+    salience: octave.salience,
+    peakRatio,
+    ibiCv,
+    truncated,
+    analyzedEndSample,
+  };
 }
