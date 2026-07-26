@@ -57,6 +57,7 @@ describe('TransportBar', () => {
       openEffectDialog: () => {},
       openConvertDialog: () => {},
       openRecordDialog: openRecord,
+      openTempoDialog: () => {},
     });
     render(<TransportBar />);
     fireEvent.click(screen.getByRole('button', { name: 'Record' }));

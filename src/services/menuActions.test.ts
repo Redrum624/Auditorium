@@ -5,6 +5,7 @@ import { createDocument, docLength } from '../audio/AudioDocument';
 import { getSpectralScale, toggleSpectralScale } from './spectralScale';
 import * as sessionFileModule from '../multitrack/sessionFile';
 import { runTempoAnalysis } from './tempoAnalysis';
+import { registerDialogSetters } from './dialogBus';
 
 jest.mock('../multitrack/sessionFile');
 jest.mock('./tempoAnalysis', () => ({
@@ -431,5 +432,42 @@ describe('tempo.detect (Task T5)', () => {
     const doc = openDoc();
     await runCommand('tempo.detect');
     expect(mockRunTempoAnalysis).toHaveBeenCalledWith(doc);
+  });
+});
+
+describe('tempo.match (Task T8)', () => {
+  it('Effects section contains tempo.match immediately after tempo.detect', () => {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    const ids = commandIds(effects.items);
+    expect(ids.indexOf('tempo.match')).toBe(ids.indexOf('tempo.detect') + 1);
+  });
+
+  function findEffectsCmd(id: string): MenuCommand {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  it('is disabled with no active document and enabled with one', () => {
+    expect(findEffectsCmd('tempo.match').enabled(useAppStore.getState())).toBe(false);
+
+    openDoc();
+    expect(findEffectsCmd('tempo.match').enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("tempo.match") opens the dialog through the bus (registered spy setter)', async () => {
+    openDoc();
+    const openTempo = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: openTempo,
+    });
+
+    await runCommand('tempo.match');
+
+    expect(openTempo).toHaveBeenCalledTimes(1);
   });
 });

@@ -7,6 +7,7 @@ import EffectDialog from './components/Dialogs/EffectDialog';
 import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
 import RecordDialog from './components/Dialogs/RecordDialog';
+import TempoDialog from './components/Dialogs/TempoDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
@@ -48,6 +49,7 @@ export default function App() {
   const [effectDialogId, setEffectDialogId] = useState<string | null>(null);
   const [convertMode, setConvertMode] = useState<ConvertMode | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
+  const [tempoOpen, setTempoOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
@@ -74,6 +76,7 @@ export default function App() {
         openEffectDialog: (effectId) => setEffectDialogId(effectId),
         openConvertDialog: (mode) => setConvertMode(mode),
         openRecordDialog: () => setRecordOpen(true),
+        openTempoDialog: () => setTempoOpen(true),
       }),
     []
   );
@@ -167,6 +170,7 @@ export default function App() {
         <ConvertDialog mode={convertMode} onClose={() => setConvertMode(null)} />
       )}
       {recordOpen && <RecordDialog onClose={() => setRecordOpen(false)} />}
+      {tempoOpen && <TempoDialog onClose={() => setTempoOpen(false)} />}
     </div>
   );
 }

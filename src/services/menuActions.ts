@@ -21,6 +21,7 @@ import {
   openEffectDialog,
   openExportDialog,
   openNewFileDialog,
+  openTempoDialog,
 } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
@@ -120,12 +121,15 @@ function fallbackCommand(id: string): MenuCommand {
  * effect is registered. */
 function effectsSectionItemIds(): (string | 'separator')[] {
   const effects = getAllEffects();
-  if (effects.length === 0) return ['noise.capture', 'tempo.detect', 'separator', 'effects.none'];
+  if (effects.length === 0) {
+    return ['noise.capture', 'tempo.detect', 'tempo.match', 'separator', 'effects.none'];
+  }
   // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
   // Noise Reduction effect), above the category-grouped effect list. 'Detect
-  // Tempo' (Task T5) joins it there rather than widening the closed
-  // MenuSection['title'] union for a single analysis command (Plan Ruling 5).
-  const ids: (string | 'separator')[] = ['noise.capture', 'tempo.detect', 'separator'];
+  // Tempo' (Task T5) and 'Match Tempo…' (Task T8) join it there rather than
+  // widening the closed MenuSection['title'] union for a couple of analysis/
+  // transform commands (Plan Ruling 5).
+  const ids: (string | 'separator')[] = ['noise.capture', 'tempo.detect', 'tempo.match', 'separator'];
   let lastCategory: string | null = null;
   for (const e of effects) {
     if (e.category !== lastCategory) {
@@ -725,11 +729,14 @@ function registerMarkerCommands(): void {
   ]);
 }
 
-/** Registers the Task T5 tempo command: `tempo.detect` joins `noise.capture`
- * in the Effects menu (Plan Ruling 5) rather than widening the closed
- * `MenuSection['title']` union for one item. Fires `runTempoAnalysis`, which
- * itself never throws/rejects and surfaces its own failure dialog — no
- * try/catch needed here, matching `effect.<id>`'s run() above. */
+/** Registers the Task T5/T8 tempo commands: `tempo.detect` and `tempo.match`
+ * join `noise.capture` in the Effects menu (Plan Ruling 5) rather than
+ * widening the closed `MenuSection['title']` union for a couple of items.
+ * `tempo.detect` fires `runTempoAnalysis`, which itself never throws/rejects
+ * and surfaces its own failure dialog — no try/catch needed here, matching
+ * `effect.<id>`'s run() above. `tempo.match` just opens the dialog through
+ * the bus (Task T8), matching `edit.convertSampleRate`/`edit.convertChannels`
+ * above. */
 function registerTempoCommands(): void {
   registerCommands([
     {
@@ -740,6 +747,12 @@ function registerTempoCommands(): void {
         const d = activeDoc(useAppStore.getState());
         if (d) await runTempoAnalysis(d);
       },
+    },
+    {
+      id: 'tempo.match',
+      label: 'Match Tempo…',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openTempoDialog(),
     },
   ]);
 }

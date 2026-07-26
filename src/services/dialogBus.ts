@@ -14,6 +14,7 @@ let openNewFile: OpenSetter | null = null;
 let openEffect: OpenEffectSetter | null = null;
 let openConvert: OpenConvertSetter | null = null;
 let openRecord: OpenSetter | null = null;
+let openTempo: OpenSetter | null = null;
 
 export function registerDialogSetters(setters: {
   openExportDialog: OpenSetter;
@@ -21,18 +22,21 @@ export function registerDialogSetters(setters: {
   openEffectDialog: OpenEffectSetter;
   openConvertDialog: OpenConvertSetter;
   openRecordDialog: OpenSetter;
+  openTempoDialog: OpenSetter;
 }): () => void {
   openExport = setters.openExportDialog;
   openNewFile = setters.openNewFileDialog;
   openEffect = setters.openEffectDialog;
   openConvert = setters.openConvertDialog;
   openRecord = setters.openRecordDialog;
+  openTempo = setters.openTempoDialog;
   return () => {
     openExport = null;
     openNewFile = null;
     openEffect = null;
     openConvert = null;
     openRecord = null;
+    openTempo = null;
   };
 }
 
@@ -54,6 +58,10 @@ export function openConvertDialog(mode: ConvertMode): void {
 
 export function openRecordDialog(): void {
   openRecord?.();
+}
+
+export function openTempoDialog(): void {
+  openTempo?.();
 }
 
 // --- Open-dialog stack (Task M7: F10/F25) ---------------------------------
