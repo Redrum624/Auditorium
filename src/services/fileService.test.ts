@@ -23,6 +23,8 @@ import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
+import * as tempoAnalysis from './tempoAnalysis';
+import { runTempoAnalysis, getTempo, clearAllTempo } from './tempoAnalysis';
 
 // Decode is mocked so file-service tests never touch OfflineAudioContext/lamejs.
 // The MP3/FLAC encoders are mocked to spy on the format-faithful save routing
@@ -1273,6 +1275,35 @@ describe('closeDocumentFlow', () => {
     await closeDocumentFlow(doc.id);
 
     expect(cacheSpy).toHaveBeenCalledTimes(1);
+  });
+
+  describe('tempo/remix analysis lifetime (Task T4)', () => {
+    beforeEach(() => {
+      clearAllTempo();
+    });
+
+    it('calls BOTH invalidateTempo and invalidateRemix with the closed doc id (missing either would retain its channel arrays forever)', async () => {
+      installApi();
+      const tempoSpy = jest.spyOn(tempoAnalysis, 'invalidateTempo');
+      const remixSpy = jest.spyOn(tempoAnalysis, 'invalidateRemix');
+      const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+
+      await closeDocumentFlow(doc.id);
+
+      expect(tempoSpy).toHaveBeenCalledWith(doc.id);
+      expect(remixSpy).toHaveBeenCalledWith(doc.id);
+    });
+
+    it('(acceptance l) getTempo returns null for an analysed doc after closeDocumentFlow', async () => {
+      installApi();
+      const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+      const entry = await runTempoAnalysis(doc);
+      expect(entry).not.toBeNull(); // sanity: analysis was actually cached before close
+
+      await closeDocumentFlow(doc.id);
+
+      expect(getTempo(doc)).toBeNull();
+    });
   });
 
   it('does not close when the dirty prompt is cancelled', async () => {

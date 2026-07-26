@@ -15,6 +15,7 @@ import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { invalidatePeaks } from './peaksCache';
 import { clearHistory, markSavePoint, invalidateSavePoint } from './undoHistory';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
+import { invalidateTempo, invalidateRemix } from './tempoAnalysis';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -536,6 +537,15 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   store().closeDocument(docId);
   clearHistory(docId);
   invalidatePeaks(docId);
+  // Task T4: without these, the closed document's channel arrays stay
+  // retained by tempoAnalysis's cache (`channelRefs`) for the whole session —
+  // the exact leak class peaksCache/clipWaveformCache already manage above.
+  // invalidateTempo drops the row unconditionally (any level); invalidateRemix
+  // is the narrower remix-only sibling a future remix session also needs on
+  // its own close (v15-architecture.md's Invalidation section) — both are
+  // called here so a level:'remix' row for this doc is cleared either way.
+  invalidateTempo(docId);
+  invalidateRemix(docId);
   if (getNoiseProfile()?.docId === docId) clearNoiseProfile();
   // A closing doc can invalidate many clips' cached mini-waveforms at once
   // (every clip sourced from it); clearing the whole cache is cheap and
