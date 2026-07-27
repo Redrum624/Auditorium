@@ -190,7 +190,23 @@ const ONSET_PEAK_RADIUS = 2;
 
 /** See the module doc comment, "The gain law is EXACT". `t` and `rho` are
  * both clamped to `[0,1]` defensively (this is meant to be usable as a
- * standalone, robust pure function, not merely an internal helper). */
+ * standalone, robust pure function, not merely an internal helper).
+ *
+ * WHY `rho` IS CLAMPED TO `>= 0`, NOT JUST `<= 1` (fix round 1, Important 4
+ * -- previously unmeasured/undocumented): `k = sqrt(1+2*rho*g0*g1)` is only
+ * safely bounded away from zero for `rho >= 0` (`g0*g1 <= 0.5`, so `k^2 in
+ * [1,2]`, as the module doc comment says). For `rho < 0`, `k` SHRINKS -- at
+ * `t=0.5` (`g0=g1=1/sqrt(2)`, `g0*g1=0.5`), `k = sqrt(1+rho)`, which is
+ * SINGULAR at `rho=-1` (unbounded gain right at the point genuinely
+ * anti-correlated material would need it most). The spec's own
+ * `clamp(rho,0,1)` sidesteps this by never handing a negative `rho` to the
+ * formula at all -- the cost is that genuinely anti-correlated material
+ * (rho < 0) is rendered as if `rho=0` (plain equal-power), which
+ * UNDER-delivers power rather than over-delivering it: recomputed directly
+ * (`gOut=cos,gIn=sin` at `t=0.5`, power `= 1+2*rho*gOut*gIn = 1+rho`), the
+ * dip is `-1.25 dB` at `rho=-0.25`, `-3.01 dB` at `rho=-0.50`, `-6.02 dB` at
+ * `rho=-0.75` -- an intentional, bounded trade-off (a quiet splice, never a
+ * blown-up one) rather than an unmeasured gap. */
 export function crossfadeGains(t: number, rho: number): { gOut: number; gIn: number } {
   const tc = Math.max(0, Math.min(1, t));
   const rc = Math.max(0, Math.min(1, rho));
@@ -220,21 +236,66 @@ export function normalizedCorrelation(a: Float32Array, b: Float32Array): number 
   return denom > 1e-12 ? dot / denom : 0;
 }
 
+/** Below this raw (unclamped) correlation, there is no reliable phase
+ * information to align on -- the "best" candidate among near-flat or
+ * all-negative scores is essentially noise-driven, not a real alignment
+ * (fix round 1, Important 1). Not the same constant as `SHAPE_RHO_THRESHOLD`
+ * (0.35): that one decides which crossfade SHAPE sounds right for a
+ * confidently-measured `rho`; this one decides whether `rho` was measured
+ * confidently at all. Per-sample correlation of two independent
+ * `ALIGN_COMPARE_MS`-length noise windows has std ~1/sqrt(441) = 0.048, BUT
+ * the search takes the MAX over `2*maxNudge+1` = 883 largely-independent
+ * candidates at the default +/-10ms, and the max of that many draws is not
+ * 0.048 -- empirically measured (200 independent-seed trials, this file's
+ * own LCG recipe, matching production's compareLen=maxNudge=441) at
+ * min 0.117 / median 0.149 / p99 0.199 / max 0.212. `0.1` (the first value
+ * tried here) would therefore almost NEVER fire on pure noise and fails to
+ * fix the underlying problem; 0.3 sits comfortably above the measured
+ * ceiling. */
+const MIN_ALIGN_RHO = 0.3;
+/** Sum-of-squares threshold below which `outTail` is treated as silent --
+ * mirrors `wsola.ts`'s `bestMatchOffset` (`refNorm < 1e-12`), which this
+ * function was modelled on but had not carried the guard over from (fix
+ * round 1, Important 1). */
+const SILENT_REF_NORM = 1e-12;
+
 /**
  * Finds the integer lag in `[-maxLag,+maxLag]` maximising
  * `normalizedCorrelation(outTail, inHead[lag+maxLag : lag+maxLag+W])`, where
  * `W = outTail.length` -- so `inHead` must supply `W + 2*maxLag` samples of
  * margin (the search candidate at `lag` reads `inHead` starting at
  * `lag+maxLag`, i.e. source position `nominalStart+lag` if `inHead` itself
- * starts at `nominalStart-maxLag`). Ties resolve to the smallest `|lag|`
- * (scan starts at `-maxLag`, only a STRICTLY greater score replaces the
- * best) -- the same tie convention as `bestMatchOffset`. `rho` is the RAW
- * correlation at the chosen lag (not clamped to `[0,1]` -- that clamp is the
- * caller's job, applied only where the gain law needs it).
+ * starts at `nominalStart-maxLag`). Ties resolve to the MOST NEGATIVE `lag`
+ * (fix round 1, Important 1 -- corrected: the scan starts at `-maxLag` and
+ * only a STRICTLY greater score replaces the best, so the first-seen,
+ * most-negative candidate in a tied group is the one that survives, not the
+ * smallest `|lag|`; the previous version of this comment mis-stated this).
+ *
+ * TWO GUARDS, both returning `{lag: 0, rho: 0 or the raw best}` rather than a
+ * manufactured shift (fix round 1, Important 1 -- measured regressions: an
+ * all-silent reference returned lag `-441`; an outgoing bar whose last 45 ms
+ * is a real musical breakdown/silence also returned `-441`; a slowly-varying
+ * tone with a near-flat correlation surface returned lag `+441` at a
+ * reported `rho` of `0.000`, i.e. a full `+/-10 ms` displacement chosen from
+ * what amounts to noise):
+ * 1. `outTail` itself carries no energy (`SILENT_REF_NORM`) -- there is
+ *    nothing to align a phase to, full stop.
+ * 2. The best score found across the WHOLE search range never clears
+ *    `MIN_ALIGN_RHO` -- every candidate was noise-level or worse, so the
+ *    "winner" is an artifact of scan order, not genuine phase information.
+ *    This is also where `rho ~= 0` (the brief's own "normal case for two
+ *    different bars") stays a plain `lag=0`, rather than the renderer
+ *    committing up to `maxLag` samples of arbitrary displacement and
+ *    partially undoing T2's sample-accurate beat placement.
  */
 export function bestAlignLag(outTail: Float32Array, inHead: Float32Array, maxLag: number): { lag: number; rho: number } {
   const W = outTail.length;
   const lag0 = Math.max(0, Math.floor(maxLag));
+
+  let refNorm = 0;
+  for (let i = 0; i < W; i++) refNorm += outTail[i] * outTail[i];
+  if (refNorm < SILENT_REF_NORM) return { lag: 0, rho: 0 };
+
   let bestRho = -Infinity;
   let bestLag = -lag0;
   for (let lag = -lag0; lag <= lag0; lag++) {
@@ -246,7 +307,9 @@ export function bestAlignLag(outTail: Float32Array, inHead: Float32Array, maxLag
       bestLag = lag;
     }
   }
-  return { lag: bestLag, rho: bestRho === -Infinity ? 0 : bestRho };
+  const finalRho = bestRho === -Infinity ? 0 : bestRho;
+  if (finalRho < MIN_ALIGN_RHO) return { lag: 0, rho: finalRho };
+  return { lag: bestLag, rho: finalRho };
 }
 
 // ---------------------------------------------------------------------------
@@ -336,6 +399,13 @@ function boundaryOnsetStrengths(analysis: RemixAnalysis): Float64Array {
   return out;
 }
 
+/** Strict `<` against the median (fix round 1, Minor -- noted, not changed):
+ * a constant or entirely-empty `analysis.odf` (e.g. a `deriveGrid`-produced
+ * analysis, which never has onset data -- see `remixFeatures.ts`) makes
+ * EVERY `onsetTo` equal to `onsetMedian`, so the onset clause never fires
+ * and every low-rho join falls to `'pre-roll'`. Harmless (`'pre-roll'` is
+ * the more conservative, never-re-reads-the-downbeat choice) and unstated
+ * by the brief either way, so left as-is rather than guessed at. */
 function selectShape(rho: number, onsetTo: number, onsetMedian: number): CrossfadeShape {
   return rho >= SHAPE_RHO_THRESHOLD || onsetTo < onsetMedian ? 'centred' : 'pre-roll';
 }
@@ -420,6 +490,10 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   const channels: Float32Array[] = Array.from({ length: numCh }, () => new Float32Array(plan.outputSample));
 
   const headLen = segments[0].start;
+  // Computed up front (not just after the loop) so the LAST join's lag clamp
+  // below can account for it -- see "Defensive clamp" inside the loop, fix
+  // round 1 Important 2.
+  const tailLen = analysis.analyzedEndSample - segments[numSegments - 1].end;
   writeRange(source, 0, headLen, channels, 0);
   let cursor = headLen;
 
@@ -461,7 +535,17 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
     const { lag: rawLag, rho: rawRho } = bestAlignLag(outTail, inHead, maxNudge);
     // Defensive clamp: keep the shifted incoming window (and, for the
     // butt-splice fallback, the WHOLE next segment) inside [0, sourceLen).
-    const lag = Math.max(-nextSeg.start, Math.min(rawLag, sourceLen - nextSeg.end));
+    // When `nextSeg` is the FINAL segment, the tail is read immediately
+    // after it at the SAME registration (`finalEffEnd = nextSeg.end+lag`),
+    // so the upper bound must also leave room for `tailLen` -- otherwise a
+    // positive lag pushes the tail's read past the true end of `source`,
+    // producing unattenuated trailing silence at the very end of the file
+    // (fix round 1, Important 2; a lag bound that only protects the segment
+    // it was computed for, and not what gets read after it, is exactly the
+    // kind of gap this defensive clamp exists to close).
+    const nextIsFinalSegment = i + 1 === numSegments - 1;
+    const lagUpperBound = sourceLen - nextSeg.end - (nextIsFinalSegment ? tailLen : 0);
+    const lag = Math.max(-nextSeg.start, Math.min(rawLag, lagUpperBound));
     const rho = Math.max(0, Math.min(1, rawRho));
     const bStartAligned = nextSeg.start + lag;
 
@@ -537,10 +621,41 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
     }
   }
 
-  // --- tail ---
-  const tailLen = analysis.analyzedEndSample - segments[numSegments - 1].end;
+  // --- tail (tailLen was computed up front, before the loop) ---
   writeRange(source, finalEffEnd, finalEffEnd + tailLen, channels, cursor);
   cursor += tailLen;
+
+  // The exact-length invariant, CHECKED rather than assumed (fix round 1,
+  // Important 3): every join/shape/butt-splice branch above is length-
+  // neutral by construction, and `plan.outputSample` is independently
+  // computed by the planner from `barBoundary[0]`/`barBoundary[M]` while
+  // this function reads `segments[0].start`/`segments[last].end` -- the two
+  // agree today because of the DP's absorbing-state guarantee, but that is
+  // a cross-module coupling this function never itself verified. A future
+  // regression in either module (or a hand-built `plan` a caller supplies
+  // directly, as this module's own tests do) would otherwise silently
+  // produce a wrong-length buffer with no error.
+  if (cursor !== plan.outputSample) {
+    throw new Error(`renderRemix: internal cursor mismatch -- wrote ${cursor} samples but plan.outputSample is ${plan.outputSample}`);
+  }
+
+  // --- exact-length trim (opt-in) REPLACES the normal tail fade entirely --
+  // fix round 1, Important 3: applying the 1500 ms quarter-cosine fade to
+  // the full untrimmed buffer and THEN slicing/fading again left the
+  // quarter-cosine fade sitting underneath the 5 ms linear fade (audible as
+  // a ~1.5 s fade where 5 ms was specified) whenever the trim point fell
+  // inside the quarter-cosine's own window, which it normally does (a
+  // typical overshoot trim is a few hundred/thousand samples, far inside a
+  // 1500 ms tail). Handled here, before the normal tail-fade decision, so
+  // the two treatments can never stack -- see the module doc comment,
+  // "Exact-length trim".
+  if (opts.exactLength && plan.outputSample > plan.targetSample) {
+    const trimLen = Math.max(0, Math.round(plan.targetSample));
+    const outChannels = channels.map((c) => c.slice(0, trimLen));
+    const fadeLen = Math.min(Math.round((EXACT_TRIM_FADE_MS / 1000) * sr), outChannels[0].length);
+    applyLinearFadeOut(outChannels, fadeLen);
+    return { channels: outChannels, joinSamples, nudgeSamples, rhos, shapes };
+  }
 
   const reachesFileEnd = analysis.analyzedEndSample >= sourceLen;
   if (!reachesFileEnd) {
@@ -548,14 +663,5 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
     applyQuarterCosineFadeOut(channels, fadeLen);
   }
 
-  // --- exact-length trim (opt-in) ---
-  let outChannels = channels;
-  if (opts.exactLength && plan.outputSample > plan.targetSample) {
-    const trimLen = Math.max(0, Math.round(plan.targetSample));
-    outChannels = channels.map((c) => c.slice(0, trimLen));
-    const fadeLen = Math.min(Math.round((EXACT_TRIM_FADE_MS / 1000) * sr), outChannels[0].length);
-    applyLinearFadeOut(outChannels, fadeLen);
-  }
-
-  return { channels: outChannels, joinSamples, nudgeSamples, rhos, shapes };
+  return { channels, joinSamples, nudgeSamples, rhos, shapes };
 }

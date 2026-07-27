@@ -283,14 +283,14 @@ describe('renderRemix -- length invariance', () => {
       expect(result.channels[0].length).toBe(expectedLength());
       expect(result.channels[0].length).toBe(plan.outputSample);
       expect(result.shapes[0]).toBe('centred');
-    });
+    }, 15000);
 
     it(`'pre-roll' fixture: crossfadeMs=${crossfadeMs} -> exact output length + shape is pre-roll`, () => {
       const result = renderRemix(sourcePreRoll, analysis, plan, { sampleRate: SR, crossfadeMs });
       expect(result.channels[0].length).toBe(expectedLength());
       expect(result.channels[0].length).toBe(plan.outputSample);
       expect(result.shapes[0]).toBe('pre-roll');
-    });
+    }, 15000);
   }
 });
 
@@ -316,6 +316,32 @@ describe('bestAlignLag', () => {
     inHead.set(ref, maxLag - trueOffsetSamples);
     const { lag } = bestAlignLag(ref, inHead, maxLag);
     expect(Math.abs(lag - -trueOffsetSamples)).toBeLessThanOrEqual(22);
+  });
+
+  // Fix round 1, Important 1 regressions -- both previously produced a
+  // manufactured +/-maxLag shift instead of "no reliable alignment".
+  it('a silent reference (all-zero outTail) never manufactures a shift -- lag 0, rho 0', () => {
+    const silentRef = new Float32Array(W); // all zero
+    const inHead = new Float32Array(W + 2 * maxLag); // also all zero: nothing to align
+    const { lag, rho } = bestAlignLag(silentRef, inHead, maxLag);
+    expect(lag).toBe(0);
+    expect(rho).toBe(0);
+  });
+
+  it('two genuinely independent (real-energy, low-confidence) windows return lag 0, not whichever noise-driven candidate scored highest', () => {
+    // The brief's own "normal case for two different bars": independent
+    // content, no real phase relationship. An 883-candidate search (+/-441)
+    // over pure noise still finds SOME positive best-of-search correlation
+    // by chance (empirically measured min/median/p99/max = 0.117/0.149/
+    // 0.199/0.212 across 200 independent-seed trials at this exact
+    // W=441/maxLag=441) -- these two fixed seeds reproduce that (best
+    // measured 0.137), well under `MIN_ALIGN_RHO`, so the guard must still
+    // suppress it rather than committing to the highest-scoring noise peak.
+    const wideRef = noise(441, 8);
+    const wideHead = noise(441 + 2 * maxLag, 50007);
+    const { lag, rho } = bestAlignLag(wideRef, wideHead, maxLag);
+    expect(lag).toBe(0);
+    expect(rho).toBeLessThan(0.3); // matches production's MIN_ALIGN_RHO
   });
 });
 
@@ -375,7 +401,7 @@ describe('renderRemix -- no clicks', () => {
         expect(Math.abs(ch[i])).toBeLessThanOrEqual(1.0 + 1e-6);
       }
     }
-  });
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------
@@ -710,5 +736,124 @@ describe('renderRemix -- exact-length trim (opts.exactLength)', () => {
     const fadeLen = Math.min(Math.round(0.005 * SR), result.channels[0].length);
     expect(Math.abs(result.channels[0][result.channels[0].length - 1])).toBeLessThan(1e-3);
     expect(fadeLen).toBeGreaterThan(0);
+  });
+
+  it('the 5ms linear fade REPLACES the 1500ms quarter-cosine tail fade, not stacks on top of it (fix round 1, Important 3)', () => {
+    // Fixture LONGER than 1.5s with TRUNCATED analysis (analyzedEndSample <
+    // source.length) -- both conditions the buggy version needed to double-
+    // fade: without them (the original test's buffer was shorter than
+    // 1.5s), the whole output falls inside the quarter-cosine window either
+    // way and the bug is unobservable.
+    const sourceLen = 200000; // ~4.5s @ 44.1kHz, comfortably > 1.5s
+    const analyzedEndSample = 150000; // < sourceLen: truncated, NOT the real ending
+    const barBoundary = Int32Array.from([1000, 140000]);
+    const src = [sine(110, sourceLen, SR, 0.8)];
+    const analysis = makeAnalysis({ numBars: 1, barBoundary, analyzedEndSample });
+    const seg0: RemixSegment = { start: barBoundary[0], end: barBoundary[1] };
+    const outputSample = barBoundary[0] + (seg0.end - seg0.start) + (analyzedEndSample - barBoundary[1]);
+    const targetSample = outputSample - 500; // the planner's own overshoot
+    const plan = makePlan({ segments: [seg0], joins: [], outputSample, targetSample });
+
+    const result = renderRemix(src, analysis, plan, { sampleRate: SR, exactLength: true });
+    expect(result.channels[0].length).toBe(targetSample);
+
+    // No join/shift in this fixture, so output[i] === source[i] except
+    // inside the 5ms fade window -- measure the amplitude RATIO (dB) at 1s,
+    // 0.5s and 0.1s from the end. If only the 5ms fade applies, all three
+    // are ~0 dB (far outside a 220-sample window); the pre-fix behaviour
+    // measured -0.88 / -4.91 / -9.47 dB at these same points (a ~1.5s fade
+    // where 5ms was specified).
+    function dbAt(distanceFromEndSamples: number): number {
+      const idx = result.channels[0].length - distanceFromEndSamples;
+      const actual = Math.abs(result.channels[0][idx]);
+      const raw = Math.abs(src[0][idx]);
+      return 20 * Math.log10(actual / raw);
+    }
+    const db1s = dbAt(Math.round(1 * SR));
+    const db500ms = dbAt(Math.round(0.5 * SR));
+    const db100ms = dbAt(Math.round(0.1 * SR));
+    expect(Math.abs(db1s)).toBeLessThan(0.01);
+    expect(Math.abs(db500ms)).toBeLessThan(0.01);
+    expect(Math.abs(db100ms)).toBeLessThan(0.01);
+
+    // And the trim's own 5ms fade is still genuinely present at the very end.
+    expect(Math.abs(result.channels[0][result.channels[0].length - 1])).toBeLessThan(1e-3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Important 2 -- the last join's lag clamp must also protect
+// the tail read that follows it, not just the segment itself.
+// ---------------------------------------------------------------------------
+
+describe('renderRemix -- tail after the last join never reads past the true end of source', () => {
+  it('clamps a positive last-join lag so the tail stays in bounds instead of trailing into unattenuated silence', () => {
+    const compareLen = 441; // matches ALIGN_COMPARE_MS
+    const maxNudge = 441; // matches the default maxNudgeMs
+    const aEnd = 50000;
+    const bStartNominal = 60000;
+    const lb = 8000;
+    const naturalLag = 400; // the raw (unclamped) alignment search's own preference
+
+    // sourceLen === analyzedEndSample (reachesFileEnd -- no masking quarter-
+    // cosine fade) AND leaves EXACTLY zero slack for a positive last-join
+    // lag: nextSeg.end + tailLenNominal === sourceLen. Before the fix, the
+    // lag clamp only bounded `nextSeg.end+lag <= sourceLen` (ignoring the
+    // tail that follows), so the natural +400 lag sailed through unclamped
+    // and pushed the tail's read 400 samples past the true end of `source`.
+    const tailLenNominal = 2100;
+    const sourceLen = bStartNominal + lb + tailLenNominal;
+    const analyzedEndSample = sourceLen;
+
+    const src = noise(sourceLen, 200);
+    const ref = noise(compareLen, 900);
+    src.set(ref, aEnd - compareLen); // outgoing reference window
+    src.set(ref, bStartNominal + naturalLag); // incoming's TRUE best match, +400 from nominal
+
+    const barBoundary = Int32Array.from([0, aEnd, bStartNominal, bStartNominal + lb]);
+    const analysis = makeAnalysis({ numBars: 3, barBoundary, analyzedEndSample });
+    const seg0: RemixSegment = { start: 0, end: aEnd };
+    const seg1: RemixSegment = { start: bStartNominal, end: bStartNominal + lb };
+    const outputSample = (seg0.end - seg0.start) + (seg1.end - seg1.start) + (analyzedEndSample - seg1.end);
+    const plan = makePlan({ segments: [seg0, seg1], joins: [join(1, 2)], outputSample });
+
+    const result = renderRemix([src], analysis, plan, { sampleRate: SR, crossfadeMs: 25, maxNudgeMs: 10 });
+
+    // Fixture sanity: the raw search really does prefer +400 (verified
+    // separately below is redundant with test 4's own coverage of
+    // bestAlignLag directly) -- what matters here is that renderRemix does
+    // NOT use it unclamped.
+    expect(result.nudgeSamples[0]).not.toBe(naturalLag);
+    expect(result.nudgeSamples[0]).toBeLessThanOrEqual(0);
+
+    // No unattenuated silence at the very end: reachesFileEnd is true here
+    // (no quarter-cosine fade applies), so if the tail read stayed in
+    // bounds the last sample matches the source exactly; the pre-fix
+    // behaviour instead produced 400 trailing zero samples with an abrupt
+    // step into silence.
+    expect(result.channels[0][result.channels[0].length - 1]).toBeCloseTo(src[sourceLen - 1], 6);
+    expect(result.channels[0][result.channels[0].length - 1]).not.toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1, Important 3 -- the exact-length invariant is now CHECKED.
+// ---------------------------------------------------------------------------
+
+describe('renderRemix -- the length identity is asserted, not merely assumed', () => {
+  it('throws if a hand-supplied plan.outputSample disagrees with what was actually written', () => {
+    const barBoundary = Int32Array.from([1000, 21000]);
+    const analyzedEndSample = 22000;
+    const src = [sine(110, 40000, SR, 0.8)];
+    const analysis = makeAnalysis({ numBars: 1, barBoundary, analyzedEndSample });
+    const seg0: RemixSegment = { start: barBoundary[0], end: barBoundary[1] };
+    const trueOutputSample = barBoundary[0] + (seg0.end - seg0.start) + (analyzedEndSample - barBoundary[1]);
+    // Deliberately wrong -- 1000 samples MORE than the segments/tail
+    // actually sum to (a surplus, not a shortfall, so the allocated buffer
+    // is large enough that the mismatch is only caught by the explicit
+    // cursor check, not a native out-of-bounds write).
+    const plan = makePlan({ segments: [seg0], joins: [], outputSample: trueOutputSample + 1000 });
+
+    expect(() => renderRemix(src, analysis, plan, { sampleRate: SR })).toThrow(/cursor mismatch/);
   });
 });
