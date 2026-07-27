@@ -1113,3 +1113,147 @@ describe('planRemix -- duration accuracy across a range of targets (varying bar 
     expect(result.maxOutputSample).toBeGreaterThan(a.analyzedEndSample);
   });
 });
+
+// ---------------------------------------------------------------------------
+// lockedJoins (fix round 2) -- pinned joins are EXEMPT from the synthetic
+// +JOIN_PENALTY this module applies, both on the re-roll path and inside the
+// over-repetition guard. See `PlanRemixOptions.lockedJoins`.
+// ---------------------------------------------------------------------------
+
+const joinKeyOf = (j: { fromBar: number; toBar: number }) => `${j.fromBar}>${j.toBar}`;
+
+describe('lockedJoins', () => {
+  // THE REQUIRED ASSERTION: the option is additive and provably inert. Every
+  // plan produced with no `lockedJoins`, with an EMPTY one, and with one
+  // naming keys that can never appear must be byte-identical -- so nothing
+  // this module produced before the option existed can have changed.
+  it('is INERT when empty: plans are deep-equal with no lock set, an empty lock set, and an unreachable lock set', () => {
+    const fixtures: RemixAnalysis[] = [
+      makeUniformAnalysis({ numBars: 40 }),
+      makeUniformAnalysis({ numBars: 24, cluster: Int32Array.from({ length: 25 }, (_, i) => i % 3) }),
+      makeVaryingAnalysis(48),
+    ];
+    let compared = 0;
+    for (const a of fixtures) {
+      for (const frac of [0.5, 0.75, 1.0, 1.4]) {
+        for (const rollIndex of [0, 1, 2, 3]) {
+          for (const strict of [true, false]) {
+            const base: PlanRemixOptions = baseOptions({
+              targetSample: Math.round(a.analyzedEndSample * frac),
+              strict,
+              allowRepeats: true,
+              rollIndex,
+            });
+            const plain = planRemix(a, base);
+            expect(planRemix(a, { ...base, lockedJoins: [] })).toEqual(plain);
+            expect(planRemix(a, { ...base, lockedJoins: ['9999>9998'] })).toEqual(plain);
+            compared++;
+          }
+        }
+      }
+    }
+    expect(compared).toBe(96); // the matrix really ran, it did not short-circuit
+  });
+
+  it('a PINNED join survives a re-roll that drops it unpinned -- the exemption, measured on the same call pair', () => {
+    // Search the fixture/target matrix for the situation the fix targets: a
+    // join in roll 0 that roll 1 discards. That situation is the norm (the
+    // roll penalty is +2.0, ~5.7x weights.jump), so this loop finds one
+    // immediately; it is a search only so the test cannot silently pass on a
+    // fixture where roll 1 happened to keep everything anyway.
+    const a = makeVaryingAnalysis(64);
+    let found = 0;
+    let rescued = 0;
+    for (const frac of [0.5, 0.65, 0.8, 1.0, 1.25, 1.5]) {
+      const base = baseOptions({
+        targetSample: Math.round(a.analyzedEndSample * frac),
+        strict: true,
+        allowRepeats: true,
+      });
+      const roll0 = planRemix(a, base);
+      if (!roll0.ok || roll0.joins.length === 0) continue;
+      for (const pinned of roll0.joins) {
+        const key = joinKeyOf(pinned);
+        const unpinned = planRemix(a, { ...base, rollIndex: 1 });
+        if (!unpinned.ok || unpinned.joins.some((j) => joinKeyOf(j) === key)) continue;
+        found++;
+        const withPin = planRemix(a, { ...base, rollIndex: 1, lockedJoins: [key] });
+        expect(withPin.ok).toBe(true);
+        if (withPin.ok && withPin.joins.some((j) => joinKeyOf(j) === key)) rescued++;
+      }
+    }
+    expect(found).toBeGreaterThan(0); // the defect scenario really occurs
+    expect(rescued).toBe(found); // and the pin survives every one of them
+  });
+
+  it('a pin cannot beat a HARD constraint: forbidding and pinning the same key leaves it out', () => {
+    const a = makeVaryingAnalysis(48);
+    const base = baseOptions({
+      targetSample: Math.round(a.analyzedEndSample * 0.75),
+      strict: true,
+      allowRepeats: true,
+    });
+    const roll0 = planRemix(a, base);
+    expectOk(roll0);
+    expect(roll0.joins.length).toBeGreaterThan(0);
+    const key = joinKeyOf(roll0.joins[0]);
+
+    const both = planRemix(a, { ...base, forbiddenJoins: [key], lockedJoins: [key] });
+
+    expectOk(both);
+    expect(both.joins.map(joinKeyOf)).not.toContain(key);
+  });
+
+  it('stays deterministic with pins: two identical calls are deep-equal', () => {
+    const a = makeVaryingAnalysis(48);
+    const base = baseOptions({
+      targetSample: Math.round(a.analyzedEndSample * 0.75),
+      strict: true,
+      allowRepeats: true,
+    });
+    const roll0 = planRemix(a, base);
+    expectOk(roll0);
+    const locked = roll0.joins.map(joinKeyOf);
+
+    const first = planRemix(a, { ...base, rollIndex: 2, lockedJoins: locked });
+    const second = planRemix(a, { ...base, rollIndex: 2, lockedJoins: locked });
+
+    expect(second).toEqual(first);
+  });
+});
+
+describe('lockedJoins — non-degeneracy (fix round 2, measured)', () => {
+  it('pinning never makes the arrangement worse: no extra over-repetition and no systematic cost increase', () => {
+    const fixtures = [makeVaryingAnalysis(64), makeUniformAnalysis({ numBars: 48, cluster: Int32Array.from({ length: 49 }, (_, i) => i % 4) })];
+    let cases = 0;
+    let overUseUnpinned = 0;
+    let overUsePinned = 0;
+    let totalDelta = 0;
+    for (const a of fixtures) {
+      for (const frac of [0.5, 0.7, 0.9, 1.2, 1.5]) {
+        for (const strict of [true, false]) {
+          const base = baseOptions({ targetSample: Math.round(a.analyzedEndSample * frac), strict, allowRepeats: true });
+          const roll0 = planRemix(a, base);
+          if (!roll0.ok || roll0.joins.length === 0) continue;
+          const unpinned = planRemix(a, { ...base, rollIndex: 1 });
+          if (!unpinned.ok) continue;
+          for (const j of roll0.joins) {
+            const pinned = planRemix(a, { ...base, rollIndex: 1, lockedJoins: [joinKeyOf(j)] });
+            if (!pinned.ok) continue;
+            cases++;
+            if (unpinned.maxBarUse > MAX_USE_COUNT) overUseUnpinned++;
+            if (pinned.maxBarUse > MAX_USE_COUNT) overUsePinned++;
+            totalDelta += pinned.totalCost - unpinned.totalCost;
+          }
+        }
+      }
+    }
+    expect(cases).toBeGreaterThanOrEqual(20);
+    // The pin must not push the DP into repeating a bar more often than it
+    // already would — the exact failure mode a cost advantage risks.
+    expect(overUsePinned).toBeLessThanOrEqual(overUseUnpinned);
+    // And it must not systematically buy pin survival with worse joins:
+    // measured MEAN change in clean cost is <= 0 on both fixtures.
+    expect(totalDelta / cases).toBeLessThanOrEqual(0);
+  });
+});

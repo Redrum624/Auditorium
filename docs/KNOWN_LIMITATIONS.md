@@ -262,18 +262,40 @@ reading the history must read its actual length rather than assume two.
 `src/workers/remixPlan.worker.ts`)
 
 **v1.5 behavior:** The remix DP is ~O(bars²). Below `MAX_DP_CELLS` (250 000
-lattice cells) it runs on the main thread, where it is ~1 ms for a typical
-song; above it, each session spawns its own plan worker and the analysis is
-posted once and kept resident there, so adjustments stay responsive on long
-material (measured at the 600-second analysis cap: a single plan is ~300 ms
-and a lock-recovery sweep several seconds — off-thread instead of frozen).
+lattice cells) it runs on the main thread; above it, each session spawns its
+own plan worker and the analysis is posted once and kept resident there, so
+adjustments stay responsive on long material.
+
+Measured main-thread cost at 120 BPM 4/4, so the threshold's meaning is
+concrete: **~20 ms for a 4-minute song** (120 bars, 0.17× the cell limit) and
+**~120 ms for a 10-minute set** (300 bars) — which is already 1.08× the limit,
+so a set that long routes to the worker rather than running here at all. At
+the 600-second analysis cap (200 BPM, 499 bars — 3.0× the limit) a single plan
+is ~300 ms and a third Re-roll press ~1 s, which is why anything past the
+limit is routed off-thread rather than left to freeze the window. (An earlier
+draft of this entry said "~1 ms for a typical song"; that was the 64-second
+test fixture, not a song, and understated a real song by ~20×.)
+
+Each session's worker keeps its OWN resident copy of the analysis (~1.7 MB of
+typed arrays). Two remixes made from the same source therefore hold two
+copies, plus the renderer's own cached one. Both are released when the remix
+or its source is closed.
 
 Two residual costs are accepted rather than engineered around. Each Re-roll
 press is dearer than the last, because `planRemix` re-derives every previous
 roll to stay deterministic and stateless; a per-session memo removes the
 REPEATED work across presses but not the cost of one cold roll. And a pinned
-("locked") join is a strong preference, not a guarantee — the planner has no
-"required joins" input, so the service retries a bounded number of later rolls
-and keeps whichever preserves the most pins.
+("locked") join is a **strong preference, not a guarantee**: the planner has
+no "required joins" constraint, so a pin is honoured by exempting that join
+from the re-roll and over-repetition penalties and giving it one join-toll of
+cost advantage. It can still lose to a genuinely cheaper arrangement, and it
+cannot survive being rejected — a rejection is a hard constraint and wins.
+Measured over 156 pin/press cases across three scales (32, 128 and 496 bars,
+both the Re-roll and Reject paths): **preserved 156/156**, against **38/156
+before this mechanism existed** (and 0/106 on the Re-roll path specifically,
+where the re-roll penalty used to push a join out precisely because it was in
+the plan being re-rolled). When a pin is dropped the session reports it
+(`lockedJoinsDropped`) instead of leaving a pin badge on a join that no longer
+exists.
 
 **Intended behavior:** No further work planned — this is complete.

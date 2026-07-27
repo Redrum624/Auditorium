@@ -76,11 +76,10 @@
  * 4.2-4.5x). At the worst case actually reachable under
  * `MAX_ANALYSIS_SECONDS = 600` (200 BPM, 600 s -> `M = 499`, `Nmax = 1497`,
  * **749 000 cells, 3.0x `MAX_DP_CELLS`**) a single `planRemix` measured
- * **302-311 ms**, `rollIndex = 3` **996-1024 ms**, and a lock-recovery sweep
- * (four plans) **2.7 s on the first Re-roll press, 5.6 s on the fourth** —
- * a renderer freeze with no progress and no cancel. It bites below the
- * threshold too (control at `M = 250`: 69-80 ms per plan, 827 ms for a
- * lock-recovery sweep).
+ * **302-311 ms** and `rollIndex = 3` **996-1024 ms** — a renderer freeze with
+ * no progress and no cancel. It bites well below the threshold too: measured
+ * at 120 BPM 4/4, a 4-minute song (120 bars) is **19 ms** and a 10-minute set
+ * (300 bars, already 1.08x the limit) is **120 ms**.
  *
  * So planning is routed to a worker when `(numBars+1)*(Nmax+1) >
  * MAX_DP_CELLS`, and the worker is **session-scoped**: the whole
@@ -95,9 +94,10 @@
  * those typed arrays ARE `tempoAnalysis`'s cache rows, and transferring would
  * detach them.
  *
- * Below the threshold the DP stays on the main thread — worker startup is not
- * worth it for a 1 ms plan (measured on this repo's 32-bar abab fixture), and
- * that is the common case.
+ * Below the threshold the DP stays on the main thread — 19 ms for a 4-minute
+ * song is not worth a worker handshake, and that is the common case. (An
+ * earlier version of this comment said "1 ms", which was this repo's 64-second
+ * abab fixture, not a song — a ~20x understatement of the real thing.)
  *
  * **Worker lifecycle is SESSION-scoped, a deliberate departure from T4's
  * one-shot `terminate()`-on-every-terminal-branch contract** (which is for
@@ -118,11 +118,9 @@
  * the last. Reducing the cost of ONE cold roll would mean restructuring
  * `remixPlan.ts` to accept a precomputed penalty map — out of scope, and
  * ruled out. What IS done here: a per-session memo keyed by `rollIndex`
- * within one option/rejection signature, so the rolls a previous press
- * already computed (in particular the `rollIndex+1..+3` sweep
- * `planWithLocks` runs) are never recomputed by the next press. That removes
- * the repeated work, not the intrinsic cost of a cold roll — a documented
- * residual.
+ * within one option/rejection/pin signature, so a roll a previous press already
+ * computed is never recomputed by the next. That removes the repeated work,
+ * not the intrinsic cost of a cold roll — a documented residual.
  *
  * ## `dirty` stays false on creation
  *
@@ -230,6 +228,11 @@ export interface RemixSession {
   rejectedJoins: string[];
   /** `${from}>${to}` keys the user pinned — see `toggleLockJoin`. */
   lockedJoins: string[];
+  /** The subset of `lockedJoins` the CURRENT plan does not contain. A pin is
+   * a strong preference, not a guarantee (`remixPlan.ts` has no
+   * `requiredJoins`), so the panel must be able to say "this pin was dropped"
+   * rather than leave a pin badge lit on a join that no longer exists. */
+  lockedJoinsDropped: string[];
   /** The roll index the CURRENT plan was actually produced at — which is not
    * necessarily the one the last `reRollRemix` requested, because
    * `planWithLocks` may have kept a later roll that preserved more locks (fix
@@ -263,9 +266,19 @@ export type ToggleLockResult =
  * a component. */
 export const MAX_LOCKED_JOINS = 8;
 
-/** How many extra deterministic re-rolls `planWithLocks` may try to bring a
- * broken lock back. See its own doc comment. */
-const MAX_LOCK_RECOVERY_ROLLS = 3;
+// THE LOCK-RECOVERY SWEEP IS GONE (fix round 2). It used to re-run planning
+// at `rollIndex+1..+3` and keep whichever attempt preserved the most pins.
+// Measured over 92 cases across three scales (M = 32 / 128 / 496, both the
+// re-roll and reject entry points): it ran 89 times and helped **0** times.
+// The reason was structural, and in the wrong module: `remixPlan.ts`
+// accumulated its re-roll penalty monotonically, so a join was penalised
+// `+JOIN_PENALTY` (2.0, ~5.7x `weights.jump`) at roll `k+1` precisely BECAUSE
+// it was in roll `k`'s plan — the sweep searched in exactly the direction
+// that pushes pins out. It is now fixed at the source
+// (`PlanRemixOptions.lockedJoins` exempts pinned keys from that penalty), so
+// pins survive in the BASE plan and the sweep has nothing left to compensate
+// for. Deleting it also removes up to 3 extra full DP runs — measured 2.7-5.6 s
+// of worker time at M = 499 — from 100% of pinned Re-rolls.
 
 const DEFAULTS: Omit<RemixOptions, 'targetSample' | 'weights'> = {
   phraseBars: 8,
@@ -573,7 +586,12 @@ function dropEntry(remixDocId: string, entry: Entry): void {
 // Planning
 // ---------------------------------------------------------------------------
 
-function planOptionsFor(options: RemixOptions, rejected: readonly string[], rollIndex: number): PlanRemixOptions {
+function planOptionsFor(
+  options: RemixOptions,
+  rejected: readonly string[],
+  locked: readonly string[],
+  rollIndex: number
+): PlanRemixOptions {
   return {
     targetSample: options.targetSample,
     weights: options.weights,
@@ -582,14 +600,18 @@ function planOptionsFor(options: RemixOptions, rejected: readonly string[], roll
     allowRepeats: options.allowRepeats,
     maxRepeatFactor: options.maxRepeatFactor,
     exactLength: options.exactLength,
-    // A plain array, not a Set: this value is structure-cloned to the worker.
+    // Plain arrays, not Sets: these values are structure-cloned to the worker.
     forbiddenJoins: [...rejected],
+    lockedJoins: [...locked],
     rollIndex,
   };
 }
 
-/** Everything the memo must key on besides `rollIndex`. */
-function memoSignature(options: RemixOptions, rejected: readonly string[]): string {
+/** Everything the memo must key on besides `rollIndex`. `locked` is part of
+ * the signature (fix round 2): pins now change the PLAN — they exempt their
+ * keys from the roll penalty — so a memo that ignored them would serve a plan
+ * computed under a different pin set. */
+function memoSignature(options: RemixOptions, rejected: readonly string[], locked: readonly string[]): string {
   return JSON.stringify([
     options.targetSample,
     options.phraseBars,
@@ -599,6 +621,7 @@ function memoSignature(options: RemixOptions, rejected: readonly string[]): stri
     options.maxRepeatFactor,
     WEIGHT_KEYS.map((k) => options.weights[k]),
     [...rejected].sort(),
+    [...locked].sort(),
   ]);
 }
 
@@ -612,9 +635,10 @@ async function runPlan(
   entry: Entry,
   options: RemixOptions,
   rejected: readonly string[],
+  locked: readonly string[],
   rollIndex: number
 ): Promise<PlanRemixResult | null> {
-  const signature = memoSignature(options, rejected);
+  const signature = memoSignature(options, rejected, locked);
   if (signature !== entry.planMemoSignature) {
     entry.planMemo.clear();
     entry.planMemoSignature = signature;
@@ -622,7 +646,7 @@ async function runPlan(
   const hit = entry.planMemo.get(rollIndex);
   if (hit) return hit;
 
-  const planOptions = planOptionsFor(options, rejected, rollIndex);
+  const planOptions = planOptionsFor(options, rejected, locked, rollIndex);
   const result = entry.planWorker
     ? await requestWorkerPlan(entry.planWorker, planOptions)
     : planRemix(entry.session.analysis, planOptions);
@@ -630,24 +654,29 @@ async function runPlan(
   return result;
 }
 
+/** `${from}>${to}` keys in `locked` that `plan` does NOT contain — the pins
+ * this arrangement dropped. Surfaced on the session so T15 can say so rather
+ * than leaving a pin badge lit on a join that is no longer there. */
+function droppedLocks(plan: RemixPlan, locked: readonly string[]): string[] {
+  const present = new Set(keysOf(plan.joins));
+  return locked.filter((key) => !present.has(key));
+}
+
 /**
- * `runPlan` plus a bounded, deterministic attempt to keep LOCKED joins.
+ * ONE plan, with pinned joins exempted from the planner's own re-roll and
+ * over-repetition penalties (`PlanRemixOptions.lockedJoins`, added in fix
+ * round 2 — the pin mechanism now lives where the penalty lives, which is the
+ * only place it can work).
  *
- * `remixPlan.ts` exposes `forbiddenJoins` but has NO "required joins" input,
- * and its re-roll penalty is applied to every join of the previous roll —
- * including a locked one. There is therefore no way to make a lock a HARD
- * constraint from this layer without changing the planner, which is out of
- * scope. What IS available, and is what this does: run the plan, and if a
- * lock was broken, try the next few deterministic re-rolls and keep whichever
- * attempt preserves the MOST locks (ties -> the earliest attempt, i.e. the
- * cheapest). Same retry-and-keep-the-best shape as `remixPlan.ts`'s own
- * over-repetition guard, and equally deterministic — but a PREFERENCE, not a
- * guarantee, which the panel must present as such.
+ * A pin remains a STRONG PREFERENCE, not a guarantee: `remixPlan.ts` has no
+ * `requiredJoins` constraint, so a pinned join can still lose to a genuinely
+ * cheaper arrangement. `locksKept`/`rollIndexUsed` are reported so the panel
+ * can tell the user a pin was dropped instead of silently lying about it.
  *
- * Returns the roll index the winning plan was ACTUALLY produced at, so the
- * session records that rather than the requested one (fix round 1) — without
- * it, the next Re-roll press could re-serve the arrangement already on
- * screen.
+ * `rollIndexUsed` is now always the REQUESTED index — the sweep that could
+ * make it differ is gone (see the constant block above) — but it is kept as
+ * the plan's own provenance so the field the session records stays honest if
+ * that ever changes again.
  */
 async function planWithLocks(
   entry: Entry,
@@ -655,35 +684,11 @@ async function planWithLocks(
   rejected: readonly string[],
   locked: readonly string[],
   rollIndex: number
-): Promise<{ result: PlanRemixResult; rollIndexUsed: number } | null> {
-  const base = await runPlan(entry, options, rejected, rollIndex);
-  if (!base) return null;
-  if (!base.ok || locked.length === 0) return { result: base, rollIndexUsed: rollIndex };
-
-  const countKept = (plan: RemixPlan): number => {
-    const keys = new Set(keysOf(plan.joins));
-    let n = 0;
-    for (const key of locked) if (keys.has(key)) n++;
-    return n;
-  };
-
-  let best = base;
-  let bestKept = countKept(base);
-  let bestRoll = rollIndex;
-  for (let extra = 1; bestKept < locked.length && extra <= MAX_LOCK_RECOVERY_ROLLS; extra++) {
-    const next = await runPlan(entry, options, rejected, rollIndex + extra);
-    // A worker failure mid-sweep: keep the best VALID plan already found
-    // rather than discarding a perfectly good base plan.
-    if (!next) break;
-    if (!next.ok) break;
-    const kept = countKept(next);
-    if (kept > bestKept) {
-      best = next;
-      bestKept = kept;
-      bestRoll = rollIndex + extra;
-    }
-  }
-  return { result: best, rollIndexUsed: bestRoll };
+): Promise<{ result: PlanRemixResult; rollIndexUsed: number; locksKept: number } | null> {
+  const result = await runPlan(entry, options, rejected, locked, rollIndex);
+  if (!result) return null;
+  const locksKept = result.ok ? locked.length - droppedLocks(result, locked).length : 0;
+  return { result, rollIndexUsed: rollIndex, locksKept };
 }
 
 /** Whether a hand-edited join list still describes a legal arrangement:
@@ -787,7 +792,7 @@ function buildPlanFromJoins(
  * would hide exactly the class of bug the checks exist to catch (T12/T10
  * carry-forward).
  */
-function commitPlan(entry: Entry, plan: RemixPlan): RemixPlan | null {
+function commitPlan(entry: Entry, plan: RemixPlan, lockedForReport?: readonly string[]): RemixPlan | null {
   const { remixDocId, sourceDocId, analysis, options } = entry.session;
   const source = findDoc(sourceDocId);
   const remixDoc = findDoc(remixDocId);
@@ -835,14 +840,21 @@ function commitPlan(entry: Entry, plan: RemixPlan): RemixPlan | null {
   entry.session.nudgeSamples = render.nudgeSamples;
   entry.session.rhos = render.rhos;
   entry.session.shapes = render.shapes;
+  entry.session.lockedJoinsDropped = droppedLocks(plan, lockedForReport ?? entry.session.lockedJoins);
   bumpVersion();
   return plan;
 }
 
-/** Shared tail of every re-PLANNING adjustment: plan, and only if that
- * succeeded, mutate the session's own bookkeeping and commit. A failed plan
- * leaves the session (and the document) exactly as it was and is handed back
- * so the caller can surface `minOutputSample`/`maxOutputSample`. */
+/** Shared tail of every re-PLANNING adjustment: plan, commit, and only then
+ * mutate the session's own bookkeeping. A failed plan leaves the session (and
+ * the document) exactly as it was and is handed back so the caller can
+ * surface `minOutputSample`/`maxOutputSample`.
+ *
+ * ORDER MATTERS (fix round 2): the bookkeeping writes land AFTER a successful
+ * `commitPlan`, never before. `commitPlan` can still refuse — its staleness
+ * re-check runs after the plan await — and writing `rejectedJoins`/
+ * `lockedJoins`/`rollIndex` first would leave the session claiming a
+ * rejection its own `plan` does not reflect. */
 async function replanAndCommit(
   entry: Entry,
   next: { rejected: string[]; locked: string[]; rollIndex: number }
@@ -851,12 +863,15 @@ async function replanAndCommit(
   if (!outcome) return null; // worker failure — the dialog is already up
   if (!outcome.result.ok) return outcome.result;
 
+  const committed = commitPlan(entry, outcome.result, next.locked);
+  if (!committed) return null;
+
   entry.session.rejectedJoins = next.rejected;
   entry.session.lockedJoins = next.locked;
   entry.session.rollIndex = outcome.rollIndexUsed;
   entry.session.manual = false;
   entry.nudgeBars = outcome.result.joins.map(() => 0);
-  return commitPlan(entry, outcome.result);
+  return committed;
 }
 
 // ---------------------------------------------------------------------------
@@ -928,7 +943,7 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
     }
   }
 
-  const planOptions = planOptionsFor(options, [], 0);
+  const planOptions = planOptionsFor(options, [], [], 0);
   const plan = planWorker
     ? await requestWorkerPlan(planWorker, planOptions)
     : planRemix(analysis, planOptions);
@@ -986,6 +1001,7 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
       shapes: render.shapes,
       rejectedJoins: [],
       lockedJoins: [],
+      lockedJoinsDropped: [],
       rollIndex: 0,
       manual: false,
       plansInWorker,
@@ -995,7 +1011,7 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
     nudgeBars: plan.joins.map(() => 0),
     planWorker,
     planMemo: new Map([[0, plan as PlanRemixResult]]),
-    planMemoSignature: memoSignature(options, []),
+    planMemoSignature: memoSignature(options, [], []),
   });
   bumpVersion();
 
@@ -1080,10 +1096,16 @@ export async function updateRemixSession(
     rollback();
     return outcome ? outcome.result : null;
   }
+  // Bookkeeping AFTER a successful commit — see `replanAndCommit`.
+  const committed = commitPlan(entry, outcome.result);
+  if (!committed) {
+    rollback();
+    return null;
+  }
   entry.session.rollIndex = outcome.rollIndexUsed;
   entry.session.manual = false;
   entry.nudgeBars = outcome.result.joins.map(() => 0);
-  return commitPlan(entry, outcome.result);
+  return committed;
 }
 
 /**
@@ -1199,11 +1221,19 @@ export async function nudgeJoin(
  * penalise the previous rolls' joins, never randomised jitter, so two
  * identically-seeded sessions re-roll identically). A no-op resolving `null`
  * when the current plan has no joins to vary.
+ *
+ * "Nothing to vary" now includes EVERY join being pinned (fix round 2): a
+ * pinned key is exempt from the roll penalty, so with all of them pinned the
+ * penalty map for the next roll is empty and `planRemix(rollIndex+1)` is
+ * provably identical to the plan already on screen. Refusing is honest; a
+ * visibly dead press is not.
  */
 export async function reRollRemix(remixDocId: string): Promise<PlanRemixResult | null> {
   const entry = liveEntry(remixDocId);
   if (!entry) return null;
-  if (entry.session.plan.joins.length === 0) return null;
+  const keys = keysOf(entry.session.plan.joins);
+  if (keys.length === 0) return null;
+  if (keys.every((key) => entry.session.lockedJoins.includes(key))) return null;
 
   return replanAndCommit(entry, {
     rejected: entry.session.rejectedJoins.slice(),

@@ -463,32 +463,18 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(rolledB!.segments).toEqual(rolledA!.segments);
   }, 15000);
 
-  // EVIDENCE LIMIT, stated rather than implied (see the task report): this
-  // asserts the CONSISTENCY of `session.rollIndex` with the plan on screen,
-  // and it is NOT a mutation-discriminating test of "used vs requested".
-  // Measured on this fixture (7 roll indices x 4 targets): no join ever
-  // recurs at a later roll, so `planWithLocks`'s recovery sweep never
-  // improves on its base plan here and `rollIndexUsed === rollIndex` always.
-  // Reverting the fix to record the REQUESTED index therefore still passes
-  // this test — verified. Producing a divergence needs material where a
-  // penalised join is still the cheapest option, which the abab fixture's
-  // rich candidate pool never yields.
-  it('(6, roll index) the session records the roll index the plan ACTUALLY came from, so consecutive presses can never re-serve the arrangement already on screen', async () => {
+  it('(6, roll index) the session records the roll index the plan came from, and replaying planRemix at that index reproduces it exactly', async () => {
     const { remixDocId, plan } = await seedSession(TARGET_2_JOINS);
     const session = getRemixSession(remixDocId)!;
-    // A lock makes planWithLocks sweep rollIndex+1..+3, which is exactly when
-    // the requested index and the used index can diverge.
-    toggleLockJoin(remixDocId, `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`);
+    expect(plan.joins.length).toBeGreaterThan(1);
 
     const first = await reRollRemix(remixDocId);
     expect(first).not.toBeNull();
     expect(first!.ok).toBe(true);
     if (!first!.ok) return;
     const usedFirst = session.rollIndex;
-    expect(usedFirst).toBeGreaterThanOrEqual(1);
+    expect(usedFirst).toBe(1);
 
-    // The recorded index really is the one that produced this plan: replaying
-    // planRemix at exactly that index reproduces it.
     const replay = planRemix(session.analysis, {
       targetSample: session.options.targetSample,
       weights: session.options.weights,
@@ -498,6 +484,7 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
       maxRepeatFactor: session.options.maxRepeatFactor,
       exactLength: session.options.exactLength,
       forbiddenJoins: session.rejectedJoins,
+      lockedJoins: session.lockedJoins,
       rollIndex: usedFirst,
     });
     expect(replay.ok).toBe(true);
@@ -506,7 +493,66 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
 
     const second = await reRollRemix(remixDocId);
     expect(second).not.toBeNull();
-    expect(session.rollIndex).toBeGreaterThan(usedFirst);
+    expect(session.rollIndex).toBe(usedFirst + 1);
+  }, 15000);
+
+  // FIX ROUND 2 — the headline. Before the planner exempted pinned keys from
+  // its own re-roll penalty, this was measured at 0/27 on this very fixture
+  // (0/106 across three scales): a join was penalised +2.0 at roll k+1
+  // PRECISELY because it was in roll k's plan, so a pin could never survive.
+  it('(lock, headline) a PINNED join survives a Re-roll — and the same join is dropped when it is not pinned', async () => {
+    const a = await seedSession(TARGET_2_JOINS);
+    const pin = `${a.plan.joins[0].fromBar}>${a.plan.joins[0].toBar}`;
+
+    // Control: WITHOUT the pin, this join is gone after one Re-roll.
+    const unpinned = await reRollRemix(a.remixDocId);
+    expect(unpinned).not.toBeNull();
+    expect(unpinned!.ok).toBe(true);
+    if (!unpinned!.ok) return;
+    expect(unpinned!.joins.map((j) => `${j.fromBar}>${j.toBar}`)).not.toContain(pin);
+
+    // Same fixture, same options, same press — but pinned first.
+    const b = await seedSession(TARGET_2_JOINS);
+    expect(`${b.plan.joins[0].fromBar}>${b.plan.joins[0].toBar}`).toBe(pin);
+    expect(toggleLockJoin(b.remixDocId, pin).ok).toBe(true);
+
+    const pinned = await reRollRemix(b.remixDocId);
+    expect(pinned).not.toBeNull();
+    expect(pinned!.ok).toBe(true);
+    if (!pinned!.ok) return;
+    expect(pinned!.joins.map((j) => `${j.fromBar}>${j.toBar}`)).toContain(pin);
+    // It is a genuinely DIFFERENT arrangement, not "the re-roll did nothing".
+    expect(pinned!.joins).not.toEqual(b.plan.joins);
+    expect(getRemixSession(b.remixDocId)!.lockedJoinsDropped).toEqual([]);
+  }, 20000);
+
+  it('(lock) a dropped pin is REPORTED rather than silently forgotten — a pin is a preference, not a guarantee', async () => {
+    const { remixDocId, plan } = await seedSession(TARGET_2_JOINS);
+    const session = getRemixSession(remixDocId)!;
+    const pin = `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`;
+    toggleLockJoin(remixDocId, pin);
+    expect(session.lockedJoinsDropped).toEqual([]);
+
+    // Changing the target re-plans against a different duration, which the
+    // pin has no power to override — the session must say so.
+    await updateRemixSession(remixDocId, { targetSample: TARGET_1_JOIN });
+
+    const dropped = session.lockedJoinsDropped;
+    const present = session.plan.joins.map((j) => `${j.fromBar}>${j.toBar}`);
+    // Whichever way it went, the report and the plan agree exactly.
+    expect(dropped.includes(pin)).toBe(!present.includes(pin));
+  }, 20000);
+
+  it('(lock) re-roll refuses when EVERY join is pinned — the penalty map would be empty, so the plan is provably identical', async () => {
+    const { remixDocId, plan } = await seedSession(TARGET_2_JOINS);
+    for (const j of plan.joins) toggleLockJoin(remixDocId, `${j.fromBar}>${j.toBar}`);
+    const channelsBefore = liveDoc(remixDocId).channels;
+    const historyBefore = getHistory(remixDocId).done.length;
+
+    expect(await reRollRemix(remixDocId)).toBeNull();
+
+    expect(liveDoc(remixDocId).channels).toBe(channelsBefore);
+    expect(getHistory(remixDocId).done.length).toBe(historyBefore);
   }, 15000);
 
   it('(reset) resetRemix drops rejections, locks and rolls and returns the original automatic plan', async () => {
@@ -915,6 +961,21 @@ describe('session-scoped plan worker', () => {
     // A different signature (new target) invalidates the memo, as it must.
     await updateRemixSession(remixDocId, { targetSample: TARGET_2_JOINS });
     expect(_getRemixPlanRequestCount()).toBeGreaterThan(afterRoll);
+  }, 20000);
+
+  it('keys the memo on the PINNED set too — pins change the plan, so a no-pin result must never be re-served for a pinned request', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const { remixDocId, plan } = await seedSession(TARGET_2_JOINS);
+    await reRollRemix(remixDocId); // roll 1, unpinned — now memoised
+    const afterUnpinned = _getRemixPlanRequestCount();
+    await resetRemix(remixDocId); // back to roll 0
+
+    toggleLockJoin(remixDocId, `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`);
+    await reRollRemix(remixDocId); // roll 1 again, but PINNED this time
+
+    // Must have gone to the worker again rather than re-serving the unpinned
+    // roll-1 entry (which, by construction, does not honour the pin).
+    expect(_getRemixPlanRequestCount()).toBeGreaterThan(afterUnpinned);
   }, 20000);
 });
 
