@@ -25,6 +25,11 @@ import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noise
 import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 import * as tempoAnalysis from './tempoAnalysis';
 import { runTempoAnalysis, getTempo, clearAllTempo } from './tempoAnalysis';
+import {
+  createRemixDocument,
+  getRemixSession,
+  clearAllRemix as clearAllRemixSessions,
+} from './remixService';
 
 // Decode is mocked so file-service tests never touch OfflineAudioContext/lamejs.
 // The MP3/FLAC encoders are mocked to spy on the format-faithful save routing
@@ -404,6 +409,61 @@ describe('openFilesViaDialog', () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// The abab fixture (Task T13) — recipe copied verbatim from
+// `remixFeatures.test.ts`, this repo's convention being that local generators
+// are re-declared per test file. Only the two remix-session close tests use
+// it, and it is memoised because generating 64 s of audio is not free.
+// ---------------------------------------------------------------------------
+
+let ababCache: Float32Array | null = null;
+function abab(): Float32Array {
+  if (ababCache) return ababCache;
+  const SR = 44100;
+  const BEAT = Math.round((60 / 120) * SR); // 22050
+  const BAR = BEAT * 4; // 88200
+  const SECTION_LEN = BAR * 8;
+  const structure: ('A' | 'B')[] = ['A', 'B', 'A', 'B'];
+  const preRollLen = BAR;
+  const totalLen = preRollLen + structure.length * SECTION_LEN;
+  const out = new Float32Array(totalLen);
+  const freqA = [220, 330];
+  const freqB = [440, 554.365];
+  for (let i = 0; i < preRollLen; i++) {
+    const t = i / SR;
+    let v = 0;
+    for (const f of freqA) v += Math.sin(2 * Math.PI * f * t);
+    out[i] += 0.25 * v;
+  }
+  structure.forEach((label, si) => {
+    const start = preRollLen + si * SECTION_LEN;
+    const freqs = label === 'A' ? freqA : freqB;
+    for (let i = 0; i < SECTION_LEN; i++) {
+      const t = i / SR;
+      let v = 0;
+      for (const f of freqs) v += Math.sin(2 * Math.PI * f * t);
+      out[start + i] += 0.25 * v;
+    }
+  });
+  let s0 = 12345;
+  const rand = () => {
+    s0 = (s0 * 1103515245 + 12345) & 0x7fffffff;
+    return s0 / 0x7fffffff - 0.5;
+  };
+  const clickLen = Math.round(0.005 * SR);
+  const clickWin = new Float32Array(clickLen);
+  for (let i = 0; i < clickLen; i++) {
+    clickWin[i] = 0.5 * (1 - Math.cos((2 * Math.PI * i) / Math.max(1, clickLen - 1)));
+  }
+  let beatIdx = -4;
+  for (let s = 0; s < totalLen; s += BEAT, beatIdx++) {
+    const gain = ((beatIdx % 4) + 4) % 4 === 0 ? 2 : 1;
+    for (let i = 0; i < clickLen && s + i < totalLen; i++) out[s + i] += gain * clickWin[i] * rand();
+  }
+  ababCache = out;
+  return out;
+}
 
 function seedDoc(opts: {
   filePath: string | null;
@@ -1304,6 +1364,41 @@ describe('closeDocumentFlow', () => {
 
       expect(getTempo(doc)).toBeNull();
     });
+  });
+
+  describe('remix session lifetime (Task T13, acceptance 11)', () => {
+    /** A live remix session over the abab fixture. Real end-to-end (analysis
+     * -> plan -> render -> new document), because the whole point of these
+     * two tests is that the SESSION — which retains the source's channel
+     * arrays and its whole RemixAnalysis — is actually released on close, and
+     * a stubbed session would not prove that. */
+    async function seedRemixSession() {
+      installApi();
+      clearAllTempo();
+      clearAllRemixSessions();
+      const source = createDocument({ name: 'Song.wav', sampleRate: 44100, channels: [abab()] });
+      useAppStore.getState().addDocument(source);
+      const result = await createRemixDocument({ sourceDocId: source.id, targetSample: Math.round(32 * 44100) });
+      if (!result.ok) throw new Error(`seedRemixSession: ${result.status} — ${result.message}`);
+      expect(getRemixSession(result.remixDocId)).not.toBeNull();
+      return { sourceId: source.id, remixDocId: result.remixDocId };
+    }
+
+    it('closing the REMIX document clears its session', async () => {
+      const { remixDocId } = await seedRemixSession();
+
+      await closeDocumentFlow(remixDocId);
+
+      expect(getRemixSession(remixDocId)).toBeNull();
+    }, 20000);
+
+    it('closing the SOURCE document clears the session too (it pins the source channels and the whole analysis)', async () => {
+      const { sourceId, remixDocId } = await seedRemixSession();
+
+      await closeDocumentFlow(sourceId);
+
+      expect(getRemixSession(remixDocId)).toBeNull();
+    }, 20000);
   });
 
   it('does not close when the dirty prompt is cancelled', async () => {

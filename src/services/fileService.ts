@@ -16,6 +16,12 @@ import { invalidatePeaks } from './peaksCache';
 import { clearHistory, markSavePoint, invalidateSavePoint } from './undoHistory';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { invalidateTempo, invalidateRemix } from './tempoAnalysis';
+// Same exported NAME, different layer: `tempoAnalysis.invalidateRemix` drops
+// the cached remix-level ANALYSIS row, `remixService.invalidateRemix` drops
+// the remix SESSION (plan, locks, rejections, and its retained
+// `sourceChannelRefs`). Closing a document must clear both, so the session
+// one is aliased rather than shadowing the analysis one (Task T13).
+import { invalidateRemix as invalidateRemixSession } from './remixService';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -546,6 +552,13 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   // called here so a level:'remix' row for this doc is cleared either way.
   invalidateTempo(docId);
   invalidateRemix(docId);
+  // Task T13: the remix SESSION must go too — and it must go whether `docId`
+  // is the remix document ITSELF or the SOURCE it was planned from (the
+  // session retains the source's channel arrays and its whole RemixAnalysis,
+  // so a source close would otherwise pin both for the rest of the session).
+  // `invalidateRemixSession` matches on both ids, mirroring the
+  // `getNoiseProfile()?.docId === docId` provenance guard right below.
+  invalidateRemixSession(docId);
   if (getNoiseProfile()?.docId === docId) clearNoiseProfile();
   // A closing doc can invalidate many clips' cached mini-waveforms at once
   // (every clip sourced from it); clearing the whole cache is cheap and
