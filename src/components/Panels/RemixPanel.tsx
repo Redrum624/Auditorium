@@ -352,7 +352,13 @@ export default function RemixPanel() {
                     type="button"
                     aria-label={`Go to edit ${n}`}
                     title="Move the cursor to this splice"
-                    disabled={stale}
+                    // Deliberately NOT gated on `stale`. Go To mutates
+                    // nothing, re-plans nothing and re-renders nothing — it
+                    // moves the cursor and zoom of the REMIX document, whose
+                    // audio the banner right above says is unaffected. A stale
+                    // session degrades to read-only, not to inert: auditioning
+                    // the splices of the remix you already have is the one
+                    // thing still worth doing in that state.
                     onClick={() => goTo(atSample)}
                     className="shrink-0 rounded px-1 py-0.5 text-xs tabular-nums text-[#8b8b92] transition-colors hover:bg-[#3a3a42] hover:text-[#26c6da] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-[#8b8b92]"
                   >

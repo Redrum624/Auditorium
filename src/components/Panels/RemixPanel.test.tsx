@@ -517,7 +517,7 @@ describe('RemixPanel — header actions (acceptance 9)', () => {
 });
 
 describe('RemixPanel — staleness (acceptance 10)', () => {
-  it('renders the banner and disables every control', () => {
+  it('renders the banner and disables every ADJUSTMENT control', () => {
     const doc = addRemixDoc();
     mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS, { stale: true }));
 
@@ -527,10 +527,47 @@ describe('RemixPanel — staleness (acceptance 10)', () => {
       screen.getByText(/source audio changed — adjustments unavailable\. the remix audio is unaffected\./i)
     ).toBeInTheDocument();
 
-    const buttons = screen.getAllByRole('button');
-    expect(buttons.length).toBeGreaterThan(0);
-    for (const button of buttons) expect(button).toBeDisabled();
+    // Every button that would reject / pin / nudge / re-roll / revert — i.e.
+    // everything except Go To, which mutates nothing (see below).
+    const adjustments = screen
+      .getAllByRole('button')
+      .filter((b) => !/^go to edit/i.test(b.getAttribute('aria-label') ?? ''));
+    expect(adjustments).toHaveLength(6 * 4 + 2); // 4 row controls x 6 joins, + Re-roll and Revert
+    for (const button of adjustments) expect(button).toBeDisabled();
     expect(screen.getByTestId('remix-crossfade')).toBeDisabled();
+  });
+
+  it('KEEPS Go To enabled while stale — the session degrades to read-only, not inert', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS, { stale: true }));
+    useAppStore.setState({ zoom: { samplesPerPixel: 20, scrollSample: 0 } });
+
+    render(<RemixPanel />);
+
+    // Asserted POSITIVELY so a future change cannot quietly re-disable it: the
+    // banner says the remix audio is unaffected, and auditioning the splices
+    // of the remix you already have is the one thing still worth doing here.
+    const goTos = screen.getAllByRole('button', { name: /go to edit/i });
+    expect(goTos).toHaveLength(6);
+    for (const button of goTos) expect(button).toBeEnabled();
+
+    fireEvent.click(goTos[0]);
+    expect(useAppStore.getState().cursorSample).toBe(10 * SR);
+    expect(useAppStore.getState().zoom.scrollSample).toBe(10 * SR - 20 * 400);
+  });
+
+  it('still applies the multitrack guard on the stale path', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS, { stale: true }));
+    useAppStore.setState({ view: 'multitrack' });
+
+    render(<RemixPanel />);
+    fireEvent.click(screen.getAllByRole('button', { name: /go to edit/i })[1]);
+
+    // Without the guard a stale-session Go To in multitrack view would be
+    // exactly the silent no-op the guard exists to prevent.
+    expect(useAppStore.getState().view).toBe('waveform');
+    expect(useAppStore.getState().cursorSample).toBe(20 * SR);
   });
 
   it('fires no adjustment when a disabled control is clicked while stale', () => {
