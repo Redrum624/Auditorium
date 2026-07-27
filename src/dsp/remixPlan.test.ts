@@ -633,6 +633,41 @@ describe('planRemix -- refusals (acceptance 4)', () => {
       expect(result.minOutputSample).toBeLessThan(naturalLength);
     }
   });
+
+  it('minOutputSample and maxOutputSample are TARGET-INDEPENDENT -- planning the same analysis at two wildly different targets must agree exactly (fix round 2, Plan Ruling 6 testing requirement)', () => {
+    // Ruling 6's own point was that reachability must not be a function of
+    // the target. The far-too-short test above pins the MIN half of that
+    // (a far-too-short request must report the true minimum, not the full
+    // source length); this pins the MAX half, which nothing else in this
+    // suite directly asserts -- under the pre-fix `Nmax = min(round(M*
+    // maxRepeatFactor), targetBars+phraseBars)`, a SHORT target starves
+    // `Nmax` and caps `maxOutputSample` at roughly `targetBars+phraseBars`
+    // bars, silently advertising a much lower ceiling than a long target
+    // would report for the exact same source.
+    const M = 40;
+    const barLen = 10000;
+    const head = 500;
+    const tail = 800;
+    const a = makeUniformAnalysis({ numBars: M, barLen, head, tail });
+    a.cluster = Int32Array.from({ length: M + 1 }, () => 0);
+    a.transitionSeen = new Set(['0>0']);
+
+    const commonOptions = {
+      phraseBars: 8,
+      strict: true,
+      allowRepeats: true,
+      minKeepBars: 8,
+      maxRepeatBars: 40,
+    } as const;
+    const farTooShort = planRemix(a, baseOptions({ targetSample: head + 2 * barLen + tail, ...commonOptions }));
+    const farTooLong = planRemix(a, baseOptions({ targetSample: head + 300 * barLen + tail, ...commonOptions }));
+
+    expect(farTooShort.minOutputSample).toBe(farTooLong.minOutputSample);
+    expect(farTooShort.maxOutputSample).toBe(farTooLong.maxOutputSample);
+    // Sanity: both fixed points are real (min < max), not a degenerate
+    // both-equal-to-the-trivial-fallback case that would pass vacuously.
+    expect(farTooShort.minOutputSample).toBeLessThan(farTooShort.maxOutputSample);
+  });
 });
 
 // ---------------------------------------------------------------------------
