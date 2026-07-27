@@ -1,4 +1,4 @@
-import { joinCost, buildCandidateLists, DEFAULT_REMIX_WEIGHTS, CANDIDATE_LIST_K } from './remixCost';
+import { joinCost, buildCandidateLists, clusterMemberCounts, DEFAULT_REMIX_WEIGHTS, CANDIDATE_LIST_K } from './remixCost';
 import type { RemixWeights } from './remixCost';
 import { analyzeRemix } from './remixFeatures';
 import type { RemixAnalysis } from './remixFeatures';
@@ -111,6 +111,27 @@ describe('joinCost -- closed forms (acceptance 1)', () => {
     expect(terms.rhythm).toBeCloseTo(0, 6);
   });
 
+  it('two identical all-zero (silent) rows -> dT === 0, dC === 0 (fix round 1, Minor 3)', () => {
+    // T/C/R default to all-zero when not overridden (see makeAnalysis). Two
+    // silent boundaries are IDENTICAL, and silence-to-silence is the least
+    // audible splice available, not the most -- so this must NOT read as
+    // maximally dissimilar (the pre-fix behaviour, which returned dT=dC=1
+    // for a zero-vs-zero comparison because the zero-vector guard didn't
+    // distinguish "both zero" from "one zero").
+    const a = makeAnalysis({ numBoundaries: 2 });
+    const terms = joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, 0, 1);
+    expect(terms.timbre).toBeCloseTo(0, 6);
+    expect(terms.chroma).toBeCloseTo(0, 6);
+    expect(terms.rhythm).toBeCloseTo(0, 6);
+  });
+
+  it('a silent row against a genuinely non-zero row -> dT === 1 (undefined direction, worst case)', () => {
+    const a = makeAnalysis({ numBoundaries: 2 });
+    setRow(a.T, 1, NUM_BANDS, arbitraryVec(NUM_BANDS, 9)); // boundary 0 stays all-zero
+    const terms = joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, 0, 1);
+    expect(terms.timbre).toBeCloseTo(1, 6);
+  });
+
   it('a 3 dB level gap -> dL === 0.5 exactly', () => {
     const a = makeAnalysis({ numBoundaries: 2 });
     a.L[0] = -20;
@@ -133,6 +154,73 @@ describe('joinCost -- closed forms (acceptance 1)', () => {
     setRow(a.C, 1, 12, oneHot(12, 1));
     const terms = joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, 0, 1);
     expect(terms.chroma).toBeCloseTo(1.0, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// joinCost -- out-of-domain indices THROW (fix round 1, Important 1)
+// ---------------------------------------------------------------------------
+
+describe('joinCost -- out-of-domain indices (fix round 1, Important 1)', () => {
+  it('throws RangeError instead of silently returning NaN when to is out of range', () => {
+    // numBars === 0 (a single-boundary, degenerate analysis) -- the exact
+    // review repro: joinCost(a, w, 8, 0, 5) previously gave
+    // {timbre: NaN, ..., total: NaN} because cosineDistance read past the
+    // Float32Array end (undefined < 1e-24 is false, so the zero-vector guard
+    // never caught it).
+    const a = makeAnalysis({ numBoundaries: 1 });
+    expect(a.numBars).toBe(0);
+    expect(() => joinCost(a, DEFAULT_REMIX_WEIGHTS, 8, 0, 5)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for a negative index', () => {
+    const a = makeAnalysis({ numBoundaries: 5 });
+    expect(() => joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, -1, 2)).toThrow(RangeError);
+  });
+
+  it('throws RangeError for a non-integer index', () => {
+    const a = makeAnalysis({ numBoundaries: 5 });
+    expect(() => joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, 1.5, 2)).toThrow(RangeError);
+  });
+
+  it('does NOT throw for the boundary values of the valid domain (0 and numBars)', () => {
+    const a = makeAnalysis({ numBoundaries: 5 }); // numBars === 4
+    expect(() => joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, 0, 4)).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// phraseBars <= 0 is clamped, not left to propagate NaN (fix round 1, Minor 6)
+// ---------------------------------------------------------------------------
+
+describe('phraseBars <= 0 guard (fix round 1, Minor 6)', () => {
+  it('joinCost with phraseBars === 0 does not produce NaN and matches the phraseBars === 1 result', () => {
+    const a = makeAnalysis({ numBoundaries: 6 });
+    const zero = joinCost(a, DEFAULT_REMIX_WEIGHTS, 0, 0, 3);
+    const one = joinCost(a, DEFAULT_REMIX_WEIGHTS, 1, 0, 3);
+    expect(Number.isNaN(zero.phrase)).toBe(false);
+    expect(Number.isNaN(zero.total)).toBe(false);
+    expect(zero.phrase).toBeCloseTo(one.phrase, 6);
+  });
+
+  it('joinCost with a negative phraseBars behaves the same as phraseBars === 1', () => {
+    const a = makeAnalysis({ numBoundaries: 6 });
+    const negative = joinCost(a, DEFAULT_REMIX_WEIGHTS, -5, 0, 3);
+    const one = joinCost(a, DEFAULT_REMIX_WEIGHTS, 1, 0, 3);
+    expect(negative.phrase).toBeCloseTo(one.phrase, 6);
+  });
+
+  it('buildCandidateLists with phraseBars === 0 does not throw or produce NaN-poisoned lists', () => {
+    const a = makeConstraintAnalysis();
+    expect(() =>
+      buildCandidateLists(a, {
+        weights: DEFAULT_REMIX_WEIGHTS,
+        phraseBars: 0,
+        minRunBars: 4,
+        strict: false,
+        allowRepeats: true,
+      })
+    ).not.toThrow();
   });
 });
 
@@ -496,6 +584,111 @@ describe('buildCandidateLists -- hard constraints (acceptance 6)', () => {
     // Sanity: strict mode is not vacuously satisfied by an all-empty result.
     const totalCandidates = lists.reduce((sum, l) => sum + l.length, 0);
     expect(totalCandidates).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DELETION coverage (fix round 1, Important 2). The original acceptance-6
+// tests all used allowRepeats:true with the default maxRepeatBars (32) and
+// minKeepBars (2*phraseBars = 16 at phraseBars=8) against numBars=20 -- under
+// those exact parameters `to - from <= numBars - minKeepBars = 4` while
+// `abs(to-from) >= phraseBars = 8` is ALSO required, so no deletion (to >
+// from) was ever legal and every previously-asserted candidate was a
+// repeat. These tests use parameters that make deletion legal, so
+// minKeepBars, allowRepeats:false, and maxRepeatBars each get positive
+// coverage, not just "the reviewer trusts it".
+// ---------------------------------------------------------------------------
+
+describe('buildCandidateLists -- DELETION coverage (fix round 1, Important 2)', () => {
+  it('allowRepeats:false -- never emits a backward edge, and deletions are actually present (non-vacuous)', () => {
+    const a = makeConstraintAnalysis();
+    const lists = buildCandidateLists(a, {
+      weights: DEFAULT_REMIX_WEIGHTS,
+      phraseBars: 4,
+      minRunBars: 4,
+      minKeepBars: 4, // small enough that deletions of up to 16 bars are legal
+      strict: false,
+      allowRepeats: false,
+    });
+    let deletionCount = 0;
+    lists.forEach((list, from) => {
+      list.forEach((to) => {
+        expect(to).toBeGreaterThan(from); // no backward edge anywhere
+        deletionCount++;
+      });
+    });
+    expect(deletionCount).toBeGreaterThan(0); // not vacuously true on an all-empty result
+  });
+
+  it('maxRepeatBars caps how far back a repeat may reach, and is the BINDING constraint (not redundant with the delta bound)', () => {
+    const a = makeConstraintAnalysis();
+    const maxRepeatBars = 5;
+    const from = 15;
+    const lists = buildCandidateLists(a, {
+      weights: DEFAULT_REMIX_WEIGHTS,
+      phraseBars: 4,
+      minRunBars: 4,
+      maxRepeatBars,
+      strict: false,
+      allowRepeats: true,
+    });
+    // General property: no repeat anywhere exceeds the cap.
+    lists.forEach((list, f) => {
+      list.forEach((to) => {
+        if (to < f) expect(f - to).toBeLessThanOrEqual(maxRepeatBars);
+      });
+    });
+    // Specific, fully-worked case: for from=15, phraseBars=4 alone would
+    // permit repeats back to to=1 (delta=14>=4); maxRepeatBars=5 is the
+    // TIGHTER bound (from-to<=5 -> to>=10), leaving repeats {10, 11}. The
+    // only deletion the delta bound alone would admit (to=19, delta=4) is
+    // separately excluded by the `to + minRunBars <= numBars` lattice bound
+    // (19+4=23>20) -- confirming that bound is independently enforced here
+    // too, not just in the dedicated minRunBars tests above. Net legal set:
+    // exactly {10, 11}.
+    const emitted = Array.from(lists[from]).sort((x, y) => x - y);
+    expect(emitted).toEqual([10, 11]);
+  });
+
+  it('minKeepBars caps how much may be deleted in one join, and is the BINDING constraint (not redundant with the delta bound)', () => {
+    const a = makeConstraintAnalysis();
+    const minKeepBars = 16; // numBars(20) - minKeepBars(16) = 4: deletion span capped at 4
+    const from = 2;
+    const lists = buildCandidateLists(a, {
+      weights: DEFAULT_REMIX_WEIGHTS,
+      phraseBars: 4,
+      minRunBars: 4,
+      minKeepBars,
+      strict: false,
+      allowRepeats: true,
+    });
+    // General property: no deletion anywhere exceeds the cap.
+    lists.forEach((list, f) => {
+      list.forEach((to) => {
+        if (to > f) expect(to - f).toBeLessThanOrEqual(NUM_BARS - minKeepBars);
+      });
+    });
+    // Specific case: for from=2, phraseBars=4 alone would permit deletions
+    // up to to=19 (or any to-from>=4); minKeepBars forces to-from<=4, so
+    // the ONLY legal deletion is to=6 (delta exactly 4). to=10 (delta=8)
+    // satisfies the phrase-delta bound but must be absent.
+    const emitted = Array.from(lists[from]);
+    expect(emitted).toContain(6);
+    expect(emitted).not.toContain(10);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// joinCost -- optional precomputed cluster member counts (fix round 1, Minor 5)
+// ---------------------------------------------------------------------------
+
+describe('joinCost -- optional precomputed cluster member counts (fix round 1, Minor 5)', () => {
+  it('passing a precomputed clusterMemberCounts gives the identical result to computing it fresh', () => {
+    const a = makeConstraintAnalysis();
+    const fresh = joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, 2, 10);
+    const precomputed = clusterMemberCounts(a.cluster);
+    const withPrecomputed = joinCost(a, DEFAULT_REMIX_WEIGHTS, 4, 2, 10, precomputed);
+    expect(withPrecomputed).toEqual(fresh);
   });
 });
 

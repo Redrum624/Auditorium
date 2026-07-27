@@ -24,8 +24,31 @@
  * re-normalise for the common case. They still divide by each vector's own
  * norm defensively (rather than assuming norm === 1 exactly) so a
  * pathological all-zero row (silence) or a hand-built test fixture that
- * skips normalisation still produces a defined, sensible distance (treated
- * as maximally dissimilar, `cos = 0`) instead of `0/0 = NaN`.
+ * skips normalisation still produces a defined, sensible distance instead of
+ * `0/0 = NaN`. Two DIFFERENT zero-handling rules apply, deliberately: a row
+ * compared against itself (both zero, i.e. two silent boundaries) returns
+ * distance `0` -- they are literally identical, and silence-to-silence is
+ * the least audible splice possible, not the most, so treating it as
+ * maximally DISSIMILAR would be actively wrong (fix round 1, Minor 3). A row
+ * compared against a genuinely non-zero row returns distance `1` (maximally
+ * dissimilar) -- cosine similarity has no defined direction against a zero
+ * vector, and "silence spliced against real content" is correctly one of
+ * the worst joins available, so the undefined case resolves to the
+ * conservative extreme rather than `0` or `NaN`.
+ *
+ * ## Fixed doc-comment arithmetic (fix round 1, Minor 4)
+ *
+ * The brief's own prose states the five signal terms (`dT..dStruct`) sum to
+ * "a theoretical 4.1" and that `dT`/`dC` range over `[0,2]`. Both are
+ * measured wrong against this module's actual weights/inputs: the weighted
+ * max is `1.0+1.2+0.8+0.6+0.7 = 4.3` (not 4.1), and because `T`/`C` are
+ * always non-negative (L2-normalised recovered-energy / log-magnitude
+ * vectors -- `remixFeatures.ts` never produces a negative component), their
+ * cosine similarity is confined to `[0,1]` in practice, so `dT`/`dC` are
+ * `[0,1]`, not the fully general `[0,2]` a signed vector would allow. Fixed
+ * here because this doc comment is the durable justification record for the
+ * weights, and future tuning decisions should be made against the real
+ * numbers.
  *
  * ## `dStruct`'s three tiers, read as an exhaustive ladder (a documented
  * interpretation of an under-specified brief clause -- reported, not silently
@@ -60,6 +83,40 @@
  * (`phraseBars` in strict mode, 4 in loose mode per the T11 brief) and must
  * pass the value it actually used, not have this module silently re-derive
  * a possibly-different one.
+ *
+ * ## Out-of-domain indices THROW (fix round 1, Important 1)
+ *
+ * `joinCost` is a public export `buildCandidateLists` never calls with an
+ * invalid index (it only ever enumerates `[0, numBars]`, verified over
+ * 77,324 emitted pairs across 216 option combinations in review), but T13/
+ * T14's panel will call `joinCost` directly with UI-derived indices, and an
+ * out-of-range `from`/`to` (e.g. `numBars === 0`) previously produced a
+ * silent `NaN` throughout `JoinCostTerms` -- `cosineDistance` read past the
+ * `Float32Array` end, got `undefined`, and `undefined < 1e-24` is `false`,
+ * so the zero-vector guard never caught it. That is exactly the
+ * "`undefined` poisoning a Float32Array rather than a throw" hazard the
+ * brief names elsewhere. `joinCost` now validates both indices against
+ * `[0, analysis.numBars]` up front and THROWS a `RangeError` (not a
+ * sentinel value, which would just relocate the same silent-poisoning
+ * problem one level up) -- matching this codebase's own convention
+ * (`AudioDocument.ts` throws `RangeError` for invalid region args). The
+ * check lives only in `joinCost` and `buildCandidateLists`' outer setup, not
+ * inside `computeJoinCostTerms`/`cosineDistance`, so the hot per-candidate
+ * loop stays branch-free.
+ *
+ * ## `phraseBars <= 0` is clamped, not left to propagate NaN (fix round 1,
+ * Minor 6)
+ *
+ * `delta % phraseBars` is `NaN` for `phraseBars <= 0`, and `NaN !== 0` is
+ * `true`, so `phrasePenalty` would silently fall through every tier to the
+ * mod-4/mod-2 checks instead of signalling a caller error. `phraseBars` is
+ * normalised to `Math.max(1, Math.floor(phraseBars))` at both entry points
+ * that use it for the phrase-alignment arithmetic (`computeJoinCostTerms`,
+ * and `buildCandidateLists`' own `resolved.phraseBars`, which also feeds
+ * `isLegalPair`'s delta/strict-congruence checks and the `minKeepBars`
+ * default) rather than only inside `phrasePenalty` itself, so the legality
+ * pruning and the cost term stay consistent with each other even for a
+ * malformed input.
  */
 
 import type { RemixAnalysis } from './remixFeatures';
@@ -92,7 +149,9 @@ export interface RemixWeights {
  * long-range guard both design judges independently named the best musical
  * idea available, sits below chroma because a never-before-seen transition
  * is unusual, not wrong. wPhrase (3.0) makes "musical plausibility over raw
- * signal similarity" numeric: the five signal terms sum to a theoretical 4.1
+ * signal similarity" numeric: the five signal terms sum to a theoretical 4.3
+ * (measured exactly -- see "Fixed doc-comment arithmetic" above; the brief's
+ * own prose states 4.1, which is arithmetically wrong against these weights)
  * but occupy roughly 0.2-1.5 on real material, so 3.0 means a spectrally
  * perfect but phrase-misaligned join essentially never beats a
  * phrase-aligned join of ordinary similarity, yet can still beat a
@@ -133,11 +192,13 @@ export interface JoinCostTerms {
 }
 
 /** `1 - cosine similarity` between two `dim`-wide rows starting at `offA`/
- * `offB` in (possibly different) arrays. Defensive against an all-zero row
- * (silence, or an unnormalised test fixture): treated as `cos = 0` (maximally
- * dissimilar) rather than `0/0 = NaN`. Cosine is clamped to `[-1,1]` before
- * subtracting, guarding against float round-off nudging an identical pair's
- * cosine to e.g. `1.0000000002`. */
+ * `offB` in (possibly different) arrays. Two zero-handling rules (see the
+ * module doc comment, fix round 1 Minor 3): BOTH rows near-zero -> distance
+ * `0` (identical silence, not maximally dissimilar); exactly ONE row
+ * near-zero -> distance `1` (undefined direction, treated as the worst
+ * case). Cosine is clamped to `[-1,1]` before subtracting, guarding against
+ * float round-off nudging an identical pair's cosine to e.g.
+ * `1.0000000002`. */
 function cosineDistance(a: Float32Array, offA: number, b: Float32Array, offB: number, dim: number): number {
   let dot = 0;
   let normA = 0;
@@ -149,7 +210,10 @@ function cosineDistance(a: Float32Array, offA: number, b: Float32Array, offB: nu
     normA += va * va;
     normB += vb * vb;
   }
-  if (normA < 1e-24 || normB < 1e-24) return 1;
+  const zeroA = normA < 1e-24;
+  const zeroB = normB < 1e-24;
+  if (zeroA && zeroB) return 0;
+  if (zeroA || zeroB) return 1;
   const cos = dot / Math.sqrt(normA * normB);
   const clamped = Math.max(-1, Math.min(1, cos));
   return 1 - clamped;
@@ -167,8 +231,12 @@ function euclideanDistance(a: Float32Array, offA: number, b: Float32Array, offB:
 
 /** `boundary -> cluster label -> how many boundaries share it`, computed once
  * per `buildCandidateLists` call (not once per candidate pair -- see that
- * function's own comment) and once per standalone `joinCost` call. */
-function clusterMemberCounts(cluster: Int32Array): Map<number, number> {
+ * function's own comment) and once per standalone `joinCost` call unless the
+ * caller supplies a precomputed one (fix round 1, Minor 5) -- exported so a
+ * caller making many `joinCost` calls against the same analysis (e.g. T11's
+ * DP relaxation) can compute this once and pass it in every time, instead of
+ * paying an `O(numBars)` rebuild per call. */
+export function clusterMemberCounts(cluster: Int32Array): Map<number, number> {
   const counts = new Map<number, number>();
   for (let i = 0; i < cluster.length; i++) {
     counts.set(cluster[i], (counts.get(cluster[i]) ?? 0) + 1);
@@ -191,7 +259,10 @@ function structCost(analysis: RemixAnalysis, from: number, to: number, memberCou
  * `(mod 2)`; `1` otherwise. Tiers are checked independently of each other (a
  * small `phraseBars`, e.g. 2 or 4, just makes an earlier tier subsume a
  * later one) -- direction-independent (`abs(to-from)`), since phrase
- * congruence is a property of the pair, not of which one is "from". */
+ * congruence is a property of the pair, not of which one is "from".
+ * `phraseBars` is assumed already normalised to >= 1 by the caller (both
+ * callers in this module do so -- see the module doc comment, fix round 1
+ * Minor 6). */
 function phrasePenalty(from: number, to: number, phraseBars: number): number {
   const delta = Math.abs(to - from);
   if (delta % phraseBars === 0) return 0;
@@ -200,16 +271,24 @@ function phrasePenalty(from: number, to: number, phraseBars: number): number {
   return 1;
 }
 
+/** `phraseBars <= 0` (or non-integer) would otherwise poison `delta %
+ * phraseBars` into `NaN` -- see the module doc comment, fix round 1 Minor
+ * 6. */
+function normalizePhraseBars(phraseBars: number): number {
+  return Math.max(1, Math.floor(phraseBars));
+}
+
 function computeJoinCostTerms(
   analysis: RemixAnalysis,
   weights: RemixWeights,
-  phraseBars: number,
+  phraseBarsRaw: number,
   from: number,
   to: number,
   memberCounts: Map<number, number>
 ): JoinCostTerms {
   const numBands = analysis.numBands;
   const rDims = 4 * analysis.beatsPerBar;
+  const phraseBars = normalizePhraseBars(phraseBarsRaw);
 
   const dT = cosineDistance(analysis.T, from * numBands, analysis.T, to * numBands, numBands);
   const dC = cosineDistance(analysis.C, from * 12, analysis.C, to * 12, 12);
@@ -229,21 +308,46 @@ function computeJoinCostTerms(
   return { timbre: dT, chroma: dC, loudness: dL, rhythm: dR, struct: dStruct, phrase: phrasePen, total };
 }
 
+/** Throws `RangeError` unless `index` is an integer in `[0, analysis.numBars]`
+ * -- see the module doc comment, fix round 1 Important 1. */
+function assertValidBoundaryIndex(analysis: RemixAnalysis, index: number, label: string): void {
+  if (!Number.isInteger(index) || index < 0 || index > analysis.numBars) {
+    throw new RangeError(
+      `joinCost: ${label}=${index} is out of range for numBars=${analysis.numBars} (expected an integer in [0, ${analysis.numBars}])`
+    );
+  }
+}
+
 /**
  * Per-term join cost breakdown for an ordered boundary pair `(from, to)`.
  * Pure math over an already-computed `RemixAnalysis` -- does not enforce any
  * of the hard constraints (that is `buildCandidateLists`' job); this
  * function will happily score a pair `buildCandidateLists` would have
- * pruned.
+ * pruned. Throws `RangeError` if `from`/`to` is not an integer in
+ * `[0, analysis.numBars]` (fix round 1 Important 1) -- `buildCandidateLists`
+ * never triggers this (it only ever enumerates that same range), but a
+ * UI-derived index reaching this public export directly must not be allowed
+ * to silently poison `JoinCostTerms` with `NaN`.
+ *
+ * `precomputedClusterMemberCounts` is optional (fix round 1, Minor 5): a
+ * caller making many `joinCost` calls against the same `analysis` (e.g. a
+ * planner's DP relaxation loop) can compute it once via
+ * `clusterMemberCounts(analysis.cluster)` and pass it in, instead of paying
+ * an `O(numBars)` rebuild on every call. Omitting it (the common case for a
+ * one-off UI tooltip lookup) computes it fresh, exactly as before.
  */
 export function joinCost(
   analysis: RemixAnalysis,
   weights: RemixWeights,
   phraseBars: number,
   from: number,
-  to: number
+  to: number,
+  precomputedClusterMemberCounts?: Map<number, number>
 ): JoinCostTerms {
-  return computeJoinCostTerms(analysis, weights, phraseBars, from, to, clusterMemberCounts(analysis.cluster));
+  assertValidBoundaryIndex(analysis, from, 'from');
+  assertValidBoundaryIndex(analysis, to, 'to');
+  const memberCounts = precomputedClusterMemberCounts ?? clusterMemberCounts(analysis.cluster);
+  return computeJoinCostTerms(analysis, weights, phraseBars, from, to, memberCounts);
 }
 
 // ---------------------------------------------------------------------------
@@ -320,13 +424,18 @@ function isLegalPair(
  */
 export function buildCandidateLists(analysis: RemixAnalysis, o: CandidateListOptions): Int32Array[] {
   const numBars = analysis.numBars;
+  // `phraseBars` is normalised ONCE here so `isLegalPair`'s delta/strict-
+  // congruence checks, its `minKeepBars` default, AND the cost computation
+  // below all agree on the same value -- see the module doc comment, fix
+  // round 1 Minor 6.
+  const phraseBars = normalizePhraseBars(o.phraseBars);
   const resolved = {
-    phraseBars: o.phraseBars,
+    phraseBars,
     minRunBars: o.minRunBars,
     strict: o.strict,
     allowRepeats: o.allowRepeats,
     edgeGuardBars: o.edgeGuardBars ?? 1,
-    minKeepBars: o.minKeepBars ?? 2 * o.phraseBars,
+    minKeepBars: o.minKeepBars ?? 2 * phraseBars,
     maxRepeatBars: o.maxRepeatBars ?? 32,
   };
   const forbidden = new Set(o.forbiddenJoins ?? []);
@@ -337,7 +446,7 @@ export function buildCandidateLists(analysis: RemixAnalysis, o: CandidateListOpt
     const candidates: { to: number; cost: number }[] = [];
     for (let to = 0; to <= numBars; to++) {
       if (!isLegalPair(from, to, numBars, resolved, forbidden)) continue;
-      const terms = computeJoinCostTerms(analysis, o.weights, o.phraseBars, from, to, memberCounts);
+      const terms = computeJoinCostTerms(analysis, o.weights, phraseBars, from, to, memberCounts);
       candidates.push({ to, cost: terms.total });
     }
     candidates.sort((x, y) => x.cost - y.cost || x.to - y.to);
