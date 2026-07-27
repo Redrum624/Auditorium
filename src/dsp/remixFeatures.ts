@@ -337,7 +337,7 @@ function frameRangeForSamples(
  * value at every boundary). See the task report's "Fix round 1" for the
  * corrected re-measurement.
  */
-export function resampleOdfBarPeak(
+function resampleOdfBarPeak(
   odf: Float32Array,
   barStartSample: number,
   barEndSample: number,
@@ -359,6 +359,18 @@ export function resampleOdfBarPeak(
   }
   return out;
 }
+
+/**
+ * Test-only export of `resampleOdfBarPeak`, so its ODF FRAME ATTRIBUTION
+ * CONTRACT fix (see the function's own doc comment) can be regression-tested
+ * with arithmetic-precise, synthetic `odf` input directly, independent of
+ * the full `analyzeTempo`/`chromaEnvelope`/`deriveRemixFeatures` pipeline.
+ * NOT a supported public API -- following this repo's `_xxxForTest`
+ * convention (`tempoAnalysis.ts`'s `_promoteToRemixLevelForTest`) so the
+ * widened surface reads as a deliberate test hook, not a new production
+ * entry point.
+ */
+export const _resampleOdfBarPeakForTest = resampleOdfBarPeak;
 
 // ---------------------------------------------------------------------------
 // Average-linkage agglomerative clustering
@@ -500,6 +512,22 @@ export interface RemixAnalysis extends TempoAnalysis {
   transitionSeen: Set<string>;
 }
 
+/**
+ * The empty/degenerate `RemixAnalysis` shape -- `numBars: 0`, every
+ * descriptor array empty. Fix round 2 (Important 4, arms 2/3): `bpm` is
+ * FORCED to `null` HERE, uniformly, for every caller -- not at one call
+ * site -- because `numBars === 0` is, on its own, "the worst possible shape
+ * for the planner" regardless of which guard produced it: a caller could
+ * branch on `bpm !== null` alone and never notice `numBars` is empty. Round
+ * 1 only forced this for the `numBands <= 0` (regrid) arm; measurement
+ * showed two more arms reaching this function with a perfectly real `tempo.
+ * bpm` intact -- an oversized `beatsPerBar` (caller-supplied from the
+ * time-signature control) leaving `numBeats <= beatsPerBar`, and a short
+ * clip (`MIN_ANALYSIS_SECONDS = 5` at `MIN_BPM` is only ~1.25 bars) leaving
+ * `numBoundaries < 2` -- both reachable in production, both left `bpm`
+ * non-null before this fix. Forcing it here closes all three arms at once
+ * and makes it structurally impossible for a fourth arm to reopen the gap.
+ */
 function emptyRemixAnalysis(
   tempo: TempoAnalysis,
   chroma: ChromaResult,
@@ -509,6 +537,7 @@ function emptyRemixAnalysis(
 ): RemixAnalysis {
   return {
     ...tempo,
+    bpm: null,
     chroma: chroma.chroma,
     numChromaFrames: chroma.numFrames,
     chromaRate: chroma.chromaRate,
@@ -546,31 +575,23 @@ export function deriveRemixFeatures(
   const beatSamples = tempo.beatSamples;
   const numBeats = beatSamples.length;
 
-  // Fix round 1 (Important 4): `numBands <= 0` is NOT a normal "not enough
-  // audio" degeneracy -- it is the signature of a `tempo` produced by
-  // `deriveGrid` (the 'regrid' fast path), which never has band/chroma data
-  // to source these from and always reports them empty (see tempoCore.ts's
-  // `deriveGrid` doc comment). A genuine `analyzeTempo` result NEVER has
-  // `bpm !== null` with `numBands <= 0` -- bands are computed in the same
-  // pass that finds bpm -- so this combination can only mean "this `tempo`
-  // cannot support a real remix analysis", regardless of what its own `bpm`
-  // says. Forcing `bpm: null` here (rather than letting `emptyRemixAnalysis`
-  // spread the real bpm through unchanged) makes this the SAME "nothing
-  // valid here" signal every other consumer in this codebase already checks
-  // (`getRemixAnalysis`, the BPM readout's `stale` gate, etc.), instead of a
-  // valid-looking bpm sitting alongside `numBars: 0` and empty descriptors --
-  // measured as "the worst possible shape for the planner" in review: a
-  // caller could easily branch on `bpm !== null` and never notice `numBars`
-  // is empty. This was chosen over threading `bands`/`odfLow` through the
-  // regrid protocol so a regridded entry could re-derive real descriptors,
-  // because that would still be only a PARTIAL fix: `deriveGrid` never runs
-  // the chroma pass either, so `C`/`S`/clustering would remain unrecoverable
-  // regardless. A full fix belongs to whichever task wires a genuine
-  // remix-level regrid (re-running `deriveRemixFeatures` against the
-  // ORIGINAL cached `bands`/`odfLow`/`chroma`, not `deriveGrid`'s output) --
-  // out of this task's scope.
+  // `numBands <= 0` is NOT a normal "not enough audio" degeneracy -- it is
+  // the signature of a `tempo` produced by `deriveGrid` (the 'regrid' fast
+  // path), which never has band/chroma data to source these from and always
+  // reports them empty (see tempoCore.ts's `deriveGrid` doc comment). A
+  // genuine `analyzeTempo` result NEVER has `bpm !== null` with `numBands <=
+  // 0` -- bands are computed in the same pass that finds bpm. This was
+  // chosen over threading `bands`/`odfLow` through the regrid protocol so a
+  // regridded entry could re-derive real descriptors, because that would
+  // still be only a PARTIAL fix: `deriveGrid` never runs the chroma pass
+  // either, so `C`/`S`/clustering would remain unrecoverable regardless. A
+  // full fix belongs to whichever task wires a genuine remix-level regrid
+  // (re-running `deriveRemixFeatures` against the ORIGINAL cached `bands`/
+  // `odfLow`/`chroma`, not `deriveGrid`'s output) -- out of this task's
+  // scope. (`emptyRemixAnalysis` forces `bpm: null` uniformly for every arm
+  // below, fix round 2 -- see its own doc comment.)
   if (numBands <= 0) {
-    return emptyRemixAnalysis({ ...tempo, bpm: null }, chroma, beatsPerBar);
+    return emptyRemixAnalysis(tempo, chroma, beatsPerBar);
   }
   if (tempo.bpm === null || numBeats <= beatsPerBar) {
     return emptyRemixAnalysis(tempo, chroma, beatsPerBar);
@@ -626,7 +647,14 @@ export function deriveRemixFeatures(
   const numBoundaries = barBoundary.length;
   const numBars = Math.max(0, numBoundaries - 1);
 
-  if (numBoundaries === 0) {
+  // Fix round 2 (Important 4, arm 3): `numBoundaries < 2`, not `=== 0` -- a
+  // SINGLE boundary bounds zero complete bars (`numBars = max(0, 1-1) = 0`)
+  // but previously fell THROUGH this guard entirely (only `=== 0` was
+  // checked) into the normal per-boundary computation below, returning a
+  // real (non-`emptyRemixAnalysis`) result with a genuine `bpm` sitting next
+  // to `numBars: 0` -- measured on a short clip at `MIN_ANALYSIS_SECONDS`/
+  // `MIN_BPM` (~1.25 bars) and on an oversized `beatsPerBar`/60-beat input.
+  if (numBoundaries < 2) {
     return emptyRemixAnalysis(tempo, chroma, beatsPerBar, effectiveB0, downbeatConfidence);
   }
 

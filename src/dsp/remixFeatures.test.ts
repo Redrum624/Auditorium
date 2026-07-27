@@ -1,5 +1,7 @@
-import { chromaEnvelope, analyzeRemix, resampleOdfBarPeak } from './remixFeatures';
+import { chromaEnvelope, analyzeRemix, deriveRemixFeatures, _resampleOdfBarPeakForTest } from './remixFeatures';
+import type { ChromaResult } from './remixFeatures';
 import { TARGET_ANALYSIS_RATE, ONSET_HOP } from './tempoCore';
+import type { TempoAnalysis } from './tempoCore';
 
 // Local generators only -- this repo re-declares such helpers per test file
 // rather than sharing one (tempoCore.test.ts, fft.test.ts, resample.test.ts).
@@ -293,13 +295,79 @@ describe('R FRAME ATTRIBUTION (fix round 1, T9 review CRITICAL finding)', () => 
     const odf = new Float32Array(60 * ONSET_HOP); // generously sized; only index 39 is non-zero
     odf[39] = 10;
 
-    const out = resampleOdfBarPeak(odf, 0, barEndDecimated, 1, points);
+    const out = _resampleOdfBarPeakForTest(odf, 0, barEndDecimated, 1, points);
 
     expect(out[4]).toBe(10); // segment 4 -- the CORRECTED attribution
     expect(out[3]).toBe(0); // segment 3 -- the PRE-FIX (wrong) attribution
     for (let p = 0; p < points; p++) {
       if (p !== 4) expect(out[p]).toBe(0);
     }
+  });
+});
+
+/**
+ * A minimal, fully-controlled `TempoAnalysis` literal -- NOT run through
+ * `analyzeTempo` -- so these tests can force `numBeats`/`beatsPerBar`/the
+ * winning downbeat phase deterministically, independent of any real signal's
+ * downbeat scoring. `odf`/`odfLow` are all-zero so `peakAround` returns 0 for
+ * every phase, making `b0Star` deterministically 0 (the first-found max on an
+ * all-equal-scores tie) -- `downbeatShiftBeats` is then used to steer
+ * `effectiveB0` to whatever exact phase a test needs.
+ */
+function fakeTempo(overrides: Partial<TempoAnalysis> = {}): TempoAnalysis {
+  const numOnsetFrames = 500;
+  const numBands = 24;
+  return {
+    bpm: 120,
+    confidence: 1,
+    beatSamples: Int32Array.from([0, 1000, 2000, 3000, 4000]),
+    salience: 1,
+    peakRatio: 1,
+    ibiCv: 0,
+    truncated: false,
+    analyzedEndSample: 1_000_000,
+    odf: new Float32Array(numOnsetFrames),
+    periodFrames: 20,
+    decimationFactor: 4,
+    bands: new Float32Array(numOnsetFrames * numBands),
+    numBands,
+    odfLow: new Float32Array(numOnsetFrames),
+    ...overrides,
+  };
+}
+
+const emptyChroma: ChromaResult = { chroma: new Float32Array(0), numFrames: 0, chromaRate: 10 };
+
+describe('EMPTY-RESULT bpm SIGNALLING (fix round 2, Important 4 arms 2/3)', () => {
+  it('arm 2 -- beatsPerBar > numBeats: bpm is null alongside numBars===0, not a real bpm sitting next to empty descriptors', () => {
+    const tempo = fakeTempo({ beatSamples: Int32Array.from([0, 1000, 2000, 3000, 4000]) }); // 5 beats
+    const result = deriveRemixFeatures(tempo, emptyChroma, { beatsPerBar: 100 }); // 100 > 5
+
+    expect(result.bpm).toBeNull();
+    expect(result.numBars).toBe(0);
+    expect(result.barBoundary.length).toBe(0);
+    expect(result.T.length).toBe(0);
+  });
+
+  it('arm 3 -- numBoundaries < 2 (a short clip / an oversized-but-not-quite-arm-2 beatsPerBar): bpm is null alongside numBars===0', () => {
+    // 6 beats, beatsPerBar=5 (clears the numBeats<=beatsPerBar guard: 6>5),
+    // downbeatShiftBeats=4 forces effectiveB0=4 (b0Star is deterministically
+    // 0 -- see fakeTempo's doc comment): idx=4 is the only valid boundary
+    // (4<6), idx=4+5=9 is not (>=6) -- exactly 1 boundary, numBars=0.
+    // beatsPerBar(5) < numBeats(6) by construction, so this is NOT arm 2
+    // (which requires numBeats <= beatsPerBar) -- it exercises the SEPARATE
+    // numBoundaries<2 guard. (`result.barBoundary` is empty either way once
+    // routed through the empty-result shape, by design -- see
+    // `emptyRemixAnalysis`'s doc comment -- so it cannot itself distinguish
+    // "0 boundaries found" from "1 found"; the guard's own `numBoundaries <
+    // 2` condition, exercised via this fixture's exact beat count, is what's
+    // under test here.)
+    const tempo = fakeTempo({ beatSamples: Int32Array.from([0, 1000, 2000, 3000, 4000, 5000]) }); // 6 beats
+    const result = deriveRemixFeatures(tempo, emptyChroma, { beatsPerBar: 5, downbeatShiftBeats: 4 });
+
+    expect(result.bpm).toBeNull();
+    expect(result.numBars).toBe(0);
+    expect(result.T.length).toBe(0);
   });
 });
 

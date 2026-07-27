@@ -64,6 +64,25 @@ function lastDoneCall(postMessage: jest.Mock): [DoneReply, ArrayBuffer[]] {
   throw new Error('no done reply received');
 }
 
+/**
+ * Every typed-array view's `.buffer` found directly on `obj`'s own
+ * properties -- derived from whatever the analysis object ACTUALLY
+ * contains, not a hand-maintained list, so this is ADDITION-safe as well as
+ * removal-safe (T9 review fix round 2, minor): a hardcoded name list would
+ * pass silently at "N vs N" if a future typed array were added to
+ * `RemixAnalysis`/`TempoAnalysis` and the worker's transfer list were not
+ * updated to match (both sides would independently be missing the same
+ * name). Non-typed-array fields (`bpm`, `transitionSeen` -- a `Set`, not an
+ * `ArrayBufferView` -- etc.) are skipped by `ArrayBuffer.isView` itself.
+ */
+function ownTypedArrayBuffers(obj: Record<string, unknown>): ArrayBuffer[] {
+  const buffers: ArrayBuffer[] = [];
+  for (const value of Object.values(obj)) {
+    if (ArrayBuffer.isView(value)) buffers.push((value as { buffer: ArrayBuffer }).buffer);
+  }
+  return buffers;
+}
+
 describe('tempo.worker.ts (real module, not the mock) — transfer list', () => {
   it('level:"tempo" transfers exactly beatSamples/odf/bands/odfLow (4 buffers), all present on analysis', () => {
     const mono = clickTrain(120, 8);
@@ -82,19 +101,9 @@ describe('tempo.worker.ts (real module, not the mock) — transfer list', () => 
     const [done, transfer] = lastDoneCall(postMessage);
     expect(done.level).toBe('tempo');
 
-    const analysis = done.analysis as {
-      beatSamples: Int32Array;
-      odf: Float32Array;
-      bands: Float32Array;
-      odfLow: Float32Array;
-    };
-    const expectedBuffers = [
-      analysis.beatSamples.buffer,
-      analysis.odf.buffer,
-      analysis.bands.buffer,
-      analysis.odfLow.buffer,
-    ];
-    expect(transfer.length).toBe(4);
+    const expectedBuffers = ownTypedArrayBuffers(done.analysis);
+    expect(expectedBuffers.length).toBe(4); // beatSamples/odf/bands/odfLow -- pins the count independent of the dynamic derivation
+    expect(transfer.length).toBe(expectedBuffers.length);
     expect(new Set(transfer)).toEqual(new Set(expectedBuffers));
   });
 
@@ -115,38 +124,12 @@ describe('tempo.worker.ts (real module, not the mock) — transfer list', () => 
     const [done, transfer] = lastDoneCall(postMessage);
     expect(done.level).toBe('remix');
 
-    const analysis = done.analysis as {
-      beatSamples: Int32Array;
-      odf: Float32Array;
-      bands: Float32Array;
-      odfLow: Float32Array;
-      chroma: Float32Array;
-      barBoundary: Int32Array;
-      T: Float32Array;
-      C: Float32Array;
-      L: Float32Array;
-      R: Float32Array;
-      S: Float32Array;
-      cluster: Int32Array;
-    };
-    const expectedBuffers = [
-      analysis.beatSamples.buffer,
-      analysis.odf.buffer,
-      analysis.bands.buffer,
-      analysis.odfLow.buffer,
-      analysis.chroma.buffer,
-      analysis.barBoundary.buffer,
-      analysis.T.buffer,
-      analysis.C.buffer,
-      analysis.L.buffer,
-      analysis.R.buffer,
-      analysis.S.buffer,
-      analysis.cluster.buffer,
-    ];
-    expect(transfer.length).toBe(12);
-    expect(new Set(transfer)).toEqual(new Set(expectedBuffers));
-    // Every buffer name is DISTINCT (no accidental aliasing that would make
-    // the count right for the wrong reason).
+    const expectedBuffers = ownTypedArrayBuffers(done.analysis);
+    expect(expectedBuffers.length).toBe(12); // 4 base + 8 remix-only -- pins the count independent of the dynamic derivation
+    // Every buffer is DISTINCT (no accidental aliasing that would make the
+    // count right for the wrong reason).
     expect(new Set(expectedBuffers).size).toBe(12);
+    expect(transfer.length).toBe(expectedBuffers.length);
+    expect(new Set(transfer)).toEqual(new Set(expectedBuffers));
   });
 });
