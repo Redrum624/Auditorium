@@ -285,6 +285,34 @@ export function getRemixAnalysis(doc: AudioDocument): RemixAnalysis | null {
   return entry.analysis as RemixAnalysis;
 }
 
+/**
+ * Publishes an already-derived level:'remix' analysis for `doc` — the
+ * write-back half of the remix-level regrid this module's Plan-Ruling-4
+ * section and `remixFeatures.ts`'s `numBands <= 0` comment both anticipate,
+ * and the ONLY sanctioned way for a consumer to hand a user-corrected grid
+ * back to the shared cache (T14's Auto-Remix dialog).
+ *
+ * Why it has to exist: `regridTempo` writes `deriveGrid`'s output through the
+ * SAME cache row while PRESERVING `level:'remix'`, but `deriveGrid` has no
+ * band/chroma data, so after an octave correction the row satisfies
+ * `getRemixAnalysis`'s level+freshness test while carrying NO `barBoundary`/
+ * `cluster`/`numBars` — a shape every remix consumer would read as a valid
+ * analysis. The corrector re-runs `deriveRemixFeatures` against the retained
+ * `bands`/`odfLow`/`chroma` (milliseconds) and calls this to REPAIR the row.
+ * The same path carries a time-signature or downbeat override, which changes
+ * nothing about the audio and so must never cost a re-analysis.
+ *
+ * `channelRefs` are snapshotted from the LIVE `doc` here, exactly like a
+ * worker run's write, so `getRemixAnalysis`'s identity-based staleness test
+ * keeps working unchanged — a corrected analysis published against audio that
+ * has since been edited is rejected at read time like any other stale row.
+ * Bumps the version (this is a cache-content change consumers must see).
+ */
+export function setRemixAnalysis(doc: AudioDocument, analysis: RemixAnalysis): void {
+  writeCache(doc.id, doc.channels.slice(), doc.sampleRate, 'remix', analysis);
+  bumpVersion();
+}
+
 // ---------------------------------------------------------------------------
 // Reactivity — version counter + subscribe/getSnapshot/useTempoVersion, copied
 // in shape from noiseProfile.ts:31-49,87-95. NOT zustand.

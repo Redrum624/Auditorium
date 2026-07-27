@@ -21,6 +21,7 @@ import {
   openEffectDialog,
   openExportDialog,
   openNewFileDialog,
+  openRemixDialog,
   openTempoDialog,
 } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
@@ -92,6 +93,8 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'separator',
       'edit.convertSampleRate',
       'edit.convertChannels',
+      'separator',
+      'edit.remix',
       'separator',
       'multitrack.insertDoc',
       'multitrack.addTrack',
@@ -757,6 +760,27 @@ function registerTempoCommands(): void {
   ]);
 }
 
+/** Registers the Task T14 Auto-Remix command. It sits in the EDIT menu beside
+ * the other whole-document, dialog-driven transforms — NOT in Effects, which
+ * is built live from `getAllEffects()` and only holds `EffectDefinition`s (a
+ * remix is a multi-second analysis producing a NEW document, which
+ * `EffectDefinition.process` — pure, synchronous, returning channels for the
+ * SAME document — structurally cannot express). `enabled` stays O(1) and
+ * pure: MenuBar re-evaluates every item on every store change. No shortcut. */
+function registerRemixCommands(): void {
+  registerCommands([
+    {
+      id: 'edit.remix',
+      label: 'Auto-Remix…',
+      enabled: (s) => {
+        const d = activeDoc(s);
+        return d !== null && docLength(d) > 0;
+      },
+      run: async () => openRemixDialog(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -767,3 +791,4 @@ registerNoiseAndViewCommands();
 registerMultitrackCommands();
 registerMarkerCommands();
 registerTempoCommands();
+registerRemixCommands();

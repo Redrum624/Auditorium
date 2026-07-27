@@ -7,6 +7,7 @@ import EffectDialog from './components/Dialogs/EffectDialog';
 import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
 import RecordDialog from './components/Dialogs/RecordDialog';
+import RemixDialog from './components/Dialogs/RemixDialog';
 import TempoDialog from './components/Dialogs/TempoDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
@@ -26,7 +27,9 @@ import { installTestHooks } from './services/testHooks';
 import { stopAll } from './services/transportService';
 import { useAppStore } from './stores/appStore';
 
-type SidebarTab = 'history' | 'markers' | 'properties';
+// 'remix' is reachable through `focusRemixPanel()` (dialogBus) the moment a
+// remix document is created; its tab button and panel body land with T15.
+type SidebarTab = 'history' | 'markers' | 'properties' | 'remix';
 const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
   { id: 'history', label: 'History' },
   { id: 'markers', label: 'Markers' },
@@ -50,6 +53,7 @@ export default function App() {
   const [convertMode, setConvertMode] = useState<ConvertMode | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
   const [tempoOpen, setTempoOpen] = useState(false);
+  const [remixOpen, setRemixOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
@@ -77,6 +81,8 @@ export default function App() {
         openConvertDialog: (mode) => setConvertMode(mode),
         openRecordDialog: () => setRecordOpen(true),
         openTempoDialog: () => setTempoOpen(true),
+        openRemixDialog: () => setRemixOpen(true),
+        focusRemixPanel: () => setSidebarTab('remix'),
       }),
     []
   );
@@ -171,6 +177,7 @@ export default function App() {
       )}
       {recordOpen && <RecordDialog onClose={() => setRecordOpen(false)} />}
       {tempoOpen && <TempoDialog onClose={() => setTempoOpen(false)} />}
+      {remixOpen && <RemixDialog onClose={() => setRemixOpen(false)} />}
     </div>
   );
 }

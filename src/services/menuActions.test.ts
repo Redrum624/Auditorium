@@ -129,6 +129,7 @@ describe('getMenuSections', () => {
       'edit.selectAll',
       'edit.convertSampleRate',
       'edit.convertChannels',
+      'edit.remix',
       'multitrack.insertDoc',
       'multitrack.addTrack',
       'marker.add',
@@ -464,10 +465,81 @@ describe('tempo.match (Task T8)', () => {
       openConvertDialog: () => {},
       openRecordDialog: () => {},
       openTempoDialog: openTempo,
+      openRemixDialog: () => {},
+      focusRemixPanel: () => {},
     });
 
     await runCommand('tempo.match');
 
     expect(openTempo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('edit.remix (Task T14)', () => {
+  function findEditCmd(id: string): MenuCommand {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  it('sits in the Edit section immediately after edit.convertChannels, preceded by a separator', () => {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    const convertIndex = edit.items.findIndex(
+      (item) => item !== 'separator' && item.id === 'edit.convertChannels'
+    );
+
+    expect(edit.items[convertIndex + 1]).toBe('separator');
+    const remix = edit.items[convertIndex + 2];
+    expect(remix !== 'separator' && remix.id).toBe('edit.remix');
+    expect(remix !== 'separator' && remix.label).toBe('Auto-Remix…');
+    expect(remix !== 'separator' && remix.shortcut).toBeUndefined();
+  });
+
+  it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {
+    expect(findEditCmd('edit.remix').enabled(useAppStore.getState())).toBe(false);
+
+    const empty = createDocument({ name: 'empty', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    expect(docLength(empty)).toBe(0);
+    expect(findEditCmd('edit.remix').enabled(useAppStore.getState())).toBe(false);
+
+    openDoc();
+    expect(findEditCmd('edit.remix').enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("edit.remix") opens the dialog through the bus (registered spy setter)', async () => {
+    openDoc();
+    const openRemix = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: openRemix,
+      focusRemixPanel: () => {},
+    });
+
+    await runCommand('edit.remix');
+
+    expect(openRemix).toHaveBeenCalledTimes(1);
+  });
+
+  it('runCommand("edit.remix") with no document never reaches the bus', async () => {
+    const openRemix = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: openRemix,
+      focusRemixPanel: () => {},
+    });
+
+    await runCommand('edit.remix');
+
+    expect(openRemix).not.toHaveBeenCalled();
   });
 });

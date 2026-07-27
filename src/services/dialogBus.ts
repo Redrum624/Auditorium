@@ -15,6 +15,8 @@ let openEffect: OpenEffectSetter | null = null;
 let openConvert: OpenConvertSetter | null = null;
 let openRecord: OpenSetter | null = null;
 let openTempo: OpenSetter | null = null;
+let openRemix: OpenSetter | null = null;
+let focusRemix: OpenSetter | null = null;
 
 export function registerDialogSetters(setters: {
   openExportDialog: OpenSetter;
@@ -23,6 +25,12 @@ export function registerDialogSetters(setters: {
   openConvertDialog: OpenConvertSetter;
   openRecordDialog: OpenSetter;
   openTempoDialog: OpenSetter;
+  openRemixDialog: OpenSetter;
+  /** Not a dialog: switches the sidebar to the Remix tab once a remix
+   * document exists (Task T14). It rides this bus for the same reason the
+   * dialog openers do — the caller must not import React or reach into
+   * App's component state. */
+  focusRemixPanel: OpenSetter;
 }): () => void {
   openExport = setters.openExportDialog;
   openNewFile = setters.openNewFileDialog;
@@ -30,6 +38,8 @@ export function registerDialogSetters(setters: {
   openConvert = setters.openConvertDialog;
   openRecord = setters.openRecordDialog;
   openTempo = setters.openTempoDialog;
+  openRemix = setters.openRemixDialog;
+  focusRemix = setters.focusRemixPanel;
   return () => {
     openExport = null;
     openNewFile = null;
@@ -37,6 +47,8 @@ export function registerDialogSetters(setters: {
     openConvert = null;
     openRecord = null;
     openTempo = null;
+    openRemix = null;
+    focusRemix = null;
   };
 }
 
@@ -62,6 +74,14 @@ export function openRecordDialog(): void {
 
 export function openTempoDialog(): void {
   openTempo?.();
+}
+
+export function openRemixDialog(): void {
+  openRemix?.();
+}
+
+export function focusRemixPanel(): void {
+  focusRemix?.();
 }
 
 // --- Open-dialog stack (Task M7: F10/F25) ---------------------------------

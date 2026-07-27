@@ -58,6 +58,8 @@ describe('TransportBar', () => {
       openConvertDialog: () => {},
       openRecordDialog: openRecord,
       openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      focusRemixPanel: () => {},
     });
     render(<TransportBar />);
     fireEvent.click(screen.getByRole('button', { name: 'Record' }));
