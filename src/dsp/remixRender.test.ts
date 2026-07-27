@@ -343,6 +343,24 @@ describe('bestAlignLag', () => {
     expect(lag).toBe(0);
     expect(rho).toBeLessThan(0.3); // matches production's MIN_ALIGN_RHO
   });
+
+  it('fix round 2, Important 1: when the guard fires, rho is the correlation AT lag 0, not the rejected best candidate', () => {
+    // Same fixture as above: the rejected best candidate scores ~0.137 (at
+    // some lag != 0), but the TRUE correlation at lag=0 -- where the
+    // crossfade actually runs once the guard fires -- is a completely
+    // different value (~0.020). Before the fix, `rho` reported the
+    // rejected 0.137; the gain law would then run at lag=0 as if the
+    // correlation there were 0.137, when it is actually ~0.020.
+    const wideRef = noise(441, 8);
+    const wideHead = noise(441 + 2 * maxLag, 50007);
+    const { lag, rho } = bestAlignLag(wideRef, wideHead, maxLag);
+    expect(lag).toBe(0);
+    const rhoAtReturnedLag = normalizedCorrelation(wideRef, wideHead.subarray(maxLag + lag, maxLag + lag + 441));
+    expect(rho).toBeCloseTo(rhoAtReturnedLag, 9);
+    // Fixture sanity: this is genuinely NOT the rejected best (~0.137) --
+    // otherwise the assertion above would pass even with the old bug.
+    expect(Math.abs(rho - 0.137)).toBeGreaterThan(0.05);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -787,7 +805,7 @@ describe('renderRemix -- exact-length trim (opts.exactLength)', () => {
 // ---------------------------------------------------------------------------
 
 describe('renderRemix -- tail after the last join never reads past the true end of source', () => {
-  it('clamps a positive last-join lag so the tail stays in bounds instead of trailing into unattenuated silence', () => {
+  it('a positive last-join lag never overflows the tail into unattenuated silence, and (fix round 2) forward alignment is NOT disabled to achieve that', () => {
     const compareLen = 441; // matches ALIGN_COMPARE_MS
     const maxNudge = 441; // matches the default maxNudgeMs
     const aEnd = 50000;
@@ -797,10 +815,13 @@ describe('renderRemix -- tail after the last join never reads past the true end 
 
     // sourceLen === analyzedEndSample (reachesFileEnd -- no masking quarter-
     // cosine fade) AND leaves EXACTLY zero slack for a positive last-join
-    // lag: nextSeg.end + tailLenNominal === sourceLen. Before the fix, the
-    // lag clamp only bounded `nextSeg.end+lag <= sourceLen` (ignoring the
-    // tail that follows), so the natural +400 lag sailed through unclamped
-    // and pushed the tail's read 400 samples past the true end of `source`.
+    // lag: nextSeg.end + tailLenNominal === sourceLen. Fix round 1 clamped
+    // the LAG itself to fit the tail, which (fix round 2, Important 2)
+    // turned out to silently disable forward alignment on the last join of
+    // every non-truncated track (the bound reduces to `sourceLen -
+    // analyzedEndSample`, exactly 0 whenever the two are equal -- the
+    // common case). Round 2 instead lets this join's lag be the genuine
+    // +400 the search found, and clamps only the TAIL's read position.
     const tailLenNominal = 2100;
     const sourceLen = bStartNominal + lb + tailLenNominal;
     const analyzedEndSample = sourceLen;
@@ -819,20 +840,24 @@ describe('renderRemix -- tail after the last join never reads past the true end 
 
     const result = renderRemix([src], analysis, plan, { sampleRate: SR, crossfadeMs: 25, maxNudgeMs: 10 });
 
-    // Fixture sanity: the raw search really does prefer +400 (verified
-    // separately below is redundant with test 4's own coverage of
-    // bestAlignLag directly) -- what matters here is that renderRemix does
-    // NOT use it unclamped.
-    expect(result.nudgeSamples[0]).not.toBe(naturalLag);
-    expect(result.nudgeSamples[0]).toBeLessThanOrEqual(0);
+    // Forward alignment is genuinely honoured -- the join's OWN lag is not
+    // clamped away just because the tail follows it (this is the property
+    // fix round 1's version of this test could NOT distinguish from
+    // "always <= 0").
+    expect(Math.abs(result.nudgeSamples[0] - naturalLag)).toBeLessThanOrEqual(2);
 
-    // No unattenuated silence at the very end: reachesFileEnd is true here
-    // (no quarter-cosine fade applies), so if the tail read stayed in
-    // bounds the last sample matches the source exactly; the pre-fix
-    // behaviour instead produced 400 trailing zero samples with an abrupt
-    // step into silence.
+    // And still no unattenuated silence at the very end: reachesFileEnd is
+    // true here (no quarter-cosine fade applies), so if the TAIL read was
+    // correctly clamped to stay in bounds, the last sample matches the
+    // source's own last sample exactly; the original bug instead produced
+    // 400 trailing zero samples with an abrupt step into silence.
     expect(result.channels[0][result.channels[0].length - 1]).toBeCloseTo(src[sourceLen - 1], 6);
     expect(result.channels[0][result.channels[0].length - 1]).not.toBe(0);
+
+    // Plus: no NaN/Inf anywhere in the tail region.
+    for (let i = result.channels[0].length - tailLenNominal; i < result.channels[0].length; i++) {
+      expect(Number.isFinite(result.channels[0][i])).toBe(true);
+    }
   });
 });
 
@@ -841,19 +866,31 @@ describe('renderRemix -- tail after the last join never reads past the true end 
 // ---------------------------------------------------------------------------
 
 describe('renderRemix -- the length identity is asserted, not merely assumed', () => {
-  it('throws if a hand-supplied plan.outputSample disagrees with what was actually written', () => {
+  function trivialMismatchFixture() {
     const barBoundary = Int32Array.from([1000, 21000]);
     const analyzedEndSample = 22000;
     const src = [sine(110, 40000, SR, 0.8)];
     const analysis = makeAnalysis({ numBars: 1, barBoundary, analyzedEndSample });
     const seg0: RemixSegment = { start: barBoundary[0], end: barBoundary[1] };
     const trueOutputSample = barBoundary[0] + (seg0.end - seg0.start) + (analyzedEndSample - barBoundary[1]);
-    // Deliberately wrong -- 1000 samples MORE than the segments/tail
-    // actually sum to (a surplus, not a shortfall, so the allocated buffer
-    // is large enough that the mismatch is only caught by the explicit
-    // cursor check, not a native out-of-bounds write).
-    const plan = makePlan({ segments: [seg0], joins: [], outputSample: trueOutputSample + 1000 });
+    return { src, analysis, seg0, trueOutputSample };
+  }
 
-    expect(() => renderRemix(src, analysis, plan, { sampleRate: SR })).toThrow(/cursor mismatch/);
+  it('throws a clear error (not a bare RangeError) when plan.outputSample is a SURPLUS over the true identity (fix round 1, Important 3 -- entry-side check added round 2)', () => {
+    const { src, analysis, seg0, trueOutputSample } = trivialMismatchFixture();
+    const plan = makePlan({ segments: [seg0], joins: [], outputSample: trueOutputSample + 1000 });
+    expect(() => renderRemix(src, analysis, plan, { sampleRate: SR })).toThrow(/outputSample/);
+  });
+
+  it('throws a clear error (not a bare RangeError) when plan.outputSample is a SHORTFALL under the true identity (fix round 2, Minor)', () => {
+    // Before the entry-side check, a shortfall allocated a too-small
+    // `channels` buffer and the first overflowing write failed with a bare
+    // native `RangeError: offset is out of bounds` instead of identifying
+    // the actual mismatch -- the surplus direction already had an
+    // informative message (the post-hoc cursor check), the shortfall
+    // direction didn't.
+    const { src, analysis, seg0, trueOutputSample } = trivialMismatchFixture();
+    const plan = makePlan({ segments: [seg0], joins: [], outputSample: trueOutputSample - 1000 });
+    expect(() => renderRemix(src, analysis, plan, { sampleRate: SR })).toThrow(/outputSample/);
   });
 });

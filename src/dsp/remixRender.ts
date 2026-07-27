@@ -110,6 +110,15 @@
  * original final bar" language -- reported, not silently assumed (see the
  * task report).
  *
+ * The tail is read starting at `min(finalEffEnd, sourceLen-tailLen)`, NOT
+ * unconditionally at `finalEffEnd` (fix round 2, Important 2). The LAST
+ * join's own micro-alignment lag is deliberately left unclamped by
+ * `tailLen` (see that clamp's own comment, at the lag computation, for why
+ * bounding the lag itself instead silently disabled forward alignment on
+ * nearly every non-truncated track) -- so it is this read-position clamp,
+ * not the lag, that keeps the tail from running past the true end of
+ * `source` when a positive lag would otherwise push it there.
+ *
  * ## Exact-length trim
  *
  * `remixPlan.ts`'s own `exactLength` planning mode deliberately overshoots
@@ -271,15 +280,16 @@ const SILENT_REF_NORM = 1e-12;
  * most-negative candidate in a tied group is the one that survives, not the
  * smallest `|lag|`; the previous version of this comment mis-stated this).
  *
- * TWO GUARDS, both returning `{lag: 0, rho: 0 or the raw best}` rather than a
- * manufactured shift (fix round 1, Important 1 -- measured regressions: an
- * all-silent reference returned lag `-441`; an outgoing bar whose last 45 ms
- * is a real musical breakdown/silence also returned `-441`; a slowly-varying
- * tone with a near-flat correlation surface returned lag `+441` at a
- * reported `rho` of `0.000`, i.e. a full `+/-10 ms` displacement chosen from
- * what amounts to noise):
+ * TWO GUARDS, both returning `{lag: 0, rho: <the correlation AT lag 0>}`
+ * rather than a manufactured shift (fix round 1, Important 1 -- measured
+ * regressions: an all-silent reference returned lag `-441`; an outgoing bar
+ * whose last 45 ms is a real musical breakdown/silence also returned
+ * `-441`; a slowly-varying tone with a near-flat correlation surface
+ * returned lag `+441` at a reported `rho` of `0.000`, i.e. a full `+/-10 ms`
+ * displacement chosen from what amounts to noise):
  * 1. `outTail` itself carries no energy (`SILENT_REF_NORM`) -- there is
- *    nothing to align a phase to, full stop.
+ *    nothing to align a phase to, full stop. `rho` at `lag=0` is trivially
+ *    `0` here too (a silent reference scores `0` against everything).
  * 2. The best score found across the WHOLE search range never clears
  *    `MIN_ALIGN_RHO` -- every candidate was noise-level or worse, so the
  *    "winner" is an artifact of scan order, not genuine phase information.
@@ -287,6 +297,17 @@ const SILENT_REF_NORM = 1e-12;
  *    different bars") stays a plain `lag=0`, rather than the renderer
  *    committing up to `maxLag` samples of arbitrary displacement and
  *    partially undoing T2's sample-accurate beat placement.
+ *
+ * `rho` ALWAYS reports the correlation AT THE RETURNED `lag` (fix round 2,
+ * Important 1 -- previously, when guard 2 fired, `rho` reported the
+ * REJECTED best candidate's score while the crossfade actually ran at
+ * `lag=0`, where the true correlation could differ substantially, e.g.
+ * measured `reportedRho=0.168` against `actual-at-lag-0=0.055` and
+ * `reportedRho=0.142` against `actual-at-lag-0=-0.069` -- feeding the
+ * WRONG rho into the exact gain law reintroduces the kind of centre dip
+ * (measured up to `-1.33 dB` over 40 guard-fired trials) that law exists to
+ * eliminate. `lag=0`'s own score is captured once during the single scan
+ * below, at no extra cost).
  */
 export function bestAlignLag(outTail: Float32Array, inHead: Float32Array, maxLag: number): { lag: number; rho: number } {
   const W = outTail.length;
@@ -298,17 +319,19 @@ export function bestAlignLag(outTail: Float32Array, inHead: Float32Array, maxLag
 
   let bestRho = -Infinity;
   let bestLag = -lag0;
+  let rhoAtZero = 0;
   for (let lag = -lag0; lag <= lag0; lag++) {
     const off = lag + lag0;
     const cand = inHead.subarray(off, off + W);
     const rho = normalizedCorrelation(outTail, cand);
+    if (lag === 0) rhoAtZero = rho;
     if (rho > bestRho) {
       bestRho = rho;
       bestLag = lag;
     }
   }
   const finalRho = bestRho === -Infinity ? 0 : bestRho;
-  if (finalRho < MIN_ALIGN_RHO) return { lag: 0, rho: finalRho };
+  if (finalRho < MIN_ALIGN_RHO) return { lag: 0, rho: rhoAtZero };
   return { lag: bestLag, rho: finalRho };
 }
 
@@ -487,13 +510,28 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   const joins = plan.joins;
   const numSegments = segments.length;
 
-  const channels: Float32Array[] = Array.from({ length: numCh }, () => new Float32Array(plan.outputSample));
-
   const headLen = segments[0].start;
-  // Computed up front (not just after the loop) so the LAST join's lag clamp
-  // below can account for it -- see "Defensive clamp" inside the loop, fix
-  // round 1 Important 2.
+  // Computed up front so the tail-read clamp (see "--- tail ---" below) has
+  // it available, and so it can feed the entry-side identity check next.
   const tailLen = analysis.analyzedEndSample - segments[numSegments - 1].end;
+
+  // Entry-side identity check (fix round 2, Minor -- gives the SHORTFALL
+  // direction the same informative error as the surplus direction, which
+  // the post-hoc cursor check below already covered): a `plan.outputSample`
+  // that disagrees with `headLen + Sum(segment spans) + tailLen` would
+  // otherwise allocate a too-small `channels` buffer and fail with a bare,
+  // unhelpful `RangeError: offset is out of bounds` on whichever write
+  // first overflows it, rather than identifying the actual mismatch.
+  let spanSum = 0;
+  for (const seg of segments) spanSum += seg.end - seg.start;
+  const expectedOutputSample = headLen + spanSum + tailLen;
+  if (expectedOutputSample !== plan.outputSample) {
+    throw new Error(
+      `renderRemix: plan.outputSample (${plan.outputSample}) does not match headLen+Sum(spans)+tailLen (${expectedOutputSample})`
+    );
+  }
+
+  const channels: Float32Array[] = Array.from({ length: numCh }, () => new Float32Array(plan.outputSample));
   writeRange(source, 0, headLen, channels, 0);
   let cursor = headLen;
 
@@ -535,17 +573,14 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
     const { lag: rawLag, rho: rawRho } = bestAlignLag(outTail, inHead, maxNudge);
     // Defensive clamp: keep the shifted incoming window (and, for the
     // butt-splice fallback, the WHOLE next segment) inside [0, sourceLen).
-    // When `nextSeg` is the FINAL segment, the tail is read immediately
-    // after it at the SAME registration (`finalEffEnd = nextSeg.end+lag`),
-    // so the upper bound must also leave room for `tailLen` -- otherwise a
-    // positive lag pushes the tail's read past the true end of `source`,
-    // producing unattenuated trailing silence at the very end of the file
-    // (fix round 1, Important 2; a lag bound that only protects the segment
-    // it was computed for, and not what gets read after it, is exactly the
-    // kind of gap this defensive clamp exists to close).
-    const nextIsFinalSegment = i + 1 === numSegments - 1;
-    const lagUpperBound = sourceLen - nextSeg.end - (nextIsFinalSegment ? tailLen : 0);
-    const lag = Math.max(-nextSeg.start, Math.min(rawLag, lagUpperBound));
+    // Deliberately does NOT also reserve room for `tailLen` when `nextSeg`
+    // is the final segment (fix round 1, Important 2, tried that: the bound
+    // reduces algebraically to `sourceLen - analysis.analyzedEndSample`,
+    // which is exactly 0 whenever the analysis was NOT truncated -- i.e. on
+    // most sources -- silently disabling forward alignment on the very last
+    // join of the common case). Instead the TAIL READ itself is clamped,
+    // below, independently of what lag this join chose -- see "--- tail ---".
+    const lag = Math.max(-nextSeg.start, Math.min(rawLag, sourceLen - nextSeg.end));
     const rho = Math.max(0, Math.min(1, rawRho));
     const bStartAligned = nextSeg.start + lag;
 
@@ -622,7 +657,19 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   }
 
   // --- tail (tailLen was computed up front, before the loop) ---
-  writeRange(source, finalEffEnd, finalEffEnd + tailLen, channels, cursor);
+  // Fix round 2, Important 2: clamp the READ position, not the last join's
+  // lag (see that clamp's own comment for why bounding the lag itself
+  // silently disabled forward alignment on nearly every real track). If a
+  // positive lag pushed `finalEffEnd` far enough right that reading
+  // `tailLen` samples from it would run past `sourceLen`, read the tail
+  // from `sourceLen-tailLen` instead -- the true physical end of the file,
+  // still exactly `tailLen` samples (length-neutral), never silence. This
+  // can only shift the tail's start LEFT of where the last segment's own
+  // content actually ended, by at most `maxNudge` samples in the narrow
+  // case that triggers it -- bounded, and never the unattenuated silence
+  // the original bug produced.
+  const tailReadStart = Math.min(finalEffEnd, sourceLen - tailLen);
+  writeRange(source, tailReadStart, tailReadStart + tailLen, channels, cursor);
   cursor += tailLen;
 
   // The exact-length invariant, CHECKED rather than assumed (fix round 1,
@@ -649,6 +696,17 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   // 1500 ms tail). Handled here, before the normal tail-fade decision, so
   // the two treatments can never stack -- see the module doc comment,
   // "Exact-length trim".
+  //
+  // NOTE (fix round 2, Minor): `> plan.targetSample`, not `>=`, is a real
+  // behavioural cliff at exactly zero overshoot -- an `outputSample` one
+  // sample past `targetSample` takes this branch (5 ms linear fade, or none
+  // if the buffer is shorter than that); an EXACT match falls through to
+  // the normal tail-fade decision below (1500 ms quarter-cosine, if
+  // `!reachesFileEnd`). Left as-is: `plan.outputSample === plan.targetSample`
+  // means there is nothing to trim, so this is "no trim requested" correctly
+  // reducing to the normal tail treatment, not a bug -- but it is a genuine
+  // discontinuity in fade LENGTH right at the boundary, worth knowing about
+  // if a future caller is surprised by it.
   if (opts.exactLength && plan.outputSample > plan.targetSample) {
     const trimLen = Math.max(0, Math.round(plan.targetSample));
     const outChannels = channels.map((c) => c.slice(0, trimLen));
