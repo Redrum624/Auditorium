@@ -145,17 +145,20 @@ import { useAppStore } from '../stores/appStore';
 import { createTempoWorker } from '../workers/createTempoWorker';
 import { MIN_BPM, MAX_BPM } from '../dsp/tempoCore';
 import type { TempoAnalysis } from '../dsp/tempoCore';
+import type { RemixAnalysis as RemixFeaturesAnalysis } from '../dsp/remixFeatures';
 
 /**
- * Placeholder until T9 (`src/dsp/remixFeatures.ts`) lands and widens this
- * with chroma / bar boundaries / per-boundary descriptors / clusters.
- * `tempo.worker.ts`'s `deriveRemixFeatures` still throws 'not implemented'
- * for `level:'remix'` requests (T3), so no genuine `RemixAnalysis` value
- * flows through this module beyond the type declaration today. A type ALIAS
- * (not an empty interface) so T9 can turn it into its own interface freely,
- * without this module needing a change.
+ * T9 (`src/dsp/remixFeatures.ts`) landed and widened this with chroma / bar
+ * boundaries / per-boundary descriptors / clusters (fix round 1: `tempo.
+ * worker.ts`'s `deriveRemixFeatures` now genuinely implements `level:'remix'`
+ * requests instead of throwing 'not implemented', so a real `RemixAnalysis`
+ * value now flows through this module, not just the type declaration). Was a
+ * type ALIAS to `TempoAnalysis` (not an empty interface) specifically so this
+ * swap could happen without any OTHER change to this module — this is that
+ * swap; every other line in this file that reads/writes a `RemixAnalysis`
+ * value already only relied on it being a `TempoAnalysis`-compatible shape.
  */
-export type RemixAnalysis = TempoAnalysis;
+export type RemixAnalysis = RemixFeaturesAnalysis;
 
 /** `TempoAnalysis` plus the REQUIRED staleness flag — required, not
  * optional, so a consumer cannot read `beatSamples` while accidentally

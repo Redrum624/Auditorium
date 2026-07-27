@@ -1,5 +1,5 @@
-import { chromaEnvelope, analyzeRemix } from './remixFeatures';
-import { TARGET_ANALYSIS_RATE } from './tempoCore';
+import { chromaEnvelope, analyzeRemix, resampleOdfBarPeak } from './remixFeatures';
+import { TARGET_ANALYSIS_RATE, ONSET_HOP } from './tempoCore';
 
 // Local generators only -- this repo re-declares such helpers per test file
 // rather than sharing one (tempoCore.test.ts, fft.test.ts, resample.test.ts).
@@ -176,25 +176,33 @@ function pureSine(freq: number, seconds: number, rate: number): Float32Array {
  * not needed here, only relative accent response), `clickAmp` far smaller
  * than `abab`'s.
  *
- * WHY A SEPARATE FIXTURE, AND WHY THIS AMPLITUDE (evidenced, see the task
- * report's amplitude/confidence sweep): `onsetEnvelope`'s `L = log(1 +
- * 1000*e)` compression is markedly SUB-linear once `1000*e >> 1` -- past
- * that point a 2x energy change (this test's 2x accent) adds only ~log(2)
- * to `L` regardless of how large `e` already is, so a LOUD baseline click
- * undershoots `downbeatConfidence > 0.3` (measured 0.09-0.13 at
- * `abab`-scale amplitudes). Reducing amplitude alone on `abab` was tried and
- * rejected: `abab`'s continuous tones and section-transition content
- * interact with amplitude in a non-monotonic, fixture-specific way (a sweep
- * across 6 orders of magnitude never cleared 0.3 for BOTH accent positions
- * simultaneously, and going low enough to help one directly confused BPM
- * detection via the tone content instead -- measured wrong-octave BPMs at
- * the lowest amplitudes tried). An ISOLATED click train -- the only signal
- * `odf`/`odfLow` (what downbeat detection actually reads) depends on --
- * removes that confound entirely and responds monotonically:
- * `clickAmp = 0.00003` measures `downbeatConfidence` 0.38 (accent at beat 0)
- * and 0.50 (accent at beat 2), both comfortably above the 0.3 bound, with
- * BPM/beat-count unaffected (127-128 beats, ~120.0 BPM throughout the
- * sweep).
+ * WHY A SEPARATE, QUIET FIXTURE (evidenced, see the task report's amplitude/
+ * confidence sweep): `onsetEnvelope`'s `L = log(1 + 1000*e)` compression is
+ * markedly SUB-linear once `1000*e >> 1` -- past that point a 2x energy
+ * change (this test's 2x accent) adds only ~log(2) to `L` regardless of how
+ * large `e` already is, so a LOUD baseline click gives a much smaller
+ * relative contrast between accented and unaccented phases (measured
+ * `downbeatConfidence` 0.09-0.13 at `abab`-scale amplitudes, vs. 0.40-0.50 at
+ * this fixture's amplitude). `abab`'s continuous tones and section-
+ * transition content also interact with amplitude non-monotonically (a sweep
+ * across 6 orders of magnitude never gave both accent positions a clearly
+ * higher score than an unaccented baseline at the same time, and going low
+ * enough to help one confused BPM detection via the tone content instead --
+ * measured wrong-octave BPM at the lowest amplitudes tried). An ISOLATED
+ * click train -- the only signal `odf`/`odfLow` (what downbeat detection
+ * actually reads) depends on -- removes that confound and responds
+ * monotonically.
+ *
+ * NOTE (PLAN OWNER RULING 5, `docs/superpowers/plans/2026-07-26-auditorium-
+ * v1.5-tempo-remix.md`): `downbeatConfidence` is NOT a gate anywhere in this
+ * codebase -- no feature may refuse or branch on it, `> 0.3` or otherwise; a
+ * correct detection on realistic material can legitimately score far below
+ * that (the ruling measured 0.033 against a 0.0105 noise floor on its own
+ * fixture). This amplitude choice is about giving THIS TEST a comfortably
+ * measurable, monotonic signal-to-noise gap to assert against -- `clickAmp =
+ * 0.00003` measures `downbeatConfidence` 0.40 (accent at beat 0) and 0.50
+ * (accent at beat 2), against a 0.06 zero-accent noise floor -- not about
+ * clearing any pass/fail bound the production code is required to reach.
  */
 function clickTrain(accentBeat: number | null, clickAmp = 0.00003): Float32Array {
   const totalLen = 4 * SECTION_LEN;
@@ -258,6 +266,43 @@ describe('chromaEnvelope purity', () => {
   });
 });
 
+describe('R FRAME ATTRIBUTION (fix round 1, T9 review CRITICAL finding)', () => {
+  it('a known attack lands in the segment it truly belongs to, not one hop early', () => {
+    // Direct, arithmetic-precise regression test of resampleOdfBarPeak's
+    // frame mapping -- no audio synthesis, no beat tracking, so the ONLY
+    // variable is the sample<->frame conversion itself.
+    //
+    // 16 output points (points = 4*beatsPerBar for beatsPerBar=4), bar chosen
+    // so each segment spans EXACTLY 10 ONSET_HOP-frames (no rounding
+    // ambiguity anywhere except at the one boundary under test): D=1,
+    // barStart=0, barEnd=160*ONSET_HOP decimated samples -> segment p spans
+    // frames [p*10, (p+1)*10) under a NAIVE (pre-fix) mapping.
+    //
+    // Per the ODF FRAME ATTRIBUTION CONTRACT (tempoCore.ts), odf frame 39's
+    // FLUX describes a real attack at decimated sample (39+1)*ONSET_HOP =
+    // 40*ONSET_HOP -- exactly the boundary between segment 3 ([30,40)*hop)
+    // and segment 4 ([40,50)*hop), which belongs to segment 4 under
+    // half-open interval semantics. The PRE-FIX code (`ceil(seg/hop)`, no
+    // `-1`) attributed frame 39 to segment 3 instead -- one segment early,
+    // reading a bar's own downbeat as if it belonged to the PREVIOUS bar's
+    // trailing segment (matching the review's own measurement: real onsets
+    // at segments 0/4/8/12 were observed at 3/7/11/15).
+    const framesPerSegment = 10;
+    const points = 16;
+    const barEndDecimated = points * framesPerSegment * ONSET_HOP;
+    const odf = new Float32Array(60 * ONSET_HOP); // generously sized; only index 39 is non-zero
+    odf[39] = 10;
+
+    const out = resampleOdfBarPeak(odf, 0, barEndDecimated, 1, points);
+
+    expect(out[4]).toBe(10); // segment 4 -- the CORRECTED attribution
+    expect(out[3]).toBe(0); // segment 3 -- the PRE-FIX (wrong) attribution
+    for (let p = 0; p < points; p++) {
+      if (p !== 4) expect(out[p]).toBe(0);
+    }
+  });
+});
+
 describe('CHROMA RESOLUTION (acceptance 5) -- pins the 130 Hz floor', () => {
   it('two ADJACENT semitones at the band floor land in different, adjacent pitch classes', () => {
     // NOTE (verified numerically -- `node -e`, see task report): the brief's
@@ -303,12 +348,23 @@ describe('BAR BOUNDARIES (acceptance 1)', () => {
 });
 
 describe('DOWNBEAT (acceptance 2)', () => {
-  it('locks onto a confident phase, and shifting the accent by +2 beats shifts the detected phase by the same +2 (mod 4)', () => {
+  it('shifting the accent by +2 beats shifts the detected phase by the same +2 (mod 4)', () => {
+    // NOTE (PLAN OWNER RULING 5): `downbeatConfidence` is never a gate, so
+    // this does NOT assert it clears any absolute bound (`> 0.3` or
+    // otherwise) -- that would be exactly the kind of downstream branch on
+    // the metric the ruling forbids. What IS asserted, without any
+    // threshold: the accented phase's confidence is clearly separated from
+    // a ZERO-accent run's own confidence (pure noise-floor artefact from
+    // unequal term counts, normalised away by the fix-round-1 mean but never
+    // exactly zero) -- proving the detector responds to genuine signal, not
+    // to counting alone -- and that the detected phase itself shifts exactly
+    // in step with where the accent moved.
+    const rNone = analyzeRemix(clickTrain(null), SR);
     const r0 = analyzeRemix(clickTrain(0), SR);
     const r2 = analyzeRemix(clickTrain(2), SR);
 
-    expect(r0.downbeatConfidence).toBeGreaterThan(0.3);
-    expect(r2.downbeatConfidence).toBeGreaterThan(0.3);
+    expect(r0.downbeatConfidence).toBeGreaterThan(rNone.downbeatConfidence);
+    expect(r2.downbeatConfidence).toBeGreaterThan(rNone.downbeatConfidence);
     expect((((r2.downbeatPhase - r0.downbeatPhase) % 4) + 4) % 4).toBe(2);
   }, 30000);
 });

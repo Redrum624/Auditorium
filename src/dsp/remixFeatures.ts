@@ -71,19 +71,28 @@
  * `20*log10(k)` (`-12.04 dB` for `k=0.25`), matching this task's acceptance
  * bound exactly rather than approximately.
  *
- * ## Downbeat-phase detection frame mapping
+ * ## Downbeat-phase detection frame mapping (fix round 1 — this was wrong)
  *
  * `deriveRemixFeatures` only receives `tempo` (sample-accurate `beatSamples`,
  * not per-beat onset-frame indices), so scoring `peak(odf, beat(b), +/-2
- * frames)` requires converting a beat's SAMPLE position back to an
- * approximate onset-frame index: `frame = beatSample / decimationFactor /
- * ONSET_HOP`. This is intentionally the plain inverse mapping, NOT the T1
- * ODF FRAME ATTRIBUTION CONTRACT's `(f+1)*ONSET_HOP*D` attack correction --
- * that correction answers "given a flux peak in frame f, where is the true
- * attack sample", the opposite direction of what is needed here ("given a
- * known sample, which nearby frame's flux should be inspected"). The +/-2
- * frame search radius the brief specifies absorbs the resulting few-frame
- * imprecision.
+ * frames)` requires converting a beat's SAMPLE position into an approximate
+ * onset-frame index for reading `odf`/`odfLow`. **`odf` is FLUX, not
+ * centred-frame energy**, so the ODF FRAME ATTRIBUTION CONTRACT
+ * (`tempoCore.ts`) applies DIRECTLY, not "the opposite direction" as a
+ * previous version of this comment claimed: the contract's own inverse
+ * (`attackSample = (f+1)*ONSET_HOP` in decimated samples) means the frame
+ * whose flux peaks for an attack at decimated sample `s` is
+ * `f = s/ONSET_HOP - 1`, i.e. `frame = beatSample/decimationFactor/ONSET_HOP
+ * - 1` — the SAME `-1` hop correction, not its opposite, applied at the
+ * point of READING flux rather than of locating an attack from a frame. The
+ * omission (a plain `beatSample/D/ONSET_HOP`, off by exactly one hop late)
+ * measured a real attack at 516.80 hops producing its true flux argmax at
+ * frame 515, while the uncorrected search centred on frame 517 — the true
+ * peak sat at the exact edge of the +/-2 window, one hop from falling
+ * outside it entirely. `bands`/`chroma` reads (`T`/`L`/`C`, via
+ * `frameRangeForSamples`) are UNAFFECTED and stay on the plain inverse: they
+ * read centred-frame ENERGY, not a differenced quantity, so there is no
+ * "attack arrives one hop late" effect to correct for.
  *
  * ## Bar-boundary head/tail and the very first boundary's "preceding beat"
  *
@@ -162,7 +171,13 @@ const DOWNBEAT_PEAK_RADIUS = 2;
 // ---------------------------------------------------------------------------
 
 export interface ChromaResult {
-  /** `numFrames * 12`, row-major, each row L2-normalised (all-zero stays zero). */
+  /** `numFrames * 12`, row-major, each row L2-normalised (all-zero stays
+   * zero). INDEX ORIGIN: `pc = 0` is A (440 Hz), NOT C -- `pc =
+   * ((round(12*log2(f/440)) % 12) + 12) % 12` is A-referenced by
+   * construction (verified: `pc(220 Hz) === pc(440 Hz) === 0`, `pc(261.63 Hz,
+   * middle C) === 3`). Never render an index from this array as an absolute
+   * pitch NAME (e.g. index 0 as "C") without first re-basing it -- doing so
+   * silently mislabels every pitch class by 3 semitones. */
   chroma: Float32Array;
   numFrames: number;
   chromaRate: number;
@@ -187,15 +202,22 @@ export function chromaEnvelope(
   const win = hann(CHROMA_FFT);
   const re = new Float32Array(CHROMA_FFT);
   const im = new Float32Array(CHROMA_FFT);
-  const mag = new Float32Array(bins);
 
   // Precompute each bin's pitch class once (or -1 when its nominal centre
-  // frequency falls outside [CHROMA_LOW_HZ, CHROMA_HIGH_HZ]).
+  // frequency falls outside [CHROMA_LOW_HZ, CHROMA_HIGH_HZ]), plus the
+  // CONTIGUOUS bin range that can possibly feed one (bin->frequency is
+  // monotonic, so this is a single [kLo, kHi) span) -- minor perf fix:
+  // only ~34% of bins ever feed a pitch class, so the per-frame accumulation
+  // loop below visits just that span instead of all `bins` every frame.
   const binPc = new Int32Array(bins).fill(-1);
+  let kLo = bins;
+  let kHi = 0;
   for (let k = 0; k < bins; k++) {
     const f = (k * rate) / CHROMA_FFT;
     if (f >= CHROMA_LOW_HZ && f <= CHROMA_HIGH_HZ) {
       binPc[k] = (((Math.round(12 * Math.log2(f / 440)) % 12) + 12) % 12);
+      if (k < kLo) kLo = k;
+      if (k >= kHi) kHi = k + 1;
     }
   }
 
@@ -211,12 +233,17 @@ export function chromaEnvelope(
       re[i] = idx >= 0 && idx < len ? signal[idx] * win[i] : 0;
     }
     fft(re, im);
-    for (let k = 0; k < bins; k++) mag[k] = Math.hypot(re[k], im[k]);
 
+    // minor perf fix: accumulate POWER (`re^2+im^2`) directly instead of
+    // `Math.hypot(re,im)` then squaring it right back -- `mag` was only ever
+    // read squared, so the sqrt in `hypot` was pure waste (~2.2M unneeded
+    // sqrt calls per 5-min track at the old `bins`-wide loop), and skipping
+    // it is also marginally MORE precise (no sqrt/multiply round-trip).
     c.fill(0);
-    for (let k = 0; k < bins; k++) {
+    for (let k = kLo; k < kHi; k++) {
       const pc = binPc[k];
-      if (pc >= 0) c[pc] += mag[k] * mag[k];
+      if (pc < 0) continue;
+      c[pc] += re[k] * re[k] + im[k] * im[k];
     }
 
     let normSq = 0;
@@ -288,11 +315,29 @@ function frameRangeForSamples(
   return [lo, hi];
 }
 
-/** Resamples `odf` over `[barStartSample, barEndSample)` (original domain,
+/**
+ * Resamples `odf` over `[barStartSample, barEndSample)` (original domain,
  * decimation factor `D`) into exactly `points` values, each the PEAK `odf`
  * value within its proportional sub-segment (see the module doc comment for
- * why peak, not mean). */
-function resampleOdfBarPeak(
+ * why peak, not mean).
+ *
+ * FRAME MAPPING (fix round 1 — this was wrong): `odf` is FLUX, not centred-
+ * frame energy, so the ODF FRAME ATTRIBUTION CONTRACT (`tempoCore.ts`)
+ * applies: an attack at decimated sample `k*ONSET_HOP` peaks at frame `k-1`,
+ * not frame `k`. Reading flux at a known sample position therefore needs the
+ * SAME `-1` hop correction the contract's own worked example uses (`attackSample
+ * = (f+1)*ONSET_HOP` inverted is `f = sample/ONSET_HOP - 1`), which the
+ * original implementation omitted (a plain `ceil(sample/ONSET_HOP)`, correct
+ * for `bands`/`chroma`'s centred-frame energy reads but exactly one hop late
+ * for `odf`). Measured impact of the omission on a 20-bar fixture with real
+ * onsets at segments 0/4/8/12 of 16: peaks observed at 3/7/11/15 instead —
+ * every bar's own downbeat fell into the segment BEFORE it (reading ~0), and
+ * the segment meant to carry "does this bar end with a fill" instead always
+ * caught the START of the NEXT bar's downbeat (a fixed, non-discriminating
+ * value at every boundary). See the task report's "Fix round 1" for the
+ * corrected re-measurement.
+ */
+export function resampleOdfBarPeak(
   odf: Float32Array,
   barStartSample: number,
   barEndSample: number,
@@ -305,8 +350,8 @@ function resampleOdfBarPeak(
   for (let p = 0; p < points; p++) {
     const segStart = startDec + (p / points) * totalDec;
     const segEnd = startDec + ((p + 1) / points) * totalDec;
-    const lo = Math.max(0, Math.ceil(segStart / ONSET_HOP));
-    let hi = Math.min(odf.length, Math.ceil(segEnd / ONSET_HOP));
+    const lo = Math.max(0, Math.ceil(segStart / ONSET_HOP) - 1);
+    let hi = Math.min(odf.length, Math.ceil(segEnd / ONSET_HOP) - 1);
     if (hi <= lo) hi = Math.min(odf.length, lo + 1);
     let peak = 0;
     for (let f = lo; f < hi; f++) if (odf[f] > peak) peak = odf[f];
@@ -406,11 +451,29 @@ export interface RemixAnalysis extends TempoAnalysis {
   /** `(D(b0*) - D(runnerUp)) / max(1e-9, D(b0*))`, computed BEFORE
    * `downbeatShiftBeats` is applied (a user override is a deliberate
    * disagreement with the detector, not evidence the detector was
-   * confident). */
+   * confident). NOT A GATE (PLAN OWNER RULING 5): the log-compression this
+   * is built from flattens a genuine 2x accent to roughly `log 2` regardless
+   * of level, so this saturates near a low value on realistic, loud
+   * material -- no feature may refuse or branch on any threshold against
+   * this value. It may be surfaced as a soft hint only; the downbeat's
+   * user-facing correction is the `<` `>` shift control (T13/T14), not a
+   * confidence check. */
   downbeatConfidence: number;
 
   /** `numBars+1` REFINED, drift-following beat samples -- never an
-   * extrapolated isochronous grid. */
+   * extrapolated isochronous grid. KNOWN LIMITATION, flagged not fixed
+   * (review minor, cheap-enough to document, not to design a guard for
+   * here): every entry is a REAL `beatSamples` position, but the Ellis DP
+   * keeps tracking as long as the transformed `odf` has ANY local structure
+   * to follow, including a tone-only tail with no genuine rhythmic attacks
+   * left -- measured drifting a tracked "beat" 1877 ms past the last
+   * musically real downbeat on a ramp fixture's trailing silence-adjacent
+   * tone. This is not extrapolation (every sample here really is a tracked
+   * beat, per the field's own contract), but a downstream splice consumer
+   * (T10-T12) must not assume the LAST few boundaries are equally trustworthy
+   * splice points just because they're structurally well-formed -- consider
+   * a flux-strength sanity check (e.g. against `peakAround`-style local `odf`
+   * magnitude) on the trailing boundaries before offering them as candidates. */
   barBoundary: Int32Array;
   numBars: number;
 
@@ -483,20 +546,57 @@ export function deriveRemixFeatures(
   const beatSamples = tempo.beatSamples;
   const numBeats = beatSamples.length;
 
-  if (tempo.bpm === null || numBeats <= beatsPerBar || numBands <= 0) {
+  // Fix round 1 (Important 4): `numBands <= 0` is NOT a normal "not enough
+  // audio" degeneracy -- it is the signature of a `tempo` produced by
+  // `deriveGrid` (the 'regrid' fast path), which never has band/chroma data
+  // to source these from and always reports them empty (see tempoCore.ts's
+  // `deriveGrid` doc comment). A genuine `analyzeTempo` result NEVER has
+  // `bpm !== null` with `numBands <= 0` -- bands are computed in the same
+  // pass that finds bpm -- so this combination can only mean "this `tempo`
+  // cannot support a real remix analysis", regardless of what its own `bpm`
+  // says. Forcing `bpm: null` here (rather than letting `emptyRemixAnalysis`
+  // spread the real bpm through unchanged) makes this the SAME "nothing
+  // valid here" signal every other consumer in this codebase already checks
+  // (`getRemixAnalysis`, the BPM readout's `stale` gate, etc.), instead of a
+  // valid-looking bpm sitting alongside `numBars: 0` and empty descriptors --
+  // measured as "the worst possible shape for the planner" in review: a
+  // caller could easily branch on `bpm !== null` and never notice `numBars`
+  // is empty. This was chosen over threading `bands`/`odfLow` through the
+  // regrid protocol so a regridded entry could re-derive real descriptors,
+  // because that would still be only a PARTIAL fix: `deriveGrid` never runs
+  // the chroma pass either, so `C`/`S`/clustering would remain unrecoverable
+  // regardless. A full fix belongs to whichever task wires a genuine
+  // remix-level regrid (re-running `deriveRemixFeatures` against the
+  // ORIGINAL cached `bands`/`odfLow`/`chroma`, not `deriveGrid`'s output) --
+  // out of this task's scope.
+  if (numBands <= 0) {
+    return emptyRemixAnalysis({ ...tempo, bpm: null }, chroma, beatsPerBar);
+  }
+  if (tempo.bpm === null || numBeats <= beatsPerBar) {
     return emptyRemixAnalysis(tempo, chroma, beatsPerBar);
   }
 
   // --- Downbeat-phase detection ---
+  // Fix round 1: (a) frame mapping corrected -- `odf`/`odfLow` are FLUX, so
+  // the ODF FRAME ATTRIBUTION CONTRACT's `-1` hop applies here too (see
+  // `resampleOdfBarPeak`'s doc comment for the full derivation; this read is
+  // a single point rather than a range, so the correction is a plain `-1`
+  // rather than `ceil(...) - 1`). (b) scores are now the MEAN, not the sum,
+  // over each phase's terms -- unnormalised sums measured a ~50% score
+  // advantage from term-count alone on short inputs (counts as uneven as
+  // `12,12,12,11` on a zero-accent fixture), an artefact with nothing to do
+  // with which phase is the true downbeat.
   const scores = new Float64Array(beatsPerBar);
   for (let b0 = 0; b0 < beatsPerBar; b0++) {
     let sum = 0;
+    let count = 0;
     for (let idx = b0; idx < numBeats; idx += beatsPerBar) {
-      const frame = beatSamples[idx] / D / ONSET_HOP;
+      const frame = beatSamples[idx] / D / ONSET_HOP - 1;
       sum += peakAround(tempo.odf, frame, DOWNBEAT_PEAK_RADIUS);
       sum += DOWNBEAT_LOW_WEIGHT * peakAround(tempo.odfLow, frame, DOWNBEAT_PEAK_RADIUS);
+      count++;
     }
-    scores[b0] = sum;
+    scores[b0] = count > 0 ? sum / count : 0;
   }
   let b0Star = 0;
   let bestScore = -Infinity;

@@ -189,7 +189,7 @@ describe('runTempoAnalysis — concurrency and worker choreography (acceptance f
     expect(_getTempoWorkerTerminateCount()).toBe(1);
   });
 
-  it('(i) a reply superseded by a second run for the same doc does not clobber the cache', async () => {
+  it('(i) a reply superseded by a second run for the same doc does not clobber the cache with STALE data', async () => {
     const doc = seedDoc([clickTrain(120, 8)]);
     const baseline = await runTempoAnalysis(doc); // E0 — the established baseline entry
     _resetTempoWorkerTestState(); // zero the terminate counter from the baseline run
@@ -198,16 +198,26 @@ describe('runTempoAnalysis — concurrency and worker choreography (acceptance f
     // genuinely NEW worker starts for each. currentRunId is updated
     // SYNCHRONOUSLY when each run starts (before either's mock microtask
     // runs), so by the time run1's (tempo) belated 'done' arrives, run2
-    // (remix) has already claimed currentRunId — making run1's reply stale.
-    const p1 = runTempoAnalysis(doc); // run1 (tempo) — will succeed, but arrives stale
-    const p2 = runRemixAnalysis(doc); // run2 (remix) — claims currentRunId; fails via the T9 stub
+    // (remix) has already claimed currentRunId — making run1's reply stale
+    // (dropped for cache purposes) even though run1's OWN promise still
+    // settles reflecting whatever was live at ITS settle time. Run2 (remix,
+    // genuinely implemented as of T9 fix round 1) is the CURRENT run when
+    // ITS OWN done arrives, so its result legitimately replaces the cache
+    // row — that is correct behaviour, not the "stale reply clobbers"
+    // failure mode this test guards against.
+    const p1 = runTempoAnalysis(doc); // run1 (tempo) — becomes stale before its own done arrives
+    const p2 = runRemixAnalysis(doc); // run2 (remix) — the CURRENT run; its own done legitimately updates the cache
 
     const [r1, r2] = await Promise.all([p1, p2]);
 
-    expect(getTempo(doc)).toBe(baseline); // untouched — run1's stale 'done' did not overwrite it
-    expect(r1).toBe(baseline); // run1's own promise still settles, reflecting the still-valid baseline
-    expect(r2).toBeNull(); // run2 fails (T9 stub)
-    expect(_getTempoWorkerTerminateCount()).toBe(2); // two distinct workers ran (baseline's is reset away below)
+    expect(r1).toBe(baseline); // run1 settles reflecting the still-valid baseline, not a stale write of its own
+    expect(r2).not.toBeNull(); // run2 (remix) now genuinely succeeds (T9)
+    expect(r2?.bpm).toBe(baseline?.bpm ?? null);
+
+    const finalEntry = getTempo(doc);
+    expect(finalEntry).not.toBe(baseline); // run2's OWN (current) done legitimately replaced the row — not a clobber
+    expect(finalEntry?.stale).toBe(false);
+    expect(_getTempoWorkerTerminateCount()).toBe(2); // two distinct workers ran
   });
 });
 
@@ -356,17 +366,15 @@ describe('level policy', () => {
     expect(_getTempoWorkerTerminateCount()).toBe(0); // no new worker started
   });
 
-  it('runRemixAnalysis currently resolves null via the T9 deriveRemixFeatures stub (documented limitation, not a T4 defect)', async () => {
-    const showMessageBox = installShowMessageBox();
+  it('runRemixAnalysis produces a genuine level:"remix" cache row end-to-end (T9 fix round 1 — was a documented stub limitation, now real)', async () => {
     const doc = seedDoc([clickTrain(120, 8)]);
 
     const result = await runRemixAnalysis(doc);
 
-    expect(result).toBeNull();
-    expect(showMessageBox).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'error', title: 'Tempo analysis failed', message: 'not implemented' })
-    );
-    expect(getRemixAnalysis(doc)).toBeNull();
+    expect(result).not.toBeNull();
+    expect(result?.bpm).not.toBeNull();
+    expect(result?.numBars).toBeGreaterThan(0);
+    expect(getRemixAnalysis(doc)).toBe(result);
   });
 });
 

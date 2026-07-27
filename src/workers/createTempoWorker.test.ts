@@ -8,6 +8,8 @@
 import { createTempoWorker } from './createTempoWorker';
 import { analyzeTempo, deriveGrid, MIN_BPM, MAX_BPM } from '../dsp/tempoCore';
 import type { TempoAnalysis } from '../dsp/tempoCore';
+import { analyzeRemix } from '../dsp/remixFeatures';
+import type { RemixAnalysis } from '../dsp/remixFeatures';
 import {
   _setTempoWorkerError,
   _setTempoWorkerLoadFailure,
@@ -25,7 +27,7 @@ interface DoneMsg {
   type: 'done';
   id: number;
   level: 'tempo' | 'remix' | 'regrid';
-  analysis: TempoAnalysis;
+  analysis: TempoAnalysis | RemixAnalysis;
 }
 interface ErrorMsg {
   type: 'error';
@@ -123,19 +125,42 @@ describe('createTempoWorker equivalence (acceptance 1)', () => {
   });
 });
 
-describe('createTempoWorker level:"remix" stub (protocol must accommodate both levels)', () => {
-  it('replies {type:"error", message:"not implemented"} until T9 lands, without crashing the worker', async () => {
-    const worker = createTempoWorker();
-    const mono = clickTrain(120, 8, 44100);
-    const replies = await runAnalyze(worker, mono, 44100, 8, 'remix');
+describe('createTempoWorker level:"remix" (T9, fix round 1 -- real coverage replacing the stale stub assertion)', () => {
+  it('mock done payload is deep-equal to analyzeRemix called directly, field by field', async () => {
+    const SR = 44100;
+    const mono = clickTrain(120, 8, SR);
+    const monoForDirectCall = clickTrain(120, 8, SR); // separate buffer: the worker's copy gets transferred away
 
-    // analyzeTempo (level 'tempo' work) still runs and may emit progress
-    // before deriveRemixFeatures throws — only the terminal reply is
-    // constrained: no 'done' ever arrives, and the run ends in exactly one
-    // 'error'.
-    expect(replies.filter((r) => r.type === 'done').length).toBe(0);
-    expect(replies.filter((r) => r.type === 'error').length).toBe(1);
-    expect(replies[replies.length - 1]).toEqual({ type: 'error', id: 8, message: 'not implemented' });
+    const worker = createTempoWorker();
+    const replies = await runAnalyze(worker, mono, SR, 8, 'remix');
+    const done = replies[replies.length - 1] as DoneMsg;
+
+    expect(done.type).toBe('done');
+    expect(done.id).toBe(8);
+    expect(done.level).toBe('remix');
+
+    const expected = analyzeRemix(monoForDirectCall, SR, { minBpm: MIN_BPM, maxBpm: MAX_BPM }, { beatsPerBar: 4, downbeatShiftBeats: 0 });
+    const analysis = done.analysis as RemixAnalysis;
+
+    expect(analysis.bpm).toBe(expected.bpm);
+    expect(Array.from(analysis.beatSamples)).toEqual(Array.from(expected.beatSamples));
+    expect(analysis.numBands).toBe(expected.numBands);
+    expect(Array.from(analysis.bands)).toEqual(Array.from(expected.bands));
+    expect(Array.from(analysis.odfLow)).toEqual(Array.from(expected.odfLow));
+    expect(analysis.numChromaFrames).toBe(expected.numChromaFrames);
+    expect(analysis.chromaRate).toBe(expected.chromaRate);
+    expect(Array.from(analysis.chroma)).toEqual(Array.from(expected.chroma));
+    expect(analysis.downbeatPhase).toBe(expected.downbeatPhase);
+    expect(analysis.downbeatConfidence).toBe(expected.downbeatConfidence);
+    expect(analysis.numBars).toBe(expected.numBars);
+    expect(Array.from(analysis.barBoundary)).toEqual(Array.from(expected.barBoundary));
+    expect(Array.from(analysis.T)).toEqual(Array.from(expected.T));
+    expect(Array.from(analysis.C)).toEqual(Array.from(expected.C));
+    expect(Array.from(analysis.L)).toEqual(Array.from(expected.L));
+    expect(Array.from(analysis.R)).toEqual(Array.from(expected.R));
+    expect(Array.from(analysis.S)).toEqual(Array.from(expected.S));
+    expect(Array.from(analysis.cluster)).toEqual(Array.from(expected.cluster));
+    expect(Array.from(analysis.transitionSeen)).toEqual(Array.from(expected.transitionSeen));
 
     worker.terminate();
   });
