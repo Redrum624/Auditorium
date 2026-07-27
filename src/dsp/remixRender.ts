@@ -195,6 +195,16 @@ const ALIGN_COMPARE_MS = 10;
 const SHAPE_RHO_THRESHOLD = 0.35;
 const TAIL_FADE_SECONDS = 1.5;
 const EXACT_TRIM_FADE_MS = 5;
+/** Floor for the tail-overflow taper (fix round 4). The overflow itself is
+ * only `lag` samples wide, so tapering over exactly that width gives a fade
+ * as short as the lag -- at a 1-2 sample lag that is a near-vertical cliff
+ * (measured at 27x the material's own slew), and when the leftover tail is
+ * shorter than the lag there is no room for a taper at all and the
+ * unattenuated step returns. Both are fixed by tapering over at least this
+ * long and letting the window reach back into the already-written segment
+ * audio, which is contiguous with it. 2 ms is below the ~10 ms where a
+ * fade-out becomes audible as a level change, so it costs nothing musically. */
+const MIN_TAIL_FADE_MS = 2;
 /** +/- frame search radius for reading a boundary's own onset strength --
  * matches `remixFeatures.ts`'s own `DOWNBEAT_PEAK_RADIUS`. */
 const ONSET_PEAK_RADIUS = 2;
@@ -719,11 +729,23 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
     // fading that already-silent region would be a no-op. What needs
     // fading is the REAL audio immediately BEFORE it, tapered down so it
     // meets that silence smoothly instead of stopping abruptly. `validLen`
-    // is how much real tail audio exists before the overflow begins;
-    // bounding the fade window by it keeps the taper inside this tail,
-    // never reaching back into the previous segment's own content.
+    // is how much real tail audio exists before the overflow begins.
+    //
+    // The taper is NOT bounded by `validLen` (fix round 4). Round 3 bounded
+    // it so the window could never reach back into the previous segment's
+    // own content, but that left two gaps: the fade is only as long as the
+    // overflow, so a 1-2 sample lag produced a 1-2 sample cliff (27x the
+    // material's natural slew), and when `tailLen <= lag` there is no real
+    // tail audio at all (`validLen === 0`), so no fade was applied and the
+    // original unattenuated step into silence returned in full. Reaching
+    // back is in fact harmless: the previous segment's write ended at
+    // `finalEffEnd` and this tail reads from exactly `finalEffEnd` onward
+    // (see above), so output samples before `cursor` are CONTIGUOUS source
+    // audio with what follows -- a taper spanning that boundary crosses no
+    // splice. `applyLinearFadeOutEndingAt` clamps its start at 0, so a fade
+    // longer than everything written so far is safe too.
     const validLen = tailLen - tailOverflow;
-    const fadeLen = Math.min(tailOverflow, validLen);
+    const fadeLen = Math.max(tailOverflow, Math.round((MIN_TAIL_FADE_MS / 1000) * sr));
     applyLinearFadeOutEndingAt(channels, cursor + validLen, fadeLen);
   }
   cursor += tailLen;

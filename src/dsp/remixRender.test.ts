@@ -876,12 +876,76 @@ describe('renderRemix -- tail after the last join never reads past the true end 
     // directly from the known fade formula and compare byte-for-byte. This
     // is the precise proof that the overflow is faded, not hard-zeroed.
     const validLen = tailLenNominal - tailOverflow;
-    const fadeLen = Math.min(tailOverflow, validLen);
+    // The taper is at least MIN_TAIL_FADE_MS long and is NOT bounded by
+    // `validLen` (fix round 4) -- it may reach back past `seamPos` into the
+    // previous segment's own written audio. That region is contiguous
+    // source audio with the tail (both read from `finalEffEnd` outward), so
+    // the same `src`-relative formula reconstructs it for negative offsets
+    // exactly as it does for positive ones.
+    const fadeLen = Math.max(tailOverflow, Math.round((2 / 1000) * SR));
     const fadeStartOutput = seamPos + validLen - fadeLen;
     for (let k = 0; k < fadeLen; k++) {
       const g = fadeLen > 1 ? 1 - k / (fadeLen - 1) : 0;
       const unfaded = src[finalEffEnd + (validLen - fadeLen + k)];
       expect(ch[fadeStartOutput + k]).toBeCloseTo(unfaded * g, 6);
+    }
+  });
+
+  // Round 3 tapered over exactly `tailOverflow` samples and bounded that by
+  // `validLen`. Both bounds had a corner the round-3 fixtures did not reach:
+  // a tiny lag made the fade a 1-2 sample cliff, and `tailLen <= lag` left
+  // `validLen === 0` so no fade was applied at all and the original
+  // unattenuated step into silence came back. Both are the SAME defect the
+  // whole tail-fade exists to prevent, so both are asserted here.
+  it('tapers smoothly even at a 1-sample overflow and when the tail is shorter than the lag', () => {
+    const freq = 197;
+    const lb = 20000;
+
+    function maxSlew(x: Float32Array, start = 0, end = x.length): { value: number } {
+      let m = 0;
+      for (let i = Math.max(1, start); i < end; i++) m = Math.max(m, Math.abs(x[i] - x[i - 1]));
+      return { value: m };
+    }
+
+    function run(targetLag: number, tailLenNominal: number) {
+      const compareLen = Math.round((10 / 1000) * SR);
+      const aEnd = 60000;
+      const bStartNominal = 90000;
+      // `sourceLen` set so the tail overflows by exactly `targetLag`.
+      const sourceLen = bStartNominal + targetLag + lb + tailLenNominal - targetLag;
+      const src = sine(freq, sourceLen, SR, 1);
+      src.set(src.slice(aEnd - compareLen, aEnd), bStartNominal + targetLag);
+
+      const analyzedEndSample = bStartNominal + lb + tailLenNominal;
+      const barBoundary = Int32Array.from([0, aEnd, bStartNominal, bStartNominal + lb]);
+      const analysis = makeAnalysis({ numBars: 3, barBoundary, analyzedEndSample });
+      const seg0: RemixSegment = { start: 0, end: aEnd };
+      const seg1: RemixSegment = { start: bStartNominal, end: bStartNominal + lb };
+      const outputSample = (seg0.end - seg0.start) + (seg1.end - seg1.start) + (analyzedEndSample - seg1.end);
+      const plan = makePlan({ segments: [seg0, seg1], joins: [join(1, 2)], outputSample });
+      const result = renderRemix([src], analysis, plan, { sampleRate: SR, crossfadeMs: 25, maxNudgeMs: 10 });
+      expect(result.nudgeSamples[0]).toBe(targetLag); // fixture sanity
+      return { ch: result.channels[0], naturalSlew: maxSlew(sine(freq, 20000, SR, 1)).value };
+    }
+
+    // Corner 1: a 1-sample overflow. Round 3 gave a 1-sample fade (a cliff);
+    // the 2 ms floor makes it a real taper.
+    {
+      const { ch, naturalSlew } = run(1, 8000);
+      const region = maxSlew(ch, ch.length - 2000, ch.length);
+      expect(region.value).toBeLessThanOrEqual(1.2 * naturalSlew);
+      expect(Math.abs(ch[ch.length - 1])).toBeLessThan(1e-6);
+    }
+
+    // Corner 2: tail SHORTER than the lag -- `validLen === 0`, so round 3
+    // applied no fade whatsoever and the step into silence was unattenuated.
+    // The taper must now reach back into the segment's own audio.
+    {
+      const { ch, naturalSlew } = run(200, 200);
+      const region = maxSlew(ch, ch.length - 2000, ch.length);
+      expect(region.value).toBeLessThanOrEqual(1.2 * naturalSlew);
+      const lastNonZero = ch.length - 1 - [...ch].reverse().findIndex((v) => Math.abs(v) > 1e-9);
+      expect(Math.abs(ch[lastNonZero])).toBeLessThanOrEqual(0.2 * naturalSlew);
     }
   });
 });
