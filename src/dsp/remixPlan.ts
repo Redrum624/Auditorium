@@ -838,7 +838,15 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
       message: `targetSample must be a finite, positive sample count (got ${options.targetSample})`,
     };
   }
-  if (analysis.confidence < CONFIDENCE_LOW) {
+  // The tempo gate takes EITHER a confident detection OR an explicit user
+  // assertion (`tempoConfirmed`, T14 fix round 1). The two are different
+  // facts, and the second is strictly stronger: a human who typed the BPM or
+  // corrected the octave knows something the ACF does not. Carrying the
+  // assertion as its own flag — rather than writing a threshold constant into
+  // `confidence` — is what keeps `confidence` a MEASUREMENT for every other
+  // consumer (the status bar's uncertainty marker, the Properties readout) on
+  // a track whose detection really is weak.
+  if (analysis.confidence < CONFIDENCE_LOW && !analysis.tempoConfirmed) {
     return {
       ok: false,
       reason: 'no-tempo',

@@ -471,6 +471,20 @@ export interface RemixAnalysis extends TempoAnalysis {
    * user-facing correction is the `<` `>` shift control (T13/T14), not a
    * confidence check. */
   downbeatConfidence: number;
+  /** NOT a measurement, and NEVER derived from `confidence`: a human's
+   * explicit assertion that this grid's tempo is right — set when the user
+   * types a BPM, presses x2 / /2, or ticks the confirmation in the Auto-Remix
+   * dialog (T14). Nothing in this module ever sets it; it is stamped on by
+   * the UI and carried through re-derives.
+   *
+   * It exists because "the detector is confident" and "a human asserted this
+   * tempo" are DIFFERENT facts and the second is strictly stronger. The
+   * planner's tempo gate accepts either (`remixPlan.ts`), so an assertion can
+   * open a gate a weak detection closed — WITHOUT overwriting `confidence`,
+   * which stays exactly as measured so the status bar's uncertainty marker
+   * and the Properties readout keep telling the truth about the detection on
+   * a document the user may go on to use for something else. */
+  tempoConfirmed?: boolean;
 
   /** `numBars+1` REFINED, drift-following beat samples -- never an
    * extrapolated isochronous grid. KNOWN LIMITATION, flagged not fixed

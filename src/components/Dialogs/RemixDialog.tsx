@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useAppStore } from '../../stores/appStore';
 import { parseTime } from '../../utils/timeFormat';
-import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 import { DEFAULT_REMIX_WEIGHTS } from '../../dsp/remixCost';
 import { deriveRemixFeatures, type RemixAnalysis } from '../../dsp/remixFeatures';
 import {
@@ -207,17 +206,17 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
     [strict]
   );
 
-  // A tempo the USER asserted clears the planner's own confidence gate
-  // (`remixPlan.ts`: `confidence < CONFIDENCE_LOW -> 'no-tempo'`). That gate
-  // measures how strongly the ACF backed the detected period; once the user
-  // has confirmed or typed the tempo, that measurement is no longer what
-  // decides whether a remix may be planned — which is exactly what the plan's
-  // own "Enter a BPM manually to continue" instruction promises. Raised to the
-  // threshold, never above it.
+  // A tempo the USER asserted opens the planner's tempo gate through its own
+  // flag (`remixPlan.ts`: `confidence < CONFIDENCE_LOW && !tempoConfirmed ->
+  // 'no-tempo'`) — which is what the plan's own "Enter a BPM manually to
+  // continue" instruction promises. `confidence` is a MEASUREMENT and is
+  // never touched here: overwriting it would silence the status bar's
+  // uncertainty marker (T5) app-wide on a document whose detection really is
+  // weak, and would disguise a human assertion as a DSP result.
   const effectiveAnalysis = useMemo(() => {
     if (!analysis) return null;
-    if (!tempoConfirmed || analysis.confidence >= CONFIDENCE_LOW) return analysis;
-    return { ...analysis, confidence: CONFIDENCE_LOW };
+    if (!tempoConfirmed || analysis.tempoConfirmed) return analysis;
+    return { ...analysis, tempoConfirmed: true };
   }, [analysis, tempoConfirmed]);
 
   const plan: PlanRemixResult | null = useMemo(() => {
@@ -288,13 +287,18 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
   }
 
   /** Adopts a re-derived analysis and publishes it to the shared cache, so
-   * `createRemixDocument` plans against exactly what is on screen. */
+   * `createRemixDocument` plans against exactly what is on screen. The user's
+   * tempo assertion is carried ON the analysis, so it survives both the
+   * write-back and a later `regridTempo` re-derive (an octave correction IS an
+   * assertion, so it sets the flag rather than clearing it). */
   function publish(next: RemixAnalysis, tempoAsserted: boolean): void {
-    setAnalysis(next);
+    const confirmed = tempoAsserted || tempoConfirmed;
+    const stamped = confirmed ? { ...next, tempoConfirmed: true } : next;
+    setAnalysis(stamped);
     setError(null);
     const live = liveDoc();
-    if (live && live.id === docId) setRemixAnalysis(live, next);
-    if (next.bpm !== null) setBpmDraft(next.bpm.toFixed(1));
+    if (live && live.id === docId) setRemixAnalysis(live, stamped);
+    if (stamped.bpm !== null) setBpmDraft(stamped.bpm.toFixed(1));
     if (tempoAsserted) setTempoConfirmed(true);
   }
 

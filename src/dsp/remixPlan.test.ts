@@ -558,6 +558,28 @@ describe('planRemix -- refusals (acceptance 4)', () => {
     }
   });
 
+  it('tempoConfirmed opens the gate a low confidence closed, WITHOUT altering the measurement', () => {
+    const a = makeUniformAnalysis({ numBars: 40, confidence: 0.2 });
+    a.cluster = Int32Array.from({ length: 41 }, () => 0);
+    a.transitionSeen = new Set(['0>0']);
+
+    const refused = planRemix(a, baseOptions({ targetSample: a.analyzedEndSample }));
+    expectFail(refused);
+    expect(refused.reason).toBe('no-tempo');
+
+    // The user asserted the tempo. That is a DIFFERENT fact from "the detector
+    // is confident", it is strictly stronger, and it rides its own flag --
+    // `confidence` stays exactly as measured, so every other consumer (the
+    // status bar's uncertainty marker, the Properties readout) keeps telling
+    // the truth about the detection.
+    const confirmed: RemixAnalysis = { ...a, tempoConfirmed: true };
+    const result = planRemix(confirmed, baseOptions({ targetSample: confirmed.analyzedEndSample }));
+
+    expect(result.ok).toBe(true);
+    expect(confirmed.confidence).toBe(0.2);
+    expect(confirmed.confidence).toBeLessThan(CONFIDENCE_LOW);
+  });
+
   it('every candidate rejected AND Nmax < M (maxRepeatFactor < 1) -> no-path', () => {
     // Fix round 1 (Plan Ruling 6): Nmax is now sized from M and
     // maxRepeatFactor ALONE, independently of the target -- so, unlike

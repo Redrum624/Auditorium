@@ -105,12 +105,12 @@ const MIN_OUT = 2 * BAR; // 0:04
 const MAX_OUT = 24 * BAR; // 0:48
 
 /** Faithful stand-in for the real planner: it reproduces `planRemix`'s own
- * `confidence < CONFIDENCE_LOW -> 'no-tempo'` refusal (remixPlan.ts:841) and
- * otherwise bar-quantises the requested target, so a test that expects Create
- * to become reachable on a low-confidence track has to prove the dialog
- * actually handed the planner a tempo the user asserted. */
+ * `confidence < CONFIDENCE_LOW && !tempoConfirmed -> 'no-tempo'` refusal
+ * (remixPlan.ts) and otherwise bar-quantises the requested target, so a test
+ * that expects Create to become reachable on a low-confidence track has to
+ * prove the dialog actually handed the planner a tempo the user asserted. */
 function defaultPlan(analysis: RemixAnalysis, options: PlanRemixOptions): PlanRemixResult {
-  if (analysis.confidence < CONFIDENCE_LOW) {
+  if (analysis.confidence < CONFIDENCE_LOW && !analysis.tempoConfirmed) {
     return {
       ok: false,
       reason: 'no-tempo',
@@ -278,6 +278,38 @@ describe('RemixDialog', () => {
     expect(mockRegridTempo).toHaveBeenCalledWith(doc.id, 40 * (120 / 128));
     expect(screen.queryByTestId('remix-hint')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Create Remix' })).toBeEnabled();
+
+    // The typed BPM is an ASSERTION, not a measurement: it opens the planner's
+    // gate through its own flag and leaves `confidence` at what the detector
+    // actually measured.
+    const planned = mockPlanRemix.mock.calls[mockPlanRemix.mock.calls.length - 1][0];
+    expect(planned.tempoConfirmed).toBe(true);
+    expect(planned.confidence).toBe(0.19);
+  });
+
+  it('5b. a confirmed low-confidence track keeps its MEASURED confidence everywhere', async () => {
+    seedDoc();
+    await renderReady(makeAnalysis({ confidence: 0.19 }));
+
+    expect(screen.getByRole('button', { name: 'Create Remix' })).toBeDisabled();
+    fireEvent.click(screen.getByTestId('remix-tempo-confirmed'));
+    expect(screen.getByRole('button', { name: 'Create Remix' })).toBeEnabled();
+
+    const planned = mockPlanRemix.mock.calls[mockPlanRemix.mock.calls.length - 1][0];
+    expect(planned.tempoConfirmed).toBe(true);
+    expect(planned.confidence).toBe(0.19);
+    expect(planned.confidence).toBeLessThan(CONFIDENCE_LOW);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Create Remix' }));
+    });
+
+    // Nothing synthesised reaches the SHARED cache either, so the status bar's
+    // uncertainty marker on this document stays honest.
+    const published = mockSetRemixAnalysis.mock.calls[0][1];
+    expect(published.tempoConfirmed).toBe(true);
+    expect(published.confidence).toBe(0.19);
+    expect(screen.getByTestId('remix-confidence')).toHaveTextContent('0.19');
   });
 
   it('6. time signature and downbeat re-derive the features only — never a second analysis', async () => {
