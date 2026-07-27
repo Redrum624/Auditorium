@@ -8,26 +8,34 @@ import {
   nudgeJoin,
   reRollRemix,
   resetRemix,
-  invalidateRemix,
+  invalidateRemixSession,
   clearAllRemix,
   getRemixVersion,
   useRemixVersion,
   MAX_LOCKED_JOINS,
+  _setPlanWorkerThresholdForTest,
 } from './remixService';
-import {
-  clearAllTempo,
-  clearAllRemix as clearAllRemixAnalysis,
-} from './tempoAnalysis';
+import { clearAllTempo, clearAllRemix as clearAllRemixAnalysis } from './tempoAnalysis';
 import { createDocument, docLength, replaceRegion, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { applyEdit } from './editOps';
 import { getHistory, undo, clearHistory } from './undoHistory';
+import { planRemix } from '../dsp/remixPlan';
 import {
   _setTempoWorkerError,
   _setTempoWorkerLoadFailure,
   _getTempoWorkerTerminateCount,
   _resetTempoWorkerTestState,
 } from '../__mocks__/createTempoWorkerMock';
+import {
+  _setRemixPlanWorkerError,
+  _setRemixPlanWorkerLoadFailure,
+  _getLastRemixPlanMessage,
+  _getRemixPlanWorkerCreateCount,
+  _getRemixPlanWorkerTerminateCount,
+  _getRemixPlanRequestCount,
+  _resetRemixPlanWorkerTestState,
+} from '../__mocks__/createRemixPlanWorkerMock';
 
 // ---------------------------------------------------------------------------
 // THE abab FIXTURE — copied verbatim (recipe, constants and all) from
@@ -138,10 +146,6 @@ function liveDoc(docId: string): AudioDocument {
   return doc;
 }
 
-function findDoc(docId: string): AudioDocument | undefined {
-  return useAppStore.getState().documents.find((d) => d.id === docId);
-}
-
 function markersOf(docId: string) {
   return useAppStore.getState().markers[docId] ?? [];
 }
@@ -154,8 +158,7 @@ function installShowMessageBox(): jest.Mock {
   return showMessageBox;
 }
 
-/** Every created document id, so each test can drop its undo histories —
- * `clearHistory` is keyed by docId and ids are globally unique (the counters
+/** `clearHistory` is keyed by docId and ids are globally unique (the counters
  * never reset), so this is belt-and-braces isolation, not a correctness
  * requirement. */
 function clearAllHistories(): void {
@@ -169,12 +172,22 @@ beforeEach(() => {
   clearAllRemixAnalysis();
   clearAllRemix();
   _resetTempoWorkerTestState();
+  _resetRemixPlanWorkerTestState();
+  _setPlanWorkerThresholdForTest(null);
   installShowMessageBox();
 });
 
 afterEach(() => {
+  _setPlanWorkerThresholdForTest(null);
   delete (window as { electronAPI?: unknown }).electronAPI;
 });
+
+async function seedSession(targetSample = TARGET_1_JOIN, channelCount: 1 | 2 = 1) {
+  const source = seedSource(channelCount);
+  const result = await createRemixDocument({ sourceDocId: source.id, targetSample });
+  if (!result.ok) throw new Error(`seedSession: plan failed (${result.status}: ${result.message})`);
+  return { source, remixDocId: result.remixDocId, plan: result.plan };
+}
 
 // ---------------------------------------------------------------------------
 // 1-2. Creation
@@ -221,6 +234,11 @@ describe('createRemixDocument — document creation (acceptance 1, 2)', () => {
     expect(liveSource.channels[0]).toBe(srcCh0);
     expect(liveSource.channels[1]).toBe(srcCh1);
     expect(liveSource.dirty).toBe(false);
+
+    // 32 bars is far below MAX_DP_CELLS, so this session plans on the main
+    // thread and no worker was ever created.
+    expect(getRemixSession(result.remixDocId)!.plansInWorker).toBe(false);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
   }, 15000);
 
   it('(2) pushes NO undo entry for the creation — the remix doc has an empty history and the source history is unchanged', async () => {
@@ -260,7 +278,7 @@ describe('createRemixDocument — document creation (acceptance 1, 2)', () => {
     expect(result.plan.joins).toEqual([]);
     expect(result.plan.canReroll).toBe(false);
     expect(markersOf(result.remixDocId)).toEqual([]);
-    expect(reRollRemix(result.remixDocId)).toBeNull();
+    expect(await reRollRemix(result.remixDocId)).toBeNull();
     // No re-roll happened, so no undo entry was pushed either.
     expect(getHistory(result.remixDocId).done).toEqual([]);
   }, 15000);
@@ -271,20 +289,13 @@ describe('createRemixDocument — document creation (acceptance 1, 2)', () => {
 // ---------------------------------------------------------------------------
 
 describe('adjustments (acceptance 3, 4, 5, 6)', () => {
-  async function seedSession(targetSample = TARGET_1_JOIN) {
-    const source = seedSource(1);
-    const result = await createRemixDocument({ sourceDocId: source.id, targetSample });
-    if (!result.ok) throw new Error(`seedSession: plan failed (${result.status}: ${result.message})`);
-    return { source, remixDocId: result.remixDocId, plan: result.plan };
-  }
-
   it('(3) rejectJoin never lets the rejected (from,to) come back, rewrites the document, and pushes exactly TWO entries: "Remix" then "Remix Markers"', async () => {
     const { remixDocId, plan } = await seedSession();
     const rejected = plan.joins[0];
     const key = `${rejected.fromBar}>${rejected.toBar}`;
     const channelsBefore = liveDoc(remixDocId).channels;
 
-    const next = rejectJoin(remixDocId, key);
+    const next = await rejectJoin(remixDocId, key);
 
     expect(next).not.toBeNull();
     expect(next!.ok).toBe(true);
@@ -302,13 +313,30 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     // A second rejection also holds — BOTH keys stay gone.
     const second = next!.joins[0];
     const key2 = `${second.fromBar}>${second.toBar}`;
-    const third = rejectJoin(remixDocId, key2);
+    const third = await rejectJoin(remixDocId, key2);
     expect(third).not.toBeNull();
     expect(third!.ok).toBe(true);
     if (!third!.ok) return;
     const keys = third!.joins.map((j) => `${j.fromBar}>${j.toBar}`);
     expect(keys).not.toContain(key);
     expect(keys).not.toContain(key2);
+  }, 15000);
+
+  it('(3, corner) the two-entry count is CONDITIONAL: with markEditPoints:false an adjustment pushes exactly ONE entry', async () => {
+    const source = seedSource(1);
+    const result = await createRemixDocument({
+      sourceDocId: source.id,
+      targetSample: TARGET_1_JOIN,
+      markEditPoints: false,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(markersOf(result.remixDocId)).toEqual([]);
+
+    const key = `${result.plan.joins[0].fromBar}>${result.plan.joins[0].toBar}`;
+    await rejectJoin(result.remixDocId, key);
+
+    expect(getHistory(result.remixDocId).done).toEqual(['Remix']);
   }, 15000);
 
   it('(4) undo() TWICE restores the previous arrangement AND its markers; undo() ONCE restores only the markers (the two-press behaviour, documented not hidden)', async () => {
@@ -318,7 +346,7 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     const markersBefore = markersOf(remixDocId);
     expect(markersBefore.length).toBe(plan.joins.length);
 
-    rejectJoin(remixDocId, `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`);
+    await rejectJoin(remixDocId, `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`);
     const markersAfter = markersOf(remixDocId);
 
     // ONE press: only the 'Remix Markers' entry comes off. The audio is still
@@ -343,7 +371,7 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     const key = `${join.fromBar}>${join.toBar}`;
     const barsBefore = emittedBars(plan.segments, getRemixSession(remixDocId)!.analysis.barBoundary);
 
-    const next = nudgeJoin(remixDocId, key, +1);
+    const next = await nudgeJoin(remixDocId, key, +1);
 
     expect(next).not.toBeNull();
     expect(next!.ok).toBe(true);
@@ -378,7 +406,7 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(docLength(liveDoc(remixDocId))).toBe(next!.outputSample);
 
     // -1 walks it straight back to where it started.
-    const back = nudgeJoin(remixDocId, `${next!.joins[0].fromBar}>${next!.joins[0].toBar}`, -1);
+    const back = await nudgeJoin(remixDocId, `${next!.joins[0].fromBar}>${next!.joins[0].toBar}`, -1);
     expect(back).not.toBeNull();
     expect(back!.ok).toBe(true);
     if (!back!.ok) return;
@@ -392,7 +420,7 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     let key = `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`;
     // phraseBars defaults to 8, so 4 nudges are legal and the 5th is not.
     for (let i = 0; i < 4; i++) {
-      const step = nudgeJoin(remixDocId, key, +1);
+      const step = await nudgeJoin(remixDocId, key, +1);
       expect(step).not.toBeNull();
       const s = getRemixSession(remixDocId)!;
       key = `${s.plan.joins[0].fromBar}>${s.plan.joins[0].toBar}`;
@@ -400,15 +428,15 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     const channelsBefore = liveDoc(remixDocId).channels;
     const historyBefore = getHistory(remixDocId).done.length;
 
-    expect(nudgeJoin(remixDocId, key, +1)).toBeNull();
+    expect(await nudgeJoin(remixDocId, key, +1)).toBeNull();
 
     expect(liveDoc(remixDocId).channels).toBe(channelsBefore);
     expect(getHistory(remixDocId).done.length).toBe(historyBefore);
   }, 15000);
 
-  it('(6) reRollRemix produces a DIFFERENT joins array whose length stays inside the planner\'s own tolerance window, and is deterministic across two identically-seeded sessions', async () => {
+  it("(6) reRollRemix produces a DIFFERENT joins array whose length stays inside the planner's own tolerance window, and is deterministic across two identically-seeded sessions", async () => {
     const a = await seedSession();
-    const rolledA = reRollRemix(a.remixDocId);
+    const rolledA = await reRollRemix(a.remixDocId);
 
     expect(rolledA).not.toBeNull();
     expect(rolledA!.ok).toBe(true);
@@ -426,7 +454,7 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     // DETERMINISM: a second, independently-created session over the same
     // audio and options re-rolls to a byte-identical plan.
     const b = await seedSession();
-    const rolledB = reRollRemix(b.remixDocId);
+    const rolledB = await reRollRemix(b.remixDocId);
     expect(rolledB).not.toBeNull();
     expect(rolledB!.ok).toBe(true);
     if (!rolledB!.ok) return;
@@ -435,13 +463,59 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(rolledB!.segments).toEqual(rolledA!.segments);
   }, 15000);
 
+  // EVIDENCE LIMIT, stated rather than implied (see the task report): this
+  // asserts the CONSISTENCY of `session.rollIndex` with the plan on screen,
+  // and it is NOT a mutation-discriminating test of "used vs requested".
+  // Measured on this fixture (7 roll indices x 4 targets): no join ever
+  // recurs at a later roll, so `planWithLocks`'s recovery sweep never
+  // improves on its base plan here and `rollIndexUsed === rollIndex` always.
+  // Reverting the fix to record the REQUESTED index therefore still passes
+  // this test — verified. Producing a divergence needs material where a
+  // penalised join is still the cheapest option, which the abab fixture's
+  // rich candidate pool never yields.
+  it('(6, roll index) the session records the roll index the plan ACTUALLY came from, so consecutive presses can never re-serve the arrangement already on screen', async () => {
+    const { remixDocId, plan } = await seedSession(TARGET_2_JOINS);
+    const session = getRemixSession(remixDocId)!;
+    // A lock makes planWithLocks sweep rollIndex+1..+3, which is exactly when
+    // the requested index and the used index can diverge.
+    toggleLockJoin(remixDocId, `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`);
+
+    const first = await reRollRemix(remixDocId);
+    expect(first).not.toBeNull();
+    expect(first!.ok).toBe(true);
+    if (!first!.ok) return;
+    const usedFirst = session.rollIndex;
+    expect(usedFirst).toBeGreaterThanOrEqual(1);
+
+    // The recorded index really is the one that produced this plan: replaying
+    // planRemix at exactly that index reproduces it.
+    const replay = planRemix(session.analysis, {
+      targetSample: session.options.targetSample,
+      weights: session.options.weights,
+      phraseBars: session.options.phraseBars,
+      strict: session.options.strict,
+      allowRepeats: session.options.allowRepeats,
+      maxRepeatFactor: session.options.maxRepeatFactor,
+      exactLength: session.options.exactLength,
+      forbiddenJoins: session.rejectedJoins,
+      rollIndex: usedFirst,
+    });
+    expect(replay.ok).toBe(true);
+    if (!replay.ok) return;
+    expect(replay.joins).toEqual(first!.joins);
+
+    const second = await reRollRemix(remixDocId);
+    expect(second).not.toBeNull();
+    expect(session.rollIndex).toBeGreaterThan(usedFirst);
+  }, 15000);
+
   it('(reset) resetRemix drops rejections, locks and rolls and returns the original automatic plan', async () => {
     const { remixDocId, plan } = await seedSession();
     const key = `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`;
-    rejectJoin(remixDocId, key);
-    reRollRemix(remixDocId);
+    await rejectJoin(remixDocId, key);
+    await reRollRemix(remixDocId);
 
-    const reset = resetRemix(remixDocId);
+    const reset = await resetRemix(remixDocId);
 
     expect(reset).not.toBeNull();
     expect(reset!.ok).toBe(true);
@@ -454,12 +528,12 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(session.rollIndex).toBe(0);
   }, 15000);
 
-  it('(lock) toggleLockJoin records and clears a lock, caps at MAX_LOCKED_JOINS, and never rewrites the audio on its own', async () => {
+  it('(lock) toggleLockJoin returns a DISCRIMINATED result, caps at MAX_LOCKED_JOINS, and never rewrites the audio on its own', async () => {
     const { remixDocId, plan } = await seedSession(TARGET_2_JOINS);
     const key = `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`;
     const channelsBefore = liveDoc(remixDocId).channels;
 
-    expect(toggleLockJoin(remixDocId, key)).toBe(true);
+    expect(toggleLockJoin(remixDocId, key)).toEqual({ ok: true, locked: true, lockedJoins: [key] });
     expect(getRemixSession(remixDocId)!.lockedJoins).toEqual([key]);
     // A lock changes nothing about the CURRENT arrangement, so it must not
     // push an undo entry or re-render (see the task report: the plan lists
@@ -467,22 +541,23 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(liveDoc(remixDocId).channels).toBe(channelsBefore);
     expect(getHistory(remixDocId).done).toEqual([]);
 
-    expect(toggleLockJoin(remixDocId, key)).toBe(false);
+    expect(toggleLockJoin(remixDocId, key)).toEqual({ ok: true, locked: false, lockedJoins: [] });
     expect(getRemixSession(remixDocId)!.lockedJoins).toEqual([]);
 
-    // Unknown join -> refused.
-    expect(toggleLockJoin(remixDocId, '999>998')).toBeNull();
+    // Each refusal is distinguishable — the panel must be able to say "you
+    // already have 8 pins" rather than failing silently.
+    expect(toggleLockJoin(remixDocId, '999>998')).toEqual({ ok: false, reason: 'unknown-join' });
+    expect(toggleLockJoin('doc-not-a-remix', key)).toEqual({ ok: false, reason: 'no-session' });
 
-    // The cap is enforced by the SERVICE, not only by the panel.
     const session = getRemixSession(remixDocId)!;
     for (let i = 0; i < MAX_LOCKED_JOINS; i++) session.lockedJoins.push(`${100 + i}>${200 + i}`);
-    expect(toggleLockJoin(remixDocId, key)).toBeNull();
+    expect(toggleLockJoin(remixDocId, key)).toEqual({ ok: false, reason: 'limit-reached' });
   }, 15000);
 
   it('(update) updateRemixSession re-plans on a target change and only re-renders on a crossfade change', async () => {
     const { remixDocId, plan } = await seedSession();
 
-    const longer = updateRemixSession(remixDocId, { targetSample: TARGET_2_JOINS });
+    const longer = await updateRemixSession(remixDocId, { targetSample: TARGET_2_JOINS });
     expect(longer).not.toBeNull();
     expect(longer!.ok).toBe(true);
     if (!longer!.ok) return;
@@ -490,7 +565,7 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(docLength(liveDoc(remixDocId))).toBe(longer!.outputSample);
 
     const joinsBefore = getRemixSession(remixDocId)!.plan.joins;
-    const faded = updateRemixSession(remixDocId, { crossfadeMs: 60 });
+    const faded = await updateRemixSession(remixDocId, { crossfadeMs: 60 });
     expect(faded).not.toBeNull();
     expect(faded!.ok).toBe(true);
     if (!faded!.ok) return;
@@ -500,12 +575,38 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(getRemixSession(remixDocId)!.options.crossfadeMs).toBe(60);
   }, 15000);
 
+  it("(update, weights identity) a VALUE-IDENTICAL weights object must NOT force a re-plan — it would silently discard the user's nudges", async () => {
+    const { remixDocId, plan } = await seedSession();
+    const key = `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`;
+    const nudged = await nudgeJoin(remixDocId, key, +1);
+    expect(nudged).not.toBeNull();
+    expect(getRemixSession(remixDocId)!.manual).toBe(true);
+    const manualJoins = getRemixSession(remixDocId)!.plan.joins;
+
+    // Exactly what a React render produces: a fresh object carrying the same
+    // seven numbers. Reference-comparing it (Object.is) would re-plan.
+    const copied = { ...getRemixSession(remixDocId)!.options.weights };
+    const after = await updateRemixSession(remixDocId, { crossfadeMs: 40, weights: copied });
+
+    expect(after).not.toBeNull();
+    expect(after!.ok).toBe(true);
+    if (!after!.ok) return;
+    expect(getRemixSession(remixDocId)!.manual).toBe(true);
+    expect(after!.joins).toEqual(manualJoins);
+
+    // A genuinely DIFFERENT weights object still re-plans.
+    const changed = { ...copied, chroma: copied.chroma + 1 };
+    const replanned = await updateRemixSession(remixDocId, { weights: changed });
+    expect(replanned).not.toBeNull();
+    expect(getRemixSession(remixDocId)!.manual).toBe(false);
+  }, 15000);
+
   it('(update, atomicity) an unreachable target is refused with the reachable bounds and leaves BOTH the options and the document untouched', async () => {
     const { remixDocId, plan } = await seedSession();
     const channelsBefore = liveDoc(remixDocId).channels;
     const historyBefore = getHistory(remixDocId).done.length;
 
-    const refused = updateRemixSession(remixDocId, { targetSample: Math.round(600 * SR) });
+    const refused = await updateRemixSession(remixDocId, { targetSample: Math.round(600 * SR) });
 
     expect(refused).not.toBeNull();
     expect(refused!.ok).toBe(false);
@@ -539,12 +640,12 @@ describe('session staleness (acceptance 7)', () => {
     applyEdit('Silence', source.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
 
     expect(getRemixSession(remixDocId)!.stale).toBe(true);
-    expect(rejectJoin(remixDocId, key)).toBeNull();
-    expect(nudgeJoin(remixDocId, key, +1)).toBeNull();
-    expect(reRollRemix(remixDocId)).toBeNull();
-    expect(resetRemix(remixDocId)).toBeNull();
-    expect(toggleLockJoin(remixDocId, key)).toBeNull();
-    expect(updateRemixSession(remixDocId, { crossfadeMs: 60 })).toBeNull();
+    expect(await rejectJoin(remixDocId, key)).toBeNull();
+    expect(await nudgeJoin(remixDocId, key, +1)).toBeNull();
+    expect(await reRollRemix(remixDocId)).toBeNull();
+    expect(await resetRemix(remixDocId)).toBeNull();
+    expect(toggleLockJoin(remixDocId, key)).toEqual({ ok: false, reason: 'stale' });
+    expect(await updateRemixSession(remixDocId, { crossfadeMs: 60 })).toBeNull();
 
     // The remix audio is unaffected — we never silently re-render from
     // different audio.
@@ -561,7 +662,27 @@ describe('session staleness (acceptance 7)', () => {
     useAppStore.getState().closeDocument(source.id);
 
     expect(getRemixSession(result.remixDocId)!.stale).toBe(true);
-    expect(reRollRemix(result.remixDocId)).toBeNull();
+    expect(await reRollRemix(result.remixDocId)).toBeNull();
+  }, 15000);
+
+  it('(7, race) a source edit that lands WHILE a worker plan is in flight is caught at COMMIT time — the remix audio never changes', async () => {
+    _setPlanWorkerThresholdForTest(0); // force the worker route
+    const { source, remixDocId, plan } = await seedSession();
+    expect(plan.joins.length).toBeGreaterThan(0);
+    const channelsBefore = liveDoc(remixDocId).channels;
+    const historyBefore = getHistory(remixDocId).done.length;
+
+    // Start the re-plan, THEN edit the source before the reply is delivered.
+    const pending = reRollRemix(remixDocId);
+    applyEdit('Silence', source.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
+    const result = await pending;
+
+    // The plan itself may well have succeeded — the point is that the audio
+    // was never rewritten against a source that no longer matches.
+    expect(result === null || result.ok === true).toBe(true);
+    expect(liveDoc(remixDocId).channels).toBe(channelsBefore);
+    expect(getHistory(remixDocId).done.length).toBe(historyBefore);
+    expect(getRemixSession(remixDocId)!.stale).toBe(true);
   }, 15000);
 });
 
@@ -570,7 +691,7 @@ describe('session staleness (acceptance 7)', () => {
 // ---------------------------------------------------------------------------
 
 describe('failure paths (acceptance 8, 9, 10)', () => {
-  it('(8) an in-band worker error resolves {ok:false}, surfaces ONE dialog, terminates the worker and creates NO document', async () => {
+  it('(8) an in-band ANALYSIS worker error resolves {ok:false}, surfaces ONE dialog, terminates the worker and creates NO document', async () => {
     const showMessageBox = installShowMessageBox();
     _setTempoWorkerError('boom');
     const source = seedSource(1);
@@ -590,7 +711,7 @@ describe('failure paths (acceptance 8, 9, 10)', () => {
     expect(useAppStore.getState().documents.length).toBe(before);
   }, 15000);
 
-  it('(9) a worker LOAD failure (the onerror path) does the same', async () => {
+  it('(9) an ANALYSIS worker LOAD failure (the onerror path) does the same', async () => {
     const showMessageBox = installShowMessageBox();
     _setTempoWorkerLoadFailure('nope');
     const source = seedSource(1);
@@ -639,17 +760,176 @@ describe('failure paths (acceptance 8, 9, 10)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// The session-scoped plan worker (fix round 1)
+// ---------------------------------------------------------------------------
+
+describe('session-scoped plan worker', () => {
+  it('routes planning to ONE worker above the MAX_DP_CELLS threshold, posts the analysis exactly once, and sends only small plan requests afterwards', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const { remixDocId, plan } = await seedSession();
+
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(true);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(1);
+    expect(_getRemixPlanRequestCount()).toBe(1);
+
+    await rejectJoin(remixDocId, `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`);
+    await reRollRemix(remixDocId);
+
+    // Still ONE worker, and every adjustment was a SMALL message — the
+    // ~1.7 MB analysis clone was paid once, at session creation.
+    expect(_getRemixPlanWorkerCreateCount()).toBe(1);
+    const last = _getLastRemixPlanMessage();
+    expect(last).not.toBeNull();
+    expect(last!.type).toBe('plan');
+    if (last!.type !== 'plan') return;
+    expect(Object.keys(last!.options)).not.toContain('analysis');
+    expect(_getRemixPlanRequestCount()).toBeGreaterThan(1);
+  }, 15000);
+
+  it('stays on the MAIN THREAD below the threshold — no worker is ever created', async () => {
+    const { remixDocId, plan } = await seedSession();
+
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(false);
+    await reRollRemix(remixDocId);
+    await rejectJoin(remixDocId, `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`);
+
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
+    expect(_getRemixPlanRequestCount()).toBe(0);
+  }, 15000);
+
+  it('terminates the worker on invalidateRemixSession and on clearAllRemix', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const a = await seedSession();
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(0);
+
+    invalidateRemixSession(a.remixDocId);
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+    expect(getRemixSession(a.remixDocId)).toBeNull();
+
+    const b = await seedSession();
+    clearAllRemix();
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(2);
+    expect(getRemixSession(b.remixDocId)).toBeNull();
+  }, 20000);
+
+  it('terminates the worker when the SOURCE document is invalidated, not just the remix document', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const { source, remixDocId } = await seedSession();
+
+    invalidateRemixSession(source.id);
+
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+    expect(getRemixSession(remixDocId)).toBeNull();
+  }, 15000);
+
+  it('an in-band plan-worker error at CREATION resolves {ok:false, status:"plan-failed"}, shows a dialog, terminates the worker and creates NO document', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const showMessageBox = installShowMessageBox();
+    _setRemixPlanWorkerError('kaput');
+    const source = seedSource(1);
+    const before = useAppStore.getState().documents.length;
+
+    const result = await createRemixDocument({ sourceDocId: source.id, targetSample: TARGET_1_JOIN });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('plan-failed');
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Remix planning failed', message: 'kaput' })
+    );
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+    expect(useAppStore.getState().documents.length).toBe(before);
+  }, 15000);
+
+  it('a plan-worker LOAD failure (onerror) resolves too — the promise never hangs', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const showMessageBox = installShowMessageBox();
+    _setRemixPlanWorkerLoadFailure('chunk missing');
+    const source = seedSource(1);
+    const before = useAppStore.getState().documents.length;
+
+    const result = await createRemixDocument({ sourceDocId: source.id, targetSample: TARGET_1_JOIN });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('plan-failed');
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Remix planning failed', message: 'chunk missing' })
+    );
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+    expect(useAppStore.getState().documents.length).toBe(before);
+  }, 15000);
+
+  it('a plan-worker failure DURING an adjustment resolves null and leaves the document untouched — no fall-back freeze', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const { remixDocId } = await seedSession();
+    const channelsBefore = liveDoc(remixDocId).channels;
+    const historyBefore = getHistory(remixDocId).done.length;
+    const showMessageBox = installShowMessageBox();
+    _setRemixPlanWorkerError('later');
+
+    const result = await reRollRemix(remixDocId);
+
+    expect(result).toBeNull();
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Remix planning failed', message: 'later' })
+    );
+    expect(liveDoc(remixDocId).channels).toBe(channelsBefore);
+    expect(getHistory(remixDocId).done.length).toBe(historyBefore);
+  }, 15000);
+
+  it("drops the reply to a SUPERSEDED request rather than committing an out-of-date arrangement, and the loser never clobbers the winner's options", async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const { remixDocId } = await seedSession();
+
+    const first = updateRemixSession(remixDocId, { targetSample: TARGET_2_JOINS });
+    const second = updateRemixSession(remixDocId, { targetSample: TARGET_0_JOINS });
+    const [r1, r2] = await Promise.all([first, second]);
+
+    expect(r1).toBeNull(); // superseded — never committed
+    expect(r2).not.toBeNull();
+    expect(r2!.ok).toBe(true);
+    if (!r2!.ok) return;
+    expect(getRemixSession(remixDocId)!.options.targetSample).toBe(TARGET_0_JOINS);
+    expect(docLength(liveDoc(remixDocId))).toBe(r2!.outputSample);
+  }, 20000);
+
+  it('memoises rolls within one option/rejection signature, so a repeated plan never reaches the worker again', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const { remixDocId } = await seedSession();
+    expect(_getRemixPlanRequestCount()).toBe(1); // rollIndex 0, at creation
+
+    // rollIndex 0 again — served entirely from the memo.
+    await resetRemix(remixDocId);
+    expect(_getRemixPlanRequestCount()).toBe(1);
+
+    await reRollRemix(remixDocId); // rollIndex 1 — a genuine miss
+    const afterRoll = _getRemixPlanRequestCount();
+    expect(afterRoll).toBeGreaterThan(1);
+
+    await resetRemix(remixDocId); // back to rollIndex 0 — memo hit
+    expect(_getRemixPlanRequestCount()).toBe(afterRoll);
+    await reRollRemix(remixDocId); // rollIndex 1 again — memo hit
+    expect(_getRemixPlanRequestCount()).toBe(afterRoll);
+
+    // A different signature (new target) invalidates the memo, as it must.
+    await updateRemixSession(remixDocId, { targetSample: TARGET_2_JOINS });
+    expect(_getRemixPlanRequestCount()).toBeGreaterThan(afterRoll);
+  }, 20000);
+});
+
+// ---------------------------------------------------------------------------
 // Session lifecycle + reactivity
 // ---------------------------------------------------------------------------
 
 describe('session lifecycle and reactivity', () => {
-  it('invalidateRemix clears the session for the REMIX doc id AND for the SOURCE doc id', async () => {
+  it('invalidateRemixSession clears the session for the REMIX doc id AND for the SOURCE doc id', async () => {
     const s1 = seedSource(1);
     const r1 = await createRemixDocument({ sourceDocId: s1.id, targetSample: TARGET_1_JOIN });
     expect(r1.ok).toBe(true);
     if (!r1.ok) return;
 
-    invalidateRemix(r1.remixDocId);
+    invalidateRemixSession(r1.remixDocId);
     expect(getRemixSession(r1.remixDocId)).toBeNull();
 
     const r2 = await createRemixDocument({ sourceDocId: s1.id, targetSample: TARGET_1_JOIN });
@@ -657,7 +937,7 @@ describe('session lifecycle and reactivity', () => {
     if (!r2.ok) return;
     expect(getRemixSession(r2.remixDocId)).not.toBeNull();
 
-    invalidateRemix(s1.id); // the SOURCE closing must clear it too
+    invalidateRemixSession(s1.id); // the SOURCE closing must clear it too
     expect(getRemixSession(r2.remixDocId)).toBeNull();
   }, 15000);
 
@@ -699,6 +979,7 @@ describe('session lifecycle and reactivity', () => {
     const session = getRemixSession(result.remixDocId)!;
     expect(session.sourceDocId).toBe(source.id);
     expect(session.remixDocId).toBe(result.remixDocId);
+    expect(session.sourceName).toBe('Song.wav');
     expect(session.analysis.numBars).toBe(MEASURED_NUM_BARS);
     expect(session.joinSamples.length).toBe(session.plan.joins.length);
     for (const pos of session.joinSamples) {
@@ -706,7 +987,7 @@ describe('session lifecycle and reactivity', () => {
       expect(pos).toBeLessThanOrEqual(docLength(liveDoc(result.remixDocId)));
     }
     expect(getRemixSession('doc-not-a-remix')).toBeNull();
-    expect(rejectJoin('doc-not-a-remix', '1>2')).toBeNull();
+    expect(await rejectJoin('doc-not-a-remix', '1>2')).toBeNull();
   }, 15000);
 });
 

@@ -213,3 +213,67 @@ drive-letter checks already protect, so they're rejected outright rather than
 mapped back to a drive letter for containment.
 
 **Intended behavior:** No further work planned — this is complete.
+
+## A remix adjustment retains its own pre-edit snapshot; ~8 of them evict the oldest
+
+**Area:** Auto-Remix session (`src/services/remixService.ts`), undo history
+(`src/services/undoHistory.ts`)
+
+**v1.5 behavior:** Every remix adjustment (reject / nudge / re-roll / reset /
+target or crossfade change) rewrites the remix document through the single
+`applyEdit` write path, so each one pushes a `'Remix'` undo entry that retains
+that document's PRE-edit channel snapshot — about 105 MB for a 5-minute stereo
+remix. `MAX_UNDO_BYTES` is 800 MB per document, so roughly eight adjustments
+reach the budget and the oldest entries are evicted, always keeping at least
+one. Undo still works; it simply cannot reach arbitrarily far back on a long
+remix.
+
+This is intended, not a leak. The alternative — remixing the SOURCE document
+in place — is worse in exactly the same currency: `applyEdit` would then
+charge the whole SOURCE per entry, the A/B reference the user needs would be
+destroyed, and the eviction pressure would land on the file they actually care
+about. Producing a new document per remix (as Mix Down does, and as Audition's
+own Remix does) confines the cost to the derived artefact.
+
+**Intended behavior:** No further work planned — this is complete.
+
+## A remix adjustment costs TWO undo presses (sometimes one)
+
+**Area:** Auto-Remix session (`src/services/remixService.ts`)
+
+**v1.5 behavior:** An adjustment normally pushes two entries — `'Remix'` (the
+new arrangement) then `'Remix Markers'` (the fresh edit-point markers) — so
+stepping back one arrangement takes two Ctrl+Z presses. `applyEdit`'s marker
+remap can only DROP or SHIFT markers that already exist, never invent one, and
+every old join marker describes a splice the new arrangement no longer has;
+seeding the new ones therefore cannot ride inside the arrangement's own entry.
+Widening `applyEdit` to carry an explicit marker list was considered and
+rejected as an unjustified change to the app's single write path.
+
+The count is conditional, not fixed: an arrangement with no joins, or the
+"Mark edit points" option turned off, produces exactly ONE entry. Anything
+reading the history must read its actual length rather than assume two.
+
+**Intended behavior:** No further work planned — this is complete.
+
+## Remix planning is off-thread only above `MAX_DP_CELLS`
+
+**Area:** Auto-Remix planner routing (`src/services/remixService.ts`,
+`src/workers/remixPlan.worker.ts`)
+
+**v1.5 behavior:** The remix DP is ~O(bars²). Below `MAX_DP_CELLS` (250 000
+lattice cells) it runs on the main thread, where it is ~1 ms for a typical
+song; above it, each session spawns its own plan worker and the analysis is
+posted once and kept resident there, so adjustments stay responsive on long
+material (measured at the 600-second analysis cap: a single plan is ~300 ms
+and a lock-recovery sweep several seconds — off-thread instead of frozen).
+
+Two residual costs are accepted rather than engineered around. Each Re-roll
+press is dearer than the last, because `planRemix` re-derives every previous
+roll to stay deterministic and stateless; a per-session memo removes the
+REPEATED work across presses but not the cost of one cold roll. And a pinned
+("locked") join is a strong preference, not a guarantee — the planner has no
+"required joins" input, so the service retries a bounded number of later rolls
+and keeps whichever preserves the most pins.
+
+**Intended behavior:** No further work planned — this is complete.

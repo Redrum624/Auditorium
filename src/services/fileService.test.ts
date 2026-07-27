@@ -25,11 +25,7 @@ import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noise
 import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 import * as tempoAnalysis from './tempoAnalysis';
 import { runTempoAnalysis, getTempo, clearAllTempo } from './tempoAnalysis';
-import {
-  createRemixDocument,
-  getRemixSession,
-  clearAllRemix as clearAllRemixSessions,
-} from './remixService';
+import { createRemixDocument, getRemixSession, clearAllRemix as clearAllRemixSessions } from './remixService';
 
 // Decode is mocked so file-service tests never touch OfflineAudioContext/lamejs.
 // The MP3/FLAC encoders are mocked to spy on the format-faithful save routing

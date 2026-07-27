@@ -19,7 +19,8 @@ module.exports = {
         '^@breezystack/lamejs$': '<rootDir>/node_modules/@breezystack/lamejs/dist/lamejs.js',
         '^.+/createDspWorker$': '<rootDir>/src/__mocks__/createDspWorkerMock.ts',
         '^.+/createSpectrogramWorker$': '<rootDir>/src/__mocks__/createSpectrogramWorkerMock.ts',
-        '^.+/createTempoWorker$': '<rootDir>/src/__mocks__/createTempoWorkerMock.ts'
+        '^.+/createTempoWorker$': '<rootDir>/src/__mocks__/createTempoWorkerMock.ts',
+        '^.+/createRemixPlanWorker$': '<rootDir>/src/__mocks__/createRemixPlanWorkerMock.ts'
       },
       setupFilesAfterEnv: ['<rootDir>/src/setupTests.ts']
     },

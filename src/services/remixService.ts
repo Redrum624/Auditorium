@@ -12,9 +12,10 @@
  * ## The flow
  *
  * `getRemixAnalysis(source)` (from the shared cache) or `runRemixAnalysis` ->
- * `planRemix` -> `renderRemix` -> `createDocument` -> `addDocument` ->
- * `setView('waveform')` -> seed join markers. The creation half follows
- * `mixdownToNewFile` (`menuActions.ts:615-637`) VERBATIM, including
+ * `planRemix` (main thread or the session's plan worker, see below) ->
+ * `renderRemix` -> `createDocument` -> `addDocument` -> `setView('waveform')`
+ * -> seed join markers. The creation half follows `mixdownToNewFile`
+ * (`menuActions.ts:615-637`) VERBATIM, including
  * `nextId('remix').split('-')[1]` for the display number and the deliberate
  * absence of any undo entry — a brand-new document has no history, exactly as
  * Mix Down.
@@ -31,6 +32,12 @@
  * closed, clips within a track must not overlap — which centred crossfades
  * violate by construction — and `Clip` has no fade fields).
  *
+ * Each `'Remix'` undo entry still retains the REMIX document's own pre-edit
+ * snapshot (~105 MB for a 5-minute stereo remix), so roughly eight
+ * adjustments reach `MAX_UNDO_BYTES` and the oldest entries are evicted,
+ * always keeping at least one. That is correct, bounded behaviour rather than
+ * a leak, and is recorded in `docs/KNOWN_LIMITATIONS.md` as intended.
+ *
  * ## Adjustments rewrite the SAME remix document, in TWO undo entries
  *
  * Every re-render (reject / nudge / re-roll / reset / target or crossfade
@@ -44,9 +51,13 @@
  * unavoidable, because `applyEdit`'s remap can only drop or shift EXISTING
  * markers, never invent one (`editOps.ts:151-155`). Widening `applyEdit` to
  * carry an explicit marker list was considered and rejected as an
- * unjustified change to the single write path. Two Ctrl+Z presses therefore
- * step back one arrangement; the panel (T15) states this rather than hiding
- * it.
+ * unjustified change to the single write path.
+ *
+ * **The two-entry count is CONDITIONAL, not a contract** (fix round 1): the
+ * marker entry is pushed only when there is a marker change to record — a
+ * zero-join arrangement, or `markEditPoints: false`, produces exactly ONE
+ * entry (`'Remix'`). A consumer that wants to undo "one adjustment" must read
+ * the actual history length, never assume 2.
  *
  * ## Staleness is a HARD gate, never a silent re-render
  *
@@ -54,26 +65,64 @@
  * `peaksCache.ts:16-22` and `tempoAnalysis.ts` use — a mutator always
  * allocates fresh channel arrays). When they no longer match the live source
  * document, or the source was closed, `stale` flips and EVERY adjustment
- * becomes a no-op returning `null`. The remix audio is untouched; we never
- * re-render an arrangement from different audio than it was planned against.
+ * becomes a no-op returning `null`. The check runs BOTH at the top of every
+ * adjustment and again at commit time, after the plan await — a resident
+ * worker analysis must never become a way to plan against audio the live
+ * document no longer matches.
  *
- * ## Planning runs on the MAIN THREAD (deviation from the brief — reported)
+ * ## Planning: main thread below `MAX_DP_CELLS`, a SESSION-SCOPED worker above
  *
- * The brief specifies routing `planRemix` to the worker above
- * `(numBars+1)*(Nmax+1) > MAX_DP_CELLS` (`remixPlan.ts`). This module does
- * NOT: `tempo.worker.ts` has an `analyze`-only protocol (levels tempo /
- * remix / regrid) and T13's file list does not include it, and — more
- * importantly — a plan request would have to ship the WHOLE cached
- * `RemixAnalysis` (~1.5 MB of typed arrays) to the worker on EVERY
- * adjustment, which cannot be transferred (transferring would detach the
- * shared cache's own arrays) and so must be copied. Measured on this repo's
- * abab fixture (32 bars): the DP runs in **1 ms**, against ~630 ms for the
- * analysis it already sits behind. The brief's own crossover (`M = 288`,
- * ~10 minutes of material) puts the worst case in the low hundreds of ms,
- * once, behind an existing progress bar — while the per-adjustment copy cost
- * would be paid on every reject/nudge/re-roll, i.e. exactly the latency the
- * routing was meant to protect. Flagged for adjudication in the task report,
- * not silently dropped.
+ * The DP is ~O(M^2) (measured: doubling `M` multiplies wall clock by
+ * 4.2-4.5x). At the worst case actually reachable under
+ * `MAX_ANALYSIS_SECONDS = 600` (200 BPM, 600 s -> `M = 499`, `Nmax = 1497`,
+ * **749 000 cells, 3.0x `MAX_DP_CELLS`**) a single `planRemix` measured
+ * **302-311 ms**, `rollIndex = 3` **996-1024 ms**, and a lock-recovery sweep
+ * (four plans) **2.7 s on the first Re-roll press, 5.6 s on the fourth** —
+ * a renderer freeze with no progress and no cancel. It bites below the
+ * threshold too (control at `M = 250`: 69-80 ms per plan, 827 ms for a
+ * lock-recovery sweep).
+ *
+ * So planning is routed to a worker when `(numBars+1)*(Nmax+1) >
+ * MAX_DP_CELLS`, and the worker is **session-scoped**: the whole
+ * `RemixAnalysis` is posted ONCE at session creation and stays RESIDENT
+ * (`remixPlan.worker.ts`), so every subsequent plan request is a small
+ * message in and a small `PlanRemixResult` out. Shipping the analysis
+ * per-call instead would have paid a ~1.7 MB structured clone on EVERY
+ * adjustment (measured payload: 1 766 000 bytes; the typed-array copy alone
+ * is ~0.4-0.5 ms) — exactly the interaction latency the routing exists to
+ * protect. Paid once at creation it sits behind the ~630 ms analysis that
+ * already dominates there. The analysis is deliberately NOT transferred:
+ * those typed arrays ARE `tempoAnalysis`'s cache rows, and transferring would
+ * detach them.
+ *
+ * Below the threshold the DP stays on the main thread — worker startup is not
+ * worth it for a 1 ms plan (measured on this repo's 32-bar abab fixture), and
+ * that is the common case.
+ *
+ * **Worker lifecycle is SESSION-scoped, a deliberate departure from T4's
+ * one-shot `terminate()`-on-every-terminal-branch contract** (which is for
+ * fire-and-forget analysis runs). It is terminated on session invalidation,
+ * on `clearAllRemix`, and on `closeDocumentFlow` for BOTH the remix document
+ * and its source. Everything else from T4 still applies verbatim: monotonic
+ * id, stale replies dropped, `onerror` wired, the request promise ALWAYS
+ * resolves (a hang here would be worse than the freeze this replaces), and
+ * failures surfaced via `showMessageBox`. There is deliberately no
+ * fall-back-to-main-thread on worker failure: that would reintroduce the
+ * multi-second freeze immediately after telling the user something went
+ * wrong, and it is the same choice `effectRunner.ts` already makes.
+ *
+ * ## Re-roll cost compounds, and is memoised per session
+ *
+ * `planRemix(rollIndex=k)` re-derives rolls `0..k-1` internally (that is what
+ * makes re-roll deterministic and stateless), so each press is dearer than
+ * the last. Reducing the cost of ONE cold roll would mean restructuring
+ * `remixPlan.ts` to accept a precomputed penalty map — out of scope, and
+ * ruled out. What IS done here: a per-session memo keyed by `rollIndex`
+ * within one option/rejection signature, so the rolls a previous press
+ * already computed (in particular the `rollIndex+1..+3` sweep
+ * `planWithLocks` runs) are never recomputed by the next press. That removes
+ * the repeated work, not the intrinsic cost of a cold roll — a documented
+ * residual.
  *
  * ## `dirty` stays false on creation
  *
@@ -98,8 +147,16 @@ import { useAppStore, type Marker } from '../stores/appStore';
 import { applyEdit, pushMarkerUndo } from './editOps';
 import { getRemixAnalysis, runRemixAnalysis, type RemixAnalysis, type RemixAnalysisParams } from './tempoAnalysis';
 import { DEFAULT_REMIX_WEIGHTS, clusterMemberCounts, joinCost, type RemixWeights } from '../dsp/remixCost';
-import { DEFAULT_MAX_REPEAT_FACTOR, planRemix, type PlanRemixResult, type RemixJoin } from '../dsp/remixPlan';
+import {
+  DEFAULT_MAX_REPEAT_FACTOR,
+  MAX_DP_CELLS,
+  planRemix,
+  type PlanRemixOptions,
+  type PlanRemixResult,
+  type RemixJoin,
+} from '../dsp/remixPlan';
 import { renderRemix, type CrossfadeShape, type RemixPlan } from '../dsp/remixRender';
+import { createRemixPlanWorker } from '../workers/createRemixPlanWorker';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -133,12 +190,13 @@ export interface CreateRemixRequest extends Partial<RemixOptions> {
   onProgress?: (fraction: number) => void;
 }
 
-/** `no-document` / `analysis-failed` are this module's own; the remaining
- * four are `PlanRemixResult`'s `reason` passed straight through, so a dialog
- * can render one message table for both layers. */
+/** `no-document` / `analysis-failed` / `plan-failed` are this module's own;
+ * the remaining four are `PlanRemixResult`'s `reason` passed straight
+ * through, so a dialog can render one message table for both layers. */
 export type RemixCreateStatus =
   | 'no-document'
   | 'analysis-failed'
+  | 'plan-failed'
   | 'no-tempo'
   | 'too-short'
   | 'too-long'
@@ -172,15 +230,33 @@ export interface RemixSession {
   rejectedJoins: string[];
   /** `${from}>${to}` keys the user pinned — see `toggleLockJoin`. */
   lockedJoins: string[];
+  /** The roll index the CURRENT plan was actually produced at — which is not
+   * necessarily the one the last `reRollRemix` requested, because
+   * `planWithLocks` may have kept a later roll that preserved more locks (fix
+   * round 1). The next press advances from here, so it can never re-serve the
+   * arrangement already on screen. */
   rollIndex: number;
   /** True once `nudgeJoin` has hand-edited the arrangement, so the current
    * `plan` is NOT what `planRemix` would return for these options. Any
    * re-plan (reject / re-roll / reset / option change) clears it. */
   manual: boolean;
+  /** True when planning for this session runs in its own worker (the
+   * `MAX_DP_CELLS` route). Surfaced so a panel can explain why an adjustment
+   * is not instantaneous. */
+  plansInWorker: boolean;
   /** Recomputed against the LIVE source document on every `getRemixSession`
-   * call and at the top of every adjustment — never trusted from write time. */
+   * call, at the top of every adjustment, and again at commit time — never
+   * trusted from write time. */
   stale: boolean;
 }
+
+/** Why `toggleLockJoin` refused. Distinct reasons, so a panel can say "you
+ * already have 8 pins" rather than failing silently (fix round 1). */
+export type ToggleLockRefusal = 'no-session' | 'stale' | 'unknown-join' | 'limit-reached';
+
+export type ToggleLockResult =
+  | { ok: true; locked: boolean; lockedJoins: string[] }
+  | { ok: false; reason: ToggleLockRefusal };
 
 /** The panel's own cap (T15: "pins the join across re-plans and re-rolls, max
  * 8"), enforced HERE as well as in the UI so the invariant does not depend on
@@ -211,13 +287,28 @@ const REPLAN_KEYS: (keyof RemixOptions)[] = [
   'strict',
   'allowRepeats',
   'exactLength',
-  'weights',
   'maxRepeatFactor',
 ];
+
+const WEIGHT_KEYS: (keyof RemixWeights)[] = ['timbre', 'chroma', 'loudness', 'rhythm', 'struct', 'phrase', 'jump'];
 
 // ---------------------------------------------------------------------------
 // Session store
 // ---------------------------------------------------------------------------
+
+/** One session-scoped plan worker. `pending` guarantees the "promise always
+ * resolves" contract from every terminal branch: a reply, an `onerror`, a
+ * failed `postMessage`, or termination. */
+interface PlanWorkerHandle {
+  worker: Worker;
+  pending: Map<number, (result: PlanRemixResult | null) => void>;
+  nextRequestId: number;
+  /** Id of the most recently ISSUED request — a reply for anything older is
+   * STALE (its state has been superseded) and resolves `null` rather than
+   * letting an out-of-date arrangement reach `commitPlan`. */
+  latestRequestId: number;
+  dead: boolean;
+}
 
 interface Entry {
   session: RemixSession;
@@ -228,6 +319,13 @@ interface Entry {
    * the `+/- floor(phraseBars/2)` bound is on the TOTAL displacement rather
    * than on one keystroke. Reset by every re-plan. */
   nudgeBars: number[];
+  /** `null` when this session plans on the main thread. */
+  planWorker: PlanWorkerHandle | null;
+  /** `rollIndex -> result` within ONE option/rejection signature; cleared
+   * whenever that signature changes, so it stays bounded by the number of
+   * rolls actually tried. */
+  planMemo: Map<number, PlanRemixResult>;
+  planMemoSignature: string;
 }
 
 const sessions = new Map<string, Entry>();
@@ -287,12 +385,27 @@ function sameChannelRefs(a: Float32Array[], b: Float32Array[]): boolean {
   return true;
 }
 
+function sameWeights(a: RemixWeights, b: RemixWeights): boolean {
+  for (const key of WEIGHT_KEYS) {
+    if (!Object.is(a[key], b[key])) return false;
+  }
+  return true;
+}
+
 function joinKey(from: number, to: number): string {
   return `${from}>${to}`;
 }
 
 function keysOf(joins: readonly RemixJoin[]): string[] {
   return joins.map((j) => joinKey(j.fromBar, j.toBar));
+}
+
+function showFailure(message: string): void {
+  void window.electronAPI?.showMessageBox({
+    type: 'error',
+    title: 'Remix planning failed',
+    message,
+  });
 }
 
 function refreshStale(entry: Entry): boolean {
@@ -309,9 +422,9 @@ function liveEntry(remixDocId: string): Entry | null {
   if (!entry) return null;
   if (!findDoc(remixDocId)) {
     // The remix document was closed without `closeDocumentFlow` (or by a
-    // direct store call): drop the session rather than leave it pinning the
-    // source's channel arrays.
-    sessions.delete(remixDocId);
+    // direct store call): drop the session — and its worker — rather than
+    // leave it pinning the source's channel arrays.
+    dropEntry(remixDocId, entry);
     bumpVersion();
     return null;
   }
@@ -333,14 +446,134 @@ function makeJoinMarkers(docId: string, joinSamples: readonly number[]): Marker[
 }
 
 // ---------------------------------------------------------------------------
+// The session-scoped plan worker
+// ---------------------------------------------------------------------------
+
+/** `(numBars+1)*(Nmax+1)` — the exact table shape `remixPlan.ts` allocates. */
+function dpCells(analysis: RemixAnalysis, maxRepeatFactor: number): number {
+  const M = analysis.numBars;
+  const Nmax = Math.max(0, Math.round(M * maxRepeatFactor));
+  return (M + 1) * (Nmax + 1);
+}
+
+let planWorkerThreshold = MAX_DP_CELLS;
+
+/** Test-only (this repo's `_xxxForTest` convention — `tempoAnalysis.ts`'s
+ * `_promoteToRemixLevelForTest`, `remixPlan.ts`'s `_runRemixDPForTest`).
+ * Lowers the `MAX_DP_CELLS` routing threshold so the worker route can be
+ * exercised without a 10-minute fixture. `null` restores the real constant. */
+export function _setPlanWorkerThresholdForTest(cells: number | null): void {
+  planWorkerThreshold = cells ?? MAX_DP_CELLS;
+}
+
+/** Resolves every outstanding request with `null`, marks the handle dead and
+ * terminates the worker. The single place the "promise always resolves"
+ * contract is honoured for abnormal termination. */
+function killPlanWorker(handle: PlanWorkerHandle, message: string | null): void {
+  if (handle.dead) return;
+  handle.dead = true;
+  try {
+    handle.worker.terminate();
+  } catch {
+    /* best-effort — nothing further to clean up */
+  }
+  const pending = [...handle.pending.values()];
+  handle.pending.clear();
+  for (const resolve of pending) resolve(null);
+  if (message !== null) showFailure(message);
+}
+
+/** Spawns a plan worker and posts the analysis ONCE. Returns `null` (having
+ * already surfaced the failure) when the worker cannot be created or the
+ * `init` post throws — the caller then refuses rather than falling back to a
+ * multi-second main-thread freeze. */
+function spawnPlanWorker(analysis: RemixAnalysis): PlanWorkerHandle | null {
+  let worker: Worker;
+  try {
+    worker = createRemixPlanWorker();
+  } catch (err) {
+    showFailure(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+
+  const handle: PlanWorkerHandle = {
+    worker,
+    pending: new Map(),
+    nextRequestId: 1,
+    latestRequestId: 0,
+    dead: false,
+  };
+
+  worker.onmessage = (e: MessageEvent) => {
+    const msg = e.data as { type?: string; id?: number; result?: PlanRemixResult; message?: string };
+    const id = msg?.id;
+    if (typeof id !== 'number') return;
+    const resolve = handle.pending.get(id);
+    if (!resolve) return; // unknown or already-settled id — dropped
+    handle.pending.delete(id);
+
+    if (msg.type === 'planned') {
+      // A reply for a superseded request must never be committed: the
+      // session's rejections/locks/options have moved on since it was issued.
+      resolve(id === handle.latestRequestId ? (msg.result as PlanRemixResult) : null);
+      return;
+    }
+    if (msg.type === 'error') {
+      showFailure(msg.message ?? 'Remix planner failed');
+      resolve(null);
+      return;
+    }
+    // Defensive, mirroring tempoAnalysis's own unexpected-reply branch.
+    showFailure(`Unexpected remix planner reply: ${String(msg.type)}`);
+    resolve(null);
+  };
+
+  worker.onerror = (ev: ErrorEvent) => {
+    // A worker that fails to LOAD never reaches `onmessage` — without this
+    // every pending promise would hang forever (the v1.4 lesson at
+    // `effectRunner.ts:106-119`).
+    killPlanWorker(handle, ev.message || 'Remix planner failed to load');
+  };
+
+  try {
+    // NOT transferred — see `remixPlan.worker.ts`.
+    worker.postMessage({ type: 'init', analysis });
+  } catch (err) {
+    killPlanWorker(handle, err instanceof Error ? err.message : String(err));
+    return null;
+  }
+
+  return handle;
+}
+
+function requestWorkerPlan(handle: PlanWorkerHandle, options: PlanRemixOptions): Promise<PlanRemixResult | null> {
+  if (handle.dead) return Promise.resolve(null);
+  const id = handle.nextRequestId++;
+  handle.latestRequestId = id;
+  return new Promise<PlanRemixResult | null>((resolve) => {
+    handle.pending.set(id, resolve);
+    try {
+      handle.worker.postMessage({ type: 'plan', id, options });
+    } catch (err) {
+      handle.pending.delete(id);
+      killPlanWorker(handle, err instanceof Error ? err.message : String(err));
+      resolve(null);
+    }
+  });
+}
+
+/** Drops a session: terminates its worker (silently — this is an orderly
+ * shutdown, not a failure) and removes it from the map. */
+function dropEntry(remixDocId: string, entry: Entry): void {
+  if (entry.planWorker) killPlanWorker(entry.planWorker, null);
+  sessions.delete(remixDocId);
+}
+
+// ---------------------------------------------------------------------------
 // Planning
 // ---------------------------------------------------------------------------
 
-function planOptionsFor(
-  options: RemixOptions,
-  rejected: readonly string[],
-  rollIndex: number
-): Parameters<typeof planRemix>[1] {
+function planOptionsFor(options: RemixOptions, rejected: readonly string[], rollIndex: number): PlanRemixOptions {
   return {
     targetSample: options.targetSample,
     weights: options.weights,
@@ -349,34 +582,83 @@ function planOptionsFor(
     allowRepeats: options.allowRepeats,
     maxRepeatFactor: options.maxRepeatFactor,
     exactLength: options.exactLength,
-    forbiddenJoins: rejected,
+    // A plain array, not a Set: this value is structure-cloned to the worker.
+    forbiddenJoins: [...rejected],
     rollIndex,
   };
 }
 
+/** Everything the memo must key on besides `rollIndex`. */
+function memoSignature(options: RemixOptions, rejected: readonly string[]): string {
+  return JSON.stringify([
+    options.targetSample,
+    options.phraseBars,
+    options.strict,
+    options.allowRepeats,
+    options.exactLength,
+    options.maxRepeatFactor,
+    WEIGHT_KEYS.map((k) => options.weights[k]),
+    [...rejected].sort(),
+  ]);
+}
+
 /**
- * `planRemix` plus a bounded, deterministic attempt to keep LOCKED joins.
+ * ONE plan: memo first, then this session's worker if it has one, else the
+ * main thread. Resolves `null` ONLY when the worker failed (the dialog has
+ * already been shown) — a planner REFUSAL is an `ok:false` result, not a
+ * null.
+ */
+async function runPlan(
+  entry: Entry,
+  options: RemixOptions,
+  rejected: readonly string[],
+  rollIndex: number
+): Promise<PlanRemixResult | null> {
+  const signature = memoSignature(options, rejected);
+  if (signature !== entry.planMemoSignature) {
+    entry.planMemo.clear();
+    entry.planMemoSignature = signature;
+  }
+  const hit = entry.planMemo.get(rollIndex);
+  if (hit) return hit;
+
+  const planOptions = planOptionsFor(options, rejected, rollIndex);
+  const result = entry.planWorker
+    ? await requestWorkerPlan(entry.planWorker, planOptions)
+    : planRemix(entry.session.analysis, planOptions);
+  if (result) entry.planMemo.set(rollIndex, result);
+  return result;
+}
+
+/**
+ * `runPlan` plus a bounded, deterministic attempt to keep LOCKED joins.
  *
  * `remixPlan.ts` exposes `forbiddenJoins` but has NO "required joins" input,
  * and its re-roll penalty is applied to every join of the previous roll —
  * including a locked one. There is therefore no way to make a lock a HARD
  * constraint from this layer without changing the planner, which is out of
- * scope for T13. What IS available, and is what this does: run the plan, and
- * if a lock was broken, try the next few deterministic re-rolls and keep
- * whichever attempt preserves the MOST locks (ties -> the earliest attempt,
- * i.e. the cheapest). Same retry-and-keep-the-best shape as `remixPlan.ts`'s
- * own over-repetition guard, and equally deterministic — but a PREFERENCE,
- * not a guarantee, which the panel must present as such.
+ * scope. What IS available, and is what this does: run the plan, and if a
+ * lock was broken, try the next few deterministic re-rolls and keep whichever
+ * attempt preserves the MOST locks (ties -> the earliest attempt, i.e. the
+ * cheapest). Same retry-and-keep-the-best shape as `remixPlan.ts`'s own
+ * over-repetition guard, and equally deterministic — but a PREFERENCE, not a
+ * guarantee, which the panel must present as such.
+ *
+ * Returns the roll index the winning plan was ACTUALLY produced at, so the
+ * session records that rather than the requested one (fix round 1) — without
+ * it, the next Re-roll press could re-serve the arrangement already on
+ * screen.
  */
-function planWithLocks(
-  analysis: RemixAnalysis,
+async function planWithLocks(
+  entry: Entry,
   options: RemixOptions,
   rejected: readonly string[],
   locked: readonly string[],
   rollIndex: number
-): PlanRemixResult {
-  const base = planRemix(analysis, planOptionsFor(options, rejected, rollIndex));
-  if (!base.ok || locked.length === 0) return base;
+): Promise<{ result: PlanRemixResult; rollIndexUsed: number } | null> {
+  const base = await runPlan(entry, options, rejected, rollIndex);
+  if (!base) return null;
+  if (!base.ok || locked.length === 0) return { result: base, rollIndexUsed: rollIndex };
 
   const countKept = (plan: RemixPlan): number => {
     const keys = new Set(keysOf(plan.joins));
@@ -387,16 +669,21 @@ function planWithLocks(
 
   let best = base;
   let bestKept = countKept(base);
+  let bestRoll = rollIndex;
   for (let extra = 1; bestKept < locked.length && extra <= MAX_LOCK_RECOVERY_ROLLS; extra++) {
-    const next = planRemix(analysis, planOptionsFor(options, rejected, rollIndex + extra));
+    const next = await runPlan(entry, options, rejected, rollIndex + extra);
+    // A worker failure mid-sweep: keep the best VALID plan already found
+    // rather than discarding a perfectly good base plan.
+    if (!next) break;
     if (!next.ok) break;
     const kept = countKept(next);
     if (kept > bestKept) {
       best = next;
       bestKept = kept;
+      bestRoll = rollIndex + extra;
     }
   }
-  return best;
+  return { result: best, rollIndexUsed: bestRoll };
 }
 
 /** Whether a hand-edited join list still describes a legal arrangement:
@@ -484,8 +771,14 @@ function buildPlanFromJoins(
 
 /**
  * Renders `plan` and rewrites the remix document through ONE
- * `applyEdit('Remix', ...)` plus ONE `pushMarkerUndo('Remix Markers', ...)`
- * — see the module doc comment for why that is two entries and not one.
+ * `applyEdit('Remix', ...)` plus (when there is a marker change to record)
+ * ONE `pushMarkerUndo('Remix Markers', ...)` — see the module doc comment for
+ * why that is normally two entries, and when it is one.
+ *
+ * RE-CHECKS STALENESS (fix round 1): a plan can now be awaited from a worker,
+ * and the source document may have been edited or closed in the meantime. A
+ * resident worker analysis must never become a way to render an arrangement
+ * against audio the live `sourceChannelRefs` no longer match.
  *
  * `renderRemix` is called WITHOUT a try/catch on purpose: it throws only when
  * `plan.outputSample` disagrees with its own segments, and `joinCost` throws
@@ -498,7 +791,14 @@ function commitPlan(entry: Entry, plan: RemixPlan): RemixPlan | null {
   const { remixDocId, sourceDocId, analysis, options } = entry.session;
   const source = findDoc(sourceDocId);
   const remixDoc = findDoc(remixDocId);
-  if (!source || !remixDoc) return null;
+  if (!source || !remixDoc) {
+    refreshStale(entry);
+    return null;
+  }
+  if (!sameChannelRefs(entry.sourceChannelRefs, source.channels)) {
+    entry.session.stale = true;
+    return null;
+  }
 
   const render = renderRemix(source.channels, analysis, plan, {
     sampleRate: source.sampleRate,
@@ -521,6 +821,8 @@ function commitPlan(entry: Entry, plan: RemixPlan): RemixPlan | null {
   // normally the empty list. Guarded exactly like `applyEdit`'s own remap
   // (`editOps.ts:156`): with nothing on either side there is no marker change
   // to record, and an empty undo entry would only cost the user a Ctrl+Z.
+  // This is also why the entry count per adjustment is 2 OR 1 — see the
+  // module doc comment.
   const before = store().markers[remixDocId] ?? [];
   const after = options.markEditPoints ? makeJoinMarkers(remixDocId, render.joinSamples) : [];
   if (before.length > 0 || after.length > 0) {
@@ -541,19 +843,20 @@ function commitPlan(entry: Entry, plan: RemixPlan): RemixPlan | null {
  * succeeded, mutate the session's own bookkeeping and commit. A failed plan
  * leaves the session (and the document) exactly as it was and is handed back
  * so the caller can surface `minOutputSample`/`maxOutputSample`. */
-function replanAndCommit(
+async function replanAndCommit(
   entry: Entry,
   next: { rejected: string[]; locked: string[]; rollIndex: number }
-): PlanRemixResult | null {
-  const plan = planWithLocks(entry.session.analysis, entry.session.options, next.rejected, next.locked, next.rollIndex);
-  if (!plan.ok) return plan;
+): Promise<PlanRemixResult | null> {
+  const outcome = await planWithLocks(entry, entry.session.options, next.rejected, next.locked, next.rollIndex);
+  if (!outcome) return null; // worker failure — the dialog is already up
+  if (!outcome.result.ok) return outcome.result;
 
   entry.session.rejectedJoins = next.rejected;
   entry.session.lockedJoins = next.locked;
-  entry.session.rollIndex = next.rollIndex;
+  entry.session.rollIndex = outcome.rollIndexUsed;
   entry.session.manual = false;
-  entry.nudgeBars = plan.joins.map(() => 0);
-  return commitPlan(entry, plan);
+  entry.nudgeBars = outcome.result.joins.map(() => 0);
+  return commitPlan(entry, outcome.result);
 }
 
 // ---------------------------------------------------------------------------
@@ -567,11 +870,10 @@ function replanAndCommit(
  *
  * Always resolves; never throws for a user-facing condition. Worker failures
  * are surfaced by `runRemixAnalysis` itself (its own `showMessageBox`, T4's
- * choreography: monotonic id, stale replies dropped, `terminate()` on every
- * terminal branch, `onerror` wired) and reported here as
- * `status: 'analysis-failed'`; planning refusals pass `PlanRemixResult`'s own
- * `reason`/`message` straight through so a dialog can clamp its input from
- * `minOutputSample`/`maxOutputSample` next time.
+ * choreography) and reported here as `status: 'analysis-failed'`; a plan
+ * worker failure is `status: 'plan-failed'`; planning refusals pass
+ * `PlanRemixResult`'s own `reason`/`message` straight through so a dialog can
+ * clamp its input from `minOutputSample`/`maxOutputSample` next time.
  */
 export async function createRemixDocument(req: CreateRemixRequest): Promise<CreateRemixResult> {
   const initial = findDoc(req.sourceDocId);
@@ -616,11 +918,38 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
     maxRepeatFactor: req.maxRepeatFactor ?? DEFAULTS.maxRepeatFactor,
   };
 
-  const plan = planRemix(analysis, planOptionsFor(options, [], 0));
-  if (!plan.ok) return { ok: false, status: plan.reason, message: plan.message };
+  // Routing decision, made ONCE per session — see the module doc comment.
+  const plansInWorker = dpCells(analysis, options.maxRepeatFactor) > planWorkerThreshold;
+  let planWorker: PlanWorkerHandle | null = null;
+  if (plansInWorker) {
+    planWorker = spawnPlanWorker(analysis);
+    if (!planWorker) {
+      return { ok: false, status: 'plan-failed', message: 'The remix planner worker could not be started.' };
+    }
+  }
 
-  const render = renderRemix(source.channels, analysis, plan, {
-    sampleRate: source.sampleRate,
+  const planOptions = planOptionsFor(options, [], 0);
+  const plan = planWorker
+    ? await requestWorkerPlan(planWorker, planOptions)
+    : planRemix(analysis, planOptions);
+  if (!plan) {
+    if (planWorker) killPlanWorker(planWorker, null);
+    return { ok: false, status: 'plan-failed', message: 'The remix planner did not return a plan.' };
+  }
+  if (!plan.ok) {
+    if (planWorker) killPlanWorker(planWorker, null);
+    return { ok: false, status: plan.reason, message: plan.message };
+  }
+
+  // The source can have changed while the plan was in flight (worker route).
+  const liveSource = findDoc(req.sourceDocId);
+  if (!liveSource || !sameChannelRefs(source.channels, liveSource.channels)) {
+    if (planWorker) killPlanWorker(planWorker, null);
+    return { ok: false, status: 'analysis-failed', message: 'The source audio changed during planning.' };
+  }
+
+  const render = renderRemix(liveSource.channels, analysis, plan, {
+    sampleRate: liveSource.sampleRate,
     crossfadeMs: options.crossfadeMs,
     exactLength: options.exactLength,
   });
@@ -632,7 +961,7 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
   const n = nextId('remix').split('-')[1];
   const doc = createDocument({
     name: `Remix ${n}`,
-    sampleRate: source.sampleRate,
+    sampleRate: liveSource.sampleRate,
     channels: render.channels,
   });
   store().addDocument(doc);
@@ -646,8 +975,8 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
   sessions.set(doc.id, {
     session: {
       remixDocId: doc.id,
-      sourceDocId: source.id,
-      sourceName: source.name,
+      sourceDocId: liveSource.id,
+      sourceName: liveSource.name,
       options,
       analysis,
       plan,
@@ -659,10 +988,14 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
       lockedJoins: [],
       rollIndex: 0,
       manual: false,
+      plansInWorker,
       stale: false,
     },
-    sourceChannelRefs: source.channels.slice(),
+    sourceChannelRefs: liveSource.channels.slice(),
     nudgeBars: plan.joins.map(() => 0),
+    planWorker,
+    planMemo: new Map([[0, plan as PlanRemixResult]]),
+    planMemoSignature: memoSignature(options, []),
   });
   bumpVersion();
 
@@ -690,48 +1023,67 @@ export function getRemixSession(remixDocId: string): RemixSession | null {
 
 /**
  * Patches the session's options and re-plans (or, for render-only keys,
- * merely re-renders) the remix document. Returns the resulting
+ * merely re-renders) the remix document. Resolves with the resulting
  * `PlanRemixResult` — including the `ok: false` arm, so a dialog can clamp
  * its target from `minOutputSample`/`maxOutputSample` — or `null` when there
- * is no live, non-stale session.
+ * is no live, non-stale session, or the plan worker failed.
+ *
+ * `weights` is compared FIELD BY FIELD, not by reference (fix round 1):
+ * building the options object in a React render is the natural idiom, and an
+ * `Object.is` comparison would make every value-identical `{...weights}` force
+ * a full re-plan — silently discarding the user's nudges and charging two
+ * extra undo entries on something as innocent as a crossfade slider tick.
  *
  * A failed re-plan is fully atomic: the options are restored and neither the
  * document nor the session is touched.
  */
-export function updateRemixSession(remixDocId: string, patch: Partial<RemixOptions>): PlanRemixResult | null {
+export async function updateRemixSession(
+  remixDocId: string,
+  patch: Partial<RemixOptions>
+): Promise<PlanRemixResult | null> {
   const entry = liveEntry(remixDocId);
   if (!entry) return null;
 
   const previous = entry.session.options;
-  const needsReplan = REPLAN_KEYS.some((key) => key in patch && !Object.is(patch[key], previous[key]));
+  const needsReplan =
+    REPLAN_KEYS.some((key) => key in patch && !Object.is(patch[key], previous[key])) ||
+    (patch.weights !== undefined && !sameWeights(patch.weights, previous.weights));
   const options: RemixOptions = { ...previous, ...patch };
   entry.session.options = options;
+
+  // Restore `previous` ONLY if nothing else has moved the options on since —
+  // two rapid `updateRemixSession` calls (a slider dragged fast) otherwise
+  // let the FIRST one's rollback clobber the SECOND one's accepted value.
+  const rollback = (): void => {
+    if (entry.session.options === options) entry.session.options = previous;
+  };
 
   if (!needsReplan) {
     // Same arrangement, new render parameters. A manual (nudged) plan
     // survives, which is the whole reason `crossfadeMs` is not a replan key.
     const committed = commitPlan(entry, entry.session.plan);
     if (!committed) {
-      entry.session.options = previous;
+      rollback();
       return null;
     }
     return committed;
   }
 
-  const plan = planWithLocks(
-    entry.session.analysis,
+  const outcome = await planWithLocks(
+    entry,
     options,
     entry.session.rejectedJoins,
     entry.session.lockedJoins,
     entry.session.rollIndex
   );
-  if (!plan.ok) {
-    entry.session.options = previous;
-    return plan;
+  if (!outcome || !outcome.result.ok) {
+    rollback();
+    return outcome ? outcome.result : null;
   }
+  entry.session.rollIndex = outcome.rollIndexUsed;
   entry.session.manual = false;
-  entry.nudgeBars = plan.joins.map(() => 0);
-  return commitPlan(entry, plan);
+  entry.nudgeBars = outcome.result.joins.map(() => 0);
+  return commitPlan(entry, outcome.result);
 }
 
 /**
@@ -741,7 +1093,7 @@ export function updateRemixSession(remixDocId: string, patch: Partial<RemixOptio
  * forbidden and pinned can never be satisfied, so keeping both would make
  * `planWithLocks` retry forever for nothing.
  */
-export function rejectJoin(remixDocId: string, key: string): PlanRemixResult | null {
+export async function rejectJoin(remixDocId: string, key: string): Promise<PlanRemixResult | null> {
   const entry = liveEntry(remixDocId);
   if (!entry) return null;
   if (!keysOf(entry.session.plan.joins).includes(key)) return null;
@@ -754,32 +1106,33 @@ export function rejectJoin(remixDocId: string, key: string): PlanRemixResult | n
 }
 
 /**
- * Pins / unpins a join. Returns the NEW locked state, or `null` when the
- * session is missing/stale, the key is not a join of the current plan, or the
- * `MAX_LOCKED_JOINS` cap is already reached.
+ * Pins / unpins a join. Synchronous and never re-renders (the brief lists
+ * 'lock' among the re-render triggers — reported as a spec problem): locking
+ * a join that is already IN the current arrangement cannot change that
+ * arrangement, so a re-render would rewrite the document to identical audio
+ * and charge the user two undo entries for it. Locks only take effect on the
+ * NEXT re-plan; see `planWithLocks` for exactly how strong that effect is.
  *
- * Deliberately does NOT re-render (the brief lists 'lock' among the
- * re-render triggers — reported as a spec problem): locking a join that is
- * already IN the current arrangement cannot change that arrangement, so a
- * re-render would rewrite the document to identical audio and charge the user
- * two undo entries for it. Locks only take effect on the NEXT re-plan; see
- * `planWithLocks` for exactly how strong that effect is.
+ * Returns a DISCRIMINATED result (fix round 1) so a panel can distinguish
+ * "no session" / "stale" / "not a join of this plan" / "you already have 8
+ * pins" instead of getting one undifferentiated `null`.
  */
-export function toggleLockJoin(remixDocId: string, key: string): boolean | null {
-  const entry = liveEntry(remixDocId);
-  if (!entry) return null;
+export function toggleLockJoin(remixDocId: string, key: string): ToggleLockResult {
+  const entry = sessions.get(remixDocId);
+  if (!entry || !findDoc(remixDocId)) return { ok: false, reason: 'no-session' };
+  if (refreshStale(entry)) return { ok: false, reason: 'stale' };
 
   const index = entry.session.lockedJoins.indexOf(key);
   if (index >= 0) {
     entry.session.lockedJoins.splice(index, 1);
     bumpVersion();
-    return false;
+    return { ok: true, locked: false, lockedJoins: entry.session.lockedJoins.slice() };
   }
-  if (!keysOf(entry.session.plan.joins).includes(key)) return null;
-  if (entry.session.lockedJoins.length >= MAX_LOCKED_JOINS) return null;
+  if (!keysOf(entry.session.plan.joins).includes(key)) return { ok: false, reason: 'unknown-join' };
+  if (entry.session.lockedJoins.length >= MAX_LOCKED_JOINS) return { ok: false, reason: 'limit-reached' };
   entry.session.lockedJoins.push(key);
   bumpVersion();
-  return true;
+  return { ok: true, locked: true, lockedJoins: entry.session.lockedJoins.slice() };
 }
 
 /**
@@ -790,6 +1143,11 @@ export function toggleLockJoin(remixDocId: string, key: string): boolean | null 
  * an illegal arrangement (a zero-length segment, or a bar outside
  * `[0, numBars]`).
  *
+ * Never runs the DP (the plan is rebuilt directly from the moved join list),
+ * so it is instant regardless of track length — but it is `async` like the
+ * other four adjustments so a caller cannot get the sync/async-ness of an
+ * adjustment wrong.
+ *
  * NOTE — the brief's acceptance asks for `outputSample` to be UNCHANGED with
  * EXACT equality. That is unachievable by construction and is NOT what this
  * implements: `barBoundary` holds REAL tracked, drift-following beat samples
@@ -799,10 +1157,13 @@ export function toggleLockJoin(remixDocId: string, key: string): boolean | null 
  * bars are different lengths. Measured on this repo's abab fixture: a
  * one-sample difference on the first join, against a whole-fixture bar-length
  * spread of 87864-88304 samples. The exactly-preserved invariant is the BAR
- * COUNT; the duration moves only by that inter-bar drift. Reported, not
- * silently reinterpreted.
+ * COUNT; the duration moves only by that inter-bar drift.
  */
-export function nudgeJoin(remixDocId: string, key: string, deltaBars: number): PlanRemixResult | null {
+export async function nudgeJoin(
+  remixDocId: string,
+  key: string,
+  deltaBars: number
+): Promise<PlanRemixResult | null> {
   const entry = liveEntry(remixDocId);
   if (!entry) return null;
   if (!Number.isInteger(deltaBars) || deltaBars === 0) return null;
@@ -833,12 +1194,13 @@ export function nudgeJoin(remixDocId: string, key: string, deltaBars: number): P
 }
 
 /**
- * Deterministic next-best arrangement: advances `rollIndex` and re-plans (see
- * `remixPlan.ts`'s "Re-roll" — penalise the previous rolls' joins, never
- * randomised jitter, so two identically-seeded sessions re-roll identically).
- * A no-op returning `null` when the current plan has no joins to vary.
+ * Deterministic next-best arrangement: advances past the roll index the
+ * CURRENT plan was produced at and re-plans (see `remixPlan.ts`'s "Re-roll" —
+ * penalise the previous rolls' joins, never randomised jitter, so two
+ * identically-seeded sessions re-roll identically). A no-op resolving `null`
+ * when the current plan has no joins to vary.
  */
-export function reRollRemix(remixDocId: string): PlanRemixResult | null {
+export async function reRollRemix(remixDocId: string): Promise<PlanRemixResult | null> {
   const entry = liveEntry(remixDocId);
   if (!entry) return null;
   if (entry.session.plan.joins.length === 0) return null;
@@ -852,7 +1214,7 @@ export function reRollRemix(remixDocId: string): PlanRemixResult | null {
 
 /** 'Revert to auto': drops every rejection, lock, nudge and roll and returns
  * the plain automatic plan for the session's current options. */
-export function resetRemix(remixDocId: string): PlanRemixResult | null {
+export async function resetRemix(remixDocId: string): Promise<PlanRemixResult | null> {
   const entry = liveEntry(remixDocId);
   if (!entry) return null;
   return replanAndCommit(entry, { rejected: [], locked: [], rollIndex: 0 });
@@ -864,24 +1226,32 @@ export function resetRemix(remixDocId: string): PlanRemixResult | null {
 
 /**
  * Drops every session that involves `docId` — as the REMIX document or as its
- * SOURCE. MANDATORY in `closeDocumentFlow` for both: without it a closed
- * document's channel arrays stay retained by `sourceChannelRefs` (and the
- * whole `RemixAnalysis`) for the rest of the session, the same leak class
- * `peaksCache`/`clipWaveformCache`/`tempoAnalysis` already manage.
+ * SOURCE — terminating each one's plan worker. MANDATORY in
+ * `closeDocumentFlow` for both: without it a closed document's channel arrays
+ * stay retained by `sourceChannelRefs` (and the whole `RemixAnalysis`, and a
+ * live Worker holding its own resident copy) for the rest of the session —
+ * the same leak class `peaksCache`/`clipWaveformCache`/`tempoAnalysis`
+ * already manage.
+ *
+ * Named `invalidateRemixSession`, not `invalidateRemix`, so it cannot be
+ * confused with `tempoAnalysis.invalidateRemix`, which drops the cached
+ * remix-level ANALYSIS row (a different layer). Both must run on close.
  */
-export function invalidateRemix(docId: string): void {
+export function invalidateRemixSession(docId: string): void {
   let removed = false;
   for (const [remixDocId, entry] of sessions) {
     if (remixDocId === docId || entry.session.sourceDocId === docId) {
-      sessions.delete(remixDocId);
+      dropEntry(remixDocId, entry);
       removed = true;
     }
   }
   if (removed) bumpVersion();
 }
 
-/** Drops every session — test isolation only, paired with `invalidateRemix`. */
+/** Drops every session and terminates every plan worker — test isolation
+ * only, paired with `invalidateRemixSession`. */
 export function clearAllRemix(): void {
+  for (const [remixDocId, entry] of sessions) dropEntry(remixDocId, entry);
   sessions.clear();
   bumpVersion();
 }
