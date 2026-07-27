@@ -805,9 +805,8 @@ describe('renderRemix -- exact-length trim (opts.exactLength)', () => {
 // ---------------------------------------------------------------------------
 
 describe('renderRemix -- tail after the last join never reads past the true end of source', () => {
-  it('a positive last-join lag never overflows the tail into unattenuated silence, and (fix round 2) forward alignment is NOT disabled to achieve that', () => {
+  it('a positive last-join lag never overflows the tail into unattenuated silence, forward alignment is NOT disabled to achieve that, and the segment/tail read position is NEVER shifted (fix round 3)', () => {
     const compareLen = 441; // matches ALIGN_COMPARE_MS
-    const maxNudge = 441; // matches the default maxNudgeMs
     const aEnd = 50000;
     const bStartNominal = 60000;
     const lb = 8000;
@@ -815,13 +814,16 @@ describe('renderRemix -- tail after the last join never reads past the true end 
 
     // sourceLen === analyzedEndSample (reachesFileEnd -- no masking quarter-
     // cosine fade) AND leaves EXACTLY zero slack for a positive last-join
-    // lag: nextSeg.end + tailLenNominal === sourceLen. Fix round 1 clamped
-    // the LAG itself to fit the tail, which (fix round 2, Important 2)
-    // turned out to silently disable forward alignment on the last join of
-    // every non-truncated track (the bound reduces to `sourceLen -
-    // analyzedEndSample`, exactly 0 whenever the two are equal -- the
-    // common case). Round 2 instead lets this join's lag be the genuine
-    // +400 the search found, and clamps only the TAIL's read position.
+    // lag: nextSeg.end + tailLenNominal === sourceLen -- so a lag of +400
+    // means reading `tailLen` samples from `finalEffEnd` runs exactly 400
+    // samples past `sourceLen`. Fix round 1 clamped the LAG itself to fit
+    // the tail (silently disabling forward alignment on every non-truncated
+    // track, fix round 2); fix round 2 clamped the TAIL'S READ POSITION
+    // instead (which turned out to jump the read backward by `lag` samples
+    // at the segment/tail seam -- a genuine phase discontinuity, fix round
+    // 3). Round 3 never shifts the read position at all: it reads from
+    // `finalEffEnd` (bounded, always <= sourceLen by the join's own lag
+    // clamp), and fades OUT only the portion that runs past `sourceLen`.
     const tailLenNominal = 2100;
     const sourceLen = bStartNominal + lb + tailLenNominal;
     const analyzedEndSample = sourceLen;
@@ -841,22 +843,45 @@ describe('renderRemix -- tail after the last join never reads past the true end 
     const result = renderRemix([src], analysis, plan, { sampleRate: SR, crossfadeMs: 25, maxNudgeMs: 10 });
 
     // Forward alignment is genuinely honoured -- the join's OWN lag is not
-    // clamped away just because the tail follows it (this is the property
-    // fix round 1's version of this test could NOT distinguish from
-    // "always <= 0").
+    // clamped away just because the tail follows it.
     expect(Math.abs(result.nudgeSamples[0] - naturalLag)).toBeLessThanOrEqual(2);
+    const lag = result.nudgeSamples[0];
+    const finalEffEnd = bStartNominal + lag + lb;
+    const tailOverflow = Math.max(0, finalEffEnd + tailLenNominal - sourceLen);
+    expect(tailOverflow).toBeGreaterThan(0); // fixture sanity -- genuinely exercises the overflow path
 
-    // And still no unattenuated silence at the very end: reachesFileEnd is
-    // true here (no quarter-cosine fade applies), so if the TAIL read was
-    // correctly clamped to stay in bounds, the last sample matches the
-    // source's own last sample exactly; the original bug instead produced
-    // 400 trailing zero samples with an abrupt step into silence.
-    expect(result.channels[0][result.channels[0].length - 1]).toBeCloseTo(src[sourceLen - 1], 6);
-    expect(result.channels[0][result.channels[0].length - 1]).not.toBe(0);
+    const ch = result.channels[0];
+    const seamPos = (seg0.end - seg0.start) + (seg1.end - seg1.start); // no head
 
-    // Plus: no NaN/Inf anywhere in the tail region.
-    for (let i = result.channels[0].length - tailLenNominal; i < result.channels[0].length; i++) {
-      expect(Number.isFinite(result.channels[0][i])).toBe(true);
+    // The seam itself reads CONTINUOUSLY from `finalEffEnd` -- no backward
+    // jump. The first real (non-faded) tail sample must equal source read
+    // at exactly that position, not at some shifted-back position.
+    expect(ch[seamPos]).toBeCloseTo(src[finalEffEnd], 6);
+    expect(ch[seamPos - 1]).toBeCloseTo(src[finalEffEnd - 1], 6);
+
+    // No unattenuated silence: the tail overflow (the portion that would
+    // have read past `sourceLen`) is faded OUT smoothly, not hard-zeroed --
+    // the very last sample is (near) silent, but the samples leading into
+    // it form a taper, not a step.
+    expect(Math.abs(ch[ch.length - 1])).toBeLessThan(1e-6);
+
+    // No NaN/Inf anywhere in the tail region.
+    for (let i = ch.length - tailLenNominal; i < ch.length; i++) {
+      expect(Number.isFinite(ch[i])).toBe(true);
+    }
+
+    // The underlying tail content is NOISE (independent samples), so a
+    // slew bound can't distinguish "smooth taper" from "normal noise
+    // variation" -- instead reconstruct the EXPECTED linear-taper values
+    // directly from the known fade formula and compare byte-for-byte. This
+    // is the precise proof that the overflow is faded, not hard-zeroed.
+    const validLen = tailLenNominal - tailOverflow;
+    const fadeLen = Math.min(tailOverflow, validLen);
+    const fadeStartOutput = seamPos + validLen - fadeLen;
+    for (let k = 0; k < fadeLen; k++) {
+      const g = fadeLen > 1 ? 1 - k / (fadeLen - 1) : 0;
+      const unfaded = src[finalEffEnd + (validLen - fadeLen + k)];
+      expect(ch[fadeStartOutput + k]).toBeCloseTo(unfaded * g, 6);
     }
   });
 });
@@ -893,4 +918,91 @@ describe('renderRemix -- the length identity is asserted, not merely assumed', (
     const plan = makePlan({ segments: [seg0], joins: [], outputSample: trueOutputSample - 1000 });
     expect(() => renderRemix(src, analysis, plan, { sampleRate: SR })).toThrow(/outputSample/);
   });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 3 -- the round-2 tail-read clamp shifted the read position
+// backward by the last join's own lag on any NON-truncated source, a phase
+// discontinuity at the segment->tail seam. Acceptance-5's own fixture uses a
+// truncated `analyzedEndSample`, so it never exercised this path at all.
+// ---------------------------------------------------------------------------
+
+describe('renderRemix -- no clicks -- segment/tail seam on a non-truncated tonal source (fix round 3)', () => {
+  const freq = 197; // avoids period dividing evenly into +/-441 (200Hz does: 441 = 2*220.5)
+  const compareLen = 441;
+  const aEnd = 60000;
+  const bStartNominal = 90000;
+  const lb = 20000;
+  const tailLenNominal = 6000;
+
+  function maxSlew(x: Float32Array, start = 0, end = x.length): { value: number; at: number } {
+    let m = 0;
+    let at = -1;
+    for (let i = Math.max(1, start); i < end; i++) {
+      const d = Math.abs(x[i] - x[i - 1]);
+      if (d > m) { m = d; at = i; }
+    }
+    return { value: m, at };
+  }
+
+  for (const targetLag of [0, 150, 300, 440]) {
+    it(`lag=${targetLag}: the segment/tail seam and the whole tail stay within 1.2x the source's own natural slew`, () => {
+      const sourceLen = bStartNominal + lb + tailLenNominal;
+      const analyzedEndSample = sourceLen; // NON-truncated -- reachesFileEnd, no masking quarter-cosine fade
+      const src = sine(freq, sourceLen, SR, 1);
+      // Plant the target lag deterministically: paste the exact outgoing
+      // reference window at the position the search must land on to
+      // report `targetLag` -- a pure periodic tone otherwise has several
+      // equally-good matches nearby (every +/-period), so a plain
+      // correlation search cannot be relied on to land on a SPECIFIC lag.
+      const ref = src.slice(aEnd - compareLen, aEnd);
+      src.set(ref, bStartNominal + targetLag);
+
+      const barBoundary = Int32Array.from([0, aEnd, bStartNominal, bStartNominal + lb]);
+      const analysis = makeAnalysis({ numBars: 3, barBoundary, analyzedEndSample });
+      const seg0: RemixSegment = { start: 0, end: aEnd };
+      const seg1: RemixSegment = { start: bStartNominal, end: bStartNominal + lb };
+      const outputSample = (seg0.end - seg0.start) + (seg1.end - seg1.start) + (analyzedEndSample - seg1.end);
+      const plan = makePlan({ segments: [seg0, seg1], joins: [join(1, 2)], outputSample });
+      const result = renderRemix([src], analysis, plan, { sampleRate: SR, crossfadeMs: 25, maxNudgeMs: 10 });
+
+      // Fixture sanity: the search actually landed on the planted lag.
+      expect(result.nudgeSamples[0]).toBe(targetLag);
+
+      // Fixture sanity: the paste artifact (an unavoidable side-effect of
+      // planting an exact lag on periodic material -- see the comment
+      // above) sits within segment 1's OWN early read range, i.e. well
+      // BEFORE the segment/tail seam this test targets. Assert that
+      // directly rather than merely assuming it -- the paste starts at
+      // SOURCE position `bStartNominal+targetLag`, which segment 1 starts
+      // reading from (fix round 1's "the incoming shift persists through
+      // the segment" design), i.e. within roughly the first `compareLen`
+      // OUTPUT samples after the join's own crossfade -- nowhere near
+      // `seamPos` (only reached after the whole of segment 1, `lb` =
+      // 20000 samples, has played).
+      const pasteAffectedOutputUpperBound = (seg0.end - seg0.start) + compareLen + 200; // generous margin
+      const seamPos = (seg0.end - seg0.start) + (seg1.end - seg1.start); // no head -- cursor at the tail's own start
+      expect(pasteAffectedOutputUpperBound).toBeLessThan(seamPos - 500);
+
+      const naturalSlew = maxSlew(sine(freq, 20000, SR, 1)).value; // clean reference, no pasted region
+      const seamStep = Math.abs(result.channels[0][seamPos] - result.channels[0][seamPos - 1]);
+      expect(seamStep).toBeLessThanOrEqual(1.2 * naturalSlew);
+
+      // The relevant region (segment/tail seam through the end of the
+      // output) must ALSO stay within bound -- not just the single seam
+      // sample, in case the overflow fade itself introduced a step.
+      // Restricted to [seamPos-500, end), which the assertion above just
+      // proved is disjoint from the paste-affected range, so nothing here
+      // can be the fixture's own paste artifact rather than a real
+      // renderRemix regression.
+      const region = maxSlew(result.channels[0], seamPos - 500, result.channels[0].length);
+      expect(region.value).toBeLessThanOrEqual(1.2 * naturalSlew);
+      // Cross-check that this measurement is genuinely reading the tail
+      // region (confirmed empirically: the peak always lands a few hundred
+      // samples INTO the tail, i.e. inside [seamPos, end), never in the
+      // [seamPos-500, seamPos) margin) -- not an artefact of the window
+      // happening to land somewhere irrelevant.
+      expect(region.at).toBeGreaterThanOrEqual(seamPos);
+    }, 15000);
+  }
 });

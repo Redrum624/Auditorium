@@ -110,14 +110,20 @@
  * original final bar" language -- reported, not silently assumed (see the
  * task report).
  *
- * The tail is read starting at `min(finalEffEnd, sourceLen-tailLen)`, NOT
- * unconditionally at `finalEffEnd` (fix round 2, Important 2). The LAST
- * join's own micro-alignment lag is deliberately left unclamped by
- * `tailLen` (see that clamp's own comment, at the lag computation, for why
- * bounding the lag itself instead silently disabled forward alignment on
- * nearly every non-truncated track) -- so it is this read-position clamp,
- * not the lag, that keeps the tail from running past the true end of
- * `source` when a positive lag would otherwise push it there.
+ * The tail is ALWAYS read starting at `finalEffEnd`, unconditionally (fix
+ * round 3 -- round 2 shifted the read start backward to `min(finalEffEnd,
+ * sourceLen-tailLen)` when it would otherwise overflow, which reduces to
+ * "jump back by the last join's own `lag`" on any non-truncated source, a
+ * genuine phase discontinuity at the segment->tail seam, worse than the
+ * bug it replaced). The LAST join's own micro-alignment lag is deliberately
+ * left unclamped by `tailLen` (see that clamp's own comment, at the lag
+ * computation, for why bounding the lag itself instead silently disabled
+ * forward alignment on nearly every non-truncated track) -- so whatever
+ * portion of the tail runs past `sourceLen` (bounded by `maxNudge`) is
+ * simply faded OUT linearly rather than read from a shifted position or
+ * left as an unattenuated step. The seam itself is therefore always exactly
+ * continuous; only the necessarily-silent tail end of a positive-lag join
+ * gets a short taper.
  *
  * ## Exact-length trim
  *
@@ -481,6 +487,27 @@ function applyLinearFadeOut(channels: Float32Array[], fadeLen: number): void {
   }
 }
 
+/**
+ * Linear fade-out over `[endPos-fadeLen, endPos)` -- unlike
+ * `applyLinearFadeOut` (always anchored to the buffer's own end), this
+ * fades a window ending at an ARBITRARY position. Used for the tail
+ * overflow taper (fix round 3): the window immediately AFTER `endPos` is
+ * assumed to already be silence (zero-padded, real audio ran out), so this
+ * forces the window's LAST sample to exactly `0` (even for a single-sample
+ * window, unlike `applyLinearFadeOut`'s `n=1 -> g=1`) -- the point is
+ * CONTINUITY with that adjacent silence, not "trail off gently over a
+ * fixed span" the way the true end-of-buffer fades are.
+ */
+function applyLinearFadeOutEndingAt(channels: Float32Array[], endPos: number, fadeLen: number): void {
+  if (fadeLen <= 0) return;
+  const start = Math.max(0, endPos - fadeLen);
+  const n = endPos - start;
+  for (let i = 0; i < n; i++) {
+    const g = n > 1 ? 1 - i / (n - 1) : 0;
+    for (let c = 0; c < channels.length; c++) channels[c][start + i] *= g;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // renderRemix
 // ---------------------------------------------------------------------------
@@ -657,19 +684,48 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   }
 
   // --- tail (tailLen was computed up front, before the loop) ---
-  // Fix round 2, Important 2: clamp the READ position, not the last join's
-  // lag (see that clamp's own comment for why bounding the lag itself
-  // silently disabled forward alignment on nearly every real track). If a
-  // positive lag pushed `finalEffEnd` far enough right that reading
-  // `tailLen` samples from it would run past `sourceLen`, read the tail
-  // from `sourceLen-tailLen` instead -- the true physical end of the file,
-  // still exactly `tailLen` samples (length-neutral), never silence. This
-  // can only shift the tail's start LEFT of where the last segment's own
-  // content actually ended, by at most `maxNudge` samples in the narrow
-  // case that triggers it -- bounded, and never the unattenuated silence
-  // the original bug produced.
-  const tailReadStart = Math.min(finalEffEnd, sourceLen - tailLen);
-  writeRange(source, tailReadStart, tailReadStart + tailLen, channels, cursor);
+  // Fix round 3, Important (round 2's own fix regressed this): the read
+  // position is NEVER shifted -- round 2's `min(finalEffEnd,
+  // sourceLen-tailLen)` looked like it only "clamped an overflow", but
+  // whenever `analyzedEndSample === sourceLen` (the common, NON-truncated
+  // case -- most sources) that expression reduces algebraically to
+  // `min(lastSeg.end+lag, lastSeg.end)`, i.e. for ANY positive last-join
+  // `lag` it silently jumped the tail's read position BACKWARD by `lag`
+  // samples, replaying up to `maxNudge` samples of audio the last segment's
+  // own write had just played, with no crossfade -- a genuine phase
+  // discontinuity at the segment->tail seam, WORSE than the unattenuated
+  // step it replaced (measured on a 200 Hz tone: seam slew up to ~36x the
+  // source's own natural slew, violating acceptance-5's whole-output bound
+  // by roughly that factor). Reading always starts at `finalEffEnd` --
+  // exactly where the last segment's own content stopped, so the seam
+  // itself is always perfectly continuous, full stop. Whatever portion of
+  // `[finalEffEnd, finalEffEnd+tailLen)` runs past `sourceLen` (bounded by
+  // `maxNudge`, since `finalEffEnd <= sourceLen` is guaranteed by the last
+  // join's own lag clamp) reads as zero via `writeRange`'s existing
+  // out-of-bounds fallback -- exactly as before round 2 -- and the REAL
+  // audio immediately preceding that already-silent region is then faded
+  // OUT linearly (see `applyLinearFadeOutEndingAt`, below) so the
+  // transition into that necessary silence is smooth rather than a click.
+  // This keeps
+  // EVERYTHING rounds 1-2 won: forward alignment still applies in full,
+  // the tail is still exactly `tailLen` samples (length-neutral), and
+  // there is still no unattenuated step into silence -- without ever
+  // moving a read position backward.
+  writeRange(source, finalEffEnd, finalEffEnd + tailLen, channels, cursor);
+  const tailOverflow = Math.max(0, Math.min(tailLen, finalEffEnd + tailLen - sourceLen));
+  if (tailOverflow > 0) {
+    // The overflow samples themselves are ALREADY zero (read past
+    // `source`'s own end, via `writeRange`'s out-of-bounds fallback) --
+    // fading that already-silent region would be a no-op. What needs
+    // fading is the REAL audio immediately BEFORE it, tapered down so it
+    // meets that silence smoothly instead of stopping abruptly. `validLen`
+    // is how much real tail audio exists before the overflow begins;
+    // bounding the fade window by it keeps the taper inside this tail,
+    // never reaching back into the previous segment's own content.
+    const validLen = tailLen - tailOverflow;
+    const fadeLen = Math.min(tailOverflow, validLen);
+    applyLinearFadeOutEndingAt(channels, cursor + validLen, fadeLen);
+  }
   cursor += tailLen;
 
   // The exact-length invariant, CHECKED rather than assumed (fix round 1,
@@ -682,6 +738,18 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   // regression in either module (or a hand-built `plan` a caller supplies
   // directly, as this module's own tests do) would otherwise silently
   // produce a wrong-length buffer with no error.
+  //
+  // DEFENCE IN DEPTH, NOT DIRECTLY COVERED (fix round 2, Minor): the
+  // entry-side identity check above (`expectedOutputSample !==
+  // plan.outputSample`) now catches every externally-supplied `plan`
+  // mismatch before any writing happens, so THIS check is unreachable from
+  // any test built by handing `renderRemix` a plan whose `outputSample`
+  // disagrees with its own segments -- it guards a DIFFERENT failure mode
+  // (a bug in the join/shape/butt-splice cursor arithmetic ABOVE that still
+  // manages to drift away from a plan whose own numbers are internally
+  // consistent), which by design cannot be reached without deliberately
+  // corrupting that arithmetic. Kept anyway, as the assertion of last
+  // resort for exactly that class of regression.
   if (cursor !== plan.outputSample) {
     throw new Error(`renderRemix: internal cursor mismatch -- wrote ${cursor} samples but plan.outputSample is ${plan.outputSample}`);
   }
