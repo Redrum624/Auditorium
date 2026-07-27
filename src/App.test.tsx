@@ -1,4 +1,4 @@
-import { act, render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent, within } from '@testing-library/react';
 import App from './App';
 import { useAppStore, makeInitialState } from './stores/appStore';
 import { createDocument } from './audio/AudioDocument';
@@ -142,6 +142,18 @@ describe('right sidebar tabs (Task 23)', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'History' }));
     expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'history');
+  });
+
+  it('offers the Remix tab (Task T15) and switches to it on click', () => {
+    render(<App />);
+
+    const tabs = screen.getByTestId('sidebar-tabs');
+    expect(within(tabs).getByRole('button', { name: 'Remix' })).toBeInTheDocument();
+
+    fireEvent.click(within(tabs).getByRole('button', { name: 'Remix' }));
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'remix');
+    // The panel body is mounted, not just the tab state.
+    expect(screen.getByText(/no remix for this document/i)).toBeInTheDocument();
   });
 });
 

@@ -14,6 +14,7 @@ import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
 import MarkersPanel from './components/Panels/MarkersPanel';
 import PropertiesPanel from './components/Panels/PropertiesPanel';
+import RemixPanel from './components/Panels/RemixPanel';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
@@ -27,13 +28,14 @@ import { installTestHooks } from './services/testHooks';
 import { stopAll } from './services/transportService';
 import { useAppStore } from './stores/appStore';
 
-// 'remix' is reachable through `focusRemixPanel()` (dialogBus) the moment a
-// remix document is created; its tab button and panel body land with T15.
+// 'remix' is also reachable through `focusRemixPanel()` (dialogBus) the moment
+// a remix document is created, without the user finding the tab first.
 type SidebarTab = 'history' | 'markers' | 'properties' | 'remix';
 const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
   { id: 'history', label: 'History' },
   { id: 'markers', label: 'Markers' },
   { id: 'properties', label: 'Properties' },
+  { id: 'remix', label: 'Remix' },
 ];
 
 // Populate the effect registry and its menu commands once at module load — before
@@ -161,6 +163,7 @@ export default function App() {
             {sidebarTab === 'history' && <HistoryPanel />}
             {sidebarTab === 'markers' && <MarkersPanel />}
             {sidebarTab === 'properties' && <PropertiesPanel />}
+            {sidebarTab === 'remix' && <RemixPanel />}
           </div>
         </div>
       </div>
