@@ -54,13 +54,30 @@
  *
  * `targetBars` itself is only ever an ESTIMATE (`(targetSample-headLen-
  * tailLen)/avgBarLen`, `avgBarLen` the analysis's own mean bar length) used
- * to size `Nmax` and the window -- it is NEVER used to compute a reported
- * duration. Every duration this module reports (`outputSample`,
- * `minOutputSample`, `maxOutputSample`) is summed from the ACTUAL
- * `barBoundary` samples of the actually-reconstructed path, so drift-varying
- * bar lengths never leak an error into the reported numbers, only (at most)
- * into which `n` gets selected -- and the tolerance window exists precisely
- * to absorb that.
+ * to place the WINDOW -- it is NEVER used to size `Nmax` (fix round 1, Plan
+ * Ruling 6 -- see "Lattice sizing is target-independent" below) and it is
+ * NEVER used to compute a reported duration. Every duration this module
+ * reports (`outputSample`, `minOutputSample`, `maxOutputSample`) is summed
+ * from the ACTUAL `barBoundary` samples of the actually-reconstructed path,
+ * so drift-varying bar lengths never leak an error into the reported
+ * numbers, only (at most) into which `n` gets selected -- and the tolerance
+ * window exists precisely to absorb that.
+ *
+ * ## Lattice sizing is target-independent (Plan Ruling 6, fix round 1)
+ *
+ * `Nmax = round(numBars*maxRepeatFactor)` -- a function of the SOURCE and
+ * `maxRepeatFactor` alone, never of `targetBars`. The brief originally
+ * specified `Nmax = min(round(M*maxRepeatFactor), targetBars+phraseBars)`,
+ * which the T11 review measured as WRONG: it made reachability itself a
+ * function of the requested target. A far-too-short target shrank `Nmax`
+ * below `M`, so even the trivial straight-through state became unreachable
+ * within the truncated table -- producing a spurious `'no-path'` whose
+ * fallback then reported the FULL source length as "the only achievable
+ * length", exactly backwards for a length slider dragged to its minimum.
+ * Sizing unconditionally makes `minOutputSample`/`maxOutputSample`
+ * genuinely target-independent reachable extremes (see "Reachability" next)
+ * and turns that `no-path` cliff into a correct `'too-short'` carrying the
+ * TRUE minimum.
  *
  * ## Reachability falls out of the same finished table for free
  *
@@ -74,23 +91,29 @@
  *
  * ## Refusals computed BEFORE the DP, where possible
  *
- * `tempoConfidence < CONFIDENCE_LOW` -> `'no-tempo'`; `numBars < 2*phraseBars
- * + 2` -> `'too-short'`; `targetSample > maxRepeatFactor*lengthSample` ->
- * `'too-long'`. None of these three touch `buildCandidateLists`/`joinCost`
- * at all (verified by a dedicated spy-based test) -- there is no meaningful
- * reachability to report for them, so `minOutputSample`/`maxOutputSample`
- * both fall back to the one length ALWAYS known without running anything:
- * the trivial straight-through play, `analysis.analyzedEndSample` (every
- * continue edge is unconditional, so "play everything, no joins" is always
- * conceptually valid regardless of confidence/length -- we just never
- * reach it structurally when refusing up front). The POST-DP empty-window
- * fallback (`'too-short'`/`'too-long'` again, but this time from a real,
+ * `targetSample` non-finite or `<= 0` -> `'too-short'` (fix round 1, Minor
+ * 1); `tempoConfidence < CONFIDENCE_LOW` -> `'no-tempo'`; `numBars <
+ * 2*phraseBars + 2` -> `'too-short'`. None of these touch
+ * `buildCandidateLists`/`joinCost` at all (verified by dedicated spy-based
+ * tests) -- there is no meaningful reachability to report for them, so
+ * `minOutputSample`/`maxOutputSample` both fall back to the one length
+ * ALWAYS known without running anything: the trivial straight-through play,
+ * `analysis.analyzedEndSample` (every continue edge is unconditional, so
+ * "play everything, no joins" is always conceptually valid regardless of
+ * confidence/length -- we just never reach it structurally when refusing up
+ * front). There is deliberately NO up-front `targetSample too large` refusal
+ * (fix round 1, Minor 3 -- see `planRemix`'s own inline comment for why: once
+ * `Nmax` no longer depends on the target, running the DP costs the same
+ * regardless of how large the target is, so the too-long case always flows
+ * through the real DP instead and gets the EXACT reachable maximum). The
+ * POST-DP empty-window fallback (`'too-short'`/`'too-long'`, from the real,
  * exact table) and a completely unreachable terminal state (`'no-path'`,
- * candidates too constrained to ever reach `p=M` within `Nmax`) use the
- * exact reachable min/max instead once the table exists; `'no-path'` has no
- * reachable state to measure from at all, so it uses the same trivial
- * straight-through fallback as the up-front refusals (a documented choice,
- * not a silent guess -- see the task report).
+ * only possible now when a caller supplies `maxRepeatFactor < 1`, making
+ * `Nmax < M` by construction) use the exact reachable min/max instead once
+ * the table exists; `'no-path'` has no reachable state to measure from at
+ * all, so it uses the same trivial straight-through fallback as the
+ * up-front refusals (a documented choice, not a silent guess -- see the
+ * task report).
  *
  * ## OUT-OF-BOUNDS defence in depth
  *
@@ -152,10 +175,15 @@
  * set is dense and overshoot is typically under one bar; in STRICT mode
  * every legal distance is a multiple of `phraseBars` (congruence), so every
  * reachable `n` at `p=M` is congruent to `M` modulo `phraseBars` too, and
- * overshoot can be as large as `phraseBars-1` bars in the worst case
- * (measured: ~1.5 bars at `phraseBars=8` in one evidence run -- see the task
- * report). The actual sample-exact trim (with a 5 ms fade) is T12's job at
- * render time,
+ * overshoot in bar-equivalent units is bounded STRICTLY LESS THAN
+ * `phraseBars` (fix round 1: the original claim here said "as large as
+ * `phraseBars-1` bars", which is wrong for the same reason `n` isn't a
+ * sample count -- real bar-length variation means the overshoot can land at
+ * a genuinely fractional bar count approaching, but never reaching,
+ * `phraseBars`; measured 7.50 bars at `phraseBars=8` in one evidence run,
+ * comfortably under 8 but well above the "7" an integer `phraseBars-1` bound
+ * would have implied). The actual sample-exact trim (with a 5 ms fade) is
+ * T12's job at render time,
  * never a WSOLA micro-stretch here or there (T12's own doc comment has the
  * full argument -- `computeOffsets` runs its full similarity search
  * regardless of ratio, so a "harmless" 2% correction would re-smear every
@@ -181,7 +209,8 @@ import { CONFIDENCE_LOW } from './tempoCore';
 // Constants
 // ---------------------------------------------------------------------------
 
-/** `Nmax = min(round(numBars*maxRepeatFactor), targetBars+phraseBars)` default. */
+/** `Nmax = round(numBars*maxRepeatFactor)` default (Plan Ruling 6, fix round
+ * 1 -- sized independently of the target; see the module doc comment). */
 export const DEFAULT_MAX_REPEAT_FACTOR = 3;
 /** Over-repetition guard threshold: a bar index used more than this many
  * times in the reconstructed path triggers a penalised re-run. */
@@ -263,6 +292,20 @@ export type PlanRemixResult =
       totalCost: number;
       minOutputSample: number;
       maxOutputSample: number;
+      /** The most times any single bar index is played in `segments` (fix
+       * round 1, Important 1 -- T11 review). The over-repetition guard is a
+       * bounded heuristic (see the module doc comment) that can settle for
+       * a plan still above `MAX_USE_COUNT` when the source material offers
+       * no cheaper alternative -- surfaced directly so a caller (T13/T14)
+       * can tell the user "this arrangement repeats a phrase N times"
+       * instead of re-deriving it from `segments` itself. */
+      maxBarUse: number;
+      /** `joins.length > 0` -- whether THIS plan has at least one join a
+       * future `rollIndex+1` re-roll could penalise (fix round 1, Minor 4).
+       * `false` means re-roll would be a silent no-op (nothing to penalise),
+       * a signal T13/T14 can use to disable a "Re-roll" control rather than
+       * offer a button that visibly does nothing. */
+      canReroll: boolean;
     }
   | {
       ok: false;
@@ -497,7 +540,8 @@ function selectTerminalN(
   targetSample: number,
   tolBars: number,
   exactLength: boolean,
-  noPathFallbackSample: number
+  noPathFallbackSample: number,
+  costMargin: number
 ): SelectionResult {
   const { M, Nmax, width, cost } = table;
   const reachable: ReachableEntry[] = [];
@@ -533,18 +577,42 @@ function selectTerminalN(
   const windowed = reachable.filter((r) => r.n >= lo && r.n <= hi);
 
   if (windowed.length > 0) {
-    let best = windowed[0];
+    // Fix round 1, Important 2 (T11 review): a pure "minimise cost" pick
+    // among several windowed `n` can land far from `targetSample` in SAMPLES
+    // even though every candidate is within `tolBars` in BARS -- measured up
+    // to +7.2% duration error on an accelerando where bar count alone was a
+    // poor proxy for sample duration (bars vary in length). Fix: among the
+    // candidates whose cost is within `costMargin` of the window's cheapest
+    // (i.e. genuinely cost-competitive, not merely "the window"), prefer
+    // whichever is closest to `targetSample` in actual samples; a candidate
+    // that is MORE than `costMargin` cheaper than everything else still wins
+    // outright, since it is then the only member of that competitive set.
+    // `costMargin` is `weights.jump` -- the planner's own smallest atomic
+    // cost unit (the fixed per-join toll), not an arbitrary invented
+    // epsilon: two arrangements within one join's worth of cost are exactly
+    // the kind of "no real quality difference" the brief's own cost design
+    // already treats as interchangeable (wJump exists precisely to make the
+    // planner indifferent between equally-similar options save the toll).
+    let minCost = Infinity;
+    for (const r of windowed) {
+      const c = cost[M * width + r.n];
+      if (c < minCost) minCost = c;
+    }
+    const competitive = windowed.filter((r) => cost[M * width + r.n] <= minCost + costMargin);
+
+    let best = competitive[0];
+    let bestDist = Math.abs(best.sample - targetSample);
     let bestCost = cost[M * width + best.n];
-    for (let i = 1; i < windowed.length; i++) {
-      const r = windowed[i];
+    for (let i = 1; i < competitive.length; i++) {
+      const r = competitive[i];
+      const dist = Math.abs(r.sample - targetSample);
       const c = cost[M * width + r.n];
       const better =
-        c < bestCost ||
-        (c === bestCost &&
-          (Math.abs(r.n - targetBars) < Math.abs(best.n - targetBars) ||
-            (Math.abs(r.n - targetBars) === Math.abs(best.n - targetBars) && r.n < best.n)));
+        dist < bestDist ||
+        (dist === bestDist && (c < bestCost || (c === bestCost && r.n < best.n)));
       if (better) {
         best = r;
+        bestDist = dist;
         bestCost = c;
       }
     }
@@ -574,6 +642,10 @@ interface AttemptOk {
   barJoins: { fromBar: number; toBar: number }[];
   minOutputSample: number;
   maxOutputSample: number;
+  /** The most times any single bar index appears in `segmentsBar` --
+   * computed once here and reused by the repetition guard and the final
+   * result, rather than recomputed at every call site. */
+  maxBarUse: number;
 }
 interface AttemptFail {
   ok: false;
@@ -612,7 +684,8 @@ function planOnce(ctx: AttemptContext, penalty: ReadonlyMap<string, number>): At
     ctx.targetSample,
     ctx.tolBars,
     ctx.exactLength,
-    ctx.noPathFallbackSample
+    ctx.noPathFallbackSample,
+    ctx.jumpToll
   );
   if (!sel.ok) {
     return { ok: false, reason: sel.reason, minOutputSample: sel.minOutputSample, maxOutputSample: sel.maxOutputSample };
@@ -625,6 +698,7 @@ function planOnce(ctx: AttemptContext, penalty: ReadonlyMap<string, number>): At
     barJoins,
     minOutputSample: sel.minOutputSample,
     maxOutputSample: sel.maxOutputSample,
+    maxBarUse: maxBarUsage(countBarUsage(segmentsBar, ctx.M)),
   };
 }
 
@@ -644,7 +718,7 @@ function planWithRepetitionGuard(
   let attempt = planOnce(ctx, penalty);
   if (!attempt.ok) return attempt;
 
-  let usage = maxBarUsage(countBarUsage(attempt.segmentsBar, ctx.M));
+  let usage = attempt.maxBarUse;
   if (usage <= MAX_USE_COUNT) return attempt;
 
   let best = attempt;
@@ -660,7 +734,7 @@ function planWithRepetitionGuard(
     if (!next.ok) break; // Reachability/window are penalty-independent; not
     // expected, but bail out safely and keep the best attempt seen so far.
     attempt = next;
-    usage = maxBarUsage(countBarUsage(attempt.segmentsBar, ctx.M));
+    usage = attempt.maxBarUse;
     if (usage <= MAX_USE_COUNT) return attempt;
     const cost = cleanCostOf(attempt.barJoins);
     if (usage < bestUsage || (usage === bestUsage && cost < bestCost)) {
@@ -689,6 +763,22 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
   const trivialSample = analysis.analyzedEndSample;
 
   // --- Refusals computed BEFORE the DP (module doc comment, "Refusals") ---
+  // (Fix round 1: `targetSample` is validated here too -- a non-finite or
+  // non-positive value would otherwise silently produce a zero-length
+  // Float64Array inside the DP, turning every write into a silent no-op and
+  // degrading to a confusing 'no-path'. There is no dedicated reason for
+  // "invalid input" in the brief's four-reason union, and no arrangement can
+  // ever be shorter than a positive sample count, so this reuses 'too-short'
+  // -- the closest honest fit -- with a message that names the real problem.)
+  if (!Number.isFinite(options.targetSample) || options.targetSample <= 0) {
+    return {
+      ok: false,
+      reason: 'too-short',
+      minOutputSample: trivialSample,
+      maxOutputSample: trivialSample,
+      message: `targetSample must be a finite, positive sample count (got ${options.targetSample})`,
+    };
+  }
   if (analysis.confidence < CONFIDENCE_LOW) {
     return {
       ok: false,
@@ -707,16 +797,18 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
       message: `only ${M} bars available; at least ${2 * phraseBars + 2} are required for phrase-aware remixing`,
     };
   }
-  const lengthSample = analysis.analyzedEndSample;
-  if (options.targetSample > maxRepeatFactor * lengthSample) {
-    return {
-      ok: false,
-      reason: 'too-long',
-      minOutputSample: trivialSample,
-      maxOutputSample: Math.round(maxRepeatFactor * lengthSample),
-      message: `target ${options.targetSample} samples exceeds ${maxRepeatFactor}x the source length (${lengthSample} samples)`,
-    };
-  }
+  // NOTE (fix round 1, Minor 3 / Plan Ruling 6): there is deliberately NO
+  // up-front `targetSample > maxRepeatFactor*lengthSample` short-circuit
+  // here anymore. Two reasons: (a) since `Nmax` (below) no longer depends on
+  // `targetBars` at all, running the DP costs the same regardless of how
+  // large the target is -- the ORIGINAL reason for a cheap up-front escape
+  // (avoiding an oversized table for an absurd target) no longer applies;
+  // (b) the up-front estimate (`round(maxRepeatFactor*lengthSample)`) was
+  // measured WRONG in both directions against the true reachable maximum
+  // (T11 review, fix round 1) -- requesting exactly the advertised estimate
+  // could even succeed with a silent shortfall. A too-long target now always
+  // flows through the real DP and gets the EXACT reachable maximum from
+  // `selectTerminalN`'s empty-window fallback instead.
 
   // --- Lattice sizing ---
   const minRunBars = options.strict ? phraseBars : 4;
@@ -725,7 +817,19 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
   const avgBarLen = (analysis.barBoundary[M] - analysis.barBoundary[0]) / M;
   const targetBarsRaw = (options.targetSample - headLen - tailLen) / Math.max(1, avgBarLen);
   const targetBars = Math.max(0, Math.round(targetBarsRaw));
-  const Nmax = Math.max(0, Math.min(Math.round(M * maxRepeatFactor), targetBars + phraseBars));
+  // Plan Ruling 6 (T11 review, fix round 1): `Nmax` is sized from `M` and
+  // `maxRepeatFactor` ALONE, independently of the target. The brief's
+  // original `min(round(M*maxRepeatFactor), targetBars+phraseBars)` made
+  // reachability itself a function of the requested target -- measured
+  // producing `no-path` for a far-too-short target (whose fallback then
+  // reports the FULL source length as the only achievable one, the worst
+  // possible answer to drag a length slider to its minimum) and a
+  // `maxOutputSample` capped at `targetBars+phraseBars` bars regardless of
+  // what's actually reachable (a 16-bar request advertising a 12 s ceiling
+  // on a 73 s-capable source). Sizing unconditionally makes
+  // `minOutputSample`/`maxOutputSample` genuinely target-independent reachable
+  // extremes, exactly as the brief's own reachability contract intends.
+  const Nmax = Math.max(0, Math.round(M * maxRepeatFactor));
   const tolBars = options.strict ? Math.ceil(phraseBars / 2) : 2;
 
   const candOptions: CandidateListOptions = {
@@ -823,5 +927,7 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
     totalCost,
     minOutputSample: attempt.minOutputSample,
     maxOutputSample: attempt.maxOutputSample,
+    maxBarUse: attempt.maxBarUse,
+    canReroll: joins.length > 0,
   };
 }

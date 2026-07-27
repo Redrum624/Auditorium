@@ -349,6 +349,85 @@ describe('planRemix -- FEASIBILITY WINDOW (acceptance 2)', () => {
 });
 
 // ---------------------------------------------------------------------------
+// FIX ROUND 1, Important 2: sample-space duration re-check within the window
+// ---------------------------------------------------------------------------
+
+describe('planRemix -- duration-margin selection within the window (fix round 1, Important 2)', () => {
+  // A pure "minimise bars-distance-to-target, tie-break lowest n" selection
+  // (the pre-fix behaviour) can pick a candidate that is far from the
+  // target in SAMPLES even when two candidates are EXACTLY tied in bars,
+  // because bar count is a poor proxy for sample duration once bars vary in
+  // length -- measured up to +7.2% duration error by the review. This
+  // fixture makes that concrete: two one-join deletions from bar 1, BOTH
+  // exactly 4 bars from a targetBars of 20 (a genuine bar-distance tie), and
+  // BOTH equally cheap (tied cost) -- but bars 17-24 are anomalously LONG
+  // (40000 samples vs 10000 elsewhere), so the two candidates' ACTUAL sample
+  // sums are very different: deleting only bars 1-16 (n=24, keeps the long
+  // bars) lands at 481,300 samples; deleting bars 1-24 (n=16, also removes
+  // the long bars) lands at only 161,300. Requesting 329,000 samples
+  // (rounds to targetBars=20, tying both in BARS) is measurably closer to
+  // the n=24 candidate (distance 152,300) than the n=16 one (distance
+  // 167,700) -- so the fix must pick n=24, where the OLD bars-only tie-break
+  // (tied distance, then lowest n) would have picked n=16 instead.
+  function makeInversionAnalysis(): RemixAnalysis {
+    const M = 40;
+    const head = 500;
+    const tail = 800;
+    const numBoundaries = M + 1;
+    const barBoundary = new Int32Array(numBoundaries);
+    barBoundary[0] = head;
+    for (let i = 1; i <= M; i++) {
+      const len = i >= 18 && i <= 25 ? 40000 : 10000; // bars 17..24 (0-indexed) are long
+      barBoundary[i] = barBoundary[i - 1] + len;
+    }
+    const analyzedEndSample = barBoundary[M] + tail;
+    return {
+      bpm: 120,
+      confidence: 1,
+      beatSamples: Int32Array.from({ length: numBoundaries * BEATS_PER_BAR }, (_, i) => i * 2500),
+      salience: 1,
+      peakRatio: 1,
+      ibiCv: 0,
+      truncated: false,
+      analyzedEndSample,
+      odf: new Float32Array(0),
+      periodFrames: 20,
+      decimationFactor: 4,
+      bands: new Float32Array(0),
+      numBands: NUM_BANDS,
+      odfLow: new Float32Array(0),
+      chroma: new Float32Array(0),
+      numChromaFrames: 0,
+      chromaRate: 10,
+      beatsPerBar: BEATS_PER_BAR,
+      downbeatPhase: 0,
+      downbeatConfidence: 0,
+      barBoundary,
+      numBars: M,
+      T: new Float32Array(numBoundaries * NUM_BANDS),
+      C: new Float32Array(numBoundaries * 12),
+      L: new Float32Array(numBoundaries),
+      R: new Float32Array(numBoundaries * R_DIMS),
+      S: new Float32Array(numBoundaries * (NUM_BANDS + 12)),
+      cluster: Int32Array.from({ length: numBoundaries }, (_, i) => i),
+      transitionSeen: new Set(['1>17', '1>25']), // both deletions equally cheap (dStruct=0)
+    };
+  }
+
+  it('picks the sample-closer candidate (n=24) over the bar-tied, sample-farther one (n=16)', () => {
+    const a = makeInversionAnalysis();
+    const targetSample = 329000; // rounds to targetBars=20 -> window [16,24], both candidates tied at bar-distance 4
+    const result = planRemix(
+      a,
+      baseOptions({ targetSample, phraseBars: 8, strict: true, allowRepeats: false, minKeepBars: 16 })
+    );
+    expectOk(result);
+    expect(result.outputSample).toBe(481300); // n=24 (delete bars 1-16, KEEP the long bars)
+    expect(result.joins).toEqual([{ fromBar: 1, toBar: 17, cost: result.joins[0].cost }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // 3. EMPTY WINDOW -- too-long
 // ---------------------------------------------------------------------------
 
@@ -369,7 +448,6 @@ describe('planRemix -- EMPTY WINDOW, too-long (acceptance 3)', () => {
         phraseBars: 8,
         strict: true,
         allowRepeats: false, // no repeats -> max reachable is the natural straight-through length
-        maxRepeatFactor: 10, // large enough that the up-front too-long precheck doesn't fire first
       })
     );
     expectFail(result);
@@ -397,10 +475,12 @@ describe('planRemix -- refusals (acceptance 4)', () => {
     a.cluster = Int32Array.from({ length: M + 1 }, () => 0);
     a.transitionSeen = new Set(['0>0']); // every legal deletion cheap/uniform
 
-    // targetBars=8 -> Nmax = min(round(M*3), 8+8) = 16, which comfortably
-    // covers the real reachable minimum (16 bars via three 8-bar deletions)
-    // while the tolBars=4 window [4,12] sits entirely below it -- an empty
-    // window on the low side, not simply outside a too-small Nmax.
+    // targetBars=8 -> the tolBars=4 window [4,12] sits entirely below the
+    // true reachable minimum (16 bars) -- an empty window on the low side.
+    // (Fix round 1: Nmax no longer depends on the target at all -- see the
+    // dedicated far-too-short test below, which pins targetBars 2/4/6
+    // specifically because those are OUTSIDE the narrow band the old,
+    // target-dependent Nmax formula happened to still cover.)
     const target = head + 8 * barLen + tail;
     const result = planRemix(
       a,
@@ -427,6 +507,33 @@ describe('planRemix -- refusals (acceptance 4)', () => {
     expect(result.reason).toBe('too-short');
   });
 
+  // Fix round 1, Minor 1 (T11 review): a non-finite or non-positive
+  // `targetSample` must be refused explicitly, not silently produce a
+  // zero-length `Float64Array` (a `NaN` size) whose every DP write is then a
+  // no-op, degrading confusingly to `no-path`.
+  describe('invalid targetSample (fix round 1, Minor 1)', () => {
+    const a = makeUniformAnalysis({ numBars: 40 });
+
+    it.each([NaN, Infinity, -Infinity, 0, -1000])('targetSample=%p -> too-short with an explanatory message, never no-path', (bad) => {
+      const result = planRemix(a, baseOptions({ targetSample: bad }));
+      expectFail(result);
+      expect(result.reason).toBe('too-short');
+      expect(result.message).toMatch(/targetSample/);
+      expect(result.minOutputSample).toBe(a.analyzedEndSample);
+      expect(result.maxOutputSample).toBe(a.analyzedEndSample);
+    });
+
+    it('never throws and never reaches the DP for an invalid targetSample', () => {
+      const spy = jest.spyOn(remixCostModule, 'buildCandidateLists');
+      try {
+        expect(() => planRemix(a, baseOptions({ targetSample: NaN }))).not.toThrow();
+        expect(spy).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+      }
+    });
+  });
+
   it('tempoConfidence 0.2 -> no-tempo, WITHOUT running the DP (buildCandidateLists never queried)', () => {
     const spy = jest.spyOn(remixCostModule, 'buildCandidateLists');
     try {
@@ -451,14 +558,20 @@ describe('planRemix -- refusals (acceptance 4)', () => {
     }
   });
 
-  it('every candidate rejected -> no-path', () => {
-    // strict phraseBars=8 requires delta>=8 for ANY legal pair; the default
-    // minKeepBars=2*phraseBars=16 caps a deletion at numBars-minKeepBars=4 --
-    // mutually exclusive (delta must be both >=8 and <=4), so
-    // buildCandidateLists genuinely returns every candidate list empty (not
-    // merely unreachable within a small Nmax). With allowRepeats:false there
-    // is no other way to reach p=M within this fixture's Nmax either, so no
-    // state at p=M is ever finite -- true 'no-path'.
+  it('every candidate rejected AND Nmax < M (maxRepeatFactor < 1) -> no-path', () => {
+    // Fix round 1 (Plan Ruling 6): Nmax is now sized from M and
+    // maxRepeatFactor ALONE, independently of the target -- so, unlike
+    // before, a small/short TARGET can no longer shrink Nmax below M. The
+    // trivial straight-through state (M,M) is reachable via unconditional
+    // continue edges whenever Nmax>=M, regardless of candidates -- so
+    // 'no-path' can now only occur when the caller supplies a
+    // maxRepeatFactor<1 (Nmax<M by construction), a genuine misconfiguration
+    // rather than an ordinary short target. strict phraseBars=8 requires
+    // delta>=8 for ANY legal pair; the default minKeepBars=2*phraseBars=16
+    // caps a deletion at numBars-minKeepBars=4 -- mutually exclusive, so
+    // buildCandidateLists ALSO genuinely returns every candidate list empty
+    // (the literal "every candidate rejected" the brief names), though with
+    // Nmax<M that alone would already be enough regardless of candidates.
     const phraseBars = 8;
     const M = 2 * phraseBars + 4; // comfortably above the too-short floor
     const a = makeUniformAnalysis({ numBars: M });
@@ -472,22 +585,53 @@ describe('planRemix -- refusals (acceptance 4)', () => {
     });
     for (const list of candidates) expect(list.length).toBe(0);
 
-    const target = a.barBoundary[0] + 1 * 10000 + (a.analyzedEndSample - a.barBoundary[M]); // ~1 bar
     const result = planRemix(
       a,
       baseOptions({
-        targetSample: target,
+        targetSample: a.analyzedEndSample,
         phraseBars,
         strict: true,
         allowRepeats: false,
-        maxRepeatFactor: 1, // Nmax = min(M, targetBars+phraseBars), small enough that even the
-        // straight-through state (M,M) sits outside the truncated table.
+        maxRepeatFactor: 0.5, // Nmax = round(M*0.5) < M -- (M,M) itself sits outside the table.
       })
     );
     expectFail(result);
     expect(result.reason).toBe('no-path');
     expect(result.minOutputSample).toBe(a.analyzedEndSample);
     expect(result.maxOutputSample).toBe(a.analyzedEndSample);
+  });
+
+  it('a target below the true reachable minimum is CORRECTLY too-short (not no-path) regardless of how far below it is -- the far-too-short case Plan Ruling 6 requires pinned outside the old narrow band', () => {
+    // Same M/constraints as the "target below the reachable minimum" test
+    // above, but the target is now WAY below the true minimum (2 bars, not
+    // tuned to sit just inside the old, target-dependent Nmax). Before the
+    // Nmax fix this fell into 'no-path' with min=max=analyzedEndSample (the
+    // FULL source length reported as the only achievable one -- the worst
+    // possible answer to a length slider dragged to its minimum). After the
+    // fix, Nmax no longer depends on the target at all, so the true
+    // reachable minimum is found regardless of how extreme the request is.
+    const M = 40;
+    const barLen = 10000;
+    const head = 500;
+    const tail = 800;
+    const a = makeUniformAnalysis({ numBars: M, barLen, head, tail });
+    a.cluster = Int32Array.from({ length: M + 1 }, () => 0);
+    a.transitionSeen = new Set(['0>0']);
+    const naturalLength = head + M * barLen + tail;
+
+    for (const targetBars of [2, 4, 6]) {
+      const target = head + targetBars * barLen + tail;
+      const result = planRemix(
+        a,
+        baseOptions({ targetSample: target, phraseBars: 8, strict: true, allowRepeats: false, minKeepBars: 8 })
+      );
+      expectFail(result);
+      expect(result.reason).toBe('too-short');
+      // The true minimum (three max-size 8-bar deletions off 40 bars = 16
+      // bars) must be reported EXACTLY, not the full source length.
+      expect(result.minOutputSample).toBe(head + 16 * barLen + tail);
+      expect(result.minOutputSample).toBeLessThan(naturalLength);
+    }
   });
 });
 
@@ -609,6 +753,11 @@ describe('planRemix -- OVER-REPETITION GUARD (acceptance 7)', () => {
     const counts = usageCounts(result.segments, BAR_LEN, HEAD, M);
     expect(Math.max(...counts)).toBe(5);
     expect(counts[12]).toBe(5);
+    // maxBarUse (fix round 1, Important 1) must match the independently
+    // counted usage exactly, including in a fixture where the guard's
+    // heuristic itself does not fully succeed (see the module doc comment --
+    // "bounded, not guaranteed").
+    expect(result.maxBarUse).toBe(5);
   });
 
   it('with a wider repeat budget available, the guard reduces every bar index to <= MAX_USE_COUNT uses, at a totalCost >= the unconstrained optimum', () => {
@@ -633,7 +782,10 @@ describe('planRemix -- OVER-REPETITION GUARD (acceptance 7)', () => {
     const baseCosts = candidates.map((cand, from) =>
       Float64Array.from(cand, (b) => joinCost(a, DEFAULT_REMIX_WEIGHTS, phraseBars, from, b).total)
     );
-    const Nmax = Math.min(Math.round(M * DEFAULT_MAX_REPEAT_FACTOR), targetBars + phraseBars);
+    // Fix round 1 (Plan Ruling 6): Nmax is sized from M and maxRepeatFactor
+    // ALONE now, matching planRemix's own (fixed) formula exactly, so this
+    // probe's table is directly comparable to planRemix's internal one.
+    const Nmax = Math.round(M * DEFAULT_MAX_REPEAT_FACTOR);
     const table = _runRemixDPForTest(candidates, baseCosts, DEFAULT_REMIX_WEIGHTS.jump, new Map(), M, Nmax, minRunBars);
     const width = Nmax + 1;
     const unconstrainedOptimum = table.cost[M * width + targetBars];
@@ -653,6 +805,9 @@ describe('planRemix -- OVER-REPETITION GUARD (acceptance 7)', () => {
     const counts = usageCounts(result.segments, BAR_LEN, HEAD, M);
     expect(Math.max(...counts)).toBeLessThanOrEqual(MAX_USE_COUNT);
     expect(result.totalCost).toBeGreaterThanOrEqual(unconstrainedOptimum);
+    // maxBarUse (fix round 1, Important 1) surfaces the same count directly.
+    expect(result.maxBarUse).toBe(Math.max(...counts));
+    expect(result.maxBarUse).toBeLessThanOrEqual(MAX_USE_COUNT);
   });
 });
 
@@ -718,6 +873,28 @@ describe('planRemix -- DETERMINISM and RE-ROLL (acceptance 8)', () => {
     const r1 = planRemix(a, options);
     const r2 = planRemix(a, { ...options });
     expect(r1).toEqual(r2);
+  });
+
+  it('canReroll (fix round 1, Minor 4) is true whenever the plan has at least one join, false for a plan with none', () => {
+    const a = makeRerollAnalysis();
+
+    const withJoin = planRemix(
+      a,
+      baseOptions({ targetSample: HEAD + 32 * BAR_LEN + TAIL, phraseBars: PHI, strict: true, allowRepeats: false, minKeepBars: 8 })
+    );
+    expectOk(withJoin);
+    expect(withJoin.joins.length).toBeGreaterThan(0);
+    expect(withJoin.canReroll).toBe(true);
+
+    // The natural straight-through length needs zero joins -- re-roll would
+    // have nothing to penalise, so canReroll must say so.
+    const natural = planRemix(
+      a,
+      baseOptions({ targetSample: a.analyzedEndSample, phraseBars: PHI, strict: true, allowRepeats: false })
+    );
+    expectOk(natural);
+    expect(natural.joins.length).toBe(0);
+    expect(natural.canReroll).toBe(false);
   });
 });
 
@@ -886,11 +1063,18 @@ describe('planRemix -- duration accuracy across a range of targets (varying bar 
     expect(targetBarsSweep.some((b) => b > M)).toBe(true);
   });
 
-  it('a target beyond maxRepeatFactor*lengthSample refuses too-long rather than silently clamping', () => {
+  it('a target beyond maxRepeatFactor*lengthSample refuses too-long via the real DP (fix round 1 -- there is no up-front shortcut anymore), reporting the EXACT reachable maximum', () => {
     const a = makeVaryingAnalysis(M);
     const farTooLong = a.analyzedEndSample * 5; // default maxRepeatFactor = 3
     const result = planFor(a, farTooLong, DEFAULT_MAX_REPEAT_FACTOR);
     expectFail(result);
     expect(result.reason).toBe('too-long');
+    // The reported maximum must be a genuine, reachable, EXACT value -- well
+    // below the absurd request, and above the natural length (since
+    // lengthening via repeats is allowed in this fixture) -- not the old
+    // `round(maxRepeatFactor*lengthSample)` ESTIMATE (fix round 1, Minor 3),
+    // which the review measured wrong in both directions.
+    expect(result.maxOutputSample).toBeLessThan(farTooLong);
+    expect(result.maxOutputSample).toBeGreaterThan(a.analyzedEndSample);
   });
 });
