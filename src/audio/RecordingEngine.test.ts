@@ -241,6 +241,33 @@ describe('RecordingEngine', () => {
       expect(node.disconnected).toBe(true);
       expect(ctx.createdSources[0].disconnected).toBe(true);
     });
+
+    it('still releases the mic, closes the context and clears _isRecording when concatChannels() throws', async () => {
+      const { engine, node, ctx, stream } = setup();
+      await engine.start({ channels: 1, sampleRate: 44100 });
+
+      // A chunk whose declared length is far past the maximum typed-array
+      // size: concatChannels sums the lengths and then allocates the merged
+      // buffer, so `new Float32Array(length)` throws RangeError — the same
+      // shape as a genuine OOM on a very long take. (No level callback is
+      // registered, so emitLevel returns before it would iterate this.)
+      const monstrous = { length: 2 ** 45 } as unknown as Float32Array;
+      node.port.emit({ channels: [monstrous], final: false });
+      respondToFlush(node, [f32([])]);
+
+      await expect(engine.stop()).rejects.toThrow(RangeError);
+
+      // Before the fix, every one of these was skipped: the mic stayed live
+      // (recording indicator stuck on), the context stayed open, the graph
+      // stayed connected and the engine could never be started again.
+      expect(stream.tracks[0].stopped).toBe(true);
+      expect(ctx.closed).toBe(true);
+      expect(node.disconnected).toBe(true);
+      expect(engine.isRecording).toBe(false);
+
+      // The decisive consequence: the engine is usable again.
+      await expect(engine.start({ channels: 1, sampleRate: 44100 })).resolves.toBeUndefined();
+    });
   });
 
   describe('level metering', () => {

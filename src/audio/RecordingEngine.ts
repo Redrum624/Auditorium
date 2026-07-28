@@ -245,30 +245,40 @@ export class RecordingEngine {
     });
 
     const sampleRate = ctx?.sampleRate ?? 44100;
-    const channels = this.concatChannels();
-    // Release the accumulated raw per-batch arrays now that they've been
-    // copied into `channels` — otherwise the previous take's chunks stayed
-    // retained via `this.chunks` until the next start() call reset it, i.e.
-    // for the rest of the session if the user never records again (Task M9 /
-    // F29).
-    this.chunks = [];
+    // EVERY teardown step lives in the `finally` below. `concatChannels()`
+    // allocates one merged buffer per channel and can therefore throw
+    // (RangeError/OOM on a long take); without the `finally` that throw left
+    // the mic TRACK LIVE (recording indicator stuck on), the AudioContext
+    // open, the worklet graph connected, the raw per-batch `chunks` retained,
+    // and `_isRecording` true — so the engine could never be started again
+    // and the only fix was restarting the app.
+    try {
+      const channels = this.concatChannels();
+      return { channels, sampleRate };
+    } finally {
+      // Release the accumulated raw per-batch arrays now that they've been
+      // copied into `channels` — otherwise the previous take's chunks stayed
+      // retained via `this.chunks` until the next start() call reset it, i.e.
+      // for the rest of the session if the user never records again (Task M9 /
+      // F29). On the throw path this matters even more: the merge failed
+      // BECAUSE the accumulation is huge.
+      this.chunks = [];
 
-    this.disposeGraph();
-    // Stop tracks (releases the mic) and close the context.
-    this.stream?.getTracks().forEach((t) => t.stop());
-    if (ctx?.close) {
-      try {
-        await ctx.close();
-      } catch {
-        // Already closed / unsupported; ignore.
+      this.disposeGraph();
+      // Stop tracks (releases the mic) and close the context.
+      this.stream?.getTracks().forEach((t) => t.stop());
+      if (ctx?.close) {
+        try {
+          await ctx.close();
+        } catch {
+          // Already closed / unsupported; ignore.
+        }
       }
+
+      this.stream = null;
+      this.ctx = null;
+      this._isRecording = false;
     }
-
-    this.stream = null;
-    this.ctx = null;
-    this._isRecording = false;
-
-    return { channels, sampleRate };
   }
 
   // --- internals ------------------------------------------------------------

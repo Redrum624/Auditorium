@@ -9,6 +9,7 @@ import {
   _getDspWorkerTerminateCount,
   _resetDspWorkerTestState,
 } from '../__mocks__/createDspWorkerMock';
+import * as createDspWorkerModule from '../workers/createDspWorker';
 
 // App.tsx registers effects at startup; mirror that so the renderer-side lookup
 // in runEffectOnSelection (used for the undo label + guard) finds the built-ins.
@@ -232,6 +233,46 @@ describe('runEffectOnSelection', () => {
     expect(_getDspWorkerTerminateCount()).toBe(1); // the failed worker was discarded
     expect(canUndo(docId)).toBe(false); // no edit was applied
     expect(Array.from(activeChannel())).toEqual(f32(values));
+  });
+
+  // Same shape as tempoAnalysis.test.ts's "worker.postMessage throwing
+  // synchronously" case: a throw inside the `new Promise` executor is caught
+  // by the Promise machinery, so without an explicit try/catch it REJECTED
+  // this promise and neither terminate() branch was ever reached — one leaked
+  // worker thread per Apply.
+  it('settles (never rejects) and TERMINATES the worker when postMessage throws synchronously', async () => {
+    const showMessageBox = jest.fn(async () => 0);
+    (window as unknown as { electronAPI: { showMessageBox: typeof showMessageBox } }).electronAPI = {
+      showMessageBox,
+    };
+    let terminateCalls = 0;
+    const fakeWorker = {
+      onmessage: null as ((e: MessageEvent) => void) | null,
+      onerror: null as ((e: ErrorEvent) => void) | null,
+      postMessage: () => {
+        throw new Error('postMessage boom');
+      },
+      terminate: () => {
+        terminateCalls++;
+      },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    const spy = jest
+      .spyOn(createDspWorkerModule, 'createDspWorker')
+      .mockImplementationOnce(() => fakeWorker as unknown as Worker);
+    const values = [0.1, 0.2, 0.3];
+    const docId = seedDoc(values);
+
+    await expect(runEffectOnSelection('amplify', { gainDb: 6 })).resolves.toBeUndefined();
+
+    expect(terminateCalls).toBe(1);
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Effect failed', message: 'postMessage boom' })
+    );
+    expect(canUndo(docId)).toBe(false);
+    expect(Array.from(activeChannel())).toEqual(f32(values));
+    spy.mockRestore();
   });
 
   it('applies no edit when the effect throws (error path)', async () => {

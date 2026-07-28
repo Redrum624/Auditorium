@@ -21,6 +21,7 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { applyEdit } from './editOps';
 import { getHistory, undo, clearHistory } from './undoHistory';
 import { planRemix } from '../dsp/remixPlan';
+import * as remixRenderModule from '../dsp/remixRender';
 import {
   _setTempoWorkerError,
   _setTempoWorkerLoadFailure,
@@ -730,6 +731,48 @@ describe('session staleness (acceptance 7)', () => {
     expect(getHistory(remixDocId).done.length).toBe(historyBefore);
     expect(getRemixSession(remixDocId)!.stale).toBe(true);
   }, 15000);
+
+  it('(hardening item 2) going stale TERMINATES the session plan worker instead of leaving it resident forever', async () => {
+    _setPlanWorkerThresholdForTest(0); // force the worker route
+    const { source, remixDocId } = await seedSession();
+    expect(_getRemixPlanWorkerCreateCount()).toBe(1);
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(0);
+
+    applyEdit('Silence', source.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
+
+    // Reading the session is what OBSERVES the transition — the panel does
+    // this on every render.
+    expect(getRemixSession(remixDocId)!.stale).toBe(true);
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+
+    // Idempotent: a second observation must not try to kill it again.
+    expect(getRemixSession(remixDocId)!.stale).toBe(true);
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+    // The session itself survives — it is read-only, not dropped.
+    expect(getRemixSession(remixDocId)!.sourceName).toBe('Song.wav');
+  }, 15000);
+
+  it('(hardening item 2) undoing the source edit un-stales the session and RESPAWNS the plan worker from the retained analysis', async () => {
+    _setPlanWorkerThresholdForTest(0); // force the worker route
+    const { source, remixDocId } = await seedSession();
+
+    applyEdit('Silence', source.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
+    expect(getRemixSession(remixDocId)!.stale).toBe(true);
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+
+    // Undo restores the very same channel arrays, so the identity test passes
+    // again and the session is live once more.
+    undo(source.id);
+    expect(getRemixSession(remixDocId)!.stale).toBe(false);
+
+    const result = await reRollRemix(remixDocId);
+
+    expect(result).not.toBeNull();
+    expect(result!.ok).toBe(true);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(2); // respawned, not resurrected
+    // The respawn re-posts the RETAINED analysis, so the worker is usable.
+    expect(_getLastRemixPlanMessage()!.type).toBe('plan');
+  }, 20000);
 });
 
 // ---------------------------------------------------------------------------
@@ -1049,6 +1092,36 @@ describe('session lifecycle and reactivity', () => {
     }
     expect(getRemixSession('doc-not-a-remix')).toBeNull();
     expect(await rejectJoin('doc-not-a-remix', '1>2')).toBeNull();
+  }, 15000);
+});
+
+// ---------------------------------------------------------------------------
+// v1.5.0 hardening — the plan worker must not outlive a post-guard throw
+// ---------------------------------------------------------------------------
+
+describe('createRemixDocument — a throw after the last guard (hardening item 4)', () => {
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('terminates the session plan worker before the throw propagates, so a retry cannot pile up threads', async () => {
+    _setPlanWorkerThresholdForTest(0); // force the worker route
+    const source = seedSource(1);
+    // `renderRemix` genuinely throws on its own entry-side identity check
+    // (remixRender.ts:566, :776) — and it runs after the last killPlanWorker
+    // guard and before `sessions.set`, so nothing could reach the worker.
+    jest.spyOn(remixRenderModule, 'renderRemix').mockImplementation(() => {
+      throw new Error('render exploded');
+    });
+
+    await expect(
+      createRemixDocument({ sourceDocId: source.id, targetSample: TARGET_1_JOIN })
+    ).rejects.toThrow('render exploded');
+
+    expect(_getRemixPlanWorkerCreateCount()).toBe(1);
+    expect(_getRemixPlanWorkerTerminateCount()).toBe(1);
+    // No half-built session was left behind either.
+    expect(getRemixSession(`${source.id}`)).toBeNull();
   }, 15000);
 });
 

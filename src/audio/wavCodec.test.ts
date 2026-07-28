@@ -155,6 +155,47 @@ describe('decodeWav error handling', () => {
     view.setUint32(16, 12, true); // lie: fmt chunkSize = 12 (< minimum 16)
     expect(() => decodeWav(buf)).toThrow('truncated fmt chunk');
   });
+
+  // Before these two checks, a header claiming numChannels === 0 DECODED
+  // SUCCESSFULLY as `channels: []`, and the failure surfaced much later and
+  // much further away as `channels[0].length` on undefined
+  // (menuActions.ts:623, remixRender.ts:480); sampleRate === 0 produced an
+  // Infinity duration instead of an error.
+  it('rejects numChannels === 0 at the header instead of decoding to an empty channel list', () => {
+    const buf = buildFmtOnlyWav({ audioFormat: 1, numChannels: 0, sampleRate: SAMPLE_RATE, bitsPerSample: 16 });
+    expect(() => decodeWav(buf)).toThrow('Invalid WAV channel count: 0');
+  });
+
+  it('rejects an absurd channel count', () => {
+    const buf = buildFmtOnlyWav({ audioFormat: 1, numChannels: 33, sampleRate: SAMPLE_RATE, bitsPerSample: 16 });
+    expect(() => decodeWav(buf)).toThrow('Invalid WAV channel count: 33');
+  });
+
+  it('accepts the boundary channel counts (1 and 32)', () => {
+    for (const numChannels of [1, 32]) {
+      const channels = Array.from({ length: numChannels }, () => Float32Array.from([0.5]));
+      expect(decodeWav(encodeWav(channels, SAMPLE_RATE, 16)).channels.length).toBe(numChannels);
+    }
+  });
+
+  it('rejects sampleRate === 0 (it makes every derived duration Infinity)', () => {
+    const buf = buildFmtOnlyWav({ audioFormat: 1, numChannels: 1, sampleRate: 0, bitsPerSample: 16 });
+    expect(() => decodeWav(buf)).toThrow('Invalid WAV sample rate: 0');
+  });
+
+  it('rejects a sample rate outside the sane window on both sides', () => {
+    const low = buildFmtOnlyWav({ audioFormat: 1, numChannels: 1, sampleRate: 2999, bitsPerSample: 16 });
+    expect(() => decodeWav(low)).toThrow('Invalid WAV sample rate: 2999');
+    const high = buildFmtOnlyWav({ audioFormat: 1, numChannels: 1, sampleRate: 768001, bitsPerSample: 16 });
+    expect(() => decodeWav(high)).toThrow('Invalid WAV sample rate: 768001');
+  });
+
+  it('accepts the boundary sample rates (3000 and 768000)', () => {
+    for (const sampleRate of [3000, 768000]) {
+      const buf = encodeWav([Float32Array.from([0.5])], sampleRate, 16);
+      expect(decodeWav(buf).sampleRate).toBe(sampleRate);
+    }
+  });
 });
 
 describe('encodeWav clipping', () => {

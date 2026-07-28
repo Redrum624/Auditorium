@@ -118,10 +118,31 @@ export async function runEffectOnSelection(
       resolve();
     };
 
-    const transfer = regionChannels.map((c) => c.buffer as ArrayBuffer);
-    worker.postMessage(
-      { type: 'run', id: runId, effectId, channels: regionChannels, sampleRate, params, extra },
-      transfer
-    );
+    // The post is wrapped for the same reason `tempoAnalysis.ts:636-643`
+    // wraps its own: a throw here (an unclonable `params`/`extra`, an
+    // already-detached transfer buffer, ...) is caught by the Promise
+    // machinery and would silently REJECT this promise — so the `terminate()`
+    // calls above are never reached and the worker created at :50 leaks, one
+    // thread per Apply. A `try` around `new Promise(...)` cannot catch it;
+    // it has to be inside the executor.
+    try {
+      const transfer = regionChannels.map((c) => c.buffer as ArrayBuffer);
+      worker.postMessage(
+        { type: 'run', id: runId, effectId, channels: regionChannels, sampleRate, params, extra },
+        transfer
+      );
+    } catch (err) {
+      try {
+        worker.terminate();
+      } catch {
+        /* best-effort — the worker never successfully posted, nothing more to clean up */
+      }
+      void window.electronAPI?.showMessageBox({
+        type: 'error',
+        title: 'Effect failed',
+        message: err instanceof Error ? err.message : String(err),
+      });
+      resolve();
+    }
   });
 }

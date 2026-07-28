@@ -291,14 +291,39 @@ interface Mp4Box {
 }
 
 /**
+ * Bounded scan: at most this many SIBLING boxes are collected per level. Every
+ * other sniffer here is bounded too (WebM 512 KB, Ogg 2 MB, FLAC MAX_BLOCKS);
+ * without this one, a 200 MB `.m4a` padded with ~25 million empty 8-byte
+ * `free` boxes made this loop run 25 million iterations on the MAIN THREAD and
+ * build a 25-million-element array of box records before OOMing — reachable
+ * from nothing more than opening a file.
+ *
+ * A byte-range cap (the WebM/Ogg shape) would have been the WRONG bound here
+ * and is deliberately not used: this walk is size-driven, so it steps over a
+ * multi-hundred-megabyte `mdat` in ONE iteration, and `moov` legitimately sits
+ * AFTER that `mdat` in every non-faststart file — capping the byte range would
+ * break sniffing for exactly the large files it was meant to protect. Bounding
+ * the box COUNT bounds both the loop and the allocation while leaving the
+ * size-driven jumps intact.
+ */
+const MP4_MAX_BOXES = 4096;
+
+/**
  * Read the sibling boxes in [start, end). Returns null on any parse doubt: a
  * malformed (size<8) or truncated box, or a 64-bit largesize that is
  * truncated, not safely representable as a Number, or overflows the range.
+ *
+ * Hitting `MP4_MAX_BOXES` is NOT parse doubt, so it returns the bounded PREFIX
+ * collected so far rather than null: the layouts that legitimately run to many
+ * top-level boxes are fragmented MP4s, whose `moov` sits at the very front, so
+ * a prefix still finds it — while a `free`-box flood, which has no `moov` to
+ * find, simply falls back to the default rate instead of freezing the app.
  */
 function readBoxes(bytes: Uint8Array, view: DataView, start: number, end: number): Mp4Box[] | null {
   const boxes: Mp4Box[] = [];
   let offset = start;
   while (offset + 8 <= end) {
+    if (boxes.length >= MP4_MAX_BOXES) return boxes;
     const size = view.getUint32(offset, false); // MP4 boxes are big-endian
     const type = readAscii(bytes, offset + 4, 4);
     if (size === 1) {

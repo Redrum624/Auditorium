@@ -192,6 +192,29 @@ function mp4LargesizeExceedsBuffer(): number[] {
   return [...ftyp, ...badBox];
 }
 
+// `count` empty 8-byte `free` boxes — the padding a hostile (or merely
+// pathological) file uses to make the top-level box walk run forever.
+function freeBoxes(count: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) out.push(...be32(8), ...ascii('free'));
+  return out;
+}
+
+/** `ftyp`, then `count` empty `free` boxes, THEN the real `moov`. */
+function mp4WithLeadingFree(count: number, timescale: number): number[] {
+  const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
+  const moov = box('moov', box('trak', box('mdia', box('mdhd', mdhdContent(timescale)))));
+  return [...ftyp, ...freeBoxes(count), ...moov];
+}
+
+/** `ftyp`, the real `moov`, THEN `count` empty `free` boxes — the shape a
+ * fragmented/faststart file has (structure at the front, bulk after). */
+function mp4WithTrailingFree(count: number, timescale: number): number[] {
+  const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
+  const moov = box('moov', box('trak', box('mdia', box('mdhd', mdhdContent(timescale)))));
+  return [...ftyp, ...moov, ...freeBoxes(count)];
+}
+
 // Top-level box declares size==1 with a largesize beyond Number.MAX_SAFE_INTEGER
 // — must be rejected without ever converting to an imprecise Number.
 function mp4LargesizeExceedsSafeInteger(): number[] {
@@ -420,6 +443,23 @@ describe('sniffSampleRate', () => {
     });
     it('returns null (never throws) when a largesize exceeds Number.MAX_SAFE_INTEGER', () => {
       expect(sniffSampleRate(toBuf(mp4LargesizeExceedsSafeInteger()), 'a.m4a')).toBeNull();
+    });
+
+    // MP4_MAX_BOXES: unbounded, a 200 MB file of ~25 M empty `free` boxes froze
+    // the main thread and OOMed on a 25-million-element box array.
+    it('stops scanning after MP4_MAX_BOXES sibling boxes instead of walking a free-box flood', () => {
+      // moov sits past the cap, so the bounded prefix never reaches it: the
+      // deliberate cost of the bound, and the proof that it exists.
+      expect(sniffSampleRate(toBuf(mp4WithLeadingFree(4200, 44100)), 'a.m4a')).toBeNull();
+    });
+
+    it('still finds a moov that precedes a huge free-box run (the bound is a prefix, not a failure)', () => {
+      expect(sniffSampleRate(toBuf(mp4WithTrailingFree(4200, 44100)), 'a.m4a')).toBe(44100);
+    });
+
+    it('a free-box flood with no moov at all returns null without throwing', () => {
+      const ftyp = box('ftyp', [...ascii('isom'), ...be32(0), ...ascii('isom')]);
+      expect(sniffSampleRate(toBuf([...ftyp, ...freeBoxes(20000)]), 'a.m4a')).toBeNull();
     });
   });
 

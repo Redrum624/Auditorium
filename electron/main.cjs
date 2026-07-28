@@ -30,6 +30,12 @@ function createWindow() {
       contextIsolation: true,
       sandbox: true,
       webSecurity: true,
+      // DevTools stay available while developing but are compiled out of a
+      // packaged build: an installed app has no legitimate use for them, and
+      // leaving them on hands anyone at the keyboard (or anything that can
+      // reach the renderer) a full console against the privileged
+      // window.electronAPI surface.
+      devTools: !app.isPackaged,
       // TEST-ONLY: forward the smoke-harness flag into the sandboxed preload via
       // process.argv (the documented channel for sandboxed preloads). Empty in
       // any normal run, so the renderer never installs test hooks in production.

@@ -13,6 +13,35 @@ const { isPackagedGateOpen } = require('./prodGate.cjs');
 // case-insensitive and immune to '..'/relative-segment mismatches.
 const approvedReadPaths = new Set();
 
+// Paths the renderer is allowed to WRITE via file:write, populated only by
+// dialog:save/dialog:open results -- the same "the user picked this in a
+// native OS dialog" rule the read gate above already enforces, applied to the
+// other direction. Until this existed, file:write was gated ONLY by the path
+// policy (writePathPolicy.cjs), which answers "is this a sane place for an
+// audio app to write" and NOT "did the user ever ask for this file": a
+// compromised renderer could silently overwrite every .wav/.mp3/.flac/.ogg/
+// .audm on the machine outside the protected directories.
+//
+// Fed by BOTH dialogs because both legitimately produce a write target:
+//   * dialog:save  -- Save As, every Export format, Save Session.
+//   * dialog:open  -- an opened document keeps its `filePath`, and plain Save
+//                     re-encodes into it in place (fileService.ts:326) with no
+//                     second dialog. Without this arm, Save-after-Open (the
+//                     single most common save in the app) would break.
+const approvedWritePaths = new Set();
+
+// Extensions the renderer may APPEND to a dialog:save result before writing.
+// It does this deliberately -- saveAsWav (fileService.ts:388-390) and
+// exportDocument (:447-449) both enforce the format's extension on the actual
+// write target when the user retypes the filename, so `song.flac` chosen in a
+// WAV save dialog is written as `song.flac.wav`. The appended path is
+// therefore a legitimate target the user's own dialog choice produced, but it
+// is NOT the string the dialog returned, so it has to be approved alongside
+// it. Deliberately this fixed list (writePathPolicy's own allow-list) rather
+// than the renderer-supplied `opts.filters`: the set of extra approvals must
+// not be steerable from the renderer.
+const APPENDABLE_EXTENSIONS = ['wav', 'mp3', 'flac', 'ogg', 'audm'];
+
 // TEST-ONLY: the scripted smoke harness sets AUDITORIUM_TEST=1 so it can
 // openPath()/exportActive()/saveActiveAs() without native dialogs. In that mode
 // only, reads are auto-approved and writes are permitted under <cwd>/test-output/
@@ -47,11 +76,26 @@ function isReadApproved(rawPath) {
   return approvedReadPaths.has(normalizeForApproval(rawPath));
 }
 
-function resetApproved() {
-  approvedReadPaths.clear();
+/** Approves `rawPath` for writing. `withAppendedExtensions` is set only for
+ * dialog:save results -- see APPENDABLE_EXTENSIONS. */
+function approveWritePath(rawPath, withAppendedExtensions = false) {
+  approvedWritePaths.add(normalizeForApproval(rawPath));
+  if (!withAppendedExtensions) return;
+  for (const ext of APPENDABLE_EXTENSIONS) {
+    approvedWritePaths.add(normalizeForApproval(`${rawPath}.${ext}`));
+  }
 }
 
-const _testing = { approvePath, isReadApproved, resetApproved };
+function isWriteApproved(rawPath) {
+  return approvedWritePaths.has(normalizeForApproval(rawPath));
+}
+
+function resetApproved() {
+  approvedReadPaths.clear();
+  approvedWritePaths.clear();
+}
+
+const _testing = { approvePath, isReadApproved, approveWritePath, isWriteApproved, resetApproved };
 
 /**
  * Registers every IPC handler used by the renderer's window.electronAPI.
@@ -71,11 +115,19 @@ function registerIpc(getWin) {
       const resolved = path.resolve(filePath);
       if (isTestMode() && isUnderTestOutput(resolved)) {
         // Test-only escape hatch: writes under test-output/ bypass the write
-        // policy (see isTestMode's comment). Ensure the dir exists first.
+        // policy AND the user-approval gate (see isTestMode's comment) -- the
+        // scripted smoke drives saveActiveAs/exportActive/saveSessionAs with
+        // no native dialog to approve anything. Ensure the dir exists first.
         await fs.promises.mkdir(path.dirname(resolved), { recursive: true });
       } else {
         assertWriteAllowed(filePath);
         assertWriteTargetSafe(resolved);
+        // Ordered LAST of the three so the policy's specific diagnostics
+        // ("extension not in the allow-list", "malformed UNC path", ...) still
+        // win for a path that is both unapproved and structurally invalid.
+        if (!isWriteApproved(filePath)) {
+          throw new Error('Write not permitted: path was not user-approved');
+        }
       }
       // F2: never truncate the destination directly -- write to a validated
       // sibling temp file, fsync it, then rename it over the target so a
@@ -96,7 +148,13 @@ function registerIpc(getWin) {
       properties
     });
     if (result.canceled || result.filePaths.length === 0) return null;
-    result.filePaths.forEach(approvePath);
+    result.filePaths.forEach((p) => {
+      approvePath(p);
+      // No appended-extension variants here: an opened document's in-place
+      // Save writes to exactly the path it was opened from, and a Save that
+      // changes the format goes through dialog:save instead.
+      approveWritePath(p);
+    });
     return result.filePaths;
   });
 
@@ -108,6 +166,7 @@ function registerIpc(getWin) {
     });
     if (result.canceled || !result.filePath) return null;
     approvePath(result.filePath);
+    approveWritePath(result.filePath, true);
     return result.filePath;
   });
 

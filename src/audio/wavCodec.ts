@@ -218,7 +218,32 @@ interface WavFmt {
   bitsPerSample: number;
 }
 
+/** Widest channel count this decoder will accept. Anything above it is a
+ * malformed/hostile header, not a real file — the app's own encoder writes 1-2
+ * and `decodeAudio` never produces more than the source really has. */
+const MAX_CHANNELS = 32;
+/** Sample-rate sanity window. The lower bound keeps a `0` (or near-zero) rate
+ * out — it makes every derived duration `Infinity` — and the upper bound is
+ * one octave above the highest rate any consumer-grade format uses. */
+const MIN_SAMPLE_RATE = 3000;
+const MAX_SAMPLE_RATE = 768000;
+
 function validateFmt(fmt: WavFmt): void {
+  // Checked BEFORE the format/bit-depth arms (F: a header claiming
+  // numChannels === 0 used to be a SUCCESSFUL decode returning `channels: []`,
+  // which then threw `Cannot read properties of undefined (reading 'length')`
+  // deep downstream at `menuActions.ts:623` / `remixRender.ts:480`, far from
+  // the file that caused it; sampleRate === 0 made every duration Infinity).
+  if (!Number.isInteger(fmt.numChannels) || fmt.numChannels < 1 || fmt.numChannels > MAX_CHANNELS) {
+    throw new Error(`Invalid WAV channel count: ${fmt.numChannels}`);
+  }
+  if (
+    !Number.isInteger(fmt.sampleRate) ||
+    fmt.sampleRate < MIN_SAMPLE_RATE ||
+    fmt.sampleRate > MAX_SAMPLE_RATE
+  ) {
+    throw new Error(`Invalid WAV sample rate: ${fmt.sampleRate}`);
+  }
   if (fmt.audioFormat === FMT_PCM) {
     if (![8, 16, 24, 32].includes(fmt.bitsPerSample)) {
       throw new Error(`Unsupported PCM bit depth: ${fmt.bitsPerSample}`);

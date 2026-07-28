@@ -41,3 +41,27 @@ describe('prodGate.isPackagedGateOpen (F23)', () => {
     expect(isPackagedGateOpen(false, '1')).toBe(true);
   });
 });
+
+// main.cjs cannot be require()d outside a real Electron process (it calls
+// app.setName/app.whenReady at module scope), so the window-hardening options
+// it passes to BrowserWindow are guarded by asserting on its source -- the
+// same approach scripts/prod-csp.test.cjs uses for the built CSP.
+describe('main.cjs BrowserWindow hardening', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, 'main.cjs'), 'utf8');
+
+  test('devTools are disabled in a PACKAGED build', () => {
+    // A packaged app has no legitimate use for DevTools, and leaving them on
+    // hands anyone who reaches the renderer a console against the privileged
+    // window.electronAPI surface.
+    expect(source).toMatch(/devTools:\s*!app\.isPackaged/);
+  });
+
+  test('the rest of the renderer sandbox is still asserted alongside it', () => {
+    expect(source).toMatch(/nodeIntegration:\s*false/);
+    expect(source).toMatch(/contextIsolation:\s*true/);
+    expect(source).toMatch(/sandbox:\s*true/);
+    expect(source).toMatch(/webSecurity:\s*true/);
+  });
+});

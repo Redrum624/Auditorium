@@ -70,6 +70,12 @@
  * worker analysis must never become a way to plan against audio the live
  * document no longer matches.
  *
+ * Going stale is also where the session gives its resources back: the
+ * transition terminates the plan worker (respawned from the retained
+ * `analysis` if an undo un-stales the session), and `sourceChannelRefs` are
+ * held WEAKLY so a stale session never pins the pre-edit source. See
+ * `refreshStale` and `Entry.sourceChannelRefs`.
+ *
  * ## Planning: main thread below `MAX_DP_CELLS`, a SESSION-SCOPED worker above
  *
  * The DP is ~O(M^2) (measured: doubling `M` multiplies wall clock by
@@ -326,8 +332,19 @@ interface PlanWorkerHandle {
 interface Entry {
   session: RemixSession;
   /** Snapshot of the source's channel arrays at plan time — the staleness
-   * test (`peaksCache.ts:16-22`'s identity convention). */
-  sourceChannelRefs: Float32Array[];
+   * test (`peaksCache.ts:16-22`'s identity convention), held WEAKLY.
+   *
+   * Weakly, because a stale session is deliberately never dropped (it stays
+   * read-only so the panel can still say where the remix came from), and a
+   * strong snapshot therefore pinned the ENTIRE PRE-EDIT source — ~105 MB for
+   * a 5-minute stereo track — for the rest of the session. Those are the same
+   * arrays `undoHistory`'s `MAX_UNDO_BYTES` eviction assumes it frees when it
+   * shifts an entry out, so the pin also made the undo budget under-report.
+   * Weak references cost the identity test nothing: while the session is
+   * FRESH the live document holds the same arrays strongly, so `deref()`
+   * always succeeds; while it is STALE, `deref()` succeeding is exactly the
+   * condition under which an undo could still bring them back. */
+  sourceChannelRefs: WeakRef<Float32Array>[];
   /** Cumulative nudge in bars per join, parallel to `session.plan.joins`, so
    * the `+/- floor(phraseBars/2)` bound is on the TOTAL displacement rather
    * than on one keystroke. Reset by every re-plan. */
@@ -398,6 +415,22 @@ function sameChannelRefs(a: Float32Array[], b: Float32Array[]): boolean {
   return true;
 }
 
+/**
+ * The same identity test against a session's WEAKLY-held snapshot (see
+ * `Entry.sourceChannelRefs`). `deref()` returning `undefined` is not a special
+ * case: it can only happen once nothing else in the process references that
+ * array — i.e. once the source edit can no longer be undone back to it — and
+ * `undefined !== b[i]` correctly reports "not the audio this session was
+ * planned against".
+ */
+function sameWeakChannelRefs(a: readonly WeakRef<Float32Array>[], b: Float32Array[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i].deref() !== b[i]) return false;
+  }
+  return true;
+}
+
 function sameWeights(a: RemixWeights, b: RemixWeights): boolean {
   for (const key of WEIGHT_KEYS) {
     if (!Object.is(a[key], b[key])) return false;
@@ -421,10 +454,29 @@ function showFailure(message: string): void {
   });
 }
 
+/**
+ * Recomputes `stale` against the LIVE source and, on the transition INTO
+ * stale, terminates the session's plan worker.
+ *
+ * The worker had to go: a stale session answers `null` to every adjustment,
+ * so nothing will ever ask it to plan again, yet it stayed resident for the
+ * rest of the process — a live thread holding its own resident copy of the
+ * ~1.7 MB analysis — because a stale session is (deliberately) never dropped.
+ * Terminating is safe precisely because it is respawnable: `session.analysis`
+ * is retained, so `liveEntry` re-spawns from it the moment the session
+ * un-stales (undoing the source edit restores the same channel arrays), which
+ * costs one `postMessage` of the analysis on the first adjustment after the
+ * undo and nothing at all otherwise.
+ */
 function refreshStale(entry: Entry): boolean {
   const source = findDoc(entry.session.sourceDocId);
-  entry.session.stale = !source || !sameChannelRefs(entry.sourceChannelRefs, source.channels);
-  return entry.session.stale;
+  const stale = !source || !sameWeakChannelRefs(entry.sourceChannelRefs, source.channels);
+  if (stale && entry.planWorker) {
+    killPlanWorker(entry.planWorker, null); // orderly, not a failure — no dialog
+    entry.planWorker = null;
+  }
+  entry.session.stale = stale;
+  return stale;
 }
 
 /** The one guard every adjustment opens with: a live, non-stale session whose
@@ -442,6 +494,14 @@ function liveEntry(remixDocId: string): Entry | null {
     return null;
   }
   if (refreshStale(entry)) return null;
+  // Un-stale again (the source edit was undone) after `refreshStale` had
+  // already terminated the worker: respawn it from the retained analysis. No
+  // main-thread fallback if that fails, for the same reason session creation
+  // has none — it would trade a visible error for a multi-second freeze.
+  if (entry.session.plansInWorker && !entry.planWorker) {
+    entry.planWorker = spawnPlanWorker(entry.session.analysis);
+    if (!entry.planWorker) return null;
+  }
   return entry;
 }
 
@@ -800,10 +860,10 @@ function commitPlan(entry: Entry, plan: RemixPlan, lockedForReport?: readonly st
     refreshStale(entry);
     return null;
   }
-  if (!sameChannelRefs(entry.sourceChannelRefs, source.channels)) {
-    entry.session.stale = true;
-    return null;
-  }
+  // Routed through `refreshStale` (rather than an inline identity test) so the
+  // commit-time refusal ALSO terminates the plan worker — this is a transition
+  // into stale exactly like the one `liveEntry` sees.
+  if (refreshStale(entry)) return null;
 
   const render = renderRemix(source.channels, analysis, plan, {
     sampleRate: source.sampleRate,
@@ -963,59 +1023,75 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
     return { ok: false, status: 'analysis-failed', message: 'The source audio changed during planning.' };
   }
 
-  const render = renderRemix(liveSource.channels, analysis, plan, {
-    sampleRate: liveSource.sampleRate,
-    crossfadeMs: options.crossfadeMs,
-    exactLength: options.exactLength,
-  });
+  // EVERYTHING from here to `sessions.set` runs AFTER the last `killPlanWorker`
+  // guard and BEFORE the session that owns `planWorker` exists — so a throw in
+  // this window leaves a live worker thread that nothing can reach to
+  // terminate. It is a reachable window, not a theoretical one: `renderRemix`
+  // throws on its own entry-side identity check (`remixRender.ts:566`, `:776`)
+  // and allocates the output (up to ~690 MB, `:571`) right after, and the
+  // caller (`RemixDialog.tsx:370-394`) has a try/finally with NO catch — so
+  // the user sees nothing and every retry adds another thread. Terminate, then
+  // rethrow: the throw itself is a programming error in this module and must
+  // stay visible (see `commitPlan`'s comment on why `renderRemix` is otherwise
+  // uncaught).
+  try {
+    const render = renderRemix(liveSource.channels, analysis, plan, {
+      sampleRate: liveSource.sampleRate,
+      crossfadeMs: options.crossfadeMs,
+      exactLength: options.exactLength,
+    });
 
-  // `mixdownToNewFile` (menuActions.ts:629-636), verbatim: the display number
-  // comes from the id counter, `addDocument` activates the new document and
-  // resets selection/cursor/zoom, then the view switches. No `pushUndo` — a
-  // brand-new document has no history.
-  const n = nextId('remix').split('-')[1];
-  const doc = createDocument({
-    name: `Remix ${n}`,
-    sampleRate: liveSource.sampleRate,
-    channels: render.channels,
-  });
-  store().addDocument(doc);
-  store().setView('waveform');
+    // `mixdownToNewFile` (menuActions.ts:629-636), verbatim: the display number
+    // comes from the id counter, `addDocument` activates the new document and
+    // resets selection/cursor/zoom, then the view switches. No `pushUndo` — a
+    // brand-new document has no history.
+    const n = nextId('remix').split('-')[1];
+    const doc = createDocument({
+      name: `Remix ${n}`,
+      sampleRate: liveSource.sampleRate,
+      channels: render.channels,
+    });
+    store().addDocument(doc);
+    store().setView('waveform');
 
-  if (options.markEditPoints) {
-    const markers = makeJoinMarkers(doc.id, render.joinSamples);
-    if (markers.length > 0) store().setMarkersForDoc(doc.id, markers);
+    if (options.markEditPoints) {
+      const markers = makeJoinMarkers(doc.id, render.joinSamples);
+      if (markers.length > 0) store().setMarkersForDoc(doc.id, markers);
+    }
+
+    sessions.set(doc.id, {
+      session: {
+        remixDocId: doc.id,
+        sourceDocId: liveSource.id,
+        sourceName: liveSource.name,
+        options,
+        analysis,
+        plan,
+        joinSamples: render.joinSamples,
+        nudgeSamples: render.nudgeSamples,
+        rhos: render.rhos,
+        shapes: render.shapes,
+        rejectedJoins: [],
+        lockedJoins: [],
+        lockedJoinsDropped: [],
+        rollIndex: 0,
+        manual: false,
+        plansInWorker,
+        stale: false,
+      },
+      sourceChannelRefs: liveSource.channels.map((c) => new WeakRef(c)),
+      nudgeBars: plan.joins.map(() => 0),
+      planWorker,
+      planMemo: new Map([[0, plan as PlanRemixResult]]),
+      planMemoSignature: memoSignature(options, [], []),
+    });
+    bumpVersion();
+
+    return { ok: true, remixDocId: doc.id, plan };
+  } catch (err) {
+    if (planWorker) killPlanWorker(planWorker, null);
+    throw err;
   }
-
-  sessions.set(doc.id, {
-    session: {
-      remixDocId: doc.id,
-      sourceDocId: liveSource.id,
-      sourceName: liveSource.name,
-      options,
-      analysis,
-      plan,
-      joinSamples: render.joinSamples,
-      nudgeSamples: render.nudgeSamples,
-      rhos: render.rhos,
-      shapes: render.shapes,
-      rejectedJoins: [],
-      lockedJoins: [],
-      lockedJoinsDropped: [],
-      rollIndex: 0,
-      manual: false,
-      plansInWorker,
-      stale: false,
-    },
-    sourceChannelRefs: liveSource.channels.slice(),
-    nudgeBars: plan.joins.map(() => 0),
-    planWorker,
-    planMemo: new Map([[0, plan as PlanRemixResult]]),
-    planMemoSignature: memoSignature(options, [], []),
-  });
-  bumpVersion();
-
-  return { ok: true, remixDocId: doc.id, plan };
 }
 
 // ---------------------------------------------------------------------------
@@ -1257,11 +1333,12 @@ export async function resetRemix(remixDocId: string): Promise<PlanRemixResult | 
 /**
  * Drops every session that involves `docId` — as the REMIX document or as its
  * SOURCE — terminating each one's plan worker. MANDATORY in
- * `closeDocumentFlow` for both: without it a closed document's channel arrays
- * stay retained by `sourceChannelRefs` (and the whole `RemixAnalysis`, and a
- * live Worker holding its own resident copy) for the rest of the session —
- * the same leak class `peaksCache`/`clipWaveformCache`/`tempoAnalysis`
- * already manage.
+ * `closeDocumentFlow` for both: without it the whole `RemixAnalysis` (and, for
+ * a session that has not yet been observed stale, a live Worker holding its
+ * own resident copy of it) stays retained for the rest of the session — the
+ * same leak class `peaksCache`/`clipWaveformCache`/`tempoAnalysis` already
+ * manage. (`sourceChannelRefs` are weak, so they are no longer part of that
+ * list; every other reason to drop the session still stands.)
  *
  * Named `invalidateRemixSession`, not `invalidateRemix`, so it cannot be
  * confused with `tempoAnalysis.invalidateRemix`, which drops the cached

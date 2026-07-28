@@ -201,8 +201,26 @@ export async function encodeOggOpus(
     if (encodeError) break;
   }
 
-  await encoder.flush();
-  encoder.close();
+  // `close()` has to run even when `flush()` rejects. It does reject in the one
+  // case that matters: the loop above breaks out on `encodeError`, and
+  // flushing an ERRORED AudioEncoder rejects — which used to skip `close()`
+  // entirely and leak the underlying codec for the rest of the session. The
+  // rejection is also the wrong error to surface (`encodeError` below is the
+  // real cause), so it is swallowed here and the real one is thrown after.
+  try {
+    await encoder.flush();
+  } catch (err) {
+    // `encodeError` is the real cause and is thrown below; a flush rejection
+    // caused by it is just the symptom. Anything else propagates.
+    if (!encodeError) throw err;
+  } finally {
+    try {
+      encoder.close();
+    } catch {
+      // WebCodecs already closes an encoder when it errors, and close() on an
+      // already-closed encoder throws InvalidStateError. Nothing left to free.
+    }
+  }
   if (encodeError) throw encodeError;
 
   const comments =

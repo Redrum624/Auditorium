@@ -14,7 +14,9 @@ import {
   getTempoVersion,
   useTempoVersion,
   _promoteToRemixLevelForTest,
+  _getCachedChannelRefsForTest,
 } from './tempoAnalysis';
+import { analyzeTempo, MAX_ANALYSIS_SECONDS } from '../dsp/tempoCore';
 import { createDocument, replaceRegion, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { applyEdit } from './editOps';
@@ -602,5 +604,106 @@ describe('useTempoVersion (acceptance m)', () => {
     // though isTempoRunning(doc.id) called fresh (below) already says false.
     expect(result.current.running).toBe(false);
     expect(isTempoRunning(doc.id)).toBe(false); // sanity: matches out-of-band
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v1.5.0 hardening — mono snapshot budget + stale-row retention
+// ---------------------------------------------------------------------------
+
+describe('monoSnapshot budget (hardening item 1)', () => {
+  // 8000 Hz keeps decimateMono at factor 1 (round(8000/11025) === 1) while
+  // still giving the ODF a usable 31.25 fps, so this exercises the real
+  // analysis path rather than a degenerate one -- at 1/5th the samples a
+  // 44.1 kHz fixture of the same duration would cost.
+  const SLOW_SR = 8000;
+  const MAX_SAMPLES = Math.round(MAX_ANALYSIS_SECONDS * SLOW_SR);
+
+  it('posts at most MAX_ANALYSIS_SECONDS+1-sample worth of mono to the worker for an over-long document', async () => {
+    const overLong = clickTrain(120, MAX_ANALYSIS_SECONDS + 30, SLOW_SR);
+    expect(overLong.length).toBeGreaterThan(MAX_SAMPLES);
+    const doc = seedDoc([overLong], SLOW_SR);
+
+    const entry = await runTempoAnalysis(doc);
+
+    // The clamp: everything past the worker's own truncation bound was
+    // allocated, averaged, transferred and then never read.
+    expect(_getLastTempoMessage()!.mono.length).toBe(MAX_SAMPLES + 1);
+    // ...and the one extra sample is what keeps `truncated` observable.
+    expect(entry!.truncated).toBe(true);
+    expect(entry!.analyzedEndSample).toBe(MAX_SAMPLES);
+  }, 60000);
+
+  it('the clamp cannot change the analysis: a clamped input is byte-identical to the full one', () => {
+    const full = clickTrain(120, MAX_ANALYSIS_SECONDS + 30, SLOW_SR);
+    const clamped = full.slice(0, MAX_SAMPLES + 1);
+
+    const fromFull = analyzeTempo(full, SLOW_SR);
+    const fromClamped = analyzeTempo(clamped, SLOW_SR);
+
+    expect(fromClamped.bpm).toBe(fromFull.bpm);
+    expect(fromClamped.truncated).toBe(fromFull.truncated);
+    expect(fromClamped.truncated).toBe(true);
+    expect(fromClamped.analyzedEndSample).toBe(fromFull.analyzedEndSample);
+    expect(fromClamped.confidence).toBe(fromFull.confidence);
+    expect(fromClamped.peakRatio).toBe(fromFull.peakRatio);
+    expect(fromClamped.periodFrames).toBe(fromFull.periodFrames);
+    expect(fromClamped.decimationFactor).toBe(fromFull.decimationFactor);
+    expect(Array.from(fromClamped.beatSamples)).toEqual(Array.from(fromFull.beatSamples));
+    expect(Array.from(fromClamped.odf)).toEqual(Array.from(fromFull.odf));
+  }, 60000);
+
+  it('a document SHORTER than the bound is still snapshotted in full', async () => {
+    const doc = seedDoc([clickTrain(120, 8)]);
+
+    await runTempoAnalysis(doc);
+
+    expect(_getLastTempoMessage()!.mono.length).toBe(8 * SR);
+  });
+});
+
+describe('stale cache rows release their pre-edit channel arrays (hardening item 3)', () => {
+  it('an observed-stale row no longer references the PRE-EDIT Float32Arrays', async () => {
+    const preEdit = clickTrain(120, 8);
+    const doc = seedDoc([preEdit]);
+    await runTempoAnalysis(doc);
+
+    applyEdit('Silence', doc.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
+    const after = getTempo(liveDoc(doc.id));
+    expect(after!.stale).toBe(true);
+
+    // Nothing reachable from the cache may still point at the pre-edit array —
+    // that is the ~105 MB (per analysed-then-edited 5-min stereo doc) this
+    // fix exists to release, and exactly the arrays undoHistory's
+    // MAX_UNDO_BYTES eviction assumes it frees when it shifts an entry out.
+    expect(_getCachedChannelRefsForTest(doc.id)).toBeNull();
+  });
+
+  it('staleness is STICKY: restoring the original channel arrays does not silently un-stale the row', async () => {
+    const preEdit = clickTrain(120, 8);
+    const doc = seedDoc([preEdit]);
+    await runTempoAnalysis(doc);
+
+    applyEdit('Silence', doc.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
+    expect(getTempo(liveDoc(doc.id))!.stale).toBe(true);
+
+    // An undo restores the very same array objects the row used to hold.
+    useAppStore.getState().updateDocument({ ...liveDoc(doc.id), channels: [preEdit] });
+
+    // The row kept nothing to compare against, so it cannot claim freshness.
+    expect(getTempo(liveDoc(doc.id))!.stale).toBe(true);
+    expect(getRemixAnalysis(liveDoc(doc.id))).toBeNull();
+  });
+
+  it('a fresh run rearms the row: stale goes back to false and channelRefs are repopulated', async () => {
+    const doc = seedDoc([clickTrain(120, 8)]);
+    await runTempoAnalysis(doc);
+    applyEdit('Silence', doc.id, (d) => replaceRegion(d, 100, 200, [new Float32Array(100)]));
+    expect(getTempo(liveDoc(doc.id))!.stale).toBe(true);
+
+    const reanalysed = await runTempoAnalysis(liveDoc(doc.id));
+
+    expect(reanalysed!.stale).toBe(false);
+    expect(_getCachedChannelRefsForTest(doc.id)).not.toBeNull();
   });
 });

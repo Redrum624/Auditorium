@@ -27,8 +27,11 @@
  *
  * ## Mono snapshot
  *
- * `monoSnapshot` allocates ONE Float32Array and averages channels[0]/[1] into
- * it in a single pass — deliberately NOT `mixDown(cloneRegion(doc, 0,
+ * `monoSnapshot` allocates ONE Float32Array — clamped to
+ * `analysisSampleBudget(doc)`, i.e. the `MAX_ANALYSIS_SECONDS` window the
+ * worker itself truncates to plus one sample of `truncated`-detection headroom
+ * — and averages channels[0]/[1] into it in a single pass — deliberately NOT
+ * `mixDown(cloneRegion(doc, 0,
  * docLength(doc)))`: `cloneRegion` slices every channel first (a redundant
  * ~106 MB allocation on a 5-min stereo doc) before `mixDown` allocates ITS OWN
  * fresh output on top of that. `mixDown(cloneRegion(...))` does typecheck
@@ -69,7 +72,10 @@
  * `channelRefs` are snapshotted at RUN START (before the worker is even
  * created), so a result landing after a concurrent edit is stored already
  * stale the moment it's cached — `getTempo`/`getRemixAnalysis` compute
- * staleness against the LIVE document at read time, never at write time.
+ * staleness against the LIVE document at read time, never at write time. That
+ * observation happens in exactly one place, `isEntryFresh`, which also
+ * RELEASES the row's `channelRefs` the first time it sees a mismatch (and so
+ * makes staleness sticky for that row) — see its comment.
  *
  * A document CLOSED mid-run is the other race this guards: the 'done'/'error'
  * handler re-reads the store for `docId` and skips the cache write entirely
@@ -143,7 +149,7 @@ import { useSyncExternalStore } from 'react';
 import type { AudioDocument } from '../audio/AudioDocument';
 import { useAppStore } from '../stores/appStore';
 import { createTempoWorker } from '../workers/createTempoWorker';
-import { MIN_BPM, MAX_BPM } from '../dsp/tempoCore';
+import { MIN_BPM, MAX_BPM, MAX_ANALYSIS_SECONDS } from '../dsp/tempoCore';
 import type { TempoAnalysis } from '../dsp/tempoCore';
 import type { RemixAnalysis as RemixFeaturesAnalysis } from '../dsp/remixFeatures';
 
@@ -175,7 +181,19 @@ export interface RemixAnalysisParams {
 }
 
 interface CacheEntry {
-  channelRefs: Float32Array[];
+  /** The channel arrays this row was analysed against, or `null` once the row
+   * has been OBSERVED stale — see `isEntryFresh`. Nulling them is the whole
+   * point of that observation: a row kept only for its (still-displayable, now
+   * out-of-date) BPM must not go on pinning ~105 MB of PRE-EDIT audio for the
+   * rest of the session. */
+  channelRefs: Float32Array[] | null;
+  /** Sticky: set the first time `isEntryFresh` sees an identity mismatch, and
+   * never cleared (the row is replaced wholesale by the next `writeCache`).
+   * It has to be sticky because `channelRefs` is dropped at the same moment —
+   * with nothing left to compare against, "fresh" is no longer decidable, and
+   * the only safe answer is the one that never serves a grid for audio it may
+   * not match. */
+  stale: boolean;
   sampleRate: number;
   level: 'tempo' | 'remix';
   analysis: TempoAnalysis | RemixAnalysis;
@@ -213,16 +231,78 @@ function sameChannelRefs(a: Float32Array[], b: Float32Array[]): boolean {
   return true;
 }
 
+/**
+ * THE single staleness-observation point for a cache row — every reader
+ * (`getTempo`, `getRemixAnalysis`, `runTempoAnalysis`'s superset short-circuit)
+ * goes through it, and it is the only place `entry.stale`/`entry.channelRefs`
+ * are written outside `writeCache`.
+ *
+ * The first time the live document's channel identities no longer match, the
+ * row's `channelRefs` are RELEASED. Before this, a document that was analysed
+ * and then edited left the row holding the PRE-EDIT `Float32Array`s forever —
+ * ~105 MB per analysed-then-edited 5-minute stereo document, up to
+ * `MAX_ENTRIES` of them — because staleness was flagged in place and the row
+ * was never dropped. Worse, those are exactly the arrays `undoHistory`'s
+ * `MAX_UNDO_BYTES` eviction assumes it frees when it shifts an entry out, so
+ * the undo budget silently under-reported the process's real footprint for as
+ * long as a stale row was armed.
+ *
+ * The row itself deliberately SURVIVES (rather than being deleted): `getTempo`
+ * must keep returning the same `TempoEntry` reference with only `.stale`
+ * flipped, so an edit marks the BPM readout out of date instead of blanking
+ * it. The trade is that staleness is now one-way for a given row — an edit
+ * followed by an undo no longer silently un-stales the readout, it needs a
+ * re-analysis (which `writeCache` then serves from a fresh row). That is the
+ * conservative direction: this module's hard rule is that a grid is never
+ * served for audio it might not match.
+ */
+function isEntryFresh(entry: CacheEntry, doc: AudioDocument): boolean {
+  if (entry.stale) return false;
+  if (entry.channelRefs && sameChannelRefs(entry.channelRefs, doc.channels)) return true;
+  entry.stale = true;
+  entry.channelRefs = null;
+  return false;
+}
+
+/**
+ * The number of samples `monoSnapshot` actually needs to hand the worker.
+ *
+ * `analyzeTempo` (`tempoCore.ts:1251`) and `deriveGrid` (`:1385`) BOTH open by
+ * truncating their input to `maxSamples = round(MAX_ANALYSIS_SECONDS *
+ * sampleRate)` and reading only `mono.subarray(0, analyzedEndSample)` from
+ * there on — `mono` is otherwise touched only for its `.length`. So every
+ * sample past that bound was being allocated, averaged, structured-transferred
+ * and then dropped unread: a 2-hour stereo document paid ~1.27 GB of transient
+ * allocation for the ~105 MB the worker can actually use, and every x2//2
+ * regrid (a ~50 ms operation) re-paid it.
+ *
+ * The bound is `maxSamples + 1`, NOT `maxSamples`, and the extra sample is
+ * load-bearing: `truncated` is computed as `mono.length > maxSamples`, so
+ * clamping to exactly `maxSamples` would silently flip `truncated` from true
+ * to false on every over-long document and lose the "analysis limited to the
+ * first 10 minutes" signal. With one sample of headroom the worker sees the
+ * same `truncated`, the same `analyzedEndSample` and the same `analyzed`
+ * subarray it saw before, so its output is byte-identical (asserted in
+ * `tempoAnalysis.test.ts`).
+ */
+function analysisSampleBudget(doc: AudioDocument): number {
+  const full = doc.channels[0]?.length ?? 0;
+  const maxSamples = Math.round(MAX_ANALYSIS_SECONDS * doc.sampleRate);
+  return full > maxSamples ? maxSamples + 1 : full;
+}
+
 /** Averages `doc.channels[0]`/`[1]` into ONE freshly-allocated Float32Array in
- * a single pass. See the module doc comment for why this is not
- * `mixDown(cloneRegion(...))`. Never mutates `doc.channels`. */
+ * a single pass, over at most `analysisSampleBudget(doc)` samples. See the
+ * module doc comment for why this is not `mixDown(cloneRegion(...))`, and
+ * `analysisSampleBudget` for why the length is clamped. Never mutates
+ * `doc.channels`. */
 function monoSnapshot(doc: AudioDocument): Float32Array {
   const channels = doc.channels;
-  const length = channels[0]?.length ?? 0;
+  const length = analysisSampleBudget(doc);
   const out = new Float32Array(length);
   if (channels.length <= 1) {
     const src = channels[0];
-    if (src) out.set(src);
+    if (src) out.set(src.subarray(0, length));
     return out;
   }
   const left = channels[0];
@@ -250,6 +330,7 @@ function writeCache(
   cache.delete(docId);
   cache.set(docId, {
     channelRefs,
+    stale: false,
     sampleRate,
     level,
     analysis,
@@ -269,7 +350,7 @@ function writeCache(
 export function getTempo(doc: AudioDocument): TempoEntry | null {
   const entry = cache.get(doc.id);
   if (!entry) return null;
-  entry.tempoEntry.stale = !sameChannelRefs(entry.channelRefs, doc.channels);
+  entry.tempoEntry.stale = !isEntryFresh(entry, doc);
   return entry.tempoEntry;
 }
 
@@ -281,7 +362,7 @@ export function getTempo(doc: AudioDocument): TempoEntry | null {
 export function getRemixAnalysis(doc: AudioDocument): RemixAnalysis | null {
   const entry = cache.get(doc.id);
   if (!entry || entry.level !== 'remix') return null;
-  if (!sameChannelRefs(entry.channelRefs, doc.channels)) return null;
+  if (!isEntryFresh(entry, doc)) return null;
   return entry.analysis as RemixAnalysis;
 }
 
@@ -655,7 +736,7 @@ export function runTempoAnalysis(doc: AudioDocument): Promise<TempoEntry | null>
   const docId = doc.id;
 
   const existing = cache.get(docId);
-  if (existing && existing.level === 'remix' && sameChannelRefs(existing.channelRefs, doc.channels)) {
+  if (existing && existing.level === 'remix' && isEntryFresh(existing, doc)) {
     return Promise.resolve(getTempo(doc));
   }
 
@@ -814,4 +895,16 @@ export function regridTempo(docId: string, newPeriodFrames: number): Promise<Tem
 export function _promoteToRemixLevelForTest(docId: string): void {
   const entry = cache.get(docId);
   if (entry) entry.level = 'remix';
+}
+
+/**
+ * Test-only: the cache row's retained `channelRefs` for `docId` — `null` once
+ * `isEntryFresh` has observed the row stale and released them, `undefined`
+ * when there is no row at all. The retention itself is the thing under test
+ * (a stale row must not go on pinning the pre-edit audio), and it is
+ * deliberately invisible through the public surface, so there is nothing else
+ * to assert against.
+ */
+export function _getCachedChannelRefsForTest(docId: string): Float32Array[] | null | undefined {
+  return cache.get(docId)?.channelRefs;
 }

@@ -33,6 +33,65 @@ describe('encodeOggOpus (WebCodecs unavailable)', () => {
 });
 
 // -----------------------------------------------------------------------------
+// Codec lifetime on the error path (v1.5.0 hardening item 9)
+// -----------------------------------------------------------------------------
+
+describe('encodeOggOpus — an errored codec is still closed', () => {
+  let closeCalls = 0;
+  let flushCalls = 0;
+
+  /** Minimal WebCodecs stand-in: reports an encode error on the first
+   * `encode()` (exactly how a real AudioEncoder surfaces one — via the error
+   * callback, not a throw) and then REJECTS `flush()`, which is what a real
+   * errored AudioEncoder does. */
+  function installFakeWebCodecs(): void {
+    closeCalls = 0;
+    flushCalls = 0;
+    class FakeAudioEncoder {
+      encodeQueueSize = 0;
+      private onError: (e: DOMException) => void;
+      constructor(init: { output: unknown; error: (e: DOMException) => void }) {
+        this.onError = init.error;
+      }
+      configure(): void {}
+      encode(): void {
+        this.onError(new Error('codec exploded') as unknown as DOMException);
+      }
+      async flush(): Promise<void> {
+        flushCalls++;
+        throw new Error('Cannot call flush on a closed codec');
+      }
+      close(): void {
+        closeCalls++;
+      }
+    }
+    class FakeAudioData {
+      constructor(_init: unknown) {}
+      close(): void {}
+    }
+    (globalThis as Record<string, unknown>).AudioEncoder = FakeAudioEncoder;
+    (globalThis as Record<string, unknown>).AudioData = FakeAudioData;
+  }
+
+  afterEach(() => {
+    delete (globalThis as Record<string, unknown>).AudioEncoder;
+    delete (globalThis as Record<string, unknown>).AudioData;
+  });
+
+  it('closes the encoder and reports the ENCODE error, not the flush rejection', async () => {
+    installFakeWebCodecs();
+
+    // Before the fix, `if (encodeError) break` fell straight into
+    // `await encoder.flush()`, whose rejection propagated past
+    // `encoder.close()` — leaking the codec and masking the real cause.
+    await expect(encodeOggOpus([new Float32Array(4800)], 48000)).rejects.toThrow('codec exploded');
+
+    expect(flushCalls).toBe(1);
+    expect(closeCalls).toBe(1);
+  });
+});
+
+// -----------------------------------------------------------------------------
 // markersToOpusRate (Task K5 — source-rate -> 48 kHz file-rate conversion)
 // -----------------------------------------------------------------------------
 
