@@ -22,6 +22,9 @@ import { copySelection, pasteAtCursor } from './editOps';
 import { getClipboard } from './clipboard';
 import { getSpectralScale, toggleSpectralScale, type SpectralScale } from './spectralScale';
 import { markSavePoint } from './undoHistory';
+import { runTempoAnalysis } from './tempoAnalysis';
+import { applyTempoChange } from './tempoService';
+import { createRemixDocument, getRemixSession } from './remixService';
 import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 
@@ -98,6 +101,31 @@ export interface TestApi {
     trackCount: number;
     droppedClipCount: number;
   }>;
+  // --- v1.5 flows ---------------------------------------------------------
+  detectTempo(): Promise<{
+    bpm: number | null;
+    confidence: number;
+    beatCount: number;
+    firstBeatSample: number | null;
+    stale: boolean;
+  }>;
+  changeTempo(sourceBpm: number, targetBpm: number): Promise<{ ok: boolean; length: number }>;
+  remixToDuration(
+    seconds: number,
+    opts?: { phraseBars?: number; strict?: boolean }
+  ): Promise<{
+    ok: boolean;
+    status: string;
+    name: string | null;
+    length: number;
+    sampleRate: number;
+    joins: number;
+    achievedSeconds: number;
+    targetSeconds: number;
+    bpm: number;
+    bars: number;
+  }>;
+  getRemixJoins(): { fromBar: number; toBar: number; atSample: number; cost: number }[] | null;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -510,6 +538,114 @@ export function installTestHooks(): void {
         trackCount: result.session.tracks.length,
         droppedClipCount: result.droppedClipCount,
       };
+    },
+
+    // --- v1.5 flows -------------------------------------------------------
+    //
+    // Every hook below calls its SERVICE directly, bypassing the menu command
+    // and the dialog (neither of which can be driven headlessly), exactly like
+    // exportActiveOgg / saveSessionAs above. Each returns PLAIN JSON — typed
+    // arrays are read out as scalars or copied with Array.from (the
+    // getNoiseProfileSpectra convention), because anything crossing
+    // page.evaluate's structured-clone boundary as a typed array arrives on
+    // the harness side as an object keyed by index.
+    //
+    // There is deliberately NO `toggleBeatGrid` hook: the beat-grid waveform
+    // OVERLAY (Task T6) is CUT by the plan's UI-scope ruling — the grid is
+    // computed and cached, only its rendering was dropped — so there is no
+    // display preference to toggle and nothing extra for the smoke to prove
+    // paints.
+
+    // Runs the REAL shared analysis (worker + cache, T4) over the whole active
+    // document — the same call `tempo.detect` makes — and flattens the entry
+    // to scalars. `beatSamples` is an Int32Array, so only its length and first
+    // element cross the boundary, never the array itself.
+    detectTempo: async () => {
+      const doc = activeDoc();
+      const entry = doc ? await runTempoAnalysis(doc) : null;
+      if (!entry) {
+        return { bpm: null, confidence: 0, beatCount: 0, firstBeatSample: null, stale: false };
+      }
+      return {
+        bpm: entry.bpm,
+        confidence: entry.confidence,
+        beatCount: entry.beatSamples.length,
+        firstBeatSample: entry.beatSamples.length > 0 ? entry.beatSamples[0] : null,
+        stale: entry.stale,
+      };
+    },
+
+    // Drives the real applyTempoChange (ratio -> the shared 'time-stretch'
+    // effect through runEffectOnSelection), bypassing the Match Tempo dialog.
+    // No selection is set, so the whole document is the region and the new
+    // length must be exactly `round(oldLength * sourceBpm / targetBpm)`.
+    changeTempo: async (sourceBpm, targetBpm) => {
+      const outcome = await applyTempoChange({ sourceBpm, targetBpm });
+      const after = activeDoc();
+      return { ok: outcome.ok, length: after ? docLength(after) : 0 };
+    },
+
+    // Drives the real createRemixDocument (analyse -> plan -> render -> new
+    // 'Remix N' document) for the active document, bypassing the Auto-Remix
+    // dialog. `seconds` is converted to the source document's sample clock,
+    // which is what RemixOptions.targetSample is measured in.
+    remixToDuration: async (seconds, opts) => {
+      const source = activeDoc();
+      const empty = {
+        ok: false,
+        status: 'no-document',
+        name: null,
+        length: 0,
+        sampleRate: 0,
+        joins: 0,
+        achievedSeconds: 0,
+        targetSeconds: seconds,
+        bpm: 0,
+        bars: 0,
+      };
+      if (!source) return empty;
+
+      const result = await createRemixDocument({
+        sourceDocId: source.id,
+        targetSample: Math.round(seconds * source.sampleRate),
+        phraseBars: opts?.phraseBars,
+        strict: opts?.strict,
+      });
+      if (!result.ok) return { ...empty, status: result.status, targetSeconds: seconds };
+
+      const session = getRemixSession(result.remixDocId);
+      const remixDoc =
+        useAppStore.getState().documents.find((d) => d.id === result.remixDocId) ?? null;
+      const length = remixDoc ? docLength(remixDoc) : 0;
+      const sampleRate = remixDoc?.sampleRate ?? 0;
+      return {
+        ok: true,
+        status: 'ok',
+        name: remixDoc?.name ?? null,
+        length,
+        sampleRate,
+        joins: result.plan.joins.length,
+        achievedSeconds: sampleRate > 0 ? length / sampleRate : 0,
+        targetSeconds: seconds,
+        bpm: session?.analysis.bpm ?? 0,
+        bars: session?.analysis.numBars ?? 0,
+      };
+    },
+
+    // The active document's remix joins, flattened for assertion: the plan's
+    // bar pair, the OUTPUT-sample position of the join's crossfade centre
+    // (`joinSamples`, parallel to `plan.joins`), and the scalar total of the
+    // six-term cost breakdown. Null when the active document is not a remix.
+    getRemixJoins: () => {
+      const doc = activeDoc();
+      const session = doc ? getRemixSession(doc.id) : null;
+      if (!session) return null;
+      return session.plan.joins.map((join, i) => ({
+        fromBar: join.fromBar,
+        toBar: join.toBar,
+        atSample: session.joinSamples[i] ?? 0,
+        cost: join.cost.total,
+      }));
     },
   };
 

@@ -1,8 +1,8 @@
 {
   "name": "audition_app",
   "productName": "Auditorium",
-  "version": "1.4.0",
-  "description": "Audition-class desktop audio editor: waveform and spectral editing, 22 effects, noise reduction, recording, and multitrack mixing.",
+  "version": "1.5.0",
+  "description": "Audition-class desktop audio editor: waveform and spectral editing, 22 effects, noise reduction, recording, multitrack mixing, tempo detection and auto-remix.",
   "author": "Auditorium contributors",
   "license": "MIT",
   "type": "module",
@@ -15,6 +15,8 @@
     "test": "jest",
     "smoke": "node scripts/e2e-smoke.cjs",
     "make-test-tone": "node scripts/make-test-tone.cjs",
+    "make-test-beat": "node scripts/make-test-beat.cjs",
+    "make-test-abab": "node scripts/make-test-abab.cjs",
     "electron": "electron .",
     "gen-icon": "node scripts/gen-icon.cjs",
     "build:win": "node scripts/clean-release.cjs && npm run build && node scripts/build-installer.cjs && node scripts/gen-readme-txt.cjs"

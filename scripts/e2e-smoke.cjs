@@ -15,6 +15,8 @@ const { _electron: electron } = require('playwright');
 
 const ROOT = path.resolve(__dirname, '..');
 const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
+const BEAT = path.join(ROOT, 'test-assets', 'beat120.wav');
+const ABAB = path.join(ROOT, 'test-assets', 'abab120.wav');
 const OUT_DIR = path.join(ROOT, 'test-output');
 const OUT_MP3 = path.join(OUT_DIR, 'out.mp3');
 const OUT_WAV = path.join(OUT_DIR, 'out.wav');
@@ -79,11 +81,18 @@ async function main() {
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('dist/index.html missing — run `npm run build` before the smoke test');
   }
-  if (!fs.existsSync(TONE)) {
-    console.log('Generating test tone...');
-    execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'make-test-tone.cjs')], {
-      stdio: 'inherit',
-    });
+  // test-assets/ is gitignored, so every fixture is generated on demand from
+  // its own plain-Node generator (deterministic PRNG => byte-identical output
+  // on every machine).
+  for (const [file, script, label] of [
+    [TONE, 'make-test-tone.cjs', 'test tone'],
+    [BEAT, 'make-test-beat.cjs', '120 BPM click train'],
+    [ABAB, 'make-test-abab.cjs', 'ABAB structure fixture'],
+  ]) {
+    if (!fs.existsSync(file)) {
+      console.log(`Generating ${label}...`);
+      execFileSync(process.execPath, [path.join(ROOT, 'scripts', script)], { stdio: 'inherit' });
+    }
   }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const f of [
@@ -739,7 +748,162 @@ async function main() {
     // beforeunload prompt at teardown.
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
 
-    // 10) Screenshot ---------------------------------------------------------
+    // 10) v1.5 step A — tempo detection (Task T4/T5 acceptance): open a 120 BPM
+    // click train and run the REAL shared analysis (worker + cache) over it via
+    // the detectTempo hook, which bypasses the Effects > Detect Tempo menu
+    // command. Detection is a pure read of the audio — it must NOT dirty the
+    // document, which the dirty assertion below pins. The waveform canvas is
+    // re-checked here because the click train is a completely different signal
+    // from the tone (sparse transients over silence), and canvas painting is
+    // unverifiable in Jest — setupTests.ts forces getContext to null — so the
+    // smoke is the only place any canvas is proven to paint at all.
+    console.log('Tempo detection on a 120 BPM click train...');
+    // Step 8's openSessionFrom left the app in the MULTITRACK view, where no
+    // waveform-canvas element exists at all — the canvas check below would
+    // simply time out rather than fail on the pixels. Opening a file does not
+    // change the view, so switch back explicitly.
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate((p) => window.__test.openPath(p), BEAT);
+    const beatSummary = await page.evaluate(() => window.__test.getStateSummary());
+    console.log(`  beat120.wav: ${JSON.stringify(beatSummary)}`);
+    const tempo = await page.evaluate(() => window.__test.detectTempo());
+    console.log(`  detectTempo: ${JSON.stringify(tempo)}`);
+    assert(
+      tempo.bpm !== null && Math.abs(tempo.bpm - 120) < 1,
+      `detected BPM is 120 ±1 (expected |bpm-120| < 1, actual bpm=${tempo.bpm})`
+    );
+    assert(
+      Math.abs(tempo.beatCount - 16) <= 1,
+      `tracked 16 beats in 8s at 120 BPM (expected |beatCount-16| <= 1, actual beatCount=${tempo.beatCount})`
+    );
+    assert(
+      tempo.confidence > 0.5,
+      `confidence clears the content gate (expected > 0.5, actual ${tempo.confidence})`
+    );
+    assert(
+      tempo.stale === false,
+      `analysis is fresh against the live audio (expected stale=false, actual stale=${tempo.stale})`
+    );
+    assert(
+      tempo.firstBeatSample !== null && tempo.firstBeatSample >= 0,
+      `first tracked beat has a real sample position (expected >= 0, actual ${tempo.firstBeatSample})`
+    );
+    await waitNonUniform(page, 'waveform-canvas');
+    assert(true, 'waveform canvas painted the click train (non-uniform pixels)');
+    const beatDirty = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      beatDirty.dirty === false,
+      `tempo detection did not dirty the document (expected dirty=false, actual dirty=${beatDirty.dirty})`
+    );
+
+    // 11) v1.5 step B — Match Tempo (Task T8 acceptance): retarget the same
+    // click train from 120 to 90 BPM through the real applyTempoChange, which
+    // runs the shared 'time-stretch' effect over the whole document (no
+    // selection). Slowing down lengthens: ratio = 120/90 = 4/3, and WSOLA's
+    // planStretch fixes the output at exactly round(N * ratio) — an integer
+    // equality, not a tolerance.
+    console.log('Match Tempo 120 -> 90 BPM (real time-stretch through the DSP worker)...');
+    const beatLen = beatSummary.length;
+    const expectedStretched = Math.round((beatLen * 4) / 3);
+    const stretched = await page.evaluate(() => window.__test.changeTempo(120, 90));
+    console.log(`  changeTempo: ${JSON.stringify(stretched)} (was ${beatLen} samples)`);
+    assert(
+      stretched.ok === true,
+      `changeTempo(120, 90) applied (expected ok=true, actual ok=${stretched.ok})`
+    );
+    assert(
+      stretched.length === expectedStretched,
+      `stretched length is exactly round(${beatLen} * 4/3) (expected ${expectedStretched}, actual ${stretched.length})`
+    );
+    // Persist so the now-stretched (dirty) document doesn't trip the
+    // unsaved-changes beforeunload prompt at teardown.
+    await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
+    // 12) v1.5 step C — Auto-Remix (Task T13 acceptance): open the 64 s ABAB
+    // fixture and ask for a 32 s arrangement through the real
+    // createRemixDocument (analyse -> plan -> render -> new document),
+    // bypassing the Edit > Auto-Remix dialog. The duration is BAR-QUANTISED, so
+    // the honest bound is half a phrase (Phi=8 bars at 120 BPM 4/4 is 16 s),
+    // not a sample-exact match.
+    //
+    // TWO requests, because 32 s is genuinely unreachable in STRICT mode on
+    // this fixture and that is worth pinning rather than stepping around: the
+    // analysis derives 31 whole bars, strict phrase mode forces every run to at
+    // least Phi = 8 bars, and 31 - 8k bars can only land on 31 or 23 whole runs
+    // — the shortest arrangement carrying a join renders at 24 bars (48 s).
+    // So the strict request must REFUSE with 'too-short' (Plan Ruling 6: an
+    // unreachable target is reported with the reachable minimum, never silently
+    // mis-served — the Auto-Remix dialog clamps its length control to that
+    // window, which is why production never issues this request), and the
+    // arrangement itself is then built in loose phrase mode, where 32 s is
+    // reachable. Both halves are real behaviour; neither bound was relaxed.
+    console.log('Auto-Remix the ABAB fixture to a 32 s target...');
+    await page.evaluate((p) => window.__test.openPath(p), ABAB);
+    const ababSummary = await page.evaluate(() => window.__test.getStateSummary());
+    console.log(`  abab120.wav: ${JSON.stringify(ababSummary)}`);
+
+    const strictRefusal = await page.evaluate(() => window.__test.remixToDuration(32));
+    console.log(`  remixToDuration(32) [strict]: ${JSON.stringify(strictRefusal)}`);
+    assert(
+      strictRefusal.ok === false && strictRefusal.status === 'too-short',
+      `a target below the strict-mode reachable minimum is refused, not mis-served ` +
+        `(expected ok=false status='too-short', actual ok=${strictRefusal.ok} status='${strictRefusal.status}')`
+    );
+
+    const remix = await page.evaluate(() => window.__test.remixToDuration(32, { strict: false }));
+    console.log(`  remixToDuration(32, {strict:false}): ${JSON.stringify(remix)}`);
+    assert(
+      remix.ok === true,
+      `remixToDuration(32) produced an arrangement (expected ok=true, actual ok=${remix.ok} status=${remix.status})`
+    );
+    assert(
+      Math.abs(remix.bpm - 120) <= 2,
+      `remix analysed the source at 120 BPM (expected |bpm-120| <= 2, actual bpm=${remix.bpm})`
+    );
+    assert(
+      Math.abs(remix.bars - 32) <= 1,
+      `source derived 32 bars of 4/4 (expected |bars-32| <= 1, actual bars=${remix.bars})`
+    );
+    assert(
+      remix.joins >= 1,
+      `the arrangement actually splices (expected joins >= 1, actual joins=${remix.joins})`
+    );
+    assert(
+      Math.abs(remix.achievedSeconds - 32) <= 16,
+      `achieved length is within half a phrase of the 32 s target ` +
+        `(expected |achieved-32| <= 16, actual achieved=${remix.achievedSeconds.toFixed(3)}s)`
+    );
+    assert(
+      remix.name === 'Remix 1',
+      `a new document named 'Remix 1' exists (expected 'Remix 1', actual ${JSON.stringify(remix.name)})`
+    );
+    const remixPeak = await page.evaluate(() => window.__test.getPeak());
+    console.log(`  remix peak: ${remixPeak.toFixed(4)}`);
+    assert(
+      remixPeak <= 1.0,
+      `the rendered remix does not clip (expected peak <= 1.0, actual ${remixPeak.toFixed(4)})`
+    );
+    await waitNonUniform(page, 'waveform-canvas');
+    assert(true, 'waveform canvas painted the rendered remix (non-uniform pixels)');
+
+    const joins = await page.evaluate(() => window.__test.getRemixJoins());
+    console.log(`  remix joins (${joins && joins.length}): ${JSON.stringify(joins)}`);
+    assert(
+      joins !== null && joins.length === remix.joins,
+      `getRemixJoins returns the plan's joins (expected ${remix.joins}, actual ${joins && joins.length})`
+    );
+    const badCost = joins.find((j) => !Number.isFinite(j.cost));
+    assert(
+      badCost === undefined,
+      `every join cost is finite (expected none non-finite, actual ${JSON.stringify(badCost)})`
+    );
+    const badAt = joins.find((j) => !(j.atSample >= 0 && j.atSample <= remix.length));
+    assert(
+      badAt === undefined,
+      `every join sits inside [0, ${remix.length}] (expected none outside, actual ${JSON.stringify(badAt)})`
+    );
+
+    // 13) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 

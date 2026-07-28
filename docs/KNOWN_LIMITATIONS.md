@@ -299,3 +299,122 @@ the plan being re-rolled). When a pin is dropped the session reports it
 exists.
 
 **Intended behavior:** No further work planned — this is complete.
+
+## A remix document closes without prompting, even after adjustments
+
+**Area:** Auto-Remix (`src/services/remixService.ts`, `src/services/fileService.ts`
+`closeDocumentFlow`)
+
+**v1.5 behavior:** `Remix N` is created the way Mix Down creates its output —
+`createDocument` + `addDocument`, no undo entry — so it inherits `dirty: false`
+and closes silently. A user who rejects three joins, nudges a fourth, and then
+closes the tab loses that arrangement with no "Unsaved changes" prompt, even
+though the audio has never been on disk.
+
+**The flag is deliberately NOT overridden.** `undoHistory` re-derives `dirty`
+from the undo position relative to the save point rather than restoring a
+snapshotted value (the v1.4 fix for "undo after Save reported the document as
+clean"), so stamping `dirty: true` at creation would survive exactly until the
+first Ctrl+Z and then silently clear itself — a gap that looks fixed and is not.
+The correct fix is a different one: a `neverSaved` provenance flag on the
+document, consulted by `closeDocumentFlow` alongside `dirty`. That is a change
+to the document model and the close path, not to the remix, so it is its own
+task.
+
+Related, and by design rather than by omission: when the SOURCE document is
+edited or closed, the session goes **stale and read-only** — the panel shows a
+banner, every adjustment control is disabled, and only **Go To** stays live.
+The rendered audio is untouched and remains fully editable as an ordinary
+document; what is unavailable is re-planning it against a grid that no longer
+describes the source.
+
+**Intended behavior:** Add a `neverSaved` provenance flag consulted by
+`closeDocumentFlow`, so a never-saved derived document prompts on close without
+touching the dirty-derivation rule.
+
+## Tempo detection makes octave errors; both tempo features assume a steady tempo
+
+**Area:** Tempo analysis (`src/dsp/tempoCore.ts`, `src/services/tempoAnalysis.ts`),
+Match Tempo (`src/services/tempoService.ts`), Auto-Remix (`src/dsp/remixPlan.ts`)
+
+**v1.5 behavior:** Three limits, all inherent to the approach rather than
+defects to be tuned out.
+
+**1. Octave errors are mitigated, not eliminated.** Measured over 91 synthetic
+fixtures spanning 60–200 BPM: **63 exact, 27 octave errors (half/double/⅔), 1
+non-octave miss.** The harmonic comb, log-Gaussian prior and beat-salience vote
+resolve most half/double ambiguity, but half-time feels, drum & bass, shuffles
+and drum-less intros still defeat it, and the disambiguator only chooses among
+{⅓, ½, ⅔, 1, 3/2, 2, 3}× the comb winner — a first-stage miss outside that
+family is unrecoverable. The confidence score **cannot** catch this: periodicity
+is invariant under octave choice (the structure really is there at 2×), and a
+60 BPM loop misread as 120 scored the highest confidence in the whole bank. The
+165–200 BPM band on uniform content is additionally phase-unstable by design.
+The remedy is therefore the **×2 / ÷2 control**, which re-tracks the grid at the
+corrected period rather than relabelling the displayed number, plus the manual
+BPM field and the Auto-Remix dialog's explicit tempo confirmation. No feature
+presents a detected BPM as authoritative.
+
+**2. Downbeat phase can be wrong** independently of the tempo. The detector
+assumes the low-frequency accent falls on beat 1; reggae, heavily syncopated
+pop and anacrusic intros land 1–3 beats off, which puts every splice off the
+bar line even at a correct tempo. `downbeatConfidence` is reported as a soft
+hint and is explicitly **not** a gate — its log compression flattens a genuine
+2× accent, so any threshold would reject correct detections on most real music.
+The Auto-Remix dialog's structure strip is where a wrong grid becomes visible
+before anything is committed, and the ◂ ▸ shift is the correction.
+
+**3. Match Tempo assumes a FIXED source tempo; the remix assumes a CONSTANT
+one.** Match Tempo applies a single ratio across the whole region, so material
+that speeds up or slows down inside the selection is corrected only on average.
+The remix's bar boundaries come from real tracked beats (so late splices still
+land on the beat on a drifting take — a genuine improvement over a rigid grid),
+but the phrase arithmetic (`a ≡ b mod Φ`) and the duration model still assume a
+stable meter: heavy rubato or a mid-song tempo change produces phrase-congruent
+joins that are musically wrong. `ibiCv` in the analysis carries real information
+about drift and is the only signal the user gets. Related: the achieved length
+is **bar-quantised** — a target is met to within one bar, measured at **+7.2 %**
+on accelerating material — and the cost function models nothing about lyrics, so
+a join can score 0.05 and still cut a vocal mid-syllable. Chroma is also
+key-blind but not transposition-aware, so a final-chorus key change reads as
+harmonically distant and the planner avoids precisely the join a producer would
+make.
+
+**4. In strict phrase mode the set of reachable lengths is COARSE.** Every run
+must be at least Φ = 8 bars long and every join must be phrase-congruent, so a
+source of `M` bars can only reach a sparse ladder of lengths — on a 31-bar
+source at 120 BPM 4/4 the shortest arrangement carrying a join renders at 24
+bars (48 s), and anything shorter is refused as `too-short` rather than
+approximated. This is why the Auto-Remix dialog clamps its length control to
+the planner's reported `[minOutputSample, maxOutputSample]` window instead of
+letting a request fail: an unreachable target is reported with the reachable
+minimum, never silently mis-served. Loose phrase mode (`minRunBars = 4`,
+congruence demoted to a soft penalty) reaches a much denser set of lengths at
+the cost of cutting mid-phrase more often.
+
+Whole-document analysis is additionally capped at `MAX_ANALYSIS_SECONDS = 600`;
+past that the result is flagged `truncated` and surfaced as "first 10 min"
+rather than silently describing a prefix.
+
+**Intended behavior:** The corrections (×2 / ÷2, manual BPM, downbeat shift,
+per-join reject/nudge) are the design, not a stopgap — a detector that cannot
+reliably self-assess must not gate. A 12-rotation transposition-aware chroma
+comparison would fix the key-change case at 12× the cost of the chroma term;
+not included, and recorded here rather than left to be discovered as a bug.
+
+## Match Tempo appears in History as `Effect: Time Stretch`
+
+**Area:** Match Tempo (`src/services/tempoService.ts`,
+`src/services/effectRunner.ts`)
+
+**v1.5 behavior:** Match Tempo deliberately reuses the existing `time-stretch`
+effect rather than duplicating WSOLA behind a second write path, and
+`effectRunner` labels every undo entry `Effect: ${def.name}` — a hardcoded
+template — so the History panel reads **`Effect: Time Stretch`** for a Match
+Tempo operation. The entry undoes correctly; only its name says how the work was
+done rather than why. A separate optional beat-marker step, when enabled, is
+pushed as its own clearly-named `Add Beat Markers` entry.
+
+**Intended behavior:** No further work planned. Threading a caller-supplied
+label through the shared effect path to rename one operation was judged not
+worth changing the path every effect in the app runs through.
