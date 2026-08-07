@@ -467,6 +467,10 @@ function seedDoc(opts: {
   name?: string;
   sourceFormat?: ReturnType<typeof createDocument>['sourceFormat'];
   sourceBitDepth?: number;
+  /** Task S4 — defaults (as createDocument does) to "true when there is no
+   * filePath". Set explicitly to model a path-less document whose audio IS on
+   * disk (an exotic source, a .audm-embedded document). */
+  neverSaved?: boolean;
 }) {
   const doc = createDocument({
     name: opts.name ?? 'doc',
@@ -475,6 +479,7 @@ function seedDoc(opts: {
     filePath: opts.filePath,
     sourceFormat: opts.sourceFormat,
     sourceBitDepth: opts.sourceBitDepth,
+    neverSaved: opts.neverSaved,
   });
   useAppStore.getState().addDocument(doc);
   if (opts.dirty) useAppStore.getState().updateDocument({ ...doc, dirty: true });
@@ -1369,10 +1374,20 @@ describe('closeDocumentFlow', () => {
      * arrays and its whole RemixAnalysis — is actually released on close, and
      * a stubbed session would not prove that. */
     async function seedRemixSession() {
-      installApi();
+      // "Don't Save": the remix document is genuinely never-saved (Task S4), so
+      // closing it now asks first. These tests are about what the close RELEASES,
+      // so they take the discard branch and let the close proceed.
+      installApi({ showMessageBox: jest.fn(async () => 1) });
       clearAllTempo();
       clearAllRemixSessions();
-      const source = createDocument({ name: 'Song.wav', sampleRate: 44100, channels: [abab()] });
+      // A remix source is a song opened from disk — give it its filePath so the
+      // source-close test exercises a close with no prompt of its own.
+      const source = createDocument({
+        name: 'Song.wav',
+        sampleRate: 44100,
+        channels: [abab()],
+        filePath: 'D:\\Song.wav',
+      });
       useAppStore.getState().addDocument(source);
       const result = await createRemixDocument({ sourceDocId: source.id, targetSample: Math.round(32 * 44100) });
       if (!result.ok) throw new Error(`seedRemixSession: ${result.status} — ${result.message}`);
@@ -1541,5 +1556,220 @@ describe('closeDocumentFlow', () => {
 
       expect(getNoiseProfile()?.docId).toBe(source.id);
     });
+  });
+
+  describe('never-saved documents (Task S4)', () => {
+    /** The live doc, re-read from the store. */
+    function live(docId: string) {
+      return useAppStore.getState().documents.find((d) => d.id === docId);
+    }
+
+    it('prompts before closing a CLEAN never-saved document, with never-saved wording', async () => {
+      const api = installApi({ showMessageBox: jest.fn(async () => 2) }); // Cancel
+      const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
+      expect(live(doc.id)!.dirty).toBe(false); // the exact state that used to close silently
+
+      await closeDocumentFlow(doc.id);
+
+      expect(api.showMessageBox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'question',
+          title: 'Unsaved document',
+          message: 'Remix 1 has never been saved to a file. Save it before closing?',
+          buttons: ['Save', "Don't Save", 'Cancel'],
+        })
+      );
+      expect(useAppStore.getState().documents).toHaveLength(1); // Cancel kept it open
+    });
+
+    it('discards and closes on "Don\'t Save" without writing', async () => {
+      const api = installApi({ showMessageBox: jest.fn(async () => 1) }); // Don't Save
+      const doc = seedDoc({ filePath: null, dirty: false, name: 'Mixdown 1' });
+
+      await closeDocumentFlow(doc.id);
+
+      expect(api.writeFile).not.toHaveBeenCalled();
+      expect(useAppStore.getState().documents).toHaveLength(0);
+    });
+
+    it('saves then closes when the user picks Save', async () => {
+      const api = installApi({
+        showMessageBox: jest.fn(async () => 0), // Save
+        showSaveDialog: jest.fn(async () => 'D:\\out\\Remix 1.wav'),
+      });
+      const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
+
+      await closeDocumentFlow(doc.id);
+
+      expect(api.writeFile).toHaveBeenCalledTimes(1);
+      expect(useAppStore.getState().documents).toHaveLength(0);
+    });
+
+    it('aborts the close when the save-as dialog is cancelled (the document is still never saved)', async () => {
+      const api = installApi({
+        showMessageBox: jest.fn(async () => 0), // Save
+        showSaveDialog: jest.fn(async () => null), // cancelled
+      });
+      const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
+
+      await closeDocumentFlow(doc.id);
+
+      expect(api.writeFile).not.toHaveBeenCalled();
+      expect(useAppStore.getState().documents).toHaveLength(1);
+    });
+
+    it('STILL prompts after an edit is UNDONE past the creation point — the trap a stamped dirty:true would fall into', async () => {
+      const api = installApi({ showMessageBox: jest.fn(async () => 2) }); // Cancel
+      const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
+
+      // A real curation edit through the app's single write path, then undo it.
+      useAppStore.getState().setSelection({ start: 2, end: 5 });
+      deleteSelection();
+      expect(live(doc.id)!.dirty).toBe(true);
+      undoHistory.undo(doc.id);
+      // undoHistory RE-DERIVES dirty from position vs. savePoint, so it is back
+      // to false here: a `dirty: true` stamped at creation would have been
+      // silently erased by exactly this call (KNOWN_LIMITATIONS / P1-0).
+      expect(live(doc.id)!.dirty).toBe(false);
+      expect(live(doc.id)!.neverSaved).toBe(true);
+
+      await closeDocumentFlow(doc.id);
+
+      expect(api.showMessageBox).toHaveBeenCalledWith(
+        expect.objectContaining({ title: 'Unsaved document' })
+      );
+      expect(useAppStore.getState().documents).toHaveLength(1);
+    });
+
+    it('keeps the ordinary "Unsaved changes" wording for a doc that has a file on disk', async () => {
+      const api = installApi({ showMessageBox: jest.fn(async () => 1) }); // Don't Save
+      const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: true, name: 'a.wav' });
+
+      await closeDocumentFlow(doc.id);
+
+      expect(api.showMessageBox).toHaveBeenCalledWith(
+        expect.objectContaining({
+          title: 'Unsaved changes',
+          message: 'Save changes to a.wav before closing?',
+        })
+      );
+    });
+
+    it('does NOT prompt for a clean path-less document whose audio is on disk (an exotic source)', async () => {
+      const api = installApi();
+      const doc = seedDoc({ filePath: null, dirty: false, neverSaved: false, name: 'take.m4a' });
+
+      await closeDocumentFlow(doc.id);
+
+      expect(api.showMessageBox).not.toHaveBeenCalled();
+      expect(useAppStore.getState().documents).toHaveLength(0);
+    });
+  });
+});
+
+describe('neverSaved provenance across open/save/export (Task S4)', () => {
+  function live(docId: string) {
+    return useAppStore.getState().documents.find((d) => d.id === docId);
+  }
+
+  it('a file opened from disk is neverSaved:false', async () => {
+    installApi();
+    await openFilePath('D:\\audio\\song.wav');
+    expect(useAppStore.getState().documents[0].neverSaved).toBe(false);
+  });
+
+  it('an EXOTIC source opened from disk is neverSaved:false even though it keeps no filePath', async () => {
+    installApi();
+    await openFilePath('D:\\audio\\clip.m4a');
+    const doc = useAppStore.getState().documents[0];
+    expect(doc.filePath).toBeNull(); // m4a cannot be saved in place ...
+    expect(doc.neverSaved).toBe(false); // ... but its audio IS on disk
+  });
+
+  it('File > New produces a never-saved document', () => {
+    installApi();
+    newDocument({ name: 'Untitled 1', sampleRate: 44100, channels: 2, durationSeconds: 1 });
+    expect(useAppStore.getState().documents[0].neverSaved).toBe(true);
+  });
+
+  it('a successful Save As clears neverSaved (and gives the document its filePath)', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\Remix 1.wav') });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Remix 1' });
+
+    await saveDocument(doc.id);
+
+    expect(live(doc.id)!.neverSaved).toBe(false);
+    expect(live(doc.id)!.filePath).toBe('D:\\out\\Remix 1.wav');
+  });
+
+  it('a FAILED write leaves neverSaved set', async () => {
+    installApi({
+      showSaveDialog: jest.fn(async () => 'D:\\out\\Remix 1.wav'),
+      writeFile: jest.fn(async () => ({ ok: false, error: 'EACCES' })),
+    });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Remix 1' });
+
+    await saveDocument(doc.id);
+
+    expect(live(doc.id)!.neverSaved).toBe(true);
+    expect(live(doc.id)!.dirty).toBe(true);
+  });
+
+  it('a CANCELLED save-as dialog leaves neverSaved set', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => null) });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Remix 1' });
+
+    await saveDocument(doc.id);
+
+    expect(live(doc.id)!.neverSaved).toBe(true);
+  });
+
+  it('a successful in-place Save clears neverSaved too', async () => {
+    installApi();
+    // A path-carrying document that has never been written by this app is not
+    // reachable through the normal flows, but the in-place branch must clear
+    // the flag on its own rather than relying on Save As having done it.
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: true, neverSaved: true, name: 'a.wav' });
+
+    await saveDocument(doc.id);
+
+    expect(live(doc.id)!.neverSaved).toBe(false);
+  });
+
+  it('a save whose staleness check rejects does NOT clear neverSaved', async () => {
+    installApi();
+    // Same shape as the Task M2 staleness tests above: an OGG source suspends
+    // inside encodeInPlace, so an edit can land mid-save.
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\voice.ogg',
+      dirty: true,
+      name: 'voice.ogg',
+      sourceFormat: 'ogg',
+      neverSaved: true,
+    });
+    let resolveEncode!: (bytes: Uint8Array) => void;
+    mockEncodeOgg.mockImplementationOnce(
+      () => new Promise<Uint8Array>((res) => { resolveEncode = res; })
+    );
+
+    const savePromise = saveDocument(doc.id);
+    // An edit lands mid-encode: the pre-await snapshot is stale, so the save's
+    // bookkeeping must not touch the live document at all.
+    useAppStore.getState().updateDocument({ ...live(doc.id)!, channels: [new Float32Array(3)], dirty: true });
+    resolveEncode(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+    await savePromise;
+
+    expect(live(doc.id)!.neverSaved).toBe(true);
+  });
+
+  it('exportDocument does NOT clear neverSaved — an export is not the document\'s own file (same rule as dirty)', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\remix.wav') });
+    const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
+
+    const written = await exportDocument(doc.id, { format: 'wav', wavBitDepth: 32, mp3Kbps: 192 });
+
+    expect(written).toBe('D:\\out\\remix.wav');
+    expect(live(doc.id)!.neverSaved).toBe(true);
+    expect(live(doc.id)!.filePath).toBeNull();
   });
 });

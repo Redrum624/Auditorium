@@ -175,6 +175,10 @@ export async function openFilePath(path: string): Promise<void> {
     filePath: keepsPath ? path : null,
     sourceFormat,
     sourceBitDepth,
+    // Task S4: this audio came OFF disk, so closing it loses nothing — even
+    // for an exotic source, which keeps no filePath (its first Save prompts a
+    // save-as WAV) but whose original file is still sitting there.
+    neverSaved: false,
   });
   store().addDocument(doc);
   if (decoded.markers && decoded.markers.length > 0) {
@@ -341,7 +345,12 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
       // to say — retag it here the same way saveAsWav already does, so
       // Properties (and a later re-open of this same path) reports the truth
       // about what's actually on disk instead of a stale source depth (F14).
-      const updated: AudioDocument = { ...current, dirty: false };
+      // `neverSaved: false` — this document's audio is now on disk at its own
+      // path (Task S4). Only reached on a SUCCESSFUL write that also passed
+      // the staleness check; every early return above (encode failure, write
+      // failure) leaves the flag alone, and so does the stale branch below,
+      // whose bytes on disk no longer correspond to the live document.
+      const updated: AudioDocument = { ...current, dirty: false, neverSaved: false };
       if (current.sourceFormat !== 'mp3' && current.sourceFormat !== 'flac' && current.sourceFormat !== 'ogg') {
         updated.sourceFormat = 'wav';
         updated.sourceBitDepth = 32;
@@ -411,6 +420,11 @@ async function saveAsWav(docId: string): Promise<void> {
       sourceFormat: 'wav',
       sourceBitDepth: 32,
       dirty: false,
+      // Task S4: this is the save that gives a computed document (Mix Down,
+      // Remix N, a recording, a stem) its first file. Cleared here and nowhere
+      // else on this path — a cancelled dialog and a failed write both return
+      // before this point, and the stale branch below deliberately skips it.
+      neverSaved: false,
     });
     markSavePoint(docId);
   } else {
@@ -500,32 +514,53 @@ export function newDocument(opts: {
   store().addDocument(doc);
 }
 
+/** True when closing this document would discard work that exists nowhere on
+ * disk — either unsaved EDITS (`dirty`) or, for a document the app computed
+ * and never wrote, the whole thing (`neverSaved`, Task S4). The two are
+ * independent: a Mix Down / `Remix N` / recording / stem is created with no
+ * undo entry, so it is CLEAN from the moment it exists, and `dirty` cannot be
+ * pressed into service to represent it (undoHistory re-derives `dirty` from
+ * the save point, which would silently erase a stamped value on the first
+ * undo — see AudioDocument.ts and docs/KNOWN_LIMITATIONS.md). */
+function hasUnsavedWork(doc: AudioDocument): boolean {
+  return doc.dirty || doc.neverSaved;
+}
+
 /**
- * Close a document, prompting to save first when it has unsaved changes. Shared
- * by the File > Close command and the Files panel's ✕ button. Guarantees the
- * per-document undo history and peak cache are freed, playback is stopped, and
- * a noise profile captured FROM this document is cleared (Task F8 — the print
- * belongs to audio that no longer exists), so closing never leaks memory or
- * leaves the engine pointed at a gone document.
+ * Close a document, prompting to save first when closing would lose work —
+ * unsaved edits (`dirty`) OR a document that has never been written to a file
+ * at all (`neverSaved`, Task S4), which is how every computed document starts
+ * out. Shared by the File > Close command and the Files panel's ✕ button.
+ * Guarantees the per-document undo history and peak cache are freed, playback
+ * is stopped, and a noise profile captured FROM this document is cleared (Task
+ * F8 — the print belongs to audio that no longer exists), so closing never
+ * leaks memory or leaves the engine pointed at a gone document.
  */
 export async function closeDocumentFlow(docId: string): Promise<void> {
   const doc = findDoc(docId);
   if (!doc) return;
 
-  if (doc.dirty) {
+  if (hasUnsavedWork(doc)) {
+    // A never-saved document isn't "changed", it's absent from disk entirely —
+    // and "Save changes to X" would imply there is a file to save them back
+    // into. Word it for what it is; the dirty wording is unchanged.
+    const neverSaved = doc.neverSaved;
     const choice = await api().showMessageBox({
       type: 'question',
-      title: 'Unsaved changes',
-      message: `Save changes to ${doc.name} before closing?`,
+      title: neverSaved ? 'Unsaved document' : 'Unsaved changes',
+      message: neverSaved
+        ? `${doc.name} has never been saved to a file. Save it before closing?`
+        : `Save changes to ${doc.name} before closing?`,
       buttons: ['Save', "Don't Save", 'Cancel'],
     });
     if (choice === 2) return; // Cancel
     if (choice === 0) {
-      // Save, then close — but abort the close if the save was cancelled (the
-      // doc would still be dirty).
+      // Save, then close — but abort the close if the save didn't actually
+      // land (a cancelled save-as dialog, a failed write): the document would
+      // still be dirty, or still have no file of its own.
       await saveDocument(docId);
       const afterSave = findDoc(docId);
-      if (afterSave && afterSave.dirty) return;
+      if (afterSave && hasUnsavedWork(afterSave)) return;
     }
     // choice === 1 ("Don't Save"): discard and close.
   }

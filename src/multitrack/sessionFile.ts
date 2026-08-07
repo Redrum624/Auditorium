@@ -365,7 +365,15 @@ export function parseSessionFile(text: string): {
   const idMap = new Map<string, string>();
   const documents: AudioDocument[] = parsed.documents.map((fd) => {
     const decoded = decodeWav(base64ToBuffer(fd.wavBase64));
-    const doc = createDocument({ name: fd.name, sampleRate: decoded.sampleRate, channels: decoded.channels });
+    // `neverSaved: false` (Task S4): this audio came off disk — it lives in
+    // the .audm being opened. The document has no filePath of its own, but
+    // closing it discards nothing that reopening the session wouldn't restore.
+    const doc = createDocument({
+      name: fd.name,
+      sampleRate: decoded.sampleRate,
+      channels: decoded.channels,
+      neverSaved: false,
+    });
     idMap.set(fd.id, doc.id);
     return doc;
   });
@@ -480,7 +488,13 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
     });
     // Fall back to a generic label rather than `undefined` for a v3 file
     // whose audio index entry lacks a `name` (e.g. hand-built/foreign writer).
-    const doc = createDocument({ name: meta.name ?? 'Untitled', sampleRate: meta.sampleRate, channels });
+    // `neverSaved: false` — see the legacy parser's note above (Task S4).
+    const doc = createDocument({
+      name: meta.name ?? 'Untitled',
+      sampleRate: meta.sampleRate,
+      channels,
+      neverSaved: false,
+    });
     idMap.set(meta.docId, doc.id);
     return doc;
   });
@@ -530,7 +544,16 @@ export function parseSessionFileBytes(buf: ArrayBuffer): {
  * the call path, so Save Session failed with zero visible feedback). On
  * success, an info box always confirms the save (extended with the
  * dropped-clip count when any clips referenced closed source documents) —
- * success is never silent either. */
+ * success is never silent either.
+ *
+ * Deliberately does NOT clear any document's `neverSaved` flag (Task S4). A
+ * session save is not a document save: it embeds only CLIP-REFERENCED
+ * documents (`computeReferenced`), so most open documents aren't in the file
+ * at all; what it embeds is a point-in-time COPY under a foreign id, which
+ * later edits don't reach and which reopening restores as a NEW document; and
+ * the document itself still has no path, so File > Save still prompts a
+ * save-as. Clearing the flag here would silently un-guard documents this file
+ * never contained. */
 export async function saveSessionViaDialog(): Promise<void> {
   const session = useSessionStore.getState().session;
   const docs = useAppStore.getState().documents;

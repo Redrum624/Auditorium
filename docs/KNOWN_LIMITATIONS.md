@@ -300,37 +300,72 @@ exists.
 
 **Intended behavior:** No further work planned — this is complete.
 
-## A remix document closes without prompting, even after adjustments
+## A computed document prompts before closing, and undo cannot silence it (resolved)
 
-**Area:** Auto-Remix (`src/services/remixService.ts`, `src/services/fileService.ts`
-`closeDocumentFlow`)
+**Area:** Document model (`src/audio/AudioDocument.ts`), close path
+(`src/services/fileService.ts` `closeDocumentFlow`), quit guard (`src/App.tsx`
+→ `electron/closeGuard.cjs`); the documents themselves come from Auto-Remix
+(`src/services/remixService.ts`), Mix Down (`src/services/menuActions.ts`),
+recording, File > New and stem separation.
 
-**v1.5 behavior:** `Remix N` is created the way Mix Down creates its output —
-`createDocument` + `addDocument`, no undo entry — so it inherits `dirty: false`
-and closes silently. A user who rejects three joins, nudges a fourth, and then
-closes the document loses that arrangement with no "Unsaved changes" prompt, even
-though the audio has never been on disk.
+**v1.5 behavior (the defect):** `Remix N` was created the way Mix Down creates
+its output — `createDocument` + `addDocument`, no undo entry — so it inherited
+`dirty: false` and closed silently. A user who rejected three joins, nudged a
+fourth, and then closed the document lost that arrangement with no prompt, even
+though the audio had never been on disk. Quitting the app discarded it just as
+quietly: the close guard counted only dirty documents.
 
-**The flag is deliberately NOT overridden.** `undoHistory` re-derives `dirty`
-from the undo position relative to the save point rather than restoring a
-snapshotted value (the v1.4 fix for "undo after Save reported the document as
-clean"), so stamping `dirty: true` at creation would survive exactly until the
-first Ctrl+Z and then silently clear itself — a gap that looks fixed and is not.
-The correct fix is a different one: a `neverSaved` provenance flag on the
-document, consulted by `closeDocumentFlow` alongside `dirty`. That is a change
-to the document model and the close path, not to the remix, so it is its own
-task.
+**Why `dirty: true` at creation was the wrong fix.** `undoHistory` re-derives
+`dirty` from the undo position relative to the save point rather than restoring
+a snapshotted value (the v1.4 fix for "undo after Save reported the document as
+clean"), so a `dirty` stamped at creation survives exactly until the first
+Ctrl+Z and then silently clears itself — a gap that looks fixed and is not.
 
-Related, and by design rather than by omission: when the SOURCE document is
-edited or closed, the session goes **stale and read-only** — the panel shows a
-banner, every adjustment control is disabled, and only **Go To** stays live.
+**v1.7 behavior:** documents carry a second, independent flag —
+**`neverSaved`** — that records PROVENANCE rather than edit state.
+
+- **Set at creation** for audio the app computed: Mix Down output, `Remix N`,
+  microphone and track recordings, File > New, and separated stems. The default
+  in `createDocument` is "true when there is no `filePath`", so a new creation
+  site is protected by default; opened files pass `neverSaved: false`
+  explicitly — including exotic containers (m4a/aac/webm), which keep no
+  `filePath` because they cannot be saved back in place but whose audio is
+  nonetheless sitting on disk. Documents recreated from a `.audm` session are
+  `false` for the same reason: their bytes live inside the session file.
+- **Cleared only by a successful save** — Save As, or an in-place Save — on the
+  same branch that clears `dirty` and marks the undo save point. A cancelled
+  dialog, a failed write, and a save whose staleness check rejects (an edit
+  landed mid-encode/write) all leave it set.
+- **Never touched by undo or redo.** `applyDerivedDirty` rewrites `dirty` and
+  nothing else, so undoing past the creation point cannot silence the prompt —
+  the failure mode a stamped `dirty` would have had.
+- **Consulted alongside `dirty`** by `closeDocumentFlow`, which asks
+  "*<name>* has never been saved to a file. Save it before closing?" (Save /
+  Don't Save / Cancel) rather than the "Unsaved changes" wording, which would
+  imply a file exists to save changes back into; and by the renderer's reply to
+  the native close guard, so quitting with an unsaved Remix open shows the
+  Quit/Cancel box instead of discarding it. Choosing Save and then cancelling
+  the save-as dialog aborts the close, exactly as it does for a dirty document.
+- **A session save does NOT clear it.** `.audm` embeds only CLIP-REFERENCED
+  documents, as a point-in-time copy under a foreign id that reopening restores
+  as a NEW document; the document itself still has no path of its own and File
+  > Save still prompts a save-as. Clearing the flag on a session save would
+  silently un-guard every open document the session never contained. Likewise
+  **Export does not clear it** — an export writes somewhere else and leaves
+  `filePath`/`dirty` alone, and the flag follows the same rule.
+
+The cost is one extra prompt: a computed document you genuinely don't want
+always takes a "Don't Save" click. That is the deliberate direction to err in —
+the alternative lost the work with no click at all.
+
+Related, and by design rather than by omission: when a remix's SOURCE document
+is edited or closed, the session goes **stale and read-only** — the panel shows
+a banner, every adjustment control is disabled, and only **Go To** stays live.
 The rendered audio is untouched and remains fully editable as an ordinary
 document; what is unavailable is re-planning it against a grid that no longer
 describes the source.
 
-**Intended behavior:** Add a `neverSaved` provenance flag consulted by
-`closeDocumentFlow`, so a never-saved derived document prompts on close without
-touching the dirty-derivation rule.
+**Intended behavior:** No further work planned — this is complete.
 
 ## Tempo detection makes octave errors; both tempo features assume a steady tempo
 

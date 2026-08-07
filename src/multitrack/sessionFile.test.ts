@@ -1119,3 +1119,39 @@ describe('id-counter seeding after parse', () => {
     expect(Number(freshId.split('-')[1])).toBeGreaterThan(77);
   });
 });
+
+describe('neverSaved provenance and sessions (Task S4)', () => {
+  it('a document recreated from a .audm is NOT never-saved — its audio is on disk inside the session file', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const v3 = parseSessionFileV3(serializeSessionV3(session, [doc]).bytes.buffer);
+    expect(v3.documents[0].neverSaved).toBe(false);
+    expect(v3.documents[0].filePath).toBeNull(); // path-less, but recoverable from the .audm
+
+    const legacy = parseSessionFile(serializeSession(session, [doc]).json);
+    expect(legacy.documents[0].neverSaved).toBe(false);
+  });
+
+  it('saving a SESSION does not clear neverSaved on the documents it embeds', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    // A computed document (a Mix Down / Remix / recording) dropped onto a track.
+    const derived = createDocument({ name: 'Mixdown 1', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(derived);
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: derived.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+    expect(useAppStore.getState().documents[0].neverSaved).toBe(true);
+
+    await saveSessionViaDialog();
+
+    // The .audm holds a COPY under a foreign id; the document itself still has
+    // no file of its own, later edits are not in that copy, and a session save
+    // embeds only CLIP-REFERENCED documents — so clearing the flag here would
+    // silently un-guard every open document the session never contained.
+    expect(useAppStore.getState().documents[0].neverSaved).toBe(true);
+  });
+});

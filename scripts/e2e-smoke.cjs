@@ -353,6 +353,14 @@ async function main() {
       `recorded ~2 seconds (${rec.length} ≈ ${expectedLen} ±20%)`
     );
     assert(rec.rms > 0, `recording is non-silent (rms ${rec.rms.toFixed(4)} > 0)`);
+    // Task S4: a take is COMPUTED audio that has never been on disk. It is
+    // created with no undo entry, so `dirty` is false — `neverSaved` is what
+    // makes closing it (or quitting) ask first instead of discarding it.
+    const recSummary = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      recSummary.neverSaved === true,
+      `a fresh recording is flagged never-saved (neverSaved=${recSummary.neverSaved}, dirty=${recSummary.dirty})`
+    );
     // Persist so the new (dirty) recording document doesn't trip the
     // unsaved-changes beforeunload prompt at teardown.
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
@@ -742,6 +750,12 @@ async function main() {
     assert(
       cleanSummary.dirty === false,
       `freshly opened document is clean before any edit (dirty=${cleanSummary.dirty})`
+    );
+    // Task S4: a document read off disk is NOT never-saved, so closing it
+    // asks nothing. (The computed-document half is asserted at step 5.)
+    assert(
+      cleanSummary.neverSaved === false,
+      `an opened file is not flagged never-saved (neverSaved=${cleanSummary.neverSaved})`
     );
     const dirtyMarkerId = await page.evaluate(() =>
       window.__test.addMarkerToActive(30000, 'Dirty Check')

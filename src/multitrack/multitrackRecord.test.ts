@@ -104,6 +104,8 @@ describe('multitrackRecorder', () => {
     expect(docs[0].name).toMatch(/^Track Recording \d+$/);
     expect(docs[0].sampleRate).toBe(44100);
     expect(docs[0].channels[0].length).toBe(2048);
+    // Task S4: a take exists only in memory until it is saved.
+    expect(docs[0].neverSaved).toBe(true);
 
     for (const id of [armedA, armedB]) {
       const clips = trackById(id).clips;

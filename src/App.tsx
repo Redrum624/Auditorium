@@ -135,16 +135,24 @@ export default function App() {
   }, []);
 
   // Native close guard (Task F8, replaces the old beforeunload handler): main
-  // intercepts the window's 'close' event and asks how many documents are
-  // dirty; we answer with the count read at REQUEST time (getState, not a
+  // intercepts the window's 'close' event and asks how many documents would
+  // lose work; we answer with the count read at REQUEST time (getState, not a
   // stale render closure). Main then closes silently (0) or shows a native
   // Quit/Cancel box. See electron/closeGuard.cjs.
+  //
+  // The count is `dirty || neverSaved`, matching closeDocumentFlow (Task S4):
+  // a computed document (Mix Down, Remix N, a recording, a stem) is CLEAN from
+  // birth, so counting `dirty` alone let Quit discard the whole thing without
+  // asking — the same silent loss the per-document close prompt exists to
+  // prevent, one level up.
   useEffect(() => {
     const api = window.electronAPI;
     if (!api?.onCloseRequested) return; // jsdom / older preload
     return api.onCloseRequested(() => {
-      const dirty = useAppStore.getState().documents.filter((d) => d.dirty).length;
-      api.respondCloseRequest(dirty, getInFlightSaveCount());
+      const unsaved = useAppStore
+        .getState()
+        .documents.filter((d) => d.dirty || d.neverSaved).length;
+      api.respondCloseRequest(unsaved, getInFlightSaveCount());
     });
   }, []);
 
