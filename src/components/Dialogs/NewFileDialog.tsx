@@ -1,11 +1,9 @@
 import { useState } from 'react';
+import { FilePlus2 } from 'lucide-react';
 import { nextId } from '../../stores/appStore';
 import { newDocument } from '../../services/fileService';
+import { FieldLabel, GlassButton, GlassField, GlassSelect } from '../UI/glass';
 import DialogShell from './DialogShell';
-
-const FIELD =
-  'w-full rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-sm text-[#d4d4d8] focus:border-[#26c6da] focus:outline-none';
-const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
 
 const SAMPLE_RATES = [44100, 48000, 96000];
 
@@ -29,27 +27,17 @@ export default function NewFileDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <DialogShell title="New File" onClose={onClose}>
+    <DialogShell title="New File" icon={<FilePlus2 size={15} />} width={380} onClose={onClose}>
       <div className="flex flex-col gap-3">
         <div>
-          <label className={LABEL} htmlFor="new-name">
-            Name
-          </label>
-          <input
-            id="new-name"
-            className={FIELD}
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-          />
+          <FieldLabel htmlFor="new-name">Name</FieldLabel>
+          <GlassField id="new-name" value={name} onChange={(e) => setName(e.target.value)} />
         </div>
 
         <div>
-          <label className={LABEL} htmlFor="new-rate">
-            Sample rate
-          </label>
-          <select
+          <FieldLabel htmlFor="new-rate">Sample rate</FieldLabel>
+          <GlassSelect
             id="new-rate"
-            className={FIELD}
             value={sampleRate}
             onChange={(e) => setSampleRate(Number(e.target.value))}
           >
@@ -58,54 +46,38 @@ export default function NewFileDialog({ onClose }: { onClose: () => void }) {
                 {r} Hz
               </option>
             ))}
-          </select>
+          </GlassSelect>
         </div>
 
         <div>
-          <label className={LABEL} htmlFor="new-channels">
-            Channels
-          </label>
-          <select
+          <FieldLabel htmlFor="new-channels">Channels</FieldLabel>
+          <GlassSelect
             id="new-channels"
-            className={FIELD}
             value={channels}
             onChange={(e) => setChannels(Number(e.target.value) === 1 ? 1 : 2)}
           >
             <option value={1}>Mono</option>
             <option value={2}>Stereo</option>
-          </select>
+          </GlassSelect>
         </div>
 
         <div>
-          <label className={LABEL} htmlFor="new-duration">
-            Duration (seconds)
-          </label>
-          <input
+          <FieldLabel htmlFor="new-duration">Duration (seconds)</FieldLabel>
+          <GlassField
             id="new-duration"
             type="number"
             min={0}
             step={0.1}
-            className={FIELD}
             value={durationSeconds}
             onChange={(e) => setDurationSeconds(Number(e.target.value))}
           />
         </div>
 
         <div className="mt-2 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42]"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={create}
-            className="rounded bg-[#26c6da] px-3 py-1 text-sm font-medium text-[#101014] hover:brightness-110"
-          >
+          <GlassButton onClick={onClose}>Cancel</GlassButton>
+          <GlassButton variant="primary" onClick={create}>
             Create
-          </button>
+          </GlassButton>
         </div>
       </div>
     </DialogShell>

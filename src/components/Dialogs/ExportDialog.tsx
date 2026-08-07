@@ -1,12 +1,10 @@
 import { useState } from 'react';
+import { Download } from 'lucide-react';
 import type { WavBitDepth } from '../../audio/wavCodec';
 import { exportDocument } from '../../services/fileService';
 import { useAppStore } from '../../stores/appStore';
+import { FieldLabel, GlassButton, GlassSelect } from '../UI/glass';
 import DialogShell from './DialogShell';
-
-const FIELD =
-  'w-full rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-sm text-[#d4d4d8] focus:border-[#26c6da] focus:outline-none';
-const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
 
 const WAV_BIT_DEPTHS: WavBitDepth[] = [16, 24, 32];
 const MP3_BITRATES: (128 | 192 | 256 | 320)[] = [128, 192, 256, 320];
@@ -17,6 +15,9 @@ const OGG_BITRATES: (96_000 | 128_000 | 192_000)[] = [96_000, 128_000, 192_000];
  * close; a cancelled save-dialog leaves this open. */
 export default function ExportDialog({ onClose }: { onClose: () => void }) {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
+  const activeDocName = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.name
+  );
   const [format, setFormat] = useState<'wav' | 'mp3' | 'flac' | 'ogg'>('wav');
   const [wavBitDepth, setWavBitDepth] = useState<WavBitDepth>(24);
   const [mp3Kbps, setMp3Kbps] = useState<128 | 192 | 256 | 320>(192);
@@ -40,15 +41,18 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <DialogShell title="Export" onClose={onClose}>
+    <DialogShell
+      title="Export"
+      subtitle={activeDocName}
+      icon={<Download size={15} />}
+      width={400}
+      onClose={onClose}
+    >
       <div className="flex flex-col gap-3">
         <div>
-          <label className={LABEL} htmlFor="export-format">
-            Format
-          </label>
-          <select
+          <FieldLabel htmlFor="export-format">Format</FieldLabel>
+          <GlassSelect
             id="export-format"
-            className={FIELD}
             value={format}
             onChange={(e) => {
               const v = e.target.value;
@@ -61,22 +65,19 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
             <option value="flac">FLAC (16-bit)</option>
             <option value="mp3">MP3 (compressed)</option>
             <option value="ogg">OGG (Opus)</option>
-          </select>
+          </GlassSelect>
         </div>
 
         {format === 'flac' ? (
-          <p className="text-xs text-[#8b8b92]">
+          <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
             Lossless FLAC, 16-bit. No quality setting to choose.
           </p>
         ) : format === 'ogg' ? (
           <div>
-            <label className={LABEL} htmlFor="export-ogg-bitrate">
-              Bit rate
-            </label>
-            <select
+            <FieldLabel htmlFor="export-ogg-bitrate">Bit rate</FieldLabel>
+            <GlassSelect
               id="export-ogg-bitrate"
               data-testid="export-ogg-bitrate"
-              className={FIELD}
               value={oggBitrate}
               onChange={(e) =>
                 setOggBitrate(Number(e.target.value) as 96_000 | 128_000 | 192_000)
@@ -87,17 +88,14 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
                   {r / 1000} kbps
                 </option>
               ))}
-            </select>
+            </GlassSelect>
           </div>
         ) : format === 'wav' ? (
           <div>
-            <label className={LABEL} htmlFor="export-bitdepth">
-              Bit depth
-            </label>
-            <select
+            <FieldLabel htmlFor="export-bitdepth">Bit depth</FieldLabel>
+            <GlassSelect
               id="export-bitdepth"
               data-testid="export-bitdepth"
-              className={FIELD}
               value={wavBitDepth}
               onChange={(e) => setWavBitDepth(Number(e.target.value) as WavBitDepth)}
             >
@@ -106,17 +104,14 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
                   {d === 32 ? '32-bit float' : `${d}-bit`}
                 </option>
               ))}
-            </select>
+            </GlassSelect>
           </div>
         ) : (
           <div>
-            <label className={LABEL} htmlFor="export-kbps">
-              Bit rate
-            </label>
-            <select
+            <FieldLabel htmlFor="export-kbps">Bit rate</FieldLabel>
+            <GlassSelect
               id="export-kbps"
               data-testid="export-kbps"
-              className={FIELD}
               value={mp3Kbps}
               onChange={(e) =>
                 setMp3Kbps(Number(e.target.value) as 128 | 192 | 256 | 320)
@@ -127,26 +122,15 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
                   {r} kbps
                 </option>
               ))}
-            </select>
+            </GlassSelect>
           </div>
         )}
 
         <div className="mt-2 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42]"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={doExport}
-            disabled={busy}
-            className="rounded bg-[#26c6da] px-3 py-1 text-sm font-medium text-[#101014] hover:brightness-110 disabled:opacity-50"
-          >
+          <GlassButton onClick={onClose}>Cancel</GlassButton>
+          <GlassButton variant="primary" onClick={doExport} disabled={busy}>
             Export
-          </button>
+          </GlassButton>
         </div>
       </div>
     </DialogShell>

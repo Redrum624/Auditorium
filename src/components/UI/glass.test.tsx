@@ -4,9 +4,11 @@ import fs from 'fs';
 import path from 'path';
 import {
   ChromePill,
+  FieldLabel,
   GlassButton,
   GlassCard,
   GlassField,
+  GlassSelect,
   GlassSlider,
   IconTile,
   SectionLabel,
@@ -177,6 +179,63 @@ describe('GlassField', () => {
   it('merges className through', () => {
     render(<GlassField aria-label="x" defaultValue="" className="extra" />);
     expect(screen.getByLabelText('x')).toHaveClass('extra');
+  });
+});
+
+describe('GlassSelect (G5)', () => {
+  it('renders a token-styled select with GlassField anatomy, forwards the ref, works controlled', () => {
+    const ref = createRef<HTMLSelectElement>();
+    const onChange = jest.fn();
+    render(
+      <GlassSelect ref={ref} aria-label="Format" value="wav" onChange={onChange} data-testid="sel">
+        <option value="wav">WAV</option>
+        <option value="mp3">MP3</option>
+      </GlassSelect>
+    );
+    const select = screen.getByLabelText('Format') as HTMLSelectElement;
+    expect(ref.current).toBe(select);
+    expect(select.value).toBe('wav');
+    // Same field anatomy as GlassField (Vitrine glassFormStyles: select === input).
+    expect(select.style.background).toBe('rgba(255, 255, 255, 0.04)');
+    expect(select.style.color).toBe('var(--glass-text-label)');
+    expect(select.style.borderRadius).toBe('8px');
+    fireEvent.change(select, { target: { value: 'mp3' } });
+    expect(onChange).toHaveBeenCalledTimes(1);
+  });
+
+  it('merges className through', () => {
+    render(
+      <GlassSelect aria-label="x" defaultValue="a" className="extra">
+        <option value="a">a</option>
+      </GlassSelect>
+    );
+    expect(screen.getByLabelText('x')).toHaveClass('extra');
+  });
+});
+
+describe('FieldLabel (G5)', () => {
+  it('renders a real <label> (htmlFor association intact) in muted field-label anatomy', () => {
+    render(
+      <>
+        <FieldLabel htmlFor="fl-target">Target length</FieldLabel>
+        <input id="fl-target" defaultValue="" />
+      </>
+    );
+    const input = screen.getByLabelText('Target length');
+    expect(input.id).toBe('fl-target');
+    const label = screen.getByText('Target length');
+    expect(label.tagName).toBe('LABEL');
+    expect(label.style.color).toBe('var(--glass-text-muted)');
+    expect(label.style.display).toBe('block');
+  });
+
+  it('merges className and testid through', () => {
+    render(
+      <FieldLabel className="extra" data-testid="fl">
+        x
+      </FieldLabel>
+    );
+    expect(screen.getByTestId('fl')).toHaveClass('extra');
   });
 });
 

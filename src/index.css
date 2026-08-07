@@ -322,6 +322,28 @@
   box-shadow: 0 0 0 4px var(--accent-ring);
 }
 
+/* Dialog-card entrance (Vitrine verbatim; G5 consumer: DialogShell). */
+@keyframes dcRise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dc-rise {
+  animation: dcRise 380ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dc-rise {
+    animation: none;
+  }
+}
+
 /* Button interaction states (Vitrine verbatim) — :hover/:disabled cannot be
    expressed inline, so GlassButton's base layout stays inline and these two
    classes carry the interactive states. Token-driven, so the glow is cyan

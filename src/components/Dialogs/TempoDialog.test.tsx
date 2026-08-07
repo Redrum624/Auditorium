@@ -333,3 +333,12 @@ describe('TempoDialog', () => {
     });
   });
 });
+
+describe('G5 glass header', () => {
+  it('carries a lucide icon tile and the active doc name as subtitle', () => {
+    seedDoc();
+    render(<TempoDialog onClose={jest.fn()} />);
+    expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
+    expect(screen.getByText('song.wav')).toBeInTheDocument();
+  });
+});

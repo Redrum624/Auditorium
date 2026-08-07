@@ -1,5 +1,6 @@
 import { useEffect, useState, type ReactNode } from 'react';
 import { isTopDialog, nextDialogToken, popDialog, pushDialog } from '../../services/dialogBus';
+import { IconTile } from '../UI/glass';
 
 /**
  * Modal overlay chrome shared by the app's dialogs. Renders a dimmed full-screen
@@ -15,14 +16,30 @@ import { isTopDialog, nextDialogToken, popDialog, pushDialog } from '../../servi
  * stacked dialogs (F25) — each shell owns its own document keydown listener,
  * so stopPropagation alone cannot stop a sibling shell from also reacting.
  * Focus trapping is intentionally out of scope for v1.
+ *
+ * G5 (v1.6 glass UI): the PANEL is a glass card (radius 20/blur/`.glass-card`,
+ * Vitrine GlassModal's .92-alpha modal override so body text stays legible
+ * over the busy canvas) with the module-card header anatomy — accent IconTile
+ * + 12.5/600 title + muted subtitle on the darkened header band — replacing
+ * the flat uppercase h2. Behaviour above is untouched; `width` lets each
+ * dialog pick its stage (mockup: simple confirms stay 360, Auto-Remix is 600).
  */
 export default function DialogShell({
   title,
+  subtitle,
+  icon,
+  width = 360,
   onClose,
   children,
   dismissable = true,
 }: {
   title: string;
+  /** Muted state subtitle under the title (e.g. "song.wav · 1:04"). */
+  subtitle?: string;
+  /** ~15px lucide glyph for the header's accent icon tile (ruling 3: lucide only). */
+  icon?: ReactNode;
+  /** Card width in px; grows per-dialog (default 360). */
+  width?: number;
   onClose: () => void;
   children: ReactNode;
   dismissable?: boolean;
@@ -53,20 +70,65 @@ export default function DialogShell({
 
   return (
     <div
-      className="fixed inset-0 z-40 flex items-center justify-center bg-black/50"
+      className="fixed inset-0 z-40 flex items-center justify-center"
+      style={{
+        background: 'rgba(5, 5, 8, 0.6)',
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
+      }}
       data-testid="dialog-overlay"
       onMouseDown={dismissViaBackdrop}
     >
       <div
         role="dialog"
         aria-label={title}
-        className="w-[360px] rounded border border-[#3a3a42] bg-[#232328] p-4 shadow-xl"
+        className="glass-card dc-rise flex max-h-[86vh] flex-col overflow-hidden"
+        style={{ width, background: 'rgba(15, 15, 19, 0.92)' }}
         onMouseDown={(e) => e.stopPropagation()}
       >
-        <h2 className="mb-4 text-sm font-semibold uppercase tracking-wide text-[#d4d4d8]">
-          {title}
-        </h2>
-        {children}
+        <div
+          className="flex flex-shrink-0 items-center"
+          style={{
+            padding: '13px 16px',
+            gap: 11,
+            background: 'rgba(0, 0, 0, 0.3)',
+            borderBottom: '1px solid var(--glass-border)',
+          }}
+        >
+          {icon && <IconTile data-testid="dialog-icon">{icon}</IconTile>}
+          <div className="min-w-0 flex-1">
+            <div
+              style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: 'var(--glass-text-title)',
+                lineHeight: 1.25,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {title}
+            </div>
+            {subtitle && (
+              <div
+                style={{
+                  fontSize: 10.5,
+                  color: 'var(--glass-text-muted)',
+                  lineHeight: 1.35,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {subtitle}
+              </div>
+            )}
+          </div>
+        </div>
+        <div className="flex-1 overflow-y-auto" style={{ padding: 16 }}>
+          {children}
+        </div>
       </div>
     </div>
   );

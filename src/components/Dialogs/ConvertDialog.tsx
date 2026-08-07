@@ -1,12 +1,10 @@
 import { useState } from 'react';
+import { ArrowLeftRight } from 'lucide-react';
 import type { ConvertMode } from '../../services/dialogBus';
 import { convertChannels, convertSampleRate } from '../../services/documentTools';
 import { useAppStore } from '../../stores/appStore';
+import { FieldLabel, GlassButton, GlassSelect } from '../UI/glass';
 import DialogShell from './DialogShell';
-
-const FIELD =
-  'w-full rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-sm text-[#d4d4d8] focus:border-[#26c6da] focus:outline-none';
-const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
 
 const SAMPLE_RATES = [22050, 44100, 48000, 96000];
 
@@ -27,6 +25,9 @@ export default function ConvertDialog({
   onClose: () => void;
 }) {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
+  const activeDocName = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.name
+  );
   const [sampleRate, setSampleRate] = useState(() => {
     const s = useAppStore.getState();
     const doc = s.documents.find((d) => d.id === s.activeDocumentId);
@@ -52,17 +53,20 @@ export default function ConvertDialog({
   };
 
   return (
-    <DialogShell title={title} onClose={onClose}>
+    <DialogShell
+      title={title}
+      subtitle={activeDocName}
+      icon={<ArrowLeftRight size={15} />}
+      width={380}
+      onClose={onClose}
+    >
       <div className="flex flex-col gap-3" data-testid="convert-dialog">
         {isRateMode ? (
           <div>
-            <label className={LABEL} htmlFor="convert-rate">
-              Target sample rate
-            </label>
-            <select
+            <FieldLabel htmlFor="convert-rate">Target sample rate</FieldLabel>
+            <GlassSelect
               id="convert-rate"
               data-testid="convert-rate"
-              className={FIELD}
               value={sampleRate}
               onChange={(e) => setSampleRate(Number(e.target.value))}
             >
@@ -71,42 +75,28 @@ export default function ConvertDialog({
                   {r} Hz
                 </option>
               ))}
-            </select>
+            </GlassSelect>
           </div>
         ) : (
           <div>
-            <label className={LABEL} htmlFor="convert-channels">
-              Channels
-            </label>
-            <select
+            <FieldLabel htmlFor="convert-channels">Channels</FieldLabel>
+            <GlassSelect
               id="convert-channels"
               data-testid="convert-channels"
-              className={FIELD}
               value={channelCount}
               onChange={(e) => setChannelCount(Number(e.target.value) === 1 ? 1 : 2)}
             >
               <option value={1}>Mono</option>
               <option value={2}>Stereo</option>
-            </select>
+            </GlassSelect>
           </div>
         )}
 
         <div className="mt-2 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42]"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={apply}
-            disabled={activeDocumentId === null}
-            className="rounded bg-[#26c6da] px-3 py-1 text-sm font-medium text-[#101014] hover:brightness-110 disabled:opacity-50"
-          >
+          <GlassButton onClick={onClose}>Cancel</GlassButton>
+          <GlassButton variant="primary" onClick={apply} disabled={activeDocumentId === null}>
             Apply
-          </button>
+          </GlassButton>
         </div>
       </div>
     </DialogShell>

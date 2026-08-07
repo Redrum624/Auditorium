@@ -479,3 +479,12 @@ describe('RemixDialog', () => {
     expect(mockRunRemixAnalysis).not.toHaveBeenCalled();
   });
 });
+
+describe('G5 glass header', () => {
+  it('carries a lucide icon tile and a "name · duration" subtitle (mockup anatomy)', async () => {
+    seedDoc();
+    await renderReady();
+    expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
+    expect(screen.getByText(/^song\.wav · \d+:\d{2}$/)).toBeInTheDocument();
+  });
+});

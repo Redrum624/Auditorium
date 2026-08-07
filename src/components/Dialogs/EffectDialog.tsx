@@ -6,11 +6,9 @@ import type { EffectParamDef, EffectParamValue } from '../../effects/types';
 import { runEffectOnSelection } from '../../services/effectRunner';
 import { getNoiseProfile, useNoiseProfileVersion } from '../../services/noiseProfile';
 import { useAppStore } from '../../stores/appStore';
+import { Sparkles } from 'lucide-react';
+import { FieldLabel, GlassButton, GlassField, GlassSelect, GlassSlider, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
-
-const FIELD =
-  'w-full rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-sm text-[#d4d4d8] focus:border-[#26c6da] focus:outline-none';
-const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
 
 /** Build the initial param map from each param's declared default. */
 function initialParams(params: EffectParamDef[]): Record<string, EffectParamValue> {
@@ -42,6 +40,9 @@ export default function EffectDialog({
 }) {
   const def = getEffect(effectId);
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
+  const activeDocName = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.name
+  );
   const [params, setParams] = useState<Record<string, EffectParamValue>>(() =>
     def ? initialParams(def.params) : {}
   );
@@ -136,14 +137,24 @@ export default function EffectDialog({
   };
 
   return (
-    <DialogShell title={def.name} onClose={onClose}>
+    <DialogShell
+      title={def.name}
+      subtitle={activeDocName}
+      icon={<Sparkles size={15} />}
+      width={460}
+      onClose={onClose}
+    >
       <div className="flex flex-col gap-3" data-testid="effect-dialog">
+        {def.params.length > 0 && <SectionLabel>Parameters</SectionLabel>}
+
         {def.params.map((p) => (
           <ParamControl key={p.id} param={p} value={params[p.id]} onChange={setParam} />
         ))}
 
         {def.params.length === 0 && (
-          <p className="text-xs text-[#8b8b92]">This effect has no parameters.</p>
+          <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+            This effect has no parameters.
+          </p>
         )}
 
         {missingNoiseProfile && (
@@ -154,40 +165,37 @@ export default function EffectDialog({
         )}
 
         {busy && (
-          <div className="h-1.5 w-full overflow-hidden rounded bg-[#2e2e34]">
+          <div
+            className="h-1.5 w-full overflow-hidden rounded-full"
+            style={{
+              background: 'rgba(255, 255, 255, 0.09)',
+              boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.6)',
+            }}
+          >
             <div
               data-testid="effect-progress"
-              className="h-full bg-[#26c6da] transition-[width]"
-              style={{ width: `${Math.round(progress * 100)}%` }}
+              className="h-full transition-[width]"
+              style={{
+                width: `${Math.round(progress * 100)}%`,
+                background: 'var(--accent)',
+                boxShadow: '0 0 8px var(--accent-ring)',
+              }}
             />
           </div>
         )}
 
         <div className="mt-2 flex items-center justify-between gap-2">
-          <button
-            type="button"
+          <GlassButton
             onClick={previewing ? stopPreview : startPreview}
             disabled={!def || activeDocumentId === null}
-            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42] disabled:opacity-50"
           >
             {previewing ? 'Stop Preview' : 'Preview'}
-          </button>
+          </GlassButton>
           <div className="flex gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42]"
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              onClick={apply}
-              disabled={!canApply}
-              className="rounded bg-[#26c6da] px-3 py-1 text-sm font-medium text-[#101014] hover:brightness-110 disabled:opacity-50"
-            >
+            <GlassButton onClick={onClose}>Cancel</GlassButton>
+            <GlassButton variant="primary" onClick={apply} disabled={!canApply}>
               Apply
-            </button>
+            </GlassButton>
           </div>
         </div>
       </div>
@@ -208,7 +216,11 @@ function ParamControl({
 
   if (param.type === 'boolean') {
     return (
-      <label className="flex items-center gap-2 text-sm text-[#d4d4d8]" htmlFor={controlId}>
+      <label
+        className="flex items-center gap-2 text-sm"
+        style={{ color: 'var(--glass-text-label)' }}
+        htmlFor={controlId}
+      >
         <input
           id={controlId}
           type="checkbox"
@@ -224,12 +236,9 @@ function ParamControl({
   if (param.type === 'select') {
     return (
       <div>
-        <label className={LABEL} htmlFor={controlId}>
-          {param.label}
-        </label>
-        <select
+        <FieldLabel htmlFor={controlId}>{param.label}</FieldLabel>
+        <GlassSelect
           id={controlId}
-          className={FIELD}
           value={String(value)}
           onChange={(e) => onChange(param.id, e.target.value)}
         >
@@ -238,7 +247,7 @@ function ParamControl({
               {o.label}
             </option>
           ))}
-        </select>
+        </GlassSelect>
       </div>
     );
   }
@@ -248,23 +257,25 @@ function ParamControl({
   const min = param.min ?? 0;
   const max = param.max ?? 100;
   const step = param.step ?? 1;
+  // `edited` mirrors Vitrine SliderRow: an accent glow marks a value moved off
+  // its declared default.
   return (
     <div>
-      <label className={LABEL} htmlFor={controlId}>
+      <FieldLabel htmlFor={controlId}>
         {param.label}
         {param.unit ? ` (${param.unit})` : ''}
-      </label>
+      </FieldLabel>
       <div className="flex items-center gap-2">
-        <input
-          type="range"
+        <GlassSlider
+          className="flex-1"
           min={min}
           max={max}
           step={step}
           value={num}
+          edited={num !== Number(param.default)}
           onChange={(e) => onChange(param.id, Number(e.target.value))}
-          className="flex-1 accent-[#26c6da]"
         />
-        <input
+        <GlassField
           id={controlId}
           type="number"
           min={min}
@@ -272,7 +283,8 @@ function ParamControl({
           step={step}
           value={num}
           onChange={(e) => onChange(param.id, Number(e.target.value))}
-          className={`${FIELD} w-20`}
+          className="w-20"
+          style={{ width: 80 }}
         />
       </div>
     </div>

@@ -130,3 +130,12 @@ describe('ExportDialog', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+describe('G5 glass header', () => {
+  it('carries a lucide icon tile and the active doc name as subtitle', () => {
+    seedActiveDoc();
+    render(<ExportDialog onClose={() => {}} />);
+    expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
+    expect(screen.getByText('song.wav')).toBeInTheDocument();
+  });
+});

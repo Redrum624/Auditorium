@@ -167,3 +167,11 @@ describe('RecordDialog', () => {
     await waitFor(() => expect(bar().style.width).toBe('90%'));
   });
 });
+
+describe('G5 glass header', () => {
+  it('carries a lucide icon tile in the shell header', () => {
+    const fake = new FakeEngine();
+    render(<RecordDialog onClose={() => {}} engine={asEngine(fake)} />);
+    expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
+  });
+});

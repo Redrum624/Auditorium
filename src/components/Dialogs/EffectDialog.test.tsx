@@ -163,3 +163,11 @@ describe('effect preview lifecycle (Task M7/F11)', () => {
     expect(fake.load).not.toHaveBeenCalled();
   });
 });
+
+describe('G5 glass header', () => {
+  it('carries a lucide icon tile in the shell header', () => {
+    seedActiveDoc();
+    render(<EffectDialog effectId="amplify" onClose={() => {}} />);
+    expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
+  });
+});

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChevronLeft, ChevronRight, Shuffle } from 'lucide-react';
+import { docLength } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { parseTime } from '../../utils/timeFormat';
 import { DEFAULT_REMIX_WEIGHTS } from '../../dsp/remixCost';
@@ -15,11 +17,11 @@ import { focusRemixPanel } from '../../services/dialogBus';
 // Structure-strip derivation + meter labels are shared with the persistent
 // TEMPO card (G4) — one colour cycle, one run derivation, one meter label.
 import { clusterColor, meterLabel, METERS, structureRuns } from '../../utils/structureStrip';
+import { FieldLabel, GlassButton, GlassField, GlassSelect, GlassSlider, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
 
-const FIELD =
-  'w-full rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-sm text-[#d4d4d8] focus:border-[#26c6da] focus:outline-none';
-const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
+/** Small chip-sized GlassButton geometry (the mockup's `.chip`). */
+const CHIP = { padding: '2px 8px', fontSize: 11 } as const;
 
 const ANALYSIS_FAILED = 'Beat analysis did not produce a usable grid for this document.';
 
@@ -350,16 +352,35 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
   if (!doc) return null;
 
   return (
-    <DialogShell title="Auto-Remix" onClose={onClose} dismissable={!busy}>
-      <div className="flex max-h-[70vh] flex-col gap-3 overflow-auto" data-testid="remix-dialog">
+    <DialogShell
+      title="Auto-Remix"
+      subtitle={`${doc.name} · ${formatMmss(docLength(doc), sampleRate)}`}
+      icon={<Shuffle size={15} />}
+      width={600}
+      onClose={onClose}
+      dismissable={!busy}
+    >
+      <div className="flex flex-col gap-3" data-testid="remix-dialog">
         {analysing && (
           <div>
-            <p className="mb-1 text-xs text-[#8b8b92]">Analyzing beat grid…</p>
-            <div className="h-1.5 w-full overflow-hidden rounded bg-[#2e2e34]">
+            <p className="mb-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              Analyzing beat grid…
+            </p>
+            <div
+              className="h-1.5 w-full overflow-hidden rounded-full"
+              style={{
+                background: 'rgba(255, 255, 255, 0.09)',
+                boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.6)',
+              }}
+            >
               <div
                 data-testid="remix-progress"
-                className="h-full bg-[#26c6da] transition-[width]"
-                style={{ width: `${Math.round(progress * 100)}%` }}
+                className="h-full transition-[width]"
+                style={{
+                  width: `${Math.round(progress * 100)}%`,
+                  background: 'var(--accent)',
+                  boxShadow: '0 0 8px var(--accent-ring)',
+                }}
               />
             </div>
           </div>
@@ -367,20 +388,34 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
 
         {analysis && (
           <>
+            <SectionLabel>Analysis</SectionLabel>
+
             <div className="flex items-baseline justify-between gap-2">
-              <span data-testid="remix-summary" className="text-sm text-[#d4d4d8]">
+              <span
+                data-testid="remix-summary"
+                className="font-mono"
+                style={{ fontSize: 15, color: 'var(--glass-text-title)' }}
+              >
                 {`${analysis.bpm !== null ? analysis.bpm.toFixed(1) : '—'} BPM · ${meterLabel(
                   analysis.beatsPerBar
                 )} · ${analysis.numBars} bars`}
               </span>
-              <span data-testid="remix-confidence" className="text-xs text-[#8b8b92]">
+              <span
+                data-testid="remix-confidence"
+                className="text-xs"
+                style={{ color: 'var(--glass-text-secondary)' }}
+              >
                 {`${'●'.repeat(Math.max(0, Math.min(5, Math.round(analysis.confidence * 5))))}${'○'.repeat(
                   5 - Math.max(0, Math.min(5, Math.round(analysis.confidence * 5)))
                 )} ${analysis.confidence.toFixed(2)}`}
               </span>
             </div>
 
-            <div className="flex h-4 w-full overflow-hidden rounded" data-testid="remix-structure">
+            <div
+              className="flex w-full overflow-hidden rounded-lg"
+              style={{ height: 34 }}
+              data-testid="remix-structure"
+            >
               {runs.map((run, i) => (
                 <div
                   key={i}
@@ -395,60 +430,53 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
             </div>
 
             <div>
-              <label className={LABEL} htmlFor="remix-bpm">
-                Tempo (BPM)
-              </label>
+              <FieldLabel htmlFor="remix-bpm">Tempo (BPM)</FieldLabel>
               <div className="flex items-center gap-1">
-                <input
+                <GlassField
                   id="remix-bpm"
                   type="number"
                   data-testid="remix-bpm"
                   value={bpmDraft}
                   disabled={busy}
                   onChange={(e) => setBpmDraft(e.target.value)}
-                  className={`${FIELD} w-24`}
+                  className="w-24"
+                  style={{ width: 96 }}
                 />
-                <button
-                  type="button"
+                <GlassButton
                   data-testid="remix-redetect"
                   onClick={() => void applyTypedBpm()}
                   disabled={busy}
-                  className="rounded border border-[#3a3a42] px-1 text-xs text-[#d4d4d8] hover:border-[#26c6da] disabled:opacity-50"
+                  style={CHIP}
                 >
                   Re-detect
-                </button>
-                <button
-                  type="button"
+                </GlassButton>
+                <GlassButton
                   data-testid="remix-double"
                   title="Double tempo (x2) — re-tracks the beat grid"
                   onClick={() => void regridAndDerive(analysis.periodFrames / 2)}
                   disabled={busy}
-                  className="rounded border border-[#3a3a42] px-1 text-xs text-[#d4d4d8] hover:border-[#26c6da] disabled:opacity-50"
+                  style={CHIP}
                 >
                   x2
-                </button>
-                <button
-                  type="button"
+                </GlassButton>
+                <GlassButton
                   data-testid="remix-halve"
                   title="Halve tempo (/2) — re-tracks the beat grid"
                   onClick={() => void regridAndDerive(analysis.periodFrames * 2)}
                   disabled={busy}
-                  className="rounded border border-[#3a3a42] px-1 text-xs text-[#d4d4d8] hover:border-[#26c6da] disabled:opacity-50"
+                  style={CHIP}
                 >
                   /2
-                </button>
+                </GlassButton>
               </div>
             </div>
 
             <div className="flex gap-2">
               <div className="flex-1">
-                <label className={LABEL} htmlFor="remix-meter">
-                  Time signature
-                </label>
-                <select
+                <FieldLabel htmlFor="remix-meter">Time signature</FieldLabel>
+                <GlassSelect
                   id="remix-meter"
                   data-testid="remix-meter"
-                  className={FIELD}
                   value={meterLabel(beatsPerBar)}
                   disabled={busy}
                   onChange={(e) => {
@@ -462,42 +490,42 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
                       {m.value}
                     </option>
                   ))}
-                </select>
+                </GlassSelect>
               </div>
               <div>
-                <span className={LABEL}>{`Downbeat (${downbeatShift >= 0 ? '+' : ''}${downbeatShift})`}</span>
+                <FieldLabel>{`Downbeat (${downbeatShift >= 0 ? '+' : ''}${downbeatShift})`}</FieldLabel>
                 <div className="flex gap-1">
-                  <button
-                    type="button"
+                  <GlassButton
                     data-testid="remix-downbeat-prev"
+                    aria-label="Shift downbeat one beat earlier"
                     onClick={() => {
                       const next = downbeatShift - 1;
                       setDownbeatShift(next);
                       rederive(beatsPerBar, next);
                     }}
                     disabled={busy}
-                    className="rounded border border-[#3a3a42] px-2 py-1 text-sm text-[#d4d4d8] hover:border-[#26c6da] disabled:opacity-50"
+                    style={{ padding: '5px 8px' }}
                   >
-                    ◂
-                  </button>
-                  <button
-                    type="button"
+                    <ChevronLeft size={14} />
+                  </GlassButton>
+                  <GlassButton
                     data-testid="remix-downbeat-next"
+                    aria-label="Shift downbeat one beat later"
                     onClick={() => {
                       const next = downbeatShift + 1;
                       setDownbeatShift(next);
                       rederive(beatsPerBar, next);
                     }}
                     disabled={busy}
-                    className="rounded border border-[#3a3a42] px-2 py-1 text-sm text-[#d4d4d8] hover:border-[#26c6da] disabled:opacity-50"
+                    style={{ padding: '5px 8px' }}
                   >
-                    ▸
-                  </button>
+                    <ChevronRight size={14} />
+                  </GlassButton>
                 </div>
               </div>
             </div>
 
-            <label className="flex items-center gap-2 text-xs text-[#d4d4d8]">
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
               <input
                 type="checkbox"
                 data-testid="remix-tempo-confirmed"
@@ -508,60 +536,47 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
               Tempo and downbeat are correct
             </label>
 
-            <div>
-              <label className={LABEL} htmlFor="remix-phrase">
-                Phrase length (bars)
-              </label>
-              <select
-                id="remix-phrase"
-                data-testid="remix-phrase"
-                className={FIELD}
-                value={String(phraseBars)}
-                onChange={(e) => setPhraseBars(Number(e.target.value))}
-              >
-                <option value="4">4</option>
-                <option value="8">8</option>
-                <option value="16">16</option>
-              </select>
-            </div>
+            <SectionLabel>Target</SectionLabel>
 
             <div>
-              <label className={LABEL} htmlFor="remix-target">
-                Target length
-              </label>
+              <FieldLabel htmlFor="remix-target">Target length</FieldLabel>
               <div className="flex items-center gap-2">
-                <input
-                  type="range"
+                <GlassSlider
+                  className="flex-1"
                   data-testid="remix-target-slider"
                   min={plan ? plan.minOutputSample : 0}
                   max={plan ? plan.maxOutputSample : 0}
                   step={sampleRate}
                   value={targetSample ?? 0}
                   onChange={(e) => commitTargetSamples(Number(e.target.value))}
-                  className="flex-1 accent-[#26c6da]"
                 />
-                <input
+                <GlassField
                   id="remix-target"
                   type="text"
                   data-testid="remix-target"
                   value={targetDraft}
                   onChange={(e) => handleTargetText(e.target.value)}
-                  className={`${FIELD} w-20`}
+                  className="w-20 font-mono"
+                  style={{ width: 80 }}
                 />
               </div>
               {plan && plan.ok && (
-                <p data-testid="remix-will-produce" className="mt-1 text-xs text-[#d4d4d8]">
+                <p
+                  data-testid="remix-will-produce"
+                  className="mt-1 text-xs"
+                  style={{ color: 'var(--glass-text-label)' }}
+                >
                   {`→ will produce ${formatMmss(plan.outputSample, sampleRate)} (nearest phrase)`}
                 </p>
               )}
             </div>
 
+            <SectionLabel>Options</SectionLabel>
+
             <div className="flex gap-2">
               <div className="flex-1">
-                <label className={LABEL} htmlFor="remix-crossfade">
-                  Crossfade (ms)
-                </label>
-                <input
+                <FieldLabel htmlFor="remix-crossfade">Crossfade (ms)</FieldLabel>
+                <GlassField
                   id="remix-crossfade"
                   type="number"
                   data-testid="remix-crossfade"
@@ -569,27 +584,36 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
                   max={120}
                   value={crossfadeMs}
                   onChange={(e) => setCrossfadeMs(Number(e.target.value))}
-                  className={FIELD}
                 />
               </div>
               <div className="flex-1">
-                <label className={LABEL} htmlFor="remix-strictness">
-                  Phrase strictness
-                </label>
-                <select
+                <FieldLabel htmlFor="remix-phrase">Phrase length (bars)</FieldLabel>
+                <GlassSelect
+                  id="remix-phrase"
+                  data-testid="remix-phrase"
+                  value={String(phraseBars)}
+                  onChange={(e) => setPhraseBars(Number(e.target.value))}
+                >
+                  <option value="4">4</option>
+                  <option value="8">8</option>
+                  <option value="16">16</option>
+                </GlassSelect>
+              </div>
+              <div className="flex-1">
+                <FieldLabel htmlFor="remix-strictness">Phrase strictness</FieldLabel>
+                <GlassSelect
                   id="remix-strictness"
                   data-testid="remix-strictness"
-                  className={FIELD}
                   value={strict ? 'strict' : 'loose'}
                   onChange={(e) => setStrict(e.target.value === 'strict')}
                 >
                   <option value="strict">Strict</option>
                   <option value="loose">Loose</option>
-                </select>
+                </GlassSelect>
               </div>
             </div>
 
-            <label className="flex items-center gap-2 text-xs text-[#d4d4d8]">
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
               <input
                 type="checkbox"
                 data-testid="remix-allow-repeats"
@@ -599,7 +623,7 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
               />
               Allow repeats
             </label>
-            <label className="flex items-center gap-2 text-xs text-[#d4d4d8]">
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
               <input
                 type="checkbox"
                 data-testid="remix-mark-edits"
@@ -609,7 +633,7 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
               />
               Mark edit points
             </label>
-            <label className="flex items-center gap-2 text-xs text-[#d4d4d8]">
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
               <input
                 type="checkbox"
                 data-testid="remix-exact-length"
@@ -636,33 +660,38 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
 
         {creating && (
           <div>
-            <p className="mb-1 text-xs text-[#8b8b92]">Building the remix…</p>
-            <div className="h-1.5 w-full overflow-hidden rounded bg-[#2e2e34]">
+            <p className="mb-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              Building the remix…
+            </p>
+            <div
+              className="h-1.5 w-full overflow-hidden rounded-full"
+              style={{
+                background: 'rgba(255, 255, 255, 0.09)',
+                boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.6)',
+              }}
+            >
               <div
                 data-testid="remix-create-progress"
-                className="h-full bg-[#26c6da] transition-[width]"
-                style={{ width: `${Math.round(progress * 100)}%` }}
+                className="h-full transition-[width]"
+                style={{
+                  width: `${Math.round(progress * 100)}%`,
+                  background: 'var(--accent)',
+                  boxShadow: '0 0 8px var(--accent-ring)',
+                }}
               />
             </div>
           </div>
         )}
 
         <div className="mt-2 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42]"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
+          <GlassButton onClick={onClose}>Cancel</GlassButton>
+          <GlassButton
+            variant="primary"
             onClick={() => void handleCreate()}
             disabled={!canCreate}
-            className="rounded bg-[#26c6da] px-3 py-1 text-sm font-medium text-[#101014] hover:brightness-110 disabled:opacity-50"
           >
             Create Remix
-          </button>
+          </GlassButton>
         </div>
       </div>
     </DialogShell>

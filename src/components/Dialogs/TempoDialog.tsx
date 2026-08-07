@@ -20,11 +20,12 @@ import {
 } from '../../services/tempoService';
 import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 import { MIN_RATIO, MAX_RATIO } from '../../dsp/wsola';
+import { Gauge } from 'lucide-react';
+import { FieldLabel, GlassButton, GlassField, GlassSelect, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
 
-const FIELD =
-  'w-full rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-sm text-[#d4d4d8] focus:border-[#26c6da] focus:outline-none';
-const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
+/** Small chip-sized GlassButton geometry (the mockup's `.chip`). */
+const CHIP = { padding: '2px 8px', fontSize: 11 } as const;
 
 type Mode = 'bpm' | 'percent';
 
@@ -286,10 +287,19 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <DialogShell title="Match Tempo" onClose={onClose} dismissable={!busy}>
+    <DialogShell
+      title="Match Tempo"
+      subtitle={doc.name}
+      icon={<Gauge size={15} />}
+      width={440}
+      onClose={onClose}
+      dismissable={!busy}
+    >
       <div className="flex flex-col gap-3" data-testid="tempo-dialog">
+        <SectionLabel>Estimate</SectionLabel>
+
         <div>
-          <div data-testid="tempo-scope" className="text-xs text-[#8b8b92]">
+          <div data-testid="tempo-scope" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
             {scopeText}
           </div>
           {selection && (
@@ -301,7 +311,11 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
 
         <div>
           <div className="flex items-baseline justify-between gap-2">
-            <span data-testid="tempo-detected" className="text-sm text-[#d4d4d8]">
+            <span
+              data-testid="tempo-detected"
+              className="font-mono text-sm"
+              style={{ color: 'var(--glass-text-title)' }}
+            >
               {display?.bpm != null
                 ? `${display.bpm.toFixed(1)} BPM${display.stale ? ' (stale)' : ''}`
                 : 'Could not detect a tempo'}
@@ -317,54 +331,51 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
           </div>
 
           {display?.bpm == null && (
-            <p className="mt-1 text-xs text-[#8b8b92]">
+            <p className="mt-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
               Type the tempo if you know it, or select a steady 8–16 bar passage and press Re-detect.
             </p>
           )}
 
           {docEntry === null && (
-            <button
-              type="button"
+            <GlassButton
               data-testid="tempo-detect-button"
               onClick={() => void handleDetect()}
               disabled={detecting}
-              className="mt-1 rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-0.5 text-xs text-[#d4d4d8] hover:bg-[#3a3a42] disabled:opacity-50"
+              className="mt-1"
+              style={CHIP}
             >
               Detect
-            </button>
+            </GlassButton>
           )}
 
           <div className="mt-1 flex flex-wrap items-center gap-1">
             {display?.bpm != null && docEntry?.bpm != null && (
               <>
-                <button
-                  type="button"
+                <GlassButton
                   data-testid="tempo-double-button"
                   title="Double tempo (x2) — re-tracks the beat grid"
                   onClick={() => void correctOctave(2)}
-                  className="rounded border border-[#3a3a42] px-1 text-xs text-[#d4d4d8] hover:border-[#26c6da]"
+                  style={CHIP}
                 >
                   x2
-                </button>
-                <button
-                  type="button"
+                </GlassButton>
+                <GlassButton
                   data-testid="tempo-halve-button"
                   title="Halve tempo (/2) — re-tracks the beat grid"
                   onClick={() => void correctOctave(0.5)}
-                  className="rounded border border-[#3a3a42] px-1 text-xs text-[#d4d4d8] hover:border-[#26c6da]"
+                  style={CHIP}
                 >
                   /2
-                </button>
+                </GlassButton>
               </>
             )}
-            <button
-              type="button"
+            <GlassButton
               data-testid="tempo-redetect-button"
               onClick={handleRedetectFromSelection}
-              className="rounded border border-[#3a3a42] px-1 text-xs text-[#d4d4d8] hover:border-[#26c6da]"
+              style={CHIP}
             >
               Re-detect from selection
-            </button>
+            </GlassButton>
           </div>
 
           {correctionFailed && (
@@ -379,11 +390,11 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
           )}
         </div>
 
+        <SectionLabel>Target</SectionLabel>
+
         <div>
-          <label className={LABEL} htmlFor="tempo-source">
-            Source BPM
-          </label>
-          <input
+          <FieldLabel htmlFor="tempo-source">Source BPM</FieldLabel>
+          <GlassField
             id="tempo-source"
             ref={sourceInputRef}
             type="number"
@@ -392,32 +403,26 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
             max={400}
             value={sourceDraft}
             onChange={(e) => setSourceDraft(e.target.value)}
-            className={FIELD}
           />
         </div>
 
         <div>
-          <label className={LABEL} htmlFor="tempo-mode">
-            Mode
-          </label>
-          <select
+          <FieldLabel htmlFor="tempo-mode">Mode</FieldLabel>
+          <GlassSelect
             id="tempo-mode"
             data-testid="tempo-mode"
-            className={FIELD}
             value={mode}
             onChange={(e) => handleModeChange(e.target.value as Mode)}
           >
             <option value="bpm">Target BPM</option>
             <option value="percent">Ratio (%)</option>
-          </select>
+          </GlassSelect>
         </div>
 
         {mode === 'bpm' ? (
           <div>
-            <label className={LABEL} htmlFor="tempo-target">
-              Target BPM
-            </label>
-            <input
+            <FieldLabel htmlFor="tempo-target">Target BPM</FieldLabel>
+            <GlassField
               id="tempo-target"
               type="number"
               data-testid="tempo-target"
@@ -425,27 +430,23 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
               max={400}
               value={targetBpmDraft}
               onChange={(e) => setTargetBpmDraft(e.target.value)}
-              className={FIELD}
             />
           </div>
         ) : (
           <div>
-            <label className={LABEL} htmlFor="tempo-percent">
-              Ratio (%)
-            </label>
-            <input
+            <FieldLabel htmlFor="tempo-percent">Ratio (%)</FieldLabel>
+            <GlassField
               id="tempo-percent"
               type="number"
               data-testid="tempo-percent"
               value={percentDraft}
               onChange={(e) => setPercentDraft(e.target.value)}
-              className={FIELD}
             />
           </div>
         )}
 
         {ratio !== null && (
-          <div data-testid="tempo-summary" className="text-xs text-[#d4d4d8]">
+          <div data-testid="tempo-summary" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
             {`x${ratio.toFixed(4)} · ${regionSeconds.toFixed(2)} s → ${(regionSeconds * ratio).toFixed(2)} s · pitch unchanged`}
           </div>
         )}
@@ -456,7 +457,9 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        <label className="flex items-center gap-2 text-xs text-[#d4d4d8]">
+        <SectionLabel>Options</SectionLabel>
+
+        <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
           <input
             type="checkbox"
             data-testid="tempo-beat-markers"
@@ -468,7 +471,7 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
           {`Add beat markers at the new tempo (max ${MAX_BEAT_MARKERS})`}
         </label>
 
-        <p className="text-xs text-[#8b8b92]">
+        <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
           Applied off the main thread — this can take a while on long files.
         </p>
 
@@ -479,31 +482,30 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
         )}
 
         {busy && (
-          <div className="h-1.5 w-full overflow-hidden rounded bg-[#2e2e34]">
+          <div
+            className="h-1.5 w-full overflow-hidden rounded-full"
+            style={{
+              background: 'rgba(255, 255, 255, 0.09)',
+              boxShadow: 'inset 0 1px 2px rgba(0, 0, 0, 0.6)',
+            }}
+          >
             <div
               data-testid="tempo-progress"
-              className="h-full bg-[#26c6da] transition-[width]"
-              style={{ width: `${Math.round(progress * 100)}%` }}
+              className="h-full transition-[width]"
+              style={{
+                width: `${Math.round(progress * 100)}%`,
+                background: 'var(--accent)',
+                boxShadow: '0 0 8px var(--accent-ring)',
+              }}
             />
           </div>
         )}
 
         <div className="mt-2 flex justify-end gap-2">
-          <button
-            type="button"
-            onClick={onClose}
-            className="rounded border border-[#3a3a42] bg-[#2e2e34] px-3 py-1 text-sm text-[#d4d4d8] hover:bg-[#3a3a42]"
-          >
-            Cancel
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleApply()}
-            disabled={!canApply}
-            className="rounded bg-[#26c6da] px-3 py-1 text-sm font-medium text-[#101014] hover:brightness-110 disabled:opacity-50"
-          >
+          <GlassButton onClick={onClose}>Cancel</GlassButton>
+          <GlassButton variant="primary" onClick={() => void handleApply()} disabled={!canApply}>
             Apply
-          </button>
+          </GlassButton>
         </div>
       </div>
     </DialogShell>

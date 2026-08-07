@@ -166,6 +166,51 @@ export function GlassField({ className = '', style, ...rest }: ComponentPropsWit
 }
 
 /**
+ * Token-styled select (G5): Vitrine's `glassFormStyles.selectStyle`, which is
+ * defined as an ALIAS of `inputStyle` — selects and inputs share the exact
+ * same field anatomy, so this mirrors GlassField on a `<select>`.
+ */
+export function GlassSelect({ className = '', style, ...rest }: ComponentPropsWithRef<'select'>) {
+  return (
+    <select
+      className={className}
+      style={{
+        width: '100%',
+        fontSize: 12,
+        padding: '6px 8px',
+        borderRadius: 8,
+        border: '1px solid rgba(255,255,255,.1)',
+        background: 'rgba(255,255,255,.04)',
+        color: 'var(--glass-text-label)',
+        ...style,
+      }}
+      {...rest}
+    />
+  );
+}
+
+/**
+ * Muted field label above a GlassField/GlassSelect (G5): the mockup's `.lbl`
+ * anatomy (block, small, muted, 4px below-gap). A real `<label>` so `htmlFor`
+ * associations — which several dialog tests query by — keep working.
+ */
+export function FieldLabel({ className = '', style, ...rest }: ComponentPropsWithoutRef<'label'>) {
+  return (
+    <label
+      className={className}
+      style={{
+        display: 'block',
+        fontSize: 11,
+        color: 'var(--glass-text-muted)',
+        marginBottom: 4,
+        ...style,
+      }}
+      {...rest}
+    />
+  );
+}
+
+/**
  * Bare glass slider: the 5px inset track + `.glass-slider-thumb` range input
  * from Vitrine's Controls/SliderRow.tsx, WITHOUT the label/value-chip/detent
  * logic (G1 primitives carry no logic — a later consumer composes those).
