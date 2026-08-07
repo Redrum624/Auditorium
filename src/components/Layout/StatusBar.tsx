@@ -55,7 +55,10 @@ function Divider() {
  * (plan: "merge, don't drop"): the PROMINENT transport time readout
  * (`transport-time`, view-routed exactly as before — cursor while stopped,
  * engine position while playing, multitrack cursor/playhead in that view) and
- * the level meter. The pill is the whole bottom edge now. */
+ * the level meter.
+ *
+ * G6: the band truly floats now — an absolute bottom-centre z-20 overlay on
+ * the radial stage (mockup `.status`), pointer-transparent outside the pill. */
 export default function StatusBar() {
   useTempoVersion();
   const documents = useAppStore((s) => s.documents);
@@ -87,10 +90,10 @@ export default function StatusBar() {
       : cursorSample;
 
   return (
-    <div className="flex shrink-0 justify-center px-3 pb-2 pt-1.5">
+    <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3">
       <ChromePill
         data-testid="status-pill"
-        className="flex items-center text-xs"
+        className="pointer-events-auto flex items-center text-xs"
         style={{ gap: 18, padding: '7px 16px', color: 'var(--glass-text-secondary)' }}
       >
         <span

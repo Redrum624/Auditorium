@@ -154,38 +154,58 @@ export default function App() {
       className="flex h-screen w-screen flex-col bg-[#1a1a1e] text-[#d4d4d8]"
     >
       <TitleBar />
-      {/* G3: the transport/view/zoom controls live in the top floating pill
-          (with the file chip); the retired bottom TransportBar's readouts
-          merged into the status pill below. */}
-      <Toolbar />
-      <div className="flex min-h-0 flex-1">
-        <div className="flex min-w-0 flex-1 flex-col bg-[#1a1a1e]">
-          {view === 'multitrack' ? (
-            <MultitrackView />
-          ) : doc && view === 'spectral' ? (
-            <SpectrogramView doc={doc} />
-          ) : doc ? (
-            <WaveformView doc={doc} />
-          ) : (
-            <div className="flex flex-1 items-center justify-center text-center text-[#8b8b92]">
-              Open an audio file (Ctrl+O) or create a new one (Ctrl+N)
-            </div>
-          )}
-        </div>
+      {/* G6: the editor canvas IS the stage — one relative surface carrying
+          the radial --canvas-bg with the active view in flow (each view roots
+          itself with .stage-inset clearance) and every piece of chrome
+          floating over it as an absolute z-20 overlay: the G3 toolbar band
+          (pill + file chip), the G4 card column and icon rail, and the G2
+          status pill. Z-order: dialogs (DialogShell, fixed z-40) above
+          chrome (z-20) above lanes (in-flow). The titlebar's menu dropdowns
+          sit at z-50 in their own band above everything, as before. */}
+      <div
+        data-testid="editor-stage"
+        className="relative flex min-h-0 min-w-0 flex-1 flex-col"
+        style={{ backgroundImage: 'var(--canvas-bg)' }}
+      >
+        {view === 'multitrack' ? (
+          <MultitrackView />
+        ) : doc && view === 'spectral' ? (
+          <SpectrogramView doc={doc} />
+        ) : doc ? (
+          <WaveformView doc={doc} />
+        ) : (
+          <div
+            className="flex flex-1 items-center justify-center text-center"
+            style={{ color: 'var(--glass-text-muted)' }}
+          >
+            Open an audio file (Ctrl+O) or create a new one (Ctrl+N)
+          </div>
+        )}
 
-        {/* G4 card column (mockup `.col`, 348px): the persistent TEMPO card
-            (hidden until an analysis exists) above ONE glass panel card for
-            the rail's active entry. The card hugs its content and scrolls
-            internally when it outgrows the column (scroll containment). */}
+        {/* G3 toolbar band: transport/view/zoom pill + file chip, floating
+            top-centre / top-left (mockup `.toolbar` / `.filechip`). */}
+        <Toolbar />
+
+        {/* G4 card column (mockup `.col`, 348px), floating top-right: the
+            persistent TEMPO card (hidden until an analysis exists) above ONE
+            glass panel card for the rail's active entry. The card hugs its
+            content and scrolls internally when it outgrows the column
+            (scroll containment preserved). The wrapper ignores pointer
+            events so the empty column strip never blocks the stage. Top is
+            68 (the stage-inset top), NOT the mockup's toolbar-band top: the
+            mockup stages a 1800px window where the centred pill ends well
+            short of the column — at the app's real 1600px default the pill's
+            zoom cluster would collide with the TEMPO card, so the column
+            starts below the band, aligned with the lanes. */}
         <div
-          className="flex min-h-0 w-[348px] shrink-0 flex-col"
-          style={{ gap: 14, padding: '8px 2px 10px 0' }}
+          className="pointer-events-none absolute z-20 flex w-[348px] flex-col"
+          style={{ top: 68, right: 84, bottom: 58, gap: 14 }}
         >
           <TempoCard />
           <GlassCard
             data-testid="sidebar-panel"
             data-active-tab={sidebarTab}
-            className="flex min-h-0 flex-col"
+            className="pointer-events-auto flex min-h-0 flex-col"
             style={{ flex: '0 1 auto', overflow: 'hidden' }}
           >
             <div
@@ -215,32 +235,33 @@ export default function App() {
           </GlassCard>
         </div>
 
-        {/* G4 icon rail (Vitrine IconSidebar anatomy on a ChromePill): the
-            old tab strip's testid and accessible names live here now. */}
-        <div className="flex shrink-0 flex-col justify-center" style={{ padding: '0 12px 0 10px' }}>
-          <ChromePill
-            data-testid="sidebar-tabs"
-            className="flex flex-col items-center"
-            style={{ padding: '10px 8px', gap: 6 }}
-          >
-            {SIDEBAR_TABS.map(({ id, label, Icon }) => (
-              <button
-                key={id}
-                type="button"
-                aria-label={label}
-                title={label}
-                aria-pressed={sidebarTab === id}
-                onClick={() => setSidebarTab(id)}
-                className={`glass-rail-btn${sidebarTab === id ? ' is-active' : ''}`}
-                style={{ ...railBtn, ...(sidebarTab === id ? railBtnActive : null) }}
-              >
-                <Icon size={20} />
-              </button>
-            ))}
-          </ChromePill>
-        </div>
+        {/* G4 icon rail (Vitrine IconSidebar anatomy on a ChromePill),
+            floating at the right edge, vertically centred (mockup `.rail`):
+            the old tab strip's testid and accessible names live here. */}
+        <ChromePill
+          data-testid="sidebar-tabs"
+          className="absolute right-3 top-1/2 z-20 flex -translate-y-1/2 flex-col items-center"
+          style={{ padding: '10px 8px', gap: 6 }}
+        >
+          {SIDEBAR_TABS.map(({ id, label, Icon }) => (
+            <button
+              key={id}
+              type="button"
+              aria-label={label}
+              title={label}
+              aria-pressed={sidebarTab === id}
+              onClick={() => setSidebarTab(id)}
+              className={`glass-rail-btn${sidebarTab === id ? ' is-active' : ''}`}
+              style={{ ...railBtn, ...(sidebarTab === id ? railBtnActive : null) }}
+            >
+              <Icon size={20} />
+            </button>
+          ))}
+        </ChromePill>
+
+        {/* G2 status pill, floating bottom-centre (mockup `.status`). */}
+        <StatusBar />
       </div>
-      <StatusBar />
 
       {newFileOpen && <NewFileDialog onClose={() => setNewFileOpen(false)} />}
       {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}

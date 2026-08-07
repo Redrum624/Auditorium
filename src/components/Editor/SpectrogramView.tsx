@@ -4,7 +4,7 @@ import { cloneRegion, docLength, mixDown } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
 import { useSpectralScale } from '../../services/spectralScale';
-import { drawMarkers, sampleToPixel } from './waveformRender';
+import { cssToken, drawMarkers, sampleToPixel } from './waveformRender';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
 import type { Marker } from '../../stores/appStore';
@@ -281,8 +281,10 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     canvas.height = backingHeight;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    ctx.fillStyle = '#0a0a0f';
-    ctx.fillRect(0, 0, width, height);
+    // G6: transparent until the raster lands — the floating .glass-lane
+    // container paints the lane fill (the raster itself is opaque and covers
+    // the whole canvas once present). The resize above already cleared.
+    ctx.clearRect(0, 0, width, height);
     if (magsData) {
       let raster = rasterRef.current;
       if (
@@ -320,10 +322,12 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
       const left = Math.max(0, Math.min(x0, x1));
       const right = Math.min(width, Math.max(x0, x1));
       if (right > left) {
-        ctx.fillStyle = 'rgba(38,198,218,0.18)';
+        // G6: --accent-soft fill with --accent-ring edges (mirrors
+        // drawSelection in waveformRender.ts).
+        ctx.fillStyle = cssToken('--accent-soft', 'rgba(38,198,218,0.14)');
         ctx.fillRect(left, 0, right - left, height);
         ctx.lineWidth = 1;
-        ctx.strokeStyle = '#26c6da';
+        ctx.strokeStyle = cssToken('--accent-ring', 'rgba(38,198,218,0.35)');
         if (x0 >= 0 && x0 <= width) verticalLine(ctx, x0, height);
         if (x1 >= 0 && x1 <= width) verticalLine(ctx, x1, height);
       }
@@ -333,7 +337,8 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     // as the waveform view's renderWaveform (shared drawMarkers).
     drawMarkers(ctx, markers, height, scrollSample, spp, width);
 
-    // Cursor (white) and playhead (yellow).
+    // Cursor (white) and playhead (accent + soft glow, G6 — mirrors
+    // renderWaveform's playhead treatment).
     const cx = sampleToPixel(cursorSample, scrollSample, spp);
     if (cx >= 0 && cx <= width) {
       ctx.lineWidth = 1;
@@ -344,8 +349,12 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
       const px = sampleToPixel(playback.positionSample, scrollSample, spp);
       if (px >= 0 && px <= width) {
         ctx.lineWidth = 1;
-        ctx.strokeStyle = '#ffd54f';
+        ctx.strokeStyle = cssToken('--accent', '#26c6da');
+        ctx.shadowColor = cssToken('--accent-ring', 'rgba(38,198,218,0.35)');
+        ctx.shadowBlur = 8;
         verticalLine(ctx, px, height);
+        ctx.shadowBlur = 0;
+        ctx.shadowColor = 'transparent';
       }
     }
   }, [
@@ -359,10 +368,15 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     markers,
   ]);
 
+  // G6: stage insets on the root, canvas floating in a glass lane — same
+  // no-padding rule as WaveformView so the gesture math is untouched.
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#1a1a1e]" data-testid="spectrogram-view">
+    <div
+      className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
+      data-testid="spectrogram-view"
+    >
       <TimelineRuler sampleRate={doc.sampleRate} />
-      <div ref={containerRef} className="relative min-h-0 min-w-0 flex-1">
+      <div ref={containerRef} className="glass-lane relative min-h-0 min-w-0 flex-1">
         <canvas
           ref={canvasRef}
           className="block h-full w-full"
@@ -375,7 +389,8 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
         {computeFailed && (
           <div
             data-testid="spectrogram-error"
-            className="pointer-events-none absolute left-2 top-2 rounded bg-[#1a1a1e]/80 px-1.5 py-0.5 text-xs text-[#8b8b92]"
+            className="pointer-events-none absolute left-2 top-2 rounded bg-black/60 px-1.5 py-0.5 text-xs"
+            style={{ color: 'var(--glass-text-muted)' }}
           >
             Spectrogram failed
           </div>

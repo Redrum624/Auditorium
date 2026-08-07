@@ -93,3 +93,13 @@ describe('ClipView waveform raster width cap (v1.5.2)', () => {
     expect((args[0] as HTMLCanvasElement).width).toBe(100);
   });
 });
+
+describe('ClipView G6 glass chrome', () => {
+  it('draws the clip container with token-driven accent chrome (idle = ring border)', () => {
+    const doc = seedDoc(4410);
+    const { getByTestId } = renderClip(doc, makeClip(4410), 44.1);
+    const clip = getByTestId('clip');
+    expect(clip.style.backgroundColor).toBe('var(--accent-soft)');
+    expect(clip.style.borderColor).toBe('var(--accent-ring)');
+  });
+});

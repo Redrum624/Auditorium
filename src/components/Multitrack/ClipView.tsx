@@ -232,20 +232,31 @@ export default function ClipView({
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
-      className="absolute top-1 overflow-hidden rounded"
+      className="absolute top-1 overflow-hidden rounded-lg"
       style={{
         left,
         width: widthPx,
         height: laneHeight - 8,
         transform: moveDx ? `translateX(${moveDx}px)` : undefined,
-        backgroundColor: '#26c6da26',
-        border: `1px solid ${selected ? '#7fe3f0' : '#26c6da'}`,
-        boxShadow: selected ? '0 0 0 1px #7fe3f0' : undefined,
+        // G6 clip chrome, token-routed (mockup accent-soft / accent-ring):
+        // idle = soft accent wash inside a ring-alpha border; selected = full
+        // accent border with a ring halo + lift shadow. Geometry (left/width/
+        // height, the 6px trim handles, the 4096px raster cap) untouched.
+        backgroundColor: 'var(--accent-soft)',
+        borderWidth: 1,
+        borderStyle: 'solid',
+        borderColor: selected ? 'var(--accent)' : 'var(--accent-ring)',
+        boxShadow: selected
+          ? '0 0 0 1px var(--accent-ring), 0 8px 24px rgba(0,0,0,0.45)'
+          : '0 6px 18px rgba(0,0,0,0.35)',
         cursor: 'grab',
         touchAction: 'none',
       }}
     >
-      <div className="pointer-events-none truncate px-1 py-0.5 text-[10px] leading-tight text-[#d4d4d8]">
+      <div
+        className="pointer-events-none truncate px-1 py-0.5 text-[10px] leading-tight"
+        style={{ color: 'var(--glass-text-label)' }}
+      >
         {doc?.name ?? clip.documentId}
       </div>
       <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />

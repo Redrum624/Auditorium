@@ -7,6 +7,8 @@ interface Call {
   fillStyle?: string;
   strokeStyle?: string;
   text?: string;
+  shadowBlur?: number;
+  shadowColor?: string;
 }
 
 /** Minimal CanvasRenderingContext2D stub that records the drawing calls
@@ -17,6 +19,8 @@ class StubCtx {
   strokeStyle = '';
   font = '';
   lineWidth = 1;
+  shadowBlur = 0;
+  shadowColor = '';
   private dash: number[] = [];
 
   fillRect(...args: number[]) {
@@ -40,7 +44,13 @@ class StubCtx {
     this.calls.push({ method: 'lineTo', args, strokeStyle: String(this.strokeStyle) });
   }
   stroke() {
-    this.calls.push({ method: 'stroke', args: [], strokeStyle: String(this.strokeStyle) });
+    this.calls.push({
+      method: 'stroke',
+      args: [],
+      strokeStyle: String(this.strokeStyle),
+      shadowBlur: this.shadowBlur,
+      shadowColor: String(this.shadowColor),
+    });
   }
   fill() {
     this.calls.push({ method: 'fill', args: [] });
@@ -140,13 +150,24 @@ describe('renderWaveform bucket mode', () => {
       playheadSample: null,
     });
 
-    const overlay = stub.calls.find((c) => c.method === 'fillRect' && c.fillStyle === '#26c6da22');
+    // G6 (styling assertion updated per ruling 4): the selection fill is the
+    // --accent-soft token (was the ad-hoc '#26c6da22') and its edges are the
+    // --accent-ring token (was solid '#26c6da').
+    const overlay = stub.calls.find(
+      (c) => c.method === 'fillRect' && c.fillStyle === 'rgba(38,198,218,0.14)'
+    );
     expect(overlay).toBeDefined();
     expect(overlay!.args[0]).toBeCloseTo(20); // left edge
     expect(overlay!.args[2]).toBeCloseTo(30); // width = (500-200)/10
+
+    const edges = stub.calls.filter(
+      (c) => c.method === 'moveTo' && c.strokeStyle === 'rgba(38,198,218,0.35)'
+    );
+    expect(edges.some((c) => Math.abs(c.args[0] - 20) < 1e-6)).toBe(true);
+    expect(edges.some((c) => Math.abs(c.args[0] - 50) < 1e-6)).toBe(true);
   });
 
-  it('draws a white cursor line and a yellow playhead line when in view', () => {
+  it('draws a white cursor line and an accent playhead line when in view', () => {
     const width = 100;
     const height = 100;
     const ch = constantChannel(1000, 0);
@@ -164,10 +185,43 @@ describe('renderWaveform bucket mode', () => {
       playheadSample: 600, // x = 60
     });
 
+    // G6 (styling assertion updated per ruling 4): the playhead is the
+    // --accent token (was the yellow '#ffd54f').
     const cursor = stub.calls.filter((c) => c.method === 'moveTo' && c.strokeStyle === '#ffffff');
-    const playhead = stub.calls.filter((c) => c.method === 'moveTo' && c.strokeStyle === '#ffd54f');
+    const playhead = stub.calls.filter((c) => c.method === 'moveTo' && c.strokeStyle === '#26c6da');
     expect(cursor.some((c) => Math.abs(c.args[0] - 30) < 1e-6)).toBe(true);
     expect(playhead.some((c) => Math.abs(c.args[0] - 60) < 1e-6)).toBe(true);
+  });
+
+  it('strokes the playhead with a soft accent glow and resets the shadow afterwards (G6)', () => {
+    const width = 100;
+    const height = 100;
+    const ch = constantChannel(1000, 0);
+    const py = buildPeaks(ch);
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, {
+      width,
+      height,
+      channels: [ch],
+      pyramids: [py],
+      scrollSample: 0,
+      samplesPerPixel: 10,
+      selection: null,
+      cursorSample: 300,
+      playheadSample: 600,
+    });
+
+    const playheadStroke = stub.calls.find(
+      (c) => c.method === 'stroke' && c.strokeStyle === '#26c6da' && (c.shadowBlur ?? 0) > 0
+    );
+    expect(playheadStroke).toBeDefined();
+    expect(playheadStroke!.shadowColor).toBe('rgba(38,198,218,0.35)');
+    // The glow must not leak onto later draws (markers etc.).
+    expect(stub.shadowBlur).toBe(0);
+
+    // No other stroke carries the glow (the cursor stays a plain white line).
+    const glowing = stub.calls.filter((c) => c.method === 'stroke' && (c.shadowBlur ?? 0) > 0);
+    expect(glowing).toHaveLength(1);
   });
 });
 

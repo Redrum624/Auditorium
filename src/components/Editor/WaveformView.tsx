@@ -82,10 +82,18 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
     size,
   ]);
 
+  // G6: the view sits on the radial stage — the root carries the stage insets
+  // (clearance for the floating chrome) and the canvas floats in a rounded
+  // glass lane. The lane has NO padding/border (see .glass-lane): the canvas
+  // rect IS the lane content box, so the clientX→sample gesture math in
+  // useEditorGestures is untouched.
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#1a1a1e]" data-testid="waveform-view">
+    <div
+      className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
+      data-testid="waveform-view"
+    >
       <TimelineRuler sampleRate={doc.sampleRate} />
-      <div ref={containerRef} className="relative min-h-0 min-w-0 flex-1">
+      <div ref={containerRef} className="glass-lane relative min-h-0 min-w-0 flex-1">
         <canvas
           ref={canvasRef}
           className="block h-full w-full"

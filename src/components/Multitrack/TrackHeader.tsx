@@ -33,9 +33,11 @@ function Toggle({
       onClick={onClick}
       className={`flex h-5 w-5 items-center justify-center rounded border text-[10px] font-semibold transition-colors ${className}`}
       style={{
-        borderColor: active ? activeColor : '#3a3a42',
-        backgroundColor: active ? activeColor : '#2e2e34',
-        color: active ? '#101014' : '#d4d4d8',
+        // G6: idle chrome routed through the glass tokens; the active state
+        // keeps its behaviour colours (mute red / solo yellow / arm red).
+        borderColor: active ? activeColor : 'var(--glass-border)',
+        backgroundColor: active ? activeColor : 'rgba(255,255,255,0.05)',
+        color: active ? '#101014' : 'var(--glass-text-label)',
       }}
     >
       {glyph}
@@ -69,7 +71,14 @@ export default function TrackHeader({ track }: { track: Track }) {
 
   return (
     <div
-      className="flex h-24 w-56 shrink-0 flex-col gap-1 border-b border-r border-[#3a3a42] bg-[#232328] px-2 py-1.5"
+      className="flex h-24 w-56 shrink-0 flex-col gap-1 px-2 py-1.5"
+      style={{
+        // G6: the darkened header band inside the floating track card (the
+        // panel-card header anatomy), hairlined off the lane. Width stays
+        // w-56 = HEADER_W — the lane x-origin the overlay math relies on.
+        background: 'rgba(0,0,0,0.3)',
+        borderRight: '1px solid var(--glass-border)',
+      }}
       data-testid="track-header"
     >
       <div className="flex items-center gap-1">
@@ -86,7 +95,12 @@ export default function TrackHeader({ track }: { track: Track }) {
                 setEditing(false);
               }
             }}
-            className="min-w-0 flex-1 rounded border border-[#26c6da] bg-[#1a1a1e] px-1 py-0.5 text-xs text-[#d4d4d8] outline-none"
+            className="min-w-0 flex-1 rounded border px-1 py-0.5 text-xs outline-none"
+            style={{
+              borderColor: 'var(--accent)',
+              background: 'rgba(255,255,255,0.06)',
+              color: 'var(--glass-text-label)',
+            }}
           />
         ) : (
           <span
@@ -95,7 +109,8 @@ export default function TrackHeader({ track }: { track: Track }) {
               setEditing(true);
             }}
             title="Double-click to rename"
-            className="min-w-0 flex-1 cursor-text truncate text-xs font-medium text-[#d4d4d8]"
+            className="min-w-0 flex-1 cursor-text truncate text-xs font-medium"
+            style={{ color: 'var(--glass-text-label)' }}
           >
             {track.name}
           </span>
@@ -128,14 +143,19 @@ export default function TrackHeader({ track }: { track: Track }) {
             aria-label="Remove track"
             title="Remove track"
             onClick={() => removeTrack(track.id)}
-            className="flex h-5 w-5 items-center justify-center rounded border border-[#3a3a42] bg-[#2e2e34] text-[#8b8b92] transition-colors hover:text-[#ef5350]"
+            className="flex h-5 w-5 items-center justify-center rounded border border-white/10 bg-white/5 text-[#8a8a92] transition-colors hover:text-[#ef5350]"
           >
             <X size={11} />
           </button>
         </div>
       </div>
 
-      <label className="flex items-center gap-1.5 text-[10px] text-[#8b8b92]">
+      {/* G6: the volume/pan ranges ride Vitrine's ported `.slider` primitive
+          (index.css) — same inputs, same aria contracts, glass anatomy. */}
+      <label
+        className="flex items-center gap-1.5 text-[10px]"
+        style={{ color: 'var(--glass-text-muted)' }}
+      >
         <span className="w-6 shrink-0">Vol</span>
         <input
           type="range"
@@ -144,16 +164,22 @@ export default function TrackHeader({ track }: { track: Track }) {
           step={0.5}
           value={track.volumeDb}
           onChange={(e) => setTrackParam(track.id, { volumeDb: Number(e.target.value) })}
-          className="h-1 min-w-0 flex-1 accent-[#26c6da]"
+          className="slider min-w-0 flex-1"
           aria-label="Volume (dB)"
         />
-        <span className="w-10 shrink-0 text-right tabular-nums text-[#d4d4d8]">
+        <span
+          className="w-10 shrink-0 text-right tabular-nums"
+          style={{ color: 'var(--glass-text-label)' }}
+        >
           {track.volumeDb > 0 ? '+' : ''}
           {track.volumeDb.toFixed(1)}
         </span>
       </label>
 
-      <label className="flex items-center gap-1.5 text-[10px] text-[#8b8b92]">
+      <label
+        className="flex items-center gap-1.5 text-[10px]"
+        style={{ color: 'var(--glass-text-muted)' }}
+      >
         <span className="w-6 shrink-0">Pan</span>
         <input
           type="range"
@@ -162,10 +188,15 @@ export default function TrackHeader({ track }: { track: Track }) {
           step={0.01}
           value={track.pan}
           onChange={(e) => setTrackParam(track.id, { pan: Number(e.target.value) })}
-          className="h-1 min-w-0 flex-1 accent-[#26c6da]"
+          className="slider min-w-0 flex-1"
           aria-label="Pan"
         />
-        <span className="w-10 shrink-0 text-right tabular-nums text-[#d4d4d8]">{panLabel}</span>
+        <span
+          className="w-10 shrink-0 text-right tabular-nums"
+          style={{ color: 'var(--glass-text-label)' }}
+        >
+          {panLabel}
+        </span>
       </label>
     </div>
   );

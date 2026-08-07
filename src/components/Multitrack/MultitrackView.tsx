@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react';
 import { FileDown, FilePlus2, Plus } from 'lucide-react';
+import { GlassButton } from '../UI/glass';
 import { runCommand } from '../../services/menuActions';
 import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
@@ -52,34 +53,44 @@ export default function MultitrackView() {
   const playheadX =
     HEADER_W + sampleToPixel(mtPlayheadSample, mtZoom.scrollSample, mtZoom.samplesPerPixel);
 
+  // G6: the view sits on the radial stage (stage-inset root) with each track
+  // row floating as a glass card. The horizontal geometry inside the relative
+  // wrapper is untouched — rows still start at x=0 with the lane at exactly
+  // HEADER_W, so the cursor/playhead overlay math and the wheel-zoom anchor
+  // (useMultitrackZoom reads the scroller's own rect) hold unchanged; the
+  // stage padding lives OUTSIDE the wrapper, shifting ruler and lanes
+  // together. Rows are separated by vertical gaps only (x-neutral).
   return (
-    <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-[#1a1a1e]" data-testid="multitrack-view">
-      {/* Toolbar strip */}
-      <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[#3a3a42] bg-[#232328] px-2">
-        <button
-          type="button"
+    <div
+      className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
+      data-testid="multitrack-view"
+    >
+      {/* Session strip: glass buttons on the bare stage (no band chrome). */}
+      <div className="flex shrink-0 items-center gap-2 pb-2">
+        <GlassButton
           disabled={!hasActiveDoc}
           onClick={() => void runCommand('multitrack.insertDoc')}
-          className="flex items-center gap-1 rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-xs text-[#d4d4d8] transition-colors enabled:hover:bg-[#3a3a42] disabled:opacity-40"
+          className="disabled:opacity-40"
+          style={{ padding: '5px 12px', fontSize: 12, gap: 6 }}
         >
           <FilePlus2 size={13} /> Insert Active File
-        </button>
-        <button
-          type="button"
+        </GlassButton>
+        <GlassButton
           disabled={!hasClips}
           onClick={() => void runCommand('multitrack.mixdown')}
-          className="flex items-center gap-1 rounded border border-[#3a3a42] bg-[#2e2e34] px-2 py-1 text-xs text-[#d4d4d8] transition-colors enabled:hover:bg-[#3a3a42] disabled:opacity-40"
+          className="disabled:opacity-40"
+          style={{ padding: '5px 12px', fontSize: 12, gap: 6 }}
         >
           <FileDown size={13} /> Mix Down
-        </button>
-        <span className="ml-auto text-[10px] text-[#8b8b92]">
+        </GlassButton>
+        <span className="ml-auto text-[10px]" style={{ color: 'var(--glass-text-muted)' }}>
           {(session.sampleRate / 1000).toFixed(1)} kHz · Ctrl+wheel zoom · Shift+wheel scroll
         </span>
       </div>
 
-      {/* Ruler row (spacer over the header column, ruler over the lanes) */}
+      {/* Ruler row (transparent spacer over the header column, ruler over the lanes) */}
       <div className="flex shrink-0">
-        <div className="w-56 shrink-0 border-r border-[#3a3a42] bg-[#232328]" />
+        <div className="w-56 shrink-0" />
         <div className="min-w-0 flex-1">
           <TimelineRuler sampleRate={session.sampleRate} zoom={mtZoom} onSeek={setMtCursor} />
         </div>
@@ -89,7 +100,11 @@ export default function MultitrackView() {
       <div className="relative min-h-0 flex-1 overflow-hidden">
         <div ref={scrollRef} className="h-full overflow-y-auto overflow-x-hidden">
           {session.tracks.map((track) => (
-            <div key={track.id} className="flex" style={{ height: LANE_H }}>
+            <div
+              key={track.id}
+              className="glass-track-row flex"
+              style={{ height: LANE_H, marginBottom: 10 }}
+            >
               <TrackHeader track={track} />
               <TrackLane
                 track={track}
@@ -108,13 +123,16 @@ export default function MultitrackView() {
           <button
             type="button"
             onClick={() => addTrack()}
-            className="m-2 flex items-center gap-1 rounded border border-dashed border-[#3a3a42] px-3 py-1.5 text-xs text-[#8b8b92] transition-colors hover:border-[#26c6da] hover:text-[#d4d4d8]"
+            className="m-2 flex items-center gap-1 rounded-lg border border-dashed border-white/20 px-3 py-1.5 text-xs text-[#8a8a92] transition-colors hover:border-[#26c6da] hover:text-[#d8d8de]"
           >
             <Plus size={13} /> Add Track
           </button>
 
           {!hasClips && (
-            <div className="pointer-events-none px-4 py-6 text-center text-xs text-[#8b8b92]">
+            <div
+              className="pointer-events-none px-4 py-6 text-center text-xs"
+              style={{ color: 'var(--glass-text-muted)' }}
+            >
               Empty session. Open an audio file, then use “Insert Active File” to place it on a track.
             </div>
           )}
@@ -125,12 +143,16 @@ export default function MultitrackView() {
           className="pointer-events-none absolute top-0 bottom-0 w-px bg-[#d4d4d8]/70"
           style={{ left: cursorX }}
         />
-        {/* Playhead (yellow) while playing. */}
+        {/* Playhead (accent + soft glow, G6) while playing. */}
         {mtPlayState === 'playing' && (
           <div
             data-testid="mt-playhead"
-            className="pointer-events-none absolute top-0 bottom-0 w-0.5 bg-[#ffd54f]"
-            style={{ left: playheadX }}
+            className="pointer-events-none absolute top-0 bottom-0 w-0.5"
+            style={{
+              left: playheadX,
+              backgroundColor: 'var(--accent)',
+              boxShadow: '0 0 8px var(--accent-ring)',
+            }}
           />
         )}
       </div>

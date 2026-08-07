@@ -226,6 +226,36 @@ describe('G4: icon rail + glass panel cards', () => {
   });
 });
 
+describe('G6: the canvas is the stage; the chrome floats over it', () => {
+  it('renders the editor stage with the radial canvas background', () => {
+    render(<App />);
+    const stage = screen.getByTestId('editor-stage');
+    expect(stage.style.backgroundImage).toBe('var(--canvas-bg)');
+    expect(stage.className).toContain('relative');
+  });
+
+  it('floats the toolbar band, status band, card column and rail as absolute z-20 overlays inside the stage (dialogs sit above at z-40)', () => {
+    render(<App />);
+    const stage = screen.getByTestId('editor-stage');
+    // Walk each floating surface up to its stage-level band and pin the
+    // overlay contract: absolutely positioned, chrome z-layer 20 — below
+    // DialogShell's fixed z-40 overlay, above the in-flow editor lanes.
+    const bandOf = (el: HTMLElement): HTMLElement => {
+      let node: HTMLElement = el;
+      while (node.parentElement && node.parentElement !== stage) {
+        node = node.parentElement;
+      }
+      return node;
+    };
+    for (const id of ['toolbar-pill', 'status-pill', 'sidebar-tabs', 'sidebar-panel']) {
+      const band = bandOf(screen.getByTestId(id));
+      expect(band.parentElement).toBe(stage);
+      expect(band.className).toContain('absolute');
+      expect(band.className).toContain('z-20');
+    }
+  });
+});
+
 describe('view-change stops both playback engines (Task 23 / Task 22 review finding)', () => {
   it('calls stop on both PlaybackEngine and MultitrackPlayer when the view changes', () => {
     const peStop = jest.spyOn(playbackEngine, 'stop').mockImplementation(() => {});

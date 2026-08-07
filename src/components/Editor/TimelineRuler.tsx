@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
-import { pixelToSample, sampleToPixel } from './waveformRender';
+import { cssToken, pixelToSample, sampleToPixel } from './waveformRender';
 
 const RULER_H = 24;
 const MIN_TICK_PX = 80;
@@ -57,8 +57,9 @@ export default function TimelineRuler({ sampleRate, zoom: zoomProp, onSeek }: Ti
     canvas.height = Math.round(RULER_H * dpr);
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 
-    ctx.fillStyle = '#232328';
-    ctx.fillRect(0, 0, width, RULER_H);
+    // G6: transparent over the radial stage (the ruler is muted chrome text
+    // above the lane, mockup `.timeline`); resizing above already cleared.
+    ctx.clearRect(0, 0, width, RULER_H);
 
     const { samplesPerPixel, scrollSample } = zoom;
     const secPerPixel = samplesPerPixel / sampleRate;
@@ -74,8 +75,8 @@ export default function TimelineRuler({ sampleRate, zoom: zoomProp, onSeek }: Ti
     const endSample = scrollSample + width * samplesPerPixel;
     const firstTick = Math.ceil(scrollSample / stepSamples) * stepSamples;
 
-    ctx.strokeStyle = '#3a3a42';
-    ctx.fillStyle = '#8b8b92';
+    ctx.strokeStyle = 'rgba(255,255,255,0.14)';
+    ctx.fillStyle = cssToken('--glass-text-muted', '#7a7a82');
     ctx.font = '10px monospace';
     ctx.lineWidth = 1;
     for (let s = firstTick; s <= endSample; s += stepSamples) {
@@ -99,7 +100,7 @@ export default function TimelineRuler({ sampleRate, zoom: zoomProp, onSeek }: Ti
     <div
       ref={containerRef}
       onClick={handleClick}
-      className="h-6 shrink-0 cursor-text border-b border-[#3a3a42] bg-[#232328]"
+      className="mb-1 h-6 shrink-0 cursor-text"
       data-testid="timeline-ruler"
     >
       <canvas ref={canvasRef} className="block h-full w-full" />

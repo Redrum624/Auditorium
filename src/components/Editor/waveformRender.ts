@@ -21,14 +21,42 @@ export interface RenderOpts {
   markers?: { positionSample: number; name?: string }[];
 }
 
-const BG = '#1a1a1e';
-const AXIS = '#3a3a42';
-const BODY = 'rgba(38,198,218,0.7)'; // #26c6da @ 70%
-const CENTER = '#26c6da';
-const SELECTION_FILL = '#26c6da22';
-const SELECTION_EDGE = '#26c6da';
+/**
+ * G6: the canvas colours route through the v1.6 glass tokens. A 2D canvas
+ * cannot consume `var(--x)` in fillStyle/strokeStyle, so `cssToken` resolves
+ * the custom property from the live stylesheet once (cached — the tokens are
+ * static for the app's lifetime and the playhead repaints every frame) and
+ * falls back to the token's authored value where no stylesheet is present
+ * (jsdom, recording-stub tests, workers).
+ */
+const tokenCache = new Map<string, string>();
+export function cssToken(name: string, fallback: string): string {
+  let v = tokenCache.get(name);
+  if (v === undefined) {
+    v = '';
+    try {
+      if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+        v = getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+      }
+    } catch {
+      // No DOM (worker) — use the fallback.
+    }
+    if (!v) v = fallback;
+    tokenCache.set(name, v);
+  }
+  return v;
+}
+
+// The lane container (.glass-lane) owns the background since G6 — the canvas
+// stays transparent so the floating-lane fill shows through (BG removed).
+const AXIS = 'rgba(255,255,255,0.12)'; // mockup lane centre line
+const BODY = 'rgba(38,198,218,0.7)'; // --accent @ 70% (no token at this alpha)
+const CENTER_FALLBACK = '#26c6da'; // --accent
+const SELECTION_FILL_FALLBACK = 'rgba(38,198,218,0.14)'; // --accent-soft
+const SELECTION_EDGE_FALLBACK = 'rgba(38,198,218,0.35)'; // --accent-ring
 const CURSOR = '#ffffff';
-const PLAYHEAD = '#ffd54f';
+const PLAYHEAD_FALLBACK = '#26c6da'; // --accent (was yellow pre-G6)
+const PLAYHEAD_GLOW_FALLBACK = 'rgba(38,198,218,0.35)'; // --accent-ring
 const MARKER = '#ff8a65';
 
 /** Fraction of a half-lane a full-scale (|v|=1) sample occupies (leaves margin). */
@@ -65,9 +93,9 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
     markers = [],
   } = opts;
 
-  // Background.
-  ctx.fillStyle = BG;
-  ctx.fillRect(0, 0, width, height);
+  // G6: no opaque background fill — the floating lane container paints the
+  // translucent fill; clear so a caller that reuses a canvas gets no ghosting.
+  ctx.clearRect(0, 0, width, height);
 
   if (width <= 0 || height <= 0 || channels.length === 0) return;
 
@@ -99,7 +127,7 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
   drawSelection(ctx, selection, height, scrollSample, samplesPerPixel, width);
   drawMarkers(ctx, markers, height, scrollSample, samplesPerPixel, width);
 
-  // Cursor (white) and playhead (yellow) overlays.
+  // Cursor (white) and playhead (accent + soft glow, G6) overlays.
   const cx = sampleToPixel(cursorSample, scrollSample, samplesPerPixel);
   if (cx >= 0 && cx <= width) {
     ctx.strokeStyle = CURSOR;
@@ -108,8 +136,12 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
   if (playheadSample != null) {
     const px = sampleToPixel(playheadSample, scrollSample, samplesPerPixel);
     if (px >= 0 && px <= width) {
-      ctx.strokeStyle = PLAYHEAD;
+      ctx.strokeStyle = cssToken('--accent', PLAYHEAD_FALLBACK);
+      ctx.shadowColor = cssToken('--accent-ring', PLAYHEAD_GLOW_FALLBACK);
+      ctx.shadowBlur = 8;
       verticalLine(ctx, px, height);
+      ctx.shadowBlur = 0;
+      ctx.shadowColor = 'transparent';
     }
   }
 }
@@ -138,7 +170,7 @@ function drawBuckets(
   }
 
   // Solid center trace (midpoint of each column) for a brighter core.
-  ctx.fillStyle = CENTER;
+  ctx.fillStyle = cssToken('--accent', CENTER_FALLBACK);
   for (let x = 0; x < cols; x++) {
     const mid = (min[x] + max[x]) / 2;
     ctx.fillRect(x, center - mid * amp, 1, 1);
@@ -161,7 +193,7 @@ function drawSamples(
   const last = Math.min(channel.length - 1, Math.ceil(endSample));
   if (last < first) return;
 
-  ctx.strokeStyle = CENTER;
+  ctx.strokeStyle = cssToken('--accent', CENTER_FALLBACK);
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let s = first; s <= last; s++) {
@@ -173,7 +205,7 @@ function drawSamples(
   ctx.stroke();
 
   if (samplesPerPixel < 1 / 8) {
-    ctx.fillStyle = CENTER;
+    ctx.fillStyle = cssToken('--accent', CENTER_FALLBACK);
     for (let s = first; s <= last; s++) {
       const x = sampleToPixel(s, scrollSample, samplesPerPixel);
       const y = center - channel[s] * amp;
@@ -197,10 +229,11 @@ function drawSelection(
   const right = Math.min(width, Math.max(x0, x1));
   if (right <= left) return;
 
-  ctx.fillStyle = SELECTION_FILL;
+  // G6: --accent-soft fill with --accent-ring edges (mockup `.sel`).
+  ctx.fillStyle = cssToken('--accent-soft', SELECTION_FILL_FALLBACK);
   ctx.fillRect(left, 0, right - left, height);
 
-  ctx.strokeStyle = SELECTION_EDGE;
+  ctx.strokeStyle = cssToken('--accent-ring', SELECTION_EDGE_FALLBACK);
   ctx.lineWidth = 1;
   if (x0 >= 0 && x0 <= width) verticalLine(ctx, x0, height);
   if (x1 >= 0 && x1 <= width) verticalLine(ctx, x1, height);

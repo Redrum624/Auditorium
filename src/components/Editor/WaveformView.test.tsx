@@ -49,6 +49,19 @@ describe('WaveformView', () => {
     expect(screen.getByTestId('timeline-ruler')).toBeInTheDocument();
   });
 
+  it('floats the canvas in a glass lane on the stage-inset root (G6), canvas filling the lane edge-to-edge', () => {
+    const doc = makeDoc();
+    render(<WaveformView doc={doc} />);
+    const canvas = screen.getByTestId('waveform-canvas');
+    // The rounded clip container WRAPS the canvas; the canvas itself keeps its
+    // full-bleed classes so the clientX→sample mapping geometry is untouched.
+    expect(canvas.parentElement).toHaveClass('glass-lane');
+    expect(canvas).toHaveClass('block', 'h-full', 'w-full');
+    // The stage insets (clearance for the floating chrome) live on the view
+    // root, never inside the lane.
+    expect(screen.getByTestId('waveform-view')).toHaveClass('stage-inset');
+  });
+
   describe('mouse selection', () => {
     it('pointerdown sets the cursor to the clicked sample and clears any existing selection', () => {
       const doc = makeDoc();

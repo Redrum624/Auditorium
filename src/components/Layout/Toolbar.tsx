@@ -16,9 +16,10 @@ import { ChromePill } from '../UI/glass';
 /**
  * v1.6 G3: the retired bottom TransportBar reborn as Vitrine's floating top
  * chrome pill (photo_app Layout/Toolbar.tsx anatomy) plus the top-left file
- * chip. One in-flow band under the titlebar (same call as G2's status pill —
- * in-flow rather than mockup-floating so nothing overlaps the still-present
- * G1-era sidebars; G6 may float it):
+ * chip. Since G6 the band truly FLOATS over the radial stage (mockup
+ * `.toolbar` / `.filechip` absolute placement — the sidebars it used to
+ * avoid are floating overlays themselves now): an absolute z-20 band whose
+ * empty stretches ignore pointer events so the stage beneath stays live.
  *
  *   [file chip]        [Open Save Export | ⏮ ⏹ ▶ ⏺ ⟳ | views | − % + Fit]
  *
@@ -147,7 +148,7 @@ function FileChip() {
   return (
     <ChromePill
       data-testid="file-chip"
-      className="flex items-center"
+      className="pointer-events-auto flex items-center"
       style={{
         justifySelf: 'start',
         maxWidth: '100%',
@@ -278,14 +279,14 @@ export default function Toolbar() {
 
   return (
     <div
-      className="grid shrink-0 items-center gap-3 px-4 pb-1.5 pt-2"
+      className="pointer-events-none absolute inset-x-0 top-2.5 z-20 grid items-center gap-3 px-4"
       style={{ gridTemplateColumns: '1fr auto 1fr' }}
     >
       <FileChip />
 
       <ChromePill
         data-testid="toolbar-pill"
-        className="flex items-center"
+        className="pointer-events-auto flex items-center"
         style={{
           borderRadius: '14px',
           padding: '6px 8px',

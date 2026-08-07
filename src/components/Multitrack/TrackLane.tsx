@@ -49,11 +49,14 @@ export default function TrackLane({
       data-track-id={track.id}
       data-testid="track-lane"
       onPointerDown={onPointerDown}
-      className="relative min-w-0 flex-1 border-b border-[#3a3a42]"
+      className="relative min-w-0 flex-1"
       style={{
         height: laneHeight,
-        backgroundColor: isDragTarget ? '#26c6da14' : '#1a1a1e',
-        boxShadow: isDragTarget ? 'inset 0 0 0 1px #26c6da' : undefined,
+        // G6: the floating .glass-track-row card paints the lane fill; the
+        // drag-target highlight keeps its accent wash + inset ring, routed
+        // through the tokens.
+        backgroundColor: isDragTarget ? 'var(--accent-soft)' : 'transparent',
+        boxShadow: isDragTarget ? 'inset 0 0 0 1px var(--accent)' : undefined,
       }}
     >
       {track.clips.map((clip) => (

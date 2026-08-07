@@ -494,6 +494,48 @@
   transform: scale(0.98);
 }
 
+/* ------------------------------------------------------------------------- */
+/* G6 stage: the editor canvas becomes the radial stage and everything else   */
+/* floats over it (mockup `.stagewave` / `.lane`).                            */
+/* ------------------------------------------------------------------------- */
+
+/* Clearance that keeps the editor content out from under the floating chrome:
+   top = toolbar band (pill bottom ~54px + gap), right = icon rail (12+60) +
+   348px card column + gaps, bottom = status pill band, left = stage margin.
+   Lives on each editor view's ROOT — never inside a lane, and never on
+   anything that participates in the clientX→sample canvas mapping. */
+.stage-inset {
+  padding: 68px 446px 60px 24px;
+}
+
+/* Floating editor lane (mockup `.lane`): rounded 12, subtle inset ring, deep
+   shadow, translucent near-black fill over the radial stage. Deliberately NO
+   padding and NO real border — the waveform/spectrogram canvas fills the
+   content box edge-to-edge, so selection dragging, cursor placement, zoom
+   anchoring and marker hit-testing (all canvas-rect based) are unaffected;
+   the ring is an inset box-shadow, which never moves the content box. */
+.glass-lane {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10, 10, 13, 0.55);
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* G6 multitrack: one track row (header + lane) floats as a card — the lane
+   anatomy at track scale. Same no-padding rule: the lane's x-origin inside
+   the row must stay exactly HEADER_W for the playhead/cursor overlay math. */
+.glass-track-row {
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10, 10, 13, 0.55);
+  box-shadow:
+    0 14px 40px rgba(0, 0, 0, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
 html,
 body,
 #root {

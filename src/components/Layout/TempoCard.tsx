@@ -112,7 +112,7 @@ export default function TempoCard() {
   return (
     <GlassCard
       data-testid="tempo-card"
-      className="shrink-0"
+      className="pointer-events-auto shrink-0"
       style={{ padding: '12px 16px 10px' }}
     >
       <div className="flex items-baseline justify-between" style={{ gap: 10, marginBottom: 8 }}>

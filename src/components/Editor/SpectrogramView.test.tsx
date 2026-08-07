@@ -91,6 +91,18 @@ describe('SpectrogramView error branch (Task F8)', () => {
   });
 });
 
+describe('SpectrogramView G6 floating lane', () => {
+  it('floats the canvas in a glass lane on the stage-inset root, canvas filling the lane edge-to-edge', async () => {
+    const doc = seedDoc();
+    render(<SpectrogramView doc={doc} />);
+    const canvas = screen.getByTestId('spectrogram-canvas');
+    expect(canvas.parentElement).toHaveClass('glass-lane');
+    expect(canvas).toHaveClass('block', 'h-full', 'w-full');
+    expect(screen.getByTestId('spectrogram-view')).toHaveClass('stage-inset');
+    await flushCompute();
+  });
+});
+
 describe('SpectrogramView viewport slicing (Task M9 / F17)', () => {
   it('mixes down only the padded visible range, not the whole document, and re-bases the offsets to the slice', async () => {
     const doc = seedDoc(); // 8192-sample doc
