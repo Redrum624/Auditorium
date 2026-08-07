@@ -50,14 +50,14 @@ use `npm run dev`.
 - **Multitrack Editor** — a session timeline of tracks and clips with per-track volume/pan/mute/solo/arm and draggable, trimmable clips.
 - **Recorder** — a record dialog with input-device selection, channel/sample-rate choice, and a live input-level meter.
 - **Effects Rack** — a categorized effects panel and menu; each effect opens a parameter dialog with a preview before applying.
-- **Files Panel** — the left-sidebar list of open documents with name, dirty marker, duration, and sample rate.
+- **Files Panel** — the list of open documents (name, dirty marker, duration, sample rate), opened from the right-edge icon rail.
 - **History Panel** — the active document's undo history; click any entry to jump the document to that state.
 - **Markers Panel** — the active document's marker list with jump-to, inline rename, and delete.
 - **Properties Panel** — read-only facts about the active document or selected clip (path, rate, channels, bit depth, duration, selection, detected tempo).
-- **Transport & Level Meters** — play/pause/stop, record, the view toggle, time readout, and output level meters.
-- **Tempo Readout** — the status bar's `♩ BPM` and the Properties panel's Tempo row, showing the detected tempo with its confidence, a staleness marker, and ×2 / ÷2 buttons that re-track the beat grid at the corrected period.
+- **Transport & Level Meters** — play/pause/stop, record, loop, the view toggle and a zoom cluster in the top toolbar pill; the time readout and output level meters in the floating bottom status pill.
+- **Tempo Readout** — the status pill's `♩ BPM`, the TEMPO card above the panel cards, and the Properties panel's Tempo row, showing the detected tempo with its confidence, a staleness marker, and ×2 / ÷2 buttons that re-track the beat grid at the corrected period.
 - **Match Tempo Dialog** — source BPM (prefilled from the detection, re-detectable from the selection), target BPM or ratio, the stretch-quality band, and an optional beat-marker grid at the new tempo.
-- **Auto-Remix Dialog & Remix Panel** — the dialog analyses the track and takes tempo/time-signature confirmation, phrase length, target length, crossfade, strictness and repeat options; the Remix panel is the fourth right-sidebar tab, listing one row per splice with a cost-coloured quality dot, Go To, ✕ Reject, 📌 Pin, ◂ ▸ Nudge, Re-roll and Revert to auto.
+- **Auto-Remix Dialog & Remix Panel** — the dialog analyses the track and takes tempo/time-signature confirmation, phrase length, target length, crossfade, strictness and repeat options; the Remix panel (the Remix entry on the icon rail) lists one row per splice with a cost-coloured quality dot, Go To, Reject, Pin, Nudge earlier/later, Re-roll and Revert to auto.
 
 ## Features
 
@@ -79,10 +79,10 @@ use `npm run dev`.
 - Cut, copy, paste, and delete on sample-accurate `[start, end)` selections.
 - Per-document undo/redo history, up to 50 steps within an 800 MB per-document memory budget (oldest step evicted once either limit is hit), browsable in the History panel; marker add/rename/delete are undoable too (`Add Marker`/`Rename Marker`/`Delete Marker`).
 - Selection by click-drag, double-click (select all), shift-click (extend), `Ctrl+A`, and `Escape` to clear.
-- Zoom and scroll on both the waveform and spectral views (mouse wheel), sharing one cursor/selection/playhead.
+- Zoom and scroll on both the waveform and spectral views (mouse wheel, plus the toolbar pill's − / % / + / Fit cluster), sharing one cursor/selection/playhead.
 - Session markers: drop with `M`, rename inline, jump to next/previous, list in the Markers panel. Markers persist to disk in every supported container: `.wav` (cue/adtl chunks, Unicode names), `.mp3` (ID3v2.3 chapter frames), `.flac` (VORBIS_COMMENT chapter tags), `.ogg` (OpusTags chapter comments), and `.audm` sessions — sample-accurate on reopen. Destructive edits (delete, paste, trim, replace, sample-rate conversion, length-changing effects) remap or drop marker positions along with the audio, clamped to the document length.
 - **Convert Sample Rate / Convert Channels**: `Edit → Convert Sample Rate…` resamples the whole document to a chosen rate (22050/44100/48000/96000 Hz), rescaling markers in lockstep; `Edit → Convert Channels…` converts Mono ↔ Stereo. Both are undoable.
-- Loop-playback toggle on the transport bar (`transport.toggleLoop`).
+- Loop-playback toggle in the toolbar pill (`transport.toggleLoop`).
 - **Noise-print workflow**: capture a noise print from a selection, then Noise Reduction subtracts it from the target region.
 - Recording device selection, channel count, and sample rate in the record dialog.
 - **Export**: WAV at 16-bit, 24-bit, or 32-bit float; FLAC (16-bit, lossless); MP3 at 128/192/256/320 kbps (CBR); OGG (Opus) at 96/128/192 kbps.
@@ -94,7 +94,7 @@ use `npm run dev`.
 - **Spectral log/linear toggle**: the Spectral Frequency Display's frequency axis switches between logarithmic (default) and linear scaling.
 - **Multitrack punch-in recording**: arm one or more tracks with their **R** toggle, position the multitrack cursor, then press **Record** — the take lands as a clip on every track that was armed when it started.
 - **Sessions**: save/open multitrack sessions as `.audm` (format v3 — a binary layout with no size-limited base64 encoding, so Save Session no longer fails silently on large embedded audio; older v1/v2 session files still open), and mix down a whole session to a new stereo document.
-- **Tempo detection**: `Effects → Detect Tempo` runs a shared off-thread beat-tracking pass (log-band spectral-flux onsets → harmonic-comb tempo estimate → Ellis dynamic-programming beat tracking → sample-accurate refinement) and reports the BPM plus a confidence score in the status bar and the Properties panel. The beats are tracked, not extrapolated, so the grid follows a drifting take; ×2 / ÷2 buttons re-track at the corrected period when the octave is wrong. Whole-document analysis is capped at 10 minutes and flags the result as truncated past that.
+- **Tempo detection**: `Effects → Detect Tempo` runs a shared off-thread beat-tracking pass (log-band spectral-flux onsets → harmonic-comb tempo estimate → Ellis dynamic-programming beat tracking → sample-accurate refinement) and reports the BPM plus a confidence score in the status pill and the Properties panel. The beats are tracked, not extrapolated, so the grid follows a drifting take; ×2 / ÷2 buttons re-track at the corrected period when the octave is wrong. Whole-document analysis is capped at 10 minutes and flags the result as truncated past that.
 - **Match Tempo**: `Effects → Match Tempo…` retargets a selection (or the whole document) from a source BPM to a target BPM or a plain ratio through the WSOLA time stretch, showing whether the resulting stretch is transparent, good, or extreme, and optionally laying down a beat-marker grid at the new tempo as its own undo step.
 - **Auto-Remix**: `Edit → Auto-Remix…` re-arranges a track's own bars to reach a requested length and writes the result to a new `Remix N` document, leaving the source untouched. Bar boundaries come from the tracked beats; each boundary is described by timbre, chroma, loudness and local rhythm and clustered into sections, and a 2-D lattice dynamic program picks the cheapest phrase-congruent arrangement (Φ = 8 bars by default) reaching the target. Joins are micro-aligned by ±10 ms cross-correlation and crossfaded with a power-preserving, length-neutral gain law. The Remix panel then lets you reject, pin, or nudge any individual splice, re-roll the whole arrangement, or revert to the automatic one — every adjustment undoable from the History panel.
 - Keyboard shortcuts throughout — see [`KEYBOARD_SHORTCUTS.md`](KEYBOARD_SHORTCUTS.md) for the full table.

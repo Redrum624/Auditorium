@@ -29,15 +29,16 @@ blank document of a chosen length.
 
 ### Recording
 
-The **Record** button on the transport bar opens the Record dialog: pick an
+The **Record** button in the toolbar pill opens the Record dialog: pick an
 input device, channel count, and sample rate, watch the live input level
 meter, then start/stop. A finished recording is added to the Files panel as a
 new document. To record straight into a session instead, see **Recording into
 the multitrack** below.
 
-### The Files panel (left sidebar)
+### The Files panel
 
-Every open document is listed with its name (a trailing `*` means unsaved
+Open the Files card from the right-edge icon rail (the folder icon). Every
+open document is listed with its name (a trailing `*` means unsaved
 changes), duration, and sample rate. Click a row to make it active; hover and
 click the ✕ to close it (you'll be prompted to save if it's dirty).
 
@@ -66,8 +67,8 @@ Standard editing acts on the current selection: `Ctrl+X` cut, `Ctrl+C` copy,
 (`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) keeps up to 50 steps per document,
 within an 800 MB per-document memory budget — whichever limit is hit first
 evicts the oldest step (a large document's effective depth can be well under
-50) — and is tracked per document — the **History** tab in the right sidebar
-lists every applied edit; click any entry to jump the document's state to
+50) — and is tracked per document — the **History** panel (opened from the
+icon rail) lists every applied edit; click any entry to jump the document's state to
 that point. Marker add/rename/delete are undoable too (labelled `Add Marker`
 / `Rename Marker` / `Delete Marker` in the History panel), and destructive
 edits that change the timeline (delete, paste, trim, replace, sample-rate
@@ -78,7 +79,7 @@ pre-edit positions.
 ### Markers
 
 Press `M` (or **Edit → Add Marker**) to drop a marker named `Marker N` at the
-current cursor position. The **Markers** tab in the right sidebar lists every
+current cursor position. The **Markers** panel (opened from the icon rail) lists every
 marker on the active document: click a marker's **time** to move the cursor
 there and re-center the view around it; double-click a marker's name to
 rename it inline (`Enter` or clicking away commits, `Escape` cancels); the ✕
@@ -112,10 +113,17 @@ channel). Both dialogs open pre-selected to the active document's current
 rate/channel count, apply to the whole document, and are undoable as a single
 History-panel step.
 
-### The right sidebar (History | Markers | Properties)
+### The panel cards (icon rail)
 
-The right sidebar is a three-tab strip; **History** is the default tab.
+The vertical icon rail at the right edge opens one floating glass panel card
+at a time — **Files**, **Effects**, **Markers**, **History**, **Properties**,
+and **Remix**; **History** is the default. When the active document has a
+tempo analysis, a persistent **TEMPO** card (BPM readout, structure strip, and
+×2 / ÷2 / Re-detect) appears above the panel card.
 
+- **Files** / **Effects** — see their own sections in this guide.
+- **Remix** — a remix document's per-splice adjustment rows (quality dot,
+  Go To, Reject, Pin, Nudge, Re-roll, Revert to auto).
 - **History** — the active document's undo history (see *Cut / Copy / Paste /
   Delete* above).
 - **Markers** — the active document's marker list (see *Markers* above).
@@ -137,7 +145,7 @@ The right sidebar is a three-tab strip; **History** is the default tab.
 
 ## Effects
 
-Effects live in the **Effects** panel (left sidebar), grouped by category, and
+Effects live in the **Effects** panel (opened from the icon rail), grouped by category, and
 mirrored in the **Effects** menu. Double-click an effect (with a document
 open) to open its parameter dialog, adjust settings, and apply. Every effect
 processes the current selection, or the whole document when there's no
@@ -175,7 +183,7 @@ Reduction dialog notices a capture or clear immediately, even while open.
 
 ## Views
 
-Switch between views from the transport bar's view toggle or **View** menu:
+Switch between views from the toolbar pill's view segment or **View** menu:
 
 - **Waveform** — the default per-sample amplitude view, with zoom (mouse
   wheel) and scroll.
@@ -206,14 +214,14 @@ document open. A session has a name, a sample rate, and any number of tracks.
   (source document, start/offset/length, and an editable gain in dB) appear
   in the **Properties** tab.
 - **Playback**: the multitrack view has its own transport, cursor, and
-  playhead, driven by the same transport bar buttons. There is no pause in
+  playhead, driven by the same toolbar-pill transport buttons. There is no pause in
   multitrack playback (v1) — Play/Pause toggles play↔stop. Volume, pan, and
   mute/solo changes apply **live while playing** — the realtime monitor uses the
   same pan law as Mix Down, so it matches the render. Clip moves, trims, and clip
   gain take effect on the next play.
 - **Recording into the multitrack**: **arm** one or more tracks with their **R**
   toggle, position the multitrack cursor where the take should begin, then press
-  **Record** on the transport bar. The session plays back from the cursor as a
+  **Record** in the toolbar pill. The session plays back from the cursor as a
   monitor while your input is captured; press **Record** again (or **Stop**) to
   end the take. The recording becomes a new *Track Recording* document and is
   dropped as a clip at the punch-in point on every track that was armed when you

@@ -308,7 +308,7 @@ exists.
 **v1.5 behavior:** `Remix N` is created the way Mix Down creates its output —
 `createDocument` + `addDocument`, no undo entry — so it inherits `dirty: false`
 and closes silently. A user who rejects three joins, nudges a fourth, and then
-closes the tab loses that arrangement with no "Unsaved changes" prompt, even
+closes the document loses that arrangement with no "Unsaved changes" prompt, even
 though the audio has never been on disk.
 
 **The flag is deliberately NOT overridden.** `undoHistory` re-derives `dirty`
