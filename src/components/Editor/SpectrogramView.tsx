@@ -114,8 +114,11 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, m: MagsData, width: numb
  * worker (debounced 150ms on zoom/scroll/doc/scale change) at the canvas's
  * device-pixel resolution (`devicePixelRatio`-scaled width/height, so the
  * raster is full-res on HiDPI screens), mapped through an inferno LUT over a
- * -90..0 dB range, and painted via `putImageData` (which ignores the canvas
- * transform, so it's drawn at raw device-pixel size) with translucent
+ * -90..0 dB range — rasterised ONCE per (magnitudes, backing size) into an
+ * offscreen canvas held in a ref (v1.5.2: the paint effect re-runs on every
+ * playback frame for the playhead, and re-rasterising the whole spectrogram
+ * per frame via a fresh `createImageData` was a 0.5–2 GB/s allocation
+ * transient) — then blitted at raw device-pixel size, with translucent
  * selection, marker, cursor, and playhead overlays on top, drawn in CSS-pixel
  * space under a `ctx.setTransform(dpr, ...)` scale (mirrors WaveformView).
  */
@@ -138,6 +141,19 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
 
   const workerRef = useRef<Worker | null>(null);
   const reqIdRef = useRef(0);
+
+  // Rendered spectrogram raster, cached across paints (v1.5.2). Keyed by the
+  // magnitudes' identity and the backing-store size: the paint effect below
+  // re-runs on every playback.positionSample change (the playhead overlay has
+  // to move), and re-running drawSpectrogram — a full createImageData +
+  // per-pixel LUT pass — on each of those frames re-allocated the entire
+  // device-resolution raster per frame. Only new data or a resize invalidates.
+  const rasterRef = useRef<{
+    mags: Float32Array;
+    width: number;
+    height: number;
+    canvas: HTMLCanvasElement;
+  } | null>(null);
 
   // Observe the drawing area size (CSS pixels).
   useEffect(() => {
@@ -267,7 +283,33 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
 
     ctx.fillStyle = '#0a0a0f';
     ctx.fillRect(0, 0, width, height);
-    if (magsData) drawSpectrogram(ctx, magsData, backingWidth, backingHeight);
+    if (magsData) {
+      let raster = rasterRef.current;
+      if (
+        !raster ||
+        raster.mags !== magsData.mags ||
+        raster.width !== backingWidth ||
+        raster.height !== backingHeight
+      ) {
+        const offscreen = document.createElement('canvas');
+        offscreen.width = backingWidth;
+        offscreen.height = backingHeight;
+        const octx = offscreen.getContext('2d');
+        if (octx) {
+          drawSpectrogram(octx, magsData, backingWidth, backingHeight);
+          raster = { mags: magsData.mags, width: backingWidth, height: backingHeight, canvas: offscreen };
+          rasterRef.current = raster;
+        }
+      }
+      if (raster) {
+        // Blit in raw device-pixel space (mirrors putImageData's
+        // transform-exempt semantics), then restore the CSS-pixel transform
+        // for the overlays below.
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.drawImage(raster.canvas, 0, 0);
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      }
+    }
 
     const { samplesPerPixel: spp, scrollSample } = zoom;
 

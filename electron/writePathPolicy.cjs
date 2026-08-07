@@ -334,6 +334,21 @@ function assertWriteAllowed(rawPath) {
     );
   }
 
+  // Reject NTFS alternate-data-stream (ADS) targets (v1.5.2): any ':' past
+  // the drive-letter position (index 1) of the RESOLVED path. A path like
+  // 'C:\x\evil.exe:payload.wav' names an ADS on evil.exe -- it passes the
+  // extension check below (extname sees '.wav') and every containment check,
+  // and the write then fails EINVAL at the atomic rename, but only AFTER the
+  // temp-file create has already materialised a 0-byte evil.exe. A drive
+  // path's own colon sits exactly at index 1; a well-formed UNC path has no
+  // drive colon at all, so a colon at index >= 2 is never legitimate. (This
+  // also rejects bracket-IPv6 UNC hosts like '\\[2001:db8::1]\share\...' --
+  // deliberate: as with ipv6-literal.net hosts, a raw-IPv6-addressed share is
+  // no legitimate save target for this app, and the policy fails closed.)
+  if (resolved.indexOf(':', 2) !== -1) {
+    throw new Error(`Write denied: NTFS alternate data stream targets are not allowed: ${rawPath}`);
+  }
+
   if (!path.isAbsolute(rawPath)) {
     throw new Error(`Write denied: path is not absolute: ${rawPath}`);
   }

@@ -319,6 +319,42 @@ describe('writePathPolicy', () => {
     });
   });
 
+  describe('NTFS alternate-data-stream targets (v1.5.2)', () => {
+    // 'C:\x\evil.exe:payload.wav' names an ADS on evil.exe. It passes the
+    // extension check (extname sees '.wav') and every containment check, and
+    // the write then fails EINVAL at the atomic rename -- but only AFTER the
+    // temp-file create has already materialised a 0-byte evil.exe. Any ':'
+    // past the drive-letter position (resolved index 1) is never legitimate:
+    // a drive path's own colon sits at index 1, and a UNC path has no drive
+    // colon at all.
+    test('rejects an ADS target whose visible extension is allowed (evil.exe:payload.wav)', () => {
+      expect(isWriteAllowed('C:\\Users\\x\\evil.exe:payload.wav')).toBe(false);
+    });
+
+    test('rejects an ADS on an otherwise-allowed audio file (take.wav:alt.wav)', () => {
+      expect(isWriteAllowed('D:\\music\\take.wav:alt.wav')).toBe(false);
+    });
+
+    test('rejects an ADS on a well-formed UNC network path', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav:ads.wav')).toBe(false);
+    });
+
+    test('assertWriteAllowed names the ADS reason', () => {
+      expect(() => assertWriteAllowed('C:\\Users\\x\\evil.exe:payload.wav')).toThrow(
+        /alternate data stream/
+      );
+    });
+
+    test('positive: the drive-letter colon itself (index 1) is untouched', () => {
+      expect(isWriteAllowed('D:\\music\\out.wav')).toBe(true);
+      expect(isWriteAllowed('C:\\Users\\x\\take.wav')).toBe(true);
+    });
+
+    test('positive: UNC paths without a colon are untouched', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav')).toBe(true);
+    });
+  });
+
   test('rejects extensions removed from the allow-list (F24: .txt, .json, .aud)', () => {
     expect(isWriteAllowed('D:\\x\\notes.txt')).toBe(false);
     expect(isWriteAllowed('D:\\x\\config.json')).toBe(false);

@@ -375,7 +375,23 @@ export function installTestHooks(): void {
         store.setTrackParam(track0.id, { volumeDb: -12 });
         multitrackPlayer.applyTrackParams(useSessionStore.getState().session.tracks);
       }
-      await new Promise((resolve) => setTimeout(resolve, 400));
+      // v1.5.2 (smoke 6b flake): a single fixed 400 ms wait sometimes sampled
+      // pos2 before the player's AudioContext had actually STARTED on a cold
+      // first run ({advanced:false, pos1:0, pos2:0}), passing only on re-run.
+      // Poll (50 ms steps, up to 3 s) until the transport has demonstrably
+      // advanced past pos1, then settle a further 150 ms (10x the player's
+      // 15 ms PARAM_SMOOTH ramp time constant) before taking the pos2 /
+      // volumeGain samples the harness asserts on. Nothing asserted got
+      // weaker: pos2 > pos1 still requires genuine advancement while playing
+      // with the live change applied, and volumeGain is now ALWAYS read well
+      // past the ramp (the old fixed wait could catch it mid-ramp when the
+      // context started late).
+      const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+      const deadline = Date.now() + 3000;
+      while (multitrackPlayer.getPositionSample() <= pos1 && Date.now() < deadline) {
+        await sleep(50);
+      }
+      await sleep(150);
       const pos2 = multitrackPlayer.getPositionSample();
       const stillPlaying = multitrackPlayer.state === 'playing';
       const volumeGain =

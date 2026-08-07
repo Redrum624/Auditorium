@@ -97,6 +97,65 @@ function resetApproved() {
 
 const _testing = { approvePath, isReadApproved, approveWritePath, isWriteApproved, resetApproved };
 
+// ---------------------------------------------------------------------------
+// dialog:* opts validation (v1.5.2). The renderer-supplied opts are forwarded
+// into REAL OS chrome (native open/save/message dialogs), so a compromised
+// renderer must not be able to render arbitrary content there. Shapes are
+// validated here at the trust boundary: enums come from an allow-list, arrays
+// are bounded to the expected primitive shapes, strings are length-capped
+// (TRUNCATED, never rejected -- a long decode error message must still produce
+// its error dialog), and unknown keys are dropped by construction (each
+// handler builds a fresh object of only the expected keys). Caps are sized
+// with generous headroom over every legitimate call site: the longest real
+// filter list is 1 group of 7 extensions (fileService's AUDIO_EXTENSIONS),
+// the only buttons user passes 3 (closeDocumentFlow), and messages are
+// one-to-two-line error/info strings.
+// ---------------------------------------------------------------------------
+const DIALOG_MESSAGE_TYPES = new Set(['info', 'warning', 'error', 'question']);
+const DIALOG_MAX_TEXT = 2000; // title / message / button labels / filter names
+const DIALOG_MAX_PATH = 1024; // defaultPath
+const DIALOG_MAX_FILTERS = 10; // filter groups per dialog
+const DIALOG_MAX_EXTENSIONS = 20; // extensions per filter group
+const DIALOG_MAX_EXTENSION_LEN = 16;
+const DIALOG_MAX_BUTTONS = 10;
+
+/** `value` when it is a string (truncated to `maxLen`), else undefined. */
+function cleanText(value, maxLen) {
+  return typeof value === 'string' ? value.slice(0, maxLen) : undefined;
+}
+
+/** Renderer opts normalized to a plain object (anything else contributes no fields). */
+function asObject(opts) {
+  return opts && typeof opts === 'object' ? opts : {};
+}
+
+/** File-dialog filters reduced to the expected `{name, extensions[]}` shape;
+ * malformed entries are dropped, a non-array is dropped entirely. */
+function cleanFilters(filters) {
+  if (!Array.isArray(filters)) return undefined;
+  const out = [];
+  for (const f of filters.slice(0, DIALOG_MAX_FILTERS)) {
+    if (!f || typeof f !== 'object') continue;
+    const name = cleanText(f.name, DIALOG_MAX_TEXT);
+    if (name === undefined || !Array.isArray(f.extensions)) continue;
+    const extensions = f.extensions
+      .slice(0, DIALOG_MAX_EXTENSIONS)
+      .filter((e) => typeof e === 'string')
+      .map((e) => e.slice(0, DIALOG_MAX_EXTENSION_LEN));
+    out.push({ name, extensions });
+  }
+  return out;
+}
+
+/** Message-box buttons reduced to a bounded array of length-capped strings. */
+function cleanButtons(buttons) {
+  if (!Array.isArray(buttons)) return undefined;
+  return buttons
+    .slice(0, DIALOG_MAX_BUTTONS)
+    .filter((b) => typeof b === 'string')
+    .map((b) => b.slice(0, DIALOG_MAX_TEXT));
+}
+
 /**
  * Registers every IPC handler used by the renderer's window.electronAPI.
  * `getWin` is a getter (not the window itself) so handlers always operate on
@@ -139,12 +198,15 @@ function registerIpc(getWin) {
     }
   });
 
-  ipcMain.handle('dialog:open', async (_event, opts = {}) => {
+  ipcMain.handle('dialog:open', async (_event, rawOpts = {}) => {
+    const opts = asObject(rawOpts);
     const win = getWin();
     const properties = ['openFile'];
-    if (opts.multi) properties.push('multiSelections');
+    // Literal-true check: `properties` steers real dialog behaviour, so it is
+    // built here from a single boolean and never taken from the renderer.
+    if (opts.multi === true) properties.push('multiSelections');
     const result = await dialog.showOpenDialog(win, {
-      filters: opts.filters,
+      filters: cleanFilters(opts.filters),
       properties
     });
     if (result.canceled || result.filePaths.length === 0) return null;
@@ -158,11 +220,12 @@ function registerIpc(getWin) {
     return result.filePaths;
   });
 
-  ipcMain.handle('dialog:save', async (_event, opts = {}) => {
+  ipcMain.handle('dialog:save', async (_event, rawOpts = {}) => {
+    const opts = asObject(rawOpts);
     const win = getWin();
     const result = await dialog.showSaveDialog(win, {
-      defaultPath: opts.defaultPath,
-      filters: opts.filters
+      defaultPath: cleanText(opts.defaultPath, DIALOG_MAX_PATH),
+      filters: cleanFilters(opts.filters)
     });
     if (result.canceled || !result.filePath) return null;
     approvePath(result.filePath);
@@ -170,13 +233,16 @@ function registerIpc(getWin) {
     return result.filePath;
   });
 
-  ipcMain.handle('dialog:message', async (_event, opts = {}) => {
+  ipcMain.handle('dialog:message', async (_event, rawOpts = {}) => {
+    const opts = asObject(rawOpts);
     const win = getWin();
     const result = await dialog.showMessageBox(win, {
-      type: opts.type || 'info',
-      title: opts.title,
-      message: opts.message,
-      buttons: opts.buttons
+      type: typeof opts.type === 'string' && DIALOG_MESSAGE_TYPES.has(opts.type) ? opts.type : 'info',
+      title: cleanText(opts.title, DIALOG_MAX_TEXT),
+      // message is the one REQUIRED field: a non-string becomes '' (an empty
+      // dialog) rather than letting arbitrary renderer values reach the OS.
+      message: cleanText(opts.message, DIALOG_MAX_TEXT) ?? '',
+      buttons: cleanButtons(opts.buttons)
     });
     return result.response;
   });

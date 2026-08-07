@@ -933,3 +933,114 @@ function buildWavWithListChunk(samples: Float32Array, sampleRate: number): Array
 
   return buffer;
 }
+
+/** Builds a mono 16-bit PCM WAV whose LIST/adtl chunk carries `labelCount`
+ * 'labl' sub-chunks (dwName 1..labelCount, name `L<dwName>`) and a cue chunk
+ * with one cue point per entry of `cueDwNames` (dwSampleOffset = dwName, as in
+ * buildWavWithCueOnlyNoLabels). Used to prove the decoder caps the label map
+ * rather than growing it unboundedly from a crafted adtl chunk (v1.5.2). */
+function buildWavWithManyAdtlLabels(
+  samples: Float32Array,
+  sampleRate: number,
+  labelCount: number,
+  cueDwNames: number[]
+): ArrayBuffer {
+  const bytesPerSample = 2;
+  const dataSize = samples.length * bytesPerSample;
+  const cuePayloadSize = 4 + cueDwNames.length * 24;
+  const labelNames: string[] = [];
+  const labelSizes: number[] = [];
+  let lablTotal = 0;
+  for (let i = 1; i <= labelCount; i++) {
+    const name = `L${i}`;
+    const size = 4 + name.length + 1; // dwName + text + NUL
+    labelNames.push(name);
+    labelSizes.push(size);
+    lablTotal += 8 + size + (size % 2);
+  }
+  const listPayloadSize = 4 + lablTotal;
+  const totalSize = 12 + (8 + 16) + (8 + dataSize) + (8 + cuePayloadSize) + (8 + listPayloadSize);
+  const buffer = new ArrayBuffer(totalSize);
+  const view = new DataView(buffer);
+  let offset = 0;
+
+  writeAscii(view, offset, 'RIFF'); offset += 4;
+  view.setUint32(offset, totalSize - 8, true); offset += 4;
+  writeAscii(view, offset, 'WAVE'); offset += 4;
+
+  writeAscii(view, offset, 'fmt '); offset += 4;
+  view.setUint32(offset, 16, true); offset += 4;
+  view.setUint16(offset, 1, true); offset += 2; // PCM
+  view.setUint16(offset, 1, true); offset += 2; // mono
+  view.setUint32(offset, sampleRate, true); offset += 4;
+  view.setUint32(offset, sampleRate * bytesPerSample, true); offset += 4;
+  view.setUint16(offset, bytesPerSample, true); offset += 2;
+  view.setUint16(offset, 16, true); offset += 2;
+
+  writeAscii(view, offset, 'data'); offset += 4;
+  view.setUint32(offset, dataSize, true); offset += 4;
+  for (let i = 0; i < samples.length; i++) {
+    const clamped = Math.max(-32768, Math.min(32767, Math.round(samples[i] * 32767)));
+    view.setInt16(offset, clamped, true);
+    offset += 2;
+  }
+
+  writeAscii(view, offset, 'cue '); offset += 4;
+  view.setUint32(offset, cuePayloadSize, true); offset += 4;
+  view.setUint32(offset, cueDwNames.length, true); offset += 4;
+  for (const n of cueDwNames) {
+    view.setUint32(offset, n, true); offset += 4; // dwName
+    view.setUint32(offset, 0, true); offset += 4;
+    writeAscii(view, offset, 'data'); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, 0, true); offset += 4;
+    view.setUint32(offset, n, true); offset += 4; // dwSampleOffset
+  }
+
+  writeAscii(view, offset, 'LIST'); offset += 4;
+  view.setUint32(offset, listPayloadSize, true); offset += 4;
+  writeAscii(view, offset, 'adtl'); offset += 4;
+  for (let i = 0; i < labelCount; i++) {
+    const size = labelSizes[i];
+    writeAscii(view, offset, 'labl'); offset += 4;
+    view.setUint32(offset, size, true); offset += 4;
+    view.setUint32(offset, i + 1, true); offset += 4; // dwName
+    writeAscii(view, offset, labelNames[i]); offset += labelNames[i].length;
+    view.setUint8(offset, 0); offset += 1;
+    if (size % 2 !== 0) {
+      view.setUint8(offset, 0);
+      offset += 1;
+    }
+  }
+
+  return buffer;
+}
+
+describe('decodeWav LIST/adtl label-map cap (v1.5.2)', () => {
+  // Mirrors id3Chapters' CTOC_CHAP_CAP pattern: keep the first N by position,
+  // never throw. A crafted 100 MB adtl chunk could otherwise grow the label
+  // Map to ~8 M entries before a single cue point is ever consulted.
+  const CAP = 10000;
+
+  it('keeps the first 10 000 labl entries by position and never throws; later entries fall back to "Marker N"', () => {
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithManyAdtlLabels(samples, SAMPLE_RATE, CAP + 500, [1, CAP, CAP + 1]);
+
+    const decoded = decodeWav(buf);
+
+    expect(decoded.markers).toEqual([
+      { name: 'L1', positionSample: 1 }, // first label: kept
+      { name: `L${CAP}`, positionSample: CAP }, // exactly at the cap: kept
+      { name: `Marker ${CAP + 1}`, positionSample: CAP + 1 }, // beyond the cap: unlabelled fallback
+    ]);
+  });
+
+  it('a file at exactly the cap keeps every label (the cap is not off by one)', () => {
+    const samples = sineWave(440, DURATION, SAMPLE_RATE);
+    const buf = buildWavWithManyAdtlLabels(samples, SAMPLE_RATE, CAP, [CAP]);
+
+    const decoded = decodeWav(buf);
+
+    expect(decoded.markers).toEqual([{ name: `L${CAP}`, positionSample: CAP }]);
+  });
+});

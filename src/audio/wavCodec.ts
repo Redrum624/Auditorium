@@ -257,6 +257,14 @@ function validateFmt(fmt: WavFmt): void {
   }
 }
 
+/** LIST/adtl 'labl' entries are capped at this many — the first N by position
+ * in the chunk are kept, later ones are ignored, never thrown on (v1.5.2;
+ * same pattern as id3Chapters' CTOC_CHAP_CAP). Uncapped, a crafted ~100 MB
+ * adtl chunk could grow the label map to ~8 M entries before a single cue
+ * point is ever consulted. Real files carry a handful; a cue point whose labl
+ * fell past the cap degrades to the existing "Marker N" fallback name. */
+const ADTL_LABEL_CAP = 10000;
+
 export function decodeWav(buf: ArrayBuffer): {
   channels: Float32Array[];
   sampleRate: number;
@@ -316,8 +324,12 @@ export function decodeWav(buf: ArrayBuffer): {
           const subDataStart = subOffset + 8;
           if (subId === 'labl' && subDataStart + 4 <= listEnd) {
             const dwName = view.getUint32(subDataStart, true);
-            const textLen = Math.max(0, Math.min(subSize - 4, listEnd - (subDataStart + 4)));
-            labels.set(dwName, decodeLabelText(view, subDataStart + 4, textLen));
+            // Cap the map at ADTL_LABEL_CAP distinct ids (first-by-position
+            // wins); a repeated id within the cap still overwrites as before.
+            if (labels.size < ADTL_LABEL_CAP || labels.has(dwName)) {
+              const textLen = Math.max(0, Math.min(subSize - 4, listEnd - (subDataStart + 4)));
+              labels.set(dwName, decodeLabelText(view, subDataStart + 4, textLen));
+            }
           }
           // Unrecognized sub-chunks (e.g. 'note', 'ltxt') are skipped — only
           // their framing is needed to find the next sub-chunk.

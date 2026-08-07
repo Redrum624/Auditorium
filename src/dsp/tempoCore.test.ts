@@ -1392,3 +1392,35 @@ describe('deriveGrid — regrid path (Task T4 Plan Ruling 4)', () => {
     expect(result.beatSamples.length).toBe(0);
   });
 });
+
+describe('analyzeTempo — BPM option validation (v1.5.2)', () => {
+  // scoreTempoCandidates' grid is multiplicative (`bpm *= CANDIDATE_STEP`), so
+  // minBpm <= 0 never advances (0 * step === 0, negatives stay negative) and
+  // the loop would never terminate. Latent today — every in-app caller passes
+  // the 60/200 defaults — but AnalyzeTempoOptions is exported, so the entry
+  // point must fail fast rather than hang. The audio below is deliberately
+  // shorter than MIN_ANALYSIS_SECONDS: the option check must fire before ANY
+  // content-based early return, or a hostile range would hang only on long
+  // audio.
+  const shortAudio = new Float32Array(1000);
+
+  it('throws a RangeError for minBpm === 0 (the multiplicative grid would loop forever)', () => {
+    expect(() => analyzeTempo(shortAudio, 44100, { minBpm: 0 })).toThrow(RangeError);
+  });
+
+  it('throws a RangeError for a negative minBpm', () => {
+    expect(() => analyzeTempo(shortAudio, 44100, { minBpm: -60 })).toThrow(RangeError);
+  });
+
+  it('throws a RangeError for maxBpm < minBpm', () => {
+    expect(() => analyzeTempo(shortAudio, 44100, { minBpm: 120, maxBpm: 60 })).toThrow(RangeError);
+  });
+
+  it('accepts the degenerate-but-valid single-point range (minBpm === maxBpm)', () => {
+    expect(() => analyzeTempo(shortAudio, 44100, { minBpm: 120, maxBpm: 120 })).not.toThrow();
+  });
+
+  it('accepts the default 60/200 range unchanged', () => {
+    expect(() => analyzeTempo(shortAudio, 44100)).not.toThrow();
+  });
+});

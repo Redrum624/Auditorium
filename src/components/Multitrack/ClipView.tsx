@@ -13,6 +13,17 @@ const HANDLE_PX = 6;
 const DRAG_THRESHOLD = 4;
 const MIN_LENGTH = 32;
 
+/** Cap (in DEVICE pixels) on the width of a clip's waveform raster — both the
+ * on-screen canvas backing store and the cached offscreen bitmap (v1.5.2).
+ * Uncapped, both were sized to the clip's FULL timeline pixel width (~7.6 MB
+ * per clip at default zoom, ~30 MB at 4x — LRU-retained 200 deep by
+ * clipWaveformCache). The peak envelope still spans the clip's whole sample
+ * range; it is simply rasterised at at most this many columns and blit-scaled
+ * across the clip's CSS width, so alignment is exact at every zoom/scroll and
+ * only sub-column detail (invisible beyond the widest real viewport anyway)
+ * is lost. */
+const MAX_CLIP_WAVEFORM_DEVICE_PX = 4096;
+
 interface Zoom {
   samplesPerPixel: number;
   scrollSample: number;
@@ -93,10 +104,15 @@ export default function ClipView({
 
     const w = Math.max(1, Math.round(widthPx));
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.round(w * dpr);
+    // v1.5.2: rasterise at most MAX_CLIP_WAVEFORM_DEVICE_PX device pixels (see
+    // the constant's comment). The canvas element's CSS size is unchanged
+    // (`h-full w-full` stretches the backing store across the whole clip), so
+    // the capped raster maps 1:1 onto the clip's full extent.
+    const drawW = Math.min(w, Math.max(1, Math.floor(MAX_CLIP_WAVEFORM_DEVICE_PX / dpr)));
+    canvas.width = Math.round(drawW * dpr);
     canvas.height = Math.round(canvasH * dpr);
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, w, canvasH);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!doc || doc.channels.length === 0) return;
 
     const off = getClipWaveformCanvas(
@@ -108,7 +124,7 @@ export default function ClipView({
         offsetSample: clip.offsetSample,
         channels: doc.channels,
       },
-      w,
+      drawW,
       (offCanvas) => {
         const octx = offCanvas.getContext('2d');
         if (!octx) return; // jsdom / no backend
@@ -130,7 +146,7 @@ export default function ClipView({
         }
       }
     );
-    ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, w, canvasH);
+    ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, canvas.width, canvas.height);
   }, [
     doc,
     clip.id,

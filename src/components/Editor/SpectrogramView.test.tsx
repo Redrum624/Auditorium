@@ -132,6 +132,101 @@ describe('SpectrogramView viewport slicing (Task M9 / F17)', () => {
   });
 });
 
+describe('SpectrogramView raster caching during playback (v1.5.2)', () => {
+  // The paint effect re-runs on every playback.positionSample change (the
+  // playhead overlay must move), but the spectrogram raster itself must NOT
+  // be rebuilt per frame: createImageData used to be re-allocated on every
+  // paint (a 0.5-2 GB/s transient while playing in Spectral view). The raster
+  // is now cached in a ref keyed by (mags identity, backing size) and merely
+  // blitted; only new data or a resize re-rasterises.
+  //
+  // jsdom has no 2d backend, so a recording stub is installed for THIS
+  // describe only (the other suites rely on getContext returning null).
+  let counts: { createImageData: number; putImageData: number; drawImage: number; stroke: number };
+  let getContextSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    counts = { createImageData: 0, putImageData: 0, drawImage: 0, stroke: 0 };
+    const fakeCtx = {
+      setTransform: jest.fn(),
+      clearRect: jest.fn(),
+      fillRect: jest.fn(),
+      beginPath: jest.fn(),
+      moveTo: jest.fn(),
+      lineTo: jest.fn(),
+      closePath: jest.fn(),
+      fill: jest.fn(),
+      fillText: jest.fn(),
+      setLineDash: jest.fn(),
+      stroke: jest.fn(() => {
+        counts.stroke++;
+      }),
+      drawImage: jest.fn(() => {
+        counts.drawImage++;
+      }),
+      putImageData: jest.fn(() => {
+        counts.putImageData++;
+      }),
+      createImageData: (w: number, h: number) => {
+        counts.createImageData++;
+        return { width: w, height: h, data: new Uint8ClampedArray(w * h * 4) };
+      },
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      font: '',
+      textBaseline: 'top',
+    };
+    getContextSpy = jest
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockImplementation(() => fakeCtx as unknown as CanvasRenderingContext2D);
+  });
+
+  afterEach(() => {
+    getContextSpy.mockRestore();
+  });
+
+  it('does not re-rasterise (no createImageData) on playhead-only paints; the cached raster is blitted instead', async () => {
+    const doc = seedDoc();
+    render(<SpectrogramView doc={doc} />);
+    await flushCompute();
+
+    expect(counts.createImageData).toBeGreaterThanOrEqual(1); // initial rasterisation happened
+    const rasterisations = counts.createImageData;
+    const blitsBefore = counts.drawImage;
+    const strokesBefore = counts.stroke;
+
+    // Three playback frames: each repaints (playhead moves) ...
+    act(() => {
+      useAppStore.getState().setPlayback({ state: 'playing', positionSample: 1000 });
+    });
+    act(() => {
+      useAppStore.getState().setPlayback({ positionSample: 2000 });
+    });
+    act(() => {
+      useAppStore.getState().setPlayback({ positionSample: 3000 });
+    });
+
+    expect(counts.createImageData).toBe(rasterisations); // ... but NONE re-rasterised
+    expect(counts.drawImage).toBeGreaterThanOrEqual(blitsBefore + 3); // the cached raster was blitted each paint
+    expect(counts.stroke).toBeGreaterThan(strokesBefore); // and the playhead overlay was actually drawn
+  });
+
+  it('does re-rasterise when new magnitudes arrive (a zoom-triggered recompute)', async () => {
+    const doc = seedDoc();
+    render(<SpectrogramView doc={doc} />);
+    await flushCompute();
+    const rasterisations = counts.createImageData;
+
+    act(() => {
+      useAppStore.getState().setZoom({ samplesPerPixel: 16, scrollSample: 0 });
+    });
+    await flushCompute();
+
+    expect(counts.createImageData).toBeGreaterThan(rasterisations);
+  });
+});
+
 describe('SpectrogramView compute-effect narrowing (Task M9 fix round 1 / MINOR 7)', () => {
   it('does not recompute on a metadata-only doc replacement (dirty/name/...), same id/channels/sampleRate', async () => {
     const doc = seedDoc();

@@ -1236,8 +1236,12 @@ function refineAndMeasure(
  * two-stage sample-accurate refinement -> least-squares BPM regression ->
  * confidence. Progress is composed 0->0.05 (decimate), 0.05->0.75 (onset
  * envelope), 0.75->0.85 (tempo candidate scoring + period refinement),
- * 0.85->1.0 (octave DP + beat refinement). Never throws; every guard path
- * returns finite fields. Does not mutate `mono`.
+ * 0.85->1.0 (octave DP + beat refinement). Never throws on any audio CONTENT;
+ * every guard path returns finite fields. Invalid OPTIONS are the one
+ * exception (v1.5.2): a non-positive or inverted BPM range throws a
+ * RangeError up front -- scoreTempoCandidates' grid is multiplicative
+ * (`bpm *= CANDIDATE_STEP`), so `minBpm <= 0` never advances and would loop
+ * forever. Does not mutate `mono`.
  */
 export function analyzeTempo(
   mono: Float32Array,
@@ -1247,6 +1251,17 @@ export function analyzeTempo(
 ): TempoAnalysis {
   const minBpm = opts?.minBpm ?? MIN_BPM;
   const maxBpm = opts?.maxBpm ?? MAX_BPM;
+
+  // Fail fast on an unusable BPM range (v1.5.2) -- BEFORE any content-based
+  // early return, so a hostile range throws consistently instead of hanging
+  // only on inputs long enough to reach the candidate grid. Latent today
+  // (every in-app caller passes the 60/200 defaults), but AnalyzeTempoOptions
+  // is exported.
+  if (minBpm <= 0 || maxBpm < minBpm) {
+    throw new RangeError(
+      `analyzeTempo: invalid BPM range (minBpm ${minBpm}, maxBpm ${maxBpm}; need 0 < minBpm <= maxBpm)`
+    );
+  }
 
   const maxSamples = Math.round(MAX_ANALYSIS_SECONDS * sampleRate);
   const truncated = mono.length > maxSamples;
