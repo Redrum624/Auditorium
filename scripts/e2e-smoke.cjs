@@ -16,6 +16,14 @@ const { _electron: electron } = require('playwright');
 const ROOT = path.resolve(__dirname, '..');
 const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
 const BEAT = path.join(ROOT, 'test-assets', 'beat120.wav');
+// Optional real-material fixture: a full commercial track the user placed
+// locally. Copyrighted, so it is NEVER committed (test-assets/ is gitignored)
+// and NEVER required — the real-song step skips cleanly when it is absent.
+const REAL_SONG = path.join(
+  ROOT,
+  'test-assets',
+  'DJ Tiësto - Adagio For Strings (Original Album Version).mp3'
+);
 const ABAB = path.join(ROOT, 'test-assets', 'abab120.wav');
 const OUT_DIR = path.join(ROOT, 'test-output');
 const OUT_MP3 = path.join(OUT_DIR, 'out.mp3');
@@ -902,6 +910,66 @@ async function main() {
       badAt === undefined,
       `every join sits inside [0, ${remix.length}] (expected none outside, actual ${JSON.stringify(badAt)})`
     );
+
+    // 12b) OPTIONAL real-song validation — runs only when the user's local
+    // real-material fixture exists (it is copyrighted, gitignored, and never
+    // required). Exercises the whole real-world chain the synthetic fixtures
+    // cannot: MP3 frame-sync sniff -> Chromium decode -> tempo detection on
+    // produced music -> full remix (analyse/plan/render) at real scale.
+    // Assertions are STRUCTURAL (finite, in-range, no clipping) — real
+    // material has no ground truth to hard-code, and the detector's known
+    // octave ambiguity is user-correctable by design; the logged numbers are
+    // the human-facing evidence.
+    if (fs.existsSync(REAL_SONG)) {
+      console.log('Real-song validation (optional fixture present)...');
+      await page.evaluate((p) => window.__test.openPath(p), REAL_SONG);
+      const songSummary = await page.evaluate(() => window.__test.getStateSummary());
+      console.log(`  real song: ${JSON.stringify(songSummary)}`);
+
+      const songTempo = await page.evaluate(() => window.__test.detectTempo());
+      console.log(`  detectTempo: ${JSON.stringify(songTempo)}`);
+      assert(
+        songTempo.bpm !== null && songTempo.bpm >= 60 && songTempo.bpm <= 200,
+        `real song yields an in-range tempo (expected 60..200 or documented octave thereof, actual ${songTempo.bpm})`
+      );
+      assert(
+        songTempo.confidence > 0 && songTempo.confidence <= 1,
+        `real song yields a reported confidence (expected (0,1], actual ${songTempo.confidence})`
+      );
+
+      const songRemix = await page.evaluate(() =>
+        window.__test.remixToDuration(120, { strict: false })
+      );
+      console.log(`  remixToDuration(120, {strict:false}): ${JSON.stringify(songRemix)}`);
+      assert(
+        songRemix.ok === true,
+        `real song remixes to a 2:00 target (expected ok=true, actual ok=${songRemix.ok} status=${songRemix.status})`
+      );
+      assert(
+        songRemix.joins >= 1,
+        `real-song arrangement actually splices (expected joins >= 1, actual ${songRemix.joins})`
+      );
+      assert(
+        Math.abs(songRemix.achievedSeconds - 120) <= 16,
+        `real-song achieved length is within half a phrase of 2:00 ` +
+          `(expected |achieved-120| <= 16, actual ${songRemix.achievedSeconds.toFixed(3)}s)`
+      );
+      const songPeak = await page.evaluate(() => window.__test.getPeak());
+      console.log(`  real-song remix peak: ${songPeak.toFixed(4)}`);
+      assert(
+        songPeak <= 1.0,
+        `real-song remix does not clip (expected peak <= 1.0, actual ${songPeak.toFixed(4)})`
+      );
+      const songJoins = await page.evaluate(() => window.__test.getRemixJoins());
+      console.log(`  real-song joins (${songJoins && songJoins.length}): ${JSON.stringify(songJoins)}`);
+      const songBadCost = songJoins && songJoins.find((j) => !Number.isFinite(j.cost));
+      assert(
+        songJoins !== null && songBadCost === undefined,
+        `every real-song join cost is finite (actual ${JSON.stringify(songBadCost)})`
+      );
+    } else {
+      console.log('Real-song validation: SKIPPED (optional local fixture not present)');
+    }
 
     // 13) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
