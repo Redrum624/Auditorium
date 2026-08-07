@@ -360,6 +360,75 @@
   box-shadow: none;
 }
 
+/* ------------------------------------------------------------------------- */
+/* G2 window chrome: menubar items, dropdown items, window buttons.          */
+/* Anatomy: mockup `.mi` (2px 9px, radius 6, white/6% hover) for the top-    */
+/* level menu items; Vitrine MenuBar.tsx dropdown (gray-800, --border,       */
+/* --shadow-lg, radius 0, 4px/6px item padding) for the menus themselves.    */
+/* ------------------------------------------------------------------------- */
+
+/* Top-level menubar item (File, Edit, ...): mockup `.menubar span.mi`. */
+.chrome-menu-btn {
+  padding: 2px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--glass-text-chrome-idle);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+.chrome-menu-btn:hover,
+.chrome-menu-btn.is-open {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--glass-text-chrome-primary);
+}
+
+/* Dropdown panel: Vitrine's menu dropdown (gray-800 · --border · shadow-lg ·
+   radius 0). */
+.chrome-menu-dropdown {
+  background: var(--gray-800);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  border-radius: 0;
+}
+
+/* Dropdown item: Vitrine's px-4 py-1.5 text-xs anatomy on the glass text
+   scale; disabled = muted at half opacity (Auditorium's existing disabled
+   contract). */
+.chrome-menu-item {
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--glass-text-label);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+.chrome-menu-item:hover:not(:disabled) {
+  background: var(--gray-700);
+  color: var(--glass-text-title);
+}
+.chrome-menu-item:disabled {
+  color: var(--glass-text-muted);
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* Frameless window button (minimize/maximize/close): Vitrine's w-11 h-full
+   subtle-hover anatomy. */
+.chrome-winbtn {
+  color: var(--glass-text-chrome-idle);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+.chrome-winbtn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--glass-text-title);
+}
+
 html,
 body,
 #root {

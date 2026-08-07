@@ -87,6 +87,26 @@ describe('StatusBar — tempo readout (Task T5)', () => {
     expect(mockRunTempoAnalysis).not.toHaveBeenCalled();
   });
 
+  describe('G2 — floating bottom chrome pill', () => {
+    it('renders the readouts inside a .glass-chrome pill (status-pill)', () => {
+      addDoc();
+      render(<StatusBar />);
+
+      const pill = screen.getByTestId('status-pill');
+      expect(pill.className).toContain('glass-chrome');
+    });
+
+    it('keeps the cursor / selection / doc-info / spp readouts', () => {
+      addDoc();
+      render(<StatusBar />);
+
+      expect(screen.getByText(/^cursor /)).toBeInTheDocument();
+      expect(screen.getByText('sel —')).toBeInTheDocument();
+      expect(screen.getByText('44100 Hz · 1ch · 44100 smp')).toBeInTheDocument();
+      expect(screen.getByText(/^spp: /)).toBeInTheDocument();
+    });
+  });
+
   describe('low-confidence uncertainty marker (Fix round 1)', () => {
     it('appends "?" and a title when confidence is below CONFIDENCE_LOW', () => {
       addDoc();

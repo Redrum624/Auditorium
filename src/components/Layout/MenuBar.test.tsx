@@ -39,6 +39,11 @@ describe('MenuBar', () => {
     expect(screen.queryByText('Open…')).not.toBeInTheDocument();
   });
 
+  it('styles the top-level menu buttons as chrome items (G2)', () => {
+    render(<MenuBar />);
+    expect(screen.getByRole('button', { name: 'File' }).className).toContain('chrome-menu-btn');
+  });
+
   it('closes the dropdown on outside click', () => {
     render(
       <div>
