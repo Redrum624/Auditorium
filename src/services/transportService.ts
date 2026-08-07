@@ -15,8 +15,9 @@ import { openRecordDialog } from './dialogBus';
  *
  * The multitrack player has no pause (v1): play/pause toggles play↔stop and
  * always plays from the multitrack cursor. State/position are mirrored back into
- * the session store by the TransportBar (which owns the rAF position pump and
- * the onStateChange subscriptions), mirroring how the waveform transport works.
+ * the session store by the transport Toolbar (which owns the rAF position pump
+ * and the onStateChange subscriptions), mirroring how the waveform transport
+ * works.
  */
 
 function activeDoc(s: AppState) {
@@ -107,8 +108,8 @@ export function transportStop(): void {
     .setPlayback({ state: 'stopped', positionSample: playbackEngine.getPositionSample() });
 }
 
-/** Single source of `transport.record` enablement (menuActions and TransportBar
- * both consult this): the multitrack view needs at least one armed track
+/** Single source of `transport.record` enablement (menuActions and the
+ * transport Toolbar both consult this): the multitrack view needs at least one armed track
  * (nothing to punch into otherwise) — except while a take is already running,
  * which must stay stoppable via the record toggle even if the user disarms
  * every track mid-take. The waveform/spectral views open the Record dialog,

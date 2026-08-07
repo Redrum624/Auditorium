@@ -13,8 +13,10 @@ import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selec
  * both views behave identically.
  */
 
-const MIN_SPP = 1 / 32;
-const ZOOM_FACTOR = 1.25;
+// Exported since G3: the toolbar's zoom −/+ buttons step by the same factor
+// and clamp to the same floor as the wheel gesture, so both paths agree.
+export const MIN_SPP = 1 / 32;
+export const ZOOM_FACTOR = 1.25;
 
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);

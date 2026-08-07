@@ -251,7 +251,7 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     // `doc` object, so a metadata-only doc replacement (dirty/name/filePath/
     // sourceBitDepth — what every marker add/rename/delete produces via
     // appStore's markDirty) doesn't re-trigger a slice + FFT recompute, same
-    // narrowing as TransportBar's reload effect (Task M9 / F13, applied here
+    // narrowing as the transport Toolbar's reload effect (Task M9 / F13, here
     // fix round 1 / MINOR 7). The effect body still closes over the current
     // render's `doc`, so this can only fire the effect LESS often, never with
     // stale data.

@@ -55,7 +55,13 @@ export function makeInitialState(): AppState {
   };
 }
 
-function defaultZoom(doc: AudioDocument): { samplesPerPixel: number; scrollSample: number } {
+/** The zoom applied whenever a document is (re)activated: whole document laid
+ * across a nominal 1600px viewport. Exported since G3 — the toolbar's Fit
+ * button restores it and the zoom-% readouts define 100% as this level. */
+export function defaultZoom(doc: AudioDocument): {
+  samplesPerPixel: number;
+  scrollSample: number;
+} {
   return { samplesPerPixel: Math.max(1, Math.ceil(docLength(doc) / 1600)), scrollSample: 0 };
 }
 

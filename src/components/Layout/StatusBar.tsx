@@ -1,10 +1,12 @@
 import type { CSSProperties } from 'react';
 import { docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
+import { useSessionStore } from '../../multitrack/sessionStore';
 import { formatTime } from '../../utils/timeFormat';
 import { getTempo, useTempoVersion } from '../../services/tempoAnalysis';
 import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 import { ChromePill } from '../UI/glass';
+import LevelMeter from './LevelMeter';
 
 const LOW_CONFIDENCE_TITLE =
   'Low confidence tempo estimate — may be wrong (e.g. an octave error) or the material may not be percussive.';
@@ -47,7 +49,13 @@ function Divider() {
 /** G2: the status bar is now the mockup's floating bottom chrome pill —
  * file info · cursor/selection · ♩ BPM · doc stats. Same five readouts (and
  * exact text shapes — the tempo `*`/`?` markers are tested contracts) as the
- * previous full-width bar; only the container changed. */
+ * previous full-width bar; only the container changed.
+ *
+ * G3 merged in the retired bottom TransportBar's two non-control surfaces
+ * (plan: "merge, don't drop"): the PROMINENT transport time readout
+ * (`transport-time`, view-routed exactly as before — cursor while stopped,
+ * engine position while playing, multitrack cursor/playhead in that view) and
+ * the level meter. The pill is the whole bottom edge now. */
 export default function StatusBar() {
   useTempoVersion();
   const documents = useAppStore((s) => s.documents);
@@ -55,9 +63,28 @@ export default function StatusBar() {
   const cursorSample = useAppStore((s) => s.cursorSample);
   const selection = useAppStore((s) => s.selection);
   const zoom = useAppStore((s) => s.zoom);
+  const view = useAppStore((s) => s.view);
+  const playback = useAppStore((s) => s.playback);
+
+  const mtSampleRate = useSessionStore((s) => s.session.sampleRate);
+  const mtCursorSample = useSessionStore((s) => s.mtCursorSample);
+  const mtPlayState = useSessionStore((s) => s.mtPlayState);
+  const mtPlayheadSample = useSessionStore((s) => s.mtPlayheadSample);
 
   const doc = documents.find((d) => d.id === activeDocumentId) ?? null;
   const tempo = tempoReadout(doc);
+
+  // Transport time routing, verbatim from the retired TransportBar.
+  const isMultitrack = view === 'multitrack';
+  const isPlaying = isMultitrack ? mtPlayState === 'playing' : playback.state === 'playing';
+  const readoutRate = isMultitrack ? mtSampleRate : (doc?.sampleRate ?? 44100);
+  const readoutSample = isMultitrack
+    ? mtPlayState === 'playing'
+      ? mtPlayheadSample
+      : mtCursorSample
+    : isPlaying
+      ? playback.positionSample
+      : cursorSample;
 
   return (
     <div className="flex shrink-0 justify-center px-3 pb-2 pt-1.5">
@@ -66,6 +93,18 @@ export default function StatusBar() {
         className="flex items-center text-xs"
         style={{ gap: 18, padding: '7px 16px', color: 'var(--glass-text-secondary)' }}
       >
+        <span
+          data-testid="transport-time"
+          style={{
+            ...monoStyle,
+            fontSize: 16,
+            fontWeight: 600,
+            color: 'var(--glass-text-title)',
+          }}
+        >
+          {formatTime(readoutSample, readoutRate)}
+        </span>
+        <Divider />
         <span>
           {doc
             ? `${doc.sampleRate} Hz · ${doc.channels.length}ch · ${docLength(doc)} smp`
@@ -89,6 +128,8 @@ export default function StatusBar() {
         <span style={{ ...monoStyle, color: 'var(--glass-text-muted)' }}>
           spp: {zoom.samplesPerPixel}
         </span>
+        <Divider />
+        <LevelMeter channels={doc?.channels.length ?? 2} />
       </ChromePill>
     </div>
   );

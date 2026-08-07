@@ -299,7 +299,7 @@ function registerSelectionAndTransportCommands(): void {
       // View-routed: the multitrack view punches into armed tracks; the
       // waveform/spectral views open the Record dialog. Enablement AND the
       // toggle/dispatch live in transportService (canRecord/transportRecord)
-      // so the menu and the TransportBar share one source of truth.
+      // so the menu and the transport Toolbar share one source of truth.
       id: 'transport.record',
       label: 'Record',
       enabled: () => canRecord(),

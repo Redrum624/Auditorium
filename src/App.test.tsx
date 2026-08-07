@@ -34,6 +34,18 @@ describe('App', () => {
     expect(screen.getByText(/open an audio file \(ctrl\+o\)/i)).toBeInTheDocument();
     expect(screen.getByText(/create a new one \(ctrl\+n\)/i)).toBeInTheDocument();
   });
+
+  it('mounts the G3 chrome exactly once: toolbar pill, file chip, status pill, and each moved testid', () => {
+    render(<App />);
+    // The bottom TransportBar is retired; its controls live in the top pill and
+    // its readouts in the status pill. Every moved testid resolves exactly once.
+    expect(screen.getAllByTestId('toolbar-pill')).toHaveLength(1);
+    expect(screen.getAllByTestId('file-chip')).toHaveLength(1);
+    expect(screen.getAllByTestId('status-pill')).toHaveLength(1);
+    expect(screen.getAllByTestId('view-toggle')).toHaveLength(1);
+    expect(screen.getAllByTestId('transport-time')).toHaveLength(1);
+    expect(screen.getAllByTestId('level-meter')).toHaveLength(1);
+  });
 });
 
 describe('native close guard renderer side (Task F8)', () => {

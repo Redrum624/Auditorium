@@ -18,7 +18,7 @@ import RemixPanel from './components/Panels/RemixPanel';
 import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
 import TitleBar from './components/Layout/TitleBar';
-import TransportBar from './components/Layout/TransportBar';
+import Toolbar from './components/Layout/Toolbar';
 import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { getInFlightSaveCount } from './services/fileService';
@@ -116,6 +116,10 @@ export default function App() {
       className="flex h-screen w-screen flex-col bg-[#1a1a1e] text-[#d4d4d8]"
     >
       <TitleBar />
+      {/* G3: the transport/view/zoom controls live in the top floating pill
+          (with the file chip); the retired bottom TransportBar's readouts
+          merged into the status pill below. */}
+      <Toolbar />
       <div className="flex min-h-0 flex-1">
         <div className="flex w-[240px] flex-col border-r border-[#3a3a42] bg-[#232328]">
           <PanelShell title="Files">
@@ -167,7 +171,6 @@ export default function App() {
           </div>
         </div>
       </div>
-      <TransportBar />
       <StatusBar />
 
       {newFileOpen && <NewFileDialog onClose={() => setNewFileOpen(false)} />}
