@@ -30,7 +30,15 @@
 
 const DEFAULT_TIMEOUT_MS = 2000;
 
-function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+/**
+ * `autoConfirmQuit` (test mode only — wired from the same prod gate as the
+ * renderer test hooks): every path that would show a native Quit/Cancel
+ * dialog destroys the window immediately instead. An unattended run (the
+ * e2e smoke, CI) has no human at the console, so a modal here is not a
+ * safety net — it is a hang that a person then has to dismiss by hand.
+ * The dialog flows themselves stay covered by the non-auto unit tests.
+ */
+function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS, autoConfirmQuit = false }) {
   /** @type {{ win: any, timer: any } | null} */
   let pending = null;
   // True from the moment ANY Quit/Cancel-style dialog (the dirty-count one or
@@ -53,6 +61,10 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS }) {
   /** Shows a Quit/Cancel dialog and destroys the window on Quit. Shared by
    * the normal dirty-count reply and the F7 timeout busy-dialog path. */
   async function confirmQuit(win, message) {
+    if (autoConfirmQuit) {
+      destroyIfAlive(win);
+      return;
+    }
     dialogOpen = true;
     try {
       const result = await dialog.showMessageBox(win, {

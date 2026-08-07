@@ -909,7 +909,21 @@ async function main() {
 
     console.log('\nSMOKE PASSED');
   } finally {
-    await app.close();
+    // The run must NEVER leave an Electron window for a human to close by
+    // hand. Graceful close first (the close guard auto-confirms in test
+    // mode), but if anything still wedges it — a crashed renderer, a native
+    // dialog from a path the guard doesn't own — force-kill after 10 s.
+    // close() may itself reject once the process dies; that must not mask
+    // the real error from the try block.
+    const proc = app.process();
+    await Promise.race([
+      app.close().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 10000)),
+    ]);
+    if (proc && proc.exitCode === null && !proc.killed) {
+      console.error('teardown: graceful close timed out after 10 s; force-killing Electron');
+      proc.kill();
+    }
   }
 }
 

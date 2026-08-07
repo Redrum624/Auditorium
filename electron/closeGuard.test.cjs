@@ -44,10 +44,10 @@ function fakeEvent() {
   };
 }
 
-function setup({ dialogResponse = 0, timeoutMs = 2000 } = {}) {
+function setup({ dialogResponse = 0, timeoutMs = 2000, autoConfirmQuit = false } = {}) {
   const ipcMain = fakeIpcMain();
   const dialog = { showMessageBox: jest.fn(async () => ({ response: dialogResponse })) };
-  const guard = createCloseGuard({ ipcMain, dialog, timeoutMs });
+  const guard = createCloseGuard({ ipcMain, dialog, timeoutMs, autoConfirmQuit });
   const win = fakeWin();
   const event = fakeEvent();
   return { ipcMain, dialog, guard, win, event };
@@ -447,6 +447,38 @@ describe('closeGuard (Task F8 native close guard)', () => {
         process.off('unhandledRejection', onUnhandledRejection);
         jest.useRealTimers();
       }
+    });
+  });
+
+  describe('autoConfirmQuit (unattended test runs must never block on a dialog)', () => {
+    test('a dirty count destroys immediately without showing any dialog', async () => {
+      const { ipcMain, dialog, guard, win, event } = setup({ autoConfirmQuit: true });
+      guard.handleClose(win, event);
+      await ipcMain.emit('app:close-response', 3, 1);
+      expect(win.destroyed).toBe(true);
+      expect(dialog.showMessageBox).not.toHaveBeenCalled();
+    });
+
+    test('the timeout busy path destroys immediately without showing any dialog', async () => {
+      jest.useFakeTimers();
+      try {
+        const { dialog, guard, win, event } = setup({ autoConfirmQuit: true, timeoutMs: 2000 });
+        guard.handleClose(win, event);
+        jest.advanceTimersByTime(2001); // renderer never answers -> busy path
+        await Promise.resolve(); // let confirmQuit's microtask run
+        expect(win.destroyed).toBe(true);
+        expect(dialog.showMessageBox).not.toHaveBeenCalled();
+      } finally {
+        jest.useRealTimers();
+      }
+    });
+
+    test('OFF by default: the dirty path still asks (packaged behaviour unchanged)', async () => {
+      const { ipcMain, dialog, guard, win, event } = setup({ dialogResponse: 1 }); // Cancel
+      guard.handleClose(win, event);
+      await ipcMain.emit('app:close-response', 2);
+      expect(dialog.showMessageBox).toHaveBeenCalled();
+      expect(win.destroyed).toBe(false); // Cancel keeps it alive
     });
   });
 });

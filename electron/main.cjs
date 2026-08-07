@@ -13,7 +13,13 @@ let mainWindow = null;
 // Native close guard (Task F8): the window's 'close' event is intercepted, the
 // renderer reports its dirty-document count over IPC, and main shows a native
 // Quit/Cancel message box when the count is non-zero. See closeGuard.cjs.
-const closeGuard = createCloseGuard({ ipcMain, dialog });
+// In test mode (same gate as the renderer test hooks) the guard destroys
+// instead of asking — an unattended smoke run has no one to click a dialog.
+const closeGuard = createCloseGuard({
+  ipcMain,
+  dialog,
+  autoConfirmQuit: isPackagedGateOpen(app.isPackaged, process.env.AUDITORIUM_TEST),
+});
 
 function createWindow() {
   const win = new BrowserWindow({
