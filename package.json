@@ -1,7 +1,7 @@
 {
   "name": "audition_app",
   "productName": "Auditorium",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "description": "Audition-class desktop audio editor: waveform and spectral editing, 22 effects, noise reduction, recording, multitrack mixing, tempo detection and auto-remix.",
   "author": "Auditorium contributors",
   "license": "MIT",
