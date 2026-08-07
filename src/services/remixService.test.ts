@@ -212,6 +212,11 @@ describe('createRemixDocument — document creation (acceptance 1, 2)', () => {
 
     const remix = liveDoc(result.remixDocId);
     expect(remix.name).toBe('Remix 1');
+    // Task S4: the rendered arrangement has never been on disk, so it carries
+    // the neverSaved provenance flag and prompts on close even though it is
+    // clean (no undo entry was pushed for its creation).
+    expect(remix.neverSaved).toBe(true);
+    expect(remix.dirty).toBe(false);
     expect(remix.sampleRate).toBe(source.sampleRate);
     expect(remix.channels.length).toBe(2);
     expect(docLength(remix)).toBe(result.plan.outputSample);

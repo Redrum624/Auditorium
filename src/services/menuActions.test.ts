@@ -4,6 +4,7 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { getSpectralScale, toggleSpectralScale } from './spectralScale';
 import * as sessionFileModule from '../multitrack/sessionFile';
+import { useSessionStore } from '../multitrack/sessionStore';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { registerDialogSetters } from './dialogBus';
 
@@ -541,5 +542,36 @@ describe('edit.remix (Task T14)', () => {
     await runCommand('edit.remix');
 
     expect(openRemix).not.toHaveBeenCalled();
+  });
+});
+
+describe('multitrack.mixdown — Mix Down output provenance (Task S4)', () => {
+  afterEach(() => {
+    useSessionStore.getState().newSession(44100);
+  });
+
+  it('produces a never-saved document: computed audio that has never been on disk', async () => {
+    installShowMessageBox();
+    const source = openDoc(); // 1000 mono samples
+    useAppStore.getState().setView('multitrack');
+    useSessionStore.getState().addTrack();
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore.getState().addClip(trackId, {
+      id: 'clip-mixdown-1',
+      documentId: source.id,
+      startSample: 0,
+      offsetSample: 0,
+      lengthSample: docLength(source),
+      gainDb: 0,
+    });
+
+    await runCommand('multitrack.mixdown');
+
+    const mix = useAppStore.getState().documents.find((d) => d.name.startsWith('Mixdown'));
+    expect(mix).toBeDefined();
+    // Created with no undo entry, so `dirty` is false — the exact state that
+    // used to let it close silently. `neverSaved` is what now guards it.
+    expect(mix!.dirty).toBe(false);
+    expect(mix!.neverSaved).toBe(true);
   });
 });

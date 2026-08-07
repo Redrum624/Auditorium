@@ -36,6 +36,10 @@ export interface TestStateSummary {
   channels: number | null;
   filePath: string | null;
   dirty: boolean | null;
+  /** Task S4 provenance: true when the active document's audio has never been
+   * written to a file (a recording, a Mix Down, `Remix N`, a stem). Gates the
+   * close prompt and the quit guard's count alongside `dirty`. */
+  neverSaved: boolean | null;
 }
 
 export interface TestApi {
@@ -177,6 +181,7 @@ export function installTestHooks(): void {
         channels: doc?.channels.length ?? null,
         filePath: doc?.filePath ?? null,
         dirty: doc?.dirty ?? null,
+        neverSaved: doc?.neverSaved ?? null,
       };
     },
 

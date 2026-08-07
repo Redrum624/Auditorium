@@ -80,6 +80,9 @@ describe('RecordDialog', () => {
     expect(docs[0].name).toMatch(/^Recording \d+$/);
     expect(docs[0].sampleRate).toBe(44100);
     expect(docs[0].channels[0]).toHaveLength(88200);
+    // Task S4: a take exists only in memory until it is saved, so it carries
+    // the neverSaved provenance flag and prompts on close.
+    expect(docs[0].neverSaved).toBe(true);
   });
 
   it('shows an error box and stays open when start() rejects', async () => {

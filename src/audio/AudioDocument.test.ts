@@ -48,6 +48,54 @@ describe('createDocument', () => {
   });
 });
 
+describe('neverSaved provenance (Task S4)', () => {
+  it('defaults to TRUE for a document created with no file on disk (Mix Down, Remix N, recordings, New File, stems)', () => {
+    const doc = createDocument({ name: 'Remix 1', sampleRate: 44100, channels: mono([1, 2, 3]) });
+    expect(doc.neverSaved).toBe(true);
+    // ... and it is NOT expressed as dirty: dirty is derived from the undo
+    // position by undoHistory, so it cannot carry provenance (see the
+    // KNOWN_LIMITATIONS entry).
+    expect(doc.dirty).toBe(false);
+  });
+
+  it('defaults to FALSE for a document created with a filePath (opened from disk)', () => {
+    const doc = createDocument({
+      name: 'foo.wav',
+      sampleRate: 44100,
+      channels: mono([0]),
+      filePath: 'C:/tmp/foo.wav',
+    });
+    expect(doc.neverSaved).toBe(false);
+  });
+
+  it('accepts an explicit neverSaved:false for path-less audio that IS on disk (an exotic source, a .audm-embedded document)', () => {
+    const doc = createDocument({
+      name: 'take.m4a',
+      sampleRate: 44100,
+      channels: mono([0]),
+      filePath: null,
+      neverSaved: false,
+    });
+    expect(doc.filePath).toBeNull();
+    expect(doc.neverSaved).toBe(false);
+  });
+
+  it('survives every whole-document edit (replaceRegion/deleteRegion/insertAt) — editing does not put audio on disk', () => {
+    const doc = createDocument({ name: 'Mixdown 1', sampleRate: 44100, channels: mono([1, 2, 3, 4]) });
+    expect(replaceRegion(doc, 0, 1, mono([9])).neverSaved).toBe(true);
+    expect(deleteRegion(doc, 0, 2).neverSaved).toBe(true);
+    expect(insertAt(doc, 1, mono([7])).neverSaved).toBe(true);
+    // The converse also holds: an edit never RESURRECTS the flag on a saved doc.
+    const saved = createDocument({
+      name: 'song.wav',
+      sampleRate: 44100,
+      channels: mono([1, 2, 3, 4]),
+      filePath: 'C:/tmp/song.wav',
+    });
+    expect(deleteRegion(saved, 0, 2).neverSaved).toBe(false);
+  });
+});
+
 describe('docLength / docDuration', () => {
   it('returns samples-per-channel for docLength', () => {
     const doc = createDocument({ name: 'x', sampleRate: 44100, channels: mono([1, 2, 3, 4, 5]) });

@@ -64,14 +64,26 @@ describe('native close guard renderer side (Task F8)', () => {
     return { fireCloseRequest: () => requestCb?.(), respondCloseRequest, unsubscribe };
   }
 
+  /** A document that HAS a file on disk (`neverSaved: false`), dirty or not —
+   * so these counting tests isolate the dirty half of the reply. The
+   * never-saved half has its own tests below (Task S4). */
   function addDoc(dirty: boolean) {
     const doc = createDocument({
       name: dirty ? 'dirty.wav' : 'clean.wav',
       sampleRate: 44100,
       channels: [new Float32Array(4)],
+      filePath: dirty ? 'D:\\dirty.wav' : 'D:\\clean.wav',
     });
     useAppStore.getState().addDocument(doc);
     if (dirty) useAppStore.getState().updateDocument({ ...doc, dirty: true });
+  }
+
+  /** A computed document that has never been on disk (Mix Down, Remix N, a
+   * recording, a stem) — clean, but its audio exists nowhere else. */
+  function addNeverSavedDoc(name = 'Remix 1') {
+    const doc = createDocument({ name, sampleRate: 44100, channels: [new Float32Array(4)] });
+    useAppStore.getState().addDocument(doc);
+    return doc;
   }
 
   it('responds to a close request with the current dirty-document count', () => {
@@ -119,6 +131,41 @@ describe('native close guard renderer side (Task F8)', () => {
     act(() => api.fireCloseRequest());
 
     expect(api.respondCloseRequest).toHaveBeenCalledWith(0, 1);
+  });
+
+  it('counts a CLEAN never-saved document (Task S4) — quitting would otherwise discard it silently', () => {
+    const api = installCloseApi();
+    addNeverSavedDoc(); // clean, but has never been on disk
+    addDoc(false); // clean AND on disk — must not be counted
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(1, 0);
+  });
+
+  it('counts a never-saved document exactly once even after it is edited (dirty && neverSaved is still one file)', () => {
+    const api = installCloseApi();
+    const doc = addNeverSavedDoc();
+    useAppStore.getState().updateDocument({ ...doc, dirty: true });
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(1, 0);
+  });
+
+  it('still counts a never-saved document after an edit is undone past the creation point (Task S4 — the derived-dirty trap)', () => {
+    const api = installCloseApi();
+    const doc = addNeverSavedDoc();
+    // Simulate what undoHistory does on undo: it re-derives dirty and rewrites
+    // the doc, which would have erased any dirty stamped at creation.
+    useAppStore.getState().updateDocument({ ...doc, dirty: false });
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(1, 0);
   });
 
   it('unsubscribes on unmount', () => {

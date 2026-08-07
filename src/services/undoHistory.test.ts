@@ -262,6 +262,36 @@ describe('save-point-derived dirty (Task M2 / F9)', () => {
     expect(liveDirty(docId)).toBe(false);
   });
 
+  it('never touches neverSaved — undoing PAST the creation point leaves the provenance flag intact (Task S4: the reason dirty could not carry it)', () => {
+    const doc = createDocument({ name: 'Remix 1', sampleRate: 44100, channels: [new Float32Array(4)] });
+    useAppStore.getState().addDocument(doc);
+    const docId = doc.id;
+    const log: string[] = [];
+    const live = () => useAppStore.getState().documents.find((d) => d.id === docId)!;
+    expect(live().neverSaved).toBe(true);
+
+    pushUndo(makeEntry(docId, 'Edit', log)); // position 0 -> 1
+    undo(docId); // position back to 0 — the derived dirty goes clean here
+    expect(liveDirty(docId)).toBe(false); // exactly the case that would clear a stamped dirty
+    expect(live().neverSaved).toBe(true); // ... but never the provenance flag
+
+    redo(docId);
+    expect(live().neverSaved).toBe(true);
+
+    // And the converse: undo/redo never RESURRECT the flag on a saved document.
+    const saved = createDocument({
+      name: 'song.wav',
+      sampleRate: 44100,
+      channels: [new Float32Array(4)],
+      filePath: 'C:/song.wav',
+    });
+    useAppStore.getState().addDocument(saved);
+    pushUndo(makeEntry(saved.id, 'Edit', log));
+    undo(saved.id);
+    redo(saved.id);
+    expect(useAppStore.getState().documents.find((d) => d.id === saved.id)!.neverSaved).toBe(false);
+  });
+
   it('a pushUndo after undo invalidates a savePoint left in the truncated redo future', () => {
     const docId = seedStoreDoc();
     const log: string[] = [];

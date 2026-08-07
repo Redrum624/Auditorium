@@ -5,6 +5,24 @@ export interface AudioDocument {
   sampleRate: number; // e.g. 44100, 48000
   channels: Float32Array[]; // length 1 (mono) or 2 (stereo); all same length
   dirty: boolean;
+  /**
+   * Provenance (Task S4): this document's audio has NEVER been written to a
+   * file — true for everything the app COMPUTES (a Mix Down output, `Remix N`,
+   * a recording, File > New, a separated stem), false for anything read off
+   * disk (an opened file, a `.audm`-embedded document).
+   *
+   * This is deliberately a SECOND flag rather than `dirty: true` at creation.
+   * `dirty` is not a stored fact: `undoHistory` RE-DERIVES it from the undo
+   * position relative to the save point on every undo/redo (the v1.4 fix for
+   * "undo after Save reported the document as clean"), so a `dirty` stamped at
+   * creation survives only until the first Ctrl+Z and then silently clears
+   * itself. `neverSaved` is provenance, not edit state: nothing but a
+   * successful save ever clears it, and undo/redo never touch it.
+   *
+   * Read alongside `dirty` by everything that asks "would closing this lose
+   * work?" — `closeDocumentFlow` and the close guard's count (App.tsx).
+   */
+  neverSaved: boolean;
   // Source-file provenance (Task F7, additive-optional). Drives format-faithful
   // Save (re-encode in the original container) and the Properties bit-depth row.
   sourceBitDepth?: number; // original file's PCM depth (WAV/FLAC); undefined for lossy
@@ -40,6 +58,15 @@ export function createDocument(opts: {
   filePath?: string | null;
   sourceBitDepth?: number;
   sourceFormat?: AudioDocument['sourceFormat'];
+  /**
+   * Task S4 provenance. Defaults to "true when there is no `filePath`", so any
+   * creation site that computes audio is protected without having to remember
+   * this flag — the safe direction to be wrong in. Pass `false` explicitly for
+   * path-less audio that nonetheless CAME from disk: an exotic source (m4a,
+   * aac, webm — opened with `filePath: null` because it cannot be saved back
+   * in place) or a document recreated from a `.audm` session.
+   */
+  neverSaved?: boolean;
 }): AudioDocument {
   return {
     id: nextId('doc'),
@@ -48,6 +75,7 @@ export function createDocument(opts: {
     sampleRate: opts.sampleRate,
     channels: opts.channels,
     dirty: false,
+    neverSaved: opts.neverSaved ?? opts.filePath == null,
     sourceBitDepth: opts.sourceBitDepth,
     sourceFormat: opts.sourceFormat,
   };
