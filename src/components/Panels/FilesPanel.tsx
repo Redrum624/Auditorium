@@ -32,9 +32,11 @@ export default function FilesPanel() {
         const isActive = doc.id === activeDocumentId;
         return (
           <li key={doc.id} data-testid="files-item" className="group">
+            {/* G4 glass restyle (styling only): white-alpha hover/active over
+                the translucent card instead of the old opaque grays. */}
             <div
-              className={`flex items-center gap-2 px-2 py-1 ${
-                isActive ? 'bg-[#2e2e34]' : 'hover:bg-[#2e2e34]'
+              className={`mx-1 flex items-center gap-2 rounded-lg px-2 py-1 ${
+                isActive ? 'bg-white/[.06]' : 'hover:bg-white/5'
               }`}
             >
               <button
@@ -57,7 +59,7 @@ export default function FilesPanel() {
                 aria-label={`Close ${doc.name}`}
                 title="Close"
                 onClick={() => void closeDocumentFlow(doc.id)}
-                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#8b8b92] opacity-0 transition-opacity hover:bg-[#3a3a42] hover:text-[#d4d4d8] group-hover:opacity-100"
+                className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[#8b8b92] opacity-0 transition-opacity hover:bg-white/10 hover:text-[#d4d4d8] group-hover:opacity-100"
               >
                 <X size={14} />
               </button>

@@ -12,6 +12,9 @@ import {
 import { regridTempo, runRemixAnalysis, setRemixAnalysis } from '../../services/tempoAnalysis';
 import { createRemixDocument } from '../../services/remixService';
 import { focusRemixPanel } from '../../services/dialogBus';
+// Structure-strip derivation + meter labels are shared with the persistent
+// TEMPO card (G4) — one colour cycle, one run derivation, one meter label.
+import { clusterColor, meterLabel, METERS, structureRuns } from '../../utils/structureStrip';
 import DialogShell from './DialogShell';
 
 const FIELD =
@@ -20,26 +23,12 @@ const LABEL = 'mb-1 block text-xs text-[#8b8b92]';
 
 const ANALYSIS_FAILED = 'Beat analysis did not produce a usable grid for this document.';
 
-/** One colour per cluster label, cycled — the structure strip's only job is to
- * make "these bars belong together" legible before the user commits. */
-const CLUSTER_COLORS = ['#26c6da', '#e0a458', '#7e57c2', '#66bb6a', '#ef5350', '#42a5f5'];
-
-const METERS: { value: string; beatsPerBar: number }[] = [
-  { value: '3/4', beatsPerBar: 3 },
-  { value: '4/4', beatsPerBar: 4 },
-  { value: '6/8', beatsPerBar: 6 },
-];
-
 /** `m:ss` — the coarse grain every length in this dialog is expressed in
  * (durations are bar-quantised anyway, so milliseconds would be noise). */
 function formatMmss(samples: number, sampleRate: number): string {
   const total = Number.isFinite(samples) ? Math.max(0, Math.round(samples / sampleRate)) : 0;
   const minutes = Math.floor(total / 60);
   return `${minutes}:${String(total - minutes * 60).padStart(2, '0')}`;
-}
-
-function meterLabel(beatsPerBar: number): string {
-  return METERS.find((m) => m.beatsPerBar === beatsPerBar)?.value ?? `${beatsPerBar}/4`;
 }
 
 /** `deriveRemixFeatures`'s `ChromaResult` argument, rebuilt from the analysis
@@ -51,42 +40,6 @@ function chromaOf(analysis: RemixAnalysis) {
     numFrames: analysis.numChromaFrames,
     chromaRate: analysis.chromaRate,
   };
-}
-
-interface StructureRun {
-  cluster: number;
-  startSample: number;
-  endSample: number;
-  widthPercent: number;
-}
-
-/** One block per MAXIMAL RUN of consecutive bars sharing a cluster label. Bar
- * `m` spans `[barBoundary[m], barBoundary[m+1])` and is labelled `cluster[m]`,
- * so a run's duration is the distance between the first and last boundary it
- * covers and the widths sum to 100%. */
-function structureRuns(analysis: RemixAnalysis | null): StructureRun[] {
-  if (!analysis || analysis.numBars < 1) return [];
-  const { barBoundary, cluster, numBars } = analysis;
-  if (barBoundary.length < numBars + 1 || cluster.length < numBars) return [];
-  const total = barBoundary[numBars] - barBoundary[0];
-  if (!(total > 0)) return [];
-
-  const runs: StructureRun[] = [];
-  let start = 0;
-  for (let bar = 1; bar <= numBars; bar++) {
-    if (bar === numBars || cluster[bar] !== cluster[start]) {
-      const startSample = barBoundary[start];
-      const endSample = barBoundary[bar];
-      runs.push({
-        cluster: cluster[start],
-        startSample,
-        endSample,
-        widthPercent: ((endSample - startSample) / total) * 100,
-      });
-      start = bar;
-    }
-  }
-  return runs;
 }
 
 /**
@@ -435,7 +388,7 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
                   title={`${formatMmss(run.startSample, sampleRate)} – ${formatMmss(run.endSample, sampleRate)}`}
                   style={{
                     width: `${Math.round(run.widthPercent * 1000) / 1000}%`,
-                    backgroundColor: CLUSTER_COLORS[((run.cluster % CLUSTER_COLORS.length) + CLUSTER_COLORS.length) % CLUSTER_COLORS.length],
+                    backgroundColor: clusterColor(run.cluster),
                   }}
                 />
               ))}

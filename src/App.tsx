@@ -1,4 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { Flag, Folder, History as HistoryIcon, Info, Shuffle, Sparkles } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import WaveformView from './components/Editor/WaveformView';
 import SpectrogramView from './components/Editor/SpectrogramView';
 import MultitrackView from './components/Multitrack/MultitrackView';
@@ -15,10 +17,11 @@ import HistoryPanel from './components/Panels/HistoryPanel';
 import MarkersPanel from './components/Panels/MarkersPanel';
 import PropertiesPanel from './components/Panels/PropertiesPanel';
 import RemixPanel from './components/Panels/RemixPanel';
-import PanelShell from './components/Layout/PanelShell';
 import StatusBar from './components/Layout/StatusBar';
+import TempoCard from './components/Layout/TempoCard';
 import TitleBar from './components/Layout/TitleBar';
 import Toolbar from './components/Layout/Toolbar';
+import { ChromePill, GlassCard, IconTile } from './components/UI/glass';
 import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { getInFlightSaveCount } from './services/fileService';
@@ -28,15 +31,48 @@ import { installTestHooks } from './services/testHooks';
 import { stopAll } from './services/transportService';
 import { useAppStore } from './stores/appStore';
 
-// 'remix' is also reachable through `focusRemixPanel()` (dialogBus) the moment
-// a remix document is created, without the user finding the tab first.
-type SidebarTab = 'history' | 'markers' | 'properties' | 'remix';
-const SIDEBAR_TABS: { id: SidebarTab; label: string }[] = [
-  { id: 'history', label: 'History' },
-  { id: 'markers', label: 'Markers' },
-  { id: 'properties', label: 'Properties' },
-  { id: 'remix', label: 'Remix' },
+// G4: the two flat sidebars (left Files/Effects column + right tab strip)
+// became ONE right-edge icon rail driving a single glass panel card. The rail
+// IS the old tab strip restyled — same `sidebar-tabs` testid, same accessible
+// names, same `data-active-tab` mechanism — with Files and Effects as
+// additive entries now that the always-visible left column is retired
+// (user-approved via the 2026-07-28 mockup). 'remix' is also reachable
+// through `focusRemixPanel()` (dialogBus) the moment a remix document is
+// created, without the user finding the rail entry first.
+type SidebarTab = 'files' | 'effects' | 'markers' | 'history' | 'properties' | 'remix';
+const SIDEBAR_TABS: { id: SidebarTab; label: string; Icon: LucideIcon }[] = [
+  { id: 'files', label: 'Files', Icon: Folder },
+  { id: 'effects', label: 'Effects', Icon: Sparkles },
+  { id: 'markers', label: 'Markers', Icon: Flag },
+  { id: 'history', label: 'History', Icon: HistoryIcon },
+  { id: 'properties', label: 'Properties', Icon: Info },
+  { id: 'remix', label: 'Remix', Icon: Shuffle },
 ];
+
+// Vitrine IconSidebar.tsx rail-button anatomy, verbatim: 42px tile, radius 12,
+// idle chrome text; interactive hover/press live in .glass-rail-btn
+// (index.css). Active = accent-soft tile + accent-ring border + accent glyph +
+// glow — the glow derives from the accent token (ruling 2), where Vitrine
+// hardcodes its blue.
+const railBtn: CSSProperties = {
+  width: 42,
+  height: 42,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  borderRadius: 12,
+  border: '1px solid transparent',
+  background: 'transparent',
+  color: 'var(--glass-text-chrome-idle)',
+  cursor: 'pointer',
+};
+
+const railBtnActive: CSSProperties = {
+  background: 'var(--accent-soft)',
+  border: '1px solid var(--accent-ring)',
+  color: 'var(--accent)',
+  boxShadow: '0 0 14px var(--accent-ring)',
+};
 
 // Populate the effect registry and its menu commands once at module load — before
 // the first render — so the Effects menu and panel are fully built on first paint.
@@ -57,6 +93,8 @@ export default function App() {
   const [tempoOpen, setTempoOpen] = useState(false);
   const [remixOpen, setRemixOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
+  const activeTab = SIDEBAR_TABS.find((t) => t.id === sidebarTab) ?? SIDEBAR_TABS[0];
+  const ActiveIcon = activeTab.Icon;
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
@@ -121,14 +159,6 @@ export default function App() {
           merged into the status pill below. */}
       <Toolbar />
       <div className="flex min-h-0 flex-1">
-        <div className="flex w-[240px] flex-col border-r border-[#3a3a42] bg-[#232328]">
-          <PanelShell title="Files">
-            <FilesPanel />
-          </PanelShell>
-          <PanelShell title="Effects">
-            <EffectsPanel />
-          </PanelShell>
-        </div>
         <div className="flex min-w-0 flex-1 flex-col bg-[#1a1a1e]">
           {view === 'multitrack' ? (
             <MultitrackView />
@@ -142,33 +172,72 @@ export default function App() {
             </div>
           )}
         </div>
-        <div className="flex w-[280px] flex-col border-l border-[#3a3a42] bg-[#232328]">
-          <div className="flex shrink-0 border-b border-[#3a3a42]" data-testid="sidebar-tabs">
-            {SIDEBAR_TABS.map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setSidebarTab(tab.id)}
-                className={`flex-1 border-b-2 px-2 py-1.5 text-xs font-semibold uppercase tracking-wide transition-colors ${
-                  sidebarTab === tab.id
-                    ? 'border-[#26c6da] text-[#26c6da]'
-                    : 'border-transparent text-[#8b8b92] hover:text-[#d4d4d8]'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-          <div
-            className="min-h-0 flex-1 overflow-auto"
+
+        {/* G4 card column (mockup `.col`, 348px): the persistent TEMPO card
+            (hidden until an analysis exists) above ONE glass panel card for
+            the rail's active entry. The card hugs its content and scrolls
+            internally when it outgrows the column (scroll containment). */}
+        <div
+          className="flex min-h-0 w-[348px] shrink-0 flex-col"
+          style={{ gap: 14, padding: '8px 2px 10px 0' }}
+        >
+          <TempoCard />
+          <GlassCard
             data-testid="sidebar-panel"
             data-active-tab={sidebarTab}
+            className="flex min-h-0 flex-col"
+            style={{ flex: '0 1 auto', overflow: 'hidden' }}
           >
-            {sidebarTab === 'history' && <HistoryPanel />}
-            {sidebarTab === 'markers' && <MarkersPanel />}
-            {sidebarTab === 'properties' && <PropertiesPanel />}
-            {sidebarTab === 'remix' && <RemixPanel />}
-          </div>
+            <div
+              className="flex shrink-0 items-center"
+              style={{
+                padding: '13px 16px',
+                gap: 11,
+                background: 'rgba(0,0,0,.3)',
+                borderBottom: '1px solid var(--glass-border)',
+              }}
+            >
+              <IconTile>
+                <ActiveIcon size={15} />
+              </IconTile>
+              <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--glass-text-title)' }}>
+                {activeTab.label}
+              </span>
+            </div>
+            <div className="min-h-0 overflow-auto">
+              {sidebarTab === 'files' && <FilesPanel />}
+              {sidebarTab === 'effects' && <EffectsPanel />}
+              {sidebarTab === 'history' && <HistoryPanel />}
+              {sidebarTab === 'markers' && <MarkersPanel />}
+              {sidebarTab === 'properties' && <PropertiesPanel />}
+              {sidebarTab === 'remix' && <RemixPanel />}
+            </div>
+          </GlassCard>
+        </div>
+
+        {/* G4 icon rail (Vitrine IconSidebar anatomy on a ChromePill): the
+            old tab strip's testid and accessible names live here now. */}
+        <div className="flex shrink-0 flex-col justify-center" style={{ padding: '0 12px 0 10px' }}>
+          <ChromePill
+            data-testid="sidebar-tabs"
+            className="flex flex-col items-center"
+            style={{ padding: '10px 8px', gap: 6 }}
+          >
+            {SIDEBAR_TABS.map(({ id, label, Icon }) => (
+              <button
+                key={id}
+                type="button"
+                aria-label={label}
+                title={label}
+                aria-pressed={sidebarTab === id}
+                onClick={() => setSidebarTab(id)}
+                className={`glass-rail-btn${sidebarTab === id ? ' is-active' : ''}`}
+                style={{ ...railBtn, ...(sidebarTab === id ? railBtnActive : null) }}
+              >
+                <Icon size={20} />
+              </button>
+            ))}
+          </ChromePill>
         </div>
       </div>
       <StatusBar />

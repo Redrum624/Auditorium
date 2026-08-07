@@ -452,6 +452,26 @@
   color: var(--glass-text-title);
 }
 
+/* ------------------------------------------------------------------------- */
+/* G4 icon rail: Vitrine's .glass-rail-btn interactions, ported verbatim.    */
+/* Layout stays inline on each button (App.tsx railBtn); hover lift, idle    */
+/* hover fill and press scale live here. Active (.is-active) keeps its       */
+/* accent tile from the inline style — hover only lifts it.                  */
+/* ------------------------------------------------------------------------- */
+.glass-rail-btn {
+  transition: transform 150ms ease, background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+.glass-rail-btn:hover {
+  transform: scale(1.06);
+}
+.glass-rail-btn:hover:not(.is-active) {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--glass-text-chrome-primary);
+}
+.glass-rail-btn:active {
+  transform: scale(0.98);
+}
+
 html,
 body,
 #root {

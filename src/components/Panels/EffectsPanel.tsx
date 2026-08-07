@@ -2,6 +2,7 @@ import { getAllEffects } from '../../effects/EffectRegistry';
 import type { EffectDefinition } from '../../effects/types';
 import { openEffectDialog } from '../../services/dialogBus';
 import { useAppStore } from '../../stores/appStore';
+import { SectionLabel } from '../UI/glass';
 
 /** Groups effects by category, preserving the getAllEffects() sort order. */
 function groupByCategory(effects: EffectDefinition[]): [string, EffectDefinition[]][] {
@@ -33,9 +34,9 @@ export default function EffectsPanel() {
     <div data-testid="effects-list" className="flex flex-col py-1 text-sm">
       {groups.map(([category, effects]) => (
         <div key={category}>
-          <div className="px-2 py-1 text-xs font-semibold uppercase tracking-wide text-[#8b8b92]">
-            {category}
-          </div>
+          {/* G4 glass restyle (styling only): the category header is the
+              shared SectionLabel primitive; rows get white-alpha hover. */}
+          <SectionLabel className="px-2 pb-1 pt-2">{category}</SectionLabel>
           <ul>
             {effects.map((e) => (
               <li key={e.id} data-testid="effects-item">
@@ -44,7 +45,7 @@ export default function EffectsPanel() {
                   disabled={!hasDoc}
                   onDoubleClick={() => hasDoc && openEffectDialog(e.id)}
                   title={hasDoc ? `Double-click to open ${e.name}` : 'Open a file first'}
-                  className="w-full truncate px-3 py-1 text-left text-[#d4d4d8] enabled:hover:bg-[#2e2e34] disabled:cursor-default disabled:text-[#8b8b92] disabled:opacity-50"
+                  className="mx-1 w-[calc(100%-0.5rem)] truncate rounded-lg px-2 py-1 text-left text-[#d4d4d8] enabled:hover:bg-white/5 disabled:cursor-default disabled:text-[#8b8b92] disabled:opacity-50"
                 >
                   {e.name}
                 </button>

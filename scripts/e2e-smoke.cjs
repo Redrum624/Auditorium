@@ -971,7 +971,49 @@ async function main() {
       console.log('Real-song validation: SKIPPED (optional local fixture not present)');
     }
 
-    // 13) Screenshot ---------------------------------------------------------
+    // 13) G4 icon rail + glass panel cards (v1.6) ---------------------------
+    // Drive the NEW right-edge rail through real DOM clicks: open the Files
+    // card, re-activate the analysed abab120.wav source through its row, and
+    // confirm the persistent TEMPO card (with its cluster structure strip,
+    // since a remix-level analysis exists for that document) is on screen —
+    // which also puts the full G4 layout into the screenshot below.
+    console.log('G4 rail: Files card, row activation, TEMPO card...');
+    const railCount = await page.evaluate(
+      () => document.querySelectorAll('[data-testid="sidebar-tabs"]').length
+    );
+    assert(railCount === 1, `exactly one icon rail is mounted (actual ${railCount})`);
+    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
+    const activeTabG4 = await page.evaluate(() =>
+      document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab')
+    );
+    assert(
+      activeTabG4 === 'files',
+      `the Files rail entry drives the panel card (expected 'files', actual '${activeTabG4}')`
+    );
+    const filesListCount = await page.evaluate(
+      () => document.querySelectorAll('[data-testid="files-list"]').length
+    );
+    assert(
+      filesListCount === 1,
+      `the Files list renders exactly once — the old left column is gone (actual ${filesListCount})`
+    );
+    await page.click('[data-testid="files-list"] button:has-text("abab120.wav")');
+    const g4Active = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      g4Active.activeName === 'abab120.wav',
+      `clicking a Files row activates that document (expected abab120.wav, actual ${g4Active.activeName})`
+    );
+    await page.waitForSelector('[data-testid="tempo-card"]', { timeout: 5000 });
+    assert(true, 'the persistent TEMPO card is visible for the analysed document');
+    const stripBlocks = await page.evaluate(
+      () => document.querySelectorAll('[data-testid="tempo-card-block"]').length
+    );
+    assert(
+      stripBlocks >= 1,
+      `the TEMPO card shows the cluster structure strip (expected >= 1 block, actual ${stripBlocks})`
+    );
+
+    // 14) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 

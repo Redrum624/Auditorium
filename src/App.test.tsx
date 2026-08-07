@@ -169,6 +169,63 @@ describe('right sidebar tabs (Task 23)', () => {
   });
 });
 
+describe('G4: icon rail + glass panel cards', () => {
+  it('mounts the rail exactly once, carrying all six panel entries', () => {
+    render(<App />);
+    const rails = screen.getAllByTestId('sidebar-tabs');
+    expect(rails).toHaveLength(1);
+    for (const name of ['Files', 'Effects', 'Markers', 'History', 'Properties', 'Remix']) {
+      expect(within(rails[0]).getByRole('button', { name })).toBeInTheDocument();
+    }
+  });
+
+  it('shows exactly one panel card at a time: Files/Effects bodies are hidden until selected', () => {
+    render(<App />);
+    // Default tab is History; the old always-visible left column is retired,
+    // so neither the Files body nor the Effects browser is mounted yet.
+    expect(screen.queryByText(/no files open/i)).not.toBeInTheDocument();
+    expect(screen.queryByTestId('effects-list')).not.toBeInTheDocument();
+
+    const rail = screen.getByTestId('sidebar-tabs');
+    fireEvent.click(within(rail).getByRole('button', { name: 'Files' }));
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'files');
+    expect(screen.getByText(/no files open/i)).toBeInTheDocument();
+
+    fireEvent.click(within(rail).getByRole('button', { name: 'Effects' }));
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'effects');
+    expect(screen.getByTestId('effects-list')).toBeInTheDocument();
+    expect(screen.queryByText(/no files open/i)).not.toBeInTheDocument();
+  });
+
+  it('double-clicking an effect in the Effects card still routes through the dialog bus (disabled without a doc)', () => {
+    render(<App />);
+    const rail = screen.getByTestId('sidebar-tabs');
+    fireEvent.click(within(rail).getByRole('button', { name: 'Effects' }));
+    // Without a document every effect row is disabled — the same enablement
+    // the old left-column browser had.
+    const items = screen.getAllByTestId('effects-item');
+    expect(items.length).toBeGreaterThan(0);
+    for (const item of items) {
+      expect(within(item).getByRole('button')).toBeDisabled();
+    }
+  });
+
+  it('marks the active rail entry with the accent tile class', () => {
+    render(<App />);
+    const rail = screen.getByTestId('sidebar-tabs');
+    expect(within(rail).getByRole('button', { name: 'History' })).toHaveClass('is-active');
+
+    fireEvent.click(within(rail).getByRole('button', { name: 'Markers' }));
+    expect(within(rail).getByRole('button', { name: 'Markers' })).toHaveClass('is-active');
+    expect(within(rail).getByRole('button', { name: 'History' })).not.toHaveClass('is-active');
+  });
+
+  it('does not render the tempo card when no analysis exists (and never starts one)', () => {
+    render(<App />);
+    expect(screen.queryByTestId('tempo-card')).not.toBeInTheDocument();
+  });
+});
+
 describe('view-change stops both playback engines (Task 23 / Task 22 review finding)', () => {
   it('calls stop on both PlaybackEngine and MultitrackPlayer when the view changes', () => {
     const peStop = jest.spyOn(playbackEngine, 'stop').mockImplementation(() => {});
