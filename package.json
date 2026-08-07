@@ -34,6 +34,9 @@
       "assets/icon.ico",
       "package.json"
     ],
+    "asarUnpack": [
+      "node_modules/onnxruntime-node/**"
+    ],
     "win": {
       "target": [
         {
@@ -79,5 +82,8 @@
     "typescript": "^5.9.3",
     "vite": "^7.3.6",
     "zustand": "^5.0.14"
+  },
+  "dependencies": {
+    "onnxruntime-node": "1.27.0"
   }
 }

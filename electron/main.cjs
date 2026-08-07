@@ -5,6 +5,8 @@ const { createCloseGuard } = require('./closeGuard.cjs');
 const { setAppPaths } = require('./writePathPolicy.cjs');
 const { isMediaAllowed } = require('./permissionPolicy.cjs');
 const { isPackagedGateOpen } = require('./prodGate.cjs');
+const { createStemManager, registerStemIpc } = require('./stemManager.cjs');
+const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs');
 
 app.setName('audition_app');
 
@@ -79,7 +81,18 @@ function createWindow() {
   return win;
 }
 
+// Stem-host self-test mode (S1): `--stem-selftest-out=<json>` runs the
+// packaged-app proof — spawn the inference utility process, run one segment,
+// write a JSON verdict, exit — with NO window and none of the normal app
+// surface. See electron/stemSelftest.cjs for the security stance.
+const stemSelftestArgs = parseStemSelftestArgs(process.argv);
+
 app.whenReady().then(() => {
+  if (stemSelftestArgs) {
+    void runStemSelftest({ app, ...stemSelftestArgs }).then((code) => app.exit(code));
+    return;
+  }
+
   setAppPaths({ appPath: app.getAppPath(), userData: app.getPath('userData') });
 
   // Grant ONLY microphone/audio capture ('media' restricted to audio media
@@ -100,6 +113,13 @@ app.whenReady().then(() => {
 
   createWindow();
   registerIpc(() => mainWindow);
+
+  // Stem separation (S1): the manager owns the model download and the
+  // inference utility-process lifetime; dispose on quit guarantees no orphan
+  // inference process outlives the app (plan ruling 7).
+  const stemManager = createStemManager({ userDataDir: app.getPath('userData') });
+  registerStemIpc({ ipcMain, manager: stemManager, getWin: () => mainWindow });
+  app.on('will-quit', () => stemManager.dispose());
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
