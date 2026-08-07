@@ -1,6 +1,8 @@
 import {
   partitionStems,
   ratioMaskBin,
+  ratioMaskBinInto,
+  spectralEnergyInto,
   colaWindowEnergy,
   DEFAULT_STEM_PARTITION_OPTIONS,
 } from './stemPartition';
@@ -259,10 +261,12 @@ describe('partitionStems — exact-sum guarantee (ruling 1 / ruling 4)', () => {
       `[stemPartition] exact-sum: ${exactSamples}/${totalSamples} samples bit-exact (${exactPct}%); ` +
         `worst |error| = ${worstAbs.toExponential(3)} (${worstDb.toFixed(1)} dBFS)`
     );
-    // Documented bound: float32 storage granularity, ≈ -300 dBFS.
-    expect(worstAbs).toBeLessThanOrEqual(1e-12);
-    // The overwhelming majority of samples are literally bit-exact.
-    expect(exactSamples / totalSamples).toBeGreaterThan(0.9);
+    // Documented bound: float32 storage granularity, ≈ -300 dBFS. Achieved
+    // 8.689e-16; asserted at 1e-14 — enough headroom for cross-machine float
+    // variation, tight enough that an exactness regression cannot hide.
+    expect(worstAbs).toBeLessThanOrEqual(1e-14);
+    // The overwhelming majority of samples are literally bit-exact (achieved 0.9974).
+    expect(exactSamples / totalSamples).toBeGreaterThan(0.99);
   });
 });
 
@@ -338,6 +342,258 @@ describe('ratioMaskBin — pure per-bin Wiener ratio mask', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// STEM CONTENT — the assertions that guard the "don't pollute one instrument
+// with another" constraint. Exact-sum is structurally BLIND to every finite
+// error here (the time-domain residual absorbs any of them), so each shipped
+// numeric path needs its own assertion on stem CONTENT, not just on the sum.
+// ---------------------------------------------------------------------------
+
+/** RMS over the interior (away from both ragged OLA ends). */
+function interiorRms(x: Float32Array, guard: number): number {
+  let acc = 0;
+  let n = 0;
+  for (let i = guard; i < x.length - guard; i++) {
+    acc += x[i] * x[i];
+    n++;
+  }
+  return n === 0 ? 0 : Math.sqrt(acc / n);
+}
+
+/**
+ * Energy-weighted spectral centroid, in bins — where a signal's energy sits on
+ * the frequency axis. Low-band content pulls it down, high-band content up.
+ */
+function spectralCentroid(x: Float32Array): number {
+  const { fftSize, hop } = DEFAULT_STEM_PARTITION_OPTIONS;
+  const f = stft(x, fftSize, hop);
+  let num = 0;
+  let den = 0;
+  for (const mag of f.frames) {
+    for (let k = 0; k < mag.length; k++) {
+      const e = mag[k] * mag[k];
+      num += k * e;
+      den += e;
+    }
+  }
+  return den === 0 ? 0 : num / den;
+}
+
+describe('spectralEnergyInto — the shipped |X|² law (partitionStems calls THIS)', () => {
+  it('computes re² + im² per bin — the imaginary term is load-bearing', () => {
+    const re = new Float32Array([3, 0, -1, 2]);
+    const im = new Float32Array([4, 5, 0, -2]);
+    const out = new Float32Array(4);
+    spectralEnergyInto(re, im, 4, out);
+    expect(out[0]).toBeCloseTo(25, 5); // 3²+4²
+    expect(out[1]).toBeCloseTo(25, 5); // 0²+5²  <- zero without the im term
+    expect(out[2]).toBeCloseTo(1, 5); // (-1)²+0²
+    expect(out[3]).toBeCloseTo(8, 5); // 2²+(-2)²
+  });
+
+  it('gives a purely-imaginary bin its full energy (not zero)', () => {
+    const re = new Float32Array([0]);
+    const im = new Float32Array([7]);
+    const out = new Float32Array(1);
+    spectralEnergyInto(re, im, 1, out);
+    expect(out[0]).toBeCloseTo(49, 5);
+  });
+
+  it('writes only the requested bin count', () => {
+    const re = new Float32Array([1, 1, 1, 1]);
+    const im = new Float32Array([0, 0, 0, 0]);
+    const out = new Float32Array(4);
+    spectralEnergyInto(re, im, 2, out);
+    expect(Array.from(out)).toEqual([1, 1, 0, 0]);
+  });
+});
+
+describe('ratioMaskBinInto — the shipped ratio law (allocation-free hot path)', () => {
+  it('agrees with the allocating ratioMaskBin wrapper', () => {
+    const e = new Float32Array([4, 1, 0.5, 0]);
+    const out = new Float32Array(4);
+    const sum = ratioMaskBinInto(e, 1e-10, out);
+    const ref = ratioMaskBin(e, 1e-10);
+    expect(Array.from(out)).toEqual(Array.from(ref));
+    let refSum = 0;
+    for (const v of ref) refSum += v;
+    expect(sum).toBeCloseTo(refSum, 12);
+  });
+
+  it('returns Σ masks and zeroes an all-silent bin', () => {
+    const out = new Float32Array(3);
+    const sum = ratioMaskBinInto(new Float32Array([0, 0, 0]), 1e-10, out);
+    expect(sum).toBe(0);
+    expect(Array.from(out)).toEqual([0, 0, 0]);
+  });
+});
+
+describe('partitionStems — the SHIPPED mask law, pinned end-to-end', () => {
+  // Two equal-amplitude sources at the SAME bin, in quadrature: a sine (purely
+  // IMAGINARY spectrum) and a cosine (purely REAL). The Wiener power law gives
+  // them equal energy -> masks 0.5/0.5. Dropping the imaginary term from the
+  // shipped energy collapses the sine's energy to ~0, handing the cosine
+  // everything — so this test pins the shipped |X|² through partitionStems.
+  const FFT = DEFAULT_STEM_PARTITION_OPTIONS.fftSize;
+  const BIN = 8; // multiple of 4 => identical phase alignment at hop = N/4
+  const len = 8192;
+
+  function buildQuadratureCase() {
+    const a = new Float32Array(len);
+    const b = new Float32Array(len);
+    const mix = new Float32Array(len);
+    for (let n = 0; n < len; n++) {
+      a[n] = 0.5 * Math.sin((2 * Math.PI * BIN * n) / FFT);
+      b[n] = 0.5 * Math.cos((2 * Math.PI * BIN * n) / FFT);
+      mix[n] = a[n] + b[n];
+    }
+    return { a, b, mix };
+  }
+
+  it('splits two equal-energy quadrature sources ~50/50 (imaginary term load-bearing)', () => {
+    const { a, b, mix } = buildQuadratureCase();
+    const res = partitionStems([mix], [[a], [b]]);
+    const rMix = interiorRms(mix, FFT);
+    const rA = interiorRms(res.stems[0][0], FFT);
+    const rB = interiorRms(res.stems[1][0], FFT);
+    // Equal energies -> equal shares. (Mutation: rA -> ~0, rB -> ~rMix.)
+    expect(rA / rB).toBeGreaterThan(0.95);
+    expect(rA / rB).toBeLessThan(1.05);
+    // Each stem carries ~half the mix.
+    expect(rA / rMix).toBeGreaterThan(0.45);
+    expect(rA / rMix).toBeLessThan(0.55);
+    expect(rB / rMix).toBeGreaterThan(0.45);
+    expect(rB / rMix).toBeLessThan(0.55);
+  });
+
+  it('keeps the sine source audible (a dropped imaginary term would silence it)', () => {
+    const { a, b, mix } = buildQuadratureCase();
+    const res = partitionStems([mix], [[a], [b]]);
+    const rMix = interiorRms(mix, FFT);
+    // The sine stem must hold real energy, not the ~0 a re²-only law would give.
+    expect(interiorRms(res.stems[0][0], FFT)).toBeGreaterThan(0.2 * rMix);
+  });
+});
+
+describe('partitionStems — the SHIPPED OLA normalizer, pinned end-to-end', () => {
+  // A single source whose estimate IS the mix gets mask ~1, so its stem is an
+  // UNMASKED analysis/synthesis round trip through partitionStems' own winSq
+  // path. Any gain error in that normalizer (e.g. dividing by winSq*2) shows up
+  // here as an amplitude error — while exact-sum stays green, because the
+  // residual silently absorbs the missing half.
+  const FFT = DEFAULT_STEM_PARTITION_OPTIONS.fftSize;
+
+  it('reconstructs the mix in the sole stem within the round-trip bound (unity gain)', () => {
+    const len = 20000;
+    const rand = makeRand(31337);
+    const x = new Float32Array(len);
+    for (let n = 0; n < len; n++) x[n] = rand();
+    const res = partitionStems([x], [[x], [zeros(len)], [zeros(len)], [zeros(len)]]);
+    let maxErr = 0;
+    for (let n = FFT; n < len - FFT; n++) maxErr = Math.max(maxErr, Math.abs(res.stems[0][0][n] - x[n]));
+    // eslint-disable-next-line no-console
+    console.log(
+      `[stemPartition] unmasked round trip THROUGH partitionStems: max|err| = ${maxErr.toExponential(3)} ` +
+        `(${(20 * Math.log10(maxErr + Number.MIN_VALUE)).toFixed(1)} dB)`
+    );
+    expect(maxErr).toBeLessThan(1e-4);
+    // Silent sources stay exactly silent.
+    for (let n = 0; n < len; n++) expect(res.stems[1][0][n]).toBe(0);
+  });
+
+  it('holds unity gain for a tone (RMS of the sole stem equals the mix)', () => {
+    const len = 12000;
+    const x = tone(len, 44100, 440, 0.8);
+    const res = partitionStems([x], [[x], [zeros(len)]]);
+    const rMix = interiorRms(x, FFT);
+    const rStem = interiorRms(res.stems[0][0], FFT);
+    // Mutating the normalizer (winSq*2) halves this ratio.
+    expect(rStem / rMix).toBeGreaterThan(0.99);
+    expect(rStem / rMix).toBeLessThan(1.01);
+  });
+});
+
+describe('partitionStems — stem content follows the estimates (band-split net)', () => {
+  it('routes the low-passed estimate the low band and the high-passed one the high band', () => {
+    const len = 16000;
+    const rand = makeRand(777);
+    const x = new Float32Array(len);
+    for (let n = 0; n < len; n++) x[n] = rand();
+    const [lp, hp] = bandSplit(x);
+    const res = partitionStems([x], [[lp], [hp]]);
+    const centMix = spectralCentroid(x);
+    const centLowStem = spectralCentroid(res.stems[0][0]);
+    const centHighStem = spectralCentroid(res.stems[1][0]);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[stemPartition] band-split content (centroid, bins): mix=${centMix.toFixed(1)} ` +
+        `lowStem=${centLowStem.toFixed(1)} highStem=${centHighStem.toFixed(1)}`
+    );
+    // The stems must be spectrally SEPARATED — the whole point of the masks.
+    // A corrupted mask law hands one source everything, collapsing both stems
+    // toward the mix's own centroid and killing this ordering.
+    expect(centLowStem).toBeLessThan(centMix);
+    expect(centHighStem).toBeGreaterThan(centMix);
+    expect(centHighStem).toBeGreaterThan(centLowStem * 2);
+    // And each stem must actually carry energy (neither is silenced).
+    expect(interiorRms(res.stems[0][0], 1024)).toBeGreaterThan(0);
+    expect(interiorRms(res.stems[1][0], 1024)).toBeGreaterThan(0);
+  });
+});
+
+describe('partitionStems — input validation', () => {
+  const good = () => new Float32Array(64);
+
+  it('throws on a NaN sample in an estimate (never produces NaN audio)', () => {
+    const mix = [good()];
+    const bad = good();
+    bad[10] = NaN;
+    expect(() => partitionStems(mix, [[bad], [good()]])).toThrow(/estimates\[0\]\[0\]\[10\] is not finite/);
+  });
+
+  it('throws on an Infinity sample in an estimate', () => {
+    const mix = [good()];
+    const bad = good();
+    bad[5] = Infinity;
+    expect(() => partitionStems(mix, [[bad]])).toThrow(/not finite/);
+  });
+
+  it('throws on a non-finite sample in the mix', () => {
+    const bad = good();
+    bad[3] = NaN;
+    expect(() => partitionStems([bad], [[good()]])).toThrow(/mix\[0\]\[3\] is not finite/);
+  });
+
+  it('accepts finite input at the rails (±1.0) without throwing', () => {
+    const x = good();
+    x.fill(1);
+    x[0] = -1;
+    expect(() => partitionStems([x], [[x]])).not.toThrow();
+  });
+
+  it('throws on a channel-count mismatch between mix and an estimate', () => {
+    expect(() => partitionStems([good(), good()], [[good()]])).toThrow(/has 1 channels, expected 2/);
+  });
+
+  it('throws on a length mismatch between mix and an estimate', () => {
+    expect(() => partitionStems([good()], [[new Float32Array(32)]])).toThrow(/length 32 != mix\[0\] length 64/);
+  });
+
+  it('throws on an empty mix or an empty estimate set', () => {
+    expect(() => partitionStems([], [[good()]])).toThrow(/at least one channel/);
+    expect(() => partitionStems([good()], [])).toThrow(/at least one source/);
+  });
+
+  it('throws on a non-power-of-two fftSize, a bad hop, or a non-positive eps', () => {
+    const mix = [good()];
+    const est = [[good()]];
+    expect(() => partitionStems(mix, est, { fftSize: 1000 })).toThrow(/power of two/);
+    expect(() => partitionStems(mix, est, { fftSize: 1024, hop: 0 })).toThrow(/hop must be in/);
+    expect(() => partitionStems(mix, est, { fftSize: 1024, hop: 2048 })).toThrow(/hop must be in/);
+    expect(() => partitionStems(mix, est, { eps: 0 })).toThrow(/eps must be > 0/);
+  });
+});
+
 describe('COLA — analysis·synthesis window overlap-adds to a constant', () => {
   it('Hann² tiles to a constant in the interior at the default hop (75% overlap)', () => {
     const { fftSize, hop } = DEFAULT_STEM_PARTITION_OPTIONS;
@@ -352,8 +608,8 @@ describe('COLA — analysis·synthesis window overlap-adds to a constant', () =>
       max = Math.max(max, energy[n]);
     }
     expect(max - min).toBeLessThan(1e-6);
-    // Hann² at hop = N/4 overlap-adds to 1.5.
-    expect(min).toBeGreaterThan(0);
+    // Hann² at hop = N/4 overlap-adds to exactly 1.5 — pin the constant, not just ">0".
+    expect(min).toBeCloseTo(1.5, 5);
     // eslint-disable-next-line no-console
     console.log(`[stemPartition] COLA interior constant (Hann², hop=N/4) = ${min.toFixed(6)}`);
   });

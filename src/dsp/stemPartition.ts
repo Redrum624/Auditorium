@@ -75,6 +75,23 @@
  *   delivered source order with Residual last (ruling 6's Drums, Bass, Vocals,
  *   Other, Residual) for the accumulation to match. (Every fixture keeps
  *   |mix| ≤ 1, so the mixdown's ±1 hard-clamp is an identity on the reconstruction.)
+ *
+ *   ⚠ MIXDOWN IS NOT TRANSPARENT FOR MONO SOURCES — S5 OWNS THE COMPENSATION.
+ *   The identity above is about the SAMPLES this module returns. Routing them
+ *   through `mixdownSession` preserves it only for STEREO stems, whose balance
+ *   law is unity at centre (ruling 6). A MONO stem hits the constant-power mono
+ *   pan law instead (gL = gR = cos(π/4) ≈ 0.7071 at centre), so the mixdown of
+ *   untouched mono stems reconstructs the source at ≈ 0.7071× — measured
+ *   −13.8 dBFS (0.205 absolute) reconstruction error, i.e. the identity FAILS
+ *   without compensation. That is a mixdown pan-law property, not a partition
+ *   defect: S2's own sum stays exact. S5 must compensate on the mono path
+ *   (its acceptance already says "mono pan law path checked, compensated if
+ *   needed — measure, don't assume") before asserting its mixdown-identity test.
+ *
+ *   INPUT CONTRACT: every sample of `mix` and `estimates` MUST be finite.
+ *   Non-finite input (NaN/±Infinity from a model or resampler bug) THROWS — a
+ *   NaN would otherwise propagate to NaN masks, stems and residual and silently
+ *   void the guarantee. Callers (S3) sanitise or fail before calling.
  * ─────────────────────────────────────────────────────────────────────────────
  *
  * Reuses the project's existing FFT (`./fft`) and periodic Hann (`./windows`);
@@ -123,25 +140,60 @@ export const DEFAULT_STEM_PARTITION_OPTIONS = {
 } as const;
 
 /**
- * Wiener ratio mask for a single time-frequency bin, given the per-source
- * spectral ENERGIES |S_i|². Returns masks m_i = e_i / (Σ e_j + eps), each in
- * [0,1] with Σ m_i ≤ 1; all-zero energies yield all-zero masks (no NaN).
+ * Spectral energy |X[k]|² = re² + im² for the non-negative-frequency bins of an
+ * FFT'd frame, written into `out` (no allocation).
  *
- * Pure and allocation-light — exported so the mask law is directly testable.
+ * THE SHIPPED SEPARATION LAW LIVES HERE. `partitionStems` calls this function —
+ * it does not keep its own copy — so mutating it (e.g. dropping the imaginary
+ * term) changes what actually ships and is caught by the tests that pin it.
+ * That matters because exact-sum is structurally BLIND to mask errors (the
+ * time-domain residual absorbs any of them): these two helpers are the only
+ * code-level defence of the "don't pollute one instrument with another"
+ * constraint (ruling 1's quality target).
  */
-export function ratioMaskBin(energies: Float32Array, eps: number): Float32Array {
+export function spectralEnergyInto(re: Float32Array, im: Float32Array, bins: number, out: Float32Array): void {
+  for (let k = 0; k < bins; k++) out[k] = re[k] * re[k] + im[k] * im[k];
+}
+
+/**
+ * Wiener ratio mask for a single time-frequency bin, given the per-source
+ * spectral ENERGIES |S_i|², written into `out` (no allocation — this is the
+ * per-bin hot path, called bins×frames×channels times).
+ *
+ * m_i = e_i / (Σ e_j + eps), each in [0,1] with Σ m_i ≤ 1; all-zero energies
+ * yield all-zero masks (no NaN). Returns Σ m_i so callers can track the
+ * invariant without a second pass. Also part of the SHIPPED law — see
+ * {@link spectralEnergyInto}.
+ */
+export function ratioMaskBinInto(energies: Float32Array, eps: number, out: Float32Array): number {
   const n = energies.length;
-  const out = new Float32Array(n);
   let denom = eps;
   for (let i = 0; i < n; i++) denom += energies[i];
-  if (denom <= 0) return out; // defensive: eps>0 makes this unreachable
+  if (denom <= 0) {
+    // Defensive: eps>0 makes this unreachable.
+    out.fill(0, 0, n);
+    return 0;
+  }
+  let sum = 0;
   for (let i = 0; i < n; i++) {
     let m = energies[i] / denom;
     // Clamp against float drift so the invariant m ∈ [0,1] holds exactly.
     if (m < 0) m = 0;
     else if (m > 1) m = 1;
     out[i] = m;
+    sum += out[i]; // read back: Σ is measured on the f32 masks actually used
   }
+  return sum;
+}
+
+/**
+ * Allocating convenience wrapper over {@link ratioMaskBinInto} — same law, one
+ * fresh Float32Array per call. Kept for direct testing and ad-hoc callers; the
+ * hot path uses the `…Into` form with reusable scratch.
+ */
+export function ratioMaskBin(energies: Float32Array, eps: number): Float32Array {
+  const out = new Float32Array(energies.length);
+  ratioMaskBinInto(energies, eps, out);
   return out;
 }
 
@@ -209,6 +261,28 @@ export function partitionStems(
     }
   }
 
+  // Finiteness validation — FAIL LOUDLY. A NaN/Infinity sample (a model or
+  // resampler bug upstream) would otherwise propagate NaN masks -> NaN stems ->
+  // NaN residual and silently destroy the "no sound removed" guarantee, which is
+  // the worst possible outcome: unplayable audio that still claims to be a
+  // partition. One O(samples) scan, negligible beside the STFT work.
+  for (let c = 0; c < channels; c++) {
+    const mixC = mix[c];
+    for (let n = 0; n < mixC.length; n++) {
+      if (!Number.isFinite(mixC[n])) {
+        throw new Error(`partitionStems: mix[${c}][${n}] is not finite (${mixC[n]})`);
+      }
+    }
+    for (let s = 0; s < S; s++) {
+      const estC = estimates[s][c];
+      for (let n = 0; n < estC.length; n++) {
+        if (!Number.isFinite(estC[n])) {
+          throw new Error(`partitionStems: estimates[${s}][${c}][${n}] is not finite (${estC[n]})`);
+        }
+      }
+    }
+  }
+
   const win = hann(fftSize);
   const bins = fftSize / 2 + 1;
   const half = fftSize / 2;
@@ -236,6 +310,9 @@ export function partitionStems(
     estEnergy.push(new Float32Array(bins));
     maskFrame.push(new Float32Array(bins));
   }
+  // Per-bin gather/scatter scratch for the shared mask law (length = #sources).
+  const binEnergy = new Float32Array(S);
+  const binMask = new Float32Array(S);
 
   for (let c = 0; c < channels; c++) {
     const len = mix[c].length;
@@ -266,21 +343,18 @@ export function partitionStems(
           reEst[i] = idx < len ? estC[idx] * win[i] : 0;
         }
         fft(reEst, imEst);
-        const e = estEnergy[s];
-        for (let k = 0; k < bins; k++) e[k] = reEst[k] * reEst[k] + imEst[k] * imEst[k];
+        // Shared law (see spectralEnergyInto) — no local copy of |X|².
+        spectralEnergyInto(reEst, imEst, bins, estEnergy[s]);
       }
 
-      // --- Ratio masks, bin-major so Σ over sources is available cheaply. ---
+      // --- Ratio masks, bin-major: gather the per-source energies for bin k,
+      //     apply the SHARED mask law, scatter the masks back. ---
       for (let k = 0; k < bins; k++) {
-        let denom = eps;
-        for (let s = 0; s < S; s++) denom += estEnergy[s][k];
-        let binSum = 0;
+        for (let s = 0; s < S; s++) binEnergy[s] = estEnergy[s][k];
+        const binSum = ratioMaskBinInto(binEnergy, eps, binMask);
         for (let s = 0; s < S; s++) {
-          let m = estEnergy[s][k] / denom;
-          if (m < 0) m = 0;
-          else if (m > 1) m = 1;
+          const m = binMask[s];
           maskFrame[s][k] = m;
-          binSum += m;
           if (collectStats) {
             if (m < maskMin) maskMin = m;
             if (m > maskMax) maskMax = m;
