@@ -1,4 +1,10 @@
-import { crossfadeGains, normalizedCorrelation, bestAlignLag, renderRemix } from './remixRender';
+import {
+  crossfadeGains,
+  normalizedCorrelation,
+  bestAlignLag,
+  effectiveCrossfadeMs,
+  renderRemix,
+} from './remixRender';
 import type { RemixPlan } from './remixRender';
 import type { RemixAnalysis } from './remixFeatures';
 import type { RemixSegment, RemixJoin } from './remixPlan';
@@ -292,6 +298,83 @@ describe('renderRemix -- length invariance', () => {
       expect(result.shapes[0]).toBe('pre-roll');
     }, 15000);
   }
+});
+
+// ---------------------------------------------------------------------------
+// 3b. effectiveCrossfadeMs -- the quarter-beat cap, stated rather than silent
+// ---------------------------------------------------------------------------
+
+/** A tracked beat grid at `bpm` -- the median inter-beat interval IS the beat
+ * period, which is exactly what the cap is derived from. */
+function beatGrid(bpm: number, count = 64): Int32Array {
+  const period = Math.round((60 / bpm) * SR);
+  return Int32Array.from({ length: count }, (_, i) => i * period);
+}
+
+describe('effectiveCrossfadeMs -- what the requested width really becomes', () => {
+  it('returns the request untouched while the quarter-beat bound is wider (120 BPM: the whole 5-120 ms UI range fits)', () => {
+    const beats = beatGrid(120); // period 22050 -> bound 5512 samples = 125.0 ms
+    // Precision 1 (0.05 ms), not 9: the only residual is the request's own
+    // rounding to a whole sample (5 ms -> 221 samples -> 5.011 ms), which is a
+    // real width, not a cap.
+    for (const requested of [0, 5, 25, 60, 120]) {
+      expect(effectiveCrossfadeMs(requested, beats, SR)).toBeCloseTo(requested, 1);
+    }
+    // Exact where the request lands on a whole sample.
+    expect(effectiveCrossfadeMs(120, beats, SR)).toBe(120);
+  });
+
+  it('reports the quarter-beat cap rather than the request above ~125 BPM (defect 4a)', () => {
+    const beats = beatGrid(150); // period 17640 -> bound 4410 samples = 100.0 ms exactly
+    expect(effectiveCrossfadeMs(120, beats, SR)).toBeCloseTo(100, 9);
+    expect(effectiveCrossfadeMs(100, beats, SR)).toBeCloseTo(100, 9);
+    // Below the cap nothing is taken away -- the readout must not cry wolf.
+    expect(effectiveCrossfadeMs(60, beats, SR)).toBeCloseTo(60, 9);
+  });
+
+  it('applies no beat cap at all when fewer than two beats were tracked (no period to bound against)', () => {
+    expect(effectiveCrossfadeMs(120, new Int32Array(0), SR)).toBeCloseTo(120, 9);
+    expect(effectiveCrossfadeMs(120, Int32Array.from([1000]), SR)).toBeCloseTo(120, 9);
+  });
+
+  it('is the width renderRemix actually applies: a request above the cap renders IDENTICALLY to one at the cap, and differently below it', () => {
+    // Same construction as the length-invariance fixture (section 3), with a
+    // 150 BPM beat grid so the cap (100 ms) bites inside the UI range.
+    const frames = [10, 30, 50, 70, 90];
+    const boundarySamples = frames.map(sampleForFrame);
+    const barBoundary = Int32Array.from(boundarySamples);
+    const analyzedEndSample = boundarySamples[4] + 2000;
+    const sourceLen = analyzedEndSample + 3000;
+    const analysis = makeAnalysis({
+      numBars: 4,
+      barBoundary,
+      analyzedEndSample,
+      beatSamples: beatGrid(150),
+    });
+
+    const seg0: RemixSegment = { start: boundarySamples[0], end: boundarySamples[1] };
+    const seg1: RemixSegment = { start: boundarySamples[2], end: boundarySamples[3] };
+    const outputSample =
+      boundarySamples[0] +
+      (seg0.end - seg0.start) +
+      (seg1.end - seg1.start) +
+      (analyzedEndSample - seg1.end);
+    const plan = makePlan({ segments: [seg0, seg1], joins: [join(1, 2)], outputSample });
+    const source: Float32Array[] = [sine(220, sourceLen)];
+
+    const capMs = effectiveCrossfadeMs(120, analysis.beatSamples, SR);
+    expect(capMs).toBeCloseTo(100, 9); // fixture sanity -- the cap really bites
+    expect(capMs).toBeLessThan(120);
+
+    const atRequest = renderRemix(source, analysis, plan, { sampleRate: SR, crossfadeMs: 120 });
+    const atCap = renderRemix(source, analysis, plan, { sampleRate: SR, crossfadeMs: capMs });
+    const belowCap = renderRemix(source, analysis, plan, { sampleRate: SR, crossfadeMs: 60 });
+
+    expect(Array.from(atRequest.channels[0])).toEqual(Array.from(atCap.channels[0]));
+    // DISCRIMINATION: the equality above must come from the cap, not from
+    // `crossfadeMs` being ignored altogether.
+    expect(Array.from(belowCap.channels[0])).not.toEqual(Array.from(atCap.channels[0]));
+  }, 15000);
 });
 
 // ---------------------------------------------------------------------------

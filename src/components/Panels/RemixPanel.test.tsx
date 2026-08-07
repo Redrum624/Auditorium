@@ -77,11 +77,18 @@ function makePlan(joins: RemixJoin[]): RemixPlan {
   };
 }
 
-/** Only the three fields the panel reads — the panel never touches the typed
- * arrays, and building a real 64-bar analysis here would test `remixFeatures`,
- * not this component. */
-function makeAnalysis(): RemixAnalysis {
-  return { bpm: 124, beatsPerBar: 4, numBars: 64 } as unknown as RemixAnalysis;
+/** Only the fields the panel reads — building a real 64-bar analysis here would
+ * test `remixFeatures`, not this component. `beatSamples` IS one of them: the
+ * crossfade readout derives the renderer's quarter-beat cap from it, so it has
+ * to be a real grid at `bpm` rather than a placeholder. */
+function makeAnalysis(bpm = 124): RemixAnalysis {
+  const period = Math.round((60 / bpm) * SR);
+  return {
+    bpm,
+    beatsPerBar: 4,
+    numBars: 64,
+    beatSamples: Int32Array.from({ length: 64 }, (_, i) => i * period),
+  } as unknown as RemixAnalysis;
 }
 
 function makeSession(
@@ -513,6 +520,43 @@ describe('RemixPanel — header actions (acceptance 9)', () => {
     });
     expect(mockUpdate).toHaveBeenCalledTimes(1);
     expect(mockUpdate).toHaveBeenCalledWith(doc.id, { crossfadeMs: 60 });
+  });
+
+  // Defect 4a: `renderRemix` clamps the requested width to a quarter of the
+  // median beat period, so above ~125 BPM the top of this 5-120 ms slider is
+  // silently clipped. The readout must say so.
+  it('shows the width actually applied when the quarter-beat cap bites (150 BPM, 120 ms requested -> 100 ms)', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        analysis: makeAnalysis(150),
+        options: { ...makeSession(doc.id, SIX_JOINS).options, crossfadeMs: 120 },
+      })
+    );
+
+    render(<RemixPanel />);
+    expect(screen.getByTestId('remix-crossfade-readout')).toHaveTextContent('120 → 100 ms');
+    expect(screen.getByTestId('remix-crossfade-capped')).toHaveTextContent(/100 ms/);
+  });
+
+  it('does NOT cry wolf when the request fits under the cap', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS)); // 124 BPM, 25 ms
+
+    render(<RemixPanel />);
+    expect(screen.getByTestId('remix-crossfade-readout')).toHaveTextContent('25 ms');
+    expect(screen.queryByTestId('remix-crossfade-capped')).toBeNull();
+  });
+
+  it('updates the effective readout live while dragging, before the release commits', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS, { analysis: makeAnalysis(150) }));
+
+    render(<RemixPanel />);
+    fireEvent.change(screen.getByTestId('remix-crossfade'), { target: { value: '120' } });
+
+    expect(mockUpdate).not.toHaveBeenCalled();
+    expect(screen.getByTestId('remix-crossfade-readout')).toHaveTextContent('120 → 100 ms');
   });
 });
 

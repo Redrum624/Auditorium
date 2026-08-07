@@ -473,6 +473,33 @@ describe('RemixDialog', () => {
     expect(screen.getByRole('button', { name: 'Create Remix' })).toBeDisabled();
   });
 
+  // Defect 4a: the renderer clamps the requested crossfade to a quarter of the
+  // median beat period, so the field's own 5-120 ms range over-promises above
+  // ~125 BPM. The dialog states the width that will really be applied.
+  it('14b. states the applied crossfade when the quarter-beat cap bites, and stays quiet when it does not', async () => {
+    seedDoc();
+    // 150 BPM -> beat period 17640 samples -> cap 4410 samples = 100 ms.
+    const fast = makeAnalysis({
+      bpm: 150,
+      beatSamples: Int32Array.from({ length: NUM_BARS * 4 + 1 }, (_, i) => i * 17640),
+    });
+    await renderReady(fast);
+
+    // 25 ms (the default) is nowhere near the cap — no note.
+    expect(screen.queryByTestId('remix-crossfade-capped')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('remix-crossfade'), { target: { value: '120' } });
+    expect(screen.getByTestId('remix-crossfade-capped')).toHaveTextContent(/100 ms/);
+  });
+
+  it('14c. leaves the crossfade field alone at 120 BPM, where the whole 5-120 ms range fits', async () => {
+    seedDoc();
+    await renderReady(); // 120 BPM -> cap 125 ms
+
+    fireEvent.change(screen.getByTestId('remix-crossfade'), { target: { value: '120' } });
+    expect(screen.queryByTestId('remix-crossfade-capped')).toBeNull();
+  });
+
   it('15. renders nothing without an active document', () => {
     render(<RemixDialog onClose={jest.fn()} />);
     expect(screen.queryByTestId('remix-dialog')).not.toBeInTheDocument();

@@ -14,6 +14,7 @@ import {
   useRemixVersion,
   type ToggleLockRefusal,
 } from '../../services/remixService';
+import { effectiveCrossfadeMs } from '../../dsp/remixRender';
 import type { JoinCostTerms } from '../../dsp/remixCost';
 
 /**
@@ -111,6 +112,14 @@ const PIN_LIMIT_TITLE = `Pin limit reached (${MAX_LOCKED_JOINS} pins) — unpin 
 const UNDO_HINT =
   'Every adjustment is undoable: it pushes a "Remix" entry to History, plus a "Remix Markers" entry whenever the edit points change — so one adjustment is usually two Ctrl+Z presses, and one when the arrangement records no edit points.';
 
+/** Why the requested width can be more than the width applied — the renderer's
+ * own quarter-beat clamp (`remixRender.ts`'s `effectiveCrossfadeMs`), stated
+ * rather than left to be discovered. The applied figure is an upper bound per
+ * join: a join against a file edge, or on a segment shorter than the fade, is
+ * narrowed further by the renderer's own edge clamps. */
+const CROSSFADE_CAP_TITLE =
+  'A crossfade wider than a quarter of the beat period would smear across the beat, so the renderer caps it there. Individual edits at the very start or end of the source can be narrower still.';
+
 const LOCK_REFUSAL: Record<ToggleLockRefusal, string> = {
   'limit-reached': PIN_LIMIT_TITLE,
   stale: 'Source audio changed — adjustments unavailable.',
@@ -201,6 +210,13 @@ export default function RemixPanel() {
   };
 
   const crossfadeMs = crossfadeDraft ?? options.crossfadeMs;
+  // Defect 4a: `renderRemix` clamps the requested width to a quarter of the
+  // median beat period, so from ~125 BPM up the top of this 5-120 ms slider is
+  // unreachable. The cap is deliberate (a wider crossfade smears across the
+  // beat) and is NOT relaxed here — it is only made visible, from the SAME
+  // function the renderer clamps with, over this session's own tracked beats.
+  const appliedMs = Math.round(effectiveCrossfadeMs(crossfadeMs, analysis.beatSamples, doc.sampleRate));
+  const crossfadeCapped = appliedMs < crossfadeMs;
   const commitCrossfade = (): void => {
     const value = crossfadeDraft;
     if (value === null) return;
@@ -290,8 +306,23 @@ export default function RemixPanel() {
             onBlur={commitCrossfade}
             className="min-w-0 flex-1"
           />
-          <span className="w-12 shrink-0 text-right tabular-nums">{crossfadeMs} ms</span>
+          <span
+            data-testid="remix-crossfade-readout"
+            className="w-20 shrink-0 text-right tabular-nums"
+          >
+            {crossfadeCapped ? `${crossfadeMs} → ${appliedMs} ms` : `${crossfadeMs} ms`}
+          </span>
         </label>
+        {crossfadeCapped && (
+          <div
+            data-testid="remix-crossfade-capped"
+            title={CROSSFADE_CAP_TITLE}
+            className="text-xs text-[#8b8b92]"
+          >
+            {appliedMs} ms applied — a quarter of this track's beat period is the widest fade that
+            stays inside the beat.
+          </div>
+        )}
 
         {droppedPins > 0 && (
           <div data-testid="remix-dropped-pins" className="text-xs text-[#ffa726]">

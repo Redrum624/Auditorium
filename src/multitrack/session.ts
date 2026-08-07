@@ -17,7 +17,7 @@ export interface Track {
   muted: boolean;
   solo: boolean;
   armed: boolean;
-  clips: Clip[]; // sorted by startSample, non-overlapping within a track
+  clips: Clip[]; // sorted by startSample; MAY overlap — see the overlap contract on sessionStore's addClip
 }
 
 export interface Session {

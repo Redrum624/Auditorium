@@ -191,6 +191,43 @@ describe('addClip', () => {
     const clips = useSessionStore.getState().session.tracks.find((t) => t.id === trackId)!.clips;
     expect(clips.map((c) => c.id)).toEqual([early.id, mid.id, late.id]);
   });
+
+  // Pins TODAY's behaviour, deliberately: `addClip` accepts an overlap (see its
+  // overlap contract in sessionStore.ts) while `moveClip` nudges clear of one.
+  // v1.8 task X5 makes same-track overlap first-class and crossfaded — when
+  // this expectation changes, that must read as the deliberate behaviour change
+  // it is, not as an accident.
+  it('accepts a clip overlapping its neighbour — only moveClip nudges clear', () => {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const sitting = createClip({ documentId: 'doc-1', startSample: 1000, offsetSample: 0, lengthSample: 1000 });
+    const overlapping = createClip({ documentId: 'doc-1', startSample: 1500, offsetSample: 0, lengthSample: 1000 });
+
+    store.addClip(trackId, sitting);
+    store.addClip(trackId, overlapping);
+
+    const clips = useSessionStore.getState().session.tracks.find((t) => t.id === trackId)!.clips;
+    expect(clips).toHaveLength(2);
+    expect(clips.map((c) => c.startSample)).toEqual([1000, 1500]); // unmoved: 1500 < 1000+1000
+
+    // The same position requested through moveClip IS nudged clear.
+    useSessionStore.getState().moveClip(overlapping.id, trackId, 1500);
+    expect(findClip(overlapping.id)!.startSample).toBe(2000);
+  });
+
+  it('trimClip may extend a clip over its neighbour — no overlap check either', () => {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const first = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000 });
+    const second = createClip({ documentId: 'doc-1', startSample: 1000, offsetSample: 0, lengthSample: 1000 });
+    store.addClip(trackId, first);
+    store.addClip(trackId, second);
+
+    useSessionStore.getState().trimClip(first.id, 'end', 1800); // 800 samples into `second`
+
+    expect(findClip(first.id)!.lengthSample).toBe(1800);
+    expect(findClip(second.id)!.startSample).toBe(1000);
+  });
 });
 
 describe('moveClip', () => {

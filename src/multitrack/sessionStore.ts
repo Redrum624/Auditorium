@@ -29,9 +29,25 @@ export interface SessionActions {
     id: string,
     patch: Partial<Pick<Track, 'volumeDb' | 'pan' | 'muted' | 'solo' | 'armed'>>
   ): void;
-  addClip(trackId: string, clip: Clip): void; // inserts sorted; caller guarantees no overlap (UI enforces)
+  /** OVERLAP CONTRACT — what actually happens, replacing an earlier comment
+   * here that claimed "caller guarantees no overlap (UI enforces)". Nothing
+   * enforces that:
+   *  - `addClip` inserts sorted and ACCEPTS a clip overlapping its neighbour.
+   *    Insert Active File (`menuActions.ts`'s `insertActiveDocAsClip`) drops
+   *    the clip at the cursor, and punch-in recording (`multitrackRecord.ts`)
+   *    at the punch-in sample, neither checking what is already there.
+   *  - `trimClip` can likewise extend a clip over its neighbour.
+   *  - `moveClip` alone nudges clear, via `resolveOverlap` — its only caller.
+   * An overlap that reaches the audio path is mixed as an unshaped RAW SUM,
+   * hard-clamped to +/-1 afterwards (`mixdown.ts`), so it can clip.
+   *
+   * This inconsistency is recorded, not endorsed: v1.8 task X5 makes same-track
+   * overlap first-class and crossfaded, unifying all three paths. The tests in
+   * `sessionStore.test.ts` pin today's behaviour so that change reads as
+   * deliberate rather than accidental. */
+  addClip(trackId: string, clip: Clip): void; // inserts sorted; an overlapping clip is accepted
   moveClip(clipId: string, toTrackId: string, newStartSample: number): void; // clamps >=0; nudges to nearest free gap
-  trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32
+  trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour
   removeClip(clipId: string): void;
   /** Sets a clip's gain trim in dB, clamped to [-24, 24]. No-op for an unknown
    * clip id. Additive (Task 23): wired to the PropertiesPanel's clip gain input. */
@@ -67,13 +83,16 @@ function insertSorted(clips: Clip[], clip: Clip): Clip[] {
 
 /** Resolves an overlap by nudging `requestedStart` forward to the nearest
  * position where a clip of `length` samples does not overlap any clip in
- * `clips` (which must be sorted ascending by startSample and already
- * non-overlapping among themselves — i.e. the moving clip removed).
+ * `clips` (sorted ascending by startSample, with the moving clip removed).
+ * `moveClip` is its ONLY caller — see the overlap contract on `addClip` for
+ * the paths that create overlaps instead of resolving them.
  *
- * A single forward pass suffices: whenever the candidate is nudged past
- * clip[i]'s end, clip[i+1] cannot start earlier than that (the track's clips
- * are non-overlapping), so later clips can only push the candidate further
- * forward, never require re-checking an earlier clip. */
+ * A single forward pass suffices, and does so even when `clips` themselves
+ * overlap (they can): `candidate` only ever moves forward, to the end of a
+ * clip it was found to overlap, and every clip is tested against the candidate
+ * position current at the time — a clip ending before the candidate cannot
+ * overlap it, and one ending after pushes it further forward. So on exit the
+ * candidate clears all of them, with no need to re-check an earlier clip. */
 function resolveOverlap(clips: Clip[], length: number, requestedStart: number): number {
   let candidate = Math.max(0, requestedStart);
   for (const c of clips) {

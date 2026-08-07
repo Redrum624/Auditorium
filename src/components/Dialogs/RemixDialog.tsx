@@ -5,6 +5,7 @@ import { useAppStore } from '../../stores/appStore';
 import { parseTime } from '../../utils/timeFormat';
 import { DEFAULT_REMIX_WEIGHTS } from '../../dsp/remixCost';
 import { deriveRemixFeatures, type RemixAnalysis } from '../../dsp/remixFeatures';
+import { effectiveCrossfadeMs } from '../../dsp/remixRender';
 import {
   DEFAULT_MAX_REPEAT_FACTOR,
   planRemix,
@@ -210,6 +211,16 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
       hint = plan.message;
     }
   }
+
+  // Defect 4a: `renderRemix` clamps the requested crossfade to a quarter of the
+  // median beat period, so this field's 5-120 ms range over-promises from
+  // ~125 BPM up. The clamp is deliberate and stays; what changes is that the
+  // width actually applied is stated, derived from THIS analysis's own tracked
+  // beats through the renderer's own function — never a per-BPM guess here.
+  const appliedCrossfadeMs = analysis
+    ? Math.round(effectiveCrossfadeMs(crossfadeMs, analysis.beatSamples, sampleRate))
+    : crossfadeMs;
+  const crossfadeCapped = appliedCrossfadeMs < crossfadeMs;
 
   const canCreate =
     !busy && !noTempo && tempoConfirmed && targetSample !== null && plan !== null && plan.ok;
@@ -585,6 +596,16 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
                   value={crossfadeMs}
                   onChange={(e) => setCrossfadeMs(Number(e.target.value))}
                 />
+                {crossfadeCapped && (
+                  <p
+                    data-testid="remix-crossfade-capped"
+                    className="mt-1 text-xs"
+                    title="A crossfade wider than a quarter of the beat period would smear across the beat, so the renderer caps it there. Individual edits at the very start or end of the source can be narrower still."
+                    style={{ color: 'var(--glass-text-label)' }}
+                  >
+                    {`→ applies ${appliedCrossfadeMs} ms (quarter-beat cap)`}
+                  </p>
+                )}
               </div>
               <div className="flex-1">
                 <FieldLabel htmlFor="remix-phrase">Phrase length (bars)</FieldLabel>

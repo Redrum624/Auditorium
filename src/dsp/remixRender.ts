@@ -406,6 +406,33 @@ function medianBeatPeriodSample(beatSamples: Int32Array): number {
   return median(diffs);
 }
 
+/** The crossfade width `renderRemix` starts from, in SAMPLES: the requested
+ * `crossfadeMs` clamped to a quarter of the median beat period. The bound is
+ * DELIBERATE (a crossfade wider than a quarter-beat smears across beats), so
+ * it is never relaxed -- but it is not the caller's guess either, which is
+ * why it lives in one function both the renderer and the UI read. */
+function crossfadeBaseSample(requestedMs: number, beatSamples: Int32Array, sampleRate: number): number {
+  const requested = Math.round((Math.max(0, requestedMs) / 1000) * sampleRate);
+  return Math.max(0, Math.min(requested, Math.floor(medianBeatPeriodSample(beatSamples) / 4)));
+}
+
+/** The crossfade width, in ms, that `renderRemix` will really apply for a
+ * requested `crossfadeMs` on this analysis -- i.e. the request after the
+ * quarter-beat clamp. Exported for the UI (RemixPanel / RemixDialog), which
+ * must state what the user is getting rather than echo what they asked for:
+ * at 150 BPM a requested 120 ms is 100 ms, and above ~125 BPM the top of the
+ * 5-120 ms control is capped.
+ *
+ * An UPPER BOUND per join, not a promise: an individual join whose segment is
+ * shorter than this, or that sits against a file edge, is narrowed further by
+ * `clampCentredX` / `clampPreRollX` (and a centred join is rounded down to an
+ * even sample count). Those depend on per-join geometry the control cannot
+ * summarise in one number; the quarter-beat clamp is the one that applies to
+ * every join of the arrangement. */
+export function effectiveCrossfadeMs(requestedMs: number, beatSamples: Int32Array, sampleRate: number): number {
+  return (crossfadeBaseSample(requestedMs, beatSamples, sampleRate) / sampleRate) * 1000;
+}
+
 /** Inverse of the ODF FRAME ATTRIBUTION CONTRACT (`tempoCore.ts` /
  * `remixFeatures.ts`'s `resampleOdfBarPeak` doc comment): `odf` is FLUX, so
  * the frame whose flux peaks for an attack at original-domain `sample` is
@@ -538,7 +565,9 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   const sourceLen = source[0].length;
   const numCh = source.length;
 
-  const xBase = Math.max(0, Math.min(Math.round((crossfadeMs / 1000) * sr), Math.floor(medianBeatPeriodSample(analysis.beatSamples) / 4)));
+  // Shared with the UI via `effectiveCrossfadeMs` so the width the Remix
+  // controls report and the width rendered here cannot drift apart.
+  const xBase = crossfadeBaseSample(crossfadeMs, analysis.beatSamples, sr);
 
   const onsetStrengths = boundaryOnsetStrengths(analysis);
   const onsetMedian = median(Array.from(onsetStrengths));
