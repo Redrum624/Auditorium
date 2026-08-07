@@ -27,10 +27,15 @@
  *                                             reference), channelCount 1|2.
  *   {type:'audio', id, offset, channels}    — deliver planar Float32Array
  *                                             audio for [offset, offset+len).
- *                                             Any order, any slicing; the host
- *                                             tracks total delivered samples.
- *   {type:'run', id}                        — all audio delivered; run the
- *                                             segment loop.
+ *                                             Any order, any slicing; overlap
+ *                                             is permitted (a re-delivered
+ *                                             range overwrites). The host
+ *                                             tracks COVERAGE — the union of
+ *                                             delivered ranges — never a bare
+ *                                             sample count.
+ *   {type:'run', id}                        — refused unless coverage is
+ *                                             exactly [0, totalSamples); then
+ *                                             runs the segment loop.
  *   {type:'cancel', id}                     — abort. Takes effect between
  *                                             segments (inference on a segment
  *                                             is not interruptible; the
@@ -75,12 +80,16 @@ const {
   extractFinalized,
 } = require('./stemSegmentation.cjs');
 
-/** Trust-boundary sanity cap on job length: 1 hour at the model rate. The
- * accumulators for a job this size are already ~1.2 GB; anything larger is a
- * malformed/hostile request, not a real document (the app itself has no
- * 1-hour-plus separation use case — and the plan's no-600 s-cap rule is
- * about covering whole real tracks, which sit far below this). */
-const MAX_TOTAL_SAMPLES = MODEL_SAMPLE_RATE * 3600;
+/** Trust-boundary cap on job length: 30 minutes at the model rate.
+ * Arithmetic (fix round 1, LOW): per input sample this process holds
+ * 8 stem-accumulator floats (32 B) + 1 weight float (4 B) + up to 2 input
+ * floats (8 B) = 44 B, so 30 min = 44100·1800 ≈ 79.4 M samples ≈ 3.5 GB of
+ * buffers, on top of ORT's measured ~5 GB inference arena ≈ 8.5 GB worst
+ * case — the most a 16–32 GB machine can genuinely tolerate alongside the
+ * app and the OS. (1 hour would be ≈ 12 GB and start paging.) The plan's
+ * no-600 s-cap rule is about covering whole real TRACKS, which sit far
+ * below 30 minutes; anything above this is a malformed/hostile request. */
+const MAX_TOTAL_SAMPLES = MODEL_SAMPLE_RATE * 1800;
 
 // Brand check, not instanceof: a Float32Array that crossed a realm boundary
 // (structured clone over the MessagePort) must still validate.
@@ -164,7 +173,7 @@ function createStemHost({ ort, postMessage, exit }) {
       msg.totalSamples > MAX_TOTAL_SAMPLES
     ) {
       protocolError(
-        `separate: totalSamples must be an integer in [1, ${MAX_TOTAL_SAMPLES}], got ${msg.totalSamples}`,
+        `separate: totalSamples must be an integer in [1, ${MAX_TOTAL_SAMPLES}] — audio longer than 30 minutes at ${MODEL_SAMPLE_RATE} Hz cannot be separated in one job — got ${msg.totalSamples}`,
         msg.id
       );
       return;
@@ -176,10 +185,31 @@ function createStemHost({ ort, postMessage, exit }) {
       channelCount: msg.channelCount,
       totalSamples: msg.totalSamples,
       channels,
-      received: 0,
+      /** Sorted, disjoint [start, end) ranges actually delivered — the
+       * completeness gate checks COVERAGE, never a sample count (fix round
+       * 1, MED-1: duplicate delivery of the same range must not stand in
+       * for the undelivered rest of the track). */
+      covered: [],
       running: false,
       cancelled: false,
     };
+  }
+
+  /** Inserts [start, end) into the sorted disjoint interval list, merging
+   * neighbours/overlaps. The manager sends ordered contiguous slices, so
+   * the list stays at one element in practice. */
+  function addCoverage(list, start, end) {
+    let i = 0;
+    while (i < list.length && list[i][1] < start) i++;
+    let ns = start;
+    let ne = end;
+    let j = i;
+    while (j < list.length && list[j][0] <= ne) {
+      ns = Math.min(ns, list[j][0]);
+      ne = Math.max(ne, list[j][1]);
+      j++;
+    }
+    list.splice(i, j - i, [ns, ne]);
   }
 
   function handleAudio(msg) {
@@ -208,7 +238,7 @@ function createStemHost({ ort, postMessage, exit }) {
       return;
     }
     for (let c = 0; c < job.channelCount; c++) job.channels[c].set(msg.channels[c], msg.offset);
-    job.received += len;
+    addCoverage(job.covered, msg.offset, msg.offset + len);
   }
 
   /** Builds the (1, 2, SEGMENT_SAMPLES) model input for one segment:
@@ -233,9 +263,13 @@ function createStemHost({ ort, postMessage, exit }) {
       protocolError('run: already running', job.id);
       return;
     }
-    if (job.received < job.totalSamples) {
+    const fullyCovered =
+      job.covered.length === 1 && job.covered[0][0] === 0 && job.covered[0][1] === job.totalSamples;
+    if (!fullyCovered) {
+      const delivered = job.covered.reduce((n, [s, e]) => n + (e - s), 0);
+      const firstGap = job.covered.length === 0 || job.covered[0][0] > 0 ? 0 : job.covered[0][1];
       protocolError(
-        `run: only ${job.received} of ${job.totalSamples} samples delivered`,
+        `run: audio coverage incomplete — only ${delivered} of ${job.totalSamples} samples delivered (first missing sample at ${firstGap}); duplicated ranges do not count`,
         job.id
       );
       return;

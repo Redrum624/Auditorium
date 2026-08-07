@@ -192,6 +192,48 @@ describe('message validation (trust boundary)', () => {
     expect(err.message).toMatch(/500/); // says how much is missing/received
   });
 
+  test('duplicate-region delivery must NOT pass the completeness gate (coverage, not count)', async () => {
+    // Review probe (fix round 1, MED-1): delivering [0,100000) twice for a
+    // 200,000-sample job matches the total on a sample COUNT but leaves the
+    // second half silent — run must refuse loudly, never post done.
+    const { host, posted } = makeHost();
+    await initReady(host, posted);
+    await host.handleMessage({ type: 'separate', id: 20, sampleRate: 44100, channelCount: 2, totalSamples: 200000 });
+    await host.handleMessage({ type: 'audio', id: 20, offset: 0, channels: [new Float32Array(100000), new Float32Array(100000)] });
+    await host.handleMessage({ type: 'audio', id: 20, offset: 0, channels: [new Float32Array(100000), new Float32Array(100000)] });
+    await host.handleMessage({ type: 'run', id: 20 });
+    const err = await waitFor(posted, 'error');
+    expect(err.stage).toBe('protocol');
+    expect(err.message).toMatch(/100000/); // names the first missing sample
+    expect(posted.find((m) => m.type === 'done')).toBeUndefined();
+  });
+
+  test('a mid-track gap is refused even when later ranges arrive', async () => {
+    const { host, posted } = makeHost();
+    await initReady(host, posted);
+    await host.handleMessage({ type: 'separate', id: 21, sampleRate: 44100, channelCount: 2, totalSamples: 1000 });
+    await host.handleMessage({ type: 'audio', id: 21, offset: 0, channels: [new Float32Array(300), new Float32Array(300)] });
+    await host.handleMessage({ type: 'audio', id: 21, offset: 700, channels: [new Float32Array(300), new Float32Array(300)] });
+    await host.handleMessage({ type: 'run', id: 21 });
+    const err = await waitFor(posted, 'error');
+    expect(err.stage).toBe('protocol');
+    expect(err.message).toMatch(/300/); // first missing sample is 300
+    expect(posted.find((m) => m.type === 'done')).toBeUndefined();
+  });
+
+  test('overlapping delivery that genuinely covers the whole track is accepted', async () => {
+    // The contract allows overlap (re-delivered ranges overwrite); what run
+    // requires is COVERAGE of [0, totalSamples).
+    const { host, posted } = makeHost();
+    await initReady(host, posted);
+    await host.handleMessage({ type: 'separate', id: 22, sampleRate: 44100, channelCount: 2, totalSamples: 1000 });
+    await host.handleMessage({ type: 'audio', id: 22, offset: 0, channels: [new Float32Array(600), new Float32Array(600)] });
+    await host.handleMessage({ type: 'audio', id: 22, offset: 400, channels: [new Float32Array(600), new Float32Array(600)] });
+    await host.handleMessage({ type: 'run', id: 22 });
+    await waitFor(posted, 'done');
+    expect(posted.filter((m) => m.type === 'error')).toHaveLength(0);
+  });
+
   test('a second separate while a job is loaded is refused (single-job host)', async () => {
     const { host, posted } = makeHost();
     await initReady(host, posted);

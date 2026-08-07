@@ -139,6 +139,29 @@ describe('downloadModel', () => {
     ).rejects.toThrow(/3 attempts.*offline/s);
     expect(impl.calls).toHaveLength(3);
   });
+
+  // Fix round 1, MED-3: a hostile/broken server must not be able to balloon
+  // main-process memory — the download aborts the moment it exceeds the pin.
+  test('aborts as soon as streamed bytes exceed the pinned size — no retry, no buffering-on', async () => {
+    const impl = scriptedRequests([
+      {
+        total: 10,
+        chunks: [Buffer.alloc(10), Buffer.alloc(10), Buffer.alloc(10_000)], // lies, then streams on
+      },
+    ]);
+    await expect(
+      downloadModel({ requestImpl: impl, maxBytes: 10, sleep: async () => {} })
+    ).rejects.toThrow(/exceed.*pinned|pinned.*exceed/is);
+    expect(impl.calls).toHaveLength(1); // oversize is NOT retryable
+  });
+
+  test('aborts immediately when content-length already exceeds the pin', async () => {
+    const impl = scriptedRequests([{ total: 999_999_999, chunks: [Buffer.alloc(4)] }]);
+    await expect(
+      downloadModel({ requestImpl: impl, maxBytes: 100, sleep: async () => {} })
+    ).rejects.toThrow(/exceed.*pinned|pinned.*exceed/is);
+    expect(impl.calls).toHaveLength(1);
+  });
 });
 
 describe('ensureModel', () => {
@@ -228,6 +251,42 @@ describe('ensureModel', () => {
     });
     const v = await verifyModelFile(dest, { expectedSha256: FAKE_SHA, expectedBytes: FAKE_MODEL.length });
     expect(v).toEqual({ ok: true });
+  });
+
+  test('a stream that overruns the pinned size aborts (ensureModel wires the pin as the cap)', async () => {
+    const dest = getModelPath(tmpDir);
+    await expect(
+      ensureModel({
+        ...opts(),
+        requestImpl: scriptedRequests([
+          { total: FAKE_MODEL.length, chunks: [FAKE_MODEL, Buffer.from('overrun-bytes')] },
+        ]),
+      })
+    ).rejects.toThrow(/exceed.*pinned|pinned.*exceed/is);
+    expect(fs.existsSync(dest)).toBe(false);
+  });
+
+  // Fix round 1, LOW-5: a corrupt model behind a file lock must surface the
+  // intended message, not a raw EPERM.
+  test('a corrupt model that cannot be deleted reports clearly', async () => {
+    const dest = getModelPath(tmpDir);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, Buffer.concat([FAKE_MODEL, Buffer.from('corruption')]));
+    const lockedFs = {
+      ...fs,
+      createReadStream: fs.createReadStream.bind(fs),
+      promises: {
+        ...fs.promises,
+        unlink: async () => {
+          const e = new Error('EPERM: operation not permitted');
+          e.code = 'EPERM';
+          throw e;
+        },
+      },
+    };
+    await expect(
+      ensureModel({ ...opts(), fsImpl: lockedFs, requestImpl: scriptedRequests([]) })
+    ).rejects.toThrow(/failed verification.*could not be deleted/is);
   });
 });
 
@@ -434,6 +493,61 @@ describe('createStemManager.startSeparation', () => {
     const result = await done;
     expect(result).toEqual({ ok: false, cancelled: true });
     expect(children[0].killed).toBe(true);
+  });
+
+  // Fix round 1, LOW-3: terminal error replies are id-gated like every other
+  // message type — a stale job's error must not settle the current run. An
+  // id-less error (init-stage/protocol, which carry no job id) still settles.
+  test('a host error carrying a DIFFERENT job id is dropped', async () => {
+    const { manager, children } = managerWithChild();
+    const done = manager.startSeparation({ sampleRate: MODEL_SAMPLE_RATE, channels: stereo(10) });
+    await waitUntil(() => children.length === 1, 'child spawn');
+    children[0].emit('message', { type: 'error', stage: 'run', id: 999, message: 'stale-job error' });
+    expect(manager.isRunning()).toBe(true); // still alive
+    manager.cancel();
+    const result = await done;
+    expect(result).toEqual({ ok: false, cancelled: true });
+  });
+
+  test('an id-less host error (init/protocol stage) still settles the run', async () => {
+    const { manager, children } = managerWithChild();
+    const done = manager.startSeparation({ sampleRate: MODEL_SAMPLE_RATE, channels: stereo(10) });
+    await waitUntil(() => children.length === 1, 'child spawn');
+    children[0].emit('message', { type: 'error', stage: 'init', message: 'bad model file' });
+    const result = await done;
+    expect(result).toMatchObject({ ok: false, error: expect.stringContaining('bad model file') });
+  });
+
+  // Fix round 1, LOW-4: dispose is a LATCH — the manager is dead afterwards.
+  test('startSeparation after dispose is refused', async () => {
+    const { manager } = managerWithChild();
+    manager.dispose();
+    const result = await manager.startSeparation({ sampleRate: MODEL_SAMPLE_RATE, channels: stereo(10) });
+    expect(result.ok).toBe(false);
+    expect(result.error).toMatch(/disposed/i);
+  });
+
+  test('dispose aborts an in-flight ensureModel download', async () => {
+    const modelDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stem-dl-abort-'));
+    try {
+      let started = false;
+      const manager = createStemManager({
+        userDataDir: modelDir,
+        expectedSha256: FAKE_SHA,
+        expectedBytes: FAKE_MODEL.length,
+        utilityProcessFactory: () => fakeChild(),
+        requestImpl: (url, handlers) =>
+          new Promise(() => {
+            started = true; // hangs forever, like a stalled-but-open socket
+          }),
+      });
+      const download = manager.ensureModel();
+      await waitUntil(() => started, 'download start');
+      manager.dispose();
+      await expect(download).rejects.toThrow(/abort/i);
+    } finally {
+      fs.rmSync(modelDir, { recursive: true, force: true });
+    }
   });
 });
 

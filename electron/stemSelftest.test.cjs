@@ -10,7 +10,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 
-const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs');
+const { runStemSelftest, parseStemSelftestArgs, validateSelftestOutPath } = require('./stemSelftest.cjs');
 const { STRIDE_SAMPLES, STEM_COUNT, MODEL_CHANNELS } = require('./stemSegmentation.cjs');
 
 // The happy path synthesises and scans a full 7.8 s segment (~2 M floats) —
@@ -18,15 +18,21 @@ const { STRIDE_SAMPLES, STEM_COUNT, MODEL_CHANNELS } = require('./stemSegmentati
 // worker past Jest's 5 s default.
 jest.setTimeout(60000);
 
-let tmpDir;
+let tmpDir; // stands in for userData
+let tmpTemp; // stands in for the OS temp dir
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'stem-selftest-'));
+  tmpTemp = fs.mkdtempSync(path.join(os.tmpdir(), 'stem-selftest-temp-'));
 });
 afterEach(() => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
+  fs.rmSync(tmpTemp, { recursive: true, force: true });
 });
 
-const fakeApp = () => ({ isPackaged: true, getPath: () => tmpDir });
+const fakeApp = () => ({
+  isPackaged: true,
+  getPath: (name) => (name === 'temp' ? tmpTemp : tmpDir),
+});
 
 describe('parseStemSelftestArgs', () => {
   test('null when the switch is absent', () => {
@@ -45,7 +51,75 @@ describe('parseStemSelftestArgs', () => {
   });
 });
 
+describe('validateSelftestOutPath (fix round 1, MED-2: the out path is attacker-reachable argv)', () => {
+  const bases = () => ({ tempDir: tmpTemp, userDataDir: tmpDir });
+
+  test('accepts paths under temp and under userData, resolved', () => {
+    expect(validateSelftestOutPath(path.join(tmpTemp, 'v.json'), bases())).toBe(path.join(tmpTemp, 'v.json'));
+    expect(validateSelftestOutPath(path.join(tmpDir, 'sub', 'v.json'), bases())).toBe(
+      path.join(tmpDir, 'sub', 'v.json')
+    );
+  });
+
+  test('rejects UNC paths (no outbound SMB coercion from a signed binary)', () => {
+    expect(() => validateSelftestOutPath('\\\\attacker\\share\\x.json', bases())).toThrow(/UNC|not permitted/i);
+    expect(() => validateSelftestOutPath('//attacker/share/x.json', bases())).toThrow(/UNC|not permitted/i);
+  });
+
+  test('rejects anything outside the allowed bases', () => {
+    expect(() => validateSelftestOutPath('C:\\Windows\\evil.json', bases())).toThrow(/not permitted/i);
+    expect(() => validateSelftestOutPath(path.join(os.homedir(), 'x.json'), bases())).toThrow(/not permitted/i);
+  });
+
+  test('rejects relative-escape forms after resolution', () => {
+    expect(() => validateSelftestOutPath(path.join(tmpTemp, '..', 'escape.json'), bases())).toThrow(/not permitted/i);
+  });
+
+  test('rejects a prefix-sibling of an allowed base (no startsWith confusion)', () => {
+    expect(() => validateSelftestOutPath(`${tmpTemp}-evil\\x.json`, bases())).toThrow(/not permitted/i);
+  });
+
+  test('rejects non-string and empty', () => {
+    expect(() => validateSelftestOutPath('', bases())).toThrow();
+    expect(() => validateSelftestOutPath(null, bases())).toThrow();
+  });
+});
+
 describe('runStemSelftest', () => {
+  test('an out path outside the allowed bases is refused: exit 1, nothing written', async () => {
+    const evil = path.join(tmpTemp, '..', `stem-escape-${process.pid}.json`);
+    const code = await runStemSelftest({
+      app: fakeApp(),
+      outPath: evil,
+      managerFactory: () => ({ startSeparation: async () => ({ ok: true, totalSegments: 1 }), dispose: () => {} }),
+    });
+    expect(code).toBe(1);
+    expect(fs.existsSync(evil)).toBe(false);
+  });
+
+  test('the verdict whitelists its fields: no modelPath echo, attacker strings never reach the file', async () => {
+    const outPath = path.join(tmpTemp, 'verdict.json');
+    const marker = 'ATTACKER-CONTROLLED-STRING';
+    const managerFactory = () => ({
+      startSeparation: async ({ modelPath }) => ({
+        ok: false,
+        error: `model verification failed (missing: ${modelPath}) — re-download required`,
+      }),
+      dispose: () => {},
+    });
+    const code = await runStemSelftest({
+      app: fakeApp(),
+      outPath,
+      modelPath: `C:\\${marker}\\model.onnx`,
+      managerFactory,
+    });
+    expect(code).toBe(1);
+    const raw = fs.readFileSync(outPath, 'utf8');
+    expect(raw).not.toContain(marker);
+    const verdict = JSON.parse(raw);
+    expect(verdict).not.toHaveProperty('modelPath');
+    expect(verdict.error).toMatch(/verification failed/);
+  });
   test('happy path: verdict ok, exit code 0', async () => {
     const outPath = path.join(tmpDir, 'verdict.json');
     const managerFactory = () => ({

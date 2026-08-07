@@ -15,6 +15,7 @@
 // Exit codes: 0 proof passed · 1 selftest failed · 2 prerequisites missing.
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 
@@ -30,7 +31,9 @@ const UNPACKED_ORT = path.join(
   'onnxruntime-node'
 );
 const MODEL = path.join(REPO, 'test-assets', 'models', 'htdemucs_fp16weights.onnx');
-const OUT = path.join(REPO, 'test-output', 'stem-selftest.json');
+// Under the OS temp dir: the selftest validates its out path against
+// temp/userData (MED-2) and refuses anything else — including repo dirs.
+const OUT = path.join(os.tmpdir(), `auditorium-stem-selftest-${process.pid}.json`);
 
 function fail(code, msg) {
   console.error(`stem-packaged-proof: ${msg}`);

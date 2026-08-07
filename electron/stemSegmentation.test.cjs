@@ -174,7 +174,7 @@ describe('overlap-add accumulation + progressive finalize (reference: out/weight
     return { left, right, plan, flushes };
   }
 
-  test('identity model reconstructs the input except the reference\'s zero-weight endpoints', () => {
+  test('identity model reconstructs the input except the reference\'s zero-weight first sample', () => {
     const { left, right, flushes } = runPipeline(() => 1);
     // Reassemble the flushed regions into full stem tracks.
     const stems = [];
@@ -191,7 +191,10 @@ describe('overlap-add accumulation + progressive finalize (reference: out/weight
     expect(covered).toBe(total);
 
     // Reference quirk, ported faithfully: sample 0 has window weight 0 in the
-    // ONLY chunk that covers it, so it normalises to exactly 0.
+    // ONLY chunk that covers it, so it normalises to exactly 0. (Sample 0 is
+    // the one and only such sample: the LAST sample always lands either in
+    // the window's all-ones region or under a later chunk's fade-in ≥ some
+    // positive weight — verified weight[last] === 1 in review.)
     for (let sc = 0; sc < STEM_COUNT * MODEL_CHANNELS; sc++) {
       expect(stems[sc][0]).toBe(0);
     }
@@ -228,32 +231,90 @@ describe('overlap-add accumulation + progressive finalize (reference: out/weight
     }
   });
 
-  test('progressive extraction equals the reference all-at-end normalisation', () => {
-    // Reference computes out /= max(weight, 1e-8) over the WHOLE track at the
-    // end; our per-segment flush must be numerically identical because each
-    // flushed sample has already received every contribution.
-    const scale = (s, c) => (s === 1 && c === 1 ? 0.5 : 1);
-    const { flushes, plan, left, right } = runPipeline(scale);
-
-    // Reference re-computation, single pass at the end.
+  test('progressive pipeline is BIT-EXACT vs an independent end-of-track-divide oracle, across 7 length classes', () => {
+    // Fix round 1, MED-5: the previous form of this test compared
+    // extractFinalized against ITSELF (same accumulator code both sides), so
+    // a flush-boundary mutation survived it. This oracle is an independent
+    // re-implementation of the HF reference INSIDE the test — its own
+    // accumulation loops, ONE divide over the whole track at the end (the
+    // reference's literal shape) — compared sample-for-sample with ===
+    // against the streamed flushes of the production path.
+    const lengths = [
+      1, // sub-sample degenerate
+      1000, // < overlap
+      OVERLAP_SAMPLES, // exactly the overlap
+      STRIDE_SAMPLES, // exactly one stride (single chunk)
+      SEGMENT_SAMPLES, // exactly one full window (two chunks)
+      STRIDE_SAMPLES * 3, // exact multiple of stride
+      STRIDE_SAMPLES * 2 + 12345, // multi-chunk with ragged tail
+    ];
     const window = makeWindow();
-    const acc = createAccumulator(total);
-    for (const seg of plan) {
-      const stems = fakeStems(chunkOf(left, seg.start), chunkOf(right, seg.start), scale);
-      accumulateSegment(acc, seg, stems, window);
-    }
-    const all = extractFinalized(acc, total);
-    expect(all.offset).toBe(0);
-    expect(all.samples).toBe(total);
 
-    for (const f of flushes) {
-      const len = f.samples;
+    for (const len of lengths) {
+      // Deterministic pseudo-audio, distinct per channel and per length.
+      const left = new Float32Array(len);
+      const right = new Float32Array(len);
+      let x = 987654321 ^ len;
+      for (let t = 0; t < len; t++) {
+        x = (x * 1103515245 + 12345) & 0x7fffffff;
+        left[t] = (x / 0x3fffffff) - 1;
+        right[t] = ((x >> 7) % 2000) / 1000 - 1;
+      }
+      const plan = planSegments(len);
+      // Per-(stem, channel, segment) varying fake model output so any
+      // cross-wiring or per-segment bookkeeping error changes values.
+      const stemsFor = (seg, segIndex) =>
+        fakeStems(chunkOf(left, seg.start), chunkOf(right, seg.start), (s, c) => 1 + s * 0.1 + c * 0.01 + (segIndex % 7) * 0.001);
+
+      // --- Production path: accumulate + progressive flush per segment.
+      const acc = createAccumulator(len);
+      const produced = [];
+      for (let i = 0; i < STEM_COUNT * MODEL_CHANNELS; i++) produced.push(new Float32Array(len));
+      let covered = 0;
+      for (let i = 0; i < plan.length; i++) {
+        accumulateSegment(acc, plan[i], stemsFor(plan[i], i), window);
+        const f = extractFinalized(acc, finalizedEnd(plan, i, len));
+        if (!f) continue;
+        expect(f.offset).toBe(covered);
+        for (let sc = 0; sc < STEM_COUNT * MODEL_CHANNELS; sc++) {
+          produced[sc].set(f.data.subarray(sc * f.samples, (sc + 1) * f.samples), f.offset);
+        }
+        covered = f.offset + f.samples;
+      }
+      expect(covered).toBe(len);
+
+      // --- Independent oracle: naive loops, single divide at the very end.
+      const oracle = [];
+      for (let i = 0; i < STEM_COUNT * MODEL_CHANNELS; i++) oracle.push(new Float32Array(len));
+      const weight = new Float32Array(len);
+      for (let i = 0; i < plan.length; i++) {
+        const seg = plan[i];
+        const stemData = stemsFor(seg, i);
+        const clen = seg.end - seg.start;
+        for (let s = 0; s < STEM_COUNT; s++) {
+          for (let c = 0; c < MODEL_CHANNELS; c++) {
+            const src = (s * MODEL_CHANNELS + c) * SEGMENT_SAMPLES;
+            const dst = oracle[s * MODEL_CHANNELS + c];
+            for (let t = 0; t < clen; t++) dst[seg.start + t] += stemData[src + t] * window[t];
+          }
+        }
+        for (let t = 0; t < clen; t++) weight[seg.start + t] += window[t];
+      }
       for (let sc = 0; sc < STEM_COUNT * MODEL_CHANNELS; sc++) {
-        for (let t = 0; t < len; t += 997) { // stride the comparison, full compare is slow
-          const ref = all.data[sc * total + (f.offset + t)];
-          expect(f.data[sc * len + t]).toBe(ref);
+        const dst = oracle[sc];
+        for (let t = 0; t < len; t++) dst[t] = dst[t] / Math.max(weight[t], 1e-8);
+      }
+
+      // --- Bit-exact comparison, EVERY sample.
+      let mismatches = 0;
+      for (let sc = 0; sc < STEM_COUNT * MODEL_CHANNELS; sc++) {
+        const a = produced[sc];
+        const b = oracle[sc];
+        for (let t = 0; t < len; t++) {
+          if (a[t] !== b[t]) mismatches++;
         }
       }
+      expect(mismatches).toBe(0);
     }
   });
 

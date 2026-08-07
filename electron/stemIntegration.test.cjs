@@ -20,18 +20,22 @@
  * Jest's vm sandbox cannot provide. This test owns gating, input prep, and
  * the assertions over the driver's JSON verdict.
  *
- * Model gating mirrors the e2e smoke's real-song step: if the model is not
- * in the repo-local cache (test-assets/models/), it is downloaded through
- * THE MANAGER UNDER TEST (ensureModel — that is its test); only if that
- * fails too (offline) does the test skip cleanly with a loud warning.
+ * Model gating (fix round 1, MED-4): a plain `npm test` NEVER downloads —
+ * the bench runs only when the model is already in the repo-local cache
+ * (test-assets/models/) and otherwise REPORTS a skip (test.skip — never a
+ * silent green). Setting STEM_INTEGRATION=1 opts into the full path: the
+ * model is then fetched through THE MANAGER UNDER TEST (ensureModel — that
+ * is its test) and a download failure fails the run you explicitly asked
+ * for. The abab fixture is (re)generated via its generator when missing,
+ * the smoke's pattern, so a fresh clone works.
  */
 
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { spawnSync } = require('node:child_process');
+const { spawnSync, execFileSync } = require('node:child_process');
 
-const { verifyModelFile, ensureModel } = require('./stemManager.cjs');
+const { verifyModelFile, ensureModel, MODEL_BYTES } = require('./stemManager.cjs');
 const { MODEL_SAMPLE_RATE } = require('./stemSegmentation.cjs');
 
 jest.setTimeout(15 * 60 * 1000);
@@ -43,17 +47,38 @@ const SLICE_JSON = path.join(REPO, 'test-assets', 'stem-bench-slice.json');
 const ABAB_WAV = path.join(REPO, 'test-assets', 'abab120.wav');
 const DRIVER = path.join(REPO, 'scripts', 'stem-bench-driver.cjs');
 
-/** The repo-local model cache, downloaded through the manager under test on
- * a cache miss. Returns the model path or null (offline AND absent). */
-async function ensureBenchModel() {
-  const existing = await verifyModelFile(MODEL_PATH);
-  if (existing.ok) return MODEL_PATH;
+// Collection-time gate (MED-4): sync probe only — presence + size. The full
+// sha256 verification still runs inside the test before any use.
+const modelOnDisk = (() => {
   try {
-    return await ensureModel({ modelPath: MODEL_PATH });
-  } catch (err) {
-    console.warn(`stemIntegration: model absent and download failed (${err.message})`);
-    return null;
+    return fs.statSync(MODEL_PATH).size === MODEL_BYTES;
+  } catch {
+    return false;
   }
+})();
+const fullPathOptIn = process.env.STEM_INTEGRATION === '1';
+// A reported skip, never a silent green: Jest counts this as "skipped" with
+// the reason in the name.
+const benchTest =
+  modelOnDisk || fullPathOptIn
+    ? test
+    : test.skip;
+
+/** The repo-local model cache. Never downloads unless STEM_INTEGRATION=1
+ * explicitly opted into the full path; with the opt-in, ensureModel (the
+ * manager under test) verifies/deletes/downloads and a failure FAILS the
+ * test — you asked for the full path, so offline is a real failure. */
+async function ensureBenchModel() {
+  if (fullPathOptIn) {
+    return ensureModel({ modelPath: MODEL_PATH });
+  }
+  const existing = await verifyModelFile(MODEL_PATH);
+  if (!existing.ok) {
+    throw new Error(
+      `model cache at ${MODEL_PATH} failed verification (${existing.reason}) — delete it, or re-run with STEM_INTEGRATION=1 to let the manager re-download`
+    );
+  }
+  return MODEL_PATH;
 }
 
 /** Writes the bench input as planar stereo f32 for the driver: the 30 s
@@ -73,6 +98,11 @@ function prepareBenchAudio() {
       path: outPath,
       samples: meta.samples,
     };
+  }
+  if (!fs.existsSync(ABAB_WAV)) {
+    // Fresh clone: generate the fixture through its generator (the smoke's
+    // pattern) instead of ENOENT-ing.
+    execFileSync(process.execPath, [path.join(REPO, 'scripts', 'make-test-abab.cjs')], { stdio: 'ignore' });
   }
   const wav = fs.readFileSync(ABAB_WAV);
   if (wav.readUInt32LE(24) !== MODEL_SAMPLE_RATE || wav.readUInt16LE(22) !== 2 || wav.readUInt16LE(34) !== 16) {
@@ -117,12 +147,8 @@ async function waitForQuietCpu({ busyThreshold = 0.25, maxWaitMs = 90000 } = {})
   }
 }
 
-test('30 s bench: 4 stems, finite, non-silent, ≥1× realtime; RMS/residual/RSS reported', async () => {
+benchTest('30 s bench (model on disk or STEM_INTEGRATION=1): 4 stems, finite, non-silent, >=1x realtime; RMS/residual/RSS reported', async () => {
   const modelPath = await ensureBenchModel();
-  if (!modelPath) {
-    console.warn('stemIntegration: SKIPPED — model not on disk and not downloadable (offline?)');
-    return;
-  }
 
   const audio = prepareBenchAudio();
 
@@ -135,8 +161,10 @@ test('30 s bench: 4 stems, finite, non-silent, ≥1× realtime; RMS/residual/RSS
   // If quiescence is NEVER reached, the wall-clock number measures the
   // foreground load, not this code — the realtime assert is then SKIPPED
   // with a loud warning (the same precondition-gating pattern as the model
-  // check above and the smoke's real-song step). Correctness assertions
-  // always apply, to every attempt's verdict alike.
+  // gate above and the smoke's real-song step). Verdict selection prefers a
+  // SUCCESSFUL attempt over a fast-but-failed one (an ok:false verdict is
+  // kept only when no attempt succeeded); the correctness assertions below
+  // judge the selected verdict.
   let verdict = null;
   let anyQuietAttempt = false;
   let lastBusy = 0;
@@ -157,7 +185,11 @@ test('30 s bench: 4 stems, finite, non-silent, ≥1× realtime; RMS/residual/RSS
       throw new Error(`driver produced no verdict; stdout=${run.stdout}\nstderr=${run.stderr}`);
     }
     expect(run.status).toBe(parsed.ok ? 0 : 1);
-    if (!verdict || parsed.realtimeFactor > verdict.realtimeFactor) verdict = parsed;
+    const better =
+      !verdict ||
+      (parsed.ok && !verdict.ok) ||
+      (parsed.ok === Boolean(verdict.ok) && (parsed.realtimeFactor || 0) > (verdict.realtimeFactor || 0));
+    if (better) verdict = parsed;
     if (parsed.ok && parsed.realtimeFactor >= 1) break;
     console.warn(
       `stemIntegration: attempt ${attempt} measured ${parsed.realtimeFactor}x realtime — ${attempt < 3 ? 'retrying' : 'out of retries'}`

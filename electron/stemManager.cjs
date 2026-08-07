@@ -70,6 +70,9 @@ const crypto = require('node:crypto');
 const https = require('node:https');
 const { atomicWriteFile } = require('./atomicWrite.cjs');
 const { MODEL_SAMPLE_RATE } = require('./stemSegmentation.cjs');
+// Safe to require here: stemHost only loads onnxruntime inside its
+// parentPort bootstrap, which never runs in the main process.
+const { MAX_TOTAL_SAMPLES } = require('./stemHost.cjs');
 
 // Ruling-3 pins (P0 report, measured + verified on this machine).
 const MODEL_URL =
@@ -85,9 +88,9 @@ const MAX_REDIRECTS = 5;
 /** Samples per 'audio' message to the host (~4 MB per channel per message —
  * structured clone copies, so slices keep each copy bounded). */
 const AUDIO_SLICE_SAMPLES = 1 << 20;
-/** Trust-boundary cap for renderer separate requests — matches the host's
- * own cap (stemHost.cjs MAX_TOTAL_SAMPLES). */
-const MAX_REQUEST_SAMPLES = MODEL_SAMPLE_RATE * 3600;
+/** Trust-boundary cap for renderer separate requests — THE host cap
+ * (stemHost.cjs documents the 30-minute memory arithmetic). */
+const MAX_REQUEST_SAMPLES = MAX_TOTAL_SAMPLES;
 
 const STEM_IPC = Object.freeze({
   modelState: 'stems:model-state',
@@ -141,7 +144,10 @@ async function verifyModelFile(
 
 /** Real HTTP GET: follows up to MAX_REDIRECTS redirects (the HF resolve URL
  * 302s to a CDN), rejects on any non-2xx terminal status, streams data out
- * through the handlers. Injectable in tests (`requestImpl`). */
+ * through the handlers. A THROW from onTotal/onData (the oversize/abort
+ * guards in downloadModel) destroys the request immediately — the socket
+ * must not keep streaming into a rejected download. Injectable in tests
+ * (`requestImpl`). */
 function httpsRequestImpl(url, { onTotal, onData }, redirectsLeft = MAX_REDIRECTS) {
   return new Promise((resolve, reject) => {
     const req = https.get(url, (res) => {
@@ -161,15 +167,43 @@ function httpsRequestImpl(url, { onTotal, onData }, redirectsLeft = MAX_REDIRECT
         reject(new Error(`HTTP ${status} from ${new URL(url).host}`));
         return;
       }
+      const guarded = (fn, arg) => {
+        try {
+          fn(arg);
+          return true;
+        } catch (err) {
+          req.destroy();
+          reject(err);
+          return false;
+        }
+      };
       const total = Number(res.headers['content-length']);
-      if (Number.isFinite(total) && total > 0) onTotal(total);
-      res.on('data', (chunk) => onData(chunk));
+      if (Number.isFinite(total) && total > 0 && !guarded(onTotal, total)) return;
+      res.on('data', (chunk) => guarded(onData, chunk));
       res.on('end', resolve);
       res.on('error', reject);
     });
     req.on('error', reject);
     req.setTimeout(60000, () => req.destroy(new Error('download timed out (60 s without data)')));
   });
+}
+
+/** Errors that must NOT be retried: an oversize stream is hostile/broken (a
+ * fresh attempt would overrun again) and an abort is deliberate. */
+const NON_RETRYABLE = new Set(['STEM_DOWNLOAD_OVERSIZE', 'STEM_DOWNLOAD_ABORTED']);
+
+function oversizeError(got, maxBytes) {
+  const err = new Error(
+    `download exceeded the pinned model size (received ${got} of at most ${maxBytes} bytes) — aborted`
+  );
+  err.code = 'STEM_DOWNLOAD_OVERSIZE';
+  return err;
+}
+
+function abortError() {
+  const err = new Error('model download aborted (manager disposed)');
+  err.code = 'STEM_DOWNLOAD_ABORTED';
+  return err;
 }
 
 /**
@@ -188,29 +222,57 @@ async function downloadModel({
   requestImpl = httpsRequestImpl,
   attempts = DOWNLOAD_ATTEMPTS,
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
+  maxBytes = MODEL_BYTES,
+  shouldAbort = () => false,
 } = {}) {
   let lastErr;
   for (let attempt = 0; attempt < attempts; attempt++) {
+    if (shouldAbort()) throw abortError();
     if (attempt > 0) {
       await sleep(DOWNLOAD_BACKOFF_MS[Math.min(attempt - 1, DOWNLOAD_BACKOFF_MS.length - 1)]);
+      if (shouldAbort()) throw abortError();
     }
     const chunks = [];
     let received = 0;
     let total = null;
+    // The abort watcher settles the race even when requestImpl is stuck in a
+    // stalled-but-open socket that will never call a handler again.
+    let watcherTimer = null;
+    const abortWatcher = new Promise((_, rejectWatch) => {
+      watcherTimer = setInterval(() => {
+        if (shouldAbort()) rejectWatch(abortError());
+      }, 100);
+    });
     try {
-      await requestImpl(url, {
+      const request = requestImpl(url, {
         onTotal: (t) => {
+          // Fix round 1, MED-3: a content-length past the pin is refused
+          // before a single body byte is buffered...
+          if (t > maxBytes) throw oversizeError(t, maxBytes);
           total = t;
         },
         onData: (chunk) => {
-          chunks.push(chunk);
+          if (shouldAbort()) throw abortError();
           received += chunk.length;
+          // ...and a stream that overruns the pin (with or without an
+          // honest content-length) aborts at the crossing chunk instead of
+          // buffering an attacker-sized payload in main-process memory.
+          if (received > maxBytes) throw oversizeError(received, maxBytes);
+          chunks.push(chunk);
           if (onProgress) onProgress({ received, total });
         },
       });
+      // If the abort watcher wins the race, the request promise is orphaned
+      // but may still reject later — that must not surface as an unhandled
+      // rejection.
+      request.catch(() => {});
+      await Promise.race([request, abortWatcher]);
       return Buffer.concat(chunks);
     } catch (err) {
+      if (err && NON_RETRYABLE.has(err.code)) throw err;
       lastErr = err;
+    } finally {
+      clearInterval(watcherTimer);
     }
   }
   throw new Error(
@@ -239,6 +301,7 @@ async function ensureModel({
   url,
   fsImpl = fs,
   atomicWrite = atomicWriteFile,
+  shouldAbort,
 } = {}) {
   const dest = modelPath || getModelPath(userDataDir);
   const status = (s) => {
@@ -253,12 +316,27 @@ async function ensureModel({
   }
   if (existing.reason !== 'missing') {
     // Mismatch deletes (ruling 3) — a corrupt file must never be loadable.
-    await fsImpl.promises.unlink(dest);
+    try {
+      await fsImpl.promises.unlink(dest);
+    } catch (err) {
+      // Fix round 1, LOW-5: a locked file must surface the intended clear
+      // message, not a raw EPERM stack.
+      throw new Error(
+        `model file failed verification (${existing.reason}) and could not be deleted (${err.code || err.message}) — close any program using it and retry`
+      );
+    }
     status('corrupt-deleted');
   }
 
   status('downloading');
-  const buf = await downloadModel({ url, onProgress, requestImpl, sleep });
+  const buf = await downloadModel({
+    url,
+    onProgress,
+    requestImpl,
+    sleep,
+    maxBytes: expectedBytes,
+    shouldAbort,
+  });
 
   status('verifying-download');
   if (buf.length !== expectedBytes) {
@@ -309,6 +387,9 @@ function createStemManager({
 } = {}) {
   let active = null; // { runId, child, settled, settle }
   let nextRunId = 1;
+  /** Fix round 1, LOW: dispose is a LATCH — set once on app quit, never
+   * cleared. It refuses new runs and aborts an in-flight model download. */
+  let disposed = false;
   const verifyOpts = { expectedSha256, expectedBytes, fsImpl };
 
   function isRunning() {
@@ -337,6 +418,7 @@ function createStemManager({
       url,
       fsImpl,
       atomicWrite,
+      shouldAbort: () => disposed,
     });
   }
 
@@ -349,6 +431,9 @@ function createStemManager({
    * stream while in flight; neither is ever called after settlement.
    */
   async function startSeparation({ modelPath, sampleRate, channels, onProgress, onStems }) {
+    if (disposed) {
+      return { ok: false, error: 'stem manager disposed (app is quitting)' };
+    }
     if (active) {
       return { ok: false, error: 'a separation is already running (busy)' };
     }
@@ -447,7 +532,13 @@ function createStemManager({
             if (msg.id === runId) entry.settle({ ok: false, cancelled: true });
             break;
           case 'error':
-            entry.settle({ ok: false, error: msg.message || 'stem host error' });
+            // Fix round 1, LOW: id-gated like every other message type — a
+            // stale job's error must not settle the current run. Host-level
+            // errors (init/protocol stages) legitimately carry no id and DO
+            // settle: there is no other job they could belong to.
+            if (msg.id === undefined || msg.id === runId) {
+              entry.settle({ ok: false, error: msg.message || 'stem host error' });
+            }
             break;
           default:
             break; // unknown host message: ignore, never crash
@@ -470,8 +561,11 @@ function createStemManager({
     return true;
   }
 
-  /** App-quit path (main.cjs 'will-quit'): no orphan process, ever. */
+  /** App-quit path (main.cjs 'will-quit'): no orphan process, ever, and no
+   * further work — the latch refuses new runs and aborts an in-flight
+   * model download. */
   function dispose() {
+    disposed = true;
     cancel();
   }
 
