@@ -5,6 +5,20 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.5.1] - 2026-07-28
+
+Platform release: Electron upgraded four majors. No feature changes.
+
+### Changed
+
+- **Electron 39.8.10 → 43.3.0.** Why: Electron supports its latest three majors, so 39 had aged out of the support window and was no longer receiving Chromium security backports — the largest standing exposure for an app that opens untrusted audio files. The full gate (1686 unit tests, typecheck, production build, and the end-to-end smoke against the packaged app — including all three v1.5 tempo/remix steps) passes unchanged on 43.
+- Behaviour note inherited from Electron 43: an **Open dialog with no explicit starting directory now opens in Downloads** rather than the OS's last-used location. Save dialogs are unaffected (they already receive an explicit default path).
+- Dev note inherited from Electron 42: `npm install` no longer downloads the Electron binary via postinstall; it is fetched on first launch (`npx electron --version` warms it for CI or a fresh clone).
+
+### Fixed
+
+- **Smoke runs no longer leave an Electron window that has to be closed by hand.** Cause: on teardown — and especially on a mid-run failure with a dirty document — the close guard showed its native Quit/Cancel prompt, which blocked `app.close()` forever in a run with nobody at the console, and also hid the failure's error text until the app was killed manually. Fix: in test mode (the same gate as the renderer test hooks) the guard destroys the window instead of asking, and the smoke's teardown force-kills the process if a graceful close hasn't completed within 10 s. Packaged behaviour is unchanged — the prompt still protects real users. Affects: `electron/closeGuard.cjs`, `electron/main.cjs`, `scripts/e2e-smoke.cjs`.
+
 ## [1.5.0] - 2026-07-27
 
 Three new opt-in capabilities built on one shared beat-tracking core: tempo detection, tempo matching, and auto-remix. Everything is pure TypeScript — no new dependencies — and every heavy pass runs off the main thread.
