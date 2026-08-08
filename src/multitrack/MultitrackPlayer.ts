@@ -1,5 +1,12 @@
 import type { AudioDocument } from '../audio/AudioDocument';
-import { monoPanGains, readClipSlice, stereoBalanceGains } from './mixdown';
+import {
+  clipFadeGainAt,
+  monoPanGains,
+  readClipSlice,
+  resolveClipFadeSpecs,
+  stereoBalanceGains,
+  type ClipFadeSpec,
+} from './mixdown';
 import type { Clip, Session, Track } from './session';
 
 export type MultitrackPlayState = 'stopped' | 'playing';
@@ -142,12 +149,19 @@ export class MultitrackPlayer {
     // mute/solo/volume/pan changes can retro-apply to the running graph. A
     // track with no clip past `from` contributes nothing and is skipped.
     for (const t of session.tracks) {
+      // Fades/crossfades resolved from the SAME shared resolver as the offline
+      // mixdown, per track, and baked into the buffers below -- so live
+      // playback and `mixdownSession` apply identical envelope gains (ruling
+      // 4). Resolution is play-position-agnostic: the whole envelope is baked
+      // and a seek is just a buffer offset, so it survives seeking like the
+      // baked clip gain does.
+      const fadeSpecs = resolveClipFadeSpecs(t.clips);
       const built: { clip: Clip; buffer: AudioBuffer }[] = [];
       for (const c of t.clips) {
         if (c.startSample + c.lengthSample <= from) continue;
         const doc = docs.get(c.documentId);
         if (!doc) continue;
-        const buffer = this.buildClipBuffer(ctx, c, doc, sr);
+        const buffer = this.buildClipBuffer(ctx, c, doc, sr, fadeSpecs.get(c.id));
         if (!buffer) continue;
         built.push({ clip: c, buffer });
       }
@@ -322,12 +336,31 @@ export class MultitrackPlayer {
     return this.ctx;
   }
 
-  /** Builds a session-rate AudioBuffer for a clip, with its gain baked in. */
+  /**
+   * Builds a session-rate AudioBuffer for a clip, with its gain -- and its
+   * fade/crossfade envelope, when it has one -- baked into the samples.
+   *
+   * Baking is the ONLY player-side fade implementation that can be
+   * sample-identical to the offline mixdown (T20): AudioParam automation
+   * (`setValueCurveAtTime` and friends) is evaluated on the audio-graph clock
+   * with render-quantum interpolation against `ctx.currentTime`, which can
+   * never reproduce mixdown's exact per-sample `env(i)`. The envelope factor
+   * comes from the SAME `clipFadeGainAt` the mixdown loop multiplies, indexed
+   * by the same clip-local sample, so the two paths share every float
+   * expression. Baking once into the buffer also applies a mono clip's fade
+   * exactly once for both pan sides (the single channel fans into panL AND
+   * panR -- a per-channel fade node would double up, T24), and it survives
+   * seeking, because a seek is a buffer offset into the same samples.
+   *
+   * A clip with no envelope and unity gain keeps the untouched-slice path,
+   * mirroring mixdown's fade-less loop (ruling 10).
+   */
   private buildClipBuffer(
     ctx: AudioContext,
     clip: Clip,
     doc: AudioDocument,
-    sessionRate: number
+    sessionRate: number,
+    fadeSpec?: ClipFadeSpec
   ): AudioBuffer | null {
     const slice = readClipSlice(doc, clip, sessionRate);
     if (slice.length === 0 || slice[0].length === 0) return null;
@@ -337,9 +370,13 @@ export class MultitrackPlayer {
     const buffer = ctx.createBuffer(slice.length, Math.max(1, len), sessionRate);
     for (let c = 0; c < slice.length; c++) {
       let data = slice[c];
-      if (clipGain !== 1) {
+      if (clipGain !== 1 || fadeSpec) {
         const scaled = new Float32Array(len);
-        for (let i = 0; i < len; i++) scaled[i] = data[i] * clipGain;
+        if (fadeSpec) {
+          for (let i = 0; i < len; i++) scaled[i] = data[i] * clipGain * clipFadeGainAt(fadeSpec, i);
+        } else {
+          for (let i = 0; i < len; i++) scaled[i] = data[i] * clipGain;
+        }
         data = scaled;
       }
       // lib.dom types copyToChannel as Float32Array<ArrayBuffer>; narrow the cast.

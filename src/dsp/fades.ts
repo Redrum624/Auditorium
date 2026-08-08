@@ -331,27 +331,44 @@ export function applyFadeInStartingAt(
  * NOT A FADE-IN. `gIn` alone is not a unity-terminating fade-in curve -- see
  * the module doc comment.
  *
- * The `equal-power` branch computes its own `cos`/`sin` rather than calling
- * `fadeOutShape`/`fadeInShape`, so that this function's arithmetic is
+ * TWO CURVES (v1.9 X3, additive). A manual clip crossfade is "the outgoing
+ * clip's fade-OUT against the incoming clip's fade-IN", and the two clips may
+ * carry DIFFERENT curve choices on those facing edges. `curveIn` names the
+ * incoming side's curve and defaults to `curve`, so every pre-existing caller
+ * (auto-remix passes a single curve) is bit-for-bit unchanged. The `k`
+ * identity is curve-agnostic -- it holds for ANY non-negative gain pair, so a
+ * mixed pair is exactly as level-preserving as a matched one. The equal-power
+ * fast path below applies only when BOTH sides are `equal-power`; a mixed
+ * pair involving `equal-power` goes through the general form (nothing pinned
+ * ever produced a mixed pair, so there is no bit-compatibility to preserve
+ * there).
+ *
+ * The both-`equal-power` branch computes its own `cos`/`sin` rather than
+ * calling `fadeOutShape`/`fadeInShape`, so that this function's arithmetic is
  * character-for-character what shipped in `remixRender.ts`. Auto-remix output
  * is pinned bit-for-bit and the gain law has its own double-precision pin;
  * routing the default path through a differently-parenthesised argument is
  * not a change worth risking for four saved lines.
  */
-export function crossfadeGains(t: number, rho: number, curve: FadeCurve = 'equal-power'): { gOut: number; gIn: number } {
+export function crossfadeGains(
+  t: number,
+  rho: number,
+  curve: FadeCurve = 'equal-power',
+  curveIn: FadeCurve = curve
+): { gOut: number; gIn: number } {
   const tc = Math.max(0, Math.min(1, t));
   const rc = Math.max(0, Math.min(1, rho));
   let g0: number;
   let g1: number;
   let sumSquares: number;
-  if (curve === 'equal-power') {
+  if (curve === 'equal-power' && curveIn === 'equal-power') {
     const theta = (Math.PI * tc) / 2;
     g0 = Math.cos(theta);
     g1 = Math.sin(theta);
     sumSquares = 1;
   } else {
     g0 = fadeOutShape(tc, curve);
-    g1 = fadeInShape(tc, curve);
+    g1 = fadeInShape(tc, curveIn);
     sumSquares = g0 * g0 + g1 * g1;
   }
   const k = Math.sqrt(sumSquares + 2 * rc * g0 * g1);

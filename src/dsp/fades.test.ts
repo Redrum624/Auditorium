@@ -523,3 +523,80 @@ describe('applyFadeOutEndingAt / applyFadeInStartingAt (arbitrary window)', () =
     for (let i = 0; i < 10; i++) expect(ch[0][i]).toBe(0.75);
   });
 });
+
+// ---------------------------------------------------------------------------
+// 7. Two-curve pairs (v1.9 X3): the outgoing and incoming sides of a manual
+// crossfade may carry DIFFERENT curves. `curveIn` defaults to `curve`, so
+// this section also pins that every pre-existing single-curve call is
+// untouched by the extension.
+// ---------------------------------------------------------------------------
+
+describe('crossfadeGains with two curves', () => {
+  const RHOS = [0, 0.25, 0.5, 0.75, 1];
+
+  it('reduces exactly to the single-curve call when curveIn is omitted or equal', () => {
+    for (const curve of FADE_CURVES) {
+      for (const rho of RHOS) {
+        for (const u of US) {
+          expect(crossfadeGains(u, rho, curve)).toEqual(crossfadeGains(u, rho, curve, curve));
+        }
+      }
+    }
+  });
+
+  it('holds the level identity gOut^2 + gIn^2 + 2*rho*gOut*gIn === 1 for every mixed pair', () => {
+    for (const curveOut of FADE_CURVES) {
+      for (const curveIn of FADE_CURVES) {
+        for (const rho of RHOS) {
+          for (const u of US) {
+            const { gOut, gIn } = crossfadeGains(u, rho, curveOut, curveIn);
+            expect(gOut * gOut + gIn * gIn + 2 * rho * gOut * gIn).toBeCloseTo(1, 12);
+          }
+        }
+      }
+    }
+  });
+
+  it('computes a mixed pair as the two RAW facing shapes over k, bit-for-bit', () => {
+    for (const curveOut of FADE_CURVES) {
+      for (const curveIn of FADE_CURVES) {
+        if (curveOut === 'equal-power' && curveIn === 'equal-power') continue; // fast path, pinned elsewhere
+        for (const rho of RHOS) {
+          for (const u of [0, 0.1, 0.3, 0.5, 0.7, 0.9, 1]) {
+            const g0 = fadeOutShape(u, curveOut);
+            const g1 = fadeInShape(u, curveIn);
+            const k = Math.sqrt(g0 * g0 + g1 * g1 + 2 * rho * g0 * g1);
+            const { gOut, gIn } = crossfadeGains(u, rho, curveOut, curveIn);
+            expect(gOut).toBe(g0 / k);
+            expect(gIn).toBe(g1 / k);
+          }
+        }
+      }
+    }
+  });
+
+  it('actually honours the second curve (a mixed pair matches NEITHER same-curve law)', () => {
+    const mixed = crossfadeGains(0.3, 0, 'exponential', 'equal-power');
+    const allOut = crossfadeGains(0.3, 0, 'exponential');
+    const allIn = crossfadeGains(0.3, 0, 'equal-power');
+    expect(Math.abs(mixed.gIn - allOut.gIn)).toBeGreaterThan(1e-3);
+    expect(Math.abs(mixed.gOut - allIn.gOut)).toBeGreaterThan(1e-3);
+  });
+
+  it('keeps the continuity endpoints for every mixed pair: {1, 0} at t=0 and {~0, 1} at t=1', () => {
+    // These endpoints are what make a clip crossfade splice-continuous with
+    // the un-faded audio on either side of the overlap.
+    for (const curveOut of FADE_CURVES) {
+      for (const curveIn of FADE_CURVES) {
+        for (const rho of RHOS) {
+          const at0 = crossfadeGains(0, rho, curveOut, curveIn);
+          expect(at0.gOut).toBe(1);
+          expect(at0.gIn).toBe(0);
+          const at1 = crossfadeGains(1, rho, curveOut, curveIn);
+          expect(at1.gOut).toBeLessThanOrEqual(6.2e-17); // equal-power's cos(pi/2) residue at most
+          expect(at1.gIn).toBeCloseTo(1, 12);
+        }
+      }
+    }
+  });
+});
