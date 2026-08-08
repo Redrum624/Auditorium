@@ -89,6 +89,15 @@ describe('fade length inputs — bound to the store clamp, local-draft pattern',
 
     expect(storeClip(clip.id).fadeInSample).toBe(RATE); // clamped to the clip
     expect(screen.getByLabelText<HTMLInputElement>('Fade in length').value).toBe('0:01.000');
+
+    // Commit the same over-ask AGAIN: the store value does not change this
+    // time, so no re-key/remount can rescue a wrong echo — this pins the
+    // commit path itself returning the STORE's answer, not the request.
+    const input2 = screen.getByLabelText('Fade in length') as HTMLInputElement;
+    fireEvent.change(input2, { target: { value: '999' } });
+    fireEvent.blur(input2);
+    expect(storeClip(clip.id).fadeInSample).toBe(RATE);
+    expect(screen.getByLabelText<HTMLInputElement>('Fade in length').value).toBe('0:01.000');
   });
 
   it('the STANDING fade wins at the meet boundary, and the echo shows what was granted', () => {
