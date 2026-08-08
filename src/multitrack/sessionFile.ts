@@ -330,7 +330,21 @@ function sanitizeFadeCurve(v: unknown): FadeCurve | undefined {
  * tolerance that lets a v1.8.0 build open a fade-carrying file is extended to
  * whatever a future version adds. */
 function sanitizeClipFades(clip: Clip): Clip {
-  const len = typeof clip.lengthSample === 'number' && Number.isFinite(clip.lengthSample) ? clip.lengthSample : 0;
+  // Clamp against the FLOOR of the length (X5, carried X2 finding): clip
+  // geometry itself is unvalidated, so a hand-edited file can carry a
+  // fractional `lengthSample`, and clamping rounded fades against it stored a
+  // fractional fade (lengthSample: 100.5 + fadeInSample: 5000 -> 100.5),
+  // breaking the positive-integer invariant. Math.floor — not Math.round,
+  // which could exceed the real length (round(100.5) = 101 > 100.5) — keeps
+  // both halves of the invariant true and is a no-op for every well-formed
+  // integer file. Geometry itself deliberately stays unvalidated: ruling 10
+  // requires pre-v1.9 files (including damaged ones v1.8.0 loaded verbatim)
+  // to load with identical clip geometry, so rounding or rejecting it here
+  // would move clips the shipped reader accepted.
+  const len =
+    typeof clip.lengthSample === 'number' && Number.isFinite(clip.lengthSample)
+      ? Math.floor(clip.lengthSample)
+      : 0;
   const pair = clampFadePair(sanitizeFadeLength(clip.fadeInSample), sanitizeFadeLength(clip.fadeOutSample), len, 'in');
   const inCurve = sanitizeFadeCurve(clip.fadeInCurve);
   const outCurve = sanitizeFadeCurve(clip.fadeOutCurve);

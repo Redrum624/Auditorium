@@ -760,6 +760,19 @@ describe('.audm clip fades (v1.9 X2)', () => {
       expect(clip.fadeInSample).toBe(1000);
     });
 
+    it('clamps against the FLOOR of a fractional lengthSample — a stored fade is always an integer (X5, carried X2 finding)', () => {
+      // Clip geometry is unvalidated (ruling 10 requires damaged pre-v1.9
+      // files to load verbatim), so `lengthSample: 100.5` survives — but the
+      // fade clamped against it must not: pre-fix this stored
+      // `fadeInSample: 100.5`, violating the positive-integer invariant.
+      // Floor, not round: round(100.5) = 101 would EXCEED the real length.
+      const clip = parseSessionFileV3(v3WithClip({ fadeInSample: 5000, lengthSample: 100.5 })).session
+        .tracks[0].clips[0];
+      expect(clip.fadeInSample).toBe(100);
+      expect(Number.isInteger(clip.fadeInSample)).toBe(true);
+      expect(clip.lengthSample).toBe(100.5); // geometry itself deliberately untouched
+    });
+
     it('resolves crossing fades with fade-in priority: in is kept, out gets the remainder', () => {
       const clip = parseSessionFileV3(v3WithClip({ fadeInSample: 800, fadeOutSample: 600 }, 1000)).session
         .tracks[0].clips[0];
