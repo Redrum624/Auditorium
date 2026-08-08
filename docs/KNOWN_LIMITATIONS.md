@@ -545,8 +545,10 @@ worth changing the path every effect in the app runs through.
 `src/components/Editor/editorSnapTargets.ts`,
 `src/components/Multitrack/sessionSnapTargets.ts`)
 
-**v1.8 behavior:** Five limits, each a consequence of drawing only what the
-analysis actually produced.
+**v1.8 behavior, items 4–5 updated for v1.9:** Five limits, each a
+consequence of drawing only what the analysis actually produced — except
+item 5, which v1.9 resolved and which is kept here as the record of what
+remains of it.
 
 **1. The tics are a tracked grid, so they follow a drifting take — and every
 tempo-detection limit above applies to them unchanged.** `beatSamples` comes

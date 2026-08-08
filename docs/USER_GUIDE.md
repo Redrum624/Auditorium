@@ -151,8 +151,9 @@ open) to open its parameter dialog, adjust settings, and apply. Every effect
 processes the current selection, or the whole document when there's no
 selection.
 
-- **Amplitude** — Amplify (gain in dB), Fade (in/out, linear/exponential/
-  cosine curve), Normalize (peak or RMS target level)
+- **Amplitude** — Amplify (gain in dB), Fade (in/out; Linear, Ducked, Cosine
+  or Equal power curve; ramp length as a % of the selection — 100 % shapes the
+  whole selection exactly as before), Normalize (peak or RMS target level)
 - **EQ & Filters** — Parametric EQ, Graphic EQ
 - **Dynamics** — Compressor, Limiter, Noise Gate
 - **Delay & Reverb** — Echo, Reverb
@@ -396,9 +397,10 @@ document open. A session has a name, a sample rate, and any number of tracks.
   suspend that — see **Snapping to the grid**). A clip dropped over a
   neighbour on the same track overlaps it deliberately and the overlap plays
   as a crossfade; hold `Ctrl` at the drop to nudge it forward clear of the
-  neighbour instead. Click a clip to select it — its facts
-  (source document, start/offset/length, and an editable gain in dB) appear
-  in the **Properties** tab.
+  neighbour instead (see **Clip fades and crossfades** below). Click a clip
+  to select it — its facts (source document, start/offset/length, and an
+  editable gain in dB) appear in the **Properties** tab, along with its
+  fade lengths and curves.
 - **Playback**: the multitrack view has its own transport, cursor, and
   playhead, driven by the same toolbar-pill transport buttons. There is no pause in
   multitrack playback (v1) — Play/Pause toggles play↔stop. Volume, pan, and
@@ -424,6 +426,78 @@ document open. A session has a name, a sample rate, and any number of tracks.
   v1/v2 format's silent failure on large embedded audio; Save Session now
   reports success or failure explicitly instead of failing quietly. Older
   `.audm` files (v1/v2) still open normally.
+
+### Clip fades and crossfades
+
+Clip fades are **non-destructive clip properties** — they shape the clip's
+level at render time (identically in live playback and Mix Down) without ever
+touching the audio samples, unlike the destructive **Fade** effect in the
+editor. They are saved in the `.audm` session; a session with no fades stays
+byte-identical on disk to what v1.8.0 wrote, and a fade-carrying session
+still opens in v1.8.0 — just without the fades.
+
+**Shaping a fade.** Select a clip: two small square handles appear in its top
+corners. Drag the left handle right to lengthen the fade-in, the right handle
+left to lengthen the fade-out; the shaded ramp overlay is the actual gain
+curve the renderer will apply. The **top 10 pixels at each end of a selected
+clip belong to the fade handle**, not to edge trim — trim still works from
+the rest of the edge band below the handle. On a clip narrower than about
+20 pixels the two handles coincide; zoom in to grab them separately. The
+selected clip's **Properties** panel has a Fades section with an exact length
+field and a curve picker per edge; a fade can never exceed its clip, and the
+two fades can meet but never cross (the standing fade wins the room).
+
+**The curves.** The clip picker names curves by the **summing law** they
+hold, because a crossfade has two sides: **Equal power** (holds the level
+when the two sides are different material — the default), **Equal gain**
+(holds the level when both sides are the same material, e.g. a loop
+repeating), **Smooth** (equal gain with eased ends), and **Ducked** (drops
+fast and comes back late, leaving a deliberate dip at the join). The
+destructive Fade *effect* keeps shape names — **Linear** and **Cosine** —
+because a solo fade over a selection has no second signal and no join, so a
+summing-law name would describe nothing there; Linear is the same curve as
+Equal gain and Cosine the same as Smooth, and the effect also offers Equal
+power. ("Ducked" is the curve formerly labelled "Exponential" — the shape is
+`t²`, which is quadratic, so that name was simply wrong.)
+
+**Overlapping is deliberate, and it crossfades.** Dragging a clip into a
+same-track neighbour commits exactly where the preview shows it and **arms
+the pair**: both facing fades are set to span the overlap, and the overlap
+renders as a real crossfade (the X-shaped gain lines and a width readout are
+drawn in the region). Moving or trimming either clip re-arms the pair at the
+new width automatically. Two modifier keys do different things here:
+
+- **Ctrl held at the drop** restores the old v1.8 behaviour instead — the
+  dropped clip is pushed forward clear of the neighbour (this is also the
+  precise way to butt-join two clips). A pill inside the dragged clip shows
+  which of the two will happen.
+- **Alt** suspends the snapping magnet, exactly as everywhere else — it does
+  not affect overlap behaviour.
+
+**When an overlap is NOT a crossfade.** A crossfade renders only when both
+facing fades **exactly** span the overlap. Anything else — partial facing
+fades, a raw layered take, equal start positions, one clip fully containing
+the other, or three clips piled on one region — renders as honest solo fades
+over a raw sum (which can clip, and is hard-clamped, exactly as in v1.8.0).
+Recorded punch-ins and Insert Active File never write fades: layering a take
+over another is left as a raw sum until you decide otherwise.
+
+**Arm and Release are the managed path.** For an overlap that is capable but
+not armed, the Properties panel shows **Arm crossfade** (it writes both
+facing fades to the exact width; it is disabled when a fade on the far side
+of either clip leaves no room). **Release** clears both facing fades and
+returns the overlap to a raw sum. Note that **dragging a facing-fade handle
+of an armed pair dissolves the crossfade** into two solo fades — the fade no
+longer spans the overlap exactly, so the pair stops crossfading (visible
+immediately in the overlay, and recoverable with Arm). To adjust a
+crossfade's width, move or trim the clips; to manage its existence, use
+Arm/Release. Each side's **curve** stays freely editable while armed.
+
+**A third clip silences, not destroys.** If another clip moves onto an armed
+pair's overlap region, the crossfade stops rendering (three simultaneous
+signals have no pair law) and the panel reports the overlap as a raw sum —
+but the stored fades are deliberately left in place, so moving the intruder
+away revives the crossfade with no further action.
 
 An empty session (no clips on any track) shows an inline hint pointing at
 Insert Active File; the main editor area shows "Open an audio file (Ctrl+O)
