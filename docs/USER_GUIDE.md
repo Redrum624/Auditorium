@@ -183,8 +183,8 @@ Reduction dialog notices a capture or clear immediately, even while open.
 
 ## Tempo, remix and stems
 
-These four features are opt-in: nothing here runs until you ask for it, so
-opening a file never pays for an analysis you didn't want.
+These features are opt-in: nothing here runs until you ask for it, so opening a
+file never pays for an analysis you didn't want.
 
 ### Detecting the tempo
 
@@ -207,6 +207,70 @@ the number, so everything built on the grid moves with it.
 
 Whole-document analysis is capped at the first 10 minutes; past that the result
 is reported as describing the first 10 min rather than the whole file.
+
+### Seeing the beat grid
+
+Once a tempo has been detected, the beats themselves are drawn: a row of short
+amber **tics** along the bottom edge of the waveform and spectral views, and a
+matching row along the bottom of every clip in the multitrack view. Toggle them
+with **View → Toggle Beat Grid** (they are on by default).
+
+There is nothing to switch on first and nothing to wait for — but there is also
+nothing to see until you have run **Detect Tempo** on that document. Drawing the
+grid never starts an analysis of its own, so a file you have not analysed simply
+has no tics.
+
+What the tics mean:
+
+- **Each tic is a beat the tracker actually found**, not a mark laid down every
+  `60 / BPM` seconds. On a take that drifts, the tics drift with it — that is
+  the whole point of drawing them instead of trusting the BPM number.
+- **Taller, brighter tics are bar lines**, and you will only see them after an
+  **Auto-Remix** analysis. An ordinary Detect Tempo measures beats and nothing
+  else; the app will not invent a downbeat it never measured, so a plain
+  detection gives you an unbroken row of equal tics. If the bar lines it does
+  draw are on the wrong beat, the ◂ ▸ downbeat shift in the Auto-Remix dialog is
+  the correction.
+- **Dimmed, dashed tics mean the grid is provisional** — the same two conditions
+  that put `*` (the audio was edited since the analysis) or `?` (low confidence)
+  on the tempo readout. The tics do not move when this happens; they only stop
+  claiming to be right. Re-run **Detect Tempo** to make them solid again.
+- **The grid stops where the analysis stopped.** On a file longer than 10
+  minutes the tics end at the 10-minute mark rather than continuing on a guess.
+- **Zoomed all the way out**, tics are thinned to at most one every 3 pixels so
+  the band stays a readable ruler instead of turning into a solid bar. Zoom in
+  and the rest reappear.
+
+If you separate a track into stems, the five stem documents show **the same
+grid as their source**, in the same places — they are one recording partitioned
+five ways, so they share one grid rather than being analysed five times. Closing
+the source keeps the stems' tics. A `Remix N` document does *not* inherit: its
+audio is a re-arrangement of the source's bars, so the source's beat positions
+would be in the wrong places. Run Detect Tempo on the remix itself.
+
+### Snapping to the grid (the magnet)
+
+With the magnet on, editing lands on the beat. Clicking the waveform puts the
+cursor on the nearest **beat or marker** within 8 screen pixels; dragging a
+selection snaps the edge you are dragging (the anchor never moves); and in the
+multitrack, dragging or trimming a clip snaps it to the beats and markers of the
+*other* clips and to the session cursor.
+
+- **Switch it on and off** with the **magnet button** in the toolbar pill, or
+  **View → Toggle Snap to Grid**. It ships on.
+- **Hold `Alt` to suspend it** for one gesture. This works *during* a drag too:
+  press `Alt` mid-drag and the position stops snapping, release it and snapping
+  resumes, without letting go of the mouse.
+- **The pull is 8 screen pixels, not a fixed number of samples**, so it behaves
+  the same at every zoom: zoom in far enough and you can place the cursor
+  anywhere between two beats without touching `Alt` at all.
+- The magnet and the tics are **independent settings**. Turning the tics off
+  does not stop snapping, and vice versa — they answer different questions.
+
+One thing the magnet does not override: when you drop a clip on top of another
+clip on the same track, the session still nudges it clear of its neighbour, and
+that nudge has the last word. The clip then sits at its neighbour's edge rather
+than on a beat.
 
 ### Matching one tempo to another
 
@@ -312,8 +376,8 @@ Switch between views from the toolbar pill's view segment or **View** menu:
   note appears in the view (details go to the developer console); the next
   successful recompute — e.g. after zooming — clears it.
 
-Both views share the same selection, cursor, playhead, and marker overlays,
-and the same zoom/scroll gestures.
+Both views share the same selection, cursor, playhead, marker and beat-grid
+overlays, and the same zoom/scroll gestures.
 
 ## Multitrack
 
@@ -326,8 +390,11 @@ document open. A session has a name, a sample rate, and any number of tracks.
   into the multitrack** below.
 - **Clips**: **Edit → Insert Active File at Cursor** places the whole active
   document as a clip on the selected (or first) track at the multitrack
-  cursor. Drag a clip to move it (it snaps forward past overlaps rather than
-  overlapping); drag its edges to trim. Click a clip to select it — its facts
+  cursor. Drag a clip to move it and drag its edges to trim; both snap to the
+  beats and markers of the other clips and to the session cursor (hold `Alt` to
+  suspend that — see **Snapping to the grid**), and a clip dropped over a
+  neighbour on the same track is then nudged forward clear of it rather than
+  overlapping. Click a clip to select it — its facts
   (source document, start/offset/length, and an editable gain in dB) appear
   in the **Properties** tab.
 - **Playback**: the multitrack view has its own transport, cursor, and

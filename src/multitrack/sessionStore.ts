@@ -41,7 +41,7 @@ export interface SessionActions {
    * An overlap that reaches the audio path is mixed as an unshaped RAW SUM,
    * hard-clamped to +/-1 afterwards (`mixdown.ts`), so it can clip.
    *
-   * This inconsistency is recorded, not endorsed: v1.8 task X5 makes same-track
+   * This inconsistency is recorded, not endorsed: v1.9 task X5 makes same-track
    * overlap first-class and crossfaded, unifying all three paths. The tests in
    * `sessionStore.test.ts` pin today's behaviour so that change reads as
    * deliberate rather than accidental. */

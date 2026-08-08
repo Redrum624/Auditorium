@@ -535,3 +535,77 @@ pushed as its own clearly-named `Add Beat Markers` entry.
 **Intended behavior:** No further work planned. Threading a caller-supplied
 label through the shared effect path to rename one operation was judged not
 worth changing the path every effect in the app runs through.
+
+## The beat grid shows only what was measured; snapping targets beats, not clip edges
+
+**Area:** Beat grid (`src/services/beatGrid.ts`,
+`src/components/Editor/waveformRender.ts`,
+`src/components/Editor/useBeatGridOverlay.ts`,
+`src/components/Multitrack/clipBeatTics.ts`), snapping (`src/services/snap.ts`,
+`src/components/Editor/editorSnapTargets.ts`,
+`src/components/Multitrack/sessionSnapTargets.ts`)
+
+**v1.8 behavior:** Five limits, each a consequence of drawing only what the
+analysis actually produced.
+
+**1. The tics are a tracked grid, so they follow a drifting take — and every
+tempo-detection limit above applies to them unchanged.** `beatSamples` comes
+from the Ellis dynamic-programming tracker with per-beat sample refinement, not
+from `60 / BPM` repeated across the file, which is why the tics stay on the beat
+on material that speeds up or slows down (measured in v1.5: 7.7 ms worst-case
+error where a rigid grid was off by 1455 ms). The flip side is that they inherit
+the detector's octave errors and downbeat-phase errors wholesale: a 60 BPM loop
+misread as 120 draws twice as many tics, all of them in real onset positions, and
+the ×2 / ÷2 control is the correction — it re-tracks the grid rather than
+relabelling the number, so the drawn tics move with it.
+
+**2. Bar lines require a remix-level analysis; an ordinary Detect Tempo has
+none.** `barBoundary`, `downbeatPhase` and `beatsPerBar` live only on a
+`level:'remix'` analysis, which only the Auto-Remix dialog produces. Every other
+path — the Properties panel, `Effects → Detect Tempo`, the test hook — produces a
+tempo-level result carrying `beatSamples` and nothing else, so the grid it draws
+is an unbroken row of equal tics with no visible bar 1. This is deliberate: the
+alternative was deriving bar data from stubbed features and publishing it into
+the shared analysis cache, which would have invented a downbeat the DSP never
+measured *and* handed it to Auto-Remix to plan against. When bar data is present
+but empty (fewer than two boundaries fit), that is handled as "no downbeats"
+rather than as an error, and `beatsPerBar` is always read as data — 4/4 is never
+assumed.
+
+**3. The grid stops at the analysed end, and can vanish when a fifth document is
+analysed.** Whole-document analysis is capped at `MAX_ANALYSIS_SECONDS = 600`, so
+on a longer file the tics end at the 10-minute mark and nothing is extrapolated
+past it. Separately, the tempo cache holds `MAX_ENTRIES = 4` and evicts in
+**insertion order, not least-recently-used** — reading a grid does not protect
+it, so a grid on screen can disappear when a fifth document is analysed, with no
+error anywhere. Promoting a row on read was considered and rejected: it would
+make a repaint reorder eviction, trading this surprise for a worse one. What
+keeps the workflow this feature exists for inside four rows is inheritance —
+a source plus its five stems occupy one row, not six.
+
+**4. Snapping targets beats, bar lines and markers — not clip edges.**
+Butt-joining two clips is the other classic multitrack magnet and it is not here:
+same-track clip boundaries are about to become first-class crossfade joins
+(v1.9's crossfade work), and snapping to a boundary whose meaning is about to
+change belongs to that feature. In practice head-to-head alignment mostly works
+anyway, because a clip's first beat usually coincides with its start. Bar lines
+add nothing to the target set even when they exist, and that is arithmetic rather
+than an omission: every bar line already *is* one of the beats. The timeline
+ruler does not snap either — it is a seek surface showing seconds, with its own
+zoom and time base.
+
+**5. The overlap nudge outranks the magnet, and the multitrack drag is where you
+see it.** A clip drag is snapped in the gesture layer and then validated by the
+session store's `resolveOverlap`, which is forward-only and has the last word, so
+a clip dropped onto a same-track neighbour commits at that neighbour's end rather
+than on the beat the preview showed. Intent first, validity second is the only
+order that cannot produce an invalid result — the reverse could pull a clip back
+into the overlap it had just been moved clear of.
+
+**Intended behavior:** 1–3 are properties of the data and are surfaced rather
+than smoothed over: a provisional grid (stale, or below `CONFIDENCE_LOW`) is
+drawn dimmed and dashed with its geometry unchanged, and no grid at all is drawn
+without a cached analysis. 4 is sequenced, not dropped — clip-edge snapping is
+the crossfade feature's to define. 5 resolves itself when same-track overlap
+becomes first-class and `resolveOverlap` stops relocating clips: snap-then-nudge
+degrades to snap-only and nothing in the gesture layer changes.

@@ -17,7 +17,7 @@
  * **Clip edges.** Butt-joining two clips is the other classic multitrack
  * magnet, but the plan's target set is "beats, bar lines (when measured), and
  * markers" and trap 27's is "other clips' grids, the session cursor, markers" —
- * neither includes an edge, and v1.8 task X5 is about to make same-track clip
+ * neither includes an edge, and v1.9 task X5 is about to make same-track clip
  * boundaries first-class *crossfade joins*. Snapping to a boundary that is
  * about to change meaning belongs to that feature, not to this one. Note that a
  * clip's first beat usually coincides with its start anyway (`offsetSample` 0),

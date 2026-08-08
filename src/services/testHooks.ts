@@ -145,6 +145,18 @@ export interface TestApi {
     firstTargetSample: number | null;
     lastTargetSample: number | null;
   };
+  /** Read-only OBSERVER of the editor's view state (Task B5). Performs no
+   * gesture and no snap — it exists so a smoke step that drove REAL pointer
+   * events can (a) work out where on the canvas a given sample is, and
+   * (b) read back the resulting cursor sample-exactly instead of through the
+   * status pill's millisecond-rounded text. */
+  getEditorViewState(): {
+    cursorSample: number;
+    selectionStart: number | null;
+    selectionEnd: number | null;
+    samplesPerPixel: number;
+    scrollSample: number;
+  };
   // --- v1.5 flows ---------------------------------------------------------
   detectTempo(): Promise<{
     bpm: number | null;
@@ -713,6 +725,27 @@ export function installTestHooks(): void {
         targetCount: targets.length,
         firstTargetSample: targets.length > 0 ? targets[0] : null,
         lastTargetSample: targets.length > 0 ? targets[targets.length - 1] : null,
+      };
+    },
+
+    // A pure OBSERVER of the view state the gesture layer works in (B5), and
+    // deliberately nothing more: it never sets the cursor, never computes a
+    // snap and never touches the target set — so it cannot stand in for the
+    // magnet the way a `snapCursorTo(x)` hook would (trap 28). It exists
+    // because a smoke step driving REAL pointer events needs two things the
+    // renderer otherwise keeps to itself: the pixel↔sample mapping
+    // (`scrollSample` / `samplesPerPixel`, so it can aim at a known beat) and
+    // the resulting cursor position as an exact sample — the status pill only
+    // renders it rounded to the millisecond, which is 44 samples wide at
+    // 44.1 kHz and cannot express "landed exactly on the beat".
+    getEditorViewState: () => {
+      const s = useAppStore.getState();
+      return {
+        cursorSample: s.cursorSample,
+        selectionStart: s.selection ? s.selection.start : null,
+        selectionEnd: s.selection ? s.selection.end : null,
+        samplesPerPixel: s.zoom.samplesPerPixel,
+        scrollSample: s.zoom.scrollSample,
       };
     },
 

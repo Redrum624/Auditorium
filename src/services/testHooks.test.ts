@@ -417,3 +417,41 @@ describe('toggleSnap / getSnapState (Task B4)', () => {
     expect(hooks.snapSample).toBeUndefined();
   });
 });
+
+describe('getEditorViewState (Task B5)', () => {
+  test('reports the cursor, selection and pixel↔sample mapping as plain JSON', () => {
+    addDoc('beat120');
+    const store = useAppStore.getState();
+    store.setZoom({ samplesPerPixel: 221, scrollSample: 4410 });
+    store.setCursor(22051);
+    store.setSelection({ start: 1000, end: 2000 });
+
+    const result = api().getEditorViewState();
+    expect(result).toStrictEqual({
+      cursorSample: 22051,
+      selectionStart: 1000,
+      selectionEnd: 2000,
+      samplesPerPixel: 221,
+      scrollSample: 4410,
+    });
+    expectPlainJson(result);
+  });
+
+  test('reports nulls for the selection when there is none, and observes without mutating', () => {
+    addDoc('beat120');
+    const hooks = api();
+    useAppStore.getState().setSelection(null);
+    const before = useAppStore.getState();
+
+    const result = hooks.getEditorViewState();
+    expect(result.selectionStart).toBeNull();
+    expect(result.selectionEnd).toBeNull();
+    expectPlainJson(result);
+
+    // A pure observer: reading it changes nothing the gesture layer depends on.
+    const after = useAppStore.getState();
+    expect(after.cursorSample).toBe(before.cursorSample);
+    expect(after.selection).toBe(before.selection);
+    expect(after.zoom).toBe(before.zoom);
+  });
+});

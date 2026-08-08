@@ -384,7 +384,7 @@ export default function ClipView({
       // fires, the committed start is NOT a snap target — the overlap rule
       // overrides the magnet, silently and forward-only, exactly as it already
       // does for every other caller. That is also why this ordering does not
-      // entrench anything against v1.8 task X5 (same-track overlap becoming
+      // entrench anything against v1.9 task X5 (same-track overlap becoming
       // first-class and crossfaded): when `resolveOverlap` stops relocating
       // clips, snap-then-nudge simply degrades to snap-only and nothing here
       // changes. The reverse order would leave a snap computed against a

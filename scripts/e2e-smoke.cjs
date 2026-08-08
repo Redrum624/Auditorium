@@ -84,6 +84,96 @@ async function spectroHash(page) {
   });
 }
 
+/**
+ * Reads the AMBER beat tics out of a canvas (v1.8, Tasks B2/B3) and reports
+ * them as pixel geometry: which device columns are lit inside the tic band,
+ * grouped into contiguous runs, plus how many columns are lit ABOVE the band.
+ *
+ * The hue test is what makes this specific rather than a "something changed"
+ * check. A beat tic is `rgba(255,213,79,·)` — yellow — so over the dark stage
+ * it satisfies `g − b > r − g`. Everything else the editor lane draws fails
+ * that: the cyan waveform/playhead and the accent-soft selection have `b > r`,
+ * the cursor is neutral white, and the ORANGE markers (`#ff8a65`) have
+ * `r − g` far larger than `g − b`. Half-covered antialiased columns keep the
+ * same ratios at lower amplitude, so a tic at a fractional x is still found.
+ *
+ * `bandCssPx` is the band's height measured up from the canvas bottom, or
+ * null for "the whole canvas" (the clip overlay IS the band).
+ */
+async function beatTicBand(page, testid, bandCssPx) {
+  return page.evaluate(
+    ({ id, bandCss }) => {
+      const c = document.querySelector(`[data-testid="${id}"]`);
+      if (!(c instanceof HTMLCanvasElement)) return null;
+      const ctx = c.getContext('2d');
+      const rect = c.getBoundingClientRect();
+      if (!ctx || !c.width || !c.height || !rect.width) return null;
+      // Measured, never assumed — the 1:1 backing-store claim is asserted
+      // against it for the clip overlay.
+      const dpr = c.width / rect.width;
+      const isTic = (r, g, b) => r - b > 30 && g - b > 20 && g - b > r - g && r > g;
+      const litColumns = (y0, rows) => {
+        if (rows <= 0) return [];
+        const data = ctx.getImageData(0, y0, c.width, rows).data;
+        const out = [];
+        for (let x = 0; x < c.width; x++) {
+          for (let y = 0; y < rows; y++) {
+            const i = (y * c.width + x) * 4;
+            if (isTic(data[i], data[i + 1], data[i + 2])) {
+              out.push(x);
+              break;
+            }
+          }
+        }
+        return out;
+      };
+
+      const bandRows = bandCss === null ? c.height : Math.min(c.height, Math.ceil(bandCss * dpr));
+      const bandTop = c.height - bandRows;
+      const cols = litColumns(bandTop, bandRows);
+      // 2 device px of slack so an antialiased tic top doesn't read as "above".
+      const above = bandTop > 2 ? litColumns(0, bandTop - 2).length : 0;
+
+      const groups = [];
+      for (const x of cols) {
+        const last = groups[groups.length - 1];
+        if (last && x === last.end + 1) last.end = x;
+        else groups.push({ start: x, end: x });
+      }
+      return {
+        dpr,
+        cssWidth: rect.width,
+        cssHeight: rect.height,
+        deviceWidth: c.width,
+        deviceHeight: c.height,
+        columnCount: cols.length,
+        aboveBandColumns: above,
+        groupCount: groups.length,
+        widestGroupPx: groups.reduce((m, g) => Math.max(m, g.end - g.start + 1), 0),
+        // Group centres in CSS px, for the "this tic is on that beat" check.
+        centresCss: groups.map((g) => (g.start + g.end + 1) / 2 / dpr),
+      };
+    },
+    { id: testid, bandCss: bandCssPx === undefined ? null : bandCssPx }
+  );
+}
+
+/** One REAL pointer click at a viewport position — `page.mouse`, so it goes
+ * through the browser's own input path and the renderer's gesture layer, not
+ * through a test hook (plan trap 28: a hook-driven assertion can pass without
+ * the magnet ever running). Clicks are separated in time by the caller so
+ * Chromium never coalesces two of them into a double-click. */
+async function realClick(page, clientX, clientY, { alt = false } = {}) {
+  if (alt) await page.keyboard.down('Alt');
+  try {
+    await page.mouse.move(clientX, clientY);
+    await page.mouse.down();
+    await page.mouse.up();
+  } finally {
+    if (alt) await page.keyboard.up('Alt');
+  }
+}
+
 async function main() {
   // Preconditions ----------------------------------------------------------
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
@@ -1031,7 +1121,276 @@ async function main() {
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 
-    // 15) v1.7 stem separation (Task S7) — LAST, because it leaves the app in
+    // 15) v1.8 step A — the beat grid PAINTS (Tasks B2/B3) ------------------
+    // Two surfaces, one grid: the editor's bottom band and the multitrack
+    // clip's own overlay. Asserted on PIXELS (`beatTicBand`, the same
+    // canvas-readback technique as the waveform/spectrogram checks) and cross-
+    // checked against `getBeatGridState()`'s numbers, because a hook alone
+    // says nothing about what is on screen and pixels alone say nothing about
+    // whether they landed on the measured beats.
+    console.log('Beat grid: tics on the waveform editor and on a multitrack clip...');
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate((p) => window.__test.openPath(p), BEAT);
+    const gridTempo = await page.evaluate(() => window.__test.detectTempo());
+    console.log(`  detectTempo: ${JSON.stringify(gridTempo)}`);
+    let gridState = await page.evaluate(() => window.__test.getBeatGridState());
+    console.log(`  getBeatGridState: ${JSON.stringify(gridState)}`);
+
+    if (!gridState.hasGrid) {
+      console.log(
+        `Beat grid: SKIPPED (REPORTED) — no analysis is cached for the click train ` +
+          `(detectTempo returned bpm=${gridTempo.bpm}, beatCount=${gridTempo.beatCount}), so ` +
+          `there is nothing the grid could legitimately draw. The grid is never derived from a ` +
+          `BPM number, so this is a real precondition, not a tolerance.`
+      );
+    } else {
+      assert(
+        gridState.visible === true,
+        `the beat grid display preference ships ON (actual visible=${gridState.visible})`
+      );
+      assert(
+        gridState.beatCount === gridTempo.beatCount &&
+          gridState.firstBeatSample === gridTempo.firstBeatSample,
+        `the drawn grid is the analysis's own tracked beats (expected ${gridTempo.beatCount} beats ` +
+          `from ${gridTempo.firstBeatSample}, actual ${gridState.beatCount} from ${gridState.firstBeatSample})`
+      );
+      assert(
+        gridState.origin === 'own' && gridState.provisional === false,
+        `the grid is this document's own, fresh analysis (actual origin=${gridState.origin}, provisional=${gridState.provisional})`
+      );
+      // AMENDED RULING 1, made executable: an ordinary Detect Tempo is a
+      // `level:'tempo'` run and produces beats and NOTHING ELSE. Bar lines are
+      // only drawn when a remix-level analysis genuinely measured a metre, so
+      // here there must be no downbeats and no `beatsPerBar` — the alternative
+      // would have been inventing a downbeat the DSP never produced.
+      assert(
+        gridState.beatsPerBar === null && gridState.downbeatCount === 0,
+        `a plain Detect Tempo draws beats only — no invented bar lines ` +
+          `(expected beatsPerBar=null downbeatCount=0, actual ${gridState.beatsPerBar}/${gridState.downbeatCount})`
+      );
+
+      const view = await page.evaluate(() => window.__test.getEditorViewState());
+      const band = await beatTicBand(page, 'waveform-canvas', 9);
+      assert(band !== null, 'the waveform canvas is readable for the tic-band check');
+      console.log(
+        `  editor tic band: ${band.groupCount} tic groups / ${band.columnCount} lit device ` +
+          `columns, widest ${band.widestGroupPx}px, ${band.aboveBandColumns} lit above the band ` +
+          `(canvas ${band.cssWidth.toFixed(0)}x${band.cssHeight.toFixed(0)} CSS, dpr ${band.dpr})`
+      );
+      assert(
+        band.groupCount >= 8,
+        `the editor draws a RULER of tics, not one stray mark (expected >= 8 groups, actual ${band.groupCount})`
+      );
+      assert(
+        band.groupCount <= gridState.beatCount,
+        `no tic is drawn that no beat accounts for (expected <= ${gridState.beatCount}, actual ${band.groupCount})`
+      );
+      assert(
+        band.widestGroupPx <= Math.max(3, Math.ceil(2 * band.dpr)),
+        `each tic is a hairline, not a block (expected <= ${Math.max(3, Math.ceil(2 * band.dpr))} device px, actual ${band.widestGroupPx})`
+      );
+      assert(
+        band.aboveBandColumns === 0,
+        `the tics are confined to the 9 px bottom band (expected 0 lit columns above it, actual ${band.aboveBandColumns})`
+      );
+      // The load-bearing one: a PAINTED tic sits where a MEASURED beat is.
+      const expectedFirstX =
+        (gridState.firstBeatSample - view.scrollSample) / view.samplesPerPixel;
+      const nearestCentre = band.centresCss.reduce(
+        (best, x) => (Math.abs(x - expectedFirstX) < Math.abs(best - expectedFirstX) ? x : best),
+        Infinity
+      );
+      console.log(
+        `  first tracked beat ${gridState.firstBeatSample} maps to x=${expectedFirstX.toFixed(2)} ` +
+          `CSS px at ${view.samplesPerPixel} samples/px; nearest painted tic centre ${nearestCentre.toFixed(2)}`
+      );
+      assert(
+        Math.abs(nearestCentre - expectedFirstX) <= 1.5,
+        `a painted tic sits on the first TRACKED beat (expected within 1.5 CSS px of ` +
+          `${expectedFirstX.toFixed(2)}, actual ${nearestCentre.toFixed(2)})`
+      );
+
+      // The toggle really governs the pixels (View > Toggle Beat Grid).
+      const offVisible = await page.evaluate(() => window.__test.toggleBeatGrid());
+      assert(offVisible === false, `toggleBeatGrid() reports the grid hidden (actual ${offVisible})`);
+      const bandOff = await beatTicBand(page, 'waveform-canvas', 9);
+      assert(
+        bandOff.groupCount === 0,
+        `toggling the grid off removes every tic from the canvas (actual ${bandOff.groupCount} groups)`
+      );
+      const onVisible = await page.evaluate(() => window.__test.toggleBeatGrid());
+      const bandOn = await beatTicBand(page, 'waveform-canvas', 9);
+      assert(
+        onVisible === true && bandOn.groupCount === band.groupCount,
+        `toggling it back on restores exactly the same ruler (expected ${band.groupCount} groups, actual ${bandOn.groupCount})`
+      );
+
+      // 15b) the SAME grid on a multitrack clip (B3). The analysis is run
+      // above, BEFORE the insert, which is what makes the clip resolve a grid
+      // at all — a clip reads its source document's cached analysis and never
+      // triggers one.
+      const clipSummary = await page.evaluate(() => window.__test.getStateSummary());
+      await page.evaluate((rate) => window.__test.newSession(rate), clipSummary.sampleRate);
+      const inserted = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
+      assert(inserted !== null, `the analysed document was inserted as a clip (${JSON.stringify(inserted)})`);
+      await page.waitForSelector('[data-testid="clip-beat-tics"]', { timeout: 10000 });
+      const clipOverlays = await page.evaluate(
+        () => document.querySelectorAll('[data-testid="clip-beat-tics"]').length
+      );
+      assert(
+        clipOverlays === 1,
+        `the clip carries exactly one beat-tic overlay (actual ${clipOverlays})`
+      );
+      const clipBand = await beatTicBand(page, 'clip-beat-tics', null);
+      assert(clipBand !== null, 'the clip tic overlay is readable');
+      console.log(
+        `  clip tic band: ${clipBand.groupCount} tic groups / ${clipBand.columnCount} lit device ` +
+          `columns, widest ${clipBand.widestGroupPx}px (overlay ${clipBand.deviceWidth}x${clipBand.deviceHeight} ` +
+          `device px for ${clipBand.cssWidth.toFixed(0)}x${clipBand.cssHeight.toFixed(0)} CSS, dpr ${clipBand.dpr})`
+      );
+      assert(
+        clipBand.deviceWidth === Math.round(clipBand.cssWidth * clipBand.dpr),
+        `the clip overlay's backing store is 1:1, never blit-stretched like the clip's own ` +
+          `waveform raster (expected ${Math.round(clipBand.cssWidth * clipBand.dpr)} device px, actual ${clipBand.deviceWidth})`
+      );
+      assert(
+        clipBand.groupCount >= 8,
+        `the clip shows the same ruler as the editor (expected >= 8 tic groups, actual ${clipBand.groupCount})`
+      );
+      assert(
+        clipBand.widestGroupPx <= Math.max(3, Math.ceil(2 * clipBand.dpr)),
+        `each clip tic is a hairline (expected <= ${Math.max(3, Math.ceil(2 * clipBand.dpr))} device px, actual ${clipBand.widestGroupPx})`
+      );
+      await page.evaluate(() => window.__test.setView('waveform'));
+    }
+
+    // 16) v1.8 step B — the MAGNET actually snaps (Task B4) -----------------
+    // Driven with REAL pointer events (`page.mouse`), never through a hook:
+    // the test hooks bypass the gesture layer entirely, so a hook-driven
+    // assertion would pass without the magnet ever running (plan trap 28).
+    // `getEditorViewState()` is a read-only observer — it supplies the
+    // pixel↔sample mapping to aim with and reads the cursor back
+    // sample-exactly; it performs no snap of its own.
+    console.log('Magnet: real pointer clicks near a tracked beat...');
+    gridState = await page.evaluate(() => window.__test.getBeatGridState());
+    const snapState = await page.evaluate(() => window.__test.getSnapState());
+    console.log(`  getSnapState: ${JSON.stringify(snapState)}`);
+    const canvasBox = await page.locator('[data-testid="waveform-canvas"]').boundingBox();
+    const magnetView = await page.evaluate(() => window.__test.getEditorViewState());
+    const targetBeat = gridState.hasGrid ? gridState.firstBeatSample : null;
+    const beatX =
+      targetBeat === null
+        ? null
+        : (targetBeat - magnetView.scrollSample) / magnetView.samplesPerPixel;
+    // Preconditions, each a real one: a grid to snap to, the magnet on, the
+    // beat actually on screen with room either side for both an inside-
+    // tolerance and an outside-tolerance click, and the canvas genuinely
+    // topmost at the aim point (an overlay would swallow the pointer).
+    const clickY = canvasBox ? canvasBox.y + canvasBox.height / 2 : 0;
+    const topmost =
+      canvasBox && beatX !== null
+        ? await page.evaluate(
+            ({ x, y }) => {
+              const el = document.elementFromPoint(x, y);
+              return el ? el.getAttribute('data-testid') || el.tagName : null;
+            },
+            { x: canvasBox.x + beatX + 4, y: clickY }
+          )
+        : null;
+    const magnetBlocked =
+      !gridState.hasGrid
+        ? 'no cached analysis, so there is nothing to snap to'
+        : !snapState.enabled
+          ? 'the magnet preference is off'
+          : snapState.targetCount === 0
+            ? 'the target set is empty'
+            : !canvasBox
+              ? 'the waveform canvas has no layout box'
+              : beatX === null || beatX < 16 || beatX > canvasBox.width - 40
+                ? `the first tracked beat is not on screen with room either side (x=${beatX})`
+                : topmost !== 'waveform-canvas'
+                  ? `an overlay covers the aim point (topmost element is ${topmost})`
+                  : null;
+
+    if (magnetBlocked) {
+      console.log(`Magnet: SKIPPED (REPORTED) — ${magnetBlocked}.`);
+    } else {
+      const spp = magnetView.samplesPerPixel;
+      assert(
+        snapState.targetCount === gridState.beatCount,
+        `every tracked beat is a snap target (expected ${gridState.beatCount}, actual ${snapState.targetCount})`
+      );
+      console.log(
+        `  aiming at beat ${targetBeat} (x=${beatX.toFixed(2)} CSS px, ${spp} samples/px, ` +
+          `tolerance ${snapState.tolerancePx} px)`
+      );
+
+      // Chromium coalesces clicks that are close in time AND position into a
+      // double-click, which selects all; the cursor would still be set, but
+      // separating them keeps every click an honest single click.
+      const settle = () => page.waitForTimeout(700);
+
+      // 1. A click 4 px PAST the beat — inside the 8 px tolerance — must land
+      //    ON the beat, exactly.
+      await realClick(page, canvasBox.x + beatX + 4, clickY);
+      await settle();
+      const snapped = await page.evaluate(() => window.__test.getEditorViewState());
+      console.log(
+        `  click at beat+4px -> cursorSample ${snapped.cursorSample} (raw would be ` +
+          `${Math.round(targetBeat + 4 * spp)})`
+      );
+      assert(
+        snapped.cursorSample === targetBeat,
+        `a real click 4 px past the beat lands EXACTLY on it (expected ${targetBeat}, actual ${snapped.cursorSample})`
+      );
+
+      // 2. The same click with Alt held must NOT snap (the escape hatch).
+      await realClick(page, canvasBox.x + beatX + 4, clickY, { alt: true });
+      await settle();
+      const withAlt = await page.evaluate(() => window.__test.getEditorViewState());
+      console.log(`  click at beat+4px with Alt held -> cursorSample ${withAlt.cursorSample}`);
+      assert(
+        withAlt.cursorSample !== targetBeat &&
+          Math.abs(withAlt.cursorSample - (targetBeat + 4 * spp)) <= spp,
+        `holding Alt suspends the magnet (expected ~${Math.round(targetBeat + 4 * spp)} and NOT ` +
+          `${targetBeat}, actual ${withAlt.cursorSample})`
+      );
+
+      // 3. A click well OUTSIDE the tolerance is left alone — the magnet pulls,
+      //    it does not swallow the whole lane.
+      await realClick(page, canvasBox.x + beatX + 30, clickY);
+      await settle();
+      const outside = await page.evaluate(() => window.__test.getEditorViewState());
+      console.log(`  click at beat+30px -> cursorSample ${outside.cursorSample}`);
+      assert(
+        outside.cursorSample !== targetBeat &&
+          Math.abs(outside.cursorSample - (targetBeat + 30 * spp)) <= spp,
+        `a click 30 px past the beat is left where the pointer was (expected ` +
+          `~${Math.round(targetBeat + 30 * spp)}, actual ${outside.cursorSample})`
+      );
+
+      // 4. The toggle governs it too, and restores.
+      const magnetOff = await page.evaluate(() => window.__test.toggleSnap());
+      assert(magnetOff === false, `toggleSnap() reports the magnet off (actual ${magnetOff})`);
+      await realClick(page, canvasBox.x + beatX + 4, clickY);
+      await settle();
+      const offCursor = await page.evaluate(() => window.__test.getEditorViewState());
+      console.log(`  click at beat+4px with the magnet OFF -> cursorSample ${offCursor.cursorSample}`);
+      assert(
+        offCursor.cursorSample !== targetBeat,
+        `with the magnet off the same click does not snap (expected NOT ${targetBeat}, actual ${offCursor.cursorSample})`
+      );
+      const magnetOn = await page.evaluate(() => window.__test.toggleSnap());
+      await realClick(page, canvasBox.x + beatX + 4, clickY);
+      await settle();
+      const backOn = await page.evaluate(() => window.__test.getEditorViewState());
+      assert(
+        magnetOn === true && backOn.cursorSample === targetBeat,
+        `turning the magnet back on restores the snap (expected ${targetBeat}, actual ${backOn.cursorSample})`
+      );
+    }
+
+    // 17) v1.7 stem separation (Task S7) — LAST, because it leaves the app in
     // the multitrack view with five new documents and must not perturb any
     // step above (including the screenshot).
     //

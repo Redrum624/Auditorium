@@ -194,7 +194,7 @@ describe('addClip', () => {
 
   // Pins TODAY's behaviour, deliberately: `addClip` accepts an overlap (see its
   // overlap contract in sessionStore.ts) while `moveClip` nudges clear of one.
-  // v1.8 task X5 makes same-track overlap first-class and crossfaded — when
+  // v1.9 task X5 makes same-track overlap first-class and crossfaded — when
   // this expectation changes, that must read as the deliberate behaviour change
   // it is, not as an accident.
   it('accepts a clip overlapping its neighbour — only moveClip nudges clear', () => {
