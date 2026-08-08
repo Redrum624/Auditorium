@@ -1031,6 +1031,143 @@ async function main() {
     await page.screenshot({ path: SHOT });
     assert(fs.existsSync(SHOT), 'smoke.png screenshot written');
 
+    // 15) v1.7 stem separation (Task S7) — LAST, because it leaves the app in
+    // the multitrack view with five new documents and must not perturb any
+    // step above (including the screenshot).
+    //
+    // GATED ON THE MODEL, not on a fixture: the 166 MB htdemucs export is
+    // downloaded on first use and is never committed, so a machine without it
+    // REPORTS a skip with the reason — the same stance as the real-song step,
+    // never a silent pass. When a repo-local copy exists (test-assets/models/,
+    // gitignored) it is linked/copied into the app's own model directory first,
+    // which is exactly where the app's downloader would have put it; the
+    // manager re-verifies the sha256 pin from disk before every load, so a bad
+    // copy fails loudly rather than separating with a wrong model.
+    //
+    // The fixture is the 8 s synthetic click train, NOT the copyrighted
+    // real-song file: separation runs at ~1.5× realtime, and a smoke step has
+    // to stay usable. Assertions are structural (names, counts, the identity),
+    // because a model's separation QUALITY has no ground truth to assert.
+    console.log('Stem separation (v1.7)...');
+    const modelState0 = await page.evaluate(() => window.__test.getStemModelState());
+    const expectedModelMb = (modelState0.expectedBytes / 1e6).toFixed(0);
+    let modelState = modelState0;
+    if (!modelState.downloaded) {
+      const repoModel = path.join(ROOT, 'test-assets', 'models', 'htdemucs_fp16weights.onnx');
+      const repoSize = fs.existsSync(repoModel) ? fs.statSync(repoModel).size : -1;
+      if (repoSize === modelState.expectedBytes) {
+        const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
+        const dest = path.join(userData, 'models', 'htdemucs_fp16weights.onnx');
+        console.log(`  provisioning the model from test-assets into ${dest}`);
+        fs.mkdirSync(path.dirname(dest), { recursive: true });
+        try {
+          fs.linkSync(repoModel, dest);
+        } catch {
+          fs.copyFileSync(repoModel, dest);
+        }
+        modelState = await page.evaluate(() => window.__test.getStemModelState());
+      }
+    }
+    if (!modelState.downloaded) {
+      console.log(
+        `Stem separation: SKIPPED (REPORTED) — the ${expectedModelMb} MB separation model ` +
+          `is not on this machine and no valid repo-local copy exists at ` +
+          `test-assets/models/htdemucs_fp16weights.onnx. Download it in-app ` +
+          `(Edit → Separate into Stems… → Download Model) to make this step run.`
+      );
+    } else {
+      await page.evaluate(() => window.__test.setView('waveform'));
+      await page.evaluate((p) => window.__test.openPath(p), BEAT);
+      const stemSource = await page.evaluate(() => window.__test.getStateSummary());
+      const audioSeconds = stemSource.length / stemSource.sampleRate;
+      console.log(
+        `  source: ${stemSource.activeName}, ${audioSeconds.toFixed(2)}s, ` +
+          `${stemSource.sampleRate} Hz, ${stemSource.channels} ch (docCount ${stemSource.docCount})`
+      );
+      const stems = await page.evaluate(() => window.__test.separateStems());
+      const stemSeconds = stems.elapsedMs / 1000;
+      console.log(`  separateStems: ${JSON.stringify(stems)}`);
+      console.log(
+        `  separation took ${stemSeconds.toFixed(1)}s for ${audioSeconds.toFixed(2)}s of audio ` +
+          `(${(audioSeconds / stemSeconds).toFixed(2)}x realtime, model load included)`
+      );
+      assert(
+        stems.ok === true,
+        `separation succeeded (expected ok=true, actual ok=${stems.ok} status=${stems.status} message=${stems.message})`
+      );
+
+      const expectedNames = ['Drums', 'Bass', 'Vocals', 'Other', 'Residual'].map(
+        (label) => `${stemSource.activeName} — ${label}`
+      );
+      assert(
+        JSON.stringify(stems.documentNames) === JSON.stringify(expectedNames),
+        `five stem documents with the ruling-6 names and order (expected ${JSON.stringify(
+          expectedNames
+        )}, actual ${JSON.stringify(stems.documentNames)})`
+      );
+      const afterSummary = await page.evaluate(() => window.__test.getStateSummary());
+      assert(
+        afterSummary.docCount === stemSource.docCount + 5,
+        `exactly five NEW documents were added (expected ${stemSource.docCount + 5}, actual ${afterSummary.docCount})`
+      );
+      assert(
+        stems.sessionName === `${stemSource.activeName} — Stems`,
+        `the session is named after the source (expected '${stemSource.activeName} — Stems', actual '${stems.sessionName}')`
+      );
+      assert(
+        stems.lengthSamples === stemSource.length && stems.sampleRate === stemSource.sampleRate,
+        `stems are full-length at the DOCUMENT's own rate (expected ${stemSource.length}@${stemSource.sampleRate}, actual ${stems.lengthSamples}@${stems.sampleRate})`
+      );
+
+      const mtCounts = await page.evaluate(() => ({
+        views: document.querySelectorAll('[data-testid="multitrack-view"]').length,
+        tracks: document.querySelectorAll('[data-testid="track-header"]').length,
+        clips: document.querySelectorAll('[data-testid="clip"]').length,
+      }));
+      assert(
+        mtCounts.views === 1,
+        `the app switched to the multitrack view (expected 1 multitrack-view, actual ${mtCounts.views})`
+      );
+      assert(
+        mtCounts.tracks === 5 && mtCounts.clips === 5,
+        `the landed session has five tracks with one clip each (actual ${mtCounts.tracks} tracks / ${mtCounts.clips} clips)`
+      );
+
+      // THE user's own requirement, made executable end-to-end through the
+      // built app: mixing the untouched session down reproduces the source.
+      // The bound is the float32 storage floor the guarantee is stated against
+      // (2^-24 ≈ 5.96e-8 at full scale), not a tuned tolerance.
+      const errDb =
+        stems.mixdownWorstAbsError > 0
+          ? (20 * Math.log10(stems.mixdownWorstAbsError)).toFixed(1)
+          : '-inf';
+      console.log(
+        `  mixdown identity: worst |err| ${stems.mixdownWorstAbsError} (${errDb} dBFS), ` +
+          `${(stems.mixdownExactFraction * 100).toFixed(4)}% bit-exact, ` +
+          `peak ${stems.mixdownPeak} vs source peak ${stems.sourcePeak}`
+      );
+      assert(
+        stems.exactSumHolds === true,
+        `the exact-sum guarantee holds for this source (expected true, actual ${stems.exactSumHolds}, sourcePeak ${stems.sourcePeak})`
+      );
+      assert(
+        stems.mixdownWorstAbsError !== null && stems.mixdownWorstAbsError <= 1e-7,
+        `mixing the untouched session down reproduces the source (expected worst |err| <= 1e-7, actual ${stems.mixdownWorstAbsError})`
+      );
+      assert(
+        stems.mixdownExactFraction !== null && stems.mixdownExactFraction >= 0.99,
+        `at least 99% of samples are BIT-identical (expected >= 0.99, actual ${stems.mixdownExactFraction})`
+      );
+      assert(
+        stems.mixdownPeak <= 1.0 && stems.mixdownPeak <= stems.sourcePeak + 1e-6,
+        `the mixdown does not clip beyond the source's own peak (expected <= min(1, ${stems.sourcePeak} + 1e-6), actual ${stems.mixdownPeak})`
+      );
+      assert(
+        Number.isFinite(stems.sanitisedEstimateSamples),
+        `the non-finite-estimate count is reported (actual ${stems.sanitisedEstimateSamples})`
+      );
+    }
+
     console.log('\nSMOKE PASSED');
   } finally {
     // The run must NEVER leave an Electron window for a human to close by

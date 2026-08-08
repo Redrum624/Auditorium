@@ -181,6 +181,123 @@ is cleared when you capture a new one — or when you close the document it was
 captured from (the print belongs to audio that no longer exists). The Noise
 Reduction dialog notices a capture or clear immediately, even while open.
 
+## Tempo, remix and stems
+
+These four features are opt-in: nothing here runs until you ask for it, so
+opening a file never pays for an analysis you didn't want.
+
+### Detecting the tempo
+
+To find a track's tempo: open it and run **Effects → Detect Tempo**. The
+analysis runs off the main thread; when it finishes, the BPM appears in three
+places — the `♩ 124.0` readout in the bottom status pill, the **TEMPO** card
+above the panel cards, and the **Tempo** row in the **Properties** panel.
+
+Two marks qualify the number, and they mean different things: a trailing `?`
+means low confidence (the material may not have a steady beat at all), and a
+trailing `*` means the grid is **stale** — the audio has been edited since the
+analysis, so re-run it.
+
+The beats are *tracked*, not extrapolated from a rigid grid, so the result
+follows a take that drifts. What the detector cannot judge is the **octave**: a
+60 BPM loop can be reported as 120 with high confidence. That is what the
+**×2** and **÷2** buttons on the TEMPO card (and in both dialogs) are for —
+they re-track the beats at the corrected period rather than just relabelling
+the number, so everything built on the grid moves with it.
+
+Whole-document analysis is capped at the first 10 minutes; past that the result
+is reported as describing the first 10 min rather than the whole file.
+
+### Matching one tempo to another
+
+To make a 128 BPM loop sit in a 124 BPM track:
+
+1. Select the region to retarget (or select nothing, to retarget the whole
+   document).
+2. **Effects → Match Tempo…**. The dialog prefills the source BPM from the
+   detection; **Re-detect from selection** re-runs it against exactly the audio
+   the ratio will be applied to.
+3. Enter the target BPM — or switch to a plain ratio. The dialog shows which
+   quality band the resulting stretch falls in (transparent / good / extreme).
+4. Optionally tick the beat-marker grid, which lays down markers at the *new*
+   tempo as a separate, separately-undoable step.
+5. **Apply**.
+
+Match Tempo runs through the same WSOLA **Time Stretch** effect and the same
+single write path as everything else, so markers remap proportionally and undo
+behaves normally — the History entry reads `Effect: Time Stretch` (see Known
+Limitations), with `Add Beat Markers` as its own entry when you asked for the
+grid.
+
+### Re-arranging a track to a length (Auto-Remix)
+
+To make a song fit a 2-minute video without time-stretching it:
+
+1. Open the track and run **Edit → Auto-Remix…**.
+2. Confirm the tempo and the downbeat the dialog reports (use ×2 / ÷2 if the
+   octave is wrong — the arrangement is built on this grid).
+3. Set the target length, and adjust phrase length, crossfade, strictness or
+   repeat limits if you want to.
+4. **Create Remix**. The result is a **new** `Remix N` document; the source is
+   never modified.
+
+Auto-Remix cuts and repeats on real bar lines rather than stretching: it
+clusters the bars into sections by timbre, chroma, loudness and rhythm, and
+picks the cheapest arrangement that reaches your target, with joins constrained
+to land at the top of a phrase, micro-aligned by ±10 ms and crossfaded with a
+power-preserving law.
+
+No cost function understands lyrics or phrasing, so some splice will eventually
+be musically wrong even at a low score. Fix it in the **Remix** panel rather
+than by re-tuning: each splice gets a row with a cost-coloured quality dot,
+**Go To** (jump the cursor there), **✕ Reject** (forbid that join and re-plan
+another way to hit the same length), **📌 Pin** (keep it, max 8), **◂ ▸ Nudge**
+(move the edit one bar earlier or later without changing the output length),
+plus **Re-roll** and **Revert to auto**. Every adjustment appears in the
+History panel and steps back with `Ctrl+Z`. If you edit or close the *source*
+document, the remix session goes stale and read-only — the rendered audio stays
+fully editable, but it can no longer be re-planned against a grid that no
+longer describes the source.
+
+### Separating a track into stems
+
+To split a song into drums, bass, vocals and everything else:
+
+1. Open the file and run **Edit → Separate into Stems…**.
+2. The first time only, the dialog offers the **one-time 166 MB model
+   download** with byte progress. It is fetched once and kept, so later
+   separations start immediately.
+3. Press **Separate** and watch the per-segment progress and its time estimate.
+   Separation runs at roughly **1.5× realtime** on a modern multi-core CPU
+   (measured: 30 seconds of audio separated in about 20 seconds), so a
+   four-minute song takes around two and a half minutes. **Cancel** stops it
+   immediately.
+4. When it finishes you land in the **multitrack view** with five new
+   documents — `<name> — Drums`, `— Bass`, `— Vocals`, `— Other`, `— Residual`
+   — one per track, in a session named `<name> — Stems`.
+
+Two things are worth knowing before you start, because they are different kinds
+of promise:
+
+- **Nothing is lost.** The five tracks add back up to your original *sample for
+  sample*: the stems are masks over your document's own spectrum, and the
+  Residual track is literally whatever the four stems didn't account for. So
+  mixing the untouched session down (**File → Mix Down to New File**) gives you
+  the original back exactly, and muting one track gives you the original minus
+  that instrument — with nothing else quietly missing.
+- **How cleanly the instruments are told apart is bounded by the model.**
+  Expect some bleed — a cymbal in the "Other" track, a vocal tail in the
+  Residual. That is a limit of the separation, not a bug, and no setting will
+  remove it. Solo each track to hear what actually landed where.
+
+Practical notes: separation is limited to **15 minutes** of audio per run;
+mixing the session down only reproduces the original exactly if the original
+itself stays within ±1 (a document you have amplified past full scale is
+detected and the dialog says the exact sum will not hold); a **mono** source's
+stems arrive as stereo documents with identical channels (use **Edit → Convert
+Channels…** if you want them mono); and the five stem documents have never been
+written to disk, so closing one — or quitting — prompts you to save it.
+
 ## Views
 
 Switch between views from the toolbar pill's view segment or **View** menu:

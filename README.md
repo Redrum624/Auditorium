@@ -9,9 +9,10 @@
 Auditorium is a free, Audition-class desktop audio editor for Windows, built on
 Electron and React. It does destructive waveform editing and spectral-frequency
 editing, ships 22 built-in effects, spectral noise reduction, microphone
-recording, a multitrack editor with sessions and mixdown, and tempo detection,
-tempo matching and auto-remix — all processing runs locally with pure-TypeScript
-DSP, no cloud and no account.
+recording, a multitrack editor with sessions and mixdown, tempo detection,
+tempo matching and auto-remix, and stem separation that splits a track into
+drums/bass/vocals/other and a residual which add back up to the original sample
+for sample — all processing runs locally, no cloud and no account.
 
 ## Install
 
@@ -58,6 +59,7 @@ use `npm run dev`.
 - **Tempo Readout** — the status pill's `♩ BPM`, the TEMPO card above the panel cards, and the Properties panel's Tempo row, showing the detected tempo with its confidence, a staleness marker, and ×2 / ÷2 buttons that re-track the beat grid at the corrected period.
 - **Match Tempo Dialog** — source BPM (prefilled from the detection, re-detectable from the selection), target BPM or ratio, the stretch-quality band, and an optional beat-marker grid at the new tempo.
 - **Auto-Remix Dialog & Remix Panel** — the dialog analyses the track and takes tempo/time-signature confirmation, phrase length, target length, crossfade, strictness and repeat options; the Remix panel (the Remix entry on the icon rail) lists one row per splice with a cost-coloured quality dot, Go To, Reject, Pin, Nudge earlier/later, Re-roll and Revert to auto.
+- **Separate into Stems Dialog** — the one-time 166 MB model download with byte progress, the five track names and both guarantees stated up front, per-segment separation progress with a time estimate, Cancel, and an honest post-run note when a source above full scale means the five tracks cannot add back to it exactly.
 
 ## Features
 
@@ -97,6 +99,7 @@ use `npm run dev`.
 - **Tempo detection**: `Effects → Detect Tempo` runs a shared off-thread beat-tracking pass (log-band spectral-flux onsets → harmonic-comb tempo estimate → Ellis dynamic-programming beat tracking → sample-accurate refinement) and reports the BPM plus a confidence score in the status pill and the Properties panel. The beats are tracked, not extrapolated, so the grid follows a drifting take; ×2 / ÷2 buttons re-track at the corrected period when the octave is wrong. Whole-document analysis is capped at 10 minutes and flags the result as truncated past that.
 - **Match Tempo**: `Effects → Match Tempo…` retargets a selection (or the whole document) from a source BPM to a target BPM or a plain ratio through the WSOLA time stretch, showing whether the resulting stretch is transparent, good, or extreme, and optionally laying down a beat-marker grid at the new tempo as its own undo step.
 - **Auto-Remix**: `Edit → Auto-Remix…` re-arranges a track's own bars to reach a requested length and writes the result to a new `Remix N` document, leaving the source untouched. Bar boundaries come from the tracked beats; each boundary is described by timbre, chroma, loudness and local rhythm and clustered into sections, and a 2-D lattice dynamic program picks the cheapest phrase-congruent arrangement (Φ = 8 bars by default) reaching the target. Joins are micro-aligned by ±10 ms cross-correlation and crossfaded with a power-preserving, length-neutral gain law. The Remix panel then lets you reject, pin, or nudge any individual splice, re-roll the whole arrangement, or revert to the automatic one — every adjustment undoable from the History panel.
+- **Stem separation**: `Edit → Separate into Stems…` splits the active document into **Drums, Bass, Vocals, Other** and a **Residual**, creating five documents and a five-track multitrack session. The five tracks add back up to the original **sample for sample** — the model's estimates are only used to build ratio masks over the original document's own spectrum, and the Residual is the time-domain complement `mix − Σ stems`, so mixing the untouched session down reproduces the source exactly (measured: worst error 0, 100 % of samples bit-identical, mono and stereo, 44.1 and 48 kHz). How cleanly the instruments are told apart is bounded by the model, and the UI says so rather than promising otherwise. The 166 MB model is downloaded on first use (sha256-pinned, re-verified before every load), inference runs on the CPU in an isolated process with per-segment progress and a Cancel that kills it outright, and separation is capped at 15 minutes of audio.
 - Keyboard shortcuts throughout — see [`KEYBOARD_SHORTCUTS.md`](KEYBOARD_SHORTCUTS.md) for the full table.
 
 See the [User Guide](docs/USER_GUIDE.md) for a full walkthrough and
@@ -120,6 +123,23 @@ The **DSP** is pure, synchronous TypeScript — each effect is a `process()` tha
 takes and returns `Float32Array` channels and never mutates its input. Heavy
 work (effects and spectrogram computation) runs in Web Workers so the UI stays
 responsive; the same effect registry is imported by both the app and the worker.
+
+**Stem separation** is the one exception to the pure-TypeScript rule, and it is
+contained: neural inference runs on `onnxruntime-node` (CPU execution provider)
+inside an Electron `utilityProcess`, so the renderer never loads it and its
+~5 GB working set can be killed instantly on Cancel. The mask/complement DSP
+that turns the model's estimates into an exact partition is ordinary TypeScript
+like everything else. There is no GPU path: on an RTX 3080 Laptop the DirectML
+provider never finished a single 7.8 s segment before exhausting 15.7 of 16 GB
+of VRAM, while the CPU provider runs at ~1.5× realtime.
+
+## Credits
+
+- **Stem separation model** — **HT-Demucs** (Hybrid Transformer Demucs) by
+  **Meta AI**, MIT licensed, used through the **StemSplitio** ONNX export
+  ([`StemSplitio/htdemucs-onnx`](https://huggingface.co/StemSplitio/htdemucs-onnx),
+  `htdemucs_fp16weights.onnx`, MIT). The model is downloaded from that
+  repository on first use and is not bundled with Auditorium.
 
 ## License
 

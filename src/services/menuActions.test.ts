@@ -157,6 +157,22 @@ describe('getMenuSections', () => {
     expect(about!.enabled(useAppStore.getState())).toBe(true);
   });
 
+  it('About credits the stem-separation model (v1.7 ruling 9)', async () => {
+    const showMessageBox = jest.fn(async (_opts: { message: string }) => 0);
+    (
+      window as unknown as {
+        electronAPI: { showMessageBox: jest.Mock; getAppVersion: jest.Mock };
+      }
+    ).electronAPI = { showMessageBox, getAppVersion: jest.fn(async () => '1.7.0') };
+
+    await runCommand('help.about');
+
+    const opts = showMessageBox.mock.calls[0][0];
+    expect(opts.message).toContain('Version 1.7.0');
+    expect(opts.message).toContain('HT-Demucs (Meta AI, MIT)');
+    expect(opts.message).toContain('StemSplitio');
+  });
+
   it('later registerCommands calls are reflected live in getMenuSections', async () => {
     const run = jest.fn();
     registerCommands([{ id: 'file.new', label: 'New', enabled: () => true, run }]);

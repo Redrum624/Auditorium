@@ -197,10 +197,16 @@ function registerDefaultCommands(): void {
         const api = window.electronAPI;
         if (!api) return;
         const version = await api.getAppVersion();
+        // The stem-separation attribution lives here as well as in the README
+        // (v1.7 ruling 9). It is appended to `message` rather than passed as
+        // `detail` because the main process's message-box validator whitelists
+        // type/title/message/buttons and drops everything else.
         await api.showMessageBox({
           type: 'info',
           title: 'About Auditorium',
-          message: `Auditorium\nVersion ${version}`,
+          message:
+            `Auditorium\nVersion ${version}\n\n` +
+            'Stem separation uses HT-Demucs (Meta AI, MIT), via the StemSplitio ONNX export.',
         });
       },
     },

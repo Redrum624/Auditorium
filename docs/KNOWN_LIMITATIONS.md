@@ -437,6 +437,88 @@ reliably self-assess must not gate. A 12-rotation transposition-aware chroma
 comparison would fix the key-change case at 12× the cost of the chroma term;
 not included, and recorded here rather than left to be discovered as a bug.
 
+## Stem bleed is model-bounded; the exact sum is guaranteed but conditional
+
+**Area:** Separate into Stems (`electron/stemHost.cjs`,
+`electron/stemManager.cjs`, `src/dsp/stemPartition.ts`,
+`src/services/stemService.ts`, `src/services/stemLanding.ts`,
+`src/components/Dialogs/SeparateDialog.tsx`)
+
+**v1.7 behavior:** The two halves of "isolate every instrument without losing
+any sound" are different kinds of promise, and Auditorium keeps them
+differently. Both are stated in the dialog itself, in every state, before you
+commit to the 166 MB download.
+
+**What is guaranteed, by construction:** the five tracks add back up to the
+source *sample for sample*. The model's raw waveforms are never shipped as
+stems; they are used only to build Wiener-style ratio masks over the ORIGINAL
+document's STFT (`mᵢ = |Sᵢ|²/(Σ|Sⱼ|²+ε)`, clamped so `Σmᵢ ≤ 1`), and the
+Residual is the **time-domain complement** `mix − Σ stems` — one subtraction,
+not a fifth mask, so there is no tolerance to tune. Measured through the real
+`mixdownSession`: worst |error| **exactly 0**, **100.0000 %** of samples
+bit-identical, for stereo *and* mono sources at both 44.1 kHz and 48 kHz. The
+track order is part of the mechanism, not cosmetics — moving the Residual off
+the last track breaks the identity (5.2e-7 at 44.1 kHz, 1.19e-6 at 48 kHz,
+bit-exact 100 % → ~73 %), because the master bus accumulates track by track
+with a float32 store per `+=` and Residual-last replays the order the
+complement was computed in.
+
+**What is NOT guaranteed:** how cleanly the instruments are separated. Bleed
+between stems — a cymbal in `Other`, a vocal tail in the Residual — is bounded
+by the model and is not a defect. Nothing in the app can remove it, no setting
+trades it off, and the honest evidence is per-stem audition plus the visible
+Residual track. On the reference track the raw model residual measured
+−45.4 dBFS, i.e. −31.9 dB below the mix.
+
+**The one condition the guarantee carries — a source above full scale.**
+`mixdownSession` hard-clamps the master bus to ±1. A document whose samples
+exceed full scale (reachable after an Amplify or an EQ boost) therefore
+reconstructs with large error even though the raw sum is still exact — measured
+0.600 at |mix| = 1.6, against a raw sum error of 3.5e-15. **The clamp is
+detected, not defeated:** the landing measures the source peak and reports
+`exactSumHolds`, and the dialog stays open on an amber note naming the peak
+("This document peaks above full scale (2.40) … reduce the source level and
+separate again if you need the exact sum") instead of closing on a promise it
+cannot keep. When the source document has already been closed, the result is
+reported as *unknown* rather than as either verdict. The stems themselves are
+complete and valid audio in every case.
+
+**Mono sources produce dual-mono STEREO stems.** `mixdownSession` picks its pan
+law from the clip source's channel count: the two-channel law is exactly unity
+at centre, while the mono law is `cos/sin(π/4)`. Measured, mono stem documents
+reconstruct with 0.196 absolute error (−14.1 dBFS) at unity, and still only
+97.47 % bit-exact with the exact inverse +3.0103 dB fader, because mixdown
+computes `(x·g)·g_L` with two roundings and `cos(π/4) ≠ sin(π/4)` (they differ
+by one ULP), so **no scalar gain can be the identity**. Laying the stems down as
+dual-mono makes the mono path the *same arithmetic* as the stereo path, exact
+by construction with every track parameter left at its default. The cost: a
+mono source's five stems occupy what a stereo source's already do, and
+exporting one yields a stereo file with identical channels (**Edit → Convert
+Channels…** converts it).
+
+**Separation is capped at 15 minutes of audio per run.** Not a round number:
+renderer RSS during the mask/complement pass was measured at **4.4 MB per
+second of audio** (15 s → 516 MB, 30 s → 584 MB, 60 s → 716 MB; 264 MB per
+minute), so 15 minutes is where the renderer alone approaches 4 GB while the
+inference process holds its own ~5 GB. The utility process enforces an outer
+30-minute bound; from the renderer that bound is unreachable, so the refusal
+you see quotes the 15 minutes that actually apply.
+
+**Inference is CPU-only and there is no GPU path to enable.** Measured on an
+RTX 3080 Laptop (16 GB VRAM), 30 s of real material: `onnxruntime-node` CPU
+**1.52× realtime** at 5.0 GB peak (1.57× / 5,068 MB in the shipped host);
+**DirectML never finished the first 7.8 s segment** — killed at 708 s with
+20.8 GB host memory and 15.7 of 16 GB VRAM consumed; `onnxruntime-web` wasm
+**0.20×**, and only with graph optimisation disabled (`'all'` dies at session
+creation with `std::bad_alloc`). The DirectML DLLs are therefore not packaged
+at all.
+
+**Intended behavior:** The exact-sum guarantee, the mono routing and the CPU
+architecture are settled — no further work planned. Separation quality is a
+property of the model: a better or newer checkpoint (or a user-selectable stem
+count beyond the fixed 4 + Residual of v1.7) is the only lever, and would be a
+model/UI change rather than a fix to this pipeline.
+
 ## Match Tempo appears in History as `Effect: Time Stretch`
 
 **Area:** Match Tempo (`src/services/tempoService.ts`,

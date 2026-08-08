@@ -25,6 +25,8 @@ import { markSavePoint } from './undoHistory';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { applyTempoChange } from './tempoService';
 import { createRemixDocument, getRemixSession } from './remixService';
+import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
+import { landStems } from './stemLanding';
 import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 
@@ -130,6 +132,36 @@ export interface TestApi {
     bars: number;
   }>;
   getRemixJoins(): { fromBar: number; toBar: number; atSample: number; cost: number }[] | null;
+  // --- v1.7 flows ---------------------------------------------------------
+  getStemModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  separateStems(): Promise<StemSeparationSummary>;
+}
+
+/** Plain-JSON result of the `separateStems` hook (see its implementation). */
+export interface StemSeparationSummary {
+  ok: boolean;
+  /** `'ok'` on success, otherwise the service's own `StemSeparationStatus`. */
+  status: string;
+  /** The service's user-facing failure message; null on success. */
+  message: string | null;
+  /** The five stem document names, in track order (Residual last). */
+  documentNames: string[];
+  sessionName: string | null;
+  lengthSamples: number;
+  sampleRate: number;
+  /** Channel count of the SOURCE document (a mono source lands as dual-mono). */
+  channelCount: number;
+  sanitisedEstimateSamples: number;
+  monoRoutedAsDualMono: boolean;
+  sourcePeak: number | null;
+  exactSumHolds: boolean | null;
+  /** Worst |mixdown − source| over the whole landed session; null if unmeasurable. */
+  mixdownWorstAbsError: number | null;
+  /** Fraction of compared samples that are bit-identical (1 = sample-identical). */
+  mixdownExactFraction: number | null;
+  /** Peak |sample| of the mixdown, for the no-clipping-beyond-the-source check. */
+  mixdownPeak: number | null;
+  elapsedMs: number;
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -667,6 +699,106 @@ export function installTestHooks(): void {
         atSample: session.joinSamples[i] ?? 0,
         cost: join.cost.total,
       }));
+    },
+
+    // --- v1.7 flows -------------------------------------------------------
+
+    // Whether the 166 MB separation model is already on disk. The smoke's stem
+    // step is gated on this: the model is downloaded on first use and is NOT in
+    // the repo, so a machine without it must REPORT a skip, never pass quietly.
+    getStemModelState: () => readStemModelState(),
+
+    // Separates the ACTIVE document into stems and lands them, bypassing
+    // SeparateDialog entirely — the same two calls the dialog makes
+    // (`separateStems` then `landStems`), so the smoke exercises the service and
+    // the landing, not the React state machine.
+    //
+    // The measured mixdown identity is computed HERE rather than asserted in the
+    // harness because it needs the raw float samples on both sides: the landed
+    // session is mixed down for real (`mixdownSession`, the same renderer Mix
+    // Down uses) and compared sample-for-sample against the source document. A
+    // mono source is compared against BOTH master sides, so a routing that fixed
+    // only one side cannot pass. Everything returned is plain JSON — typed
+    // arrays do not survive Playwright's `page.evaluate` bridge.
+    separateStems: async () => {
+      const empty: StemSeparationSummary = {
+        ok: false,
+        status: 'no-document',
+        message: null,
+        documentNames: [],
+        sessionName: null,
+        lengthSamples: 0,
+        sampleRate: 0,
+        channelCount: 0,
+        sanitisedEstimateSamples: 0,
+        monoRoutedAsDualMono: false,
+        sourcePeak: null,
+        exactSumHolds: null,
+        mixdownWorstAbsError: null,
+        mixdownExactFraction: null,
+        mixdownPeak: null,
+        elapsedMs: 0,
+      };
+      const source = activeDoc();
+      if (!source) return empty;
+
+      const sourceId = source.id;
+      const startedAt = Date.now();
+      const result = await runStemSeparation({ sourceDocId: sourceId });
+      const elapsedMs = Date.now() - startedAt;
+      if (!result.ok) {
+        return { ...empty, status: result.status, message: result.message, elapsedMs };
+      }
+
+      const landing = landStems(result.output);
+      const store = useAppStore.getState();
+      const byId = new Map(store.documents.map((d) => [d.id, d]));
+      const summary: StemSeparationSummary = {
+        ...empty,
+        ok: true,
+        status: 'ok',
+        documentNames: landing.documentIds.map((id) => byId.get(id)?.name ?? '(missing)'),
+        sessionName: landing.sessionName,
+        lengthSamples: result.output.lengthSamples,
+        sampleRate: result.output.sampleRate,
+        channelCount: result.output.channelCount,
+        sanitisedEstimateSamples: result.output.sanitisedEstimateSamples,
+        monoRoutedAsDualMono: landing.monoRoutedAsDualMono,
+        sourcePeak: landing.sourcePeak,
+        exactSumHolds: landing.exactSumHolds,
+        elapsedMs,
+      };
+
+      // The identity can only be measured while the source is still open; if it
+      // is gone, report nulls rather than a fabricated number (the same stance
+      // `landStems` takes for `exactSumHolds`).
+      const live = byId.get(sourceId);
+      if (!live) return summary;
+
+      const { channels: master } = renderMixdown(useSessionStore.getState().session, byId);
+      const length = Math.min(master[0]?.length ?? 0, live.channels[0]?.length ?? 0);
+      let worst = 0;
+      let peak = 0;
+      let exact = 0;
+      let compared = 0;
+      for (let side = 0; side < master.length; side++) {
+        const got = master[side];
+        const want = live.channels[side] ?? live.channels[0];
+        for (let i = 0; i < length; i++) {
+          const a = Math.abs(got[i]);
+          if (a > peak) peak = a;
+          const err = Math.abs(got[i] - want[i]);
+          if (err > worst) worst = err;
+          if (got[i] === want[i]) exact++;
+          compared++;
+        }
+      }
+      return {
+        ...summary,
+        mixdownWorstAbsError: worst,
+        mixdownExactFraction: compared > 0 ? exact / compared : null,
+        mixdownPeak: peak,
+      };
     },
   };
 
