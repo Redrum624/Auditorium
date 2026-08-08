@@ -690,6 +690,95 @@ describe('mixdownSession same-track overlap WITHOUT a canonical pair (solo fades
     }
   });
 
+  it('an outgoing facing fade LONGER than the overlap stays solo (rule 3 a-side, above the boundary)', () => {
+    // A's fade-out is 500 over the 400-sample overlap [600, 1000) -- rule 3
+    // is EXACT on the a-side, so no crossfade: A fades solo over its OWN
+    // window [500, 1000), which starts BEFORE the overlap, and B's exact
+    // fade-in stays a solo ramp. The USER_GUIDE documents this state: drag
+    // the outgoing handle past the overlap and the pair dissolves. Sibling
+    // fixtures pin below (200 < w, above) and on (canonical describe) the
+    // boundary; this one pins ABOVE it, where `!== w` and `< w` disagree.
+    const a = constDoc('a', 0.6, 1000);
+    const b = constDoc('b', 0.4, 1000);
+    const s = session([
+      track({
+        pan: -1,
+        clips: [
+          clip({
+            documentId: 'a',
+            startSample: 0,
+            lengthSample: 1000,
+            fadeOutSample: 500,
+            fadeOutCurve: 'equal-gain',
+          }),
+          clip({
+            documentId: 'b',
+            startSample: 600,
+            lengthSample: 1000,
+            fadeInSample: 400,
+            fadeInCurve: 'equal-gain',
+          }),
+        ],
+      }),
+    ]);
+    const [L] = mixdownSession(s, docsMap(a, b)).channels;
+
+    // Before the overlap A is ALREADY fading solo -- a crossfade at w = 400
+    // would supersede the fade-out and hold A at full level here.
+    for (const j of [50, 99]) {
+      expect(L[500 + j]).toBeCloseTo(0.6 * (1 - j / 499), 6);
+    }
+    // Inside the overlap: each fade at its OWN length, raw-summed, no k.
+    for (const j of [0, 100, 200, 300, 399]) {
+      const expected = 0.6 * (1 - (100 + j) / 499) + 0.4 * (j / 399);
+      expect(L[600 + j]).toBeCloseTo(expected, 6);
+    }
+    expect(L[1000]).toBe(Math.fround(0.4)); // B alone, fade-in complete
+  });
+
+  it('an incoming facing fade LONGER than the overlap stays solo (rule 3 b-side, above the boundary)', () => {
+    // The mirror fixture: A's fade-out is exact (400 == w) but B's fade-in is
+    // 500, its window [600, 1100) extending PAST the overlap -- so B is still
+    // rising after A has ended. Rule 3 is exact PER MEMBER: the b-side
+    // comparison must reject this on its own, with the a-side satisfied.
+    const a = constDoc('a', 0.6, 1000);
+    const b = constDoc('b', 0.4, 1000);
+    const s = session([
+      track({
+        pan: -1,
+        clips: [
+          clip({
+            documentId: 'a',
+            startSample: 0,
+            lengthSample: 1000,
+            fadeOutSample: 400,
+            fadeOutCurve: 'equal-gain',
+          }),
+          clip({
+            documentId: 'b',
+            startSample: 600,
+            lengthSample: 1000,
+            fadeInSample: 500,
+            fadeInCurve: 'equal-gain',
+          }),
+        ],
+      }),
+    ]);
+    const [L] = mixdownSession(s, docsMap(a, b)).channels;
+
+    // Inside the overlap: solo fades at their own lengths, raw-summed.
+    for (const j of [0, 100, 200, 300, 399]) {
+      const expected = 0.6 * (1 - j / 399) + 0.4 * (j / 499);
+      expect(L[600 + j]).toBeCloseTo(expected, 6);
+    }
+    // Past the overlap B is STILL fading in -- a crossfade at w = 400 would
+    // have superseded the solo fade and put B at full level from 1000 on.
+    for (const k of [0, 50, 99]) {
+      expect(L[1000 + k]).toBeCloseTo(0.4 * ((400 + k) / 499), 6);
+    }
+    expect(L[1100]).toBe(Math.fround(0.4)); // fade-in complete
+  });
+
   it('containment (B entirely inside A) never crossfades: A must not duck to zero and jump back', () => {
     // A [0, 2000) contains B [600, 1600). Both carry fades sized like a
     // canonical pair would be -- they still apply SOLO, because a handover

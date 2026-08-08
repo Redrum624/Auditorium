@@ -301,6 +301,43 @@ describe('moveClip disarming — a dissolved pair clears its facing fades', () =
   });
 });
 
+describe('over-length facing fades — an un-armed layering a reposition must not overwrite', () => {
+  // The armed-detect in preOverlapStates is EXACT on both members (rule 3):
+  // a facing fade LONGER than the overlap is a legitimate un-armed state the
+  // USER_GUIDE documents (dragging a handle past the overlap dissolves the
+  // pair into honest solo fades). Reading it as armed would let a later
+  // reposition re-arm the pair and SHRINK the user's standing fade — the
+  // data-loss class maintainFacingFades forbids (clip mutations have no
+  // undo). Below- and at-boundary siblings live in the describes around
+  // this one; these two pin ABOVE the boundary, one per operand role.
+
+  it('outgoing (a-side) fade longer than the overlap: a reposition leaves both fades untouched', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600); // armed at w=400
+    // The USER_GUIDE dissolve gesture: A's fade-out handle dragged past the
+    // overlap — 500 > w, the pair is no longer canonical.
+    useSessionStore.getState().setClipFade(a, 'out', { lengthSample: 500 });
+
+    useSessionStore.getState().moveClip(b, trackId(), 700); // reposition: w would be 300
+
+    expect(findClip(a)!.fadeOutSample).toBe(500); // standing fade NOT shrunk
+    expect(findClip(b)!.fadeInSample).toBe(400); // partner untouched, not re-armed at 300
+  });
+
+  it('incoming (b-side) fade longer than the overlap: a reposition leaves both fades untouched', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600); // armed at w=400
+    useSessionStore.getState().setClipFade(b, 'in', { lengthSample: 500 }); // 500 > w: dissolved
+
+    useSessionStore.getState().moveClip(b, trackId(), 700); // reposition: w would be 300
+
+    expect(findClip(a)!.fadeOutSample).toBe(400); // partner untouched, not re-armed at 300
+    expect(findClip(b)!.fadeInSample).toBe(500); // standing fade NOT shrunk
+  });
+});
+
 describe('trimClip maintenance — a trim never silently disarms a crossfade', () => {
   /** A canonical pair: A [0,1000) fadeOut 400 / B [600, 600+len) fadeIn 400. */
   function armedPair(bLen = 1000, bOffset = 300): { a: string; b: string } {
