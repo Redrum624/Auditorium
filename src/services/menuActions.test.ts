@@ -131,6 +131,7 @@ describe('getMenuSections', () => {
       'edit.convertSampleRate',
       'edit.convertChannels',
       'edit.remix',
+      'edit.separateStems',
       'multitrack.insertDoc',
       'multitrack.addTrack',
       'marker.add',
@@ -467,6 +468,7 @@ describe('tempo.match (Task T8)', () => {
       openRecordDialog: () => {},
       openTempoDialog: openTempo,
       openRemixDialog: () => {},
+      openSeparateDialog: () => {},
       focusRemixPanel: () => {},
     });
 
@@ -518,6 +520,7 @@ describe('edit.remix (Task T14)', () => {
       openRecordDialog: () => {},
       openTempoDialog: () => {},
       openRemixDialog: openRemix,
+      openSeparateDialog: () => {},
       focusRemixPanel: () => {},
     });
 
@@ -536,12 +539,76 @@ describe('edit.remix (Task T14)', () => {
       openRecordDialog: () => {},
       openTempoDialog: () => {},
       openRemixDialog: openRemix,
+      openSeparateDialog: () => {},
       focusRemixPanel: () => {},
     });
 
     await runCommand('edit.remix');
 
     expect(openRemix).not.toHaveBeenCalled();
+  });
+});
+
+describe('edit.separateStems (Task S6)', () => {
+  function findEditCmd(id: string): MenuCommand {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  function installSetters(openSeparate: jest.Mock) {
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      openSeparateDialog: openSeparate,
+      focusRemixPanel: () => {},
+    });
+  }
+
+  it('sits in the Edit section immediately BESIDE Auto-Remix, in the same separator group', () => {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    const remixIndex = edit.items.findIndex((item) => item !== 'separator' && item.id === 'edit.remix');
+
+    const separate = edit.items[remixIndex + 1];
+    expect(separate !== 'separator' && separate.id).toBe('edit.separateStems');
+    expect(separate !== 'separator' && separate.label).toBe('Separate into Stems…');
+    expect(separate !== 'separator' && separate.shortcut).toBeUndefined();
+    expect(edit.items[remixIndex + 2]).toBe('separator');
+  });
+
+  it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {
+    expect(findEditCmd('edit.separateStems').enabled(useAppStore.getState())).toBe(false);
+
+    const empty = createDocument({ name: 'empty', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    expect(docLength(empty)).toBe(0);
+    expect(findEditCmd('edit.separateStems').enabled(useAppStore.getState())).toBe(false);
+
+    openDoc();
+    expect(findEditCmd('edit.separateStems').enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("edit.separateStems") opens the dialog through the bus (registered spy setter)', async () => {
+    openDoc();
+    const openSeparate = jest.fn();
+    installSetters(openSeparate);
+
+    await runCommand('edit.separateStems');
+
+    expect(openSeparate).toHaveBeenCalledTimes(1);
+  });
+
+  it('runCommand("edit.separateStems") with no document never reaches the bus', async () => {
+    const openSeparate = jest.fn();
+    installSetters(openSeparate);
+
+    await runCommand('edit.separateStems');
+
+    expect(openSeparate).not.toHaveBeenCalled();
   });
 });
 

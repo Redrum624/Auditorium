@@ -16,6 +16,7 @@ let openConvert: OpenConvertSetter | null = null;
 let openRecord: OpenSetter | null = null;
 let openTempo: OpenSetter | null = null;
 let openRemix: OpenSetter | null = null;
+let openSeparate: OpenSetter | null = null;
 let focusRemix: OpenSetter | null = null;
 
 export function registerDialogSetters(setters: {
@@ -26,6 +27,7 @@ export function registerDialogSetters(setters: {
   openRecordDialog: OpenSetter;
   openTempoDialog: OpenSetter;
   openRemixDialog: OpenSetter;
+  openSeparateDialog: OpenSetter;
   /** Not a dialog: switches the sidebar to the Remix tab once a remix
    * document exists (Task T14). It rides this bus for the same reason the
    * dialog openers do — the caller must not import React or reach into
@@ -39,6 +41,7 @@ export function registerDialogSetters(setters: {
   openRecord = setters.openRecordDialog;
   openTempo = setters.openTempoDialog;
   openRemix = setters.openRemixDialog;
+  openSeparate = setters.openSeparateDialog;
   focusRemix = setters.focusRemixPanel;
   return () => {
     openExport = null;
@@ -48,6 +51,7 @@ export function registerDialogSetters(setters: {
     openRecord = null;
     openTempo = null;
     openRemix = null;
+    openSeparate = null;
     focusRemix = null;
   };
 }
@@ -78,6 +82,10 @@ export function openTempoDialog(): void {
 
 export function openRemixDialog(): void {
   openRemix?.();
+}
+
+export function openSeparateDialog(): void {
+  openSeparate?.();
 }
 
 export function focusRemixPanel(): void {

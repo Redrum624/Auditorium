@@ -152,6 +152,7 @@ function installBus(): void {
     openRecordDialog: () => {},
     openTempoDialog: () => {},
     openRemixDialog: () => {},
+    openSeparateDialog: () => {},
     focusRemixPanel,
   });
 }

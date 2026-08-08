@@ -22,6 +22,7 @@ import {
   openExportDialog,
   openNewFileDialog,
   openRemixDialog,
+  openSeparateDialog,
   openTempoDialog,
 } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
@@ -95,6 +96,7 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.convertChannels',
       'separator',
       'edit.remix',
+      'edit.separateStems',
       'separator',
       'multitrack.insertDoc',
       'multitrack.addTrack',
@@ -781,6 +783,27 @@ function registerRemixCommands(): void {
   ]);
 }
 
+/** Registers the Task S6 stem-separation command. It sits BESIDE Auto-Remix in
+ * the same Edit-menu group (plan ruling 8) for the same reason Auto-Remix is
+ * there: a separation is a long analysis producing NEW documents, which the
+ * Effects menu's `EffectDefinition.process` — pure, synchronous, returning
+ * channels for the SAME document — structurally cannot express. Identical
+ * `enabled` rule (an active document with audio in it), and no shortcut: this
+ * is a multi-minute job that should never be one keystroke away. */
+function registerStemCommands(): void {
+  registerCommands([
+    {
+      id: 'edit.separateStems',
+      label: 'Separate into Stems…',
+      enabled: (s) => {
+        const d = activeDoc(s);
+        return d !== null && docLength(d) > 0;
+      },
+      run: async () => openSeparateDialog(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -792,3 +815,4 @@ registerMultitrackCommands();
 registerMarkerCommands();
 registerTempoCommands();
 registerRemixCommands();
+registerStemCommands();

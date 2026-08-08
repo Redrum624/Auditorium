@@ -10,6 +10,7 @@ import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
 import RecordDialog from './components/Dialogs/RecordDialog';
 import RemixDialog from './components/Dialogs/RemixDialog';
+import SeparateDialog from './components/Dialogs/SeparateDialog';
 import TempoDialog from './components/Dialogs/TempoDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
@@ -93,6 +94,7 @@ export default function App() {
   const [recordOpen, setRecordOpen] = useState(false);
   const [tempoOpen, setTempoOpen] = useState(false);
   const [remixOpen, setRemixOpen] = useState(false);
+  const [separateOpen, setSeparateOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
   const activeTab = SIDEBAR_TABS.find((t) => t.id === sidebarTab) ?? SIDEBAR_TABS[0];
   const ActiveIcon = activeTab.Icon;
@@ -123,6 +125,7 @@ export default function App() {
         openRecordDialog: () => setRecordOpen(true),
         openTempoDialog: () => setTempoOpen(true),
         openRemixDialog: () => setRemixOpen(true),
+        openSeparateDialog: () => setSeparateOpen(true),
         focusRemixPanel: () => setSidebarTab('remix'),
       }),
     []
@@ -287,6 +290,7 @@ export default function App() {
       {recordOpen && <RecordDialog onClose={() => setRecordOpen(false)} />}
       {tempoOpen && <TempoDialog onClose={() => setTempoOpen(false)} />}
       {remixOpen && <RemixDialog onClose={() => setRemixOpen(false)} />}
+      {separateOpen && <SeparateDialog onClose={() => setSeparateOpen(false)} />}
     </div>
   );
 }

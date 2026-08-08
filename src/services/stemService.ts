@@ -195,8 +195,11 @@ const MODEL_BYTES = 165612636;
  * reference machine (P0: 1.52x; S1's integration bench measured 1.57x). Used
  * only until the first segment lands, after which the estimate is derived
  * from THIS run's own measured segment rate.
+ *
+ * Exported so S6's dialog can state the same figure it will actually be held
+ * to, rather than re-typing 1.52 into the UI where the two could drift apart.
  */
-const MEASURED_REALTIME_FACTOR = 1.52;
+export const MEASURED_REALTIME_FACTOR = 1.52;
 
 /** Ruling 6's track order. The result's `stems` array is in this order. */
 export const STEM_LABELS = ['Drums', 'Bass', 'Vocals', 'Other'] as const;
