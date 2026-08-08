@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import type { Clip, Session, Track } from './session';
-import { clampFadePair, createTrack } from './session';
+import { clampFadePair, createTrack, crossfadableOverlap } from './session';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import {
   purgeClip as purgeClipWaveform,
@@ -30,25 +30,31 @@ export interface SessionActions {
     id: string,
     patch: Partial<Pick<Track, 'volumeDb' | 'pan' | 'muted' | 'solo' | 'armed'>>
   ): void;
-  /** OVERLAP CONTRACT — what actually happens, replacing an earlier comment
-   * here that claimed "caller guarantees no overlap (UI enforces)". Nothing
-   * enforces that:
-   *  - `addClip` inserts sorted and ACCEPTS a clip overlapping its neighbour.
+  /** OVERLAP CONTRACT (v1.9 X5 — unified; this replaces the recorded v1.8
+   * inconsistency where `moveClip` alone nudged clear). Same-track overlap is
+   * FIRST-CLASS: every placement path accepts it, and what distinguishes the
+   * paths is only whether they SHAPE it:
+   *  - `addClip` inserts sorted and accepts an overlapping clip VERBATIM.
    *    Insert Active File (`menuActions.ts`'s `insertActiveDocAsClip`) drops
-   *    the clip at the cursor, and punch-in recording (`multitrackRecord.ts`)
-   *    at the punch-in sample, neither checking what is already there.
-   *  - `trimClip` can likewise extend a clip over its neighbour.
-   *  - `moveClip` alone nudges clear, via `resolveOverlap` — its only caller.
-   * An overlap that reaches the audio path is mixed as an unshaped RAW SUM,
-   * hard-clamped to +/-1 afterwards (`mixdown.ts`), so it can clip.
-   *
-   * This inconsistency is recorded, not endorsed: v1.9 task X5 makes same-track
-   * overlap first-class and crossfaded, unifying all three paths. The tests in
-   * `sessionStore.test.ts` pin today's behaviour so that change reads as
-   * deliberate rather than accidental. */
-  addClip(trackId: string, clip: Clip): void; // inserts sorted; an overlapping clip is accepted
-  moveClip(clipId: string, toTrackId: string, newStartSample: number): void; // clamps >=0; nudges to nearest free gap
-  trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour; re-clamps fades (X2 — see setClipFade)
+   *    the clip at the cursor and punch-in recording (`multitrackRecord.ts`)
+   *    at the punch-in sample; neither checks what is already there, and a
+   *    programmatic placement never writes fade keys — inventing a crossfade
+   *    around a recorded take is not this layer's call.
+   *  - `moveClip` commits the requested position verbatim by default; a drag
+   *    that creates or maintains an overlap arms/maintains the pair's facing
+   *    fades (see `maintainFacingFades`) so it renders as X3's canonical-pair
+   *    crossfade. `opts.clearOverlap` — the drag gesture's Ctrl modifier —
+   *    re-enables the v1.8 forward-only nudge (`resolveOverlap`) instead.
+   *  - `trimClip` can extend a clip over its neighbour; it runs the same
+   *    facing-fade maintenance, so a trim that reshapes an armed crossfade
+   *    re-arms it at the new width instead of silently disarming it.
+   * An overlap whose facing fades do NOT exactly span it (a raw layering
+   * choice, a vetoed arm, a pile-up) renders as honest solo fades over a raw
+   * sum, hard-clamped to +/-1 in `mixdown.ts`, so it can clip — see
+   * `resolveClipFadeSpecs` for the render-side gate. */
+  addClip(trackId: string, clip: Clip): void; // inserts sorted; accepts overlap verbatim; never writes fades
+  moveClip(clipId: string, toTrackId: string, newStartSample: number, opts?: { clearOverlap?: boolean }): void; // clamps >=0; commits verbatim + maintains facing fades; opts.clearOverlap = v1.8 nudge
+  trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour; re-clamps fades (X2 — see setClipFade) and maintains facing fades on the overlap it reshapes (X5)
   removeClip(clipId: string): void;
   /** Sets a clip's gain trim in dB, clamped to [-24, 24]. No-op for an unknown
    * clip id. Additive (Task 23): wired to the PropertiesPanel's clip gain input. */
@@ -110,25 +116,168 @@ function insertSorted(clips: Clip[], clip: Clip): Clip[] {
 
 /** Resolves an overlap by nudging `requestedStart` forward to the nearest
  * position where a clip of `length` samples does not overlap any clip in
- * `clips` (sorted ascending by startSample, with the moving clip removed).
- * `moveClip` is its ONLY caller — see the overlap contract on `addClip` for
- * the paths that create overlaps instead of resolving them.
+ * `clips` (the moving clip removed). Since X5 the nudge is OPT-IN:
+ * `moveClip` — still its only caller — runs it only under
+ * `opts.clearOverlap` (the drag gesture's Ctrl modifier); by default a
+ * requested overlap commits verbatim (see the overlap contract on `addClip`).
  *
- * A single forward pass suffices, and does so even when `clips` themselves
- * overlap (they can): `candidate` only ever moves forward, to the end of a
- * clip it was found to overlap, and every clip is tested against the candidate
- * position current at the time — a clip ending before the candidate cannot
- * overlap it, and one ending after pushes it further forward. So on exit the
- * candidate clears all of them, with no need to re-check an earlier clip. */
-function resolveOverlap(clips: Clip[], length: number, requestedStart: number): number {
+ * The single forward pass is sound only over an ASCENDING scan: `candidate`
+ * only ever moves forward to the end of a clip it overlapped, so a clip
+ * visited EARLIER whose start lies AFTER the current candidate could be
+ * re-entered by a later jump and never re-checked (trap T39's
+ * counterexample). The array itself cannot be trusted to be ascending —
+ * `trimClip('start')` writes in place without re-sorting (T40) — so the scan
+ * orders a copy first instead of assuming. */
+function resolveOverlap(clips: readonly Clip[], length: number, requestedStart: number): number {
+  const ascending = [...clips].sort((x, y) => x.startSample - y.startSample);
   let candidate = Math.max(0, requestedStart);
-  for (const c of clips) {
+  for (const c of ascending) {
     const clipEnd = c.startSample + c.lengthSample;
     const candidateEnd = candidate + length;
     const overlaps = candidate < clipEnd && candidateEnd > c.startSample;
     if (overlaps) candidate = clipEnd;
   }
   return candidate;
+}
+
+/** Plain interval intersection of two clips' spans — 0 when they do not
+ * overlap. Distinguishes an overlap a gesture CREATED (pre-gesture width 0)
+ * from one it merely repositioned (see `maintainFacingFades`). */
+function rawOverlapWidth(m: Clip, n: Clip): number {
+  const lo = Math.max(m.startSample, n.startSample);
+  const hi = Math.min(m.startSample + m.lengthSample, n.startSample + n.lengthSample);
+  return Math.max(0, hi - lo);
+}
+
+interface PreOverlapState {
+  /** Raw overlap width with the pivot before the gesture (0 = none). */
+  width: number;
+  /** True when the pair was a fully-armed canonical pair (crossfade-capable
+   * geometry AND both facing fades exactly spanning the overlap). */
+  armed: boolean;
+  /** The PIVOT's facing edge in that armed pair ('out' when the pivot was the
+   * outgoing/earlier side), null when not armed. */
+  pivotEdge: 'in' | 'out' | null;
+}
+
+/** Snapshot of the pivot clip's overlap relationships on its track BEFORE a
+ * gesture edit — the memory `maintainFacingFades` needs afterwards to tell a
+ * crossfade it must maintain (armed) from a raw layering choice it must not
+ * touch (overlapped but unarmed). */
+function preOverlapStates(clips: readonly Clip[], pivot: Clip): Map<string, PreOverlapState> {
+  const map = new Map<string, PreOverlapState>();
+  for (const n of clips) {
+    if (n.id === pivot.id) continue;
+    const width = rawOverlapWidth(pivot, n);
+    let armed = false;
+    let pivotEdge: 'in' | 'out' | null = null;
+    if (width > 0) {
+      const geo = crossfadableOverlap(clips, pivot, n);
+      if (geo && (geo.a.fadeOutSample ?? 0) === geo.width && (geo.b.fadeInSample ?? 0) === geo.width) {
+        armed = true;
+        pivotEdge = geo.a.id === pivot.id ? 'out' : 'in';
+      }
+    }
+    map.set(n.id, { width, armed, pivotEdge });
+  }
+  return map;
+}
+
+/** Replaces the identified clip with a copy whose named fade length is
+ * `lengthSample` (`undefined` = "no fade"; curves are never touched). */
+function writeClipFade(
+  clips: Clip[],
+  clipId: string,
+  edge: 'in' | 'out',
+  lengthSample: number | undefined
+): void {
+  const idx = clips.findIndex((c) => c.id === clipId);
+  if (idx === -1) return;
+  const c = clips[idx];
+  clips[idx] = edge === 'in' ? { ...c, fadeInSample: lengthSample } : { ...c, fadeOutSample: lengthSample };
+}
+
+/** X5 — facing-fade maintenance: the store's half of X3's canonical-pair
+ * contract ("the gesture keeps both facing fades exactly equal to the overlap
+ * width, or the overlap silently renders as solo fades"). Runs after a
+ * `moveClip`/`trimClip` edit has been applied to `tracks` (a draft whose
+ * affected clips arrays are fresh copies), with `pre` snapshotted via
+ * `preOverlapStates` before the edit. For each track-mate N of the edited
+ * (pivot) clip:
+ *
+ *  - ARM — write `a.fadeOutSample = b.fadeInSample = width` — exactly when
+ *    the post-edit pair has crossfade-capable geometry (`crossfadableOverlap`,
+ *    X3's rules 1/2/4) AND the overlap is either NEW (pre-gesture width 0:
+ *    this gesture produced it) or was ALREADY ARMED (a live crossfade tracks
+ *    the width the gesture gives it — closing the "a trim silently disarms
+ *    the crossfade" gap X3's report flagged) AND both AWAY-side fades leave
+ *    room (`awayFade + width <= lengthSample` on each member). A standing
+ *    fade the gesture did not touch is never shrunk — clip mutations have no
+ *    undo, so silently destroying one is data loss; the vetoed pair simply
+ *    stays un-armed, an honest raw sum. An existing UN-armed overlap is
+ *    deliberately not armed either: bare raw sums and partial facing fades
+ *    are legitimate states (X3's honest fallback) and repositioning a clip
+ *    must not overwrite them.
+ *  - DISARM — a pair that was armed and whose facing edges were not re-armed
+ *    by this edit has been dissolved (moved apart, geometry now containment /
+ *    equal-start / pile-up, or the re-arm was vetoed): BOTH stale facing
+ *    fades are cleared so no mismatched pair lingers as surprise solo fades.
+ *    Away-side fades are untouched.
+ *
+ * Fades are written only for integer widths: fractional geometry can only
+ * come from a hand-built file (gesture arithmetic is all rounded), and the
+ * renderer's `=== width` gate compares unrounded, so a rounded write could
+ * never fire. `addClip` deliberately gets none of this — a programmatic
+ * placement (punch-in, Insert Active File, session load) lands verbatim and
+ * never invents fades (see the overlap contract above). */
+function maintainFacingFades(
+  tracks: Track[],
+  pivotTrackIdx: number,
+  preTrackIdx: number,
+  pivotId: string,
+  pre: Map<string, PreOverlapState>
+): void {
+  const clips = tracks[pivotTrackIdx].clips;
+  const armedNow = new Set<string>(); // "clipId:edge" freshly written by this pass
+
+  const mateIds = clips.filter((c) => c.id !== pivotId).map((c) => c.id);
+  for (const mateId of mateIds) {
+    // Re-resolve both members from the live array each iteration: an earlier
+    // arm in this pass may have replaced either object (e.g. a chain where
+    // the pivot arms at both edges), and the away-room check below must see
+    // the freshly-written value, not a stale reference.
+    const pivot = clips.find((c) => c.id === pivotId);
+    const mate = clips.find((c) => c.id === mateId);
+    if (!pivot || !mate) continue;
+    const geo = crossfadableOverlap(clips, pivot, mate);
+    if (!geo || !Number.isInteger(geo.width)) continue;
+    const preState = pre.get(mateId);
+    const eligible = preState === undefined || preState.width === 0 || preState.armed;
+    if (!eligible) continue;
+    const roomOk =
+      (geo.a.fadeInSample ?? 0) + geo.width <= geo.a.lengthSample &&
+      (geo.b.fadeOutSample ?? 0) + geo.width <= geo.b.lengthSample;
+    if (!roomOk) continue;
+    writeClipFade(clips, geo.a.id, 'out', geo.width);
+    writeClipFade(clips, geo.b.id, 'in', geo.width);
+    armedNow.add(`${geo.a.id}:out`);
+    armedNow.add(`${geo.b.id}:in`);
+  }
+
+  // Disarm: clear the facing edges of every previously-armed pair, except
+  // edges the arm pass above just rewrote (a re-arm at a new width, or a new
+  // pair claiming the same edge). Keyed per (clip, edge) so a pair that
+  // re-armed with FLIPPED orientation still has its stale edges cleared.
+  for (const [mateId, preState] of pre) {
+    if (!preState.armed || preState.pivotEdge === null) continue;
+    const mateEdge = preState.pivotEdge === 'out' ? 'in' : 'out';
+    if (!armedNow.has(`${pivotId}:${preState.pivotEdge}`)) {
+      writeClipFade(tracks[pivotTrackIdx].clips, pivotId, preState.pivotEdge, undefined);
+    }
+    if (!armedNow.has(`${mateId}:${mateEdge}`)) {
+      writeClipFade(tracks[preTrackIdx].clips, mateId, mateEdge, undefined);
+    }
+  }
 }
 
 /** v1.9 X2 (trap T17): a trim that shortens a clip must leave its fades
@@ -246,21 +395,30 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
     }));
   },
 
-  moveClip(clipId, toTrackId, newStartSample) {
+  moveClip(clipId, toTrackId, newStartSample, opts) {
     set((s) => {
       const loc = findClipLocation(s.session.tracks, clipId);
       const targetTrackIdx = s.session.tracks.findIndex((t) => t.id === toTrackId);
       if (!loc || targetTrackIdx === -1) return s;
 
       const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
+      // Snapshot BEFORE the move: which mates the clip overlapped, and which
+      // of those overlaps were armed crossfades (see maintainFacingFades).
+      const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
       const tracks = s.session.tracks.map((t) => ({ ...t, clips: [...t.clips] }));
       tracks[loc.trackIdx].clips.splice(loc.clipIdx, 1);
 
       const requestedStart = Math.max(0, newStartSample);
-      const resolvedStart = resolveOverlap(tracks[targetTrackIdx].clips, clip.lengthSample, requestedStart);
+      // X5: the requested (snapped) position commits VERBATIM by default —
+      // overlap is intentional. The v1.8 forward-only nudge survives behind
+      // opts.clearOverlap (the drag gesture's Ctrl modifier).
+      const resolvedStart = opts?.clearOverlap
+        ? resolveOverlap(tracks[targetTrackIdx].clips, clip.lengthSample, requestedStart)
+        : requestedStart;
       const movedClip: Clip = { ...clip, startSample: resolvedStart };
       tracks[targetTrackIdx].clips = insertSorted(tracks[targetTrackIdx].clips, movedClip);
 
+      maintainFacingFades(tracks, targetTrackIdx, loc.trackIdx, clipId, pre);
       return { session: { ...s.session, tracks } };
     });
   },
@@ -297,9 +455,16 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       }
       updated = reconcileTrimmedFades(updated, edge); // X2: fades must stay within the new length
 
+      // Snapshot BEFORE the trim (see maintainFacingFades), then write the
+      // trimmed clip back IN PLACE at clipIdx — deliberately no re-sort, so
+      // X2's index-stable update contract holds (and trap T40 remains a fact
+      // consumers must handle, which the maintenance below does: it pairs by
+      // startSample, never by array position).
+      const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
       const tracks = s.session.tracks.map((t, i) =>
         i === loc.trackIdx ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? updated : c)) } : t
       );
+      maintainFacingFades(tracks, loc.trackIdx, loc.trackIdx, clipId, pre);
       return { session: { ...s.session, tracks } };
     });
   },

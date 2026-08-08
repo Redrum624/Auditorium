@@ -192,12 +192,12 @@ describe('addClip', () => {
     expect(clips.map((c) => c.id)).toEqual([early.id, mid.id, late.id]);
   });
 
-  // Pins TODAY's behaviour, deliberately: `addClip` accepts an overlap (see its
-  // overlap contract in sessionStore.ts) while `moveClip` nudges clear of one.
-  // v1.9 task X5 makes same-track overlap first-class and crossfaded — when
-  // this expectation changes, that must read as the deliberate behaviour change
-  // it is, not as an accident.
-  it('accepts a clip overlapping its neighbour — only moveClip nudges clear', () => {
+  // The DELIBERATE X5 behaviour change (the v1.8 pin here said exactly this
+  // would happen): same-track overlap is first-class on every path now.
+  // `addClip` accepts an overlap verbatim and writes no fades; `moveClip`
+  // keeps a requested overlap too, with the v1.8 nudge surviving behind
+  // opts.clearOverlap (the drag gesture's Ctrl modifier).
+  it('accepts a clip overlapping its neighbour — and moveClip keeps a requested overlap (X5)', () => {
     const store = useSessionStore.getState();
     const trackId = store.session.tracks[0].id;
     const sitting = createClip({ documentId: 'doc-1', startSample: 1000, offsetSample: 0, lengthSample: 1000 });
@@ -209,13 +209,24 @@ describe('addClip', () => {
     const clips = useSessionStore.getState().session.tracks.find((t) => t.id === trackId)!.clips;
     expect(clips).toHaveLength(2);
     expect(clips.map((c) => c.startSample)).toEqual([1000, 1500]); // unmoved: 1500 < 1000+1000
+    // addClip never writes fade keys — a programmatic overlap stays raw.
+    expect(findClip(sitting.id)!.fadeOutSample).toBeUndefined();
+    expect(findClip(overlapping.id)!.fadeInSample).toBeUndefined();
 
-    // The same position requested through moveClip IS nudged clear.
+    // The same position requested through moveClip now also commits verbatim —
+    // and because this overlap EXISTED before the move and was never armed, it
+    // is a raw layering choice the gesture must not overwrite: still no fades.
     useSessionStore.getState().moveClip(overlapping.id, trackId, 1500);
+    expect(findClip(overlapping.id)!.startSample).toBe(1500);
+    expect(findClip(sitting.id)!.fadeOutSample).toBeUndefined();
+    expect(findClip(overlapping.id)!.fadeInSample).toBeUndefined();
+
+    // opts.clearOverlap re-enables the v1.8 forward-only nudge.
+    useSessionStore.getState().moveClip(overlapping.id, trackId, 1500, { clearOverlap: true });
     expect(findClip(overlapping.id)!.startSample).toBe(2000);
   });
 
-  it('trimClip may extend a clip over its neighbour — no overlap check either', () => {
+  it('trimClip may extend a clip over its neighbour — and the NEW overlap arms a crossfade (X5)', () => {
     const store = useSessionStore.getState();
     const trackId = store.session.tracks[0].id;
     const first = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000 });
@@ -227,6 +238,14 @@ describe('addClip', () => {
 
     expect(findClip(first.id)!.lengthSample).toBe(1800);
     expect(findClip(second.id)!.startSample).toBe(1000);
+    // The trim PRODUCED this overlap, so the gesture leaves both facing fades
+    // spanning it exactly (X3's canonical-pair rule 3) — it renders as a
+    // crossfade rather than a raw sum.
+    expect(findClip(first.id)!.fadeOutSample).toBe(800);
+    expect(findClip(second.id)!.fadeInSample).toBe(800);
+    // Away-side edges untouched.
+    expect(findClip(first.id)!.fadeInSample).toBeUndefined();
+    expect(findClip(second.id)!.fadeOutSample).toBeUndefined();
   });
 });
 
@@ -246,7 +265,7 @@ describe('moveClip', () => {
     expect(findClip(clip.id)!.startSample).toBe(0);
   });
 
-  it('nudges to the nearest free gap (clip end) when the requested position overlaps an existing clip', () => {
+  it('keeps a requested overlapping position and arms the crossfade — overlap is intentional (X5)', () => {
     const store = useSessionStore.getState();
     const trackId = store.session.tracks[0].id;
     const clipA = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000 }); // [0,1000)
@@ -254,14 +273,18 @@ describe('moveClip', () => {
     store.addClip(trackId, clipA);
     store.addClip(trackId, clipB);
 
-    store.moveClip(clipB.id, trackId, 500); // requested position overlaps A
+    store.moveClip(clipB.id, trackId, 500); // requested position overlaps A — deliberately
 
-    expect(findClip(clipB.id)!.startSample).toBe(1000); // A's end
+    expect(findClip(clipB.id)!.startSample).toBe(500); // committed VERBATIM
+    // The move CREATED this overlap, so the facing fades span it exactly
+    // (X3's canonical pair): A fades out over the overlap, B fades in.
+    expect(findClip(clipA.id)!.fadeOutSample).toBe(500); // w = 1000 - 500
+    expect(findClip(clipB.id)!.fadeInSample).toBe(500);
     const clips = useSessionStore.getState().session.tracks.find((t) => t.id === trackId)!.clips;
     expect(clips.map((c) => c.id)).toEqual([clipA.id, clipB.id]); // stays sorted
   });
 
-  it('resolves a multi-clip chain by nudging past every subsequent overlapping clip', () => {
+  it('clearOverlap: nudges past every subsequent overlapping clip (the v1.8 nudge, now opt-in)', () => {
     const store = useSessionStore.getState();
     const trackId = store.session.tracks[0].id;
     const clipA = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000 }); // [0,1000)
@@ -271,9 +294,13 @@ describe('moveClip', () => {
     store.addClip(trackId, clipC);
     store.addClip(trackId, clipB);
 
-    store.moveClip(clipB.id, trackId, 500); // overlaps A, then the nudged position overlaps C too
+    store.moveClip(clipB.id, trackId, 500, { clearOverlap: true }); // overlaps A, then the nudged position overlaps C too
 
     expect(findClip(clipB.id)!.startSample).toBe(2000); // pushed past both A and C
+    // The nudged clip overlaps nothing, so the nudge arms nothing.
+    expect(findClip(clipB.id)!.fadeInSample).toBeUndefined();
+    expect(findClip(clipA.id)!.fadeOutSample).toBeUndefined();
+    expect(findClip(clipC.id)!.fadeOutSample).toBeUndefined();
   });
 
   it('does not nudge when the requested position is already free', () => {
@@ -635,6 +662,29 @@ describe('setClipFade', () => {
     const before = useSessionStore.getState().session;
     useSessionStore.getState().setClipFade(clipId, 'in', {});
     expect(useSessionStore.getState().session).toBe(before);
+  });
+
+  // X5 (carried X2 review finding): the "healing" write-back at the bottom of
+  // setClipFade's length branch is claimed by its comment but was unpinned —
+  // a mutation writing back only the EDITED side survived every store test.
+  // An out-of-range standing fade is constructible because addClip performs
+  // no validation.
+  it('heals an out-of-range STANDING fade when the opposite edge is edited — both sides written back', () => {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const clip = {
+      ...createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000 }),
+      fadeOutSample: 1600, // breach: exceeds the clip (addClip skips validation)
+    };
+    store.addClip(trackId, clip);
+
+    useSessionStore.getState().setClipFade(clip.id, 'in', { lengthSample: 300 });
+
+    const healed = findClip(clip.id)!;
+    // The standing breach is clamped to the clip length instead of preserved…
+    expect(healed.fadeOutSample).toBe(1000);
+    // …and the edited fade gets only the room that remains (none here).
+    expect(healed.fadeInSample).toBeUndefined();
   });
 });
 

@@ -267,10 +267,11 @@ multitrack, dragging or trimming a clip snaps it to the beats and markers of the
 - The magnet and the tics are **independent settings**. Turning the tics off
   does not stop snapping, and vice versa — they answer different questions.
 
-One thing the magnet does not override: when you drop a clip on top of another
-clip on the same track, the session still nudges it clear of its neighbour, and
-that nudge has the last word. The clip then sits at its neighbour's edge rather
-than on a beat.
+Dropping a clip on top of another clip on the same track keeps it exactly where
+the magnet showed it — the overlap is deliberate, and the two clips' facing
+fades are set to span it so it plays as a crossfade. Hold **Ctrl** at the drop
+to push the clip forward clear of its neighbour instead (it then sits at the
+neighbour's edge rather than on a beat).
 
 ### Matching one tempo to another
 
@@ -392,9 +393,10 @@ document open. A session has a name, a sample rate, and any number of tracks.
   document as a clip on the selected (or first) track at the multitrack
   cursor. Drag a clip to move it and drag its edges to trim; both snap to the
   beats and markers of the other clips and to the session cursor (hold `Alt` to
-  suspend that — see **Snapping to the grid**), and a clip dropped over a
-  neighbour on the same track is then nudged forward clear of it rather than
-  overlapping. Click a clip to select it — its facts
+  suspend that — see **Snapping to the grid**). A clip dropped over a
+  neighbour on the same track overlaps it deliberately and the overlap plays
+  as a crossfade; hold `Ctrl` at the drop to nudge it forward clear of the
+  neighbour instead. Click a clip to select it — its facts
   (source document, start/offset/length, and an editable gain in dB) appear
   in the **Properties** tab.
 - **Playback**: the multitrack view has its own transport, cursor, and

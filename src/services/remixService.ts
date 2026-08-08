@@ -29,11 +29,11 @@
  * needs; and a new document matches Audition's own Remix behaviour.
  * Multitrack clips were considered and rejected (clip/session mutations get
  * NO undo at all; saving a `.audm` drops clips whose source document is
- * closed; same-track overlap is not yet first-class — `moveClip` still nudges
- * clips apart, and an overlap that survives mixes as a raw clamped sum, not
- * the centred correlation-compensated crossfade Remix needs (v1.9 X5 changes
- * that); and the clip fades added in v1.9 X2 are solo EDGE envelopes, not a
- * crossfade law between two adjacent clips).
+ * closed; and although v1.9 made same-track overlap first-class — a drag can
+ * deliberately overlap, and a canonical pair of facing clip fades renders as
+ * a crossfade (X2/X3/X5) — that pair law is a fixed rho=0 blend of exactly
+ * TWO clips' facing fades, not the centred, correlation-compensated,
+ * lag-searched per-join crossfade Remix needs across many joins).
  *
  * Each `'Remix'` undo entry still retains the REMIX document's own pre-edit
  * snapshot (~105 MB for a 5-minute stereo remix), so roughly eight

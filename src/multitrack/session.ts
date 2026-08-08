@@ -59,6 +59,42 @@ export function clampFadePair(
   return { fadeIn: Math.min(Math.max(0, fadeIn), len - fo), fadeOut: fo };
 }
 
+/** The crossfade-capable overlap GEOMETRY between two clips of one track —
+ * rules 1, 2 and 4 of the canonical-pair rule (X3's ruling; rule 3, the
+ * facing-fade match, is the caller's half: the renderer CHECKS it in
+ * `resolveClipFadeSpecs`, and the store's gesture maintenance ESTABLISHES it
+ * — see `sessionStore`'s overlap contract). Returns the oriented pair — `a`
+ * outgoing (earlier start), `b` incoming — and the overlap width
+ * `a.end − b.start`, or `null` when the pair cannot crossfade regardless of
+ * what fades are set:
+ *  - no overlap, or equal starts (rule 1 — no handover direction);
+ *  - containment, `a` outliving `b` (rule 2 — `a` would have to jump from 0
+ *    back to full level at `b`'s end: a click by construction);
+ *  - a third clip of `clips` intersecting the overlap region (rule 4 — the
+ *    pair law has no meaning for three simultaneous signals).
+ * Order-independent: the pair is oriented by `startSample`, never by array
+ * position, because the sorted invariant does not actually hold
+ * (`trimClip('start')` writes in place without re-sorting). `x` and `y` must
+ * be elements of `clips` — the intrusion scan excludes them by identity. */
+export function crossfadableOverlap(
+  clips: readonly Clip[],
+  x: Clip,
+  y: Clip
+): { a: Clip; b: Clip; width: number } | null {
+  if (x.startSample === y.startSample) return null; // rule 1: no outgoing side
+  const a = x.startSample < y.startSample ? x : y;
+  const b = a === x ? y : x;
+  const aEnd = a.startSample + a.lengthSample;
+  const bEnd = b.startSample + b.lengthSample;
+  if (b.startSample >= aEnd) return null; // rule 1: no overlap
+  if (aEnd > bEnd) return null; // rule 2: containment
+  const intruded = clips.some(
+    (c) => c !== a && c !== b && c.startSample < aEnd && c.startSample + c.lengthSample > b.startSample
+  );
+  if (intruded) return null; // rule 4
+  return { a, b, width: aEnd - b.startSample };
+}
+
 export interface Track {
   id: string; // 'track-N'
   name: string;
@@ -67,7 +103,11 @@ export interface Track {
   muted: boolean;
   solo: boolean;
   armed: boolean;
-  clips: Clip[]; // sorted by startSample; MAY overlap — see the overlap contract on sessionStore's addClip
+  /** Kept in startSample order by `insertSorted` (addClip/moveClip), but
+   * `trimClip('start')` writes in place without re-sorting, so the order is
+   * NOT an invariant consumers may assume (trap T40). Clips MAY overlap —
+   * see the overlap contract on sessionStore's `addClip`. */
+  clips: Clip[];
 }
 
 export interface Session {

@@ -87,7 +87,10 @@ function snapSuspended(e: { altKey: boolean }): boolean {
  * cached mini waveform. Pointer interactions:
  *   - click               → select
  *   - drag body (>4px)     → move horizontally (live transform) and across
- *                            tracks (target lane highlighted), committed on release
+ *                            tracks (target lane highlighted), committed on
+ *                            release. A same-track overlap commits verbatim
+ *                            and arms a crossfade (X5); hold Ctrl at the drop
+ *                            to push clear of the overlap instead.
  *   - drag a 6px edge      → trim start/end live (clamped to source bounds)
  * v1: parameter changes don't affect in-flight playback (see MultitrackPlayer).
  */
@@ -356,8 +359,8 @@ export default function ClipView({
       trimClip(clip.id, 'start', Math.round(snapBoundary(drag.origStart + dxSamples, drag, alt)));
     } else {
       // Snap FIRST, then clamp: the source-length and min-length clamps are
-      // hard validity limits and must survive the magnet, exactly as the
-      // overlap nudge does on a move (see the ordering note on pointerUp).
+      // hard validity limits and must survive the magnet — intent first,
+      // validity second (the ordering v1.8 established; see pointerUp).
       const snappedEnd = snapBoundary(drag.origEnd + dxSamples, drag, alt);
       const target = Math.min(maxTrimEnd(), snappedEnd);
       trimClip(clip.id, 'end', Math.round(Math.max(drag.origStart + MIN_LENGTH, target)));
@@ -371,25 +374,25 @@ export default function ClipView({
     e.currentTarget.releasePointerCapture?.(e.pointerId);
     if (drag && drag.mode === 'move' && drag.exceeded) {
       const target = resolveTrackAt(e.clientX, e.clientY) ?? trackId;
-      // SNAP-THEN-NUDGE. The magnet is a user-intent transform expressed in
-      // SCREEN space, and only this layer has the zoom and the tolerance to
-      // compute it; `moveClip`'s `resolveOverlap` is a validity transform in
-      // SAMPLE space that only the store can compute, since only it knows the
-      // target track's other clips. Intent first, validity second, is the only
-      // order that cannot produce an invalid result: nudging first and snapping
-      // afterwards could pull the clip straight back into the overlap it had
-      // just been moved clear of.
+      // SNAP-ONLY BY DEFAULT (v1.9 X5) — v1.8's snap-then-nudge ordering
+      // degraded exactly as its ordering note predicted: the magnet still
+      // expresses user intent in SCREEN space here (only this layer has the
+      // zoom and the tolerance), but `resolveOverlap` no longer relocates a
+      // clip by default, so the committed start IS the snapped start and the
+      // preview cannot disagree with the commit. A same-track overlap is
+      // intentional now: the store arms the pair's facing fades so the
+      // overlap renders as a crossfade (see sessionStore's overlap contract).
       //
-      // The consequence is deliberate and pinned by tests: when the nudge
-      // fires, the committed start is NOT a snap target — the overlap rule
-      // overrides the magnet, silently and forward-only, exactly as it already
-      // does for every other caller. That is also why this ordering does not
-      // entrench anything against v1.9 task X5 (same-track overlap becoming
-      // first-class and crossfaded): when `resolveOverlap` stops relocating
-      // clips, snap-then-nudge simply degrades to snap-only and nothing here
-      // changes. The reverse order would leave a snap computed against a
-      // position the user never pointed at.
-      moveClip(clip.id, target, moveStartFor(drag, e.clientX, snapSuspended(e)));
+      // Holding CTRL at the drop re-enables the v1.8 validity nudge
+      // (opts.clearOverlap): snap first (intent), then the store pushes the
+      // clip forward clear of any overlap (validity) — the one remaining
+      // case where the commit deliberately diverges from the preview, pinned
+      // by ClipView.snap.test.tsx. Ctrl, because Alt is the snap suspend
+      // (snapSuspended above) and Shift is this app's selection-extension
+      // modifier in the editor surface — neither may silently collide.
+      moveClip(clip.id, target, moveStartFor(drag, e.clientX, snapSuspended(e)), {
+        clearOverlap: e.ctrlKey,
+      });
     }
     setMoveDx(0);
     onDragOverTrack(null);

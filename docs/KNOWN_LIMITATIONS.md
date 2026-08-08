@@ -584,28 +584,35 @@ keeps the workflow this feature exists for inside four rows is inheritance —
 a source plus its five stems occupy one row, not six.
 
 **4. Snapping targets beats, bar lines and markers — not clip edges.**
-Butt-joining two clips is the other classic multitrack magnet and it is not here:
-same-track clip boundaries are about to become first-class crossfade joins
-(v1.9's crossfade work), and snapping to a boundary whose meaning is about to
-change belongs to that feature. In practice head-to-head alignment mostly works
+Butt-joining two clips is the other classic multitrack magnet and it is not
+here. Same-track clip boundaries became first-class crossfade joins in v1.9,
+but clip-edge snap targets still did not land with them; the precise butt-join
+affordance is instead the Ctrl-drag nudge (below), which lands a clip exactly
+at its neighbour's end. In practice head-to-head alignment mostly works
 anyway, because a clip's first beat usually coincides with its start. Bar lines
 add nothing to the target set even when they exist, and that is arithmetic rather
 than an omission: every bar line already *is* one of the beats. The timeline
 ruler does not snap either — it is a seek surface showing seconds, with its own
 zoom and time base.
 
-**5. The overlap nudge outranks the magnet, and the multitrack drag is where you
-see it.** A clip drag is snapped in the gesture layer and then validated by the
-session store's `resolveOverlap`, which is forward-only and has the last word, so
-a clip dropped onto a same-track neighbour commits at that neighbour's end rather
-than on the beat the preview showed. Intent first, validity second is the only
-order that cannot produce an invalid result — the reverse could pull a clip back
-into the overlap it had just been moved clear of.
+**5. The Ctrl-drag nudge commits somewhere the preview does not show.** v1.8's
+"overlap nudge outranks the magnet" limitation resolved exactly as predicted:
+since v1.9 (X5) `resolveOverlap` no longer relocates clips by default, so
+snap-then-nudge degraded to snap-only, a dropped clip commits precisely where
+the preview showed it — overlapping a same-track neighbour if that is where it
+was dropped (the overlap arms a crossfade) — and nothing in the gesture layer
+changed. What remains is the deliberate residue: holding **Ctrl** at the drop
+re-enables the v1.8 forward-only nudge, and in that one opted-into case the
+committed position (the neighbour's end) is not the position the preview
+showed, because only the session store knows the target track's other clips.
+Intent first, validity second — the reverse order could pull a clip back into
+the overlap it had just been moved clear of.
 
 **Intended behavior:** 1–3 are properties of the data and are surfaced rather
 than smoothed over: a provisional grid (stale, or below `CONFIDENCE_LOW`) is
 drawn dimmed and dashed with its geometry unchanged, and no grid at all is drawn
-without a cached analysis. 4 is sequenced, not dropped — clip-edge snapping is
-the crossfade feature's to define. 5 resolves itself when same-track overlap
-becomes first-class and `resolveOverlap` stops relocating clips: snap-then-nudge
-degrades to snap-only and nothing in the gesture layer changes.
+without a cached analysis. 4 remains sequenced, not dropped — clip-edge snap
+targets can now be defined without ambiguity (the boundary's meaning settled in
+v1.9) and Ctrl-drag covers the butt-join in the meantime. 5 is the pinned
+preview/commit contract: divergence exists only under the Ctrl opt-out, never
+on a default drop.

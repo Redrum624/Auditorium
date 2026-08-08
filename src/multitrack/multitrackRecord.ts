@@ -183,9 +183,11 @@ export function createMultitrackRecorder(deps: MultitrackRecorderDeps): Multitra
         const lengthSample = docLength(doc);
         for (const trackId of armedTrackIds) {
           // The clip lands verbatim at the punch-in cursor — same convention as
-          // insertActiveDocAsClip (menuActions): no overlap nudge is applied, so
-          // a take over an existing clip overlaps it on the lane and the user
-          // resolves it by dragging either clip (moveClip nudges past overlaps).
+          // insertActiveDocAsClip (menuActions): overlap is first-class (X5)
+          // and a programmatic placement never writes fade keys, so a take
+          // over an existing clip lands as a raw overlap and the user shapes
+          // it afterwards — drag a clip to arm a crossfade over the overlap,
+          // or Ctrl-drag to push it clear (sessionStore's overlap contract).
           deps.addClip(trackId, {
             id: nextId('clip'),
             documentId: doc.id,

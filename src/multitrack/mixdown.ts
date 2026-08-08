@@ -3,7 +3,7 @@ import { docLength } from '../audio/AudioDocument';
 import { crossfadeGains, fadeInGainAt, fadeOutGainAt, type FadeCurve } from '../dsp/fades';
 import { resampleChannel } from '../dsp/resample';
 import type { Clip, Session, Track } from './session';
-import { DEFAULT_FADE_CURVE } from './session';
+import { DEFAULT_FADE_CURVE, crossfadableOverlap } from './session';
 
 /**
  * Offline stereo mixdown of a multitrack session — pure (no store imports),
@@ -215,20 +215,14 @@ export function resolveClipFadeSpecs(clips: readonly Clip[]): Map<string, ClipFa
 
   for (let i = 0; i < clips.length; i++) {
     for (let j = i + 1; j < clips.length; j++) {
-      if (clips[i].startSample === clips[j].startSample) continue; // no outgoing side (rule 1)
-      const a = clips[i].startSample < clips[j].startSample ? clips[i] : clips[j];
-      const b = a === clips[i] ? clips[j] : clips[i];
-      const aEnd = a.startSample + a.lengthSample;
-      const bEnd = b.startSample + b.lengthSample;
-      if (b.startSample >= aEnd) continue; // no overlap (rule 1)
-      if (aEnd > bEnd) continue; // containment (rule 2)
-      const w = aEnd - b.startSample;
+      // Rules 1, 2 and 4 live in the shared geometry predicate (session.ts)
+      // since X5, so the renderer's gate and the store's gesture-side arming
+      // cannot drift apart. Rule 3 — the facing-fade match — stays here: it is
+      // the renderer's half of the contract.
+      const geo = crossfadableOverlap(clips, clips[i], clips[j]);
+      if (!geo) continue; // rules 1/2/4
+      const { a, b, width: w } = geo;
       if ((a.fadeOutSample ?? 0) !== w || (b.fadeInSample ?? 0) !== w) continue; // rule 3
-      const intruded = clips.some(
-        (c, k) =>
-          k !== i && k !== j && c.startSample < aEnd && c.startSample + c.lengthSample > b.startSample
-      );
-      if (intruded) continue; // rule 4
       const cross: ClipCrossfade = {
         lengthSample: w,
         curveOut: a.fadeOutCurve ?? DEFAULT_FADE_CURVE,

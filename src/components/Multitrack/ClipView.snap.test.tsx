@@ -16,9 +16,11 @@ import { _resetClipWaveformCache } from './clipWaveformCache';
  * The two things this file exists to prove:
  *   - the drag PREVIEW (a CSS transform) and the COMMIT (the store write) are
  *     the same position, so a snapped clip does not visibly jump on drop
- *     (trap 23);
- *   - `moveClip`'s overlap nudge runs AFTER the snap and can override it,
- *     silently and forward-only, exactly as it does today (trap 22).
+ *     (trap 23) — since X5 this holds on EVERY default drop, overlapping or
+ *     not, because `resolveOverlap` no longer relocates clips by default;
+ *   - the v1.8 overlap nudge survives behind the Ctrl modifier
+ *     (moveClip's opts.clearOverlap), still AFTER the snap, still
+ *     forward-only — the one opted-into case where commit ≠ preview.
  */
 
 const SPP = 100; // 1 CSS px == 100 samples -> the 8px tolerance is 800 samples
@@ -27,7 +29,14 @@ const SESSION_RATE = 44_100;
 function firePointer(
   element: Element,
   type: 'pointerdown' | 'pointermove' | 'pointerup',
-  init: { clientX: number; clientY?: number; button?: number; altKey?: boolean; pointerId?: number }
+  init: {
+    clientX: number;
+    clientY?: number;
+    button?: number;
+    altKey?: boolean;
+    ctrlKey?: boolean;
+    pointerId?: number;
+  }
 ): void {
   const event = new MouseEvent(type, {
     bubbles: true,
@@ -36,6 +45,7 @@ function firePointer(
     clientY: init.clientY ?? 0,
     button: init.button ?? 0,
     altKey: init.altKey ?? false,
+    ctrlKey: init.ctrlKey ?? false,
   });
   Object.defineProperty(event, 'pointerId', { value: init.pointerId ?? 1 });
   act(() => {
@@ -299,10 +309,13 @@ describe('clip move — the toggle disables the magnet entirely', () => {
   });
 });
 
-describe('snap / overlap-nudge ordering — SNAP FIRST, then the store nudges', () => {
-  // The two authorities are independent and the nudge wins, silently and
-  // forward-only (sessionStore.resolveOverlap). B4 pins that ordering rather
-  // than pretending it does not exist.
+describe('snap / overlap ordering — snap-only by default (X5), the v1.8 nudge behind Ctrl', () => {
+  // v1.8 pinned snap-then-nudge with the nudge able to override the snap.
+  // X5 degraded it exactly as ClipView's ordering note predicted: by default
+  // `resolveOverlap` no longer relocates, so the snapped position has the
+  // last word and the preview always equals the commit — a same-track
+  // overlap is intentional now. The nudge survives behind the Ctrl modifier
+  // (opts.clearOverlap), still forward-only, still AFTER the snap.
   it('a snapped position that is FREE is committed exactly', () => {
     const el = mountDragged(
       [
@@ -318,8 +331,10 @@ describe('snap / overlap-nudge ordering — SNAP FIRST, then the store nudges', 
     expect(startOf('dragged')).toBe(100_000);
   });
 
-  it('a snapped position that OVERLAPS is nudged past the neighbour — the nudge overrides the snap', () => {
-    // Same track this time: "other" occupies [100 000, 200 000).
+  it('a snapped position that OVERLAPS commits verbatim — preview and commit agree', () => {
+    // Same track this time: "other" occupies [100 000, 200 000). Before X5
+    // this drop was nudged to 200 000 and the preview deliberately disagreed
+    // with the commit; the flip to agreement is the deliberate X5 change.
     const el = mountDragged(
       [
         { trackIdx: 0, clip: clipOf('dragged', 0, 20_000) },
@@ -332,14 +347,48 @@ describe('snap / overlap-nudge ordering — SNAP FIRST, then the store nudges', 
     firePointer(el, 'pointermove', { clientX: grab + 1003 });
     // The preview shows where the magnet put it...
     expect(previewDx(el)).toBe(1000);
+    const shownStart = previewDx(el) * SPP;
     firePointer(el, 'pointerup', { clientX: grab + 1003 });
-    // ...and the store's overlap rule then moves it forward past the neighbour.
-    // The committed position is NOT a snap target, and that is deliberate:
-    // validity wins over intent (see ClipView's ordering note).
-    expect(startOf('dragged')).toBe(200_000);
+    // ...and the commit lands exactly there, overlap and all.
+    expect(startOf('dragged')).toBe(100_000);
+    expect(startOf('dragged')).toBe(shownStart);
+    expect(startOf('other')).toBe(100_000); // the neighbour never moves
+    // Equal starts have no handover direction (X3's rule 1), so THIS overlap
+    // stays raw: the gesture writes no fade keys on either clip.
+    expect(clipById('dragged').fadeInSample).toBeUndefined();
+    expect(clipById('dragged').fadeOutSample).toBeUndefined();
+    expect(clipById('other').fadeInSample).toBeUndefined();
+    expect(clipById('other').fadeOutSample).toBeUndefined();
   });
 
-  it('the nudge only ever moves a clip FORWARD, never back onto an earlier target', () => {
+  it('a drop overlapping a neighbour’s TAIL arms the crossfade — facing fades == overlap width', () => {
+    // Both clips on track 0. "other"'s mapped beats include 188 200; dropping
+    // there puts dragged at [188 200, 208 200) over other's [100 000, 200 000)
+    // tail: a genuine handover, overlap width 11 800.
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: clipOf('dragged', 0, 20_000) },
+        { trackIdx: 0, clip: clipOf('other', 100_000, 100_000) },
+      ],
+      'dragged'
+    );
+    const grab = grabX(20_000);
+    firePointer(el, 'pointerdown', { clientX: grab });
+    firePointer(el, 'pointermove', { clientX: grab + 1883 }); // raw 188 300, 1px past the beat
+    expect(previewDx(el)).toBe(1882); // snapped to 188 200
+    firePointer(el, 'pointerup', { clientX: grab + 1883 });
+
+    expect(startOf('dragged')).toBe(188_200); // committed == previewed
+    // The gesture leaves the facing fades spanning the overlap exactly
+    // (X3's canonical-pair contract, maintained by the store on commit).
+    expect(clipById('other').fadeOutSample).toBe(11_800);
+    expect(clipById('dragged').fadeInSample).toBe(11_800);
+    // Away-side edges untouched.
+    expect(clipById('other').fadeInSample).toBeUndefined();
+    expect(clipById('dragged').fadeOutSample).toBeUndefined();
+  });
+
+  it('Ctrl at the drop re-enables the v1.8 nudge — forward-only, after the snap', () => {
     const el = mountDragged(
       [
         { trackIdx: 0, clip: clipOf('dragged', 0, 20_000) },
@@ -350,8 +399,15 @@ describe('snap / overlap-nudge ordering — SNAP FIRST, then the store nudges', 
     const grab = grabX(20_000);
     firePointer(el, 'pointerdown', { clientX: grab });
     firePointer(el, 'pointermove', { clientX: grab + 1003 });
-    firePointer(el, 'pointerup', { clientX: grab + 1003 });
-    expect(startOf('dragged')).toBeGreaterThanOrEqual(100_000);
+    expect(previewDx(el)).toBe(1000); // preview still shows the snapped spot…
+    firePointer(el, 'pointerup', { clientX: grab + 1003, ctrlKey: true });
+    // …and the opted-into nudge then pushes the clip clear, forward past the
+    // neighbour — never back onto an earlier target. The committed position
+    // is NOT a snap target; with Ctrl held that divergence is deliberate.
+    expect(startOf('dragged')).toBe(200_000);
+    // A nudged drop overlaps nothing, so nothing is armed.
+    expect(clipById('dragged').fadeInSample).toBeUndefined();
+    expect(clipById('other').fadeOutSample).toBeUndefined();
   });
 });
 
