@@ -142,6 +142,54 @@ describe('moveClip arming — the gesture half of the canonical-pair contract', 
     expect(findClip(a)!.fadeOutSample).toBeUndefined();
   });
 
+  it('an away fade that EXACTLY meets the new facing fade still arms (outgoing side, review round 1)', () => {
+    // The veto boundary is `awayFade + width <= lengthSample`, and the
+    // equality is legal by policy: setClipFade explicitly allows fades to
+    // MEET (fadeIn + fadeOut === lengthSample) and X3 renders meeting fades.
+    // 600 + 400 == 1000 must therefore arm — a `<` regression would silently
+    // veto every exact-fit arm.
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    useSessionStore.getState().setClipFade(a, 'in', { lengthSample: 600 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+
+    useSessionStore.getState().moveClip(b, trackId(), 600); // w=400; 600 + 400 == 1000 exactly
+
+    expect(findClip(a)!.fadeOutSample).toBe(400); // armed
+    expect(findClip(b)!.fadeInSample).toBe(400);
+    expect(findClip(a)!.fadeInSample).toBe(600); // the meeting away fade is untouched
+  });
+
+  it('an away fade that EXACTLY meets the new facing fade still arms (incoming side, review round 1)', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().setClipFade(b, 'out', { lengthSample: 600 });
+
+    useSessionStore.getState().moveClip(b, trackId(), 600); // w=400; 600 + 400 == 1000 exactly
+
+    expect(findClip(b)!.fadeInSample).toBe(400); // armed
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(findClip(b)!.fadeOutSample).toBe(600); // the meeting away fade is untouched
+  });
+
+  it('an EQUAL-END pair is a handover, not containment — it arms and the renderer fires (review round 1)', () => {
+    // Rule 2's boundary: containment is `aEnd > bEnd` STRICTLY — B starting
+    // inside A with both ending on the same sample is crossfade-capable under
+    // X3's ratified code, and is reachable by a plain drag. A `>=` regression
+    // would silently drop every equal-end pair to a raw clamped sum; no other
+    // fixture in the whole suite sits on this equality.
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 400 });
+
+    useSessionStore.getState().moveClip(b, trackId(), 600); // B [600,1000): ends exactly with A
+
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(findClip(b)!.fadeInSample).toBe(400);
+    // Through the renderer's own gate too (the shared predicate feeds both).
+    const specs = resolveClipFadeSpecs(trackClips());
+    expect(specs.get(a)?.crossOut?.lengthSample).toBe(400);
+    expect(specs.get(b)?.crossIn?.lengthSample).toBe(400);
+  });
+
   it('a fractional overlap width (corrupt geometry) is never written as a fade', () => {
     // Only a hand-built file can carry fractional geometry; addClip performs
     // no validation, which is exactly how such a session would reach the
