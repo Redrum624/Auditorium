@@ -181,10 +181,16 @@ describe('FadeEffect length parameter (X6)', () => {
   });
 
   it('lengthPercent above 100 clamps: 150 renders byte-identically to 100, both directions', () => {
+    // 64 samples, not 8: the fixture must be sized so the clamp constant's own
+    // boundary can move the output. Below 50 samples, 1% of the selection is
+    // under half a sample and Math.round absorbs a clamp drifted to 101
+    // (round(8 * 1.01) is still 8) — at 64, a 101-clamp yields fadeLen 65 and
+    // the whole ramp shifts (X6 review round 1's surviving mutant).
+    const src = Float32Array.from({ length: 64 }, (_, i) => (((i * 37) % 128) - 64) / 64);
     for (const direction of ['in', 'out']) {
-      const a = run(fadeEffect, mk8(), { direction, curve: 'exponential', lengthPercent: 150 });
-      const b = run(fadeEffect, mk8(), { direction, curve: 'exponential', lengthPercent: 100 });
-      for (let i = 0; i < 8; i++) expect(a[0][i]).toBe(b[0][i]);
+      const a = run(fadeEffect, [Float32Array.from(src)], { direction, curve: 'exponential', lengthPercent: 150 });
+      const b = run(fadeEffect, [Float32Array.from(src)], { direction, curve: 'exponential', lengthPercent: 100 });
+      for (let i = 0; i < 64; i++) expect(a[0][i]).toBe(b[0][i]);
     }
   });
 
