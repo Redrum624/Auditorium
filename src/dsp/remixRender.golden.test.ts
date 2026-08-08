@@ -130,10 +130,23 @@ describe('renderRemix -- golden pin (bit-exact, against a stored fixture)', () =
   const cases = goldenCases();
 
   if (PRINT_MODE) {
-    it('prints a regenerated fixture instead of asserting (REMIX_GOLDEN_PRINT=1)', () => {
+    // DELIBERATELY FAILS. Print mode disarms every assertion in this file,
+    // and this file is the only thing standing between a shared-DSP edit and
+    // a silently changed auto-remix. If it could exit 0, an inherited or
+    // stray `REMIX_GOLDEN_PRINT` in a shell, a CI job or an editor's test
+    // runner would turn the pin off and the run would still read as a pass --
+    // the exact shape of failure the pin exists to prevent. Regeneration is a
+    // deliberate act with a red run attached; the fixture is printed first,
+    // so the workflow still works.
+    it('FAILS ON PURPOSE: print mode regenerated the fixture and verified nothing', () => {
       printFixture(cases.map(generate));
       printGainFixture(generateGainRows());
-      expect(cases.length).toBeGreaterThan(0);
+      throw new Error(
+        'REMIX_GOLDEN_PRINT=1 was set, so the golden pin did NOT run -- the fixture above was ' +
+          'regenerated and NOTHING was verified. This failure is intentional: a green run must ' +
+          'never be possible with the pin disarmed. Paste the printed blocks into ' +
+          'src/dsp/__fixtures__/remixGolden.ts, unset REMIX_GOLDEN_PRINT, and re-run to verify.'
+      );
     }, 60000);
     return;
   }

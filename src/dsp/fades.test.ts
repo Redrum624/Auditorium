@@ -420,6 +420,22 @@ describe('applyFadeOut / applyFadeIn (buffer-end and buffer-start anchored)', ()
     expect(ch[0][0]).toBe(1);
     expect(ch[0][4]).toBe(0);
   });
+
+  it('a fade-IN longer than the buffer still REACHES UNITY by the last sample', () => {
+    // The counterpart of the assertion above, and the one that matters most
+    // in practice: `n` is `min(fadeLen, len)`, so an over-long fade-in
+    // spreads its full 0 -> 1 ramp across the buffer it actually has. Drop
+    // that clamp and `n` becomes the requested length, so the visible part is
+    // only the ramp's quiet beginning -- a 2 s fade-in requested on a 1 s
+    // clip would play the whole clip attenuated (here: last sample at 4/499
+    // instead of 1, about -42 dB) and never arrive at full level. A fade
+    // handle dragged past the end of a clip reaches exactly this.
+    const ch = filled(1, 5);
+    applyFadeIn(ch, 500, 'equal-gain');
+    expect(ch[0][0]).toBe(0);
+    expect(ch[0][4]).toBe(1);
+    for (let i = 0; i < 5; i++) expect(ch[0][i]).toBeCloseTo(i / 4, 6);
+  });
 });
 
 describe('applyFadeOutEndingAt / applyFadeInStartingAt (arbitrary window)', () => {
@@ -444,6 +460,20 @@ describe('applyFadeOutEndingAt / applyFadeInStartingAt (arbitrary window)', () =
     applyFadeOutEndingAt(ch, 5, 50, 'equal-gain');
     // start clamps to 0, so the ramp spans 5 samples, not 50.
     for (let i = 0; i < 5; i++) expect(ch[0][i]).toBeCloseTo(1 - i / 4, 6);
+    for (let i = 5; i < 20; i++) expect(ch[0][i]).toBe(1);
+  });
+
+  it('compresses a fade-IN window that starts before sample 0, and touches nothing past it', () => {
+    // The near-edge counterpart for the fade-in direction. X5 positions
+    // overlap fade-ins by absolute sample, so a window beginning before 0 is
+    // routine, not a defensive corner. `start` clamps to 0 and `n` shortens
+    // with it: a [-5, 5) window is a 5-sample ramp reaching unity at sample
+    // 4. Without the shortening, `n` stays 10 -- the ramp lands at half
+    // slope AND runs five samples past where the fade was asked to end,
+    // overwriting audio that was never part of it.
+    const ch = filled(1, 20);
+    applyFadeInStartingAt(ch, -5, 10, 'equal-gain');
+    for (let i = 0; i < 5; i++) expect(ch[0][i]).toBeCloseTo(i / 4, 6);
     for (let i = 5; i < 20; i++) expect(ch[0][i]).toBe(1);
   });
 
