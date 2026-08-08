@@ -35,6 +35,8 @@ const OUT_MARKERS_MP3 = path.join(OUT_DIR, 'markers.mp3');
 const OUT_MARKERS_FLAC = path.join(OUT_DIR, 'markers.flac');
 const OUT_MARKERS_OGG = path.join(OUT_DIR, 'markers.ogg');
 const OUT_SESSION = path.join(OUT_DIR, 'session.audm');
+const OUT_FADES_SESSION = path.join(OUT_DIR, 'fades-session.audm');
+const OUT_FADES_REFERENCE = path.join(OUT_DIR, 'fades-v18-reference.json');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -203,6 +205,8 @@ async function main() {
     OUT_MARKERS_FLAC,
     OUT_MARKERS_OGG,
     OUT_SESSION,
+    OUT_FADES_SESSION,
+    OUT_FADES_REFERENCE,
     SHOT,
   ]) {
     if (fs.existsSync(f)) fs.rmSync(f);
@@ -1526,6 +1530,344 @@ async function main() {
         `the non-finite-estimate count is reported (actual ${stems.sanitisedEstimateSamples})`
       );
     }
+
+    // 18) v1.9 — clip fades and crossfades, end to end ---------------------
+    // Discharges the three standing obligations the unit suites cannot:
+    //   (a) a REAL pointer drag that overlaps two clips and arms a crossfade
+    //       (X4/X5's gestures ran in jsdom only),
+    //   (b) REAL Web Audio rendering of that crossfade compared against the
+    //       offline mixdown (the ruling-4 unit parity test sums the player's
+    //       graph in test arithmetic — Jest has no OfflineAudioContext),
+    //   (c) a fade-carrying .audm written here for the v1.8.0 binary check,
+    //       with the raw-sum reference numbers a fade-blind build must match.
+    console.log('Crossfades (v1.9): drag-to-overlap, arm, real Web Audio render...');
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const toneDoc = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      toneDoc.length === 88200 && toneDoc.sampleRate === 44100,
+      `the tone fixture is open and active (${toneDoc.length} samples @ ${toneDoc.sampleRate})`
+    );
+    await page.evaluate((rate) => window.__test.newSession(rate), 44100);
+    const clipA = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
+    const clipB = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 132300));
+    assert(
+      clipA !== null && clipB !== null,
+      `two tone clips inserted on track 1 at 0 and 132300 (${JSON.stringify([clipA, clipB])})`
+    );
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 2,
+      null,
+      { timeout: 10000 }
+    );
+    const fades0 = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      fades0.clips.every(
+        (c) =>
+          c.fadeInSample === 0 &&
+          c.fadeOutSample === 0 &&
+          c.crossInWidth === null &&
+          c.crossOutWidth === null
+      ),
+      'programmatic insertion wrote no fade keys and armed nothing (X5 contract)'
+    );
+
+    // A REAL pointer drag: grab clip B mid-body and drop it so it overlaps
+    // A's tail by about a second. All aiming is done in pixels from the two
+    // clips' own DOM rects (no zoom hook), and the assertions below are on
+    // the committed SAMPLE values read back from the store, so pixel
+    // rounding cannot fail the step.
+    const xfRects = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="clip"]')].map((el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      })
+    );
+    xfRects.sort((a, b) => a.x - b.x);
+    const [rectA, rectB] = xfRects;
+    const grabX = rectB.x + rectB.width / 2;
+    const grabY = rectB.y + rectB.height / 2;
+    // Target: B.start at ~44100 == the middle of A, i.e. B's left edge lands
+    // at A's horizontal midpoint.
+    const dropX = grabX + (rectA.x + rectA.width / 2 - rectB.x);
+    await page.mouse.move(grabX, grabY);
+    await page.mouse.down();
+    for (let step = 1; step <= 5; step++) {
+      await page.mouse.move(grabX + ((dropX - grabX) * step) / 5, grabY, { steps: 4 });
+    }
+    // Mid-drag, still held: X4's overlap drop hint, and its live Ctrl flip
+    // through a REAL keyboard listener.
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="overlap-drag-hint"]')?.textContent ===
+        'Drop crossfades — hold Ctrl to push clear',
+      null,
+      { timeout: 5000 }
+    );
+    assert(true, 'the overlap drop hint appears mid-drag with the crossfade wording');
+    await page.keyboard.down('Control');
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="overlap-drag-hint"]')?.textContent ===
+        'Drop pushes clear of the overlap',
+      null,
+      { timeout: 5000 }
+    );
+    assert(true, 'holding Ctrl mid-drag flips the hint to the push-clear wording');
+    await page.keyboard.up('Control');
+    await page.waitForFunction(
+      () =>
+        document.querySelector('[data-testid="overlap-drag-hint"]')?.textContent ===
+        'Drop crossfades — hold Ctrl to push clear',
+      null,
+      { timeout: 5000 }
+    );
+    await page.mouse.up(); // Ctrl NOT held: verbatim commit + arm (X5)
+
+    const fades1 = await page.evaluate(() => window.__test.getClipFadeState());
+    const xfA = fades1.clips.find((c) => c.startSample === 0);
+    const xfB = fades1.clips.find((c) => c.startSample !== 0);
+    assert(xfA && xfB, `both clips still exist after the drop (${JSON.stringify(fades1.clips)})`);
+    assert(
+      xfB.startSample > 0 && xfB.startSample < 88200,
+      `the drop committed a genuine overlap, verbatim (B.start ${xfB.startSample} inside (0, 88200))`
+    );
+    const xfWidth = 88200 - xfB.startSample;
+    assert(
+      xfA.fadeOutSample === xfWidth && xfB.fadeInSample === xfWidth,
+      `the drag ARMED the pair: both facing fades exactly span the ${xfWidth}-sample overlap`
+    );
+    assert(
+      xfA.crossOutWidth === xfWidth && xfB.crossInWidth === xfWidth,
+      'the renderer resolves the pair as a live crossfade (rule 3 confirmed by the resolver itself)'
+    );
+    assert(
+      xfA.fadeInSample === 0 && xfB.fadeOutSample === 0,
+      'the away-side edges were not touched by the arm'
+    );
+    const svgCounts = await page.evaluate(() => ({
+      inLine: document.querySelectorAll('[data-testid="crossfade-in-line"]').length,
+      outLine: document.querySelectorAll('[data-testid="crossfade-out-line"]').length,
+      readout: document.querySelectorAll('[data-testid="crossfade-readout"]').length,
+    }));
+    assert(
+      svgCounts.inLine === 1 && svgCounts.outLine === 1 && svgCounts.readout === 1,
+      `the crossfade indicator is drawn: one incoming line, one outgoing line, one width readout (${JSON.stringify(svgCounts)})`
+    );
+
+    // Switch both facing curves to equal-gain so the pair law is
+    // OBSERVABLE: with the default equal-power curves at rho = 0, k = 1 and
+    // the crossfade is numerically identical to two solo fades (X1's
+    // documented property) — every audio assertion below would pass without
+    // the law ever engaging.
+    const curveEchoA = await page.evaluate(
+      (id) => window.__test.setClipFade(id, 'out', { curve: 'equal-gain' }),
+      xfA.clipId
+    );
+    const curveEchoB = await page.evaluate(
+      (id) => window.__test.setClipFade(id, 'in', { curve: 'equal-gain' }),
+      xfB.clipId
+    );
+    assert(
+      curveEchoA.fadeOutCurve === 'equal-gain' &&
+        curveEchoB.fadeInCurve === 'equal-gain' &&
+        curveEchoA.fadeOutSample === xfWidth &&
+        curveEchoB.fadeInSample === xfWidth &&
+        curveEchoA.crossOutWidth === xfWidth &&
+        curveEchoB.crossInWidth === xfWidth,
+      'both facing curves switched to equal-gain; lengths untouched, pair still armed'
+    );
+
+    // Save the ARMED, fade-carrying session — the file the v1.8.0 binary
+    // compatibility check opens.
+    const savedFades = await page.evaluate(
+      (p) => window.__test.saveSessionAs(p),
+      OUT_FADES_SESSION
+    );
+    assert(
+      savedFades === true && fs.existsSync(OUT_FADES_SESSION),
+      `the fade-carrying session was written to ${OUT_FADES_SESSION}`
+    );
+
+    // (b) REAL Web Audio rendering: the genuine player graph rendered by the
+    // genuine engine, compared per sample against mixdownSession. Anchors are
+    // computed HERE with independent arithmetic (never through dsp/fades.ts),
+    // so two identically-wrong paths cannot agree their way past them.
+    const bStart = xfB.startSample;
+    const probeJs = [
+      Math.floor(xfWidth / 4),
+      Math.floor((xfWidth - 1) / 2),
+      Math.floor((3 * xfWidth) / 4),
+    ];
+    const probeIdxs = probeJs.map((j) => bStart + j);
+    const srcA = await page.evaluate(
+      (idxs) => idxs.map((i) => window.__test.getChannelSamples(0, i, 1)[0]),
+      probeIdxs
+    );
+    const srcB = await page.evaluate(
+      (js) => js.map((j) => window.__test.getChannelSamples(0, j, 1)[0]),
+      probeJs
+    );
+    const web = await page.evaluate(
+      ({ overlap, probes }) => window.__test.renderSessionWebAudio(overlap, probes),
+      { overlap: { start: bStart, end: 88200 }, probes: probeIdxs }
+    );
+    console.log(
+      `  renderSessionWebAudio: ${JSON.stringify({ ...web, probes: undefined })} (${web.probes.length} probes)`
+    );
+    assert(web.ok === true, `the offline Web Audio render succeeded (${web.reason})`);
+    assert(
+      web.lengthSamples === bStart + 88200,
+      `the render spans the session (expected ${bStart + 88200}, actual ${web.lengthSamples})`
+    );
+    assert(
+      web.worstAbsErrorOutside === 0,
+      `outside the overlap the real Web Audio render is BIT-IDENTICAL to the mixdown (worst |err| ${web.worstAbsErrorOutside})`
+    );
+    assert(
+      web.worstAbsErrorInside <= 1e-6,
+      `inside the crossfade the two paths agree to the float32 store-rounding class (worst |err| ${web.worstAbsErrorInside} <= 1e-6)`
+    );
+    assert(
+      web.webPeak <= 1 && web.mixPeak <= 1,
+      `the k-normalised crossfade does not clip (web peak ${web.webPeak}, mixdown peak ${web.mixPeak})`
+    );
+    // Law anchors: equal-gain pair at rho = 0 under the generalised
+    // normaliser k = sqrt(g0^2 + g1^2), computed independently.
+    const f32 = Math.fround;
+    for (let p = 0; p < probeIdxs.length; p++) {
+      const t = probeJs[p] / (xfWidth - 1);
+      const k = Math.sqrt((1 - t) * (1 - t) + t * t);
+      const expected = f32(srcA[p] * ((1 - t) / k)) + f32(srcB[p] * (t / k));
+      const probe = web.probes[p];
+      assert(
+        Math.abs(probe.webL - expected) <= 5e-7 && Math.abs(probe.mixL - expected) <= 5e-7,
+        `law anchor at overlap sample ${probeJs[p]}/${xfWidth}: web ${probe.webL} and mixdown ${probe.mixL} within 5e-7 of the independent equal-gain/k expectation ${expected}`
+      );
+      assert(
+        probe.webR === probe.webL,
+        `the dual-mono fixture renders identical channels (R ${probe.webR} == L ${probe.webL})`
+      );
+    }
+
+    // (c) Reference numbers for the v1.8.0 binary check: what a fade-BLIND
+    // build must produce from this same .audm — the raw sum. Measured by
+    // RELEASING the crossfade here (ruling 10: the fade-less path is the
+    // literally unchanged v1.8.0 loop), then re-arming through the hook.
+    const armedMix = await page.evaluate(() => window.__test.mixdownSession());
+    const armedPeak = await page.evaluate(() => window.__test.getPeak());
+    const released = await page.evaluate(
+      (id) => window.__test.releaseCrossfade(id, 'in'),
+      xfB.clipId
+    );
+    assert(
+      released.ok === true && released.outClipId === xfA.clipId && released.inClipId === xfB.clipId,
+      `releaseCrossfade cleared the pair (${JSON.stringify(released)})`
+    );
+    const fadesReleased = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      fadesReleased.clips.every(
+        (c) => c.fadeInSample === 0 && c.fadeOutSample === 0 && c.crossInWidth === null
+      ),
+      'after Release both facing fades are gone and nothing is armed'
+    );
+    const rawMix = await page.evaluate(() => window.__test.mixdownSession());
+    const rawPeak = await page.evaluate(() => window.__test.getPeak());
+    assert(
+      rawMix.length === armedMix.length,
+      `armed and raw mixdowns have the same length (${armedMix.length})`
+    );
+    assert(
+      Math.abs(rawMix.rms - armedMix.rms) > 1e-3,
+      `the crossfade AUDIBLY differs from the raw sum (rms armed ${armedMix.rms} vs raw ${rawMix.rms})`
+    );
+    fs.writeFileSync(
+      OUT_FADES_REFERENCE,
+      JSON.stringify(
+        {
+          audmPath: OUT_FADES_SESSION,
+          trackCount: 4,
+          clipCount: 2,
+          aStartSample: 0,
+          bStartSample: bStart,
+          overlapWidth: xfWidth,
+          armedMixdown: { length: armedMix.length, rms: armedMix.rms, peak: armedPeak },
+          rawMixdown: { length: rawMix.length, rms: rawMix.rms, peak: rawPeak },
+        },
+        null,
+        2
+      )
+    );
+    console.log(`  reference written: ${OUT_FADES_REFERENCE}`);
+
+    // Recovery: the hook's Arm (the panel's direct path) re-arms the released
+    // pair at the exact width.
+    const rearmed = await page.evaluate((id) => window.__test.armCrossfade(id, 'in'), xfB.clipId);
+    assert(
+      rearmed.ok === true && rearmed.width === xfWidth,
+      `armCrossfade re-arms the released pair at the exact width (${JSON.stringify(rearmed)})`
+    );
+
+    // Round-trip: the fade-carrying .audm reopens in THIS build with the
+    // armed pair and both equal-gain curves intact.
+    const fadesReopened = await page.evaluate(
+      (p) => window.__test.openSessionFrom(p),
+      OUT_FADES_SESSION
+    );
+    assert(
+      fadesReopened.trackCount === 4 && fadesReopened.droppedClipCount === 0,
+      `the fade-carrying session reopened (${JSON.stringify(fadesReopened)})`
+    );
+    const fades2 = await page.evaluate(() => window.__test.getClipFadeState());
+    const xfA2 = fades2.clips.find((c) => c.startSample === 0);
+    const xfB2 = fades2.clips.find((c) => c.startSample === bStart);
+    assert(
+      xfA2 &&
+        xfB2 &&
+        xfA2.fadeOutSample === xfWidth &&
+        xfB2.fadeInSample === xfWidth &&
+        xfA2.fadeOutCurve === 'equal-gain' &&
+        xfB2.fadeInCurve === 'equal-gain' &&
+        xfA2.crossOutWidth === xfWidth &&
+        xfB2.crossInWidth === xfWidth,
+      'fade lengths, curves and the armed crossfade all survived the .audm round trip'
+    );
+
+    // The Ctrl opt-out, end to end: drag B further into A but hold Ctrl at
+    // the drop — the v1.8 forward-only nudge fires, B lands EXACTLY at A's
+    // end, and the store disarms the stale pair (both facing fades cleared).
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 2,
+      null,
+      { timeout: 10000 }
+    );
+    const xfRects2 = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="clip"]')].map((el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height };
+      })
+    );
+    xfRects2.sort((a, b) => a.x - b.x);
+    const rB2 = xfRects2[1];
+    const grab2X = rB2.x + rB2.width / 2;
+    const grab2Y = rB2.y + rB2.height / 2;
+    await page.mouse.move(grab2X, grab2Y);
+    await page.mouse.down();
+    await page.mouse.move(grab2X - 30, grab2Y, { steps: 8 });
+    await page.keyboard.down('Control');
+    await page.mouse.up();
+    await page.keyboard.up('Control');
+    const fades3 = await page.evaluate(() => window.__test.getClipFadeState());
+    const xfA3 = fades3.clips.find((c) => c.startSample === 0);
+    const xfB3 = fades3.clips.find((c) => c.startSample !== 0);
+    assert(
+      xfB3.startSample === 88200,
+      `Ctrl at the drop restored the v1.8 nudge: B pushed forward EXACTLY clear of A (B.start ${xfB3.startSample})`
+    );
+    assert(
+      xfA3.fadeOutSample === 0 && xfB3.fadeInSample === 0 && xfA3.crossOutWidth === null,
+      'the no-longer-overlapping pair was disarmed — no stale facing fades survive'
+    );
 
     console.log('\nSMOKE PASSED');
   } finally {

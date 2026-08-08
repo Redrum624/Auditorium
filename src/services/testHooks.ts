@@ -9,9 +9,14 @@ import { encodeOggOpus } from '../audio/oggOpusEncoder';
 import type { EffectParamValue } from '../effects/types';
 import type { EditorView, Marker } from '../stores/appStore';
 import { nextId, useAppStore } from '../stores/appStore';
-import { createClip } from '../multitrack/session';
+import {
+  clampFadePair,
+  createClip,
+  crossfadableOverlap,
+  DEFAULT_FADE_CURVE,
+} from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
-import { mixdownSession as renderMixdown } from '../multitrack/mixdown';
+import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { runEffectOnSelection } from './effectRunner';
@@ -33,8 +38,9 @@ import { applyTempoChange } from './tempoService';
 import { createRemixDocument, getRemixSession } from './remixService';
 import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
 import { landStems } from './stemLanding';
-import { multitrackPlayer } from '../multitrack/MultitrackPlayer';
+import { MultitrackPlayer, multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
+import type { FadeCurve } from '../dsp/fades';
 
 export interface TestStateSummary {
   docCount: number;
@@ -185,6 +191,85 @@ export interface TestApi {
   // --- v1.7 flows ---------------------------------------------------------
   getStemModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   separateStems(): Promise<StemSeparationSummary>;
+  // --- v1.9 flows (X7) ----------------------------------------------------
+  //
+  // Scalars only, per the getBeatGridState precedent: no live Clip objects, no
+  // store handles. Everything below calls the REAL store action / resolver /
+  // player — none of it re-implements a clamp or a rule.
+  /** Sets one edge's fade through the store's own `setClipFade` (THE clamp
+   * boundary) and echoes what the store kept. `curve` is runtime-checked by
+   * the store against FADE_CURVES; an unknown string is ignored, exactly as
+   * for any other JS caller. Returns null for an unknown clip id. */
+  setClipFade(
+    clipId: string,
+    edge: 'in' | 'out',
+    fade: { lengthSample?: number; curve?: string }
+  ): ClipFadeSummary | null;
+  /** Every clip's stored fade state plus the renderer's own resolved
+   * crossfade widths — enough to distinguish "fade keys present" from
+   * "crossfade actually armed" (rule 3 is the resolver's, not re-derived). */
+  getClipFadeState(): { selectedClipId: string | null; clips: ClipFadeSummary[] };
+  /** Arms the crossfade-capable pair on one edge of the clip — the panel's
+   * Arm path: the pair from `crossfadableOverlap`, enablement from the
+   * store's own exported `clampFadePair` (refusing partial arms), then both
+   * facing fades written through `setClipFade`. */
+  armCrossfade(
+    clipId: string,
+    edge: 'in' | 'out'
+  ): { ok: boolean; reason: string | null; width: number; outClipId: string | null; inClipId: string | null };
+  /** Clears BOTH facing fades of the pair on one edge — the panel's Release
+   * path (clearing one side would strand a surprise solo fade). */
+  releaseCrossfade(
+    clipId: string,
+    edge: 'in' | 'out'
+  ): { ok: boolean; reason: string | null; outClipId: string | null; inClipId: string | null };
+  /** Renders the CURRENT session through the real MultitrackPlayer graph in
+   * an OfflineAudioContext — the genuine Web Audio engine performs the
+   * summation — and compares it per sample against `mixdownSession`. This is
+   * the end-to-end half of ruling 4 that the unit parity test cannot reach
+   * (Jest has no OfflineAudioContext; its "player path" sums in test
+   * arithmetic). `overlap` scopes the inside/outside error split; `probes`
+   * returns raw rendered values at the given absolute sample indices so the
+   * harness can assert law anchors with its own independent arithmetic. */
+  renderSessionWebAudio(
+    overlap: { start: number; end: number } | null,
+    probeIndices: number[]
+  ): Promise<WebAudioRenderSummary>;
+}
+
+/** Plain-JSON snapshot of one clip's fade state (v1.9 X7). Stored values are
+ * read under the consumer contract (`?? 0` / `?? DEFAULT_FADE_CURVE`);
+ * `crossInWidth`/`crossOutWidth` are `resolveClipFadeSpecs`' own verdict. */
+export interface ClipFadeSummary {
+  clipId: string;
+  trackIndex: number;
+  startSample: number;
+  lengthSample: number;
+  fadeInSample: number;
+  fadeOutSample: number;
+  fadeInCurve: string;
+  fadeOutCurve: string;
+  crossInWidth: number | null;
+  crossOutWidth: number | null;
+}
+
+/** Plain-JSON result of `renderSessionWebAudio` (v1.9 X7). All errors are
+ * absolute |web − mixdown| over both channels; "inside"/"outside" refer to
+ * the caller-supplied overlap region (with no region, everything counts as
+ * outside). Probe values are raw float32 samples from both paths. */
+export interface WebAudioRenderSummary {
+  ok: boolean;
+  reason: string | null;
+  lengthSamples: number;
+  sampleRate: number;
+  worstAbsError: number;
+  worstAbsErrorInside: number;
+  worstAbsErrorOutside: number;
+  exactFraction: number;
+  exactFractionOutside: number;
+  webPeak: number;
+  mixPeak: number;
+  probes: { index: number; webL: number; webR: number; mixL: number; mixR: number }[];
 }
 
 /** Plain-JSON result of the `separateStems` hook (see its implementation). */
@@ -244,6 +329,54 @@ function activeRms(): number {
 function activeDoc(): AudioDocument | null {
   const s = useAppStore.getState();
   return s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
+}
+
+/** Every clip's fade snapshot (v1.9 X7) — see {@link ClipFadeSummary}. */
+function fadeSummaries(): ClipFadeSummary[] {
+  const { session } = useSessionStore.getState();
+  const out: ClipFadeSummary[] = [];
+  session.tracks.forEach((t, trackIndex) => {
+    const specs = resolveClipFadeSpecs(t.clips);
+    for (const c of t.clips) {
+      const spec = specs.get(c.id);
+      out.push({
+        clipId: c.id,
+        trackIndex,
+        startSample: c.startSample,
+        lengthSample: c.lengthSample,
+        fadeInSample: c.fadeInSample ?? 0,
+        fadeOutSample: c.fadeOutSample ?? 0,
+        fadeInCurve: c.fadeInCurve ?? DEFAULT_FADE_CURVE,
+        fadeOutCurve: c.fadeOutCurve ?? DEFAULT_FADE_CURVE,
+        crossInWidth: spec?.crossIn?.lengthSample ?? null,
+        crossOutWidth: spec?.crossOut?.lengthSample ?? null,
+      });
+    }
+  });
+  return out;
+}
+
+/** The crossfade-capable pair on one edge of a clip — the PropertiesPanel's
+ * own `pairOnEdge` logic verbatim (full-track geometry, rule 4 included), so
+ * the hook and the panel cannot disagree about which pair Arm/Release touch.
+ * Rule 4 guarantees at most one capable pair per edge. */
+function pairOnEdge(
+  clipId: string,
+  edge: 'in' | 'out'
+): { a: { id: string; fadeInSample?: number; lengthSample: number }; b: { id: string; fadeOutSample?: number; lengthSample: number }; width: number } | null {
+  const { session } = useSessionStore.getState();
+  for (const t of session.tracks) {
+    const clip = t.clips.find((c) => c.id === clipId);
+    if (!clip) continue;
+    for (const m of t.clips) {
+      if (m.id === clip.id) continue;
+      const geo = crossfadableOverlap(t.clips, clip, m);
+      if (!geo) continue;
+      if (edge === 'in' ? geo.b.id === clip.id : geo.a.id === clip.id) return geo;
+    }
+    return null;
+  }
+  return null;
 }
 
 export function installTestHooks(): void {
@@ -938,6 +1071,176 @@ export function installTestHooks(): void {
         mixdownWorstAbsError: worst,
         mixdownExactFraction: compared > 0 ? exact / compared : null,
         mixdownPeak: peak,
+      };
+    },
+
+    // --- v1.9 flows (X7) --------------------------------------------------
+
+    // The store action IS the clamp boundary (X2); this hook only forwards
+    // and echoes. `curve` crosses as a string because the harness is plain
+    // JS; the store runtime-checks it against FADE_CURVES exactly as it does
+    // for any JS caller, so the cast adds no unchecked path.
+    setClipFade: (clipId, edge, fade) => {
+      useSessionStore
+        .getState()
+        .setClipFade(clipId, edge, {
+          lengthSample: fade.lengthSample,
+          curve: fade.curve as FadeCurve | undefined,
+        });
+      return fadeSummaries().find((s) => s.clipId === clipId) ?? null;
+    },
+
+    getClipFadeState: () => ({
+      selectedClipId: useSessionStore.getState().selectedClipId,
+      clips: fadeSummaries(),
+    }),
+
+    // The panel's Arm path: pair from the shared geometry predicate,
+    // enablement from the store's own exported clampFadePair on exactly the
+    // arguments setClipFade will use (refusing partial arms — a shortened
+    // facing fade would fail rule 3 and silently render as solo fades), then
+    // both facing fades written through the store.
+    armCrossfade: (clipId, edge) => {
+      const geo = pairOnEdge(clipId, edge);
+      if (!geo) {
+        return { ok: false, reason: 'no crossfade-capable pair on this edge', width: 0, outClipId: null, inClipId: null };
+      }
+      const grantsFull =
+        clampFadePair(geo.a.fadeInSample ?? 0, geo.width, geo.a.lengthSample, 'in').fadeOut ===
+          geo.width &&
+        clampFadePair(geo.width, geo.b.fadeOutSample ?? 0, geo.b.lengthSample, 'out').fadeIn ===
+          geo.width;
+      if (!grantsFull) {
+        return {
+          ok: false,
+          reason: 'an away-side fade leaves no room at this width',
+          width: geo.width,
+          outClipId: geo.a.id,
+          inClipId: geo.b.id,
+        };
+      }
+      const store = useSessionStore.getState();
+      store.setClipFade(geo.a.id, 'out', { lengthSample: geo.width });
+      store.setClipFade(geo.b.id, 'in', { lengthSample: geo.width });
+      return { ok: true, reason: null, width: geo.width, outClipId: geo.a.id, inClipId: geo.b.id };
+    },
+
+    // The panel's Release path: BOTH facing fades cleared (0 normalises to
+    // "no fade"), never one side alone.
+    releaseCrossfade: (clipId, edge) => {
+      const geo = pairOnEdge(clipId, edge);
+      if (!geo) {
+        return { ok: false, reason: 'no crossfade-capable pair on this edge', outClipId: null, inClipId: null };
+      }
+      const store = useSessionStore.getState();
+      store.setClipFade(geo.a.id, 'out', { lengthSample: 0 });
+      store.setClipFade(geo.b.id, 'in', { lengthSample: 0 });
+      return { ok: true, reason: null, outClipId: geo.a.id, inClipId: geo.b.id };
+    },
+
+    // Obligation-1 instrument: the REAL MultitrackPlayer builds its REAL graph
+    // (same play() code path as live playback, buffers baked by the same
+    // buildClipBuffer) against an OfflineAudioContext, and the REAL Web Audio
+    // engine performs every gain multiply and the summation. The unit parity
+    // test proves player ≡ mixdown with the summation done in test arithmetic;
+    // this closes the half it cannot: genuine Web Audio rendering.
+    renderSessionWebAudio: async (overlap, probeIndices) => {
+      const empty: WebAudioRenderSummary = {
+        ok: false,
+        reason: null,
+        lengthSamples: 0,
+        sampleRate: 0,
+        worstAbsError: 0,
+        worstAbsErrorInside: 0,
+        worstAbsErrorOutside: 0,
+        exactFraction: 0,
+        exactFractionOutside: 0,
+        webPeak: 0,
+        mixPeak: 0,
+        probes: [],
+      };
+      const session = useSessionStore.getState().session;
+      const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+      const { channels: mix, sampleRate } = renderMixdown(session, docs);
+      const length = mix[0]?.length ?? 0;
+      if (length === 0) return { ...empty, reason: 'empty session' };
+
+      const offline = new OfflineAudioContext(2, length, sampleRate);
+      // OfflineAudioContext.resume() REJECTS before startRendering() has been
+      // called; the player fires a void ctx.resume() for the live context's
+      // autoplay policy. Stub the instance method (an own property shadowing
+      // the prototype) so the render is not accompanied by an unhandled
+      // rejection — rendering is driven by startRendering() below, and the
+      // stub changes nothing about the graph or the engine's arithmetic.
+      (offline as unknown as { resume: () => Promise<void> }).resume = () => Promise.resolve();
+      const player = new MultitrackPlayer({
+        // The player's play()/buildClipBuffer path touches only BaseAudioContext
+        // members OfflineAudioContext genuinely has (createGain, createBuffer,
+        // createBufferSource, createChannelMerger, createChannelSplitter,
+        // destination, currentTime, resume — stubbed above). The cast is wrong
+        // only about AudioContext members this call path never reaches.
+        createContext: () => offline as unknown as AudioContext,
+      });
+      player.play(0, session, docs);
+      let rendered: AudioBuffer;
+      try {
+        rendered = await offline.startRendering();
+      } catch (err) {
+        return { ...empty, reason: `startRendering failed: ${String(err)}` };
+      }
+
+      let worst = 0;
+      let worstIn = 0;
+      let worstOut = 0;
+      let exact = 0;
+      let exactOut = 0;
+      let outCount = 0;
+      let webPeak = 0;
+      let mixPeak = 0;
+      const compared = 2 * length;
+      for (let ch = 0; ch < 2; ch++) {
+        const web = rendered.getChannelData(Math.min(ch, rendered.numberOfChannels - 1));
+        const ref = mix[ch];
+        for (let i = 0; i < length; i++) {
+          const aw = Math.abs(web[i]);
+          const am = Math.abs(ref[i]);
+          if (aw > webPeak) webPeak = aw;
+          if (am > mixPeak) mixPeak = am;
+          const err = Math.abs(web[i] - ref[i]);
+          const inside = overlap !== null && i >= overlap.start && i < overlap.end;
+          if (err > worst) worst = err;
+          if (inside) {
+            if (err > worstIn) worstIn = err;
+          } else {
+            outCount++;
+            if (err > worstOut) worstOut = err;
+            if (web[i] === ref[i]) exactOut++;
+          }
+          if (web[i] === ref[i]) exact++;
+        }
+      }
+      const probes = probeIndices
+        .filter((i) => Number.isInteger(i) && i >= 0 && i < length)
+        .map((index) => ({
+          index,
+          webL: rendered.getChannelData(0)[index],
+          webR: rendered.getChannelData(Math.min(1, rendered.numberOfChannels - 1))[index],
+          mixL: mix[0][index],
+          mixR: mix[1][index],
+        }));
+      return {
+        ok: true,
+        reason: null,
+        lengthSamples: length,
+        sampleRate,
+        worstAbsError: worst,
+        worstAbsErrorInside: worstIn,
+        worstAbsErrorOutside: worstOut,
+        exactFraction: exact / compared,
+        exactFractionOutside: outCount > 0 ? exactOut / outCount : 1,
+        webPeak,
+        mixPeak,
+        probes,
       };
     },
   };
