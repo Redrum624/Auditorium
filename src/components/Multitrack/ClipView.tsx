@@ -6,7 +6,15 @@ import { getPeaksForRange } from '../../audio/peaks';
 import { getPyramids } from '../../services/peaksCache';
 import type { Clip } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
-import { sampleToPixel } from '../Editor/waveformRender';
+import { drawBeatTics, sampleToPixel } from '../Editor/waveformRender';
+import {
+  CLIP_BEAT_TIC_PX,
+  CLIP_DOWNBEAT_TIC_PX,
+  CLIP_TIC_BAND_PX,
+  ticWindow,
+  useClipBeatTics,
+  useViewportWidth,
+} from './clipBeatTics';
 import { getClipWaveformCanvas, zoomBucket } from './clipWaveformCache';
 
 const HANDLE_PX = 6;
@@ -83,12 +91,25 @@ export default function ClipView({
   const setSelectedClip = useSessionStore((s) => s.setSelectedClip);
 
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const ticCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [moveDx, setMoveDx] = useState(0);
 
   const left = sampleToPixel(clip.startSample, zoom.scrollSample, zoom.samplesPerPixel);
   const widthPx = Math.max(2, clip.lengthSample / zoom.samplesPerPixel);
   const canvasH = Math.max(1, laneHeight - 22);
+
+  // Task B3 — the beat grid mapped onto THIS clip, in session samples. `null`
+  // whenever there is nothing to draw: no cached analysis, the toggle off, the
+  // source document closed, or a clip taken from past the analysed prefix.
+  const beatTics = useClipBeatTics(clip, doc, sessionRate);
+  const viewportPx = useViewportWidth();
+  // Only the on-screen slice of the clip is rasterised — see ticWindow. The
+  // drag translation is included so the band still covers the lane while a clip
+  // is being dragged, and the window is quantised so that costs a canvas resize
+  // once per 256 px of movement rather than once per pointer event.
+  const ticBand = ticWindow(-(left + moveDx), widthPx, viewportPx);
+  const showTics = beatTics !== null && ticBand.width > 0;
 
   // Mini waveform (Task F8): the peak envelope is drawn ONCE into an offscreen
   // canvas cached by (clipId, lengthSample, zoom bucket, channels identity,
@@ -157,6 +178,43 @@ export default function ClipView({
     sessionRate,
     zoom.samplesPerPixel,
   ]);
+
+  // Task B3 — the beat tics, on their OWN canvas.
+  //
+  // Deliberately not the waveform canvas above: that raster is capped at 4096
+  // device px and blit-STRETCHED across the clip's whole CSS width, which is
+  // right for a min/max envelope and wrong for a position — one raster column
+  // can span many CSS px, so every tic would be displaced and fattened. This
+  // canvas is sized in CSS px at 1:1 (times dpr) over the visible slice, so a
+  // tic lands on the pixel the mapping computed. It is also not the CACHED
+  // offscreen bitmap: that cache's key carries no beat-grid or toggle identity,
+  // so tics baked into it would persist or vanish stale across a toggle, an
+  // analysis completing, or a x2 / /2 correction.
+  useEffect(() => {
+    const canvas = ticCanvasRef.current;
+    if (!canvas || !beatTics || ticBand.width <= 0) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return; // jsdom / no backend
+
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = Math.max(1, Math.round(ticBand.width * dpr));
+    canvas.height = Math.max(1, Math.round(CLIP_TIC_BAND_PX * dpr));
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, ticBand.width, CLIP_TIC_BAND_PX);
+
+    drawBeatTics(ctx, {
+      ...beatTics,
+      // The overlay's left edge is `ticBand.start` CSS px into the clip, and
+      // clip-local x 0 is exactly `clip.startSample` on the session timeline.
+      scrollSample: clip.startSample + ticBand.start * zoom.samplesPerPixel,
+      samplesPerPixel: zoom.samplesPerPixel,
+      width: ticBand.width,
+      baseline: CLIP_TIC_BAND_PX,
+      beatHeight: CLIP_BEAT_TIC_PX,
+      downbeatHeight: CLIP_DOWNBEAT_TIC_PX,
+    });
+    // `moveDx` is deliberately absent: ticBand already carries it, quantised.
+  }, [beatTics, ticBand.start, ticBand.width, zoom.samplesPerPixel, clip.startSample]);
 
   const maxTrimEnd = (): number => {
     if (!doc) return Number.POSITIVE_INFINITY;
@@ -260,6 +318,25 @@ export default function ClipView({
         {doc?.name ?? clip.documentId}
       </div>
       <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />
+      {/* Beat tics (B3). Pinned to the clip element's BOTTOM edge, not the
+          waveform canvas's: that canvas is `h-full` below the name label inside
+          an overflow-hidden box, so its own bottom strip is clipped away and
+          anything drawn there would be invisible. Being a child of the clip, the
+          band also rides the move-drag transform, so the tics travel with the
+          audio they describe instead of lagging on the lane until the drop. */}
+      {showTics && (
+        <canvas
+          ref={ticCanvasRef}
+          data-testid="clip-beat-tics"
+          className="pointer-events-none absolute"
+          style={{
+            left: ticBand.start,
+            bottom: 0,
+            width: ticBand.width,
+            height: CLIP_TIC_BAND_PX,
+          }}
+        />
+      )}
       {/* Edge trim affordances (hit-tested by pointer X; these are visual). */}
       <div
         className="absolute inset-y-0 left-0"
