@@ -34,6 +34,29 @@ const electronAPI = {
   respondCloseRequest: (dirtyCount, inFlightSaveCount) =>
     ipcRenderer.send('app:close-response', dirtyCount, inFlightSaveCount),
 
+  // Stem separation (v1.7). Channels, payload shapes and event layouts are
+  // documented in electron/stemManager.cjs's module header; this bridge adds
+  // no logic of its own beyond the on*/unsubscribe pattern used above.
+  stemsModelState: () => ipcRenderer.invoke('stems:model-state'),
+  stemsEnsureModel: () => ipcRenderer.invoke('stems:ensure-model'),
+  onStemsModelProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('stems:model-progress', listener);
+    return () => ipcRenderer.removeListener('stems:model-progress', listener);
+  },
+  stemsSeparate: (req) => ipcRenderer.invoke('stems:separate', req),
+  stemsCancel: () => ipcRenderer.invoke('stems:cancel'),
+  onStemsProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('stems:progress', listener);
+    return () => ipcRenderer.removeListener('stems:progress', listener);
+  },
+  onStemsChunk: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('stems:chunk', listener);
+    return () => ipcRenderer.removeListener('stems:chunk', listener);
+  },
+
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
   pathBasename: (p) => p.split(/[\\/]/).pop()

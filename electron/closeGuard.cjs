@@ -7,8 +7,9 @@
  *   1. The window's 'close' event is intercepted (`handleClose`): prevented,
  *      and 'app:close-requested' is sent to the renderer.
  *   2. The renderer replies over 'app:close-response' with its count of dirty
- *      (unsaved) documents and its count of in-flight (mid-encode/write)
- *      saves.
+ *      (unsaved) documents and its count of in-flight BUSY WORK — saves
+ *      mid-encode/write, plus (v1.7) any running stem separation, which is
+ *      minutes of inference that a silent quit would throw away.
  *   3. Both zero → the window is destroyed (destroy() skips the 'close'
  *      event, so there is no re-entry). Otherwise a native Quit/Cancel
  *      message box is shown: Quit destroys, Cancel aborts the close.
@@ -106,7 +107,7 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS, aut
     const message =
       dirtyN > 0
         ? `${dirtyN} file(s) have unsaved changes.`
-        : 'A save is still in progress.';
+        : 'A save or stem separation is still in progress.';
     // ipcMain.on doesn't await (or catch a rejection from) this listener's
     // returned promise, so an uncaught confirmQuit failure here would become
     // an unhandled rejection exactly like the timeout path below (review fix

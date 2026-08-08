@@ -25,6 +25,7 @@ import { ChromePill, GlassCard, IconTile } from './components/UI/glass';
 import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { getInFlightSaveCount } from './services/fileService';
+import { getStemBusyCount } from './services/stemService';
 import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
@@ -140,6 +141,10 @@ export default function App() {
   // stale render closure). Main then closes silently (0) or shows a native
   // Quit/Cancel box. See electron/closeGuard.cjs.
   //
+  // The busy count is saves-in-flight PLUS any in-flight stem separation
+  // (Task S3, ruling 7): a separation is minutes of inference the user cannot
+  // get back, so quitting mid-run must warn rather than discard it silently.
+  //
   // The count is `dirty || neverSaved`, matching closeDocumentFlow (Task S4):
   // a computed document (Mix Down, Remix N, a recording, a stem) is CLEAN from
   // birth, so counting `dirty` alone let Quit discard the whole thing without
@@ -152,7 +157,7 @@ export default function App() {
       const unsaved = useAppStore
         .getState()
         .documents.filter((d) => d.dirty || d.neverSaved).length;
-      api.respondCloseRequest(unsaved, getInFlightSaveCount());
+      api.respondCloseRequest(unsaved, getInFlightSaveCount() + getStemBusyCount());
     });
   }, []);
 

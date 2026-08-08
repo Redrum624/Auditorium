@@ -9,6 +9,16 @@ export interface ElectronAPI {
   onCloseRequested(cb: () => void): () => void;                  // returns unsubscribe (Task F8 close guard)
   respondCloseRequest(dirtyCount: number, inFlightSaveCount: number): void; // renderer's reply to 'app:close-requested'
   getAppVersion(): Promise<string>;
+  // Stem separation (v1.7, tasks S1/S3). Renderer code goes through
+  // `src/services/stemService.ts`, never these directly.
+  stemsModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  stemsEnsureModel(): Promise<{ ok: true; path: string } | { ok: false; error: string }>;
+  onStemsModelProgress(cb: (p: { received: number; total: number }) => void): () => void;  // returns unsubscribe
+  stemsSeparate(req: { sampleRate: number; channels: ArrayBuffer[] }): Promise<{ ok: true; totalSegments: number } | { ok: false; cancelled?: true; error?: string }>;
+  stemsCancel(): Promise<{ cancelled: boolean }>;
+  onStemsProgress(cb: (p: { segment: number; totalSegments: number }) => void): () => void; // returns unsubscribe
+  onStemsChunk(cb: (c: { offset: number; samples: number; data: ArrayBuffer }) => void): () => void; // returns unsubscribe
+
   pathBasename(p: string): string;      // implemented in preload (string ops only, no IPC)
 }
 declare global { interface Window { electronAPI: ElectronAPI } }

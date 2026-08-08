@@ -21,6 +21,7 @@ import { invalidateTempo, invalidateRemix } from './tempoAnalysis';
 // remix SESSION (plan, locks, rejections, its retained `sourceChannelRefs`
 // and its plan worker). Closing a document must clear both (Task T13).
 import { invalidateRemixSession } from './remixService';
+import { invalidateStemRun } from './stemService';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -594,6 +595,11 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   // `invalidateRemixSession` matches on both ids, mirroring the
   // `getNoiseProfile()?.docId === docId` provenance guard right below.
   invalidateRemixSession(docId);
+  // Task S3: an in-flight stem separation for this document can no longer
+  // deliver anything (the delivery-time staleness gate would discard it), so
+  // its ~5 GB utility process must not go on running — and its busy count must
+  // not keep the close guard armed. Terminates the run; a no-op otherwise.
+  invalidateStemRun(docId);
   if (getNoiseProfile()?.docId === docId) clearNoiseProfile();
   // A closing doc can invalidate many clips' cached mini-waveforms at once
   // (every clip sourced from it); clearing the whole cache is cheap and
