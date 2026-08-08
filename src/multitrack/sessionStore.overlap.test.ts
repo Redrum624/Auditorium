@@ -338,6 +338,58 @@ describe('over-length facing fades — an un-armed layering a reposition must no
   });
 });
 
+describe('over-length stale fades — the disarm pass latent-pair guard is EXACT on both members', () => {
+  // The disarm pass keeps an armed-but-intruded pair's fades ONLY while the
+  // pair is still canonical by its own pair-only geometry (the latent-pair
+  // guard in maintainFacingFades): removing the intruder must revive the
+  // crossfade with no store write. That guard is exact PER MEMBER, like the
+  // armed-detect and the renderer's rule 3 — a stale facing fade LONGER than
+  // the current overlap is not latent, it is a dissolved pair, and BOTH
+  // facing fades must clear so no mismatched pair lingers as surprise solo
+  // fades. The corridor that puts one fade ABOVE the width with the partner
+  // exact: an intruder blocks the re-arm (rule 4) while a trim of the pivot
+  // clamps the pivot's facing fade to exactly the new width (its away-side
+  // fade sits at the X2 meet boundary, fadeIn + fadeOut == length), leaving
+  // the mate's fade above it. One fixture per operand role; the guard's
+  // at-boundary (latent, kept) siblings are pinned in the intruder describes.
+
+  it('stale outgoing (a-side) fade longer than the shrunk overlap: the disarm still clears both', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600); // armed at w=400
+    // Away-side fade at the X2 meet boundary: 400 + 600 == B.length.
+    useSessionStore.getState().setClipFade(b, 'out', { lengthSample: 600 });
+    seed({ startSample: 900, lengthSample: 200 }); // intruder in [600,1000): rule 4 blocks re-arm
+
+    // Trim B's start 600 -> 700: the fade re-clamp squeezes B.fadeIn to
+    // 900 - 600 = 300 == the new pair-only width, while A.fadeOut stays 400
+    // ABOVE it — the a-side comparison alone must reject the guard.
+    useSessionStore.getState().trimClip(b, 'start', 700);
+
+    expect(findClip(a)!.fadeOutSample).toBeUndefined(); // stale 400 cleared, not kept as latent
+    expect(findClip(b)!.fadeInSample).toBeUndefined();
+    expect(findClip(b)!.fadeOutSample).toBe(600); // away side untouched
+  });
+
+  it('stale incoming (b-side) fade longer than the shrunk overlap: the disarm still clears both', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600); // armed at w=400
+    // Away-side fade at the X2 meet boundary: 600 + 400 == A.length.
+    useSessionStore.getState().setClipFade(a, 'in', { lengthSample: 600 });
+    seed({ startSample: 800, lengthSample: 200 }); // intruder in [600,1000): rule 4 blocks re-arm
+
+    // Trim A's end 1000 -> 900: the fade re-clamp squeezes A.fadeOut to
+    // 900 - 600 = 300 == the new pair-only width, while B.fadeIn stays 400
+    // ABOVE it — the b-side comparison alone must reject the guard.
+    useSessionStore.getState().trimClip(a, 'end', 900);
+
+    expect(findClip(a)!.fadeOutSample).toBeUndefined();
+    expect(findClip(b)!.fadeInSample).toBeUndefined(); // stale 400 cleared, not kept as latent
+    expect(findClip(a)!.fadeInSample).toBe(600); // away side untouched
+  });
+});
+
 describe('trimClip maintenance — a trim never silently disarms a crossfade', () => {
   /** A canonical pair: A [0,1000) fadeOut 400 / B [600, 600+len) fadeIn 400. */
   function armedPair(bLen = 1000, bOffset = 300): { a: string; b: string } {
