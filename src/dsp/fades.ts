@@ -117,12 +117,20 @@ export type FadeCurve = 'equal-gain' | 'equal-power' | 'smooth' | 'exponential';
 /** Every curve, in the order a picker should offer them. */
 export const FADE_CURVES: readonly FadeCurve[] = ['equal-power', 'equal-gain', 'smooth', 'exponential'];
 
-/** Short UI labels. */
+/** Short UI labels (ruling 2: name curves by what they DO to the level, not
+ * by their formula). 'Equal power'/'Equal gain' are behaviour names with
+ * direct Pro Tools precedent (they say which summing law holds the level).
+ * `exponential` is DELIBERATELY NOT labelled "Exponential" (X1's flag: the
+ * shape is `t²` — quadratic, so the formula name was wrong twice over):
+ * 'Ducked' names the audible behaviour — the level is held low through most
+ * of the fade, leaving a deliberate dip at a crossfade's midpoint. The curve
+ * ID stays `'exponential'` because it is persisted in `.audm` files (X2);
+ * only the user-facing string is a UI decision (X4). */
 export const FADE_CURVE_LABELS: Record<FadeCurve, string> = {
   'equal-power': 'Equal power',
   'equal-gain': 'Equal gain',
   smooth: 'Smooth',
-  exponential: 'Exponential',
+  exponential: 'Ducked',
 };
 
 /** One line each, for a tooltip or a helper row under the picker. */

@@ -112,8 +112,11 @@ export function readClipSlice(doc: AudioDocument, clip: Clip, sessionRate: numbe
  * case says a caller with no measurement must pass `rho = 0` -- the honest
  * assumption for two unrelated clips, normalising the pair for power
  * summation -- rather than invent an estimate.
+ *
+ * Exported (X4) so the clip UI draws the crossfade indicator from the SAME
+ * gains this renderer applies, instead of duplicating the constant.
  */
-const CROSSFADE_RHO = 0;
+export const CROSSFADE_RHO = 0;
 
 /** One same-track overlap rendered as a crossfade. The SAME object is shared
  * by both members of the pair (outgoing reads `curveOut`/`gOut`, incoming

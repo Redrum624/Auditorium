@@ -152,8 +152,13 @@ function rawOverlapWidth(m: Clip, n: Clip): number {
 interface PreOverlapState {
   /** Raw overlap width with the pivot before the gesture (0 = none). */
   width: number;
-  /** True when the pair was a fully-armed canonical pair (crossfade-capable
-   * geometry AND both facing fades exactly spanning the overlap). */
+  /** True when the pair was an armed canonical pair BY ITS OWN GEOMETRY AND
+   * FADES (rules 1/2 + both facing fades exactly spanning the overlap).
+   * Deliberately INTRUSION-BLIND (X4, carried X5 finding): an armed pair a
+   * later `addClip`/punch-in intruded on is only SILENCED at the renderer
+   * (rule 4) — its stored fades still mark it as armed, and reading it as
+   * not-armed here made moving a member away skip the disarm and strand the
+   * partner's facing fade as a surprise solo fade. */
   armed: boolean;
   /** The PIVOT's facing edge in that armed pair ('out' when the pivot was the
    * outgoing/earlier side), null when not armed. */
@@ -172,7 +177,13 @@ function preOverlapStates(clips: readonly Clip[], pivot: Clip): Map<string, PreO
     let armed = false;
     let pivotEdge: 'in' | 'out' | null = null;
     if (width > 0) {
-      const geo = crossfadableOverlap(clips, pivot, n);
+      // Pair-only geometry ([pivot, n], not the whole track): rule 4 must NOT
+      // decide armed-ness here. An intruder silences the crossfade at the
+      // renderer while the stored fades keep the pair armed; snapshotting it
+      // as not-armed skipped the disarm on a later move-away (X5 finding,
+      // fixed in X4). The ARM pass still runs the full-track predicate, so an
+      // intruded pair can never be (re-)armed through this eligibility.
+      const geo = crossfadableOverlap([pivot, n], pivot, n);
       if (geo && (geo.a.fadeOutSample ?? 0) === geo.width && (geo.b.fadeInSample ?? 0) === geo.width) {
         armed = true;
         pivotEdge = geo.a.id === pivot.id ? 'out' : 'in';
@@ -271,6 +282,30 @@ function maintainFacingFades(
   for (const [mateId, preState] of pre) {
     if (!preState.armed || preState.pivotEdge === null) continue;
     const mateEdge = preState.pivotEdge === 'out' ? 'in' : 'out';
+    // Latent-pair guard (X4, carried X5 finding): an armed pair the arm pass
+    // could not re-arm ONLY because an intruder trips rule 4 may still be an
+    // exact canonical pair by its own geometry — same orientation, both
+    // facing fades still spanning the (possibly unchanged) overlap. Its
+    // fades are not stale: the renderer merely silences them while the
+    // intruder sits there, and removing the intruder revives the crossfade
+    // with no store write (pinned X5 behaviour). Clearing here would destroy
+    // that. The orientation term matters: a flipped re-arm at the same width
+    // writes the OPPOSITE edges, and the stale originals must still fall
+    // through to the clears below.
+    const pivotNow = clips.find((c) => c.id === pivotId);
+    const mateNow = clips.find((c) => c.id === mateId);
+    if (pivotNow && mateNow) {
+      const geoNow = crossfadableOverlap([pivotNow, mateNow], pivotNow, mateNow);
+      const outId = preState.pivotEdge === 'out' ? pivotId : mateId;
+      if (
+        geoNow !== null &&
+        geoNow.a.id === outId &&
+        (geoNow.a.fadeOutSample ?? 0) === geoNow.width &&
+        (geoNow.b.fadeInSample ?? 0) === geoNow.width
+      ) {
+        continue;
+      }
+    }
     if (!armedNow.has(`${pivotId}:${preState.pivotEdge}`)) {
       writeClipFade(tracks[pivotTrackIdx].clips, pivotId, preState.pivotEdge, undefined);
     }

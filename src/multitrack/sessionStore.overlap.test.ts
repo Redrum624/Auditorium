@@ -486,3 +486,108 @@ describe('a gesture-armed crossfade reaches the renderer end-to-end', () => {
     ).toBeGreaterThan(1e-3);
   });
 });
+
+describe('X4 — carried X5 findings: intruded armed pairs, and the fade-UI recovery path', () => {
+  /** Arms A[0,1000) / B[600,1600) at width 400 through the real gesture, then
+   * lands an intruder C inside the overlap region via addClip (the punch-in /
+   * Insert Active File path — the only way an armed pair gets intruded
+   * without the gesture maintenance seeing it happen). */
+  function armThenIntrude(): { a: string; b: string; c: string } {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600); // arms at w=400
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    const c = seed({ startSample: 700, lengthSample: 60 }); // [700,760) inside [600,1000)
+    // addClip writes no fades and the renderer silences the pair (rule 4).
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(resolveClipFadeSpecs(trackClips()).get(a)?.crossOut ?? null).toBeNull();
+    return { a, b, c };
+  }
+
+  it('moving a member of an INTRUDED armed pair away disarms both facing fades (X5 finding 2)', () => {
+    const { a, b } = armThenIntrude();
+
+    useSessionStore.getState().moveClip(a, trackId(), 5000); // far clear of B and C
+
+    // Before the fix the pre-gesture snapshot read the intruded pair as
+    // not-armed (rule 4 in the armed test), skipped the disarm, and B kept a
+    // 400-sample fade-in as a surprise solo fade.
+    expect(findClip(a)!.fadeOutSample).toBeUndefined();
+    expect(findClip(b)!.fadeInSample).toBeUndefined();
+  });
+
+  it('a start-trim that leaves an intruded pair still exactly spanning preserves it (latent crossfade)', () => {
+    const { a, b, c } = armThenIntrude();
+
+    // Trim A's start: A's END does not move, so the overlap [600,1000) and
+    // its width 400 are unchanged; the arm pass cannot re-arm (rule 4), and
+    // the disarm must NOT treat the still-exact pair as stale.
+    useSessionStore.getState().trimClip(a, 'start', 100);
+
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(findClip(b)!.fadeInSample).toBe(400);
+    // Removing the intruder revives the crossfade with no store write — the
+    // pinned X5 behaviour this guard exists to protect.
+    useSessionStore.getState().removeClip(c);
+    const specs = resolveClipFadeSpecs(trackClips());
+    expect(specs.get(a)?.crossOut?.lengthSample).toBe(400);
+    expect(specs.get(b)?.crossIn?.lengthSample).toBe(400);
+  });
+
+  it('an edit that CHANGES an intruded pair`s overlap width clears the now-stale fades', () => {
+    const { a, b } = armThenIntrude();
+
+    // Trim A's end from 1000 to 900: overlap narrows to [600,900), w=300 —
+    // the stored 400s no longer span it, the arm pass cannot re-arm (C still
+    // intrudes [700,760)), so both facing fades are stale and must clear.
+    useSessionStore.getState().trimClip(a, 'end', 900);
+
+    expect(findClip(a)!.fadeOutSample).toBeUndefined();
+    expect(findClip(b)!.fadeInSample).toBeUndefined();
+  });
+
+  it('a flipped-orientation re-arm at the SAME width still clears the stale opposite edges', () => {
+    // No intruder here: this pins the latent guard's ORIENTATION term. A
+    // [0,1000) armed with B [600,1600) at w=400; moving A to 1200 flips the
+    // pair (B outgoing, A incoming) at the SAME width 400 — the stale
+    // A.fadeOut/B.fadeIn match that width numerically and would survive a
+    // guard that ignored orientation.
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600);
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(findClip(b)!.fadeInSample).toBe(400);
+
+    useSessionStore.getState().moveClip(a, trackId(), 1200); // A [1200,2200) over B's tail [600,1600): flipped pair, width 400 again
+
+    expect(findClip(b)!.fadeOutSample).toBe(400); // new outgoing edge, armed
+    expect(findClip(a)!.fadeInSample).toBe(400); // new incoming edge, armed
+    expect(findClip(a)!.fadeOutSample).toBeUndefined(); // stale edge cleared
+    expect(findClip(b)!.fadeInSample).toBeUndefined(); // stale edge cleared
+  });
+
+  it('the fade-UI arm path makes a raw addClip overlap drag-maintainable (X5 finding 1)', () => {
+    // A raw overlap born from addClip (punch-in semantics): eligibility
+    // requires pre-width 0 or already-armed, so no drag can EVER arm it —
+    // the recovery is the fade UI writing both facing fades to the exact
+    // width through setClipFade (what the panel's Arm button does).
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 600, lengthSample: 1000 }); // raw overlap, w=400
+    useSessionStore.getState().moveClip(b, trackId(), 600); // same-position move: still not armable
+    expect(findClip(b)!.fadeInSample).toBeUndefined(); // eligibility refuses (raw pair)
+
+    useSessionStore.getState().setClipFade(a, 'out', { lengthSample: 400 });
+    useSessionStore.getState().setClipFade(b, 'in', { lengthSample: 400 });
+
+    // The renderer now crossfades it…
+    const specs = resolveClipFadeSpecs(trackClips());
+    expect(specs.get(a)?.crossOut?.lengthSample).toBe(400);
+    expect(specs.get(b)?.crossIn?.lengthSample).toBe(400);
+
+    // …and the pair is armed for the maintenance from now on: a drag that
+    // reshapes the overlap re-arms at the new width instead of refusing.
+    useSessionStore.getState().moveClip(b, trackId(), 700); // w becomes 300
+    expect(findClip(a)!.fadeOutSample).toBe(300);
+    expect(findClip(b)!.fadeInSample).toBe(300);
+  });
+});

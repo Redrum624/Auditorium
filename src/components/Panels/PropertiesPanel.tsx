@@ -2,8 +2,15 @@ import { useRef, useState } from 'react';
 import { docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
-import type { Clip } from '../../multitrack/session';
-import { formatTime } from '../../utils/timeFormat';
+import { clampFadePair, crossfadableOverlap, DEFAULT_FADE_CURVE, type Clip } from '../../multitrack/session';
+import { resolveClipFadeSpecs } from '../../multitrack/mixdown';
+import {
+  FADE_CURVES,
+  FADE_CURVE_DESCRIPTIONS,
+  FADE_CURVE_LABELS,
+  type FadeCurve,
+} from '../../dsp/fades';
+import { formatTime, parseTime } from '../../utils/timeFormat';
 import {
   getTempo,
   isTempoRunning,
@@ -35,17 +42,21 @@ function SectionLabel({ children }: { children: string }) {
   );
 }
 
-/** Shared 'Detect Tempo' / 'Re-analyze' full-width button (Fix round 1
- * simplification — the two were identical JSX differing only in
- * testid/label). */
-function TempoActionButton({
+/** Shared full-width accent action button (Fix round 1 simplification — the
+ * two tempo buttons were identical JSX differing only in testid/label; X4
+ * generalised it with `disabled`/`title` for the crossfade Arm action). */
+function PanelActionButton({
   testId,
   label,
   onClick,
+  disabled,
+  title,
 }: {
   testId: string;
   label: string;
   onClick: () => void;
+  disabled?: boolean;
+  title?: string;
 }) {
   return (
     <div className="px-2 py-1">
@@ -53,7 +64,9 @@ function TempoActionButton({
         type="button"
         data-testid={testId}
         onClick={onClick}
-        className="w-full rounded bg-[#26c6da] px-2 py-1 text-xs font-medium text-[#1a1a1e] hover:opacity-90"
+        disabled={disabled}
+        title={title}
+        className="w-full rounded bg-[#26c6da] px-2 py-1 text-xs font-medium text-[#1a1a1e] hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
       >
         {label}
       </button>
@@ -192,11 +205,11 @@ function TempoSection({ doc }: { doc: AudioDocument }) {
             </div>
           )}
           {entry.stale && (
-            <TempoActionButton testId="tempo-reanalyze-button" label="Re-analyze" onClick={detectOrReanalyze} />
+            <PanelActionButton testId="tempo-reanalyze-button" label="Re-analyze" onClick={detectOrReanalyze} />
           )}
         </>
       ) : (
-        <TempoActionButton testId="tempo-analyze-button" label="Detect Tempo" onClick={detectOrReanalyze} />
+        <PanelActionButton testId="tempo-analyze-button" label="Detect Tempo" onClick={detectOrReanalyze} />
       )}
     </div>
   );
@@ -311,20 +324,119 @@ function GainInput({
   );
 }
 
-/** Selected clip facts + editable gain (multitrack view). */
+/**
+ * X4 — fade length editor: the GainInput local-draft pattern (T36 — a
+ * store-bound value would fight the user mid-keystroke, because
+ * `setClipFade`'s clamp can answer with a different number than was typed).
+ * Displays `formatTime` (`m:ss.mmm`), parses via `parseTime` (which also
+ * accepts plain seconds). `onCommit` performs the store write and returns
+ * what the store actually kept, so the echoed value is the store's clamp,
+ * never a UI re-implementation of it (C4). The parent additionally keys this
+ * component by the committed value, so an edit arriving from elsewhere (a
+ * handle drag with the panel open) resets the draft.
+ */
+function FadeLengthInput({
+  valueSample,
+  sampleRate,
+  label,
+  onCommit,
+}: {
+  valueSample: number;
+  sampleRate: number;
+  label: string;
+  onCommit: (lengthSample: number) => number;
+}) {
+  const [draft, setDraft] = useState(formatTime(valueSample, sampleRate));
+  const escapingRef = useRef(false);
+
+  const commit = () => {
+    if (escapingRef.current) return;
+    const parsed = parseTime(draft, sampleRate);
+    if (parsed !== null) {
+      const stored = onCommit(parsed);
+      setDraft(formatTime(stored, sampleRate)); // reflect the store's clamp
+    } else {
+      setDraft(formatTime(valueSample, sampleRate)); // revert garbage
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={draft}
+      aria-label={label}
+      title="Fade length — m:ss.mmm or plain seconds; 0 clears the fade"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') {
+          setDraft(formatTime(valueSample, sampleRate));
+          escapingRef.current = true;
+          e.currentTarget.blur(); // dispatches blur synchronously
+          escapingRef.current = false;
+        }
+      }}
+      className="w-20 rounded border border-[#3a3a42] bg-[#1a1a1e] px-1 py-0.5 text-right text-[#d4d4d8] outline-none focus:border-[#26c6da]"
+    />
+  );
+}
+
+/** X4 — fade curve picker. Options come straight from FADE_CURVES in its
+ * documented picker order; labels are the ruling-2 behaviour names and the
+ * title carries the one-line description of the selected curve. Styled on the
+ * panel's own raw-Tailwind field idiom (this file deliberately does not use
+ * the Glass* primitives). */
+function FadeCurveSelect({
+  value,
+  label,
+  onChange,
+}: {
+  value: FadeCurve;
+  label: string;
+  onChange: (curve: FadeCurve) => void;
+}) {
+  return (
+    <select
+      value={value}
+      aria-label={label}
+      title={FADE_CURVE_DESCRIPTIONS[value]}
+      // The cast is sound: every option value below comes from FADE_CURVES,
+      // and setClipFade re-validates against FADE_CURVES at runtime anyway.
+      onChange={(e) => onChange(e.target.value as FadeCurve)}
+      className="rounded border border-[#3a3a42] bg-[#1a1a1e] px-1 py-0.5 text-[#d4d4d8] outline-none focus:border-[#26c6da]"
+    >
+      {FADE_CURVES.map((c) => (
+        <option key={c} value={c}>
+          {FADE_CURVE_LABELS[c]}
+        </option>
+      ))}
+    </select>
+  );
+}
+
+/** Selected clip facts + editable gain and fades (multitrack view). The fade
+ * controls are X4's Properties-panel half of ruling 7: per-edge length +
+ * curve, with the crossfade state of each edge surfaced next to it (armed →
+ * width readout + Release; capable overlap → Arm; other overlap → an honest
+ * "raw sum" note). */
 function ClipProperties() {
   const documents = useAppStore((s) => s.documents);
   const session = useSessionStore((s) => s.session);
   const selectedClipId = useSessionStore((s) => s.selectedClipId);
   const setClipGain = useSessionStore((s) => s.setClipGain);
+  const setClipFade = useSessionStore((s) => s.setClipFade);
 
   let clip: Clip | null = null;
   let trackName = '';
+  let trackClips: Clip[] = [];
   for (const track of session.tracks) {
     const found = track.clips.find((c) => c.id === selectedClipId);
     if (found) {
       clip = found;
       trackName = track.name;
+      trackClips = track.clips;
       break;
     }
   }
@@ -334,6 +446,79 @@ function ClipProperties() {
   }
 
   const srcDoc = documents.find((d) => d.id === clip!.documentId);
+
+  // The renderer's own resolver decides what each edge IS right now (solo
+  // fade, live crossfade, or superseded) — the panel never re-derives rule 3.
+  const spec = resolveClipFadeSpecs(trackClips).get(clip.id);
+
+  /** Commits one edge's fade length through the store — THE clamp boundary
+   * (C4) — and returns what the store actually kept (read synchronously from
+   * the store, zustand's set is synchronous), so the input can echo the clamp
+   * without re-implementing it. */
+  const commitFadeLength = (edge: 'in' | 'out', lengthSample: number): number => {
+    setClipFade(clip!.id, edge, { lengthSample });
+    for (const t of useSessionStore.getState().session.tracks) {
+      const c = t.clips.find((x) => x.id === clip!.id);
+      if (c) return (edge === 'in' ? c.fadeInSample : c.fadeOutSample) ?? 0;
+    }
+    return 0;
+  };
+
+  /** The crossfade-capable pair on one edge of this clip, if any. Full-track
+   * geometry (rule 4 included), so an intruded or piled-up overlap is
+   * honestly "not capable" here. Rule 4 also guarantees at most ONE capable
+   * pair per edge. */
+  const pairOnEdge = (edge: 'in' | 'out') => {
+    for (const m of trackClips) {
+      if (m.id === clip!.id) continue;
+      const geo = crossfadableOverlap(trackClips, clip!, m);
+      if (!geo) continue;
+      if (edge === 'in' ? geo.b.id === clip!.id : geo.a.id === clip!.id) return geo;
+    }
+    return null;
+  };
+  const pairIn = pairOnEdge('in');
+  const pairOut = pairOnEdge('out');
+
+  type PairGeo = NonNullable<typeof pairIn>;
+
+  /** True when arming would grant BOTH members the full overlap width —
+   * evaluated with the store's own exported `clampFadePair` on exactly the
+   * arguments `setClipFade` would use, so this predicate cannot drift from
+   * the store (it IS the store's clamp, not a second one). It refuses
+   * partial arms: a shortened facing fade would not satisfy rule 3 and the
+   * "armed" pair would silently render as solo fades. */
+  const armGrantsFullWidth = (geo: PairGeo): boolean =>
+    clampFadePair(geo.a.fadeInSample ?? 0, geo.width, geo.a.lengthSample, 'in').fadeOut ===
+      geo.width &&
+    clampFadePair(geo.width, geo.b.fadeOutSample ?? 0, geo.b.lengthSample, 'out').fadeIn ===
+      geo.width;
+
+  /** X4's direct recovery path for a raw/dissolved overlap (carried X5
+   * finding: such a pair is not drag-armable — eligibility needs pre-width 0
+   * or already-armed). Writing both facing fades to the exact width through
+   * setClipFade makes the pair canonical: the renderer crossfades it and the
+   * store's maintenance treats it as armed from then on. */
+  const armCrossfade = (geo: PairGeo): void => {
+    setClipFade(geo.a.id, 'out', { lengthSample: geo.width });
+    setClipFade(geo.b.id, 'in', { lengthSample: geo.width });
+  };
+
+  /** Clears BOTH facing fades (0 normalises to "no fade") — the symmetric
+   * un-arm X5 left to the fade UI. Clearing only one side would strand the
+   * partner's fade as a surprise solo fade. */
+  const releaseCrossfade = (geo: PairGeo): void => {
+    setClipFade(geo.a.id, 'out', { lengthSample: 0 });
+    setClipFade(geo.b.id, 'in', { lengthSample: 0 });
+  };
+
+  const hasAnyOverlap = trackClips.some(
+    (m) =>
+      m.id !== clip!.id &&
+      Math.min(m.startSample + m.lengthSample, clip!.startSample + clip!.lengthSample) -
+        Math.max(m.startSample, clip!.startSample) >
+        0
+  );
 
   return (
     <div className="flex flex-col py-1" data-testid="properties-clip">
@@ -352,6 +537,85 @@ function ClipProperties() {
           onCommit={(g) => setClipGain(clip!.id, g)}
         />
       </label>
+
+      <SectionLabel>Fades</SectionLabel>
+      {(['in', 'out'] as const).map((edge) => {
+        const isIn = edge === 'in';
+        const armed = (isIn ? spec?.crossIn : spec?.crossOut) ?? null;
+        const stored = (isIn ? clip!.fadeInSample : clip!.fadeOutSample) ?? 0;
+        const curve = (isIn ? clip!.fadeInCurve : clip!.fadeOutCurve) ?? DEFAULT_FADE_CURVE;
+        const geo = isIn ? pairIn : pairOut;
+        return (
+          <div key={edge} className="flex flex-col">
+            <div className="flex items-center justify-between gap-2 px-2 py-1 text-xs">
+              <span className="shrink-0 text-[#8b8b92]">{isIn ? 'Fade In' : 'Fade Out'}</span>
+              <span className="flex min-w-0 items-center gap-1">
+                {armed !== null ? (
+                  // A live crossfade's facing fade IS the overlap width (rule
+                  // 3, sample-exact) — a ms-precision text field cannot
+                  // express it, and a hand edit would silently dissolve the
+                  // pair. Readout instead; the curve stays editable (each
+                  // side's curve is free).
+                  <span
+                    data-testid={`fade-${edge}-cross-readout`}
+                    className="text-[#d4d4d8]"
+                    title="This edge is a live crossfade — its length is the overlap width. Move or trim a clip to change it, or release the crossfade."
+                  >
+                    {formatTime(armed.lengthSample, session.sampleRate)}
+                  </span>
+                ) : (
+                  <FadeLengthInput
+                    // Re-key on the committed value too, so an edit arriving
+                    // from the clip handles resets a stale draft.
+                    key={`${clip!.id}:${edge}:${stored}`}
+                    valueSample={stored}
+                    sampleRate={session.sampleRate}
+                    label={isIn ? 'Fade in length' : 'Fade out length'}
+                    onCommit={(n) => commitFadeLength(edge, n)}
+                  />
+                )}
+                <FadeCurveSelect
+                  value={curve}
+                  label={isIn ? 'Fade in curve' : 'Fade out curve'}
+                  onChange={(c) => setClipFade(clip!.id, edge, { curve: c })}
+                />
+              </span>
+            </div>
+            {armed !== null && geo !== null && (
+              <div className="flex items-center justify-between gap-2 px-2 pb-1 text-xs">
+                <span className="text-[#8b8b92]">{isIn ? 'Crossfade in' : 'Crossfade out'}</span>
+                <button
+                  type="button"
+                  data-testid={`crossfade-release-${edge}`}
+                  title="Clear both facing fades — the overlap becomes a raw sum"
+                  onClick={() => releaseCrossfade(geo)}
+                  className="rounded border border-[#3a3a42] px-1 text-[#d4d4d8] hover:border-[#26c6da]"
+                >
+                  Release
+                </button>
+              </div>
+            )}
+            {armed === null && geo !== null && (
+              <PanelActionButton
+                testId={`crossfade-arm-${edge}`}
+                label={`Arm crossfade (${formatTime(geo.width, session.sampleRate)})`}
+                disabled={!armGrantsFullWidth(geo)}
+                title={
+                  armGrantsFullWidth(geo)
+                    ? 'Set both facing fades to span the overlap exactly'
+                    : 'Blocked — an away-side fade leaves no room at this width'
+                }
+                onClick={() => armCrossfade(geo)}
+              />
+            )}
+          </div>
+        );
+      })}
+      {hasAnyOverlap && pairIn === null && pairOut === null && spec?.crossIn == null && spec?.crossOut == null && (
+        // Overlapping, but no edge can crossfade (equal starts, containment,
+        // pile-up, or an intruder) — say so instead of showing nothing.
+        <Row label="Overlap" value="raw sum — not crossfade-capable" muted />
+      )}
     </div>
   );
 }
