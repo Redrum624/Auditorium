@@ -28,6 +28,7 @@ import {
 import { getAllEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
 import { toggleSpectralScale } from './spectralScale';
+import { toggleBeatGrid } from './beatGridDisplay';
 import { runTempoAnalysis } from './tempoAnalysis';
 
 export interface MenuCommand {
@@ -109,7 +110,13 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
   { title: 'Effects', itemIds: ['effects.none'] },
   {
     title: 'View',
-    itemIds: ['view.waveform', 'view.spectral', 'view.spectralScale', 'view.multitrack'],
+    itemIds: [
+      'view.waveform',
+      'view.spectral',
+      'view.spectralScale',
+      'view.beatGrid',
+      'view.multitrack',
+    ],
   },
   { title: 'Help', itemIds: ['help.about'] },
 ];
@@ -524,8 +531,9 @@ export function registerEffectCommands(): void {
  * selected region), the real `view.waveform` / `view.spectral` toggles
  * (enabled when an active doc exists and that view isn't already current), and
  * `view.spectralScale` (Task F4 — flips the module-level spectral scale
- * setting; enabled only while the spectral view is active). `view.multitrack`
- * stays a disabled stub until Phase D. */
+ * setting; enabled only while the spectral view is active) and `view.beatGrid`
+ * (Task B2 — flips the module-level beat-tic visibility; enabled in either
+ * editor view). `view.multitrack` stays a disabled stub until Phase D. */
 function registerNoiseAndViewCommands(): void {
   registerCommands([
     {
@@ -559,6 +567,19 @@ function registerNoiseAndViewCommands(): void {
       label: 'Spectral: Toggle Log/Linear Scale',
       enabled: (s) => s.view === 'spectral',
       run: async () => toggleSpectralScale(),
+    },
+    {
+      // Task B2. A pure display preference: enabled wherever the tics can be
+      // drawn, NOT gated on a grid existing. Reading whether one exists would
+      // mean a `getBeatGrid` call on every store change just to grey a menu
+      // item out, and the user must be able to set the preference before
+      // running Detect Tempo, not only after.
+      id: 'view.beatGrid',
+      label: 'Toggle Beat Grid',
+      enabled: (s) => activeDoc(s) !== null && (s.view === 'waveform' || s.view === 'spectral'),
+      run: async () => {
+        toggleBeatGrid();
+      },
     },
   ]);
 }

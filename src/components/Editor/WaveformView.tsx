@@ -4,6 +4,7 @@ import { docLength } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { getPyramids } from '../../services/peaksCache';
 import { renderWaveform } from './waveformRender';
+import { useBeatGridOverlay } from './useBeatGridOverlay';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
 import type { Marker } from '../../stores/appStore';
@@ -25,6 +26,9 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
   const cursorSample = useAppStore((s) => s.cursorSample);
   const playback = useAppStore((s) => s.playback);
   const markers = useAppStore((s) => s.markers[doc.id] ?? NO_MARKERS);
+  // Task B2: the beat tics. `null` (and free) whenever the toggle is off or no
+  // analysis is cached — reading it never starts one.
+  const beatGrid = useBeatGridOverlay(doc.id, doc.channels);
 
   const length = docLength(doc);
   const gestures = useEditorGestures(canvasRef, length, size.width);
@@ -68,8 +72,11 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
       cursorSample,
       playheadSample,
       markers,
+      beatGrid,
     });
-    // doc.channels identity, zoom, selection, cursor, playhead, markers, size drive redraws.
+    // doc.channels identity, zoom, selection, cursor, playhead, markers, beat
+    // grid, size drive redraws. `beatGrid` is memoised by useBeatGridOverlay,
+    // so it only changes when the grid or the toggle actually does.
   }, [
     doc,
     doc.channels,
@@ -79,6 +86,7 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
     playback.positionSample,
     playback.state,
     markers,
+    beatGrid,
     size,
   ]);
 

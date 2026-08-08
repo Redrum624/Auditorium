@@ -3,6 +3,11 @@ import WaveformView from './WaveformView';
 import { createDocument, docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { clearAllPeaks } from '../../services/peaksCache';
+import * as waveformRender from './waveformRender';
+import type { RenderOpts } from './waveformRender';
+import * as beatGridService from '../../services/beatGrid';
+import type { BeatGrid } from '../../services/beatGrid';
+import { setBeatGridVisible, toggleBeatGrid } from '../../services/beatGridDisplay';
 
 function makeDoc(): AudioDocument {
   const ch = new Float32Array(4096);
@@ -118,5 +123,117 @@ describe('WaveformView', () => {
 
       expect(useAppStore.getState().selection).toEqual({ start: 100, end: 5 * spp });
     });
+  });
+});
+
+describe('WaveformView beat tics (Task B2)', () => {
+  // jsdom reports 0 for clientWidth/clientHeight and has no 2d backend, so the
+  // render effect bails before it ever calls renderWaveform. Both are stubbed
+  // for THIS describe only — the gesture suites above depend on the real
+  // (zero-sized, null-context) behaviour.
+  let getContextSpy: jest.SpyInstance;
+  let renderSpy: jest.SpyInstance;
+  let gridSpy: jest.SpyInstance;
+
+  const fakeCtx = {
+    setTransform: jest.fn(),
+    clearRect: jest.fn(),
+    fillRect: jest.fn(),
+    beginPath: jest.fn(),
+    moveTo: jest.fn(),
+    lineTo: jest.fn(),
+    closePath: jest.fn(),
+    fill: jest.fn(),
+    fillText: jest.fn(),
+    setLineDash: jest.fn(),
+    stroke: jest.fn(),
+    fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 1,
+    font: '',
+    textBaseline: 'top',
+  };
+
+  function grid(over: Partial<BeatGrid> = {}): BeatGrid {
+    return {
+      beatSamples: Int32Array.from([0, 22050, 44100]),
+      sampleRate: 44100,
+      beatsPerBar: null,
+      downbeatPhase: null,
+      barCount: 0,
+      confidence: 0.9,
+      stale: false,
+      analyzedEndSample: 44100,
+      truncated: false,
+      origin: 'own',
+      originDocId: 'x',
+      originOpen: true,
+      ...over,
+    };
+  }
+
+  beforeEach(() => {
+    useAppStore.setState(makeInitialState());
+    clearAllPeaks();
+    for (const prop of ['clientWidth', 'clientHeight'] as const) {
+      Object.defineProperty(HTMLElement.prototype, prop, {
+        configurable: true,
+        value: prop === 'clientWidth' ? 300 : 150,
+      });
+    }
+    getContextSpy = jest
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockImplementation(() => fakeCtx as unknown as CanvasRenderingContext2D);
+    renderSpy = jest.spyOn(waveformRender, 'renderWaveform').mockImplementation(() => {});
+    gridSpy = jest.spyOn(beatGridService, 'getBeatGrid');
+    setBeatGridVisible(true);
+  });
+
+  afterEach(() => {
+    getContextSpy.mockRestore();
+    renderSpy.mockRestore();
+    gridSpy.mockRestore();
+    // Wrapped: this describe's afterEach runs BEFORE testing-library's auto
+    // cleanup, so the component is still mounted and subscribed here.
+    act(() => {
+      setBeatGridVisible(true);
+    });
+    for (const prop of ['clientWidth', 'clientHeight'] as const) {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>)[prop];
+    }
+  });
+
+  function lastOpts(): RenderOpts {
+    return renderSpy.mock.calls[renderSpy.mock.calls.length - 1][1] as RenderOpts;
+  }
+
+  it('hands the cached grid to renderWaveform', () => {
+    const g = grid();
+    gridSpy.mockReturnValue(g);
+    render(<WaveformView doc={makeDoc()} />);
+    expect(lastOpts().beatGrid!.beats).toBe(g.beatSamples);
+    expect(lastOpts().beatGrid!.endSample).toBe(44100);
+  });
+
+  it('passes null when the document has no cached grid — and never triggers an analysis', () => {
+    gridSpy.mockReturnValue(null);
+    render(<WaveformView doc={makeDoc()} />);
+    expect(lastOpts().beatGrid).toBeNull();
+  });
+
+  it('the View toggle hides the tics: renderWaveform is re-run with no grid', () => {
+    gridSpy.mockImplementation(() => grid());
+    render(<WaveformView doc={makeDoc()} />);
+    expect(lastOpts().beatGrid).not.toBeNull();
+
+    act(() => {
+      toggleBeatGrid();
+    });
+    expect(lastOpts().beatGrid).toBeNull();
+
+    act(() => {
+      toggleBeatGrid();
+    });
+    expect(lastOpts().beatGrid).not.toBeNull();
   });
 });

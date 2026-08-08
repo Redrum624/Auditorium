@@ -21,6 +21,9 @@ import { convertSampleRate } from './documentTools';
 import { copySelection, pasteAtCursor } from './editOps';
 import { getClipboard } from './clipboard';
 import { getSpectralScale, toggleSpectralScale, type SpectralScale } from './spectralScale';
+import { getBeatGrid, isDownbeat } from './beatGrid';
+import { isBeatGridVisible, toggleBeatGrid } from './beatGridDisplay';
+import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { markSavePoint } from './undoHistory';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { applyTempoChange } from './tempoService';
@@ -107,6 +110,25 @@ export interface TestApi {
     trackCount: number;
     droppedClipCount: number;
   }>;
+  // --- beat grid (Task B2) ------------------------------------------------
+  /** Flips the beat-tic display preference; returns the NEW visibility. */
+  toggleBeatGrid(): boolean;
+  /** What would be drawn for the active document. Plain JSON scalars only —
+   * the grid's `beatSamples` is an Int32Array and cannot cross page.evaluate. */
+  getBeatGridState(): {
+    visible: boolean;
+    hasGrid: boolean;
+    beatCount: number;
+    firstBeatSample: number | null;
+    lastBeatSample: number | null;
+    downbeatCount: number;
+    beatsPerBar: number | null;
+    provisional: boolean;
+    stale: boolean;
+    confidence: number;
+    analyzedEndSample: number;
+    origin: 'own' | 'inherited' | null;
+  };
   // --- v1.5 flows ---------------------------------------------------------
   detectTempo(): Promise<{
     bpm: number | null;
@@ -603,11 +625,57 @@ export function installTestHooks(): void {
     // page.evaluate's structured-clone boundary as a typed array arrives on
     // the harness side as an object keyed by index.
     //
-    // There is deliberately NO `toggleBeatGrid` hook: the beat-grid waveform
-    // OVERLAY (Task T6) is CUT by the plan's UI-scope ruling — the grid is
-    // computed and cached, only its rendering was dropped — so there is no
-    // display preference to toggle and nothing extra for the smoke to prove
-    // paints.
+    // Beat-grid display (Task B2 — the T6 overlay the v1.5 plan cut, now
+    // built): `toggleBeatGrid` flips the module-level visibility preference and
+    // returns the NEW value, exactly as the T16 spec defined it, and
+    // `getBeatGridState` reports what would be drawn. Neither ever starts an
+    // analysis (`getBeatGrid` is a cached read by construction), so the smoke
+    // can only observe tics after it has run `detectTempo` itself.
+    toggleBeatGrid: () => toggleBeatGrid(),
+
+    // Scalars only. `beatSamples` is an Int32Array and cannot cross
+    // page.evaluate's structured-clone boundary as itself (it arrives on the
+    // harness side as an object keyed by index), so the positions are reported
+    // as a count plus the first/last values — the same convention detectTempo
+    // and getNoiseProfileSpectra follow.
+    getBeatGridState: () => {
+      const doc = activeDoc();
+      const grid = doc ? getBeatGrid(doc.id) : null;
+      if (!grid) {
+        return {
+          visible: isBeatGridVisible(),
+          hasGrid: false,
+          beatCount: 0,
+          firstBeatSample: null,
+          lastBeatSample: null,
+          downbeatCount: 0,
+          beatsPerBar: null,
+          provisional: false,
+          stale: false,
+          confidence: 0,
+          analyzedEndSample: 0,
+          origin: null,
+        };
+      }
+      let downbeatCount = 0;
+      for (let i = 0; i < grid.beatSamples.length; i++) {
+        if (isDownbeat(grid, i)) downbeatCount++;
+      }
+      return {
+        visible: isBeatGridVisible(),
+        hasGrid: true,
+        beatCount: grid.beatSamples.length,
+        firstBeatSample: grid.beatSamples[0],
+        lastBeatSample: grid.beatSamples[grid.beatSamples.length - 1],
+        downbeatCount,
+        beatsPerBar: grid.beatsPerBar,
+        provisional: grid.stale || grid.confidence < CONFIDENCE_LOW,
+        stale: grid.stale,
+        confidence: grid.confidence,
+        analyzedEndSample: grid.analyzedEndSample,
+        origin: grid.origin,
+      };
+    },
 
     // Runs the REAL shared analysis (worker + cache, T4) over the whole active
     // document — the same call `tempo.detect` makes — and flattens the entry

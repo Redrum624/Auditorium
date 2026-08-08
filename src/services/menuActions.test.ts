@@ -3,6 +3,7 @@ import type { MenuCommand, MenuSection } from './menuActions';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { getSpectralScale, toggleSpectralScale } from './spectralScale';
+import { isBeatGridVisible, setBeatGridVisible } from './beatGridDisplay';
 import * as sessionFileModule from '../multitrack/sessionFile';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { runTempoAnalysis } from './tempoAnalysis';
@@ -389,6 +390,52 @@ describe('view.spectralScale (Task F4)', () => {
 
     await runCommand('view.spectralScale');
     expect(getSpectralScale()).toBe('log');
+  });
+});
+
+describe('view.beatGrid (Task B2)', () => {
+  afterEach(() => {
+    // The visibility store is module-level; restore the documented default.
+    setBeatGridVisible(true);
+  });
+
+  function findViewCmd(id: string): MenuCommand {
+    const view = getMenuSections().find((s) => s.title === 'View')!;
+    return view.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  it('is registered in the View section, after view.spectralScale', () => {
+    const view = getMenuSections().find((s) => s.title === 'View')!;
+    const ids = view.items
+      .filter((item): item is MenuCommand => item !== 'separator')
+      .map((item) => item.id);
+    expect(ids).toContain('view.beatGrid');
+    expect(ids.indexOf('view.beatGrid')).toBeGreaterThan(ids.indexOf('view.spectralScale'));
+  });
+
+  it('is enabled in BOTH editor views with a document, and nowhere else', () => {
+    useAppStore.setState({ view: 'waveform' });
+    expect(findViewCmd('view.beatGrid').enabled(useAppStore.getState())).toBe(false); // no doc
+
+    openDoc();
+    useAppStore.setState({ view: 'waveform' });
+    expect(findViewCmd('view.beatGrid').enabled(useAppStore.getState())).toBe(true);
+    useAppStore.setState({ view: 'spectral' });
+    expect(findViewCmd('view.beatGrid').enabled(useAppStore.getState())).toBe(true);
+    useAppStore.setState({ view: 'multitrack' });
+    expect(findViewCmd('view.beatGrid').enabled(useAppStore.getState())).toBe(false);
+  });
+
+  it('running it flips the beat-grid visibility', async () => {
+    openDoc();
+    useAppStore.setState({ view: 'waveform' });
+    expect(isBeatGridVisible()).toBe(true);
+
+    await runCommand('view.beatGrid');
+    expect(isBeatGridVisible()).toBe(false);
+
+    await runCommand('view.beatGrid');
+    expect(isBeatGridVisible()).toBe(true);
   });
 });
 

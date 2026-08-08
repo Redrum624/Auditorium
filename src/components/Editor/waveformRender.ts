@@ -19,6 +19,63 @@ export interface RenderOpts {
    * `name` is optional so callers that only have positions still typecheck;
    * omitting it just suppresses that marker's label. Default: none. */
   markers?: { positionSample: number; name?: string }[];
+  /** Optional beat-tic overlay (Task B2). OPTIONAL by design, exactly like
+   * `markers`: a required field would break every existing caller and the whole
+   * unit suite at compile time. Omitted / `null` / empty draws nothing at all
+   * and costs nothing — which is also what "no cached analysis" resolves to
+   * (plan ruling 6: never trigger an analysis just to draw). */
+  beatGrid?: BeatGridOverlay | null;
+}
+
+/**
+ * What the render layer needs in order to draw a beat grid — and nothing that
+ * would couple this pure drawing module to the store. Deliberately NOT the
+ * service's `BeatGrid`: `beatGrid.ts` imports `useAppStore` and React, and this
+ * module has to stay importable from a worker and testable against a recording
+ * stub. `useBeatGridOverlay` is the adapter between the two.
+ */
+export interface BeatGridOverlay {
+  /**
+   * Ascending beat positions expressed in the SAME time base as the
+   * `scrollSample`/`samplesPerPixel` they are drawn with. Read-only: the
+   * service's `beatSamples` is a SHARED `Int32Array` handed to every consumer,
+   * so nothing here may sort or mutate it (trap 20). `ArrayLike` rather than
+   * `Int32Array` so B3 can pass a mapped `number[]` for a clip without copying
+   * into a typed array first.
+   */
+  beats: ArrayLike<number>;
+  /**
+   * Whether beat `index` starts a bar. **Omitted means no downbeats are drawn
+   * at all** — AMENDED RULING 1: bar data exists only on a genuinely measured
+   * `level:'remix'` analysis, and a grid without it must degrade to beats-only
+   * rather than assume 4/4.
+   */
+  isDownbeat?: (index: number) => boolean;
+  /** The analysis's `analyzedEndSample`: no tic is ever drawn past it, because
+   * on a long file the grid legitimately covers only the analysed prefix and
+   * extrapolating would invent beats the DSP never measured (trap 11). */
+  endSample?: number;
+  /** True when the grid is stale or below `CONFIDENCE_LOW` — draw it as
+   * provisional (dimmer + dashed) so a doubtful grid is never presented as
+   * fact. The visual analogue of the status bar's `*` / `?` (plan ruling 6). */
+  provisional?: boolean;
+}
+
+/** {@link BeatGridOverlay} plus the geometry to draw it with. All primitives —
+ * no editor zoom/scroll object — so the multitrack clips (B3) can call it with
+ * their own lane origin, their own zoom and their own visible band. */
+export interface BeatTicOpts extends BeatGridOverlay {
+  scrollSample: number;
+  samplesPerPixel: number;
+  /** Width of the drawable window in CSS px; tics outside it are culled. */
+  width: number;
+  /** y of the tic baseline in CSS px. Tics grow UPWARD from here. */
+  baseline: number;
+  /** Tic length for an ordinary beat, in CSS px. */
+  beatHeight: number;
+  /** Tic length for a downbeat. Defaults to {@link beatHeight}, i.e. no visual
+   * distinction — which is the correct default when nothing was measured. */
+  downbeatHeight?: number;
 }
 
 /**
@@ -59,6 +116,40 @@ const PLAYHEAD_FALLBACK = '#26c6da'; // --accent (was yellow pre-G6)
 const PLAYHEAD_GLOW_FALLBACK = 'rgba(38,198,218,0.35)'; // --accent-ring
 const MARKER = '#ff8a65';
 
+// --- Beat grid (Task B2) ---------------------------------------------------
+// Amber: the four colours already on this canvas are cyan (waveform, playhead,
+// selection), orange (markers), white (cursor) and the faint white axis. Amber
+// is the one hue left that reads as "reference grid" against all of them, and
+// it is the pre-G6 playhead colour so it is already in the app's palette.
+/** Confident, fresh grid. */
+const BEAT_TIC = 'rgba(255,213,79,0.55)';
+const DOWNBEAT_TIC = 'rgba(255,213,79,0.95)';
+/** Stale or low-confidence: the drawn analogue of the status bar's `*` / `?`. */
+const BEAT_TIC_PROVISIONAL = 'rgba(255,213,79,0.22)';
+const DOWNBEAT_TIC_PROVISIONAL = 'rgba(255,213,79,0.4)';
+/** ...and dashed, so the difference survives a colour-blind or dimmed display
+ * (the marker lines' own `[4,3]` precedent, tightened for a ~9 px tic). */
+const PROVISIONAL_DASH = [2, 2];
+
+/**
+ * THE THINNING RULE (trap 8): at most one tic per 3 CSS px.
+ *
+ * At maximum zoom-out a whole document collapses into ~50 CSS px, which for a
+ * 5-minute track at 120 BPM is ~600 beats — 0.08 px apart. Drawn faithfully
+ * that is a solid amber block that says nothing. Skipping any tic closer than
+ * `MIN_TIC_GAP_PX` to the previously DRAWN one turns it back into a legible
+ * ~17-tic ruler, and at any normal zoom (>= 3 px between beats, i.e. anything
+ * closer in than about 15x zoomed-out on a typical track) the rule never fires
+ * so nothing is lost. It is a pixel rule, not a beat rule, so it degrades
+ * smoothly instead of switching modes. Same shape as `LABEL_MIN_GAP` below.
+ */
+const MIN_TIC_GAP_PX = 3;
+
+/** The editor band: tics hang off the BOTTOM of the canvas, ~9 px for a beat
+ * and ~16 px for a measured downbeat. */
+const BEAT_TIC_PX = 9;
+const DOWNBEAT_TIC_PX = 16;
+
 /** Fraction of a half-lane a full-scale (|v|=1) sample occupies (leaves margin). */
 const VSCALE = 0.9;
 
@@ -91,6 +182,7 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
     cursorSample,
     playheadSample,
     markers = [],
+    beatGrid,
   } = opts;
 
   // G6: no opaque background fill — the floating lane container paints the
@@ -123,6 +215,12 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
       drawSamples(ctx, channel, width, scrollSample, samplesPerPixel, center, amp);
     }
   }
+
+  // Beat tics sit in the BACKGROUND layer, immediately after the audio itself
+  // and before every user-facing overlay: they are a reference grid, so the
+  // selection tint, the markers, the cursor and the playhead must all read as
+  // being ON TOP of them, never hidden behind them.
+  drawEditorBeatTics(ctx, beatGrid, height, scrollSample, samplesPerPixel, width);
 
   drawSelection(ctx, selection, height, scrollSample, samplesPerPixel, width);
   drawMarkers(ctx, markers, height, scrollSample, samplesPerPixel, width);
@@ -290,4 +388,153 @@ export function drawMarkers(
       lastLabelX = mx;
     }
   }
+}
+
+/** Index of the first beat at or after `value`. The beats are ascending by
+ * construction (`tempoCore`'s tracker emits them in time order), so the visible
+ * window is found in O(log n) rather than by walking the grid — see
+ * {@link drawBeatTics}'s culling note. */
+function firstBeatAtOrAfter(beats: ArrayLike<number>, value: number): number {
+  let lo = 0;
+  let hi = beats.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >>> 1;
+    if (beats[mid] < value) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
+}
+
+/**
+ * Task B2 — the beat-tic primitive. Draws one short vertical tic per beat,
+ * hanging upward off `baseline`, with measured downbeats taller and brighter.
+ *
+ * Standalone and primitive-taking on purpose (the {@link drawMarkers}
+ * precedent): it knows nothing about the editor's zoom object, the store, or
+ * which canvas it is on, so the multitrack clips (B3) can call it with a clip's
+ * own lane origin, the multitrack zoom, and a band that is actually on screen
+ * — none of which the editor's own numbers would give them.
+ *
+ * Returns the number of tics actually drawn (after culling and thinning), which
+ * is what makes both of those behaviours assertable rather than merely visual.
+ *
+ * **Culling.** The waveform re-renders on every animation frame during playback
+ * (trap 7), so a naive walk over a 5-minute grid would run ~600 iterations at
+ * 60 Hz for the handful of beats actually on screen. The visible window is
+ * located by binary search and the loop stops at the first beat past its right
+ * edge, so the cost is O(log n + visible), independent of document length.
+ *
+ * **State.** Restores `strokeStyle` and `lineWidth`, and clears the dash,
+ * before returning (trap 9) — this pass runs *before* the marker/cursor/
+ * playhead overlays, and leaking a dash or a colour into them would corrupt
+ * their visuals and break their existing tests. `save()`/`restore()` are
+ * deliberately not used, and neither is `getLineDash()`: the recording stub the
+ * render tests drive implements only the handful of context methods this path
+ * already uses, and reaching for one it lacks throws. Clearing the dash rather
+ * than restoring it is the same invariant `drawMarkers` keeps — every pass in
+ * this module enters and leaves undashed.
+ *
+ * Never mutates or sorts `beats` — it is the analysis cache's own shared
+ * `Int32Array` (trap 20).
+ */
+export function drawBeatTics(ctx: CanvasRenderingContext2D, opts: BeatTicOpts): number {
+  const {
+    beats,
+    isDownbeat,
+    scrollSample,
+    samplesPerPixel,
+    width,
+    baseline,
+    beatHeight,
+    downbeatHeight = beatHeight,
+    endSample,
+    provisional = false,
+  } = opts;
+
+  const count = beats.length;
+  if (count === 0 || width <= 0 || samplesPerPixel <= 0 || beatHeight <= 0) return 0;
+
+  // The window this pass may draw in: the visible sample range, clipped to
+  // where the analysis actually stops (trap 11 — never extrapolate past it).
+  const firstSample = scrollSample;
+  const visibleEnd = scrollSample + width * samplesPerPixel;
+  const lastSample = endSample === undefined ? visibleEnd : Math.min(visibleEnd, endSample);
+  if (lastSample < firstSample) return 0;
+
+  const prevStroke = ctx.strokeStyle;
+  const prevLineWidth = ctx.lineWidth;
+  ctx.lineWidth = 1;
+  if (provisional) ctx.setLineDash(PROVISIONAL_DASH);
+
+  const beatColor = provisional ? BEAT_TIC_PROVISIONAL : BEAT_TIC;
+  const downbeatColor = provisional ? DOWNBEAT_TIC_PROVISIONAL : DOWNBEAT_TIC;
+
+  let drawn = 0;
+  let lastX = -Infinity;
+  let style = '';
+  for (let i = firstBeatAtOrAfter(beats, firstSample); i < count; i++) {
+    const sample = beats[i];
+    if (sample > lastSample) break; // right-edge cull
+    const x = sampleToPixel(sample, scrollSample, samplesPerPixel);
+    if (x - lastX < MIN_TIC_GAP_PX) continue; // thinning
+    lastX = x;
+
+    const down = isDownbeat ? isDownbeat(i) : false;
+    const want = down ? downbeatColor : beatColor;
+    if (want !== style) {
+      ctx.strokeStyle = want;
+      style = want;
+    }
+    const top = Math.max(0, baseline - (down ? downbeatHeight : beatHeight));
+    ctx.beginPath();
+    ctx.moveTo(x, top);
+    ctx.lineTo(x, baseline);
+    ctx.stroke();
+    drawn++;
+  }
+
+  if (provisional) ctx.setLineDash([]);
+  ctx.strokeStyle = prevStroke;
+  ctx.lineWidth = prevLineWidth;
+  return drawn;
+}
+
+/**
+ * The editor's beat band: ONE row of tics hanging off the bottom edge of the
+ * canvas, whatever the channel count.
+ *
+ * *Per-lane vs once* — `renderWaveform` draws one lane per channel, so "the
+ * bottom of the waveform lane" is ambiguous for stereo. Once, at the bottom of
+ * the whole canvas: the grid is a property of TIME, not of a channel, so
+ * repeating it per lane would draw the same information N times and, on stereo,
+ * would slice a band of tics straight through the middle of the view between
+ * the two lanes. One bottom band also puts the tics in exactly the same place
+ * for mono and stereo, which is what makes them readable as a ruler.
+ *
+ * Exported so `SpectrogramView` — which paints its own overlays rather than
+ * going through `renderWaveform` — gets the identical band from the identical
+ * code, exactly as it already does for {@link drawMarkers}. It must be called
+ * AFTER the spectrogram raster is blitted, never into the cached raster itself
+ * (trap 10), or the tics would freeze at the zoom the raster was built at.
+ */
+export function drawEditorBeatTics(
+  ctx: CanvasRenderingContext2D,
+  grid: BeatGridOverlay | null | undefined,
+  height: number,
+  scrollSample: number,
+  samplesPerPixel: number,
+  width: number
+): number {
+  if (!grid || grid.beats.length === 0 || height <= 0) return 0;
+  return drawBeatTics(ctx, {
+    ...grid,
+    scrollSample,
+    samplesPerPixel,
+    width,
+    baseline: height,
+    // Clamped so a very short lane gets a proportionate band instead of tics
+    // drawn off the top of the canvas.
+    beatHeight: Math.min(BEAT_TIC_PX, height),
+    downbeatHeight: Math.min(DOWNBEAT_TIC_PX, height),
+  });
 }

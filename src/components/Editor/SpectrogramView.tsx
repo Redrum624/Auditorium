@@ -4,7 +4,8 @@ import { cloneRegion, docLength, mixDown } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
 import { useSpectralScale } from '../../services/spectralScale';
-import { cssToken, drawMarkers, sampleToPixel } from './waveformRender';
+import { cssToken, drawEditorBeatTics, drawMarkers, sampleToPixel } from './waveformRender';
+import { useBeatGridOverlay } from './useBeatGridOverlay';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
 import type { Marker } from '../../stores/appStore';
@@ -135,6 +136,8 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
   const playback = useAppStore((s) => s.playback);
   const markers = useAppStore((s) => s.markers[doc.id] ?? NO_MARKERS);
   const scale = useSpectralScale();
+  // Task B2: the same beat tics as the waveform view, from the same adapter.
+  const beatGrid = useBeatGridOverlay(doc.id, doc.channels);
 
   const length = docLength(doc);
   const gestures = useEditorGestures(canvasRef, length, size.width);
@@ -315,6 +318,14 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
 
     const { samplesPerPixel: spp, scrollSample } = zoom;
 
+    // Beat tics (Task B2) — drawn HERE, on the live canvas AFTER the raster
+    // blit, and never into `rasterRef`'s offscreen canvas: that raster is
+    // cached across paints and only re-rasterised when the magnitudes or the
+    // backing size change, so tics baked into it would freeze at the zoom and
+    // scroll they were drawn at while the audio underneath moved (trap 10).
+    // Same band and same code as the waveform view (`drawEditorBeatTics`).
+    drawEditorBeatTics(ctx, beatGrid, height, scrollSample, spp, width);
+
     // Selection: translucent fill + edges.
     if (selection && selection.end > selection.start) {
       const x0 = sampleToPixel(selection.start, scrollSample, spp);
@@ -366,6 +377,7 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     playback.state,
     playback.positionSample,
     markers,
+    beatGrid,
   ]);
 
   // G6: stage insets on the root, canvas floating in a glass lane — same

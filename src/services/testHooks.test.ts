@@ -18,6 +18,10 @@ import type { TempoEntry } from './tempoAnalysis';
 import * as tempoAnalysis from './tempoAnalysis';
 import * as tempoService from './tempoService';
 import * as remixService from './remixService';
+import * as beatGrid from './beatGrid';
+import type { BeatGrid } from './beatGrid';
+import { isBeatGridVisible, setBeatGridVisible } from './beatGridDisplay';
+import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 
 function api(): TestApi {
   installTestHooks();
@@ -237,5 +241,109 @@ describe('getRemixJoins', () => {
 
     useAppStore.setState(makeInitialState());
     expect(api().getRemixJoins()).toBeNull();
+  });
+});
+
+describe('toggleBeatGrid / getBeatGridState (Task B2)', () => {
+  function fullGrid(over: Partial<BeatGrid> = {}): BeatGrid {
+    return {
+      beatSamples: Int32Array.from([0, 22050, 44100, 66150]),
+      sampleRate: 44100,
+      beatsPerBar: 2,
+      downbeatPhase: 0,
+      barCount: 1,
+      confidence: 0.93,
+      stale: false,
+      analyzedEndSample: 88200,
+      truncated: false,
+      origin: 'own',
+      originDocId: 'x',
+      originOpen: true,
+      ...over,
+    };
+  }
+
+  afterEach(() => {
+    setBeatGridVisible(true); // module-level preference: restore the default
+  });
+
+  test('toggleBeatGrid flips the preference and returns the new value', () => {
+    const hooks = api();
+    expect(hooks.toggleBeatGrid()).toBe(false);
+    expect(isBeatGridVisible()).toBe(false);
+    expect(hooks.toggleBeatGrid()).toBe(true);
+    expect(isBeatGridVisible()).toBe(true);
+  });
+
+  test('getBeatGridState flattens the grid to plain JSON — no Int32Array escapes', () => {
+    addDoc('beat120');
+    jest.spyOn(beatGrid, 'getBeatGrid').mockReturnValue(fullGrid());
+
+    const result = api().getBeatGridState();
+
+    expect(result).toStrictEqual({
+      visible: true,
+      hasGrid: true,
+      beatCount: 4,
+      firstBeatSample: 0,
+      lastBeatSample: 66150,
+      downbeatCount: 2, // beats 0 and 2, with beatsPerBar 2 and barCount 1
+      beatsPerBar: 2,
+      provisional: false,
+      stale: false,
+      confidence: 0.93,
+      analyzedEndSample: 88200,
+      origin: 'own',
+    });
+    expectPlainJson(result);
+  });
+
+  test('reports no downbeats when no metre was measured', () => {
+    addDoc('beat120');
+    jest
+      .spyOn(beatGrid, 'getBeatGrid')
+      .mockReturnValue(fullGrid({ beatsPerBar: null, downbeatPhase: null, barCount: 0 }));
+
+    const result = api().getBeatGridState();
+    expect(result.downbeatCount).toBe(0);
+    expect(result.beatsPerBar).toBeNull();
+    expectPlainJson(result);
+  });
+
+  test('reports a stale or low-confidence grid as provisional', () => {
+    addDoc('beat120');
+    const spy = jest.spyOn(beatGrid, 'getBeatGrid');
+
+    spy.mockReturnValue(fullGrid({ stale: true }));
+    expect(api().getBeatGridState().provisional).toBe(true);
+
+    spy.mockReturnValue(fullGrid({ confidence: CONFIDENCE_LOW - 0.01 }));
+    expect(api().getBeatGridState().provisional).toBe(true);
+
+    spy.mockReturnValue(fullGrid({ confidence: CONFIDENCE_LOW }));
+    expect(api().getBeatGridState().provisional).toBe(false);
+  });
+
+  test('is an empty, plain-JSON report with no grid and with nothing open', () => {
+    addDoc('plain');
+    jest.spyOn(beatGrid, 'getBeatGrid').mockReturnValue(null);
+    const noGrid = api().getBeatGridState();
+    expect(noGrid.hasGrid).toBe(false);
+    expect(noGrid.beatCount).toBe(0);
+    expect(noGrid.firstBeatSample).toBeNull();
+    expect(noGrid.origin).toBeNull();
+    expectPlainJson(noGrid);
+
+    useAppStore.setState(makeInitialState());
+    const closed = api().getBeatGridState();
+    expect(closed.hasGrid).toBe(false);
+    expectPlainJson(closed);
+  });
+
+  test('still reports the visibility preference when there is no grid to draw', () => {
+    const hooks = api();
+    jest.spyOn(beatGrid, 'getBeatGrid').mockReturnValue(null);
+    hooks.toggleBeatGrid();
+    expect(hooks.getBeatGridState().visible).toBe(false);
   });
 });

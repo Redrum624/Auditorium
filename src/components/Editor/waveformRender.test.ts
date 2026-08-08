@@ -1,4 +1,12 @@
-import { renderWaveform, pixelToSample, sampleToPixel, type RenderOpts } from './waveformRender';
+import {
+  renderWaveform,
+  pixelToSample,
+  sampleToPixel,
+  drawBeatTics,
+  drawEditorBeatTics,
+  type BeatTicOpts,
+  type RenderOpts,
+} from './waveformRender';
 import { buildPeaks } from '../../audio/peaks';
 
 interface Call {
@@ -9,6 +17,8 @@ interface Call {
   text?: string;
   shadowBlur?: number;
   shadowColor?: string;
+  lineWidth?: number;
+  dash?: number[];
 }
 
 /** Minimal CanvasRenderingContext2D stub that records the drawing calls
@@ -21,7 +31,9 @@ class StubCtx {
   lineWidth = 1;
   shadowBlur = 0;
   shadowColor = '';
-  private dash: number[] = [];
+  /** Public (was private) so the Task B2 beat-tic tests can assert the dash
+   * state was RESTORED after the beat pass — trap 9. */
+  dash: number[] = [];
 
   fillRect(...args: number[]) {
     this.calls.push({ method: 'fillRect', args, fillStyle: String(this.fillStyle) });
@@ -38,6 +50,8 @@ class StubCtx {
       args,
       strokeStyle: String(this.strokeStyle),
       fillStyle: String(this.fillStyle),
+      lineWidth: this.lineWidth,
+      dash: [...this.dash],
     });
   }
   lineTo(...args: number[]) {
@@ -50,6 +64,8 @@ class StubCtx {
       strokeStyle: String(this.strokeStyle),
       shadowBlur: this.shadowBlur,
       shadowColor: String(this.shadowColor),
+      lineWidth: this.lineWidth,
+      dash: [...this.dash],
     });
   }
   fill() {
@@ -322,5 +338,329 @@ describe('renderWaveform markers (Task 23)', () => {
     const { ctx, stub } = makeCtx();
     renderWaveform(ctx, { ...baseOpts(100, 100), markers: [{ positionSample: 300 }] });
     expect(stub.calls.some((c) => c.method === 'fillText')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task B2 — beat tics
+// ---------------------------------------------------------------------------
+
+const BEAT_TIC = 'rgba(255,213,79,0.55)';
+const DOWNBEAT_TIC = 'rgba(255,213,79,0.95)';
+const BEAT_TIC_PROVISIONAL = 'rgba(255,213,79,0.22)';
+const DOWNBEAT_TIC_PROVISIONAL = 'rgba(255,213,79,0.4)';
+const TIC_PALETTE = [BEAT_TIC, DOWNBEAT_TIC, BEAT_TIC_PROVISIONAL, DOWNBEAT_TIC_PROVISIONAL];
+
+/** Every `moveTo` the beat pass made, in draw order. The beat pass is the only
+ * thing that ever strokes in the amber tic palette. */
+function ticStarts(stub: StubCtx): Call[] {
+  return stub.calls.filter((c) => c.method === 'moveTo' && TIC_PALETTE.includes(c.strokeStyle ?? ''));
+}
+
+function ticXs(stub: StubCtx): number[] {
+  return ticStarts(stub).map((c) => c.args[0]);
+}
+
+/** An `ArrayLike<number>` that counts how many ELEMENTS the drawing code reads.
+ * A culled draw reads O(log n) (the binary search) + O(visible); an unculled
+ * one reads all n. Nothing about the resulting picture distinguishes the two,
+ * which is exactly why the read count has to be asserted directly. */
+function countingBeats(beats: Int32Array): { view: ArrayLike<number>; reads: () => number } {
+  let reads = 0;
+  const view = new Proxy(
+    { length: beats.length },
+    {
+      get(_t, prop) {
+        if (prop === 'length') return beats.length;
+        const i = typeof prop === 'string' ? Number(prop) : NaN;
+        if (Number.isInteger(i)) {
+          reads++;
+          return beats[i];
+        }
+        return undefined;
+      },
+    }
+  ) as unknown as ArrayLike<number>;
+  return { view, reads: () => reads };
+}
+
+/** Beats every `spacing` samples: at spp = 10 the default is one tic per 10 px. */
+function evenBeats(count: number, spacing = 100): Int32Array {
+  return Int32Array.from({ length: count }, (_, i) => i * spacing);
+}
+
+describe('drawBeatTics (Task B2 primitive)', () => {
+  function base(over: Partial<BeatTicOpts> = {}): BeatTicOpts {
+    return {
+      beats: evenBeats(10),
+      scrollSample: 0,
+      samplesPerPixel: 10,
+      width: 100,
+      baseline: 100,
+      beatHeight: 9,
+      downbeatHeight: 16,
+      ...over,
+    };
+  }
+
+  it('strokes one tic per beat at the beat pixel, growing UP from the baseline', () => {
+    const { ctx, stub } = makeCtx();
+    const drawn = drawBeatTics(ctx, base());
+
+    expect(drawn).toBe(10);
+    expect(ticXs(stub)).toEqual([0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
+    // Each tic runs from (baseline - beatHeight) down to baseline: 91 -> 100.
+    for (const c of ticStarts(stub)) expect(c.args[1]).toBe(91);
+    const ends = stub.calls.filter((c) => c.method === 'lineTo' && c.strokeStyle === BEAT_TIC);
+    expect(ends).toHaveLength(10);
+    for (const c of ends) expect(c.args[1]).toBe(100);
+  });
+
+  it('honours scroll and zoom rather than assuming an origin', () => {
+    const { ctx, stub } = makeCtx();
+    // scroll 250 @ spp 5: beat 300 -> x 10, beat 400 -> x 30, ... beat 700 -> x 90.
+    drawBeatTics(ctx, base({ scrollSample: 250, samplesPerPixel: 5 }));
+    expect(ticXs(stub)).toEqual([10, 30, 50, 70, 90]);
+  });
+
+  it('draws NOTHING when there are no beats', () => {
+    const { ctx, stub } = makeCtx();
+    expect(drawBeatTics(ctx, base({ beats: new Int32Array(0) }))).toBe(0);
+    expect(stub.calls).toHaveLength(0);
+  });
+
+  it('never draws a tic past endSample (the analysis stops there — no extrapolation)', () => {
+    const { ctx, stub } = makeCtx();
+    const drawn = drawBeatTics(ctx, base({ endSample: 450 }));
+    expect(drawn).toBe(5);
+    expect(ticXs(stub)).toEqual([0, 10, 20, 30, 40]); // samples 0..400, never 500
+  });
+
+  it('draws no downbeat distinction at all when no isDownbeat predicate is supplied', () => {
+    const { ctx, stub } = makeCtx();
+    drawBeatTics(ctx, base());
+    expect(new Set(ticStarts(stub).map((c) => c.strokeStyle))).toEqual(new Set([BEAT_TIC]));
+    // One height only — no taller bar lines invented from an assumed 4/4.
+    expect(new Set(ticStarts(stub).map((c) => c.args[1]))).toEqual(new Set([91]));
+  });
+
+  it('draws downbeats taller AND brighter when the predicate genuinely answers', () => {
+    const { ctx, stub } = makeCtx();
+    drawBeatTics(ctx, base({ isDownbeat: (i) => i % 4 === 0 }));
+
+    const starts = ticStarts(stub);
+    const downs = starts.filter((c) => c.strokeStyle === DOWNBEAT_TIC);
+    const plain = starts.filter((c) => c.strokeStyle === BEAT_TIC);
+    expect(downs.map((c) => c.args[0])).toEqual([0, 40, 80]);
+    expect(plain).toHaveLength(7);
+    for (const c of downs) expect(c.args[1]).toBe(84); // 100 - 16, taller
+    for (const c of plain) expect(c.args[1]).toBe(91); // 100 - 9
+  });
+
+  it('draws a stale / low-confidence grid as PROVISIONAL — dimmer and dashed', () => {
+    const { ctx: c1, stub: confident } = makeCtx();
+    drawBeatTics(c1, base({ isDownbeat: (i) => i % 4 === 0 }));
+    const { ctx: c2, stub: doubtful } = makeCtx();
+    drawBeatTics(c2, base({ isDownbeat: (i) => i % 4 === 0, provisional: true }));
+
+    // Same geometry...
+    expect(ticXs(doubtful)).toEqual(ticXs(confident));
+    // ...visibly different treatment: dimmer colours and a dashed stroke.
+    expect(new Set(ticStarts(doubtful).map((c) => c.strokeStyle))).toEqual(
+      new Set([BEAT_TIC_PROVISIONAL, DOWNBEAT_TIC_PROVISIONAL])
+    );
+    for (const c of ticStarts(doubtful)) expect(c.dash!.length).toBeGreaterThan(0);
+    for (const c of ticStarts(confident)) expect(c.dash).toEqual([]);
+  });
+
+  it('restores strokeStyle and lineWidth, and clears the dash, after the pass', () => {
+    const { ctx, stub } = makeCtx();
+    stub.strokeStyle = '#abcdef';
+    stub.lineWidth = 7;
+    stub.setLineDash([9, 9]);
+
+    drawBeatTics(ctx, base({ isDownbeat: (i) => i % 4 === 0, provisional: true }));
+
+    expect(stub.strokeStyle).toBe('#abcdef');
+    expect(stub.lineWidth).toBe(7);
+    // Dash goes back to NONE, not to the caller's — the module-wide invariant
+    // (`drawMarkers` does the same), because `getLineDash()` cannot be read
+    // back here: the recording stub implements only the handful of methods the
+    // render path uses and throws on anything else.
+    expect(stub.dash).toEqual([]);
+  });
+
+  it('leaves a confident (undashed) pass with the dash untouched', () => {
+    const { ctx, stub } = makeCtx();
+    drawBeatTics(ctx, base());
+    expect(stub.dash).toEqual([]);
+  });
+
+  it('CULLS to the visible range instead of walking the whole grid (trap 7)', () => {
+    // 10 000 beats, one every 1000 samples; the viewport shows 1000 samples.
+    const { view, reads } = countingBeats(evenBeats(10000, 1000));
+    const { ctx, stub } = makeCtx();
+    const drawn = drawBeatTics(ctx, base({ beats: view, samplesPerPixel: 1, width: 1000 }));
+
+    expect(drawn).toBe(2); // samples 0 and 1000 only
+    expect(ticXs(stub)).toEqual([0, 1000]);
+    // Binary search (~14 probes) + the two visible beats + one look-ahead.
+    // A linear walk would read all 10 000.
+    expect(reads()).toBeLessThan(40);
+  });
+
+  it('culls from the LEFT too — a scrolled view never walks the beats behind it', () => {
+    const { view, reads } = countingBeats(evenBeats(10000, 1000));
+    const { ctx, stub } = makeCtx();
+    const drawn = drawBeatTics(
+      ctx,
+      base({ beats: view, scrollSample: 5_000_000, samplesPerPixel: 1, width: 1000 })
+    );
+    expect(drawn).toBe(2); // 5 000 000 and 5 001 000
+    expect(ticXs(stub)).toEqual([0, 1000]);
+    expect(reads()).toBeLessThan(40);
+  });
+
+  it('THINS at extreme zoom-out rather than painting a solid block (trap 8)', () => {
+    // The worst case: a whole document collapsed into ~50 CSS px.
+    const beats = evenBeats(1000, 10_000); // 10 M samples of beats
+    const { ctx, stub } = makeCtx();
+    const drawn = drawBeatTics(
+      ctx,
+      base({ beats, samplesPerPixel: 200_000, width: 50 }) // 0.05 px between beats
+    );
+
+    // The rule: at most one tic per 3 CSS px.
+    expect(drawn).toBeLessThanOrEqual(Math.ceil(50 / 3) + 1);
+    expect(drawn).toBeGreaterThan(10); // still a legible grid, not one lonely tic
+    const xs = ticXs(stub);
+    expect(xs).toHaveLength(drawn);
+    for (let i = 1; i < xs.length; i++) expect(xs[i] - xs[i - 1]).toBeGreaterThanOrEqual(3);
+  });
+
+  it('does not thin at a normal zoom (the thinning rule is not always on)', () => {
+    const { ctx, stub } = makeCtx();
+    drawBeatTics(ctx, base()); // 10 px apart
+    expect(ticXs(stub)).toHaveLength(10);
+  });
+
+  it("never mutates or reorders the caller's shared beat array", () => {
+    const beats = evenBeats(10);
+    const before = Array.from(beats);
+    const { ctx } = makeCtx();
+    drawBeatTics(ctx, base({ beats, isDownbeat: (i) => i % 4 === 0, provisional: true }));
+    expect(Array.from(beats)).toEqual(before);
+  });
+});
+
+describe('drawEditorBeatTics + renderWaveform integration (Task B2)', () => {
+  function gridOpts(width: number, height: number, channels = 1): RenderOpts {
+    const ch = constantChannel(1000, 0); // spp = 10
+    const py = buildPeaks(ch);
+    return {
+      width,
+      height,
+      channels: Array.from({ length: channels }, () => ch),
+      pyramids: Array.from({ length: channels }, () => py),
+      scrollSample: 0,
+      samplesPerPixel: 10,
+      selection: null,
+      cursorSample: 0,
+      playheadSample: null,
+    };
+  }
+
+  it('draws nothing beat-related when beatGrid is omitted, null, or empty', () => {
+    for (const grid of [undefined, null, { beats: new Int32Array(0) }]) {
+      const { ctx, stub } = makeCtx();
+      renderWaveform(ctx, { ...gridOpts(100, 100), beatGrid: grid });
+      expect(ticStarts(stub)).toHaveLength(0);
+    }
+  });
+
+  it('draws the tics ONCE along the bottom of the canvas, not once per channel lane', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, {
+      ...gridOpts(100, 200, 2), // stereo: two 100 px lanes
+      beatGrid: { beats: evenBeats(10) },
+    });
+    const starts = ticStarts(stub);
+    expect(starts).toHaveLength(10); // 10, not 20
+    // All in the band at the very bottom of the canvas (below BOTH lanes).
+    for (const c of starts) expect(c.args[1]).toBe(200 - 9);
+    const ends = stub.calls.filter((c) => c.method === 'lineTo' && c.strokeStyle === BEAT_TIC);
+    for (const c of ends) expect(c.args[1]).toBe(200);
+  });
+
+  it('puts the mono band in exactly the same place as the stereo one', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, { ...gridOpts(100, 200, 1), beatGrid: { beats: evenBeats(10) } });
+    const starts = ticStarts(stub);
+    expect(starts).toHaveLength(10);
+    for (const c of starts) expect(c.args[1]).toBe(200 - 9);
+  });
+
+  it('leaves the marker, cursor and playhead visuals uncorrupted (state restored, trap 9)', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, {
+      ...gridOpts(100, 100),
+      beatGrid: { beats: evenBeats(10), provisional: true },
+      markers: [{ positionSample: 300, name: 'Verse' }],
+      playheadSample: 600,
+    });
+
+    // The playhead is still a SOLID glowing accent line, not a dashed one.
+    const playhead = stub.calls.find(
+      (c) => c.method === 'stroke' && c.strokeStyle === '#26c6da' && (c.shadowBlur ?? 0) > 0
+    );
+    expect(playhead).toBeDefined();
+    expect(playhead!.dash).toEqual([]);
+    expect(playhead!.lineWidth).toBe(1);
+    // The cursor is still a solid white line.
+    const cursor = stub.calls.find((c) => c.method === 'moveTo' && c.strokeStyle === '#ffffff');
+    expect(cursor!.dash).toEqual([]);
+    // And nothing dashed leaks out of renderWaveform.
+    expect(stub.dash).toEqual([]);
+  });
+
+  it('does not dash the cursor or the playhead when NO marker pass follows to clear it', () => {
+    // The marker pass ends with setLineDash([]), so a leaked dash from the beat
+    // pass is invisible whenever markers happen to exist. Without them the beat
+    // pass is the only thing between the waveform and the cursor/playhead, and
+    // a missing restore shows up immediately.
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, {
+      ...gridOpts(100, 100),
+      beatGrid: { beats: evenBeats(10), provisional: true },
+      cursorSample: 300,
+      playheadSample: 600,
+    });
+    const cursor = stub.calls.find((c) => c.method === 'moveTo' && c.strokeStyle === '#ffffff');
+    expect(cursor).toBeDefined();
+    expect(cursor!.dash).toEqual([]);
+    const playhead = stub.calls.find(
+      (c) => c.method === 'stroke' && c.strokeStyle === '#26c6da' && (c.shadowBlur ?? 0) > 0
+    );
+    expect(playhead).toBeDefined();
+    expect(playhead!.dash).toEqual([]);
+    // The selection edges sit between the two and must be solid as well.
+    expect(stub.dash).toEqual([]);
+  });
+
+  it('clamps the tic band to a very short canvas instead of drawing off the top', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, { ...gridOpts(100, 6), beatGrid: { beats: evenBeats(3) } });
+    expect(ticStarts(stub)).toHaveLength(3);
+    for (const c of ticStarts(stub)) expect(c.args[1]).toBeGreaterThanOrEqual(0);
+  });
+
+  it('drawEditorBeatTics is standalone and takes primitives (SpectrogramView / B3 reuse)', () => {
+    const { ctx, stub } = makeCtx();
+    const drawn = drawEditorBeatTics(ctx, { beats: evenBeats(4) }, 120, 0, 10, 100);
+    expect(drawn).toBe(4);
+    expect(ticXs(stub)).toEqual([0, 10, 20, 30]);
+    for (const c of ticStarts(stub)) expect(c.args[1]).toBe(120 - 9);
+    expect(drawEditorBeatTics(ctx, null, 120, 0, 10, 100)).toBe(0);
+    expect(drawEditorBeatTics(ctx, undefined, 120, 0, 10, 100)).toBe(0);
   });
 });

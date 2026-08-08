@@ -10,6 +10,10 @@ import {
   _getLastComputeMessage,
   _resetSpectrogramWorkerCapture,
 } from '../../__mocks__/createSpectrogramWorkerMock';
+import * as waveformRender from './waveformRender';
+import * as beatGridService from '../../services/beatGrid';
+import type { BeatGrid } from '../../services/beatGrid';
+import { setBeatGridVisible, toggleBeatGrid } from '../../services/beatGridDisplay';
 
 // jsdom reports 0 for clientWidth/clientHeight; the compute effect bails on a
 // zero-sized container, so give every element a fixed fake size.
@@ -266,5 +270,108 @@ describe('SpectrogramView compute-effect narrowing (Task M9 fix round 1 / MINOR 
     await flushCompute();
 
     expect(_getLastComputeMessage()).not.toBeNull();
+  });
+});
+
+describe('SpectrogramView beat tics (Task B2)', () => {
+  // The tics must be an OVERLAY on the live canvas, drawn after the cached
+  // raster is blitted — never into the raster itself, which is only rebuilt
+  // when the magnitudes or the backing size change and would therefore freeze
+  // the tics at a stale zoom/scroll (trap 10).
+  let order: string[];
+  let getContextSpy: jest.SpyInstance;
+  let ticSpy: jest.SpyInstance;
+  let gridSpy: jest.SpyInstance;
+
+  function grid(): BeatGrid {
+    return {
+      beatSamples: Int32Array.from([0, 22050, 44100]),
+      sampleRate: 44100,
+      beatsPerBar: null,
+      downbeatPhase: null,
+      barCount: 0,
+      confidence: 0.9,
+      stale: false,
+      analyzedEndSample: 44100,
+      truncated: false,
+      origin: 'own',
+      originDocId: 'x',
+      originOpen: true,
+    };
+  }
+
+  beforeEach(() => {
+    order = [];
+    const fakeCtx = {
+      setTransform: jest.fn(),
+      clearRect: jest.fn(),
+      fillRect: jest.fn(),
+      beginPath: jest.fn(),
+      moveTo: jest.fn(),
+      lineTo: jest.fn(),
+      closePath: jest.fn(),
+      fill: jest.fn(),
+      fillText: jest.fn(),
+      setLineDash: jest.fn(),
+      stroke: jest.fn(),
+      drawImage: jest.fn(() => {
+        order.push('blit');
+      }),
+      putImageData: jest.fn(),
+      createImageData: (w: number, h: number) => ({
+        width: w,
+        height: h,
+        data: new Uint8ClampedArray(w * h * 4),
+      }),
+      fillStyle: '',
+      strokeStyle: '',
+      lineWidth: 1,
+      font: '',
+      textBaseline: 'top',
+    };
+    getContextSpy = jest
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockImplementation(() => fakeCtx as unknown as CanvasRenderingContext2D);
+    ticSpy = jest.spyOn(waveformRender, 'drawEditorBeatTics').mockImplementation(() => {
+      order.push('tics');
+      return 0;
+    });
+    gridSpy = jest.spyOn(beatGridService, 'getBeatGrid');
+    setBeatGridVisible(true);
+  });
+
+  afterEach(() => {
+    getContextSpy.mockRestore();
+    ticSpy.mockRestore();
+    gridSpy.mockRestore();
+    // Wrapped: this describe's afterEach runs BEFORE testing-library's auto
+    // cleanup, so the component is still mounted and subscribed here.
+    act(() => {
+      setBeatGridVisible(true);
+    });
+  });
+
+  it('draws the tics on the live canvas AFTER the raster blit, never inside it', async () => {
+    gridSpy.mockImplementation(() => grid());
+    render(<SpectrogramView doc={seedDoc()} />);
+    await flushCompute();
+
+    expect(order).toContain('blit');
+    expect(order).toContain('tics');
+    expect(order.lastIndexOf('tics')).toBeGreaterThan(order.lastIndexOf('blit'));
+  });
+
+  it('passes the same grid the waveform view gets, and null when the toggle is off', async () => {
+    const g = grid();
+    gridSpy.mockReturnValue(g);
+    render(<SpectrogramView doc={seedDoc()} />);
+    await flushCompute();
+    expect(ticSpy.mock.calls[ticSpy.mock.calls.length - 1][1].beats).toBe(g.beatSamples);
+
+    gridSpy.mockImplementation(() => grid());
+    await act(async () => {
+      toggleBeatGrid();
+    });
+    expect(ticSpy.mock.calls[ticSpy.mock.calls.length - 1][1]).toBeNull();
   });
 });
