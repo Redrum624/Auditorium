@@ -23,6 +23,9 @@ import { getClipboard } from './clipboard';
 import { getSpectralScale, toggleSpectralScale, type SpectralScale } from './spectralScale';
 import { getBeatGrid, isDownbeat } from './beatGrid';
 import { isBeatGridVisible, toggleBeatGrid } from './beatGridDisplay';
+import { editorSnapTargets } from '../components/Editor/editorSnapTargets';
+import { SNAP_TOLERANCE_PX } from './snap';
+import { isSnapEnabled, toggleSnap } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { markSavePoint } from './undoHistory';
 import { runTempoAnalysis } from './tempoAnalysis';
@@ -128,6 +131,19 @@ export interface TestApi {
     confidence: number;
     analyzedEndSample: number;
     origin: 'own' | 'inherited' | null;
+  };
+  // --- snapping (Task B4) --------------------------------------------------
+  /** Flips the snap ("magnet") preference; returns the NEW value. */
+  toggleSnap(): boolean;
+  /** The magnet's state and the target set a driven gesture would consult.
+   * Plain JSON scalars only. There is deliberately no hook that PERFORMS a
+   * snap — see the note at the implementation. */
+  getSnapState(): {
+    enabled: boolean;
+    tolerancePx: number;
+    targetCount: number;
+    firstTargetSample: number | null;
+    lastTargetSample: number | null;
   };
   // --- v1.5 flows ---------------------------------------------------------
   detectTempo(): Promise<{
@@ -674,6 +690,29 @@ export function installTestHooks(): void {
         confidence: grid.confidence,
         analyzedEndSample: grid.analyzedEndSample,
         origin: grid.origin,
+      };
+    },
+
+    // Snapping (Task B4). Deliberately a PREFERENCE hook and nothing more:
+    // there is intentionally no `snapCursorTo(x)` hook, because a hook that
+    // computed a snapped position would bypass the gesture layer entirely and
+    // let a smoke assertion pass without the magnet ever having run. Anything
+    // asserting the magnet must drive real pointer events; these two exist only
+    // so a harness can put the preference into a known state first and read
+    // back what a driven gesture should have used.
+    toggleSnap: () => toggleSnap(),
+
+    getSnapState: () => {
+      const doc = activeDoc();
+      const targets = editorSnapTargets(doc ? doc.id : null);
+      return {
+        enabled: isSnapEnabled(),
+        tolerancePx: SNAP_TOLERANCE_PX,
+        // Scalars only — the same convention getBeatGridState follows, since a
+        // typed array cannot cross page.evaluate's structured-clone boundary.
+        targetCount: targets.length,
+        firstTargetSample: targets.length > 0 ? targets[0] : null,
+        lastTargetSample: targets.length > 0 ? targets[targets.length - 1] : null,
       };
     },
 

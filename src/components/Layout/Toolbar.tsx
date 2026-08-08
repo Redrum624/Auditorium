@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
-import { Circle, Minus, Pause, Play, Plus, Repeat, SkipBack, Square } from 'lucide-react';
+import { Circle, Magnet, Minus, Pause, Play, Plus, Repeat, SkipBack, Square } from 'lucide-react';
 import { docLength } from '../../audio/AudioDocument';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import { playbackEngine } from '../../audio/PlaybackEngine';
@@ -7,6 +7,7 @@ import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { runCommand } from '../../services/menuActions';
+import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
 import { canRecord } from '../../services/transportService';
 import { defaultZoom, useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
@@ -185,6 +186,11 @@ export default function Toolbar() {
   const playback = useAppStore((s) => s.playback);
   const view = useAppStore((s) => s.view);
   const zoom = useAppStore((s) => s.zoom);
+
+  // Task B4 — the magnet's visible switch. A preference, not a document action,
+  // so it is never disabled: the user must be able to set it before running
+  // Detect Tempo, not only after (the same rule `view.beatGrid` follows).
+  const snapEnabled = useSnapEnabled();
 
   const mtPlayState = useSessionStore((s) => s.mtPlayState);
   // Subscribe to the armed set (value unused directly) so canRecord() below is
@@ -388,6 +394,28 @@ export default function Toolbar() {
             </button>
           ))}
         </div>
+
+        <Divider />
+
+        {/* Task B4 — the magnet. Snapping is a global interaction preference
+            (it governs the editor cursor/selection AND multitrack clip drag and
+            trim), so it lives in the chrome pill rather than in either view, is
+            never disabled, and shows its state with the same accent tile Loop
+            and the view segment use. The title carries the escape hatch, which
+            is otherwise undiscoverable. */}
+        <PillButton
+          label="Snap to Grid"
+          title={
+            snapEnabled
+              ? 'Snap to Grid: on — hold Alt to suspend'
+              : 'Snap to Grid: off'
+          }
+          icon
+          active={snapEnabled}
+          onClick={() => toggleSnap()}
+        >
+          <Magnet size={14} />
+        </PillButton>
 
         <Divider />
 

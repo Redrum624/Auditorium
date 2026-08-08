@@ -1,7 +1,9 @@
 import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import { useAppStore } from '../../stores/appStore';
+import { snapSample } from '../../services/snap';
 import { pixelToSample } from './waveformRender';
+import { editorSnapTargets } from './editorSnapTargets';
 import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selectionGestures';
 
 /**
@@ -11,6 +13,43 @@ import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selec
  * selects all. All state lives in the app store; the only transient (the active
  * drag) is a ref. Reuses the pure helpers in selectionGestures/waveformRender so
  * both views behave identically.
+ *
+ * ---------------------------------------------------------------------------
+ * TASK B4 — THE MAGNET
+ * ---------------------------------------------------------------------------
+ * Cursor placement and the moving edge of a selection are quantised onto the
+ * nearest beat or marker within {@link SNAP_TOLERANCE_PX} SCREEN pixels
+ * (`snap.ts`). Three properties are load-bearing:
+ *
+ *  - **The anchor never moves.** Only the position the pointer is currently at
+ *    is snapped. The selection anchor is snapped once, at pointerdown (the user
+ *    pointed at it), and then used verbatim for the rest of the drag; a
+ *    shift+click's anchor — an existing selection edge or the existing cursor —
+ *    is never touched at all. "Snap must never move something the user did not
+ *    drag."
+ *  - **The zoom is passed in, never looked up globally** (trap 26). This hook
+ *    uses the app store's `zoom.samplesPerPixel`; the multitrack passes its own
+ *    `mtZoom`. A helper that reached for "the" zoom would quantise one surface
+ *    at the other's scale.
+ *  - **The modifier is re-read on EVERY pointer event** (trap: latching it at
+ *    pointerdown breaks the escape hatch, and there is no key listener in the
+ *    renderer to fall back on). Chromium puts the live modifier state on every
+ *    pointer event, so `e.altKey` gives "suspended while held" — including
+ *    pressing Alt in the middle of a drag and releasing it again — with no
+ *    global listener to install, leak or race with pointer capture.
+ *
+ * **Alt was verified free in the BUILT app**, not assumed: the Electron default
+ * menu is indeed still installed (`Menu.getApplicationMenu()` returns
+ * File/Edit/View/Window — it was never disabled), but the window is frameless
+ * (`electron/main.cjs`, `frame: false`), so there is no menu bar for Alt to
+ * toggle: `win.isMenuBarVisible()` is false before and after, focus stays in
+ * the document, and a `keydown`/`pointerdown` pair while Alt is held arrives in
+ * the renderer with `altKey: true` and `defaultPrevented: false`.
+ *
+ * The target set is captured once, at pointerdown (`editorSnapTargets`), and
+ * reused for the whole drag: it is a cached read, but it must also be STABLE —
+ * an analysis completing mid-drag must not move the pointer under the user's
+ * hand.
  */
 
 // Exported since G3: the toolbar's zoom −/+ buttons step by the same factor
@@ -26,6 +65,16 @@ interface DragState {
   anchorSample: number;
   anchorX: number;
   exceeded: boolean;
+  /** The snap targets as they stood when the drag began (B4). Empty whenever
+   * the magnet is off or there is nothing to snap to, which makes the whole
+   * feature a single `snapSample` call that provably returns its input. */
+  targets: number[];
+}
+
+/** True while the escape-hatch modifier is held on THIS event. Alt, verified
+ * free against the built app — see the hook's header. */
+function snapSuspended(e: { altKey: boolean }): boolean {
+  return e.altKey;
 }
 
 export interface EditorGestureHandlers {
@@ -79,6 +128,10 @@ export function useEditorGestures(
 
   const dragRef = useRef<DragState | null>(null);
 
+  /** Raw pixel→sample for a client x, clamped to the document. No snapping —
+   * the wheel gesture and the drag-threshold test both want the true pointer
+   * position, and quantising the threshold would make the magnet's own pull
+   * count as a drag. */
   function sampleAtClientX(clientX: number): { x: number; sample: number } {
     const canvas = canvasRef.current;
     const rect = canvas ? canvas.getBoundingClientRect() : { left: 0 };
@@ -87,11 +140,25 @@ export function useEditorGestures(
     return { x, sample };
   }
 
+  /** The position a gesture should COMMIT for a raw sample: the nearest target
+   * within tolerance, or the raw value untouched. The clamp is re-applied
+   * because a document truncated after its analysis can leave a target past the
+   * current end; with an intact document every target is already in range and
+   * the clamp is a no-op. */
+  function snapped(raw: number, targets: number[], e: { altKey: boolean }): number {
+    if (snapSuspended(e) || targets.length === 0) return raw;
+    return clamp(snapSample(raw, targets, zoom.samplesPerPixel).sample, 0, length);
+  }
+
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const { x, sample } = sampleAtClientX(e.clientX);
-    const { setCursor, setSelection } = useAppStore.getState();
+    const { x, sample: raw } = sampleAtClientX(e.clientX);
+    const { setCursor, setSelection, activeDocumentId } = useAppStore.getState();
+
+    // Captured once per gesture — see the hook header.
+    const targets = editorSnapTargets(activeDocumentId);
+    const sample = snapped(raw, targets, e);
 
     setCursor(sample);
 
@@ -106,24 +173,32 @@ export function useEditorGestures(
     }
 
     if (e.shiftKey) {
+      // The anchor is an EXISTING edge or the existing cursor: it is not being
+      // dragged, so it is used exactly as it stands.
       const anchor = shiftClickAnchor(sample, selection, cursorSample);
-      dragRef.current = { anchorSample: anchor, anchorX: x, exceeded: true };
+      dragRef.current = { anchorSample: anchor, anchorX: x, exceeded: true, targets };
       setSelection(dragToSelection(anchor, sample));
     } else {
-      dragRef.current = { anchorSample: sample, anchorX: x, exceeded: false };
+      dragRef.current = { anchorSample: sample, anchorX: x, exceeded: false, targets };
     }
   };
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
-    const { x, sample } = sampleAtClientX(e.clientX);
+    const { x, sample: raw } = sampleAtClientX(e.clientX);
 
     if (!drag.exceeded) {
+      // The threshold is measured on the RAW pointer travel: a snap can move
+      // the position by up to the tolerance without the pointer having moved,
+      // and that must not by itself turn a click into a selection.
       if (!exceedsDragThreshold(drag.anchorX, x)) return;
       drag.exceeded = true;
     }
-    useAppStore.getState().setSelection(dragToSelection(drag.anchorSample, sample));
+    // Only the moving edge is snapped; `drag.anchorSample` is reused verbatim.
+    useAppStore
+      .getState()
+      .setSelection(dragToSelection(drag.anchorSample, snapped(raw, drag.targets, e)));
   };
 
   const onPointerUp = (e: ReactPointerEvent<HTMLCanvasElement>) => {

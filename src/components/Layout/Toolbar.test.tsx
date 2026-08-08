@@ -6,6 +6,7 @@ import { useAppStore, makeInitialState, defaultZoom } from '../../stores/appStor
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { registerDialogSetters } from '../../services/dialogBus';
+import { _resetSnapPreference, isSnapEnabled, setSnapEnabled } from '../../services/snapPreference';
 import { formatTime } from '../../utils/timeFormat';
 
 function makeDoc(): AudioDocument {
@@ -381,5 +382,62 @@ describe('Toolbar — G3 file chip (top-left)', () => {
     render(<Toolbar />);
     expect(screen.getByTestId('file-chip')).toHaveTextContent('mono');
     expect(screen.getByTestId('file-chip')).toHaveTextContent('48.0 kHz');
+  });
+});
+
+describe('Toolbar — the snap magnet (Task B4)', () => {
+  beforeEach(() => {
+    useAppStore.setState(makeInitialState());
+    _resetSnapPreference();
+  });
+  afterEach(() => _resetSnapPreference());
+
+  it('renders a magnet toggle that is enabled with NO document open', () => {
+    render(<Toolbar />);
+    const btn = screen.getByRole('button', { name: 'Snap to Grid' });
+    expect(btn).toBeInTheDocument();
+    // A preference, not a document action: the multitrack works with no open
+    // document and snapping governs its clip drag/trim too.
+    expect(btn).toBeEnabled();
+  });
+
+  it('clicking it flips the preference, and the title carries the escape hatch', () => {
+    render(<Toolbar />);
+    const btn = screen.getByRole('button', { name: 'Snap to Grid' });
+    expect(isSnapEnabled()).toBe(true);
+    expect(btn).toHaveAttribute('title', expect.stringContaining('Alt'));
+
+    fireEvent.click(btn);
+    expect(isSnapEnabled()).toBe(false);
+    expect(screen.getByRole('button', { name: 'Snap to Grid' })).toHaveAttribute(
+      'title',
+      'Snap to Grid: off'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Snap to Grid' }));
+    expect(isSnapEnabled()).toBe(true);
+  });
+
+  it('shows the accent tile only while snapping is on', () => {
+    render(<Toolbar />);
+    const on = screen.getByRole('button', { name: 'Snap to Grid' });
+    expect(on.style.color).toBe('var(--accent)');
+
+    act(() => {
+      setSnapEnabled(false);
+    });
+    const off = screen.getByRole('button', { name: 'Snap to Grid' });
+    expect(off.style.color).not.toBe('var(--accent)');
+  });
+
+  it('re-renders when the preference is flipped from outside the toolbar', () => {
+    render(<Toolbar />);
+    act(() => {
+      setSnapEnabled(false);
+    });
+    expect(screen.getByRole('button', { name: 'Snap to Grid' })).toHaveAttribute(
+      'title',
+      'Snap to Grid: off'
+    );
   });
 });

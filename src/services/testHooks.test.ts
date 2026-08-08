@@ -21,6 +21,8 @@ import * as remixService from './remixService';
 import * as beatGrid from './beatGrid';
 import type { BeatGrid } from './beatGrid';
 import { isBeatGridVisible, setBeatGridVisible } from './beatGridDisplay';
+import { SNAP_TOLERANCE_PX } from './snap';
+import { _resetSnapPreference, isSnapEnabled } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 
 function api(): TestApi {
@@ -345,5 +347,73 @@ describe('toggleBeatGrid / getBeatGridState (Task B2)', () => {
     jest.spyOn(beatGrid, 'getBeatGrid').mockReturnValue(null);
     hooks.toggleBeatGrid();
     expect(hooks.getBeatGridState().visible).toBe(false);
+  });
+});
+describe('toggleSnap / getSnapState (Task B4)', () => {
+  afterEach(() => _resetSnapPreference());
+
+  test('toggleSnap flips the preference and returns the new value', () => {
+    const hooks = api();
+    expect(hooks.toggleSnap()).toBe(false);
+    expect(isSnapEnabled()).toBe(false);
+    expect(hooks.toggleSnap()).toBe(true);
+    expect(isSnapEnabled()).toBe(true);
+  });
+
+  test('getSnapState reports the targets as plain JSON scalars — no Int32Array escapes', () => {
+    const doc = addDoc('beat120');
+    jest.spyOn(beatGrid, 'getBeatGrid').mockReturnValue({
+      beatSamples: Int32Array.from([0, 22050, 44100]),
+      sampleRate: 44100,
+      beatsPerBar: null,
+      downbeatPhase: null,
+      barCount: 0,
+      confidence: 0.9,
+      stale: false,
+      analyzedEndSample: 88200,
+      truncated: false,
+      origin: 'own',
+      originDocId: doc.id,
+      originOpen: true,
+    });
+
+    const result = api().getSnapState();
+    expect(result).toStrictEqual({
+      enabled: true,
+      tolerancePx: SNAP_TOLERANCE_PX,
+      targetCount: 3,
+      firstTargetSample: 0,
+      lastTargetSample: 44100,
+    });
+    expectPlainJson(result);
+  });
+
+  test('reports an empty target set when the magnet is off, and with nothing open', () => {
+    addDoc('beat120');
+    const hooks = api();
+    jest.spyOn(beatGrid, 'getBeatGrid').mockReturnValue(null);
+
+    hooks.toggleSnap();
+    const off = hooks.getSnapState();
+    expect(off.enabled).toBe(false);
+    expect(off.targetCount).toBe(0);
+    expect(off.firstTargetSample).toBeNull();
+    expectPlainJson(off);
+
+    _resetSnapPreference();
+    useAppStore.setState(makeInitialState());
+    const closed = api().getSnapState();
+    expect(closed.enabled).toBe(true);
+    expect(closed.targetCount).toBe(0);
+    expectPlainJson(closed);
+  });
+
+  test('there is deliberately no hook that PERFORMS a snap', () => {
+    // A `snapCursorTo(x)` hook would let a smoke assertion pass without the
+    // gesture layer ever running the magnet (plan trap 28). Anything asserting
+    // the magnet must drive real pointer events.
+    const hooks = api() as unknown as Record<string, unknown>;
+    expect(hooks.snapCursorTo).toBeUndefined();
+    expect(hooks.snapSample).toBeUndefined();
   });
 });

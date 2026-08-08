@@ -4,6 +4,7 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { getSpectralScale, toggleSpectralScale } from './spectralScale';
 import { isBeatGridVisible, setBeatGridVisible } from './beatGridDisplay';
+import { _resetSnapPreference, isSnapEnabled } from './snapPreference';
 import * as sessionFileModule from '../multitrack/sessionFile';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { runTempoAnalysis } from './tempoAnalysis';
@@ -435,6 +436,44 @@ describe('view.beatGrid (Task B2)', () => {
     expect(isBeatGridVisible()).toBe(false);
 
     await runCommand('view.beatGrid');
+    expect(isBeatGridVisible()).toBe(true);
+  });
+});
+
+describe('view.snapToGrid (Task B4)', () => {
+  afterEach(() => _resetSnapPreference());
+
+  function findViewCmd(id: string): MenuCommand {
+    const view = getMenuSections().find((s) => s.title === 'View')!;
+    return view.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  it('is registered in the View section, after view.beatGrid', () => {
+    const view = getMenuSections().find((s) => s.title === 'View')!;
+    const ids = view.items
+      .filter((item): item is MenuCommand => item !== 'separator')
+      .map((item) => item.id);
+    expect(ids).toContain('view.snapToGrid');
+    expect(ids.indexOf('view.snapToGrid')).toBeGreaterThan(ids.indexOf('view.beatGrid'));
+  });
+
+  it('is ALWAYS enabled — snapping governs the multitrack too, which needs no open document', () => {
+    for (const view of ['waveform', 'spectral', 'multitrack'] as const) {
+      useAppStore.setState({ view });
+      expect(findViewCmd('view.snapToGrid').enabled(useAppStore.getState())).toBe(true);
+    }
+  });
+
+  it('running it flips the snap preference', async () => {
+    expect(isSnapEnabled()).toBe(true);
+    await runCommand('view.snapToGrid');
+    expect(isSnapEnabled()).toBe(false);
+    await runCommand('view.snapToGrid');
+    expect(isSnapEnabled()).toBe(true);
+  });
+
+  it('does not touch the beat-grid display preference', async () => {
+    await runCommand('view.snapToGrid');
     expect(isBeatGridVisible()).toBe(true);
   });
 });

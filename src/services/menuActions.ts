@@ -29,6 +29,7 @@ import { getAllEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
 import { toggleSpectralScale } from './spectralScale';
 import { toggleBeatGrid } from './beatGridDisplay';
+import { toggleSnap } from './snapPreference';
 import { runTempoAnalysis } from './tempoAnalysis';
 
 export interface MenuCommand {
@@ -115,6 +116,7 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'view.spectral',
       'view.spectralScale',
       'view.beatGrid',
+      'view.snapToGrid',
       'view.multitrack',
     ],
   },
@@ -579,6 +581,18 @@ function registerNoiseAndViewCommands(): void {
       enabled: (s) => activeDoc(s) !== null && (s.view === 'waveform' || s.view === 'spectral'),
       run: async () => {
         toggleBeatGrid();
+      },
+    },
+    {
+      // Task B4. The same rule as `view.beatGrid` — a pure preference, not
+      // gated on a grid or a marker existing — but ALWAYS enabled, because
+      // snapping governs the multitrack's clip drag/trim as well as the two
+      // single-document views, and the multitrack works with no open document.
+      id: 'view.snapToGrid',
+      label: 'Toggle Snap to Grid',
+      enabled: () => true,
+      run: async () => {
+        toggleSnap();
       },
     },
   ]);

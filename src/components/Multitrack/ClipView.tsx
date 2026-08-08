@@ -6,6 +6,7 @@ import { getPeaksForRange } from '../../audio/peaks';
 import { getPyramids } from '../../services/peaksCache';
 import type { Clip } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { snapSample, snapSpan } from '../../services/snap';
 import { drawBeatTics, sampleToPixel } from '../Editor/waveformRender';
 import {
   CLIP_BEAT_TIC_PX,
@@ -16,6 +17,7 @@ import {
   useViewportWidth,
 } from './clipBeatTics';
 import { getClipWaveformCanvas, zoomBucket } from './clipWaveformCache';
+import { sessionSnapTargets } from './sessionSnapTargets';
 
 const HANDLE_PX = 6;
 const DRAG_THRESHOLD = 4;
@@ -59,11 +61,25 @@ interface DragState {
   origStart: number;
   origEnd: number;
   exceeded: boolean;
+  /** Task B4 — the SESSION's snap targets as they stood when this drag began,
+   * with this clip's own contribution excluded (trap 27). Captured once because
+   * building it walks every clip in the session, and because the set a drag
+   * uses must not change under the user's hand mid-gesture. */
+  targets: number[];
+  /** Task B4 — the last pointer x seen, so a modifier press with the pointer
+   * STILL can recompute the preview from the same position. */
+  lastClientX: number;
 }
 
 /** Number of source-document samples spanned by `lengthSample` session samples. */
 function docSpan(lengthSample: number, docRate: number, sessionRate: number): number {
   return docRate === sessionRate ? lengthSample : Math.round((lengthSample * docRate) / sessionRate);
+}
+
+/** True while the escape-hatch modifier is held on THIS event (Task B4). Alt,
+ * verified free against the BUILT app — see `useEditorGestures`'s header. */
+function snapSuspended(e: { altKey: boolean }): boolean {
+  return e.altKey;
 }
 
 /**
@@ -94,6 +110,10 @@ export default function ClipView({
   const ticCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const dragRef = useRef<DragState | null>(null);
   const [moveDx, setMoveDx] = useState(0);
+  // Task B4 — true only while a MOVE drag is in flight, so the modifier
+  // listener below exists for exactly as long as there is a preview to keep
+  // honest and not one render longer.
+  const [moveDragging, setMoveDragging] = useState(false);
 
   const left = sampleToPixel(clip.startSample, zoom.scrollSample, zoom.samplesPerPixel);
   const widthPx = Math.max(2, clip.lengthSample / zoom.samplesPerPixel);
@@ -232,6 +252,64 @@ export default function ClipView({
     return 'move';
   };
 
+  // --- Task B4, the magnet -------------------------------------------------
+  //
+  // Everything below works in DELTAS from the pointerdown x, so the multitrack
+  // lane's pixel origin never enters the arithmetic — which is why trap 25 (the
+  // lane is offset by the 224 px header column, and the wheel-zoom code gets
+  // that wrong) cannot bite here. The zoom used is the `zoom` PROP, i.e. the
+  // session store's `mtZoom`, never the editor's app-store zoom (trap 26).
+
+  /** The clip start this drag is asking for, snapped unless suspended. Shared
+   * by the preview and the commit so the two cannot disagree (trap 23). The
+   * clamp mirrors `moveClip`'s own `Math.max(0, …)`. */
+  const moveStartFor = (drag: DragState, clientX: number, alt: boolean): number => {
+    const raw = drag.origStart + (clientX - drag.startClientX) * zoom.samplesPerPixel;
+    if (alt || drag.targets.length === 0) return Math.max(0, Math.round(raw));
+    // Either edge of the clip may catch a target — aligning a clip's tail to a
+    // beat is as ordinary as aligning its head.
+    const s = snapSpan(raw, clip.lengthSample, drag.targets, zoom.samplesPerPixel);
+    return Math.max(0, Math.round(s.sample));
+  };
+
+  /** A single trim boundary, snapped unless suspended. */
+  const snapBoundary = (raw: number, drag: DragState, alt: boolean): number => {
+    if (alt || drag.targets.length === 0) return raw;
+    return snapSample(raw, drag.targets, zoom.samplesPerPixel).sample;
+  };
+
+  // Task B4 — the ONE case a per-pointer-event modifier read cannot cover.
+  //
+  // Reading `e.altKey` off every pointer event gives "suspended while held"
+  // without any global listener, and that is how both surfaces do it. But a
+  // clip move has a *persistent* preview: press or release Alt with the pointer
+  // perfectly still and the preview would keep showing the previous decision
+  // until the next mouse move — and then the drop, which reads the modifier at
+  // that instant, would land somewhere else. That is trap 23 again, reached by
+  // the keyboard instead of by the store. So while (and only while) a move drag
+  // is live, a modifier change recomputes the preview from the last pointer x.
+  useEffect(() => {
+    if (!moveDragging) return;
+    const onAltChange = (e: KeyboardEvent) => {
+      if (e.key !== 'Alt') return;
+      const drag = dragRef.current;
+      if (!drag || drag.mode !== 'move' || !drag.exceeded) return;
+      setMoveDx(
+        (moveStartFor(drag, drag.lastClientX, e.altKey) - drag.origStart) / zoom.samplesPerPixel
+      );
+    };
+    window.addEventListener('keydown', onAltChange);
+    window.addEventListener('keyup', onAltChange);
+    return () => {
+      window.removeEventListener('keydown', onAltChange);
+      window.removeEventListener('keyup', onAltChange);
+    };
+    // `moveStartFor` is re-created every render; the deps below are everything
+    // it actually reads, so the listener is rebound exactly when its answer
+    // could change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [moveDragging, zoom.samplesPerPixel, clip.lengthSample]);
+
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.stopPropagation();
@@ -239,13 +317,17 @@ export default function ClipView({
 
     const rect = e.currentTarget.getBoundingClientRect();
     const localX = e.clientX - rect.left;
+    const mode = modeForX(localX);
     dragRef.current = {
-      mode: modeForX(localX),
+      mode,
       startClientX: e.clientX,
       origStart: clip.startSample,
       origEnd: clip.startSample + clip.lengthSample,
       exceeded: false,
+      targets: sessionSnapTargets(clip.id),
+      lastClientX: e.clientX,
     };
+    if (mode === 'move') setMoveDragging(true);
     e.currentTarget.setPointerCapture?.(e.pointerId);
   };
 
@@ -254,18 +336,30 @@ export default function ClipView({
     if (!drag) return;
     const dxPx = e.clientX - drag.startClientX;
     if (!drag.exceeded) {
+      // The threshold is measured on the RAW pointer travel: the magnet's own
+      // pull must not by itself promote a click into a drag.
       if (Math.abs(dxPx) < DRAG_THRESHOLD) return;
       drag.exceeded = true;
     }
+    drag.lastClientX = e.clientX;
+    const alt = snapSuspended(e);
     const dxSamples = dxPx * zoom.samplesPerPixel;
 
     if (drag.mode === 'move') {
-      setMoveDx(dxPx);
+      // The preview is a CSS translate of the clip element, and the clip's
+      // `left` still reflects `origStart` (the store is only written on drop),
+      // so translating by exactly (snappedStart − origStart) puts the element
+      // on the position the drop will commit.
+      setMoveDx((moveStartFor(drag, e.clientX, alt) - drag.origStart) / zoom.samplesPerPixel);
       onDragOverTrack(resolveTrackAt(e.clientX, e.clientY));
     } else if (drag.mode === 'trim-start') {
-      trimClip(clip.id, 'start', Math.round(drag.origStart + dxSamples));
+      trimClip(clip.id, 'start', Math.round(snapBoundary(drag.origStart + dxSamples, drag, alt)));
     } else {
-      const target = Math.min(maxTrimEnd(), drag.origEnd + dxSamples);
+      // Snap FIRST, then clamp: the source-length and min-length clamps are
+      // hard validity limits and must survive the magnet, exactly as the
+      // overlap nudge does on a move (see the ordering note on pointerUp).
+      const snappedEnd = snapBoundary(drag.origEnd + dxSamples, drag, alt);
+      const target = Math.min(maxTrimEnd(), snappedEnd);
       trimClip(clip.id, 'end', Math.round(Math.max(drag.origStart + MIN_LENGTH, target)));
     }
   };
@@ -273,11 +367,29 @@ export default function ClipView({
   const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     dragRef.current = null;
+    setMoveDragging(false);
     e.currentTarget.releasePointerCapture?.(e.pointerId);
     if (drag && drag.mode === 'move' && drag.exceeded) {
-      const dxSamples = (e.clientX - drag.startClientX) * zoom.samplesPerPixel;
       const target = resolveTrackAt(e.clientX, e.clientY) ?? trackId;
-      moveClip(clip.id, target, Math.round(drag.origStart + dxSamples));
+      // SNAP-THEN-NUDGE. The magnet is a user-intent transform expressed in
+      // SCREEN space, and only this layer has the zoom and the tolerance to
+      // compute it; `moveClip`'s `resolveOverlap` is a validity transform in
+      // SAMPLE space that only the store can compute, since only it knows the
+      // target track's other clips. Intent first, validity second, is the only
+      // order that cannot produce an invalid result: nudging first and snapping
+      // afterwards could pull the clip straight back into the overlap it had
+      // just been moved clear of.
+      //
+      // The consequence is deliberate and pinned by tests: when the nudge
+      // fires, the committed start is NOT a snap target — the overlap rule
+      // overrides the magnet, silently and forward-only, exactly as it already
+      // does for every other caller. That is also why this ordering does not
+      // entrench anything against v1.8 task X5 (same-track overlap becoming
+      // first-class and crossfaded): when `resolveOverlap` stops relocating
+      // clips, snap-then-nudge simply degrades to snap-only and nothing here
+      // changes. The reverse order would leave a snap computed against a
+      // position the user never pointed at.
+      moveClip(clip.id, target, moveStartFor(drag, e.clientX, snapSuspended(e)));
     }
     setMoveDx(0);
     onDragOverTrack(null);
