@@ -102,6 +102,176 @@ describe('FadeEffect', () => {
   });
 });
 
+describe('FadeEffect curve routing (X6): persisted ids onto the shared fades.ts family', () => {
+  const unity = () => [Float32Array.from([1, 1, 1, 1, 1])];
+
+  it('equal-power fade-in: 0 at start, sin(pi/4) at the midpoint, 1 at the end', () => {
+    const out = run(fadeEffect, unity(), { direction: 'in', curve: 'equal-power' });
+    expect(out[0][0]).toBe(0);
+    expect(out[0][2]).toBe(Math.fround(Math.sin(Math.PI / 4)));
+    expect(out[0][2]).toBeCloseTo(Math.SQRT1_2, 7);
+    expect(out[0][4]).toBe(1);
+  });
+
+  it('equal-power fade-out ends at the documented cos(pi/2) residue, not a literal zero', () => {
+    const out = run(fadeEffect, unity(), { direction: 'out', curve: 'equal-power' });
+    expect(out[0][0]).toBe(1);
+    expect(out[0][4]).toBe(Math.fround(Math.cos(Math.PI / 2)));
+    expect(out[0][4]).not.toBe(0);
+    expect(out[0][4]).toBeLessThan(1e-15);
+  });
+
+  it('every persisted id renders its mapped shape at the midpoint of a 5-sample ramp', () => {
+    const mid = (curve: string) => run(fadeEffect, unity(), { direction: 'in', curve })[0][2];
+    expect(mid('linear')).toBe(0.5); // equal-gain: t
+    expect(mid('exponential')).toBe(0.25); // t^2
+    expect(mid('cosine')).toBe(0.5); // smooth: (1 - cos(pi t)) / 2
+    expect(mid('equal-power')).toBe(Math.fround(Math.sin(Math.PI / 4)));
+  });
+
+  it('an unknown persisted id falls back to the linear ramp, as the v1.8.0 default branch did', () => {
+    const out = run(fadeEffect, unity(), { direction: 'in', curve: 'wavelet' });
+    expect(Array.from(out[0])).toEqual([0, 0.25, 0.5, 0.75, 1]);
+  });
+});
+
+describe('FadeEffect length parameter (X6)', () => {
+  // Every value is exactly representable in float32, so byte-equality
+  // assertions against these literals are assertions about the samples, not
+  // about rounding on the way into the fixture.
+  const SRC8 = [0.5, -0.5, 0.25, -0.25, 0.75, -0.75, 1, -1];
+  const mk8 = () => [Float32Array.from(SRC8)];
+
+  it('the default length (100%) renders byte-identically to an explicit 100 and to the v1.8.0 formula', () => {
+    const dflt = run(fadeEffect, mk8(), { direction: 'in', curve: 'cosine' });
+    const explicit = run(fadeEffect, mk8(), { direction: 'in', curve: 'cosine', lengthPercent: 100 });
+    for (let i = 0; i < 8; i++) {
+      expect(dflt[0][i]).toBe(explicit[0][i]);
+      // v1.8.0: dst[i] = c[i] * (1 - cos(pi * i/(len-1))) / 2 over the WHOLE selection.
+      expect(dflt[0][i]).toBe(Math.fround(SRC8[i] * ((1 - Math.cos(Math.PI * (i / 7))) / 2)));
+    }
+  });
+
+  it('fade-in at 50% shapes exactly the first half; the second half is byte-identical', () => {
+    const out = run(fadeEffect, mk8(), { direction: 'in', curve: 'linear', lengthPercent: 50 });
+    // fadeLen = 4; ramp gains 0, 1/3, 2/3, 1.
+    expect(out[0][0]).toBe(0);
+    expect(out[0][1]).toBe(Math.fround(-0.5 * (1 / 3)));
+    expect(out[0][2]).toBe(Math.fround(0.25 * (2 / 3)));
+    expect(out[0][3]).toBe(-0.25); // last in-window sample: ramp position 1, gain exactly 1
+    for (let i = 4; i < 8; i++) expect(out[0][i]).toBe(mk8()[0][i]); // first untouched index is 4
+  });
+
+  it('fade-out at 50% shapes exactly the last half; the first half is byte-identical', () => {
+    const out = run(fadeEffect, mk8(), { direction: 'out', curve: 'linear', lengthPercent: 50 });
+    for (let i = 0; i < 4; i++) expect(out[0][i]).toBe(mk8()[0][i]); // last untouched index is 3
+    expect(out[0][4]).toBe(0.75); // first in-window sample: ramp position 0, gain exactly 1
+    expect(out[0][5]).toBe(Math.fround(-0.75 * (2 / 3)));
+    expect(out[0][6]).toBe(Math.fround(1 * (1 / 3)));
+    expect(Object.is(out[0][7], -0)).toBe(true); // -1 * 0: the final ramp gain really lands
+  });
+
+  it('lengthPercent 100 on a 64-sample selection fades all 64 samples (the clamp boundary is inclusive)', () => {
+    const out = run(fadeEffect, [new Float32Array(64).fill(1)], {
+      direction: 'in',
+      curve: 'linear',
+      lengthPercent: 100,
+    });
+    for (let i = 0; i < 64; i++) expect(out[0][i]).toBe(Math.fround(i / 63));
+  });
+
+  it('lengthPercent above 100 clamps: 150 renders byte-identically to 100, both directions', () => {
+    for (const direction of ['in', 'out']) {
+      const a = run(fadeEffect, mk8(), { direction, curve: 'exponential', lengthPercent: 150 });
+      const b = run(fadeEffect, mk8(), { direction, curve: 'exponential', lengthPercent: 100 });
+      for (let i = 0; i < 8; i++) expect(a[0][i]).toBe(b[0][i]);
+    }
+  });
+
+  it('lengthPercent 0 applies no fade: the output is a byte-identical copy, not the same array', () => {
+    const input = mk8();
+    const out = run(fadeEffect, input, { direction: 'in', curve: 'linear', lengthPercent: 0 });
+    expect(out[0]).not.toBe(input[0]);
+    for (let i = 0; i < 8; i++) expect(out[0][i]).toBe(input[0][i]);
+  });
+
+  it('a negative lengthPercent clamps to 0 and applies no fade', () => {
+    const input = mk8();
+    const out = run(fadeEffect, input, { direction: 'out', curve: 'cosine', lengthPercent: -10 });
+    for (let i = 0; i < 8; i++) expect(out[0][i]).toBe(input[0][i]);
+  });
+
+  it('the window length rounds half up: 50% of 5 samples is a 3-sample ramp', () => {
+    const out = run(fadeEffect, [Float32Array.from([1, 1, 1, 1, 1])], {
+      direction: 'in',
+      curve: 'linear',
+      lengthPercent: 50,
+    });
+    expect(Array.from(out[0])).toEqual([0, 0.5, 1, 1, 1]);
+  });
+
+  it('the window length rounds down below half: 30% of 8 samples is a 2-sample ramp', () => {
+    const out = run(fadeEffect, mk8(), { direction: 'in', curve: 'linear', lengthPercent: 30 });
+    expect(out[0][0]).toBe(0); // ramp position 0
+    expect(out[0][1]).toBe(-0.5); // ramp position 1: gain exactly 1
+    for (let i = 2; i < 8; i++) expect(out[0][i]).toBe(mk8()[0][i]);
+  });
+
+  it('the window length rounds up above half: 44% of 8 samples is a 4-sample ramp', () => {
+    const out = run(fadeEffect, mk8(), { direction: 'in', curve: 'linear', lengthPercent: 44 });
+    expect(out[0][2]).toBe(Math.fround(0.25 * (2 / 3))); // interior gain of a 4-sample ramp
+    expect(out[0][3]).toBe(-0.25); // in-window, gain 1 at the ramp end
+    for (let i = 4; i < 8; i++) expect(out[0][i]).toBe(mk8()[0][i]);
+  });
+
+  it('a one-sample fade-in window zeroes exactly that sample, preserving the sign of zero', () => {
+    const input = [Float32Array.from([-0.7, 0.7, 0.5, -0.5, 1])];
+    const out = run(fadeEffect, input, { direction: 'in', curve: 'equal-power', lengthPercent: 20 });
+    expect(Object.is(out[0][0], -0)).toBe(true); // -0.7 * 0: v1.8.0's singleton convention (t = 0)
+    for (let i = 1; i < 5; i++) expect(out[0][i]).toBe(input[0][i]);
+  });
+
+  it('a one-sample fade-out window leaves the final sample alone (gain 1, the trail-off convention)', () => {
+    const input = [Float32Array.from([-0.7, 0.7, 0.5, -0.5, 1])];
+    const out = run(fadeEffect, input, { direction: 'out', curve: 'equal-power', lengthPercent: 20 });
+    for (let i = 0; i < 5; i++) expect(out[0][i]).toBe(input[0][i]);
+  });
+
+  it('produces no NaN at selection lengths 0, 1 and 2, every curve, every length', () => {
+    for (const curve of ['linear', 'exponential', 'cosine', 'equal-power']) {
+      for (const direction of ['in', 'out']) {
+        for (const lengthPercent of [0, 20, 50, 100]) {
+          for (const len of [0, 1, 2]) {
+            const out = run(fadeEffect, [new Float32Array(len).fill(1)], { curve, direction, lengthPercent });
+            out[0].forEach((v) => expect(Number.isNaN(v)).toBe(false));
+          }
+        }
+      }
+    }
+  });
+});
+
+describe('FadeEffect parameter surface (X6)', () => {
+  it('persisted curve option values are unchanged, plus the new equal-power', () => {
+    const curveDef = fadeEffect.params.find((p) => p.id === 'curve')!;
+    expect(curveDef.options?.map((o) => o.value)).toEqual(['linear', 'exponential', 'cosine', 'equal-power']);
+    expect(curveDef.default).toBe('linear');
+  });
+
+  it('curve labels: Ducked and Equal power aligned with the clip-fade picker', () => {
+    const curveDef = fadeEffect.params.find((p) => p.id === 'curve')!;
+    expect(curveDef.options?.map((o) => o.label)).toEqual(['Linear', 'Ducked', 'Cosine', 'Equal power']);
+  });
+
+  it('the length parameter is a clamped percentage defaulting to the whole selection', () => {
+    const lenDef = fadeEffect.params.find((p) => p.id === 'lengthPercent')!;
+    expect(lenDef.type).toBe('number');
+    expect(lenDef.min).toBe(0);
+    expect(lenDef.max).toBe(100);
+    expect(lenDef.default).toBe(100);
+  });
+});
+
 describe('ReverseEffect', () => {
   it('reversing twice is the exact identity', () => {
     const input = [Float32Array.from([0.1, 0.2, 0.3, 0.4])];
