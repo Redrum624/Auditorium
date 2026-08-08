@@ -245,6 +245,90 @@ describe('crossfade rows — Arm, Release, and the readout', () => {
     expect(screen.getByTestId('fade-in-cross-readout')).toBeInTheDocument();
   });
 
+  it('a CAPABLE pair is never simultaneously called a raw sum (the pairIn gate)', () => {
+    const { b } = seedPair(); // raw but crossfade-capable on B's in edge
+    useSessionStore.getState().setSelectedClip(b.id);
+    render(<PropertiesPanel />);
+
+    expect(screen.getByTestId('crossfade-arm-in')).toBeInTheDocument();
+    expect(screen.queryByText(/raw sum/i)).toBeNull();
+  });
+
+  it('the OUTGOING member gets Arm on its OUT edge — and no raw-sum row beside it (the pairOut gate)', () => {
+    const { a, b } = seedPair(); // raw: A is the outgoing side of the capable pair
+    useSessionStore.getState().setSelectedClip(a.id);
+    render(<PropertiesPanel />);
+
+    const arm = screen.getByTestId('crossfade-arm-out') as HTMLButtonElement;
+    expect(arm.disabled).toBe(false);
+    expect(screen.queryByText(/raw sum/i)).toBeNull();
+    fireEvent.click(arm);
+
+    expect(storeClip(a.id).fadeOutSample).toBe(22_050);
+    expect(storeClip(b.id).fadeInSample).toBe(22_050);
+    // The row flips to the armed readout on THIS member's out edge.
+    expect(screen.getByTestId('fade-out-cross-readout')).toBeInTheDocument();
+  });
+
+  it('the OUTGOING member shows the out-edge readout + Release, and Release clears both sides', () => {
+    const { a, b } = seedPair();
+    armPair(a, b);
+    useSessionStore.getState().setSelectedClip(a.id);
+    render(<PropertiesPanel />);
+
+    expect(screen.queryByLabelText('Fade out length')).toBeNull();
+    expect(screen.getByTestId('fade-out-cross-readout').textContent).toBe(
+      formatTime(22_050, RATE)
+    );
+    // The away (in) edge of this member stays an ordinary input.
+    expect(screen.getByLabelText('Fade in length')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('crossfade-release-out'));
+
+    expect(storeClip(a.id).fadeOutSample).toBeUndefined();
+    expect(storeClip(b.id).fadeInSample).toBeUndefined();
+    expect(screen.queryByTestId('fade-out-cross-readout')).toBeNull();
+    expect(screen.getByLabelText('Fade out length')).toBeInTheDocument();
+  });
+
+  it('Arm is DISABLED when the INCOMING member carries a blocking away fade (the b-side veto)', () => {
+    const { b } = seedPair();
+    // B's away fade-out one sample past the boundary: b.length − b.fadeOut
+    // = 22 049 < width 22 050 — a full-width arm cannot be granted on B.
+    useSessionStore.getState().setClipFade(b.id, 'out', { lengthSample: RATE - 22_050 + 1 });
+    useSessionStore.getState().setSelectedClip(b.id);
+    render(<PropertiesPanel />);
+
+    expect((screen.getByTestId('crossfade-arm-in') as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('Arm stays ENABLED with the INCOMING away fade at exactly len − width, and arming preserves it', () => {
+    const { a, b } = seedPair();
+    useSessionStore.getState().setClipFade(b.id, 'out', { lengthSample: RATE - 22_050 });
+    useSessionStore.getState().setSelectedClip(b.id);
+    render(<PropertiesPanel />);
+
+    const arm = screen.getByTestId('crossfade-arm-in') as HTMLButtonElement;
+    expect(arm.disabled).toBe(false);
+    fireEvent.click(arm);
+
+    expect(storeClip(a.id).fadeOutSample).toBe(22_050);
+    expect(storeClip(b.id).fadeInSample).toBe(22_050);
+    expect(storeClip(b.id).fadeOutSample).toBe(RATE - 22_050); // away fade untouched — a legal meet on B
+  });
+
+  it('abutting clips are NOT called a raw sum (the > 0 boundary)', () => {
+    const doc = addDoc();
+    const a = seedClip(doc, { startSample: 0, lengthSample: RATE });
+    seedClip(doc, { startSample: RATE, lengthSample: RATE }); // exact abut
+    useSessionStore.getState().setSelectedClip(a.id);
+    render(<PropertiesPanel />);
+
+    expect(screen.queryByText(/raw sum/i)).toBeNull();
+    expect(screen.queryByTestId('crossfade-arm-in')).toBeNull();
+    expect(screen.queryByTestId('crossfade-arm-out')).toBeNull();
+  });
+
   it('Arm stays ENABLED with an away fade at exactly len − width (the boundary), and arming preserves it', () => {
     const { a, b } = seedPair();
     // A's away fade (fade-in) at exactly lengthSample − width: a legal meet.

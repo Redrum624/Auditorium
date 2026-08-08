@@ -439,6 +439,21 @@ describe('overlap drop hint — X5’s Ctrl affordance, surfaced', () => {
     expect(byTestId(el, 'overlap-drag-hint')).toBeNull();
   });
 
+  it('a lone clip nudged within its own width shows NO hint — self-overlap is not an overlap', () => {
+    // Any drag shorter than the clip's own width leaves the previewed span
+    // overlapping the clip's own pre-drop position (the store still holds it
+    // there until the drop). Without the identity exclusion in
+    // overlapUnderPreview, this would flash a false "Drop crossfades" pill on
+    // every small nudge of a clip with no neighbours at all.
+    const el = mountClip([{ trackIdx: 0, clip: clipOf('solo', 0, 20_000) }], 'solo', false);
+    firePointer(el, 'pointerdown', { clientX: 100 });
+    firePointer(el, 'pointermove', { clientX: 150 }); // +50 px: preview [5 000, 25 000) over its own [0, 20 000)
+    expect(byTestId(el, 'overlap-drag-hint')).toBeNull();
+    firePointer(el, 'pointermove', { clientX: 250 }); // +150 px: still inside its own width
+    expect(byTestId(el, 'overlap-drag-hint')).toBeNull();
+    firePointer(el, 'pointerup', { clientX: 250 });
+  });
+
   it('a plain click on an already-overlapped clip shows no hint (moveDx gate)', () => {
     const s = useSessionStore.getState();
     s.addClip(s.session.tracks[0].id, clipOf('under', 0, 20_000));
