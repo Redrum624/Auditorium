@@ -475,6 +475,87 @@ describe('mixdownSession same-track overlap crossfade (the canonical pair)', () 
     }
   });
 
+  it('DISARMS the pair when a neighbour intrudes one sample past the overlap END edge', () => {
+    // The opposite direction of the butt-joined pin: shifting the end-edge
+    // neighbour inward by ONE sample (start 999, inside [600, 1000)) makes
+    // it an intruder, and the pair must fall back to solo fades over a raw
+    // sum. Without this fixture, `c.startSample < aEnd` relaxed to
+    // `< aEnd - 1` survives: a 1-sample intruder would leave the pair armed
+    // and raw-sum a third signal over the k-normalised law -- a level error.
+    const a = constDoc('a', 0.6, 1000);
+    const b = constDoc('b', 0.4, 1000);
+    const c = constDoc('c', 0.2, 400);
+    const s = session([
+      track({
+        pan: -1,
+        clips: [
+          clip({
+            documentId: 'a',
+            startSample: 0,
+            lengthSample: 1000,
+            fadeOutSample: 400,
+            fadeOutCurve: 'equal-gain',
+          }),
+          clip({
+            documentId: 'b',
+            startSample: 600,
+            lengthSample: 1000,
+            fadeInSample: 400,
+            fadeInCurve: 'equal-gain',
+          }),
+          clip({ documentId: 'c', startSample: 999, lengthSample: 400 }), // 1 sample inside the overlap
+        ],
+      }),
+    ]);
+    const [L] = mixdownSession(s, docsMap(a, b, c)).channels;
+    // Solo-fade fallback at samples the intruder does not cover -- and
+    // distinguishably NOT the armed law.
+    for (const j of [50, 200, 350]) {
+      const solo = 0.6 * (1 - j / 399) + 0.4 * (j / 399);
+      expect(L[600 + j]).toBeCloseTo(solo, 6);
+      const { gOut, gIn } = crossfadeGains(j / 399, 0, 'equal-gain');
+      expect(Math.abs(L[600 + j] - (0.6 * gOut + 0.4 * gIn))).toBeGreaterThan(1e-3);
+    }
+  });
+
+  it('DISARMS the pair when a neighbour intrudes one sample past the overlap START edge', () => {
+    // Mirror of the fixture above: the start-edge neighbour shifted inward
+    // by one sample (ends at 601 > overlap start 600). Kills the surviving
+    // relaxation of `c.end > b.startSample` to `> b.startSample + 1`.
+    const a = constDoc('a', 0.6, 1000);
+    const b = constDoc('b', 0.4, 1000);
+    const c = constDoc('c', 0.2, 400);
+    const s = session([
+      track({
+        pan: -1,
+        clips: [
+          clip({
+            documentId: 'a',
+            startSample: 0,
+            lengthSample: 1000,
+            fadeOutSample: 400,
+            fadeOutCurve: 'equal-gain',
+          }),
+          clip({
+            documentId: 'b',
+            startSample: 600,
+            lengthSample: 1000,
+            fadeInSample: 400,
+            fadeInCurve: 'equal-gain',
+          }),
+          clip({ documentId: 'c', startSample: 201, lengthSample: 400 }), // ends 601: 1 sample inside
+        ],
+      }),
+    ]);
+    const [L] = mixdownSession(s, docsMap(a, b, c)).channels;
+    for (const j of [50, 200, 350]) {
+      const solo = 0.6 * (1 - j / 399) + 0.4 * (j / 399);
+      expect(L[600 + j]).toBeCloseTo(solo, 6);
+      const { gOut, gIn } = crossfadeGains(j / 399, 0, 'equal-gain');
+      expect(Math.abs(L[600 + j] - (0.6 * gOut + 0.4 * gIn))).toBeGreaterThan(1e-3);
+    }
+  });
+
   it('supports a chain A-B-C: one clip can be incoming on one edge and outgoing on the other', () => {
     // A [0,1000) out-fade 200; B [800,1800) in-fade 200 AND out-fade 300;
     // C [1500,2500) in-fade 300. Both pairs are canonical and their regions
