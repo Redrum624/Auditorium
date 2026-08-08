@@ -21,9 +21,18 @@
  * removed" guarantee real: the exact-sum identity is asserted against the
  * user's actual audio, not against a resampled copy of it. The resampler is
  * `src/dsp/resample.ts`'s `resampleChannel` on BOTH legs — linear
- * interpolation and hand-rolled resamplers are forbidden (ruling 4), and the
- * unit tests pin the outgoing payload BIT-EXACTLY against `resampleChannel`
- * so a substitution cannot pass silently.
+ * interpolation and hand-rolled resamplers are forbidden (ruling 4), and BOTH
+ * legs are pinned BIT-EXACTLY by the unit tests: leg 1 against
+ * `resampleChannel`'s output for the outgoing payload, leg 2 by recomputing
+ * the whole partition from the delivered chunk and comparing every stem
+ * sample.
+ *
+ * Leg 2 needed its own pin because the reconstruction metric CANNOT catch a
+ * wrong resampler there — and in the most misleading direction. A linear
+ * resampler leaves above-Nyquist junk in the estimates; those bins' masks
+ * then route the corresponding mix energy into the Residual, which makes
+ * every exact-sum number look BETTER (0 error, 100% bit-exact). Correctness
+ * on the return leg is therefore a property of the SAMPLES, never of the sum.
  *
  * Length across the round trip: `modelLength = round(docLength * 44100/rate)`
  * and the return leg lands at `round(modelLength * rate/44100)`, which can
@@ -51,8 +60,9 @@
  *     removed. Throwing away a multi-minute inference run over a handful of
  *     samples would cost the user everything and buy no safety. Sanitisation
  *     happens at CHUNK-ACCUMULATION time, at the model rate — before the
- *     return-leg resample, so one bad sample cannot smear across the
- *     resampler's +/-32 taps.
+ *     return-leg resample, where one bad sample would otherwise smear across
+ *     up to 63 output samples (`resample.ts` spans +/-32 input taps and its
+ *     Hann window is exactly 0 at both ends).
  *   - The MIX is NEVER sanitised. It is the user's own audio; a non-finite
  *     sample there is an app/decode bug, and quietly rewriting it would alter
  *     what the user recorded. `partitionStems` catches it (naming
@@ -63,6 +73,15 @@
  *
  * Either way a NaN never reaches the user's audio silently, which is the
  * property the whole feature rests on.
+ *
+ * Sanitising is not licence to report success on nothing, though: a run whose
+ * masks are ALL zero (`stats.maxMaskSum === 0`) over a mix that HAS energy is
+ * refused as a terminal `failed`, with the discarded-sample count in the
+ * message. Four silent stems and `residual === mix` is a copy with extra
+ * steps, and presenting it as a separation would be the worst silent failure
+ * this feature could produce. The count is also carried on every successful
+ * result (`sanitisedEstimateSamples`) so a partially-degraded run can be
+ * reported honestly rather than passed off as clean.
  *
  * ## Staleness — T13 discipline, checked at DELIVERY
  *
@@ -106,7 +125,9 @@
  *   `${output.sourceName} — ${label}`, sampleRate: output.sampleRate,
  *   channels: stem.channels})`.
  *   output.sanitisedEstimateSamples — non-finite model samples zeroed (0 in
- *   the normal case; a non-zero value is worth surfacing in the UI).
+ *   the normal case). A non-zero value means the run is DEGRADED but valid:
+ *   S6 should say so rather than let it pass silently. An all-zero-mask run
+ *   never reaches here — it is a `failed`.
  *   output.stats — S2's mask stats (min/max mask, worst-case sum).
  *
  *   S3 deliberately creates NO documents and NO session: that is S5.
@@ -131,8 +152,40 @@ export const MODEL_SAMPLE_RATE = 44100;
 const MODEL_CHANNELS = 2;
 /** drums, bass, other, vocals (`stemSegmentation.cjs` STEM_NAMES). */
 const HOST_STEM_COUNT = 4;
-/** `stemHost.cjs` MAX_TOTAL_SAMPLES — 30 minutes at the model rate. */
-const MAX_MODEL_SAMPLES = MODEL_SAMPLE_RATE * 1800;
+/**
+ * RENDERER-side length cap: 15 minutes at the model rate. Deliberately NOT
+ * `stemHost.cjs`'s MAX_TOTAL_SAMPLES (30 min) — that number is the HOST's
+ * memory arithmetic, and mirroring it here would have let the renderer accept
+ * a job it cannot hold.
+ *
+ * MEASURED on this machine (stereo 48 kHz, the real pipeline: both resample
+ * legs + `partitionStems`, peak RSS sampled at every phase boundary):
+ * 15 s -> 516 MB, 30 s -> 584 MB, 60 s -> 716 MB — a slope of
+ * **4.4 MB of renderer RSS per second of audio (~264 MB/min)**, linear across
+ * both intervals. The analytic figure agrees: at the partition peak the
+ * renderer holds the document (2ch), the document-rate estimates (4 stems x
+ * 2ch), the partition's stems (4 x 2ch) and the residual (2ch) = 20 channels
+ * x 4 B x 48000 = 3.84 MB/s, plus scratch and GC lag.
+ *
+ * Two phases, two budgets:
+ *   - DURING inference the renderer holds document + model-rate mix +
+ *     model-rate estimates ~= 2.1 MB/s (126 MB/min) WHILE the main side holds
+ *     its own ~1.94 MB/s (116 MB/min) plus ORT's measured ~5 GB arena
+ *     (S1) -> 5 GB + 242 MB/min.
+ *   - AFTER inference (the manager kills the child on `done`, so the 5 GB is
+ *     already back) the renderer peaks alone at 264 MB/min.
+ * On a 16 GB machine, leaving ~4-5 GB for the OS, Chromium and the app, the
+ * inference phase is the binding one: 5 GB + 0.242 GB/min x D <= ~10 GB gives
+ * D <= ~20 min. 15 minutes takes that with headroom (combined ~8.6 GB;
+ * renderer-alone partition peak ~3.9 GB).
+ *
+ * At the host's 30-minute cap the renderer alone would peak near 7.9 GB and
+ * the combined figure near 12.3 GB — which is why that cap is unreachable
+ * from here and is not mirrored. The host still enforces its own 30 min as
+ * the outer bound; this is the tighter, renderer-feasible one, and whole real
+ * tracks sit far below it (the plan's own framing of the length rule).
+ */
+const MAX_MODEL_SAMPLES = MODEL_SAMPLE_RATE * 900;
 /** `stemManager.cjs` MODEL_BYTES — used only for the "no preload" fallback
  * model state, so the dialog can still show the 166 MB warning. */
 const MODEL_BYTES = 165612636;
@@ -324,6 +377,20 @@ function coversExactly(covered: [number, number][], total: number): boolean {
   return covered.length === 1 && covered[0][0] === 0 && covered[0][1] === total;
 }
 
+/** Whether the mix carries ANY non-zero sample. Only consulted when the
+ * partition reports `maxMaskSum === 0` (see the all-silent refusal below), so
+ * this O(n) scan runs on a path that is already terminal — never on a healthy
+ * run. Digital silence in, all-zero masks out is CORRECT, and must not be
+ * mistaken for the model having failed. */
+function hasAnyEnergy(channels: Float32Array[]): boolean {
+  for (const ch of channels) {
+    for (let n = 0; n < ch.length; n++) {
+      if (ch[n] !== 0) return true;
+    }
+  }
+  return false;
+}
+
 /** Truncates or zero-pads `input` to `length` — the round-trip rounding fix-up
  * that satisfies `partitionStems`' shape contract (see the module header). */
 function fitLength(input: Float32Array, length: number): Float32Array {
@@ -364,6 +431,24 @@ interface ActiveRun {
 let active: ActiveRun | null = null;
 let nextRunId = 1;
 let progressState: StemSeparationProgress | null = null;
+
+/**
+ * Test-only (this repo's `_xxxForTest` convention). Disables the EARLY-abort
+ * store subscription so the DELIVERY-TIME staleness gate can be exercised on
+ * its own.
+ *
+ * It exists because the two guards overlap by design: in production a store
+ * change fires the subscription first, which means the delivery-time check --
+ * the one ruling 7 actually rests on ("never deliver stems for audio that
+ * changed") -- is never the branch that catches a normal edit. Without this
+ * switch that branch is untestable, and an untestable guarantee is not a
+ * guarantee.
+ */
+export function _setStaleWatchForTest(enabled: boolean): void {
+  staleWatchEnabled = enabled;
+}
+
+let staleWatchEnabled = true;
 
 /** True while a separation is in flight. */
 export function isStemSeparationRunning(): boolean {
@@ -524,7 +609,10 @@ export async function separateStems(req: SeparateStemsRequest): Promise<StemSepa
   const channelCount = doc.channels.length;
   const modelLength = Math.round(docLength * (MODEL_SAMPLE_RATE / doc.sampleRate));
   if (modelLength > MAX_MODEL_SAMPLES) {
-    return fail('too-long', 'Stem separation is limited to 30 minutes of audio.');
+    return fail(
+      'too-long',
+      'Stem separation is limited to 15 minutes of audio (the renderer holds roughly 264 MB per minute while building the stems).'
+    );
   }
 
   const run: ActiveRun = {
@@ -553,7 +641,7 @@ export async function separateStems(req: SeparateStemsRequest): Promise<StemSepa
   // minutes on audio that no longer exists. The delivery-time re-check below
   // is the guarantee; this is the courtesy that saves the CPU.
   const unsubscribeStore = useAppStore.subscribe(() => {
-    if (active !== run || run.settled) return;
+    if (!staleWatchEnabled || active !== run || run.settled) return;
     const live = findDoc(run.sourceDocId);
     if (!live) {
       abortRun(run, 'closed');
@@ -647,6 +735,19 @@ export async function separateStems(req: SeparateStemsRequest): Promise<StemSepa
       // catch the promise would reject instead of resolving — the one thing
       // this module must never do (the v1.4 `effectRunner.ts:106-119` lesson,
       // one layer up).
+      //
+      // A rejection says nothing about the CHILD, though: the manager may
+      // still own a live utility process for this run. Kill it explicitly, or
+      // it outlives the run it belonged to (~5 GB, for the rest of the
+      // session). Deliberately NOT `abortRun` — this is a failure, not an
+      // abort, and must keep the `failed` status rather than becoming
+      // `cancelled`.
+      if (!run.cancelInvoked) {
+        run.cancelInvoked = true;
+        void api.stemsCancel?.().catch(() => {
+          /* best-effort: the channel that just died may not answer */
+        });
+      }
       const message = errorMessage(err);
       showFailure(message);
       return fail('failed', message);
@@ -718,6 +819,26 @@ export async function separateStems(req: SeparateStemsRequest): Promise<StemSepa
       return fail('failed', message);
     }
 
+    // MED-5: `maxMaskSum` is the MAXIMUM over every bin, frame and channel, so
+    // 0 means every ratio mask was 0 everywhere — the model's estimates
+    // carried no energy anywhere and the "partition" is four silent stems with
+    // `residual === mix`. That is a copy with extra steps, and reporting it as
+    // success would be the worst kind of silent failure: the user would be
+    // told their track was separated. There is no partial-credit reading of
+    // this number — a single bin with any estimate energy pushes it to ~1 —
+    // so the threshold is exact rather than a tuned epsilon. Guarded by the
+    // mix actually having energy: for a genuinely silent document, all-zero
+    // masks are the correct answer.
+    if (partition.stats && partition.stats.maxMaskSum <= 0 && hasAnyEnergy(live.channels)) {
+      let message =
+        'The separation model returned no usable output — every stem came back silent, so nothing was separated.';
+      if (run.sanitised > 0) {
+        message += ` ${run.sanitised} non-finite model sample(s) had to be discarded.`;
+      }
+      showFailure(message);
+      return fail('failed', message);
+    }
+
     return {
       ok: true,
       output: {
@@ -732,6 +853,18 @@ export async function separateStems(req: SeparateStemsRequest): Promise<StemSepa
         stats: partition.stats,
       },
     };
+  } catch (err) {
+    // MED-3: the always-resolves contract, closed for good. Every allocation
+    // on this path is a multi-hundred-megabyte one (the estimate
+    // accumulators, both resample legs, the partition's own output), so a
+    // `RangeError: Array buffer allocation failed` is a NORMAL failure mode on
+    // a memory-pressured machine — not an escape. Leg 1 was already guarded
+    // for exactly this reason; this makes the guarantee unconditional, so S5
+    // and S6 can be written against "always resolves" without a defensive
+    // catch of their own.
+    const message = errorMessage(err);
+    showFailure(message);
+    return fail('failed', message);
   } finally {
     run.settled = true;
     unsubscribeProgress?.();
@@ -754,8 +887,8 @@ export async function separateStems(req: SeparateStemsRequest): Promise<StemSepa
  * accumulators or throwing inside an event callback.
  *
  * Sanitisation happens HERE, at the model rate, before the return-leg
- * resample can smear a single bad sample across 65 taps — see the module
- * header's non-finite policy.
+ * resample can smear a single bad sample across up to 63 output samples — see
+ * the module header's non-finite policy.
  */
 function acceptChunk(run: ActiveRun, chunk: { offset: number; samples: number; data: ArrayBuffer }): void {
   const { offset, samples } = chunk;

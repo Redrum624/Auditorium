@@ -8,6 +8,7 @@ import {
   getStemModelState,
   ensureStemModel,
   invalidateStemRun,
+  _setStaleWatchForTest,
   getStemVersion,
   useStemVersion,
   STEM_LABELS,
@@ -19,6 +20,8 @@ import { closeDocumentFlow } from './fileService';
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { resampleChannel } from '../dsp/resample';
+import * as resampleModule from '../dsp/resample';
+import { partitionStems } from '../dsp/stemPartition';
 
 // ---------------------------------------------------------------------------
 // Fixtures — deterministic pseudo-noise (the LCG recipe this repo re-declares
@@ -184,21 +187,96 @@ const STEM_COUNT = 4;
  * mix the service actually sent: planar stem-major/channel-minor, block
  * s*2+c, stems in HOST order. Mono input is repeated into both channels
  * exactly as stemHost.cjs's buildSegmentInput does. */
+interface ChunkOptions {
+  corrupt?: (data: Float32Array) => void;
+  /** Gain applied to model channel `c` of host stem `s`. Defaults to the
+   * symmetric `HOST_GAINS[s]`; an ASYMMETRIC gain is what pins the mono fold. */
+  gainFor?: (s: number, c: number) => number;
+  offset?: number;
+}
+
 function buildChunk(
   modelChannels: Float32Array[],
-  corrupt?: (data: Float32Array) => void
+  opts: ChunkOptions = {}
 ): { offset: number; samples: number; data: ArrayBuffer } {
+  const gainFor = opts.gainFor ?? ((s: number) => HOST_GAINS[s]);
   const samples = modelChannels[0].length;
   const data = new Float32Array(STEM_COUNT * MODEL_CHANNELS * samples);
   for (let s = 0; s < STEM_COUNT; s++) {
     for (let c = 0; c < MODEL_CHANNELS; c++) {
       const src = modelChannels[Math.min(c, modelChannels.length - 1)];
       const base = (s * MODEL_CHANNELS + c) * samples;
-      for (let n = 0; n < samples; n++) data[base + n] = src[n] * HOST_GAINS[s];
+      for (let n = 0; n < samples; n++) data[base + n] = src[n] * gainFor(s, c);
     }
   }
-  corrupt?.(data);
-  return { offset: 0, samples, data: data.buffer };
+  opts.corrupt?.(data);
+  return { offset: opts.offset ?? 0, samples, data: data.buffer };
+}
+
+/** `fitLength` from stemService.ts, re-declared here so the expectation is
+ * independent of the implementation under test. */
+function fitLengthLocal(input: Float32Array, length: number): Float32Array {
+  if (input.length === length) return input;
+  const out = new Float32Array(length);
+  out.set(input.subarray(0, Math.min(length, input.length)));
+  return out;
+}
+
+/** The MODEL-rate estimates the service must have accumulated from a chunk
+ * built with the same `gainFor` -- including the mono fold (average of the
+ * model's two channels), reproduced independently. */
+function modelEstimatesFrom(
+  modelChannels: Float32Array[],
+  channelCount: number,
+  gainFor: (s: number, c: number) => number
+): Float32Array[][] {
+  const samples = modelChannels[0].length;
+  const out: Float32Array[][] = [];
+  for (let s = 0; s < STEM_COUNT; s++) {
+    const perChannel: Float32Array[] = [];
+    for (let c = 0; c < channelCount; c++) {
+      const arr = new Float32Array(samples);
+      if (channelCount === 1) {
+        const left = new Float32Array(samples);
+        const right = new Float32Array(samples);
+        for (let n = 0; n < samples; n++) {
+          left[n] = modelChannels[0][n] * gainFor(s, 0);
+          right[n] = modelChannels[0][n] * gainFor(s, 1);
+        }
+        for (let n = 0; n < samples; n++) arr[n] = (left[n] + right[n]) / 2;
+      } else {
+        for (let n = 0; n < samples; n++) arr[n] = modelChannels[c][n] * gainFor(s, c);
+      }
+      perChannel.push(arr);
+    }
+    out.push(perChannel);
+  }
+  return out;
+}
+
+/** Rebuilds -- independently of the service -- exactly what `partitionStems`
+ * must have been handed: host-order estimates reordered to ruling-6 order and
+ * carried back UP to the document rate with the app's own windowed-sinc. */
+function expectedPartition(modelEstimates: Float32Array[][], doc: AudioDocument) {
+  const hostForLabel = [0, 1, 3, 2];
+  const docLength = doc.channels[0].length;
+  const estimates = hostForLabel.map((h) =>
+    modelEstimates[h].map((ch) =>
+      fitLengthLocal(resampleChannel(ch, MODEL_SAMPLE_RATE, doc.sampleRate), docLength)
+    )
+  );
+  return partitionStems(doc.channels, estimates, { collectStats: true });
+}
+
+function expectBitExact(actual: Float32Array, expected: Float32Array, label: string): void {
+  expect(actual.length).toBe(expected.length);
+  for (let n = 0; n < expected.length; n++) {
+    if (actual[n] !== expected[n]) {
+      throw new Error(
+        `${label}: first difference at sample ${n} -- got ${actual[n]}, expected ${expected[n]}`
+      );
+    }
+  }
 }
 
 function requestChannels(backend: StemBackend): Float32Array[] {
@@ -218,12 +296,12 @@ async function waitForRequest(backend: StemBackend): Promise<void> {
  * chunk, then {ok:true}. */
 async function driveSuccess(
   backend: StemBackend,
-  opts: { segments?: number; corrupt?: (data: Float32Array) => void } = {}
+  opts: ChunkOptions & { segments?: number } = {}
 ): Promise<void> {
   const segments = opts.segments ?? 3;
   await waitForRequest(backend);
   for (let i = 1; i <= segments; i++) backend.emitProgress({ segment: i, totalSegments: segments });
-  backend.emitChunk(buildChunk(requestChannels(backend), opts.corrupt));
+  backend.emitChunk(buildChunk(requestChannels(backend), opts));
   backend.settle({ ok: true, totalSegments: segments });
 }
 
@@ -284,7 +362,7 @@ function expectReconstructs(
   expect(worstUlps).toBeLessThanOrEqual(2);
   // ...and in absolute terms below one ULP at full scale (~ -138 dBFS).
   expect(worstAbs).toBeLessThan(1.5e-7);
-  expect(exactFraction).toBeGreaterThan(0.5);
+  expect(exactFraction).toBeGreaterThan(0.99);
 }
 
 function rms(a: Float32Array): number {
@@ -306,6 +384,8 @@ afterEach(async () => {
   // Nothing may outlive a test: an in-flight run holds a store subscription
   // and (in production) a utility process.
   await cancelStemSeparation();
+  _setStaleWatchForTest(true);
+  jest.restoreAllMocks();
   delete (window as { electronAPI?: unknown }).electronAPI;
 });
 
@@ -903,5 +983,317 @@ describe('model state', () => {
     expect(result.ok).toBe(false);
     if (result.ok) throw new Error('unreachable');
     expect(result.status).toBe('failed');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 10. Fix round 1 — the invariants the review proved were unpinned
+// ---------------------------------------------------------------------------
+
+describe('the DELIVERY-TIME staleness gate, on its own (review MED-1)', () => {
+  // The early-abort store subscription normally fires first, so a plain edit
+  // never reaches the delivery-time check. With the watch off, the delivery
+  // gate is the ONLY thing standing between a changed document and stems
+  // computed from audio that no longer exists (ruling 7).
+
+  it('discards the result when the source was edited and nothing aborted the run', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+    _setStaleWatchForTest(false);
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    useAppStore.getState().updateDocument({
+      ...doc,
+      channels: [makeSignal(HALF_SECOND_48K, 31), makeSignal(HALF_SECOND_48K, 32)],
+    });
+    // The run was never aborted: the host finishes normally and reports ok.
+    backend.emitChunk(buildChunk(requestChannels(backend)));
+    backend.settle({ ok: true, totalSegments: 3 });
+
+    const result = await promise;
+    expect(backend.cancelCalls).toBe(0); // proof the early path never ran
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('stale');
+  });
+
+  it('discards the result when the source was closed and nothing aborted the run', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+    _setStaleWatchForTest(false);
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    const modelChannels = requestChannels(backend);
+    useAppStore.getState().closeDocument(doc.id);
+    backend.emitChunk(buildChunk(modelChannels));
+    backend.settle({ ok: true, totalSegments: 3 });
+
+    const result = await promise;
+    expect(backend.cancelCalls).toBe(0);
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('source-closed');
+  });
+});
+
+describe('ruling 4 leg 2 — the RETURN resample, pinned bit-exactly (review MED-2)', () => {
+  // The reconstruction metric can NEVER pin this leg: a linear resampler
+  // leaves above-Nyquist content in the estimates, whose masks then route it
+  // into the Residual, which makes the exact-sum numbers look BETTER. So the
+  // leg is pinned against `resampleChannel`'s own output instead: the whole
+  // partition is recomputed here from the chunk the backend sent, and every
+  // stem sample must match bit for bit.
+
+  it('produces exactly the partition of resampleChannel-carried estimates (48 kHz)', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc({ sampleRate: 48000 });
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    const modelChannels = requestChannels(backend);
+    backend.emitChunk(buildChunk(modelChannels));
+    backend.settle({ ok: true, totalSegments: 3 });
+    const output = expectOk(await promise);
+
+    const expected = expectedPartition(modelEstimatesFrom(modelChannels, 2, (st) => HOST_GAINS[st]), doc);
+    for (let i = 0; i < STEM_LABELS.length; i++) {
+      for (let c = 0; c < 2; c++) {
+        expectBitExact(output.stems[i].channels[c], expected.stems[i][c], `${STEM_LABELS[i]} ch${c}`);
+      }
+    }
+    for (let c = 0; c < 2; c++) {
+      expectBitExact(output.residual[c], expected.residual[c], `residual ch${c}`);
+    }
+  });
+
+  it('fits an estimate whose resample round trip drifts by a sample (review LOW-8)', async () => {
+    const backend = installStemApi();
+    // 24006 @ 48 kHz -> 22056 @ 44.1 kHz -> 24007 back: one sample of drift,
+    // which without the tail fit would be a partitionStems shape error.
+    const doc = seedDoc({ sampleRate: 48000, length: 24006 });
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    const modelChannels = requestChannels(backend);
+    expect(modelChannels[0].length).toBe(22056);
+    expect(resampleChannel(modelChannels[0], MODEL_SAMPLE_RATE, 48000).length).toBe(24007);
+
+    backend.emitChunk(buildChunk(modelChannels));
+    backend.settle({ ok: true, totalSegments: 3 });
+    const output = expectOk(await promise);
+
+    expect(output.lengthSamples).toBe(24006);
+    for (const stem of output.stems) for (const ch of stem.channels) expect(ch.length).toBe(24006);
+    expectReconstructs('48 kHz stereo, drifting round-trip length', output, doc.channels);
+  });
+
+  it('averages the model two channels on the mono fold (review LOW-9)', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc({ channelCount: 1, sampleRate: 48000 });
+    // Per-stem ASYMMETRY: taking the left channel only would change the
+    // relative stem energies, and therefore the masks, and therefore the
+    // stems. A symmetric fixture cannot tell the two apart (the ratio mask is
+    // scale-invariant).
+    const gainFor = (st: number, c: number) => HOST_GAINS[st] * (c === 1 ? st + 1 : 1);
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    const modelChannels = requestChannels(backend);
+    backend.emitChunk(buildChunk(modelChannels, { gainFor }));
+    backend.settle({ ok: true, totalSegments: 3 });
+    const output = expectOk(await promise);
+
+    const expected = expectedPartition(modelEstimatesFrom(modelChannels, 1, gainFor), doc);
+    for (let i = 0; i < STEM_LABELS.length; i++) {
+      expectBitExact(output.stems[i].channels[0], expected.stems[i][0], `${STEM_LABELS[i]} mono`);
+    }
+    expectBitExact(output.residual[0], expected.residual[0], 'residual mono');
+  });
+});
+
+describe('the always-resolves contract under allocation failure (review MED-3)', () => {
+  it('settles failed when the RETURN-leg resample throws', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+    const realResample = resampleModule.resampleChannel;
+    jest
+      .spyOn(resampleModule, 'resampleChannel')
+      .mockImplementation((input: Float32Array, from: number, to: number) => {
+        if (from === MODEL_SAMPLE_RATE) throw new RangeError('Array buffer allocation failed');
+        return realResample(input, from, to);
+      });
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await driveSuccess(backend);
+
+    // The headline contract: RESOLVES, never rejects.
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/allocation failed/);
+    expect(backend.showMessageBox).toHaveBeenCalled();
+    expect(backend.liveListeners).toBe(0);
+    expect(isStemSeparationRunning()).toBe(false);
+  });
+
+  it('settles failed when the OUTGOING-leg resample throws', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+    jest.spyOn(resampleModule, 'resampleChannel').mockImplementation(() => {
+      throw new RangeError('Array buffer allocation failed');
+    });
+
+    const result = await separateStems({ sourceDocId: doc.id });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('failed');
+    expect(backend.separateCalls).toBe(0);
+    expect(isStemSeparationRunning()).toBe(false);
+  });
+});
+
+describe('a model that contributed nothing must FAIL, not report success (review MED-5)', () => {
+  it('refuses an all-NaN model output instead of returning silent stems', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await driveSuccess(backend, {
+      corrupt: (data) => data.fill(NaN),
+    });
+    const result = await promise;
+
+    // Sanitisation alone would have produced 4 silent stems, residual === mix,
+    // and a cheerful `ok` -- a copy with extra steps presented as a separation.
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/no usable output/i);
+    // The cause is surfaced, not just the symptom.
+    expect(result.message).toMatch(/non-finite/i);
+    expect(backend.showMessageBox).toHaveBeenCalled();
+  });
+
+  it('still succeeds for a genuinely SILENT document (all-zero masks are correct there)', async () => {
+    const backend = installStemApi();
+    const silent = createDocument({
+      name: 'Silence.wav',
+      sampleRate: 48000,
+      channels: [new Float32Array(HALF_SECOND_48K), new Float32Array(HALF_SECOND_48K)],
+      filePath: 'D:\\Silence.wav',
+    });
+    useAppStore.getState().addDocument(silent);
+
+    const promise = separateStems({ sourceDocId: silent.id });
+    await driveSuccess(backend);
+    const output = expectOk(await promise);
+
+    expect(output.stats!.maxMaskSum).toBe(0);
+    for (const ch of output.residual) for (let n = 0; n < ch.length; n++) expect(ch[n]).toBe(0);
+  });
+});
+
+describe('chunk-boundary discipline (review LOW-10, LOW-11)', () => {
+  it('does not let a DUPLICATED region stand in for an undelivered one', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    const modelChannels = requestChannels(backend);
+    const half = Math.floor(modelChannels[0].length / 2);
+    const firstHalf = modelChannels.map((ch) => ch.subarray(0, half)) as Float32Array[];
+    // Same region twice: a naive delivered-sample COUNT would read as complete.
+    backend.emitChunk(buildChunk(firstHalf));
+    backend.emitChunk(buildChunk(firstHalf));
+    backend.settle({ ok: true, totalSegments: 2 });
+
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/incomplete/i);
+  });
+
+  it('accepts overlapping chunks that genuinely tile the track', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    const modelChannels = requestChannels(backend);
+    const total = modelChannels[0].length;
+    const cut = Math.floor(total * 0.6);
+    backend.emitChunk(buildChunk(modelChannels.map((ch) => ch.subarray(0, cut)) as Float32Array[]));
+    backend.emitChunk({
+      ...buildChunk(modelChannels.map((ch) => ch.subarray(cut - 100, total)) as Float32Array[]),
+      offset: cut - 100,
+    });
+    backend.settle({ ok: true, totalSegments: 2 });
+
+    expectOk(await promise);
+  });
+
+  it('drops a chunk that runs past the end of the track', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await waitForRequest(backend);
+    const modelChannels = requestChannels(backend);
+    // offset 1 with a full-length payload ends one sample past modelLength.
+    backend.emitChunk({ ...buildChunk(modelChannels), offset: 1 });
+    backend.settle({ ok: true, totalSegments: 2 });
+
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('failed');
+    expect(result.message).toMatch(/incomplete/i);
+  });
+});
+
+describe('the renderer length cap (review MED-4)', () => {
+  it('refuses a job whose model-rate length exceeds the measured renderer budget', async () => {
+    const backend = installStemApi();
+    // A low-rate document reaches the cap with a small fixture: 4 M samples at
+    // 4 kHz resample UP to 44.1 M at the model rate, past the 39 690 000
+    // (15 min) cap, without allocating a 15-minute buffer in the test.
+    const long = createDocument({
+      name: 'Long.wav',
+      sampleRate: 4000,
+      channels: [new Float32Array(4_000_000)],
+      filePath: 'D:\\Long.wav',
+    });
+    useAppStore.getState().addDocument(long);
+
+    const result = await separateStems({ sourceDocId: long.id });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) throw new Error('unreachable');
+    expect(result.status).toBe('too-long');
+    expect(result.message).toMatch(/15 minutes/);
+    expect(backend.separateCalls).toBe(0);
+    expect(isStemSeparationRunning()).toBe(false);
+  });
+});
+
+describe('utility-process lifetime on a dead IPC channel (review LOW-12)', () => {
+  it('kills the utility process when the separate invoke rejects', async () => {
+    const backend = installStemApi();
+    backend.invokeThrows = 'IPC channel closed';
+    const doc = seedDoc();
+
+    const result = await separateStems({ sourceDocId: doc.id });
+
+    expect(result.ok).toBe(false);
+    // A rejected invoke says nothing about the CHILD: without an explicit
+    // cancel the manager's utility process outlives the run it belonged to.
+    expect(backend.cancelCalls).toBe(1);
+    expect(isStemSeparationRunning()).toBe(false);
   });
 });

@@ -177,7 +177,7 @@ describe('closeGuard (Task F8 native close guard)', () => {
         expect(dialog.showMessageBox).toHaveBeenCalledWith(
           win,
           expect.objectContaining({
-            message: 'The editor is busy (a save or export may be running). Quit anyway?',
+            message: 'The editor is busy (a save, export or stem separation may be running). Quit anyway?',
             buttons: ['Quit', 'Cancel'],
           })
         );

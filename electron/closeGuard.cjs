@@ -159,7 +159,7 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS, aut
       // unhandled rejection this .catch exists to prevent.
       void confirmQuit(
         win,
-        'The editor is busy (a save or export may be running). Quit anyway?'
+        'The editor is busy (a save, export or stem separation may be running). Quit anyway?'
       ).catch(() => {
         try {
           destroyIfAlive(win);
