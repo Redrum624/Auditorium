@@ -183,8 +183,9 @@ export interface ClipFadeSpec {
  * continuous only when both ramps traverse their FULL `1 -> 0` / `0 -> 1`
  * range over ONE shared region. A facing fade shorter or longer than the
  * overlap ends its ramp mid-region at a non-extreme value, and the `1/k`
- * normalisation switching off there steps the gain audibly (measured: an
- * equal-power pair whose fade-in ends mid-overlap steps ~1.7 dB). So partial
+ * normalisation switching off there steps the gain audibly (derived, not
+ * measured: an equal-power fade-in ending at the overlap midpoint steps from
+ * `1/k` to 1 with `k = sqrt(3/2)` -- 1.76 dB). So partial
  * facing fades stay HONEST SOLO FADES over a raw sum -- still click-free,
  * because every solo envelope is itself continuous -- and only the exact
  * pairing X5's gesture maintains (both facing fades == the overlap) engages

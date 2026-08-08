@@ -25,8 +25,10 @@ import type { Clip, Session, Track } from './session';
 // Where only ONE clip sounds and every graph gain is exactly 1, both paths
 // compute float32(sample * env) from identical doubles -- compared EXACTLY.
 // Where two clips overlap, the sums differ by at most an ulp or two of
-// float32 (~1e-7); compared against 1e-6, three orders of magnitude below
-// any envelope error a real fade bug produces (>= 1e-2). Fixtures keep
+// float32 (~1e-7); compared against 1e-6, well below the smallest realistic
+// envelope error (an off-by-one ramp denominator shifts mid-ramp samples in
+// these fixtures by ~2e-3; the absolute anchors, asserting at 5e-7, catch
+// even that). Fixtures keep
 // |sum| < 1 and tracks unmuted so the clamp/mute/length divergences (which
 // predate fades) never enter the comparison (per coupling C6).
 // ---------------------------------------------------------------------------
@@ -411,6 +413,33 @@ describe('MultitrackPlayer fade baking (buffer contents)', () => {
     }
     expect(bufA[599]).toBe(Math.fround(0.6)); // superseded solo fade: untouched before the overlap
     expect(bufB[400]).toBe(Math.fround(0.4)); // and after it
+  });
+
+  it('bakes a ONE-sample crossfade at the law midpoint t = 0.5 into both members (no 0/0 ramp)', () => {
+    // The player-side twin of the mixdown fixture: w = 1 has no i/(w-1) to
+    // evaluate (0/0 = NaN straight into the AudioBuffer); the bake must take
+    // the midpoint t = 0.5 for the single shared sample.
+    const { player, ctx } = makePlayer();
+    const s = session([
+      track({
+        clips: [
+          clip({ documentId: 'a', startSample: 0, lengthSample: 500, fadeOutSample: 1 }),
+          clip({ documentId: 'b', startSample: 499, lengthSample: 500, fadeInSample: 1 }),
+        ],
+      }),
+    ]);
+    player.play(0, s, docs(monoDoc('a', 0.6, 500), monoDoc('b', 0.4, 500)));
+
+    const bufA = ctx.sources[0].buffer?.copied[0];
+    const bufB = ctx.sources[1].buffer?.copied[0];
+    if (!bufA || !bufB) throw new Error('missing baked buffers');
+    const { gOut, gIn } = crossfadeGains(0.5, 0);
+    expect(Number.isNaN(bufA[499])).toBe(false);
+    expect(Number.isNaN(bufB[0])).toBe(false);
+    expect(bufA[499]).toBe(Math.fround(Math.fround(0.6) * gOut));
+    expect(bufB[0]).toBe(Math.fround(Math.fround(0.4) * gIn));
+    expect(bufA[498]).toBe(Math.fround(0.6)); // untouched up to the single shared sample
+    expect(bufB[1]).toBe(Math.fround(0.4)); // and after it
   });
 
   it('applies one envelope identically to both channels of a stereo clip', () => {

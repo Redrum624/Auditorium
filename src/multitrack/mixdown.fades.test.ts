@@ -406,6 +406,75 @@ describe('mixdownSession same-track overlap crossfade (the canonical pair)', () 
     expect(L[50]).toBe(1);
   });
 
+  it('renders a ONE-sample overlap at the law midpoint t = 0.5 (no 0/0 ramp, both members shaped)', () => {
+    // w = 1: a one-sample ramp has no `i / (w - 1)` to evaluate -- that
+    // expression is 0/0 = NaN, and the master clamp passes NaN straight
+    // through into a rendered file. The implementation must take the
+    // midpoint t = 0.5 instead: both sides sounding at equal, k-normalised
+    // level for the single shared sample.
+    const a = constDoc('a', 0.6, 500);
+    const b = constDoc('b', 0.4, 500);
+    const s = session([
+      track({
+        pan: -1,
+        clips: [
+          clip({ documentId: 'a', startSample: 0, lengthSample: 500, fadeOutSample: 1 }),
+          clip({ documentId: 'b', startSample: 499, lengthSample: 500, fadeInSample: 1 }),
+        ],
+      }),
+    ]);
+    const [L] = mixdownSession(s, docsMap(a, b)).channels;
+    expect(Number.isNaN(L[499])).toBe(false);
+    const { gOut, gIn } = crossfadeGains(0.5, 0);
+    expect(L[499]).toBeCloseTo(0.6 * gOut + 0.4 * gIn, 6);
+    expect(L[498]).toBe(Math.fround(0.6)); // A untouched right up to the overlap
+    expect(L[500]).toBe(Math.fround(0.4)); // B untouched right after it
+  });
+
+  it('keeps the pair armed when neighbours BUTT-JOIN the overlap exactly (intrusion boundary strictness)', () => {
+    // One clip ends exactly at the overlap start and another starts exactly
+    // at the overlap end -- the NORMAL butt-joined multitrack layout, not an
+    // exotic one. Neither is inside the region, so the canonical pair must
+    // still crossfade; an off-by-one in the intrusion comparison would
+    // silently disarm the feature for the most common arrangement (the
+    // degradation is the solo-fade fallback -- wrong level, no corruption --
+    // which is exactly why only a value pin can notice it).
+    const a = constDoc('a', 0.6, 1000);
+    const b = constDoc('b', 0.4, 1000);
+    const c = constDoc('c', 0.2, 400);
+    const s = session([
+      track({
+        pan: -1,
+        clips: [
+          clip({
+            documentId: 'a',
+            startSample: 0,
+            lengthSample: 1000,
+            fadeOutSample: 400,
+            fadeOutCurve: 'equal-gain',
+          }),
+          clip({
+            documentId: 'b',
+            startSample: 600,
+            lengthSample: 1000,
+            fadeInSample: 400,
+            fadeInCurve: 'equal-gain',
+          }),
+          clip({ documentId: 'c', startSample: 200, lengthSample: 400 }), // ends at 600 == overlap start
+          clip({ documentId: 'c', startSample: 1000, lengthSample: 400 }), // starts at 1000 == overlap end
+        ],
+      }),
+    ]);
+    const [L] = mixdownSession(s, docsMap(a, b, c)).channels;
+    // The overlap itself contains neither neighbour, so its samples are the
+    // pure pair law -- k-normalised equal-gain, distinguishable from the
+    // solo-fade fallback by > 1e-3 at these positions.
+    for (const j of [50, 200, 350]) {
+      const { gOut, gIn } = crossfadeGains(j / 399, 0, 'equal-gain');
+      expect(L[600 + j]).toBeCloseTo(0.6 * gOut + 0.4 * gIn, 6);
+    }
+  });
+
   it('supports a chain A-B-C: one clip can be incoming on one edge and outgoing on the other', () => {
     // A [0,1000) out-fade 200; B [800,1800) in-fade 200 AND out-fade 300;
     // C [1500,2500) in-fade 300. Both pairs are canonical and their regions
