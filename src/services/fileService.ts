@@ -16,6 +16,7 @@ import { invalidatePeaks } from './peaksCache';
 import { clearHistory, markSavePoint, invalidateSavePoint } from './undoHistory';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { invalidateTempo, invalidateRemix } from './tempoAnalysis';
+import { releaseBeatGrid } from './beatGrid';
 // Two layers, two calls: `tempoAnalysis.invalidateRemix` drops the cached
 // remix-level ANALYSIS row; `remixService.invalidateRemixSession` drops the
 // remix SESSION (plan, locks, rejections, its retained `sourceChannelRefs`
@@ -574,6 +575,13 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   // document count rather than the pre-close one (Task M9 fix round 1 /
   // MINOR 4 — corrects a misleading "read BEFORE" comment here).
   const wasLoaded = playbackEngine.loadedDocumentId === docId;
+
+  // Task B1: BEFORE the close, not after — `releaseBeatGrid` drops this
+  // document's own provenance link AND hands its (small) beat grid to every
+  // derived document that inherits it, which it can only read while the
+  // document is still in the store and its tempo cache row is still armed.
+  // Both of those are gone by the next two lines.
+  releaseBeatGrid(docId);
 
   store().closeDocument(docId);
   clearHistory(docId);

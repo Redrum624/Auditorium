@@ -16,6 +16,7 @@ import {
   _setPlanWorkerThresholdForTest,
 } from './remixService';
 import { clearAllTempo, clearAllRemix as clearAllRemixAnalysis } from './tempoAnalysis';
+import { getBeatGrid, clearBeatGridLinks, _getBeatGridLinkForTest } from './beatGrid';
 import { createDocument, docLength, replaceRegion, type AudioDocument } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { applyEdit } from './editOps';
@@ -172,6 +173,7 @@ beforeEach(() => {
   clearAllTempo();
   clearAllRemixAnalysis();
   clearAllRemix();
+  clearBeatGridLinks();
   _resetTempoWorkerTestState();
   _resetRemixPlanWorkerTestState();
   _setPlanWorkerThresholdForTest(null);
@@ -260,6 +262,22 @@ describe('createRemixDocument — document creation (acceptance 1, 2)', () => {
     expect(getHistory(source.id).done.length).toBe(sourceBefore);
     // Matches Mix Down: a brand-new document has no history and is not dirty.
     expect(liveDoc(result.remixDocId).dirty).toBe(false);
+  }, 15000);
+
+  it('(B1) the remix document does NOT inherit the source\'s beat grid — its samples are a REARRANGEMENT, not a partition', async () => {
+    const source = seedSource(2);
+
+    const result = await createRemixDocument({ sourceDocId: source.id, targetSample: TARGET_1_JOIN });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+
+    // The source necessarily has a remix-level analysis by now, so it HAS a
+    // grid — the remix document still gets none, because the parent's beat
+    // positions do not describe the rearranged timeline. Inheriting them would
+    // draw tics where the remix has no measured beat.
+    expect(getBeatGrid(source.id)).not.toBeNull();
+    expect(_getBeatGridLinkForTest(result.remixDocId)).toBeUndefined();
+    expect(getBeatGrid(result.remixDocId)).toBeNull();
   }, 15000);
 
   it('(12) a MONO source produces a MONO remix document', async () => {

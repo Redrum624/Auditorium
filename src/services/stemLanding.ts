@@ -94,6 +94,7 @@ import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCac
 import { createClip, createTrack, type Session, type Track } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { useAppStore } from '../stores/appStore';
+import { linkDerivedDocument } from './beatGrid';
 import { STEM_LABELS, type StemSeparationOutput } from './stemService';
 
 /**
@@ -200,6 +201,17 @@ export function landStems(output: StemSeparationOutput): StemLandingResult {
   // Residual — the diagnostic leftover — as the active document. The headline
   // output is the first stem, so activate that instead.
   app.setActiveDocument(docs[0].id);
+
+  // Task B1: this is the only moment the SOURCE document's id is in scope for
+  // the stems, so it is where their beat-grid provenance is recorded. Every
+  // stem is a time-aligned partition of the source at the same rate and the
+  // same length, so its grid IS the source's grid — an identity copy, no rate
+  // or offset conversion. Without the link each stem would have to be analysed
+  // on its own, which thrashes the 4-row analysis cache (5 stems + source) and
+  // can land a bass stem on a half-time tempo, drawing five disagreeing grids
+  // for one recording. `linkDerivedDocument` re-verifies the rate/length
+  // precondition and simply declines if it ever stops holding.
+  for (const doc of docs) linkDerivedDocument(doc.id, output.sourceDocId);
 
   const tracks: Track[] = docs.map((doc, i) => {
     const track = createTrack(STEM_TRACK_LABELS[i]);

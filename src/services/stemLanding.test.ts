@@ -26,6 +26,7 @@ import {
   MONO_PAN_COMPENSATION_DB,
   STEM_TRACK_LABELS,
 } from './stemLanding';
+import { clearBeatGridLinks, _getBeatGridLinkForTest } from './beatGrid';
 
 // ---------------------------------------------------------------------------
 // Fixtures — a local generator per file, this repo's convention
@@ -176,6 +177,7 @@ function measureIdentity(
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(44100);
+  clearBeatGridLinks();
 });
 
 // ---------------------------------------------------------------------------
@@ -525,6 +527,40 @@ describe('over-unity sources — the ±1 master clamp', () => {
     // ...and the clamp is NOT defeated: the mixdown still never exceeds ±1.
     for (const side of mixdownCurrentSession().channels) {
       for (let i = 0; i < side.length; i++) expect(Math.abs(side[i])).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('records beat-grid provenance for every stem, so the five tracks share ONE grid (Task B1)', () => {
+    const source = addSourceDocument(2, 44100);
+    const result = landStems(makeOutput(source));
+
+    expect(result.documentIds).toHaveLength(5);
+    for (const docId of result.documentIds) {
+      expect(_getBeatGridLinkForTest(docId)).toEqual({ parentDocId: source.id, detached: false });
+    }
+    // The source itself inherits from nothing.
+    expect(_getBeatGridLinkForTest(source.id)).toBeUndefined();
+  });
+
+  it('records provenance for a MONO source too — dual-mono stems keep the same time base', () => {
+    const source = addSourceDocument(1, 44100);
+    const result = landStems(makeOutput(source));
+
+    expect(result.monoRoutedAsDualMono).toBe(true);
+    for (const docId of result.documentIds) {
+      expect(_getBeatGridLinkForTest(docId)?.parentDocId).toBe(source.id);
+    }
+  });
+
+  it('records NO provenance when the source document is already gone — there is nothing to inherit', () => {
+    const source = addSourceDocument(2, 44100);
+    const output = makeOutput(source);
+    useAppStore.getState().closeDocument(source.id);
+
+    const result = landStems(output);
+
+    for (const docId of result.documentIds) {
+      expect(_getBeatGridLinkForTest(docId)).toBeUndefined();
     }
   });
 
