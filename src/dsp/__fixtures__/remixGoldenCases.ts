@@ -15,14 +15,14 @@
  * |---------------------|--------------------------------------------------------------|
  * | `centred-cap-tail`  | `crossfadeGains` on the centred branch, at the QUARTER-BEAT   |
  * |                     | width cap (trap T48), plus the 1500 ms quarter-cosine tail    |
- * |                     | fade (`applyQuarterCosineFadeOut`)                            |
+ * |                     | fade (equal-power, buffer-end anchored)                       |
  * | `preroll-cap`       | `crossfadeGains` on the pre-roll branch (which reads back its |
  * |                     | own already-written, already-float32-rounded output), also at |
  * |                     | the cap; no tail fade                                         |
  * | `exact-trim`        | the 5 ms end-anchored linear fade after an exact-length trim  |
- * |                     | (`applyLinearFadeOut`), applied to sliced COPIES              |
+ * |                     | (equal-gain, buffer-end anchored) on sliced COPIES            |
  * | `tail-overflow`     | the tail-overflow taper ending at an arbitrary position       |
- * |                     | (`applyLinearFadeOutEndingAt`), reaching BACKWARD past the    |
+ * |                     | (equal-gain, arbitrary end position), reaching BACKWARD past  |
  * |                     | cursor into the previous segment's audio                      |
  *
  * ## Why the widths are what they are
@@ -32,8 +32,10 @@
  * quarter beat period -- 4410 samples, 100 ms -- so the rendered width is the
  * CAP's, not the request's. That is the path auto-remix actually takes at any
  * tempo above ~125 BPM, and a pin that stopped short of it would not cover it
- * (trap T48). `expectCapBelowRequestMs` on those cases asserts the cap really
- * bites, so a future edit to the fixture cannot silently stop exercising it.
+ * (trap T48). Those cases carry `expect.requestedMsAboveCap`, which the test
+ * turns into an assertion that the cap really bites AND that the render at
+ * the cap is identical to the render at the request -- so a future edit to the
+ * fixture cannot silently stop exercising it.
  */
 import type { RemixAnalysis } from '../remixFeatures';
 import type { RemixSegment, RemixJoin } from '../remixPlan';

@@ -8,6 +8,11 @@
  *
  * ## The gain law is EXACT, not a heuristic blend
  *
+ * (The law itself now lives in `fades.ts` -- v1.9 X1 extracted it so the
+ * manual clip crossfades use the same implementation -- and is re-exported
+ * from here. It is restated below because the shape selection, the
+ * micro-alignment and the tail treatment in this file are all built on it.)
+ *
  * `theta = pi*t/2`, `g0 = cos(theta)`, `g1 = sin(theta)`,
  * `k = sqrt(1 + 2*rho*g0*g1)`, `gOut = g0/k`, `gIn = g1/k`. Then
  * `gOut^2 + gIn^2 + 2*rho*gOut*gIn = (g0^2+g1^2+2*rho*g0*g1)/k^2 = 1`
@@ -141,6 +146,12 @@
 import type { RemixAnalysis } from './remixFeatures';
 import type { PlanRemixResult } from './remixPlan';
 import { ONSET_HOP } from './tempoCore';
+import { crossfadeGains, applyFadeOut, applyFadeOutEndingAt } from './fades';
+
+/** Re-exported so this module's public surface is unchanged by the v1.9 move
+ * of the gain law into `fades.ts` (X1). The law itself, its `rho` contract
+ * and the reason `gIn` is not a fade-in curve are all documented there. */
+export { crossfadeGains };
 
 /** The `ok: true` arm of `PlanRemixResult` -- the only shape `renderRemix`
  * ever consumes (a caller must have already handled `ok: false` itself). */
@@ -210,37 +221,15 @@ const MIN_TAIL_FADE_MS = 2;
 const ONSET_PEAK_RADIUS = 2;
 
 // ---------------------------------------------------------------------------
-// crossfadeGains / normalizedCorrelation / bestAlignLag
+// normalizedCorrelation / bestAlignLag
+//
+// The gain law itself (`crossfadeGains`) moved to `fades.ts` in v1.9 (X1), so
+// that the manual clip crossfades share ONE implementation with auto-remix;
+// it is re-exported at the top of this file, and its full rationale (the
+// exactness proof, the `rho >= 0` clamp and its measured cost, and why `gIn`
+// is not a fade-in curve) lives there. What stays here is everything that
+// MEASURES the `rho` the law is fed, which is specific to this renderer.
 // ---------------------------------------------------------------------------
-
-/** See the module doc comment, "The gain law is EXACT". `t` and `rho` are
- * both clamped to `[0,1]` defensively (this is meant to be usable as a
- * standalone, robust pure function, not merely an internal helper).
- *
- * WHY `rho` IS CLAMPED TO `>= 0`, NOT JUST `<= 1` (fix round 1, Important 4
- * -- previously unmeasured/undocumented): `k = sqrt(1+2*rho*g0*g1)` is only
- * safely bounded away from zero for `rho >= 0` (`g0*g1 <= 0.5`, so `k^2 in
- * [1,2]`, as the module doc comment says). For `rho < 0`, `k` SHRINKS -- at
- * `t=0.5` (`g0=g1=1/sqrt(2)`, `g0*g1=0.5`), `k = sqrt(1+rho)`, which is
- * SINGULAR at `rho=-1` (unbounded gain right at the point genuinely
- * anti-correlated material would need it most). The spec's own
- * `clamp(rho,0,1)` sidesteps this by never handing a negative `rho` to the
- * formula at all -- the cost is that genuinely anti-correlated material
- * (rho < 0) is rendered as if `rho=0` (plain equal-power), which
- * UNDER-delivers power rather than over-delivering it: recomputed directly
- * (`gOut=cos,gIn=sin` at `t=0.5`, power `= 1+2*rho*gOut*gIn = 1+rho`), the
- * dip is `-1.25 dB` at `rho=-0.25`, `-3.01 dB` at `rho=-0.50`, `-6.02 dB` at
- * `rho=-0.75` -- an intentional, bounded trade-off (a quiet splice, never a
- * blown-up one) rather than an unmeasured gap. */
-export function crossfadeGains(t: number, rho: number): { gOut: number; gIn: number } {
-  const tc = Math.max(0, Math.min(1, t));
-  const rc = Math.max(0, Math.min(1, rho));
-  const theta = (Math.PI * tc) / 2;
-  const g0 = Math.cos(theta);
-  const g1 = Math.sin(theta);
-  const k = Math.sqrt(1 + 2 * rc * g0 * g1);
-  return { gOut: g0 / k, gIn: g1 / k };
-}
 
 /** Cosine-similarity-style normalised correlation (no mean subtraction) --
  * the same convention `wsola.ts`'s `bestMatchOffset` uses for its own
@@ -500,50 +489,27 @@ function clampPreRollX(xBase: number, laActual: number, bStartAligned: number): 
 
 // ---------------------------------------------------------------------------
 // Fades
+//
+// The three fade helpers this file used to define privately moved to
+// `fades.ts` in v1.9 (X1) and are consumed from there. Nothing about what
+// they compute changed -- each curve is written in `fades.ts` in the exact
+// float form it had here, and `remixRender.golden.test.ts` pins this file's
+// rendered output bit-for-bit across the move.
+//
+// The three call sites below are the only fades this renderer applies. Two of
+// their arguments used to be baked into three separate function names and are
+// now explicit, which is the point of the move -- both are load-bearing:
+//
+//   curve          'equal-power' is the 1500 ms quarter-cosine tail fade;
+//                  'equal-gain' is the linear one used by the exact-length
+//                  trim and by the tail-overflow taper.
+//   singletonGain  what a ONE-SAMPLE window returns, where there is no
+//                  `i/(n-1)` to evaluate. The tail-overflow taper passes 0
+//                  because it must meet adjacent zero-padded silence at
+//                  exactly zero; the two end-of-buffer fades keep the default
+//                  1 because zeroing a legitimate final sample would be a
+//                  click, not a fade.
 // ---------------------------------------------------------------------------
-
-function applyQuarterCosineFadeOut(channels: Float32Array[], fadeLen: number): void {
-  if (fadeLen <= 0) return;
-  const len = channels[0].length;
-  const start = Math.max(0, len - fadeLen);
-  const n = len - start;
-  for (let i = 0; i < n; i++) {
-    const g = n > 1 ? Math.cos((i / (n - 1)) * (Math.PI / 2)) : 1;
-    for (let c = 0; c < channels.length; c++) channels[c][start + i] *= g;
-  }
-}
-
-function applyLinearFadeOut(channels: Float32Array[], fadeLen: number): void {
-  if (fadeLen <= 0) return;
-  const len = channels[0].length;
-  const start = Math.max(0, len - fadeLen);
-  const n = len - start;
-  for (let i = 0; i < n; i++) {
-    const g = n > 1 ? 1 - i / (n - 1) : 1;
-    for (let c = 0; c < channels.length; c++) channels[c][start + i] *= g;
-  }
-}
-
-/**
- * Linear fade-out over `[endPos-fadeLen, endPos)` -- unlike
- * `applyLinearFadeOut` (always anchored to the buffer's own end), this
- * fades a window ending at an ARBITRARY position. Used for the tail
- * overflow taper (fix round 3): the window immediately AFTER `endPos` is
- * assumed to already be silence (zero-padded, real audio ran out), so this
- * forces the window's LAST sample to exactly `0` (even for a single-sample
- * window, unlike `applyLinearFadeOut`'s `n=1 -> g=1`) -- the point is
- * CONTINUITY with that adjacent silence, not "trail off gently over a
- * fixed span" the way the true end-of-buffer fades are.
- */
-function applyLinearFadeOutEndingAt(channels: Float32Array[], endPos: number, fadeLen: number): void {
-  if (fadeLen <= 0) return;
-  const start = Math.max(0, endPos - fadeLen);
-  const n = endPos - start;
-  for (let i = 0; i < n; i++) {
-    const g = n > 1 ? 1 - i / (n - 1) : 0;
-    for (let c = 0; c < channels.length; c++) channels[c][start + i] *= g;
-  }
-}
 
 // ---------------------------------------------------------------------------
 // renderRemix
@@ -743,7 +709,7 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
   // join's own lag clamp) reads as zero via `writeRange`'s existing
   // out-of-bounds fallback -- exactly as before round 2 -- and the REAL
   // audio immediately preceding that already-silent region is then faded
-  // OUT linearly (see `applyLinearFadeOutEndingAt`, below) so the
+  // OUT linearly (see `applyFadeOutEndingAt`, below) so the
   // transition into that necessary silence is smooth rather than a click.
   // This keeps
   // EVERYTHING rounds 1-2 won: forward alignment still applies in full,
@@ -771,11 +737,17 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
     // `finalEffEnd` and this tail reads from exactly `finalEffEnd` onward
     // (see above), so output samples before `cursor` are CONTIGUOUS source
     // audio with what follows -- a taper spanning that boundary crosses no
-    // splice. `applyLinearFadeOutEndingAt` clamps its start at 0, so a fade
+    // splice. `applyFadeOutEndingAt` clamps its start at 0, so a fade
     // longer than everything written so far is safe too.
+    //
+    // `singletonGain: 0` -- the window immediately AFTER `endPos` is already
+    // silence (zero-padded, the real audio ran out), so this fade's job is
+    // CONTINUITY with that silence: its last sample must be exactly 0 even
+    // when the window is a single sample, unlike the end-of-buffer fades
+    // whose job is to trail off over a fixed span.
     const validLen = tailLen - tailOverflow;
     const fadeLen = Math.max(tailOverflow, Math.round((MIN_TAIL_FADE_MS / 1000) * sr));
-    applyLinearFadeOutEndingAt(channels, cursor + validLen, fadeLen);
+    applyFadeOutEndingAt(channels, cursor + validLen, fadeLen, 'equal-gain', 0);
   }
   cursor += tailLen;
 
@@ -830,14 +802,17 @@ export function renderRemix(source: Float32Array[], analysis: RemixAnalysis, pla
     const trimLen = Math.max(0, Math.round(plan.targetSample));
     const outChannels = channels.map((c) => c.slice(0, trimLen));
     const fadeLen = Math.min(Math.round((EXACT_TRIM_FADE_MS / 1000) * sr), outChannels[0].length);
-    applyLinearFadeOut(outChannels, fadeLen);
+    // Applied to `.slice()` COPIES, never to the live render buffer.
+    applyFadeOut(outChannels, fadeLen, 'equal-gain');
     return { channels: outChannels, joinSamples, nudgeSamples, rhos, shapes };
   }
 
   const reachesFileEnd = analysis.analyzedEndSample >= sourceLen;
   if (!reachesFileEnd) {
     const fadeLen = Math.min(Math.round(TAIL_FADE_SECONDS * sr), channels[0].length);
-    applyQuarterCosineFadeOut(channels, fadeLen);
+    // Mutates the buffer that is about to be returned -- deliberately, not a
+    // copy: this IS the render's tail treatment.
+    applyFadeOut(channels, fadeLen, 'equal-power');
   }
 
   return { channels, joinSamples, nudgeSamples, rhos, shapes };
