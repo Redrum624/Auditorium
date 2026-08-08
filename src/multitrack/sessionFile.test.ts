@@ -553,6 +553,277 @@ describe('parseSessionFileBytes (sniff-and-dispatch)', () => {
   });
 });
 
+// v1.9 X2: clip fades persist as OPTIONAL keys inside the existing v3 JSON
+// clip records, with `formatVersion` STAYING 3. Three compatibility
+// directions are pinned here: a pre-fade file loads with fades absent; a
+// no-fade session writes bytes identical to the v1.8.0 layout; and a
+// fade-carrying file stays readable by a v1.8.0-era parser (whose clip
+// handling is a validation-free spread — demonstrated on the real parse path
+// via an unknown-key probe, since the old build itself cannot run here).
+describe('.audm clip fades (v1.9 X2)', () => {
+  /** One 4-sample doc, one track, one clip whose record carries `clipExtras`
+   * verbatim — the hand-built shape a hand-edited/foreign/corrupt file would
+   * present to the parser. */
+  function v3WithClip(clipExtras: object, lengthSample = 1000): ArrayBuffer {
+    const payload = new Uint8Array(16); // 4 float32 samples
+    const meta = {
+      formatVersion: 3,
+      session: {
+        name: 'S',
+        sampleRate: 44100,
+        tracks: [
+          trackJson('track-1', [
+            { id: 'clip-1', documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample, gainDb: 0, ...clipExtras },
+          ]),
+        ],
+      },
+      audio: [{ docId: 'doc-1', name: 'a.wav', sampleRate: 44100, length: 4, channels: [{ offset: 0, byteLength: 16 }] }],
+    };
+    return buildV3Buffer(meta, payload);
+  }
+
+  it('round-trips fade lengths and curves through v3, inside the JSON clip records, still as formatVersion 3', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    clip.fadeInSample = 25;
+    clip.fadeOutSample = 40;
+    clip.fadeInCurve = 'smooth';
+    clip.fadeOutCurve = 'equal-gain';
+    track.clips = [clip];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    // Container is unchanged: same magic, same version — a v1.8.0 build's
+    // dispatcher and version check both still accept this file.
+    expect(new TextDecoder().decode(bytes.subarray(0, 6))).toBe('AUDM3\n');
+    const jsonByteLength = new DataView(bytes.buffer).getUint32(6, true);
+    const rawMeta = JSON.parse(new TextDecoder().decode(bytes.subarray(10, 10 + jsonByteLength)));
+    expect(rawMeta.formatVersion).toBe(3);
+    // The fade keys live in the JSON clip record itself, not in any binary
+    // structure (there is none for clips) — self-describing, order-free.
+    expect(rawMeta.session.tracks[0].clips[0].fadeInSample).toBe(25);
+    expect(rawMeta.session.tracks[0].clips[0].fadeOutCurve).toBe('equal-gain');
+
+    const { session: restored } = parseSessionFileV3(bytes.buffer);
+    const restoredClip = restored.tracks[0].clips[0];
+    expect(restoredClip.fadeInSample).toBe(25);
+    expect(restoredClip.fadeOutSample).toBe(40);
+    expect(restoredClip.fadeInCurve).toBe('smooth');
+    expect(restoredClip.fadeOutCurve).toBe('equal-gain');
+  });
+
+  it('a pre-fade (v1.8.0-written) .audm loads with all four fade keys absent and no error', () => {
+    const result = parseSessionFileBytes(v3WithClip({}, 4));
+
+    expect(result.droppedClipCount).toBe(0);
+    const clip = result.session.tracks[0].clips[0];
+    expect(clip.lengthSample).toBe(4);
+    expect('fadeInSample' in clip).toBe(false);
+    expect('fadeOutSample' in clip).toBe(false);
+    expect('fadeInCurve' in clip).toBe(false);
+    expect('fadeOutCurve' in clip).toBe(false);
+  });
+
+  it('a session with NO fades set serializes byte-identically to the v1.8.0 layout (hand-assembled expectation)', () => {
+    // The expectation below is assembled independently of serializeSessionV3,
+    // following the documented v3 byte layout and the exact key insertion
+    // order the v1.8.0 factories produced (createTrack/createClip literal
+    // order, fileShape order formatVersion/session/audio). If the model
+    // change ever leaks a fade key (or reorders keys) into no-fade output,
+    // this comparison goes red — that would break "a v1.9 save opens in
+    // v1.8.0 byte-for-byte the same".
+    const samples = new Float32Array([0.25, -0.5, 1, -1]);
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [samples] });
+    const track = createTrack('T');
+    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 4 });
+    track.clips = [clip];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    const expectedShape = {
+      formatVersion: 3,
+      session: {
+        name: 'S',
+        sampleRate: 44100,
+        tracks: [
+          {
+            id: track.id,
+            name: 'T',
+            volumeDb: 0,
+            pan: 0,
+            muted: false,
+            solo: false,
+            armed: false,
+            clips: [
+              { id: clip.id, documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 4, gainDb: 0 },
+            ],
+          },
+        ],
+      },
+      audio: [{ docId: doc.id, name: 'a.wav', sampleRate: 44100, length: 4, channels: [{ offset: 0, byteLength: 16 }] }],
+    };
+    const expectedJson = new TextEncoder().encode(JSON.stringify(expectedShape));
+    const expected = new Uint8Array(10 + expectedJson.byteLength + 16);
+    expected.set(new TextEncoder().encode('AUDM3\n'), 0);
+    new DataView(expected.buffer).setUint32(6, expectedJson.byteLength, true);
+    expected.set(expectedJson, 10);
+    expected.set(new Uint8Array(samples.buffer), 10 + expectedJson.byteLength);
+
+    expect(Array.from(bytes)).toEqual(Array.from(expected));
+  });
+
+  it('a cleared fade (undefined in memory) writes no key — "no fade" round-trips to "no key on disk"', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    clip.fadeInSample = undefined; // the exact in-memory state setClipFade leaves after clearing
+    clip.fadeInCurve = 'smooth'; // a curve choice DOES persist
+    track.clips = [clip];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    const jsonByteLength = new DataView(bytes.buffer).getUint32(6, true);
+    const rawClip = JSON.parse(new TextDecoder().decode(bytes.subarray(10, 10 + jsonByteLength))).session
+      .tracks[0].clips[0];
+    expect('fadeInSample' in rawClip).toBe(false);
+    expect(rawClip.fadeInCurve).toBe('smooth');
+  });
+
+  it('the v3 parse path never validates or rejects clip keys — the tolerance a v1.8.0 reader applies to OUR fade keys', () => {
+    // A v1.8.0 build's clip handling is this same spread-through code minus
+    // the fade sanitizer: to it, `fadeInSample` is exactly what
+    // `futureUnknownKey` is to the current build. Proving (on the real parse
+    // path) that an unknown clip key neither throws nor gets stripped is the
+    // mechanism by which a fade-carrying v1.9 file opens in v1.8.0 — the old
+    // reader simply carries the keys it does not know.
+    const result = parseSessionFileV3(v3WithClip({ fadeInSample: 25, futureUnknownKey: 'kept' }, 1000));
+
+    const clip = result.session.tracks[0].clips[0] as unknown as Record<string, unknown>;
+    expect(clip.fadeInSample).toBe(25);
+    expect(clip.futureUnknownKey).toBe('kept');
+  });
+
+  describe('parse-time sanitization of hand-edited/corrupt fade keys (trap T15)', () => {
+    it.each([
+      ['a negative length', { fadeInSample: -50 }],
+      ['a string length', { fadeInSample: '100' }],
+      ['a null length', { fadeInSample: null }],
+      ['a boolean length', { fadeInSample: true }],
+    ])('drops %s entirely (no fade, no key)', (_label, extras) => {
+      const clip = parseSessionFileV3(v3WithClip(extras)).session.tracks[0].clips[0];
+      expect('fadeInSample' in clip).toBe(false);
+    });
+
+    it('drops a non-finite numeric length (raw `1e999` parses as Infinity)', () => {
+      // JSON.stringify cannot produce `1e999`, so assemble the JSON text by hand.
+      const payload = new Uint8Array(16);
+      const meta = {
+        formatVersion: 3,
+        session: {
+          name: 'S',
+          sampleRate: 44100,
+          tracks: [
+            trackJson('track-1', [
+              { id: 'clip-1', documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000, gainDb: 0, fadeInSample: '__INF__' },
+            ]),
+          ],
+        },
+        audio: [{ docId: 'doc-1', name: 'a.wav', sampleRate: 44100, length: 4, channels: [{ offset: 0, byteLength: 16 }] }],
+      };
+      const jsonBytes = new TextEncoder().encode(JSON.stringify(meta).replace('"__INF__"', '1e999'));
+      const out = new Uint8Array(10 + jsonBytes.byteLength + payload.byteLength);
+      out.set(new TextEncoder().encode('AUDM3\n'), 0);
+      new DataView(out.buffer).setUint32(6, jsonBytes.byteLength, true);
+      out.set(jsonBytes, 10);
+      out.set(payload, 10 + jsonBytes.byteLength);
+
+      const clip = parseSessionFileV3(out.buffer).session.tracks[0].clips[0];
+      expect('fadeInSample' in clip).toBe(false);
+    });
+
+    it('rounds a fractional length', () => {
+      const clip = parseSessionFileV3(v3WithClip({ fadeOutSample: 100.6 })).session.tracks[0].clips[0];
+      expect(clip.fadeOutSample).toBe(101);
+    });
+
+    it('normalizes an explicit zero back to "no key"', () => {
+      const clip = parseSessionFileV3(v3WithClip({ fadeInSample: 0 })).session.tracks[0].clips[0];
+      expect('fadeInSample' in clip).toBe(false);
+    });
+
+    it('clamps a fade longer than its clip to the clip length', () => {
+      const clip = parseSessionFileV3(v3WithClip({ fadeInSample: 5000 }, 1000)).session.tracks[0].clips[0];
+      expect(clip.fadeInSample).toBe(1000);
+    });
+
+    it('resolves crossing fades with fade-in priority: in is kept, out gets the remainder', () => {
+      const clip = parseSessionFileV3(v3WithClip({ fadeInSample: 800, fadeOutSample: 600 }, 1000)).session
+        .tracks[0].clips[0];
+      expect(clip.fadeInSample).toBe(800);
+      expect(clip.fadeOutSample).toBe(200);
+    });
+
+    it.each([
+      ['non-numeric garbage', 'garbage'],
+      // A numeric STRING would clamp "successfully" through JS coercion in
+      // Math.min/max — the typeof guard is what refuses to clamp against it.
+      ['a numeric string', '1000'],
+    ])(
+      'drops fades entirely when lengthSample itself is %s (never clamps against a non-number)',
+      (_label, lengthSample) => {
+        const clip = parseSessionFileV3(v3WithClip({ fadeInSample: 100, lengthSample })).session.tracks[0]
+          .clips[0];
+        expect('fadeInSample' in clip).toBe(false);
+      }
+    );
+
+    it('drops an unknown curve and keeps a valid one', () => {
+      const clip = parseSessionFileV3(
+        v3WithClip({ fadeInCurve: 'bogus', fadeOutCurve: 'smooth', fadeOutSample: 100 })
+      ).session.tracks[0].clips[0];
+      expect('fadeInCurve' in clip).toBe(false);
+      expect(clip.fadeOutCurve).toBe('smooth');
+      expect(clip.fadeOutSample).toBe(100);
+    });
+  });
+
+  it('fades survive the legacy v2 JSON path too (shared finalize/sanitize)', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });
+    const track = createTrack('T');
+    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    clip.fadeOutSample = 30;
+    clip.fadeOutCurve = 'exponential';
+    track.clips = [clip];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { json } = serializeSession(session, [doc]);
+    const restoredClip = parseSessionFile(json).session.tracks[0].clips[0];
+
+    expect(restoredClip.fadeOutSample).toBe(30);
+    expect(restoredClip.fadeOutCurve).toBe('exponential');
+  });
+
+  it('fade keys keep the JSON metadata slice tiny (T16 — a couple of numbers, never a fat payload)', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(1000)] });
+    const track = createTrack('T');
+    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 1000 });
+    clip.fadeInSample = 400;
+    clip.fadeOutSample = 400;
+    clip.fadeInCurve = 'equal-power';
+    clip.fadeOutCurve = 'exponential';
+    track.clips = [clip];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    expect(new DataView(bytes.buffer).getUint32(6, true)).toBeLessThan(2000);
+  });
+});
+
 describe('markers (.audm)', () => {
   it('serializeSession (legacy v2) embeds markers only for docs referenced by a clip', () => {
     const referenced = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(100)] });

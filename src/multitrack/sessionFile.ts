@@ -1,7 +1,9 @@
 import { bumpIdCounter, createDocument, docLength, nextId, type AudioDocument } from '../audio/AudioDocument';
 import { decodeWav, encodeWav } from '../audio/wavCodec';
 import { useAppStore, type Marker } from '../stores/appStore';
-import type { Session } from './session';
+import type { Clip, Session } from './session';
+import { clampFadePair } from './session';
+import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import { useSessionStore } from './sessionStore';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
@@ -11,7 +13,20 @@ import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCac
  * into a raw binary payload, so no monolithic JS string is ever built for the
  * audio content (the V8 string-length cap made v2 throw a RangeError once
  * embedded audio crossed ~402MB — see F3). The loader accepts all three; only
- * v3 is ever written by `saveSessionViaDialog`. */
+ * v3 is ever written by `saveSessionViaDialog`.
+ *
+ * v1.9 (X2): clips may additionally carry OPTIONAL fade keys (`fadeInSample`,
+ * `fadeOutSample`, `fadeInCurve`, `fadeOutCurve` — see `session.ts`). These
+ * ride inside the existing JSON clip records with `formatVersion` STAYING 3:
+ * absent keys mean "no fade", so every pre-fade `.audm` still loads, a
+ * session saved without fades is byte-identical to what v1.8.0 wrote, and a
+ * fade-carrying file still opens in a v1.8.0 build (its parser spreads clip
+ * records through untouched, so unknown keys are simply carried). Bumping the
+ * version instead would be a data-loss-class change: `parseSessionFileV3`
+ * hard-rejects any `formatVersion !== 3` (an equality, not a floor), so a v4
+ * file would be unreadable by every shipped build. Fade keys from disk are
+ * UNTRUSTED and normalized in `finalizeParsedSession` (see
+ * `sanitizeClipFades`). */
 const FORMAT_VERSION = 2;
 const SUPPORTED_VERSIONS = new Set([1, 2]);
 
@@ -288,6 +303,50 @@ function seedDocCounterFromRawClips(rawSession: { tracks: { clips: { documentId:
  * parsed from a WAV/MP3/FLAC/OGG file's own embedded cue points/tags (see
  * fileService's seeding chain).
  */
+function sanitizeFadeLength(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) return 0;
+  return Math.max(0, Math.round(v));
+}
+
+function sanitizeFadeCurve(v: unknown): FadeCurve | undefined {
+  return typeof v === 'string' && (FADE_CURVES as readonly string[]).includes(v) ? (v as FadeCurve) : undefined;
+}
+
+/** v1.9 X2 (trap T15): fade keys arrive from disk UNVALIDATED — the JSON is
+ * cast, never checked, so a hand-edited or corrupt `.audm` can carry
+ * anything. This re-establishes the Clip fade invariant (`session.ts`) at the
+ * parse boundary so no consumer downstream has to defend itself:
+ *  - a fade length that isn't a finite number (string, null, `1e999`) is
+ *    dropped; a fractional one is rounded; a negative one becomes "no fade";
+ *  - the pair is clamped to `fadeIn + fadeOut <= lengthSample` with the
+ *    fade-IN preserved when they'd cross (there is no "edited edge" here, so
+ *    the rule is fixed: in first, out gets the remainder) — against a
+ *    non-numeric `lengthSample` (nothing validates clip geometry either) both
+ *    fades drop to 0 rather than clamping against garbage;
+ *  - an unknown curve string is dropped (absent = `DEFAULT_FADE_CURVE`);
+ *  - zero-length results lose their key entirely, so "no fade" round-trips
+ *    back to "no key on disk".
+ * Unknown OTHER keys are deliberately preserved by the spread — the same
+ * tolerance that lets a v1.8.0 build open a fade-carrying file is extended to
+ * whatever a future version adds. */
+function sanitizeClipFades(clip: Clip): Clip {
+  const len = typeof clip.lengthSample === 'number' && Number.isFinite(clip.lengthSample) ? clip.lengthSample : 0;
+  const pair = clampFadePair(sanitizeFadeLength(clip.fadeInSample), sanitizeFadeLength(clip.fadeOutSample), len, 'in');
+  const inCurve = sanitizeFadeCurve(clip.fadeInCurve);
+  const outCurve = sanitizeFadeCurve(clip.fadeOutCurve);
+
+  const out: Clip = { ...clip };
+  delete out.fadeInSample;
+  delete out.fadeOutSample;
+  delete out.fadeInCurve;
+  delete out.fadeOutCurve;
+  if (pair.fadeIn > 0) out.fadeInSample = pair.fadeIn;
+  if (pair.fadeOut > 0) out.fadeOutSample = pair.fadeOut;
+  if (inCurve !== undefined) out.fadeInCurve = inCurve;
+  if (outCurve !== undefined) out.fadeOutCurve = outCurve;
+  return out;
+}
+
 function finalizeParsedSession(
   parsedSession: Session,
   idMap: Map<string, string>,
@@ -301,7 +360,7 @@ function finalizeParsedSession(
     tracks: parsedSession.tracks.map((t) => ({
       ...t,
       clips: t.clips
-        .map((c) => ({ ...c, documentId: idMap.get(c.documentId) ?? c.documentId }))
+        .map((c) => sanitizeClipFades({ ...c, documentId: idMap.get(c.documentId) ?? c.documentId }))
         .filter((c) => {
           const keep = recreatedIds.has(c.documentId);
           if (!keep) droppedClipCount++;

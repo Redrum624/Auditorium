@@ -488,3 +488,257 @@ describe('setClipGain', () => {
     expect(useSessionStore.getState().session).toBe(before);
   });
 });
+
+// v1.9 X2. setClipFade is THE clamp boundary for clip fades — X4 binds UI
+// inputs to it verbatim and re-implements nothing, so these tests pin the
+// policy X4 (and X3's envelope indexing) relies on.
+describe('setClipFade', () => {
+  beforeEach(() => {
+    useSessionStore.getState().newSession(44100);
+  });
+
+  function seedClip(lengthSample = 1000): string {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const clip = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample });
+    store.addClip(trackId, clip);
+    return clip.id;
+  }
+
+  it('sets fade-in length and curve on the target clip only', () => {
+    const clipId = seedClip();
+    const other = createClip({ documentId: 'doc-1', startSample: 5000, offsetSample: 0, lengthSample: 100 });
+    useSessionStore.getState().addClip(useSessionStore.getState().session.tracks[0].id, other);
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 250, curve: 'smooth' });
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBe(250);
+    expect(clip.fadeInCurve).toBe('smooth');
+    expect(clip.fadeOutSample).toBeUndefined();
+    expect(clip.fadeOutCurve).toBeUndefined();
+    expect(findClip(other.id)!.fadeInSample).toBeUndefined();
+  });
+
+  it('sets fade-out independently of fade-in', () => {
+    const clipId = seedClip();
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 100 });
+
+    useSessionStore.getState().setClipFade(clipId, 'out', { lengthSample: 300, curve: 'exponential' });
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBe(100);
+    expect(clip.fadeOutSample).toBe(300);
+    expect(clip.fadeOutCurve).toBe('exponential');
+    expect(clip.fadeInCurve).toBeUndefined();
+  });
+
+  it('rounds a fractional length to the nearest integer', () => {
+    const clipId = seedClip();
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 100.4 });
+    expect(findClip(clipId)!.fadeInSample).toBe(100);
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 100.6 });
+    expect(findClip(clipId)!.fadeInSample).toBe(101);
+  });
+
+  it('clamps a fade to the clip length', () => {
+    const clipId = seedClip(1000);
+
+    useSessionStore.getState().setClipFade(clipId, 'out', { lengthSample: 5000 });
+
+    expect(findClip(clipId)!.fadeOutSample).toBe(1000);
+  });
+
+  it('cannot cross the standing opposite fade — the edited fade yields, the standing one is untouched', () => {
+    const clipId = seedClip(1000);
+    useSessionStore.getState().setClipFade(clipId, 'out', { lengthSample: 600 });
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 800 }); // only 400 remain
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBe(400);
+    expect(clip.fadeOutSample).toBe(600); // standing fade wins
+  });
+
+  it('allows the two fades to exactly meet (fadeIn + fadeOut === lengthSample)', () => {
+    const clipId = seedClip(1000);
+    useSessionStore.getState().setClipFade(clipId, 'out', { lengthSample: 600 });
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 400 });
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBe(400);
+    expect(clip.fadeOutSample).toBe(600);
+  });
+
+  it('a negative request clears the fade to "no fade" (undefined, not 0)', () => {
+    const clipId = seedClip();
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 250 });
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: -10 });
+
+    expect(findClip(clipId)!.fadeInSample).toBeUndefined();
+  });
+
+  it('a zero request clears the fade but keeps the curve choice', () => {
+    const clipId = seedClip();
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 250, curve: 'smooth' });
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 0 });
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBeUndefined();
+    expect(clip.fadeInCurve).toBe('smooth'); // persists for when the fade returns
+  });
+
+  it('ignores a non-finite length request instead of clamping it', () => {
+    const clipId = seedClip();
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: 250 });
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: Number.NaN });
+    expect(findClip(clipId)!.fadeInSample).toBe(250);
+
+    useSessionStore.getState().setClipFade(clipId, 'in', { lengthSample: Number.POSITIVE_INFINITY });
+    expect(findClip(clipId)!.fadeInSample).toBe(250);
+  });
+
+  it('rejects an unknown curve at runtime (the type does not protect a JS caller)', () => {
+    const clipId = seedClip();
+
+    useSessionStore
+      .getState()
+      .setClipFade(clipId, 'in', { curve: 'bogus' as unknown as import('../dsp/fades').FadeCurve });
+
+    expect(findClip(clipId)!.fadeInCurve).toBeUndefined();
+  });
+
+  it('accepts a curve-only patch on a clip with no fade length', () => {
+    const clipId = seedClip();
+
+    useSessionStore.getState().setClipFade(clipId, 'out', { curve: 'equal-gain' });
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeOutCurve).toBe('equal-gain');
+    expect(clip.fadeOutSample).toBeUndefined();
+  });
+
+  it('is a no-op for an unknown clip id', () => {
+    const before = useSessionStore.getState().session;
+    useSessionStore.getState().setClipFade('clip-does-not-exist', 'in', { lengthSample: 100 });
+    expect(useSessionStore.getState().session).toBe(before);
+  });
+
+  it('is a no-op for a patch with nothing valid in it', () => {
+    const clipId = seedClip();
+    const before = useSessionStore.getState().session;
+    useSessionStore.getState().setClipFade(clipId, 'in', {});
+    expect(useSessionStore.getState().session).toBe(before);
+  });
+});
+
+// v1.9 X2 (trap T17): trimClip rewrites lengthSample via spread, which would
+// silently carry fades past the new clip length. Policy under test: the fade
+// at the UN-trimmed edge is preserved; the fade at the trimmed edge yields.
+describe('trimClip keeps fades coherent', () => {
+  beforeEach(() => {
+    useSessionStore.getState().newSession(44100);
+  });
+
+  function seedFadedClip(opts: {
+    startSample: number;
+    offsetSample: number;
+    lengthSample: number;
+    fadeIn?: number;
+    fadeOut?: number;
+  }): string {
+    const store = useSessionStore.getState();
+    const trackId = store.session.tracks[0].id;
+    const clip = createClip({
+      documentId: 'doc-1',
+      startSample: opts.startSample,
+      offsetSample: opts.offsetSample,
+      lengthSample: opts.lengthSample,
+    });
+    store.addClip(trackId, clip);
+    if (opts.fadeIn) store.setClipFade(clip.id, 'in', { lengthSample: opts.fadeIn });
+    if (opts.fadeOut) store.setClipFade(clip.id, 'out', { lengthSample: opts.fadeOut });
+    return clip.id;
+  }
+
+  it('end trim under the fades: fade-in preserved, fade-out yields the difference', () => {
+    const clipId = seedFadedClip({ startSample: 0, offsetSample: 0, lengthSample: 1000, fadeIn: 300, fadeOut: 300 });
+
+    useSessionStore.getState().trimClip(clipId, 'end', 400); // new length 400 < 300+300
+
+    const clip = findClip(clipId)!;
+    expect(clip.lengthSample).toBe(400);
+    expect(clip.fadeInSample).toBe(300);
+    expect(clip.fadeOutSample).toBe(100);
+  });
+
+  it('end trim past the fade-in: fade-in clamps to the clip, fade-out is squeezed out entirely (undefined)', () => {
+    const clipId = seedFadedClip({ startSample: 0, offsetSample: 0, lengthSample: 1000, fadeIn: 300, fadeOut: 300 });
+
+    useSessionStore.getState().trimClip(clipId, 'end', 100); // new length 100 < fadeIn alone
+
+    const clip = findClip(clipId)!;
+    expect(clip.lengthSample).toBe(100);
+    expect(clip.fadeInSample).toBe(100);
+    expect(clip.fadeOutSample).toBeUndefined();
+  });
+
+  it('start trim under the fades: fade-out preserved, fade-in yields (mirror of the end trim)', () => {
+    const clipId = seedFadedClip({ startSample: 0, offsetSample: 0, lengthSample: 1000, fadeIn: 300, fadeOut: 300 });
+
+    useSessionStore.getState().trimClip(clipId, 'start', 600); // new length 400
+
+    const clip = findClip(clipId)!;
+    expect(clip.lengthSample).toBe(400);
+    expect(clip.fadeOutSample).toBe(300);
+    expect(clip.fadeInSample).toBe(100);
+  });
+
+  it('a trim that still leaves room for both fades touches neither', () => {
+    const clipId = seedFadedClip({ startSample: 0, offsetSample: 0, lengthSample: 1000, fadeIn: 200, fadeOut: 200 });
+
+    useSessionStore.getState().trimClip(clipId, 'end', 400); // 200+200 === 400 exactly — legal
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBe(200);
+    expect(clip.fadeOutSample).toBe(200);
+  });
+
+  it('a trim that LENGTHENS the clip leaves fades untouched', () => {
+    const clipId = seedFadedClip({ startSample: 0, offsetSample: 0, lengthSample: 1000, fadeIn: 300, fadeOut: 300 });
+
+    useSessionStore.getState().trimClip(clipId, 'end', 5000);
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBe(300);
+    expect(clip.fadeOutSample).toBe(300);
+  });
+
+  it('a fade-free clip trims without gaining fade keys', () => {
+    const clipId = seedFadedClip({ startSample: 0, offsetSample: 0, lengthSample: 1000 });
+
+    useSessionStore.getState().trimClip(clipId, 'end', 400);
+
+    const clip = findClip(clipId)!;
+    expect(clip.fadeInSample).toBeUndefined();
+    expect(clip.fadeOutSample).toBeUndefined();
+  });
+
+  it('moveClip carries fades over unchanged (spread regression guard)', () => {
+    const clipId = seedFadedClip({ startSample: 0, offsetSample: 0, lengthSample: 1000, fadeIn: 250, fadeOut: 100 });
+    const trackB = useSessionStore.getState().session.tracks[1].id;
+
+    useSessionStore.getState().moveClip(clipId, trackB, 2000);
+
+    const clip = findClip(clipId)!;
+    expect(clip.startSample).toBe(2000);
+    expect(clip.fadeInSample).toBe(250);
+    expect(clip.fadeOutSample).toBe(100);
+  });
+});

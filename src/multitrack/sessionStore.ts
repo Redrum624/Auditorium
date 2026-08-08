@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { Clip, Session, Track } from './session';
-import { createTrack } from './session';
+import { clampFadePair, createTrack } from './session';
+import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import {
   purgeClip as purgeClipWaveform,
   clearClipWaveformCache,
@@ -47,11 +48,37 @@ export interface SessionActions {
    * deliberate rather than accidental. */
   addClip(trackId: string, clip: Clip): void; // inserts sorted; an overlapping clip is accepted
   moveClip(clipId: string, toTrackId: string, newStartSample: number): void; // clamps >=0; nudges to nearest free gap
-  trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour
+  trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour; re-clamps fades (X2 — see setClipFade)
   removeClip(clipId: string): void;
   /** Sets a clip's gain trim in dB, clamped to [-24, 24]. No-op for an unknown
    * clip id. Additive (Task 23): wired to the PropertiesPanel's clip gain input. */
   setClipGain(clipId: string, gainDb: number): void;
+  /** Sets one edge's fade length and/or curve (v1.9 X2). THIS ACTION IS THE
+   * CLAMP BOUNDARY — the single place the fade policy lives. X4 binds UI
+   * inputs (handle drags, the Properties panel) straight to it and must NOT
+   * re-implement the clamp; X3 reads the stored values without re-checking.
+   *
+   * The policy, exactly:
+   *  - `fade.lengthSample` (samples at session rate) is rounded to the nearest
+   *    integer, then clamped to `[0, clip.lengthSample - otherFade]` — a fade
+   *    can never exceed its clip and can never cross the opposite fade. The
+   *    STANDING fade wins: asking for more room than the other fade leaves
+   *    shortens the requested fade, never the standing one. (Fades may MEET —
+   *    `fadeIn + fadeOut === lengthSample` is legal.)
+   *  - A resulting length of 0 is stored as `undefined` ("no fade"), so a
+   *    cleared fade writes no key into a saved `.audm`.
+   *  - A non-finite `lengthSample` (NaN/Infinity) is ignored, not clamped.
+   *  - `fade.curve` must be one of `FADE_CURVES` (checked at runtime — the
+   *    type doesn't protect a JS caller); an unknown curve is ignored. A curve
+   *    may be set while the fade length is 0/absent: the choice persists and
+   *    takes effect when the fade gets a length.
+   *  - Unknown clip id, or a patch with nothing valid in it: no-op.
+   *
+   * The same pair invariant is re-established by `trimClip` when a trim
+   * shrinks the clip under an existing fade (there, the fade at the TRIMMED
+   * edge yields — see `reconcileTrimmedFades`) and by `sessionFile.ts` against
+   * hand-edited/foreign files at parse time. */
+  setClipFade(clipId: string, edge: 'in' | 'out', fade: { lengthSample?: number; curve?: FadeCurve }): void;
   setSelectedClip(id: string | null): void;
   setMtCursor(s: number): void;
   setMtZoom(z: SessionState['mtZoom']): void;
@@ -102,6 +129,31 @@ function resolveOverlap(clips: Clip[], length: number, requestedStart: number): 
     if (overlaps) candidate = clipEnd;
   }
   return candidate;
+}
+
+/** v1.9 X2 (trap T17): a trim that shortens a clip must leave its fades
+ * coherent — the spread in `trimClip` carries `fadeInSample`/`fadeOutSample`
+ * over unchanged, so without this they could exceed the new `lengthSample` or
+ * cross each other. Policy: the fade anchored at the UN-trimmed edge is
+ * preserved (clamped only by the new clip length); the fade at the trimmed
+ * edge — the one visually colliding with the boundary the user is dragging —
+ * yields what room remains. A fade squeezed to 0 is normalized back to
+ * `undefined` so it leaves no key behind. Fade-free clips pass through
+ * untouched. Kept as its own function so X5's coming `trimClip` changes and
+ * this fade re-clamp stay separable (coupling C5). */
+function reconcileTrimmedFades(clip: Clip, trimmedEdge: 'start' | 'end'): Clip {
+  const fadeIn = clip.fadeInSample ?? 0;
+  const fadeOut = clip.fadeOutSample ?? 0;
+  if (fadeIn === 0 && fadeOut === 0) return clip;
+  // trimmed 'start' edge => the fade-in yields => the fade-OUT has priority.
+  const priority = trimmedEdge === 'start' ? 'out' : 'in';
+  const next = clampFadePair(fadeIn, fadeOut, clip.lengthSample, priority);
+  if (next.fadeIn === fadeIn && next.fadeOut === fadeOut) return clip;
+  return {
+    ...clip,
+    fadeInSample: next.fadeIn > 0 ? next.fadeIn : undefined,
+    fadeOutSample: next.fadeOut > 0 ? next.fadeOut : undefined,
+  };
 }
 
 function findClipLocation(
@@ -243,6 +295,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         const newEnd = Math.max(newBoundarySample, minEnd);
         updated = { ...clip, lengthSample: newEnd - clip.startSample };
       }
+      updated = reconcileTrimmedFades(updated, edge); // X2: fades must stay within the new length
 
       const tracks = s.session.tracks.map((t, i) =>
         i === loc.trackIdx ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? updated : c)) } : t
@@ -274,6 +327,43 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       const tracks = s.session.tracks.map((t, i) =>
         i === loc.trackIdx
           ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, gainDb: clamped } : c)) }
+          : t
+      );
+      return { session: { ...s.session, tracks } };
+    });
+  },
+
+  setClipFade(clipId, edge, fade) {
+    set((s) => {
+      const loc = findClipLocation(s.session.tracks, clipId);
+      if (!loc) return s;
+      const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
+
+      const patch: Partial<Clip> = {};
+      if (fade.lengthSample !== undefined && Number.isFinite(fade.lengthSample)) {
+        const requested = Math.round(fade.lengthSample);
+        // The STANDING (opposite) fade has priority: clampFadePair preserves
+        // it and gives the edited fade only the room that remains. See the
+        // full policy on the SessionActions declaration.
+        const pair =
+          edge === 'in'
+            ? clampFadePair(requested, clip.fadeOutSample ?? 0, clip.lengthSample, 'out')
+            : clampFadePair(clip.fadeInSample ?? 0, requested, clip.lengthSample, 'in');
+        // Both sides are written back: normally only the edited one changes,
+        // but if the standing fade ever arrived out of range (an invariant
+        // breach upstream) this heals it rather than preserving the breach.
+        patch.fadeInSample = pair.fadeIn > 0 ? pair.fadeIn : undefined;
+        patch.fadeOutSample = pair.fadeOut > 0 ? pair.fadeOut : undefined;
+      }
+      if (fade.curve !== undefined && (FADE_CURVES as readonly string[]).includes(fade.curve)) {
+        if (edge === 'in') patch.fadeInCurve = fade.curve;
+        else patch.fadeOutCurve = fade.curve;
+      }
+      if (Object.keys(patch).length === 0) return s;
+
+      const tracks = s.session.tracks.map((t, i) =>
+        i === loc.trackIdx
+          ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, ...patch } : c)) }
           : t
       );
       return { session: { ...s.session, tracks } };
