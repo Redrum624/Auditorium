@@ -548,6 +548,52 @@ session that never used automation stays byte-identical on disk to what
 earlier versions wrote, and an automation-carrying session still opens in
 v1.9.2 — the lanes are simply not shown there and survive a re-save.
 
+### Spatial placement (the Spatial panel)
+
+The **Spatial** entry on the right-edge icon rail opens a positioner that
+places a track's sound around the listener: a top-down stage (front is up)
+where you drag the source, an elevation slider, and readouts for the three
+position parameters — **azimuth** (direction, −180°..180°, positive to the
+right), **elevation** (−90°..90°) and **distance** (multiples of a reference
+distance, 0..10×).
+
+**What it is — honestly.** The placement is a **stereo projection**:
+amplitude panning (the position's component along the left–right axis) plus
+distance level (unity at or inside the reference circle, −6 dB at 2×, −20 dB
+at 10×). It is **not binaural** — there is no HRTF processing — so a source
+behind you sounds like its mirror in front, and elevation only narrows the
+image toward the centre (straight overhead is dead centre). The panel's
+"Stereo:" readout always shows the actual stereo position and level your
+placement produces.
+
+**Placing and keyframing.** The panel follows the playhead: the dot shows the
+track's spatial automation evaluated at the current position, moving during
+playback. Dragging the dot previews the new position and, on release, writes
+**azimuth and distance keys together** at the playhead (the elevation slider
+does the same for elevation; an unreleased elevation tweak rides along with
+the next stage commit — what the panel shows at release is exactly what
+lands). Keys live on ordinary envelope lanes: the three small toggles open
+the azimuth / elevation / distance lanes on the track for timeline editing
+with the same gestures as volume and pan (click add, drag move, right-click
+delete, double-click curve).
+
+**Spatial supersedes pan.** While any spatial lane has a key, the track's
+placement comes from the spatial position and the pan control — the fader
+*and* a pan envelope — is ignored; the pan slider disables with an
+explanation. Remove the spatial keys to hand placement back to pan.
+
+**The ±180° seam.** Azimuth is a circle, and a segment between two keys
+always travels the **short way** around it: keys at 170° and −170° sweep 20°
+behind the listener, not 340° back across the front. To make a sound travel
+the long way round deliberately, add an intermediate key along the intended
+path (for example at 0° for a front pass). Keys exactly opposite each other
+take the leftward arc, by definition.
+
+Spatial placement renders identically in live playback and Mix Down (baked,
+bit-exact — the same guarantee as volume and pan automation) and saves into
+the `.audm` with everything else; older builds open a spatial session with
+the lanes preserved but inert.
+
 An empty session (no clips on any track) shows an inline hint pointing at
 Insert Active File; the main editor area shows "Open an audio file (Ctrl+O)
 or create a new one (Ctrl+N)" when no document is open in the waveform/

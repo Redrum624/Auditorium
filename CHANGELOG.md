@@ -5,6 +5,85 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-08-09
+
+One feature completes the outstanding-work list: the **spatial panner** — place each
+track's sound around the listener in 3D (azimuth, elevation, distance), drag it live on a
+positioner panel, and automate the position with keys on the timeline. The placement is
+named for what it is: a **stereo projection** — amplitude panning plus distance level —
+**not binaural** (no HRTF, no interaural delay), and the playback≡mixdown invariant holds
+at v1.10's strongest tier across it: the live render is bit-identical to Mix Down even
+while the position sweeps through the ±180° azimuth seam.
+
+### Added
+
+- **Spatial placement: a 3D position per track, automated on the timeline.** Why: pan
+  places a sound on a line; the user asked to move sounds around the listener in 3D, with
+  keys on the timeline. Three new automation parameters — **azimuth** (−180°..180°, 0 =
+  front, positive = right), **elevation** (−90°..90°) and **distance** (0..10× a reference
+  distance) — ride the v1.10 automation system unchanged: the same keys, per-segment
+  curves, hold semantics, snapping, envelope-lane gestures and `.audm` persistence. How to
+  use: the **Spatial** entry on the icon rail opens the positioner — a top-down stage
+  (front = up) with the listener at the centre; drag the source to set direction and
+  distance, the slider beneath for elevation. The panel follows the playhead (the dot
+  moves with automation during playback), previews while you drag, and commits **once on
+  release**, writing azimuth and distance keys together at the playhead; the three lane
+  toggles open ordinary envelope lanes for timeline editing. What is shown during a drag
+  is exactly what lands — including a not-yet-released elevation tweak, which rides the
+  next stage commit.
+- **The projection, stated plainly.** The audible placement is amplitude panning — the
+  position's component along the interaural axis, `sin(azimuth)·cos(elevation)`, fed to
+  the same per-clip pan laws pan automation uses — times the Web Audio inverse distance
+  law (unity at or inside the reference circle, −6 dB at 2×, −20 dB at 10×). It is **not
+  binaural**: a source behind the listener sounds like its mirror in front, elevation only
+  narrows the image toward centre, and there is no interaural time difference (a
+  time-varying delay is a resampling problem that produces Doppler artefacts unless
+  carefully interpolated — omitted rather than approximated). Web Audio's built-in HRTF
+  `PannerNode` was rejected because it has no offline equivalent: what you monitored would
+  no longer be what Mix Down exports. The panel and the docs say all of this; the "Stereo:"
+  readout shows the actual stereo position and level a placement produces.
+- **Azimuth wraps the short way.** The azimuth circle's ±180° seam is a real musical
+  decision: a segment between two keys always travels the **short arc** — keys at 170° and
+  −170° sweep 20° *behind* the listener, never 340° back across the front. **To sweep the
+  long way round deliberately, add an intermediate key along the intended path** (e.g. at
+  0° for a front pass). Keys exactly opposite each other take the leftward arc (a fixed,
+  tested tie-break). The seam is inaudible by construction (the projection is periodic);
+  the envelope lane draws the numeric wrap as a vertical jump, which is the honest picture.
+- **Parity, extended and measured.** Both engines compute spatial gains from one shared
+  TypeScript function (position → projection → pan law → distance gain), baked exactly as
+  volume/pan automation is. Measured in the built app against the real Web Audio engine:
+  with volume and all three spatial lanes moving — azimuth crossing the seam, distance
+  crossing the reference boundary — the live render is **bit-identical to Mix Down (worst
+  error 0, 100 % of samples exact)**, anchored against independently computed law values.
+
+### Changed
+
+- **While any spatial lane has a key, the spatial position IS the track's placement** —
+  the pan fader *and* a pan envelope are superseded entirely (the fader disables with an
+  explanation naming the Spatial panel). Rationale: pan and spatial placement compute the
+  same thing, and composing two placement laws would double-apply position; this is v1.10's
+  override-not-offset ruling one level up. Remove the spatial keys and pan governs again.
+  Byte-identical playback for every session without spatial lanes is pinned, as always.
+- **`.audm` carries the spatial lanes at the same format version (3).** Additive optional
+  keys on the existing per-track `automation` field — nothing else changed, so a spatial
+  session opens in older builds with the lanes preserved-but-inert (the v1.10 mechanism),
+  a session without spatial lanes stays byte-identical on disk, and hostile values from a
+  hand-edited file are clamped or dropped at the parse boundary before either engine sees
+  them.
+- **The end-to-end smoke gains a spatial step**: a real positioner gesture against the
+  built app (one drag → one batched commit of azimuth+distance keys, the pan fader's
+  supersession title asserted from the real DOM), the seam-crossing bit-identity render
+  measurement above with law anchors computed in the harness's own arithmetic (balance law
+  for the stereo fixture, probes guarded off the tone's zero crossings), and a
+  spatial-carrying `.audm` round trip.
+
+### Known gaps
+
+- Rear/elevation cues, ITD and HRTF are consciously out of scope for the stereo
+  projection; the upgrade path (an HRTF backend behind the same position→gains interface)
+  and the frozen-preview commit rule are documented with their reasoning in
+  `docs/KNOWN_LIMITATIONS.md`.
+
 ## [1.10.0] - 2026-08-09
 
 Three features close out the outstanding-work list: **automation keys** — timeline envelopes that make track volume and pan vary over time, the foundation for every future time-varying parameter — plus two effects, **Pitch Correct** (scale-snapped pitch correction) and **Remove Silence** (podcast pause tightening with exact marker remapping). Automation extends the playback≡mixdown invariant to moving parameters and lands it *stronger* than the fades did: the built app's live graph renders bit-identical to Mix Down across a moving envelope, exact to the last float32 bit.
