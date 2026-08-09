@@ -21,6 +21,7 @@ import { channelMixerEffect } from './stereo/ChannelMixerEffect';
 import { panEffect } from './stereo/PanEffect';
 import { timeStretchEffect } from './pitch/TimeStretchEffect';
 import { pitchShiftEffect } from './pitch/PitchShiftEffect';
+import { autoTuneEffect } from './pitch/AutoTuneEffect';
 
 let registered = false;
 
@@ -54,4 +55,5 @@ export function registerAllEffects(): void {
   registerEffect(panEffect);
   registerEffect(timeStretchEffect);
   registerEffect(pitchShiftEffect);
+  registerEffect(autoTuneEffect);
 }

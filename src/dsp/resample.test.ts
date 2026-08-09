@@ -1,4 +1,4 @@
-import { resampleChannel } from './resample';
+import { resampleChannel, resampleVariable } from './resample';
 
 /** Count sign changes (zero crossings) in a signal, ignoring exact zeros. */
 function countZeroCrossings(x: Float32Array, start = 0, end = x.length): number {
@@ -88,5 +88,59 @@ describe('resampleChannel', () => {
       expect(f).toBeGreaterThanOrEqual(0);
       expect(f).toBeLessThanOrEqual(1);
     }
+  });
+});
+
+describe('resampleVariable', () => {
+  function sine(freq: number, n: number, sr: number): Float32Array {
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = Math.sin((2 * Math.PI * freq * i) / sr);
+    return out;
+  }
+
+  it('unit-step integer positions at fc 0.5 reproduce the input to float-sinc precision', () => {
+    // At fc = 0.5 the kernel is 1 at d = 0 and ~0 at every other integer tap —
+    // "~" because Math.sin(π·k) is ≈1.2e-16 rather than exactly 0 for integer k,
+    // so each off-centre tap leaks O(1e-16) (measured: 1.06e-17 at a true-zero
+    // sample). 1e-12 gives two orders of headroom over the 63-tap worst case
+    // while still being far below one 24-bit mantissa step of full-scale audio.
+    const input = sine(440, 4096, 44100);
+    const positions = new Float64Array(input.length);
+    for (let i = 0; i < input.length; i++) positions[i] = i;
+    const out = resampleVariable(input, positions, 0.5);
+    expect(out.length).toBe(input.length);
+    for (let i = 0; i < input.length; i++) {
+      if (Math.abs(out[i] - input[i]) > 1e-12) {
+        throw new Error(`sample ${i}: ${out[i]} vs ${input[i]}`);
+      }
+    }
+  });
+
+  it.each([
+    [44100, 88200], // upsample ×2: step 0.5, fc 0.5
+    [88200, 44100], // downsample ×2: step 2, fc 0.25
+  ])('constant-step positions are byte-identical to resampleChannel (%d → %d)', (from, to) => {
+    // Same per-sample arithmetic, same kernel builder — a constant-step position
+    // array must reproduce the fixed-ratio path exactly, which pins that the
+    // variable path shares (not reimplements) the resampler's behaviour.
+    const input = sine(1000, 8192, from);
+    const fixed = resampleChannel(input, from, to);
+    const step = from / to;
+    const positions = new Float64Array(fixed.length);
+    for (let i = 0; i < fixed.length; i++) positions[i] = i * step;
+    const fc = 0.5 * Math.min(1, to / from);
+    const variable = resampleVariable(input, positions, fc);
+    expect(variable.length).toBe(fixed.length);
+    for (let i = 0; i < fixed.length; i++) {
+      if (variable[i] !== fixed[i]) throw new Error(`sample ${i}: ${variable[i]} !== ${fixed[i]}`);
+    }
+  });
+
+  it('empty positions or empty input yield an empty/zero output with terminal progress 1', () => {
+    const fractions: number[] = [];
+    expect(resampleVariable(new Float32Array(16), new Float64Array(0), 0.5, (f) => fractions.push(f)).length).toBe(0);
+    expect(fractions[fractions.length - 1]).toBe(1);
+    const out = resampleVariable(new Float32Array(0), new Float64Array(4), 0.5);
+    expect(Array.from(out)).toEqual([0, 0, 0, 0]);
   });
 });

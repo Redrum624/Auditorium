@@ -1,4 +1,11 @@
-import { timeStretch, timeStretchLinked, planStretch, computeOffsets, olaWithOffsets } from './wsola';
+import {
+  timeStretch,
+  timeStretchLinked,
+  timeStretchVariableLinked,
+  planStretch,
+  computeOffsets,
+  olaWithOffsets,
+} from './wsola';
 
 const SR = 44100;
 
@@ -259,4 +266,91 @@ describe('timeStretchLinked (stereo-linked WSOLA)', () => {
     }
     expect(maxDevFromOwn).toBeGreaterThan(1e-3);
   }, 15000);
+});
+
+describe('timeStretchVariableLinked', () => {
+  /**
+   * Cumulative-map helpers mirroring how Auto-Tune drives the variable path: a
+   * per-sample ratio rho(i) integrates to S, outLen = round(S[N]), and the
+   * inverse map is found by binary search over S.
+   */
+  function buildMap(N: number, rhoAt: (i: number) => number): { S: Float64Array; outLen: number } {
+    const S = new Float64Array(N + 1);
+    let acc = 0;
+    for (let i = 0; i < N; i++) {
+      acc += rhoAt(i);
+      S[i + 1] = acc;
+    }
+    return { S, outLen: Math.round(S[N]) };
+  }
+
+  function inverseOf(S: Float64Array, N: number): (v: number) => number {
+    return (v: number) => {
+      if (v <= 0) return 0;
+      if (v >= S[N]) return N;
+      let lo = 0;
+      let hi = N;
+      while (hi - lo > 1) {
+        const m = (lo + hi) >> 1;
+        if (S[m] <= v) lo = m;
+        else hi = m;
+      }
+      return lo + (v - S[lo]) / (S[lo + 1] - S[lo]);
+    };
+  }
+
+  it.each([[2], [0.5]])(
+    'a constant dyadic map (ratio %f) is byte-identical to timeStretchLinked, stereo',
+    (ratio) => {
+      // Dyadic ratios keep v/r exact in floating point, so the nominal analysis
+      // starts computed from the map equal round(k·analysisHop) bit-for-bit and
+      // the whole pipeline must reproduce the constant path exactly.
+      const seconds = 0.3;
+      const n = Math.round(seconds * SR);
+      const l = sine(300, seconds);
+      const r = sine(500, seconds);
+      const constant = timeStretchLinked([l, r], SR, ratio);
+      const variable = timeStretchVariableLinked([l, r], SR, Math.round(n * ratio), (v) => v / ratio);
+      expect(variable.length).toBe(2);
+      for (let ch = 0; ch < 2; ch++) {
+        expect(variable[ch].length).toBe(constant[ch].length);
+        for (let i = 0; i < constant[ch].length; i++) {
+          if (variable[ch][i] !== constant[ch][i]) {
+            throw new Error(`ch ${ch} sample ${i}: ${variable[ch][i]} !== ${constant[ch][i]}`);
+          }
+        }
+      }
+    },
+    20000
+  );
+
+  it('tiny input takes the nearest-remap fallback identically to the constant path', () => {
+    const c = new Float32Array([0.5, -0.25, 0.125]);
+    const constant = timeStretchLinked([c, c], SR, 2);
+    const variable = timeStretchVariableLinked([c, c], SR, 6, (v) => v / 2);
+    expect(Array.from(variable[0])).toEqual(Array.from(constant[0]));
+    expect(Array.from(variable[1])).toEqual(Array.from(constant[1]));
+  });
+
+  it('empty input yields the requested output length of zeros', () => {
+    const out = timeStretchVariableLinked([new Float32Array(0)], SR, 0, () => 0);
+    expect(out.length).toBe(1);
+    expect(out[0].length).toBe(0);
+  });
+
+  it('a ramped ratio (1 → 1.06) changes duration to round(∫ρ) while preserving pitch', () => {
+    // Pitch preservation is THE property of the stretch stage: the output of a
+    // 440 Hz sine keeps a ~880 crossings/s zero-crossing rate even while the
+    // local time scale drifts 6%. (Auto-Tune's pitch change comes from the
+    // separate resample stage.)
+    const seconds = 0.5;
+    const n = Math.round(seconds * SR);
+    const input = sine(440, seconds);
+    const { S, outLen } = buildMap(n, (i) => 1 + (0.06 * i) / n);
+    expect(outLen).toBeGreaterThan(n * 1.02); // the map genuinely stretches
+    const out = timeStretchVariableLinked([input], SR, outLen, inverseOf(S, n));
+    expect(out[0].length).toBe(outLen);
+    const zcr = zeroCrossingRate(out[0]);
+    expect(Math.abs(zcr - 2 * 440) / (2 * 440)).toBeLessThan(0.02);
+  }, 20000);
 });

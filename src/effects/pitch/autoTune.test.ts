@@ -1,0 +1,334 @@
+/**
+ * Auto-Tune effect tests. Every numeric bound is a MEASURED value (recorded
+ * 2026-08-08 on this implementation, noted per assertion) plus headroom, and
+ * output pitch is asserted by MEASURING the output's f0 with the detector that
+ * pitchDetect.test.ts validates against known-f0 fixtures — not by "samples
+ * changed".
+ */
+import { autoTuneEffect, correctionCurve, hzToMidi, snapMidiToScale, SCALE_INTERVALS } from './AutoTuneEffect';
+import { getAllEffects } from '../EffectRegistry';
+import { registerAllEffects } from '../registerAll';
+import { detectPitch, type PitchTrack } from '../../dsp/pitchDetect';
+import type { EffectParamValue } from '../types';
+
+const SR = 44100;
+
+function sine(freq: number, seconds: number, amplitude = 1): Float32Array {
+  const n = Math.round(seconds * SR);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = amplitude * Math.sin((2 * Math.PI * freq * i) / SR);
+  return out;
+}
+
+function noise(seconds: number, amplitude: number, seed: number): Float32Array {
+  const n = Math.round(seconds * SR);
+  const out = new Float32Array(n);
+  let state = seed >>> 0;
+  for (let i = 0; i < n; i++) {
+    state = (state * 1664525 + 1013904223) >>> 0;
+    out[i] = amplitude * (state / 2147483648 - 1);
+  }
+  return out;
+}
+
+function cents(a: number, b: number): number {
+  return 1200 * Math.log2(a / b);
+}
+
+/** Runs the effect and asserts the inputs were not mutated (registry contract). */
+function run(channels: Float32Array[], params: Record<string, EffectParamValue>): Float32Array[] {
+  const before = channels.map((c) => Array.from(c));
+  const result = autoTuneEffect.process(channels, SR, params);
+  channels.forEach((c, i) => expect(Array.from(c)).toEqual(before[i]));
+  return result.channels;
+}
+
+/** Median MEASURED f0 over voiced frames whose centre lies in [fromSec, toSec]. */
+function medianF0(x: Float32Array, fromSec: number, toSec: number): number {
+  const track = detectPitch(x, SR);
+  const center = track.frameSamples / 2;
+  const f0s: number[] = [];
+  track.frames.forEach((fr, k) => {
+    const t = (k * track.hopSamples + center) / SR;
+    if (fr.f0Hz !== null && t >= fromSec && t <= toSec) f0s.push(fr.f0Hz);
+  });
+  expect(f0s.length).toBeGreaterThan(0);
+  f0s.sort((a, b) => a - b);
+  return f0s[Math.floor(f0s.length / 2)];
+}
+
+describe('autoTuneEffect — registration and parameter surface', () => {
+  it('registers as auto-tune in Time & Pitch via registerAllEffects', () => {
+    registerAllEffects();
+    const byId = new Map(getAllEffects().map((e) => [e.id, e]));
+    expect(byId.get('auto-tune')?.category).toBe('Time & Pitch');
+    expect(byId.get('auto-tune')?.name).toBe('Auto-Tune');
+  });
+
+  it('ships the derived defaults: key C, chromatic, strength 100 %, retune 50 ms', () => {
+    const p = new Map(autoTuneEffect.params.map((d) => [d.id, d]));
+    expect(p.get('key')?.default).toBe('C');
+    expect(p.get('scale')?.default).toBe('chromatic');
+    expect(p.get('strength')?.default).toBe(100);
+    expect(p.get('retuneMs')?.default).toBe(50);
+  });
+
+  it('retune readout mirrors the one-pole corner 1/(2πτ) and names 0 ms an instant snap', () => {
+    const readout = autoTuneEffect.params.find((d) => d.id === 'retuneMs')?.readout;
+    expect(readout).toBeDefined();
+    const ctx = { regionSamples: SR, sampleRate: SR };
+    expect(readout?.(0, ctx)).toBe('instant snap');
+    // 1/(2π·0.05 s) = 3.183 Hz
+    expect(readout?.(50, ctx)).toBe('corner ≈ 3.2 Hz');
+  });
+});
+
+describe('snapMidiToScale — nearest-note selection (boundary trios per scale gap)', () => {
+  const chromatic = SCALE_INTERVALS.chromatic as readonly number[];
+  const major = SCALE_INTERVALS.major as readonly number[];
+  const minor = SCALE_INTERVALS.minor as readonly number[];
+
+  it('chromatic: below / on / above the half-semitone midpoint', () => {
+    expect(snapMidiToScale(60.499, 0, chromatic)).toBe(60);
+    expect(snapMidiToScale(60.5, 0, chromatic)).toBe(61); // exact tie snaps UP (half-up)
+    expect(snapMidiToScale(60.501, 0, chromatic)).toBe(61);
+    expect(snapMidiToScale(61.0, 0, chromatic)).toBe(61); // exact note is a fixpoint
+  });
+
+  it('C major: C#4 (61) is the midpoint of the C–D whole step — below / on / above', () => {
+    expect(snapMidiToScale(60.99, 0, major)).toBe(60);
+    expect(snapMidiToScale(61.0, 0, major)).toBe(62); // tie snaps UP
+    expect(snapMidiToScale(61.01, 0, major)).toBe(62);
+  });
+
+  it('crosses octave boundaries in both directions (C major)', () => {
+    expect(snapMidiToScale(71.6, 0, major)).toBe(72); // B4 → C5, the next octave's root
+    expect(snapMidiToScale(59.7, 0, major)).toBe(60); // below C4 pulls up to it
+  });
+
+  it('distinguishes the minor third from the major third (root A)', () => {
+    expect(snapMidiToScale(72.4, 9, minor)).toBe(72); // C5 is IN A natural minor
+    expect(snapMidiToScale(72.4, 9, major)).toBe(73); // A major has C#5 instead
+  });
+
+  it('hzToMidi: A4 = 440 Hz is exactly MIDI 69, octaves are ±12', () => {
+    expect(hzToMidi(440)).toBe(69);
+    expect(hzToMidi(880)).toBe(81);
+    expect(hzToMidi(220)).toBe(57);
+  });
+});
+
+describe('correctionCurve — smoothing semantics', () => {
+  const chromatic = SCALE_INTERVALS.chromatic as readonly number[];
+
+  /** All-voiced synthetic track at a constant f0 (hop/frame mirror 44.1 kHz geometry). */
+  function steadyTrack(f0: number, frames: number): PitchTrack {
+    return {
+      frames: Array.from({ length: frames }, () => ({ f0Hz: f0, confidence: 1 })),
+      hopSamples: 441,
+      frameSamples: 2206,
+    };
+  }
+
+  it('retune 0 jumps to the full snapped correction on the first frame', () => {
+    // midi(452) = 69.4664…; chromatic snap → 69 ⇒ correction = −0.46637 st.
+    const corr = correctionCurve(steadyTrack(452, 3), SR, 0, chromatic, 1, 0);
+    const expected = 69 - hzToMidi(452);
+    expect(corr[0]).toBeCloseTo(expected, 10);
+    expect(corr[2]).toBeCloseTo(expected, 10);
+  });
+
+  it('strength scales the correction linearly (50 % ⇒ half the semitone offset)', () => {
+    const corr = correctionCurve(steadyTrack(452, 2), SR, 0, chromatic, 0.5, 0);
+    expect(corr[0]).toBeCloseTo((69 - hzToMidi(452)) / 2, 10);
+  });
+
+  it('retuneMs is the time constant: 1 − e⁻¹ of the step after τ, ~95 % after 3τ', () => {
+    // τ = 100 ms = 10 hops of 10 ms. state(m) = target·(1 − (1−α)^m) with
+    // α = 1 − e^(−hop/τ), so state(10)/target = 1 − e^(−10·hop/τ) = 1 − e⁻¹.
+    const target = 69 - hzToMidi(452);
+    const corr = correctionCurve(steadyTrack(452, 31), SR, 0, chromatic, 1, 100);
+    expect(corr[9] / target).toBeCloseTo(1 - Math.exp(-1), 6); // frame 9 = 10th update
+    expect(corr[29] / target).toBeCloseTo(1 - Math.exp(-3), 6);
+  });
+
+  it('unvoiced frames pull the correction back toward zero with the same constant', () => {
+    const track = steadyTrack(452, 20);
+    for (let k = 10; k < 20; k++) track.frames[k] = { f0Hz: null, confidence: 0 };
+    const corr = correctionCurve(track, SR, 0, chromatic, 1, 0);
+    expect(corr[9]).not.toBe(0);
+    expect(corr[10]).toBe(0); // retune 0: the decay is also instant
+  });
+});
+
+describe('autoTuneEffect — pass-through rulings (byte-identical)', () => {
+  it('strength 0 returns byte-identical copies in NEW arrays (ruling 4)', () => {
+    const input = sine(452, 0.3);
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 0, retuneMs: 0 });
+    expect(out[0]).not.toBe(input);
+    expect(Array.from(out[0])).toEqual(Array.from(input));
+  });
+
+  it('strength 1 (just above the boundary) does NOT pass through', () => {
+    const input = sine(452, 0.3);
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 1, retuneMs: 0 });
+    // Measured: every sample differs at strength 1 on an off-pitch tone.
+    let differing = 0;
+    for (let i = 0; i < input.length; i++) if (out[0][i] !== input[i]) differing++;
+    expect(differing).toBeGreaterThan(0);
+  });
+
+  it('digital silence passes through byte-identically at full strength (ruling 3)', () => {
+    const input = new Float32Array(Math.round(0.4 * SR));
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 50 });
+    expect(Array.from(out[0])).toEqual(Array.from(input));
+  });
+
+  it('unvoiced audio (white noise) passes through byte-identically (ruling 3)', () => {
+    // The detector reports this fixture entirely unvoiced (pinned in
+    // pitchDetect.test.ts), so the correction curve is exactly zero.
+    const input = noise(0.5, 0.5, 12345);
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 });
+    expect(Array.from(out[0])).toEqual(Array.from(input));
+  });
+
+  it('input shorter than one analysis frame (no detector frames) passes through', () => {
+    const input = sine(452, 2205 / SR); // one sample short of a frame
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 });
+    expect(Array.from(out[0])).toEqual(Array.from(input));
+  });
+});
+
+describe('autoTuneEffect — measured pitch correction (452 Hz = A4 + 46.6 cents)', () => {
+  it('chromatic, strength 100, retune 0: output measures 440 Hz within 3 cents, length preserved', () => {
+    // Measured: 440.01 Hz (+0.04 c) — ≥ 99 % of the 46.6 c offset removed.
+    const input = sine(452, 1.0);
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 });
+    expect(out[0].length).toBe(input.length);
+    expect(Math.abs(cents(medianF0(out[0], 0.15, 0.85), 440))).toBeLessThan(3);
+  });
+
+  it('strength 50 leaves half the offset: output ≈ +23 cents from A4 (linear-in-cents blend)', () => {
+    // Measured +23.36 c; the exact half is +23.32 c. Pin ±5 c.
+    const out = run([sine(452, 1.0)], { key: 'C', scale: 'chromatic', strength: 50, retuneMs: 0 });
+    const c = cents(medianF0(out[0], 0.15, 0.85), 440);
+    expect(c).toBeGreaterThan(18);
+    expect(c).toBeLessThan(28);
+  });
+
+  it('strength above 100 clamps to full correction (no overshoot past the note)', () => {
+    // A broken upper clamp would overshoot to ≈ −23 c; measured behaviour is ≈ 440 Hz.
+    const out = run([sine(452, 1.0)], { key: 'C', scale: 'chromatic', strength: 150, retuneMs: 0 });
+    expect(Math.abs(cents(medianF0(out[0], 0.15, 0.85), 440))).toBeLessThan(3);
+  });
+});
+
+describe('autoTuneEffect — key and scale route to different target notes (460 Hz input)', () => {
+  // 460 Hz = midi 69.77: nearest chromatic note is A#4 (466.16 Hz, 0.23 st away);
+  // nearest C-MAJOR note is A4 (440 Hz — A# is not in the scale); nearest
+  // C-MINOR note is A#4 again (it IS in the scale). Same input, three targets.
+  it.each([
+    ['chromatic', 'C', 466.16],
+    ['major', 'C', 440],
+    ['minor', 'C', 466.16],
+  ] as const)('scale %s (key %s) retunes 460 Hz to %f Hz within 3 cents', (scale, key, target) => {
+    // Measured: 466.15 / 440.00 / 466.15 Hz.
+    const out = run([sine(460, 1.0)], { key, scale, strength: 100, retuneMs: 0 });
+    expect(Math.abs(cents(medianF0(out[0], 0.15, 0.85), target))).toBeLessThan(3);
+  });
+});
+
+describe('autoTuneEffect — retune speed is an exponential glide with time constant retuneMs', () => {
+  it('retune 200 ms: the residual offset decays exponentially along the note', () => {
+    // Measured residuals from 440 Hz (input +46.6 c): [0.1,0.15] s → 28.5 c,
+    // [0.2,0.25] → 17.3 c, [0.4,0.45] → 6.4 c, [1.2,1.4] → 0.12 c — matching
+    // 46.6·e^(−(t−t₀)/0.2) with t₀ ≈ the first frame centre (25 ms).
+    const out = run([sine(452, 1.5)], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 200 });
+    const residuals = (
+      [
+        [0.1, 0.15],
+        [0.2, 0.25],
+        [0.4, 0.45],
+        [1.2, 1.4],
+      ] as const
+    ).map(([a, b]) => cents(medianF0(out[0], a, b), 440));
+    expect(residuals[0]).toBeGreaterThan(20);
+    expect(residuals[0]).toBeLessThan(35);
+    for (let i = 1; i < residuals.length; i++) expect(residuals[i]).toBeLessThan(residuals[i - 1]);
+    expect(residuals[3]).toBeLessThan(3);
+  });
+
+  it('retune 0 corrects fully from the start of the note (measured +0.03 c at 0.1 s)', () => {
+    const input = sine(452, 1.5);
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 });
+    expect(Math.abs(cents(medianF0(out[0], 0.1, 0.15), 440))).toBeLessThan(3);
+
+    // The correction curve HOLDS its first/last frame values across the edge
+    // regions (the first/last ~25 ms lie before/after any frame centre), so
+    // with retune 0 even the head and tail of the note are pitch-shifted — an
+    // edge that decayed to "no correction" would leave them byte-equal to the
+    // input. Probes the t ≤ 0 and t ≥ K−1 hold branches of the ratio curve.
+    let headDiffers = false;
+    for (let i = 0; i < 1000; i++) {
+      if (out[0][i] !== input[i]) {
+        headDiffers = true;
+        break;
+      }
+    }
+    expect(headDiffers).toBe(true);
+    let tailDiffers = false;
+    for (let i = input.length - 1000; i < input.length; i++) {
+      if (out[0][i] !== input[i]) {
+        tailDiffers = true;
+        break;
+      }
+    }
+    expect(tailDiffers).toBe(true);
+  });
+});
+
+describe('autoTuneEffect — stereo linkage and silence gaps', () => {
+  it('proportional channels stay exactly proportional (shared offsets + shared read positions)', () => {
+    // R = 0.5·L throughout; measured max |out.R − 0.5·out.L| = 0 exactly
+    // (scaling by a power of two commutes with every float operation used).
+    const l = sine(452, 0.8, 0.8);
+    const r = sine(452, 0.8, 0.4);
+    const out = run([l, r], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 });
+    expect(out[0].length).toBe(l.length);
+    expect(out[1].length).toBe(l.length);
+    let maxDev = 0;
+    for (let i = 0; i < out[0].length; i++) {
+      maxDev = Math.max(maxDev, Math.abs(out[1][i] - 0.5 * out[0][i]));
+    }
+    expect(maxDev).toBeLessThan(1e-7);
+  });
+
+  it('a digital-silence gap between corrected notes stays exactly zero in its interior', () => {
+    // 0.3 s tone | 0.3 s silence | 0.3 s tone. WSOLA frames reach at most
+    // frame/2 + search ≈ 35 ms across the boundary and the sinc kernel 0.73 ms,
+    // so a 60 ms margin bounds all bleed; measured interior max |sample| = 0.
+    const seg = Math.round(0.3 * SR);
+    const input = new Float32Array(3 * seg);
+    input.set(sine(452, 0.3), 0);
+    input.set(sine(452, 0.3), 2 * seg);
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 });
+    expect(out[0].length).toBe(input.length);
+    const margin = Math.round(0.06 * SR);
+    for (let i = seg + margin; i < 2 * seg - margin; i++) {
+      if (out[0][i] !== 0) throw new Error(`non-zero sample ${out[0][i]} at ${i}`);
+    }
+    // …and the gap did not disable correction: the first tone measures 440.
+    expect(Math.abs(cents(medianF0(out[0].subarray(0, seg), 0.1, 0.25), 440))).toBeLessThan(3);
+  });
+});
+
+describe('autoTuneEffect — progress reporting', () => {
+  it('reports a terminal 1 and never regresses across the three stages', () => {
+    const seen: number[] = [];
+    autoTuneEffect.process([sine(452, 0.5)], SR, { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 }, (f) =>
+      seen.push(f)
+    );
+    expect(seen[seen.length - 1]).toBe(1);
+    for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1]);
+  });
+});

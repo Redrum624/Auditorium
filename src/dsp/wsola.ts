@@ -158,25 +158,43 @@ export function computeOffsets(
   plan: Extract<StretchPlan, { kind: 'ola' }>,
   onProgress?: (f: number) => void
 ): number[] {
-  const { N, outLen, synthesisHop, analysisHop, search, compare } = plan;
+  const { outLen, synthesisHop, analysisHop } = plan;
+  const nominalStarts: number[] = [];
+  for (let k = 0; k * synthesisHop < outLen; k++) {
+    nominalStarts.push(Math.round(k * analysisHop));
+  }
+  return computeOffsetsFromStarts(signal, plan, nominalStarts, onProgress);
+}
+
+/**
+ * Core of the similarity search, generalized over the per-frame nominal
+ * analysis positions so the constant-ratio path (starts = round(k·analysisHop))
+ * and the variable-ratio path (starts sampled from a caller-supplied time map)
+ * share one implementation. Frame 0 has no predecessor and is copied straight
+ * from its nominal position.
+ */
+function computeOffsetsFromStarts(
+  signal: Float32Array,
+  plan: Extract<StretchPlan, { kind: 'ola' }>,
+  nominalStarts: number[],
+  onProgress?: (f: number) => void
+): number[] {
+  const { N, outLen, synthesisHop, search, compare } = plan;
   const read = (idx: number): number => (idx >= 0 && idx < N ? signal[idx] : 0);
 
   const offsets: number[] = [];
   // Reference = "natural continuation" of the previously placed frame.
   let refStart = synthesisHop;
 
-  for (let k = 0; ; k++) {
-    const synthesisPos = k * synthesisHop;
-    if (synthesisPos >= outLen) break;
-
-    const nominalStart = Math.round(k * analysisHop);
+  for (let k = 0; k < nominalStarts.length; k++) {
+    const nominalStart = nominalStarts[k];
     const chosen = k === 0 ? nominalStart : bestMatchOffset(read, nominalStart, refStart, compare, search);
     offsets.push(chosen);
 
     refStart = chosen + synthesisHop;
 
     if (onProgress && k % PROGRESS_FRAME_BATCH === 0) {
-      onProgress(Math.min(0.99, synthesisPos / outLen));
+      onProgress(Math.min(0.99, (k * synthesisHop) / outLen));
     }
   }
 
@@ -285,6 +303,87 @@ export function timeStretchLinked(
   }
 
   const offsets = computeOffsets(mid, plan, onProgress);
+  const out = channels.map((c) => olaWithOffsets(c, offsets, plan));
+  onProgress?.(1);
+  return out;
+}
+
+/**
+ * Stereo-linked WSOLA time-stretch with a TIME-VARYING ratio — the
+ * generalisation of `timeStretchLinked` used by Auto-Tune, where the stretch
+ * factor follows a pitch-correction curve instead of being constant.
+ *
+ * The caller supplies the target output length `outLen` (the rounded integral
+ * of its per-sample ratio curve) and `analysisPosAt`, the inverse of that
+ * cumulative map: for a synthesis (output) position v ∈ [0, outLen] it returns
+ * the input position whose content belongs there. Nominal analysis starts are
+ * sampled from it at every synthesis-grid point; the similarity search and
+ * overlap-add are the SAME code as the constant path (one shared search over
+ * the channel mean, identical offsets applied to every channel), so the
+ * inter-channel phase relationship is preserved exactly as in
+ * `timeStretchLinked`. With a constant map (analysisPosAt = v ↦ v/r, r a
+ * dyadic ratio) the chosen offsets — and therefore the output — are
+ * byte-identical to `timeStretchLinked` (pinned in wsola.test.ts).
+ *
+ * The plan is derived from the AVERAGE ratio outLen/N — only its frame/window
+ * geometry is used (per-frame positions come from `analysisPosAt`) — and its
+ * outLen is overridden with the caller's exact value so the cumulative map and
+ * the plan can never disagree by a rounding ulp. `analysisPosAt` must be
+ * monotone non-decreasing with range within [0, N]; the caller enforces
+ * per-sample ratio clamping to [MIN_RATIO, MAX_RATIO] when building its map
+ * (this function cannot see the ratio curve, only its inverse).
+ */
+export function timeStretchVariableLinked(
+  channels: Float32Array[],
+  sampleRate: number,
+  outLen: number,
+  analysisPosAt: (synthesisPos: number) => number,
+  onProgress?: (f: number) => void
+): Float32Array[] {
+  const numCh = channels.length;
+  const N = channels[0]?.length ?? 0;
+  const basePlan = planStretch(N, sampleRate, N > 0 ? outLen / N : 1);
+
+  if (basePlan.kind === 'empty' || outLen <= 0) {
+    onProgress?.(1);
+    return channels.map(() => new Float32Array(Math.max(0, outLen)));
+  }
+  if (basePlan.kind === 'nearest') {
+    const out = channels.map((c) => {
+      const o = new Float32Array(outLen);
+      for (let i = 0; i < outLen; i++) {
+        o[i] = c[Math.min(N - 1, Math.max(0, Math.round(analysisPosAt(i))))];
+      }
+      return o;
+    });
+    onProgress?.(1);
+    return out;
+  }
+
+  const plan = { ...basePlan, outLen };
+
+  // Nominal analysis start per synthesis frame, from the caller's time map.
+  const nominalStarts: number[] = [];
+  for (let k = 0; k * plan.synthesisHop < outLen; k++) {
+    nominalStarts.push(Math.round(analysisPosAt(k * plan.synthesisHop)));
+  }
+
+  // Shared search on the channel mean (the mid signal), as in timeStretchLinked;
+  // a mono input searches its own channel directly (identical to the mean of one).
+  let searchSignal: Float32Array;
+  if (numCh === 1) {
+    searchSignal = channels[0];
+  } else {
+    const mid = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let sum = 0;
+      for (let c = 0; c < numCh; c++) sum += channels[c][i];
+      mid[i] = sum / numCh;
+    }
+    searchSignal = mid;
+  }
+
+  const offsets = computeOffsetsFromStarts(searchSignal, plan, nominalStarts, onProgress);
   const out = channels.map((c) => olaWithOffsets(c, offsets, plan));
   onProgress?.(1);
   return out;

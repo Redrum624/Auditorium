@@ -38,10 +38,7 @@ const kernelCache = new Map<number, Float64Array>();
  * d = i/TABLE_OVERSAMPLE - TAPS_PER_SIDE. The Hann window is exactly 0 at the
  * endpoints, so the table tapers to 0 there. Cached per fc.
  */
-function getKernelTable(fc: number): Float64Array {
-  const cached = kernelCache.get(fc);
-  if (cached) return cached;
-
+function buildKernelTable(fc: number): Float64Array {
   const twoFc = 2 * fc;
   const invTaps = 1 / TAPS_PER_SIDE;
   const table = new Float64Array(TABLE_SIZE);
@@ -50,6 +47,13 @@ function getKernelTable(fc: number): Float64Array {
     const win = 0.5 * (1 + Math.cos(Math.PI * d * invTaps));
     table[i] = twoFc * sinc(twoFc * d) * win;
   }
+  return table;
+}
+
+function getKernelTable(fc: number): Float64Array {
+  const cached = kernelCache.get(fc);
+  if (cached) return cached;
+  const table = buildKernelTable(fc);
   kernelCache.set(fc, table);
   return table;
 }
@@ -98,6 +102,69 @@ export function resampleChannel(
       // Read g(d) from the precomputed kernel table with linear interpolation.
       // d ∈ (-TAPS_PER_SIDE, TAPS_PER_SIDE) so the index stays within bounds and
       // i0 + 1 never exceeds the last entry.
+      const fidx = (d + TAPS_PER_SIDE) * TABLE_OVERSAMPLE;
+      const i0 = fidx | 0; // truncation = floor for the non-negative fidx here
+      const frac = fidx - i0;
+      const weight = table[i0] + frac * (table[i0 + 1] - table[i0]);
+      weightSum += weight;
+      acc += input[k] * weight;
+    }
+
+    output[i] = weightSum !== 0 ? acc / weightSum : 0;
+
+    if (onProgress && (i & (PROGRESS_INTERVAL - 1)) === 0 && i !== 0) {
+      onProgress(i / outLen);
+    }
+  }
+
+  onProgress?.(1);
+  return output;
+}
+
+/**
+ * Variable-position windowed-sinc read: output[i] is the bandlimited
+ * reconstruction of `input` at fractional position positions[i], using the
+ * SAME kernel arithmetic as `resampleChannel` — a constant-step position array
+ * (positions[i] = i·fromRate/toRate with the matching fc) reproduces
+ * `resampleChannel` byte-for-byte, pinned in resample.test.ts. Used by
+ * Auto-Tune's resynthesis, where the read rate follows the correction curve.
+ *
+ * `fc` is the normalized cutoff in INPUT cycles/sample: 0.5 when the local
+ * read rate never exceeds 1 (no downsampling anywhere), otherwise
+ * 0.5 / maxRate to anti-alias at the fastest read point. The caller supplies
+ * it because only the caller knows the rate curve the positions were built
+ * from. The kernel table is built per call and deliberately NOT entered into
+ * the module cache: variable-rate callers derive fc from a per-run maximum, so
+ * caching by arbitrary fc values would grow the cache without bound.
+ */
+export function resampleVariable(
+  input: Float32Array,
+  positions: Float64Array,
+  fc: number,
+  onProgress?: (fraction: number) => void
+): Float32Array {
+  const outLen = positions.length;
+  const output = new Float32Array(outLen);
+  if (outLen === 0 || input.length === 0) {
+    onProgress?.(1);
+    return output;
+  }
+
+  const inLen = input.length;
+  const table = buildKernelTable(fc);
+
+  for (let i = 0; i < outLen; i++) {
+    const pos = positions[i];
+    const center = Math.floor(pos);
+    const first = center - TAPS_PER_SIDE + 1;
+    const last = center + TAPS_PER_SIDE;
+
+    let acc = 0;
+    let weightSum = 0;
+    for (let k = first; k <= last; k++) {
+      const d = pos - k;
+      if (d <= -TAPS_PER_SIDE || d >= TAPS_PER_SIDE) continue;
+      if (k < 0 || k >= inLen) continue;
       const fidx = (d + TAPS_PER_SIDE) * TABLE_OVERSAMPLE;
       const i0 = fidx | 0; // truncation = floor for the non-negative fidx here
       const frac = fidx - i0;
