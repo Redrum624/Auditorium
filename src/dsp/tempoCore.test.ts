@@ -461,7 +461,7 @@ describe('analyzeTempo — ACCURACY', () => {
 });
 
 describe('analyzeTempo — OCTAVE, both directions', () => {
-  it('3. drumLoop(90, 20, ghostAmp<=0.3) -> 90 +/- 1.5 and NOT doubled to ~180 -- the C1 regression case, at the ghost amplitude the fix demonstrably reaches', () => {
+  it('3. drumLoop(90, 20) -> 90 +/- 1.5 and NOT doubled to ~180, across the FULL ghost-amplitude range 0.15-0.6 -- the C1 regression case, now including the canonical default (R4)', () => {
     // This is the exact case the T2 review's Critical C1 finding was about:
     // pre-fix, drumLoop(90) reported 180 bpm at 0.995 confidence (the r=2
     // family member "borrowed" the r=1 track's beats while keeping its own
@@ -469,10 +469,22 @@ describe('analyzeTempo — OCTAVE, both directions', () => {
     // `chooseOctave`'s doc comment) suppresses exactly this borrowing at
     // ghostAmp 0.15 and 0.3, measured: 90.29 bpm both times (diff 0.29,
     // comfortably inside +/-1.5) and confidence 0.74/0.73 respectively.
-    // ghostAmp 0.45/0.6 (a LOUDER ghost note) is a DIFFERENT, deeper, still-
-    // unresolved case -- see the `it.failing` block below for why, and for
-    // its own evidence.
-    for (const g of [0.15, 0.3]) {
+    //
+    // ghostAmp 0.45/0.6 (a LOUDER ghost note) was a DIFFERENT, deeper case
+    // that sat here as an `it.failing` KNOWN-UNRESOLVED block from T2 until
+    // R4: the doubled candidate's track is genuinely non-collapsed at those
+    // amplitudes (periodMatch ~0.99, a content-level ambiguity no collapse
+    // detector can touch), while the TRUE track carried ~0.84 from benign
+    // DP-tracking jitter. The R4 jitter-tolerant penalty
+    // (`JITTER_VARIANCE_WEIGHT` -- offset keeps full weight, only zero-mean
+    // scatter is down-weighted) stops taxing that benign jitter, and the
+    // true track now wins: measured 91.05 bpm at BOTH 0.45 and 0.6
+    // (confidence 0.71 both), inside +/-1.5. The folded-in assertions below
+    // are exactly the ones the it.failing block stated as "desired,
+    // currently-unmet"; its jittered HARDER sibling (loud ghost + human
+    // timing) still doubles and is tracked on the R4 bench
+    // (jdrum-90-g0.6-j0.03), not here.
+    for (const g of [0.15, 0.3, 0.45, 0.6]) {
       const result = analyzeTempo(drumLoop(90, 20, g), 44100);
       expect(result.bpm).not.toBeNull();
       expect(Math.abs((result.bpm as number) - 90)).toBeLessThan(1.5);
@@ -498,31 +510,6 @@ describe('analyzeTempo — OCTAVE, both directions', () => {
     }
   }, 30000);
 
-  it.failing('4b. KNOWN, UNRESOLVED (delete this it.failing when fixed): drumLoop(90, 20) at the CANONICAL default ghostAmp=0.6 (and 0.45) still doubles to ~180', () => {
-    // NEW FINDING (fix-round-2, reported per the standing rule -- NOT a
-    // passing assertion pinning the bug): at ghostAmp>=0.45 the off-beat
-    // ghost note becomes comparably LOUD to the main kick, so the doubled
-    // (r=2) candidate's own delivered track is no longer "collapsed" at all
-    // -- it genuinely, honestly matches its own requested period (measured
-    // periodMatch~0.99, vs the true tempo's own ~0.84, itself carrying some
-    // natural DP-tracking jitter that is NOT a collapse artifact). This is a
-    // CONTENT-LEVEL ambiguity: the audio itself genuinely supports a
-    // uniform-ish "every strong onset is a beat" reading at ~180 bpm as well
-    // as the intended 90 bpm reading, so no selection-metric fix (salience,
-    // periodMatch, achieved-vs-nominal prior -- all evaluated, see
-    // task-T2-report.md "Fix round 2") can distinguish them from PER-
-    // CANDIDATE signals alone. Confidence is 0.91 -- nowhere near
-    // CONFIDENCE_LOW, so the gate provides no safety net here either. This
-    // assertion states the DESIRED, currently-unmet behaviour; delete this
-    // `it.failing` and fold it back into test 3 above once a real fix
-    // lands (likely requires a genuinely new signal, e.g. cross-checking
-    // odfLow/downbeat structure -- out of scope for T2).
-    for (const g of [0.45, 0.6]) {
-      const result = analyzeTempo(drumLoop(90, 20, g), 44100);
-      expect(result.bpm).not.toBeNull();
-      expect(Math.abs((result.bpm as number) - 90)).toBeLessThan(1.5);
-    }
-  }, 15000);
 });
 
 describe('analyzeTempo — BEAT PHASE / GRID', () => {
@@ -962,19 +949,24 @@ describe('analyzeTempo — TABLE-DRIVEN octave detection (all reviewer + discove
   // Fix-round-2 substantially shrank the unresolved set from round-1's 6 (of
   // 20 in this same table): drumLoop(150) now resolves at EVERY ghost level
   // (0.15-0.6), not just 0.15. Two NEW unresolved cases appeared instead --
-  // drumLoop(90, g=0.45) and (g=0.6) -- see test 4b's `it.failing` above for
-  // the dedicated evidence on why (a content-level ambiguity, not a
-  // labelling defect). Net: 9 resolved / 11 unresolved in this table (up
-  // from round-1's 8/12), consistent with the broader 60-200bpm A/B showing
-  // a net improvement over both the pre-fix baseline and the round-1
+  // drumLoop(90, g=0.45) and (g=0.6) -- a content-level ambiguity, not a
+  // labelling defect. Net at T2: 9 resolved / 11 unresolved (up from
+  // round-1's 8/12), consistent with the broader 60-200bpm A/B showing a
+  // net improvement over both the pre-fix baseline and the round-1
   // regression.
   //
-  // GENUINE, UNRESOLVED OCTAVE AMBIGUITIES this fix does NOT close:
+  // R4 UPDATE: the jitter-tolerant penalty (`JITTER_VARIANCE_WEIGHT`,
+  // tempoCore.ts) reclaimed exactly those two cases -- drumLoop(90) now
+  // resolves at EVERY ghost level (measured 91.05 bpm at g=0.45/0.6, see
+  // test 3) -- so this table is now 11 resolved / 9 unresolved. The nine
+  // that remain are all bStar-level (below), which no chooseOctave-internal
+  // change can reach.
+  //
+  // GENUINE, UNRESOLVED OCTAVE AMBIGUITIES neither fix closes:
   // backbeat(75), drumLoop(60,*) and drumLoop(75,*) at every ghost level
   // (all bStar-level: the full-grid argmax itself lands on the wrong octave
   // family before `chooseOctave` ever runs, so no octave-family-internal fix
-  // can reach them -- see Finding 1, task-T2-report.md), plus
-  // drumLoop(90,g=0.45/0.6) (content-level, see test 4b). NONE of these 11
+  // can reach them -- see Finding 1, task-T2-report.md). NONE of these 9
   // report confidence below CONFIDENCE_LOW (measured range 0.65-1.00) -- the
   // confidence gate (C2 fix) measures "is there real periodic structure",
   // which genuinely IS present in all of them, and is therefore
@@ -998,12 +990,12 @@ describe('analyzeTempo — TABLE-DRIVEN octave detection (all reviewer + discove
   for (const bpm of [60, 75, 90, 150]) {
     for (const g of [0.15, 0.3, 0.45, 0.6]) {
       const c = { label: `drumLoop(${bpm},g=${g})`, audio: () => drumLoop(bpm, 20, g), truth: bpm };
-      const resolves = bpm === 150 || (bpm === 90 && (g === 0.15 || g === 0.3));
+      const resolves = bpm === 150 || bpm === 90; // R4: 90 now resolves at EVERY ghost level
       (resolves ? resolvedCases : unresolvedCases).push(c);
     }
   }
 
-  it('resolves the true tempo for every case the fix reaches (9 of 20) -- confidence finite throughout', () => {
+  it('resolves the true tempo for every case the fix reaches (11 of 20 post-R4) -- confidence finite throughout', () => {
     for (const c of resolvedCases) {
       const r = analyzeTempo(c.audio(), 44100);
       expect(r.bpm).not.toBeNull();
@@ -1012,11 +1004,12 @@ describe('analyzeTempo — TABLE-DRIVEN octave detection (all reviewer + discove
     }
   }, 60000);
 
-  it.failing('KNOWN, UNRESOLVED (delete this it.failing when fixed): the remaining 11 of 20 cases do NOT resolve to truth, and confidence does not gate them either', () => {
+  it.failing('KNOWN, UNRESOLVED (delete this it.failing when fixed): the remaining 9 of 20 cases do NOT resolve to truth, and confidence does not gate them either', () => {
     // Per the standing rule, this states the DESIRED behaviour (which
     // currently fails) rather than a passing assertion that pins the bug.
-    // Today, every one of these 11 cases reports an octave alias/collapse
-    // FAR from truth (>10 bpm off) with confidence comfortably ABOVE
+    // Today, every one of these 9 cases (all bStar-level, out of any
+    // chooseOctave fix's reach) reports an octave alias/collapse FAR from
+    // truth (>10 bpm off) with confidence comfortably ABOVE
     // CONFIDENCE_LOW (0.65-1.00) -- i.e. the gate provides no safety net.
     for (const c of unresolvedCases) {
       const r = analyzeTempo(c.audio(), 44100);

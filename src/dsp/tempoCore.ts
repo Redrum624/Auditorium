@@ -828,6 +828,36 @@ interface OctaveChoice {
 }
 
 /**
+ * R4 (P2-4, the T2 reviewer's named follow-up): how much of the JITTER
+ * (variance) component of the tightness penalty is kept. The decomposition
+ * in `meanTightnessPenalty` splits the mean-square log-gap error into
+ * `mean^2` (systematic OFFSET from the requested period -- the collapse
+ * signature `periodMatch` exists to detect) plus `variance` (zero-mean
+ * scatter -- benign human/DP tracking jitter). The offset term keeps FULL
+ * weight; only the variance term is down-weighted, because mean-centring
+ * (dropping `mean^2`, weight 0 on offset) destroys exactly the collapse
+ * signal -- measured on the R4 bank: 70/83, WORSE than not changing
+ * anything.
+ *
+ * A/B-measured on the R4 83-fixture bank (docs/bench/, scripts/
+ * tempo-bench.cjs; task-R4-report.md). correct/octave/other by weight:
+ *   1.0 (previous form, full jitter penalty)  71/12/0
+ *   0.5   72/11/0      0.4   73/10/0
+ *   0.35  74/ 9/0  <-- kept (best; all misses are the two evidenced
+ *   0.3   73/10/0      chooseOctave limitations, see its doc comment)
+ *   0.25  73/10/0      0.15  73/ 9/1
+ *   0.0 (offset-only)  72/ 9/2
+ *   variance-only (mean-centred trap)         70/13/0
+ *   median-gap form                           69/ 9/5
+ * The 0.15-0.5 plateau all beats 1.0; 0.35 sits +1 above its +-0.05
+ * neighbours on a single limitation-band fixture (jclick-180-j0.02), so
+ * the choice is measured-best-on-plateau, not a knife edge. The bank is
+ * SYNTHETIC -- this is not a real-world-material claim; the harness makes
+ * any future re-measure a one-command diff.
+ */
+const JITTER_VARIANCE_WEIGHT = 0.35;
+
+/**
  * Mean (deliberately NOT summed -- beat-count sensitivity is exactly the
  * defect being avoided, see `chooseOctave`'s doc comment) per-hop Ellis-DP
  * tightness penalty of the ACTUAL track `beatFrames` against the period `P`
@@ -837,18 +867,36 @@ interface OctaveChoice {
  * `ln(gap/P) approx 0`); large when the DP's wide tau-window let it
  * "collapse" onto some OTHER octave-family member's real periodicity while
  * nominally requesting a period that periodicity doesn't match at all.
+ *
+ * R4 JITTER-TOLERANT FORM: the raw second moment `mean(ln^2(gap/P))` is
+ * decomposed as `meanLog^2 + varLog` and the variance term is down-weighted
+ * by `JITTER_VARIANCE_WEIGHT` (see its A/B table). Rationale: a COLLAPSED
+ * candidate's gaps are systematically OFFSET from its own requested `P`
+ * (nonzero `meanLog` -- that is definitionally what collapse means), while
+ * a jittery-but-GENUINE track scatters symmetrically around `P` (zero-mean
+ * `varLog`); the old form charged both at full price, structurally
+ * favouring a machine-regular octave error over honest human timing (P2-4).
+ * Offset keeps full weight, so the collapse detection this function exists
+ * for is intact -- re-verified on the R4 bank: the previous form's
+ * collapse-suppression wins (drumLoop 120/150, backbeat<=150, all
+ * ramp/rise/click<=165) are all retained, and the flagship measured
+ * numbers in `chooseOctave`'s comment still hold.
  */
 function meanTightnessPenalty(beatFrames: Int32Array, P: number): number {
   if (beatFrames.length < 2) return Infinity;
   let sum = 0;
+  let sumSq = 0;
   let n = 0;
   for (let i = 1; i < beatFrames.length; i++) {
     const gap = beatFrames[i] - beatFrames[i - 1];
     const logRatio = Math.log(gap / P);
-    sum += TIGHTNESS * logRatio * logRatio;
+    sum += logRatio;
+    sumSq += logRatio * logRatio;
     n++;
   }
-  return sum / n;
+  const meanLog = sum / n;
+  const varLog = sumSq / n - meanLog * meanLog;
+  return TIGHTNESS * (meanLog * meanLog + JITTER_VARIANCE_WEIGHT * varLog);
 }
 
 /**
@@ -934,6 +982,21 @@ const PERIOD_MATCH_POWER = 2;
  * because the doubled candidate did NOT collapse. See task-T2-report.md
  * "Fix round 2" for the measured backbeat/drumLoop(90, ghostAmp in
  * {0.45,0.6}) case this affects.
+ *
+ * R4 MEASURED UPDATE (jitter-tolerant penalty, `JITTER_VARIANCE_WEIGHT`):
+ * the UNJITTERED drumLoop(90, ghostAmp 0.45/0.6) now RESOLVES to ~90 --
+ * not because the doubled candidate got penalised (it still honestly
+ * matches its own period, ~0.99) but because the TRUE track's benign
+ * DP-tracking jitter (the ~0.84 above) is no longer taxed, lifting its
+ * periodMatch enough for salience x prior to win the tie. Limitation (2)'s
+ * mechanism claim stands: nothing detects a collapse that did not happen,
+ * and the HARDER variant -- a jittered loud-ghost loop (R4 bank
+ * `jdrum-90-g0.6-j0.03`) -- still reports 180. Limitation (1) is untouched:
+ * on the R4 bank, click-180/200, backbeat-165/180 and jclick-180-j0.04/
+ * j0.1 still alias to the half tempo, and drumLoop(75, ghost 0.3/0.6)
+ * doubles to 150 -- the same genuine-multi-member tie, broken by the prior
+ * toward `PRIOR_CENTER_BPM` in the x2 direction this time. Full per-form
+ * numbers: `JITTER_VARIANCE_WEIGHT`'s table and task-R4-report.md.
  *
  * `r=1` (bStar unchanged) is always a member of the family and always in
  * range (bStar itself came from the same [minBpm,maxBpm] search), so this

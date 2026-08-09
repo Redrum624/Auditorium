@@ -56,8 +56,10 @@ export function clickTrain(bpm: number, seconds: number, sr = 44100, phase = 0):
  * re-documented at their own call sites (OCTAVE tests 3/4/4b, TABLE-DRIVEN
  * test, task-T2-report.md "Fix round 2"). In short, at ghostAmp 0.6:
  * `drumLoop(120,20)` and `drumLoop(150,20)` resolve correctly; `drumLoop(90,
- * 20)` does NOT (a NEW, content-level finding -- the fix DOES reach
- * `drumLoop(90,20)` at ghostAmp 0.15/0.3, see test 3).
+ * 20)` did NOT (a content-level finding -- fix round 2 reached
+ * `drumLoop(90,20)` only at ghostAmp 0.15/0.3) until R4's jitter-tolerant
+ * penalty (`JITTER_VARIANCE_WEIGHT` in tempoCore.ts): measured 91.05 bpm at
+ * ghostAmp 0.45/0.6, so test 3 now pins the FULL 0.15-0.6 range.
  */
 export function drumLoop(bpm: number, seconds: number, ghostAmp = 0.6, sr = 44100): Float32Array {
   const n = Math.round(seconds * sr);
