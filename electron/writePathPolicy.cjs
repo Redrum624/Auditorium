@@ -73,20 +73,40 @@ function rawStartsWithUncPrefix(rawPath) {
 const LOCAL_ALIAS_HOSTS = new Set(['localhost', '.', '::1']);
 
 /**
+ * Strips the trailing dots and/or spaces that Windows silently removes from a
+ * path component during Win32 -> NT canonicalization (CreateFile drops trailing
+ * dots and spaces from the last component and from share/host names). Without
+ * this, a decorated spelling like `localhost..`, `localhost ` or a share `C$.`
+ * / `C$ ` slips past the loopback-alias / admin-share refusals while still
+ * resolving to the very target they forbid. Fail closed: we refuse what we
+ * cannot confidently classify, whether or not this particular Windows/DNS
+ * config happens to resolve the decorated form (v1.9.1 security fix). Anchored
+ * to the END only -- a leading/interior dot is a real, meaningful character
+ * (`127.0.0.1`, an FQDN). A component that is ALL dots/spaces collapses to ''
+ * (which then matches no local alias and no `$` share -- an ordinary
+ * non-loopback classification, never a throw).
+ */
+function stripTrailingDotsAndSpaces(component) {
+  return component.replace(/[.\s]+$/, '');
+}
+
+/**
  * Normalizes a raw UNC host component before the alias lookup (review fix
- * round 2, GAP A): strips IPv6 bracket-literal notation (\\[::1]\...),
- * strips a single trailing dot (FQDN root-dot notation, \\localhost.\...),
- * and lowercases. '127.0.0.1' alone is NOT sufficient -- see
- * isLocal127Address below for the full 127.0.0.0/8 range.
+ * round 2, GAP A): strips IPv6 bracket-literal notation (\\[::1]\...), strips
+ * ALL trailing dots/spaces (FQDN root-dot notation \\localhost.\..., and the
+ * v1.9.1 fix for the multi-dot/space bypass \\localhost..\... / \\localhost \...
+ * which the prior single-dot strip let through unrecognized), and lowercases.
+ * The bracket strip stays FIRST (a bracketed IPv6 literal has no trailing dot
+ * to remove; any colon it carries is caught independently by the ADS gate).
+ * '127.0.0.1' alone is NOT sufficient -- see isLocal127Address below for the
+ * full 127.0.0.0/8 range.
  */
 function normalizeUncHost(rawHost) {
   let host = rawHost;
   if (host.startsWith('[') && host.endsWith(']')) {
     host = host.slice(1, -1);
   }
-  if (host.endsWith('.')) {
-    host = host.slice(0, -1);
-  }
+  host = stripTrailingDotsAndSpaces(host);
   return host.toLowerCase();
 }
 
@@ -186,7 +206,11 @@ function isLocalAliasHost(rawHost) {
  * strictly safe, not merely a narrower "admin share" heuristic.
  */
 function isDollarSuffixedShare(share) {
-  return /\$$/.test(share);
+  // v1.9.1: normalize the trailing dots/spaces Windows strips before the '$'
+  // test -- \\host\C$.\... and \\host\C$ \... resolve to the C$ admin share,
+  // but the bare /\$$/ saw the dot/space and not the '$'. Same "handles one,
+  // not N" bypass as the host side (stripTrailingDotsAndSpaces).
+  return /\$$/.test(stripTrailingDotsAndSpaces(share));
 }
 
 /**
@@ -218,7 +242,16 @@ function isLocalAliasOrAdminShareUncPath(uncPath) {
   // rejected this shape outright before this function is ever reached; this
   // is a backstop against the positional assumption silently drifting again
   // if that ordering ever changes, or a new caller doesn't guarantee it.
-  if (host === '?' || host.toLowerCase() === 'unc') {
+  // v1.9.1: only the literal '?' arm is kept. The former `|| host === 'unc'`
+  // arm was a false positive -- it refused a legitimate remote NAS literally
+  // named UNC (\\UNC\music\take.wav) while adding no real protection: a genuine
+  // \\?\UNC\server\share\... re-entry is a device/extended path that
+  // assertWriteAllowed's raw-string AND resolved-path checks (isDeviceOrExtendedPath)
+  // already reject outright before this function is ever reached ('?' is itself
+  // an illegal Windows host/share char, so the '?' arm covers the residual
+  // shape). Do NOT reintroduce a components[1] === 'UNC' shape check -- it would
+  // re-break \\server\UNC\... style shares.
+  if (host === '?') {
     return true;
   }
   return isLocalAliasHost(host) || isDollarSuffixedShare(share);

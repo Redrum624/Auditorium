@@ -319,6 +319,87 @@ describe('writePathPolicy', () => {
     });
   });
 
+  describe('trailing dot/space host & share bypass, and the UNC-named-NAS false positive (v1.9.1 security fix)', () => {
+    // Pre-fix normalizeUncHost stripped exactly ONE trailing dot, so a host
+    // wearing two-or-more trailing dots (or a trailing space) escaped the
+    // loopback-alias refusal unrecognized. Measured ALLOWED at HEAD before the
+    // fix: \\localhost..\music\x.wav, \\127.0.0.1..\music\x.wav, \\NAS\C$.\...
+    // The boundary is "number of trailing dots": pinned at 0 / 1 / 2 / 3.
+    test('boundary 0 dots: bare \\\\localhost\\music\\x.wav stays rejected', () => {
+      expect(isWriteAllowed('\\\\localhost\\music\\x.wav')).toBe(false);
+    });
+    test('boundary 1 dot: \\\\localhost.\\music\\x.wav stays rejected (old strip count)', () => {
+      expect(isWriteAllowed('\\\\localhost.\\music\\x.wav')).toBe(false);
+    });
+    test('boundary 2 dots: \\\\localhost..\\music\\x.wav now rejected (the reported bypass)', () => {
+      expect(isWriteAllowed('\\\\localhost..\\music\\x.wav')).toBe(false);
+    });
+    test('boundary 3 dots: \\\\localhost...\\music\\x.wav now rejected', () => {
+      expect(isWriteAllowed('\\\\localhost...\\music\\x.wav')).toBe(false);
+    });
+    test('rejects a trailing-SPACE loopback host \\\\localhost \\music\\x.wav', () => {
+      expect(isWriteAllowed('\\\\localhost \\music\\x.wav')).toBe(false);
+    });
+    test('rejects a mixed trailing dot+space loopback host \\\\localhost. \\music\\x.wav', () => {
+      expect(isWriteAllowed('\\\\localhost. \\music\\x.wav')).toBe(false);
+    });
+    test('rejects a double-dot 127.0.0.1 loopback \\\\127.0.0.1..\\music\\x.wav', () => {
+      expect(isWriteAllowed('\\\\127.0.0.1..\\music\\x.wav')).toBe(false);
+    });
+    test('rejects an abbreviated-IPv4 loopback wearing trailing dots \\\\127.1..\\share\\a.wav', () => {
+      expect(isWriteAllowed('\\\\127.1..\\share\\a.wav')).toBe(false);
+    });
+    test("rejects this machine's own hostname wearing trailing dots on a NON-$ share", () => {
+      const hostname = os.hostname();
+      expect(isWriteAllowed(`\\\\${hostname}..\\music\\x.wav`)).toBe(false);
+    });
+    // Share side of the same class: Windows strips trailing dots/spaces from a
+    // share name too, so \\host\C$.\... resolves to the C$ admin share while the
+    // bare /\$$/ saw the dot/space, not the '$' -- ALLOWED before the fix.
+    test('rejects an admin share wearing a trailing dot \\\\NAS\\C$.\\evil.wav', () => {
+      expect(isWriteAllowed('\\\\NAS\\C$.\\evil.wav')).toBe(false);
+    });
+    test('rejects an admin share wearing two trailing dots \\\\NAS\\ADMIN$..\\evil.wav', () => {
+      expect(isWriteAllowed('\\\\NAS\\ADMIN$..\\evil.wav')).toBe(false);
+    });
+    test('rejects an admin share wearing a trailing space \\\\NAS\\C$ \\evil.wav', () => {
+      expect(isWriteAllowed('\\\\NAS\\C$ \\evil.wav')).toBe(false);
+    });
+    test('positive: a MID-string dollar with a trailing dot is NOT an admin share (\\\\NAS\\ba$ckup.\\take.wav)', () => {
+      expect(isWriteAllowed('\\\\NAS\\ba$ckup.\\take.wav')).toBe(true);
+    });
+    // Bracketed-IPv6 + trailing-dot stays rejected via the INDEPENDENT ADS colon
+    // gate (any ':' past index 1); pinned so a future reorder cannot open it.
+    test('rejects a bracketed IPv6 loopback wearing a trailing dot \\\\[::1].\\music\\x.wav', () => {
+      expect(isWriteAllowed('\\\\[::1].\\music\\x.wav')).toBe(false);
+    });
+    // Degenerate all-dots host: normalizes to '' (no local-alias match, no
+    // throw) -> an ordinary unknown remote host. A $-share on it is still
+    // refused, fail-closed.
+    test('an all-dots host does not throw, and a $-share on it is still refused', () => {
+      expect(() => isWriteAllowed('\\\\...\\music\\x.wav')).not.toThrow();
+      expect(isWriteAllowed('\\\\...\\C$\\evil.wav')).toBe(false);
+    });
+    // Sibling nit: a legitimate remote NAS literally named UNC was refused by a
+    // dead defensive arm; the \\?\UNC\... re-entry it guarded is already
+    // rejected upstream by the device/extended-path checks.
+    test('positive: a remote NAS literally named UNC is now allowed \\\\UNC\\music\\take.wav', () => {
+      expect(isWriteAllowed('\\\\UNC\\music\\take.wav')).toBe(true);
+    });
+    test('positive: case-insensitive UNC-named host is allowed \\\\unc\\share\\a.wav', () => {
+      expect(isWriteAllowed('\\\\unc\\share\\a.wav')).toBe(true);
+    });
+    test('the \\\\?\\UNC\\localhost\\C$\\... re-entry stays rejected (device/extended check, not the dropped arm)', () => {
+      expect(isWriteAllowed('\\\\?\\UNC\\localhost\\C$\\evil.wav')).toBe(false);
+      expect(isWriteAllowed('//?/UNC/localhost/C$/Windows/Temp/x.wav')).toBe(false);
+    });
+    test('positive: ordinary remote shares still pass unchanged', () => {
+      expect(isWriteAllowed('\\\\NAS\\music\\take.wav')).toBe(true);
+      expect(isWriteAllowed('\\\\studio-nas.local\\projects\\session.audm')).toBe(true);
+      expect(isWriteAllowed('D:\\music\\out.wav')).toBe(true);
+    });
+  });
+
   describe('NTFS alternate-data-stream targets (v1.5.2)', () => {
     // 'C:\x\evil.exe:payload.wav' names an ADS on evil.exe. It passes the
     // extension check (extname sees '.wav') and every containment check, and
