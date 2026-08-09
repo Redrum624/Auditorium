@@ -662,3 +662,45 @@ implementation that keeps live playback sample-identical to `mixdownSession`
 (the playback≡mixdown invariant held since v1.1) — so an edit needs a
 rebuild, and the rebuild is scoped to one track and one commit per gesture
 rather than per pointermove.
+
+## Spatial placement is a stereo projection, not binaural 3D audio
+
+**Area:** F5 spatial positioner (`src/dsp/spatial.ts`,
+`src/multitrack/mixdown.ts` `autoSpatialGainsAt`,
+`src/components/Panels/SpatialPanel.tsx`).
+
+**Behavior a user will notice:** four things, all deliberate. (1) A source
+placed BEHIND the listener sounds identical to its mirror position in front
+— the stage shows "front" and "behind", but the audio folds the rear onto
+the front. (2) Raising elevation narrows the image toward the centre; at the
+zenith every azimuth sounds dead centre, and elevation at azimuth 0 changes
+nothing at all. (3) Distance changes only level (unity at or inside the
+reference circle, −6 dB at 2×, −20 dB at the 10× range edge) — no air
+absorption, no reverb cue. (4) While any spatial lane has a key, the track's
+pan — the slider AND a pan envelope — is superseded entirely; the pan slider
+disables with an explanation.
+
+**Why it is built this way:** (1)–(3) are the honest limits of amplitude
+panning: the projection `sin(azimuth)·cos(elevation)` is the source
+direction's component along the interaural axis, and front/back or
+median-plane cues simply do not exist in two channel gains. True binaural
+placement needs HRTF convolution — a licensed HRIR dataset, per-sample
+convolution, and a model download on the scale of stem separation — and Web
+Audio's built-in `PannerNode` HRTF was rejected because it has no offline
+equivalent: what you heard would no longer be what `mixdownSession` exports,
+breaking the exact playback≡mixdown parity F0 established (both engines
+compute spatial gains from one shared TypeScript function instead, proven
+equal to the last float32 bit). ITD (interaural delay) is likewise omitted
+rather than approximated: a time-varying delay line is a resampling problem
+that produces Doppler-like artefacts unless carefully interpolated. The
+interface (position lanes → per-sample gain pair) is exactly the seam a
+future HRTF backend would slot into. (4) is F0's override-not-offset ruling
+one level up: spatial placement and pan compute the same thing, and two
+placement laws composed would double-apply position; the more specific
+system governs while it exists.
+
+Azimuth automation interpolates along the SHORT arc across the ±180° seam
+(keys at 170° and −170° mean a 20° pass behind the listener, not a 340°
+sweep through the front); a deliberate long sweep is written by adding an
+intermediate key. Keys exactly opposite (180° apart) travel the
+decreasing-azimuth arc — through the left — as a fixed, pinned tie-break.
