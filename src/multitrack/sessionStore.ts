@@ -508,9 +508,23 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
     set((s) => {
       const loc = findClipLocation(s.session.tracks, clipId);
       if (!loc) return s;
+      const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
+      // X5/v1.9.1: snapshot the pivot's overlap relationships BEFORE it leaves
+      // the array (trap T5). preOverlapStates skips the pivot and measures every
+      // overlap against it, so it must run while the pivot is still present —
+      // snapshotting after the filter reads every pair as unarmed and disarms
+      // nothing. With the pivot then filtered out, maintainFacingFades re-arms
+      // nothing (its arm loop finds no pivot -> continue) and its disarm loop
+      // clears the survivor's now-stale facing edge, so deleting one member of
+      // an armed crossfade pair no longer strands the survivor's facing fade as
+      // a surprise solo fade. The dead pivot's own facing-edge write is a no-op
+      // (writeClipFade's index guard). Reuses the existing helper verbatim — no
+      // bespoke disarm logic (trap T6).
+      const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
       const tracks = s.session.tracks.map((t, i) =>
         i === loc.trackIdx ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t
       );
+      maintainFacingFades(tracks, loc.trackIdx, loc.trackIdx, clipId, pre);
       const selectedClipId = s.selectedClipId === clipId ? null : s.selectedClipId;
       return { session: { ...s.session, tracks }, selectedClipId };
     });

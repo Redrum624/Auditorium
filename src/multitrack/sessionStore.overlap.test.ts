@@ -576,6 +576,55 @@ describe('a gesture-armed crossfade reaches the renderer end-to-end', () => {
   });
 });
 
+describe('removeClip disarming — deleting a member never strands the survivor`s facing fade (v1.9.1 item 4)', () => {
+  it('deleting the INCOMING clip of an armed pair clears the outgoing survivor`s facing fade; away fades survive', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().setClipFade(a, 'in', { lengthSample: 50 }); // away-side on A
+    useSessionStore.getState().setClipFade(b, 'out', { lengthSample: 60 }); // away-side on B
+    useSessionStore.getState().moveClip(b, trackId(), 600); // arms: 50+400<=1000, 60+400<=1000
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(findClip(b)!.fadeInSample).toBe(400);
+
+    useSessionStore.getState().removeClip(b);
+
+    // The survivor keeps NO stranded facing fade-out (the bug: it kept 400).
+    expect(findClip(a)!.fadeOutSample).toBeUndefined();
+    // The away-side fade on A is untouched.
+    expect(findClip(a)!.fadeInSample).toBe(50);
+    expect(findClip(b)).toBeUndefined();
+  });
+
+  it('deleting the OUTGOING clip of an armed pair clears the incoming survivor`s facing fade', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600); // armed at 400
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(findClip(b)!.fadeInSample).toBe(400);
+
+    useSessionStore.getState().removeClip(a);
+
+    expect(findClip(b)!.fadeInSample).toBeUndefined();
+    expect(findClip(a)).toBeUndefined();
+  });
+
+  it('deleting an UNRELATED clip leaves an armed crossfade untouched (no false disarm)', () => {
+    const a = seed({ startSample: 0, lengthSample: 1000 });
+    const b = seed({ startSample: 5000, lengthSample: 1000 });
+    useSessionStore.getState().moveClip(b, trackId(), 600); // armed at 400
+    const d = seed({ startSample: 20000, lengthSample: 1000 }); // no overlap with a/b
+
+    useSessionStore.getState().removeClip(d);
+
+    expect(findClip(a)!.fadeOutSample).toBe(400);
+    expect(findClip(b)!.fadeInSample).toBe(400);
+    // The renderer still sees a live crossfade.
+    const specs = resolveClipFadeSpecs(trackClips());
+    expect(specs.get(a)?.crossOut?.lengthSample).toBe(400);
+    expect(specs.get(b)?.crossIn?.lengthSample).toBe(400);
+  });
+});
+
 describe('X4 — carried X5 findings: intruded armed pairs, and the fade-UI recovery path', () => {
   /** Arms A[0,1000) / B[600,1600) at width 400 through the real gesture, then
    * lands an intruder C inside the overlap region via addClip (the punch-in /
