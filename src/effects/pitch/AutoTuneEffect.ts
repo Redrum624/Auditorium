@@ -124,6 +124,53 @@ export function correctionCurve(
   return out;
 }
 
+/**
+ * Cumulative stretch map from the per-frame correction curve. S[i] is the
+ * stretched-signal position of input sample i (S[0] = 0, S[N] = the stretched
+ * total length); the per-sample ratio is ρ(i) = 2^(c(i)/12) where c(i)
+ * interpolates the correction linearly in SEMITONES between frame centres
+ * (centerSamples + k·hopSamples) and HOLDS the first/last frame's value across
+ * the head/tail edges. Every ρ is clamped to [MIN_RATIO, MAX_RATIO]: corrections
+ * from snapMidiToScale are bounded by half the largest scale gap (≤ 1 st ⇒
+ * ρ ∈ [0.944, 1.060]) so the clamp never binds in the effect, but this function
+ * accepts ARBITRARY curves and must never emit a ratio WSOLA does not support
+ * (the clamp is pinned directly in the tests via out-of-range curves).
+ * Exported for exact-arithmetic unit pinning of the edge-hold and clamp
+ * branches, which are unobservable at f0-measurement scale (the tail hold
+ * affects only the last ~25 ms).
+ */
+export function buildCorrectionMap(
+  corr: ArrayLike<number>,
+  N: number,
+  centerSamples: number,
+  hopSamples: number
+): { S: Float64Array; maxRho: number } {
+  const K = corr.length;
+  const S = new Float64Array(N + 1);
+  let acc = 0;
+  let maxRho = 0;
+  for (let i = 0; i < N; i++) {
+    const t = (i - centerSamples) / hopSamples; // fractional frame index at sample i
+    let c: number;
+    if (t <= 0) {
+      c = corr[0];
+    } else if (t >= K - 1) {
+      c = corr[K - 1];
+    } else {
+      const k0 = Math.floor(t);
+      const fr = t - k0;
+      c = corr[k0] + fr * (corr[k0 + 1] - corr[k0]);
+    }
+    let rho = Math.pow(2, c / 12);
+    if (rho < MIN_RATIO) rho = MIN_RATIO;
+    else if (rho > MAX_RATIO) rho = MAX_RATIO;
+    if (rho > maxRho) maxRho = rho;
+    acc += rho;
+    S[i + 1] = acc;
+  }
+  return { S, maxRho };
+}
+
 // Progress budget per stage, from per-sample op-count estimates at 44.1 kHz:
 // detection ≈ τmax·W/hop ≈ 1103²/441 ≈ 2760 ops/sample, WSOLA search ≈
 // (2·search+1)·compare/analysisHop ≈ 883·441/882 ≈ 442, sinc read-back = 64
@@ -231,32 +278,8 @@ export const autoTuneEffect: EffectDefinition = {
 
     // Per-sample ratio and its cumulative map S (S[i] = stretched position of
     // input sample i). Correction interpolates linearly in SEMITONES between
-    // frame centres and holds at the edges.
-    const center = track.frameSamples / 2;
-    const hop = track.hopSamples;
-    const K = corr.length;
-    const S = new Float64Array(N + 1);
-    let acc = 0;
-    let maxRho = 0;
-    for (let i = 0; i < N; i++) {
-      const t = (i - center) / hop; // fractional frame index at sample i
-      let c: number;
-      if (t <= 0) {
-        c = corr[0];
-      } else if (t >= K - 1) {
-        c = corr[K - 1];
-      } else {
-        const k0 = Math.floor(t);
-        const fr = t - k0;
-        c = corr[k0] + fr * (corr[k0 + 1] - corr[k0]);
-      }
-      let rho = Math.pow(2, c / 12);
-      if (rho < MIN_RATIO) rho = MIN_RATIO;
-      else if (rho > MAX_RATIO) rho = MAX_RATIO;
-      if (rho > maxRho) maxRho = rho;
-      acc += rho;
-      S[i + 1] = acc;
-    }
+    // frame centres and holds at the edges; see buildCorrectionMap.
+    const { S, maxRho } = buildCorrectionMap(corr, N, track.frameSamples / 2, track.hopSamples);
     const M = Math.round(S[N]);
 
     // Inverse of S for the WSOLA stage (binary search; S is strictly

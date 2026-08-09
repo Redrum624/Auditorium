@@ -119,6 +119,11 @@ describe('resampleVariable', () => {
   it.each([
     [44100, 88200], // upsample ×2: step 0.5, fc 0.5
     [88200, 44100], // downsample ×2: step 2, fc 0.25
+    // Non-dyadic pairs: step 147/160 resp. 160/147, so tap distances fall BETWEEN
+    // kernel-table entries (frac ≠ 0) and the table interpolation genuinely runs —
+    // the ×2 pairs above hit exact entries (frac = 0) and cannot see it.
+    [44100, 48000], // upsample, fc 0.5, fractional table reads
+    [48000, 44100], // downsample, fc = 0.5·44100/48000, fractional table reads
   ])('constant-step positions are byte-identical to resampleChannel (%d → %d)', (from, to) => {
     // Same per-sample arithmetic, same kernel builder — a constant-step position
     // array must reproduce the fixed-ratio path exactly, which pins that the

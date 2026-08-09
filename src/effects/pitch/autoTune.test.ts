@@ -5,7 +5,15 @@
  * pitchDetect.test.ts validates against known-f0 fixtures — not by "samples
  * changed".
  */
-import { autoTuneEffect, correctionCurve, hzToMidi, snapMidiToScale, SCALE_INTERVALS } from './AutoTuneEffect';
+import {
+  autoTuneEffect,
+  buildCorrectionMap,
+  correctionCurve,
+  hzToMidi,
+  snapMidiToScale,
+  SCALE_INTERVALS,
+} from './AutoTuneEffect';
+import { MAX_RATIO, MIN_RATIO } from '../../dsp/wsola';
 import { getAllEffects } from '../EffectRegistry';
 import { registerAllEffects } from '../registerAll';
 import { detectPitch, type PitchTrack } from '../../dsp/pitchDetect';
@@ -161,6 +169,60 @@ describe('correctionCurve — smoothing semantics', () => {
   });
 });
 
+describe('buildCorrectionMap — exact per-sample ratios (edge holds, interpolation, clamp)', () => {
+  // The tail hold affects only the last ~25 ms of audio and is unobservable at
+  // f0-measurement scale (a surviving mutant proved it: with the accumulated
+  // map shift, even a zero-correction tail deviates from the input by O(1)
+  // phase offset), so the hold/interp/clamp branches are pinned here with
+  // EXACT arithmetic on the per-sample increments S[i+1] − S[i] = ρ(i).
+  const rho = (c: number) => Math.pow(2, c / 12);
+  const inc = (S: Float64Array, i: number) => S[i + 1] - S[i];
+  // S[i+1] − S[i] recovers ρ(i) up to one accumulation ulp (~2e-16); precision
+  // 12 (5e-13) absorbs that while the pinned branch differences are ≥ percents.
+  const expectRho = (got: number, c: number) => expect(got).toBeCloseTo(rho(c), 12);
+
+  it('holds corr[0] up to the first frame centre and corr[K−1] from the last (below/on/above each)', () => {
+    // center = 2, hop = 4, K = 3 ⇒ centres at samples 2, 6, 10 over N = 16.
+    const corr = [0.5, 0.2, -0.3];
+    const { S } = buildCorrectionMap(corr, 16, 2, 4);
+    expectRho(inc(S, 0), 0.5); // below the first centre: head hold
+    expectRho(inc(S, 1), 0.5);
+    expectRho(inc(S, 2), 0.5); // ON the first centre (t = 0 takes the hold branch)
+    expectRho(inc(S, 3), 0.5 + 0.25 * (0.2 - 0.5)); // above: interpolation begins
+    expectRho(inc(S, 9), 0.2 + 0.75 * (-0.3 - 0.2)); // below the last centre: interp
+    expectRho(inc(S, 10), -0.3); // ON the last centre (t = K−1 takes the hold branch)
+    expectRho(inc(S, 11), -0.3); // above: tail hold
+    expectRho(inc(S, 15), -0.3);
+  });
+
+  it('interpolates linearly in semitones between frame centres', () => {
+    const corr = [0, 1.2];
+    const { S, maxRho } = buildCorrectionMap(corr, 8, 0, 4); // centres at 0 and 4
+    expectRho(inc(S, 1), 0.3);
+    expectRho(inc(S, 2), 0.6);
+    expectRho(inc(S, 3), 0.9);
+    expect(maxRho).toBe(rho(1.2)); // maxRho is a direct copy, not a difference — exact
+  });
+
+  it('clamps out-of-range ratios to [MIN_RATIO, MAX_RATIO] (unreachable from the effect, pinned here)', () => {
+    // ±100 st ⇒ ρ = 2^±8.33, far outside WSOLA's supported range.
+    const up = buildCorrectionMap([100], 4, 2, 4);
+    expect(inc(up.S, 0)).toBe(MAX_RATIO);
+    expect(up.maxRho).toBe(MAX_RATIO);
+    const down = buildCorrectionMap([-100], 4, 2, 4);
+    expect(inc(down.S, 0)).toBe(MIN_RATIO);
+    // …and an in-range curve is NOT clamped (boundary from the inside).
+    const inside = buildCorrectionMap([1], 4, 2, 4);
+    expect(inc(inside.S, 0)).toBe(rho(1));
+  });
+
+  it('S starts at 0 and accumulates to the stretched total', () => {
+    const { S } = buildCorrectionMap([0], 5, 2, 4); // ρ ≡ 1
+    expect(S[0]).toBe(0);
+    expect(S[5]).toBe(5);
+  });
+});
+
 describe('autoTuneEffect — pass-through rulings (byte-identical)', () => {
   it('strength 0 returns byte-identical copies in NEW arrays (ruling 4)', () => {
     const input = sine(452, 0.3);
@@ -265,25 +327,22 @@ describe('autoTuneEffect — retune speed is an exponential glide with time cons
 
     // The correction curve HOLDS its first/last frame values across the edge
     // regions (the first/last ~25 ms lie before/after any frame centre), so
-    // with retune 0 even the head and tail of the note are pitch-shifted — an
-    // edge that decayed to "no correction" would leave them byte-equal to the
-    // input. Probes the t ≤ 0 and t ≥ K−1 hold branches of the ratio curve.
-    let headDiffers = false;
-    for (let i = 0; i < 1000; i++) {
-      if (out[0][i] !== input[i]) {
-        headDiffers = true;
-        break;
-      }
-    }
-    expect(headDiffers).toBe(true);
-    let tailDiffers = false;
+    // with retune 0 even the head and tail of the note are pitch-shifted. The
+    // 46.6 c shift drifts the phase ~1.7 rad across 1000 samples, so the
+    // corrected edges deviate from the input by O(1) — measured max 1.497
+    // (head) / 1.437 (tail) — while an edge whose correction decayed to zero
+    // is a unit-ratio pass-through deviating by ~1e-17 (sinc leakage only).
+    // A magnitude pin, not an any-sample-differs pin: near-zero samples pick
+    // up float-level leakage either way. Probes the t ≤ 0 and t ≥ K−1 hold
+    // branches of the ratio curve.
+    let headDev = 0;
+    for (let i = 0; i < 1000; i++) headDev = Math.max(headDev, Math.abs(out[0][i] - input[i]));
+    expect(headDev).toBeGreaterThan(0.1);
+    let tailDev = 0;
     for (let i = input.length - 1000; i < input.length; i++) {
-      if (out[0][i] !== input[i]) {
-        tailDiffers = true;
-        break;
-      }
+      tailDev = Math.max(tailDev, Math.abs(out[0][i] - input[i]));
     }
-    expect(tailDiffers).toBe(true);
+    expect(tailDev).toBeGreaterThan(0.1);
   });
 });
 
