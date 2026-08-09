@@ -16,6 +16,7 @@ import {
   DEFAULT_FADE_CURVE,
 } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
+import type { AutomationLane } from '../multitrack/automation';
 import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
@@ -235,6 +236,23 @@ export interface TestApi {
     overlap: { start: number; end: number } | null,
     probeIndices: number[]
   ): Promise<WebAudioRenderSummary>;
+  // --- v1.10 flows (F0) ----------------------------------------------------
+  /** Every track's stored automation lanes as plain JSON — `null` when the
+   * track has no `automation` field at all (absent means none, trap T9: the
+   * smoke asserts the FIELD's absence, not just emptiness, after the last
+   * key is deleted through the real gesture). */
+  getAutomationState(): { tracks: { trackId: string; automation: AutomationLane[] | null }[] };
+  /** Writes one automation key through the store's own `upsertAutomationKey`
+   * (THE write boundary — position rounding, value clamping and curve
+   * validation are the store's, exactly as for any other JS caller) and
+   * echoes the track's stored lanes. Returns null for an out-of-range track
+   * index. */
+  upsertAutomationKey(
+    trackIndex: number,
+    param: 'volumeDb' | 'pan',
+    key: { positionSample: number; value: number; curve?: string },
+    replacePositionSample?: number
+  ): { automation: AutomationLane[] | null } | null;
 }
 
 /** Plain-JSON snapshot of one clip's fade state (v1.9 X7). Stored values are
@@ -1241,6 +1259,39 @@ export function installTestHooks(): void {
         webPeak,
         mixPeak,
         probes,
+      };
+    },
+
+    // F0 — plain-JSON automation snapshots. `automation: null` reports the
+    // FIELD's absence (a `'automation' in track` check), so the smoke can
+    // assert trap T9's "absent means none" against the real store after the
+    // last key is deleted through the real gesture.
+    getAutomationState: () => ({
+      tracks: useSessionStore.getState().session.tracks.map((t) => ({
+        trackId: t.id,
+        automation: t.automation ? (JSON.parse(JSON.stringify(t.automation)) as AutomationLane[]) : null,
+      })),
+    }),
+
+    // F0 — writes through the store's own action (THE write boundary); the
+    // store rounds/clamps/validates exactly as for any other JS caller.
+    upsertAutomationKey: (trackIndex, param, key, replacePositionSample) => {
+      const tracks = useSessionStore.getState().session.tracks;
+      const t = tracks[trackIndex];
+      if (!t) return null;
+      useSessionStore
+        .getState()
+        .upsertAutomationKey(
+          t.id,
+          param,
+          key as { positionSample: number; value: number; curve?: FadeCurve },
+          replacePositionSample
+        );
+      const after = useSessionStore.getState().session.tracks[trackIndex];
+      return {
+        automation: after.automation
+          ? (JSON.parse(JSON.stringify(after.automation)) as AutomationLane[])
+          : null,
       };
     },
   };

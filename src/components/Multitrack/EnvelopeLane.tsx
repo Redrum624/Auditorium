@@ -191,8 +191,8 @@ export default function EnvelopeLane({ track, param, zoom, laneHeight }: Envelop
       window.removeEventListener('keydown', onAltChange);
       window.removeEventListener('keyup', onAltChange);
     };
-    // dropFor is recreated per render; these are everything it reads.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // dropFor is recreated per render; the deps are everything it reads, so
+    // the listener is rebound exactly when its answer could change.
   }, [dragging, zoom.samplesPerPixel, zoom.scrollSample, param]);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {

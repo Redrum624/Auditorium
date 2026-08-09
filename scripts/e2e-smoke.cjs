@@ -37,6 +37,7 @@ const OUT_MARKERS_OGG = path.join(OUT_DIR, 'markers.ogg');
 const OUT_SESSION = path.join(OUT_DIR, 'session.audm');
 const OUT_FADES_SESSION = path.join(OUT_DIR, 'fades-session.audm');
 const OUT_FADES_REFERENCE = path.join(OUT_DIR, 'fades-v18-reference.json');
+const OUT_AUTOMATION_SESSION = path.join(OUT_DIR, 'automation-session.audm');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -1867,6 +1868,262 @@ async function main() {
     assert(
       xfA3.fadeOutSample === 0 && xfB3.fadeInSample === 0 && xfA3.crossOutWidth === null,
       'the no-longer-overlapping pair was disarmed — no stale facing fades survive'
+    );
+
+    // 19) F0 (v1.10) — automation keys, end to end --------------------------
+    // Discharges the packaged-app obligations the 103 unit/parity tests
+    // cannot:
+    //   (a) REAL gestures on the built app: open the volume envelope from the
+    //       track header, Alt-click keys onto the lane (Alt suspends the
+    //       magnet so the aimed pixel IS the committed sample), drag one,
+    //       right-click both away — asserting committed store state after
+    //       each, ruling B's disabled fader in the real DOM, and trap T9's
+    //       field-absence after the last key dies;
+    //   (b) REAL Web Audio parity over MOVING vol+pan envelopes: exact lanes
+    //       set through the store's write boundary, rendered through the
+    //       genuine player graph in an OfflineAudioContext (baked buffers,
+    //       neutralised nodes) and required BIT-IDENTICAL to mixdownSession,
+    //       with law anchors computed here with independent arithmetic;
+    //   (c) the automation-carrying .audm round-trips, lanes intact.
+    // Entry state from step 18: track 1 holds A [0, 88200) and B
+    // [88200, 176400), fade-free and disarmed; the tone doc is dual-mono
+    // STEREO (identical channels), so the stereo balance law governs pan.
+    console.log('Automation keys (F0): envelope gestures, baked render parity, round trip...');
+    const auto0 = await page.evaluate(() => window.__test.getAutomationState());
+    assert(
+      auto0.tracks.length === 4 && auto0.tracks.every((t) => t.automation === null),
+      'no track carries an automation field before the first key (absent means none)'
+    );
+
+    // (a) Open the volume envelope from the FIRST track header's real toggle.
+    const volToggles = await page.$$('[aria-label="Volume envelope"]');
+    assert(volToggles.length === 4, `each track header has a volume envelope toggle (${volToggles.length})`);
+    await volToggles[0].click();
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="envelope-lane"]').length === 1,
+      null,
+      { timeout: 5000 }
+    );
+    assert(true, 'the envelope lane overlay opened on track 1');
+
+    // Pixel→sample conversion derived from clip A's own rect (A spans
+    // [0, 88200), so its width in px measures the zoom — no zoom hook).
+    const envRects = await page.evaluate(() => {
+      const clips = [...document.querySelectorAll('[data-testid="clip"]')].map((el) => {
+        const r = el.getBoundingClientRect();
+        return { x: r.x, width: r.width };
+      });
+      const lane = document.querySelector('[data-testid="envelope-lane"]').getBoundingClientRect();
+      return { clips: clips.sort((a, b) => a.x - b.x), lane: { x: lane.x, y: lane.y, height: lane.height } };
+    });
+    const envA = envRects.clips[0];
+    const sppEst = 88200 / envA.width;
+    const laneY = envRects.lane.y;
+    const laneH = envRects.lane.height;
+    // The lane's value mapping (EnvelopeLane constants: PAD_Y 6, range
+    // −60..+12 dB): y → −60 + (1 − (yLocal − 6)/(laneH − 12))·72.
+    const yFor = (dB) => laneY + 6 + (1 - (dB + 60) / 72) * (laneH - 12);
+
+    // Two Alt-clicks: key 1 at ~25% of A (quiet), key 2 at ~75% (loud).
+    await realClick(page, envA.x + envA.width * 0.25, laneY + laneH * 0.75, { alt: true });
+    await realClick(page, envA.x + envA.width * 0.75, laneY + laneH * 0.25, { alt: true });
+    const auto1 = await page.evaluate(() => window.__test.getAutomationState());
+    const volLane1 = (auto1.tracks[0].automation ?? []).find((l) => l.param === 'volumeDb');
+    assert(
+      volLane1 && volLane1.keys.length === 2,
+      `two Alt-clicks committed two volume keys (${JSON.stringify(auto1.tracks[0].automation)})`
+    );
+    const [k1, k2] = volLane1.keys;
+    assert(
+      Math.abs(k1.positionSample - 22050) <= 4 * sppEst &&
+        Math.abs(k2.positionSample - 66150) <= 4 * sppEst &&
+        k1.positionSample < k2.positionSample,
+      `the keys landed where aimed, ascending (${k1.positionSample} ~22050, ${k2.positionSample} ~66150, ±${Math.round(4 * sppEst)})`
+    );
+    assert(
+      k1.value > -50 && k1.value < -39 && k2.value > -9 && k2.value < 2 && k1.value < k2.value,
+      `the key values follow the aimed heights (quiet ${k1.value} dB, loud ${k2.value} dB)`
+    );
+    // Ruling B in the real DOM: track 1's volume fader is governed/disabled,
+    // track 2's is not, and the pan fader on track 1 stays live.
+    const faderState = await page.evaluate(() => {
+      const headers = [...document.querySelectorAll('[data-testid="track-header"]')];
+      const vol = (i) => headers[i].querySelector('[aria-label="Volume (dB)"]').disabled;
+      const pan = (i) => headers[i].querySelector('[aria-label="Pan"]').disabled;
+      return { vol0: vol(0), vol1: vol(1), pan0: pan(0) };
+    });
+    assert(
+      faderState.vol0 === true && faderState.vol1 === false && faderState.pan0 === false,
+      `an active lane disables ONLY its own fader (${JSON.stringify(faderState)})`
+    );
+
+    // A REAL key drag: grab key 2 at its committed position (the value→y map
+    // above), pull it right by ~10% of A with Alt held, release — ONE commit.
+    const k2x = envA.x + k2.positionSample / sppEst;
+    const k2y = yFor(k2.value);
+    await page.keyboard.down('Alt');
+    await page.mouse.move(k2x, k2y);
+    await page.mouse.down();
+    await page.mouse.move(k2x + envA.width * 0.1, k2y, { steps: 6 });
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+    const auto2 = await page.evaluate(() => window.__test.getAutomationState());
+    const volLane2 = (auto2.tracks[0].automation ?? []).find((l) => l.param === 'volumeDb');
+    const k2moved = volLane2.keys[1];
+    assert(
+      volLane2.keys.length === 2 &&
+        Math.abs(k2moved.positionSample - (k2.positionSample + 8820)) <= 4 * sppEst &&
+        Math.abs(k2moved.value - k2.value) <= 1,
+      `the drag moved key 2 by ~8820 samples at constant value, in one commit (${k2.positionSample}→${k2moved.positionSample}, ${k2.value}→${k2moved.value})`
+    );
+
+    // Right-click deletes: first the moved key, then the last one — after
+    // which the FIELD itself must be gone (T9) and the fader live again.
+    const rightClick = async (x, y) => {
+      await page.mouse.move(x, y);
+      await page.mouse.down({ button: 'right' });
+      await page.mouse.up({ button: 'right' });
+    };
+    await rightClick(envA.x + k2moved.positionSample / sppEst, yFor(k2moved.value));
+    const auto3 = await page.evaluate(() => window.__test.getAutomationState());
+    assert(
+      auto3.tracks[0].automation.find((l) => l.param === 'volumeDb').keys.length === 1,
+      'right-click deleted the moved key (one remains)'
+    );
+    await rightClick(envA.x + k1.positionSample / sppEst, yFor(k1.value));
+    const auto4 = await page.evaluate(() => window.__test.getAutomationState());
+    assert(
+      auto4.tracks[0].automation === null,
+      'deleting the last key removed the automation FIELD entirely (absent means none, T9)'
+    );
+    const faderAfter = await page.evaluate(
+      () =>
+        [...document.querySelectorAll('[data-testid="track-header"]')][0].querySelector(
+          '[aria-label="Volume (dB)"]'
+        ).disabled
+    );
+    assert(faderAfter === false, 'the volume fader is live again once no lane governs it');
+    await volToggles[0].click(); // close the envelope overlay
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="envelope-lane"]').length === 0,
+      null,
+      { timeout: 5000 }
+    );
+
+    // (b) Exact MOVING lanes through the write boundary, then the genuine
+    // engine. Both params automated => the player neutralises volume AND pan
+    // nodes to unity, so the baked buffers pass through the graph untouched
+    // and the render must be BIT-IDENTICAL to the mixdown — the strongest
+    // form of the playback≡mixdown invariant, now over a moving envelope.
+    await page.evaluate(() => {
+      window.__test.upsertAutomationKey(0, 'volumeDb', { positionSample: 0, value: -6, curve: 'equal-gain' });
+      window.__test.upsertAutomationKey(0, 'volumeDb', { positionSample: 88200, value: 0, curve: 'smooth' });
+      window.__test.upsertAutomationKey(0, 'volumeDb', { positionSample: 132300, value: -3 });
+      window.__test.upsertAutomationKey(0, 'pan', { positionSample: 22050, value: -0.8, curve: 'equal-gain' });
+      window.__test.upsertAutomationKey(0, 'pan', { positionSample: 154350, value: 0.8 });
+    });
+    const autoSet = await page.evaluate(() => window.__test.getAutomationState());
+    const setLanes = autoSet.tracks[0].automation;
+    assert(
+      setLanes &&
+        setLanes.length === 2 &&
+        setLanes[0].param === 'volumeDb' &&
+        setLanes[0].keys.length === 3 &&
+        setLanes[1].param === 'pan' &&
+        setLanes[1].keys.length === 2,
+      `the write boundary stored both exact lanes (${JSON.stringify(setLanes)})`
+    );
+
+    // Probe positions sit OFF the tone's zero crossings (multiples of 22050
+    // are exact zeros of the 440 Hz fixture — an anchor at src 0 passes no
+    // matter what the gains do); a non-vacuity guard below enforces it.
+    const autoProbeIdxs = [44125, 88225, 110275, 132325, 160000];
+    const autoWeb = await page.evaluate(
+      (probes) => window.__test.renderSessionWebAudio(null, probes),
+      autoProbeIdxs
+    );
+    console.log(
+      `  renderSessionWebAudio (automation): ${JSON.stringify({ ...autoWeb, probes: undefined })}`
+    );
+    assert(autoWeb.ok === true, `the automated offline render succeeded (${autoWeb.reason})`);
+    assert(
+      autoWeb.lengthSamples === 176400,
+      `the render spans both clips (expected 176400, actual ${autoWeb.lengthSamples})`
+    );
+    assert(
+      autoWeb.worstAbsError === 0 && autoWeb.exactFraction === 1,
+      `with both lanes baked and every live gain at unity, the REAL Web Audio render is BIT-IDENTICAL to the mixdown over the whole session (worst |err| ${autoWeb.worstAbsError}, exact ${autoWeb.exactFraction})`
+    );
+    assert(
+      autoWeb.webPeak <= 1 && autoWeb.mixPeak <= 1,
+      `the automated render does not clip (web peak ${autoWeb.webPeak}, mix peak ${autoWeb.mixPeak})`
+    );
+
+    // Law anchors with independent arithmetic (never through dsp/fades.ts or
+    // multitrack/automation.ts): the lane values at each probe are computed
+    // from the interpolation formulas inline, the pan gains from the STEREO
+    // balance law (tone.wav is a dual-mono STEREO file, so the clip's channel
+    // count selects the balance law — unity on the near side, cosine on the
+    // far side; the first run of this step assumed the mono law and its
+    // anchors failed by exactly the law difference, which is the anchors
+    // doing their job), dB→linear from 10^(dB/20), and the per-sample product
+    // in the engines' multiply order src·v·gPan (clip gain 1 and fade 1 drop
+    // out exactly). Dual-mono: both channels share the same source sample.
+    const autoVolAt = (s) =>
+      s < 88200
+        ? -6 + 6 * (s / 88200) // equal-gain segment −6 → 0
+        : s < 132300
+          ? 0 + -3 * ((1 - Math.cos(Math.PI * ((s - 88200) / 44100))) / 2) // smooth 0 → −3
+          : -3; // hold after the last key
+    const autoPanAt = (s) =>
+      s < 22050 ? -0.8 : s < 154350 ? -0.8 + 1.6 * ((s - 22050) / 132300) : 0.8;
+    const autoSrc = await page.evaluate(
+      (idxs) => idxs.map((i) => window.__test.getChannelSamples(0, i % 88200, 1)[0]),
+      autoProbeIdxs
+    );
+    for (let p = 0; p < autoProbeIdxs.length; p++) {
+      const s = autoProbeIdxs[p];
+      assert(
+        Math.abs(autoSrc[p]) > 0.05,
+        `anchor ${s} probes a non-zero source sample (${autoSrc[p]}) — a zero-crossing anchor is vacuous`
+      );
+      const v = Math.pow(10, autoVolAt(s) / 20);
+      const pan = autoPanAt(s);
+      const gL = pan <= 0 ? 1 : Math.cos((pan * Math.PI) / 2);
+      const gR = pan >= 0 ? 1 : Math.cos((-pan * Math.PI) / 2);
+      const expL = f32(autoSrc[p] * v * gL);
+      const expR = f32(autoSrc[p] * v * gR);
+      const probe = autoWeb.probes[p];
+      assert(
+        Math.abs(probe.webL - expL) <= 5e-7 && Math.abs(probe.mixL - expL) <= 5e-7,
+        `law anchor L at ${s}: web ${probe.webL} and mixdown ${probe.mixL} within 5e-7 of the independent vol+balance-pan expectation ${expL}`
+      );
+      assert(
+        Math.abs(probe.webR - expR) <= 5e-7 && Math.abs(probe.mixR - expR) <= 5e-7,
+        `law anchor R at ${s}: web ${probe.webR} and mixdown ${probe.mixR} within 5e-7 of ${expR}`
+      );
+    }
+
+    // (c) The automation-carrying .audm round-trips with lanes intact — and
+    // the untouched tracks still have NO automation field.
+    const savedAuto = await page.evaluate((p) => window.__test.saveSessionAs(p), OUT_AUTOMATION_SESSION);
+    assert(
+      savedAuto === true && fs.existsSync(OUT_AUTOMATION_SESSION),
+      `the automation-carrying session was written to ${OUT_AUTOMATION_SESSION}`
+    );
+    const autoReopened = await page.evaluate((p) => window.__test.openSessionFrom(p), OUT_AUTOMATION_SESSION);
+    assert(
+      autoReopened.trackCount === 4 && autoReopened.droppedClipCount === 0,
+      `the automation session reopened (${JSON.stringify(autoReopened)})`
+    );
+    const autoBack = await page.evaluate(() => window.__test.getAutomationState());
+    assert(
+      JSON.stringify(autoBack.tracks[0].automation) === JSON.stringify(setLanes),
+      'both lanes — params, positions, values, per-key curves, order — survived the .audm round trip'
+    );
+    assert(
+      autoBack.tracks.slice(1).every((t) => t.automation === null),
+      'the automation-free tracks still carry NO automation field after the round trip'
     );
 
     console.log('\nSMOKE PASSED');
