@@ -73,18 +73,38 @@ function rawStartsWithUncPrefix(rawPath) {
 const LOCAL_ALIAS_HOSTS = new Set(['localhost', '.', '::1']);
 
 /**
- * Strips the trailing dots and/or spaces that Windows silently removes from a
+ * Strips the trailing dots and whitespace that Windows silently removes from a
  * path component during Win32 -> NT canonicalization (CreateFile drops trailing
  * dots and spaces from the last component and from share/host names). Without
  * this, a decorated spelling like `localhost..`, `localhost ` or a share `C$.`
  * / `C$ ` slips past the loopback-alias / admin-share refusals while still
- * resolving to the very target they forbid. Fail closed: we refuse what we
- * cannot confidently classify, whether or not this particular Windows/DNS
- * config happens to resolve the decorated form (v1.9.1 security fix). Anchored
- * to the END only -- a leading/interior dot is a real, meaningful character
- * (`127.0.0.1`, an FQDN). A component that is ALL dots/spaces collapses to ''
- * (which then matches no local alias and no `$` share -- an ordinary
- * non-loopback classification, never a throw).
+ * resolving to the very target they forbid.
+ *
+ * EXACT behaviour of the regex, stated precisely because this is a
+ * security-critical normalisation: `/[.\s]+$/` removes a trailing run of ASCII
+ * dots AND *any* character `\s` matches -- so ALL Unicode and control
+ * whitespace, not only U+0020: space, tab, CR, LF, NBSP (U+00A0), the
+ * ideographic space (U+3000), and the rest. This is intentionally WIDER than
+ * the exact {dot, space} set Windows itself canonicalizes away. Fail closed: we
+ * refuse what we cannot confidently classify, whether or not this particular
+ * Windows/DNS config resolves the decorated form (v1.9.1 security fix). No
+ * legitimate host or share ends in whitespace, so nothing real is caught; every
+ * extra whitespace class resolves to REFUSED.
+ *
+ * Anchored to the END only -- a leading/interior dot is a real, meaningful
+ * character (`127.0.0.1`, an FQDN).
+ *
+ * DEGENERATE case, KNOWN and deliberately left as-is (not a false positive):
+ * a component that is ALL dots/whitespace collapses to '', which then matches
+ * no local alias and no `$` share -- an ordinary non-loopback classification,
+ * never a throw. So `\\...\music\x.wav` is ALLOWED, as if `music` were a share
+ * on a remote host named ''. That is safe, and there is no reachable failure
+ * behind it: it is NOT a local device path -- the dangerous `\\.\music`
+ * "open the device named music" form is a DEVICE path caught by
+ * isDeviceOrExtendedPath long before this runs -- and the one genuinely
+ * dangerous shape on such a host, a `$`-suffixed share, is refused
+ * independently by isDollarSuffixedShare. Do NOT "fix" the '' host into a hard
+ * refusal: it would be a false positive with no attack behind it.
  */
 function stripTrailingDotsAndSpaces(component) {
   return component.replace(/[.\s]+$/, '');
