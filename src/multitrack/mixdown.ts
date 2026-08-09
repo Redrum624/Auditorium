@@ -2,6 +2,7 @@ import type { AudioDocument } from '../audio/AudioDocument';
 import { docLength } from '../audio/AudioDocument';
 import { crossfadeGains, fadeInGainAt, fadeOutGainAt, type FadeCurve } from '../dsp/fades';
 import { resampleChannel } from '../dsp/resample';
+import { automationValueAt, resolveAutomation, type AutomationKey } from './automation';
 import type { Clip, Session, Track } from './session';
 import { DEFAULT_FADE_CURVE, crossfadableOverlap } from './session';
 
@@ -65,6 +66,35 @@ export function stereoBalanceGains(pan: number): { gL: number; gR: number } {
 
 function isAudible(track: Track, anySolo: boolean): boolean {
   return !track.muted && (!anySolo || track.solo);
+}
+
+/**
+ * F0 — the volume lane's linear gain at timeline sample `s`:
+ * `dbToLinear(automationValueAt(keys, s))`. Exported for the SAME reason the
+ * pan laws are: the realtime `MultitrackPlayer` bakes the identical float
+ * expression into its buffers, so live playback and offline mixdown cannot
+ * drift (ruling A / trap T5 — one evaluator, one dB→linear conversion, shared
+ * verbatim by both engines).
+ */
+export function autoVolumeGainAt(keys: readonly AutomationKey[], s: number): number {
+  return dbToLinear(automationValueAt(keys, s));
+}
+
+/**
+ * F0 — the pan lane's gain pair at timeline sample `s`, under the law the
+ * clip's source channel count selects (`mono` — exactly how the static path
+ * picks its law per clip). Shared by both engines like {@link autoVolumeGainAt}.
+ * Ruling C rides on this: a mono clip keeps the MONO constant-power law even
+ * though the player promotes its BUFFER to two channels — the law choice
+ * follows the clip's source, never the buffer.
+ */
+export function autoPanGainsAt(
+  keys: readonly AutomationKey[],
+  s: number,
+  mono: boolean
+): { gL: number; gR: number } {
+  const pan = automationValueAt(keys, s);
+  return mono ? monoPanGains(pan) : stereoBalanceGains(pan);
 }
 
 function clamp1(v: number): number {
@@ -327,6 +357,11 @@ export function mixdownSession(
   let done = 0;
   for (const t of audible) {
     const trackGain = dbToLinear(t.volumeDb);
+    // F0 — the track's active automation, from the SAME resolver the player
+    // gates on. `null` for a lane-less track (or zero-key lanes), which keeps
+    // the pristine static branches below byte-identical to v1.9.2 (ruling:
+    // no existing session may change how it sounds).
+    const auto = resolveAutomation(t.automation);
     // Same-track fades/crossfades, resolved once per track. The spec lookup
     // doubles as the has-envelope test: a fade-less clip takes the plain loop
     // below UNCHANGED, so a session without fade fields renders byte-identical
@@ -347,7 +382,38 @@ export function mixdownSession(
       const base = c.startSample;
       const n = Math.min(slice[0].length, length - base);
       const spec = fadeSpecs.get(c.id);
-      if (spec) {
+      if (auto) {
+        // F0 — AUTOMATED track: the hoisted static factors above are dead for
+        // any automated parameter (trap T4 — keeping `g`/`gL` in the product
+        // would double-apply the static value under the envelope), and the
+        // envelope moves per sample, so EVERY clip of the track — with or
+        // without a fade spec — takes this per-sample loop. The fade-less
+        // fast path below must not be reachable here, or automation would be
+        // silently dropped for fade-less clips (T4's second half).
+        //
+        // The per-sample product is written in the EXACT order the player
+        // bakes (`buildClipBuffer`): sample · clipGain · v · gPan · e, with
+        // the lane factors from the SAME shared `autoVolumeGainAt` /
+        // `autoPanGainsAt` — so over a region where every remaining live
+        // node gain is exactly 1, the two paths compute identical doubles
+        // (the parity suite asserts exact float32 equality there). A static
+        // (un-automated) parameter falls back to the track's own field here
+        // and to a live node value of the same number in the player.
+        // Timeline indexing: `base + i` (trap T6 — never the slice length;
+        // a resampled slice's overhang sample evaluates at its true timeline
+        // position, past the clip span, exactly like the fade shapes clamp).
+        const clipGain = dbToLinear(c.gainDb);
+        for (let i = 0; i < n; i++) {
+          const s = base + i;
+          const e = spec ? clipFadeGainAt(spec, i) : 1;
+          const v = auto.volume ? autoVolumeGainAt(auto.volume, s) : trackGain;
+          const p = auto.pan ? autoPanGainsAt(auto.pan, s, mono) : null;
+          const pgL = p ? p.gL : gL;
+          const pgR = p ? p.gR : gR;
+          L[s] += chL[i] * clipGain * v * pgL * e;
+          R[s] += chR[i] * clipGain * v * pgR * e;
+        }
+      } else if (spec) {
         // Envelope applied PER CLIP, before the `+=` accumulation -- never to
         // the summed bus, and never after the clamp pass below (T22): two
         // crossfading clips must each be shaped before they meet, and the

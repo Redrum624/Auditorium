@@ -274,12 +274,31 @@ export default function Toolbar() {
   // volume/pan/mute/solo changes into the running graph as they happen (the store
   // replaces the tracks array on every edit). Unsubscribes on stop/view change/
   // unmount so no stray updates hit a torn-down graph.
+  //
+  // F0: an automation edit (a per-track `automation` reference change) first
+  // re-bakes THAT track's chain in place (`refreshTracks`, ruling D — the
+  // envelope is baked into the buffers, so pushing node values cannot carry
+  // it), then the ordinary param push runs; `applyTrackParams` itself skips
+  // baked parameters (trap T2), so the push cannot stomp a neutralised node.
+  // Non-automation edits take exactly the pre-F0 path.
   useEffect(() => {
     if (!isMultitrack || mtPlayState !== 'playing') return;
     return useSessionStore.subscribe((state, prev) => {
-      if (state.session.tracks !== prev.session.tracks) {
-        multitrackPlayer.applyTrackParams(state.session.tracks);
+      if (state.session.tracks === prev.session.tracks) return;
+      const prevById = new Map(prev.session.tracks.map((t) => [t.id, t]));
+      const changedIds = state.session.tracks
+        .filter((t) => {
+          const p = prevById.get(t.id);
+          return p !== undefined && p.automation !== t.automation;
+        })
+        .map((t) => t.id);
+      if (changedIds.length > 0) {
+        const docs = new Map<string, AudioDocument>(
+          useAppStore.getState().documents.map((d) => [d.id, d])
+        );
+        multitrackPlayer.refreshTracks(state.session, docs, changedIds);
       }
+      multitrackPlayer.applyTrackParams(state.session.tracks);
     });
   }, [isMultitrack, mtPlayState]);
 

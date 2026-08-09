@@ -1,5 +1,8 @@
 import type { AudioDocument } from '../audio/AudioDocument';
+import { resolveAutomation, type TrackAutomationSpec } from './automation';
 import {
+  autoPanGainsAt,
+  autoVolumeGainAt,
   clipFadeGainAt,
   monoPanGains,
   readClipSlice,
@@ -19,7 +22,11 @@ export interface MultitrackPlayerDeps {
 /**
  * Per-clip pan gain pair. `mode` records which pan law this clip's `panL`/`panR`
  * follow — chosen by the CLIP's source channel count, exactly like the offline
- * mixdown applies its law per clip (see `play`).
+ * mixdown applies its law per clip (see `play`). F0 exception: on a track with
+ * an active PAN lane the pair is neutralised to unity (the time-varying gains
+ * are baked into an always-2-channel buffer — ruling C) and `mode` then
+ * describes the promoted BUFFER's routing ('stereo' even for a mono source);
+ * the LAW still follows the source channel count, inside the bake.
  */
 export interface ClipPanNodes {
   panL: GainNode;
@@ -33,11 +40,25 @@ export interface ClipPanNodes {
  * per CLIP (`clipPans`, keyed by clip id): the pan law depends on each clip's
  * source channel count, so a track mixing mono and stereo clips gets a distinct
  * gain pair per clip. Volume and mute are per track.
+ *
+ * F0 additions: `bakedVolume`/`bakedPan` record which parameters were BAKED
+ * into this chain's buffers when it was built (an active automation lane,
+ * ruling A/B) — `applyTrackParams` must skip those nodes (trap T2: re-pushing
+ * the static field would stomp the neutralised unity node under the baked
+ * envelope). The flags describe the RUNNING buffers, not the current store
+ * state, so they cannot desync mid-play (`refreshTracks` rebuilds chain and
+ * flags together). `chainNodes`/`scheduled` are this track's own graph pieces,
+ * kept per track so `refreshTracks` can tear down and rebuild ONE track's
+ * chain without touching the rest of the running graph (ruling D).
  */
 export interface LiveTrackNodes {
   volumeGain: GainNode;
   muteGain: GainNode;
   clipPans: Map<string, ClipPanNodes>;
+  bakedVolume: boolean;
+  bakedPan: boolean;
+  chainNodes: AudioNode[];
+  scheduled: { src: AudioBufferSourceNode; clipEnd: number }[];
 }
 
 function dbToLinear(db: number): number {
@@ -96,10 +117,10 @@ export class MultitrackPlayer {
 
   private ctx: AudioContext | null = null;
   private master: GainNode | null = null;
-  /** Track-level nodes (gains, splitters, mergers) to disconnect on teardown. */
-  private graphNodes: AudioNode[] = [];
-  private sources: AudioBufferSourceNode[] = [];
-  /** Live per-track node registry, keyed by track id (empty while stopped). */
+  /** Live per-track node registry, keyed by track id (empty while stopped).
+   * Since F0 this is ALSO the ownership registry for teardown: every chain
+   * node and every scheduled source lives on its track's entry, so a single
+   * track's chain can be torn down and rebuilt in place (`refreshTracks`). */
   private trackNodes = new Map<string, LiveTrackNodes>();
 
   private _state: MultitrackPlayState = 'stopped';
@@ -138,123 +159,234 @@ export class MultitrackPlayer {
     const master = ctx.createGain();
     master.gain.value = 1;
     master.connect(ctx.destination);
-
-    const graphNodes: AudioNode[] = [master];
-    const sources: AudioBufferSourceNode[] = [];
-    let endSample = from;
-    let latest: AudioBufferSourceNode | null = null;
-    let latestEnd = -Infinity;
+    this.master = master;
 
     // Build EVERY track's full chain (even muted/solo-excluded ones) so live
     // mute/solo/volume/pan changes can retro-apply to the running graph. A
     // track with no clip past `from` contributes nothing and is skipped.
     for (const t of session.tracks) {
-      // Fades/crossfades resolved from the SAME shared resolver as the offline
-      // mixdown, per track, and baked into the buffers below -- so live
-      // playback and `mixdownSession` apply identical envelope gains (ruling
-      // 4). Resolution is play-position-agnostic: the whole envelope is baked
-      // and a seek is just a buffer offset, so it survives seeking like the
-      // baked clip gain does.
-      const fadeSpecs = resolveClipFadeSpecs(t.clips);
-      const built: { clip: Clip; buffer: AudioBuffer }[] = [];
-      for (const c of t.clips) {
-        if (c.startSample + c.lengthSample <= from) continue;
-        const doc = docs.get(c.documentId);
-        if (!doc) continue;
-        const buffer = this.buildClipBuffer(ctx, c, doc, sr, fadeSpecs.get(c.id));
-        if (!buffer) continue;
-        built.push({ clip: c, buffer });
-      }
-      if (built.length === 0) continue;
-
-      // Per-track chain: per-clip panL/panR -> shared merger(2) -> volume ->
-      // mute -> master. The pan LAW is chosen per clip below, like the mixdown.
-      const merger = ctx.createChannelMerger(2);
-      const volumeGain = ctx.createGain();
-      volumeGain.gain.value = dbToLinear(t.volumeDb);
-      const muteGain = ctx.createGain();
-      muteGain.gain.value = isEffectivelyMuted(t, anySolo) ? 0 : 1;
-
-      merger.connect(volumeGain);
-      volumeGain.connect(muteGain);
-      muteGain.connect(master);
-      graphNodes.push(merger, volumeGain, muteGain);
-      const clipPans = new Map<string, ClipPanNodes>();
-      this.trackNodes.set(t.id, { volumeGain, muteGain, clipPans });
-
-      for (const { clip: c, buffer } of built) {
-        const src = ctx.createBufferSource();
-        src.buffer = buffer;
-
-        // Per-clip pan pair under the clip's OWN law (mixdown parity).
-        const mode: ClipPanNodes['mode'] = buffer.numberOfChannels >= 2 ? 'stereo' : 'mono';
-        const panL = ctx.createGain();
-        const panR = ctx.createGain();
-        const { gL, gR } = mode === 'mono' ? monoPanGains(t.pan) : stereoBalanceGains(t.pan);
-        panL.gain.value = gL;
-        panR.gain.value = gR;
-        panL.connect(merger, 0, 0);
-        panR.connect(merger, 0, 1);
-        graphNodes.push(panL, panR);
-        clipPans.set(c.id, { panL, panR, mode });
-
-        if (mode === 'stereo') {
-          // Stereo: channel 0 -> panL, channel 1 -> panR (balance law).
-          const splitter = ctx.createChannelSplitter(2);
-          src.connect(splitter);
-          splitter.connect(panL, 0);
-          splitter.connect(panR, 1);
-          graphNodes.push(splitter);
-        } else {
-          // Mono: fan the single channel into both pan gains (constant-power).
-          src.connect(panL);
-          src.connect(panR);
-        }
-
-        const clipEnd = c.startSample + c.lengthSample;
-        const when = ctx.currentTime + Math.max(0, (c.startSample - from) / sr);
-        const offsetSec = Math.max(0, (from - c.startSample) / sr);
-        const durationSec = (clipEnd - Math.max(from, c.startSample)) / sr;
-        src.start(when, offsetSec, durationSec);
-
-        sources.push(src);
-        endSample = Math.max(endSample, clipEnd);
-        if (clipEnd > latestEnd) {
-          latestEnd = clipEnd;
-          latest = src;
-        }
-      }
+      this.buildTrackChain(ctx, t, sr, docs, anySolo, from, master);
     }
 
-    if (sources.length === 0) {
+    if (!this.finalizeSchedule()) {
       // Nothing audible to play — leave the (unused) master disconnected and
-      // stay stopped without emitting a spurious transition.
+      // stay stopped without emitting a spurious transition. (No chains were
+      // registered either: buildTrackChain only registers when it scheduled.)
       try {
         master.disconnect();
       } catch {
         // ignore
       }
+      this.master = null;
       this.position = from;
       this._state = 'stopped';
       return;
     }
 
-    // The last-ending source drives the natural-end transition (its clip has the
-    // greatest end sample, so it stops last).
-    if (latest) latest.onended = () => this.handleEnded();
-
-    this.master = master;
-    this.graphNodes = graphNodes;
-    this.sources = sources;
     this.playStartSample = from;
     this.position = from;
     this.startedAt = ctx.currentTime;
     this.rate = sr;
-    this.endSample = endSample;
     this._state = 'playing';
 
     if (typeof ctx.resume === 'function') void ctx.resume();
     this.emitState();
+  }
+
+  /**
+   * Builds one track's whole chain — baked clip buffers, per-clip pan pairs,
+   * merger → volume → mute → `master` — and schedules its sources from
+   * timeline sample `from`. Registers the chain in `trackNodes` (only when at
+   * least one source was scheduled, mirroring the pre-F0 skip of clip-less
+   * tracks). Shared verbatim by `play` and `refreshTracks`, so a mid-play
+   * automation rebuild cannot drift from the initial build.
+   *
+   * F0 (rulings A/B/C): the track's active automation is resolved from the
+   * SAME `resolveAutomation` the mixdown gates on and handed to
+   * `buildClipBuffer`, which bakes the moving parameter(s) into the buffers.
+   * A baked parameter's live node is set to UNITY here (the envelope carries
+   * the whole value — override, not offset) and its `baked*` flag is recorded
+   * so `applyTrackParams` never re-pushes the static field over it (trap T2).
+   */
+  private buildTrackChain(
+    ctx: AudioContext,
+    t: Track,
+    sr: number,
+    docs: Map<string, AudioDocument>,
+    anySolo: boolean,
+    from: number,
+    master: GainNode
+  ): void {
+    const auto = resolveAutomation(t.automation);
+    // Fades/crossfades resolved from the SAME shared resolver as the offline
+    // mixdown, per track, and baked into the buffers below -- so live
+    // playback and `mixdownSession` apply identical envelope gains (ruling
+    // 4). Resolution is play-position-agnostic: the whole envelope is baked
+    // and a seek is just a buffer offset, so it survives seeking like the
+    // baked clip gain does. F0's track automation is baked the same way,
+    // indexed by TIMELINE sample, so it survives seeking identically.
+    const fadeSpecs = resolveClipFadeSpecs(t.clips);
+    const built: { clip: Clip; buffer: AudioBuffer }[] = [];
+    for (const c of t.clips) {
+      if (c.startSample + c.lengthSample <= from) continue;
+      const doc = docs.get(c.documentId);
+      if (!doc) continue;
+      const buffer = this.buildClipBuffer(ctx, c, doc, sr, fadeSpecs.get(c.id), auto);
+      if (!buffer) continue;
+      built.push({ clip: c, buffer });
+    }
+    if (built.length === 0) return;
+
+    // Per-track chain: per-clip panL/panR -> shared merger(2) -> volume ->
+    // mute -> master. The pan LAW is chosen per clip below, like the mixdown.
+    const merger = ctx.createChannelMerger(2);
+    const volumeGain = ctx.createGain();
+    // Ruling B: an active volume lane is baked into the buffers, so the live
+    // node is neutralised to unity — the value must be applied exactly once.
+    volumeGain.gain.value = auto?.volume ? 1 : dbToLinear(t.volumeDb);
+    const muteGain = ctx.createGain();
+    muteGain.gain.value = isEffectivelyMuted(t, anySolo) ? 0 : 1;
+
+    merger.connect(volumeGain);
+    volumeGain.connect(muteGain);
+    muteGain.connect(master);
+    const chainNodes: AudioNode[] = [merger, volumeGain, muteGain];
+    const clipPans = new Map<string, ClipPanNodes>();
+    const scheduled: LiveTrackNodes['scheduled'] = [];
+    this.trackNodes.set(t.id, {
+      volumeGain,
+      muteGain,
+      clipPans,
+      bakedVolume: auto?.volume != null,
+      bakedPan: auto?.pan != null,
+      chainNodes,
+      scheduled,
+    });
+
+    for (const { clip: c, buffer } of built) {
+      const src = ctx.createBufferSource();
+      src.buffer = buffer;
+
+      // Per-clip pan pair under the clip's OWN law (mixdown parity). With a
+      // pan lane active the time-varying gains are already IN the buffer
+      // (ruling C — always 2 channels then), so the pair is neutral unity.
+      const mode: ClipPanNodes['mode'] = buffer.numberOfChannels >= 2 ? 'stereo' : 'mono';
+      const panL = ctx.createGain();
+      const panR = ctx.createGain();
+      const { gL, gR } = auto?.pan
+        ? { gL: 1, gR: 1 }
+        : mode === 'mono'
+          ? monoPanGains(t.pan)
+          : stereoBalanceGains(t.pan);
+      panL.gain.value = gL;
+      panR.gain.value = gR;
+      panL.connect(merger, 0, 0);
+      panR.connect(merger, 0, 1);
+      chainNodes.push(panL, panR);
+      clipPans.set(c.id, { panL, panR, mode });
+
+      if (mode === 'stereo') {
+        // Stereo: channel 0 -> panL, channel 1 -> panR (balance law).
+        const splitter = ctx.createChannelSplitter(2);
+        src.connect(splitter);
+        splitter.connect(panL, 0);
+        splitter.connect(panR, 1);
+        chainNodes.push(splitter);
+      } else {
+        // Mono: fan the single channel into both pan gains (constant-power).
+        src.connect(panL);
+        src.connect(panR);
+      }
+
+      const clipEnd = c.startSample + c.lengthSample;
+      const when = ctx.currentTime + Math.max(0, (c.startSample - from) / sr);
+      const offsetSec = Math.max(0, (from - c.startSample) / sr);
+      const durationSec = (clipEnd - Math.max(from, c.startSample)) / sr;
+      src.start(when, offsetSec, durationSec);
+      scheduled.push({ src, clipEnd });
+    }
+  }
+
+  /**
+   * Recomputes the natural-end wiring and the `endSample` bound over EVERY
+   * scheduled source (shared by `play` and `refreshTracks`): exactly one
+   * source — the one whose clip ends last — carries the `onended` callback
+   * that drives the natural-end transition; every other source's callback is
+   * cleared. Returns false when nothing is scheduled at all.
+   */
+  private finalizeSchedule(): boolean {
+    let latest: AudioBufferSourceNode | null = null;
+    let latestEnd = -Infinity;
+    for (const tn of this.trackNodes.values()) {
+      for (const s of tn.scheduled) {
+        s.src.onended = null;
+        if (s.clipEnd > latestEnd) {
+          latestEnd = s.clipEnd;
+          latest = s.src;
+        }
+      }
+    }
+    if (!latest) return false;
+    latest.onended = () => this.handleEnded();
+    this.endSample = latestEnd;
+    return true;
+  }
+
+  /**
+   * F0 ruling D — re-bakes and reschedules the NAMED tracks' chains on the
+   * RUNNING graph after an automation edit: tear down that track's sources
+   * and nodes, rebuild them from the current play position with the current
+   * session's lanes baked in, and leave every other track untouched (an edit
+   * rebuilds the affected track's clips, never the session). No-op while
+   * stopped — there are no buffers while stopped; the next `play()` bakes
+   * from the store anyway. The handover is start-accurate to the scheduling
+   * clock, not sample-seamless: the parity guarantee applies to a clean play,
+   * and this exists so an edit is HEARD without restarting the transport.
+   */
+  refreshTracks(
+    session: Session,
+    docs: Map<string, AudioDocument>,
+    trackIds: readonly string[]
+  ): void {
+    const ctx = this.ctx;
+    const master = this.master;
+    if (!ctx || !master || this._state !== 'playing') return;
+    const anySolo = session.tracks.some((t) => t.solo);
+    const from = this.getPositionSample();
+    for (const id of trackIds) {
+      const old = this.trackNodes.get(id);
+      if (old) {
+        for (const { src } of old.scheduled) {
+          src.onended = null;
+          try {
+            src.stop();
+          } catch {
+            // already stopped / never started
+          }
+          try {
+            src.disconnect();
+          } catch {
+            // ignore
+          }
+        }
+        for (const n of old.chainNodes) {
+          try {
+            n.disconnect();
+          } catch {
+            // ignore
+          }
+        }
+        this.trackNodes.delete(id);
+      }
+      const t = session.tracks.find((tr) => tr.id === id);
+      if (!t) continue;
+      this.buildTrackChain(ctx, t, this.rate, docs, anySolo, from, master);
+    }
+    if (!this.finalizeSchedule()) {
+      // Every scheduled source is gone (the refreshed track was the last one
+      // sounding and nothing of it remains past the position): natural end.
+      this.handleEnded();
+    }
   }
 
   stop(): void {
@@ -278,6 +410,15 @@ export class MultitrackPlayer {
    * `setTargetAtTime` (15 ms). No-op when stopped or for tracks not in the
    * current graph. Solo state is derived from the passed tracks. Clip
    * geometry/gain are baked per source and intentionally NOT handled here.
+   *
+   * F0 (trap T2): a parameter whose envelope is BAKED into this chain's
+   * buffers (`bakedVolume`/`bakedPan`, set at build time) is SKIPPED — its
+   * node was neutralised to unity and re-pushing the static field here (this
+   * fires on EVERY tracks-array write, including edits to unrelated tracks)
+   * would stomp the neutralised node and double- or mis-apply the parameter.
+   * The lane governs while it has keys (ruling B); the static fader is inert
+   * for that parameter until the lane empties and the chain is rebuilt.
+   * Mute/solo stay live regardless — mute is a filter, not part of the value.
    */
   applyTrackParams(tracks: Track[]): void {
     const ctx = this.ctx;
@@ -287,13 +428,17 @@ export class MultitrackPlayer {
     for (const t of tracks) {
       const nodes = this.trackNodes.get(t.id);
       if (!nodes) continue;
-      nodes.volumeGain.gain.setTargetAtTime(dbToLinear(t.volumeDb), now, PARAM_SMOOTH);
-      const monoG = monoPanGains(t.pan);
-      const stereoG = stereoBalanceGains(t.pan);
-      for (const pans of nodes.clipPans.values()) {
-        const { gL, gR } = pans.mode === 'mono' ? monoG : stereoG;
-        pans.panL.gain.setTargetAtTime(gL, now, PARAM_SMOOTH);
-        pans.panR.gain.setTargetAtTime(gR, now, PARAM_SMOOTH);
+      if (!nodes.bakedVolume) {
+        nodes.volumeGain.gain.setTargetAtTime(dbToLinear(t.volumeDb), now, PARAM_SMOOTH);
+      }
+      if (!nodes.bakedPan) {
+        const monoG = monoPanGains(t.pan);
+        const stereoG = stereoBalanceGains(t.pan);
+        for (const pans of nodes.clipPans.values()) {
+          const { gL, gR } = pans.mode === 'mono' ? monoG : stereoG;
+          pans.panL.gain.setTargetAtTime(gL, now, PARAM_SMOOTH);
+          pans.panR.gain.setTargetAtTime(gR, now, PARAM_SMOOTH);
+        }
       }
       const target = isEffectivelyMuted(t, anySolo) ? 0 : 1;
       nodes.muteGain.gain.setTargetAtTime(target, now, PARAM_SMOOTH);
@@ -360,13 +505,57 @@ export class MultitrackPlayer {
     clip: Clip,
     doc: AudioDocument,
     sessionRate: number,
-    fadeSpec?: ClipFadeSpec
+    fadeSpec?: ClipFadeSpec,
+    auto?: TrackAutomationSpec | null
   ): AudioBuffer | null {
     const slice = readClipSlice(doc, clip, sessionRate);
     if (slice.length === 0 || slice[0].length === 0) return null;
 
     const clipGain = dbToLinear(clip.gainDb);
     const len = slice[0].length;
+
+    if (auto) {
+      // F0 automated bake (rulings A/B/C). The per-sample product is written
+      // in the EXACT order mixdown's automated loop multiplies —
+      // `sample · clipGain · v · gPan · e` — with the lane factors from the
+      // SAME shared `autoVolumeGainAt`/`autoPanGainsAt`, indexed by TIMELINE
+      // sample `clip.startSample + i` in both engines (trap T6). A parameter
+      // that is NOT automated contributes a literal 1 here (bit-exact
+      // identity) and its static value stays on the live node, so the value
+      // is applied exactly once either way.
+      //
+      // Ruling C: with a PAN lane active the buffer is promoted to TWO
+      // channels even for a mono source — one buffer channel cannot carry two
+      // different time-varying gains (trap T3: the mono fan-out puts
+      // different gL/gR on the same samples) — and the MONO constant-power
+      // law is baked into the pair. The clip itself stays mono and mixdown
+      // still applies the mono law, so which law governs never changes
+      // (v1.7: the two laws differ by ~3 dB at centre); only the player's
+      // buffer layout does. Cost: 2× buffer memory for mono clips on a
+      // pan-automated track — accepted by the ruling.
+      const monoSrc = slice.length === 1;
+      const outChannels = auto.pan ? 2 : slice.length;
+      const buffer = ctx.createBuffer(outChannels, Math.max(1, len), sessionRate);
+      for (let ch = 0; ch < outChannels; ch++) {
+        const data = monoSrc ? slice[0] : slice[ch];
+        const scaled = new Float32Array(len);
+        for (let i = 0; i < len; i++) {
+          const s = clip.startSample + i;
+          const e = fadeSpec ? clipFadeGainAt(fadeSpec, i) : 1;
+          const v = auto.volume ? autoVolumeGainAt(auto.volume, s) : 1;
+          let g = 1;
+          if (auto.pan) {
+            const p = autoPanGainsAt(auto.pan, s, monoSrc);
+            g = ch === 0 ? p.gL : p.gR;
+          }
+          scaled[i] = data[i] * clipGain * v * g * e;
+        }
+        // lib.dom types copyToChannel as Float32Array<ArrayBuffer>.
+        buffer.copyToChannel(scaled as Float32Array<ArrayBuffer>, ch);
+      }
+      return buffer;
+    }
+
     const buffer = ctx.createBuffer(slice.length, Math.max(1, len), sessionRate);
     for (let c = 0; c < slice.length; c++) {
       let data = slice[c];
@@ -393,31 +582,39 @@ export class MultitrackPlayer {
     this.emitState();
   }
 
-  /** Stop + disconnect the whole graph, suppressing onended (manual teardown). */
+  /** Stop + disconnect the whole graph, suppressing onended (manual teardown).
+   * Everything is owned per track since F0 (see `trackNodes`), plus master. */
   private teardown(): void {
-    for (const s of this.sources) {
-      s.onended = null;
-      try {
-        s.stop();
-      } catch {
-        // already stopped / never started
+    for (const tn of this.trackNodes.values()) {
+      for (const { src } of tn.scheduled) {
+        src.onended = null;
+        try {
+          src.stop();
+        } catch {
+          // already stopped / never started
+        }
+        try {
+          src.disconnect();
+        } catch {
+          // ignore double-disconnect
+        }
       }
-      try {
-        s.disconnect();
-      } catch {
-        // ignore double-disconnect
+      for (const n of tn.chainNodes) {
+        try {
+          n.disconnect();
+        } catch {
+          // ignore
+        }
       }
     }
-    this.sources = [];
-    for (const n of this.graphNodes) {
+    this.trackNodes.clear();
+    if (this.master) {
       try {
-        n.disconnect();
+        this.master.disconnect();
       } catch {
         // ignore
       }
     }
-    this.graphNodes = [];
-    this.trackNodes.clear();
     this.master = null;
   }
 
