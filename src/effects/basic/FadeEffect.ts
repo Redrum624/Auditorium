@@ -84,6 +84,8 @@ export const fadeEffect: EffectDefinition = {
       // T10: an unrounded readout disagrees with what is written on short
       // selections, precisely where a user checks the number). `≈` because
       // `formatTime` then rounds the exact sample count to milliseconds.
+      // Assumes a SEEDED value (EffectDialog seeds params from defaults);
+      // an undefined value would render NaN -- do not wire to unseeded paths.
       readout: (value, ctx) => {
         const pct = Math.max(0, Math.min(100, Number(value)));
         const fadeLen = Math.round((ctx.regionSamples * pct) / 100);

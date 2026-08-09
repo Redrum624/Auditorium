@@ -400,24 +400,32 @@ describe('applyFadeOut / applyFadeIn (buffer-end and buffer-start anchored)', ()
     // A double-precision implementation would keep more bits here; the
     // renderer's pinned output depends on it not doing so.
     //
-    // R2-3b (v1.9.2): probed at index 1 of a FOUR-sample exponential ramp,
-    // where the gain is (1 - 1/3)^2 = 4/9 -- genuinely < 1 and NOT a dyadic
-    // rational. The original probe sat at index 0 of a 3-sample ramp, gain
-    // exactly 1, so both assertions held even if applyFadeOut wrote nothing
-    // (the Float32Array constructor had already narrowed 1/3 on assignment);
-    // and every n=3 exponential gain (1, 0.25, 0) is unity-or-dyadic, which
-    // only shifts the float exponent and cannot expose the store rounding
-    // either (trap T12). Verified: fround(fround(1/3) * 4/9-ish) differs both
-    // from the unfaded sample and from the double-precision product, so this
-    // fails if the fade skips the write OR if the result kept double bits.
+    // R2-3b (v1.9.2, round 2): probed at index 1 of a FOUR-sample exponential
+    // ramp, where the gain is (1 - 1/3)^2 = 4/9 -- genuinely < 1 and NOT a
+    // dyadic rational. The original probe sat at index 0 of a 3-sample ramp,
+    // gain exactly 1, so both assertions held even if applyFadeOut wrote
+    // nothing (the Float32Array constructor had already narrowed the source
+    // on assignment); and every n=3 exponential gain (1, 0.25, 0) is
+    // unity-or-dyadic, which only shifts the float exponent and cannot expose
+    // the store rounding either (trap T12).
+    //
+    // The source is fround(0.7), CHOSEN BY EXECUTION (round 2, reviewer
+    // finding): with fround(1/3), fr(x*fr(g)) === fr(x*g) at BOTH non-dyadic
+    // n=4 gains, so a pre-narrowed float32 gain (e.g. a Float32Array gain
+    // LUT) -- the exact refactor this test exists to catch -- still passed.
+    // With fround(0.7) the three failure modes are all distinct at this
+    // probe: skipping the write, keeping double bits, and pre-narrowing the
+    // gain each produce a different stored value than the contract
+    // fr(fround(0.7) * g_double), one narrowing at the store.
     const ch = filled(1, 4);
-    ch[0][1] = 1 / 3;
+    ch[0][1] = 0.7;
     applyFadeOut(ch, 4, 'exponential');
     const gain = fadeOutGainAt(1, 4, 'exponential'); // (2/3)^2, double precision
     expect(gain).toBeLessThan(1);
     expect(gain).toBeGreaterThan(0);
-    expect(ch[0][1]).toBe(Math.fround(Math.fround(1 / 3) * gain));
-    expect(Object.is(ch[0][1], Math.fround(1 / 3) * gain)).toBe(false);
+    expect(ch[0][1]).toBe(Math.fround(Math.fround(0.7) * gain));
+    expect(Object.is(ch[0][1], Math.fround(0.7) * gain)).toBe(false);
+    expect(Object.is(ch[0][1], Math.fround(Math.fround(0.7) * Math.fround(gain)))).toBe(false);
   });
 
   it('is a no-op for a non-positive fadeLen', () => {
