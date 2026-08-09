@@ -633,3 +633,32 @@ slivers inside words and cut into speech; the chosen constant only ever errs
 toward removing *less*. The gap's END is accurate to ~1 ms (1 ms attack), so
 speech onsets are never clipped. If a bordering gap must be caught, lowering
 "Min silence" by ~100 ms compensates exactly.
+
+## An open envelope lane owns its track lane; automation overrides the fader
+
+**Area:** F0 automation keys (`src/components/Multitrack/EnvelopeLane.tsx`,
+`src/multitrack/automation.ts`, `src/multitrack/MultitrackPlayer.ts`).
+
+**Behavior a user will notice:** three things, all deliberate. (1) While a
+track's envelope lane is open (the Activity toggle in the track header), the
+overlay owns every pointer event on that lane — clips underneath cannot be
+selected, dragged or trimmed until the envelope is closed. (2) While a lane
+has at least one key, that parameter's header slider is disabled and the live
+fader is inert: the envelope IS the parameter (override, not offset), and the
+slider's stored value only returns to force when the last key is removed.
+(3) Editing automation during playback re-bakes and reschedules only the
+affected track from the current position; the handover is scheduled-clock
+accurate but not sample-seamless, so a tiny seam can occur at the moment of
+the edit. A clean play (and every mixdown) is exact.
+
+**Why it is built this way:** (1) is the standard DAW automation-mode
+contract — a lane cannot serve two gesture vocabularies at once, and the
+overlay stopping propagation is also what protects the clip selection under
+it. (2) is ruling B: a user who draws a volume envelope means *that* to be
+the volume; letting the fader offset it would make the drawn curve a lie.
+(3) is the cost of ruling A: envelopes are BAKED into the player's buffers
+from the same shared evaluator the offline mixdown multiplies — the only
+implementation that keeps live playback sample-identical to `mixdownSession`
+(the playback≡mixdown invariant held since v1.1) — so an edit needs a
+rebuild, and the rebuild is scoped to one track and one commit per gesture
+rather than per pointermove.
