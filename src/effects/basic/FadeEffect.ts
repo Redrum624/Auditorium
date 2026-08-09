@@ -1,6 +1,7 @@
 import type { EffectDefinition } from '../types';
 import type { FadeCurve } from '../../dsp/fades';
 import { FADE_CURVE_LABELS, fadeInGainAt, fadeOutGainAt } from '../../dsp/fades';
+import { formatTime } from '../../utils/timeFormat';
 
 /**
  * Amplitude envelope over the leading (fade-in) or trailing (fade-out) part
@@ -77,6 +78,17 @@ export const fadeEffect: EffectDefinition = {
       step: 1,
       unit: '% of selection',
       default: 100,
+      // v1.9.2 (R2-2): absolute-time readout — 50% of a 3 s selection is very
+      // different from 50% of 30 s. Mirrors `process` EXACTLY (same clamp,
+      // same `Math.round`, same selection length via ctx.regionSamples — trap
+      // T10: an unrounded readout disagrees with what is written on short
+      // selections, precisely where a user checks the number). `≈` because
+      // `formatTime` then rounds the exact sample count to milliseconds.
+      readout: (value, ctx) => {
+        const pct = Math.max(0, Math.min(100, Number(value)));
+        const fadeLen = Math.round((ctx.regionSamples * pct) / 100);
+        return `≈ ${formatTime(fadeLen, ctx.sampleRate)}`;
+      },
     },
   ],
   process(channels, _sampleRate, params, onProgress) {

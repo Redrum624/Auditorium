@@ -43,6 +43,18 @@ export default function EffectDialog({
   const activeDocName = useAppStore(
     (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.name
   );
+  // R2-2: param readouts derive from the region the effect will target, so the
+  // dialog must react to the selection moving while it is open (without this
+  // subscription a computed readout would go stale on re-select) and must
+  // reproduce runEffectOnSelection's whole-document fallback (trap T11).
+  const selection = useAppStore((s) => s.selection);
+  const activeDocLength = useAppStore((s) => {
+    const d = s.documents.find((dd) => dd.id === s.activeDocumentId);
+    return d ? docLength(d) : null;
+  });
+  const activeSampleRate = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.sampleRate ?? null
+  );
   const [params, setParams] = useState<Record<string, EffectParamValue>>(() =>
     def ? initialParams(def.params) : {}
   );
@@ -148,7 +160,22 @@ export default function EffectDialog({
         {def.params.length > 0 && <SectionLabel>Parameters</SectionLabel>}
 
         {def.params.map((p) => (
-          <ParamControl key={p.id} param={p} value={params[p.id]} onChange={setParam} />
+          <ParamControl
+            key={p.id}
+            param={p}
+            value={params[p.id]}
+            onChange={setParam}
+            // Display-only derived readout (R2-2). Region length reproduces the
+            // runner's fallback: the selection, else the whole document.
+            readout={
+              p.readout && activeDocLength !== null && activeSampleRate !== null
+                ? p.readout(params[p.id], {
+                    regionSamples: selection ? selection.end - selection.start : activeDocLength,
+                    sampleRate: activeSampleRate,
+                  })
+                : null
+            }
+          />
         ))}
 
         {def.params.length === 0 && (
@@ -207,10 +234,14 @@ function ParamControl({
   param,
   value,
   onChange,
+  readout = null,
 }: {
   param: EffectParamDef;
   value: EffectParamValue;
   onChange: (id: string, value: EffectParamValue) => void;
+  /** Pre-computed display-only readout string (R2-2); null renders nothing —
+   * a param without the capability produces byte-identical DOM to v1.9.1. */
+  readout?: string | null;
 }) {
   const controlId = `effect-param-${param.id}`;
 
@@ -286,6 +317,15 @@ function ParamControl({
           className="w-20"
           style={{ width: 80 }}
         />
+        {readout !== null && (
+          <span
+            data-testid={`effect-param-readout-${param.id}`}
+            className="whitespace-nowrap text-xs tabular-nums"
+            style={{ color: 'var(--glass-text-muted)' }}
+          >
+            {readout}
+          </span>
+        )}
       </div>
     </div>
   );

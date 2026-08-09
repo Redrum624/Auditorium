@@ -164,6 +164,54 @@ describe('effect preview lifecycle (Task M7/F11)', () => {
   });
 });
 
+describe('param derived readout (R2-2, v1.9.2)', () => {
+  function seedDoc(lengthSamples: number, sampleRate = 44100) {
+    const doc = createDocument({
+      name: 'tone.wav',
+      sampleRate,
+      channels: [new Float32Array(lengthSamples)],
+    });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('Fade Length shows the selection percentage as absolute time, and follows the typed value', () => {
+    seedDoc(8192);
+    // 4410 samples at 44.1 kHz = exactly 100 ms.
+    act(() => useAppStore.getState().setSelection({ start: 1000, end: 5410 }));
+    render(<EffectDialog effectId="fade" onClose={() => {}} />);
+
+    // Default lengthPercent = 100 -> the whole 100 ms selection.
+    expect(screen.getByTestId('effect-param-readout-lengthPercent')).toHaveTextContent('≈ 0:00.100');
+
+    fireEvent.change(screen.getByLabelText('Length (% of selection)'), { target: { value: '50' } });
+    expect(screen.getByTestId('effect-param-readout-lengthPercent')).toHaveTextContent('≈ 0:00.050');
+  });
+
+  it('falls back to the WHOLE document when nothing is selected — the runner fallback, not 0:00 (trap T11)', () => {
+    seedDoc(44100); // 1 s, no selection
+    render(<EffectDialog effectId="fade" onClose={() => {}} />);
+    expect(screen.getByTestId('effect-param-readout-lengthPercent')).toHaveTextContent('≈ 0:01.000');
+  });
+
+  it('re-reads a selection made while the dialog is open instead of going stale', () => {
+    seedDoc(44100);
+    render(<EffectDialog effectId="fade" onClose={() => {}} />);
+    expect(screen.getByTestId('effect-param-readout-lengthPercent')).toHaveTextContent('≈ 0:01.000');
+
+    act(() => useAppStore.getState().setSelection({ start: 0, end: 22050 }));
+
+    expect(screen.getByTestId('effect-param-readout-lengthPercent')).toHaveTextContent('≈ 0:00.500');
+  });
+
+  it('a param without the capability renders no readout element — existing effects are unchanged', () => {
+    seedDoc(8192);
+    render(<EffectDialog effectId="amplify" onClose={() => {}} />);
+    expect(screen.queryByTestId('effect-param-readout-gainDb')).toBeNull();
+    expect(screen.queryByText(/≈/)).toBeNull();
+  });
+});
+
 describe('G5 glass header', () => {
   it('carries a lucide icon tile in the shell header', () => {
     seedActiveDoc();

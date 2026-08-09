@@ -278,6 +278,40 @@ describe('FadeEffect parameter surface (X6)', () => {
   });
 });
 
+describe('FadeEffect lengthPercent readout (R2-2, v1.9.2)', () => {
+  const readout = fadeEffect.params.find((p) => p.id === 'lengthPercent')!.readout!;
+
+  it('mirrors the process window arithmetic: 50% of 5 samples reads as the SAME 3-sample ramp the effect writes', () => {
+    // Identical boundary to the "50% of 5 samples is a 3-sample ramp" pin
+    // above: Math.round(2.5) = 3, half rounds UP. sampleRate 10 makes one
+    // sample = 100 ms, so a floor-based readout (2 samples -> 0:00.200) is a
+    // visibly different string, not a sub-ms difference formatTime would hide
+    // (trap T10: the readout must agree with what process writes exactly
+    // where a user checks it — short selections).
+    expect(readout(50, { regionSamples: 5, sampleRate: 10 })).toBe('≈ 0:00.300');
+  });
+
+  it('below and above the rounding boundary: 40% of 5 -> 2 samples, 60% of 5 -> 3 samples', () => {
+    expect(readout(40, { regionSamples: 5, sampleRate: 10 })).toBe('≈ 0:00.200');
+    expect(readout(60, { regionSamples: 5, sampleRate: 10 })).toBe('≈ 0:00.300');
+  });
+
+  it('clamps exactly like process: above 100 reads as 100, at 100 the whole region, at/below 0 nothing', () => {
+    // 150 UNCLAMPED would be 15 samples = 0:01.500 — the clamp visibly moves
+    // the output. (The 0-side clamp cannot be distinguished from formatTime's
+    // own negative-input floor at the string level; asserted for the record.)
+    expect(readout(150, { regionSamples: 10, sampleRate: 10 })).toBe('≈ 0:01.000');
+    expect(readout(100, { regionSamples: 10, sampleRate: 10 })).toBe('≈ 0:01.000');
+    expect(readout(0, { regionSamples: 10, sampleRate: 10 })).toBe('≈ 0:00.000');
+    expect(readout(-50, { regionSamples: 10, sampleRate: 10 })).toBe('≈ 0:00.000');
+  });
+
+  it('the motivating case: 50% of a 1 s selection is 0.5 s; 50% of a 30 s selection is 15 s', () => {
+    expect(readout(50, { regionSamples: 44100, sampleRate: 44100 })).toBe('≈ 0:00.500');
+    expect(readout(50, { regionSamples: 30 * 44100, sampleRate: 44100 })).toBe('≈ 0:15.000');
+  });
+});
+
 describe('ReverseEffect', () => {
   it('reversing twice is the exact identity', () => {
     const input = [Float32Array.from([0.1, 0.2, 0.3, 0.4])];
