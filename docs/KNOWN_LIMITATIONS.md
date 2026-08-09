@@ -519,23 +519,6 @@ property of the model: a better or newer checkpoint (or a user-selectable stem
 count beyond the fixed 4 + Residual of v1.7) is the only lever, and would be a
 model/UI change rather than a fix to this pipeline.
 
-## Match Tempo appears in History as `Effect: Time Stretch`
-
-**Area:** Match Tempo (`src/services/tempoService.ts`,
-`src/services/effectRunner.ts`)
-
-**v1.5 behavior:** Match Tempo deliberately reuses the existing `time-stretch`
-effect rather than duplicating WSOLA behind a second write path, and
-`effectRunner` labels every undo entry `Effect: ${def.name}` — a hardcoded
-template — so the History panel reads **`Effect: Time Stretch`** for a Match
-Tempo operation. The entry undoes correctly; only its name says how the work was
-done rather than why. A separate optional beat-marker step, when enabled, is
-pushed as its own clearly-named `Add Beat Markers` entry.
-
-**Intended behavior:** No further work planned. Threading a caller-supplied
-label through the shared effect path to rename one operation was judged not
-worth changing the path every effect in the app runs through.
-
 ## The beat grid shows only what was measured; snapping targets beats, not clip edges
 
 **Area:** Beat grid (`src/services/beatGrid.ts`,

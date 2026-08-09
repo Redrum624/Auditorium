@@ -445,7 +445,7 @@ export function installTestHooks(): void {
     // document). `extra` is forwarded to the worker's `__effectExtra` side channel
     // (Noise Reduction's captured profile). Returns the resulting peak.
     applyEffect: async (effectId, params, extra) => {
-      await runEffectOnSelection(effectId, params, undefined, extra);
+      await runEffectOnSelection(effectId, params, { extra });
       return activePeak();
     },
 

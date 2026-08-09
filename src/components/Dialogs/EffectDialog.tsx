@@ -102,7 +102,7 @@ export default function EffectDialog({
       const extra = isNoiseReduction
         ? { spectra: (getNoiseProfile()?.spectra ?? []).map((s) => Array.from(s)) }
         : undefined;
-      await runEffectOnSelection(def.id, params, setProgress, extra);
+      await runEffectOnSelection(def.id, params, { onProgress: setProgress, extra });
       onClose();
     } finally {
       setBusy(false);

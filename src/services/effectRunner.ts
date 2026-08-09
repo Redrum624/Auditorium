@@ -12,6 +12,22 @@ type WorkerReply =
 
 let nextRunId = 1;
 
+/** Trailing options for `runEffectOnSelection`. An options object rather than
+ * more positionals (v1.9.2): with `extra` typed `unknown`, a transposed
+ * `(extra, label)` pair would type-check silently, and every caller needing a
+ * late option had to pad the earlier slots with `undefined`. */
+export interface RunEffectOptions {
+  onProgress?: (fraction: number) => void;
+  /** Opaque payload forwarded to the worker's `__effectExtra` side channel
+   * (Task 19's noise profile). */
+  extra?: unknown;
+  /** Overrides the undo/History label. Default: `Effect: ${def.name}`. Used by
+   * Match Tempo (v1.9.2), which runs the Time Stretch effect but should show up
+   * in History as what the USER asked for, not how the work was done. The label
+   * is display-only and in-memory (never serialized into `.audm`). */
+  label?: string;
+}
+
 /**
  * Runs an effect over the target region (the active selection, or the whole
  * document when there is none) on a one-shot DSP worker. On success the result is
@@ -23,16 +39,13 @@ let nextRunId = 1;
  * fails — e.g. the document was closed while the worker was busy — the failure is
  * surfaced via an error dialog and the promise resolves with no edit applied, so
  * callers (EffectDialog's busy state) reliably settle.
- *
- * `extra` is an opaque payload forwarded to the worker's `__effectExtra` side
- * channel (reserved for Task 19's noise profile).
  */
 export async function runEffectOnSelection(
   effectId: string,
   params: Record<string, EffectParamValue>,
-  onProgress?: (fraction: number) => void,
-  extra?: unknown
+  opts: RunEffectOptions = {}
 ): Promise<void> {
+  const { onProgress, extra, label } = opts;
   const state = useAppStore.getState();
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
   if (!doc) return;
@@ -65,7 +78,7 @@ export async function runEffectOnSelection(
         const resultLen = resultChannels[0]?.length ?? 0;
         try {
           applyEdit(
-            `Effect: ${def.name}`,
+            label ?? `Effect: ${def.name}`,
             docId,
             (d) => replaceRegion(d, start, end, resultChannels),
             { selection: { start, end: start + resultLen }, cursorSample: start },

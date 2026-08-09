@@ -291,9 +291,8 @@ To make a 128 BPM loop sit in a 124 BPM track:
 
 Match Tempo runs through the same WSOLA **Time Stretch** effect and the same
 single write path as everything else, so markers remap proportionally and undo
-behaves normally — the History entry reads `Effect: Time Stretch` (see Known
-Limitations), with `Add Beat Markers` as its own entry when you asked for the
-grid.
+behaves normally — the History entry reads `Match Tempo`, with `Add Beat
+Markers` as its own entry when you asked for the grid.
 
 ### Re-arranging a track to a length (Auto-Remix)
 

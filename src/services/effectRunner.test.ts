@@ -3,7 +3,7 @@ import { registerEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
-import { canUndo, undo, redo } from './undoHistory';
+import { canUndo, undo, redo, getHistory } from './undoHistory';
 import {
   _setDspWorkerLoadFailure,
   _getDspWorkerTerminateCount,
@@ -188,7 +188,7 @@ describe('runEffectOnSelection', () => {
     });
     seedDoc([0.1, 0.2]);
 
-    await runEffectOnSelection('test-extra', {}, undefined, { profile: [1, 2, 3] });
+    await runEffectOnSelection('test-extra', {}, { extra: { profile: [1, 2, 3] } });
 
     expect(seen).toEqual({ profile: [1, 2, 3] });
     // The side channel must not leak past the run.
@@ -273,6 +273,22 @@ describe('runEffectOnSelection', () => {
     expect(canUndo(docId)).toBe(false);
     expect(Array.from(activeChannel())).toEqual(f32(values));
     spy.mockRestore();
+  });
+
+  it('labels the undo entry `Effect: <name>` by default — the v1.5 contract every existing effect relies on (R2-1 pin)', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3]);
+
+    await runEffectOnSelection('amplify', { gainDb: 6 });
+
+    expect(getHistory(docId).done).toEqual(['Effect: Amplify']);
+  });
+
+  it('uses the caller-supplied label override verbatim when provided (R2-1: Match Tempo)', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3]);
+
+    await runEffectOnSelection('amplify', { gainDb: 6 }, { label: 'Match Tempo' });
+
+    expect(getHistory(docId).done).toEqual(['Match Tempo']);
   });
 
   it('applies no edit when the effect throws (error path)', async () => {

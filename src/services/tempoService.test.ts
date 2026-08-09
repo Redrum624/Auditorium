@@ -269,7 +269,7 @@ describe('applyTempoChange — optional beat markers', () => {
     expect(result.ok).toBe(true);
 
     const history = getHistory(docId);
-    expect(history.done).toEqual(['Effect: Time Stretch', 'Add Beat Markers']);
+    expect(history.done).toEqual(['Match Tempo', 'Add Beat Markers']);
 
     const markers = liveMarkers(docId).filter((m) => m.name.startsWith('Beat '));
     expect(markers.length).toBeGreaterThan(1);
@@ -286,7 +286,7 @@ describe('applyTempoChange — optional beat markers', () => {
     // stretch itself (and its own marker remap) intact.
     undo(docId);
     expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat ')).length).toBe(0);
-    expect(getHistory(docId).done).toEqual(['Effect: Time Stretch']);
+    expect(getHistory(docId).done).toEqual(['Match Tempo']);
   }, 15000);
 
   it('caps beat markers at MAX_BEAT_MARKERS and shows one info dialog when truncated', async () => {
@@ -354,7 +354,7 @@ describe('applyTempoChange — beat grid at the CURRENT tempo (v1.9.1 item 2)', 
     });
     expect(result).toEqual({ ok: true });
 
-    // No stretch ran: no 'Effect: Time Stretch' entry (only the marker step),
+    // No stretch ran: no 'Match Tempo' stretch entry (only the marker step),
     // the audio length is unchanged, and the channels array is the SAME
     // reference — a WSOLA pass at ratio 1 would have allocated a fresh one via
     // replaceRegion and seamed both region edges.

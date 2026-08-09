@@ -259,7 +259,7 @@ function addBeatMarkersAfterStretch(
  * (`newFirstBeat === clampedFirstBeat`, `regionEnd === end`), so the grid lands
  * on the CURRENT tempo's beats. Crucially it does NOT call
  * `runEffectOnSelection`, so there is no WSOLA pass, no seam at the region
- * edges, and no `'Effect: Time Stretch'` undo entry — only the `'Add Beat
+ * edges, and no stretch undo entry — only the `'Add Beat
  * Markers'` step. It deliberately does NOT copy `applyTempoChange`'s
  * `postDoc.channels !== doc.channels` success gate (trap T2): this path performs
  * no audio edit, so that identity can never change and the gate would report
@@ -297,8 +297,9 @@ function layBeatGridAtCurrentTempo(req: ApplyTempoChangeRequest): TempoChangeOut
  * `applyEdit` with a `{type:'stretch'}` marker remap — the region is
  * TRANSFORMED, not replaced, so interior markers ride the stretch
  * proportionally (the M3 fix-round-2 ruling; `'replace'` would drop every
- * interior marker). The History label reads `Effect: Time Stretch`
- * (hardcoded at `effectRunner.ts:68`) — accepted, not worked around.
+ * interior marker). The History label reads `Match Tempo` (v1.9.2, R2-1):
+ * threaded through `runEffectOnSelection`'s `label` option — every other
+ * caller omits it and keeps the default `Effect: <name>`.
  *
  * `runEffectOnSelection` never signals success/failure through its return
  * value (`Promise<void>`, always resolves) — a worker load failure, the
@@ -343,7 +344,7 @@ export async function applyTempoChange(
   if (!check.ok) {
     // v1.9.1 item 2 (trap T1): the 1e-6 no-op guard is CORRECT and stays — a
     // real WSOLA pass at ratio 1.0 would seam both region edges and push a
-    // bogus 'Effect: Time Stretch' undo entry for zero tempo change. But laying
+    // bogus stretch undo entry for zero tempo change. But laying
     // a beat grid AT THE CURRENT TEMPO is a distinct, legitimate action (its own
     // undo step) that must not be gated on the stretch. So a no-op ratio WITH
     // beat markers requested lays the grid and skips the stretch entirely; every
@@ -363,7 +364,12 @@ export async function applyTempoChange(
   const start = selection ? selection.start : 0;
   const end = selection ? selection.end : docLength(doc);
 
-  await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, onProgress);
+  await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, {
+    onProgress,
+    // v1.9.2 (R2-1): the History entry names what the user asked for — Match
+    // Tempo — not the Time Stretch effect the work happens to run through.
+    label: 'Match Tempo',
+  });
 
   const postDoc = useAppStore.getState().documents.find((d) => d.id === docId);
   const applied = postDoc !== undefined && postDoc.channels !== doc.channels;
