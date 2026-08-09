@@ -3,6 +3,7 @@ import type { AudioDocument } from '../../audio/AudioDocument';
 import type { Track } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import ClipView from './ClipView';
+import EnvelopeLane from './EnvelopeLane';
 
 interface Zoom {
   samplesPerPixel: number;
@@ -37,6 +38,7 @@ export default function TrackLane({
   onDragOverTrack,
 }: TrackLaneProps) {
   const setSelectedClip = useSessionStore((s) => s.setSelectedClip);
+  const mtEnvelope = useSessionStore((s) => s.mtEnvelope);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     // Only a click on empty lane space (not a clip) reaches here — clips call
@@ -73,6 +75,14 @@ export default function TrackLane({
           onDragOverTrack={onDragOverTrack}
         />
       ))}
+      {/* F0 — the envelope editing overlay, a TrackLane child (T23/T29: it
+          belongs to the TRACK's timeline, resolves for cross-lane drops via
+          the data-track-id ancestor, and never rides a clip's drag
+          translate, T27). Rendered after the clips so it paints — and
+          receives pointer events — above them while open. */}
+      {mtEnvelope !== null && mtEnvelope.trackId === track.id && (
+        <EnvelopeLane track={track} param={mtEnvelope.param} zoom={zoom} laneHeight={laneHeight} />
+      )}
     </div>
   );
 }

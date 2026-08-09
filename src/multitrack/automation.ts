@@ -74,14 +74,22 @@ export interface AutomationLane {
  * what every drawn envelope means by default. */
 export const DEFAULT_AUTOMATION_CURVE: FadeCurve = 'equal-gain';
 
+/** Each parameter's legal value range — THE single source for the clamp below
+ * and for the UI's value↔pixel mapping. These are the Track field ranges
+ * (`session.ts`): volumeDb −60..+12 dB, pan −1..1. */
+export const AUTOMATION_RANGES: Record<AutomationParam, { min: number; max: number }> = {
+  volumeDb: { min: -60, max: 12 },
+  pan: { min: -1, max: 1 },
+};
+
 /** Clamps a key value to its parameter's legal range — THE value-range
- * arithmetic, shared by the store action (`upsertAutomationKey`) and the parse
- * boundary (`sanitizeAutomationLanes`), the `clampFadePair` pattern (T15).
- * Ranges are the Track field ranges (`session.ts`): volumeDb −60..+12 dB,
- * pan −1..1. Inputs must be finite (callers own NaN/type guarding). */
+ * arithmetic, shared by the store action (`upsertAutomationKey`), the parse
+ * boundary (`sanitizeAutomationLanes`) and the envelope gesture's preview
+ * (the `clampFadePair` pattern, T15). Inputs must be finite (callers own
+ * NaN/type guarding). */
 export function clampAutomationValue(param: AutomationParam, value: number): number {
-  if (param === 'volumeDb') return Math.min(12, Math.max(-60, value));
-  return Math.min(1, Math.max(-1, value));
+  const r = AUTOMATION_RANGES[param];
+  return Math.min(r.max, Math.max(r.min, value));
 }
 
 /** Index of the LAST key at or before `sample` (-1 when `sample` precedes the

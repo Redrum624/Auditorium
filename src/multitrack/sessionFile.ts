@@ -747,6 +747,7 @@ export async function openSessionViaDialog(): Promise<void> {
     mtZoom: { samplesPerPixel: 512, scrollSample: 0 },
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
+    mtEnvelope: null, // F0: a stale open-envelope target must not outlive its session
   });
   // Every clip in the just-replaced session is either new or a stale id from a
   // previous session — either way no bitmap in the cache belongs to it (F9).

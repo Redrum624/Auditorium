@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
-import { X } from 'lucide-react';
+import { Activity, X } from 'lucide-react';
+import { resolveAutomation, type AutomationParam } from '../../multitrack/automation';
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import type { Track } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
@@ -53,11 +54,46 @@ export default function TrackHeader({ track }: { track: Track }) {
   const renameTrack = useSessionStore((s) => s.renameTrack);
   const setTrackParam = useSessionStore((s) => s.setTrackParam);
   const removeTrack = useSessionStore((s) => s.removeTrack);
+  const mtEnvelope = useSessionStore((s) => s.mtEnvelope);
+  const setMtEnvelope = useSessionStore((s) => s.setMtEnvelope);
 
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(track.name);
   const [recording, setRecording] = useState(() => multitrackRecorder.isRecording());
   useEffect(() => multitrackRecorder.onChange(setRecording), []);
+
+  // F0 — which params have an ACTIVE lane (>= 1 key): that lane GOVERNS the
+  // parameter (ruling B), so the static slider is disabled while it does —
+  // the honest surface for "the fader is overridden, edit the envelope".
+  const auto = resolveAutomation(track.automation);
+  const volGoverned = auto?.volume != null;
+  const panGoverned = auto?.pan != null;
+
+  const envOpen = (param: AutomationParam): boolean =>
+    mtEnvelope !== null && mtEnvelope.trackId === track.id && mtEnvelope.param === param;
+  const toggleEnvelope = (param: AutomationParam) =>
+    setMtEnvelope(envOpen(param) ? null : { trackId: track.id, param });
+
+  /** The per-row envelope toggle: opens/closes this track's lane overlay.
+   * Accent-filled while open; accent-outlined while a lane is active (has
+   * keys) but closed, so an overriding envelope is visible at a glance. */
+  const envToggle = (param: AutomationParam, label: string, governed: boolean) => (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={envOpen(param)}
+      title={governed ? `${label} — automation active (overrides the slider)` : label}
+      onClick={() => toggleEnvelope(param)}
+      className="flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors"
+      style={{
+        borderColor: envOpen(param) || governed ? 'var(--accent)' : 'var(--glass-border)',
+        backgroundColor: envOpen(param) ? 'var(--accent)' : 'rgba(255,255,255,0.05)',
+        color: envOpen(param) ? '#101014' : governed ? 'var(--accent)' : 'var(--glass-text-muted)',
+      }}
+    >
+      <Activity size={10} />
+    </button>
+  );
 
   const commitName = () => {
     const name = draft.trim();
@@ -163,17 +199,21 @@ export default function TrackHeader({ track }: { track: Track }) {
           max={VOL_MAX}
           step={0.5}
           value={track.volumeDb}
+          disabled={volGoverned}
+          title={volGoverned ? 'Overridden by the volume envelope (lane has keys)' : undefined}
           onChange={(e) => setTrackParam(track.id, { volumeDb: Number(e.target.value) })}
           className="slider min-w-0 flex-1"
+          style={volGoverned ? { opacity: 0.35 } : undefined}
           aria-label="Volume (dB)"
         />
         <span
           className="w-10 shrink-0 text-right tabular-nums"
-          style={{ color: 'var(--glass-text-label)' }}
+          style={{ color: 'var(--glass-text-label)', opacity: volGoverned ? 0.5 : undefined }}
         >
           {track.volumeDb > 0 ? '+' : ''}
           {track.volumeDb.toFixed(1)}
         </span>
+        {envToggle('volumeDb', 'Volume envelope', volGoverned)}
       </label>
 
       <label
@@ -187,16 +227,20 @@ export default function TrackHeader({ track }: { track: Track }) {
           max={1}
           step={0.01}
           value={track.pan}
+          disabled={panGoverned}
+          title={panGoverned ? 'Overridden by the pan envelope (lane has keys)' : undefined}
           onChange={(e) => setTrackParam(track.id, { pan: Number(e.target.value) })}
           className="slider min-w-0 flex-1"
+          style={panGoverned ? { opacity: 0.35 } : undefined}
           aria-label="Pan"
         />
         <span
           className="w-10 shrink-0 text-right tabular-nums"
-          style={{ color: 'var(--glass-text-label)' }}
+          style={{ color: 'var(--glass-text-label)', opacity: panGoverned ? 0.5 : undefined }}
         >
           {panLabel}
         </span>
+        {envToggle('pan', 'Pan envelope', panGoverned)}
       </label>
     </div>
   );

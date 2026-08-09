@@ -25,6 +25,14 @@ export interface SessionState {
    * line from. Additive extension over the Task 21 contract (Task 22).
    */
   mtPlayheadSample: number;
+  /**
+   * F0 — which track's envelope lane is open for editing, and for which
+   * parameter (`null` = none). UI-only state, NEVER serialized: the lanes
+   * themselves live on `Track.automation`; this is just the editing surface's
+   * visibility. One open envelope at a time keeps the gesture surface
+   * unambiguous (an open envelope overlay owns its lane's pointer events).
+   */
+  mtEnvelope: { trackId: string; param: AutomationParam } | null;
 }
 
 export interface SessionActions {
@@ -133,6 +141,8 @@ export interface SessionActions {
     curve: FadeCurve
   ): void;
   setSelectedClip(id: string | null): void;
+  /** F0 — opens/closes a track's envelope lane (see `mtEnvelope`). */
+  setMtEnvelope(v: SessionState['mtEnvelope']): void;
   setMtCursor(s: number): void;
   setMtZoom(z: SessionState['mtZoom']): void;
   setMtPlayState(state: SessionState['mtPlayState']): void;
@@ -405,6 +415,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   mtZoom: defaultMtZoom(),
   mtPlayState: 'stopped',
   mtPlayheadSample: 0,
+  mtEnvelope: null,
 
   newSession(sampleRate) {
     set({
@@ -414,6 +425,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       mtZoom: defaultMtZoom(),
       mtPlayState: 'stopped',
       mtPlayheadSample: 0,
+      mtEnvelope: null,
     });
     // A fresh session discards every track/clip that could own a cached
     // mini-waveform bitmap (F9) — clear the whole cache rather than track
@@ -727,6 +739,10 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
 
   setSelectedClip(id) {
     set({ selectedClipId: id });
+  },
+
+  setMtEnvelope(v) {
+    set({ mtEnvelope: v });
   },
 
   setMtCursor(sample) {
