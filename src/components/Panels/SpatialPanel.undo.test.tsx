@@ -71,6 +71,38 @@ describe('elevation commits', () => {
     now.mockRestore();
   });
 
+  it('keyboard commits on DIFFERENT tracks never merge — the track-id operand of the coalesce key', () => {
+    // Review round 1: `elevation:${track.id}` survived a mutant that fixed
+    // the key — nudge track A's elevation, switch the panel to track B,
+    // nudge within the window, and both merged into one entry. This fixture
+    // pins the id operand: two tracks, two entries, undo lifts only B's key.
+    const now = jest.spyOn(Date, 'now').mockReturnValue(10_000);
+    const { getByTestId } = render(<SpatialPanel />);
+    const slider = getByTestId('spatial-elevation') as HTMLInputElement;
+    const tracks = useSessionStore.getState().session.tracks;
+
+    fireEvent.change(slider, { target: { value: '10' } });
+    fireEvent.keyUp(slider); // commits on track 1 (the default governed track)
+    act(() => {
+      fireEvent.change(getByTestId('spatial-track-select'), { target: { value: tracks[1].id } });
+    });
+    fireEvent.change(slider, { target: { value: '20' } });
+    fireEvent.keyUp(slider); // commits on track 2, same param, in-window
+
+    expect(doneLabels()).toEqual(['Set elevation', 'Set elevation']);
+
+    const hasElevation = (trackId: string) =>
+      (useSessionStore.getState().session.tracks.find((t) => t.id === trackId)?.automation ?? []).some(
+        (l) => l.param === 'elevation' && l.keys.length > 0
+      );
+    expect(hasElevation(tracks[0].id)).toBe(true);
+    expect(hasElevation(tracks[1].id)).toBe(true);
+    act(() => undoSession()); // must lift ONLY track 2's key
+    expect(hasElevation(tracks[0].id)).toBe(true);
+    expect(hasElevation(tracks[1].id)).toBe(false);
+    now.mockRestore();
+  });
+
   it('pointer commits never coalesce: two slider releases are two entries', () => {
     const now = jest.spyOn(Date, 'now').mockReturnValue(10_000);
     const { getByTestId } = render(<SpatialPanel />);

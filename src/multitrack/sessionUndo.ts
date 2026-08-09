@@ -111,11 +111,13 @@ function bound(): SessionUndoBinding {
  * Pointer gestures never name a coalesceKey — each drag is its own entry —
  * so only keyboard/incremental commits ever merge.
  *
- * 1000 ms is a UX judgment, not a derived constant: it comfortably exceeds
- * the slowest common OS keyboard initial-repeat delay (~1 s) so a repeat
- * stream never splits mid-hold, while adjustments more than a second apart
- * read as separate intents deserving separate undo steps. The below/on/above
- * boundary is pinned by tests; change it deliberately or not at all.
+ * 1000 ms is a UX judgment, not a derived constant: it EQUALS Windows'
+ * slowest keyboard initial-repeat setting (~1 s) — only the inclusive `<=`
+ * makes that exactly-on-boundary case merge — and exceeds every faster
+ * setting, so a repeat stream never splits mid-hold, while adjustments more
+ * than a second apart read as separate intents deserving separate undo
+ * steps. The below/on/above boundary is pinned by tests; change either the
+ * constant or the inclusivity deliberately or not at all.
  */
 export const SESSION_COALESCE_WINDOW_MS = 1000;
 

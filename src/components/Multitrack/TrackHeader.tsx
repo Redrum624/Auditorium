@@ -213,7 +213,15 @@ export default function TrackHeader({ track }: { track: Track }) {
           // tick; the bracket folds them into ONE undo entry. Keyboard
           // arrows fire onChange with no pointer events — those single
           // commits coalesce in the store via the per-(track,param) key.
-          onPointerDown={() => beginSessionGesture('Set track volume')}
+          // Capture is taken EXPLICITLY (review round 1): without it a
+          // pointerup outside the input could be lost, leaving the gesture
+          // open and session undo silently no-op until the next commit —
+          // Chromium's implicit range-input capture usually saves this, but
+          // the bracket must not depend on it. jsdom lacks the API (`?.`).
+          onPointerDown={(e) => {
+            beginSessionGesture('Set track volume');
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+          }}
           onPointerUp={endSessionGesture}
           onPointerCancel={endSessionGesture}
           className="slider min-w-0 flex-1"
@@ -244,8 +252,11 @@ export default function TrackHeader({ track }: { track: Track }) {
           disabled={panGoverned}
           title={panGoverned ? panGovernedTitle : undefined}
           onChange={(e) => setTrackParam(track.id, { pan: Number(e.target.value) })}
-          // R3: same bracket as the volume slider above.
-          onPointerDown={() => beginSessionGesture('Set track pan')}
+          // R3: same bracket + explicit capture as the volume slider above.
+          onPointerDown={(e) => {
+            beginSessionGesture('Set track pan');
+            e.currentTarget.setPointerCapture?.(e.pointerId);
+          }}
           onPointerUp={endSessionGesture}
           onPointerCancel={endSessionGesture}
           className="slider min-w-0 flex-1"

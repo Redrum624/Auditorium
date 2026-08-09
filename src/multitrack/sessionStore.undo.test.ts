@@ -281,6 +281,25 @@ describe('gesture wiring against the real store (ruling 2)', () => {
     expect(sessionRef()).toBe(post);
   });
 
+  it('keyboard ticks on DIFFERENT tracks never merge — the track-id operand of the coalesce key', () => {
+    // Review round 1: `trackParam:${id}:${param}` survived a mutant that
+    // dropped the id — nudge track A's fader, focus track B's, nudge within
+    // the window, and both merged into one entry that a single Ctrl+Z
+    // reverted TOGETHER. This fixture pins the id operand.
+    const now = jest.spyOn(Date, 'now').mockReturnValue(50_000);
+    const a = seeded.tracks[0].id;
+    const b = seeded.tracks[1].id;
+    store().setTrackParam(a, { volumeDb: -1 });
+    store().setTrackParam(b, { volumeDb: -2 }); // same param, other track, in-window
+    expect(doneLabels()).toEqual(['Set track volume', 'Set track volume']);
+
+    undoSession(); // must revert ONLY track B
+    const tracks = sessionRef().tracks;
+    expect(tracks.find((t) => t.id === a)?.volumeDb).toBe(-1);
+    expect(tracks.find((t) => t.id === b)?.volumeDb).toBe(0);
+    now.mockRestore();
+  });
+
   it('keyboard slider ticks coalesce per (track, param); pointer-style single commits on another param do not', () => {
     const now = jest.spyOn(Date, 'now').mockReturnValue(50_000);
     const t1 = seeded.tracks[0].id;
@@ -378,7 +397,6 @@ describe('a session snapshot retains no audio (the byte-bound question)', () => 
     // MAX_UNDO_BYTES = 800 MB: KBs, not MBs — which is why session entries
     // carry no `bytes` (the pushMarkerUndo precedent).
     const jsonBytes = Buffer.byteLength(JSON.stringify(snapshotGraph.session));
-    // eslint-disable-next-line no-console
     console.info(`R3 measurement: realistic session snapshot JSON = ${jsonBytes} bytes`);
     expect(jsonBytes).toBeGreaterThan(1000); // the fixture is genuinely populated
     expect(jsonBytes).toBeLessThan(64 * 1024); // and structurally tiny vs the byte budget
