@@ -1,16 +1,6 @@
 import { registerAllEffects } from '../effects/registerAll';
 import { getEffect } from '../effects/EffectRegistry';
-import type { EffectParamValue } from '../effects/types';
-
-interface RunMessage {
-  type: 'run';
-  id: number;
-  effectId: string;
-  channels: Float32Array[];
-  sampleRate: number;
-  params: Record<string, EffectParamValue>;
-  extra?: unknown;
-}
+import type { DspWorkerDoneMessage, DspWorkerRunMessage } from '../workers/dspWorkerMessages';
 
 // Test-only fault injection (Task M9 / F28): when set, every FakeDspWorker
 // instance fires `onerror` instead of ever processing the 'run' message —
@@ -45,7 +35,7 @@ class FakeDspWorker {
   private terminated = false;
 
   postMessage(message: unknown, _transfer?: Transferable[]): void {
-    const msg = message as RunMessage;
+    const msg = message as DspWorkerRunMessage;
     if (this.terminated || !msg || msg.type !== 'run') return;
     if (loadFailureMessage !== null) {
       const failure = loadFailureMessage;
@@ -70,8 +60,15 @@ class FakeDspWorker {
 
         this.emit({ type: 'progress', id: msg.id, fraction: 0.5 });
         const result = def.process(msg.channels, msg.sampleRate, msg.params);
-        // Mirror dsp.worker.ts: `removedSpans` (F2) rides the done message.
-        this.emit({ type: 'done', id: msg.id, channels: result.channels, removedSpans: result.removedSpans });
+        // Mirror dsp.worker.ts, on the SAME shared type, so the mock cannot
+        // drift from what the real worker sends (F2 review, Important 1).
+        const done: DspWorkerDoneMessage = {
+          type: 'done',
+          id: msg.id,
+          channels: result.channels,
+          removedSpans: result.removedSpans,
+        };
+        this.emit(done);
       } catch (err) {
         this.emit({
           type: 'error',

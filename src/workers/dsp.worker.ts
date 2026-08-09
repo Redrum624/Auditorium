@@ -1,26 +1,16 @@
 import { registerAllEffects } from '../effects/registerAll';
 import { getEffect } from '../effects/EffectRegistry';
-import type { EffectParamValue } from '../effects/types';
+import type { DspWorkerDoneMessage, DspWorkerRunMessage } from './dspWorkerMessages';
 
 // Effects must be registered in the worker's own module scope (it does not share
 // the renderer's registry).
 registerAllEffects();
 
-interface RunMessage {
-  type: 'run';
-  id: number;
-  effectId: string;
-  channels: Float32Array[];
-  sampleRate: number;
-  params: Record<string, EffectParamValue>;
-  extra?: unknown;
-}
-
 // The worker global. Typed via a narrow cast so this file compiles under the DOM
 // lib without pulling in the conflicting `webworker` lib `self` declaration.
 const ctx = self as unknown as {
   postMessage(message: unknown, transfer?: Transferable[]): void;
-  onmessage: ((e: MessageEvent<RunMessage>) => void) | null;
+  onmessage: ((e: MessageEvent<DspWorkerRunMessage>) => void) | null;
 };
 
 const PROGRESS_INTERVAL_MS = 50;
@@ -50,11 +40,17 @@ ctx.onmessage = (e) => {
     const result = def.process(msg.channels, msg.sampleRate, msg.params, onProgress);
     const transfer = result.channels.map((c) => c.buffer as ArrayBuffer);
     // `removedSpans` (F2) rides along so effectRunner can remap markers with
-    // the exact per-cut rule; plain numbers, so no transfer list entry.
-    ctx.postMessage(
-      { type: 'done', id: msg.id, channels: result.channels, removedSpans: result.removedSpans },
-      transfer
-    );
+    // the exact per-cut rule; plain numbers, so no transfer list entry. The
+    // message is built as a TYPED value (postMessage itself takes `unknown`)
+    // so a field drifting from the shared contract is a compile error here,
+    // not a silent production-only remap degradation — see dspWorkerMessages.
+    const done: DspWorkerDoneMessage = {
+      type: 'done',
+      id: msg.id,
+      channels: result.channels,
+      removedSpans: result.removedSpans,
+    };
+    ctx.postMessage(done, transfer);
   } catch (err) {
     ctx.postMessage({
       type: 'error',

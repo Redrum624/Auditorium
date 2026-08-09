@@ -610,3 +610,26 @@ targets can now be defined without ambiguity (the boundary's meaning settled in
 v1.9) and Ctrl-drag covers the butt-join in the meantime. 5 is the pinned
 preview/commit contract: divergence exists only under the Ctrl opt-out, never
 on a default drop.
+
+## Remove Silence detects a pause starting ~100 ms late (safe direction, by design)
+
+**Area:** Remove Silence effect (`src/effects/restoration/SilenceRemoverEffect.ts`,
+detector in `src/dsp/silenceDetect.ts`).
+
+**Behavior a user will notice:** with "Min silence" at 500 ms, a physical gap of
+~550 ms can survive untouched. The detector's envelope does not drop to the
+threshold the instant speech stops — it decays there over
+`release · ln(level/threshold)`, about 100 ms for speech 44 dB above the
+default −50 dB threshold — so the *detected* run is roughly 100 ms shorter than
+the physical gap. In practice the effective minimum physical gap is
+"Min silence" + ~100 ms, and every processed gap keeps that much extra
+material at its head on top of the padding.
+
+**Why it is built this way:** the 20 ms release is the shortest that still
+bridges the gaps between glottal pulses inside voiced speech (lowest common
+speaking f0 ≈ 75 Hz → 13.3 ms between pulses; τ = 13.3/ln 2 ≈ 19.2 ms keeps
+the inter-pulse droop under 6 dB). A faster release would see sub-threshold
+slivers inside words and cut into speech; the chosen constant only ever errs
+toward removing *less*. The gap's END is accurate to ~1 ms (1 ms attack), so
+speech onsets are never clipped. If a bordering gap must be caught, lowering
+"Min silence" by ~100 ms compensates exactly.

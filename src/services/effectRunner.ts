@@ -3,13 +3,9 @@ import { getEffect } from '../effects/EffectRegistry';
 import type { EffectParamValue } from '../effects/types';
 import { useAppStore } from '../stores/appStore';
 import { createDspWorker } from '../workers/createDspWorker';
+import type { DspWorkerReply, DspWorkerRunMessage } from '../workers/dspWorkerMessages';
 import { applyEdit } from './editOps';
 import type { MarkerRemap } from './editOps';
-
-type WorkerReply =
-  | { type: 'progress'; id: number; fraction: number }
-  | { type: 'done'; id: number; channels: Float32Array[]; removedSpans?: { start: number; end: number }[] }
-  | { type: 'error'; id: number; message: string };
 
 /**
  * Human-readable summary of what a span-deleting effect removed (ruling 5:
@@ -83,7 +79,7 @@ export async function runEffectOnSelection(
 
   await new Promise<void>((resolve) => {
     worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data as WorkerReply;
+      const msg = e.data as DspWorkerReply;
       if (msg.id !== runId) return;
 
       if (msg.type === 'progress') {
@@ -174,10 +170,18 @@ export async function runEffectOnSelection(
     // it has to be inside the executor.
     try {
       const transfer = regionChannels.map((c) => c.buffer as ArrayBuffer);
-      worker.postMessage(
-        { type: 'run', id: runId, effectId, channels: regionChannels, sampleRate, params, extra },
-        transfer
-      );
+      // Typed for the same reason as the worker's done message: postMessage
+      // takes `unknown`, so the shared contract is enforced at the literal.
+      const runMessage: DspWorkerRunMessage = {
+        type: 'run',
+        id: runId,
+        effectId,
+        channels: regionChannels,
+        sampleRate,
+        params,
+        extra,
+      };
+      worker.postMessage(runMessage, transfer);
     } catch (err) {
       try {
         worker.terminate();
