@@ -236,3 +236,31 @@ describe('automation store actions', () => {
     });
   });
 });
+
+describe('F5 — the write boundary accepts the spatial params with their own ranges', () => {
+  beforeEach(() => {
+    useSessionStore.getState().newSession(44100);
+  });
+
+  it('azimuth/elevation/distance keys land clamped to the spatial ranges (shared arithmetic)', () => {
+    const id = track().id;
+    const s = useSessionStore.getState();
+    s.upsertAutomationKey(id, 'azimuth', { positionSample: 0, value: 240 }); // clamps to 180
+    s.upsertAutomationKey(id, 'elevation', { positionSample: 10, value: -95 }); // clamps to -90
+    s.upsertAutomationKey(id, 'distance', { positionSample: 20, value: 12 }); // clamps to 10
+    expect(track().automation).toEqual([
+      { param: 'azimuth', keys: [{ positionSample: 0, value: 180 }] },
+      { param: 'elevation', keys: [{ positionSample: 10, value: -90 }] },
+      { param: 'distance', keys: [{ positionSample: 20, value: 10 }] },
+    ]);
+  });
+
+  it('removing the last spatial key strips the lane, and the field when it was the only lane', () => {
+    const id = track().id;
+    const s = useSessionStore.getState();
+    s.upsertAutomationKey(id, 'azimuth', { positionSample: 100, value: 90 });
+    expect(track().automation).toHaveLength(1);
+    s.removeAutomationKey(id, 'azimuth', 100);
+    expect('automation' in track()).toBe(false); // absent means none (T9/T11)
+  });
+});

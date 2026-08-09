@@ -250,3 +250,108 @@ describe('the automation-free byte pin stays untouched', () => {
     expect(text.includes('"automation"')).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// F5 persistence: the three spatial lanes ride the SAME additive-optional
+// `automation` key at formatVersion 3 — no format change at all (the reader's
+// version check is an equality; the sanitiser's allow-list simply widened).
+// ---------------------------------------------------------------------------
+
+const SPATIAL_LANES: AutomationLane[] = [
+  {
+    param: 'azimuth',
+    keys: [
+      { positionSample: 0, value: 170, curve: 'equal-gain' },
+      { positionSample: 800, value: -170 },
+      { positionSample: 1500, value: 180 }, // the seam value itself round-trips
+    ],
+  },
+  {
+    param: 'elevation',
+    keys: [
+      { positionSample: 200, value: -45, curve: 'smooth' },
+      { positionSample: 900, value: 90 },
+    ],
+  },
+  {
+    param: 'distance',
+    keys: [
+      { positionSample: 0, value: 0.5 },
+      { positionSample: 1000, value: 10, curve: 'exponential' },
+    ],
+  },
+];
+
+describe('F5 .audm round trip — spatial lanes', () => {
+  it('round-trips all three spatial lanes exactly at formatVersion 3 (v3 binary path)', () => {
+    const { session, docs } = sessionWithLanes(SPATIAL_LANES);
+    const { bytes } = serializeSessionV3(session, docs);
+    const json = JSON.parse(
+      new TextDecoder().decode(bytes.subarray(10, 10 + new DataView(bytes.buffer).getUint32(6, true)))
+    );
+    expect(json.formatVersion).toBe(3); // stays 3 — additive optional keys only
+    const result = parseSessionFileBytes(bytes.buffer);
+    expect(result.session.tracks[0].automation).toEqual(SPATIAL_LANES);
+  });
+
+  it('spatial lanes coexist with volume/pan lanes in one automation array', () => {
+    const all = [...LANES, ...SPATIAL_LANES];
+    const { session, docs } = sessionWithLanes(all);
+    const { bytes } = serializeSessionV3(session, docs);
+    const result = parseSessionFileBytes(bytes.buffer);
+    expect(result.session.tracks[0].automation).toEqual(all);
+  });
+
+  it('round-trips through the LEGACY v1/v2 JSON path too (shared finalize)', () => {
+    const { session, docs } = sessionWithLanes(SPATIAL_LANES);
+    const { json } = serializeSession(session, docs);
+    const result = parseSessionFile(json);
+    expect(result.session.tracks[0].automation).toEqual(SPATIAL_LANES);
+  });
+
+  it('hostile spatial values are clamped/dropped at the parse boundary (v3 path)', () => {
+    const result = parseSessionFileV3(
+      v3WithTrack({
+        automation: [
+          {
+            param: 'azimuth',
+            keys: [
+              { positionSample: 100, value: 720 }, // clamps to +180 (clamp, not wrap)
+              { positionSample: 0, value: -999 }, // clamps to −180
+              { positionSample: 50, value: NaN }, // dropped
+            ],
+          },
+          {
+            param: 'elevation',
+            keys: [{ positionSample: 10.6, value: -100 }], // rounds, clamps to −90
+          },
+          {
+            param: 'distance',
+            keys: [
+              { positionSample: 0, value: -5 }, // clamps to 0
+              { positionSample: 20, value: 1e9 }, // clamps to 10
+            ],
+          },
+          { param: 'azimuthDeg', keys: [{ positionSample: 0, value: 1 }] }, // unknown param dropped
+        ],
+      })
+    );
+    expect(result.session.tracks[0].automation).toEqual([
+      {
+        param: 'azimuth',
+        keys: [
+          { positionSample: 0, value: -180 },
+          { positionSample: 100, value: 180 },
+        ],
+      },
+      { param: 'elevation', keys: [{ positionSample: 11, value: -90 }] },
+      {
+        param: 'distance',
+        keys: [
+          { positionSample: 0, value: 0 },
+          { positionSample: 20, value: 10 },
+        ],
+      },
+    ]);
+  });
+});
