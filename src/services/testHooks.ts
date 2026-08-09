@@ -41,6 +41,8 @@ import { createRemixDocument, getRemixSession } from './remixService';
 import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
 import { landStems } from './stemLanding';
 import { MultitrackPlayer, multitrackPlayer } from '../multitrack/MultitrackPlayer';
+import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/firstPlayLatency';
+import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import type { FadeCurve } from '../dsp/fades';
 
@@ -100,6 +102,9 @@ export interface TestApi {
     pos2: number;
     volumeGain: number | null;
   }>;
+  /** R4 (P2-7): measures cold/warm first-play latency of the multitrack path
+   * on a FRESH player + FRESH real AudioContext (see firstPlayLatency.ts). */
+  measureFirstPlayLatency(): Promise<FirstPlayLatencyReport>;
   punchInRecord(seconds: number): Promise<{
     docCreated: boolean;
     docName: string | null;
@@ -637,6 +642,19 @@ export function installTestHooks(): void {
         track0 ? multitrackPlayer.liveTrackNodes(track0.id)?.volumeGain.gain.value ?? null : null;
       multitrackPlayer.stop();
       return { started, stillPlaying, advanced: pos2 > pos1, pos1, pos2, volumeGain };
+    },
+
+    // R4 (P2-7): the first-play latency instrument. Runs on a FRESH
+    // MultitrackPlayer with a FRESH real AudioContext — the singleton player
+    // is deliberately untouched, because its context may already be warm
+    // from earlier steps, which is exactly what a FIRST-play measurement
+    // must avoid. Plays the CURRENT session (cold probe, then a warm probe
+    // on the same context) and returns the timing report; the player and
+    // its context are disposed before returning.
+    measureFirstPlayLatency: async () => {
+      const session = useSessionStore.getState().session;
+      const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+      return runFirstPlayLatency(session, docs, () => new AudioContext());
     },
 
     // Multitrack punch-in recording (Task F6): arm the first track, set the
