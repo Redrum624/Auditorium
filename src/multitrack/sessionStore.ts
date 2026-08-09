@@ -1,6 +1,12 @@
 import { create } from 'zustand';
 import type { Clip, Session, Track } from './session';
 import { clampFadePair, createTrack, crossfadableOverlap } from './session';
+import {
+  clampAutomationValue,
+  type AutomationKey,
+  type AutomationLane,
+  type AutomationParam,
+} from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import {
   purgeClip as purgeClipWaveform,
@@ -85,6 +91,47 @@ export interface SessionActions {
    * edge yields — see `reconcileTrimmedFades`) and by `sessionFile.ts` against
    * hand-edited/foreign files at parse time. */
   setClipFade(clipId: string, edge: 'in' | 'out', fade: { lengthSample?: number; curve?: FadeCurve }): void;
+  /** F0 — adds or replaces one automation key. THIS ACTION IS THE AUTOMATION
+   * WRITE BOUNDARY (the `setClipFade` pattern, trap T15): the UI hands raw
+   * gesture output straight to it and must NOT re-implement the policy; both
+   * audio engines read the stored lane without re-checking. The policy:
+   *  - `key.positionSample` is rounded to the nearest integer and clamped
+   *    `>= 0`; `key.value` is clamped to the parameter's range via the shared
+   *    `clampAutomationValue` (volumeDb −60..+12 dB, pan −1..1). A non-finite
+   *    position or value is a no-op (ignored, not clamped).
+   *  - `key.curve` must be one of `FADE_CURVES` (checked at runtime); an
+   *    unknown curve is dropped. When absent on a MOVE (see below), the moved
+   *    key keeps the curve it had.
+   *  - `replacePositionSample` makes the write a MOVE: the key at that exact
+   *    position is removed in the same write (one commit, one tracks-array
+   *    replacement — the drag gesture's pointerup calls this once).
+   *  - Landing on an occupied position replaces that key — positions stay
+   *    unique, and the lane stays ascending (re-sorted on every write).
+   *  - The first key creates the lane (and the track's `automation` field);
+   *    every write produces fresh key/lane/track arrays (trap T16). Unknown
+   *    track id: no-op. */
+  upsertAutomationKey(
+    trackId: string,
+    param: AutomationParam,
+    key: { positionSample: number; value: number; curve?: FadeCurve },
+    replacePositionSample?: number
+  ): void;
+  /** F0 — removes the key at the exact `positionSample`. An emptied lane is
+   * removed, and a track whose last lane went is stripped of its `automation`
+   * field entirely — ABSENT means none (traps T9/T11: an empty-but-present
+   * field would serialize `"automation":[…]` into every save and redden the
+   * byte-identity pin). Unknown track/param/position: no-op. */
+  removeAutomationKey(trackId: string, param: AutomationParam, positionSample: number): void;
+  /** F0 — sets the interpolation curve of the SEGMENT that starts at the key
+   * at `positionSample` (each key's `curve` shapes the ramp to the NEXT key).
+   * The curve is validated against `FADE_CURVES`; an unknown curve, track,
+   * param or position is a no-op. */
+  setAutomationKeyCurve(
+    trackId: string,
+    param: AutomationParam,
+    positionSample: number,
+    curve: FadeCurve
+  ): void;
   setSelectedClip(id: string | null): void;
   setMtCursor(s: number): void;
   setMtZoom(z: SessionState['mtZoom']): void;
@@ -580,6 +627,100 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
           ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, ...patch } : c)) }
           : t
       );
+      return { session: { ...s.session, tracks } };
+    });
+  },
+
+  upsertAutomationKey(trackId, param, key, replacePositionSample) {
+    set((s) => {
+      const idx = s.session.tracks.findIndex((t) => t.id === trackId);
+      if (idx === -1) return s;
+      if (typeof key.positionSample !== 'number' || !Number.isFinite(key.positionSample)) return s;
+      if (typeof key.value !== 'number' || !Number.isFinite(key.value)) return s;
+
+      const pos = Math.max(0, Math.round(key.positionSample));
+      const value = clampAutomationValue(param, key.value);
+      const t = s.session.tracks[idx];
+      const lanes = t.automation ?? [];
+      const laneIdx = lanes.findIndex((l) => l.param === param);
+      const oldKeys = laneIdx === -1 ? [] : lanes[laneIdx].keys;
+
+      const replacePos =
+        replacePositionSample !== undefined && Number.isFinite(replacePositionSample)
+          ? Math.round(replacePositionSample)
+          : undefined;
+      const replaced =
+        replacePos !== undefined ? oldKeys.find((k) => k.positionSample === replacePos) : undefined;
+      // An explicit valid curve wins; a MOVE without one carries the moved
+      // key's own curve so dragging a key never silently resets its segment.
+      const curve =
+        key.curve !== undefined && (FADE_CURVES as readonly string[]).includes(key.curve)
+          ? key.curve
+          : replaced?.curve;
+
+      const nextKey: AutomationKey = { positionSample: pos, value };
+      if (curve !== undefined) nextKey.curve = curve;
+      const kept = oldKeys.filter(
+        (k) => k.positionSample !== pos && (replacePos === undefined || k.positionSample !== replacePos)
+      );
+      const keys = [...kept, nextKey].sort((a, b) => a.positionSample - b.positionSample);
+      const lane: AutomationLane = { param, keys };
+      const automation =
+        laneIdx === -1 ? [...lanes, lane] : lanes.map((l, i) => (i === laneIdx ? lane : l));
+      const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
+      return { session: { ...s.session, tracks } };
+    });
+  },
+
+  removeAutomationKey(trackId, param, positionSample) {
+    set((s) => {
+      const idx = s.session.tracks.findIndex((t) => t.id === trackId);
+      if (idx === -1) return s;
+      if (typeof positionSample !== 'number' || !Number.isFinite(positionSample)) return s;
+      const t = s.session.tracks[idx];
+      const lanes = t.automation;
+      if (!lanes) return s;
+      const laneIdx = lanes.findIndex((l) => l.param === param);
+      if (laneIdx === -1) return s;
+
+      const pos = Math.round(positionSample);
+      const keys = lanes[laneIdx].keys.filter((k) => k.positionSample !== pos);
+      if (keys.length === lanes[laneIdx].keys.length) return s; // nothing at that position
+
+      const automation =
+        keys.length > 0
+          ? lanes.map((l, i) => (i === laneIdx ? { param, keys } : l))
+          : lanes.filter((_, i) => i !== laneIdx);
+      const tracks = s.session.tracks.map((tr, i) => {
+        if (i !== idx) return tr;
+        if (automation.length > 0) return { ...tr, automation };
+        // Last lane gone: the field itself goes — absent means none (T9/T11).
+        const stripped = { ...tr };
+        delete stripped.automation;
+        return stripped;
+      });
+      return { session: { ...s.session, tracks } };
+    });
+  },
+
+  setAutomationKeyCurve(trackId, param, positionSample, curve) {
+    set((s) => {
+      if (!(FADE_CURVES as readonly string[]).includes(curve)) return s;
+      const idx = s.session.tracks.findIndex((t) => t.id === trackId);
+      if (idx === -1) return s;
+      if (typeof positionSample !== 'number' || !Number.isFinite(positionSample)) return s;
+      const t = s.session.tracks[idx];
+      const lanes = t.automation;
+      if (!lanes) return s;
+      const laneIdx = lanes.findIndex((l) => l.param === param);
+      if (laneIdx === -1) return s;
+      const pos = Math.round(positionSample);
+      const keyIdx = lanes[laneIdx].keys.findIndex((k) => k.positionSample === pos);
+      if (keyIdx === -1) return s;
+
+      const keys = lanes[laneIdx].keys.map((k, i) => (i === keyIdx ? { ...k, curve } : k));
+      const automation = lanes.map((l, i) => (i === laneIdx ? { param, keys } : l));
+      const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
       return { session: { ...s.session, tracks } };
     });
   },

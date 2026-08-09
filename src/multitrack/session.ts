@@ -1,5 +1,6 @@
 import { nextId } from '../audio/AudioDocument';
 import type { FadeCurve } from '../dsp/fades';
+import type { AutomationLane } from './automation';
 
 export interface Clip {
   id: string; // 'clip-N'
@@ -108,6 +109,16 @@ export interface Track {
    * NOT an invariant consumers may assume (trap T40). Clips MAY overlap —
    * see the overlap contract on sessionStore's `addClip`. */
   clips: Clip[];
+  /** F0 (v1.10) automation lanes — OPTIONAL, and ABSENT means none. Never
+   * initialised by `createTrack`, removed entirely when the last lane empties
+   * (see `sessionStore.removeAutomationKey`), and never written to disk when
+   * absent — which is what keeps a session that never touched automation
+   * byte-identical to what v1.9.2 wrote (the byte-identity pin in
+   * `sessionFile.test.ts` hard-codes the v1.8.0 track key order; when the
+   * store DOES write this field, the object spread appends it after `clips`).
+   * Semantics, invariants and the shared evaluator live in `automation.ts`;
+   * an active lane OVERRIDES this track's static field (ruling B). */
+  automation?: AutomationLane[];
 }
 
 export interface Session {
