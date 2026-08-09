@@ -38,6 +38,7 @@ const OUT_SESSION = path.join(OUT_DIR, 'session.audm');
 const OUT_FADES_SESSION = path.join(OUT_DIR, 'fades-session.audm');
 const OUT_FADES_REFERENCE = path.join(OUT_DIR, 'fades-v18-reference.json');
 const OUT_AUTOMATION_SESSION = path.join(OUT_DIR, 'automation-session.audm');
+const OUT_SPATIAL_SESSION = path.join(OUT_DIR, 'spatial-session.audm');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -2124,6 +2125,208 @@ async function main() {
     assert(
       autoBack.tracks.slice(1).every((t) => t.automation === null),
       'the automation-free tracks still carry NO automation field after the round trip'
+    );
+
+    // 20) F5 (v1.11) — spatial placement, end to end ------------------------
+    // Discharges the packaged-app obligations the F5 unit/parity tests
+    // cannot:
+    //   (a) a REAL positioner gesture on the built app: open the Spatial
+    //       sidebar tab, pick track 2, drag the stage — ONE commit writing
+    //       azimuth AND distance keys together — and ruling 4 visible in the
+    //       real DOM (the pan fader disables with the SPATIAL explanation);
+    //   (b) REAL Web Audio render over MOVING spatial lanes that cross the
+    //       ±180° azimuth seam and the reference-distance boundary, on a
+    //       track that ALSO carries a pan lane (superseded — if the real
+    //       engine let the pan lane through, the law anchors break), required
+    //       BIT-IDENTICAL to mixdownSession, with anchors computed here from
+    //       the laws with independent arithmetic. Step 19's lesson applies:
+    //       the tone doc is dual-mono STEREO, so the BALANCE law governs, and
+    //       every probe is guarded off the tone's zero crossings;
+    //   (c) the spatial-carrying .audm round-trips at formatVersion 3, all
+    //       lanes intact on both tracks.
+    // Entry state from step 19(c): the reopened automation session — track 1
+    // holds A [0, 88200) and B [88200, 176400) plus the volumeDb (3 keys) and
+    // pan (2 keys) lanes; tracks 2-4 carry no automation field.
+    console.log('Spatial placement (F5): positioner gesture, seam-crossing render parity, round trip...');
+
+    // (a) Open the Spatial tab and aim the positioner at track 2 (lane-free,
+    // so the gesture's effect is unambiguous).
+    await page.click('[aria-label="Spatial"]');
+    await page.waitForSelector('[data-testid="spatial-panel"]', { timeout: 5000 });
+    const track2Id = await page.evaluate(
+      () => document.querySelector('[data-testid="spatial-track-select"]').options[1].value
+    );
+    await page.selectOption('[data-testid="spatial-track-select"]', track2Id);
+
+    // Stage geometry: viewBox 300×300, centre (150,150), radius 132 = 10×
+    // distance. Aim at (216, 150): hard right (azimuth 90°) at distance 5.
+    const stageRect = await page.evaluate(() => {
+      const r = document.querySelector('[data-testid="spatial-stage"]').getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+    const stagePt = (vx, vy) => ({
+      x: stageRect.x + (vx / 300) * stageRect.width,
+      y: stageRect.y + (vy / 300) * stageRect.height,
+    });
+    const aim = stagePt(216, 150);
+    await page.mouse.move(aim.x - 8, aim.y);
+    await page.mouse.down();
+    await page.mouse.move(aim.x, aim.y, { steps: 4 });
+    await page.mouse.up();
+
+    const spat1 = await page.evaluate(() => window.__test.getAutomationState());
+    const t2Lanes = spat1.tracks[1].automation ?? [];
+    const gAz = t2Lanes.find((l) => l.param === 'azimuth');
+    const gDist = t2Lanes.find((l) => l.param === 'distance');
+    assert(
+      gAz && gDist && gAz.keys.length === 1 && gDist.keys.length === 1,
+      `ONE stage drag committed one azimuth AND one distance key on track 2 (${JSON.stringify(t2Lanes)})`
+    );
+    assert(
+      gAz.keys[0].positionSample === gDist.keys[0].positionSample,
+      `both keys landed on the SAME sample — one batched commit (${gAz.keys[0].positionSample} vs ${gDist.keys[0].positionSample})`
+    );
+    assert(
+      Math.abs(gAz.keys[0].value - 90) <= 2 && Math.abs(gDist.keys[0].value - 5) <= 0.25,
+      `the keys carry the aimed position (azimuth ${gAz.keys[0].value} ~90°, distance ${gDist.keys[0].value} ~5×)`
+    );
+    // Ruling 4 in the real DOM: track 2's pan fader is now governed by the
+    // spatial position — disabled, with the SPATIAL explanation (track 2 has
+    // no pan lane, so only supersession can disable it).
+    const spatFader = await page.evaluate(() => {
+      const h = [...document.querySelectorAll('[data-testid="track-header"]')][1];
+      const pan = h.querySelector('[aria-label="Pan"]');
+      return { disabled: pan.disabled, title: pan.title };
+    });
+    assert(
+      spatFader.disabled === true &&
+        spatFader.title === 'Overridden by the spatial position (Spatial panel)',
+      `spatial supersession disables the pan fader with its own explanation (${JSON.stringify(spatFader)})`
+    );
+
+    // (b) Exact MOVING spatial lanes on track 1 through the write boundary.
+    // The azimuth ramp crosses the ±180 seam at s=88200; the distance ramp
+    // crosses the reference distance (gain clamps to unity below it) at
+    // s=25200; the elevation ramp narrows the image as it climbs. The pan
+    // lane from step 19 STAYS on the track — superseded (ruling 4): the
+    // anchors below model NO pan-lane factor, so if either real engine let
+    // it through, they fail by the pan gains.
+    await page.evaluate(() => {
+      window.__test.upsertAutomationKey(0, 'azimuth', { positionSample: 22050, value: 170, curve: 'equal-gain' });
+      window.__test.upsertAutomationKey(0, 'azimuth', { positionSample: 154350, value: -170 });
+      window.__test.upsertAutomationKey(0, 'elevation', { positionSample: 44100, value: -45, curve: 'equal-gain' });
+      window.__test.upsertAutomationKey(0, 'elevation', { positionSample: 132300, value: 60 });
+      window.__test.upsertAutomationKey(0, 'distance', { positionSample: 0, value: 0.5, curve: 'equal-gain' });
+      window.__test.upsertAutomationKey(0, 'distance', { positionSample: 176400, value: 4 });
+    });
+    const spatSet = await page.evaluate(() => window.__test.getAutomationState());
+    const spatLanes = spatSet.tracks[0].automation;
+    assert(
+      spatLanes &&
+        spatLanes.length === 5 &&
+        ['volumeDb', 'pan', 'azimuth', 'elevation', 'distance'].every((p) =>
+          spatLanes.some((l) => l.param === p)
+        ),
+      `track 1 carries all five lanes (${JSON.stringify(spatLanes.map((l) => l.param))})`
+    );
+
+    // Probes bracket the seam (88175 / 88275) and the reference-distance
+    // boundary (20000 below it, everything else above); all sit off the
+    // tone's zero crossings (multiples of 22050 are exact zeros) and the
+    // non-vacuity guard below measures the actual source samples.
+    const spatProbeIdxs = [20000, 44125, 88175, 88275, 132325, 160000];
+    const spatWeb = await page.evaluate(
+      (probes) => window.__test.renderSessionWebAudio(null, probes),
+      spatProbeIdxs
+    );
+    console.log(
+      `  renderSessionWebAudio (spatial): ${JSON.stringify({ ...spatWeb, probes: undefined })}`
+    );
+    assert(spatWeb.ok === true, `the spatial offline render succeeded (${spatWeb.reason})`);
+    assert(
+      spatWeb.worstAbsError === 0 && spatWeb.exactFraction === 1,
+      `with volume + spatial baked and every live gain at unity, the REAL Web Audio render is BIT-IDENTICAL to the mixdown across the seam-crossing region (worst |err| ${spatWeb.worstAbsError}, exact ${spatWeb.exactFraction})`
+    );
+
+    // Law anchors with independent arithmetic (never through dsp/spatial.ts
+    // or multitrack/automation.ts): short-arc azimuth, linear elevation and
+    // distance ramps, the interaural projection sin(az)·cos(el), the STEREO
+    // balance law (dual-mono stereo fixture — step 19's lesson), the inverse
+    // distance law 1/max(1, d), and the volume lane from step 19 composing.
+    const spAzAt = (s) => {
+      if (s <= 22050) return 170;
+      if (s >= 154350) return -170;
+      const raw = 170 + 20 * ((s - 22050) / 132300);
+      return raw > 180 ? raw - 360 : raw; // the SHORT arc across the seam
+    };
+    const spElAt = (s) => (s <= 44100 ? -45 : s >= 132300 ? 60 : -45 + 105 * ((s - 44100) / 88200));
+    const spDistAt = (s) => 0.5 + 3.5 * (s / 176400);
+    const spatSrc = await page.evaluate(
+      (idxs) => idxs.map((i) => window.__test.getChannelSamples(0, i % 88200, 1)[0]),
+      spatProbeIdxs
+    );
+    const DEG = Math.PI / 180;
+    for (let p = 0; p < spatProbeIdxs.length; p++) {
+      const s = spatProbeIdxs[p];
+      assert(
+        Math.abs(spatSrc[p]) > 0.05,
+        `spatial anchor ${s} probes a non-zero source sample (${spatSrc[p]}) — a zero-crossing anchor is vacuous`
+      );
+      const v = Math.pow(10, autoVolAt(s) / 20); // the step-19 volume lane still governs
+      const pos = Math.sin(spAzAt(s) * DEG) * Math.cos(spElAt(s) * DEG);
+      const gL = pos <= 0 ? 1 : Math.cos((pos * Math.PI) / 2);
+      const gR = pos >= 0 ? 1 : Math.cos((-pos * Math.PI) / 2);
+      const dg = 1 / Math.max(1, spDistAt(s));
+      const expL = f32(spatSrc[p] * v * gL * dg);
+      const expR = f32(spatSrc[p] * v * gR * dg);
+      const probe = spatWeb.probes[p];
+      assert(
+        Math.abs(probe.webL - expL) <= 5e-7 && Math.abs(probe.mixL - expL) <= 5e-7,
+        `spatial law anchor L at ${s}: web ${probe.webL} and mixdown ${probe.mixL} within 5e-7 of the independent projection expectation ${expL}`
+      );
+      assert(
+        Math.abs(probe.webR - expR) <= 5e-7 && Math.abs(probe.mixR - expR) <= 5e-7,
+        `spatial law anchor R at ${s}: web ${probe.webR} and mixdown ${probe.mixR} within 5e-7 of ${expR}`
+      );
+    }
+    // The seam is a numeric wrap, not an audio jump: the two probes 100
+    // samples apart across it must be close (the long-arc fold would differ
+    // by nearly the full stereo width).
+    {
+      const a = spatWeb.probes[2];
+      const b = spatWeb.probes[3];
+      const norm = (x, src) => x / src; // divide out the tone phase
+      assert(
+        Math.abs(norm(a.webL, spatSrc[2]) - norm(b.webL, spatSrc[3])) < 0.01,
+        `the render is continuous across the ±180 seam (normalised L ${norm(a.webL, spatSrc[2])} vs ${norm(b.webL, spatSrc[3])})`
+      );
+    }
+
+    // (c) The spatial-carrying .audm round-trips at formatVersion 3 — all
+    // five lanes on track 1, the gesture's two lanes on track 2, and the
+    // untouched tracks still lane-free.
+    const savedSpat = await page.evaluate((p) => window.__test.saveSessionAs(p), OUT_SPATIAL_SESSION);
+    assert(
+      savedSpat === true && fs.existsSync(OUT_SPATIAL_SESSION),
+      `the spatial-carrying session was written to ${OUT_SPATIAL_SESSION}`
+    );
+    const spatReopened = await page.evaluate((p) => window.__test.openSessionFrom(p), OUT_SPATIAL_SESSION);
+    assert(
+      spatReopened.trackCount === 4 && spatReopened.droppedClipCount === 0,
+      `the spatial session reopened (${JSON.stringify(spatReopened)})`
+    );
+    const spatBack = await page.evaluate(() => window.__test.getAutomationState());
+    assert(
+      JSON.stringify(spatBack.tracks[0].automation) === JSON.stringify(spatLanes),
+      'all five track-1 lanes — params, positions, values, curves, order — survived the round trip'
+    );
+    assert(
+      JSON.stringify(spatBack.tracks[1].automation) === JSON.stringify(t2Lanes),
+      "the positioner gesture's azimuth+distance lanes survived on track 2"
+    );
+    assert(
+      spatBack.tracks.slice(2).every((t) => t.automation === null),
+      'tracks 3-4 still carry NO automation field after the round trip'
     );
 
     console.log('\nSMOKE PASSED');

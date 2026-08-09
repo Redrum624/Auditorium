@@ -50,6 +50,12 @@ interface SpatialPosition {
  * reference distance) and the first gesture writes the first keys — which
  * activates spatial placement and supersedes pan (ruling 4; the TrackHeader
  * pan slider disables with an explanation while it does).
+ *
+ * FROZEN-PREVIEW RULE (pinned by test): the position SHOWN during a gesture
+ * is the position that lands — the whole preview freezes at pointerdown, so
+ * an XY drag while the playhead moves across a MOVING elevation lane commits
+ * the drag-start elevation the panel displayed, not the value the lane
+ * reached meanwhile. The dot and readouts are a promise about the commit.
  */
 export default function SpatialPanel() {
   const session = useSessionStore((s) => s.session);

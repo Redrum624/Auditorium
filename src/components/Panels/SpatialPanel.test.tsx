@@ -149,6 +149,45 @@ describe('the elevation slider', () => {
   });
 });
 
+describe('what is SHOWN during a drag is what lands (frozen preview during playback)', () => {
+  it('an XY drag over a MOVING elevation lane commits the drag-start (displayed) elevation', () => {
+    // Elevation lane moving 0 → 90 over [0, 1000]. The stage drag freezes the
+    // whole shown position at pointerdown; when the playhead advances during
+    // the drag, pointerup writes the FROZEN elevation the panel displayed —
+    // not the value the lane reached meanwhile. Deliberate (review round 2):
+    // the dot and readouts are a promise about what will land.
+    const id = track0().id;
+    act(() => {
+      const s = useSessionStore.getState();
+      s.upsertAutomationKey(id, 'elevation', { positionSample: 0, value: 0 });
+      s.upsertAutomationKey(id, 'elevation', { positionSample: 1000, value: 90 });
+      s.setMtPlayState('playing');
+      s.setMtPlayheadSample(0);
+    });
+    const { getByTestId } = render(<SpatialPanel />);
+    const stage = getByTestId('spatial-stage');
+
+    firePointer(stage, 'pointerdown', { clientX: 216, clientY: 150 }); // el frozen at 0
+    act(() => {
+      useSessionStore.getState().setMtPlayheadSample(500); // lane now reads 45
+    });
+    firePointer(stage, 'pointerup', { clientX: 216, clientY: 150 });
+
+    expect(track0().automation).toEqual([
+      {
+        param: 'elevation',
+        keys: [
+          { positionSample: 0, value: 0 },
+          { positionSample: 500, value: 0 }, // the frozen, DISPLAYED value
+          { positionSample: 1000, value: 90 },
+        ],
+      },
+      { param: 'azimuth', keys: [{ positionSample: 500, value: 90 }] },
+      { param: 'distance', keys: [{ positionSample: 500, value: 5 }] },
+    ]);
+  });
+});
+
 describe('lane toggles and the track selector', () => {
   it('opens the azimuth envelope lane for the governed track', () => {
     const { getByTestId } = render(<SpatialPanel />);

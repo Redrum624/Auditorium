@@ -16,7 +16,7 @@ import {
   DEFAULT_FADE_CURVE,
 } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
-import type { AutomationLane } from '../multitrack/automation';
+import type { AutomationLane, AutomationParam } from '../multitrack/automation';
 import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
@@ -249,7 +249,7 @@ export interface TestApi {
    * index. */
   upsertAutomationKey(
     trackIndex: number,
-    param: 'volumeDb' | 'pan',
+    param: AutomationParam,
     key: { positionSample: number; value: number; curve?: string },
     replacePositionSample?: number
   ): { automation: AutomationLane[] | null } | null;

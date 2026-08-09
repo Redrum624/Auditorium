@@ -76,11 +76,11 @@ function isAudible(track: Track, anySolo: boolean): boolean {
 
 /**
  * F0 — the volume lane's linear gain at timeline sample `s`:
- * `dbToLinear(automationValueAt(keys, s))`. Exported for the SAME reason the
- * pan laws are: the realtime `MultitrackPlayer` bakes the identical float
- * expression into its buffers, so live playback and offline mixdown cannot
- * drift (ruling A / trap T5 — one evaluator, one dB→linear conversion, shared
- * verbatim by both engines).
+ * `dbToLinear(automationValueAt(keys, s, 'volumeDb'))`. Exported for the SAME
+ * reason the pan laws are: the realtime `MultitrackPlayer` bakes the identical
+ * float expression into its buffers, so live playback and offline mixdown
+ * cannot drift (ruling A / trap T5 — one evaluator, one dB→linear conversion,
+ * shared verbatim by both engines).
  */
 export function autoVolumeGainAt(keys: readonly AutomationKey[], s: number): number {
   return dbToLinear(automationValueAt(keys, s, 'volumeDb'));

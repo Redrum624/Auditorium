@@ -704,3 +704,9 @@ Azimuth automation interpolates along the SHORT arc across the ±180° seam
 sweep through the front); a deliberate long sweep is written by adding an
 intermediate key. Keys exactly opposite (180° apart) travel the
 decreasing-azimuth arc — through the left — as a fixed, pinned tie-break.
+
+One consequence of the positioner's what-you-see-lands rule: the whole
+preview freezes when a drag starts, so dragging the stage during playback
+while an elevation lane is moving writes an elevation key at the value shown
+when the drag began (the frozen dot/readout), not at the value the lane
+reached by release. The panel displays exactly what will be committed.
