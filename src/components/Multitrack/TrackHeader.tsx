@@ -65,9 +65,15 @@ export default function TrackHeader({ track }: { track: Track }) {
   // F0 — which params have an ACTIVE lane (>= 1 key): that lane GOVERNS the
   // parameter (ruling B), so the static slider is disabled while it does —
   // the honest surface for "the fader is overridden, edit the envelope".
+  // F5 — an active SPATIAL group supersedes pan entirely (lane and static,
+  // ruling 4), so it disables the pan slider too, with its own explanation.
   const auto = resolveAutomation(track.automation);
   const volGoverned = auto?.volume != null;
-  const panGoverned = auto?.pan != null;
+  const spatialGoverns = auto?.spatial != null;
+  const panGoverned = auto?.pan != null || spatialGoverns;
+  const panGovernedTitle = spatialGoverns
+    ? 'Overridden by the spatial position (Spatial panel)'
+    : 'Overridden by the pan envelope (lane has keys)';
 
   const envOpen = (param: AutomationParam): boolean =>
     mtEnvelope !== null && mtEnvelope.trackId === track.id && mtEnvelope.param === param;
@@ -228,7 +234,7 @@ export default function TrackHeader({ track }: { track: Track }) {
           step={0.01}
           value={track.pan}
           disabled={panGoverned}
-          title={panGoverned ? 'Overridden by the pan envelope (lane has keys)' : undefined}
+          title={panGoverned ? panGovernedTitle : undefined}
           onChange={(e) => setTrackParam(track.id, { pan: Number(e.target.value) })}
           className="slider min-w-0 flex-1"
           style={panGoverned ? { opacity: 0.35 } : undefined}
@@ -240,7 +246,11 @@ export default function TrackHeader({ track }: { track: Track }) {
         >
           {panLabel}
         </span>
-        {envToggle('pan', 'Pan envelope', panGoverned)}
+        {/* The toggle reflects the pan LANE itself (keys exist), not the
+            spatial supersession — a spatially-governed track with no pan
+            keys shows a plain toggle, and the disabled slider's title says
+            who actually governs. */}
+        {envToggle('pan', 'Pan envelope', auto?.pan != null)}
       </label>
     </div>
   );

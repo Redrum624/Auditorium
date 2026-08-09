@@ -333,3 +333,64 @@ describe('TrackLane integration', () => {
     expect(useSessionStore.getState().selectedClipId).toBe('clip-keep');
   });
 });
+
+describe('F5 — spatial params on the envelope lane', () => {
+  it('an azimuth lane labels itself, formats degrees, and maps y to the +/-180 range', () => {
+    const { getByTestId, getByText } = render(
+      <EnvelopeLane
+        track={track0()}
+        param="azimuth"
+        zoom={{ samplesPerPixel: SPP, scrollSample: 0 }}
+        laneHeight={96}
+      />
+    );
+    expect(getByText(/Azimuth · click add/)).toBeTruthy();
+    const lane = getByTestId('envelope-lane');
+    // y=6 (PAD_Y, top) = +180; the preview readout formats degrees.
+    firePointer(lane, 'pointerdown', { clientX: 50, clientY: 6 });
+    expect(getByTestId('envelope-readout').textContent).toBe('180°');
+    firePointer(lane, 'pointerup', { clientX: 50, clientY: 6 });
+    expect(track0().automation).toEqual([
+      { param: 'azimuth', keys: [{ positionSample: 5000, value: 180 }] },
+    ]);
+  });
+
+  it('with NO keys the dashed line sits at the parameter NEUTRAL (distance -> 1x, not 0)', () => {
+    const { getByTestId } = render(
+      <EnvelopeLane
+        track={track0()}
+        param="distance"
+        zoom={{ samplesPerPixel: SPP, scrollSample: 0 }}
+        laneHeight={96}
+      />
+    );
+    // distance range 0..10, neutral 1: y = 6 + (1 - 1/10)*84 = 81.6.
+    const points = getByTestId('envelope-svg').querySelector('polyline')?.getAttribute('points');
+    expect(points).toBeTruthy();
+    const first = (points ?? '').split(' ')[0].split(',');
+    expect(parseFloat(first[1])).toBeCloseTo(81.6, 1);
+  });
+
+  it('draws an azimuth wrap segment from the CIRCULAR evaluator (short arc, not the long ramp)', () => {
+    const id = track0().id;
+    act(() => {
+      const s = useSessionStore.getState();
+      s.upsertAutomationKey(id, 'azimuth', { positionSample: 0, value: 170 });
+      s.upsertAutomationKey(id, 'azimuth', { positionSample: 80_000, value: -170 });
+    });
+    const { getByTestId } = render(
+      <EnvelopeLane
+        track={track0()}
+        param="azimuth"
+        zoom={{ samplesPerPixel: SPP, scrollSample: 0 }}
+        laneHeight={96}
+      />
+    );
+    const points = getByTestId('envelope-svg').querySelector('polyline')?.getAttribute('points') ?? '';
+    // x=200px -> s=20000, u=0.25: short arc az=175 -> y = 6 + (1-(175+180)/360)*84
+    // = 7.17; the LINEAR long ramp would read az=85 -> y = 28.17.
+    const at200 = points.split(' ').find((p) => p.startsWith('200,'));
+    expect(at200).toBeTruthy();
+    expect(parseFloat((at200 ?? '').split(',')[1])).toBeCloseTo(6 + (1 - 355 / 360) * 84, 1);
+  });
+});

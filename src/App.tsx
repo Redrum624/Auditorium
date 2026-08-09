@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { Flag, Folder, History as HistoryIcon, Info, Shuffle, Sparkles } from 'lucide-react';
+import { Flag, Folder, History as HistoryIcon, Info, Orbit, Shuffle, Sparkles } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import WaveformView from './components/Editor/WaveformView';
 import SpectrogramView from './components/Editor/SpectrogramView';
@@ -18,6 +18,7 @@ import HistoryPanel from './components/Panels/HistoryPanel';
 import MarkersPanel from './components/Panels/MarkersPanel';
 import PropertiesPanel from './components/Panels/PropertiesPanel';
 import RemixPanel from './components/Panels/RemixPanel';
+import SpatialPanel from './components/Panels/SpatialPanel';
 import StatusBar from './components/Layout/StatusBar';
 import TempoCard from './components/Layout/TempoCard';
 import TitleBar from './components/Layout/TitleBar';
@@ -41,7 +42,7 @@ import { useAppStore } from './stores/appStore';
 // (user-approved via the 2026-07-28 mockup). 'remix' is also reachable
 // through `focusRemixPanel()` (dialogBus) the moment a remix document is
 // created, without the user finding the rail entry first.
-type SidebarTab = 'files' | 'effects' | 'markers' | 'history' | 'properties' | 'remix';
+type SidebarTab = 'files' | 'effects' | 'markers' | 'history' | 'properties' | 'remix' | 'spatial';
 const SIDEBAR_TABS: { id: SidebarTab; label: string; Icon: LucideIcon }[] = [
   { id: 'files', label: 'Files', Icon: Folder },
   { id: 'effects', label: 'Effects', Icon: Sparkles },
@@ -49,6 +50,12 @@ const SIDEBAR_TABS: { id: SidebarTab; label: string; Icon: LucideIcon }[] = [
   { id: 'history', label: 'History', Icon: HistoryIcon },
   { id: 'properties', label: 'Properties', Icon: Info },
   { id: 'remix', label: 'Remix', Icon: Shuffle },
+  // F5 — the spatial positioner (stereo projection; lucide line icon, never
+  // emoji). A sidebar tab rather than a track-header popover because the
+  // positioner is playhead-scoped, not row-scoped: it follows the transport
+  // and switches tracks from its own selector, and the 348px card gives the
+  // stage room the 96px track row never could.
+  { id: 'spatial', label: 'Spatial', Icon: Orbit },
 ];
 
 // Vitrine IconSidebar.tsx rail-button anatomy, verbatim: 42px tile, radius 12,
@@ -247,6 +254,7 @@ export default function App() {
               {sidebarTab === 'markers' && <MarkersPanel />}
               {sidebarTab === 'properties' && <PropertiesPanel />}
               {sidebarTab === 'remix' && <RemixPanel />}
+              {sidebarTab === 'spatial' && <SpatialPanel />}
             </div>
           </GlassCard>
         </div>

@@ -3,6 +3,7 @@ import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent }
 import { FADE_CURVES, FADE_CURVE_LABELS } from '../../dsp/fades';
 import type { FadeCurve } from '../../dsp/fades';
 import {
+  AUTOMATION_PARAM_LABELS,
   AUTOMATION_RANGES,
   DEFAULT_AUTOMATION_CURVE,
   automationValueAt,
@@ -10,6 +11,7 @@ import {
   type AutomationKey,
   type AutomationParam,
 } from '../../multitrack/automation';
+import { SPATIAL_NEUTRAL } from '../../dsp/spatial';
 import type { Track } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { snapSample } from '../../services/snap';
@@ -301,14 +303,24 @@ export default function EnvelopeLane({ track, param, zoom, laneHeight }: Envelop
   }
 
   // The envelope polyline over the VISIBLE range, drawn from the real
-  // evaluator (the fade-overlay precedent: the picture is the DSP's own
-  // answer, never a second implementation). Zero keys: the static field's
-  // flat value, dashed — the state where the field still governs.
-  const staticValue = param === 'volumeDb' ? track.volumeDb : track.pan;
+  // evaluator — WITH the param, so an azimuth lane draws its short-arc wrap
+  // (the vertical jump at the ±180 seam is the honest picture of the wrap;
+  // the audio is continuous there, the NUMBER is not). Zero keys: the flat
+  // dashed line at the value that governs without keys — the static field
+  // for volume/pan, the parameter's `SPATIAL_NEUTRAL` member for the F5
+  // spatial params (which have NO static Track field: position is
+  // automation-only, and this line shows where the source sits until the
+  // first key exists).
+  const staticValue =
+    param === 'volumeDb'
+      ? track.volumeDb
+      : param === 'pan'
+        ? track.pan
+        : SPATIAL_NEUTRAL[param];
   const points: string[] = [];
   for (let x = 0; x <= width; x += 2) {
     const s = pixelToSample(x, zoom.scrollSample, zoom.samplesPerPixel);
-    const v = displayKeys.length > 0 ? automationValueAt(displayKeys, s) : staticValue;
+    const v = displayKeys.length > 0 ? automationValueAt(displayKeys, s, param) : staticValue;
     points.push(`${x},${valueToY(v).toFixed(2)}`);
   }
 
@@ -319,12 +331,21 @@ export default function EnvelopeLane({ track, param, zoom, laneHeight }: Envelop
     }))
     .filter(({ x }) => x >= -KEY_HIT_PX && x <= width + KEY_HIT_PX);
 
-  const fmtValue = (v: number): string =>
-    param === 'volumeDb'
-      ? `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`
-      : Math.round(Math.abs(v) * 100) === 0
-        ? 'C'
-        : `${v < 0 ? 'L' : 'R'}${Math.round(Math.abs(v) * 100)}`;
+  const fmtValue = (v: number): string => {
+    switch (param) {
+      case 'volumeDb':
+        return `${v > 0 ? '+' : ''}${v.toFixed(1)} dB`;
+      case 'azimuth':
+      case 'elevation':
+        return `${v.toFixed(0)}°`;
+      case 'distance':
+        return `${v.toFixed(2)}×`; // multiples of the reference distance
+      case 'pan':
+        return Math.round(Math.abs(v) * 100) === 0
+          ? 'C'
+          : `${v < 0 ? 'L' : 'R'}${Math.round(Math.abs(v) * 100)}`;
+    }
+  };
 
   return (
     <div
@@ -403,7 +424,7 @@ export default function EnvelopeLane({ track, param, zoom, laneHeight }: Envelop
         className="pointer-events-none absolute right-1.5 bottom-0.5 text-[9px]"
         style={{ color: 'var(--glass-text-muted)' }}
       >
-        {param === 'volumeDb' ? 'Volume' : 'Pan'} · click add · drag move · right-click delete ·
+        {AUTOMATION_PARAM_LABELS[param]} · click add · drag move · right-click delete ·
         double-click curve
       </div>
     </div>

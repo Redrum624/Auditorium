@@ -72,3 +72,31 @@ describe('ruling B on the faders', () => {
     expect((getByLabelText('Volume (dB)') as HTMLInputElement).disabled).toBe(false);
   });
 });
+
+describe('F5 — ruling 4 on the pan fader', () => {
+  it('an active spatial lane disables the pan slider with the SPATIAL explanation', () => {
+    const id = track0().id;
+    act(() => {
+      useSessionStore.getState().upsertAutomationKey(id, 'azimuth', { positionSample: 0, value: 90 });
+    });
+    const { getByLabelText } = render(<TrackHeader track={track0()} />);
+    const pan = getByLabelText('Pan') as HTMLInputElement;
+    expect(pan.disabled).toBe(true);
+    expect(pan.title).toBe('Overridden by the spatial position (Spatial panel)');
+    // The volume fader stays live, and the pan TOGGLE stays un-governed
+    // (it reflects the pan LANE, which has no keys here).
+    expect((getByLabelText('Volume (dB)') as HTMLInputElement).disabled).toBe(false);
+    expect(getByLabelText('Pan envelope').getAttribute('title')).toBe('Pan envelope');
+  });
+
+  it('a pan LANE keeps its own explanation when no spatial lane exists', () => {
+    const id = track0().id;
+    act(() => {
+      useSessionStore.getState().upsertAutomationKey(id, 'pan', { positionSample: 0, value: 0.5 });
+    });
+    const { getByLabelText } = render(<TrackHeader track={track0()} />);
+    const pan = getByLabelText('Pan') as HTMLInputElement;
+    expect(pan.disabled).toBe(true);
+    expect(pan.title).toBe('Overridden by the pan envelope (lane has keys)');
+  });
+});
