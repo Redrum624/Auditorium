@@ -187,10 +187,16 @@ function computeBeatMarkerPositions(
   return { positions, truncated };
 }
 
-/** Lays down the beat grid as a SECOND, separately-labelled undo step (see
- * the module doc comment for why this cannot ride inside the stretch's own
- * `applyEdit` entry). No-ops (no undo entry, no dialog) when the region
- * yields zero beat positions. */
+/** Lays down the beat grid as a separately-labelled undo step (see the module
+ * doc comment for why this cannot ride inside the stretch's own `applyEdit`
+ * entry). Returns `true` when it laid at least one marker, `false` when it
+ * no-ops (no undo entry, no dialog) because the region yields zero beat
+ * positions or the document is gone. Reached from TWO paths: AFTER a stretch
+ * (ratio != 1, applyTempoChange), and — v1.9.1 item 2 — the no-stretch
+ * `layBeatGridAtCurrentTempo` path at ratio 1 (`newFirstBeat === clampedFirstBeat`,
+ * `regionEnd === end` by arithmetic). The boolean is what
+ * `layBeatGridAtCurrentTempo` reports as success, since that path has no audio
+ * edit to gate on (trap T2). */
 function addBeatMarkersAfterStretch(
   docId: string,
   start: number,
@@ -199,9 +205,9 @@ function addBeatMarkersAfterStretch(
   targetBpm: number,
   sampleRate: number,
   firstBeatSample: number
-): void {
+): boolean {
   const newDoc = useAppStore.getState().documents.find((d) => d.id === docId);
-  if (!newDoc) return; // document closed while the stretch was running
+  if (!newDoc) return false; // document closed while the stretch was running
 
   const { positions, truncated } = computeBeatMarkerPositions(
     start,
@@ -212,7 +218,7 @@ function addBeatMarkersAfterStretch(
     firstBeatSample,
     docLength(newDoc)
   );
-  if (positions.length === 0) return;
+  if (positions.length === 0) return false;
 
   const store = useAppStore.getState();
   const before: Marker[] = store.markers[docId] ?? [];
@@ -241,6 +247,44 @@ function addBeatMarkersAfterStretch(
       message: `Only the first ${MAX_BEAT_MARKERS} beat markers were added — the stretched region contains more beats than that.`,
     });
   }
+  return true;
+}
+
+/**
+ * v1.9.1 item 2 — the no-stretch beat-grid path. Reached ONLY from
+ * `applyTempoChange` when `checkTempoChange` refused with `'no-op'` (ratio
+ * within 1e-6 of 1.0) AND the caller asked for beat markers. It resolves the
+ * region exactly as `applyTempoChange` does, then lays the grid at ratio 1 —
+ * `addBeatMarkersAfterStretch` is already ratio-1-safe by arithmetic
+ * (`newFirstBeat === clampedFirstBeat`, `regionEnd === end`), so the grid lands
+ * on the CURRENT tempo's beats. Crucially it does NOT call
+ * `runEffectOnSelection`, so there is no WSOLA pass, no seam at the region
+ * edges, and no `'Effect: Time Stretch'` undo entry — only the `'Add Beat
+ * Markers'` step. It deliberately does NOT copy `applyTempoChange`'s
+ * `postDoc.channels !== doc.channels` success gate (trap T2): this path performs
+ * no audio edit, so that identity can never change and the gate would report
+ * failure after successfully writing the grid. Success is "a marker was laid",
+ * which `addBeatMarkersAfterStretch` now returns.
+ */
+function layBeatGridAtCurrentTempo(req: ApplyTempoChangeRequest): TempoChangeOutcome {
+  const doc = activeDoc();
+  if (!doc) return { ok: false, reason: 'no-document' };
+  if (req.firstBeatSample == null) return { ok: false, reason: 'no-op' };
+
+  const selection = useAppStore.getState().selection;
+  const start = selection ? selection.start : 0;
+  const end = selection ? selection.end : docLength(doc);
+
+  const laid = addBeatMarkersAfterStretch(
+    doc.id,
+    start,
+    end,
+    1,
+    req.targetBpm,
+    doc.sampleRate,
+    req.firstBeatSample
+  );
+  return { ok: laid };
 }
 
 /**
@@ -296,7 +340,19 @@ export async function applyTempoChange(
   onProgress?: (fraction: number) => void
 ): Promise<TempoChangeOutcome> {
   const check = checkTempoChange(req);
-  if (!check.ok) return { ok: false, reason: check.reason };
+  if (!check.ok) {
+    // v1.9.1 item 2 (trap T1): the 1e-6 no-op guard is CORRECT and stays — a
+    // real WSOLA pass at ratio 1.0 would seam both region edges and push a
+    // bogus 'Effect: Time Stretch' undo entry for zero tempo change. But laying
+    // a beat grid AT THE CURRENT TEMPO is a distinct, legitimate action (its own
+    // undo step) that must not be gated on the stretch. So a no-op ratio WITH
+    // beat markers requested lays the grid and skips the stretch entirely; every
+    // other refusal — including a no-op with markers OFF — is unchanged.
+    if (check.reason === 'no-op' && req.addBeatMarkers && req.firstBeatSample != null) {
+      return layBeatGridAtCurrentTempo(req);
+    }
+    return { ok: false, reason: check.reason };
+  }
   const { ratio } = check;
 
   const doc = activeDoc();

@@ -337,6 +337,81 @@ describe('applyTempoChange — optional beat markers', () => {
   }, 15000);
 });
 
+describe('applyTempoChange — beat grid at the CURRENT tempo (v1.9.1 item 2)', () => {
+  it('no-op ratio WITH markers lays the grid at ratio 1, runs no stretch, pushes only the marker step', async () => {
+    const seconds = 4;
+    const doc = seedDoc([sine(220, seconds)]);
+    const docId = doc.id;
+    const lenBefore = docLength(liveDoc(docId));
+    const channelsBefore = liveDoc(docId).channels[0];
+    const firstBeatSample = 1000;
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 120, // ratio EXACTLY 1 -> checkTempoChange returns 'no-op'
+      addBeatMarkers: true,
+      firstBeatSample,
+    });
+    expect(result).toEqual({ ok: true });
+
+    // No stretch ran: no 'Effect: Time Stretch' entry (only the marker step),
+    // the audio length is unchanged, and the channels array is the SAME
+    // reference — a WSOLA pass at ratio 1 would have allocated a fresh one via
+    // replaceRegion and seamed both region edges.
+    expect(getHistory(docId).done).toEqual(['Add Beat Markers']);
+    expect(docLength(liveDoc(docId))).toBe(lenBefore);
+    expect(liveDoc(docId).channels[0]).toBe(channelsBefore);
+
+    // The grid lands on the CURRENT tempo's beats: spacing 60/targetBpm*SR,
+    // starting at firstBeatSample verbatim (ratio 1 -> newFirstBeat === it).
+    const markers = liveMarkers(docId)
+      .filter((m) => m.name.startsWith('Beat '))
+      .sort((a, b) => a.positionSample - b.positionSample);
+    expect(markers.length).toBeGreaterThan(1);
+    const spacing = (60 / 120) * SR;
+    markers.forEach((m, i) => {
+      expect(m.positionSample).toBe(firstBeatSample + Math.round(i * spacing));
+      expect(m.name).toBe(`Beat ${i + 1}`);
+    });
+
+    // The single marker step undoes cleanly.
+    undo(docId);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+    expect(getHistory(docId).done).toEqual([]);
+  }, 15000);
+
+  it('no-op ratio WITHOUT markers is still refused with no-op, lays nothing, runs no stretch (trap T1)', async () => {
+    const doc = seedDoc([sine(220, 4)]);
+    const docId = doc.id;
+    const lenBefore = docLength(liveDoc(docId));
+    const before = getHistory(docId).done.length;
+
+    const result = await applyTempoChange({ sourceBpm: 120, targetBpm: 120 });
+
+    expect(result).toEqual({ ok: false, reason: 'no-op' });
+    expect(getHistory(docId).done.length).toBe(before);
+    expect(docLength(liveDoc(docId))).toBe(lenBefore);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+  });
+
+  it('no-op ratio with markers requested but NO firstBeatSample refuses and lays nothing', async () => {
+    const doc = seedDoc([sine(220, 4)]);
+    const docId = doc.id;
+    const before = getHistory(docId).done.length;
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 120,
+      addBeatMarkers: true,
+      firstBeatSample: null,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(getHistory(docId).done.length).toBe(before);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+  });
+});
+
 describe('applyTempoChange — the stretch never lands (fix round 1, CRITICAL)', () => {
   it('reports failure and adds no beat markers / no undo entry when the DSP worker fails to load', async () => {
     const seconds = 4;

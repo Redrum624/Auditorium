@@ -174,6 +174,34 @@ describe('TempoDialog', () => {
     expect(screen.getByTestId('tempo-quality')).toHaveTextContent('Target equals source tempo.');
   });
 
+  it('7b. source === target WITH beat markers ticked ENABLES Apply and lays the grid at the current tempo (v1.9.1 item 2)', async () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(makeEntry({ bpm: 100, confidence: 0.9 }));
+    mockApplyTempoChange.mockResolvedValue({ ok: true });
+    const onClose = jest.fn();
+    render(<TempoDialog onClose={onClose} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '100' } });
+    // Before ticking: still the plain no-op dead end (unchanged behaviour).
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+    expect(screen.getByTestId('tempo-quality')).toHaveTextContent('Target equals source tempo.');
+
+    fireEvent.click(screen.getByTestId('tempo-beat-markers'));
+
+    // After ticking: Apply is enabled and the copy explains the no-stretch path.
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+    expect(screen.getByTestId('tempo-quality')).toHaveTextContent(
+      'Same tempo — beat markers will be laid at the current grid (no stretch).'
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+    expect(mockApplyTempoChange).toHaveBeenCalledWith(
+      { sourceBpm: 100, targetBpm: 100, addBeatMarkers: true, firstBeatSample: 1000 },
+      expect.any(Function)
+    );
+  });
+
   it('8. Apply calls applyTempoChange with exactly the expected request, then onClose', async () => {
     seedDoc(44100, 44100 * 20);
     mockGetTempo.mockReturnValue(

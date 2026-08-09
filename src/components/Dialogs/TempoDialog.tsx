@@ -186,7 +186,14 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   const check = validSource && validTarget ? checkTempoChange({ sourceBpm: sourceNum, targetBpm: targetNum }) : null;
   const ratio = check?.ok ? check.ratio : validSource && validTarget ? tempoRatio(sourceNum, targetNum) : null;
 
-  const canApply = validSource && validTarget && check !== null && check.ok && !busy;
+  // v1.9.1 item 2: a no-op ratio (source === target) normally disables Apply,
+  // but if the user has ticked "Add beat markers" (only possible when a beat
+  // phase exists), applying lays the grid at the CURRENT tempo with no stretch.
+  // The service (`applyTempoChange` -> `layBeatGridAtCurrentTempo`) enforces the
+  // "no stretch at ratio 1" half; this only re-enables the button for it.
+  const noOpWithMarkers =
+    check !== null && !check.ok && check.reason === 'no-op' && addBeatMarkers && hasBeatPhase;
+  const canApply = validSource && validTarget && !busy && ((check !== null && check.ok) || noOpWithMarkers);
 
   async function handleDetect() {
     if (!doc || detecting) return;
@@ -264,8 +271,11 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   let qualityClass = 'text-[#8b8b92]';
   if (check && !check.ok) {
     if (check.reason === 'no-op') {
-      qualityText = 'Target equals source tempo.';
-      qualityClass = 'text-[#8b8b92]';
+      // v1.9.1 item 2: same tempo is not a dead end when markers are requested.
+      qualityText = noOpWithMarkers
+        ? 'Same tempo — beat markers will be laid at the current grid (no stretch).'
+        : 'Target equals source tempo.';
+      qualityClass = noOpWithMarkers ? 'text-[#26c6da]' : 'text-[#8b8b92]';
     } else if (check.reason === 'out-of-range') {
       const targetMin = Math.round(sourceNum / MAX_RATIO);
       const targetMax = Math.round(sourceNum / MIN_RATIO);
