@@ -10,6 +10,7 @@ import {
 } from '../../multitrack/automation';
 import { SPATIAL_NEUTRAL, spatialDistanceGain, spatialPanPosition } from '../../dsp/spatial';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { withSessionGesture } from '../../multitrack/sessionUndo';
 
 /** SVG stage geometry: a 300×300 viewBox, listener at the centre, the
  * distance range (0..10, `AUTOMATION_RANGES.distance`) mapped LINEARLY onto
@@ -161,16 +162,27 @@ export default function SpatialPanel() {
     if (pendingElevation !== null) {
       writes.push({ param: 'elevation', key: { positionSample: sample, value: pendingElevation } });
     }
-    upsertAutomationKeys(track.id, writes);
+    // R3: the drop is one user act — one entry, labeled by INTENT (the store's
+    // own label for the batch is the generic 'Edit automation').
+    withSessionGesture('Set spatial position', () => upsertAutomationKeys(track.id, writes));
   };
 
-  const commitElevation = () => {
+  /** Commits the elevation preview as one undo entry. `source` decides
+   * coalescing (R3 ruling 2, keyboard-repeat clause): keyboard commits fire
+   * once per keyup, so contiguous arrow taps on the SAME track's elevation
+   * merge into one entry; pointer commits are one-per-drag already and never
+   * merge — two deliberate drags are two undo steps. */
+  const commitElevation = (source: 'pointer' | 'key') => {
     if (!track || preview === null) return;
     const el = preview.elevation;
     setPreview(null);
     const st = useSessionStore.getState();
     const sample = Math.round(st.mtPlayState === 'playing' ? st.mtPlayheadSample : st.mtCursorSample);
-    upsertAutomationKey(track.id, 'elevation', { positionSample: sample, value: el });
+    withSessionGesture(
+      'Set elevation',
+      () => upsertAutomationKey(track.id, 'elevation', { positionSample: sample, value: el }),
+      source === 'key' ? { coalesceKey: `elevation:${track.id}` } : undefined
+    );
   };
 
   const laneButton = (param: AutomationParam) => {
@@ -317,8 +329,8 @@ export default function SpatialPanel() {
           value={Math.round(shown.elevation)}
           aria-label="Elevation (degrees)"
           onChange={(e) => setPreview({ ...shown, elevation: Number(e.target.value) })}
-          onPointerUp={commitElevation}
-          onKeyUp={commitElevation}
+          onPointerUp={() => commitElevation('pointer')}
+          onKeyUp={() => commitElevation('key')}
           className="slider min-w-0 flex-1"
         />
         <span className="w-9 shrink-0 text-right tabular-nums" style={{ color: '#d4d4d8' }}>

@@ -13,6 +13,7 @@ import {
   pushMarkerUndo,
 } from './editOps';
 import { canRedo, canUndo, redo, undo } from './undoHistory';
+import { canRedoSession, canUndoSession, redoSession, undoSession } from '../multitrack/sessionUndo';
 import { getClipboard } from './clipboard';
 import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
 import { openSessionViaDialog, saveSessionViaDialog } from '../multitrack/sessionFile';
@@ -336,11 +337,23 @@ function registerEditCommands(): void {
   const hasSelection = (s: AppState) => activeDoc(s) !== null && s.selection !== null;
   registerCommands([
     {
+      // R3 view routing (ruling 1), same shape as edit.delete below: in the
+      // multitrack view Ctrl+Z addresses the SESSION's history; in the
+      // waveform/spectral editors it addresses the active document's. The
+      // two stacks never interleave — that is the per-document convention
+      // multi-document editors already follow, extended to the session.
       id: 'edit.undo',
       label: 'Undo',
       shortcut: 'Ctrl+Z',
-      enabled: (s) => s.activeDocumentId !== null && canUndo(s.activeDocumentId),
+      enabled: (s) =>
+        s.view === 'multitrack'
+          ? canUndoSession()
+          : s.activeDocumentId !== null && canUndo(s.activeDocumentId),
       run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          undoSession();
+          return;
+        }
         const id = useAppStore.getState().activeDocumentId;
         if (id) undo(id);
       },
@@ -349,8 +362,15 @@ function registerEditCommands(): void {
       id: 'edit.redo',
       label: 'Redo',
       shortcut: 'Ctrl+Y',
-      enabled: (s) => s.activeDocumentId !== null && canRedo(s.activeDocumentId),
+      enabled: (s) =>
+        s.view === 'multitrack'
+          ? canRedoSession()
+          : s.activeDocumentId !== null && canRedo(s.activeDocumentId),
       run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          redoSession();
+          return;
+        }
         const id = useAppStore.getState().activeDocumentId;
         if (id) redo(id);
       },

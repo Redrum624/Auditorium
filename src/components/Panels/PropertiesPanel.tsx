@@ -2,6 +2,7 @@ import { useRef, useState } from 'react';
 import { docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { withSessionGesture } from '../../multitrack/sessionUndo';
 import { clampFadePair, crossfadableOverlap, DEFAULT_FADE_CURVE, type Clip } from '../../multitrack/session';
 import { resolveClipFadeSpecs } from '../../multitrack/mixdown';
 import {
@@ -505,16 +506,22 @@ function ClipProperties() {
    * setClipFade makes the pair canonical: the renderer crossfades it and the
    * store's maintenance treats it as armed from then on. */
   const armCrossfade = (geo: PairGeo): void => {
-    setClipFade(geo.a.id, 'out', { lengthSample: geo.width });
-    setClipFade(geo.b.id, 'in', { lengthSample: geo.width });
+    // R3: one user act, two store writes — one undo entry (ruling 2).
+    withSessionGesture('Arm crossfade', () => {
+      setClipFade(geo.a.id, 'out', { lengthSample: geo.width });
+      setClipFade(geo.b.id, 'in', { lengthSample: geo.width });
+    });
   };
 
   /** Clears BOTH facing fades (0 normalises to "no fade") — the symmetric
    * un-arm X5 left to the fade UI. Clearing only one side would strand the
    * partner's fade as a surprise solo fade. */
   const releaseCrossfade = (geo: PairGeo): void => {
-    setClipFade(geo.a.id, 'out', { lengthSample: 0 });
-    setClipFade(geo.b.id, 'in', { lengthSample: 0 });
+    // R3: one user act, two store writes — one undo entry (ruling 2).
+    withSessionGesture('Release crossfade', () => {
+      setClipFade(geo.a.id, 'out', { lengthSample: 0 });
+      setClipFade(geo.b.id, 'in', { lengthSample: 0 });
+    });
   };
 
   const hasAnyOverlap = trackClips.some(

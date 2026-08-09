@@ -4,6 +4,7 @@ import { resolveAutomation, type AutomationParam } from '../../multitrack/automa
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import type { Track } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
 
 const VOL_MIN = -60;
 const VOL_MAX = 12;
@@ -208,6 +209,13 @@ export default function TrackHeader({ track }: { track: Track }) {
           disabled={volGoverned}
           title={volGoverned ? 'Overridden by the volume envelope (lane has keys)' : undefined}
           onChange={(e) => setTrackParam(track.id, { volumeDb: Number(e.target.value) })}
+          // R3 (ruling 2): a pointer drag on the range fires onChange per
+          // tick; the bracket folds them into ONE undo entry. Keyboard
+          // arrows fire onChange with no pointer events — those single
+          // commits coalesce in the store via the per-(track,param) key.
+          onPointerDown={() => beginSessionGesture('Set track volume')}
+          onPointerUp={endSessionGesture}
+          onPointerCancel={endSessionGesture}
           className="slider min-w-0 flex-1"
           style={volGoverned ? { opacity: 0.35 } : undefined}
           aria-label="Volume (dB)"
@@ -236,6 +244,10 @@ export default function TrackHeader({ track }: { track: Track }) {
           disabled={panGoverned}
           title={panGoverned ? panGovernedTitle : undefined}
           onChange={(e) => setTrackParam(track.id, { pan: Number(e.target.value) })}
+          // R3: same bracket as the volume slider above.
+          onPointerDown={() => beginSessionGesture('Set track pan')}
+          onPointerUp={endSessionGesture}
+          onPointerCancel={endSessionGesture}
           className="slider min-w-0 flex-1"
           style={panGoverned ? { opacity: 0.35 } : undefined}
           aria-label="Pan"

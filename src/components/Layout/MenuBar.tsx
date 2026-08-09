@@ -2,12 +2,18 @@ import { useEffect, useRef, useState } from 'react';
 import type { MenuCommand } from '../../services/menuActions';
 import { getMenuSections, runCommand } from '../../services/menuActions';
 import { useAppStore } from '../../stores/appStore';
+import { useHistoryVersion } from '../../services/undoHistory';
 
 export default function MenuBar() {
   const [openTitle, setOpenTitle] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   // Subscribe so item.enabled(...) is recomputed whenever store state changes.
   useAppStore((s) => s);
+  // R3: session undo entries change no appStore state (a clip drag writes the
+  // SESSION store), so Edit > Undo/Redo enablement in the multitrack view
+  // also needs the history's own version counter. Document edits piggybacked
+  // on appStore re-renders and never needed this.
+  useHistoryVersion();
   const sections = getMenuSections();
 
   useEffect(() => {

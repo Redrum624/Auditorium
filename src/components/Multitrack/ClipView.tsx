@@ -8,6 +8,7 @@ import { crossfadeGains, fadeInShape, fadeOutShape } from '../../dsp/fades';
 import type { Clip } from '../../multitrack/session';
 import { CROSSFADE_RHO, resolveClipFadeSpecs } from '../../multitrack/mixdown';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
 import { snapSample, snapSpan } from '../../services/snap';
 import { formatTime } from '../../utils/timeFormat';
 import { drawBeatTics, sampleToPixel } from '../Editor/waveformRender';
@@ -499,6 +500,9 @@ export default function ClipView({
         origFade: (edge === 'in' ? liveClip.fadeInSample : liveClip.fadeOutSample) ?? 0,
         exceeded: false,
       };
+      // R3 (ruling 2): the fade drag commits live per pointermove through
+      // setClipFade, so the whole drag is bracketed into ONE undo entry.
+      beginSessionGesture('Set fade');
       e.currentTarget.setPointerCapture?.(e.pointerId);
     };
 
@@ -525,6 +529,9 @@ export default function ClipView({
     if (!fadeDragRef.current) return;
     e.stopPropagation();
     fadeDragRef.current = null;
+    // R3: commit the drag's single undo entry (no-op when nothing changed —
+    // a corner click that never dragged). Bound to pointercancel too.
+    endSessionGesture();
     e.currentTarget.releasePointerCapture?.(e.pointerId);
   };
 
@@ -546,6 +553,11 @@ export default function ClipView({
       lastClientX: e.clientX,
     };
     if (mode === 'move') setMoveDragging(true);
+    // R3 (ruling 2): trim drags commit live per pointermove through trimClip,
+    // so both trim modes are bracketed into ONE undo entry. The move mode is
+    // NOT bracketed — it already previews via CSS translate and commits once
+    // on drop (moveClip records its own single 'Move clip' entry).
+    if (mode !== 'move') beginSessionGesture('Trim clip');
     e.currentTarget.setPointerCapture?.(e.pointerId);
   };
 
@@ -592,6 +604,11 @@ export default function ClipView({
     const drag = dragRef.current;
     dragRef.current = null;
     setMoveDragging(false);
+    // R3: closes the trim gesture opened on pointerdown (one entry for the
+    // whole drag; none for a click). No-op for move mode — nothing is open,
+    // and the moveClip below records its own entry. Fires on pointercancel
+    // too via the JSX binding.
+    endSessionGesture();
     e.currentTarget.releasePointerCapture?.(e.pointerId);
     if (drag && drag.mode === 'move' && drag.exceeded) {
       const target = resolveTrackAt(e.clientX, e.clientY) ?? trackId;

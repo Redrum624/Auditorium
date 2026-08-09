@@ -16,6 +16,7 @@ import {
   DEFAULT_FADE_CURVE,
 } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
+import { withSessionGesture } from '../multitrack/sessionUndo';
 import type { AutomationLane, AutomationParam } from '../multitrack/automation';
 import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
@@ -1138,8 +1139,11 @@ export function installTestHooks(): void {
         };
       }
       const store = useSessionStore.getState();
-      store.setClipFade(geo.a.id, 'out', { lengthSample: geo.width });
-      store.setClipFade(geo.b.id, 'in', { lengthSample: geo.width });
+      // R3: same single-entry bracket as the panel's Arm path.
+      withSessionGesture('Arm crossfade', () => {
+        store.setClipFade(geo.a.id, 'out', { lengthSample: geo.width });
+        store.setClipFade(geo.b.id, 'in', { lengthSample: geo.width });
+      });
       return { ok: true, reason: null, width: geo.width, outClipId: geo.a.id, inClipId: geo.b.id };
     },
 
@@ -1151,8 +1155,11 @@ export function installTestHooks(): void {
         return { ok: false, reason: 'no crossfade-capable pair on this edge', outClipId: null, inClipId: null };
       }
       const store = useSessionStore.getState();
-      store.setClipFade(geo.a.id, 'out', { lengthSample: 0 });
-      store.setClipFade(geo.b.id, 'in', { lengthSample: 0 });
+      // R3: same single-entry bracket as the panel's Release path.
+      withSessionGesture('Release crossfade', () => {
+        store.setClipFade(geo.a.id, 'out', { lengthSample: 0 });
+        store.setClipFade(geo.b.id, 'in', { lengthSample: 0 });
+      });
       return { ok: true, reason: null, outClipId: geo.a.id, inClipId: geo.b.id };
     },
 
