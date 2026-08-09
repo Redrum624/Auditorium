@@ -124,8 +124,9 @@ tempo analysis, a persistent **TEMPO** card (BPM readout, structure strip, and
 - **Files** / **Effects** — see their own sections in this guide.
 - **Remix** — a remix document's per-splice adjustment rows (quality dot,
   Go To, Reject, Pin, Nudge, Re-roll, Revert to auto).
-- **History** — the active document's undo history (see *Cut / Copy / Paste /
-  Delete* above).
+- **History** — the undo history of whatever is active: the **session's** in
+  the multitrack view, the **active document's** elsewhere (see *Cut / Copy /
+  Paste / Delete* above and *Undo in the multitrack* below).
 - **Markers** — the active document's marker list (see *Markers* above).
 - **Properties** — read-only facts about what you're working on. In the
   waveform/spectral views it shows the active document's name, path (`—` for
@@ -434,6 +435,33 @@ document open. A session has a name, a sample rate, and any number of tracks.
   v1/v2 format's silent failure on large embedded audio; Save Session now
   reports success or failure explicitly instead of failing quietly. Older
   `.audm` files (v1/v2) still open normally.
+
+### Undo in the multitrack (session history)
+
+Every session edit is undoable: clip moves, trims, deletes and gain changes,
+fade and crossfade edits (arm/release included), automation-key adds, moves,
+deletes and curve changes, track add/remove/rename, the fader and pan sliders,
+the M/S/R toggles, spatial placements, recorded takes, and **New Session**
+itself.
+
+- **Where Ctrl+Z goes**: the session has its own undo history, separate from
+  every document's — the same per-document model the editor already follows.
+  In the **multitrack view**, `Ctrl+Z`/`Ctrl+Y` address the **session's**
+  history (no document needs to be open); in the waveform or spectral editor
+  they address the **active document's**, exactly as before. The History
+  panel shows whichever history is active.
+- **One gesture is one step**: a drag is a single undo step no matter how
+  many times the screen updated on the way — one `Ctrl+Z` reverts a whole
+  trim or fade drag, a recorded take across several armed tracks, or an Arm
+  Crossfade (both facing fades together). Contiguous keyboard nudges on the
+  same fader (arrow keys within about a second) merge into one step too.
+- **View state is not undoable**: scrolling, zooming, moving the cursor or
+  playhead, selecting a clip, and opening an envelope lane never create undo
+  steps — undo is for edits, not navigation. Undoing an edit does restore
+  the selection to the affected clip so you can see what changed.
+- **Limits**: like documents, the session keeps up to 50 steps, in memory
+  only. **Open Session** and stem landing start a fresh history (undo does
+  not reach across a load); **New Session** is itself undoable.
 
 ### Clip fades and crossfades
 

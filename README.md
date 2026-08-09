@@ -49,12 +49,12 @@ use `npm run dev`.
 
 - **Waveform Editor** — the default per-sample amplitude view with zoom, scroll, selection, cursor, and playhead.
 - **Spectral Frequency Display** — an off-main-thread spectrogram (logarithmic frequency axis by default, toggleable to linear, inferno color map, HiDPI-rendered) of the active document.
-- **Multitrack Editor** — a session timeline of tracks and clips with per-track volume/pan/mute/solo/arm, draggable, trimmable clips carrying non-destructive edge fades and crossfaded overlaps, and per-track automation envelopes (volume, pan, and the three spatial parameters) edited on the lane itself.
+- **Multitrack Editor** — a session timeline of tracks and clips with per-track volume/pan/mute/solo/arm, draggable, trimmable clips carrying non-destructive edge fades and crossfaded overlaps, per-track automation envelopes (volume, pan, and the three spatial parameters) edited on the lane itself, and full session undo/redo (one step per gesture).
 - **Spatial Panel** — a playhead-following positioner (Spatial entry on the icon rail) that places a track's sound around the listener by azimuth, elevation and distance — a stereo projection (amplitude pan + distance level, not binaural) — writing automation keys on release.
 - **Recorder** — a record dialog with input-device selection, channel/sample-rate choice, and a live input-level meter.
 - **Effects Rack** — a categorized effects panel and menu; each effect opens a parameter dialog with a preview before applying.
 - **Files Panel** — the list of open documents (name, dirty marker, duration, sample rate), opened from the right-edge icon rail.
-- **History Panel** — the active document's undo history; click any entry to jump the document to that state.
+- **History Panel** — the undo history of whatever is active (the session's in the multitrack view, the active document's elsewhere); click any entry to jump to that state.
 - **Markers Panel** — the active document's marker list with jump-to, inline rename, and delete.
 - **Properties Panel** — read-only facts about the active document or selected clip (path, rate, channels, bit depth, duration, selection, detected tempo).
 - **Transport & Level Meters** — play/pause/stop, record, loop, the view toggle and a zoom cluster in the top toolbar pill; the time readout and output level meters in the floating bottom status pill.
@@ -82,6 +82,7 @@ use `npm run dev`.
 
 - Cut, copy, paste, and delete on sample-accurate `[start, end)` selections.
 - Per-document undo/redo history, up to 50 steps within an 800 MB per-document memory budget (oldest step evicted once either limit is hit), browsable in the History panel; marker add/rename/delete are undoable too (`Add Marker`/`Rename Marker`/`Delete Marker`).
+- Session undo/redo for the multitrack: every clip, fade, automation and track edit is undoable, one step per gesture (a whole trim drag, a recorded take, an armed crossfade each revert with one `Ctrl+Z`); `Ctrl+Z` in the multitrack view addresses the session's own 50-step history, in the editor views the active document's — view changes, selection and scrolling are never undo steps.
 - Selection by click-drag, double-click (select all), shift-click (extend), `Ctrl+A`, and `Escape` to clear.
 - Zoom and scroll on both the waveform and spectral views (mouse wheel, plus the toolbar pill's − / % / + / Fit cluster), sharing one cursor/selection/playhead.
 - Session markers: drop with `M`, rename inline, jump to next/previous, list in the Markers panel. Markers persist to disk in every supported container: `.wav` (cue/adtl chunks, Unicode names), `.mp3` (ID3v2.3 chapter frames), `.flac` (VORBIS_COMMENT chapter tags), `.ogg` (OpusTags chapter comments), and `.audm` sessions — sample-accurate on reopen. Destructive edits (delete, paste, trim, replace, sample-rate conversion, length-changing effects) remap or drop marker positions along with the audio, clamped to the document length.

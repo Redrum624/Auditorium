@@ -2329,6 +2329,117 @@ async function main() {
       'tracks 3-4 still carry NO automation field after the round trip'
     );
 
+    // 21) R3 (v1.12) — session undo, end to end -----------------------------
+    //
+    // Nobody had pressed Ctrl+Z in the running app until this step. It
+    // drives REAL gestures through the packaged renderer and asserts the
+    // three load-bearing properties against anchors recorded independently
+    // BEFORE each gesture (never re-derived through the code under test):
+    //   (a) Ctrl+Z in the multitrack view reverts a committed clip move
+    //       exactly, and Ctrl+Y re-applies the exact committed position;
+    //   (b) a trim drag — which writes the store on EVERY pointermove — is
+    //       ONE undo step (ruling 2): the step proves the drag really wrote
+    //       intermediate states mid-drag (the anti-vacuous guard: without
+    //       that read, per-write entries restoring only the last slice
+    //       could masquerade as coalescing on a one-write drag), then
+    //       asserts a SINGLE Ctrl+Z restores the pre-drag length exactly;
+    //   (c) the stacks are ordered: the next Ctrl+Z after the trim undo
+    //       reverts the earlier move, not anything else.
+    console.log('Session undo (v1.12): move, Ctrl+Z, Ctrl+Y, one-step trim undo...');
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    await page.evaluate((rate) => window.__test.newSession(rate), 44100);
+    const undoClip = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
+    assert(
+      undoClip !== null && undoClip.startSample === 0 && undoClip.lengthSample === 88200,
+      `one tone clip inserted at 0, length 88200 (${JSON.stringify(undoClip)})`
+    );
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 1,
+      null,
+      { timeout: 10000 }
+    );
+
+    // (a) A real move drag, then Ctrl+Z / Ctrl+Y. Anchors: start 0 recorded
+    // above from the insert echo; the moved position read back once and then
+    // required EXACTLY after redo.
+    const undoRect0 = await page.evaluate(() => {
+      const r = document.querySelector('[data-testid="clip"]').getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+    const uGrabX = undoRect0.x + undoRect0.width / 2;
+    const uGrabY = undoRect0.y + undoRect0.height / 2;
+    await page.mouse.move(uGrabX, uGrabY);
+    await page.mouse.down();
+    for (let s = 1; s <= 4; s++) {
+      await page.mouse.move(uGrabX + (150 * s) / 4, uGrabY, { steps: 4 });
+    }
+    await page.mouse.up();
+    const undoMoved = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      undoMoved.clips.length === 1 && undoMoved.clips[0].startSample > 0,
+      `the drag committed a move (start ${undoMoved.clips[0].startSample} > 0)`
+    );
+    const movedStart = undoMoved.clips[0].startSample;
+
+    await page.keyboard.press('Control+z');
+    const undoAfterZ = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      undoAfterZ.clips.length === 1 && undoAfterZ.clips[0].startSample === 0,
+      `Ctrl+Z in the multitrack view reverted the move exactly (start ${undoAfterZ.clips[0].startSample} === 0)`
+    );
+    await page.keyboard.press('Control+y');
+    const undoAfterY = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      undoAfterY.clips[0].startSample === movedStart,
+      `Ctrl+Y re-applied the exact committed position (${undoAfterY.clips[0].startSample} === ${movedStart})`
+    );
+
+    // (b) A real trim drag: grab the clip's right edge (the outer 6 CSS px),
+    // drag left in several separated moves so the store is written multiple
+    // times, and PROVE it mid-drag with a state read taken while the button
+    // is still down — the guard that makes the one-Ctrl+Z assertion below
+    // non-vacuous.
+    const undoRect1 = await page.evaluate(() => {
+      const r = document.querySelector('[data-testid="clip"]').getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+    const tGrabX = undoRect1.x + undoRect1.width - 2;
+    const tGrabY = undoRect1.y + undoRect1.height / 2;
+    await page.mouse.move(tGrabX, tGrabY);
+    await page.mouse.down();
+    await page.mouse.move(tGrabX - 30, tGrabY, { steps: 4 });
+    const undoMidTrim = await page.evaluate(() => window.__test.getClipFadeState());
+    await page.mouse.move(tGrabX - 60, tGrabY, { steps: 4 });
+    await page.mouse.move(tGrabX - 90, tGrabY, { steps: 4 });
+    await page.mouse.up();
+    const undoTrimmed = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      undoMidTrim.clips[0].lengthSample < 88200 &&
+        undoMidTrim.clips[0].lengthSample > undoTrimmed.clips[0].lengthSample,
+      `the trim wrote the store MID-drag (${undoMidTrim.clips[0].lengthSample} strictly between the final ${undoTrimmed.clips[0].lengthSample} and 88200) — multiple live writes, so one undo restoring 88200 exactly proves the gesture coalesced`
+    );
+    assert(
+      undoTrimmed.clips[0].lengthSample < 88200 - 1000,
+      `the trim shortened the clip by a meaningful amount (${undoTrimmed.clips[0].lengthSample} < 87200)`
+    );
+
+    await page.keyboard.press('Control+z');
+    const undoAfterTrimZ = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      undoAfterTrimZ.clips[0].lengthSample === 88200 &&
+        undoAfterTrimZ.clips[0].startSample === movedStart,
+      `ONE Ctrl+Z restored the whole trim gesture (length ${undoAfterTrimZ.clips[0].lengthSample} === 88200) without touching the earlier move (start still ${movedStart})`
+    );
+
+    // (c) Stack order: the next Ctrl+Z reverts the MOVE.
+    await page.keyboard.press('Control+z');
+    const undoAfterZ2 = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      undoAfterZ2.clips[0].startSample === 0 && undoAfterZ2.clips[0].lengthSample === 88200,
+      'the next Ctrl+Z reverted the earlier move (start back to 0, length untouched)'
+    );
+
     console.log('\nSMOKE PASSED');
   } finally {
     // The run must NEVER leave an Electron window for a human to close by

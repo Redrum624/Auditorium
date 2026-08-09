@@ -5,6 +5,49 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.12.0] - 2026-08-09
+
+**Multitrack edits are now undoable** — the last structural gap in the session editor.
+Before this release, `Ctrl+Z` after dragging a clip fell through to the last *document*
+edit; now every session edit reverts: clip moves, trims, deletes and gain, fade and
+crossfade edits (arm/release included), automation keys, track add/remove/rename, the
+faders and toggles, spatial placements, recorded takes, and New Session itself.
+
+### Added
+
+- **Session undo/redo (R3).** Why: since v1.9 made overlap an invited gesture and
+  v1.10/v1.11 added automation, ever more of the user's work lived in the one place undo
+  could not reach. How it routes, plainly: **the session has its own history, exactly like
+  each document has its own** — `Ctrl+Z`/`Ctrl+Y` in the **multitrack view** address the
+  **session's** stack (no document needs to be open); in the waveform/spectral editors
+  they address the **active document's**, unchanged. The History panel shows whichever is
+  active. **One gesture is one undo step**: a trim or fade drag commits live on every
+  pointermove, but the whole drag reverts with a single `Ctrl+Z` (pointerdown opens a
+  transaction, pointerup commits exactly one entry); a recorded take across several armed
+  tracks, an Arm/Release Crossfade (two fade writes) and a spatial drop (three parameters)
+  are each one step; contiguous keyboard nudges on the same fader coalesce within a
+  1-second window. **View state is never undoable**: scroll, zoom, cursor, playhead,
+  selection and envelope-lane visibility create no entries — though undoing an edit
+  restores the selection to the affected clip so the result is visible. The session keeps
+  up to 50 steps in memory, like documents; Open Session and stem landing start a fresh
+  history, and New Session is itself undoable. Entries are snapshot pairs of the
+  immutable session state and retain **no audio** (a realistic snapshot measures ~8.5 KB
+  of structural data; verified by a reachability walk, not asserted).
+
+### Fixed
+
+- **Redo of a clip/track removal left the clip's waveform bitmap (and its document
+  channels reference) in the render cache.** Cause: the original remove actions purge the
+  cache after their store write, but undo/redo swap whole state snapshots without
+  re-running the action, so the purge never fired on the redo path. Fix: the undo
+  apply-side re-derives the purge by diffing clip ids across the swap. Affects:
+  `sessionStore.ts` (found while answering R3's snapshot-retention question).
+- **No-op session writes no longer replace state.** Cause: `renameTrack`, `setTrackParam`,
+  `addClip`, `setClipGain` and `setClipFade` rebuilt the session object even when an
+  unknown id or an unchanged value (a blur without an edit) changed nothing — harmless
+  before, but a noise undo entry once recording keyed on the state reference. Fix:
+  reference-stable guards; content behaviour is identical. Affects: `sessionStore.ts`.
+
 ## [1.11.0] - 2026-08-09
 
 One feature completes the outstanding-work list: the **spatial panner** — place each
