@@ -33,9 +33,15 @@
  *
  *     REMIX_GOLDEN_PRINT=1 npx jest src/dsp/remixRender.golden.test.ts
  *
- * prints a ready-to-paste `REMIX_GOLDEN` block and skips the comparisons. Do
- * that only when rendered output was MEANT to move, and commit the
- * regeneration on its own with the reason.
+ * prints two ready-to-paste blocks — `REMIX_GOLDEN` (rendered audio) and
+ * `CROSSFADE_GAINS_GOLDEN` (the double-precision gain table) — and then
+ * deliberately THROWS (the single registered test is named 'FAILS ON
+ * PURPOSE'), so a print run can never exit green with every comparison
+ * disarmed (X1 round 1: a stray `REMIX_GOLDEN_PRINT` in a shell or CI job
+ * must read as a failure, not a pass). Paste the printed blocks into
+ * `src/dsp/__fixtures__/remixGolden.ts`, unset the env var, re-run to verify
+ * — only when rendered output was MEANT to move, and commit the regeneration
+ * on its own with the reason.
  */
 import { renderRemix, effectiveCrossfadeMs, crossfadeGains } from './remixRender';
 import { goldenCases, crossfadeGainsGrid, GOLDEN_SR } from './__fixtures__/remixGoldenCases';

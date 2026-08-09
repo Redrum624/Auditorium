@@ -82,14 +82,22 @@ const LOCAL_ALIAS_HOSTS = new Set(['localhost', '.', '::1']);
  *
  * EXACT behaviour of the regex, stated precisely because this is a
  * security-critical normalisation: `/[.\s]+$/` removes a trailing run of ASCII
- * dots AND *any* character `\s` matches -- so ALL Unicode and control
- * whitespace, not only U+0020: space, tab, CR, LF, NBSP (U+00A0), the
- * ideographic space (U+3000), and the rest. This is intentionally WIDER than
- * the exact {dot, space} set Windows itself canonicalizes away. Fail closed: we
+ * dots AND every character JS `\s` matches -- space, tab, CR, LF, NBSP
+ * (U+00A0), the ideographic space (U+3000), U+FEFF, and the rest of that
+ * class. That is NOT the full Unicode White_Space set (R2-3c, v1.9.2): the
+ * one White_Space=Yes character `\s` does NOT match is U+0085 (NEL), so an
+ * NEL-decorated host survives the strip un-normalised (measured; the only
+ * other asymmetry is U+FEFF, which `\s` matches despite White_Space=No).
+ * Verified non-exploitable: Windows canonicalizes away only {dot, U+0020}
+ * here, so an NEL-decorated spelling never resolves to the loopback or
+ * admin-share target these refusals guard -- NEL simply stays part of a
+ * hostname that resolves to nothing local. The strip is still intentionally
+ * WIDER than that exact {dot, space} set Windows itself canonicalizes away.
+ * Fail closed: we
  * refuse what we cannot confidently classify, whether or not this particular
  * Windows/DNS config resolves the decorated form (v1.9.1 security fix). No
  * legitimate host or share ends in whitespace, so nothing real is caught; every
- * extra whitespace class resolves to REFUSED.
+ * stripped whitespace class resolves to REFUSED.
  *
  * Anchored to the END only -- a leading/interior dot is a real, meaningful
  * character (`127.0.0.1`, an FQDN).
