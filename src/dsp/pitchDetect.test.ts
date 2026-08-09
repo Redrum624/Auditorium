@@ -241,6 +241,14 @@ describe('detectPitch — the SILENCE_RMS gate boundary (below / on / above)', (
   // A ±c square wave has RMS exactly c (every sample is ±c, and c = 2^−15 scaled
   // by small dyadic factors keeps the float arithmetic exact), so the gate's
   // `rms < SILENCE_RMS` comparison can be probed exactly on the equality.
+  //
+  // GATE is a deliberately INDEPENDENT literal, not the imported constant: fixtures
+  // derived from SILENCE_RMS itself would scale along with a mutated constant and
+  // pin only the comparison's strictness, never its numeric position (the
+  // operand-role trap from the v1.9 mutation-testing rounds). The identity
+  // assertion below makes any drift between the two an explicit failure.
+  const GATE = 2 ** -15; // one LSB of 16-bit PCM
+
   function square(c: number): Float32Array {
     const n = Math.round(0.3 * SR);
     const out = new Float32Array(n);
@@ -248,18 +256,22 @@ describe('detectPitch — the SILENCE_RMS gate boundary (below / on / above)', (
     return out;
   }
 
+  it('SILENCE_RMS is exactly one LSB of 16-bit PCM', () => {
+    expect(SILENCE_RMS).toBe(GATE);
+  });
+
   it('RMS one-sixteenth below the gate: unvoiced despite perfect periodicity', () => {
-    expect(voicedCount(detectPitch(square(SILENCE_RMS * (1 - 1 / 16)), SR))).toBe(0);
+    expect(voicedCount(detectPitch(square(GATE * (1 - 1 / 16)), SR))).toBe(0);
   });
 
   it('RMS exactly ON the gate: voiced (the comparison is strictly below)', () => {
-    const track = detectPitch(square(SILENCE_RMS), SR);
+    const track = detectPitch(square(GATE), SR);
     expect(voicedCount(track)).toBe(track.frames.length);
   });
 
   it('RMS one-sixteenth above the gate: voiced at 100 Hz within 1 cent', () => {
     // Measured f0 = 99.990 Hz (−0.17 c).
-    const track = detectPitch(square(SILENCE_RMS * (1 + 1 / 16)), SR);
+    const track = detectPitch(square(GATE * (1 + 1 / 16)), SR);
     expect(voicedCount(track)).toBe(track.frames.length);
     for (const fr of track.frames) {
       expect(Math.abs(cents(fr.f0Hz as number, 100))).toBeLessThan(1);
