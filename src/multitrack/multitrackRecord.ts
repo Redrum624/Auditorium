@@ -3,6 +3,7 @@ import { resampleChannel } from '../dsp/resample';
 import { RecordingEngine } from '../audio/RecordingEngine';
 import { multitrackPlayer } from './MultitrackPlayer';
 import { useSessionStore } from './sessionStore';
+import { withSessionGesture } from './sessionUndo';
 import { useAppStore } from '../stores/appStore';
 import type { Clip, Session } from './session';
 
@@ -181,22 +182,28 @@ export function createMultitrackRecorder(deps: MultitrackRecorderDeps): Multitra
         deps.addDocument(doc);
 
         const lengthSample = docLength(doc);
-        for (const trackId of armedTrackIds) {
-          // The clip lands verbatim at the punch-in cursor — same convention as
-          // insertActiveDocAsClip (menuActions): overlap is first-class (X5)
-          // and a programmatic placement never writes fade keys, so a take
-          // over an existing clip lands as a raw overlap and the user shapes
-          // it afterwards — drag a clip to arm a crossfade over the overlap,
-          // or Ctrl-drag to push it clear (sessionStore's overlap contract).
-          deps.addClip(trackId, {
-            id: nextId('clip'),
-            documentId: doc.id,
-            startSample: punchInSample,
-            offsetSample: 0,
-            lengthSample,
-            gainDb: 0,
-          });
-        }
+        // R3: one recording stop is ONE undo step — N armed tracks land N
+        // clips, and undoing the take must lift all of them together, not one
+        // per Ctrl+Z. The gesture bracket folds the per-track addClip commits
+        // (each recorded inside the store) into a single session entry.
+        withSessionGesture(armedTrackIds.length === 1 ? 'Record clip' : 'Record clips', () => {
+          for (const trackId of armedTrackIds) {
+            // The clip lands verbatim at the punch-in cursor — same convention as
+            // insertActiveDocAsClip (menuActions): overlap is first-class (X5)
+            // and a programmatic placement never writes fade keys, so a take
+            // over an existing clip lands as a raw overlap and the user shapes
+            // it afterwards — drag a clip to arm a crossfade over the overlap,
+            // or Ctrl-drag to push it clear (sessionStore's overlap contract).
+            deps.addClip(trackId, {
+              id: nextId('clip'),
+              documentId: doc.id,
+              startSample: punchInSample,
+              offsetSample: 0,
+              lengthSample,
+              gainDb: 0,
+            });
+          }
+        });
       } finally {
         setState('idle');
       }

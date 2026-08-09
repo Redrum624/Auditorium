@@ -12,6 +12,7 @@ import {
   purgeClip as purgeClipWaveform,
   clearClipWaveformCache,
 } from '../components/Multitrack/clipWaveformCache';
+import { bindSessionUndo, recordSessionMutation } from './sessionUndo';
 
 export interface SessionState {
   session: Session;
@@ -470,6 +471,43 @@ function findClipLocation(
   return null;
 }
 
+/** R3 — the History label for a `setTrackParam` patch. Call sites pass
+ * single-key patches (sliders, the M/S/R toggles); a multi-key or unknown
+ * patch falls back to the generic label rather than guessing. */
+function trackParamLabel(patch: Partial<Pick<Track, 'volumeDb' | 'pan' | 'muted' | 'solo' | 'armed'>>): string {
+  const keys = Object.keys(patch);
+  if (keys.length !== 1) return 'Edit track';
+  switch (keys[0]) {
+    case 'volumeDb':
+      return 'Set track volume';
+    case 'pan':
+      return 'Set track pan';
+    case 'muted':
+      return patch.muted ? 'Mute track' : 'Unmute track';
+    case 'solo':
+      return patch.solo ? 'Solo track' : 'Unsolo track';
+    case 'armed':
+      return patch.armed ? 'Arm track' : 'Disarm track';
+    default:
+      return 'Edit track';
+  }
+}
+
+/** R3 — the coalescing key for a `setTrackParam` patch: only the CONTINUOUS
+ * params coalesce (a slider's keyboard arrow fires one store write per repeat
+ * tick — without merging, one held key would flood `UNDO_LIMIT`). The
+ * discrete toggles never coalesce: mute-then-unmute merged into one entry
+ * would be a no-op entry, and each toggle is a deliberate act. Keyed per
+ * (track, param) so adjusting two different faders never merges. */
+function trackParamCoalesceKey(
+  id: string,
+  patch: Partial<Pick<Track, 'volumeDb' | 'pan' | 'muted' | 'solo' | 'armed'>>
+): string | undefined {
+  const keys = Object.keys(patch);
+  if (keys.length !== 1) return undefined;
+  return keys[0] === 'volumeDb' || keys[0] === 'pan' ? `trackParam:${id}:${keys[0]}` : undefined;
+}
+
 export const useSessionStore = create<SessionState & SessionActions>()((set) => ({
   session: makeSession(44100),
   selectedClipId: null,
@@ -480,14 +518,19 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   mtEnvelope: null,
 
   newSession(sampleRate) {
-    set({
-      session: makeSession(sampleRate),
-      selectedClipId: null,
-      mtCursorSample: 0,
-      mtZoom: defaultMtZoom(),
-      mtPlayState: 'stopped',
-      mtPlayheadSample: 0,
-      mtEnvelope: null,
+    // R3: recorded — File > New Session is a store mutation of the current
+    // timeline (undo restores the discarded session), unlike the load-shaped
+    // replacements (Open Session, stem landing) which CLEAR the history.
+    recordSessionMutation('New session', () => {
+      set({
+        session: makeSession(sampleRate),
+        selectedClipId: null,
+        mtCursorSample: 0,
+        mtZoom: defaultMtZoom(),
+        mtPlayState: 'stopped',
+        mtPlayheadSample: 0,
+        mtEnvelope: null,
+      });
     });
     // A fresh session discards every track/clip that could own a cached
     // mini-waveform bitmap (F9) — clear the whole cache rather than track
@@ -496,9 +539,11 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   addTrack() {
-    set((s) => {
-      const name = `Track ${s.session.tracks.length + 1}`;
-      return { session: { ...s.session, tracks: [...s.session.tracks, createTrack(name)] } };
+    recordSessionMutation('Add track', () => {
+      set((s) => {
+        const name = `Track ${s.session.tracks.length + 1}`;
+        return { session: { ...s.session, tracks: [...s.session.tracks, createTrack(name)] } };
+      });
     });
   },
 
@@ -506,16 +551,18 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
     // Captured inside the set() updater below so the post-set purge (F9) knows
     // exactly which clips died with the track, without a second state lookup.
     let removedClipIds: string[] = [];
-    set((s) => {
-      const removed = s.session.tracks.find((t) => t.id === id);
-      if (!removed) return s;
-      removedClipIds = removed.clips.map((c) => c.id);
-      const tracks = s.session.tracks.filter((t) => t.id !== id);
-      const selectedClipId =
-        s.selectedClipId !== null && removed.clips.some((c) => c.id === s.selectedClipId)
-          ? null
-          : s.selectedClipId;
-      return { session: { ...s.session, tracks }, selectedClipId };
+    recordSessionMutation('Remove track', () => {
+      set((s) => {
+        const removed = s.session.tracks.find((t) => t.id === id);
+        if (!removed) return s;
+        removedClipIds = removed.clips.map((c) => c.id);
+        const tracks = s.session.tracks.filter((t) => t.id !== id);
+        const selectedClipId =
+          s.selectedClipId !== null && removed.clips.some((c) => c.id === s.selectedClipId)
+            ? null
+            : s.selectedClipId;
+        return { session: { ...s.session, tracks }, selectedClipId };
+      });
     });
     // Each removed clip's mini-waveform bitmap (and the doc channels reference
     // it holds) must not sit in the cache until unrelated churn evicts it (F9).
@@ -523,131 +570,165 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   renameTrack(id, name) {
-    set((s) => ({
-      session: {
-        ...s.session,
-        tracks: s.session.tracks.map((t) => (t.id === id ? { ...t, name } : t)),
-      },
-    }));
+    recordSessionMutation('Rename track', () => {
+      set((s) => {
+        // R3 no-op guard: an unknown id, or a blur that re-commits the
+        // unchanged name, must return the SAME state — a rebuilt-but-equal
+        // session would mint a noise undo entry (recording keys on the
+        // session reference). Same rationale for the guards added to
+        // setTrackParam/addClip/setClipGain/setClipFade below.
+        const track = s.session.tracks.find((t) => t.id === id);
+        if (!track || track.name === name) return s;
+        return {
+          session: {
+            ...s.session,
+            tracks: s.session.tracks.map((t) => (t.id === id ? { ...t, name } : t)),
+          },
+        };
+      });
+    });
   },
 
   setTrackParam(id, patch) {
-    set((s) => ({
-      session: {
-        ...s.session,
-        tracks: s.session.tracks.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+    recordSessionMutation(
+      trackParamLabel(patch),
+      () => {
+        set((s) => {
+          const track = s.session.tracks.find((t) => t.id === id);
+          if (!track) return s; // R3 no-op guard (see renameTrack)
+          const keys = Object.keys(patch) as (keyof typeof patch)[];
+          if (keys.every((k) => track[k] === patch[k])) return s;
+          return {
+            session: {
+              ...s.session,
+              tracks: s.session.tracks.map((t) => (t.id === id ? { ...t, ...patch } : t)),
+            },
+          };
+        });
       },
-    }));
+      trackParamCoalesceKey(id, patch)
+    );
   },
 
   addClip(trackId, clip) {
-    set((s) => ({
-      session: {
-        ...s.session,
-        tracks: s.session.tracks.map((t) =>
-          t.id === trackId ? { ...t, clips: insertSorted(t.clips, clip) } : t
-        ),
-      },
-    }));
+    recordSessionMutation('Add clip', () => {
+      set((s) => {
+        if (!s.session.tracks.some((t) => t.id === trackId)) return s; // R3 no-op guard
+        return {
+          session: {
+            ...s.session,
+            tracks: s.session.tracks.map((t) =>
+              t.id === trackId ? { ...t, clips: insertSorted(t.clips, clip) } : t
+            ),
+          },
+        };
+      });
+    });
   },
 
   moveClip(clipId, toTrackId, newStartSample, opts) {
-    set((s) => {
-      const loc = findClipLocation(s.session.tracks, clipId);
-      const targetTrackIdx = s.session.tracks.findIndex((t) => t.id === toTrackId);
-      if (!loc || targetTrackIdx === -1) return s;
+    recordSessionMutation('Move clip', () => {
+      set((s) => {
+        const loc = findClipLocation(s.session.tracks, clipId);
+        const targetTrackIdx = s.session.tracks.findIndex((t) => t.id === toTrackId);
+        if (!loc || targetTrackIdx === -1) return s;
 
-      const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
-      // Snapshot BEFORE the move: which mates the clip overlapped, and which
-      // of those overlaps were armed crossfades (see maintainFacingFades).
-      const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
-      const tracks = s.session.tracks.map((t) => ({ ...t, clips: [...t.clips] }));
-      tracks[loc.trackIdx].clips.splice(loc.clipIdx, 1);
+        const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
+        // Snapshot BEFORE the move: which mates the clip overlapped, and which
+        // of those overlaps were armed crossfades (see maintainFacingFades).
+        const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
+        const tracks = s.session.tracks.map((t) => ({ ...t, clips: [...t.clips] }));
+        tracks[loc.trackIdx].clips.splice(loc.clipIdx, 1);
 
-      const requestedStart = Math.max(0, newStartSample);
-      // X5: the requested (snapped) position commits VERBATIM by default —
-      // overlap is intentional. The v1.8 forward-only nudge survives behind
-      // opts.clearOverlap (the drag gesture's Ctrl modifier).
-      const resolvedStart = opts?.clearOverlap
-        ? resolveOverlap(tracks[targetTrackIdx].clips, clip.lengthSample, requestedStart)
-        : requestedStart;
-      const movedClip: Clip = { ...clip, startSample: resolvedStart };
-      tracks[targetTrackIdx].clips = insertSorted(tracks[targetTrackIdx].clips, movedClip);
+        const requestedStart = Math.max(0, newStartSample);
+        // X5: the requested (snapped) position commits VERBATIM by default —
+        // overlap is intentional. The v1.8 forward-only nudge survives behind
+        // opts.clearOverlap (the drag gesture's Ctrl modifier).
+        const resolvedStart = opts?.clearOverlap
+          ? resolveOverlap(tracks[targetTrackIdx].clips, clip.lengthSample, requestedStart)
+          : requestedStart;
+        const movedClip: Clip = { ...clip, startSample: resolvedStart };
+        tracks[targetTrackIdx].clips = insertSorted(tracks[targetTrackIdx].clips, movedClip);
 
-      maintainFacingFades(tracks, targetTrackIdx, loc.trackIdx, clipId, pre);
-      return { session: { ...s.session, tracks } };
+        maintainFacingFades(tracks, targetTrackIdx, loc.trackIdx, clipId, pre);
+        return { session: { ...s.session, tracks } };
+      });
     });
   },
 
   trimClip(clipId, edge, newBoundarySample) {
-    set((s) => {
-      const loc = findClipLocation(s.session.tracks, clipId);
-      if (!loc) return s;
-      const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
+    recordSessionMutation('Trim clip', () => {
+      set((s) => {
+        const loc = findClipLocation(s.session.tracks, clipId);
+        if (!loc) return s;
+        const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
 
-      let updated: Clip;
-      if (edge === 'start') {
-        const end = clip.startSample + clip.lengthSample;
-        const earliest = clip.startSample - clip.offsetSample; // offsetSample can't go below 0
-        const latest = end - 32; // lengthSample can't go below 32
-        const newStart = Math.min(Math.max(newBoundarySample, earliest), latest);
-        updated = {
-          ...clip,
-          startSample: newStart,
-          offsetSample: clip.offsetSample + (newStart - clip.startSample),
-          lengthSample: end - newStart,
-        };
-      } else {
-        // The upper bound (offsetSample + newLength <= source document length)
-        // is intentionally NOT enforced here: the store has no reference to
-        // the source AudioDocument, only its id, so it cannot know the
-        // document's length. The multitrack UI (Task 22) is responsible for
-        // clamping newBoundarySample to the source's available length before
-        // calling trimClip; this store only guarantees the min-length-32
-        // invariant, which is data it always has.
-        const minEnd = clip.startSample + 32;
-        const newEnd = Math.max(newBoundarySample, minEnd);
-        updated = { ...clip, lengthSample: newEnd - clip.startSample };
-      }
-      updated = reconcileTrimmedFades(updated, edge); // X2: fades must stay within the new length
+        let updated: Clip;
+        if (edge === 'start') {
+          const end = clip.startSample + clip.lengthSample;
+          const earliest = clip.startSample - clip.offsetSample; // offsetSample can't go below 0
+          const latest = end - 32; // lengthSample can't go below 32
+          const newStart = Math.min(Math.max(newBoundarySample, earliest), latest);
+          updated = {
+            ...clip,
+            startSample: newStart,
+            offsetSample: clip.offsetSample + (newStart - clip.startSample),
+            lengthSample: end - newStart,
+          };
+        } else {
+          // The upper bound (offsetSample + newLength <= source document length)
+          // is intentionally NOT enforced here: the store has no reference to
+          // the source AudioDocument, only its id, so it cannot know the
+          // document's length. The multitrack UI (Task 22) is responsible for
+          // clamping newBoundarySample to the source's available length before
+          // calling trimClip; this store only guarantees the min-length-32
+          // invariant, which is data it always has.
+          const minEnd = clip.startSample + 32;
+          const newEnd = Math.max(newBoundarySample, minEnd);
+          updated = { ...clip, lengthSample: newEnd - clip.startSample };
+        }
+        updated = reconcileTrimmedFades(updated, edge); // X2: fades must stay within the new length
 
-      // Snapshot BEFORE the trim (see maintainFacingFades), then write the
-      // trimmed clip back IN PLACE at clipIdx — deliberately no re-sort, so
-      // X2's index-stable update contract holds (and trap T40 remains a fact
-      // consumers must handle, which the maintenance below does: it pairs by
-      // startSample, never by array position).
-      const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
-      const tracks = s.session.tracks.map((t, i) =>
-        i === loc.trackIdx ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? updated : c)) } : t
-      );
-      maintainFacingFades(tracks, loc.trackIdx, loc.trackIdx, clipId, pre);
-      return { session: { ...s.session, tracks } };
+        // Snapshot BEFORE the trim (see maintainFacingFades), then write the
+        // trimmed clip back IN PLACE at clipIdx — deliberately no re-sort, so
+        // X2's index-stable update contract holds (and trap T40 remains a fact
+        // consumers must handle, which the maintenance below does: it pairs by
+        // startSample, never by array position).
+        const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
+        const tracks = s.session.tracks.map((t, i) =>
+          i === loc.trackIdx ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? updated : c)) } : t
+        );
+        maintainFacingFades(tracks, loc.trackIdx, loc.trackIdx, clipId, pre);
+        return { session: { ...s.session, tracks } };
+      });
     });
   },
 
   removeClip(clipId) {
-    set((s) => {
-      const loc = findClipLocation(s.session.tracks, clipId);
-      if (!loc) return s;
-      const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
-      // X5/v1.9.1: snapshot the pivot's overlap relationships BEFORE it leaves
-      // the array (trap T5). preOverlapStates skips the pivot and measures every
-      // overlap against it, so it must run while the pivot is still present —
-      // snapshotting after the filter reads every pair as unarmed and disarms
-      // nothing. With the pivot then filtered out, maintainFacingFades re-arms
-      // nothing (its arm loop finds no pivot -> continue) and its disarm loop
-      // clears the survivor's now-stale facing edge, so deleting one member of
-      // an armed crossfade pair no longer strands the survivor's facing fade as
-      // a surprise solo fade. The dead pivot's own facing-edge write is a no-op
-      // (writeClipFade's index guard). Reuses the existing helper verbatim — no
-      // bespoke disarm logic (trap T6).
-      const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
-      const tracks = s.session.tracks.map((t, i) =>
-        i === loc.trackIdx ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t
-      );
-      maintainFacingFades(tracks, loc.trackIdx, loc.trackIdx, clipId, pre);
-      const selectedClipId = s.selectedClipId === clipId ? null : s.selectedClipId;
-      return { session: { ...s.session, tracks }, selectedClipId };
+    recordSessionMutation('Remove clip', () => {
+      set((s) => {
+        const loc = findClipLocation(s.session.tracks, clipId);
+        if (!loc) return s;
+        const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
+        // X5/v1.9.1: snapshot the pivot's overlap relationships BEFORE it leaves
+        // the array (trap T5). preOverlapStates skips the pivot and measures every
+        // overlap against it, so it must run while the pivot is still present —
+        // snapshotting after the filter reads every pair as unarmed and disarms
+        // nothing. With the pivot then filtered out, maintainFacingFades re-arms
+        // nothing (its arm loop finds no pivot -> continue) and its disarm loop
+        // clears the survivor's now-stale facing edge, so deleting one member of
+        // an armed crossfade pair no longer strands the survivor's facing fade as
+        // a surprise solo fade. The dead pivot's own facing-edge write is a no-op
+        // (writeClipFade's index guard). Reuses the existing helper verbatim — no
+        // bespoke disarm logic (trap T6).
+        const pre = preOverlapStates(s.session.tracks[loc.trackIdx].clips, clip);
+        const tracks = s.session.tracks.map((t, i) =>
+          i === loc.trackIdx ? { ...t, clips: t.clips.filter((c) => c.id !== clipId) } : t
+        );
+        maintainFacingFades(tracks, loc.trackIdx, loc.trackIdx, clipId, pre);
+        const selectedClipId = s.selectedClipId === clipId ? null : s.selectedClipId;
+        return { session: { ...s.session, tracks }, selectedClipId };
+      });
     });
     // A dead clip's mini-waveform bitmap (and the doc channels reference it
     // holds) must not sit in the cache until unrelated churn evicts it (F9).
@@ -655,137 +736,156 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   setClipGain(clipId, gainDb) {
-    set((s) => {
-      const loc = findClipLocation(s.session.tracks, clipId);
-      if (!loc) return s;
-      const clamped = Math.min(24, Math.max(-24, gainDb));
-      const tracks = s.session.tracks.map((t, i) =>
-        i === loc.trackIdx
-          ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, gainDb: clamped } : c)) }
-          : t
-      );
-      return { session: { ...s.session, tracks } };
+    recordSessionMutation('Set clip gain', () => {
+      set((s) => {
+        const loc = findClipLocation(s.session.tracks, clipId);
+        if (!loc) return s;
+        const clamped = Math.min(24, Math.max(-24, gainDb));
+        // R3 no-op guard (see renameTrack): re-committing the unchanged gain
+        // (a blur without an edit) must not mint a noise undo entry.
+        if (s.session.tracks[loc.trackIdx].clips[loc.clipIdx].gainDb === clamped) return s;
+        const tracks = s.session.tracks.map((t, i) =>
+          i === loc.trackIdx
+            ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, gainDb: clamped } : c)) }
+            : t
+        );
+        return { session: { ...s.session, tracks } };
+      });
     });
   },
 
   setClipFade(clipId, edge, fade) {
-    set((s) => {
-      const loc = findClipLocation(s.session.tracks, clipId);
-      if (!loc) return s;
-      const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
+    recordSessionMutation('Set fade', () => {
+      set((s) => {
+        const loc = findClipLocation(s.session.tracks, clipId);
+        if (!loc) return s;
+        const clip = s.session.tracks[loc.trackIdx].clips[loc.clipIdx];
 
-      const patch: Partial<Clip> = {};
-      if (fade.lengthSample !== undefined && Number.isFinite(fade.lengthSample)) {
-        const requested = Math.round(fade.lengthSample);
-        // The STANDING (opposite) fade has priority: clampFadePair preserves
-        // it and gives the edited fade only the room that remains. See the
-        // full policy on the SessionActions declaration.
-        const pair =
-          edge === 'in'
-            ? clampFadePair(requested, clip.fadeOutSample ?? 0, clip.lengthSample, 'out')
-            : clampFadePair(clip.fadeInSample ?? 0, requested, clip.lengthSample, 'in');
-        // Both sides are written back: normally only the edited one changes,
-        // but if the standing fade ever arrived out of range (an invariant
-        // breach upstream) this heals it rather than preserving the breach.
-        patch.fadeInSample = pair.fadeIn > 0 ? pair.fadeIn : undefined;
-        patch.fadeOutSample = pair.fadeOut > 0 ? pair.fadeOut : undefined;
-      }
-      if (fade.curve !== undefined && (FADE_CURVES as readonly string[]).includes(fade.curve)) {
-        if (edge === 'in') patch.fadeInCurve = fade.curve;
-        else patch.fadeOutCurve = fade.curve;
-      }
-      if (Object.keys(patch).length === 0) return s;
+        const patch: Partial<Clip> = {};
+        if (fade.lengthSample !== undefined && Number.isFinite(fade.lengthSample)) {
+          const requested = Math.round(fade.lengthSample);
+          // The STANDING (opposite) fade has priority: clampFadePair preserves
+          // it and gives the edited fade only the room that remains. See the
+          // full policy on the SessionActions declaration.
+          const pair =
+            edge === 'in'
+              ? clampFadePair(requested, clip.fadeOutSample ?? 0, clip.lengthSample, 'out')
+              : clampFadePair(clip.fadeInSample ?? 0, requested, clip.lengthSample, 'in');
+          // Both sides are written back: normally only the edited one changes,
+          // but if the standing fade ever arrived out of range (an invariant
+          // breach upstream) this heals it rather than preserving the breach.
+          patch.fadeInSample = pair.fadeIn > 0 ? pair.fadeIn : undefined;
+          patch.fadeOutSample = pair.fadeOut > 0 ? pair.fadeOut : undefined;
+        }
+        if (fade.curve !== undefined && (FADE_CURVES as readonly string[]).includes(fade.curve)) {
+          if (edge === 'in') patch.fadeInCurve = fade.curve;
+          else patch.fadeOutCurve = fade.curve;
+        }
+        if (Object.keys(patch).length === 0) return s;
+        // R3 no-op guard (see renameTrack): a patch whose every key already
+        // holds the stored value (a blur without an edit; a fade-handle click
+        // that never dragged) must not mint a noise undo entry.
+        if ((Object.keys(patch) as (keyof Clip)[]).every((k) => clip[k] === patch[k])) return s;
 
-      const tracks = s.session.tracks.map((t, i) =>
-        i === loc.trackIdx
-          ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, ...patch } : c)) }
-          : t
-      );
-      return { session: { ...s.session, tracks } };
+        const tracks = s.session.tracks.map((t, i) =>
+          i === loc.trackIdx
+            ? { ...t, clips: t.clips.map((c, j) => (j === loc.clipIdx ? { ...c, ...patch } : c)) }
+            : t
+        );
+        return { session: { ...s.session, tracks } };
+      });
     });
   },
 
   upsertAutomationKey(trackId, param, key, replacePositionSample) {
-    set((s) => {
-      const idx = s.session.tracks.findIndex((t) => t.id === trackId);
-      if (idx === -1) return s;
-      const t = s.session.tracks[idx];
-      const automation = upsertKeyIntoLanes(t.automation ?? [], param, key, replacePositionSample);
-      if (automation === null) return s;
-      const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
-      return { session: { ...s.session, tracks } };
+    recordSessionMutation(replacePositionSample !== undefined ? 'Move automation key' : 'Add automation key', () => {
+      set((s) => {
+        const idx = s.session.tracks.findIndex((t) => t.id === trackId);
+        if (idx === -1) return s;
+        const t = s.session.tracks[idx];
+        const automation = upsertKeyIntoLanes(t.automation ?? [], param, key, replacePositionSample);
+        if (automation === null) return s;
+        const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
+        return { session: { ...s.session, tracks } };
+      });
     });
   },
 
   upsertAutomationKeys(trackId, writes) {
-    set((s) => {
-      const idx = s.session.tracks.findIndex((t) => t.id === trackId);
-      if (idx === -1) return s;
-      const t = s.session.tracks[idx];
-      let automation = t.automation ?? [];
-      let changed = false;
-      for (const w of writes) {
-        const next = upsertKeyIntoLanes(automation, w.param, w.key, w.replacePositionSample);
-        if (next === null) continue; // invalid member: skipped, siblings land
-        automation = next;
-        changed = true;
-      }
-      if (!changed) return s;
-      const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
-      return { session: { ...s.session, tracks } };
+    recordSessionMutation('Edit automation', () => {
+      set((s) => {
+        const idx = s.session.tracks.findIndex((t) => t.id === trackId);
+        if (idx === -1) return s;
+        const t = s.session.tracks[idx];
+        let automation = t.automation ?? [];
+        let changed = false;
+        for (const w of writes) {
+          const next = upsertKeyIntoLanes(automation, w.param, w.key, w.replacePositionSample);
+          if (next === null) continue; // invalid member: skipped, siblings land
+          automation = next;
+          changed = true;
+        }
+        if (!changed) return s;
+        const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
+        return { session: { ...s.session, tracks } };
+      });
     });
   },
 
   removeAutomationKey(trackId, param, positionSample) {
-    set((s) => {
-      const idx = s.session.tracks.findIndex((t) => t.id === trackId);
-      if (idx === -1) return s;
-      if (typeof positionSample !== 'number' || !Number.isFinite(positionSample)) return s;
-      const t = s.session.tracks[idx];
-      const lanes = t.automation;
-      if (!lanes) return s;
-      const laneIdx = lanes.findIndex((l) => l.param === param);
-      if (laneIdx === -1) return s;
+    recordSessionMutation('Remove automation key', () => {
+      set((s) => {
+        const idx = s.session.tracks.findIndex((t) => t.id === trackId);
+        if (idx === -1) return s;
+        if (typeof positionSample !== 'number' || !Number.isFinite(positionSample)) return s;
+        const t = s.session.tracks[idx];
+        const lanes = t.automation;
+        if (!lanes) return s;
+        const laneIdx = lanes.findIndex((l) => l.param === param);
+        if (laneIdx === -1) return s;
 
-      const pos = Math.round(positionSample);
-      const keys = lanes[laneIdx].keys.filter((k) => k.positionSample !== pos);
-      if (keys.length === lanes[laneIdx].keys.length) return s; // nothing at that position
+        const pos = Math.round(positionSample);
+        const keys = lanes[laneIdx].keys.filter((k) => k.positionSample !== pos);
+        if (keys.length === lanes[laneIdx].keys.length) return s; // nothing at that position
 
-      const automation =
-        keys.length > 0
-          ? lanes.map((l, i) => (i === laneIdx ? { param, keys } : l))
-          : lanes.filter((_, i) => i !== laneIdx);
-      const tracks = s.session.tracks.map((tr, i) => {
-        if (i !== idx) return tr;
-        if (automation.length > 0) return { ...tr, automation };
-        // Last lane gone: the field itself goes — absent means none (T9/T11).
-        const stripped = { ...tr };
-        delete stripped.automation;
-        return stripped;
+        const automation =
+          keys.length > 0
+            ? lanes.map((l, i) => (i === laneIdx ? { param, keys } : l))
+            : lanes.filter((_, i) => i !== laneIdx);
+        const tracks = s.session.tracks.map((tr, i) => {
+          if (i !== idx) return tr;
+          if (automation.length > 0) return { ...tr, automation };
+          // Last lane gone: the field itself goes — absent means none (T9/T11).
+          const stripped = { ...tr };
+          delete stripped.automation;
+          return stripped;
+        });
+        return { session: { ...s.session, tracks } };
       });
-      return { session: { ...s.session, tracks } };
     });
   },
 
   setAutomationKeyCurve(trackId, param, positionSample, curve) {
-    set((s) => {
-      if (!(FADE_CURVES as readonly string[]).includes(curve)) return s;
-      const idx = s.session.tracks.findIndex((t) => t.id === trackId);
-      if (idx === -1) return s;
-      if (typeof positionSample !== 'number' || !Number.isFinite(positionSample)) return s;
-      const t = s.session.tracks[idx];
-      const lanes = t.automation;
-      if (!lanes) return s;
-      const laneIdx = lanes.findIndex((l) => l.param === param);
-      if (laneIdx === -1) return s;
-      const pos = Math.round(positionSample);
-      const keyIdx = lanes[laneIdx].keys.findIndex((k) => k.positionSample === pos);
-      if (keyIdx === -1) return s;
+    recordSessionMutation('Set automation curve', () => {
+      set((s) => {
+        if (!(FADE_CURVES as readonly string[]).includes(curve)) return s;
+        const idx = s.session.tracks.findIndex((t) => t.id === trackId);
+        if (idx === -1) return s;
+        if (typeof positionSample !== 'number' || !Number.isFinite(positionSample)) return s;
+        const t = s.session.tracks[idx];
+        const lanes = t.automation;
+        if (!lanes) return s;
+        const laneIdx = lanes.findIndex((l) => l.param === param);
+        if (laneIdx === -1) return s;
+        const pos = Math.round(positionSample);
+        const keyIdx = lanes[laneIdx].keys.findIndex((k) => k.positionSample === pos);
+        if (keyIdx === -1) return s;
 
-      const keys = lanes[laneIdx].keys.map((k, i) => (i === keyIdx ? { ...k, curve } : k));
-      const automation = lanes.map((l, i) => (i === laneIdx ? { param, keys } : l));
-      const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
-      return { session: { ...s.session, tracks } };
+        const keys = lanes[laneIdx].keys.map((k, i) => (i === keyIdx ? { ...k, curve } : k));
+        const automation = lanes.map((l, i) => (i === laneIdx ? { param, keys } : l));
+        const tracks = s.session.tracks.map((tr, i) => (i === idx ? { ...tr, automation } : tr));
+        return { session: { ...s.session, tracks } };
+      });
     });
   },
 
@@ -813,3 +913,34 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
     set({ mtPlayheadSample: sample });
   },
 }));
+
+// R3 — binds the session undo plumbing to this store (one-way dependency:
+// this module imports sessionUndo, never the reverse). The snapshot is
+// `{ session, selectedClipId }` — see SessionSnapshot in sessionUndo.ts for
+// the ruling-3 view-state pin. `apply` also maintains the F9 cache
+// discipline the ORIGINAL mutations maintain out-of-band: `removeClip`/
+// `removeTrack` purge dead clips' mini-waveform bitmaps after their set(),
+// but an undo/redo swaps whole snapshots without re-running the action, so
+// the purge is re-derived here by diffing clip ids — a clip present before
+// the swap but absent after it is dead and its bitmap (holding a doc
+// channels reference) must not linger until unrelated churn evicts it.
+bindSessionUndo({
+  capture: () => {
+    const s = useSessionStore.getState();
+    return { session: s.session, selectedClipId: s.selectedClipId };
+  },
+  apply: (snapshot) => {
+    const before = useSessionStore.getState().session;
+    useSessionStore.setState({
+      session: snapshot.session,
+      selectedClipId: snapshot.selectedClipId,
+    });
+    if (before !== snapshot.session) {
+      const kept = new Set<string>();
+      for (const t of snapshot.session.tracks) for (const c of t.clips) kept.add(c.id);
+      for (const t of before.tracks) {
+        for (const c of t.clips) if (!kept.has(c.id)) purgeClipWaveform(c.id);
+      }
+    }
+  },
+});

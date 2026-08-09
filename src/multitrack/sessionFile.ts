@@ -6,6 +6,7 @@ import { clampFadePair } from './session';
 import { sanitizeAutomationLanes } from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import { useSessionStore } from './sessionStore';
+import { clearSessionHistory } from './sessionUndo';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 
 /** .audm format version. v1: no markers. v2: adds an optional `markers` map,
@@ -752,6 +753,12 @@ export async function openSessionViaDialog(): Promise<void> {
   // Every clip in the just-replaced session is either new or a stale id from a
   // previous session — either way no bitmap in the cache belongs to it (F9).
   clearClipWaveformCache();
+  // R3: opening a session starts a new editing timeline — the previous
+  // session's undo history is dropped, exactly as opening a document starts
+  // that document's history fresh. (An unrecorded, un-cleared replacement
+  // would be silently reverted by the next undo of an older entry — the
+  // recording invariant in sessionUndo.ts.)
+  clearSessionHistory();
   useAppStore.getState().setView('multitrack');
 
   if (result.droppedClipCount > 0) {
