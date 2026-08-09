@@ -2,6 +2,7 @@ import type { AudioDocument } from '../audio/AudioDocument';
 import { resolveAutomation, type TrackAutomationSpec } from './automation';
 import {
   autoPanGainsAt,
+  autoSpatialGainsAt,
   autoVolumeGainAt,
   clipFadeGainAt,
   monoPanGains,
@@ -258,7 +259,10 @@ export class MultitrackPlayer {
       muteGain,
       clipPans,
       bakedVolume: auto?.volume != null,
-      bakedPan: auto?.pan != null,
+      // F5: the spatial group bakes into the SAME pan pair a pan lane would
+      // (it supersedes pan, ruling 4), so either one marks the pair baked —
+      // applyTrackParams must not re-push the static pan over it (trap T2).
+      bakedPan: auto?.pan != null || auto?.spatial != null,
       chainNodes,
       scheduled,
     });
@@ -268,16 +272,18 @@ export class MultitrackPlayer {
       src.buffer = buffer;
 
       // Per-clip pan pair under the clip's OWN law (mixdown parity). With a
-      // pan lane active the time-varying gains are already IN the buffer
-      // (ruling C — always 2 channels then), so the pair is neutral unity.
+      // pan lane — or the F5 spatial group, which supersedes pan (ruling 4)
+      // — active, the time-varying gains are already IN the buffer (ruling C
+      // — always 2 channels then), so the pair is neutral unity.
       const mode: ClipPanNodes['mode'] = buffer.numberOfChannels >= 2 ? 'stereo' : 'mono';
       const panL = ctx.createGain();
       const panR = ctx.createGain();
-      const { gL, gR } = auto?.pan
-        ? { gL: 1, gR: 1 }
-        : mode === 'mono'
-          ? monoPanGains(t.pan)
-          : stereoBalanceGains(t.pan);
+      const { gL, gR } =
+        auto?.pan || auto?.spatial
+          ? { gL: 1, gR: 1 }
+          : mode === 'mono'
+            ? monoPanGains(t.pan)
+            : stereoBalanceGains(t.pan);
       panL.gain.value = gL;
       panR.gain.value = gR;
       panL.connect(merger, 0, 0);
@@ -534,7 +540,11 @@ export class MultitrackPlayer {
       // buffer layout does. Cost: 2× buffer memory for mono clips on a
       // pan-automated track — accepted by the ruling.
       const monoSrc = slice.length === 1;
-      const outChannels = auto.pan ? 2 : slice.length;
+      // F5: the spatial group needs the promoted 2-channel buffer for exactly
+      // the reason a pan lane does (one channel cannot carry gL and gR, T3);
+      // its gains supersede the pan lane's when both exist (ruling 4), in the
+      // SAME three-way order as mixdown's automated loop.
+      const outChannels = auto.pan || auto.spatial ? 2 : slice.length;
       const buffer = ctx.createBuffer(outChannels, Math.max(1, len), sessionRate);
       for (let ch = 0; ch < outChannels; ch++) {
         const data = monoSrc ? slice[0] : slice[ch];
@@ -544,7 +554,10 @@ export class MultitrackPlayer {
           const e = fadeSpec ? clipFadeGainAt(fadeSpec, i) : 1;
           const v = auto.volume ? autoVolumeGainAt(auto.volume, s) : 1;
           let g = 1;
-          if (auto.pan) {
+          if (auto.spatial) {
+            const p = autoSpatialGainsAt(auto.spatial, s, monoSrc);
+            g = ch === 0 ? p.gL : p.gR;
+          } else if (auto.pan) {
             const p = autoPanGainsAt(auto.pan, s, monoSrc);
             g = ch === 0 ? p.gL : p.gR;
           }

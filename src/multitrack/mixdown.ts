@@ -2,7 +2,13 @@ import type { AudioDocument } from '../audio/AudioDocument';
 import { docLength } from '../audio/AudioDocument';
 import { crossfadeGains, fadeInGainAt, fadeOutGainAt, type FadeCurve } from '../dsp/fades';
 import { resampleChannel } from '../dsp/resample';
-import { automationValueAt, resolveAutomation, type AutomationKey } from './automation';
+import { SPATIAL_NEUTRAL, spatialDistanceGain, spatialPanPosition } from '../dsp/spatial';
+import {
+  automationValueAt,
+  resolveAutomation,
+  type AutomationKey,
+  type SpatialAutomationSpec,
+} from './automation';
 import type { Clip, Session, Track } from './session';
 import { DEFAULT_FADE_CURVE, crossfadableOverlap } from './session';
 
@@ -95,6 +101,44 @@ export function autoPanGainsAt(
 ): { gL: number; gR: number } {
   const pan = automationValueAt(keys, s);
   return mono ? monoPanGains(pan) : stereoBalanceGains(pan);
+}
+
+/**
+ * F5 — the spatial group's gain pair at timeline sample `s`: the source
+ * position (each lane evaluated by the SHARED evaluator — azimuth under its
+ * circular short-arc rule — with an absent lane held at its `SPATIAL_NEUTRAL`
+ * value) is projected onto the interaural axis (`spatialPanPosition`,
+ * dsp/spatial.ts), handed to the SAME pan law the clip's source channel
+ * count selects for the `pan` parameter, and attenuated by the inverse
+ * distance law. ONE spatialisation function in shared TS, called by both
+ * engines (F5 ruling 2 — `PannerNode` has no offline equivalent, so using it
+ * would split what you hear from what you export).
+ *
+ * An absent DISTANCE lane skips the attenuation multiply entirely — the
+ * result is bit-identical to multiplying by `spatialDistanceGain(1) = 1`,
+ * but the skip keeps the azimuth-only product exactly the pan-lane product
+ * shape, and both engines share the skip.
+ *
+ * SUPERSESSION (F5 ruling 4): while the spec's `spatial` is non-null, BOTH
+ * engines take their channel gains from here and the pan lane AND static
+ * `Track.pan` are ignored — see `TrackAutomationSpec`'s contract note.
+ */
+export function autoSpatialGainsAt(
+  spatial: SpatialAutomationSpec,
+  s: number,
+  mono: boolean
+): { gL: number; gR: number } {
+  const az = spatial.azimuth
+    ? automationValueAt(spatial.azimuth, s, 'azimuth')
+    : SPATIAL_NEUTRAL.azimuth;
+  const el = spatial.elevation
+    ? automationValueAt(spatial.elevation, s, 'elevation')
+    : SPATIAL_NEUTRAL.elevation;
+  const pos = spatialPanPosition(az, el);
+  const g = mono ? monoPanGains(pos) : stereoBalanceGains(pos);
+  if (!spatial.distance) return g;
+  const dg = spatialDistanceGain(automationValueAt(spatial.distance, s, 'distance'));
+  return { gL: g.gL * dg, gR: g.gR * dg };
 }
 
 function clamp1(v: number): number {
@@ -402,12 +446,21 @@ export function mixdownSession(
         // Timeline indexing: `base + i` (trap T6 — never the slice length;
         // a resampled slice's overhang sample evaluates at its true timeline
         // position, past the clip span, exactly like the fade shapes clamp).
+        // F5 — placement: the SPATIAL group first (while any spatial lane is
+        // active it supersedes the pan lane AND the static pan — ruling 4),
+        // then the pan lane, then the static pair. The identical three-way order
+        // lives in the player's bake (`buildClipBuffer`), so the two engines
+        // cannot disagree about which law governs.
         const clipGain = dbToLinear(c.gainDb);
         for (let i = 0; i < n; i++) {
           const s = base + i;
           const e = spec ? clipFadeGainAt(spec, i) : 1;
           const v = auto.volume ? autoVolumeGainAt(auto.volume, s) : trackGain;
-          const p = auto.pan ? autoPanGainsAt(auto.pan, s, mono) : null;
+          const p = auto.spatial
+            ? autoSpatialGainsAt(auto.spatial, s, mono)
+            : auto.pan
+              ? autoPanGainsAt(auto.pan, s, mono)
+              : null;
           const pgL = p ? p.gL : gL;
           const pgR = p ? p.gR : gR;
           L[s] += chL[i] * clipGain * v * pgL * e;

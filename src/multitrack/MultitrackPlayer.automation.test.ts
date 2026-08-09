@@ -1,6 +1,12 @@
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { automationValueAt, type AutomationKey, type AutomationLane } from './automation';
-import { autoPanGainsAt, autoVolumeGainAt, mixdownSession, monoPanGains } from './mixdown';
+import {
+  autoPanGainsAt,
+  autoSpatialGainsAt,
+  autoVolumeGainAt,
+  mixdownSession,
+  monoPanGains,
+} from './mixdown';
 import { MultitrackPlayer } from './MultitrackPlayer';
 import type { Clip, Session, Track } from './session';
 
@@ -623,5 +629,234 @@ describe('RULING: player-rendered output === mixdownSession output over a MOVING
     expect(data[10]).toBe(Math.fround(0.5 * dbToLinear(automationValueAt(kA, 500))));
     expect(data[10]).toBeCloseTo(0.5 * dbToLinear(-60), 6);
     expect(data[11]).toBeCloseTo(0.5 * dbToLinear(2), 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F5, player side: the spatial group baked through the SAME machinery as the
+// pan lane — promoted 2-channel buffers, neutralised pan pair, bakedPan skip
+// — and the RULING-2 parity proof: player output === mixdownSession output,
+// EXACT float32 equality, across a region where azimuth crosses the ±180
+// seam and elevation and distance are moving simultaneously.
+// ---------------------------------------------------------------------------
+
+function azLane(keys: AutomationKey[]): AutomationLane {
+  return { param: 'azimuth', keys };
+}
+function elLane(keys: AutomationKey[]): AutomationLane {
+  return { param: 'elevation', keys };
+}
+function distLane(keys: AutomationKey[]): AutomationLane {
+  return { param: 'distance', keys };
+}
+const RAD = Math.PI / 180;
+
+describe('F5 player spatial baking (promoted buffers, neutralised nodes, T2 skip)', () => {
+  it('a DISTANCE-only lane promotes a mono clip to 2 channels, neutralises the pan pair', () => {
+    const dKeys: AutomationKey[] = [
+      { positionSample: 300, value: 0, curve: 'equal-gain' },
+      { positionSample: 700, value: 2 },
+    ];
+    const { player, ctx } = makePlayer();
+    const t = track({
+      pan: 0.7, // superseded by the spatial group (ruling 4)
+      volumeDb: -2, // NOT automated: stays on the live node
+      clips: [clip({ documentId: 'm', startSample: 100, lengthSample: 800 })],
+      automation: [distLane(dKeys)],
+    });
+    player.play(0, session([t]), docs(monoDoc('m', 0.5)));
+
+    const buf = ctx.sources[0].buffer;
+    if (!buf) throw new Error('no buffer');
+    expect(buf.numberOfChannels).toBe(2); // promoted exactly like a pan lane (T3)
+    // Neutral azimuth/elevation → centred MONO law × the inverse distance
+    // gain, written from the laws: below the reference (unity), on it, above.
+    const centre = Math.cos(Math.PI / 4);
+    expect(buf.copied[0][300]).toBeCloseTo(0.5 * centre * 1, 6); // d(400)=0.5 → unity
+    expect(buf.copied[0][400]).toBeCloseTo(0.5 * centre * 1, 6); // d(500)=1 → ON ref
+    expect(buf.copied[0][500]).toBeCloseTo(0.5 * centre * (1 / 1.5), 6); // d(600)=1.5
+    expect(buf.copied[1][500]).toBeCloseTo(0.5 * centre * (1 / 1.5), 6);
+    // Exact product of the shared helper, both channels, across the ramp:
+    for (const i of [0, 250, 450, 799]) {
+      const p = autoSpatialGainsAt({ azimuth: null, elevation: null, distance: dKeys }, 100 + i, true);
+      expect(buf.copied[0][i]).toBe(Math.fround(0.5 * 1 * 1 * p.gL * 1));
+      expect(buf.copied[1][i]).toBe(Math.fround(0.5 * 1 * 1 * p.gR * 1));
+    }
+    // The pan pair is unity; volume stays live/static; bakedPan is set.
+    const nodes = player.liveTrackNodes(t.id);
+    expect(nodes?.bakedPan).toBe(true);
+    expect(nodes?.bakedVolume).toBe(false);
+    const pans = nodes?.clipPans.get(t.clips[0].id);
+    expect(pans?.panL.gain.value).toBe(1);
+    expect(pans?.panR.gain.value).toBe(1);
+    expect(nodes?.volumeGain.gain.value).toBeCloseTo(dbToLinear(-2), 12);
+  });
+
+  it('applyTrackParams cannot stomp a spatially-baked pan pair (trap T2)', () => {
+    const { player } = makePlayer();
+    const t = track({
+      pan: 0,
+      clips: [clip({ documentId: 'm', startSample: 0, lengthSample: 1000 })],
+      automation: [azLane([{ positionSample: 0, value: 45 }])],
+    });
+    player.play(0, session([t]), docs(monoDoc('m', 0.5)));
+    const nodes = player.liveTrackNodes(t.id);
+    const pans = nodes?.clipPans.get(t.clips[0].id);
+    expect(pans?.panL.gain.value).toBe(1);
+
+    player.applyTrackParams([{ ...t, pan: -0.9, volumeDb: -3 }]);
+
+    expect(pans?.panL.gain.value).toBe(1); // baked: untouched
+    expect(pans?.panR.gain.value).toBe(1);
+    expect(nodes?.volumeGain.gain.value).toBeCloseTo(dbToLinear(-3), 12); // live vol applied
+  });
+
+  it('what the bake passes the evaluator IS the timeline sample (wiring pin, F1 lesson)', () => {
+    // Adjacent azimuth keys flip the image hard-left → hard-right between
+    // two consecutive TIMELINE samples; any indexing slip lands both on one.
+    const kA: AutomationKey[] = [
+      { positionSample: 500, value: -90 },
+      { positionSample: 501, value: 90 },
+    ];
+    const { player, ctx } = makePlayer();
+    const t = track({
+      clips: [clip({ documentId: 'm', startSample: 490, lengthSample: 100 })],
+      automation: [azLane(kA)],
+    });
+    player.play(0, session([t]), docs(monoDoc('m', 0.5)));
+    const buf = ctx.sources[0].buffer;
+    if (!buf) throw new Error('no buffer');
+    // Buffer index 10 = timeline 500 (az −90): mono law at pos −1 → gL 1, gR 0.
+    expect(buf.copied[0][10]).toBeCloseTo(0.5 * Math.cos(0), 6);
+    expect(buf.copied[1][10]).toBeCloseTo(0.5 * Math.sin(0), 6);
+    // Buffer index 11 = timeline 501 (az +90): pos 1 → gL 0, gR 1.
+    expect(buf.copied[0][11]).toBeCloseTo(0.5 * Math.cos(Math.PI / 2), 6);
+    expect(buf.copied[1][11]).toBeCloseTo(0.5, 6);
+  });
+});
+
+describe('F5 RULING 2: player output === mixdown output over a MOVING spatial region', () => {
+  /** Track 1 (stereo): azimuth crosses the ±180 seam while elevation and
+   * distance are BOTH moving; track 2 (mono, promoted buffer): a rear pass
+   * through −180 with a volume lane composing. Static pan is non-neutral on
+   * both (superseded → unity nodes); static volume is 0 where not automated
+   * (dbToLinear(0) = 1 exactly) and non-neutral where a lane overrides it —
+   * so every remaining live gain is EXACTLY 1 and parity is the exact-0
+   * tier, the strongest the v1.9 suite defines. */
+  function spatialFixture(): { s: Session; d: Map<string, AudioDocument> } {
+    const az1: AutomationKey[] = [
+      { positionSample: 200, value: 170, curve: 'equal-gain' },
+      { positionSample: 600, value: -170, curve: 'smooth' },
+      { positionSample: 950, value: -20 },
+    ];
+    const el1: AutomationKey[] = [
+      { positionSample: 300, value: -45, curve: 'equal-gain' },
+      { positionSample: 800, value: 60 },
+    ];
+    const d1: AutomationKey[] = [
+      { positionSample: 100, value: 0.5, curve: 'equal-gain' },
+      { positionSample: 900, value: 4 },
+    ];
+    const az2: AutomationKey[] = [
+      { positionSample: 1100, value: -120, curve: 'equal-gain' },
+      { positionSample: 1800, value: 120 },
+    ];
+    const v2: AutomationKey[] = [
+      { positionSample: 1200, value: 3, curve: 'smooth' },
+      { positionSample: 1700, value: -9 },
+    ];
+    const s = session([
+      track({
+        volumeDb: 0, // NOT automated: live node dbToLinear(0) = 1 exactly
+        pan: 0.4, // superseded by the spatial group → neutralised node
+        clips: [clip({ documentId: 'st', startSample: 0, lengthSample: 1000 })],
+        automation: [azLane(az1), elLane(el1), distLane(d1)],
+      }),
+      track({
+        volumeDb: 3, // overridden by the volume lane → neutralised node
+        pan: -0.6, // superseded
+        clips: [clip({ documentId: 'm', startSample: 1000, lengthSample: 1000 })],
+        automation: [azLane(az2), volLane(v2)],
+      }),
+    ]);
+    return { s, d: docs(stereoDoc('st', 0.5, -0.25, 1000), monoDoc('m', 0.5, 1000)) };
+  }
+
+  it('EXACT (0) parity across both moving spatial regions', () => {
+    const { s, d } = spatialFixture();
+    const { player, ctx } = makePlayer();
+    player.play(0, s, d);
+    const mix = mixdownSession(s, d).channels;
+    const emu = renderPlayerGraph(ctx, 1000, mix[0].length);
+
+    for (const ch of [0, 1] as const) {
+      expect(maxAbsDiff(emu[ch], mix[ch], 0, 0, 1000)).toBe(0); // stereo, wrap + el + dist
+      expect(maxAbsDiff(emu[ch], mix[ch], 0, 1000, 2000)).toBe(0); // mono, promoted bake
+    }
+
+    // Anti-vacuity anchors — the whole chain written from the formulas
+    // (sin/cos/inverse-distance/balance/mono laws inline), NOT the helpers:
+    const mixL = mix[0];
+    const mixR = mix[1];
+    // s=400 — azimuth mid-seam: az = 170 + 20·0.5 = 180 → pos = sin(180°)·
+    // cos(el(400)) with el = −45 + 105·(100/500) = −24; dist = 0.5 +
+    // 3.5·(300/800) = 1.8125 → gain 1/1.8125. Balance law at pos ≈ 0: both
+    // sides ≈ unity × the distance gain.
+    {
+      const pos = Math.sin(180 * RAD) * Math.cos(-24 * RAD);
+      const gL = pos <= 0 ? 1 : Math.cos((pos * Math.PI) / 2);
+      const gR = pos >= 0 ? 1 : Math.cos((-pos * Math.PI) / 2);
+      const dg = 1 / 1.8125;
+      expect(mixL[400]).toBeCloseTo(0.5 * gL * dg, 6);
+      expect(mixR[400]).toBeCloseTo(-0.25 * gR * dg, 6);
+    }
+    // s=150 — hold + below-reference distance: az held 170, el held −45,
+    // dist = 0.5 + 3.5·(50/800) = 0.71875 < 1 → unity gain (the below/on
+    // boundary probe). pos = sin(170°)·cos(−45°) > 0 → balance attenuates L.
+    {
+      const pos = Math.sin(170 * RAD) * Math.cos(-45 * RAD);
+      expect(mixL[150]).toBeCloseTo(0.5 * Math.cos((pos * Math.PI) / 2) * 1, 6);
+      expect(mixR[150]).toBeCloseTo(-0.25 * 1 * 1, 6);
+    }
+    // s=1450 — track 2's rear pass hits the seam: az = −120 − 120·(350/700)
+    // = −180 → pos ≈ 0 → centred MONO law; vol = 3 − 12·smooth(0.5) = −3 dB
+    // (the smooth curve is the raised cosine (1 − cos πt)/2, = 0.5 at 0.5).
+    {
+      const vol = 3 - 12 * ((1 - Math.cos(Math.PI * 0.5)) / 2);
+      expect(mixL[1450]).toBeCloseTo(0.5 * dbToLinear(vol) * Math.cos(Math.PI / 4), 6);
+      expect(mixR[1450]).toBeCloseTo(0.5 * dbToLinear(vol) * Math.sin(Math.PI / 4), 6);
+    }
+    // s=1275 — mid-arc, off the seam: az = −120 − 120·(175/700) = −150 →
+    // pos = sin(−150°) = −0.5 → mono law θ = π/8; vol = 3 − 12·smooth(0.15),
+    // raised cosine written inline.
+    {
+      const u = 0.15;
+      const vol = 3 - 12 * ((1 - Math.cos(Math.PI * u)) / 2);
+      const theta = ((-0.5 + 1) / 2) * (Math.PI / 2);
+      expect(mixL[1275]).toBeCloseTo(0.5 * dbToLinear(vol) * Math.cos(theta), 6);
+      expect(mixR[1275]).toBeCloseTo(0.5 * dbToLinear(vol) * Math.sin(theta), 6);
+    }
+    // The superseded statics would land elsewhere: pan 0.4 on track 1 would
+    // attenuate L to cos(0.2π) ≈ 0.809 in the hold region — pinned absent.
+    expect(mixR[150]).not.toBeCloseTo(-0.25 * Math.cos((0.4 * Math.PI) / 2), 2);
+  });
+
+  it('EXACT parity survives seeking into the MIDDLE of the wrap segment', () => {
+    const { s, d } = spatialFixture();
+    const from = 450; // inside track 1's azimuth seam crossing
+    const { player, ctx } = makePlayer();
+    player.play(from, s, d);
+    const mix = mixdownSession(s, d).channels;
+    const emu = renderPlayerGraph(ctx, 1000, mix[0].length - from);
+
+    for (const ch of [0, 1] as const) {
+      expect(maxAbsDiff(emu[ch], mix[ch], from, from, 2000)).toBe(0);
+    }
+    // First played sample is DEEP in the moving region: az(450) = 170 +
+    // 20·(250/400) = 182.5 → wrapped −177.5; el(450) = −45 + 105·(150/500)
+    // = −13.5; dist(450) = 0.5 + 3.5·(350/800) = 2.03125.
+    const pos = Math.sin(-177.5 * RAD) * Math.cos(-13.5 * RAD);
+    const gR = pos >= 0 ? 1 : Math.cos((-pos * Math.PI) / 2);
+    expect(Math.fround(emu[1][0])).toBeCloseTo((-0.25 * gR) / 2.03125, 6);
   });
 });

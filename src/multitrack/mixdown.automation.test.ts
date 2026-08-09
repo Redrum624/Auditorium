@@ -2,6 +2,7 @@ import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { automationValueAt, type AutomationKey, type AutomationLane } from './automation';
 import {
   autoPanGainsAt,
+  autoSpatialGainsAt,
   autoVolumeGainAt,
   mixdownSession,
   monoPanGains,
@@ -296,5 +297,227 @@ describe('mixdown automation — neutrality and gating', () => {
     expect(L[500]).toBe(Math.fround(0.5 * dbToLinear(automationValueAt(kA, 500)) * gC));
     expect(L[500]).toBeCloseTo(0.5 * dbToLinear(-60) * gC, 6);
     expect(L[501]).toBeCloseTo(0.5 * dbToLinear(2) * gC, 6);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F5, mixdown side: the spatial group rendered through the SAME automated
+// loop. Every expected value is written out from the law's definition —
+// sin/cos of the inline-interpolated position, the inverse distance ratio —
+// never from the shared helpers, so an identically-wrong pair still fails.
+// Static pan is NON-neutral in every fixture: ruling 4 (spatial supersedes
+// pan lane AND static pan) is what the anchors discriminate.
+// ---------------------------------------------------------------------------
+
+function azLane(keys: AutomationKey[]): AutomationLane {
+  return { param: 'azimuth', keys };
+}
+function elLane(keys: AutomationKey[]): AutomationLane {
+  return { param: 'elevation', keys };
+}
+function distLane(keys: AutomationKey[]): AutomationLane {
+  return { param: 'distance', keys };
+}
+/** The inline reference law: mono constant-power gains at pan position p. */
+function monoLaw(p: number): { gL: number; gR: number } {
+  const theta = ((p + 1) / 2) * (Math.PI / 2);
+  return { gL: Math.cos(theta), gR: Math.sin(theta) };
+}
+const RAD = Math.PI / 180;
+
+describe('F5 mixdown spatial — azimuth wrap region (THE mandatory ±180 fixture)', () => {
+  // Mono clip on [200, 1200); azimuth 170° → −170° over [400, 800]: a 20°
+  // pass BEHIND the listener. Static pan 0.6 must be superseded (ruling 4).
+  const keys: AutomationKey[] = [
+    { positionSample: 400, value: 170, curve: 'equal-gain' },
+    { positionSample: 800, value: -170 },
+  ];
+  const t = track({
+    pan: 0.6,
+    clips: [clip({ documentId: 'm', startSample: 200, lengthSample: 1000 })],
+    automation: [azLane(keys)],
+  });
+  const s = session([t]);
+  const d = docs(monoDoc('m', 0.5));
+
+  /** Inline short-arc azimuth at timeline sample sm (equal-gain ramp). */
+  function azAt(sm: number): number {
+    if (sm <= 400) return 170;
+    if (sm >= 800) return -170;
+    const raw = 170 + 20 * ((sm - 400) / 400);
+    return raw > 180 ? raw - 360 : raw;
+  }
+
+  it('travels the SHORT arc: probes below / on / above the seam sample', () => {
+    const [L, R] = mixdownSession(s, d).channels;
+    // u=0.25 → az 175: the LONG arc would sit at 85° (pos ≈ 0.996, nearly
+    // hard right) — the short arc reads sin(175°) ≈ 0.087, near centre.
+    {
+      const { gL, gR } = monoLaw(Math.sin(175 * RAD));
+      expect(L[500]).toBeCloseTo(0.5 * gL, 6);
+      expect(R[500]).toBeCloseTo(0.5 * gR, 6);
+    }
+    // The seam sample (az exactly 180, pos = sin(180°) ≈ 0): centre.
+    {
+      const { gL, gR } = monoLaw(Math.sin(180 * RAD));
+      expect(L[600]).toBeCloseTo(0.5 * gL, 6);
+      expect(R[600]).toBeCloseTo(0.5 * gR, 6);
+      expect(L[600]).toBeCloseTo(0.5 * Math.cos(Math.PI / 4), 6); // = centre
+    }
+    // One sample below / above the seam: gains move CONTINUOUSLY across it
+    // (the wrap is a numeric seam, not an audio one). Derived bound: the ramp
+    // moves 0.05°/sample; near az 180 the gain slope is
+    // 0.5·(π/4)·sin(θ)·(π/180)·|cos az| ≈ 2.4e-4 per sample, so two samples
+    // step ≈ 4.8e-4 — while a long-arc fold would JUMP by ≈ 0.4.
+    expect(Math.abs(L[599] - L[601])).toBeLessThan(1e-3);
+    // u=0.75 → az −175 (wrapped): sin(−175°) ≈ −0.087 — mirrored to the left.
+    {
+      const { gL } = monoLaw(Math.sin(-175 * RAD));
+      expect(L[700]).toBeCloseTo(0.5 * gL, 6);
+    }
+  });
+
+  it('holds 170° before the first key and −170° after the last; static pan 0.6 is IGNORED', () => {
+    const [L, R] = mixdownSession(s, d).channels;
+    const before = monoLaw(Math.sin(170 * RAD));
+    expect(L[300]).toBeCloseTo(0.5 * before.gL, 6);
+    expect(R[300]).toBeCloseTo(0.5 * before.gR, 6);
+    const after = monoLaw(Math.sin(-170 * RAD));
+    expect(L[1000]).toBeCloseTo(0.5 * after.gL, 6);
+    // The superseded static pan 0.6 would read monoLaw(0.6): gL ≈ 0.454 —
+    // far from every azimuth anchor above (the discriminator for ruling 4).
+    expect(L[300]).not.toBeCloseTo(0.5 * monoLaw(0.6).gL, 2);
+  });
+
+  it('the whole region is the exact float32 product of the shared helpers (wiring)', () => {
+    const [L, R] = mixdownSession(s, d).channels;
+    for (const sm of [200, 399, 400, 401, 599, 600, 601, 799, 800, 1199]) {
+      const p = autoSpatialGainsAt({ azimuth: keys, elevation: null, distance: null }, sm, true);
+      expect(L[sm]).toBe(Math.fround(0.5 * 1 * 1 * p.gL * 1));
+      expect(R[sm]).toBe(Math.fround(0.5 * 1 * 1 * p.gR * 1));
+    }
+  });
+
+  it('inline azAt agrees with the shared evaluator across the ramp (fixture self-check)', () => {
+    for (const sm of [400, 500, 600, 700, 799, 800]) {
+      expect(automationValueAt(keys, sm, 'azimuth')).toBeCloseTo(azAt(sm), 10);
+    }
+  });
+});
+
+describe('F5 mixdown spatial — ruling 4 supersession is total', () => {
+  it('a pan LANE and static pan are both ignored while an azimuth lane exists', () => {
+    const az: AutomationKey[] = [{ positionSample: 0, value: 90 }]; // hard right
+    const pan: AutomationKey[] = [{ positionSample: 0, value: -1 }]; // hard left!
+    const base = {
+      pan: -0.8,
+      clips: [clip({ documentId: 'm', startSample: 0, lengthSample: 500 })],
+    };
+    const withBoth = track({ ...base, automation: [panLane(pan), azLane(az)] });
+    const spatialOnly = track({ ...base, automation: [azLane(az)] });
+    const d = docs(monoDoc('m', 0.5));
+
+    const both = mixdownSession(session([withBoth]), d).channels;
+    const solo = mixdownSession(session([spatialOnly]), d).channels;
+    // Byte-identical: the pan lane contributes NOTHING while spatial governs.
+    expect(both[0]).toEqual(solo[0]);
+    expect(both[1]).toEqual(solo[1]);
+    // And the governing law is the spatial one: az 90 → pos sin(90°)=1 →
+    // mono law hard right (gL = cos(π/2) ≈ 0). The pan lane at −1 would put
+    // the signal ENTIRELY on the left instead — maximally discriminating.
+    expect(both[0][250]).toBeCloseTo(0.5 * Math.cos(Math.PI / 2), 6);
+    expect(both[1][250]).toBeCloseTo(0.5 * Math.sin(Math.PI / 2), 6);
+    expect(both[1][250]).toBeCloseTo(0.5, 6);
+  });
+
+  it('a DISTANCE-only lane activates the group: azimuth/elevation neutral, pan superseded', () => {
+    // Ramp 0 → 2 over [300, 700] crosses the reference distance at s=500:
+    // gain exactly 1 below AND on the reference, 1/d above it.
+    const dist: AutomationKey[] = [
+      { positionSample: 300, value: 0, curve: 'equal-gain' },
+      { positionSample: 700, value: 2 },
+    ];
+    const t = track({
+      pan: 0.6, // must be ignored: distance-only STILL means spatial placement
+      clips: [clip({ documentId: 'm', startSample: 0, lengthSample: 1000 })],
+      automation: [distLane(dist)],
+    });
+    const [L, R] = mixdownSession(session([t]), docs(monoDoc('m', 0.5))).channels;
+    const centre = monoLaw(0); // neutral azimuth/elevation → dead centre
+    // d(400)=0.5 (below ref → unity), d(500)=1 (ON ref → unity):
+    expect(L[400]).toBeCloseTo(0.5 * centre.gL * 1, 6);
+    expect(L[500]).toBeCloseTo(0.5 * centre.gL * 1, 6);
+    // d(600)=1.5 → 1/1.5; d(700)=2 → 0.5; held past the last key:
+    expect(L[600]).toBeCloseTo(0.5 * centre.gL * (1 / 1.5), 6);
+    expect(L[700]).toBeCloseTo(0.5 * centre.gL * 0.5, 6);
+    expect(R[999]).toBeCloseTo(0.5 * centre.gR * 0.5, 6);
+    // Not the static pan image:
+    expect(L[400]).not.toBeCloseTo(0.5 * monoLaw(0.6).gL, 2);
+  });
+});
+
+describe('F5 mixdown spatial — elevation narrows, stereo balance law, volume composes', () => {
+  it('elevation sweeps the image to centre at the zenith (mono law, az 90 fixed)', () => {
+    const az: AutomationKey[] = [{ positionSample: 0, value: 90 }];
+    const el: AutomationKey[] = [
+      { positionSample: 200, value: -90, curve: 'equal-gain' },
+      { positionSample: 600, value: 90 },
+    ];
+    const t = track({
+      clips: [clip({ documentId: 'm', startSample: 0, lengthSample: 800 })],
+      automation: [azLane(az), elLane(el)],
+    });
+    const [L, R] = mixdownSession(session([t]), docs(monoDoc('m', 0.5))).channels;
+    // el −90 (nadir): pos = sin(90°)·cos(−90°) = 0 → centre.
+    expect(L[200]).toBeCloseTo(0.5 * Math.cos(Math.PI / 4), 6);
+    // el 0 (ear level, s=400): pos = 1 → hard right.
+    expect(L[400]).toBeCloseTo(0.5 * Math.cos(Math.PI / 2), 6);
+    expect(R[400]).toBeCloseTo(0.5, 6);
+    // el 45 (s=500): pos = cos(45°) ≈ 0.707 — between centre and hard right.
+    const pos = Math.cos(45 * RAD);
+    const theta = ((pos + 1) / 2) * (Math.PI / 2);
+    expect(L[500]).toBeCloseTo(0.5 * Math.cos(theta), 6);
+    expect(R[500]).toBeCloseTo(0.5 * Math.sin(theta), 6);
+  });
+
+  it('a STEREO clip takes the balance law from the projected position', () => {
+    const az: AutomationKey[] = [{ positionSample: 0, value: -90 }]; // hard left
+    const t = track({
+      clips: [clip({ documentId: 'st', startSample: 0, lengthSample: 500 })],
+      automation: [azLane(az)],
+    });
+    const [L, R] = mixdownSession(session([t]), docs(stereoDoc('st', 0.5, -0.25))).channels;
+    // Balance at pos −1: near side (L) untouched, far side scaled by
+    // cos(π/2) ≈ 0 — written from the balance law's definition.
+    expect(L[250]).toBeCloseTo(0.5 * 1, 6);
+    expect(R[250]).toBeCloseTo(-0.25 * Math.cos(Math.PI / 2), 6);
+    // Also pin a position where the two laws DIFFER: balance centre is
+    // unity (0.5 stays 0.5) where the mono law would read 0.5·0.707.
+    const az2: AutomationKey[] = [{ positionSample: 0, value: 0 }];
+    const t2 = track({
+      clips: [clip({ documentId: 'st', startSample: 0, lengthSample: 500 })],
+      automation: [azLane(az2)],
+    });
+    const [L2] = mixdownSession(session([t2]), docs(stereoDoc('st', 0.5, -0.25))).channels;
+    expect(L2[250]).toBeCloseTo(0.5, 6);
+  });
+
+  it('a volume lane composes with the spatial gains (v · gPan per sample)', () => {
+    const az: AutomationKey[] = [{ positionSample: 0, value: 30 }];
+    const dist: AutomationKey[] = [{ positionSample: 0, value: 2 }];
+    const vol: AutomationKey[] = [
+      { positionSample: 100, value: -6, curve: 'equal-gain' },
+      { positionSample: 500, value: 0 },
+    ];
+    const t = track({
+      volumeDb: 3, // non-neutral static: must be overridden by the lane
+      clips: [clip({ documentId: 'm', startSample: 0, lengthSample: 600 })],
+      automation: [volLane(vol), azLane(az), distLane(dist)],
+    });
+    const [L, R] = mixdownSession(session([t]), docs(monoDoc('m', 0.5))).channels;
+    // s=300: vol −6+6·0.5 = −3 dB; pos = sin(30°) = 0.5; distance 2 → 0.5.
+    const { gL, gR } = monoLaw(Math.sin(30 * RAD));
+    expect(L[300]).toBeCloseTo(0.5 * dbToLinear(-3) * gL * 0.5, 6);
+    expect(R[300]).toBeCloseTo(0.5 * dbToLinear(-3) * gR * 0.5, 6);
   });
 });
