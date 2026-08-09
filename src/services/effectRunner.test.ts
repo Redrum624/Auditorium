@@ -1,4 +1,4 @@
-import { runEffectOnSelection } from './effectRunner';
+import { describeRemoval, runEffectOnSelection } from './effectRunner';
 import { registerEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, docLength } from '../audio/AudioDocument';
@@ -291,6 +291,90 @@ describe('runEffectOnSelection', () => {
     expect(getHistory(docId).done).toEqual(['Match Tempo']);
   });
 
+  it('remaps markers with the exact per-cut rule when the effect reports removedSpans — NOT the proportional stretch (F2 / ruling 3)', async () => {
+    registerEffect({
+      id: 'test-remove-spans',
+      name: 'Remove Spans',
+      category: 'Utility',
+      params: [],
+      // Deletes region-relative [5, 45) from the selected region and reports
+      // it — the Remove Silence shape.
+      process: (channels) => ({
+        channels: channels.map((c) => {
+          const out = new Float32Array(c.length - 40);
+          out.set(c.subarray(0, 5), 0);
+          out.set(c.subarray(45), 5);
+          return out;
+        }),
+        removedSpans: [{ start: 5, end: 45 }],
+      }),
+    });
+    const docId = seedDoc(Array.from({ length: 100 }, (_, i) => i / 128));
+    useAppStore.getState().setSelection({ start: 5, end: 95 }); // absolute cut = [10, 50)
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'm0', name: 'before', positionSample: 3 }, // < region: kept
+      { id: 'm1', name: 'inPause', positionSample: 30 }, // inside the cut: snaps to the join
+      { id: 'm2', name: 'afterCut', positionSample: 70 }, // after the cut: exact shift
+      { id: 'm3', name: 'afterRegion', positionSample: 97 },
+    ]);
+    const before = useAppStore.getState().markers[docId];
+
+    await runEffectOnSelection('test-remove-spans', {});
+
+    // Exact rule: 3 kept; 30 -> 10 (join); 70 -> 30 (minus the 40 removed);
+    // 97 -> 57. The proportional stretch would have said 19 and 41 for the
+    // middle two — markers landing INSIDE re-timed audio at wrong positions.
+    const positions = useAppStore.getState().markers[docId].map((m) => m.positionSample);
+    expect(positions).toEqual([3, 10, 30, 57]);
+    // Ruling 5: the default label reports what was removed. 40 samples at
+    // 44.1 kHz is 0.907 ms -> rounds to "1 ms".
+    expect(getHistory(docId).done).toEqual(['Effect: Remove Spans (1 gap, 1 ms removed)']);
+    // Selection spans the shortened region.
+    expect(useAppStore.getState().selection).toEqual({ start: 5, end: 55 });
+
+    undo(docId);
+    expect(useAppStore.getState().markers[docId]).toEqual(before);
+
+    redo(docId);
+    expect(useAppStore.getState().markers[docId].map((m) => m.positionSample)).toEqual([3, 10, 30, 57]);
+  });
+
+  it('a removedSpans effect that removed nothing says so in the label and leaves markers untouched', async () => {
+    registerEffect({
+      id: 'test-remove-none',
+      name: 'Remove None',
+      category: 'Utility',
+      params: [],
+      process: (channels) => ({ channels: channels.map((c) => c.slice()), removedSpans: [] }),
+    });
+    const docId = seedDoc([0.1, 0.2, 0.3]);
+    useAppStore.getState().setMarkersForDoc(docId, [{ id: 'm0', name: 'a', positionSample: 1 }]);
+    const before = useAppStore.getState().markers[docId];
+
+    await runEffectOnSelection('test-remove-none', {});
+
+    expect(getHistory(docId).done).toEqual(['Effect: Remove None (nothing removed)']);
+    expect(useAppStore.getState().markers[docId]).toEqual(before);
+  });
+
+  it('a caller-supplied label still overrides the removal report', async () => {
+    registerEffect({
+      id: 'test-remove-labelled',
+      name: 'Remove Labelled',
+      category: 'Utility',
+      params: [],
+      process: (channels) => ({
+        channels: channels.map((c) => c.slice(1)),
+        removedSpans: [{ start: 0, end: 1 }],
+      }),
+    });
+    const docId = seedDoc([0.1, 0.2, 0.3]);
+
+    await runEffectOnSelection('test-remove-labelled', {}, { label: 'Tighten It' });
+
+    expect(getHistory(docId).done).toEqual(['Tighten It']);
+  });
+
   it('applies no edit when the effect throws (error path)', async () => {
     registerEffect({
       id: 'test-throw',
@@ -308,5 +392,32 @@ describe('runEffectOnSelection', () => {
 
     expect(Array.from(activeChannel())).toEqual(f32(values));
     expect(canUndo(docId)).toBe(false);
+  });
+});
+
+describe('describeRemoval (ruling 5 formatting)', () => {
+  it('says "nothing removed" for zero spans', () => {
+    expect(describeRemoval([], 44100)).toBe('nothing removed');
+  });
+
+  it('uses singular/plural and ms below one second', () => {
+    expect(describeRemoval([{ start: 100, end: 541 }], 44100)).toBe('1 gap, 10 ms removed');
+    expect(describeRemoval(
+      [
+        { start: 0, end: 44100 },
+        { start: 50000, end: 94100 },
+      ],
+      44100
+    )).toBe('2 gaps, 2.00 s removed');
+  });
+
+  it('the ROUNDED ms picks the unit: below / on / just-under the 1 s boundary', () => {
+    // 44056 samples = 999.00 ms -> "999 ms".
+    expect(describeRemoval([{ start: 0, end: 44056 }], 44100)).toBe('1 gap, 999 ms removed');
+    // Exactly one second.
+    expect(describeRemoval([{ start: 0, end: 44100 }], 44100)).toBe('1 gap, 1.00 s removed');
+    // 44078 samples = 999.5 ms: rounds to 1000, so it must read "1.00 s",
+    // never "1000 ms".
+    expect(describeRemoval([{ start: 0, end: 44078 }], 44100)).toBe('1 gap, 1.00 s removed');
   });
 });

@@ -70,7 +70,8 @@ class FakeDspWorker {
 
         this.emit({ type: 'progress', id: msg.id, fraction: 0.5 });
         const result = def.process(msg.channels, msg.sampleRate, msg.params);
-        this.emit({ type: 'done', id: msg.id, channels: result.channels });
+        // Mirror dsp.worker.ts: `removedSpans` (F2) rides the done message.
+        this.emit({ type: 'done', id: msg.id, channels: result.channels, removedSpans: result.removedSpans });
       } catch (err) {
         this.emit({
           type: 'error',

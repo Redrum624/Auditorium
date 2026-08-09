@@ -55,6 +55,21 @@ function docBytes(doc: AudioDocument): number {
  *   effectRunner originally used 'replace' here, which drops every interior
  *   marker — including all of them on a whole-file Time Stretch. Reviewed and
  *   ruled proportional.]
+ * - cuts (F2, Remove Silence): `cuts` is a sorted, non-overlapping list of
+ *   deleted [start,end) spans. Before the first cut keep; at/after a cut's
+ *   end shift left by the total length of every cut at or before it; INSIDE
+ *   a cut, snap to the cut's join point (cut.start minus the removal before
+ *   it) rather than drop. Deliberate divergence from 'delete': there the
+ *   USER deleted that region, content and cues included; here the effect
+ *   removed samples it classified as silence, and a marker inside a silent
+ *   gap is typically a cue placed IN the pause (podcast chapter markers live
+ *   exactly there) — dropping it would be the data-loss-class failure the
+ *   marker remap exists to prevent, while the join point is exactly where
+ *   that pause survives in the output. Every branch is monotonic in pos, so
+ *   relative marker order is preserved. Boundary equivalences, argued not
+ *   assumed: at pos === cut.start the snap equals the keep-side formula, and
+ *   at pos === cut.end the snap equals the shift-side formula (both reduce
+ *   to cut.start - removedBefore), so the rule is seamless at both edges.
  */
 export type MarkerRemap =
   | { type: 'delete'; start: number; end: number }
@@ -62,7 +77,8 @@ export type MarkerRemap =
   | { type: 'replace'; start: number; end: number; length: number }
   | { type: 'trim'; start: number; end: number }
   | { type: 'rescale'; fromRate: number; toRate: number }
-  | { type: 'stretch'; start: number; end: number; length: number };
+  | { type: 'stretch'; start: number; end: number; length: number }
+  | { type: 'cuts'; cuts: { start: number; end: number }[] };
 
 /** Maps a single marker position per `remap`'s rule; `null` means "drop". */
 function remapPosition(pos: number, remap: MarkerRemap): number | null {
@@ -90,6 +106,15 @@ function remapPosition(pos: number, remap: MarkerRemap): number | null {
         return remap.start + Math.round((pos - remap.start) * (remap.length / (remap.end - remap.start)));
       }
       return pos + (remap.length - (remap.end - remap.start));
+    case 'cuts': {
+      let removedBefore = 0;
+      for (const cut of remap.cuts) {
+        if (pos < cut.start) break;
+        if (pos < cut.end) return cut.start - removedBefore; // inside: snap to the join
+        removedBefore += cut.end - cut.start;
+      }
+      return pos - removedBefore;
+    }
   }
 }
 

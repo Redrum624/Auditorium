@@ -105,6 +105,15 @@ under a length-changing effect map proportionally rather than being dropped.
 Positions are always clamped to `[0, document length]`, so a marker can never
 be written to disk past the end of the file.
 
+**v1.10 refinement (F2):** the proportional rule above is right for effects
+that TRANSFORM the whole region but wrong for Remove Silence, which deletes
+discontiguous interior spans — a marker on speech after a removed gap must
+shift by exactly the removal before it, not by the region's average shrink
+ratio. Span-deleting effects therefore report their removed spans and markers
+get an exact piecewise remap; a marker INSIDE a removed span (a cue placed in
+the pause — podcast chapters live there) snaps to the splice point instead of
+dropping, unlike an explicit user delete.
+
 **Remaining notes (interop granularity, not persistence gaps):** third-party
 tools read the standard chapter fields at millisecond granularity (that is all
 ID3 `CHAP`/vorbis `CHAPTER` timestamps can express); Auditorium itself reopens

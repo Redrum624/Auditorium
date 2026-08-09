@@ -4,11 +4,30 @@ import type { EffectParamValue } from '../effects/types';
 import { useAppStore } from '../stores/appStore';
 import { createDspWorker } from '../workers/createDspWorker';
 import { applyEdit } from './editOps';
+import type { MarkerRemap } from './editOps';
 
 type WorkerReply =
   | { type: 'progress'; id: number; fraction: number }
-  | { type: 'done'; id: number; channels: Float32Array[] }
+  | { type: 'done'; id: number; channels: Float32Array[]; removedSpans?: { start: number; end: number }[] }
   | { type: 'error'; id: number; message: string };
+
+/**
+ * Human-readable summary of what a span-deleting effect removed (ruling 5:
+ * the user must be able to see the effect DID something). Rendered into the
+ * default History label because a param `readout` cannot know it — readouts
+ * see only the param value and the region length, never the samples, and the
+ * removal is only known after the effect has run. Sub-second totals are shown
+ * in ms so a small removal never reads as "0.0 s"; the rounded ms value picks
+ * the unit, so 999.7 ms shows as "1.00 s", not "1000 ms".
+ */
+export function describeRemoval(spans: { start: number; end: number }[], sampleRate: number): string {
+  if (spans.length === 0) return 'nothing removed';
+  let total = 0;
+  for (const s of spans) total += s.end - s.start;
+  const ms = Math.round((total / sampleRate) * 1000);
+  const amount = ms < 1000 ? `${ms} ms` : `${(total / sampleRate).toFixed(2)} s`;
+  return `${spans.length} gap${spans.length === 1 ? '' : 's'}, ${amount} removed`;
+}
 
 let nextRunId = 1;
 
@@ -76,20 +95,35 @@ export async function runEffectOnSelection(
         worker.terminate();
         const resultChannels = msg.channels;
         const resultLen = resultChannels[0]?.length ?? 0;
+        // Most effects are equal-length (no remap needed), but length-changing
+        // ones (Time Stretch, Pitch Shift) TRANSFORM the region rather than
+        // replacing it with unrelated content, so interior markers ride the
+        // stretch proportionally instead of dropping (Task M3 fix round 2 —
+        // 'replace' was ruled wrong here: it drops every interior marker,
+        // including all of them on a whole-file Time Stretch). Markers at/
+        // after the region still shift by the same length delta either way.
+        //
+        // A proportional stretch is WRONG, however, for an effect that deletes
+        // discontiguous interior spans (Remove Silence, F2): there a marker on
+        // speech after a removed gap must shift by exactly the removal before
+        // it, not by the region's average shrink ratio. Such effects report
+        // their `removedSpans` (region-relative; made absolute here) and get
+        // the exact piecewise 'cuts' remap instead.
+        const remap: MarkerRemap = msg.removedSpans
+          ? { type: 'cuts', cuts: msg.removedSpans.map((s) => ({ start: start + s.start, end: start + s.end })) }
+          : { type: 'stretch', start, end, length: resultLen };
         try {
           applyEdit(
-            label ?? `Effect: ${def.name}`,
+            // Ruling 5 (F2): a span-deleting effect's default label reports
+            // what it removed; an explicit caller label still wins.
+            label ??
+              (msg.removedSpans
+                ? `Effect: ${def.name} (${describeRemoval(msg.removedSpans, sampleRate)})`
+                : `Effect: ${def.name}`),
             docId,
             (d) => replaceRegion(d, start, end, resultChannels),
             { selection: { start, end: start + resultLen }, cursorSample: start },
-            // Most effects are equal-length (no remap needed), but length-changing
-            // ones (Time Stretch, Pitch Shift) TRANSFORM the region rather than
-            // replacing it with unrelated content, so interior markers ride the
-            // stretch proportionally instead of dropping (Task M3 fix round 2 —
-            // 'replace' was ruled wrong here: it drops every interior marker,
-            // including all of them on a whole-file Time Stretch). Markers at/
-            // after the region still shift by the same length delta either way.
-            { type: 'stretch', start, end, length: resultLen }
+            remap
           );
           onProgress?.(1);
         } catch (err) {

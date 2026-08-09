@@ -32,8 +32,16 @@ export interface EffectParamDef {
 }
 
 export interface EffectResult {
-  channels: Float32Array[];
-} // may differ in length (time-stretch)
+  channels: Float32Array[]; // may differ in length (time-stretch)
+  /** Optional (F2): a length-changing effect that DELETES discontiguous
+   * interior spans (Remove Silence) lists here the exact INPUT-relative
+   * `[start, end)` sample spans absent from the output — sorted ascending,
+   * non-overlapping, with lengths summing to `inputLen - outputLen`.
+   * effectRunner then remaps markers with the exact piecewise 'cuts' rule
+   * instead of the proportional 'stretch' heuristic, which mis-places every
+   * marker after a removed gap. Absent for all other effects. */
+  removedSpans?: { start: number; end: number }[];
+}
 
 export type EffectCategory =
   | 'Amplitude'

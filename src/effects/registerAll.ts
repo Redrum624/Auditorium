@@ -17,6 +17,7 @@ import { flangerEffect } from './time/FlangerEffect';
 import { distortionEffect } from './color/DistortionEffect';
 import { deHumEffect } from './restoration/DeHumEffect';
 import { noiseReductionEffect } from './restoration/NoiseReductionEffect';
+import { silenceRemoverEffect } from './restoration/SilenceRemoverEffect';
 import { channelMixerEffect } from './stereo/ChannelMixerEffect';
 import { panEffect } from './stereo/PanEffect';
 import { timeStretchEffect } from './pitch/TimeStretchEffect';
@@ -51,6 +52,7 @@ export function registerAllEffects(): void {
   registerEffect(distortionEffect);
   registerEffect(deHumEffect);
   registerEffect(noiseReductionEffect);
+  registerEffect(silenceRemoverEffect);
   registerEffect(channelMixerEffect);
   registerEffect(panEffect);
   registerEffect(timeStretchEffect);

@@ -676,6 +676,67 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
     expect(markerPositions(doc.id)).toEqual([1, 2, 8, 10, 13]);
   });
 
+  it('cuts (F2): before the first cut keeps, inside a cut SNAPS to the join (never drops), at/after the end shifts by the removal', () => {
+    const doc = addDoc([ramp(100)]);
+    // Boundary probes per operand role on cut [10, 50): 9 = start-1 (keep),
+    // 10 = start (first removed sample: snap), 49 = end-1 (snap), 50 = end
+    // (shift — input[50] lands exactly at the seam too), 95 well after.
+    setMarkers(doc.id, [9, 10, 49, 50, 95]);
+    const before = useAppStore.getState().markers[doc.id];
+
+    applyEdit(
+      'Remove Silence',
+      doc.id,
+      (d) => ({ ...d, channels: d.channels.map(() => new Float32Array(60)) }), // 100 - 40
+      undefined,
+      { type: 'cuts', cuts: [{ start: 10, end: 50 }] }
+    );
+
+    // A marker inside the cut is a cue in the removed pause: it SURVIVES at
+    // the join (10), unlike 'delete' which drops it — the ruling-3 decision.
+    expect(markerPositions(doc.id)).toEqual([9, 10, 10, 10, 55]);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+
+    redo(doc.id);
+    expect(markerPositions(doc.id)).toEqual([9, 10, 10, 10, 55]);
+  });
+
+  it('cuts: a second cut repeats every boundary on its own object, and removals accumulate', () => {
+    const doc = addDoc([ramp(100)]);
+    // cuts [10,20) and [40,70): 15 inside cut 1 -> its join 10; 25 between
+    // cuts -> shifts by cut 1 only (15); 39/40/69/70 probe cut 2's start and
+    // end boundaries with 10 already removed before it; 95 after everything.
+    setMarkers(doc.id, [15, 25, 39, 40, 69, 70, 95]);
+
+    applyEdit(
+      'Remove Silence',
+      doc.id,
+      (d) => ({ ...d, channels: d.channels.map(() => new Float32Array(60)) }), // 100 - 10 - 30
+      undefined,
+      { type: 'cuts', cuts: [{ start: 10, end: 20 }, { start: 40, end: 70 }] }
+    );
+
+    expect(markerPositions(doc.id)).toEqual([10, 15, 29, 30, 30, 30, 55]);
+  });
+
+  it('cuts: an empty cut list is a marker no-op', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [2, 7]);
+    const before = useAppStore.getState().markers[doc.id];
+
+    applyEdit(
+      'Remove Silence',
+      doc.id,
+      (d) => ({ ...d, channels: d.channels.map((c) => Float32Array.from(c)) }),
+      undefined,
+      { type: 'cuts', cuts: [] }
+    );
+
+    expect(useAppStore.getState().markers[doc.id]).toEqual(before);
+  });
+
   it('a delete that drops ALL markers still writes the empty list (and undo restores it) — pins the OR guard, not AND (Minor 1 pin)', () => {
     const doc = addDoc([ramp(10)]);
     setMarkers(doc.id, [2, 3, 4]); // all inside the region about to be deleted

@@ -49,7 +49,12 @@ ctx.onmessage = (e) => {
 
     const result = def.process(msg.channels, msg.sampleRate, msg.params, onProgress);
     const transfer = result.channels.map((c) => c.buffer as ArrayBuffer);
-    ctx.postMessage({ type: 'done', id: msg.id, channels: result.channels }, transfer);
+    // `removedSpans` (F2) rides along so effectRunner can remap markers with
+    // the exact per-cut rule; plain numbers, so no transfer list entry.
+    ctx.postMessage(
+      { type: 'done', id: msg.id, channels: result.channels, removedSpans: result.removedSpans },
+      transfer
+    );
   } catch (err) {
     ctx.postMessage({
       type: 'error',
