@@ -257,13 +257,18 @@ describe('spliceCuts — assembly and the crossfade law', () => {
     // Equal DC on both sides of the blend: at t=0.5 the equal-power pair at
     // rho 0 sums to (cos+sin)(pi/4) = sqrt(2) — the law is level-preserving
     // for UNCORRELATED sides; identical DC is the worst-case correlated
-    // fixture and bounds the bump at +3.01 dB. This pins that the blend is
-    // the fades.ts law (an equal-gain blend would give exactly 1.0 here).
-    // xfade 101 (odd) so sample i=50 sits at exactly t = 50/100 = 0.5.
+    // fixture and bounds the bump at +3.01 dB. xfade 101 (odd) so sample
+    // i=50 sits at exactly t = 50/100 = 0.5.
     const input = new Float32Array(2000).fill(0.001);
     const cut: SilenceCut = { fadeOutStart: 500, fadeInStart: 899, xfade: 101, removed: { start: 601, end: 1000 } };
     const [out] = spliceCuts([input], [cut]);
     expect(out[550]).toBeCloseTo(0.001 * Math.SQRT2, 9);
+    // At the CENTRE every k-normalised curve coincides on equal DC (mutation
+    // check: swapping the curve survived a centre-only probe), so the curve
+    // identity is pinned OFF-centre: at t=0.25 equal-power sums to
+    // cos(pi/8)+sin(pi/8) = 1.30656, where normalised equal-gain would give
+    // 1.0/sqrt(0.625) = 1.26491.
+    expect(out[525]).toBeCloseTo(0.001 * (Math.cos(Math.PI / 8) + Math.sin(Math.PI / 8)), 9);
   });
 
   it('singleton blend (xfade 1) uses the t=0.5 convention from mixdown.ts', () => {
