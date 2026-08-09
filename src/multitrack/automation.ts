@@ -32,15 +32,41 @@ import { FADE_CURVES, fadeInShape, type FadeCurve } from '../dsp/fades';
  * the parse boundary and the UI.
  */
 
-/** The parameters a track lane can automate in v1.10 (F0's deliberately
- * bounded scope: track volume and pan only — not clip gain, not effect
- * parameters, not sends). Extending this union + `clampAutomationValue` is
- * the designed extension point for later time-varying parameters. */
-export type AutomationParam = 'volumeDb' | 'pan';
+/** The parameters a track lane can automate. F0 (v1.10) shipped `volumeDb`
+ * and `pan`; F5 (v1.11) extends the union — the designed extension point —
+ * with the spatial position: `azimuth` (degrees, 0 = front, positive =
+ * toward the RIGHT ear, ±180 = behind — the pan sign convention), `elevation`
+ * (degrees, 0 = ear level, +90 = zenith) and `distance` (unitless multiples
+ * of the reference distance — see `dsp/spatial.ts` for the projection these
+ * feed). Still deliberately bounded: track parameters only — not clip gain,
+ * not effect parameters, not sends. */
+export type AutomationParam = 'volumeDb' | 'pan' | 'azimuth' | 'elevation' | 'distance';
 
 /** Every automatable parameter, for runtime membership checks (the
  * `FADE_CURVES.includes` precedent — the type doesn't protect a JS caller). */
-export const AUTOMATION_PARAMS: readonly AutomationParam[] = ['volumeDb', 'pan'];
+export const AUTOMATION_PARAMS: readonly AutomationParam[] = [
+  'volumeDb',
+  'pan',
+  'azimuth',
+  'elevation',
+  'distance',
+];
+
+/** UI display names, one per parameter (the `FADE_CURVE_LABELS` precedent —
+ * a single source so panels and lanes cannot drift). */
+export const AUTOMATION_PARAM_LABELS: Record<AutomationParam, string> = {
+  volumeDb: 'Volume',
+  pan: 'Pan',
+  azimuth: 'Azimuth',
+  elevation: 'Elevation',
+  distance: 'Distance',
+};
+
+/** The spatial parameters as a group: while ANY of these three lanes has a
+ * key, the track's placement comes from the spatial projection and the `pan`
+ * parameter — lane AND static field — is superseded entirely (F5 ruling 4;
+ * see `resolveAutomation`). */
+export const SPATIAL_PARAMS: readonly AutomationParam[] = ['azimuth', 'elevation', 'distance'];
 
 /** One automation key. `curve` shapes the segment from THIS key to the NEXT
  * key (a trailing key's curve is inert until a later key exists); absent means
@@ -75,11 +101,19 @@ export interface AutomationLane {
 export const DEFAULT_AUTOMATION_CURVE: FadeCurve = 'equal-gain';
 
 /** Each parameter's legal value range — THE single source for the clamp below
- * and for the UI's value↔pixel mapping. These are the Track field ranges
- * (`session.ts`): volumeDb −60..+12 dB, pan −1..1. */
+ * and for the UI's value↔pixel mapping. volumeDb/pan are the Track field
+ * ranges (`session.ts`): −60..+12 dB, −1..1. The spatial ranges: azimuth
+ * ±180° (the full circle; both endpoints are the same direction — see the
+ * circular interpolation note on `automationValueAt`), elevation ±90°
+ * (nadir..zenith), distance 0..10 — 10 × the reference distance is −20 dB
+ * under the inverse law (`dsp/spatial.ts`), a chosen UI depth bound exactly
+ * like volumeDb's −60 floor. */
 export const AUTOMATION_RANGES: Record<AutomationParam, { min: number; max: number }> = {
   volumeDb: { min: -60, max: 12 },
   pan: { min: -1, max: 1 },
+  azimuth: { min: -180, max: 180 },
+  elevation: { min: -90, max: 90 },
+  distance: { min: 0, max: 10 },
 };
 
 /** Clamps a key value to its parameter's legal range — THE value-range
@@ -108,6 +142,37 @@ function lastAtOrBefore(keys: readonly AutomationKey[], sample: number): number 
 }
 
 /**
+ * F5 — the short-arc wrap of an azimuth DELTA into [−180, 180): the signed
+ * degrees actually travelled between two azimuth keys. Interpolating a lane
+ * across ±180 takes the SHORT way round — two keys at 170° and −170° mean a
+ * 20° pass behind the listener, not a 340° sweep back through the front: the
+ * keys describe a motion, and the shortest arc is the least-surprise
+ * continuation (a deliberate long sweep is expressed by adding an
+ * intermediate key, which the short-arc rule then honours segment by
+ * segment). ANTIPODAL keys (delta exactly ±180 — both arcs equal) travel the
+ * DECREASING-azimuth arc, through the listener's LEFT: `−180`, the value the
+ * plain mod formula produces for both signs, kept as the deterministic
+ * tie-break and pinned by test. In-range deltas return bit-exact (no mod
+ * round-trip).
+ */
+export function wrapAzimuthDelta(d: number): number {
+  if (d > -180 && d < 180) return d;
+  return ((((d + 180) % 360) + 360) % 360) - 180;
+}
+
+/** F5 — re-wraps an interpolated azimuth VALUE into [−180, 180]. Values
+ * already in range — every key value, by the range clamp — return BIT-EXACT
+ * (both endpoints included: a key may hold +180, and +180 must come back as
+ * +180, not −180; the two label the same direction, so audio cannot tell,
+ * but the evaluator's exact-on-key contract can). Only a mid-segment value
+ * carried past the seam by the short arc (range ±360 by construction) takes
+ * the mod formula, which lands in [−180, 180). */
+export function wrapAzimuth(v: number): number {
+  if (v >= -180 && v <= 180) return v;
+  return ((((v + 180) % 360) + 360) % 360) - 180;
+}
+
+/**
  * THE evaluator: the parameter's value at timeline sample `sample` — one pure
  * function serving BOTH audio engines (ruling A / trap T5: two evaluators
  * would disagree at segment boundaries and in the hold regions), the UI's
@@ -128,28 +193,72 @@ function lastAtOrBefore(keys: readonly AutomationKey[], sample: number): number 
  *    the arithmetic collapses to `v0 + (v1 − v0) · 0` — no floating-point
  *    round-trip can move it).
  *
+ * F5 — CIRCULAR PARAMETER: when `param` is `'azimuth'` the value domain is a
+ * circle and segments interpolate along the SHORT arc,
+ * `wrapAzimuth(v0 + wrapAzimuthDelta(v1 − v0) · shape(u))` — see the two
+ * helpers above for the arc choice, the antipodal tie-break and the exactness
+ * guarantees (hold regions and on-key samples still return the stored value
+ * bit-exact; only mid-segment values can wrap). Every OTHER param — and an
+ * omitted `param`, which existing F0 callers rely on — interpolates linearly
+ * exactly as before. A caller evaluating an azimuth lane MUST pass the param;
+ * both audio engines route through `autoSpatialGainsAt` (mixdown.ts), which
+ * does, and the envelope UI passes its lane's param — the single-evaluator
+ * discipline (T5) with the wrap decided in exactly one place.
+ *
  * `keys` must be non-empty and ascending by `positionSample` (the lane
  * invariant). Callers gate emptiness through `resolveAutomation`.
  */
-export function automationValueAt(keys: readonly AutomationKey[], sample: number): number {
+export function automationValueAt(
+  keys: readonly AutomationKey[],
+  sample: number,
+  param?: AutomationParam
+): number {
   const i = lastAtOrBefore(keys, sample);
   if (i < 0) return keys[0].value; // hold before the first key
   if (i >= keys.length - 1) return keys[keys.length - 1].value; // hold after the last
   const a = keys[i];
   const b = keys[i + 1];
   const u = (sample - a.positionSample) / (b.positionSample - a.positionSample);
-  return a.value + (b.value - a.value) * fadeInShape(u, a.curve ?? DEFAULT_AUTOMATION_CURVE);
+  const shape = fadeInShape(u, a.curve ?? DEFAULT_AUTOMATION_CURVE);
+  if (param === 'azimuth') {
+    return wrapAzimuth(a.value + wrapAzimuthDelta(b.value - a.value) * shape);
+  }
+  return a.value + (b.value - a.value) * shape;
+}
+
+/** F5 — the spatial lanes as a resolved group: each of the three key lists,
+ * `null` when that lane is absent or has zero keys. The GROUP exists (the
+ * spec's `spatial` is non-null) as soon as ANY of the three is active; a
+ * missing member then evaluates at its `SPATIAL_NEUTRAL` value inside
+ * `autoSpatialGainsAt` (dead ahead / ear level / reference distance). */
+export interface SpatialAutomationSpec {
+  azimuth: readonly AutomationKey[] | null;
+  elevation: readonly AutomationKey[] | null;
+  distance: readonly AutomationKey[] | null;
 }
 
 /** A track's ACTIVE automation, resolved once per render pass: the volume and
- * pan key lists, `null` per parameter when that lane is absent OR has zero
- * keys. The whole spec is `null` when nothing is active — the shared
- * has-automation test both engines gate on (the `resolveClipFadeSpecs` Map
- * pattern), which is what keeps a lane-less track on the pristine static code
- * path, byte-identical to v1.9.2. */
+ * pan key lists — `null` per parameter when that lane is absent OR has zero
+ * keys — plus the F5 spatial group. The whole spec is `null` when nothing is
+ * active — the shared has-automation test both engines gate on (the
+ * `resolveClipFadeSpecs` Map pattern), which is what keeps a lane-less track
+ * on the pristine static code path, byte-identical to v1.9.2.
+ *
+ * F5 RULING 4 — WHILE `spatial` IS NON-NULL, `pan` IS SUPERSEDED. The spatial
+ * projection and the pan parameter compute the same thing — the track's
+ * stereo placement — and two placement laws composed would double-apply
+ * position (the exact reasoning of F0's override-not-offset ruling B, one
+ * level up: the more specific placement system IS the placement). So while
+ * any spatial lane has a key, BOTH engines take their channel gains from
+ * `autoSpatialGainsAt` and ignore the pan lane AND the static `Track.pan`
+ * entirely; `pan` here stays whatever its lane resolves to, but consumers
+ * must consult `spatial` FIRST (both engines and the header UI do — pinned
+ * by the supersession tests). A track with NO spatial lane behaves exactly
+ * as F0 shipped it, byte-identical (v1.10.0's ruling 10, re-pinned for F5). */
 export interface TrackAutomationSpec {
   volume: readonly AutomationKey[] | null;
   pan: readonly AutomationKey[] | null;
+  spatial: SpatialAutomationSpec | null;
 }
 
 /**
@@ -165,13 +274,23 @@ export function resolveAutomation(
   if (!lanes || lanes.length === 0) return null;
   let volume: readonly AutomationKey[] | null = null;
   let pan: readonly AutomationKey[] | null = null;
+  let azimuth: readonly AutomationKey[] | null = null;
+  let elevation: readonly AutomationKey[] | null = null;
+  let distance: readonly AutomationKey[] | null = null;
   for (const lane of lanes) {
     if (lane.keys.length === 0) continue; // zero keys: indistinguishable from no lane
     if (lane.param === 'volumeDb') volume = lane.keys;
     else if (lane.param === 'pan') pan = lane.keys;
+    else if (lane.param === 'azimuth') azimuth = lane.keys;
+    else if (lane.param === 'elevation') elevation = lane.keys;
+    else if (lane.param === 'distance') distance = lane.keys;
   }
-  if (volume === null && pan === null) return null;
-  return { volume, pan };
+  const spatial: SpatialAutomationSpec | null =
+    azimuth !== null || elevation !== null || distance !== null
+      ? { azimuth, elevation, distance }
+      : null;
+  if (volume === null && pan === null && spatial === null) return null;
+  return { volume, pan, spatial };
 }
 
 /**

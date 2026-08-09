@@ -6,6 +6,8 @@ import {
   clampAutomationValue,
   resolveAutomation,
   sanitizeAutomationLanes,
+  wrapAzimuth,
+  wrapAzimuthDelta,
   type AutomationKey,
   type AutomationLane,
 } from './automation';
@@ -126,6 +128,33 @@ describe('clampAutomationValue — per-param range boundaries (below / on / abov
     expect(clampAutomationValue('pan', 0.999)).toBe(0.999);
     expect(clampAutomationValue('pan', 1)).toBe(1);
     expect(clampAutomationValue('pan', 1.001)).toBe(1);
+  });
+
+  it('F5 — azimuth clamps to [-180, 180] (a CLAMP, not a wrap: only the evaluator wraps)', () => {
+    expect(clampAutomationValue('azimuth', -180.001)).toBe(-180);
+    expect(clampAutomationValue('azimuth', -180)).toBe(-180);
+    expect(clampAutomationValue('azimuth', -179.999)).toBe(-179.999);
+    expect(clampAutomationValue('azimuth', 179.999)).toBe(179.999);
+    expect(clampAutomationValue('azimuth', 180)).toBe(180);
+    expect(clampAutomationValue('azimuth', 180.001)).toBe(180);
+  });
+
+  it('F5 — elevation clamps to [-90, 90]', () => {
+    expect(clampAutomationValue('elevation', -90.001)).toBe(-90);
+    expect(clampAutomationValue('elevation', -90)).toBe(-90);
+    expect(clampAutomationValue('elevation', -89.999)).toBe(-89.999);
+    expect(clampAutomationValue('elevation', 89.999)).toBe(89.999);
+    expect(clampAutomationValue('elevation', 90)).toBe(90);
+    expect(clampAutomationValue('elevation', 90.001)).toBe(90);
+  });
+
+  it('F5 — distance clamps to [0, 10]', () => {
+    expect(clampAutomationValue('distance', -0.001)).toBe(0);
+    expect(clampAutomationValue('distance', 0)).toBe(0);
+    expect(clampAutomationValue('distance', 0.001)).toBe(0.001);
+    expect(clampAutomationValue('distance', 9.999)).toBe(9.999);
+    expect(clampAutomationValue('distance', 10)).toBe(10);
+    expect(clampAutomationValue('distance', 10.001)).toBe(10);
   });
 });
 
@@ -260,7 +289,173 @@ describe('sanitizeAutomationLanes — the parse-boundary arithmetic (trap T13)',
     expect((lanes as AutomationLane[])[0].keys).not.toBe(rawKeys);
   });
 
-  it('AUTOMATION_PARAMS is the runtime allow-list (volumeDb and pan only, F0 scope)', () => {
-    expect(AUTOMATION_PARAMS).toEqual(['volumeDb', 'pan']);
+  it('AUTOMATION_PARAMS is the runtime allow-list (F0 volume/pan + F5 spatial)', () => {
+    expect(AUTOMATION_PARAMS).toEqual(['volumeDb', 'pan', 'azimuth', 'elevation', 'distance']);
+  });
+
+  it('F5 — accepts the spatial params and clamps their values to the spatial ranges', () => {
+    const lanes = sanitizeAutomationLanes([
+      { param: 'azimuth', keys: [key(0, -181), key(100, 181), key(200, 90)] },
+      { param: 'elevation', keys: [key(0, -90.5), key(100, 90.5), key(200, 45)] },
+      { param: 'distance', keys: [key(0, -1), key(100, 10.5), key(200, 2.5)] },
+    ]);
+    expect(lanes).toEqual([
+      { param: 'azimuth', keys: [key(0, -180), key(100, 180), key(200, 90)] },
+      { param: 'elevation', keys: [key(0, -90), key(100, 90), key(200, 45)] },
+      { param: 'distance', keys: [key(0, 0), key(100, 10), key(200, 2.5)] },
+    ]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F5 — the circular azimuth domain. The ±180° wrap is the boundary most
+// likely to be wrong (the brief's mandatory fixture): every comparison in
+// wrapAzimuthDelta / wrapAzimuth is probed below / on / above, with values
+// where taking the LONG arc — or wrapping when it should not — MOVES the
+// answer.
+// ---------------------------------------------------------------------------
+
+describe('F5 wrapAzimuthDelta — short-arc segment delta', () => {
+  it('in-range deltas return bit-exact (below/above zero, just inside both boundaries)', () => {
+    expect(wrapAzimuthDelta(0)).toBe(0);
+    expect(wrapAzimuthDelta(20.25)).toBe(20.25);
+    expect(wrapAzimuthDelta(-20.25)).toBe(-20.25);
+    expect(wrapAzimuthDelta(179.5)).toBe(179.5); // just below +180
+    expect(wrapAzimuthDelta(-179.5)).toBe(-179.5); // just above −180
+  });
+
+  it('antipodal deltas (exactly ±180) both take the DECREASING arc: −180 (pinned tie-break)', () => {
+    expect(wrapAzimuthDelta(180)).toBe(-180);
+    expect(wrapAzimuthDelta(-180)).toBe(-180);
+  });
+
+  it('out-of-range deltas wrap to the short arc (just past ±180, and far out)', () => {
+    expect(wrapAzimuthDelta(180.5)).toBe(-179.5); // just above +180 → short arc backwards
+    expect(wrapAzimuthDelta(-180.5)).toBe(179.5); // just below −180 → short arc forwards
+    expect(wrapAzimuthDelta(340)).toBe(-20); // 170 → −170 travels 20° behind, not 340°
+    expect(wrapAzimuthDelta(-340)).toBe(20);
+    expect(wrapAzimuthDelta(250)).toBe(-110);
+  });
+});
+
+describe('F5 wrapAzimuth — value re-wrap into [−180, 180]', () => {
+  it('in-range values return bit-exact, INCLUDING both endpoints (a key may hold ±180)', () => {
+    expect(wrapAzimuth(0)).toBe(0);
+    expect(wrapAzimuth(179.999)).toBe(179.999);
+    expect(wrapAzimuth(-179.999)).toBe(-179.999);
+    expect(wrapAzimuth(180)).toBe(180); // ON the boundary: NOT folded to −180
+    expect(wrapAzimuth(-180)).toBe(-180);
+  });
+
+  it('out-of-range values wrap (just past each endpoint, and mid-arc)', () => {
+    expect(wrapAzimuth(180.5)).toBe(-179.5);
+    expect(wrapAzimuth(-180.5)).toBe(179.5);
+    expect(wrapAzimuth(190)).toBe(-170);
+    expect(wrapAzimuth(-190)).toBe(170);
+    expect(wrapAzimuth(350)).toBe(-10);
+  });
+});
+
+describe('F5 automationValueAt — azimuth interpolates along the SHORT arc across ±180', () => {
+  // THE mandatory wrap fixture: 170° → −170° is a 20° pass BEHIND the
+  // listener (through ±180), never a 340° sweep back through 0.
+  const wrapKeys = [key(1000, 170), key(1400, -170)];
+
+  it('travels 170 → 180 → −170 (probes below / on / above the seam sample)', () => {
+    // u = 0.25 → 170 + 20·0.25 = 175 (long arc would read 170 − 340·0.25 = 85)
+    expect(automationValueAt(wrapKeys, 1100, 'azimuth')).toBe(175);
+    // u = 0.5 → exactly the seam value +180 (in range, not folded)
+    expect(automationValueAt(wrapKeys, 1200, 'azimuth')).toBe(180);
+    // u = 0.75 → 185 → wrapped to −175: the value has crossed the seam
+    expect(automationValueAt(wrapKeys, 1300, 'azimuth')).toBe(-175);
+  });
+
+  it('never passes through the front (0°) — the long arc is NOT taken', () => {
+    for (let s = 1000; s <= 1400; s += 25) {
+      expect(Math.abs(automationValueAt(wrapKeys, s, 'azimuth'))).toBeGreaterThanOrEqual(170);
+    }
+  });
+
+  it('holds and on-key samples return stored values bit-exact (including a +180 key)', () => {
+    const keys = [key(100, 180), key(500, -90)];
+    expect(automationValueAt(keys, 0, 'azimuth')).toBe(180); // hold before
+    expect(automationValueAt(keys, 100, 'azimuth')).toBe(180); // ON the key
+    expect(automationValueAt(keys, 500, 'azimuth')).toBe(-90); // ON the last
+    expect(automationValueAt(keys, 900, 'azimuth')).toBe(-90); // hold after
+  });
+
+  it('a non-wrapping azimuth segment interpolates exactly like the linear branch', () => {
+    const keys = [key(0, -30), key(100, 90, 'smooth')];
+    for (const s of [25, 50, 75]) {
+      expect(automationValueAt(keys, s, 'azimuth')).toBe(automationValueAt(keys, s));
+    }
+  });
+
+  it('antipodal keys (0 → 180) travel the DECREASING arc through the LEFT (pinned)', () => {
+    const keys = [key(0, 0), key(400, 180)];
+    expect(automationValueAt(keys, 100, 'azimuth')).toBe(-45);
+    expect(automationValueAt(keys, 200, 'azimuth')).toBe(-90); // hard left, not hard right
+    expect(automationValueAt(keys, 300, 'azimuth')).toBe(-135);
+  });
+
+  it('the segment curve shapes the wrapped delta (equal-power across the seam)', () => {
+    const keys = [key(0, 170, 'equal-power'), key(100, -170)];
+    const expected = wrapAzimuth(170 + 20 * fadeInShape(0.25, 'equal-power'));
+    expect(automationValueAt(keys, 25, 'azimuth')).toBe(expected);
+    // Anchor the shape independently: sin(π/8) ≈ 0.38268 → 177.653677…
+    expect(expected).toBeCloseTo(170 + 20 * Math.sin((0.25 * Math.PI) / 2), 12);
+  });
+
+  it('the circular branch applies ONLY to azimuth: pan/volume/elevation/distance stay linear', () => {
+    // A hostile out-of-range pair would reveal wrapping on a linear param.
+    const keys = [key(0, -60), key(100, 12)];
+    expect(automationValueAt(keys, 50, 'volumeDb')).toBe(automationValueAt(keys, 50));
+    const eKeys = [key(0, -90), key(100, 90)];
+    expect(automationValueAt(eKeys, 50, 'elevation')).toBe(automationValueAt(eKeys, 50));
+    const dKeys = [key(0, 0), key(100, 10)];
+    expect(automationValueAt(dKeys, 50, 'distance')).toBe(automationValueAt(dKeys, 50));
+  });
+});
+
+describe('F5 resolveAutomation — the spatial group and ruling 4', () => {
+  it('any ONE spatial lane with a key activates the group; missing members are null', () => {
+    const az = [key(0, 90)];
+    const spec = resolveAutomation([{ param: 'azimuth', keys: az }]);
+    expect(spec).not.toBeNull();
+    expect(spec?.spatial).toEqual({ azimuth: az, elevation: null, distance: null });
+    expect(spec?.spatial?.azimuth).toBe(az); // the lane's own array, not a copy
+    expect(spec?.volume).toBeNull();
+    expect(spec?.pan).toBeNull();
+  });
+
+  it('a distance-only lane activates the group too (ruling 4: ANY spatial lane supersedes pan)', () => {
+    const d = [key(0, 5)];
+    const spec = resolveAutomation([{ param: 'distance', keys: d }]);
+    expect(spec?.spatial).toEqual({ azimuth: null, elevation: null, distance: d });
+  });
+
+  it('zero-key spatial lanes do NOT activate the group (=== no lane)', () => {
+    expect(
+      resolveAutomation([
+        { param: 'azimuth', keys: [] },
+        { param: 'elevation', keys: [] },
+        { param: 'distance', keys: [] },
+      ])
+    ).toBeNull();
+  });
+
+  it('spatial and pan lanes can coexist in the spec; consumers gate on spatial FIRST', () => {
+    const az = [key(0, -90)];
+    const pan = [key(0, 0.5)];
+    const spec = resolveAutomation([
+      { param: 'pan', keys: pan },
+      { param: 'azimuth', keys: az },
+    ]);
+    expect(spec?.pan).toBe(pan);
+    expect(spec?.spatial?.azimuth).toBe(az);
+  });
+
+  it('a lane-less track still resolves to null with the spatial field in the union (ruling 10)', () => {
+    expect(resolveAutomation(undefined)).toBeNull();
   });
 });
