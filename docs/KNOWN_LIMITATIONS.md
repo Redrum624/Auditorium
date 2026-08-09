@@ -384,15 +384,23 @@ Match Tempo (`src/services/tempoService.ts`), Auto-Remix (`src/dsp/remixPlan.ts`
 **v1.5 behavior:** Three limits, all inherent to the approach rather than
 defects to be tuned out.
 
-**1. Octave errors are mitigated, not eliminated.** Measured over 91 synthetic
-fixtures spanning 60–200 BPM: **63 exact, 27 octave errors (half/double/⅔), 1
-non-octave miss.** The harmonic comb, log-Gaussian prior and beat-salience vote
-resolve most half/double ambiguity, but half-time feels, drum & bass, shuffles
-and drum-less intros still defeat it, and the disambiguator only chooses among
-{⅓, ½, ⅔, 1, 3/2, 2, 3}× the comb winner — a first-stage miss outside that
-family is unrecoverable. The confidence score **cannot** catch this: periodicity
-is invariant under octave choice (the structure really is there at 2×), and a
-60 BPM loop misread as 120 scored the highest confidence in the whole bank. The
+**1. Octave errors are mitigated, not eliminated.** Measured on the committed,
+deterministic 83-fixture bank (v1.13, `scripts/tempo-bench.cjs`, results in
+`docs/bench/`): **74 exact, 9 octave errors, 0 non-octave misses**, spanning
+click/attack trains, drum loops across the ghost-note range, backbeats, tempo
+ramps, humanly-jittered timing, and no-tempo material. (An earlier "63 of 91"
+figure circulated from v1.5; that bank was never preserved, so it is not
+reproducible and not comparable — the committed bank is its own denominator.)
+The harmonic comb, log-Gaussian prior, beat-salience vote and the v1.13
+jitter-tolerant period-match resolve most half/double ambiguity, but the
+remaining misses are structural: genuine multi-member octave families in the
+165–200 BPM band, prior-pull doubling on slow loops with strong half-period
+energy (a drumLoop(75) misread as 150 reports confidence 1.0 — the highest in
+the bank), and loud-ghost content whose doubled reading is honestly present in
+the audio. The disambiguator only chooses among {⅓, ½, ⅔, 1, 3/2, 2, 3}× the
+comb winner — a first-stage miss outside that family is unrecoverable. The
+confidence score **cannot** catch any of this: periodicity is invariant under
+octave choice (the structure really is there at 2×). The
 165–200 BPM band on uniform content is additionally phase-unstable by design.
 The remedy is therefore the **×2 / ÷2 control**, which re-tracks the grid at the
 corrected period rather than relabelling the displayed number, plus the manual

@@ -5,6 +5,53 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-08-09
+
+**Measured before tuned** — this release builds the two measurement rigs the audit said
+never existed, records honest baselines from them, and only then lands a detector
+improvement whose every number is reproducible from the committed harnesses.
+
+### Added
+
+- **Tempo A/B bench (R4).** Why: the audit's long-quoted "63/91 correct" detector figure
+  had no committed bank, harness or report behind it — unreproducible and unfalsifiable,
+  so no detector claim could be checked. How to use: `node scripts/tempo-bench.cjs`
+  runs a documented, deterministic 83-fixture bank (click/attack trains, drum loops
+  across the ghost-note range, backbeats, tempo ramps, seeded humanly-jittered timing,
+  no-tempo material; composition and seeds in `src/dsp/__fixtures__/tempoBench.ts`) and
+  writes a timestamp-free JSON report that diffs byte-for-byte between runs
+  (`--families`/`--limit-per-family` for subsets). The bank is a **new denominator**:
+  its baseline measured **71/83 correct, 12 octave, 0 other** (committed at
+  `docs/bench/tempo-bench-baseline.json`) — never comparable to "63/91". The harness is
+  proven non-vacuous: deliberately broken detectors score strictly worse, and the
+  generators were extracted verbatim into `src/dsp/__fixtures__/` so tests and bench
+  share one definition.
+- **First-play latency rig (R4, P2-7).** Why: the audit carried "the multitrack
+  `AudioContext` sometimes starts slowly on first play" for months on suspicion — the
+  v1.5.2 fix stabilised the smoke *test* (3 s poll) without ever measuring the
+  behaviour. How to use: `node scripts/first-play-latency-rig.cjs` (after a build)
+  drives the built app through cold/warm probes of `src/multitrack/firstPlayLatency.ts`.
+  **The answer: measured, there is nothing to fix** — process-cold first play starts
+  rendering 21.5–22.7 ms after `play()` returns (worst audible estimate 53.5 ms;
+  `docs/bench/first-play-latency-baseline.json`), ~130× inside the old poll margin.
+
+### Changed
+
+- **Jitter-tolerant octave disambiguation (R4, the T2 reviewer's named follow-up).**
+  Why: the period-match penalty charged full price for *zero-mean human timing jitter*,
+  structurally favouring a machine-regular octave error over an honestly-played track.
+  What changed: the penalty now decomposes into systematic offset from the requested
+  period (the collapse signature — **kept at full weight**; mean-centring it away
+  measured *worse* than changing nothing, 70/83) plus zero-mean scatter (benign jitter —
+  down-weighted to 0.35, swept across 0–1 on the bank with a 0.15–0.5 plateau all
+  beating the old form). Result on the committed bank: **71/83 → 74/83 correct, 12 → 9
+  octave errors** — the flips are the jittered-human drum loop the item was about plus
+  the two loud-ghost 90 BPM loops that had sat as a KNOWN-UNRESOLVED `it.failing` since
+  v1.5 (now folded into the passing acceptance test). The 9 remaining misses are the two
+  evidenced structural limitations documented in `chooseOctave`'s comment; the bank is
+  synthetic, so this is not a real-world-material claim. `docs/KNOWN_LIMITATIONS.md`
+  now cites the reproducible numbers.
+
 ## [1.12.0] - 2026-08-09
 
 **Multitrack edits are now undoable** — the last structural gap in the session editor.
