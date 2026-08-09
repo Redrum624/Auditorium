@@ -310,7 +310,7 @@ export function timeStretchLinked(
 
 /**
  * Stereo-linked WSOLA time-stretch with a TIME-VARYING ratio — the
- * generalisation of `timeStretchLinked` used by Auto-Tune, where the stretch
+ * generalisation of `timeStretchLinked` used by Pitch Correct, where the stretch
  * factor follows a pitch-correction curve instead of being constant.
  *
  * The caller supplies the target output length `outLen` (the rounded integral

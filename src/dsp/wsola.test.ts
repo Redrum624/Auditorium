@@ -270,7 +270,7 @@ describe('timeStretchLinked (stereo-linked WSOLA)', () => {
 
 describe('timeStretchVariableLinked', () => {
   /**
-   * Cumulative-map helpers mirroring how Auto-Tune drives the variable path: a
+   * Cumulative-map helpers mirroring how Pitch Correct drives the variable path: a
    * per-sample ratio rho(i) integrates to S, outLen = round(S[N]), and the
    * inverse map is found by binary search over S.
    */
@@ -341,7 +341,7 @@ describe('timeStretchVariableLinked', () => {
   it('a ramped ratio (1 → 1.06) changes duration to round(∫ρ) while preserving pitch', () => {
     // Pitch preservation is THE property of the stretch stage: the output of a
     // 440 Hz sine keeps a ~880 crossings/s zero-crossing rate even while the
-    // local time scale drifts 6%. (Auto-Tune's pitch change comes from the
+    // local time scale drifts 6%. (Pitch Correct's pitch change comes from the
     // separate resample stage.)
     const seconds = 0.5;
     const n = Math.round(seconds * SR);

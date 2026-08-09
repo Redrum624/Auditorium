@@ -4,7 +4,7 @@ import { MAX_RATIO, MIN_RATIO, timeStretchVariableLinked } from '../../dsp/wsola
 import { resampleVariable } from '../../dsp/resample';
 
 /**
- * Auto-Tune — detects the sung/played pitch over time (YIN, src/dsp/pitchDetect),
+ * Pitch Correct — detects the sung/played pitch over time (YIN, src/dsp/pitchDetect),
  * snaps it toward the nearest note of a chosen key/scale, and resynthesizes with
  * a time-varying pitch shift. Destructive, like every registry effect.
  *
@@ -77,6 +77,12 @@ export function snapMidiToScale(midi: number, rootPc: number, intervals: readonl
   const baseOct = Math.floor((midi - rootPc) / 12);
   let best = rootPc + 12 * baseOct;
   let bestDist = Infinity;
+  // The oct = baseOct − 1 candidates can only win when the interval set lacks
+  // the root (0): with 0 present, the in-octave root sits at distance
+  // (midi − rootPc) mod 12 while the octave-below's best candidate is at least
+  // one semitone further, so for every SHIPPED scale the branch never fires.
+  // It is kept (and pinned live in the tests via a rootless interval set)
+  // because this function accepts arbitrary interval arrays.
   for (let oct = baseOct - 1; oct <= baseOct + 1; oct++) {
     for (const iv of intervals) {
       const cand = rootPc + 12 * oct + iv;
@@ -178,9 +184,9 @@ export function buildCorrectionMap(
 const P_DETECT = 0.85;
 const P_STRETCH = 0.13;
 
-export const autoTuneEffect: EffectDefinition = {
-  id: 'auto-tune',
-  name: 'Auto-Tune',
+export const pitchCorrectEffect: EffectDefinition = {
+  id: 'pitch-correct',
+  name: 'Pitch Correct',
   category: 'Time & Pitch',
   params: [
     {

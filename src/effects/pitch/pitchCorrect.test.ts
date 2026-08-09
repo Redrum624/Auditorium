@@ -1,18 +1,18 @@
 /**
- * Auto-Tune effect tests. Every numeric bound is a MEASURED value (recorded
+ * Pitch Correct effect tests. Every numeric bound is a MEASURED value (recorded
  * 2026-08-08 on this implementation, noted per assertion) plus headroom, and
  * output pitch is asserted by MEASURING the output's f0 with the detector that
  * pitchDetect.test.ts validates against known-f0 fixtures — not by "samples
  * changed".
  */
 import {
-  autoTuneEffect,
+  pitchCorrectEffect,
   buildCorrectionMap,
   correctionCurve,
   hzToMidi,
   snapMidiToScale,
   SCALE_INTERVALS,
-} from './AutoTuneEffect';
+} from './PitchCorrectEffect';
 import { MAX_RATIO, MIN_RATIO } from '../../dsp/wsola';
 import { getAllEffects } from '../EffectRegistry';
 import { registerAllEffects } from '../registerAll';
@@ -46,7 +46,7 @@ function cents(a: number, b: number): number {
 /** Runs the effect and asserts the inputs were not mutated (registry contract). */
 function run(channels: Float32Array[], params: Record<string, EffectParamValue>): Float32Array[] {
   const before = channels.map((c) => Array.from(c));
-  const result = autoTuneEffect.process(channels, SR, params);
+  const result = pitchCorrectEffect.process(channels, SR, params);
   channels.forEach((c, i) => expect(Array.from(c)).toEqual(before[i]));
   return result.channels;
 }
@@ -65,16 +65,16 @@ function medianF0(x: Float32Array, fromSec: number, toSec: number): number {
   return f0s[Math.floor(f0s.length / 2)];
 }
 
-describe('autoTuneEffect — registration and parameter surface', () => {
-  it('registers as auto-tune in Time & Pitch via registerAllEffects', () => {
+describe('pitchCorrectEffect — registration and parameter surface', () => {
+  it('registers as pitch-correct in Time & Pitch via registerAllEffects', () => {
     registerAllEffects();
     const byId = new Map(getAllEffects().map((e) => [e.id, e]));
-    expect(byId.get('auto-tune')?.category).toBe('Time & Pitch');
-    expect(byId.get('auto-tune')?.name).toBe('Auto-Tune');
+    expect(byId.get('pitch-correct')?.category).toBe('Time & Pitch');
+    expect(byId.get('pitch-correct')?.name).toBe('Pitch Correct');
   });
 
   it('ships the derived defaults: key C, chromatic, strength 100 %, retune 50 ms', () => {
-    const p = new Map(autoTuneEffect.params.map((d) => [d.id, d]));
+    const p = new Map(pitchCorrectEffect.params.map((d) => [d.id, d]));
     expect(p.get('key')?.default).toBe('C');
     expect(p.get('scale')?.default).toBe('chromatic');
     expect(p.get('strength')?.default).toBe(100);
@@ -82,7 +82,7 @@ describe('autoTuneEffect — registration and parameter surface', () => {
   });
 
   it('retune readout mirrors the one-pole corner 1/(2πτ) and names 0 ms an instant snap', () => {
-    const readout = autoTuneEffect.params.find((d) => d.id === 'retuneMs')?.readout;
+    const readout = pitchCorrectEffect.params.find((d) => d.id === 'retuneMs')?.readout;
     expect(readout).toBeDefined();
     const ctx = { regionSamples: SR, sampleRate: SR };
     expect(readout?.(0, ctx)).toBe('instant snap');
@@ -117,6 +117,15 @@ describe('snapMidiToScale — nearest-note selection (boundary trios per scale g
   it('distinguishes the minor third from the major third (root A)', () => {
     expect(snapMidiToScale(72.4, 9, minor)).toBe(72); // C5 is IN A natural minor
     expect(snapMidiToScale(72.4, 9, major)).toBe(73); // A major has C#5 instead
+  });
+
+  it('the octave-below scan is live for rootless interval sets (dead for all shipped scales)', () => {
+    // With intervals [11] (no root), midi 60.2's nearest candidates are 59
+    // (11 of the octave BELOW, distance 1.2) and 71 (distance 10.8) — only the
+    // baseOct − 1 scan can find 59. Every shipped scale contains 0, which
+    // provably beats any octave-below candidate, so this pin documents why the
+    // branch exists rather than a reachable effect behaviour.
+    expect(snapMidiToScale(60.2, 0, [11])).toBe(59);
   });
 
   it('hzToMidi: A4 = 440 Hz is exactly MIDI 69, octaves are ±12', () => {
@@ -205,7 +214,8 @@ describe('buildCorrectionMap — exact per-sample ratios (edge holds, interpolat
   });
 
   it('clamps out-of-range ratios to [MIN_RATIO, MAX_RATIO] (unreachable from the effect, pinned here)', () => {
-    // ±100 st ⇒ ρ = 2^±8.33, far outside WSOLA's supported range.
+    // ±100 st ⇒ ρ = 2^±8.33, far outside WSOLA's supported range — pins the
+    // clamp TARGET; the trio below pins the clamp THRESHOLD.
     const up = buildCorrectionMap([100], 4, 2, 4);
     expect(inc(up.S, 0)).toBe(MAX_RATIO);
     expect(up.maxRho).toBe(MAX_RATIO);
@@ -216,6 +226,27 @@ describe('buildCorrectionMap — exact per-sample ratios (edge holds, interpolat
     expect(inc(inside.S, 0)).toBe(rho(1));
   });
 
+  it('clamp THRESHOLD trios: just below / exactly on / just above each ratio boundary', () => {
+    // A ±100 st fixture sits 80× beyond the boundary and cannot see a moved
+    // threshold (rho > MAX_RATIO·4 clamps it just the same) — the round-2
+    // review proved that mutant survives. These fixtures straddle the boundary
+    // itself: ρ = MAX_RATIO exactly at c = 24 st (2^(24/12) = 4, dyadic ⇒ every
+    // value below is float-exact), MIN_RATIO at c = −24 st (2^−2 = 0.25).
+    const maxBelow = buildCorrectionMap([23.9], 4, 2, 4); // ρ ≈ 3.977 — inside, must NOT clamp
+    expectRho(inc(maxBelow.S, 0), 23.9);
+    const maxOn = buildCorrectionMap([24], 4, 2, 4); // ρ = 4 exactly — clamping is a no-op AT the
+    expect(inc(maxOn.S, 0)).toBe(MAX_RATIO); //         boundary value, so `>` vs `>=` is invisible
+    const maxAbove = buildCorrectionMap([24.1], 4, 2, 4); // ρ ≈ 4.023 — MUST clamp to exactly 4;
+    expect(inc(maxAbove.S, 0)).toBe(MAX_RATIO); //          kills any moved-threshold mutant
+
+    const minAbove = buildCorrectionMap([-23.9], 4, 2, 4); // ρ ≈ 0.2515 — inside, must NOT clamp
+    expectRho(inc(minAbove.S, 0), -23.9);
+    const minOn = buildCorrectionMap([-24], 4, 2, 4); // ρ = 0.25 exactly
+    expect(inc(minOn.S, 0)).toBe(MIN_RATIO);
+    const minBelow = buildCorrectionMap([-24.1], 4, 2, 4); // ρ ≈ 0.2486 — MUST clamp to exactly 0.25
+    expect(inc(minBelow.S, 0)).toBe(MIN_RATIO);
+  });
+
   it('S starts at 0 and accumulates to the stretched total', () => {
     const { S } = buildCorrectionMap([0], 5, 2, 4); // ρ ≡ 1
     expect(S[0]).toBe(0);
@@ -223,11 +254,20 @@ describe('buildCorrectionMap — exact per-sample ratios (edge holds, interpolat
   });
 });
 
-describe('autoTuneEffect — pass-through rulings (byte-identical)', () => {
+describe('pitchCorrectEffect — pass-through rulings (byte-identical)', () => {
   it('strength 0 returns byte-identical copies in NEW arrays (ruling 4)', () => {
     const input = sine(452, 0.3);
     const out = run([input], { key: 'C', scale: 'chromatic', strength: 0, retuneMs: 0 });
     expect(out[0]).not.toBe(input);
+    expect(Array.from(out[0])).toEqual(Array.from(input));
+  });
+
+  it('a NEGATIVE persisted strength clamps to 0 and passes through (never inverts corrections)', () => {
+    // Only reachable via hand-edited params (the slider floors at 0), but an
+    // unclamped negative strength would INVERT every correction — pushing
+    // pitch away from the scale. Probes Math.max(0, …) from below.
+    const input = sine(452, 0.3);
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: -50, retuneMs: 0 });
     expect(Array.from(out[0])).toEqual(Array.from(input));
   });
 
@@ -261,7 +301,7 @@ describe('autoTuneEffect — pass-through rulings (byte-identical)', () => {
   });
 });
 
-describe('autoTuneEffect — measured pitch correction (452 Hz = A4 + 46.6 cents)', () => {
+describe('pitchCorrectEffect — measured pitch correction (452 Hz = A4 + 46.6 cents)', () => {
   it('chromatic, strength 100, retune 0: output measures 440 Hz within 3 cents, length preserved', () => {
     // Measured: 440.01 Hz (+0.04 c) — ≥ 99 % of the 46.6 c offset removed.
     const input = sine(452, 1.0);
@@ -285,7 +325,7 @@ describe('autoTuneEffect — measured pitch correction (452 Hz = A4 + 46.6 cents
   });
 });
 
-describe('autoTuneEffect — key and scale route to different target notes (460 Hz input)', () => {
+describe('pitchCorrectEffect — key and scale route to different target notes (460 Hz input)', () => {
   // 460 Hz = midi 69.77: nearest chromatic note is A#4 (466.16 Hz, 0.23 st away);
   // nearest C-MAJOR note is A4 (440 Hz — A# is not in the scale); nearest
   // C-MINOR note is A#4 again (it IS in the scale). Same input, three targets.
@@ -300,7 +340,7 @@ describe('autoTuneEffect — key and scale route to different target notes (460 
   });
 });
 
-describe('autoTuneEffect — retune speed is an exponential glide with time constant retuneMs', () => {
+describe('pitchCorrectEffect — retune speed is an exponential glide with time constant retuneMs', () => {
   it('retune 200 ms: the residual offset decays exponentially along the note', () => {
     // Measured residuals from 440 Hz (input +46.6 c): [0.1,0.15] s → 28.5 c,
     // [0.2,0.25] → 17.3 c, [0.4,0.45] → 6.4 c, [1.2,1.4] → 0.12 c — matching
@@ -346,7 +386,43 @@ describe('autoTuneEffect — retune speed is an exponential glide with time cons
   });
 });
 
-describe('autoTuneEffect — stereo linkage and silence gaps', () => {
+describe('pitchCorrectEffect — frame-centre attribution (correction-vs-audio alignment)', () => {
+  it('a glide through the A4 snap zone flattens to 440 with the residual the detector lag predicts', () => {
+    // buildCorrectionMap is exactly pinned GIVEN centerSamples, but nothing else
+    // pins what the effect passes it — a centre mis-wire shifts the correction
+    // curve against the audio with every steady-tone pin still green (round-2
+    // review: `frameSamples / 4` survived all 32 tests). On a glide the shift
+    // is observable: residual ≈ slope × (detector lag + wiring error).
+    // Measured on this fixture (333 c/s through the zone): correct wiring
+    // +3.79 c median (spread 3.64–3.86 — the detector's ≈11 ms glide lag);
+    // `frameSamples / 4` −0.38 c; a hypothetical un-halved centre ≈ +8 c.
+    // The (2.0, 5.5) band accepts the correct wiring and rejects a ±12.5 ms
+    // mis-attribution in either direction.
+    const n = Math.round(0.6 * SR);
+    const input = new Float32Array(n);
+    let phase = 0;
+    for (let i = 0; i < n; i++) {
+      input[i] = Math.sin(phase);
+      const f = 415.3047 * Math.pow(466.1638 / 415.3047, i / n); // G#4 → A#4, −100 c → +100 c of A4
+      phase += (2 * Math.PI * f) / SR;
+    }
+    const out = run([input], { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 });
+    const track = detectPitch(out[0], SR);
+    const center = track.frameSamples / 2;
+    const residuals: number[] = [];
+    track.frames.forEach((fr, k) => {
+      const t = (k * track.hopSamples + center) / SR;
+      if (fr.f0Hz !== null && t >= 0.24 && t <= 0.36) residuals.push(cents(fr.f0Hz, 440));
+    });
+    expect(residuals.length).toBeGreaterThan(0);
+    residuals.sort((a, b) => a - b);
+    const median = residuals[Math.floor(residuals.length / 2)];
+    expect(median).toBeGreaterThan(2.0);
+    expect(median).toBeLessThan(5.5);
+  });
+});
+
+describe('pitchCorrectEffect — stereo linkage and silence gaps', () => {
   it('proportional channels stay exactly proportional (shared offsets + shared read positions)', () => {
     // R = 0.5·L throughout; measured max |out.R − 0.5·out.L| = 0 exactly
     // (scaling by a power of two commutes with every float operation used).
@@ -381,10 +457,10 @@ describe('autoTuneEffect — stereo linkage and silence gaps', () => {
   });
 });
 
-describe('autoTuneEffect — progress reporting', () => {
+describe('pitchCorrectEffect — progress reporting', () => {
   it('reports a terminal 1 and never regresses across the three stages', () => {
     const seen: number[] = [];
-    autoTuneEffect.process([sine(452, 0.5)], SR, { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 }, (f) =>
+    pitchCorrectEffect.process([sine(452, 0.5)], SR, { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 0 }, (f) =>
       seen.push(f)
     );
     expect(seen[seen.length - 1]).toBe(1);

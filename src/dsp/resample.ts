@@ -127,7 +127,7 @@ export function resampleChannel(
  * SAME kernel arithmetic as `resampleChannel` — a constant-step position array
  * (positions[i] = i·fromRate/toRate with the matching fc) reproduces
  * `resampleChannel` byte-for-byte, pinned in resample.test.ts. Used by
- * Auto-Tune's resynthesis, where the read rate follows the correction curve.
+ * Pitch Correct's resynthesis, where the read rate follows the correction curve.
  *
  * `fc` is the normalized cutoff in INPUT cycles/sample: 0.5 when the local
  * read rate never exceeds 1 (no downsampling anywhere), otherwise

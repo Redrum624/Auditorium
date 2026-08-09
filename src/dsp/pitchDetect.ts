@@ -2,7 +2,7 @@
  * YIN fundamental-frequency detector (de Cheveigné & Kawahara 2002, "YIN, a
  * fundamental frequency estimator for speech and music", JASA 111(4):1917–1930).
  *
- * Frame-wise monophonic f0 estimation for the Auto-Tune effect. Per frame:
+ * Frame-wise monophonic f0 estimation for the Pitch Correct effect. Per frame:
  *
  *  1. Difference function  d(τ) = Σ_{j=0}^{W−1} (x[j] − x[j+τ])²  over an
  *     integration window of W samples (paper step 2).
@@ -44,7 +44,7 @@ export const F0_MAX_HZ = 2093;
 /**
  * Absolute threshold on d′ (paper step 4). The paper documents 0.10–0.15 as
  * the useful range; we take the strict end, 0.1 — for pitch CORRECTION a false
- * voiced frame retunes a consonant or breath (the classic auto-tune artefact),
+ * voiced frame retunes a consonant or breath (the classic pitch-correct artefact),
  * while a false unvoiced frame merely leaves audio untouched. Matches the
  * default in widely-used implementations (e.g. librosa.yin trough_threshold).
  */
