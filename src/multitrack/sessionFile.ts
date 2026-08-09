@@ -1,8 +1,9 @@
 import { bumpIdCounter, createDocument, docLength, nextId, type AudioDocument } from '../audio/AudioDocument';
 import { decodeWav, encodeWav } from '../audio/wavCodec';
 import { useAppStore, type Marker } from '../stores/appStore';
-import type { Clip, Session } from './session';
+import type { Clip, Session, Track } from './session';
 import { clampFadePair } from './session';
+import { sanitizeAutomationLanes } from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import { useSessionStore } from './sessionStore';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
@@ -361,6 +362,25 @@ function sanitizeClipFades(clip: Clip): Clip {
   return out;
 }
 
+/** F0 (traps T12/T13): the automation counterpart of `sanitizeClipFades`,
+ * applied at the SAME shared finalize so the v3 AND the legacy v1/v2 parse
+ * paths are both covered — the first (and so far only) track-LEVEL sanitiser.
+ * The arithmetic lives in `automation.ts` (`sanitizeAutomationLanes`): keys
+ * from disk are UNTRUSTED (nothing else between the parse boundary and the
+ * two audio engines validates track fields), so a hand-edited `value: null` /
+ * `1e999` / string would otherwise flow straight into both engines' gain
+ * path. An invalid or emptied field is DELETED — garbage round-trips back to
+ * "no key on disk", never to a default-valued key — while a track that never
+ * had the field never gains one. Unknown OTHER track keys stay untouched
+ * (spread tolerance — the forward-compat mechanism). */
+function sanitizeTrackAutomation(track: Track): Track {
+  const lanes = sanitizeAutomationLanes((track as { automation?: unknown }).automation);
+  const out: Track = { ...track };
+  delete out.automation;
+  if (lanes !== undefined) out.automation = lanes;
+  return out;
+}
+
 function finalizeParsedSession(
   parsedSession: Session,
   idMap: Map<string, string>,
@@ -371,16 +391,18 @@ function finalizeParsedSession(
   let droppedClipCount = 0;
   const session: Session = {
     ...parsedSession,
-    tracks: parsedSession.tracks.map((t) => ({
-      ...t,
-      clips: t.clips
-        .map((c) => sanitizeClipFades({ ...c, documentId: idMap.get(c.documentId) ?? c.documentId }))
-        .filter((c) => {
-          const keep = recreatedIds.has(c.documentId);
-          if (!keep) droppedClipCount++;
-          return keep;
-        }),
-    })),
+    tracks: parsedSession.tracks.map((t) =>
+      sanitizeTrackAutomation({
+        ...t,
+        clips: t.clips
+          .map((c) => sanitizeClipFades({ ...c, documentId: idMap.get(c.documentId) ?? c.documentId }))
+          .filter((c) => {
+            const keep = recreatedIds.has(c.documentId);
+            if (!keep) droppedClipCount++;
+            return keep;
+          }),
+      })
+    ),
   };
 
   // Seeded from the raw file, not the (possibly clip-dropping) `session`
