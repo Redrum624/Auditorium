@@ -4,8 +4,12 @@
  * tests and the `scripts/tempo-bench.cjs` A/B harness use ONE definition —
  * two copies would drift and silently make the harness measure something the
  * tests do not. Every generator is deterministic: the only randomness is a
- * fixed-seed LCG (`speechLike` seed 999, `noiseOnly` seed 12345). Never
- * `Math.random()`.
+ * fixed-seed LCG (`speechLike` seed 999, `noiseOnly` seed 12345, and the
+ * jittered generators' explicit `seed` parameter). Never `Math.random()`.
+ *
+ * The R4-NEW generators at the bottom (`lcg`, `jitterClickTrain`,
+ * `jitterDrumLoop`) are the P2-4 "jittery human-like timing" fixtures and
+ * did not exist in the test file; everything above them is the verbatim move.
  */
 
 export function sine(freq: number, seconds: number, sr = 44100, amp = 1): Float32Array {
@@ -240,6 +244,102 @@ export function noiseOnly(seconds: number, sr = 44100): Float32Array {
   for (let i = 0; i < n; i++) {
     seed = (seed * 1103515245 + 12345) & 0x7fffffff;
     out[i] = seed / 0x7fffffff - 0.5;
+  }
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// R4-NEW generators — P2-4 "jittery human-like timing" fixtures.
+// ---------------------------------------------------------------------------
+
+/**
+ * Seeded LCG in [-0.5, 0.5) — the SAME recurrence `speechLike`/`noiseOnly`
+ * already use (glibc constants), exposed with an explicit seed so the
+ * jittered generators are deterministic per (seed) and two fixtures with
+ * different seeds get independent jitter sequences.
+ */
+export function lcg(seed: number): () => number {
+  let s = seed;
+  return () => {
+    s = (s * 1103515245 + 12345) & 0x7fffffff;
+    return s / 0x7fffffff - 0.5;
+  };
+}
+
+/**
+ * A HUMANLY-JITTERED click train: nominal grid at `bpm`, each click displaced
+ * by an independent uniform offset in `[-jitterFrac*P/2, +jitterFrac*P/2)`
+ * samples (`P` = the beat period). Zero-mean displacement of GRID positions
+ * (not accumulated inter-onset error), so the long-run tempo is exactly
+ * `bpm` and the least-squares regression truth stays the nominal label —
+ * what a human playing to an internal pulse produces, as opposed to a
+ * random-walk drift. `jitterFrac` 0.02–0.10 spans tight-professional to
+ * sloppy-amateur timing (at 120 bpm, P = 500 ms, so 0.04 = ±10 ms).
+ *
+ * This is the P2-4 fixture: per-beat jitter raises `meanTightnessPenalty`
+ * for the TRUE-tempo track, while a half-tempo track's gaps (sums of two
+ * consecutive intervals) average the jitter down — so the current
+ * `periodMatch` form structurally favours the machine-regular octave error
+ * on exactly this content.
+ */
+export function jitterClickTrain(
+  bpm: number,
+  seconds: number,
+  jitterFrac: number,
+  seed: number,
+  sr = 44100
+): Float32Array {
+  const n = Math.round(seconds * sr);
+  const out = new Float32Array(n);
+  const period = (60 / bpm) * sr;
+  const rand = lcg(seed);
+  for (let k = 0; ; k++) {
+    const nominal = k * period;
+    if (nominal >= n) break;
+    const displaced = Math.round(nominal + rand() * jitterFrac * period);
+    if (displaced >= 0 && displaced < n) out[displaced] = 1;
+  }
+  return out;
+}
+
+/**
+ * A HUMANLY-JITTERED drum loop: `drumLoop`'s exact kick synthesis (decaying
+ * 60 Hz tone, ~120 ms tau, ghost note at the half period) on a jittered grid
+ * — main beats displaced like `jitterClickTrain`'s clicks, each ghost note
+ * placed at the half period AFTER its own beat's displaced position with its
+ * OWN independent jitter draw. Arms the ×2 octave trap AND the P2-4 jitter
+ * penalty simultaneously: real half-period energy plus human timing.
+ */
+export function jitterDrumLoop(
+  bpm: number,
+  seconds: number,
+  ghostAmp: number,
+  jitterFrac: number,
+  seed: number,
+  sr = 44100
+): Float32Array {
+  const n = Math.round(seconds * sr);
+  const out = new Float32Array(n);
+  const period = (60 / bpm) * sr;
+  const decayTau = 0.12 / 3; // ~120 ms decay time constant (verbatim drumLoop)
+  const kickLen = Math.min(n, Math.round(0.2 * sr));
+  const rand = lcg(seed);
+
+  function addKick(start: number, amp: number): void {
+    for (let i = 0; i < kickLen && start + i < n; i++) {
+      const t = i / sr;
+      const env = Math.exp(-t / decayTau);
+      out[start + i] += amp * env * Math.sin(2 * Math.PI * 60 * t);
+    }
+  }
+
+  for (let k = 0; ; k++) {
+    const nominal = k * period;
+    if (nominal >= n) break;
+    const mainAt = Math.round(nominal + rand() * jitterFrac * period);
+    if (mainAt >= 0 && mainAt < n) addKick(mainAt, 1.0);
+    const ghostAt = Math.round(mainAt + period / 2 + rand() * jitterFrac * period);
+    if (ghostAt >= 0 && ghostAt < n) addKick(ghostAt, ghostAmp);
   }
   return out;
 }
