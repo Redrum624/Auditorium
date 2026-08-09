@@ -133,16 +133,29 @@ export default function SpatialPanel() {
     setDragging(false);
     e.currentTarget.releasePointerCapture?.(e.pointerId);
     const p = positionFor(e);
+    // A pending elevation preview (slider adjusted without release) must not
+    // be silently discarded by the stage commit — the panel shows one
+    // position, so one position lands (review round 1 minor).
+    const pendingElevation =
+      preview !== null && preview.elevation !== evaluated.elevation ? preview.elevation : null;
     setPreview(null);
-    // ONE commit (ruling D): azimuth + distance land together at the
-    // playhead sample read at COMMIT time (during playback it has moved
-    // since pointerdown — the key belongs where the transport is now).
+    // ONE commit (ruling D): azimuth + distance (+ any pending elevation)
+    // land together at the playhead sample read at COMMIT time (during
+    // playback it has moved since pointerdown — the key belongs where the
+    // transport is now).
     const st = useSessionStore.getState();
     const sample = Math.round(st.mtPlayState === 'playing' ? st.mtPlayheadSample : st.mtCursorSample);
-    upsertAutomationKeys(track.id, [
+    const writes: {
+      param: AutomationParam;
+      key: { positionSample: number; value: number };
+    }[] = [
       { param: 'azimuth', key: { positionSample: sample, value: p.azimuth } },
       { param: 'distance', key: { positionSample: sample, value: p.distance } },
-    ]);
+    ];
+    if (pendingElevation !== null) {
+      writes.push({ param: 'elevation', key: { positionSample: sample, value: pendingElevation } });
+    }
+    upsertAutomationKeys(track.id, writes);
   };
 
   const commitElevation = () => {

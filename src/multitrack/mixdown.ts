@@ -83,7 +83,7 @@ function isAudible(track: Track, anySolo: boolean): boolean {
  * verbatim by both engines).
  */
 export function autoVolumeGainAt(keys: readonly AutomationKey[], s: number): number {
-  return dbToLinear(automationValueAt(keys, s));
+  return dbToLinear(automationValueAt(keys, s, 'volumeDb'));
 }
 
 /**
@@ -99,7 +99,7 @@ export function autoPanGainsAt(
   s: number,
   mono: boolean
 ): { gL: number; gR: number } {
-  const pan = automationValueAt(keys, s);
+  const pan = automationValueAt(keys, s, 'pan');
   return mono ? monoPanGains(pan) : stereoBalanceGains(pan);
 }
 

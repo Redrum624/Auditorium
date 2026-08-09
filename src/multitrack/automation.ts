@@ -62,12 +62,6 @@ export const AUTOMATION_PARAM_LABELS: Record<AutomationParam, string> = {
   distance: 'Distance',
 };
 
-/** The spatial parameters as a group: while ANY of these three lanes has a
- * key, the track's placement comes from the spatial projection and the `pan`
- * parameter — lane AND static field — is superseded entirely (F5 ruling 4;
- * see `resolveAutomation`). */
-export const SPATIAL_PARAMS: readonly AutomationParam[] = ['azimuth', 'elevation', 'distance'];
-
 /** One automation key. `curve` shapes the segment from THIS key to the NEXT
  * key (a trailing key's curve is inert until a later key exists); absent means
  * `DEFAULT_AUTOMATION_CURVE`, and nothing may distinguish absent from
@@ -198,12 +192,15 @@ export function wrapAzimuth(v: number): number {
  * `wrapAzimuth(v0 + wrapAzimuthDelta(v1 − v0) · shape(u))` — see the two
  * helpers above for the arc choice, the antipodal tie-break and the exactness
  * guarantees (hold regions and on-key samples still return the stored value
- * bit-exact; only mid-segment values can wrap). Every OTHER param — and an
- * omitted `param`, which existing F0 callers rely on — interpolates linearly
- * exactly as before. A caller evaluating an azimuth lane MUST pass the param;
- * both audio engines route through `autoSpatialGainsAt` (mixdown.ts), which
- * does, and the envelope UI passes its lane's param — the single-evaluator
- * discipline (T5) with the wrap decided in exactly one place.
+ * bit-exact; only mid-segment values can wrap). Every OTHER param
+ * interpolates linearly exactly as F0 shipped. `param` is REQUIRED (review
+ * round 1): the evaluator cannot know a lane is circular unless told, and an
+ * optional param would let a future caller evaluate an azimuth lane linearly
+ * by silent omission — making it mandatory turns that mistake into an
+ * affirmative wrong choice the call site has to write down. Both audio
+ * engines route through `autoSpatialGainsAt` (mixdown.ts) and the envelope
+ * UI passes its lane's param — the single-evaluator discipline (T5) with the
+ * wrap decided in exactly one place.
  *
  * `keys` must be non-empty and ascending by `positionSample` (the lane
  * invariant). Callers gate emptiness through `resolveAutomation`.
@@ -211,7 +208,7 @@ export function wrapAzimuth(v: number): number {
 export function automationValueAt(
   keys: readonly AutomationKey[],
   sample: number,
-  param?: AutomationParam
+  param: AutomationParam
 ): number {
   const i = lastAtOrBefore(keys, sample);
   if (i < 0) return keys[0].value; // hold before the first key

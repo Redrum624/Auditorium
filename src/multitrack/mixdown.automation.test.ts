@@ -294,7 +294,7 @@ describe('mixdown automation — neutrality and gating', () => {
     });
     const [L] = mixdownSession(session([t]), docs(monoDoc('m', 0.5))).channels;
     const gC = monoPanGains(0).gL;
-    expect(L[500]).toBe(Math.fround(0.5 * dbToLinear(automationValueAt(kA, 500)) * gC));
+    expect(L[500]).toBe(Math.fround(0.5 * dbToLinear(automationValueAt(kA, 500, 'volumeDb')) * gC));
     expect(L[500]).toBeCloseTo(0.5 * dbToLinear(-60) * gC, 6);
     expect(L[501]).toBeCloseTo(0.5 * dbToLinear(2) * gC, 6);
   });

@@ -626,7 +626,7 @@ describe('RULING: player-rendered output === mixdownSession output over a MOVING
     player.play(0, session([t]), docs(monoDoc('m', 0.5)));
     const data = ctx.sources[0].buffer?.copied[0];
     if (!data) throw new Error('no buffer');
-    expect(data[10]).toBe(Math.fround(0.5 * dbToLinear(automationValueAt(kA, 500))));
+    expect(data[10]).toBe(Math.fround(0.5 * dbToLinear(automationValueAt(kA, 500, 'volumeDb'))));
     expect(data[10]).toBeCloseTo(0.5 * dbToLinear(-60), 6);
     expect(data[11]).toBeCloseTo(0.5 * dbToLinear(2), 6);
   });
@@ -690,6 +690,30 @@ describe('F5 player spatial baking (promoted buffers, neutralised nodes, T2 skip
     expect(pans?.panL.gain.value).toBe(1);
     expect(pans?.panR.gain.value).toBe(1);
     expect(nodes?.volumeGain.gain.value).toBeCloseTo(dbToLinear(-2), 12);
+  });
+
+  it('with BOTH a pan lane and a spatial lane, the bake carries the SPATIAL image (ruling 4 order)', () => {
+    // Pan lane hard-LEFT vs azimuth hard-RIGHT — the ordering discriminator
+    // the mixdown suite pins, now pinned on the PLAYER bake too (review
+    // round 1: swapping the player's branch survived without this).
+    const az: AutomationKey[] = [{ positionSample: 0, value: 90 }];
+    const pan: AutomationKey[] = [{ positionSample: 0, value: -1 }];
+    const { player, ctx } = makePlayer();
+    const t = track({
+      pan: -0.8, // static also superseded
+      clips: [clip({ documentId: 'm', startSample: 0, lengthSample: 500 })],
+      automation: [panLane(pan), azLane(az)],
+    });
+    player.play(0, session([t]), docs(monoDoc('m', 0.5)));
+
+    const buf = ctx.sources[0].buffer;
+    if (!buf) throw new Error('no buffer');
+    // Spatial governs: az 90 → pos sin(90°) = 1 → mono law hard right
+    // (gL = cos(π/2) ≈ 0, gR = 1). The pan lane at −1 would put the whole
+    // signal on the LEFT (gL = 1, gR = 0) — written from the law, inline.
+    expect(buf.copied[0][250]).toBeCloseTo(0.5 * Math.cos(Math.PI / 2), 6);
+    expect(buf.copied[1][250]).toBeCloseTo(0.5, 6);
+    expect(player.liveTrackNodes(t.id)?.bakedPan).toBe(true);
   });
 
   it('applyTrackParams cannot stomp a spatially-baked pan pair (trap T2)', () => {
@@ -765,18 +789,25 @@ describe('F5 RULING 2: player output === mixdown output over a MOVING spatial re
       { positionSample: 1200, value: 3, curve: 'smooth' },
       { positionSample: 1700, value: -9 },
     ];
+    // Both tracks ALSO carry a hard-panned PAN LANE that ruling 4 supersedes
+    // (hard-left on the stereo track, hard-right on the mono track — images
+    // maximally far from the spatial anchors). This folds the player-side
+    // supersede ORDER into the exactness assertion itself: a player branch
+    // that lets the pan lane win bakes the pan image while mixdown renders
+    // the spatial one, and every exact-0 comparison (and every anchor) goes
+    // red — review round 1's survivor, now pinned.
     const s = session([
       track({
         volumeDb: 0, // NOT automated: live node dbToLinear(0) = 1 exactly
         pan: 0.4, // superseded by the spatial group → neutralised node
         clips: [clip({ documentId: 'st', startSample: 0, lengthSample: 1000 })],
-        automation: [azLane(az1), elLane(el1), distLane(d1)],
+        automation: [azLane(az1), elLane(el1), distLane(d1), panLane([{ positionSample: 0, value: -1 }])],
       }),
       track({
         volumeDb: 3, // overridden by the volume lane → neutralised node
         pan: -0.6, // superseded
         clips: [clip({ documentId: 'm', startSample: 1000, lengthSample: 1000 })],
-        automation: [azLane(az2), volLane(v2)],
+        automation: [azLane(az2), volLane(v2), panLane([{ positionSample: 1000, value: 1 }])],
       }),
     ]);
     return { s, d: docs(stereoDoc('st', 0.5, -0.25, 1000), monoDoc('m', 0.5, 1000)) };

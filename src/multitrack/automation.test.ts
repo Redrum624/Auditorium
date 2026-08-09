@@ -29,30 +29,30 @@ describe('automationValueAt — hold regions', () => {
   const keys = [key(100, -6), key(500, 3)];
 
   it('holds the FIRST key value before the first key, up to the exact boundary sample', () => {
-    expect(automationValueAt(keys, 0)).toBe(-6);
-    expect(automationValueAt(keys, 99)).toBe(-6); // one below the boundary
-    expect(automationValueAt(keys, 100)).toBe(-6); // exactly ON the first key
+    expect(automationValueAt(keys, 0, 'volumeDb')).toBe(-6);
+    expect(automationValueAt(keys, 99, 'volumeDb')).toBe(-6); // one below the boundary
+    expect(automationValueAt(keys, 100, 'volumeDb')).toBe(-6); // exactly ON the first key
     // one above: the segment has begun — equal-gain from -6 toward 3
-    expect(automationValueAt(keys, 101)).toBeCloseTo(-6 + 9 * (1 / 400), 12);
-    expect(automationValueAt(keys, 101)).not.toBe(-6);
+    expect(automationValueAt(keys, 101, 'volumeDb')).toBeCloseTo(-6 + 9 * (1 / 400), 12);
+    expect(automationValueAt(keys, 101, 'volumeDb')).not.toBe(-6);
   });
 
   it('holds the LAST key value from the exact last-key sample onward', () => {
     // one below: still interpolating (not yet the held value)
-    expect(automationValueAt(keys, 499)).toBeCloseTo(-6 + 9 * (399 / 400), 12);
-    expect(automationValueAt(keys, 499)).not.toBe(3);
-    expect(automationValueAt(keys, 500)).toBe(3); // exactly ON the last key
-    expect(automationValueAt(keys, 501)).toBe(3); // one above
-    expect(automationValueAt(keys, 1_000_000)).toBe(3); // far past — held, never extrapolated
+    expect(automationValueAt(keys, 499, 'volumeDb')).toBeCloseTo(-6 + 9 * (399 / 400), 12);
+    expect(automationValueAt(keys, 499, 'volumeDb')).not.toBe(3);
+    expect(automationValueAt(keys, 500, 'volumeDb')).toBe(3); // exactly ON the last key
+    expect(automationValueAt(keys, 501, 'volumeDb')).toBe(3); // one above
+    expect(automationValueAt(keys, 1_000_000, 'volumeDb')).toBe(3); // far past — held, never extrapolated
   });
 
   it('a one-key lane holds its value over the whole timeline', () => {
     const one = [key(300, -12.5)];
-    expect(automationValueAt(one, 0)).toBe(-12.5);
-    expect(automationValueAt(one, 299)).toBe(-12.5);
-    expect(automationValueAt(one, 300)).toBe(-12.5);
-    expect(automationValueAt(one, 301)).toBe(-12.5);
-    expect(automationValueAt(one, 10_000_000)).toBe(-12.5);
+    expect(automationValueAt(one, 0, 'volumeDb')).toBe(-12.5);
+    expect(automationValueAt(one, 299, 'volumeDb')).toBe(-12.5);
+    expect(automationValueAt(one, 300, 'volumeDb')).toBe(-12.5);
+    expect(automationValueAt(one, 301, 'volumeDb')).toBe(-12.5);
+    expect(automationValueAt(one, 10_000_000, 'volumeDb')).toBe(-12.5);
   });
 });
 
@@ -65,10 +65,10 @@ describe('automationValueAt — a sample exactly ON a key returns that key value
     // caught by EXACT equality — `v0 + (v1 − v0)·1` lands an ulp off the key
     // value, while `v1 + (…)·0` cannot move it.
     const keys = [key(0, -6.1), key(200, 3.3), key(600, 0.7), key(900, 0.1)];
-    expect(automationValueAt(keys, 0)).toBe(-6.1);
-    expect(automationValueAt(keys, 200)).toBe(3.3);
-    expect(automationValueAt(keys, 600)).toBe(0.7);
-    expect(automationValueAt(keys, 900)).toBe(0.1);
+    expect(automationValueAt(keys, 0, 'volumeDb')).toBe(-6.1);
+    expect(automationValueAt(keys, 200, 'volumeDb')).toBe(3.3);
+    expect(automationValueAt(keys, 600, 'volumeDb')).toBe(0.7);
+    expect(automationValueAt(keys, 900, 'volumeDb')).toBe(0.1);
   });
 });
 
@@ -79,17 +79,17 @@ describe('automationValueAt — segment selection at key boundaries', () => {
   const keys = [key(0, 0, 'equal-gain'), key(400, 10, 'exponential'), key(800, -20, 'smooth')];
 
   it('one below the middle key: segment 0 (equal-gain 0 -> 10)', () => {
-    expect(automationValueAt(keys, 399)).toBeCloseTo(0 + 10 * fadeInShape(399 / 400, 'equal-gain'), 12);
+    expect(automationValueAt(keys, 399, 'volumeDb')).toBeCloseTo(0 + 10 * fadeInShape(399 / 400, 'equal-gain'), 12);
   });
 
   it('exactly on the middle key: the key value', () => {
-    expect(automationValueAt(keys, 400)).toBe(10);
+    expect(automationValueAt(keys, 400, 'volumeDb')).toBe(10);
   });
 
   it('one above the middle key: segment 1 (exponential 10 -> -20)', () => {
-    expect(automationValueAt(keys, 401)).toBeCloseTo(10 + -30 * fadeInShape(1 / 400, 'exponential'), 12);
+    expect(automationValueAt(keys, 401, 'volumeDb')).toBeCloseTo(10 + -30 * fadeInShape(1 / 400, 'exponential'), 12);
     // sanity: the two candidate segments genuinely disagree here
-    expect(automationValueAt(keys, 401)).not.toBeCloseTo(0 + 10 * fadeInShape(401 / 400, 'equal-gain'), 6);
+    expect(automationValueAt(keys, 401, 'volumeDb')).not.toBeCloseTo(0 + 10 * fadeInShape(401 / 400, 'equal-gain'), 6);
   });
 });
 
@@ -99,15 +99,15 @@ describe('automationValueAt — every curve interpolates as the shared fades.ts 
     // quarter / mid / three-quarter probes, plus off-grid
     for (const s of [1250, 1500, 1750, 1333]) {
       const u = (s - 1000) / 1000;
-      expect(automationValueAt(keys, s)).toBe(-24 + 30 * fadeInShape(u, curve));
+      expect(automationValueAt(keys, s, 'volumeDb')).toBe(-24 + 30 * fadeInShape(u, curve));
     }
   });
 
   it('an absent curve means DEFAULT_AUTOMATION_CURVE (equal-gain: the straight segment)', () => {
     const keys = [key(0, 0), key(100, 1)];
     expect(DEFAULT_AUTOMATION_CURVE).toBe('equal-gain');
-    expect(automationValueAt(keys, 25)).toBe(0 + 1 * fadeInShape(0.25, 'equal-gain'));
-    expect(automationValueAt(keys, 25)).toBeCloseTo(0.25, 12);
+    expect(automationValueAt(keys, 25, 'volumeDb')).toBe(0 + 1 * fadeInShape(0.25, 'equal-gain'));
+    expect(automationValueAt(keys, 25, 'volumeDb')).toBeCloseTo(0.25, 12);
   });
 });
 
@@ -384,10 +384,12 @@ describe('F5 automationValueAt — azimuth interpolates along the SHORT arc acro
     expect(automationValueAt(keys, 900, 'azimuth')).toBe(-90); // hold after
   });
 
-  it('a non-wrapping azimuth segment interpolates exactly like the linear branch', () => {
+  it('a non-wrapping azimuth segment interpolates exactly like a linear param', () => {
+    // Same keys through 'elevation' (a linear degree-domain param) as the
+    // reference: in-range deltas must be arithmetically identical.
     const keys = [key(0, -30), key(100, 90, 'smooth')];
     for (const s of [25, 50, 75]) {
-      expect(automationValueAt(keys, s, 'azimuth')).toBe(automationValueAt(keys, s));
+      expect(automationValueAt(keys, s, 'azimuth')).toBe(automationValueAt(keys, s, 'elevation'));
     }
   });
 
@@ -406,14 +408,12 @@ describe('F5 automationValueAt — azimuth interpolates along the SHORT arc acro
     expect(expected).toBeCloseTo(170 + 20 * Math.sin((0.25 * Math.PI) / 2), 12);
   });
 
-  it('the circular branch applies ONLY to azimuth: pan/volume/elevation/distance stay linear', () => {
-    // A hostile out-of-range pair would reveal wrapping on a linear param.
-    const keys = [key(0, -60), key(100, 12)];
-    expect(automationValueAt(keys, 50, 'volumeDb')).toBe(automationValueAt(keys, 50));
-    const eKeys = [key(0, -90), key(100, 90)];
-    expect(automationValueAt(eKeys, 50, 'elevation')).toBe(automationValueAt(eKeys, 50));
-    const dKeys = [key(0, 0), key(100, 10)];
-    expect(automationValueAt(dKeys, 50, 'distance')).toBe(automationValueAt(dKeys, 50));
+  it('the circular branch applies ONLY to azimuth: volume/elevation/distance stay linear', () => {
+    // Independent midpoint arithmetic (v0 + (v1−v0)·0.5, equal-gain default):
+    // a wrap sneaking onto a linear param would move every one of these.
+    expect(automationValueAt([key(0, -60), key(100, 12)], 50, 'volumeDb')).toBe(-24);
+    expect(automationValueAt([key(0, -90), key(100, 90)], 50, 'elevation')).toBe(0);
+    expect(automationValueAt([key(0, 0), key(100, 10)], 50, 'distance')).toBe(5);
   });
 });
 

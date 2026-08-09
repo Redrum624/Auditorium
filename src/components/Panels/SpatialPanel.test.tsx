@@ -105,6 +105,33 @@ describe('keyframe awareness (the dot follows the lanes at the playhead)', () =>
 });
 
 describe('the elevation slider', () => {
+  it('a pending elevation preview rides the stage commit — nothing shown is discarded', () => {
+    act(() => {
+      useSessionStore.getState().setMtCursor(8_000);
+    });
+    const { getByTestId } = render(<SpatialPanel />);
+    // Adjust elevation WITHOUT releasing, then drag the stage and release:
+    fireEvent.change(getByTestId('spatial-elevation'), { target: { value: '45' } });
+    expect(track0().automation).toBeUndefined();
+
+    let writes = 0;
+    const unsub = useSessionStore.subscribe(() => {
+      writes++;
+    });
+    const stage = getByTestId('spatial-stage');
+    firePointer(stage, 'pointerdown', { clientX: 216, clientY: 150 });
+    firePointer(stage, 'pointerup', { clientX: 216, clientY: 150 });
+    unsub();
+
+    // ONE write carrying all three lanes — the previewed elevation included.
+    expect(writes).toBe(1);
+    expect(track0().automation).toEqual([
+      { param: 'azimuth', keys: [{ positionSample: 8_000, value: 90 }] },
+      { param: 'distance', keys: [{ positionSample: 8_000, value: 5 }] },
+      { param: 'elevation', keys: [{ positionSample: 8_000, value: 45 }] },
+    ]);
+  });
+
   it('previews on change (no write) and commits ONE elevation key on release', () => {
     act(() => {
       useSessionStore.getState().setMtCursor(4_000);
