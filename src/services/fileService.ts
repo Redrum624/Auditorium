@@ -524,7 +524,7 @@ export function newDocument(opts: {
  * pressed into service to represent it (undoHistory re-derives `dirty` from
  * the save point, which would silently erase a stamped value on the first
  * undo — see AudioDocument.ts and docs/KNOWN_LIMITATIONS.md). */
-function hasUnsavedWork(doc: AudioDocument): boolean {
+export function hasUnsavedWork(doc: AudioDocument): boolean {
   return doc.dirty || doc.neverSaved;
 }
 

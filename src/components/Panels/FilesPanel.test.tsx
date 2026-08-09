@@ -10,7 +10,13 @@ jest.mock('../../services/fileService', () => ({
 
 const mockClose = closeDocumentFlow as jest.MockedFunction<typeof closeDocumentFlow>;
 
-function addDoc(opts: { name: string; sampleRate?: number; seconds?: number; dirty?: boolean }): AudioDocument {
+function addDoc(opts: {
+  name: string;
+  sampleRate?: number;
+  seconds?: number;
+  dirty?: boolean;
+  neverSaved?: boolean;
+}): AudioDocument {
   const sampleRate = opts.sampleRate ?? 44100;
   const length = Math.round(sampleRate * (opts.seconds ?? 1));
   const doc = createDocument({
@@ -19,7 +25,10 @@ function addDoc(opts: { name: string; sampleRate?: number; seconds?: number; dir
     channels: [new Float32Array(length), new Float32Array(length)],
   });
   useAppStore.getState().addDocument(doc);
-  if (opts.dirty) useAppStore.getState().updateDocument({ ...doc, dirty: true });
+  const patch: Partial<AudioDocument> = {};
+  if (opts.dirty) patch.dirty = true;
+  if (opts.neverSaved !== undefined) patch.neverSaved = opts.neverSaved;
+  if (Object.keys(patch).length > 0) useAppStore.getState().updateDocument({ ...doc, ...patch });
   return useAppStore.getState().documents.at(-1)!;
 }
 
@@ -49,6 +58,37 @@ describe('FilesPanel', () => {
     addDoc({ name: 'edited.wav', dirty: true });
     render(<FilesPanel />);
     expect(screen.getByText(/edited\.wav\s*\*/)).toBeInTheDocument();
+  });
+
+  // v1.9.1 item 3: the never-saved marker is a distinct indicator from the
+  // dirty asterisk. The two flags are independent; probe all four combinations.
+  it('shows the never-saved dot for a clean, never-saved (computed) document, with NO asterisk', () => {
+    addDoc({ name: 'Remix 1', neverSaved: true }); // dirty false
+    render(<FilesPanel />);
+    const dot = screen.getByTestId('files-neversaved');
+    expect(dot).toBeInTheDocument();
+    expect(dot).toHaveAttribute('title', 'Never saved to disk');
+    expect(screen.queryByText(/Remix 1\s*\*/)).not.toBeInTheDocument();
+  });
+
+  it('shows NO never-saved dot for a saved (on-disk) document', () => {
+    addDoc({ name: 'ondisk.wav', neverSaved: false }); // dirty false
+    render(<FilesPanel />);
+    expect(screen.queryByTestId('files-neversaved')).not.toBeInTheDocument();
+  });
+
+  it('shows the asterisk but NO never-saved dot for a saved-but-edited document (dirty, not never-saved)', () => {
+    addDoc({ name: 'edited.wav', dirty: true, neverSaved: false });
+    render(<FilesPanel />);
+    expect(screen.getByText(/edited\.wav\s*\*/)).toBeInTheDocument();
+    expect(screen.queryByTestId('files-neversaved')).not.toBeInTheDocument();
+  });
+
+  it('shows BOTH the dot and the asterisk for a never-saved, edited document', () => {
+    addDoc({ name: 'Remix 2', dirty: true, neverSaved: true });
+    render(<FilesPanel />);
+    expect(screen.getByTestId('files-neversaved')).toBeInTheDocument();
+    expect(screen.getByText(/Remix 2\s*\*/)).toBeInTheDocument();
   });
 
   it('activates a document when its row is clicked', () => {

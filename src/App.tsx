@@ -25,7 +25,7 @@ import Toolbar from './components/Layout/Toolbar';
 import { ChromePill, GlassCard, IconTile } from './components/UI/glass';
 import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
-import { getInFlightSaveCount } from './services/fileService';
+import { getInFlightSaveCount, hasUnsavedWork } from './services/fileService';
 import { getStemBusyCount } from './services/stemService';
 import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
@@ -159,7 +159,7 @@ export default function App() {
     return api.onCloseRequested(() => {
       const unsaved = useAppStore
         .getState()
-        .documents.filter((d) => d.dirty || d.neverSaved).length;
+        .documents.filter(hasUnsavedWork).length;
       api.respondCloseRequest(unsaved, getInFlightSaveCount() + getStemBusyCount());
     });
   }, []);

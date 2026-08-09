@@ -39,6 +39,21 @@ export default function FilesPanel() {
                 isActive ? 'bg-white/[.06]' : 'hover:bg-white/5'
               }`}
             >
+              {/* v1.9.1: a "never saved to disk" marker, visually DISTINCT from
+                  the dirty `*` — the two mean different things (dirty = has
+                  unsaved edits; never-saved = has no file on disk at all) and a
+                  document can be both. v1.6 glass language: a 2x2 amber tint dot
+                  with a title tooltip (the RemixPanel quality-dot convention).
+                  Sits at the row level (not inside the name span) so the name
+                  stays a single text node. */}
+              {doc.neverSaved && (
+                <span
+                  data-testid="files-neversaved"
+                  title="Never saved to disk"
+                  aria-label="Never saved to disk"
+                  className="h-2 w-2 shrink-0 rounded-full bg-[#e0a458]"
+                />
+              )}
               <button
                 type="button"
                 onClick={() => setActiveDocument(doc.id)}

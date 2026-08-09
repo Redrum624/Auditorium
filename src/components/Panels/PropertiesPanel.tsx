@@ -248,6 +248,11 @@ function DocumentProperties() {
       <Row label="Duration" value={formatTime(length, doc.sampleRate)} />
       <Row label="Samples" value={length.toLocaleString()} />
       <Row label="Dirty" value={doc.dirty ? 'Yes' : 'No'} />
+      {/* v1.9.1: surfaced alongside — never-saved is distinct provenance (no
+          file on disk at all), not the same as dirty (has unsaved edits); a
+          computed doc is clean-but-never-saved from birth, which is why it can
+          still prompt on close. */}
+      <Row label="Never saved" value={doc.neverSaved ? 'Yes' : 'No'} />
 
       <TempoSection key={doc.id} doc={doc} />
 

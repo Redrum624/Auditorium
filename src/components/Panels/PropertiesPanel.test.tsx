@@ -77,6 +77,14 @@ beforeEach(() => {
   mockRegridTempo.mockReset().mockResolvedValue(null);
 });
 
+/** The value shown in a Properties Row identified by its unique label — used
+ * to disambiguate rows that share a value string (Dirty vs Never saved both
+ * read Yes/No). */
+function rowValue(label: string): string {
+  const row = screen.getByText(label).parentElement!;
+  return (row.querySelector('span:last-child')?.textContent ?? '').trim();
+}
+
 describe('PropertiesPanel (waveform/spectral view)', () => {
   it('shows a "no document" hint when nothing is open', () => {
     render(<PropertiesPanel />);
@@ -96,7 +104,9 @@ describe('PropertiesPanel (waveform/spectral view)', () => {
     expect(screen.getByText('32-bit float (internal)')).toBeInTheDocument();
     expect(screen.getByText('0:01.000')).toBeInTheDocument(); // 44100 samples @ 44100Hz
     expect(screen.getByText('44,100')).toBeInTheDocument();
-    expect(screen.getByText('No')).toBeInTheDocument(); // dirty: false on a fresh doc
+    expect(rowValue('Dirty')).toBe('No'); // dirty: false on a fresh doc
+    // v1.9.1 item 3: an on-disk document (filePath set) is not never-saved.
+    expect(rowValue('Never saved')).toBe('No');
   });
 
   it('shows "N-bit source → 32-bit float" when the source bit depth is known', () => {
@@ -114,10 +124,20 @@ describe('PropertiesPanel (waveform/spectral view)', () => {
   });
 
   it('shows "Yes" once the document is dirty', () => {
-    const doc = addDoc();
+    const doc = addDoc({ filePath: 'C:\\audio\\clip.wav' }); // saved -> neverSaved false
     useAppStore.getState().updateDocument({ ...doc, dirty: true });
     render(<PropertiesPanel />);
-    expect(screen.getByText('Yes')).toBeInTheDocument();
+    expect(rowValue('Dirty')).toBe('Yes');
+    expect(rowValue('Never saved')).toBe('No');
+  });
+
+  // v1.9.1 item 3: never-saved is a SEPARATE provenance row from Dirty. A
+  // computed document (no filePath) is clean-but-never-saved from birth.
+  it('shows "Never saved: Yes" for a computed (path-less) document that is not dirty', () => {
+    addDoc({ filePath: null });
+    render(<PropertiesPanel />);
+    expect(rowValue('Never saved')).toBe('Yes');
+    expect(rowValue('Dirty')).toBe('No'); // distinct from dirty
   });
 
   it('shows selection start/end/length when a selection exists', () => {
