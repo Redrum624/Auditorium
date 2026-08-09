@@ -8,11 +8,12 @@
 
 Auditorium is a free, Audition-class desktop audio editor for Windows, built on
 Electron and React. It does destructive waveform editing and spectral-frequency
-editing, ships 22 built-in effects, spectral noise reduction, microphone
-recording, a multitrack editor with sessions and mixdown, tempo detection,
-tempo matching and auto-remix, and stem separation that splits a track into
-drums/bass/vocals/other and a residual which add back up to the original sample
-for sample — all processing runs locally, no cloud and no account.
+editing, ships 24 built-in effects, spectral noise reduction, microphone
+recording, a multitrack editor with sessions, mixdown and volume/pan
+automation envelopes, tempo detection, tempo matching and auto-remix, and stem
+separation that splits a track into drums/bass/vocals/other and a residual
+which add back up to the original sample for sample — all processing runs
+locally, no cloud and no account.
 
 ## Install
 
@@ -48,7 +49,7 @@ use `npm run dev`.
 
 - **Waveform Editor** — the default per-sample amplitude view with zoom, scroll, selection, cursor, and playhead.
 - **Spectral Frequency Display** — an off-main-thread spectrogram (logarithmic frequency axis by default, toggleable to linear, inferno color map, HiDPI-rendered) of the active document.
-- **Multitrack Editor** — a session timeline of tracks and clips with per-track volume/pan/mute/solo/arm and draggable, trimmable clips carrying non-destructive edge fades and crossfaded overlaps.
+- **Multitrack Editor** — a session timeline of tracks and clips with per-track volume/pan/mute/solo/arm, draggable, trimmable clips carrying non-destructive edge fades and crossfaded overlaps, and per-track volume/pan automation envelopes edited on the lane itself.
 - **Recorder** — a record dialog with input-device selection, channel/sample-rate choice, and a live input-level meter.
 - **Effects Rack** — a categorized effects panel and menu; each effect opens a parameter dialog with a preview before applying.
 - **Files Panel** — the list of open documents (name, dirty marker, duration, sample rate), opened from the right-edge icon rail.
@@ -63,7 +64,7 @@ use `npm run dev`.
 
 ## Features
 
-**Effects (22), grouped by category:**
+**Effects (24), grouped by category:**
 
 - **Amplitude** — Amplify, Normalize, Fade.
 - **EQ & Filters** — Parametric EQ, Graphic EQ.
@@ -71,9 +72,9 @@ use `npm run dev`.
 - **Delay & Reverb** — Echo, Reverb.
 - **Modulation** — Chorus, Flanger.
 - **Distortion** — Distortion.
-- **Restoration** — Remove DC Offset, DeHum, Noise Reduction.
+- **Restoration** — Remove DC Offset, DeHum, Noise Reduction, Remove Silence.
 - **Stereo** — Channel Mixer, Pan.
-- **Time & Pitch** — Time Stretch, Pitch Shift.
+- **Time & Pitch** — Time Stretch, Pitch Shift, Pitch Correct.
 - **Utility** — Invert, Reverse.
 
 **Editing & workflow:**
@@ -98,6 +99,9 @@ use `npm run dev`.
 - **Sessions**: save/open multitrack sessions as `.audm` (format v3 — a binary layout with no size-limited base64 encoding, so Save Session no longer fails silently on large embedded audio; older v1/v2 session files still open), and mix down a whole session to a new stereo document.
 - **Clip fades**: every multitrack clip carries non-destructive fade-in/fade-out — corner handles on the selected clip, exact length fields and a curve picker (Equal power / Equal gain / Smooth / Ducked) in the Properties panel — applied identically in live playback and Mix Down, saved in the `.audm`, and re-editable at any time.
 - **Crossfades**: dragging a clip into a same-track neighbour commits the overlap verbatim and arms a real crossfade (both facing fades span the overlap; the pair is rendered with the same correlation-compensated, level-preserving gain law Auto-Remix uses); moves and trims re-arm at the new width, Arm/Release manage it from the Properties panel, and holding Ctrl at the drop restores the old push-clear nudge. A fade-carrying session still opens in v1.8.0, minus the fades.
+- **Track automation**: per-track volume and pan envelopes — keys on the multitrack timeline with per-segment curves, edited directly on the lane (click to add, drag to move with snapping, right-click to delete, double-click to change the curve); an active envelope overrides its fader, plays and mixes down with bit-identical gains, and saves in the `.audm` (a lane-free session stays byte-identical on disk, and an automation session opens in v1.9.2 and round-trips through it with the lanes preserved — v1.9.2 just cannot edit or play them).
+- **Pitch Correct**: scale-snapped pitch correction — a YIN pitch detector tracks the sung/played line, snaps each voiced frame to the chosen key and scale (chromatic, major, or natural minor) with adjustable Strength and Retune Speed, and resynthesises through a time-varying stretch+resample pair that preserves the input length exactly.
+- **Remove Silence**: detects pauses under a threshold and either shortens each to a target length or removes it (keeping padding), splicing every cut with a click-free crossfade and remapping markers by the exact material removed before them — a marker inside a removed pause snaps to the splice point instead of being lost.
 - **Fade effect curves**: the destructive Fade effect gains the Equal power curve and a ramp-length control (% of the selection); its "Exponential" option is now labelled **Ducked** — the shape is quadratic, and the new name describes what it sounds like.
 - **Tempo detection**: `Effects → Detect Tempo` runs a shared off-thread beat-tracking pass (log-band spectral-flux onsets → harmonic-comb tempo estimate → Ellis dynamic-programming beat tracking → sample-accurate refinement) and reports the BPM plus a confidence score in the status pill and the Properties panel. The beats are tracked, not extrapolated, so the grid follows a drifting take; ×2 / ÷2 buttons re-track at the corrected period when the octave is wrong. Whole-document analysis is capped at 10 minutes and flags the result as truncated past that.
 - **Beat grid**: once a tempo has been detected, the tracked beats are drawn as tics along the bottom of the waveform and spectral editors and on every multitrack clip (mapped through the clip's own offset, trim and sample rate), so you can see where the beat actually falls rather than inferring it from a BPM number; a stale or low-confidence grid is drawn dimmed and dashed rather than as fact, bar lines appear only when an Auto-Remix analysis genuinely measured a metre, stems inherit their source's grid instead of being re-analysed, and `View → Toggle Beat Grid` switches it off.

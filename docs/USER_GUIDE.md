@@ -159,9 +159,16 @@ selection.
 - **Delay & Reverb** — Echo, Reverb
 - **Modulation** — Chorus, Flanger
 - **Distortion** — Distortion
-- **Restoration** — Remove DC Offset, DeHum, Noise Reduction
+- **Restoration** — Remove DC Offset, DeHum, Noise Reduction, Remove Silence
+  (detects pauses under a Threshold lasting at least Min silence and shortens
+  each to a target — or removes it, keeping Padding — with a click-free
+  crossfade at every cut; markers shift by exactly the material removed before
+  them, and a marker inside a removed pause snaps to the splice point)
 - **Stereo** — Channel Mixer, Pan
-- **Time & Pitch** — Time Stretch, Pitch Shift
+- **Time & Pitch** — Time Stretch, Pitch Shift, Pitch Correct (snaps a sung
+  or played line to a Key and Scale — chromatic, major, or natural minor —
+  with Strength scaling the correction and Retune Speed smoothing it; 0 ms is
+  an instant snap, and unvoiced frames and silence pass through untouched)
 - **Utility** — Invert, Reverse
 
 ### Noise Reduction (capture → apply flow)
@@ -405,7 +412,9 @@ document open. A session has a name, a sample rate, and any number of tracks.
   multitrack playback (v1) — Play/Pause toggles play↔stop. Volume, pan, and
   mute/solo changes apply **live while playing** — the realtime monitor uses the
   same pan law as Mix Down, so it matches the render. Clip moves, trims, and clip
-  gain take effect on the next play.
+  gain take effect on the next play. A parameter governed by an automation
+  envelope is the exception: its fader is disabled and the envelope carries
+  the value (see **Track automation** below).
 - **Recording into the multitrack**: **arm** one or more tracks with their **R**
   toggle, position the multitrack cursor where the take should begin, then press
   **Record** in the toolbar pill. The session plays back from the cursor as a
@@ -497,6 +506,47 @@ pair's overlap region, the crossfade stops rendering (three simultaneous
 signals have no pair law) and the panel reports the overlap as a raw sum —
 but the stored fades are deliberately left in place, so moving the intruder
 away revives the crossfade with no further action.
+
+### Track automation (volume and pan envelopes)
+
+Automation makes a track's **volume** or **pan** vary over time: an envelope
+of keys drawn on the track lane itself, applied identically in live playback
+and Mix Down (bit-exact — the envelope is baked into the render on both
+paths, never approximated by the audio graph's own parameter scheduling).
+
+**Opening a lane.** Each track header has a small activity toggle beside its
+volume slider and another beside its pan slider. Click one to open that
+parameter's envelope over the track lane (one envelope is open at a time;
+click again to close it). While a lane is open it owns the track lane's
+mouse — close it to select, drag, or trim the clips underneath.
+
+**Editing.**
+
+- **Click** empty lane space to add a key at that time and value (up is
+  louder / pan right; the current value is shown in a readout while you
+  hold). With no keys yet, the dashed line shows the fader's own value —
+  the first key takes over from it.
+- **Drag** a key to move it in time and value. Keys snap to the same beat
+  and marker targets as every other timeline gesture; hold `Alt` to suspend
+  the magnet. The store commits once, on release.
+- **Right-click** a key to delete it. Deleting the last key hands the
+  parameter back to the fader.
+- **Double-click** a key to cycle the curve of the segment leading to the
+  *next* key — Equal gain (a straight line, the default), Equal power,
+  Smooth, or Ducked, the same curve family as the clip fades; a small label
+  flashes the new choice.
+
+**The envelope governs.** While a lane has at least one key, that parameter's
+header slider is disabled and its static value is ignored — the envelope *is*
+the volume (or pan). Before the first key and after the last one the nearest
+key's value is held flat; a single key therefore holds its value for the
+whole timeline. Editing during playback re-bakes just the affected track, so
+the change is heard without restarting the transport.
+
+**Sessions.** Envelopes save into the `.audm` alongside everything else. A
+session that never used automation stays byte-identical on disk to what
+earlier versions wrote, and an automation-carrying session still opens in
+v1.9.2 — the lanes are simply not shown there and survive a re-save.
 
 An empty session (no clips on any track) shows an inline hint pointing at
 Insert Active File; the main editor area shows "Open an audio file (Ctrl+O)
