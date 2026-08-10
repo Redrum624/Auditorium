@@ -785,3 +785,88 @@ preview freezes when a drag starts, so dragging the stage during playback
 while an elevation lane is moving writes an elevation key at the value shown
 when the drag began (the frozen dot/readout), not at the value the lane
 reached by release. The panel displays exactly what will be committed.
+
+## Speaker separation is reliable for one or two voices, not three
+
+**Area:** F4 transcription (`electron/transcribeHost.cjs`,
+`electron/transcribeManager.cjs`, `src/dsp/speakerClustering.ts`,
+`src/services/transcribeService.ts`,
+`src/components/Panels/TranscriptPanel.tsx`).
+
+**Behavior a user will notice:** `Edit → Transcribe…` labels every segment
+with a speaker, and on two-voice material it is right. With three or more
+voices it is not, and it will still hand you a confident-looking answer with
+the wrong number of speakers in it. It also has no idea when two people talk
+at once: a segment containing two voices gets one label, silently.
+
+**The measurement.** Ground truth by construction — every chunk cut from a
+single-speaker recording, so its true speaker is whichever file it came from;
+2 s chunks, CAM++ embeddings, the shipped clustering. Ten cases:
+
+| Case | Result |
+|---|---|
+| 5 single-speaker sets | 5/5 returned **1 speaker** |
+| 4 two-speaker sets | 4/4 returned **2 speakers**, **100 %** of segments correct |
+| 1 three-speaker set | returned 2, **45 %** of segments correct — **73 %** even when told there were three |
+
+Two things follow. First, **the speaker count is a control, not a readout**:
+the Transcript panel lets you set it, and the grouping is recomputed from the
+stored voice embeddings instantly, with no second transcription run. Second,
+**100 % on two speakers is an upper bound, not a field expectation** — that
+material was concatenated single-speaker recordings, so it had clean cuts, no
+crosstalk, no overlapping speech, and different channel conditions per
+speaker, all of which make the job easier than a real conversation.
+
+**Why it is built this way:** the failure is in the count selection *and* in
+the clustering, so neither half can be patched alone — forcing k = 3 still
+only reached 73 %, which means CAM++ embeddings over 2 s chunks are simply not
+cleanly separable for that trio. Frame-level diarization with overlap
+detection is a different model class (pyannote's segmentation models), and
+those are HuggingFace-gated, which the on-demand-download design rules out.
+The obvious cheap fix was measured and rejected: thresholding the silhouette
+score cannot separate "one speaker" from "two" here — single-speaker sets
+scored up to 0.379 and the weakest genuine two-speaker set also scored 0.379,
+a zero-width gap. What does separate them is the average-linkage cosine
+between the two clusters of the best 2-way split (single-speaker sets 0.554 to
+0.890, multi-speaker sets 0.231 to 0.262), so `SAME_SPEAKER_COSINE = 0.40`
+sits at the midpoint of that gap. Segments shorter than 0.5 s are not embedded
+at all (below that an embedding is more noise than voice); they inherit a
+label only when their neighbouring labelled segments agree, and are marked
+**Unknown** otherwise rather than guessed.
+
+## Transcription is speech recognition, and singing is not speech
+
+**Area:** F4 transcription (`electron/whisperDecode.cjs`,
+`electron/transcribeHost.cjs`).
+
+**Behavior a user will notice:** transcribing a song gives you plausible
+English that is not the lyrics. On clean solo singing the output is partly
+right and partly invented; over a backing band it is invented outright. There
+is no warning, because there is no signal to warn from.
+
+**The measurement.** whisper-base, 16 kHz mono, against a spoken control:
+
+| Material | Realtime factor | Mean avgLogprob | Word error rate |
+|---|---|---|---|
+| Spoken control (`jfk.wav`, 11 s) | 9.02x | −0.297 | **0.0 %** |
+| Sung, solo voice + light guitar (60 s) | 14.20x | −0.328 | **45.6 %** |
+| Sung with a dance band (60 s) | 14.71x | −1.248 | unusable |
+
+The clean-singing output recovers real phrases and then systematically
+mangles function words, substitutes content words, and collapses into
+repetition — 77 words emitted against 114 in the reference, with the third
+verse replaced by a repeat of the second. The band recording produces fluent
+sentences bearing no relation to the lyrics.
+
+**Why there is no confidence warning:** the model's own confidence does not
+notice. avgLogprob was −0.328 on 45.6 %-WER singing versus −0.297 on
+0 %-WER speech — indistinguishable. Whisper's standard silence rule
+(`noSpeechProb > 0.6` AND `avgLogprob < −1.0`, both required, as the host
+implements) never fires either: `noSpeechProb` was 0.000 in every sung
+segment. Only the heavily degraded band case drops avgLogprob below the
+threshold. So there is no threshold that separates "sung and wrong" from
+"spoken and right", and inventing one would be worse than saying this plainly.
+Separating the vocal stem first (`Edit → Separate into Stems…`) is necessary —
+it is what moves the band case from *fabricated* back to merely *corrupted* —
+but it is not sufficient.
+

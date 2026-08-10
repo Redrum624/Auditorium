@@ -10,9 +10,10 @@ Auditorium is a free, Audition-class desktop audio editor for Windows, built on
 Electron and React. It does destructive waveform editing and spectral-frequency
 editing, ships 24 built-in effects, spectral noise reduction, microphone
 recording, a multitrack editor with sessions, mixdown and volume/pan
-automation envelopes, tempo detection, tempo matching and auto-remix, and stem
+automation envelopes, tempo detection, tempo matching and auto-remix, stem
 separation that splits a track into drums/bass/vocals/other and a residual
-which add back up to the original sample for sample — all processing runs
+which add back up to the original sample for sample, and speech transcription
+with speaker labels that exports as SRT or WebVTT — all processing runs
 locally, no cloud and no account.
 
 ## Install
@@ -62,6 +63,8 @@ use `npm run dev`.
 - **Match Tempo Dialog** — source BPM (prefilled from the detection, re-detectable from the selection), target BPM or ratio, the stretch-quality band, and an optional beat-marker grid at the new tempo.
 - **Auto-Remix Dialog & Remix Panel** — the dialog analyses the track and takes tempo/time-signature confirmation, phrase length, target length, crossfade, strictness and repeat options; the Remix panel (the Remix entry on the icon rail) lists one row per splice with a cost-coloured quality dot, Go To, Reject, Pin, Nudge earlier/later, Re-roll and Revert to auto.
 - **Separate into Stems Dialog** — the one-time 166 MB model download with byte progress, the five track names and both guarantees stated up front, per-segment separation progress with a time estimate, Cancel, and an honest post-run note when a source above full scale means the five tracks cannot add back to it exactly.
+- **Transcribe Dialog** — the one-time ~323 MB model download with byte progress, the speaker count chosen up front (auto, or 1–6), the measured limits of speaker separation stated before you commit, phase-by-phase progress with a time estimate, and a Cancel that kills the inference process.
+- **Transcript Panel** — the active document's transcript (the Transcript entry on the icon rail): one row per spoken segment with its time, speaker and text, a Go-to that moves the cursor, a speaker-count control that re-groups instantly without re-transcribing, a warning when the audio has changed under the transcript, and SRT / WebVTT export.
 
 ## Features
 
@@ -113,6 +116,7 @@ use `npm run dev`.
 - **Match Tempo**: `Effects → Match Tempo…` retargets a selection (or the whole document) from a source BPM to a target BPM or a plain ratio through the WSOLA time stretch, showing whether the resulting stretch is transparent, good, or extreme, and optionally laying down a beat-marker grid at the new tempo as its own undo step.
 - **Auto-Remix**: `Edit → Auto-Remix…` re-arranges a track's own bars to reach a requested length and writes the result to a new `Remix N` document, leaving the source untouched. Bar boundaries come from the tracked beats; each boundary is described by timbre, chroma, loudness and local rhythm and clustered into sections, and a 2-D lattice dynamic program picks the cheapest phrase-congruent arrangement (Φ = 8 bars by default) reaching the target. Joins are micro-aligned by ±10 ms cross-correlation and crossfaded with a power-preserving, length-neutral gain law. The Remix panel then lets you reject, pin, or nudge any individual splice, re-roll the whole arrangement, or revert to the automatic one — every adjustment undoable from the History panel.
 - **Stem separation**: `Edit → Separate into Stems…` splits the active document into **Drums, Bass, Vocals, Other** and a **Residual**, creating five documents and a five-track multitrack session. The five tracks add back up to the original **sample for sample** — the model's estimates are only used to build ratio masks over the original document's own spectrum, and the Residual is the time-domain complement `mix − Σ stems`, so mixing the untouched session down reproduces the source exactly (measured: worst error 0, 100 % of samples bit-identical, mono and stereo, 44.1 and 48 kHz). How cleanly the instruments are told apart is bounded by the model, and the UI says so rather than promising otherwise. The 166 MB model is downloaded on first use (sha256-pinned, re-verified before every load), inference runs on the CPU in an isolated process with per-segment progress and a Cancel that kills it outright, and separation is capped at 15 minutes of audio.
+- **Transcription with speaker separation**: `Edit → Transcribe…` turns speech into timestamped text with a speaker label per segment, using Whisper (base) and a CAM++ speaker-embedding model running locally on the CPU — no cloud, no account, nothing leaves the machine. The transcript appears in the Transcript panel and as coloured regions on the editor's timeline; clicking either moves the cursor there. Timestamps are kept in document samples, so they line up with the waveform at any sample rate, and export as SRT or WebVTT with the speaker labels. **What the speaker separation is worth, measured:** on clean recordings with one voice at a time it told two speakers apart with 100 % of segments correct and recognised a single speaker as one person every time, but it placed only 45 % of segments correctly with three speakers — 73 % even when told there were three. Overlapping speech is not detected at all: a segment with two voices in it gets one label. The speaker count is therefore a control, not just a readout — set it yourself in the Transcript panel and the grouping is recomputed instantly, with no second transcription run. The ~323 MB model set is downloaded on first use (sha256-pinned, re-verified before every load), inference runs in an isolated process with progress and a Cancel that kills it outright, and a job is capped at 2 hours of audio.
 - Keyboard shortcuts throughout — see [`KEYBOARD_SHORTCUTS.md`](KEYBOARD_SHORTCUTS.md) for the full table.
 
 See the [User Guide](docs/USER_GUIDE.md) for a full walkthrough and
@@ -137,14 +141,17 @@ takes and returns `Float32Array` channels and never mutates its input. Heavy
 work (effects and spectrogram computation) runs in Web Workers so the UI stays
 responsive; the same effect registry is imported by both the app and the worker.
 
-**Stem separation** is the one exception to the pure-TypeScript rule, and it is
-contained: neural inference runs on `onnxruntime-node` (CPU execution provider)
-inside an Electron `utilityProcess`, so the renderer never loads it and its
-~5 GB working set can be killed instantly on Cancel. The mask/complement DSP
-that turns the model's estimates into an exact partition is ordinary TypeScript
-like everything else. There is no GPU path: on an RTX 3080 Laptop the DirectML
-provider never finished a single 7.8 s segment before exhausting 15.7 of 16 GB
-of VRAM, while the CPU provider runs at ~1.5× realtime.
+**Stem separation and transcription** are the exceptions to the
+pure-TypeScript rule, and they are contained the same way: neural inference
+runs on `onnxruntime-node` (CPU execution provider) inside an Electron
+`utilityProcess` — one per feature, never shared — so the renderer never loads
+it and the working set can be killed instantly on Cancel. Everything built on
+top of the models is ordinary TypeScript: the mask/complement DSP that turns
+stem estimates into an exact partition, and the Ward-linkage speaker
+clustering that turns voice embeddings into speaker labels. There is no GPU
+path: on an RTX 3080 Laptop the DirectML provider never finished a single
+7.8 s stem segment before exhausting 15.7 of 16 GB of VRAM, while the CPU
+provider runs stem separation at ~1.5x realtime and transcription at ~9x.
 
 ## Credits
 
@@ -153,6 +160,14 @@ of VRAM, while the CPU provider runs at ~1.5× realtime.
   ([`StemSplitio/htdemucs-onnx`](https://huggingface.co/StemSplitio/htdemucs-onnx),
   `htdemucs_fp16weights.onnx`, MIT). The model is downloaded from that
   repository on first use and is not bundled with Auditorium.
+- **Speech recognition model** — **Whisper (base)** by **OpenAI**, Apache-2.0,
+  used through the ONNX export at
+  [`onnx-community/whisper-base`](https://huggingface.co/onnx-community/whisper-base).
+- **Speaker-embedding model** — **CAM++** trained on VoxCeleb by the
+  **WeSpeaker** project, Apache-2.0, taken from the
+  [sherpa-onnx speaker-recognition model release](https://github.com/k2-fsa/sherpa-onnx/releases/tag/speaker-recongition-models)
+  (`wespeaker_en_voxceleb_CAM++.onnx`). Both are downloaded on first use and
+  are not bundled with Auditorium.
 
 ## License
 

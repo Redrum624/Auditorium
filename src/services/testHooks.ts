@@ -39,6 +39,15 @@ import { runTempoAnalysis } from './tempoAnalysis';
 import { applyTempoChange } from './tempoService';
 import { createRemixDocument, getRemixSession } from './remixService';
 import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
+import {
+  cancelTranscription,
+  getTranscribeModelState as readTranscribeModelState,
+  getTranscript,
+  setTranscriptSpeakerCount as applyTranscriptSpeakerCount,
+  transcribeDocument as runTranscription,
+  type TranscribeProgress,
+} from './transcribeService';
+import { formatSrt, formatWebVtt } from './subtitleFormat';
 import { landStems } from './stemLanding';
 import { MultitrackPlayer, multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/firstPlayLatency';
@@ -198,6 +207,25 @@ export interface TestApi {
   // --- v1.7 flows ---------------------------------------------------------
   getStemModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   separateStems(): Promise<StemSeparationSummary>;
+  // --- F4b flows (transcription) -----------------------------------------
+  getTranscribeModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  /** Transcribes the ACTIVE document, bypassing TranscribeDialog. Pass a
+   * count to assert a speaker count, or null/omit for auto-detection. */
+  transcribeActive(speakerCount?: number | null): Promise<TranscriptionSummary>;
+  /** Starts a transcription of the ACTIVE document and cancels it after
+   * `delayMs`. Proves Cancel against a REAL utility process. */
+  transcribeActiveThenCancel(delayMs: number): Promise<TranscriptionSummary>;
+  /** Re-clusters the active document's stored transcript. Returns the new
+   * speaker assignment, or null when there is no transcript. */
+  setTranscriptSpeakers(count: number | null): {
+    speakerCount: number;
+    requestedSpeakerCount: number | null;
+    speakers: (number | null)[];
+  } | null;
+  /** Writes the active document's transcript to `outPath` with the SAME
+   * formatter `exportTranscript` uses, skipping only the native save dialog
+   * (the `exportActive` precedent). */
+  exportTranscriptTo(format: 'srt' | 'vtt', outPath: string): Promise<boolean>;
   // --- v1.9 flows (X7) ----------------------------------------------------
   //
   // Scalars only, per the getBeatGridState precedent: no live Clip objects, no
@@ -294,6 +322,42 @@ export interface WebAudioRenderSummary {
   webPeak: number;
   mixPeak: number;
   probes: { index: number; webL: number; webR: number; mixL: number; mixR: number }[];
+}
+
+/** Plain-JSON result of the transcription hooks. Typed arrays do not survive
+ * Playwright's `page.evaluate` bridge, so everything here is JSON-safe. */
+export interface TranscriptionSummary {
+  ok: boolean;
+  /** `'ok'` on success, otherwise the service's own `TranscribeStatus`. */
+  status: string;
+  message: string | null;
+  segmentCount: number;
+  speakerCount: number;
+  requestedSpeakerCount: number | null;
+  language: string | null;
+  languageProbability: number | null;
+  unembeddedSegments: number;
+  unlabelledSegments: number;
+  /** The DOCUMENT's rate; segment positions are in its samples. */
+  sampleRate: number;
+  lengthSamples: number;
+  segments: {
+    index: number;
+    startSample: number;
+    endSample: number;
+    text: string;
+    speaker: number | null;
+  }[];
+  elapsedMs: number;
+  /** How many progress events the host actually streamed — 0 would mean the
+   * child never reported, which a `done`-only assertion would not notice. */
+  progressEvents: number;
+  /** Furthest `done` seen in the transcribe stage, and the total it was
+   * reported against, both in 16 kHz samples. */
+  maxTranscribeDone: number;
+  transcribeTotal: number;
+  /** Distinct phases the service passed through, in first-seen order. */
+  phasesSeen: string[];
 }
 
 /** Plain-JSON result of the `separateStems` hook (see its implementation). */
@@ -401,6 +465,91 @@ function pairOnEdge(
     return null;
   }
   return null;
+}
+
+/**
+ * The body behind `transcribeActive` / `transcribeActiveThenCancel`: one real
+ * run through the real service, with the progress stream RECORDED so the smoke
+ * can prove the host actually streamed rather than only that it finished.
+ *
+ * `cancelAfterMs` non-null schedules a `cancelTranscription()` that many
+ * milliseconds in — the only way to exercise Cancel against a live utility
+ * process from a script.
+ */
+async function runTranscriptionHook(
+  speakerCount: number | undefined,
+  cancelAfterMs: number | null
+): Promise<TranscriptionSummary> {
+  const empty: TranscriptionSummary = {
+    ok: false,
+    status: 'no-document',
+    message: null,
+    segmentCount: 0,
+    speakerCount: 0,
+    requestedSpeakerCount: null,
+    language: null,
+    languageProbability: null,
+    unembeddedSegments: 0,
+    unlabelledSegments: 0,
+    sampleRate: 0,
+    lengthSamples: 0,
+    segments: [],
+    elapsedMs: 0,
+    progressEvents: 0,
+    maxTranscribeDone: 0,
+    transcribeTotal: 0,
+    phasesSeen: [],
+  };
+  const doc = activeDoc();
+  if (!doc) return empty;
+
+  let progressEvents = 0;
+  let maxTranscribeDone = 0;
+  let transcribeTotal = 0;
+  const phasesSeen: string[] = [];
+  const onProgress = (p: TranscribeProgress): void => {
+    progressEvents++;
+    if (!phasesSeen.includes(p.phase)) phasesSeen.push(p.phase);
+    if (p.phase === 'transcribing') {
+      if (p.done > maxTranscribeDone) maxTranscribeDone = p.done;
+      if (p.total > transcribeTotal) transcribeTotal = p.total;
+    }
+  };
+
+  const timer =
+    cancelAfterMs === null ? null : setTimeout(() => void cancelTranscription(), cancelAfterMs);
+  const startedAt = Date.now();
+  const result = await runTranscription({ docId: doc.id, speakerCount, onProgress });
+  const elapsedMs = Date.now() - startedAt;
+  if (timer !== null) clearTimeout(timer);
+
+  const observed = { elapsedMs, progressEvents, maxTranscribeDone, transcribeTotal, phasesSeen };
+  if (!result.ok) {
+    return { ...empty, ...observed, status: result.status, message: result.message };
+  }
+  const t = result.transcript;
+  return {
+    ...empty,
+    ...observed,
+    ok: true,
+    status: 'ok',
+    segmentCount: t.segments.length,
+    speakerCount: t.speakerCount,
+    requestedSpeakerCount: t.requestedSpeakerCount,
+    language: t.language,
+    languageProbability: t.languageProbability,
+    unembeddedSegments: t.unembeddedSegments,
+    unlabelledSegments: t.unlabelledSegments,
+    sampleRate: t.sampleRate,
+    lengthSamples: t.lengthSamples,
+    segments: t.segments.map((s) => ({
+      index: s.index,
+      startSample: s.startSample,
+      endSample: s.endSample,
+      text: s.text,
+      speaker: s.speaker,
+    })),
+  };
 }
 
 export function installTestHooks(): void {
@@ -1017,6 +1166,45 @@ export function installTestHooks(): void {
     // step is gated on this: the model is downloaded on first use and is NOT in
     // the repo, so a machine without it must REPORT a skip, never pass quietly.
     getStemModelState: () => readStemModelState(),
+
+    // --- F4b flows --------------------------------------------------------
+
+    // Whether the ~323 MB six-file model set is already on disk. The smoke's
+    // transcription step is gated on this exactly as the stem step is: the
+    // files are downloaded on first use and are NOT in the repo, so a machine
+    // without them must REPORT a skip, never pass quietly.
+    getTranscribeModelState: () => readTranscribeModelState(),
+
+    transcribeActive: (speakerCount) => runTranscriptionHook(speakerCount ?? undefined, null),
+    transcribeActiveThenCancel: (delayMs) => runTranscriptionHook(undefined, delayMs),
+
+    setTranscriptSpeakers: (count) => {
+      const doc = activeDoc();
+      if (!doc) return null;
+      const next = applyTranscriptSpeakerCount(doc.id, count);
+      if (!next) return null;
+      return {
+        speakerCount: next.speakerCount,
+        requestedSpeakerCount: next.requestedSpeakerCount,
+        speakers: next.segments.map((s) => s.speaker),
+      };
+    },
+
+    exportTranscriptTo: async (format, outPath) => {
+      const doc = activeDoc();
+      if (!doc) return false;
+      const transcript = getTranscript(doc.id);
+      if (!transcript || transcript.segments.length === 0) return false;
+      const text =
+        format === 'srt'
+          ? formatSrt(transcript.segments, transcript.sampleRate)
+          : formatWebVtt(transcript.segments, transcript.sampleRate);
+      const bytes = new TextEncoder().encode(text);
+      const buffer = new ArrayBuffer(bytes.byteLength);
+      new Uint8Array(buffer).set(bytes);
+      const result = await window.electronAPI.writeFile(outPath, buffer);
+      return result.ok;
+    },
 
     // Separates the ACTIVE document into stems and lands them, bypassing
     // SeparateDialog entirely — the same two calls the dialog makes

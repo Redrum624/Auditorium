@@ -162,3 +162,52 @@ describe('make-test-abab.cjs', () => {
     expect(diff / bar).toBeGreaterThan(0.05);
   });
 });
+
+// F4b: the transcription transport fixture. Its ONLY job is to be longer than
+// one IPC audio slice, so the assertions below are about length and
+// decodability, not content.
+describe('make-test-long.cjs', () => {
+  /** electron/transcribeManager.cjs AUDIO_SLICE_SAMPLES, restated here rather
+   * than imported: the point of the fixture is to outlast that constant, so a
+   * silent change to it must break this test. */
+  const AUDIO_SLICE_SAMPLES = 1 << 20;
+  const WHISPER_SAMPLE_RATE = 16000;
+
+  it('writes a decodable mono 44100 Hz 16-bit WAV', () => {
+    const h = generate('make-test-long.cjs', 'long70.wav');
+    expect(h.riff).toBe('RIFF');
+    expect(h.wave).toBe('WAVE');
+    expect(h.audioFormat).toBe(1);
+    expect(h.channels).toBe(1);
+    expect(h.sampleRate).toBe(SAMPLE_RATE);
+    expect(h.bitsPerSample).toBe(16);
+    expect(h.riffSize).toBe(h.buf.length - 8);
+    expect(h.dataSize).toBe(h.buf.length - 44);
+  });
+
+  it('is long enough to force MORE THAN ONE audio slice over IPC', () => {
+    const h = generate('make-test-long.cjs', 'long70.wav');
+    const frames = h.dataSize / (h.channels * (h.bitsPerSample / 8));
+    const modelSamples = Math.round((frames * WHISPER_SAMPLE_RATE) / h.sampleRate);
+    expect(modelSamples).toBeGreaterThan(AUDIO_SLICE_SAMPLES);
+    expect(Math.ceil(modelSamples / AUDIO_SLICE_SAMPLES)).toBe(2);
+  });
+
+  it('leaves a SHORT final slice rather than an even split', () => {
+    const h = generate('make-test-long.cjs', 'long70.wav');
+    const frames = h.dataSize / (h.channels * (h.bitsPerSample / 8));
+    const modelSamples = Math.round((frames * WHISPER_SAMPLE_RATE) / h.sampleRate);
+    const tail = modelSamples % AUDIO_SLICE_SAMPLES;
+    expect(tail).toBeGreaterThan(0);
+    expect(tail).toBeLessThan(AUDIO_SLICE_SAMPLES);
+  });
+
+  it('carries real signal, not silence', () => {
+    const h = generate('make-test-long.cjs', 'long70.wav');
+    let peak = 0;
+    for (let i = 44; i + 1 < h.buf.length; i += 2) {
+      peak = Math.max(peak, Math.abs(h.buf.readInt16LE(i)));
+    }
+    expect(peak).toBeGreaterThan(0.2 * 32767);
+  });
+});

@@ -25,6 +25,14 @@ const REAL_SONG = path.join(
   'DJ Tiësto - Adagio For Strings (Original Album Version).mp3'
 );
 const ABAB = path.join(ROOT, 'test-assets', 'abab120.wav');
+// F4b transport fixture: 70 s, deliberately longer than one IPC audio slice
+// (see scripts/make-test-long.cjs for the arithmetic).
+const LONG70 = path.join(ROOT, 'test-assets', 'long70.wav');
+// Optional real-speech fixture the user may drop in. test-assets/ is
+// gitignored and this is NEVER required — the transcript-surface half of the
+// transcription step falls back to whatever the synthetic fixture produced,
+// and reports when that is nothing.
+const SPEECH = path.join(ROOT, 'test-assets', 'speech.wav');
 const OUT_DIR = path.join(ROOT, 'test-output');
 const OUT_MP3 = path.join(OUT_DIR, 'out.mp3');
 const OUT_WAV = path.join(OUT_DIR, 'out.wav');
@@ -39,6 +47,7 @@ const OUT_FADES_SESSION = path.join(OUT_DIR, 'fades-session.audm');
 const OUT_FADES_REFERENCE = path.join(OUT_DIR, 'fades-v18-reference.json');
 const OUT_AUTOMATION_SESSION = path.join(OUT_DIR, 'automation-session.audm');
 const OUT_SPATIAL_SESSION = path.join(OUT_DIR, 'spatial-session.audm');
+const OUT_TRANSCRIPT_SRT = path.join(OUT_DIR, 'transcript.srt');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -190,6 +199,7 @@ async function main() {
     [TONE, 'make-test-tone.cjs', 'test tone'],
     [BEAT, 'make-test-beat.cjs', '120 BPM click train'],
     [ABAB, 'make-test-abab.cjs', 'ABAB structure fixture'],
+    [LONG70, 'make-test-long.cjs', '70 s multi-slice transcription fixture'],
   ]) {
     if (!fs.existsSync(file)) {
       console.log(`Generating ${label}...`);
@@ -209,6 +219,7 @@ async function main() {
     OUT_SESSION,
     OUT_FADES_SESSION,
     OUT_FADES_REFERENCE,
+    OUT_TRANSCRIPT_SRT,
     SHOT,
   ]) {
     if (fs.existsSync(f)) fs.rmSync(f);
@@ -2439,6 +2450,320 @@ async function main() {
       undoAfterZ2.clips[0].startSample === 0 && undoAfterZ2.clips[0].lengthSample === 88200,
       'the next Ctrl+Z reverted the earlier move (start back to 0, length untouched)'
     );
+
+    // 22) F4b (v1.16) — transcription with speaker separation, end to end ---
+    //
+    // Nothing in this feature had ever run through a real `utilityProcess`
+    // before this step: the host's spawn, its sliced-audio transport and its
+    // Cancel were covered only by unit tests with a FAKE child, which is
+    // precisely the class of bug v1.7 met at packaging time. This step
+    // discharges what those tests structurally cannot:
+    //   (a) a REAL spawn and a REAL multi-slice transport. The manager cuts
+    //       the 16 kHz mono buffer into 1<<20-sample messages and the host
+    //       REFUSES to run unless the delivered slices cover [0, totalSamples)
+    //       exactly, so a successful `done` on a fixture longer than one slice
+    //       is itself the transport proof. The slice count is computed HERE
+    //       from the fixture's own duration, never read back from the app;
+    //   (b) Cancel against a LIVE child: a run is killed mid-flight and the
+    //       NEXT run is then required to succeed — the anti-vacuous guard,
+    //       because a cancel that left the child alive or the manager's slot
+    //       reserved would show up as a busy refusal or a hang, not as a
+    //       failed cancel;
+    //   (c) the renderer surface in the packaged app: the Transcript tab, a
+    //       row per segment, the region ribbon over the waveform, a click
+    //       moving the real playhead, the speaker-count control re-grouping
+    //       with no second inference run, and an SRT written to disk whose
+    //       timestamps are re-derived here with independent arithmetic.
+    //
+    // GATED ON THE MODELS, not on a fixture: the ~323 MB six-file set is
+    // downloaded on first use and is never committed, so a machine without it
+    // REPORTS a skip with the reason — never a silent pass.
+    //
+    // Entry state from step 21: the tone document is open in the waveform view
+    // inside a one-clip session. This step opens its own documents and does
+    // not depend on any of that.
+    console.log('Transcription (F4b): real utilityProcess, cancel, panel, ribbon, SRT...');
+    const transcribeModel0 = await page.evaluate(() => window.__test.getTranscribeModelState());
+    const transcribeMb = (transcribeModel0.expectedBytes / 1e6).toFixed(0);
+    let transcribeModel = transcribeModel0;
+    if (!transcribeModel.downloaded) {
+      // Same provisioning stance as step 17: when a repo-local copy exists
+      // (test-assets/models/transcription/, gitignored) it is linked/copied
+      // into the app's own model directory first, which is exactly where the
+      // app's downloader would have put it. The manager re-verifies every
+      // sha256 pin from disk before every load, so a bad copy fails loudly
+      // rather than transcribing with a wrong model.
+      const repoDir = path.join(ROOT, 'test-assets', 'models', 'transcription');
+      if (fs.existsSync(repoDir)) {
+        const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
+        const destDir = path.join(userData, 'models', 'transcription');
+        console.log(`  provisioning the transcription models from test-assets into ${destDir}`);
+        fs.mkdirSync(destDir, { recursive: true });
+        for (const name of fs.readdirSync(repoDir)) {
+          const dest = path.join(destDir, name);
+          if (fs.existsSync(dest)) continue;
+          try {
+            fs.linkSync(path.join(repoDir, name), dest);
+          } catch {
+            fs.copyFileSync(path.join(repoDir, name), dest);
+          }
+        }
+        transcribeModel = await page.evaluate(() => window.__test.getTranscribeModelState());
+      }
+    }
+    if (!transcribeModel.downloaded) {
+      console.log(
+        `Transcription: SKIPPED (REPORTED) — the ${transcribeMb} MB transcription model set ` +
+          `is not on this machine and no valid repo-local copy exists at ` +
+          `test-assets/models/transcription/. Download it in-app ` +
+          `(Edit → Transcribe… → Download Models) to make this step run.`
+      );
+    } else {
+      // --- (a) real spawn + multi-slice transport -------------------------
+      //
+      // Anchors computed from the fixture, independently of the app: 70 s at
+      // 44100 Hz resamples to round(70*44100 * 16000/44100) = 1,120,000 model
+      // samples, and the manager's AUDIO_SLICE_SAMPLES is 1<<20 = 1,048,576.
+      const SLICE_SAMPLES = 1 << 20;
+      const WHISPER_RATE = 16000;
+      await page.evaluate(() => window.__test.setView('waveform'));
+      await page.evaluate((p) => window.__test.openPath(p), LONG70);
+      const longState = await page.evaluate(() => window.__test.getStateSummary());
+      const expectedModelSamples = Math.round(
+        (longState.length * WHISPER_RATE) / longState.sampleRate
+      );
+      const expectedSlices = Math.ceil(expectedModelSamples / SLICE_SAMPLES);
+      assert(
+        expectedSlices >= 2,
+        `the transport fixture spans ${expectedSlices} IPC audio slices (${expectedModelSamples} model samples / ${SLICE_SAMPLES} per slice) — more than one, so the slicing is actually exercised`
+      );
+      console.log(
+        `  source: ${longState.activeName}, ${(longState.length / longState.sampleRate).toFixed(
+          1
+        )}s, ${longState.sampleRate} Hz, ${longState.channels} ch → ${expectedModelSamples} model samples in ${expectedSlices} slices`
+      );
+
+      const run = await page.evaluate(() => window.__test.transcribeActive(null));
+      const runSeconds = run.elapsedMs / 1000;
+      const audioSeconds = longState.length / longState.sampleRate;
+      console.log(
+        `  transcribeActive: status=${run.status} segments=${run.segmentCount} ` +
+          `speakers=${run.speakerCount} language=${run.language} ` +
+          `(${runSeconds.toFixed(1)}s for ${audioSeconds.toFixed(1)}s of audio, ` +
+          `${(audioSeconds / runSeconds).toFixed(2)}x realtime, model load included)`
+      );
+      assert(
+        run.ok === true,
+        `the real utility process spawned, received all ${expectedSlices} audio slices and finished (status ${run.status}${
+          run.message ? `: ${run.message}` : ''
+        }) — the host refuses to run on incomplete coverage, so this IS the transport proof`
+      );
+      assert(
+        run.progressEvents > 0,
+        `the host streamed progress rather than only reporting done (${run.progressEvents} event(s))`
+      );
+      assert(
+        run.transcribeTotal === expectedModelSamples,
+        `the host was told the sample count this script computed independently (${run.transcribeTotal} === ${expectedModelSamples})`
+      );
+      assert(
+        run.maxTranscribeDone === expectedModelSamples,
+        `the decode walked the WHOLE buffer, including the short final slice (${run.maxTranscribeDone} === ${expectedModelSamples})`
+      );
+      assert(
+        run.sampleRate === longState.sampleRate,
+        `segment positions came back in DOCUMENT samples, not model samples (${run.sampleRate} === ${longState.sampleRate})`
+      );
+      for (const seg of run.segments) {
+        assert(
+          seg.startSample >= 0 && seg.endSample <= longState.length && seg.endSample > seg.startSample,
+          `segment ${seg.index} lies inside the document [0, ${longState.length}) and is non-empty (${seg.startSample}..${seg.endSample})`
+        );
+      }
+
+      // --- (b) Cancel against a LIVE child --------------------------------
+      //
+      // 2000 ms is comfortably inside a run that takes seconds just to
+      // sha256-verify 323 MB and build three ORT sessions, so the cancel lands
+      // while a child is alive. If it ever landed late the status would be
+      // 'ok' and the assertion below would say so rather than passing.
+      const cancelled = await page.evaluate(() => window.__test.transcribeActiveThenCancel(2000));
+      console.log(
+        `  transcribeActiveThenCancel: status=${cancelled.status} after ${(
+          cancelled.elapsedMs / 1000
+        ).toFixed(1)}s`
+      );
+      assert(
+        cancelled.status === 'cancelled',
+        `Cancel settled the run as cancelled against a real child (status ${cancelled.status})`
+      );
+      assert(
+        cancelled.elapsedMs < run.elapsedMs,
+        `the cancelled run stopped EARLY rather than running to completion (${cancelled.elapsedMs}ms < ${run.elapsedMs}ms)`
+      );
+
+      // The anti-vacuous guard: a cancel that left the child alive, or left
+      // the manager's one-run slot reserved, breaks the NEXT run — as a busy
+      // refusal or a hang, never as a failed cancel.
+      const afterCancel = await page.evaluate(() => window.__test.transcribeActive(null));
+      assert(
+        afterCancel.ok === true,
+        `a fresh run succeeds after the cancel, so the killed child released its slot and its ORT arena (status ${afterCancel.status})`
+      );
+
+      // --- (c) the renderer surface ---------------------------------------
+      //
+      // Driven off a REAL speech file when the machine has one, because the
+      // synthetic sweep is not speech and Whisper may legitimately find
+      // nothing in it. With no speech file and no segments, this half REPORTS
+      // rather than passing on an empty list.
+      let surface = afterCancel;
+      let surfaceName = longState.activeName;
+      if (fs.existsSync(SPEECH)) {
+        await page.evaluate((p) => window.__test.openPath(p), SPEECH);
+        const speechState = await page.evaluate(() => window.__test.getStateSummary());
+        surfaceName = speechState.activeName;
+        console.log(
+          `  real speech fixture present: ${surfaceName}, ${(
+            speechState.length / speechState.sampleRate
+          ).toFixed(1)}s`
+        );
+        surface = await page.evaluate(() => window.__test.transcribeActive(null));
+        assert(surface.ok === true, `the speech fixture transcribed (status ${surface.status})`);
+        console.log(
+          `  speech transcript: ${surface.segmentCount} segment(s), ${surface.speakerCount} speaker(s), ` +
+            `first line ${JSON.stringify((surface.segments[0] || {}).text || '')}`
+        );
+      }
+
+      if (surface.segmentCount === 0) {
+        console.log(
+          '  Transcript surface: SKIPPED (REPORTED) — the synthetic sweep produced no speech ' +
+            'segments, so there is no transcript to render. The panel, ribbon and export are ' +
+            'covered by the jsdom component tests; drop a speech WAV at test-assets/speech.wav ' +
+            'to exercise them against the packaged app too.'
+        );
+      } else {
+        // The Transcript tab is a real rail button with an accessible name.
+        const transcriptTab = await page.$('[data-testid="sidebar-tabs"] [aria-label="Transcript"]');
+        assert(transcriptTab !== null, 'the sidebar rail carries a Transcript button');
+        await transcriptTab.click();
+        await page.waitForFunction(
+          () => document.querySelector('[data-testid="transcript-panel"]') !== null,
+          null,
+          { timeout: 5000 }
+        );
+        const rowCount = await page.evaluate(
+          () => document.querySelectorAll('[data-testid="transcript-item"]').length
+        );
+        assert(
+          rowCount === surface.segmentCount,
+          `the panel shows one row per segment (${rowCount} === ${surface.segmentCount})`
+        );
+
+        // The ribbon draws a region per VISIBLE segment. At the default zoom
+        // only part of the file is on screen, so require at least one and no
+        // more than the segment count.
+        const regionCount = await page.evaluate(
+          () => document.querySelectorAll('[data-testid="transcript-region"]').length
+        );
+        assert(
+          regionCount >= 1 && regionCount <= surface.segmentCount,
+          `the timeline ribbon drew ${regionCount} region(s), between 1 and the ${surface.segmentCount} segment(s)`
+        );
+
+        // No markers were created: the transcript must never be written into
+        // the user's marker list (it would be saved into their exported audio).
+        const markerCount = await page.evaluate(() => window.__test.getActiveMarkers().length);
+        assert(
+          markerCount === 0,
+          `the transcript added NO markers to the document (${markerCount} === 0) — it is never persisted into the user's cue chunks`
+        );
+
+        // A real click on a row's time button moves the real playhead. The
+        // target is the LAST row whose start is non-zero and the cursor is
+        // parked somewhere else first — clicking the first row of a transcript
+        // that starts at sample 0 would assert 0 === 0 and pass without the
+        // handler running at all.
+        const gotoButtons = await page.$$('[data-testid="transcript-goto"]');
+        assert(gotoButtons.length === rowCount, `every row has a Go-to button (${gotoButtons.length})`);
+        const gotoIndex = surface.segments.map((s) => s.startSample).lastIndexOf(
+          Math.max(...surface.segments.map((s) => s.startSample))
+        );
+        const gotoTarget = surface.segments[gotoIndex].startSample;
+        assert(
+          gotoTarget > 0,
+          `the Go-to target is a NON-ZERO sample (${gotoTarget}), so the assertion below cannot pass vacuously`
+        );
+        const beforeGoto = await page.evaluate(() => window.__test.getEditorViewState());
+        assert(
+          beforeGoto.cursorSample !== gotoTarget,
+          `the cursor was NOT already at the target before the click (${beforeGoto.cursorSample} !== ${gotoTarget})`
+        );
+        await gotoButtons[gotoIndex].click();
+        const afterGoto = await page.evaluate(() => window.__test.getEditorViewState());
+        assert(
+          afterGoto.cursorSample === gotoTarget,
+          `clicking row ${gotoIndex + 1} moved the cursor from ${beforeGoto.cursorSample} to that segment's start (${afterGoto.cursorSample} === ${gotoTarget})`
+        );
+
+        // The speaker-count control re-groups WITHOUT another inference run:
+        // forcing 1 must collapse every label to speaker 0, instantly.
+        const regrouped = await page.evaluate(() => window.__test.setTranscriptSpeakers(1));
+        assert(
+          regrouped !== null && regrouped.speakerCount === 1,
+          `forcing one speaker re-grouped the stored embeddings (${JSON.stringify(regrouped)})`
+        );
+        assert(
+          regrouped.speakers.every((s) => s === 0),
+          'every segment carries the single speaker after the re-group'
+        );
+        await page.evaluate(() => window.__test.setTranscriptSpeakers(null));
+
+        // The SRT on disk, re-parsed and re-derived here.
+        const wrote = await page.evaluate(
+          (p) => window.__test.exportTranscriptTo('srt', p),
+          OUT_TRANSCRIPT_SRT
+        );
+        assert(wrote === true, `the transcript wrote to ${OUT_TRANSCRIPT_SRT}`);
+        assert(fs.existsSync(OUT_TRANSCRIPT_SRT), 'the .srt exists on disk');
+        const srt = fs.readFileSync(OUT_TRANSCRIPT_SRT, 'utf8');
+        const blocks = srt.trim().split(/\n\s*\n/);
+        assert(
+          blocks.length === surface.segmentCount,
+          `the .srt holds one cue per segment (${blocks.length} === ${surface.segmentCount})`
+        );
+
+        // Independent timestamp arithmetic — NOT the app's formatter.
+        const stamp = (samples, rate) => {
+          const totalMs = Math.round((samples / rate) * 1000);
+          const ms = totalMs % 1000;
+          const totalS = (totalMs - ms) / 1000;
+          const s = totalS % 60;
+          const totalM = (totalS - s) / 60;
+          const m = totalM % 60;
+          const h = (totalM - m) / 60;
+          const p2 = (n) => String(n).padStart(2, '0');
+          return `${p2(h)}:${p2(m)}:${p2(s)},${String(ms).padStart(3, '0')}`;
+        };
+        const firstLines = blocks[0].split('\n');
+        assert(firstLines[0].trim() === '1', `the first cue is numbered 1 (${firstLines[0].trim()})`);
+        const expectedFirst = `${stamp(surface.segments[0].startSample, surface.sampleRate)} --> ${stamp(
+          surface.segments[0].endSample,
+          surface.sampleRate
+        )}`;
+        assert(
+          firstLines[1].trim() === expectedFirst,
+          `the first cue's times match this script's own arithmetic (${firstLines[1].trim()} === ${expectedFirst})`
+        );
+        const lastNumber = Number(blocks[blocks.length - 1].split('\n')[0].trim());
+        assert(
+          lastNumber === surface.segmentCount,
+          `cue numbering runs contiguously to the last segment (${lastNumber} === ${surface.segmentCount})`
+        );
+        console.log(`  wrote ${blocks.length} SRT cue(s) from ${surfaceName}`);
+      }
+    }
 
     console.log('\nSMOKE PASSED');
   } finally {

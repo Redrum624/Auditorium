@@ -117,7 +117,7 @@ History-panel step.
 
 The vertical icon rail at the right edge opens one floating glass panel card
 at a time — **Files**, **Effects**, **Markers**, **History**, **Properties**,
-and **Remix**; **History** is the default. When the active document has a
+**Remix**, **Spatial** and **Transcript**; **History** is the default. When the active document has a
 tempo analysis, a persistent **TEMPO** card (BPM readout, structure strip, and
 ×2 / ÷2 / Re-detect) appears above the panel card.
 
@@ -128,6 +128,8 @@ tempo analysis, a persistent **TEMPO** card (BPM readout, structure strip, and
   the multitrack view, the **active document's** elsewhere (see *Cut / Copy /
   Paste / Delete* above and *Undo in the multitrack* below).
 - **Markers** — the active document's marker list (see *Markers* above).
+- **Transcript** — the active document's transcript, once you have run one
+  (see *Transcribing speech* below).
 - **Properties** — read-only facts about what you're working on. In the
   waveform/spectral views it shows the active document's name, path (`—` for
   never-saved documents), sample rate, channels (Mono/Stereo), bit depth,
@@ -190,7 +192,7 @@ is cleared when you capture a new one — or when you close the document it was
 captured from (the print belongs to audio that no longer exists). The Noise
 Reduction dialog notices a capture or clear immediately, even while open.
 
-## Tempo, remix and stems
+## Tempo, remix, stems and transcription
 
 These features are opt-in: nothing here runs until you ask for it, so opening a
 file never pays for an analysis you didn't want.
@@ -370,6 +372,51 @@ detected and the dialog says the exact sum will not hold); a **mono** source's
 stems arrive as stereo documents with identical channels (use **Edit → Convert
 Channels…** if you want them mono); and the five stem documents have never been
 written to disk, so closing one — or quitting — prompts you to save it.
+
+### Transcribing speech
+
+To turn speech into timestamped text with a speaker label per segment:
+
+1. Open the recording and run **Edit → Transcribe…**.
+2. The first time only, the dialog offers the **one-time ~323 MB model
+   download** with byte progress (Whisper base, plus a speaker-embedding
+   model). They are fetched once and kept.
+3. Choose the **number of speakers**, or leave it on *Detect automatically*.
+   You can change this afterwards — see the honesty note below.
+4. Press **Transcribe**. Progress runs through decoding, then a short pass
+   that measures each segment's voice, then the grouping. Transcription runs
+   at roughly **9x realtime** on a modern multi-core CPU, so a ten-minute
+   interview takes about a minute. **Cancel** stops it immediately.
+5. You land in the **Transcript** panel: one row per spoken segment with its
+   time, its speaker and its text. Click a row's time to move the cursor
+   there. The same segments appear as coloured bars in a thin strip between
+   the time ruler and the waveform — click one to jump to it.
+
+**Read this before you trust the speaker labels.** Speaker separation was
+measured on clean recordings with one voice at a time. It told **two**
+speakers apart with every segment correct, and recognised a single speaker as
+one person every time. With **three** it placed only 45 % of segments
+correctly — 73 % even when told there were three. And it does not detect
+**overlapping speech** at all: a segment with two people talking over each
+other gets one label. So the **Speakers** control in the panel is there to be
+used: set the count yourself and the grouping is recomputed instantly from the
+voices already measured, with no second transcription run. A segment the
+grouping could not place — too short to measure, or sitting between two
+different voices — is labelled **Unknown** rather than guessed into someone's
+mouth.
+
+**Exporting.** The **SRT** and **WebVTT** buttons write standard subtitle
+files with the speaker labels included (`Speaker 1: ...` in SRT, the spec's
+own `<v Speaker 1>` voice span in WebVTT). Times are kept as sample positions
+internally and only converted at the moment of writing, so they line up with
+the audio exactly.
+
+**Practical notes:** a job is capped at **2 hours** of audio; the language is
+detected automatically; **singing is not speech** and Whisper mangles lyrics
+even on a clean solo vocal (see
+[Known Limitations](KNOWN_LIMITATIONS.md) for the measured word error rates);
+and if you edit the audio after transcribing, the panel warns you that the
+times no longer line up rather than quietly throwing the transcript away.
 
 ## Views
 
