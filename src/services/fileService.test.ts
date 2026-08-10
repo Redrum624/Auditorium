@@ -150,6 +150,17 @@ describe('openFilePath', () => {
     expect(state.activeDocumentId).toBe(state.documents[0].id);
   });
 
+  it('R6 wiring: a decoded channelMask lands on the document; an absent one stays absent', async () => {
+    installApi();
+    mockDecode.mockResolvedValueOnce({ ...decoded(44100, 6), channelMask: 0x3f });
+    await openFilePath('D:\\audio\\surround.wav');
+    mockDecode.mockResolvedValueOnce(decoded(44100, 6));
+    await openFilePath('D:\\audio\\unmasked.wav');
+    const [masked, unmasked] = useAppStore.getState().documents;
+    expect(masked.channelMask).toBe(0x3f);
+    expect(unmasked.channelMask).toBeUndefined();
+  });
+
   it('keeps the filePath and tags sourceFormat for round-trippable mp3/flac sources', async () => {
     installApi();
     await openFilePath('D:\\audio\\clip.mp3');

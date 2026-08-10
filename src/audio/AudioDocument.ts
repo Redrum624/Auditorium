@@ -3,7 +3,9 @@ export interface AudioDocument {
   name: string; // display name: file basename or 'Untitled 1'
   filePath: string | null; // absolute path when opened from / saved to disk
   sampleRate: number; // e.g. 44100, 48000
-  channels: Float32Array[]; // length 1 (mono) or 2 (stereo); all same length
+  // Usually 1 (mono) or 2 (stereo); a multichannel import keeps all N (<= 32,
+  // the decoder bound). All channels are the same length.
+  channels: Float32Array[];
   dirty: boolean;
   /**
    * Provenance (Task S4): this document's audio has NEVER been written to a
@@ -27,6 +29,13 @@ export interface AudioDocument {
   // Save (re-encode in the original container) and the Properties bit-depth row.
   sourceBitDepth?: number; // original file's PCM depth (WAV/FLAC); undefined for lossy
   sourceFormat?: 'wav' | 'mp3' | 'flac' | 'ogg' | 'other';
+  /** Speaker layout of a multichannel source: the raw `dwChannelMask` read from
+   * a WAVE_FORMAT_EXTENSIBLE WAV, present only when it fully describes the
+   * channels (see `decodeWav`). Consumed by the layout-aware downmix (ITU-R
+   * BS.775 requires knowing which channel is centre/LFE/surround). Cleared by
+   * any edit that changes the channel count — the mask describes the source
+   * file's channels, not a converted set. */
+  channelMask?: number;
 }
 
 const idCounters: Record<string, number> = {};
@@ -58,6 +67,7 @@ export function createDocument(opts: {
   filePath?: string | null;
   sourceBitDepth?: number;
   sourceFormat?: AudioDocument['sourceFormat'];
+  channelMask?: number;
   /**
    * Task S4 provenance. Defaults to "true when there is no `filePath`", so any
    * creation site that computes audio is protected without having to remember
@@ -78,6 +88,7 @@ export function createDocument(opts: {
     neverSaved: opts.neverSaved ?? opts.filePath == null,
     sourceBitDepth: opts.sourceBitDepth,
     sourceFormat: opts.sourceFormat,
+    channelMask: opts.channelMask,
   };
 }
 

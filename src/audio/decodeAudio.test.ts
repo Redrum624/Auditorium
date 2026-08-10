@@ -1,4 +1,5 @@
 import { decodeArrayBuffer, downmixToStereo } from './decodeAudio';
+import { buildExtensibleWav } from './__fixtures__/extensibleWav';
 import { encodeWav } from './wavCodec';
 
 class FakeAudioBuffer {
@@ -95,6 +96,29 @@ describe('decodeArrayBuffer markers passthrough (WAV only)', () => {
     const buf = encodeWav(mono, 44100, 16);
     const result = await decodeArrayBuffer(buf, 'song.wav');
     expect(result.markers).toEqual([]);
+  });
+});
+
+describe('decodeArrayBuffer channelMask passthrough (WAVE_FORMAT_EXTENSIBLE only)', () => {
+  it('carries a fully-specified dwChannelMask through to the decode result', async () => {
+    const channels = Array.from({ length: 6 }, () => new Float32Array(8));
+    const buf = buildExtensibleWav({ channels, mask: 0x3f });
+    const result = await decodeArrayBuffer(buf, 'surround.wav');
+    expect(result.channels).toHaveLength(6);
+    expect(result.channelMask).toBe(0x3f);
+  });
+
+  it('a mask of 0 stays absent on the decode result (unspecified is not an error and not a default)', async () => {
+    const channels = Array.from({ length: 6 }, () => new Float32Array(8));
+    const buf = buildExtensibleWav({ channels, mask: 0 });
+    const result = await decodeArrayBuffer(buf, 'surround.wav');
+    expect(result.channelMask).toBeUndefined();
+  });
+
+  it('plain-tag WAVs carry no channelMask', async () => {
+    const buf = encodeWav([new Float32Array(8)], 44100, 16);
+    const result = await decodeArrayBuffer(buf, 'mono.wav');
+    expect(result.channelMask).toBeUndefined();
   });
 });
 

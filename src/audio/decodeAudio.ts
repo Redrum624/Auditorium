@@ -10,6 +10,11 @@ export interface DecodedAudio {
   /** Markers read from the WAV's cue/adtl chunks (WAV only). Undefined for
    * everything else — no other supported container has a marker chunk. */
   markers?: WavMarker[];
+  /** Speaker layout: the raw `dwChannelMask` of a WAVE_FORMAT_EXTENSIBLE WAV,
+   * present only when it fully describes the channels (see `decodeWav`).
+   * Undefined for every other source — the Web Audio path exposes no layout
+   * metadata, and an absent layout must stay absent rather than be invented. */
+  channelMask?: number;
 }
 
 // -3 dB (1/√2) fold gain applied to the surround/extra channels when downmixing.
@@ -65,8 +70,8 @@ export function downmixToStereo(channels: Float32Array[]): Float32Array[] {
  */
 export async function decodeArrayBuffer(buf: ArrayBuffer, hintedName: string): Promise<DecodedAudio> {
   if (/\.wav$/i.test(hintedName)) {
-    const { channels, sampleRate, bitDepth, markers } = decodeWav(buf);
-    return { channels, sampleRate, sourceBitDepth: bitDepth, markers };
+    const { channels, sampleRate, bitDepth, markers, channelMask } = decodeWav(buf);
+    return { channels, sampleRate, sourceBitDepth: bitDepth, markers, channelMask };
   }
 
   if (typeof OfflineAudioContext === 'undefined') {

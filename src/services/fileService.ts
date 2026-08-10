@@ -177,6 +177,7 @@ export async function openFilePath(path: string): Promise<void> {
     filePath: keepsPath ? path : null,
     sourceFormat,
     sourceBitDepth,
+    channelMask: decoded.channelMask,
     // Task S4: this audio came OFF disk, so closing it loses nothing — even
     // for an exotic source, which keeps no filePath (its first Save prompts a
     // save-as WAV) but whose original file is still sitting there.

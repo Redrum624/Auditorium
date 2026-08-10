@@ -1,4 +1,5 @@
 import { encodeWav, decodeWav, WavBitDepth, WavMarker } from './wavCodec';
+import { buildExtensibleWav, buildPlainTagWav } from './__fixtures__/extensibleWav';
 
 function sineWave(freq: number, seconds: number, sampleRate: number): Float32Array {
   const length = Math.round(seconds * sampleRate);
@@ -1042,5 +1043,163 @@ describe('decodeWav LIST/adtl label-map cap (v1.5.2)', () => {
     const decoded = decodeWav(buf);
 
     expect(decoded.markers).toEqual([{ name: `L${CAP}`, positionSample: CAP }]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R6 Part 1 — WAVE_FORMAT_EXTENSIBLE (0xFFFE): the tag every spec-conforming
+// writer uses for >2 channels. Before R6 `validateFmt` rejected it outright,
+// so properly-written 5.1/7.1 WAVs did not open at all.
+// ---------------------------------------------------------------------------
+
+/** 6 distinct-valued channels, 4 frames each, in 5.1 mask-bit order. */
+function sixDistinctChannels(): Float32Array[] {
+  return Array.from({ length: 6 }, (_, c) =>
+    Float32Array.from([0.1 * (c + 1), -0.05 * (c + 1), 0.02 * (c + 1), -0.5])
+  );
+}
+
+const MASK_5_1 = 0x3f; // FL|FR|FC|LFE|BL|BR
+
+describe('decodeWav WAVE_FORMAT_EXTENSIBLE support', () => {
+  it('decodes an extensible PCM 16-bit 5.1 file byte-identically to its plain-tag twin, with rate/depth/count/mask', () => {
+    const channels = sixDistinctChannels();
+    const ext = decodeWav(buildExtensibleWav({ channels, mask: MASK_5_1, bitsPerSample: 16 }));
+    const plain = decodeWav(buildPlainTagWav({ channels, bitsPerSample: 16 }));
+    expect(ext.sampleRate).toBe(44100);
+    expect(ext.bitDepth).toBe(16);
+    expect(ext.channels).toHaveLength(6);
+    expect(ext.channelMask).toBe(MASK_5_1);
+    expect(ext.channels).toEqual(plain.channels);
+  });
+
+  it('decodes an extensible IEEE-float 32-bit 5.1 file exactly, with the mask carried', () => {
+    const channels = sixDistinctChannels();
+    const ext = decodeWav(buildExtensibleWav({ channels, mask: MASK_5_1, bitsPerSample: 32, float: true }));
+    const plain = decodeWav(buildPlainTagWav({ channels, bitsPerSample: 32, float: true }));
+    expect(ext.bitDepth).toBe(32);
+    expect(ext.channelMask).toBe(MASK_5_1);
+    expect(ext.channels).toEqual(plain.channels); // float path: bit-exact
+    expect(ext.channels[2][0]).toBeCloseTo(0.3, 6); // and genuinely float-decoded
+  });
+
+  it('decodes an extensible 24-bit PCM file byte-identically to its plain-tag twin', () => {
+    const channels = sixDistinctChannels();
+    const ext = decodeWav(buildExtensibleWav({ channels, mask: MASK_5_1, bitsPerSample: 24 }));
+    const plain = decodeWav(buildPlainTagWav({ channels, bitsPerSample: 24 }));
+    expect(ext.bitDepth).toBe(24);
+    expect(ext.channels).toEqual(plain.channels);
+  });
+
+  it('a mask of 0 is legal "unspecified": decode succeeds and the layout stays ABSENT, not invented', () => {
+    const decoded = decodeWav(buildExtensibleWav({ channels: sixDistinctChannels(), mask: 0 }));
+    expect(decoded.channels).toHaveLength(6);
+    expect(decoded.channelMask).toBeUndefined();
+  });
+
+  // The popcount-vs-numChannels comparison, probed per operand role: below,
+  // on, and above the channel count. Only exact agreement carries a layout —
+  // a half-true mask keyed into a downmix matrix would misplace content
+  // silently, which is worse than the layout-agnostic fallback.
+  it('a mask with MORE bits than channels decodes but carries no layout (pinned: inconsistent metadata is dropped)', () => {
+    const decoded = decodeWav(buildExtensibleWav({ channels: sixDistinctChannels(), mask: 0xff })); // 8 bits, 6 ch
+    expect(decoded.channels).toHaveLength(6);
+    expect(decoded.channelMask).toBeUndefined();
+  });
+
+  it('a mask with FEWER bits than channels decodes but carries no layout (pinned: partial layouts are not half-trusted)', () => {
+    const decoded = decodeWav(buildExtensibleWav({ channels: sixDistinctChannels(), mask: 0x3 })); // 2 bits, 6 ch
+    expect(decoded.channels).toHaveLength(6);
+    expect(decoded.channelMask).toBeUndefined();
+  });
+
+  it('wValidBitsPerSample below the container (20-in-24) decodes at container scale, container depth reported', () => {
+    // Spec-conforming 20-valid-bit samples are left-justified with zero low
+    // bits, so container-scale decoding is numerically exact — the decode must
+    // equal the plain 24-bit twin and must not throw.
+    const channels = sixDistinctChannels();
+    const decoded = decodeWav(
+      buildExtensibleWav({ channels, mask: MASK_5_1, bitsPerSample: 24, validBits: 20 })
+    );
+    expect(decoded.bitDepth).toBe(24);
+    expect(decoded.channels).toEqual(decodeWav(buildPlainTagWav({ channels, bitsPerSample: 24 })).channels);
+  });
+
+  it('validates bit depth against the RESOLVED subformat: extensible float@16 rejected, float@32 accepted', () => {
+    const mono16 = [Float32Array.from([0.5])];
+    expect(() =>
+      decodeWav(buildExtensibleWav({ channels: mono16, bitsPerSample: 16, subTag: 3 }))
+    ).toThrow('Unsupported IEEE float bit depth: 16');
+    const ok = decodeWav(buildExtensibleWav({ channels: mono16, bitsPerSample: 32, float: true }));
+    expect(ok.bitDepth).toBe(32);
+  });
+
+  it('validates PCM bit depth through the extensible path (12 rejected)', () => {
+    // Zero frames: the 12-bit header must be rejected before any sample math.
+    expect(() =>
+      decodeWav(buildExtensibleWav({ channels: [new Float32Array(0)], bitsPerSample: 12 as never, subTag: 1 }))
+    ).toThrow('Unsupported PCM bit depth: 12');
+  });
+
+  it('rejects an unknown subformat tag with the RESOLVED code, not 65534', () => {
+    expect(() =>
+      decodeWav(buildExtensibleWav({ channels: [Float32Array.from([0.5])], subTag: 2 }))
+    ).toThrow('Unsupported WAV audio format code: 2');
+  });
+
+  it('a nested 0xFFFE subformat tag terminates with a clean rejection (no re-resolution loop)', () => {
+    expect(() =>
+      decodeWav(buildExtensibleWav({ channels: [Float32Array.from([0.5])], subTag: 0xfffe }))
+    ).toThrow('Unsupported WAV audio format code: 65534');
+  });
+
+  it('rejects a non-KSDATAFORMAT subformat GUID (e.g. ambisonic B-format) instead of decoding it as PCM', () => {
+    const suffix = [0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x72]; // last byte off
+    expect(() =>
+      decodeWav(buildExtensibleWav({ channels: [Float32Array.from([0.5])], guidSuffix: suffix }))
+    ).toThrow('Unsupported WAV subformat GUID');
+  });
+
+  it('the channel-count bound applies through the extensible path (33 rejected, 32 accepted)', () => {
+    const make = (n: number) => Array.from({ length: n }, () => Float32Array.from([0.25]));
+    expect(() => decodeWav(buildExtensibleWav({ channels: make(33), mask: 0 }))).toThrow(
+      'Invalid WAV channel count: 33'
+    );
+    expect(decodeWav(buildExtensibleWav({ channels: make(32), mask: 0 })).channels).toHaveLength(32);
+  });
+
+  // cbSize / physical-extension-size comparisons, below / on / above.
+  it('rejects cbSize 21 (below the 22-byte minimum) with a clean, specific Error', () => {
+    expect(() =>
+      decodeWav(buildExtensibleWav({ channels: [Float32Array.from([0.5])], cbSize: 21, presentExtensionBytes: 22 }))
+    ).toThrow('truncated WAVE_FORMAT_EXTENSIBLE fmt extension');
+  });
+
+  it('accepts cbSize exactly 22 (on the boundary) and cbSize 24 with the extra bytes present (above)', () => {
+    expect(decodeWav(buildExtensibleWav({ channels: [Float32Array.from([0.5])], cbSize: 22 })).bitDepth).toBe(16);
+    expect(decodeWav(buildExtensibleWav({ channels: [Float32Array.from([0.5])], cbSize: 24 })).bitDepth).toBe(16);
+  });
+
+  it('rejects an extension physically shorter than declared (cbSize 22, 21 bytes present) with a clean Error', () => {
+    expect(() =>
+      decodeWav(buildExtensibleWav({ channels: [Float32Array.from([0.5])], cbSize: 22, presentExtensionBytes: 21 }))
+    ).toThrow('truncated WAVE_FORMAT_EXTENSIBLE fmt extension');
+  });
+
+  it('rejects a buffer truncated mid-GUID with a clean Error, never an out-of-bounds DataView RangeError', () => {
+    const full = buildExtensibleWav({ channels: [Float32Array.from([0.5])], mask: 0x4 });
+    // fmt data starts at byte 20; the GUID occupies fmt bytes 24..39. Cut inside it.
+    const truncated = full.slice(0, 20 + 30);
+    expect(() => decodeWav(truncated)).toThrow('truncated WAVE_FORMAT_EXTENSIBLE fmt extension');
+  });
+
+  it('a fmt chunk with audioFormat 0xFFFE but no extension at all (chunkSize 16) is rejected cleanly', () => {
+    const buf = buildFmtOnlyWav({ audioFormat: 0xfffe, numChannels: 6, sampleRate: SAMPLE_RATE, bitsPerSample: 16 });
+    expect(() => decodeWav(buf)).toThrow('truncated WAVE_FORMAT_EXTENSIBLE fmt extension');
+  });
+
+  it('plain-tag decodes carry NO channelMask (nothing invented for the pre-R6 form)', () => {
+    const decoded = decodeWav(buildPlainTagWav({ channels: sixDistinctChannels() }));
+    expect(decoded.channelMask).toBeUndefined();
   });
 });

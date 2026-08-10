@@ -10,6 +10,26 @@ export interface WavMarker {
 
 const FMT_PCM = 1;
 const FMT_IEEE_FLOAT = 3;
+/** WAVE_FORMAT_EXTENSIBLE (mmreg.h). The fmt tag every spec-conforming writer
+ * uses for >2 channels, >16 valid bits, or any file carrying a speaker mask.
+ * The REAL sample format lives in the extension's SubFormat GUID. */
+const FMT_EXTENSIBLE = 0xfffe;
+
+/** Bytes 2..15 of the KSDATAFORMAT_SUBTYPE_* media GUIDs (ksmedia.h):
+ * `XXXXXXXX-0000-0010-8000-00AA00389B71` with the format tag in the first two
+ * bytes (little-endian Data1). PCM and IEEE-float SubFormats differ ONLY in
+ * that leading tag. A GUID with any other suffix (e.g. the ambisonic
+ * SUBTYPE_AMBISONIC_B_FORMAT_PCM family) is a genuinely different sample
+ * layout, not a tag variant, and must not be decoded as if it were plain
+ * PCM/float. */
+const KSDATAFORMAT_SUFFIX = [0x00, 0x00, 0x00, 0x00, 0x10, 0x00, 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71];
+
+/** Number of set bits in a uint32 (SWAR popcount). */
+function popcount32(v: number): number {
+  v = v - ((v >>> 1) & 0x55555555);
+  v = (v & 0x33333333) + ((v >>> 2) & 0x33333333);
+  return (((v + (v >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+}
 
 function writeAscii(view: DataView, offset: number, str: string): void {
   for (let i = 0; i < str.length; i++) {
@@ -270,6 +290,16 @@ export function decodeWav(buf: ArrayBuffer): {
   sampleRate: number;
   bitDepth: number;
   markers: WavMarker[];
+  /** Raw `dwChannelMask` from a WAVE_FORMAT_EXTENSIBLE fmt chunk — the speaker
+   * position of every channel, in mask-bit order (lowest set bit = channel 0).
+   * Present ONLY when the mask fully describes the file: nonzero AND its
+   * population count equals `numChannels`. A mask of 0 is legal ("channels have
+   * no assigned positions") and stays absent; a mask whose bit count disagrees
+   * with the channel count in EITHER direction is inconsistent metadata and is
+   * likewise dropped rather than half-trusted — a downmix matrix keyed to a
+   * wrong layout misplaces content silently, which is worse than falling back
+   * to the layout-agnostic fold. */
+  channelMask?: number;
 } {
   const view = new DataView(buf);
   if (buf.byteLength < 12 || readAscii(view, 0, 4) !== 'RIFF' || readAscii(view, 8, 4) !== 'WAVE') {
@@ -277,6 +307,7 @@ export function decodeWav(buf: ArrayBuffer): {
   }
 
   let fmt: WavFmt | null = null;
+  let channelMask: number | undefined;
   let dataOffset = -1;
   let dataSize = 0;
   const cuePoints: { name: number; sampleOffset: number }[] = [];
@@ -298,6 +329,43 @@ export function decodeWav(buf: ArrayBuffer): {
         sampleRate: view.getUint32(chunkDataStart + 4, true),
         bitsPerSample: view.getUint16(chunkDataStart + 14, true),
       };
+      if (fmt.audioFormat === FMT_EXTENSIBLE) {
+        // WAVE_FORMAT_EXTENSIBLE: the extension is cbSize (2 bytes at +16)
+        // followed by wValidBitsPerSample (2), dwChannelMask (4) and the
+        // 16-byte SubFormat GUID — 22 extension bytes minimum, 40 fmt bytes
+        // total. Anything shorter cannot name the real sample format, and
+        // decoding without it would mean GUESSING between int32 PCM and
+        // float32 (identical byte widths, garbage if misread) — so a
+        // truncated extension is a deliberate, bounded rejection, never an
+        // out-of-bounds DataView read.
+        const fmtBytesAvailable = Math.min(chunkSize, view.byteLength - chunkDataStart);
+        const cbSize = fmtBytesAvailable >= 18 ? view.getUint16(chunkDataStart + 16, true) : 0;
+        if (cbSize < 22 || fmtBytesAvailable < 40) {
+          throw new Error('Invalid WAV: truncated WAVE_FORMAT_EXTENSIBLE fmt extension');
+        }
+        // wValidBitsPerSample (+18) is read as documentation only: valid bits
+        // are left-justified in the container per the spec (low bits zero), so
+        // decoding at CONTAINER scale is numerically exact for a conforming
+        // file — e.g. 20 valid bits in a 24-bit container decode to the same
+        // floats either way — and a nonconforming value cannot change the
+        // sample bytes. The container depth governs layout, scaling and the
+        // reported bitDepth; validBits is advisory metadata, deliberately not
+        // enforced.
+        const mask = view.getUint32(chunkDataStart + 20, true);
+        const guid = readBytes(view, chunkDataStart + 24, 16);
+        for (let i = 2; i < 16; i++) {
+          if (guid[i] !== KSDATAFORMAT_SUFFIX[i - 2]) {
+            throw new Error('Unsupported WAV subformat GUID');
+          }
+        }
+        // The first two GUID bytes carry the underlying format tag (1 = PCM,
+        // 3 = IEEE float). Resolve it and validate bit depth against the
+        // RESOLVED format below — never against the 0xFFFE wrapper tag.
+        fmt.audioFormat = guid[0] | (guid[1] << 8);
+        if (mask !== 0 && popcount32(mask) === fmt.numChannels) {
+          channelMask = mask;
+        }
+      }
       validateFmt(fmt);
     } else if (chunkId === 'data') {
       dataOffset = chunkDataStart;
@@ -395,5 +463,5 @@ export function decodeWav(buf: ArrayBuffer): {
     }
   }
 
-  return { channels, sampleRate: fmt.sampleRate, bitDepth: fmt.bitsPerSample, markers };
+  return { channels, sampleRate: fmt.sampleRate, bitDepth: fmt.bitsPerSample, markers, channelMask };
 }
