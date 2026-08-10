@@ -13,6 +13,7 @@ import RemixDialog from './components/Dialogs/RemixDialog';
 import SeparateDialog from './components/Dialogs/SeparateDialog';
 import TempoDialog from './components/Dialogs/TempoDialog';
 import TranscribeDialog from './components/Dialogs/TranscribeDialog';
+import VoiceChangerDialog from './components/Dialogs/VoiceChangerDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
@@ -31,6 +32,7 @@ import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { getInFlightSaveCount, hasUnsavedWork } from './services/fileService';
 import { getStemBusyCount } from './services/stemService';
 import { getTranscribeBusyCount } from './services/transcribeService';
+import { getVoiceBusyCount } from './services/voiceService';
 import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
@@ -119,6 +121,7 @@ export default function App() {
   const [remixOpen, setRemixOpen] = useState(false);
   const [separateOpen, setSeparateOpen] = useState(false);
   const [transcribeOpen, setTranscribeOpen] = useState(false);
+  const [voiceChangerOpen, setVoiceChangerOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
   const activeTab = SIDEBAR_TABS.find((t) => t.id === sidebarTab) ?? SIDEBAR_TABS[0];
   const ActiveIcon = activeTab.Icon;
@@ -151,6 +154,7 @@ export default function App() {
         openRemixDialog: () => setRemixOpen(true),
         openSeparateDialog: () => setSeparateOpen(true),
         openTranscribeDialog: () => setTranscribeOpen(true),
+        openVoiceChangerDialog: () => setVoiceChangerOpen(true),
         focusRemixPanel: () => setSidebarTab('remix'),
         focusTranscriptPanel: () => setSidebarTab('transcript'),
       }),
@@ -188,7 +192,7 @@ export default function App() {
         .documents.filter(hasUnsavedWork).length;
       api.respondCloseRequest(
         unsaved,
-        getInFlightSaveCount() + getStemBusyCount() + getTranscribeBusyCount()
+        getInFlightSaveCount() + getStemBusyCount() + getTranscribeBusyCount() + getVoiceBusyCount()
       );
     });
   }, []);
@@ -323,6 +327,7 @@ export default function App() {
       {remixOpen && <RemixDialog onClose={() => setRemixOpen(false)} />}
       {separateOpen && <SeparateDialog onClose={() => setSeparateOpen(false)} />}
       {transcribeOpen && <TranscribeDialog onClose={() => setTranscribeOpen(false)} />}
+      {voiceChangerOpen && <VoiceChangerDialog onClose={() => setVoiceChangerOpen(false)} />}
     </div>
   );
 }

@@ -53,6 +53,7 @@ beforeEach(() => {
     openRemixDialog: () => {},
     openSeparateDialog: () => {},
     openTranscribeDialog: () => {},
+    openVoiceChangerDialog: () => {},
     focusRemixPanel: () => {},
     focusTranscriptPanel: focusTranscript,
   });

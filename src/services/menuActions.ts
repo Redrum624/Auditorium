@@ -25,6 +25,7 @@ import {
   openRemixDialog,
   openSeparateDialog,
   openTranscribeDialog,
+  openVoiceChangerDialog,
   openTempoDialog,
 } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
@@ -102,6 +103,7 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.remix',
       'edit.separateStems',
       'edit.transcribe',
+      'edit.voiceChanger',
       'separator',
       'multitrack.insertDoc',
       'multitrack.addTrack',
@@ -887,6 +889,26 @@ function registerTranscribeCommands(): void {
   ]);
 }
 
+/** F3 — Voice Changer. Sits with Auto-Remix, Separate into Stems and
+ * Transcribe in the same Edit-menu group, for the same structural reason: a
+ * long CPU-inference job producing a NEW document, which the Effects menu's
+ * pure, synchronous `EffectDefinition.process` (same-document channels in,
+ * channels out) cannot express. Identical `enabled` rule, and no shortcut —
+ * a minutes-long job should never be one keystroke away. */
+function registerVoiceCommands(): void {
+  registerCommands([
+    {
+      id: 'edit.voiceChanger',
+      label: 'Voice Changer…',
+      enabled: (s) => {
+        const d = activeDoc(s);
+        return d !== null && docLength(d) > 0;
+      },
+      run: async () => openVoiceChangerDialog(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -900,3 +922,4 @@ registerTempoCommands();
 registerRemixCommands();
 registerStemCommands();
 registerTranscribeCommands();
+registerVoiceCommands();

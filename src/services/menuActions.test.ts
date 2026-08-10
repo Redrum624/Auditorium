@@ -135,6 +135,7 @@ describe('getMenuSections', () => {
       'edit.remix',
       'edit.separateStems',
       'edit.transcribe',
+      'edit.voiceChanger',
       'multitrack.insertDoc',
       'multitrack.addTrack',
       'marker.add',
@@ -573,6 +574,7 @@ describe('tempo.match (Task T8)', () => {
       openRemixDialog: () => {},
       openSeparateDialog: () => {},
       openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -627,6 +629,7 @@ describe('edit.remix (Task T14)', () => {
       openRemixDialog: openRemix,
       openSeparateDialog: () => {},
       openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -648,6 +651,7 @@ describe('edit.remix (Task T14)', () => {
       openRemixDialog: openRemix,
       openSeparateDialog: () => {},
       openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -675,6 +679,7 @@ describe('edit.separateStems (Task S6)', () => {
       openRemixDialog: () => {},
       openSeparateDialog: openSeparate,
       openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -740,6 +745,7 @@ describe('edit.transcribe (Task F4b)', () => {
       openRemixDialog: () => {},
       openSeparateDialog: () => {},
       openTranscribeDialog: openTranscribe,
+      openVoiceChangerDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -756,7 +762,12 @@ describe('edit.transcribe (Task F4b)', () => {
     expect(transcribe !== 'separator' && transcribe.label).toBe('Transcribe…');
     // No shortcut: a multi-minute job must never be one keystroke away.
     expect(transcribe !== 'separator' && transcribe.shortcut).toBeUndefined();
-    expect(edit.items[separateIndex + 2]).toBe('separator');
+    // F3 joined the same long-inference group: Voice Changer closes it.
+    const voice = edit.items[separateIndex + 2];
+    expect(voice !== 'separator' && voice.id).toBe('edit.voiceChanger');
+    expect(voice !== 'separator' && voice.label).toBe('Voice Changer…');
+    expect(voice !== 'separator' && voice.shortcut).toBeUndefined();
+    expect(edit.items[separateIndex + 3]).toBe('separator');
   });
 
   it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {

@@ -154,6 +154,7 @@ function installBus(): void {
     openRemixDialog: () => {},
     openSeparateDialog: () => {},
     openTranscribeDialog: () => {},
+    openVoiceChangerDialog: () => {},
     focusRemixPanel,
     focusTranscriptPanel: () => {},
   });
