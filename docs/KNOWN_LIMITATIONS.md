@@ -998,21 +998,52 @@ whole utterance in one run, so an unchunked 20-minute file would need roughly
 6.5 GB of RSS — and no overlap size can buy sample-level agreement with an
 unchunked run past the first chunk.
 
-**What is guaranteed instead**, and is asserted on every run of
-`electron/voiceIntegration.test.cjs` against the real model:
+**What is guaranteed instead.** Each line below gives the value measured on the
+70 s fixture and, in brackets, the bound `electron/voiceIntegration.test.cjs`
+actually asserts against the real model — the two are not the same thing, and
+the measured figure is not what the test enforces:
 
-- the first chunk's exclusive region is **bit-identical** to an unchunked run
-  (measured over 28.5 s, max difference exactly 0);
-- the 20 ms RMS envelopes of the chunked and unchunked runs correlate at
-  **0.978**, with total RMS agreeing to **0.038 dB**;
-- no 20 ms frame within a second of a seam departs from the unchunked run by
-  more than **1.46 dB** (bounded at 6 dB, which is just past the −5.6 dB worst
-  dip the rejected equal-gain seam design measured).
+- the first chunk's exclusive region is **bit-identical** to an unchunked run —
+  measured max difference exactly 0 over 28.5 s (asserted: exactly 0);
+- right up to the crossfade, including the stretch where the chunk has already
+  begun to drift, the deviation is **2.5e-7** (asserted: below 1e-4). This is
+  the line that sizes the discard margin: the same measurement with the
+  2-frame margin the first draft used is **3.4e-1**, a factor of 1.6 million;
+- the 20 ms RMS envelopes correlate at **0.978** with total RMS agreeing to
+  **0.038 dB** (asserted: correlation ≥ 0.95, gap ≤ 1.0 dB). This is a coarse
+  same-audio check, not a seam check — it reads 0.975–0.978 even with the
+  broken margin;
+- the crossfade window's own RMS sits **+2.08 dB** above the windows either
+  side of it (asserted: below 3.5 dB).
 
-Seams are constant-power (sin/cos) over 25 ms, placed 16,384 samples clear of
-each chunk edge because that is the measured reach of the decoder's context
-deficiency — the spectrogram's own 2-frame overlap suggests 512 samples, and
-that figure is wrong by a factor of 32.
+That last figure is the honest cost of the seam law, and it is worth stating
+plainly. Seams are **constant-power** (sin/cos) over 25 ms. Constant power is
+the correct law for *uncorrelated* material, which is what the decoder produces
+globally — but over a 25 ms window on tonal material the two renditions turn
+out to be roughly half-correlated (equal gain measures −0.87 dB on the same
+seam, implying a correlation near 0.45), and constant power therefore
+over-sums. Constant power is kept anyway because it is exactly right in the
+structural case (ρ = 0, which is what the shift-invariance measurement says the
+decoder does) and errs by at most +3 dB in the coherent case, whereas equal
+gain has the mirror-image failure and dips 3 dB on genuinely decorrelated
+material; it is also the app's own established join law (the v1.9 crossfade
+ruling, and `remixService.ts`'s default). An earlier revision of this entry
+claimed the two renditions were simply "decorrelated" at the seam and that a
+6 dB bound would fail the rejected equal-gain design. Neither was true: the
+measured correlation is about 0.45, and −5.6 dB passes a 6 dB bound.
+
+Seams are placed 16,384 samples clear of each chunk edge because that is the
+measured reach of the decoder's context deficiency — the spectrogram's own
+2-frame overlap suggests 512 samples, and that figure is wrong by a factor
+of 32.
+
+**One metric that was tried and removed**, because it could not do what it
+appeared to: comparing the chunked run's 20 ms frames against the unchunked
+run's near a seam. Away from any seam that comparison already spreads
+**±14.26 dB** purely from rendition decorrelation, so every bound below 14 dB
+was measuring noise. The −1.46 dB an earlier revision published as "the worst
+level change at a seam" was one such frame, 5,574 samples from the nearest
+crossfade.
 
 **Practical consequence:** peak memory stays flat with input length (measured
 1,355 MB on a 70 s input and 1,351 MB on double that, against 1,730 MB for the

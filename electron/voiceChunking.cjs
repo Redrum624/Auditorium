@@ -29,7 +29,7 @@
  *    output (max |diff| = 0), so nothing here is chasing run-to-run noise.
  *  - **The pipeline is prefix-stable**: chunk 0 starts where the whole
  *    utterance starts, and its output was BIT-IDENTICAL to the unchunked run
- *    for 635,239 samples — right up to where its own missing right-context
+ *    for 635,245 samples — right up to where its own missing right-context
  *    begins to tell.
  *  - **But the decoder is NOT frame-shift-equivariant, at all.** Extending
  *    the analysis window to the left by a SINGLE hop (256 samples) leaves the
@@ -39,14 +39,38 @@
  *    renders the same words in the same voice with entirely different fine
  *    structure; sample-level agreement with an unchunked run is not something
  *    this model offers past chunk 0, and no seam geometry can buy it.
- *  - Which settles the crossfade law: two decorrelated renditions are exactly
- *    the case **constant power** exists for (the v1.9 ruling added sin/cos
- *    precisely because equal gain dips on uncorrelated material — and the
- *    stem-style SEGMENT/4 equal-gain overlap measured a mean −1.9 dB / worst
- *    −5.6 dB dip smeared across each 7.5 s seam). Length is the **25 ms** the
- *    remix engine ships as its default for splicing at a join
- *    (`remixService.ts` DEFAULTS.crossfadeMs) — short, because blending two
- *    decorrelated renditions for longer only widens the doubled-voice region.
+ *  - Length is the **25 ms** the remix engine ships as its default for
+ *    splicing at a join (`remixService.ts` DEFAULTS.crossfadeMs) — short,
+ *    because blending two different renditions for longer only widens the
+ *    doubled-voice region.
+ *
+ * ### The crossfade law, and a correction to the reasoning that chose it
+ *
+ * The first version of this header argued: the renditions are decorrelated,
+ * decorrelated material is exactly what **constant power** exists for, done.
+ * The first half of that is true GLOBALLY (the shift measurement above) but
+ * NOT at the scale the crossfade actually operates. Measured on the seam
+ * itself — the crossfade window's RMS against the equal-length windows either
+ * side of it, on the 70 s fixture:
+ *
+ *      constant power  +2.08 dB      equal gain  −0.87 dB
+ *
+ * A constant-power sum only rises like that when the two sides are partly
+ * COHERENT; the equal-gain figure implies a correlation near 0.45. Over 25 ms
+ * of tonal material the two renditions share enough local phase to add
+ * constructively, and the earlier −1.9/−5.6 dB equal-gain measurement came
+ * from a 7.5 s crossfade, over which that coherence averages away. So the
+ * honest statement is that neither law is exactly right here.
+ *
+ * Constant power is kept, for a reason that survives the correction: it is
+ * exact at ρ = 0 and errs by at most +3 dB at ρ = 1, while equal gain is
+ * exact at ρ = 1 and dips 3 dB at ρ = 0 — and ρ = 0 is the STRUCTURAL case
+ * this decoder produces (the shift measurement), with the coherence above an
+ * artefact of a locally tonal fixture. Erring toward a brief boost on tonal
+ * content beats dipping on everything else, and it keeps one join law across
+ * the app (the v1.9 crossfade ruling, and the remix engine's default).
+ * The +2.08 dB is recorded in docs/KNOWN_LIMITATIONS.md as a real cost, not
+ * argued away.
  *
  * ## EDGE_DISCARD — sized by measurement, twice, because the obvious answer
  *    was wrong by 32x
@@ -60,21 +84,27 @@
  * far further. Both were measured:
  *
  *  - **Sample level, at chunk 0's tail** (the one place with a phase-locked
- *    ground truth): |chunk − unchunked| first becomes non-zero 26,265 samples
- *    before the chunk's end, and rises 1.7e-6 at 14,000 → 9.2e-4 at 10,000 →
- *    2.8e-2 at 8,000 → 0.35 at 2,000 (against a signal rms of 0.106). So the
- *    last ~10,000 samples of a chunk are audibly wrong, and it is not
- *    numerically clean until ~14,000.
- *  - **Envelope level, at mid-file chunk heads and tails** (20 ms RMS frames,
- *    4 starts, vs the unchunked run — the only comparison that survives the
- *    shift non-equivariance above): head −6.18 dB in the first frame, −0.62 dB
- *    by 8 frames, indistinguishable from the interior control (mean 0.10 dB)
- *    by ~15 frames. Tail −2.11 dB at 6 frames, −0.47 dB at 13, gone by ~20.
+ *    ground truth): |chunk − unchunked| first becomes non-zero ~26,260 samples
+ *    before the chunk's end (26,259 under this plan, 26,265 under the pre-fix
+ *    one — the source tone is a mean over the plan's own chunks, so the onset
+ *    shifts a few samples with the geometry), and rises 1.7e-6 at 14,000 →
+ *    9.2e-4 at 10,000 → 2.8e-2 at 8,000 → 0.35 at 2,000 (against a signal rms
+ *    of 0.106). So the last ~10,000 samples of a chunk are audibly wrong, and
+ *    it is not numerically clean until ~14,000.
+ *  - **Envelope level, at mid-file chunk heads and tails** (20 ms = 441-sample
+ *    RMS frames — NOT the 256-sample STFT frame — 4 starts, vs the unchunked
+ *    run, the only comparison that survives the shift non-equivariance above):
+ *    head −6.18 dB in the first frame, −0.62 dB by 8 frames, indistinguishable
+ *    from the interior control (mean 0.10 dB) by ~15 frames = 6,615 samples.
+ *    Tail −2.11 dB at 6 frames, −0.47 dB at 13, gone by ~20 = 8,820 samples.
  *
- * EDGE_DISCARD is therefore **64 frames = 16,384 samples (0.74 s)** — past
- * the sample-level noise floor (14,000) and ~3x the envelope artefact's
- * ~20-frame reach, on both sides. It costs 5.3% extra inference (below), on a
- * path measured at 4.0-4.9x realtime.
+ * EDGE_DISCARD is therefore **64 STFT frames = 16,384 samples (0.74 s)** —
+ * past the sample-level noise floor (14,000), and 2.5x the head artefact's
+ * 6,615-sample reach / 1.9x the tail's 8,820. (An earlier revision said "~3x
+ * the envelope artefact's ~20-frame reach", which silently multiplied
+ * 441-sample RMS frames by the 256-sample STFT frame; the margin is
+ * unaffected, the multiplier was wrong.) It costs 5.3% extra inference
+ * (below), on a path measured at 4.0-4.9x realtime.
  *
  * Derived constants:
  *   SEGMENT_SAMPLES     661,504  — the spike's ~30 s, rounded UP to a HOP

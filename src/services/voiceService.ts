@@ -120,8 +120,6 @@ export const MEASURED_REALTIME_FACTOR = 3.86;
  * numbers from `.superpowers/sdd/task-F3-spike.md` round 2.
  */
 export const VOICE_LIMITS = Object.freeze({
-  /** 8 of 9 real conversions landed closest to the requested target. */
-  targetWins: '8 of 9',
   /** The one miss: two low male voices 1.7 semitones apart barely moved. */
   missSemitones: 1.7,
   /** Worst intelligibility cost: 27% word errors at a +8.1 semitone jump. */
@@ -275,10 +273,6 @@ function subscribe(cb: () => void): () => void {
 }
 
 function getSnapshot(): number {
-  return version;
-}
-
-export function getVoiceVersion(): number {
   return version;
 }
 

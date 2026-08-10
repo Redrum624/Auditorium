@@ -46,25 +46,34 @@
  * parts, each matched to what is actually claimable:
  *
  *   1. PREFIX — chunk 0 shares the unchunked run's start, so it is the one
- *      place with a phase-locked ground truth, and there the agreement is
- *      BIT-IDENTICAL: zero, not "close". It holds until chunk 0's own missing
- *      right-context begins to tell, measured at 26,265 samples before its
- *      end. The assertion is made over everything up to the first crossfade
- *      MINUS the discard margin, which is 16,384 samples — comfortably inside
- *      the measured 26,265 — so the exact-match region is ~28.5 s long and
- *      the margin's sizing is what makes it hold.
- *   2. ENVELOPE — over the whole file, the 20 ms RMS envelopes correlate
- *      >= 0.85 and total RMS agrees within 1.0 dB. Both bounds sit below the
- *      0.89 envelope correlation already measured for this arrangement, with
- *      margin, and above what an actually-broken splice could reach.
- *   3. NO SEAM ARTEFACT — no 20 ms frame anywhere near a seam is more than
- *      6 dB below the unchunked run's frame at the same position. This is the
- *      assertion that would have caught the equal-gain design that was
- *      rejected (mean -1.9 dB, worst -5.6 dB dips smeared across each seam);
- *      it is deliberately set just past that worst measured dip so the
- *      rejected design fails it. It is ALSO the assertion that catches an
- *      under-sized discard margin, which is how the 512-sample margin this
- *      file's first run inherited was found to be 32x too small.
+ *      place with a phase-locked ground truth. Two assertions, because they
+ *      say different things:
+ *        (a) BIT-IDENTICAL (exactly zero) up to the first crossfade MINUS the
+ *            discard margin — ~28.5 s;
+ *        (b) below 1e-4 all the way UP TO the crossfade. This is the one that
+ *            sizes the margin, and it is sharply discriminating: measured
+ *            2.05e-7 with the shipped 64-frame margin against 3.37e-1 with
+ *            the 2-frame margin the first draft used — a factor of 1.6
+ *            million. Chunk 0 starts drifting 26,259 samples before its end
+ *            (26,265 under the pre-fix plan; the source tone is a mean over
+ *            the plan's own chunks, so the onset moves a few samples with the
+ *            geometry), and the margin's whole job is to keep the crossfade
+ *            out of that drift while it is still ~130 dB down.
+ *   2. ENVELOPE — the 20 ms RMS envelopes correlate >= 0.95 and total RMS
+ *      agrees within 1.0 dB. This is a coarse "the two runs are the same
+ *      audio" check and NOT a seam check: it measures 0.975-0.978 under every
+ *      arrangement tried, including the broken 2-frame margin, so it cannot
+ *      tell a good seam from a bad one and does not claim to.
+ *   3. SEAM CONTINUITY — the crossfade window's own RMS against the
+ *      equal-length windows either side of it, bounded at 3.5 dB (measured
+ *      +2.08 dB). This deliberately does NOT compare against the unchunked
+ *      run: that comparison was tried, and away from any seam it already
+ *      spreads +/-14.26 dB purely from rendition decorrelation, so every
+ *      bound below 14 dB was measuring noise rather than the join. What this
+ *      does catch is a join that drops the signal (-inf) or double-adds it
+ *      (+4.6 dB at the measured correlation). It does not discriminate
+ *      constant power from equal gain at this crossfade length, and says so
+ *      rather than claiming a rejected design would fail it.
  *
  * RSS boundedness is asserted as the property that matters: the chunked run's
  * peak stays BELOW the unchunked run's on the same input, and doubling the
@@ -91,6 +100,7 @@ const {
   VC_SAMPLE_RATE,
   SEGMENT_SAMPLES,
   EDGE_DISCARD_SAMPLES,
+  CROSSFADE_SAMPLES,
   planVoiceSegments,
   crossfadeStart,
 } = require('./voiceChunking.cjs');
@@ -309,10 +319,20 @@ benchTest(
     expect(prefixEnd).toBeGreaterThan(28 * VC_SAMPLE_RATE); // ~28.5 s exact
     expect(prefixWorst).toBe(0);
 
-    // The margin is what makes that hold — so pin that it is sized from the
-    // measurement rather than from the spectrogram's 2 frames. Chunk 0's
-    // divergence begins 26,265 samples before its end; the seam's own
-    // geometry must place the crossfade at least a margin away from it.
+    // (b) THE MARGIN ASSERTION. Right up to the crossfade — including the
+    // stretch where chunk 0 has already begun to drift — the deviation must
+    // still be negligible. This is what sizes EDGE_DISCARD, and it is the
+    // assertion that fails if the margin is cut back to the spectrogram's own
+    // 2 frames: measured 2.05e-7 at 64 frames against 3.37e-1 at 2 frames.
+    let toSeamWorst = 0;
+    for (let t = 0; t < seams[0]; t++) {
+      toSeamWorst = Math.max(toSeamWorst, Math.abs(host.audio[t] - direct.audio[t]));
+    }
+    console.log(
+      `voiceIntegration: up to the crossfade at ${seams[0]}, max |host - direct| = ${toSeamWorst.toExponential(3)} ` +
+        `(2-frame margin measures 3.37e-1 here)`
+    );
+    expect(toSeamWorst).toBeLessThan(1e-4);
     expect(EDGE_DISCARD_SAMPLES).toBe(16384);
     expect(plan[0].end - seams[0]).toBeGreaterThanOrEqual(EDGE_DISCARD_SAMPLES);
     expect(seams[0] - plan[1].start).toBeGreaterThanOrEqual(EDGE_DISCARD_SAMPLES);
@@ -325,42 +345,53 @@ benchTest(
     console.log(
       `voiceIntegration: envelope correlation ${envCorr.toFixed(4)}, total RMS gap ${dbGap.toFixed(3)} dB`
     );
-    expect(envCorr).toBeGreaterThanOrEqual(0.85);
+    // 0.95, not 0.85: every arrangement measured 0.975-0.978, so 0.85 was
+    // three times looser than the spread it was bounding. It is still only a
+    // coarse same-audio check — see the header, it does not move when the
+    // seam breaks.
+    expect(envCorr).toBeGreaterThanOrEqual(0.95);
     expect(dbGap).toBeLessThanOrEqual(1.0);
 
-    // --- tolerance 3: NO SEAM DIP -----------------------------------------
-    // The assertion that discriminates constant-power from the equal-gain
-    // design that was measured and rejected (mean -1.9 dB, worst -5.6 dB).
-    // Judged over every 20 ms frame within 1 s of a seam, against the
-    // unchunked run's frame at the same position, on frames loud enough for
-    // a ratio to mean anything.
-    // The bound is symmetric: a dip is what equal gain does to decorrelated
-    // material, and a BOOST (up to +3 dB) is what constant power would do if
-    // the two sides were correlated instead. Either would mean the seam law
-    // is mismatched to the material, so both are refused.
-    const floor = 1e-4;
+    // --- tolerance 3: SEAM CONTINUITY -------------------------------------
+    // LOCAL only — the crossfade window's own RMS against the equal-length
+    // windows immediately either side of it. It never looks at the unchunked
+    // run, which is the point: that comparison was tried and measured a
+    // +/-14.26 dB spread AWAY from any seam, purely from the decoder's
+    // rendition-to-rendition decorrelation, so it could not see a seam at all.
+    // (The -1.46 dB this file once reported was such a frame, 5,574 samples
+    // from the nearest crossfade.)
+    const rmsOver = (x, from, to) => {
+      let s = 0;
+      for (let i = from; i < to; i++) s += x[i] * x[i];
+      return Math.sqrt(s / (to - from));
+    };
     let worstSeamDb = 0;
-    let worstSeamFrame = -1;
+    let worstSeamAt = -1;
     let judged = 0;
-    for (let f = 0; f < Math.min(hostFrames.length, directFrames.length); f++) {
-      const centre = f * FRAME + FRAME / 2;
-      if (!seams.some((s) => Math.abs(centre - s) <= VC_SAMPLE_RATE)) continue;
-      if (directFrames[f] < floor) continue;
+    for (const s of seams) {
+      const inSeam = rmsOver(host.audio, s, s + CROSSFADE_SAMPLES);
+      const before = rmsOver(host.audio, s - CROSSFADE_SAMPLES, s);
+      const after = rmsOver(host.audio, s + CROSSFADE_SAMPLES, s + 2 * CROSSFADE_SAMPLES);
+      const local = (before + after) / 2;
+      if (!(local > 1e-5)) continue;
       judged++;
-      const db = 20 * Math.log10(Math.max(hostFrames[f], 1e-12) / directFrames[f]);
+      const db = 20 * Math.log10(Math.max(inSeam, 1e-12) / local);
       if (Math.abs(db) > Math.abs(worstSeamDb)) {
         worstSeamDb = db;
-        worstSeamFrame = f;
+        worstSeamAt = s;
       }
     }
     console.log(
-      `voiceIntegration: ${judged} frames judged near ${seams.length} seams, worst level change ` +
-        `${worstSeamDb.toFixed(2)} dB (frame ${worstSeamFrame})`
+      `voiceIntegration: ${judged} seam(s) judged, worst crossfade-vs-neighbours level change ` +
+        `${worstSeamDb >= 0 ? '+' : ''}${worstSeamDb.toFixed(2)} dB (at sample ${worstSeamAt})`
     );
-    expect(judged).toBeGreaterThan(150); // ~100 frames per seam, both seams
-    // Measured -1.46 dB with this geometry; the bound is the rejected
-    // equal-gain design's worst dip (-5.6 dB), rounded outward.
-    expect(Math.abs(worstSeamDb)).toBeLessThan(6);
+    expect(judged).toBe(seams.length);
+    // Measured +2.08 dB. The bound catches a join that drops the signal
+    // (-inf) or double-adds it (+4.6 dB at the correlation measured here). It
+    // does NOT separate constant power from equal gain at 25 ms — equal gain
+    // measures -0.87 dB on this fixture, which is not a defect — so no such
+    // claim is made for it.
+    expect(Math.abs(worstSeamDb)).toBeLessThan(3.5);
 
     // --- RSS is bounded ----------------------------------------------------
     // The unchunked path's own measured law is linear in length (~183 MB +

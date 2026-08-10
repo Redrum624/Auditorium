@@ -346,6 +346,54 @@ describe('run choreography', () => {
     expect(spawned).toBe(0);
   });
 
+  test('THE VERIFY LOOP RUNS TO ITS END: a valid first file does not excuse a corrupt second', async () => {
+    // The test above puts NOTHING on disk, so files[0] fails and the loop
+    // returns before it ever reaches files[1]. It therefore pins the loop's
+    // EXISTENCE, not its EXTENT — `for (const f of files.slice(0, 1))` passes
+    // it. That is not academic: the un-verified file would be loaded straight
+    // into the utility process, so a build checking only the converter would
+    // happily load a substituted tone_extract.onnx. Every element needs a
+    // fixture in which the EARLIER ones pass.
+    for (const badIndex of [0, 1]) {
+      const files = makeFakeFiles();
+      const fsImpl = memFs();
+      const paths = getVoiceModelPaths(USER_DATA, files);
+      // Every file valid on disk...
+      for (const f of files) fsImpl.store.set(paths[f.key], f.payload);
+      // ...except one, corrupted while keeping a plausible length so the
+      // refusal has to come from the sha256 and not merely from the size.
+      const bad = files[badIndex];
+      const corrupt = Buffer.from(bad.payload);
+      corrupt[0] ^= 0xff;
+      expect(corrupt.length).toBe(bad.bytes);
+      fsImpl.store.set(paths[bad.key], corrupt);
+
+      let spawned = 0;
+      const manager = createVoiceManager({
+        userDataDir: USER_DATA,
+        files,
+        fsImpl,
+        atomicWrite: memAtomicWrite(fsImpl),
+        utilityProcessFactory: () => {
+          spawned++;
+          return fakeChild();
+        },
+      });
+      const result = await manager.startEmbed({ samples: new Float32Array(1000) });
+      expect(result.ok).toBe(false);
+      // The refusal names the file that actually failed — so a loop that
+      // checked the wrong element could not pass by luck.
+      expect(result.error).toContain(bad.filename);
+      expect(result.error).toMatch(/failed verification/);
+      expect(spawned).toBe(0);
+      // And the OTHER file was genuinely valid, so this really did require
+      // reaching index ${badIndex} rather than stopping at the first.
+      const other = files[1 - badIndex];
+      expect(fsImpl.store.get(paths[other.key]).equals(other.payload)).toBe(true);
+      expect(result.error).not.toContain(other.filename);
+    }
+  });
+
   test('spawn failure, host error and unexpected exit each settle exactly once', async () => {
     const files = makeFakeFiles();
     const fsImpl = memFs();

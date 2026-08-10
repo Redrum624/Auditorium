@@ -434,7 +434,7 @@ account, no upload.
 reference voices you can reuse. Add one with **From file…** (any audio file) or
 **From selection** (whatever is selected in the open document, which is the
 quickest way to try a voice you already have on the timeline). A reference of
-roughly **6–15 seconds of clean speech** is what the model was measured on;
+roughly **6–12 seconds of clean speech** is what the model was measured on;
 much shorter gives it little to work with, and it will not accept a reference
 longer than 350 seconds.
 

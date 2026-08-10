@@ -88,17 +88,19 @@ is local-first and none of that would work offline anyway.
   own geometry — an analysis window overlaps its neighbours by two frames, so
   512 samples looked like enough. The decoder's context reaches far further
   than its analysis window does. Measured against the real model: a chunk's
-  output starts diverging from an unchunked run **26,265 samples** before its
-  end and is audibly wrong over the last ~10,000, and the 20 ms level at a
+  output starts diverging from an unchunked run about **26,260 samples** before
+  its end and is audibly wrong over the last ~10,000, and the 20 ms level at a
   chunk's head is **−6.18 dB** in the first frame, only rejoining the interior
   by ~15 frames. The margin was therefore about **32× too small**, and put both
   sides of every crossfade inside the corrupted region. Fix: the margin is now
   16,384 samples (64 frames), derived from those measurements, with the overlap
   and stride following from it — 5.3 % extra inference on a path that runs at
-  4–4.9× realtime. After the fix a chunked run is **bit-identical** to an
-  unchunked one for the first 28.5 s, envelope correlation is 0.978, and the
-  worst level change at a seam is 1.46 dB. Affects:
-  `electron/voiceChunking.cjs`, `electron/voiceHost.cjs`.
+  4–4.9× realtime. The size of the difference: at the point the crossfade
+  begins, a chunk's deviation from an unchunked run is **2.5e-7** with the new
+  margin and **3.4e-1** with the old one. After the fix a chunked run is
+  **bit-identical** to an unchunked one for the first 28.5 s and its envelope
+  correlates at 0.978. Affects: `electron/voiceChunking.cjs`,
+  `electron/voiceHost.cjs`.
 - **Every in-app time estimate for a conversion was wrong.** Cause: the
   renderer keeps its own copy of the chunk-plan constants (it cannot load a
   main-process `.cjs` at runtime) and the copy had been left behind by two
