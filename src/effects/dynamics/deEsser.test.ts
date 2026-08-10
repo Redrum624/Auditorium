@@ -85,6 +85,26 @@ function vowel(seconds: number, targetRmsDb: number): Float32Array {
   return scaleToRms(out, dbToLin(targetRmsDb));
 }
 
+/** Linear fade to zero across the whole signal. */
+function fadeOut(signal: Float32Array): Float32Array {
+  const out = new Float32Array(signal.length);
+  for (let i = 0; i < signal.length; i++) out[i] = signal[i] * (1 - i / signal.length);
+  return out;
+}
+
+/**
+ * Sibilance faded to nothing, followed by an equal stretch of DIGITAL SILENCE.
+ * The silent tail is what makes the Nyquist boundary testable. At exactly
+ * Nyquist the one-pole design lands on a NEAR pole-zero cancellation (b0 = b1 =
+ * 0.9999999999999999 against a1 = 0.9999999999999998, off by ~2e-13) feeding a
+ * marginally stable recursion, so the split band carries a ~2e-15 residue that
+ * never decays. Against signal it is swamped and the guard looks equivalent to
+ * no guard; against exact zeros it is the entire output.
+ */
+function fadedWithSilentTail(seconds: number, seed: number): Float32Array {
+  return concat(fadeOut(sibilance(seconds, -12, seed)), new Float32Array(Math.round(seconds * SR)));
+}
+
 function concat(...parts: Float32Array[]): Float32Array {
   const total = parts.reduce((a, p) => a + p.length, 0);
   const out = new Float32Array(total);
@@ -272,9 +292,15 @@ describe('de-esser selectivity (the test that matters)', () => {
     // point pins the point, not the extent.
     const win = Math.round(0.02 * SR);
     let worstVowelDb = 0;
+    let windows = 0;
     for (let start = 0; start + win <= sibStart; start += win) {
       worstVowelDb = Math.min(worstVowelDb, gainDb(signal, out[0], start, start + win));
+      windows++;
     }
+    // Without this the scan could cover no windows at all and `toBe(0)` would
+    // pass on the initialiser.
+    expect(windows).toBe(Math.floor(sibStart / win));
+    expect(windows).toBeGreaterThan(15);
     expect(worstVowelDb).toBe(0);
     expect(sibDb).toBeLessThan(worstVowelDb - 6);
   });
@@ -351,6 +377,24 @@ describe('de-esser listen path', () => {
     );
   });
 
+  it('reconstructs the input on BOTH channels of a stereo pair', () => {
+    const other = concat(vowel(0.3, LEVEL_DB), sibilance(0.15, -18, 37));
+    const stereo = [signal, other];
+    const processed = run(stereo, DEFAULTS);
+    const removed = run(stereo, { ...DEFAULTS, listen: true });
+    for (let ch = 0; ch < 2; ch++) {
+      let removedEnergy = 0;
+      for (let i = 0; i < stereo[ch].length; i++) {
+        expect(processed[ch][i] + removed[ch][i]).toBeCloseTo(stereo[ch][i], 6);
+        removedEnergy += removed[ch][i] * removed[ch][i];
+      }
+      // Both channels genuinely had something taken out of them - a channel
+      // left as all zeros would satisfy the reconstruction above vacuously
+      // only if it were also untouched, so pin that it was not.
+      expect(removedEnergy).toBeGreaterThan(0);
+    }
+  });
+
   it('carries the high band, not the programme: almost none of it is below 1 kHz', () => {
     const removed = run([signal], { ...DEFAULTS, listen: true });
     const lp = designBiquad('lowpass', SR, 1000, Math.SQRT1_2);
@@ -425,7 +469,7 @@ describe('de-esser channel handling', () => {
 });
 
 describe('de-esser crossover frequency bounds', () => {
-  const input = [sibilance(0.2, -12, 61)];
+  const input = [fadedWithSilentTail(0.1, 61)];
   const nyquist = SR / 2;
   const params = { ...DEFAULTS, thresholdDb: -60 };
 
@@ -434,17 +478,28 @@ describe('de-esser crossover frequency bounds', () => {
     expect(Array.from(out[0])).not.toEqual(Array.from(input[0]));
   });
 
-  it('passes through exactly ON Nyquist and above it rather than designing a runaway filter', () => {
+  it('passes through exactly ON Nyquist and above it rather than designing a degenerate filter', () => {
     // The detector floor is -120 dBFS, so a threshold below it puts EVERY
-    // sample on the reduction path. Both the split lowpass and the sidechain
-    // highpass are unstable at or past Nyquist, so without the guard the
-    // output would run away instead of coming back untouched - which is what
-    // makes `>= nyquist` (not `> nyquist`) observable here.
+    // sample on the reduction path, where the split filter's output is what
+    // reaches the ear. Past Nyquist both filters are outright unstable; AT
+    // Nyquist the split lands on a near pole-zero cancellation whose residue
+    // the fixture's silent tail exposes. Spelling the guard `> nyquist`
+    // instead of `>= nyquist` changes all 4800 samples of that tail.
     for (const freqHz of [nyquist, nyquist + 1, SR]) {
       const out = run(input, { ...params, thresholdDb: -140, freqHz });
       expect(out[0]).not.toBe(input[0]);
       expect(Array.from(out[0])).toEqual(Array.from(input[0]));
     }
+  });
+
+  it('passes both channels through, and silences both under listen, when out of band', () => {
+    const stereo = [input[0], fadedWithSilentTail(0.1, 63)];
+    const passed = run(stereo, { ...params, thresholdDb: -140, freqHz: nyquist });
+    expect(Array.from(passed[0])).toEqual(Array.from(stereo[0]));
+    expect(Array.from(passed[1])).toEqual(Array.from(stereo[1]));
+    const silent = run(stereo, { ...params, freqHz: nyquist, listen: true });
+    expect(Array.from(silent[0])).toEqual(new Array(stereo[0].length).fill(0));
+    expect(Array.from(silent[1])).toEqual(new Array(stereo[1].length).fill(0));
   });
 
   it('passes through at and below a zero (or NaN) crossover, and processes just above it', () => {
@@ -461,10 +516,21 @@ describe('de-esser crossover frequency bounds', () => {
 });
 
 describe('de-esser progress reporting', () => {
-  it('reports progress and finishes at 1', () => {
+  it('rises once through the whole job and reaches 1 exactly once, on the last sample', () => {
+    // Long enough (and stereo) that several progress chunks fall inside the
+    // run: 72000 samples x 2 channels against a 65536-sample chunk. A denominator
+    // that counted one channel's samples instead of the whole job would report
+    // 100 % at the end of channel 0 and then start over.
     const fractions: number[] = [];
-    run([sibilance(0.1, -12, 71)], DEFAULTS, (f) => fractions.push(f));
-    expect(fractions.length).toBeGreaterThan(0);
+    const stereo = [sibilance(1.5, -12, 71), sibilance(1.5, -12, 73)];
+    run(stereo, DEFAULTS, (f) => fractions.push(f));
+
+    expect(fractions.length).toBeGreaterThan(2);
+    for (let i = 1; i < fractions.length; i++) {
+      expect(fractions[i]).toBeGreaterThan(fractions[i - 1]);
+    }
+    expect(fractions.filter((f) => f === 1)).toHaveLength(1);
     expect(fractions[fractions.length - 1]).toBe(1);
+    expect(fractions[0]).toBeLessThan(1);
   });
 });
