@@ -5,6 +5,63 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.14.0] - 2026-08-09
+
+**Every finalized WebM/Matroska file over 512 KB was silently playing at the wrong
+speed** — that is this release's real headline, found while closing what looked like a
+small format-variant gap (R5). If your `.webm`/`.mkv` imports sounded pitched-down or
+slow, this is why, and it is fixed.
+
+### Fixed
+
+- **WebM/Matroska sniffing failed outright for ANY finalized file larger than 512 KB
+  (R5).** Symptom: the file opened and decoded at 48000 Hz regardless of its real rate —
+  wrong speed and pitch, with no error anywhere. Cause: the EBML walk carried a 512 KB
+  byte cap, and `readEbmlElement` treats an element whose declared end exceeds the limit
+  as parse doubt — so for any known-size Segment past 512 KB (i.e. essentially every
+  *saved* `.webm`/`.mkv`; only sub-512 KB files and live-muxed unknown-size Segments
+  ever worked) the **Segment element itself failed to parse** and the walk died at the
+  top. The audit item had filed this as "deep `Tracks` unreachable"; Tracks depth was
+  irrelevant. Fix: the byte cap is replaced by a per-level sibling-count bound
+  (`EBML_MAX_CHILDREN = 65536` — the count-not-bytes shape `MP4_MAX_BOXES` established
+  for size-driven walks; covers Tracks-after-Clusters layouts for 18+ hours of material
+  while a hostile tiny-element flood stays microsecond-bounded, and zero-advance is
+  impossible since every element consumes ≥ 2 bytes). Affects:
+  `src/audio/sniffSampleRate.ts`.
+
+### Added
+
+- **Ogg FLAC and Ogg Speex sniffing (R5).** Why: `OggS` was recognised but only Vorbis
+  and Opus first packets were parsed, so FLAC-in-Ogg and Speex files fell back to
+  48000 Hz. Now the RFC 9639 §10.2 first packet (`0x7F FLAC`, with the inner `fLaC`
+  marker also required) and the 80-byte SpeexHeader struct (rate at packet offset 36)
+  yield the real rate.
+- **Free-format MP3 sniffing (R5).** Why: `bitrate_index` 0000 (ISO/IEC 11172-3
+  §2.4.2.3) has no bitrate-table entry and was skipped outright, so free-format streams
+  fell back. A lone free header is indistinguishable from a stray sync byte, so one is
+  accepted only when a second header with matching version/layer/sample-rate fields —
+  itself free-format, protection bit ignored — confirms it within 2881 bytes, the
+  longest frame the spec permits a free-format stream (Layer II, 160 kbps LSF table
+  maximum, 8000 Hz, one padding slot).
+- **Deep `moov` pinned as already handled (R5).** The audit listed MP4 files whose
+  `moov` follows a large `mdat` (every non-faststart file) as unsniffable; verified
+  false — the size-driven box walk always reached it. Pinned by test rather than
+  "fixed", so the claim stays checkable. Genuinely unparseable layouts still fall back
+  to 48000 Hz — the bounded, honest default — never an inferred guess.
+
+### Closed without building (recorded with evidence so they stay closed)
+
+- **P4-11, native Vorbis encoder: DROPPED, measured.** The shipped runtime's
+  `AudioEncoder.isConfigSupported` reports vorbis **not supported** (mp3/flac/pcm
+  likewise; only opus and aac encode), so WebCodecs cannot provide it and building it
+  means implementing Vorbis I (MDCT, floor/residue codebooks) in TypeScript — a
+  multi-week project. Legacy Ogg Vorbis continues to re-encode as Opus-in-Ogg, the
+  deliberate modern default.
+- **P4-12, legacy `.audm` partial-parse salvage: MOOT.** The legacy writer built the
+  very same single JS string the reader decodes, so writer and reader hit the identical
+  V8 string cap — an over-cap legacy session cannot have been produced by this app, and
+  there is nothing to salvage. (v3 sessions are immune by construction.)
+
 ## [1.13.0] - 2026-08-09
 
 **Measured before tuned** — this release builds the two measurement rigs the audit said
