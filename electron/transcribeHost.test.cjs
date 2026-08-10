@@ -25,6 +25,24 @@ const {
   MIN_EMBED_SAMPLES,
 } = require('./transcribeHost.cjs');
 
+/**
+ * Jest's 5 s default is not enough for this suite, and the reason is real work
+ * rather than a hang: the fake stands in for onnxruntime only — every test
+ * still runs the GENUINE feature pipeline, and `encodeWindow` computes a full
+ * 30-second mel spectrogram (80 bins x 3000 frames) per window even for a
+ * one-second job, because that is what Whisper's fixed input demands.
+ *
+ * Measured: 28 tests in 7.7 s with `--maxWorkers=1`. Under the full parallel
+ * gate that multiplies — 16 workers compete, and on a machine with the pinned
+ * models on disk `transcribeIntegration.test.cjs` is simultaneously running
+ * real ONNX inference in a child process. Individual tests were observed
+ * crossing 5 s there and failing as timeouts while passing in isolation.
+ *
+ * 30 s is ~4x the whole suite's isolated runtime, so it still fails fast on a
+ * genuine hang rather than waiting out a stuck promise.
+ */
+jest.setTimeout(30000);
+
 const VOCAB = 79;
 const EOT = 20;
 const SOT = 21;
