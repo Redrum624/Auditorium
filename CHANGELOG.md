@@ -7,121 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.16.0] - 2026-08-10
 
-**Auditorium now transcribes speech, and labels who is speaking.** `Edit →
-Transcribe…` turns a recording into timestamped text with a speaker per
-segment, using Whisper (base) and a CAM++ speaker-embedding model that run on
-your own CPU — no cloud, no account, nothing leaves the machine. The transcript
-opens in a new Transcript panel and is drawn as coloured regions on the editor's
-timeline; clicking either moves the cursor there. It exports as SRT or WebVTT
-with the speaker labels included.
-
-**Read this before trusting the speaker labels.** Measured on clean recordings
-with one voice at a time, the separation told **two** speakers apart with
-**100 % of segments correct**, and recognised a single speaker as one person
-every time. With **three** it placed only **45 %** correctly — **73 %** even
-when told there were three. That test material was concatenated single-speaker
-recordings, so it had clean cuts and **no overlapping speech**; 100 % on two
-speakers is an upper bound, not what a real conversation will give you. And
-overlap is not detected at all: a segment with two people talking over each
-other gets one label. So the speaker count is a **control**, not a readout —
-set it yourself in the panel and the grouping is recomputed instantly from the
-voices already measured, with no second transcription run.
-
-### Added
-
-- **Transcription with speaker separation.** Why: the request was "a
-  transcriptor that can separate speakers", and every hosted option means
-  shipping the user's audio to someone else's server — this app is local-first.
-  How to use: `Edit → Transcribe…`, accept the one-time ~323 MB model download,
-  pick a speaker count or leave it on automatic, then read the result in the
-  **Transcript** panel (the Transcript entry on the icon rail). Click a row's
-  time to move the cursor there. Affects: `electron/whisperFeatures.cjs`,
-  `electron/whisperDecode.cjs`, `electron/transcribeHost.cjs`,
-  `electron/transcribeManager.cjs`, `src/dsp/speakerClustering.ts`,
-  `src/services/transcribeService.ts`, `src/services/subtitleFormat.ts`,
-  `src/components/Panels/TranscriptPanel.tsx`,
-  `src/components/Editor/TranscriptRibbon.tsx`,
-  `src/components/Dialogs/TranscribeDialog.tsx`.
-- **SRT and WebVTT export**, with speaker labels — `Speaker 1: …` in SRT (the
-  only thing a plain SRT player renders) and the spec's own `<v Speaker 1>`
-  voice span in WebVTT, so a conforming player can style or filter by speaker.
-  Times are held as sample positions internally and converted only at the
-  moment of writing, so they line up with the audio exactly at any sample rate.
-- **A transcript ribbon on the timeline** — one coloured region per segment,
-  spanning its real start and end, in its own 12 px lane between the time ruler
-  and the waveform. Why regions and not markers: a marker is a point and a
-  segment's end is half of what a transcript is for; markers carry no speaker;
-  and markers are written into the cue chunks of every WAV/MP3/FLAC/OGG you
-  export afterwards, so a transcript would silently follow your audio into
-  every deliverable.
-- **A speaker-count control in the Transcript panel** that re-groups the stored
-  voice embeddings instantly. Why it is mandatory rather than a nicety: see the
-  measured numbers above. It offers only counts the recording's own evidence
-  can support (one cluster per measurable segment, capped at 6).
-
-### Changed
-
-- **Windows of hallucinated speech now correctly produce nothing.** Whisper
-  invents fluent text over silence and over heavily degraded audio; openai's
-  own defence is to skip a window when it is both confident there is no speech
-  and unconfident about what it decoded. That defence was inert in the first
-  build of this feature (see Fixed), so a 60 s band recording produced seven
-  fabricated sentences. It now produces none. If you transcribed something with
-  a pre-release build and got text you could not account for, this is why.
-
-### Fixed
-
-- **The silence rule never fired, so Whisper's hallucinations landed as real
-  transcript segments.** Cause: two independent defects with the same symptom.
-  (1) The no-speech probability was read from the last decoder position rather
-  than the `<|startoftranscript|>` position openai reads it at — the token
-  carries no probability mass there. (2) The token is spelled `<|nocaptions|>`
-  in the vocabulary this app pins, and only `<|nospeech|>` was looked up, so the
-  value was undefined and the whole rule was skipped. Either alone pins the
-  probability at exactly 0 for every window. Fix: the decoder returns every
-  requested row and the loop reads the SOT row (located by token, not assumed
-  to be first); both token spellings resolve. Measured against the real model,
-  before → after: digital silence 0.000 → 0.932, speech 0.000 → 0.044, and a
-  sung recording over a dance band 7 fabricated segments → 0. Affects:
-  `electron/whisperDecode.cjs`, `electron/transcribeHost.cjs`.
-- **The transcript ribbon drew nothing for the whole session.** Cause: the lane
-  measured its own width from an effect that runs once on mount, but the lane
-  does not exist until a transcript does — so the measurement never ran, every
-  region was culled as off-screen, and the failure was silent. Fix: a callback
-  ref, which fires on the mount the measurement has to follow. Found by the
-  packaged smoke test, not by the unit tests. Affects:
-  `src/components/Editor/TranscriptRibbon.tsx`.
-- **A speaker count the recording could not support was accepted and then
-  quietly ignored.** Cause: the request path and the re-cluster path disagreed
-  — one refused an out-of-range count, the other silently fell back to
-  automatic — and neither considered how many segments were actually
-  measurable, so asking for 6 speakers on a 3-segment transcript stored a
-  number the panel then contradicted. Fix: one shared validator, a ceiling of
-  `min(6, measurable segments)`, and a refusal that names the real ceiling
-  rather than clamping. Affects: `src/services/transcribeService.ts`,
-  `src/components/Panels/TranscriptPanel.tsx`.
-- **A transcription host that ignored a kill request was abandoned silently**,
-  leaving its ~1 GB inference arena resident while the next run started a
-  second one. Fix: the kill result is checked, retried once, and reported.
-  Affects: `electron/transcribeManager.cjs`.
-
-### Known limitations
-
-- **Speaker separation is reliable for one or two voices, not three or more**,
-  and does not detect overlapping speech. Set the count manually when the
-  detected one looks wrong. Full measurement in
-  [`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
-- **Singing is not speech.** Whisper mangles lyrics even on a clean solo vocal
-  (45.6 % word error rate, measured) and the model's own confidence does not
-  flag it. Separating the vocal stem first helps with backing music but does
-  not rescue clean singing.
-- **A transcript lives only for the session.** It is not written into the audio
-  file or the `.audm` session, and closing the document — or quitting —
-  discards it without prompting. Export to SRT or WebVTT before you close.
-- Transcription is capped at **2 hours** of audio per run.
-
-## [1.16.0] - 2026-08-10
-
 **Transcription with speaker separation**, running entirely on your machine. No account, no upload, no cloud service.
 
 ### Added
@@ -169,7 +54,35 @@ survive a restart.
   well-known `"you"`, because its own confidence in that guess sits above the threshold. That
   matches the reference implementation rather than diverging from it.
 
-3555 tests.
+- **The timeline ribbon drew nothing at all.** The transcript lane measures its own width when it
+  mounts, but the lane does not exist until a transcript does — so the measurement never ran, every
+  region was culled as off-screen, and the failure was completely silent. Found by the packaged
+  smoke test rather than by the unit tests, which all happened to create a transcript before the
+  first render.
+
+- **A speaker count the recording could not support was accepted and then quietly ignored.** Asking
+  for six speakers on a transcript with three usable segments stored a number the panel then
+  contradicted, because the request path and the re-cluster path disagreed about what to do with an
+  out-of-range value — one refused it, the other silently fell back to automatic. Both now share one
+  rule, the ceiling is what the recording's own evidence can separate, and an impossible count is
+  refused with the real ceiling named rather than clamped behind your back.
+
+- **A transcription process that ignored a kill request was abandoned silently**, leaving its ~1 GB
+  inference arena resident while the next run started a second one. The kill result is now checked,
+  retried once, and reported.
+
+### Known limitations
+
+- **Singing is not speech.** Whisper mangles lyrics even on a clean solo vocal — 45.6% word error
+  rate, measured — and its own confidence does not flag it (−0.328 on badly-wrong singing versus
+  −0.297 on perfect speech). Separating the vocal stem first helps with backing music but does not
+  rescue clean singing.
+- **A transcript lives only for the session.** Export to SRT or WebVTT before you close the
+  document; there is no prompt on the way out.
+- Transcription is capped at **2 hours** of audio per run.
+
+Full details for every limitation above are in
+[`docs/KNOWN_LIMITATIONS.md`](docs/KNOWN_LIMITATIONS.md).
 
 ## [1.15.0] - 2026-08-09
 
