@@ -5,6 +5,46 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.18.0] - 2026-08-10
+
+**De-esser** — tame harsh "s" and "sh" sounds without dulling the voice.
+
+### Added
+
+- **`Effects → Dynamics → De-esser`.** A split-band design: a crossover isolates the sibilant region,
+  a steep sidechain detector decides when sibilance is actually present, and only that band is
+  reduced. **Listen** monitors what is being removed rather than what is left — which is how a
+  de-esser is actually dialled in, since nobody can judge a 3 dB reduction at 7 kHz in context, but
+  anyone can hear whether the isolated band contains only sibilance or also consonant detail.
+
+  Every default is derived from measurement on a real vocal rather than chosen: the 5500 Hz crossover
+  is where sibilant-versus-vowel selectivity peaks across a 3–11 kHz sweep (29.8 dB, with 5.0–6.0 kHz
+  within 0.31 dB of it), and the attack and release come from measured sibilant burst durations.
+
+### How selective it is, measured
+
+On a real 142-second solo vocal at the shipped defaults, sibilant frames lose up to **6.75 dB** while
+**98.7 % of all samples are bit-identical** — the vowels are not attenuated less than the sibilants,
+they are untouched, because the detector never crosses the threshold on them.
+
+That distinction is the whole point. A processor that pulls vowels down slightly and sibilants down
+more is a low-pass filter with extra steps; it would pass a naive "did the level drop" test. The
+test fixture here puts a vowel and a sibilant at **identical RMS**, so the separation comes from
+spectrum alone, and shifting the detector corner by 25 % breaks the vowel bit-identity.
+
+With no reduction applied the output is **bit-identical to the input** — the crossover sums flat, so
+the effect colours nothing at rest.
+
+### Known limits
+
+The threshold is in absolute dBFS, like the compressor and the gate, so it is set relative to the
+file rather than to the voice: a vocal roughly 5 dB hotter than the material the default was derived
+on will begin engaging on vowel peaks (the effect stays small — under 0.15 dB even 20 dB hot — but
+the bit-exact-at-rest property is lost). Set it by ear with **Listen** enabled. The subtractive split
+also caps total reduction at about 7.7 dB, which is the price of that exact identity at rest.
+
+3694 tests.
+
 ## [1.17.0] - 2026-08-10
 
 **Auditorium can now change a voice.** `Edit → Voice Changer…` re-timbres a
