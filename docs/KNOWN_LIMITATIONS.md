@@ -18,8 +18,23 @@ defensive WAV `fmt` reader, a bounded WebM/Matroska EBML walk down to
 trusting the sync) and the `OfflineAudioContext` is built at that rate, so
 Chromium's `decodeAudioData` no longer resamples the output. As of v1.3 the
 MP4 walk also handles 64-bit (largesize) boxes and version-1 `mdhd` headers.
-Only genuinely unrecognized/exotic container layouts still fall back to
-**48000 Hz**. Audio with more than two channels is down-mixed to stereo —
+As of v1.14 (R5) the remaining in-extension variants sniff too: **Ogg FLAC**
+(the RFC 9639 §10.2 `0x7F FLAC` first packet) and **Ogg Speex** (the
+SpeexHeader struct) identification headers are parsed; a **free-format MP3**
+(bitrate_index 0000) is accepted when a second header with matching
+version/layer/sample-rate fields confirms it within 2881 bytes — the longest
+frame the spec permits a free-format stream (Layer II at the 160 kbps LSF
+table maximum, 8000 Hz, plus one padding slot), since a lone free header is
+indistinguishable from a stray sync byte; and the WebM/Matroska EBML walk is
+no longer byte-capped at 512 KB — that cap made any finalized (known-size)
+Segment larger than 512 KB unsniffable outright — but walks the whole buffer
+size-driven, bounded by a 65536 per-level sibling count (the same
+count-not-bytes shape as the MP4 box cap, covering Tracks-after-Clusters
+layouts for 18+ hours of material while a tiny-element flood stays
+microsecond-bounded). Deep `moov` (after a large `mdat`, the non-faststart
+layout) needed no change — the size-driven MP4 walk already reached it, now
+pinned by test. Only genuinely unrecognized container layouts still fall back
+to **48000 Hz**. Audio with more than two channels is down-mixed to stereo —
 the extra channels (index ≥ 2) are folded into both L and R at −3 dB rather
 than dropped: `mix = 0.7071·mean(ch2…chN-1)`, `L' = clamp(ch0 + mix, ±1)`,
 `R' = clamp(ch1 + mix, ±1)`.

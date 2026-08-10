@@ -124,6 +124,33 @@ function sniffOgg(bytes: Uint8Array, view: DataView): number | null {
   }
   // Opus always decodes at 48 kHz regardless of the container's original rate.
   if (matchAscii(bytes, payload, 'OpusHead')) return 48000;
+  // Ogg FLAC (RFC 9639 §10.2): the first packet is 0x7F 'FLAC', a 2-byte
+  // mapping version, a 2-byte big-endian header-packet count, then the native
+  // 'fLaC' stream marker, a 4-byte metadata block header and STREAMINFO —
+  // whose 20-bit rate field sits 10 bytes in (after min/max blocksize 2+2 and
+  // min/max framesize 3+3), i.e. at packet offset 9+4+4+10 = 27. Both magics
+  // are required so a stray 0x7F first byte cannot alias another codec.
+  if (
+    bytes[payload] === 0x7f &&
+    matchAscii(bytes, payload + 1, 'FLAC') &&
+    matchAscii(bytes, payload + 9, 'fLaC')
+  ) {
+    const rateOff = payload + 27;
+    if (rateOff + 3 > bytes.length) return null;
+    const rate = (bytes[rateOff] << 12) | (bytes[rateOff + 1] << 4) | (bytes[rateOff + 2] >> 4);
+    return rate > 0 ? rate : null;
+  }
+  // Ogg Speex: the first packet is the SpeexHeader struct (libspeex
+  // speex_header.h, all int32 fields little-endian) — 8-byte magic
+  // 'Speex   ' (5 letters + 3 spaces), a 20-byte version string, then
+  // speex_version_id(4) and header_size(4), so `rate` sits at packet offset
+  // 8+20+4+4 = 36.
+  if (matchAscii(bytes, payload, 'Speex   ')) {
+    const rateOff = payload + 36;
+    if (rateOff + 4 > bytes.length) return null;
+    const rate = view.getUint32(rateOff, true);
+    return rate > 0 ? rate : null;
+  }
   return null;
 }
 
@@ -139,9 +166,28 @@ const EBML_ID_CODECID = 0x86;
 const EBML_ID_AUDIO = 0xe1;
 const EBML_ID_SAMPLINGFREQUENCY = 0xb5;
 
-// Bounded scan: we never read past the first 512 KB of the file while walking
-// EBML structure, so a malformed or gigantic file cannot make this loop for long.
-const WEBM_SCAN_LIMIT = 512 * 1024;
+/**
+ * Bounded scan: the EBML walk is size-driven — each sibling is stepped over in
+ * one O(1) hop (`offset = el.contentEnd`) regardless of its size — so, exactly
+ * as with `MP4_MAX_BOXES` below, the right bound is a COUNT of siblings per
+ * level, not a byte range. The previous bound here was a 512 KB byte cap, and
+ * it was the wrong shape twice over: a finalized (known-size) Segment larger
+ * than 512 KB failed `readEbmlElement`'s `contentEnd > limit` check outright —
+ * making essentially every real saved .webm/.mkv unsniffable, not just exotic
+ * ones — and a `Tracks` element sitting past a large SeekHead/Void/Attachments
+ * run (or past Clusters, which Matroska/RFC 9559 permits: Tracks SHOULD
+ * precede Clusters, not MUST) was unreachable. Capping the per-level sibling
+ * count bounds both the loop and the TrackEntry collection while leaving the
+ * size-driven hops free to cross a multi-gigabyte Cluster in one step.
+ *
+ * 65536 (2^16): Segment-level siblings are dominated by Clusters, which
+ * muxers emit every ~1-5 s of media, so this covers Tracks-after-Clusters
+ * layouts for >= 18 hours of material even at one Cluster per second — far
+ * beyond anything this app opens — while a hostile file that floods a level
+ * with tiny elements costs at most 65536 constant-time header reads per level
+ * (microseconds, no allocation) before falling back to the default rate.
+ */
+const EBML_MAX_CHILDREN = 65536;
 
 interface EbmlElement {
   id: number;
@@ -225,10 +271,14 @@ function readEbmlElement(bytes: Uint8Array, offset: number, limit: number): Ebml
   return { id: idInfo.id, contentStart, contentEnd };
 }
 
-/** First direct child with `id` inside [start, end). Null if absent or on any parse doubt. */
+/**
+ * First direct child with `id` inside [start, end). Null if absent, on any
+ * parse doubt, or not found within the first EBML_MAX_CHILDREN siblings.
+ */
 function findEbmlChild(bytes: Uint8Array, id: number, start: number, end: number): EbmlElement | null {
   let offset = start;
-  while (offset < end) {
+  for (let read = 0; offset < end; read++) {
+    if (read >= EBML_MAX_CHILDREN) return null;
     const el = readEbmlElement(bytes, offset, end);
     if (!el) return null;
     if (el.id === id) return el;
@@ -237,11 +287,15 @@ function findEbmlChild(bytes: Uint8Array, id: number, start: number, end: number
   return null;
 }
 
-/** All direct children with `id` inside [start, end); stops (without failing) at the first parse doubt. */
+/**
+ * All direct children with `id` inside [start, end); stops (without failing)
+ * at the first parse doubt, or after EBML_MAX_CHILDREN siblings.
+ */
 function findAllEbmlChildren(bytes: Uint8Array, id: number, start: number, end: number): EbmlElement[] {
   const result: EbmlElement[] = [];
   let offset = start;
-  while (offset < end) {
+  for (let read = 0; offset < end; read++) {
+    if (read >= EBML_MAX_CHILDREN) break;
     const el = readEbmlElement(bytes, offset, end);
     if (!el) break;
     if (el.id === id) result.push(el);
@@ -258,7 +312,7 @@ function readEbmlFloat(bytes: Uint8Array, view: DataView, start: number, end: nu
 }
 
 function sniffWebm(bytes: Uint8Array, view: DataView): number | null {
-  const scanEnd = Math.min(bytes.length, WEBM_SCAN_LIMIT);
+  const scanEnd = bytes.length;
   const header = readEbmlElement(bytes, 0, scanEnd); // the EBML header element itself
   if (!header) return null;
   const segment = findEbmlChild(bytes, EBML_ID_SEGMENT, header.contentEnd, scanEnd);
@@ -492,11 +546,52 @@ function sniffMp3(bytes: Uint8Array): number | null {
     if (layerBits === 0x00) continue; // reserved layer
     if (i + 2 >= bytes.length) break;
     const bitrateIndex = (bytes[i + 2] >> 4) & 0x0f;
-    if (bitrateIndex === 0x0f || bitrateIndex === 0x00) continue; // reserved / free — cuts false syncs
+    if (bitrateIndex === 0x0f) continue; // reserved — cuts false syncs
     const srIndex = (bytes[i + 2] >> 2) & 0x03;
     if (srIndex === 0x03) continue; // reserved sample-rate index
     const row = MP3_RATE_TABLE[versionBits];
-    if (row) return row[srIndex];
+    if (!row) continue;
+    if (bitrateIndex !== 0x00) return row[srIndex];
+    // Free format (bitrate_index 0000, ISO/IEC 11172-3 §2.4.2.3): the bitrate
+    // is not in the table, so a lone header is indistinguishable from a stray
+    // 0xFF in payload/tag bytes (which is why this index used to be skipped
+    // outright). Accept it only when a second header confirms it — the same
+    // consecutive-frame defence sniffAdts uses above.
+    if (confirmFreeFormatMp3(bytes, i, b1, srIndex)) return row[srIndex];
   }
   return null;
+}
+
+/**
+ * The longest frame a free-format header this sniffer accepts could legally
+ * describe. ISO/IEC 11172-3 §2.4.2.3 (and its ISO/IEC 13818-3 LSF extension)
+ * fixes the free-format bitrate for the whole stream and requires it to be
+ * BELOW the layer's maximum tabled bitrate, so no free frame can exceed the
+ * largest tabled frame. Maximising frame bytes over every version/layer/rate
+ * combination the header can encode: Layer II at the LSF table maximum of
+ * 160 kbps and the MPEG-2.5 minimum rate of 8000 Hz — 144·160000/8000 = 2880,
+ * plus one padding slot = 2881 bytes. (For comparison: MPEG-1 Layer II at
+ * 384 kbps / 32 kHz = 1729; Layer III tops out at 1441; Layer I, measured in
+ * 4-byte slots, at (12·256000/8000 + 1)·4 = 1540.)
+ */
+const MP3_MAX_FREE_FRAME = 2881;
+
+/**
+ * A free-format header at `i` is confirmed only by a SECOND header that starts
+ * after the first header's own 4 bytes and within the longest legal frame,
+ * whose sync/version/layer bits match (b1 with the protection bit masked off),
+ * whose bitrate_index is also free (the spec fixes the free bitrate for the
+ * whole stream, so a mid-stream switch to a tabled index cannot be the same
+ * stream), and whose sample-rate index matches.
+ */
+function confirmFreeFormatMp3(bytes: Uint8Array, i: number, b1: number, srIndex: number): boolean {
+  const last = Math.min(i + MP3_MAX_FREE_FRAME, bytes.length - 3);
+  for (let j = i + 4; j <= last; j++) {
+    if (bytes[j] !== 0xff) continue;
+    if ((bytes[j + 1] & 0xfe) !== (b1 & 0xfe)) continue; // sync + version + layer must match
+    if (((bytes[j + 2] >> 4) & 0x0f) !== 0x00) continue; // must also be free format
+    if (((bytes[j + 2] >> 2) & 0x03) !== srIndex) continue; // same sample-rate index
+    return true;
+  }
+  return false;
 }
