@@ -50,11 +50,69 @@ const OUT_FADES_REFERENCE = path.join(OUT_DIR, 'fades-v18-reference.json');
 const OUT_AUTOMATION_SESSION = path.join(OUT_DIR, 'automation-session.audm');
 const OUT_SPATIAL_SESSION = path.join(OUT_DIR, 'spatial-session.audm');
 const OUT_TRANSCRIPT_SRT = path.join(OUT_DIR, 'transcript.srt');
+const OUT_VOICE_WAV = path.join(OUT_DIR, 'voice-converted.wav');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
   console.log(`  ok: ${msg}`);
+}
+
+// Minimal RIFF/WAVE reader used by step 23 to re-measure what the packaged app
+// wrote WITHOUT calling back into the app for the numbers. It walks the chunk
+// table rather than assuming a 44-byte header, because `saveActiveAs` writes
+// 32-bit float and may carry a cue chunk.
+function readWav(file) {
+  const b = fs.readFileSync(file);
+  if (b.toString('ascii', 0, 4) !== 'RIFF' || b.toString('ascii', 8, 12) !== 'WAVE') {
+    throw new Error(`${file} is not a RIFF/WAVE file`);
+  }
+  let fmt = null;
+  let data = null;
+  let p = 12;
+  while (p + 8 <= b.length) {
+    const id = b.toString('ascii', p, p + 4);
+    const size = b.readUInt32LE(p + 4);
+    const body = p + 8;
+    if (id === 'fmt ') {
+      fmt = {
+        format: b.readUInt16LE(body),
+        channelCount: b.readUInt16LE(body + 2),
+        sampleRate: b.readUInt32LE(body + 4),
+        bits: b.readUInt16LE(body + 14),
+      };
+    } else if (id === 'data') {
+      data = { offset: body, size };
+    }
+    p = body + size + (size % 2);
+  }
+  if (!fmt || !data) throw new Error(`${file} has no fmt/data chunk`);
+  const bytesPerSample = fmt.bits / 8;
+  const frames = Math.floor(data.size / (bytesPerSample * fmt.channelCount));
+  const channels = [];
+  for (let c = 0; c < fmt.channelCount; c++) channels.push(new Float32Array(frames));
+  for (let i = 0; i < frames; i++) {
+    for (let c = 0; c < fmt.channelCount; c++) {
+      const at = data.offset + (i * fmt.channelCount + c) * bytesPerSample;
+      if (fmt.bits === 32 && fmt.format === 3) channels[c][i] = b.readFloatLE(at);
+      else if (fmt.bits === 16) channels[c][i] = b.readInt16LE(at) / 32768;
+      else throw new Error(`unsupported WAV sample format ${fmt.format}/${fmt.bits}-bit`);
+    }
+  }
+  return { ...fmt, frames, channels };
+}
+
+/** 20 ms RMS frames of a mono buffer — the smoke's own envelope arithmetic. */
+function rmsFrames20ms(x, sampleRate) {
+  const size = Math.round(0.02 * sampleRate);
+  const n = Math.floor(x.length / size);
+  const out = new Float64Array(n);
+  for (let f = 0; f < n; f++) {
+    let s = 0;
+    for (let i = f * size; i < (f + 1) * size; i++) s += x[i] * x[i];
+    out[f] = Math.sqrt(s / size);
+  }
+  return { frames: out, size };
 }
 
 // Waits until the given canvas has drawn at least two differing pixels (i.e. it
@@ -2770,6 +2828,291 @@ async function main() {
         );
         console.log(`  wrote ${blocks.length} SRT cue(s) from ${surfaceName}`);
       }
+    }
+
+    // 23) F3 (v1.17) — Voice Changer, end to end in the packaged app --------
+    //
+    // Same reason step 22 exists: this feature's utility process, its chunked
+    // splice and its consent gate had only ever run against fakes or against
+    // `node`, never inside the packaged Electron bundle. What this step
+    // discharges that unit tests structurally cannot:
+    //   (a) the CONSENT GATE survives bundling. The brief's ruling makes
+    //       affirmation blocking, so both entry points are driven with
+    //       consent WITHHELD first and must refuse, and only then with it
+    //       given. A gate that had been optimised away, or that the packaged
+    //       preload silently bypassed, fails here and nowhere else;
+    //   (b) a REAL spawn, a REAL multi-slice transport (the manager cuts the
+    //       22050 Hz buffer into 1<<20-sample messages and the host refuses
+    //       to run unless the slices cover [0, totalSamples) exactly) and a
+    //       REAL multi-chunk splice. The chunk count is computed HERE from
+    //       the fixture's own duration and the plan law restated below with
+    //       literal constants — never read back from the app;
+    //   (c) the converted audio is re-measured from the WAV the app WROTE,
+    //       decoded by this script's own RIFF reader, so the length, rate,
+    //       channel count, level and — the one that matters — the absence of
+    //       a level discontinuity at each seam are this script's arithmetic
+    //       and not the app's self-report;
+    //   (d) Cancel against a LIVE child, with the anti-vacuous follow-up: a
+    //       later run must still succeed, because a cancel that left the
+    //       child alive or the manager's slot reserved shows up as a busy
+    //       refusal, not as a failed cancel.
+    //
+    // GATED ON THE MODELS: the 161 MB two-file set is downloaded on first use
+    // and is never committed, so a machine without it REPORTS a skip.
+    console.log('Voice Changer (F3): consent gate, real utilityProcess, chunked splice, cancel...');
+    const voiceModel0 = await page.evaluate(() => window.__test.getVoiceModelState());
+    const voiceMb = (voiceModel0.expectedBytes / 1e6).toFixed(0);
+    let voiceModel = voiceModel0;
+    if (!voiceModel.downloaded) {
+      const repoDir = path.join(ROOT, 'test-assets', 'models', 'voice');
+      if (fs.existsSync(repoDir)) {
+        const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
+        const destDir = path.join(userData, 'models', 'voice');
+        console.log(`  provisioning the voice models from test-assets into ${destDir}`);
+        fs.mkdirSync(destDir, { recursive: true });
+        for (const name of fs.readdirSync(repoDir)) {
+          const dest = path.join(destDir, name);
+          if (fs.existsSync(dest)) continue;
+          try {
+            fs.linkSync(path.join(repoDir, name), dest);
+          } catch {
+            fs.copyFileSync(path.join(repoDir, name), dest);
+          }
+        }
+        voiceModel = await page.evaluate(() => window.__test.getVoiceModelState());
+      }
+    }
+    if (!voiceModel.downloaded) {
+      console.log(
+        `Voice Changer: SKIPPED (REPORTED) — the ${voiceMb} MB voice model set is not on this ` +
+          `machine and no valid repo-local copy exists at test-assets/models/voice/. Download it ` +
+          `in-app (Edit → Voice Changer… → Download Models) to make this step run.`
+      );
+    } else {
+      // The model's fixed rate and the chunk-plan law, restated here with
+      // literal constants so the expected chunk count is this script's
+      // arithmetic. (voiceChunking.cjs derives them; a smoke step that
+      // imported them would be asking the app to mark its own homework.)
+      const VC_RATE = 22050;
+      const VC_SEGMENT = 661504; // ~30 s, rounded up to a HOP multiple
+      const VC_OVERLAP = 33536; // 2 x 16,384 discard + 551 crossfade, HOP-aligned
+      const VC_STRIDE = VC_SEGMENT - VC_OVERLAP; // 627,968
+      const planChunks = (total) => {
+        const n = Math.max(1, Math.ceil(total / VC_STRIDE));
+        const lastStart = (n - 1) * VC_STRIDE;
+        const lastLen = Math.min(lastStart + VC_SEGMENT, total) - lastStart;
+        return n > 1 && lastLen < VC_OVERLAP ? n - 1 : n;
+      };
+
+      await page.evaluate(() => window.__test.setView('waveform'));
+      await page.evaluate((p) => window.__test.openPath(p), LONG70);
+      const voiceSrc = await page.evaluate(() => window.__test.getStateSummary());
+      const expectedModelSamples = Math.round((voiceSrc.length * VC_RATE) / voiceSrc.sampleRate);
+      const expectedChunks = planChunks(expectedModelSamples);
+      assert(
+        expectedChunks >= 2,
+        `the fixture forces a MULTI-CHUNK conversion: ${expectedModelSamples} model samples over a ${VC_STRIDE}-sample stride is ${expectedChunks} chunks, so the splice is actually exercised`
+      );
+      console.log(
+        `  source: ${voiceSrc.activeName}, ${(voiceSrc.length / voiceSrc.sampleRate).toFixed(1)}s, ` +
+          `${voiceSrc.sampleRate} Hz, ${voiceSrc.channels} ch → ${expectedModelSamples} model samples in ${expectedChunks} chunks`
+      );
+
+      // --- (a) the consent gate, in the packaged build --------------------
+      const refusedProfile = await page.evaluate(
+        (n) => window.__test.createVoiceProfileFrom('Smoke target', 0, n, false),
+        8 * voiceSrc.sampleRate
+      );
+      assert(
+        refusedProfile.ok === false && refusedProfile.status === 'consent-required',
+        `saving a voice profile WITHOUT the consent affirmation is refused (status ${refusedProfile.status})`
+      );
+      assert(
+        refusedProfile.profileId === null,
+        'the refused profile was not created — the gate is before the work, not after it'
+      );
+
+      const profile = await page.evaluate(
+        (n) => window.__test.createVoiceProfileFrom('Smoke target', 0, n, true),
+        8 * voiceSrc.sampleRate
+      );
+      assert(
+        profile.ok === true,
+        `with the affirmation, the profile saves (status ${profile.status}${profile.message ? `: ${profile.message}` : ''})`
+      );
+      assert(
+        profile.embeddingLength === 256 && profile.embeddingNorm > 0,
+        `the real tone extractor ran: a 256-value embedding with a non-zero norm (${profile.embeddingLength} values, norm ${profile.embeddingNorm.toFixed(4)})`
+      );
+
+      const refusedConvert = await page.evaluate(
+        (id) => window.__test.convertActiveVoice(id, false),
+        profile.profileId
+      );
+      assert(
+        refusedConvert.ok === false && refusedConvert.status === 'consent-required',
+        `converting WITHOUT the consent affirmation is refused (status ${refusedConvert.status})`
+      );
+      assert(
+        refusedConvert.docCountDelta === 0,
+        'the refused conversion produced no document — nothing ran'
+      );
+
+      // --- (b) the real run -----------------------------------------------
+      const beforeConvert = await page.evaluate(() => window.__test.getStateSummary());
+      const conv = await page.evaluate(
+        (id) => window.__test.convertActiveVoice(id, true),
+        profile.profileId
+      );
+      const convSeconds = conv.elapsedMs / 1000;
+      const audioSeconds = voiceSrc.length / voiceSrc.sampleRate;
+      console.log(
+        `  convertActiveVoice: status=${conv.status} doc="${conv.docName}" ` +
+          `(${convSeconds.toFixed(1)}s for ${audioSeconds.toFixed(1)}s of audio, ` +
+          `${(audioSeconds / convSeconds).toFixed(2)}x realtime, model load included)`
+      );
+      assert(
+        conv.ok === true,
+        `the real utility process spawned, received every audio slice and finished (status ${conv.status}${conv.message ? `: ${conv.message}` : ''})`
+      );
+      assert(conv.docCountDelta === 1, `the conversion landed exactly ONE new document (${conv.docCountDelta})`);
+      assert(
+        conv.landedSampleRate === VC_RATE,
+        `the landed document is at the model's fixed rate (${conv.landedSampleRate} Hz)`
+      );
+      assert(conv.landedChannelCount === 1, `the landed document is mono (${conv.landedChannelCount} ch)`);
+      assert(
+        conv.landedLengthSamples === expectedModelSamples,
+        `the landed length is this script's own arithmetic, sample for sample (${conv.landedLengthSamples} === ${expectedModelSamples})`
+      );
+      assert(
+        conv.progressEvents > 0 && conv.phasesSeen.includes('converting'),
+        `the host STREAMED progress rather than only finishing (${conv.progressEvents} events, phases ${conv.phasesSeen.join('/')})`
+      );
+      assert(
+        conv.sanitisedSamples === 0,
+        `the model produced no non-finite samples needing sanitising (${conv.sanitisedSamples})`
+      );
+
+      // --- (c) re-measure what the app WROTE ------------------------------
+      const wrote = await page.evaluate((p) => window.__test.saveActiveAs(p), OUT_VOICE_WAV);
+      assert(wrote === true, 'the converted document saved to disk');
+      const wav = readWav(OUT_VOICE_WAV);
+      assert(
+        wav.sampleRate === VC_RATE && wav.channelCount === 1,
+        `the WAV on disk is mono at ${VC_RATE} Hz (${wav.channelCount} ch, ${wav.sampleRate} Hz, ${wav.bits}-bit)`
+      );
+      assert(
+        wav.frames === expectedModelSamples,
+        `the WAV on disk holds exactly the expected sample count (${wav.frames} === ${expectedModelSamples})`
+      );
+
+      const converted = wav.channels[0];
+      let peak = 0;
+      let sumSquares = 0;
+      let nonFinite = 0;
+      for (let i = 0; i < converted.length; i++) {
+        const v = converted[i];
+        if (!Number.isFinite(v)) nonFinite++;
+        else {
+          const a = Math.abs(v);
+          if (a > peak) peak = a;
+          sumSquares += v * v;
+        }
+      }
+      const convRmsDb = 20 * Math.log10(Math.max(Math.sqrt(sumSquares / converted.length), 1e-12));
+      console.log(`  converted WAV: peak ${peak.toFixed(4)}, RMS ${convRmsDb.toFixed(2)} dBFS`);
+      assert(nonFinite === 0, `every sample on disk is finite (${nonFinite} non-finite)`);
+      assert(peak > 0.001 && convRmsDb > -60, `the converted audio is real, not silence (RMS ${convRmsDb.toFixed(2)} dBFS)`);
+      assert(peak <= 1.0, `the converted audio does not clip (peak ${peak.toFixed(4)})`);
+
+      // THE SEAM CHECK — the one measurement that is worth doing here rather
+      // than in a unit test, because a splice bug survives every fake. Seam
+      // positions come from the plan law restated above; each is compared
+      // against the LOCAL level either side of it, so a dip or a boost
+      // introduced by the join shows up regardless of what the material does.
+      // (A -1.9 dB mean / -5.6 dB worst dip is what the rejected equal-gain
+      // design measured, so the 6 dB bound is set just past it.)
+      const { frames: env, size: frameSize } = rmsFrames20ms(converted, VC_RATE);
+      const CROSSFADE_OFFSET = 16492; // discard margin + centring slack
+      let worstSeamDb = 0;
+      let worstSeamAt = -1;
+      for (let i = 1; i < expectedChunks; i++) {
+        const seam = i * VC_STRIDE + CROSSFADE_OFFSET;
+        const seamFrame = Math.round(seam / frameSize);
+        // Local reference: the median frame level over +/- 1 s around the
+        // seam, EXCLUDING the 5 frames the seam itself spans.
+        const near = [];
+        for (let f = seamFrame - 50; f <= seamFrame + 50; f++) {
+          if (f < 0 || f >= env.length) continue;
+          if (Math.abs(f - seamFrame) <= 2) continue;
+          near.push(env[f]);
+        }
+        near.sort((a, b) => a - b);
+        const local = near[Math.floor(near.length / 2)];
+        if (!(local > 1e-4)) continue;
+        for (let f = seamFrame - 2; f <= seamFrame + 2; f++) {
+          if (f < 0 || f >= env.length) continue;
+          const db = 20 * Math.log10(Math.max(env[f], 1e-12) / local);
+          if (Math.abs(db) > Math.abs(worstSeamDb)) {
+            worstSeamDb = db;
+            worstSeamAt = seam;
+          }
+        }
+      }
+      console.log(
+        `  seam continuity: worst level change ${worstSeamDb.toFixed(2)} dB across ${expectedChunks - 1} seam(s)` +
+          (worstSeamAt >= 0 ? ` (at sample ${worstSeamAt}, ${(worstSeamAt / VC_RATE).toFixed(1)}s)` : '')
+      );
+      assert(
+        Math.abs(worstSeamDb) < 6,
+        `no chunk seam leaves a level discontinuity (worst ${worstSeamDb.toFixed(2)} dB against a 6 dB bound)`
+      );
+
+      // --- (d) Cancel against a live child, with the anti-vacuous guard ----
+      await page.evaluate(() => window.__test.setView('waveform'));
+      await page.evaluate((p) => window.__test.openPath(p), LONG70);
+      const cancelled = await page.evaluate(
+        (id) => window.__test.convertActiveVoiceThenCancel(id, 2500),
+        profile.profileId
+      );
+      console.log(
+        `  convertActiveVoiceThenCancel: status=${cancelled.status} after ${cancelled.elapsedMs} ms`
+      );
+      assert(
+        cancelled.ok === false && cancelled.status === 'cancelled',
+        `Cancel stopped a LIVE conversion (status ${cancelled.status})`
+      );
+      assert(
+        cancelled.elapsedMs < conv.elapsedMs,
+        `the cancelled run really was cut short (${cancelled.elapsedMs} ms < ${conv.elapsedMs} ms)`
+      );
+      assert(
+        cancelled.docCountDelta === 0,
+        `a cancelled conversion lands nothing (${cancelled.docCountDelta} new documents)`
+      );
+
+      // Anti-vacuous: the NEXT conversion must succeed. A cancel that left the
+      // child alive or the manager's slot reserved shows up here as a busy
+      // refusal or a hang, not as a failed cancel. Uses the short fixture so
+      // the guard costs seconds rather than another 70 s run.
+      await page.evaluate((p) => window.__test.openPath(p), TONE);
+      const after = await page.evaluate(
+        (id) => window.__test.convertActiveVoice(id, true),
+        profile.profileId
+      );
+      assert(
+        after.ok === true,
+        `a conversion started AFTER the cancel still succeeds — the child died and the slot was released (status ${after.status}${after.message ? `: ${after.message}` : ''})`
+      );
+      assert(
+        after.landedSampleRate === VC_RATE && after.landedChannelCount === 1,
+        `the post-cancel conversion landed a mono ${VC_RATE} Hz document too`
+      );
+      assert(
+        beforeConvert.docCount < (await page.evaluate(() => window.__test.getStateSummary())).docCount,
+        'the session gained documents across the whole step, as expected'
+      );
     }
 
     console.log('\nSMOKE PASSED');

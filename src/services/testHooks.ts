@@ -47,6 +47,13 @@ import {
   transcribeDocument as runTranscription,
   type TranscribeProgress,
 } from './transcribeService';
+import {
+  cancelVoiceRun,
+  convertDocumentVoice,
+  createVoiceProfile,
+  getVoiceModelState as readVoiceModelState,
+  type VoiceProgress,
+} from './voiceService';
 import { formatSrt, formatWebVtt } from './subtitleFormat';
 import { landStems } from './stemLanding';
 import { MultitrackPlayer, multitrackPlayer } from '../multitrack/MultitrackPlayer';
@@ -215,6 +222,25 @@ export interface TestApi {
   /** Starts a transcription of the ACTIVE document and cancels it after
    * `delayMs`. Proves Cancel against a REAL utility process. */
   transcribeActiveThenCancel(delayMs: number): Promise<TranscriptionSummary>;
+  // --- F3 flows (voice changer) ------------------------------------------
+  getVoiceModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  /** Saves a voice profile from a slice of the ACTIVE document, bypassing
+   * VoiceChangerDialog's native file picker (which a script cannot drive).
+   * `consentAffirmed` is passed THROUGH, not forced: the smoke calls it with
+   * `false` first and must see the refusal, which is how the packaged build
+   * proves the consent gate survives bundling. */
+  createVoiceProfileFrom(
+    name: string,
+    startSample: number,
+    endSample: number,
+    consentAffirmed: boolean
+  ): Promise<VoiceProfileSummary>;
+  /** Converts the ACTIVE document with a saved profile. `consentAffirmed` is
+   * passed through for the same reason as above. */
+  convertActiveVoice(profileId: string, consentAffirmed: boolean): Promise<VoiceConversionSummary>;
+  /** Starts a conversion of the ACTIVE document and cancels it after
+   * `delayMs`. Proves Cancel against a REAL utility process. */
+  convertActiveVoiceThenCancel(profileId: string, delayMs: number): Promise<VoiceConversionSummary>;
   /** Re-clusters the active document's stored transcript. Returns the new
    * speaker assignment, or null when there is no transcript. */
   setTranscriptSpeakers(count: number | null): {
@@ -385,6 +411,122 @@ export interface StemSeparationSummary {
   /** Peak |sample| of the mixdown, for the no-clipping-beyond-the-source check. */
   mixdownPeak: number | null;
   elapsedMs: number;
+}
+
+/** Plain-JSON result of the `createVoiceProfileFrom` hook. */
+export interface VoiceProfileSummary {
+  ok: boolean;
+  /** `'ok'` on success, otherwise the service's own `VoiceStatus`. */
+  status: string;
+  message: string | null;
+  profileId: string | null;
+  profileName: string | null;
+  /** Length of the stored embedding — 256 when the host really ran. */
+  embeddingLength: number;
+  /** L2 norm of the embedding: a degenerate (all-zero) target would be 0. */
+  embeddingNorm: number;
+  persistError: string | null;
+}
+
+/** Plain-JSON result of the `convertActiveVoice` hooks. */
+export interface VoiceConversionSummary {
+  ok: boolean;
+  status: string;
+  message: string | null;
+  docId: string | null;
+  docName: string | null;
+  sanitisedSamples: number;
+  /** Measured off the LANDED document, not reported by the service. */
+  landedLengthSamples: number;
+  landedSampleRate: number;
+  landedChannelCount: number;
+  landedPeak: number;
+  landedRmsDb: number;
+  docCountDelta: number;
+  elapsedMs: number;
+  progressEvents: number;
+  phasesSeen: string[];
+  maxFraction: number;
+}
+
+/**
+ * The body behind `convertActiveVoice` / `convertActiveVoiceThenCancel`: one
+ * real run through the real service, with the progress stream RECORDED so the
+ * smoke can prove the host streamed rather than only that it finished, and
+ * with the landed document measured here rather than taken on trust.
+ */
+async function runVoiceConversionHook(
+  profileId: string,
+  consentAffirmed: boolean,
+  cancelAfterMs: number | null
+): Promise<VoiceConversionSummary> {
+  const empty: VoiceConversionSummary = {
+    ok: false,
+    status: 'no-document',
+    message: null,
+    docId: null,
+    docName: null,
+    sanitisedSamples: 0,
+    landedLengthSamples: 0,
+    landedSampleRate: 0,
+    landedChannelCount: 0,
+    landedPeak: 0,
+    landedRmsDb: -Infinity,
+    docCountDelta: 0,
+    elapsedMs: 0,
+    progressEvents: 0,
+    phasesSeen: [],
+    maxFraction: 0,
+  };
+  const doc = activeDoc();
+  if (!doc) return empty;
+  const before = useAppStore.getState().documents.length;
+
+  let progressEvents = 0;
+  let maxFraction = 0;
+  const phasesSeen: string[] = [];
+  const onProgress = (p: VoiceProgress): void => {
+    progressEvents++;
+    if (!phasesSeen.includes(p.phase)) phasesSeen.push(p.phase);
+    if (p.fraction > maxFraction) maxFraction = p.fraction;
+  };
+
+  const timer =
+    cancelAfterMs === null ? null : setTimeout(() => void cancelVoiceRun(), cancelAfterMs);
+  const startedAt = Date.now();
+  const result = await convertDocumentVoice({ docId: doc.id, profileId, consentAffirmed, onProgress });
+  const elapsedMs = Date.now() - startedAt;
+  if (timer !== null) clearTimeout(timer);
+
+  const docCountDelta = useAppStore.getState().documents.length - before;
+  const observed = { elapsedMs, progressEvents, phasesSeen, maxFraction, docCountDelta };
+  if (!result.ok) {
+    return { ...empty, ...observed, status: result.status, message: result.message };
+  }
+  const landed = useAppStore.getState().documents.find((d) => d.id === result.docId) ?? null;
+  const ch = landed?.channels[0] ?? new Float32Array(0);
+  let peak = 0;
+  let sumSquares = 0;
+  for (let i = 0; i < ch.length; i++) {
+    const a = Math.abs(ch[i]);
+    if (a > peak) peak = a;
+    sumSquares += ch[i] * ch[i];
+  }
+  return {
+    ...empty,
+    ...observed,
+    ok: true,
+    status: 'ok',
+    docId: result.docId,
+    docName: result.docName,
+    sanitisedSamples: result.sanitisedSamples,
+    landedLengthSamples: ch.length,
+    landedSampleRate: landed?.sampleRate ?? 0,
+    landedChannelCount: landed?.channels.length ?? 0,
+    landedPeak: peak,
+    landedRmsDb:
+      ch.length === 0 ? -Infinity : 20 * Math.log10(Math.max(Math.sqrt(sumSquares / ch.length), 1e-12)),
+  };
 }
 
 /** Largest absolute sample value across all channels of the active document. */
@@ -1177,6 +1319,58 @@ export function installTestHooks(): void {
 
     transcribeActive: (speakerCount) => runTranscriptionHook(speakerCount ?? undefined, null),
     transcribeActiveThenCancel: (delayMs) => runTranscriptionHook(undefined, delayMs),
+
+    // --- F3 flows (voice changer) -----------------------------------------
+
+    // Whether the 161 MB two-file model set is already on disk. The smoke's
+    // voice step is gated on this exactly as the stem and transcription steps
+    // are: the files are downloaded on first use and are NOT in the repo, so
+    // a machine without them must REPORT a skip, never pass quietly.
+    getVoiceModelState: () => readVoiceModelState(),
+
+    createVoiceProfileFrom: async (name, startSample, endSample, consentAffirmed) => {
+      const doc = activeDoc();
+      const empty: VoiceProfileSummary = {
+        ok: false,
+        status: 'no-document',
+        message: null,
+        profileId: null,
+        profileName: null,
+        embeddingLength: 0,
+        embeddingNorm: 0,
+        persistError: null,
+      };
+      if (!doc) return empty;
+      const lo = Math.max(0, Math.min(startSample, doc.channels[0]?.length ?? 0));
+      const hi = Math.max(lo, Math.min(endSample, doc.channels[0]?.length ?? 0));
+      const result = await createVoiceProfile({
+        name,
+        channels: doc.channels.map((c) => c.slice(lo, hi)),
+        sampleRate: doc.sampleRate,
+        sourceName: doc.name,
+        consentAffirmed,
+      });
+      if (!result.ok) return { ...empty, status: result.status, message: result.message };
+      let norm = 0;
+      for (let i = 0; i < result.profile.embedding.length; i++) {
+        norm += result.profile.embedding[i] * result.profile.embedding[i];
+      }
+      return {
+        ...empty,
+        ok: true,
+        status: 'ok',
+        profileId: result.profile.id,
+        profileName: result.profile.name,
+        embeddingLength: result.profile.embedding.length,
+        embeddingNorm: Math.sqrt(norm),
+        persistError: result.persistError,
+      };
+    },
+
+    convertActiveVoice: (profileId, consentAffirmed) =>
+      runVoiceConversionHook(profileId, consentAffirmed, null),
+    convertActiveVoiceThenCancel: (profileId, delayMs) =>
+      runVoiceConversionHook(profileId, true, delayMs),
 
     setTranscriptSpeakers: (count) => {
       const doc = activeDoc();
