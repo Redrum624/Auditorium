@@ -28,7 +28,9 @@ function registerSetters(overrides: Partial<Parameters<typeof registerDialogSett
     openTempoDialog: () => {},
     openRemixDialog: () => {},
     openSeparateDialog: () => {},
+    openTranscribeDialog: () => {},
     focusRemixPanel: () => {},
+    focusTranscriptPanel: () => {},
     ...overrides,
   });
 }

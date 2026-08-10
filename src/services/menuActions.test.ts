@@ -134,6 +134,7 @@ describe('getMenuSections', () => {
       'edit.convertChannels',
       'edit.remix',
       'edit.separateStems',
+      'edit.transcribe',
       'multitrack.insertDoc',
       'multitrack.addTrack',
       'marker.add',
@@ -571,7 +572,9 @@ describe('tempo.match (Task T8)', () => {
       openTempoDialog: openTempo,
       openRemixDialog: () => {},
       openSeparateDialog: () => {},
+      openTranscribeDialog: () => {},
       focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
     });
 
     await runCommand('tempo.match');
@@ -623,7 +626,9 @@ describe('edit.remix (Task T14)', () => {
       openTempoDialog: () => {},
       openRemixDialog: openRemix,
       openSeparateDialog: () => {},
+      openTranscribeDialog: () => {},
       focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
     });
 
     await runCommand('edit.remix');
@@ -642,7 +647,9 @@ describe('edit.remix (Task T14)', () => {
       openTempoDialog: () => {},
       openRemixDialog: openRemix,
       openSeparateDialog: () => {},
+      openTranscribeDialog: () => {},
       focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
     });
 
     await runCommand('edit.remix');
@@ -667,7 +674,9 @@ describe('edit.separateStems (Task S6)', () => {
       openTempoDialog: () => {},
       openRemixDialog: () => {},
       openSeparateDialog: openSeparate,
+      openTranscribeDialog: () => {},
       focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
     });
   }
 
@@ -679,7 +688,7 @@ describe('edit.separateStems (Task S6)', () => {
     expect(separate !== 'separator' && separate.id).toBe('edit.separateStems');
     expect(separate !== 'separator' && separate.label).toBe('Separate into Stems…');
     expect(separate !== 'separator' && separate.shortcut).toBeUndefined();
-    expect(edit.items[remixIndex + 2]).toBe('separator');
+    expect(edit.items[remixIndex + 2]).not.toBe('separator');
   });
 
   it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {
@@ -711,6 +720,74 @@ describe('edit.separateStems (Task S6)', () => {
     await runCommand('edit.separateStems');
 
     expect(openSeparate).not.toHaveBeenCalled();
+  });
+});
+
+describe('edit.transcribe (Task F4b)', () => {
+  function findEditCmd(id: string): MenuCommand {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  function installSetters(openTranscribe: jest.Mock) {
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      openSeparateDialog: () => {},
+      openTranscribeDialog: openTranscribe,
+      focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
+    });
+  }
+
+  it('sits with Auto-Remix and Separate into Stems, closing that separator group', () => {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    const separateIndex = edit.items.findIndex(
+      (item) => item !== 'separator' && item.id === 'edit.separateStems'
+    );
+
+    const transcribe = edit.items[separateIndex + 1];
+    expect(transcribe !== 'separator' && transcribe.id).toBe('edit.transcribe');
+    expect(transcribe !== 'separator' && transcribe.label).toBe('Transcribe…');
+    // No shortcut: a multi-minute job must never be one keystroke away.
+    expect(transcribe !== 'separator' && transcribe.shortcut).toBeUndefined();
+    expect(edit.items[separateIndex + 2]).toBe('separator');
+  });
+
+  it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {
+    expect(findEditCmd('edit.transcribe').enabled(useAppStore.getState())).toBe(false);
+
+    const empty = createDocument({ name: 'empty', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    expect(docLength(empty)).toBe(0);
+    expect(findEditCmd('edit.transcribe').enabled(useAppStore.getState())).toBe(false);
+
+    openDoc();
+    expect(findEditCmd('edit.transcribe').enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("edit.transcribe") opens the dialog through the bus', async () => {
+    openDoc();
+    const openTranscribe = jest.fn();
+    installSetters(openTranscribe);
+
+    await runCommand('edit.transcribe');
+
+    expect(openTranscribe).toHaveBeenCalledTimes(1);
+  });
+
+  it('runCommand("edit.transcribe") with no document never reaches the bus', async () => {
+    const openTranscribe = jest.fn();
+    installSetters(openTranscribe);
+
+    await runCommand('edit.transcribe');
+
+    expect(openTranscribe).not.toHaveBeenCalled();
   });
 });
 

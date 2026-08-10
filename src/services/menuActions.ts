@@ -24,6 +24,7 @@ import {
   openNewFileDialog,
   openRemixDialog,
   openSeparateDialog,
+  openTranscribeDialog,
   openTempoDialog,
 } from './dialogBus';
 import { getAllEffects } from '../effects/EffectRegistry';
@@ -100,6 +101,7 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'separator',
       'edit.remix',
       'edit.separateStems',
+      'edit.transcribe',
       'separator',
       'multitrack.insertDoc',
       'multitrack.addTrack',
@@ -865,6 +867,26 @@ function registerStemCommands(): void {
   ]);
 }
 
+/** F4b — Transcribe. Sits with Auto-Remix and Separate into Stems in the same
+ * Edit-menu group and for the same reason: a long analysis over the whole
+ * document that the Effects menu's pure, synchronous `EffectDefinition.process`
+ * structurally cannot express. Identical `enabled` rule (an active document
+ * with audio in it), and no shortcut — a multi-minute job should never be one
+ * keystroke away. */
+function registerTranscribeCommands(): void {
+  registerCommands([
+    {
+      id: 'edit.transcribe',
+      label: 'Transcribe…',
+      enabled: (s) => {
+        const d = activeDoc(s);
+        return d !== null && docLength(d) > 0;
+      },
+      run: async () => openTranscribeDialog(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -877,3 +899,4 @@ registerMarkerCommands();
 registerTempoCommands();
 registerRemixCommands();
 registerStemCommands();
+registerTranscribeCommands();

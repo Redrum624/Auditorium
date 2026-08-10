@@ -7,6 +7,7 @@ import { renderWaveform } from './waveformRender';
 import { useBeatGridOverlay } from './useBeatGridOverlay';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
+import TranscriptRibbon from './TranscriptRibbon';
 import type { Marker } from '../../stores/appStore';
 
 // Stable empty-array reference: `s.markers[doc.id] ?? []` would otherwise
@@ -101,6 +102,7 @@ export default function WaveformView({ doc }: { doc: AudioDocument }) {
       data-testid="waveform-view"
     >
       <TimelineRuler sampleRate={doc.sampleRate} />
+      <TranscriptRibbon />
       <div ref={containerRef} className="glass-lane relative min-h-0 min-w-0 flex-1">
         <canvas
           ref={canvasRef}

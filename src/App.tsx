@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
-import { Flag, Folder, History as HistoryIcon, Info, Orbit, Shuffle, Sparkles } from 'lucide-react';
+import { Captions, Flag, Folder, History as HistoryIcon, Info, Orbit, Shuffle, Sparkles } from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import WaveformView from './components/Editor/WaveformView';
 import SpectrogramView from './components/Editor/SpectrogramView';
@@ -12,6 +12,7 @@ import RecordDialog from './components/Dialogs/RecordDialog';
 import RemixDialog from './components/Dialogs/RemixDialog';
 import SeparateDialog from './components/Dialogs/SeparateDialog';
 import TempoDialog from './components/Dialogs/TempoDialog';
+import TranscribeDialog from './components/Dialogs/TranscribeDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
@@ -19,6 +20,7 @@ import MarkersPanel from './components/Panels/MarkersPanel';
 import PropertiesPanel from './components/Panels/PropertiesPanel';
 import RemixPanel from './components/Panels/RemixPanel';
 import SpatialPanel from './components/Panels/SpatialPanel';
+import TranscriptPanel from './components/Panels/TranscriptPanel';
 import StatusBar from './components/Layout/StatusBar';
 import TempoCard from './components/Layout/TempoCard';
 import TitleBar from './components/Layout/TitleBar';
@@ -28,6 +30,7 @@ import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { getInFlightSaveCount, hasUnsavedWork } from './services/fileService';
 import { getStemBusyCount } from './services/stemService';
+import { getTranscribeBusyCount } from './services/transcribeService';
 import { registerEffectCommands } from './services/menuActions';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
@@ -42,7 +45,15 @@ import { useAppStore } from './stores/appStore';
 // (user-approved via the 2026-07-28 mockup). 'remix' is also reachable
 // through `focusRemixPanel()` (dialogBus) the moment a remix document is
 // created, without the user finding the rail entry first.
-type SidebarTab = 'files' | 'effects' | 'markers' | 'history' | 'properties' | 'remix' | 'spatial';
+type SidebarTab =
+  | 'files'
+  | 'effects'
+  | 'markers'
+  | 'history'
+  | 'properties'
+  | 'remix'
+  | 'spatial'
+  | 'transcript';
 const SIDEBAR_TABS: { id: SidebarTab; label: string; Icon: LucideIcon }[] = [
   { id: 'files', label: 'Files', Icon: Folder },
   { id: 'effects', label: 'Effects', Icon: Sparkles },
@@ -56,6 +67,11 @@ const SIDEBAR_TABS: { id: SidebarTab; label: string; Icon: LucideIcon }[] = [
   // and switches tracks from its own selector, and the 348px card gives the
   // stage room the 96px track row never could.
   { id: 'spatial', label: 'Spatial', Icon: Orbit },
+  // F4b — the transcript (lucide line icon, never emoji). A sidebar tab
+  // rather than a dialog because a transcript is read ALONGSIDE the audio:
+  // rows are scrubbed against the waveform one at a time, over minutes, and a
+  // modal would have to be dismissed to do the one thing it is for.
+  { id: 'transcript', label: 'Transcript', Icon: Captions },
 ];
 
 // Vitrine IconSidebar.tsx rail-button anatomy, verbatim: 42px tile, radius 12,
@@ -102,6 +118,7 @@ export default function App() {
   const [tempoOpen, setTempoOpen] = useState(false);
   const [remixOpen, setRemixOpen] = useState(false);
   const [separateOpen, setSeparateOpen] = useState(false);
+  const [transcribeOpen, setTranscribeOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
   const activeTab = SIDEBAR_TABS.find((t) => t.id === sidebarTab) ?? SIDEBAR_TABS[0];
   const ActiveIcon = activeTab.Icon;
@@ -133,7 +150,9 @@ export default function App() {
         openTempoDialog: () => setTempoOpen(true),
         openRemixDialog: () => setRemixOpen(true),
         openSeparateDialog: () => setSeparateOpen(true),
+        openTranscribeDialog: () => setTranscribeOpen(true),
         focusRemixPanel: () => setSidebarTab('remix'),
+        focusTranscriptPanel: () => setSidebarTab('transcript'),
       }),
     []
   );
@@ -167,7 +186,10 @@ export default function App() {
       const unsaved = useAppStore
         .getState()
         .documents.filter(hasUnsavedWork).length;
-      api.respondCloseRequest(unsaved, getInFlightSaveCount() + getStemBusyCount());
+      api.respondCloseRequest(
+        unsaved,
+        getInFlightSaveCount() + getStemBusyCount() + getTranscribeBusyCount()
+      );
     });
   }, []);
 
@@ -255,6 +277,7 @@ export default function App() {
               {sidebarTab === 'properties' && <PropertiesPanel />}
               {sidebarTab === 'remix' && <RemixPanel />}
               {sidebarTab === 'spatial' && <SpatialPanel />}
+              {sidebarTab === 'transcript' && <TranscriptPanel />}
             </div>
           </GlassCard>
         </div>
@@ -299,6 +322,7 @@ export default function App() {
       {tempoOpen && <TempoDialog onClose={() => setTempoOpen(false)} />}
       {remixOpen && <RemixDialog onClose={() => setRemixOpen(false)} />}
       {separateOpen && <SeparateDialog onClose={() => setSeparateOpen(false)} />}
+      {transcribeOpen && <TranscribeDialog onClose={() => setTranscribeOpen(false)} />}
     </div>
   );
 }

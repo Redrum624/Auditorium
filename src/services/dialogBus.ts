@@ -17,7 +17,9 @@ let openRecord: OpenSetter | null = null;
 let openTempo: OpenSetter | null = null;
 let openRemix: OpenSetter | null = null;
 let openSeparate: OpenSetter | null = null;
+let openTranscribe: OpenSetter | null = null;
 let focusRemix: OpenSetter | null = null;
+let focusTranscript: OpenSetter | null = null;
 
 export function registerDialogSetters(setters: {
   openExportDialog: OpenSetter;
@@ -28,11 +30,15 @@ export function registerDialogSetters(setters: {
   openTempoDialog: OpenSetter;
   openRemixDialog: OpenSetter;
   openSeparateDialog: OpenSetter;
+  openTranscribeDialog: OpenSetter;
   /** Not a dialog: switches the sidebar to the Remix tab once a remix
    * document exists (Task T14). It rides this bus for the same reason the
    * dialog openers do — the caller must not import React or reach into
    * App's component state. */
   focusRemixPanel: OpenSetter;
+  /** Not a dialog either: switches the sidebar to the Transcript tab once a
+   * transcript exists (F4b), for the same reason as `focusRemixPanel`. */
+  focusTranscriptPanel: OpenSetter;
 }): () => void {
   openExport = setters.openExportDialog;
   openNewFile = setters.openNewFileDialog;
@@ -42,7 +48,9 @@ export function registerDialogSetters(setters: {
   openTempo = setters.openTempoDialog;
   openRemix = setters.openRemixDialog;
   openSeparate = setters.openSeparateDialog;
+  openTranscribe = setters.openTranscribeDialog;
   focusRemix = setters.focusRemixPanel;
+  focusTranscript = setters.focusTranscriptPanel;
   return () => {
     openExport = null;
     openNewFile = null;
@@ -52,7 +60,9 @@ export function registerDialogSetters(setters: {
     openTempo = null;
     openRemix = null;
     openSeparate = null;
+    openTranscribe = null;
     focusRemix = null;
+    focusTranscript = null;
   };
 }
 
@@ -88,8 +98,16 @@ export function openSeparateDialog(): void {
   openSeparate?.();
 }
 
+export function openTranscribeDialog(): void {
+  openTranscribe?.();
+}
+
 export function focusRemixPanel(): void {
   focusRemix?.();
+}
+
+export function focusTranscriptPanel(): void {
+  focusTranscript?.();
 }
 
 // --- Open-dialog stack (Task M7: F10/F25) ---------------------------------
