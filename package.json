@@ -2,7 +2,7 @@
   "name": "audition_app",
   "productName": "Auditorium",
   "version": "1.16.0",
-  "description": "Audition-class audio editor: waveform and spectral editing, undoable multitrack with automation and spatial placement, 24 effects, stem separation, speech transcription with speaker labels, tempo detection and auto-remix.",
+  "description": "Audition-class audio editor: waveform and spectral editing, undoable multitrack with automation and spatial placement, 24 effects, stem separation, local transcription with speaker separation, tempo detection and auto-remix.",
   "author": "Auditorium contributors",
   "license": "MIT",
   "type": "module",
