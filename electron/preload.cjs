@@ -90,6 +90,32 @@ const electronAPI = {
     return () => ipcRenderer.removeListener('transcribe:embedding', listener);
   },
 
+  // Voice changer (F3). Channels, payload shapes and event layouts are
+  // documented in electron/voiceManager.cjs's module header; this bridge adds
+  // no logic of its own beyond the on*/unsubscribe pattern used above.
+  voiceModelState: () => ipcRenderer.invoke('voice:model-state'),
+  voiceEnsureModels: () => ipcRenderer.invoke('voice:ensure-models'),
+  onVoiceModelProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('voice:model-progress', listener);
+    return () => ipcRenderer.removeListener('voice:model-progress', listener);
+  },
+  voiceEmbed: (req) => ipcRenderer.invoke('voice:embed', req),
+  voiceConvert: (req) => ipcRenderer.invoke('voice:convert', req),
+  voiceCancel: () => ipcRenderer.invoke('voice:cancel'),
+  onVoiceProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('voice:progress', listener);
+    return () => ipcRenderer.removeListener('voice:progress', listener);
+  },
+  onVoiceChunk: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('voice:chunk', listener);
+    return () => ipcRenderer.removeListener('voice:chunk', listener);
+  },
+  voiceProfilesLoad: () => ipcRenderer.invoke('voice:profiles-load'),
+  voiceProfilesSave: (req) => ipcRenderer.invoke('voice:profiles-save', req),
+
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
   pathBasename: (p) => p.split(/[\\/]/).pop()

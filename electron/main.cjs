@@ -7,6 +7,7 @@ const { isMediaAllowed } = require('./permissionPolicy.cjs');
 const { isPackagedGateOpen } = require('./prodGate.cjs');
 const { createStemManager, registerStemIpc } = require('./stemManager.cjs');
 const { createTranscribeManager, registerTranscribeIpc } = require('./transcribeManager.cjs');
+const { createVoiceManager, registerVoiceIpc } = require('./voiceManager.cjs');
 const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs');
 
 app.setName('audition_app');
@@ -129,6 +130,12 @@ app.whenReady().then(() => {
   const transcribeManager = createTranscribeManager({ userDataDir: app.getPath('userData') });
   registerTranscribeIpc({ ipcMain, manager: transcribeManager, getWin: () => mainWindow });
   app.on('will-quit', () => transcribeManager.dispose());
+
+  // Voice changer (F3): same shape again, a third independent manager. It
+  // also owns the voice-profile store (userData/voice-profiles.json).
+  const voiceManager = createVoiceManager({ userDataDir: app.getPath('userData') });
+  registerVoiceIpc({ ipcMain, manager: voiceManager, getWin: () => mainWindow });
+  app.on('will-quit', () => voiceManager.dispose());
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

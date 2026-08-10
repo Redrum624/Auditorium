@@ -31,6 +31,20 @@ export interface ElectronAPI {
   onTranscribeSegment(cb: (s: { index: number; startSample: number; endSample: number; text: string; avgLogprob: number; noSpeechProb: number; compressionRatio: number }) => void): () => void; // returns unsubscribe
   onTranscribeEmbedding(cb: (e: { segmentIndex: number; vector: ArrayBuffer }) => void): () => void; // returns unsubscribe
 
+  // Voice changer (F3). Renderer code goes through
+  // `src/services/voiceService.ts`, never these directly. `consent` is the
+  // F3 consent affirmation and is REQUIRED true by the main-process parser.
+  voiceModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  voiceEnsureModels(): Promise<{ ok: true } | { ok: false; error: string }>;
+  onVoiceModelProgress(cb: (p: { file: string; fileIndex: number; fileCount: number; received: number; total: number }) => void): () => void; // returns unsubscribe
+  voiceEmbed(req: { sampleRate: number; samples: ArrayBuffer; consent: boolean }): Promise<{ ok: true; vector: ArrayBuffer } | { ok: false; cancelled?: true; error?: string }>;
+  voiceConvert(req: { sampleRate: number; samples: ArrayBuffer; target: ArrayBuffer; consent: boolean }): Promise<{ ok: true; chunkCount: number; sanitisedSamples: number } | { ok: false; cancelled?: true; error?: string }>;
+  voiceCancel(): Promise<{ cancelled: boolean }>;
+  onVoiceProgress(cb: (p: { stage: 'embed' | 'convert'; done: number; total: number }) => void): () => void; // returns unsubscribe
+  onVoiceChunk(cb: (c: { offset: number; samples: number; data: ArrayBuffer }) => void): () => void; // returns unsubscribe
+  voiceProfilesLoad(): Promise<{ ok: true; profiles: unknown[] } | { ok: false; error: string }>;
+  voiceProfilesSave(req: { profiles: unknown[] }): Promise<{ ok: true } | { ok: false; error: string }>;
+
   pathBasename(p: string): string;      // implemented in preload (string ops only, no IPC)
 }
 declare global { interface Window { electronAPI: ElectronAPI } }
