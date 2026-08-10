@@ -156,11 +156,18 @@ describe('transcription integration (real models, real onnxruntime)', () => {
     silence = runBench('integration-silence', audio);
     expect(silence.error).toBeNull();
     expect(silence.ok).toBe(true);
-    // Whatever the window decodes to, the SIGNAL must be alive. Exactly 0 is
-    // the fingerprint of both historical bugs (wrong logits row; unresolved
-    // token spelling), so the floor is deliberately far from 0 and is the
-    // rule's own threshold.
+    // A segment IS expected here, and its presence is not a bug: openai's rule
+    // needs BOTH halves, and digital silence decodes at avgLogprob -0.818,
+    // ABOVE the -1.0 threshold. So the window is deliberately NOT skipped and
+    // Whisper's classic "you" hallucination survives — matching openai rather
+    // than a residual miss. Read this before "fixing" a future change that
+    // drives this count to 0: that would mean the LOGPROB half started firing,
+    // not that the no-speech half was repaired.
     expect(silence.segments.length).toBeGreaterThan(0);
+    expect(silence.maxAvgLogprob).toBeGreaterThan(-1);
+    // The no-speech SIGNAL must be alive. Exactly 0 is the fingerprint of both
+    // historical bugs (wrong logits row; unresolved token spelling), so the
+    // floor is deliberately far from 0 and is the rule's own threshold.
     for (const s of silence.segments) {
       expect(s.noSpeechProb).toBeGreaterThan(0.6);
     }
@@ -178,10 +185,21 @@ describe('transcription integration (real models, real onnxruntime)', () => {
     expect(speech.error).toBeNull();
     expect(speech.ok).toBe(true);
     expect(speech.segments.length).toBeGreaterThan(0);
-    // The KV cache proof: a cache error does not throw, it produces fluent
-    // nonsense, so the check is that real words came out at all.
+    // THE KV-CACHE PROOF, and it has to be the WORDS.
+    //
+    // A cache error does not throw — it produces fluent nonsense of about the
+    // right length. A broken cache was measured returning "I'm going to be a
+    // politician. ." for this clip: seven words, a low no-speech probability,
+    // every loose assertion satisfied. So a word COUNT proves nothing here,
+    // and neither does "some text came out".
+    //
+    // The fixture is the public-domain JFK inaugural line and whisper-base
+    // transcribes it exactly, so the assertion is the CONTENT. Two distinctive
+    // phrases rather than the whole string: punctuation and casing are
+    // legitimately model-version-dependent, these words are not.
     const text = speech.segments.map((s) => s.text).join(' ');
-    expect(text.split(/\s+/).filter(Boolean).length).toBeGreaterThan(5);
+    expect(text).toMatch(/ask not what your country can do for you/i);
+    expect(text).toMatch(/what you can do for your country/i);
     for (const s of speech.segments) {
       expect(s.noSpeechProb).toBeLessThan(0.6);
     }

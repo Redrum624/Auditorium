@@ -290,6 +290,15 @@ async function greedyDecodeWindow(runDecoder, prompt, cfg) {
     }
     const grid = await runDecoder({ tokens: requested, useCache: useKv && step > 0 });
     rows = requested.length;
+    // Divisibility, not row COUNT — the difference is worth stating. This
+    // catches a callback returning a partial row, which is the mis-slicing
+    // hazard that matters, but it cannot catch a callback returning the wrong
+    // NUMBER of whole rows: `vocab` is derived from the same division, so
+    // e.g. 2 rows of a 4-row request would be read as rows of double the
+    // vocabulary. It fires for every prompt shape this host builds ([sot] and
+    // [sot, lang, transcribe]) because with 1 or 3 rows any short return is
+    // non-divisible; a prompt of 5+ tokens is where the gap would open, and
+    // nothing here constructs one.
     if (grid.length % rows !== 0) {
       throw new Error(
         `greedyDecodeWindow: decoder returned ${grid.length} logits for ${rows} position(s) — not a whole number of rows`
