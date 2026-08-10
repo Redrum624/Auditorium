@@ -44,9 +44,9 @@
  *   {type:'embedded', id, vector}         — embed-job terminal: the
  *                                           Float32Array(256) tone embedding.
  *   {type:'chunk', id, offset, samples, data}
- *       — a finalized converted mono region (weight-normalised overlap-add
- *         output, NOT raw per-chunk model output). Regions are contiguous
- *         and tile [0, totalSamples) exactly.
+ *       — a finalized converted mono region (SPLICED output, NOT raw
+ *         per-chunk model output). Regions are contiguous and tile
+ *         [0, totalSamples) exactly.
  *   {type:'done', id, chunkCount, sanitisedSamples}
  *                                         — convert-job terminal.
  *   {type:'cancelled', id}
@@ -60,9 +60,14 @@
  *     tunable.
  *   - The tone-colour graph converts a whole utterance in one run, so RSS is
  *     linear in length (~183 MB + 5.4 MB/s measured); conversion is chunked
- *     at ~30 s (voiceChunking.cjs SEGMENT_SAMPLES) with the stem reference's
- *     overlap-add crossfade, bounding peak inference RSS near 350 MB at zero
- *     throughput cost (measured length-independent, 4.0-4.9x realtime).
+ *     at ~30 s (voiceChunking.cjs SEGMENT_SAMPLES) with constant-power 25 ms
+ *     seams and edge-frame discard — the seam design is derived from real
+ *     measurements recorded in voiceChunking.cjs's header (the decoder is
+ *     deterministic but NOT frame-shift-equivariant, and its context reaches
+ *     ~64 frames past a chunk edge — 32x further than the spectrogram's own
+ *     2 frames, which is why the discard margin is 16,384 samples and not
+ *     512). Chunking bounds inference memory at a throughput cost of 5.3%
+ *     seam re-processing, on a path measured at 4.0-4.9x realtime.
  *   - The SOURCE tone embedding is global: computed ONCE, before conversion,
  *     as the unweighted mean of the per-chunk embeddings over the same chunk
  *     plan — OpenVoice's own `se_extractor.get_se` behaviour
@@ -84,7 +89,6 @@ const {
   spectrogram,
   toFramesBins,
   planVoiceSegments,
-  makeVoiceWindow,
   createVoiceAccumulator,
   accumulateVoiceSegment,
   voiceFinalizedEnd,
@@ -100,10 +104,12 @@ const TONE_EMBEDDING_SIZE = 256;
 
 /** Trust-boundary cap on a CONVERSION job: 30 minutes at 22050 Hz — the same
  * whole-real-tracks policy as stemHost's cap, with this host's arithmetic:
- * per input sample it holds the job buffer (4 B) + overlap-add accumulator
- * (4 B) + weight track (4 B) = 12 B, so 30 min = 22050·1800 ≈ 39.7 M samples
- * ≈ 476 MB of buffers, on top of the ~350 MB measured per-chunk inference
- * RSS ≈ 830 MB worst case. Anything above is a malformed/hostile request. */
+ * per input sample it holds the job buffer (4 B) + the splice accumulator
+ * (4 B) = 8 B (the weight track the stem port needed is gone — outside a
+ * 551-sample seam exactly one chunk contributes at weight 1), so 30 min =
+ * 22050·1800 ≈ 39.7 M samples ≈ 318 MB of buffers, on top of the ~350 MB
+ * measured per-chunk inference RSS ≈ 670 MB worst case. Anything above is a
+ * malformed/hostile request. */
 const MAX_TOTAL_SAMPLES = VC_SAMPLE_RATE * 1800;
 
 /** Trust-boundary cap on an EMBED job: 350 s — the longest input the spike
@@ -167,7 +173,7 @@ async function convertChunk({ ort, session, samples, srcTone, destTone }) {
   const raw = out[session.outputNames[0]].data;
   // The measured output contract (spike: 11.00 s in → 947 frames → 947·256
   // samples out). A different length means the graph is not the one the spike
-  // validated — fail loudly rather than mis-align the overlap-add.
+  // validated — fail loudly rather than mis-align the splice.
   if (raw.length !== frames * HOP_LENGTH) {
     throw new Error(
       `converter returned ${raw.length} samples for ${frames} frames, expected ${frames * HOP_LENGTH}`
@@ -380,9 +386,8 @@ function createVoiceHost({ ort, postMessage, exit }) {
     }
     const srcTone = Float32Array.from(acc64, (v) => v / plan.length);
 
-    // Pass 2 — convert each chunk with the fixed embeddings, overlap-add with
-    // the crossfade window, stream each region as soon as it is final.
-    const window = makeVoiceWindow();
+    // Pass 2 — convert each chunk with the fixed embeddings, splice at the
+    // constant-power seams, stream each region as soon as it is final.
     const acc = createVoiceAccumulator(thisJob.totalSamples);
     let sanitisedSamples = 0;
     for (let i = 0; i < plan.length; i++) {
@@ -399,7 +404,7 @@ function createVoiceHost({ ort, postMessage, exit }) {
       // before doing any more work on a result nobody wants (stemHost).
       checkCancelled(thisJob);
       sanitisedSamples += sanitised;
-      accumulateVoiceSegment(acc, seg, data, window);
+      accumulateVoiceSegment(acc, plan, i, data);
       const flushed = extractVoiceFinalized(acc, voiceFinalizedEnd(plan, i, thisJob.totalSamples));
       if (flushed) {
         post({

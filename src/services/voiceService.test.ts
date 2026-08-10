@@ -591,9 +591,27 @@ describe('mirrored constants and the estimate', () => {
     expect(MAX_REFERENCE_MODEL_SAMPLES).toBe(22050 * 350);
     expect(VOICE_MODEL_BYTES).toBe(157196170 + 3364792);
     expect(VC_SEGMENT_SAMPLES).toBe(661504);
-    expect(VC_STRIDE_SAMPLES).toBe(661504 - 661504 / 4);
+    expect(VC_STRIDE_SAMPLES).toBe(661504 - 33536); // SEGMENT − OVERLAP
     expect(TONE_EMBEDDING_SIZE).toBe(256);
     expect(MEASURED_REALTIME_FACTOR).toBe(3.86);
+  });
+
+  test('the chunk-plan mirror EQUALS the main process, loaded — not restated', () => {
+    // These four numbers exist twice: once in voiceChunking.cjs, which owns
+    // the real plan, and once here in the renderer, which cannot require a
+    // .cjs at runtime and so keeps a copy for the time estimate. Restating a
+    // copy's value proves nothing about the original — and they HAD drifted,
+    // twice, before this test existed (the renderer still carried a stride
+    // from two seam designs ago). So load the real module and compare.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const chunking = require('../../electron/voiceChunking.cjs');
+    expect(VC_SEGMENT_SAMPLES).toBe(chunking.SEGMENT_SAMPLES);
+    expect(VC_STRIDE_SAMPLES).toBe(chunking.STRIDE_SAMPLES);
+    expect(VC_SAMPLE_RATE).toBe(chunking.VC_SAMPLE_RATE);
+    expect(MIN_MODEL_SAMPLES).toBe(chunking.MIN_INPUT_SAMPLES);
+    // And the estimate's premise: multi-chunk runs really do re-process the
+    // overlap, so the ratio it charges is the geometry's, not a guess.
+    expect(VC_SEGMENT_SAMPLES / VC_STRIDE_SAMPLES).toBeCloseTo(1.0534, 4);
   });
 
   test('the estimate charges the overlap re-processing for multi-chunk runs only', () => {

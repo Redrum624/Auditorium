@@ -13,8 +13,9 @@
  *    on its first element pins the loop's existence, not its extent).
  *  - dest_tone is the caller's target vector, verbatim, on the first AND the
  *    last converter call.
- *  - chunked output ≈ unchunked output of the same fake pipeline (the
- *    chunking-equivalence pin, tolerance derived below).
+ *  - chunked output equals the unchunked output of the same fake pipeline
+ *    BIT-EXACTLY outside the seams, and equals the analytic constant-power
+ *    sum inside them (the chunking-equivalence pin, derived below).
  *  - no model run ever sees more than a SEGMENT's worth of frames (the
  *    RSS-boundedness proxy: the spike's linear-RSS finding means bounded
  *    frames-per-run IS bounded inference memory).
@@ -24,11 +25,13 @@ const {
   SEGMENT_SAMPLES,
   OVERLAP_SAMPLES,
   STRIDE_SAMPLES,
+  CROSSFADE_SAMPLES,
   HOP_LENGTH,
   SPEC_BINS,
   MIN_INPUT_SAMPLES,
   spectrogram,
   planVoiceSegments,
+  crossfadeStart,
   framesForSamples,
 } = require('./voiceChunking.cjs');
 const {
@@ -354,7 +357,11 @@ describe('convert jobs — the chunk loop and its pins', () => {
   // >30 s: 3 chunks (two full segments + a 51,200-sample tail, HOP-aligned).
   const N = 2 * STRIDE_SAMPLES + 51200;
 
-  test('single-chunk conversion: output equals the fake pipeline, sample 0 quirk aside', async () => {
+  /** The constant-power pair, restated here rather than imported. */
+  const fadeIn = (k) => Math.sin((Math.PI / 2) * ((k + 0.5) / CROSSFADE_SAMPLES));
+  const fadeOut = (k) => Math.cos((Math.PI / 2) * ((k + 0.5) / CROSSFADE_SAMPLES));
+
+  test('single-chunk conversion: output equals the fake pipeline BIT-EXACTLY, sample 0 included', async () => {
     const h = createHarness();
     await initHost(h);
     const n = 2048;
@@ -375,10 +382,13 @@ describe('convert jobs — the chunk loop and its pins', () => {
 
     const { spec } = spectrogram(x); // n is a HOP multiple — no padding
     const offset = (tv[0] - h.constantEmb[0]) * 0.5;
-    expect(chunks[0].data[0]).toBe(0); // the documented window quirk
-    for (const t of [1, 500, 1024, n - 2, n - 1]) {
-      const expected = spec[Math.floor(t / HOP_LENGTH)] * 0.001 + offset;
-      expect(Math.abs(chunks[0].data[t] - expected)).toBeLessThan(1e-6);
+    // A single-chunk plan carries weight 1 everywhere — no window, no
+    // normalisation — so the model's samples are copied through unchanged.
+    // Sample 0 included: the old overlap-add's zero-weight first sample is
+    // gone by construction, so it is probed here rather than excused.
+    for (const t of [0, 1, 500, 1024, n - 2, n - 1]) {
+      const expected = Math.fround(spec[Math.floor(t / HOP_LENGTH)] * 0.001 + offset);
+      expect(chunks[0].data[t]).toBe(expected);
     }
   });
 
@@ -412,32 +422,58 @@ describe('convert jobs — the chunk loop and its pins', () => {
     const expected = new Float32Array(N);
     for (let t = 0; t < N; t++) expected[t] = spec[Math.floor(t / HOP_LENGTH)] * 0.001 + offset;
 
-    // Tolerance, derived not chosen: the fake is frame-local, and a chunk's
-    // outermost 2 frames (512 samples) see reflected/padded context instead
-    // of the true neighbour samples. Those frames only ever carry crossfade
-    // weight <= 512/(OVERLAP-1) ≈ 0.31%, and the global head/tail reflections
-    // are identical in both runs — so outside ±1024 samples of an interior
-    // boundary the match is exact to float32 arithmetic, and inside it the
-    // error is bounded by that weight times the value swing.
+    // The tolerance is DERIVED, and outside the seams it is ZERO.
+    //
+    // The fake converter is frame-local, and chunk starts are HOP multiples,
+    // so a chunk's frame f is the whole signal's frame f + start/HOP with
+    // IDENTICAL window samples — except in the outermost 2 frames of each
+    // chunk, whose analysis window reads reflected padding instead of the true
+    // neighbour audio. Those are exactly the 512 samples per side the seam
+    // geometry discards (EDGE_DISCARD_SAMPLES), so no contaminated frame ever
+    // contributes. The first chunk's head and the last chunk's tail reflect
+    // the same samples the unchunked run reflects, so they are not special.
+    // Outside a seam exactly one chunk contributes at weight 1 → BIT-EXACT.
+    //
+    // Inside a seam both chunks render the SAME value, so the output is
+    // exactly that value times (sin + cos) — up to +41% on this perfectly
+    // correlated fake. That over-sum is the deliberate trade, not a defect:
+    // the REAL decoder's chunk renditions are decorrelated (measured sample
+    // correlation 0.02-0.18 — voiceChunking.cjs's header), which is the case
+    // constant power exists for and where equal gain measured a -5.6 dB dip.
+    // Pinning the analytic factor pins the seam law itself; the real-model
+    // equivalence, where the two renditions differ, is measured against the
+    // actual unchunked run in voiceIntegration.test.cjs.
     const plan = planVoiceSegments(N);
-    const boundaries = [];
-    for (let i = 1; i < plan.length; i++) {
-      boundaries.push(plan[i].start);
-      boundaries.push(plan[i - 1].end);
+    expect(plan).toHaveLength(3); // two full segments + a HOP-aligned tail
+    const seams = [];
+    for (let i = 0; i + 1 < plan.length; i++) seams.push(crossfadeStart(plan, i));
+    const seamPos = (t) => {
+      for (const s of seams) if (t >= s && t < s + CROSSFADE_SAMPLES) return t - s;
+      return -1;
+    };
+
+    let outsideWorst = 0;
+    let insideWorst = 0;
+    let insideCount = 0;
+    let boostedSamples = 0;
+    for (let t = 0; t < N; t++) {
+      const k = seamPos(t);
+      if (k < 0) {
+        outsideWorst = Math.max(outsideWorst, Math.abs(out[t] - expected[t]));
+      } else {
+        insideCount++;
+        insideWorst = Math.max(insideWorst, Math.abs(out[t] - expected[t] * (fadeIn(k) + fadeOut(k))));
+        if (Math.abs(out[t]) > Math.abs(expected[t]) * 1.05) boostedSamples++;
+      }
     }
-    const nearBoundary = (t) => boundaries.some((b) => Math.abs(t - b) <= 1024);
-    let maxAbs = 0;
-    for (let t = 0; t < N; t++) maxAbs = Math.max(maxAbs, Math.abs(expected[t]));
-    let interiorWorst = 0;
-    let overallWorst = 0;
-    for (let t = 1; t < N; t++) {
-      const diff = Math.abs(out[t] - expected[t]);
-      overallWorst = Math.max(overallWorst, diff);
-      if (!nearBoundary(t)) interiorWorst = Math.max(interiorWorst, diff);
-    }
-    expect(out[0]).toBe(0); // the window quirk, again
-    expect(interiorWorst).toBeLessThan(1e-5);
-    expect(overallWorst).toBeLessThan(0.01 * (maxAbs + 0.01));
+    // Sample 0 is included in the sweep above — no exclusion, no quirk.
+    expect(outsideWorst).toBe(0);
+    expect(insideCount).toBe(2 * CROSSFADE_SAMPLES); // 1,102 samples of 1,370,624
+    expect(insideWorst).toBeLessThan(1e-6);
+    // The seams are genuinely being exercised: the analytic factor is not
+    // vacuously 1, so `outsideWorst === 0` above is a real claim about a real
+    // split rather than a plan that never actually crossfaded.
+    expect(boostedSamples).toBeGreaterThan(insideCount * 0.9);
   });
 
   test('loop extents and per-call feeds: tau, dest_tone, audio_length, frame bound — every call, not just the first', async () => {

@@ -16,7 +16,7 @@
  *     -> average to MONO at the document rate         [transcribeService.monoMix]
  *     -> resampleChannel(..., 22050)                  [the app's windowed-sinc]
  *     -> IPC 'voice:convert' -> utilityProcess -> OpenVoice V2 (ONNX, CPU EP)
- *     -> 'voice:chunk' events (finalized overlap-add regions, in order)
+ *     -> 'voice:chunk' events (finalized spliced regions, in order)
  *     -> ONE new 22050 Hz mono document
  *
  * 22050 Hz because that is the model's fixed rate (spike step 1), and the
@@ -92,9 +92,12 @@ export const MAX_REFERENCE_MODEL_SAMPLES = VC_SAMPLE_RATE * 350;
 export const TONE_EMBEDDING_SIZE = 256;
 
 /** Chunk plan mirror (`voiceChunking.cjs` SEGMENT/STRIDE), used ONLY for the
- * time estimate below — the host owns the real plan. */
+ * time estimate below — the host owns the real plan. The renderer cannot
+ * `require` the .cjs, so these are copies; voiceService.test.ts loads the real
+ * module and asserts they are equal, which is what stops them drifting (they
+ * already had, twice, before that pin existed). */
 export const VC_SEGMENT_SAMPLES = 661504;
-export const VC_STRIDE_SAMPLES = 496128;
+export const VC_STRIDE_SAMPLES = 627968;
 
 /** Sum of the two `bytes` pins in `electron/voiceManager.cjs` VOICE_FILES —
  * 157,196,170 + 3,364,792. Fallback for the "no preload" model state only. */
@@ -303,7 +306,7 @@ function sameChannelRefs(a: readonly Float32Array[], b: readonly Float32Array[])
 
 /**
  * Wall-clock estimate for converting `modelSamples` of 22050 Hz audio. The
- * chunk overlap re-processes SEGMENT/STRIDE of the input (~1.33x for
+ * chunk overlap re-processes SEGMENT/STRIDE of the input (~1.053x for
  * multi-chunk runs, exactly 1x for a single chunk), and the measured factor
  * already includes both host passes over the audio they touch.
  */

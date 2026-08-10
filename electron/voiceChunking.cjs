@@ -5,48 +5,100 @@
  * onnxruntime, no electron, so it is unit-testable and reusable by both the
  * utility-process host (voiceHost.cjs) and the integration bench driver.
  *
- * Two sources, both settled elsewhere — nothing here is invented:
+ * ## The spectrogram
  *
- * 1. **The STFT is OpenVoice's `spectrogram_torch`, ported via the F3 spike
- *    harness** (`.superpowers/sdd/task-F3-spike.md`, step 1): resample to
- *    22050 Hz (the caller's job), reflect-pad by `(1024-256)/2 = 384`,
- *    periodic Hann, `n_fft` 1024 / `hop` 256, `center=False`, magnitude
- *    `sqrt(re²+im²+1e-6)`. The spike verified this preprocessing end-to-end:
- *    the converted output was real audio (envelope correlation 0.9496 to the
- *    source, all providers agreeing within 2 LSB of 16-bit).
+ * OpenVoice's `spectrogram_torch`, ported via the F3 spike harness
+ * (`.superpowers/sdd/task-F3-spike.md`, step 1): resample to 22050 Hz (the
+ * caller's job), reflect-pad by `(1024-256)/2 = 384`, periodic Hann, `n_fft`
+ * 1024 / `hop` 256, `center=False`, magnitude `sqrt(re²+im²+1e-6)`. The spike
+ * verified this preprocessing end-to-end (real audio out, cross-provider
+ * agreement within 2 LSB of 16-bit).
  *
- * 2. **The chunking is stemSegmentation.cjs's proven overlap-add discipline**
- *    (itself a port of the HF htdemucs reference): linear crossfade window
- *    (`makeWindow` is REUSED from that module, not re-implemented), chunk
- *    plan `n = max(1, ceil(total/stride))`, per-chunk `out += y*w; weight
- *    += w`, progressive normalisation `out /= max(weight, 1e-8)`. The spike's
- *    ruling that forces chunking at all: the exported graph converts a whole
- *    utterance in one run, so RSS is linear in length (~183 MB + 5.4 MB per
- *    second of audio) — ~30 s chunks bound peak RSS near 350 MB and cost
- *    nothing because throughput is length-independent (4.0-4.9x realtime at
- *    11 s, 70 s and 350 s alike).
+ * ## The chunking — designed from MEASUREMENT, not proportion
  *
- * Derived constants (each derivation stated where it is defined):
- *   SEGMENT_SAMPLES  661,504  — the spike's ~30 s, rounded UP to a HOP
- *                               multiple so a chunk's output length equals its
- *                               input length exactly (see framesForSamples).
- *   OVERLAP_SAMPLES  165,376  — SEGMENT/4, the stem reference's own overlap
- *                               proportion (`N_SAMPLES // 4`).
- *   STRIDE_SAMPLES   496,128  — SEGMENT − OVERLAP.
- *   MIN_INPUT_SAMPLES    385  — REFLECT_PAD+1: the head reflection reads
- *                               x[384], so any shorter input is out of range.
+ * The spike's binding finding: the exported graph converts a whole utterance
+ * in one run, so RSS is linear in length — chunk at ~30 s, which costs
+ * nothing because throughput is length-independent.
  *
- * The reference edge quirk is KEPT, exactly as stemSegmentation keeps it: the
- * crossfade window is 0 at a chunk's first sample, so the very first sample
- * of the whole output normalises to exactly 0. (Only that one: the plan law
- * always leaves the FINAL chunk truncated below SEGMENT_SAMPLES — proven in
- * voiceChunking.test.cjs — so the window's trailing zero is never applied to
- * a final sample.) One sample at 22.05 kHz is far below audibility, and
- * diverging from the proven port to "fix" it would buy a new untested branch
- * for nothing.
+ * The seam design then came from measuring the REAL model's behaviour on the
+ * 70 s fixture (F3 integration bench, 2026-08-10; every figure below was
+ * produced by running the shipped primitives against the pinned ONNX files,
+ * and the assertions that hold each one live in voiceIntegration.test.cjs):
+ *
+ *  - **The graph is deterministic**: identical inputs give a BIT-IDENTICAL
+ *    output (max |diff| = 0), so nothing here is chasing run-to-run noise.
+ *  - **The pipeline is prefix-stable**: chunk 0 starts where the whole
+ *    utterance starts, and its output was BIT-IDENTICAL to the unchunked run
+ *    for 635,239 samples — right up to where its own missing right-context
+ *    begins to tell.
+ *  - **But the decoder is NOT frame-shift-equivariant, at all.** Extending
+ *    the analysis window to the left by a SINGLE hop (256 samples) leaves the
+ *    interior completely decorrelated: rms|diff| 0.349 against a signal rms
+ *    of 0.186 — the difference is LARGER than the signal. Extending by 4, 40
+ *    or 400 hops is no different. A chunk that starts mid-file therefore
+ *    renders the same words in the same voice with entirely different fine
+ *    structure; sample-level agreement with an unchunked run is not something
+ *    this model offers past chunk 0, and no seam geometry can buy it.
+ *  - Which settles the crossfade law: two decorrelated renditions are exactly
+ *    the case **constant power** exists for (the v1.9 ruling added sin/cos
+ *    precisely because equal gain dips on uncorrelated material — and the
+ *    stem-style SEGMENT/4 equal-gain overlap measured a mean −1.9 dB / worst
+ *    −5.6 dB dip smeared across each 7.5 s seam). Length is the **25 ms** the
+ *    remix engine ships as its default for splicing at a join
+ *    (`remixService.ts` DEFAULTS.crossfadeMs) — short, because blending two
+ *    decorrelated renditions for longer only widens the doubled-voice region.
+ *
+ * ## EDGE_DISCARD — sized by measurement, twice, because the obvious answer
+ *    was wrong by 32x
+ *
+ * The seam must blend two renditions that are each locally FAITHFUL. A chunk
+ * is not faithful at its own edges, because it lacks the context a continuous
+ * run has there. The tempting derivation — "an output sample in frame f is
+ * synthesised from analysis window [f·256−384, f·256+640), so only a chunk's
+ * first two and last two frames see reflected padding, discard 512 samples" —
+ * accounts for the SPECTROGRAM only, and the decoder's own context reaches
+ * far further. Both were measured:
+ *
+ *  - **Sample level, at chunk 0's tail** (the one place with a phase-locked
+ *    ground truth): |chunk − unchunked| first becomes non-zero 26,265 samples
+ *    before the chunk's end, and rises 1.7e-6 at 14,000 → 9.2e-4 at 10,000 →
+ *    2.8e-2 at 8,000 → 0.35 at 2,000 (against a signal rms of 0.106). So the
+ *    last ~10,000 samples of a chunk are audibly wrong, and it is not
+ *    numerically clean until ~14,000.
+ *  - **Envelope level, at mid-file chunk heads and tails** (20 ms RMS frames,
+ *    4 starts, vs the unchunked run — the only comparison that survives the
+ *    shift non-equivariance above): head −6.18 dB in the first frame, −0.62 dB
+ *    by 8 frames, indistinguishable from the interior control (mean 0.10 dB)
+ *    by ~15 frames. Tail −2.11 dB at 6 frames, −0.47 dB at 13, gone by ~20.
+ *
+ * EDGE_DISCARD is therefore **64 frames = 16,384 samples (0.74 s)** — past
+ * the sample-level noise floor (14,000) and ~3x the envelope artefact's
+ * ~20-frame reach, on both sides. It costs 5.3% extra inference (below), on a
+ * path measured at 4.0-4.9x realtime.
+ *
+ * Derived constants:
+ *   SEGMENT_SAMPLES     661,504  — the spike's ~30 s, rounded UP to a HOP
+ *                                  multiple so a chunk's output length equals
+ *                                  its input length (see framesForSamples).
+ *   EDGE_DISCARD_SAMPLES 16,384  — 64 frames · HOP; the measured extent of a
+ *                                  chunk's context deficiency (above).
+ *   CROSSFADE_SAMPLES       551  — round(0.025 · 22050): the remix default.
+ *   OVERLAP_SAMPLES      33,536  — smallest HOP multiple ≥ 2·16,384 + 551, so
+ *                                  discard margins + crossfade fit and chunk
+ *                                  starts stay frame-aligned.
+ *   STRIDE_SAMPLES      627,968  — SEGMENT − OVERLAP. Work ratio
+ *                                  SEGMENT/STRIDE ≈ 1.053: chunking costs
+ *                                  ~5.3% extra inference.
+ *   CROSSFADE_OFFSET     16,492  — EDGE_DISCARD + centring slack, where a
+ *                                  seam's crossfade begins inside the overlap.
+ *   MIN_INPUT_SAMPLES       385  — REFLECT_PAD+1: the head reflection reads
+ *                                  x[384]; shorter input is unrepresentable.
+ *
+ * Because exactly one chunk carries weight 1 everywhere outside a 551-sample
+ * crossfade, chunk interiors are copied through BIT-EXACTLY (no windowing, no
+ * epsilon division) — which is also what makes the first chunk's
+ * prefix-identity a pinnable integration assertion.
  */
-
-const { makeWindow } = require('./stemSegmentation.cjs');
 
 /** The model's fixed rate — `tone_config.json` (22050 Hz), spike step 1. */
 const VC_SAMPLE_RATE = 22050;
@@ -61,15 +113,29 @@ const REFLECT_PAD = (N_FFT - HOP_LENGTH) / 2;
 const MIN_INPUT_SAMPLES = REFLECT_PAD + 1;
 
 /** ~30 s (spike ruling), rounded UP from 30·22050 = 661,500 to the next HOP
- * multiple (2584·256) so that framesForSamples(SEGMENT)·HOP === SEGMENT and a
- * full chunk's converted output covers its input exactly, sample for sample. */
+ * multiple (2584·256) so that framesForSamples(SEGMENT)·HOP === SEGMENT. */
 const SEGMENT_SAMPLES = 661504;
-/** SEGMENT/4 — the proportion the stem reference uses (`N_SAMPLES // 4`);
- * also a HOP multiple (646·256), so chunk starts stay frame-aligned. */
-const OVERLAP_SAMPLES = SEGMENT_SAMPLES / 4;
+/** 64 frames · HOP = 16,384 samples (0.74 s) — the MEASURED extent of a
+ * chunk's context deficiency at its own edges, not the 2-frame spectrogram
+ * figure the STFT geometry alone would suggest (see the header: sample level
+ * clean past 14,000, envelope artefact gone by ~20 frames). */
+const EDGE_DISCARD_FRAMES = 64;
+const EDGE_DISCARD_SAMPLES = EDGE_DISCARD_FRAMES * HOP_LENGTH;
+/** round(0.025 · 22050) — the remix engine's default join crossfade (25 ms,
+ * `remixService.ts` DEFAULTS.crossfadeMs), the in-repo precedent for splicing
+ * imperfectly-correlated audio. */
+const CROSSFADE_SAMPLES = Math.round(0.025 * VC_SAMPLE_RATE);
+/** Smallest HOP multiple ≥ 2·EDGE_DISCARD + CROSSFADE (= 33,319) — the seam
+ * needs both discard margins plus the crossfade, and chunk starts must stay
+ * frame-aligned. */
+const OVERLAP_SAMPLES = Math.ceil((2 * EDGE_DISCARD_SAMPLES + CROSSFADE_SAMPLES) / HOP_LENGTH) * HOP_LENGTH;
 const STRIDE_SAMPLES = SEGMENT_SAMPLES - OVERLAP_SAMPLES;
-/** Reference: out /= np.maximum(weight, 1e-8) (stemSegmentation.cjs). */
-const WEIGHT_EPSILON = 1e-8;
+/** Where a seam's crossfade begins, relative to the later chunk's start: past
+ * the discard margin, centring the 551 samples in the 768 the two margins
+ * leave inside the overlap. */
+const CROSSFADE_OFFSET =
+  EDGE_DISCARD_SAMPLES +
+  Math.floor((OVERLAP_SAMPLES - 2 * EDGE_DISCARD_SAMPLES - CROSSFADE_SAMPLES) / 2);
 
 /**
  * Frame count of the centre-less STFT over `n` samples after reflect padding:
@@ -190,13 +256,15 @@ function toFramesBins(spec, frames) {
 }
 
 /**
- * The stem reference's chunk-plan law with the VC constants, plus ONE derived
- * rule the stem planner does not need: a final chunk shorter than
- * MIN_INPUT_SAMPLES cannot be reflect-padded, so it is dropped — safely,
- * because such a tail is ALWAYS already covered by the previous chunk:
- * the dropped chunk starts at s = (n−1)·STRIDE with total − s < 385, and the
- * previous chunk reaches min(s + OVERLAP, total) = total since
- * OVERLAP (165,376) ≥ 385. Asserted, not assumed, in voiceChunking.test.cjs.
+ * The chunk-plan law: n = max(1, ceil(total/STRIDE)), chunk i covering
+ * [i·STRIDE, min(i·STRIDE + SEGMENT, total)), plus ONE derived rule: a final
+ * chunk shorter than OVERLAP_SAMPLES is dropped — safely, because such a tail
+ * is ALWAYS already covered by the previous chunk (the dropped chunk starts
+ * at s = (n−1)·STRIDE with total − s < OVERLAP, and the previous chunk
+ * reaches min(s + OVERLAP, total) = total). The rule also guarantees every
+ * surviving seam has the FULL overlap: the last chunk being ≥ OVERLAP long
+ * forces the previous chunk's end to s + OVERLAP exactly. Both proofs are
+ * asserted, not assumed, in voiceChunking.test.cjs.
  */
 function planVoiceSegments(totalSamples) {
   if (!Number.isInteger(totalSamples) || totalSamples < MIN_INPUT_SAMPLES) {
@@ -211,49 +279,60 @@ function planVoiceSegments(totalSamples) {
     plan.push({ start, end: Math.min(start + SEGMENT_SAMPLES, totalSamples) });
   }
   const last = plan[plan.length - 1];
-  if (plan.length > 1 && last.end - last.start < MIN_INPUT_SAMPLES) plan.pop();
+  if (plan.length > 1 && last.end - last.start < OVERLAP_SAMPLES) plan.pop();
   return plan;
 }
 
-/** The full-segment crossfade window, shared with stemSegmentation (linear
- * ramps over OVERLAP at both ends; adjacent ramps sum to exactly 1). Chunks
- * shorter than SEGMENT read a truncated view of it, exactly as stemHost does. */
-function makeVoiceWindow() {
-  return makeWindow(SEGMENT_SAMPLES, OVERLAP_SAMPLES);
+/** Where the crossfade between plan[i] and plan[i+1] begins (global sample). */
+function crossfadeStart(plan, i) {
+  return plan[i + 1].start + CROSSFADE_OFFSET;
 }
 
-/** Mono overlap-add state — stemSegmentation.createAccumulator with one block. */
+/** Splice state: the assembled output plus the progressive-flush cursor. No
+ * weight track — outside a crossfade exactly one chunk contributes at
+ * weight 1, so interiors are bit-exact copies. */
 function createVoiceAccumulator(totalSamples) {
-  return {
-    total: totalSamples,
-    out: new Float32Array(totalSamples),
-    weight: new Float32Array(totalSamples),
-    flushed: 0,
-  };
+  return { total: totalSamples, out: new Float32Array(totalSamples), flushed: 0 };
 }
 
-/** out[start:end] += data·window; weight[start:end] += window — the reference
- * accumulation, mono. `data` must cover at least `seg.end − seg.start`. */
-function accumulateVoiceSegment(acc, seg, data, window) {
+/**
+ * Adds chunk `i`'s converted samples into the splice. Piecewise, in global
+ * coordinates:
+ *   entry crossfade  [xfStart(i−1), +CROSSFADE)  — sin-weighted add
+ *   body             up to xfStart(i) (or total) — exact copy
+ *   exit crossfade   [xfStart(i), +CROSSFADE)    — cos-weighted add
+ * Everything else of the chunk (discard margins, coverage past its seams) is
+ * dropped. sin/cos use the half-sample midpoint (k+0.5)/CROSSFADE, so the two
+ * sides' POWERS sum to exactly 1 at every sample — the constant-power law the
+ * measured decorrelation calls for (module header).
+ */
+function accumulateVoiceSegment(acc, plan, i, data) {
+  const seg = plan[i];
   const clen = seg.end - seg.start;
   if (data.length < clen) {
     throw new Error(`accumulateVoiceSegment: data length ${data.length} < segment length ${clen}`);
   }
   const out = acc.out;
-  const weight = acc.weight;
-  for (let t = 0; t < clen; t++) {
-    out[seg.start + t] += data[t] * window[t];
-    weight[seg.start + t] += window[t];
+  const contributeFrom = i > 0 ? crossfadeStart(plan, i - 1) : seg.start;
+  const contributeTo = i + 1 < plan.length ? crossfadeStart(plan, i) + CROSSFADE_SAMPLES : seg.end;
+  for (let t = contributeFrom; t < contributeTo; t++) {
+    let w = 1;
+    if (i > 0 && t < contributeFrom + CROSSFADE_SAMPLES) {
+      w = Math.sin((Math.PI / 2) * ((t - contributeFrom + 0.5) / CROSSFADE_SAMPLES));
+    } else if (i + 1 < plan.length && t >= contributeTo - CROSSFADE_SAMPLES) {
+      w = Math.cos((Math.PI / 2) * ((t - (contributeTo - CROSSFADE_SAMPLES) + 0.5) / CROSSFADE_SAMPLES));
+    }
+    out[t] += data[t - seg.start] * w;
   }
 }
 
-/** First sample NOT final after segment i — stemSegmentation.finalizedEnd. */
+/** First sample NOT final after chunk i: the next seam's crossfade needs the
+ * next chunk, so everything before it is done; the last chunk ends the run. */
 function voiceFinalizedEnd(plan, i, totalSamples) {
-  return i + 1 < plan.length ? plan[i + 1].start : totalSamples;
+  return i + 1 < plan.length ? crossfadeStart(plan, i) : totalSamples;
 }
 
-/** Normalises and emits [acc.flushed, upTo) — progressive
- * `out /= max(weight, 1e-8)`. Returns {offset, samples, data} or null. */
+/** Emits [acc.flushed, upTo) — a plain copy; splicing already happened. */
 function extractVoiceFinalized(acc, upTo) {
   if (upTo > acc.total) {
     throw new Error(`extractVoiceFinalized: upTo ${upTo} past total ${acc.total}`);
@@ -261,10 +340,7 @@ function extractVoiceFinalized(acc, upTo) {
   const offset = acc.flushed;
   const samples = upTo - offset;
   if (samples <= 0) return null;
-  const data = new Float32Array(samples);
-  for (let t = 0; t < samples; t++) {
-    data[t] = acc.out[offset + t] / Math.max(acc.weight[offset + t], WEIGHT_EPSILON);
-  }
+  const data = acc.out.slice(offset, upTo);
   acc.flushed = upTo;
   return { offset, samples, data };
 }
@@ -272,7 +348,7 @@ function extractVoiceFinalized(acc, upTo) {
 /** Zero-pads `x` up to the next HOP multiple (returns `x` itself when it
  * already is one), so the converter's output (frames·HOP samples) covers the
  * chunk completely. The pad is at most HOP−1 = 255 zero samples (11.6 ms)
- * whose converted tail is discarded by the accumulator's `clen` bound. */
+ * whose converted tail is discarded by the accumulator's bounds. */
 function padToHopMultiple(x) {
   const rem = x.length % HOP_LENGTH;
   if (rem === 0) return x;
@@ -289,15 +365,17 @@ module.exports = {
   REFLECT_PAD,
   MIN_INPUT_SAMPLES,
   SEGMENT_SAMPLES,
+  EDGE_DISCARD_SAMPLES,
+  CROSSFADE_SAMPLES,
   OVERLAP_SAMPLES,
   STRIDE_SAMPLES,
-  WEIGHT_EPSILON,
+  CROSSFADE_OFFSET,
   framesForSamples,
   makeFft,
   spectrogram,
   toFramesBins,
   planVoiceSegments,
-  makeVoiceWindow,
+  crossfadeStart,
   createVoiceAccumulator,
   accumulateVoiceSegment,
   voiceFinalizedEnd,
