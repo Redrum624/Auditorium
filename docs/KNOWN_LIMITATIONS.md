@@ -73,8 +73,15 @@ plus a sample-accurate private `AUDITORIUM_MARKERS` tag, and reopening the
 file restores them exactly.
 
 **Intended behavior:** No further work planned — Opus-in-Ogg is the correct
-modern default. A native Vorbis encoder (to keep Vorbis sources as Vorbis) is a
-possible future refinement but not needed for round-tripping.
+modern default. A native Vorbis encoder (to keep Vorbis sources as Vorbis) was
+**dropped 2026-08-09 (R5), on measurement, not preference**: the shipped
+runtime's `AudioEncoder.isConfigSupported` was probed directly and reports
+**vorbis: not supported** (mp3, flac and pcm likewise; only **opus** and
+**aac** can be encoded). WebCodecs therefore cannot provide it, and "add a
+native Vorbis encoder" would mean implementing the Vorbis I specification in
+TypeScript — MDCT, floor and residue codebooks, the lot — a multi-week
+project, not a wishlist tidy-up. Do not re-open this on the assumption that
+the platform encoder would do it; it will not.
 
 ## Markers persist in every container, remap under edits, and are undoable (resolved)
 
@@ -187,15 +194,20 @@ quietly. v3 sessions load exactly like v1/v2 wrote them; v1/v2 files still
 open normally.
 
 **Remaining limitation:** a **legacy v1/v2** session file whose JSON already
-exceeds the JS string cap (built by a pre-v1.4 Auditorium, or by another tool)
-still cannot be loaded — Open Session now reports a clear error instead of
-crashing, but the file itself is unreadable either way. Resaving as v3 (once
-it can be opened at all) avoids the ceiling entirely, since v3 never builds
-that string. There is no migration path for a legacy session that is already
-too large to open.
+exceeds the JS string cap still cannot be loaded — Open Session reports a
+clear error instead of crashing, but the file itself is unreadable either way.
+Resaving as v3 (once it can be opened at all) avoids the ceiling entirely,
+since v3 never builds that string.
 
-**Intended behavior:** No further work planned for v3 itself; a v1/v2-specific
-recovery tool (partial-parse salvage) is not planned.
+**Intended behavior:** No further work planned for v3 itself. A v1/v2-specific
+recovery tool (partial-parse salvage) is **moot, not merely unplanned**
+(closed 2026-08-08, R2-4): the legacy *writer* built the very same single JS
+string the reader decodes — `serializeSession` base64-encoded each document
+and `JSON.stringify`-ed the result into one string of the same length — so
+writer and reader hit the identical V8 string cap. Any legacy `.audm` this
+app successfully wrote is by construction readable; an over-cap legacy file
+can only have come from another tool, and there is nothing of Auditorium's to
+salvage. (The over-cap error path is pinned by test.)
 
 ## Closing while busy asks instead of force-quitting
 
