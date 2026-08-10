@@ -1,3 +1,4 @@
+import { bs775Applicable, downmixBs775, type DownmixLaw } from '../dsp/downmix';
 import { decodeWav, type WavMarker } from './wavCodec';
 import { sniffSampleRate } from './sniffSampleRate';
 
@@ -51,6 +52,33 @@ export function downmixToStereo(channels: Float32Array[]): Float32Array[] {
     R[i] = clamp1(channels[1][i] + mix);
   }
   return [L, R];
+}
+
+/**
+ * R6 — the user-selectable stereo downmix, in one place so every consumer
+ * agrees on the fallback rule:
+ *
+ *  - `'fold'` → exactly {@link downmixToStereo}, byte-identical to the app's
+ *    original law. This is the DEFAULT: a user who re-opens or re-converts a
+ *    multichannel file without opting in gets the same samples as before.
+ *  - `'bs775'` WITH a layout the matrix covers ({@link bs775Applicable}) →
+ *    the ITU-R BS.775-3 Annex 4 2/0 matrix (see dsp/downmix.ts for the
+ *    coefficients and their citation).
+ *  - `'bs775'` WITHOUT one → falls back to `'fold'`. BS.775 needs to know
+ *    which channel is centre/LFE/surround; applying it to an unknown order
+ *    would misplace content with no error. A crude fold beats a silently
+ *    wrong matrix. UI surfaces (ConvertDialog) disable the BS.775 option in
+ *    exactly this case so the law in force is always the one displayed.
+ */
+export function downmixToStereoWithLaw(
+  channels: Float32Array[],
+  law: DownmixLaw,
+  channelMask?: number
+): Float32Array[] {
+  if (law === 'bs775' && bs775Applicable(channelMask, channels.length)) {
+    return downmixBs775(channels, channelMask as number);
+  }
+  return downmixToStereo(channels);
 }
 
 /**

@@ -12,11 +12,12 @@ jest.mock('../../services/documentTools', () => ({
 const mockRate = convertSampleRate as jest.MockedFunction<typeof convertSampleRate>;
 const mockChannels = convertChannels as jest.MockedFunction<typeof convertChannels>;
 
-function seedActiveDoc(sampleRate = 44100, channelCount = 2) {
+function seedActiveDoc(sampleRate = 44100, channelCount = 2, channelMask?: number) {
   const doc = createDocument({
     name: 'song.wav',
     sampleRate,
     channels: Array.from({ length: channelCount }, () => new Float32Array(8)),
+    channelMask,
   });
   useAppStore.getState().addDocument(doc);
   return doc;
@@ -95,5 +96,66 @@ describe('G5 glass header', () => {
     render(<ConvertDialog mode="sampleRate" onClose={() => {}} />);
     expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
     expect(screen.getByText('song.wav')).toBeInTheDocument();
+  });
+});
+
+describe('R6 surround downmix law select', () => {
+  const MASK_5_1 = 0x3f;
+
+  it('is absent for mono/stereo documents (nothing to fold)', () => {
+    seedActiveDoc(44100, 2);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    expect(screen.queryByTestId('convert-downmix')).not.toBeInTheDocument();
+  });
+
+  it('appears for a >2-channel document targeting stereo, defaulting to the original fold', () => {
+    seedActiveDoc(44100, 6, MASK_5_1);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    const select = screen.getByTestId('convert-downmix') as HTMLSelectElement;
+    expect(select.value).toBe('fold');
+  });
+
+  it('disappears when the target is switched to mono (mono conversion keeps the legacy path)', () => {
+    seedActiveDoc(44100, 6, MASK_5_1);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    fireEvent.change(screen.getByTestId('convert-channels'), { target: { value: '1' } });
+    expect(screen.queryByTestId('convert-downmix')).not.toBeInTheDocument();
+  });
+
+  it('applies the chosen BS.775 law when the document carries a covered layout', () => {
+    const doc = seedActiveDoc(44100, 6, MASK_5_1);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    fireEvent.change(screen.getByTestId('convert-downmix'), { target: { value: 'bs775' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(mockChannels).toHaveBeenCalledWith(doc.id, 2, 'bs775');
+  });
+
+  it('applies the fold by default (opt-in ruling: no law change without an explicit pick)', () => {
+    const doc = seedActiveDoc(44100, 6, MASK_5_1);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    expect(mockChannels).toHaveBeenCalledWith(doc.id, 2, 'fold');
+  });
+
+  it('disables the BS.775 option when the document has no channel mask, and says the fold applies', () => {
+    seedActiveDoc(44100, 6);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    const option = screen.getByRole('option', { name: /BS\.775/ }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+    expect(screen.getByTestId('convert-downmix-hint').textContent).toMatch(/fold applies/);
+  });
+
+  it('disables the BS.775 option for a layout the matrix does not cover (7.1)', () => {
+    seedActiveDoc(44100, 8, 0x63f);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    const option = screen.getByRole('option', { name: /BS\.775/ }) as HTMLOptionElement;
+    expect(option.disabled).toBe(true);
+  });
+
+  it('states the BS.775 behaviour (LFE discarded) once that law is selected', () => {
+    seedActiveDoc(44100, 6, MASK_5_1);
+    render(<ConvertDialog mode="channels" onClose={() => {}} />);
+    fireEvent.change(screen.getByTestId('convert-downmix'), { target: { value: 'bs775' } });
+    expect(screen.getByTestId('convert-downmix-hint').textContent).toMatch(/LFE is discarded/);
   });
 });

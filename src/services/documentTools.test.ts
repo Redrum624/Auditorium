@@ -1,6 +1,8 @@
 import { convertSampleRate, convertChannels } from './documentTools';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
+import { downmixToStereo } from '../audio/decodeAudio';
+import { downmixBs775 } from '../dsp/downmix';
 import { undo } from './undoHistory';
 
 function activeDoc() {
@@ -14,8 +16,13 @@ function sine(freq: number, n: number, sr: number, amplitude = 0.5): Float32Arra
   return out;
 }
 
-function seedDoc(opts: { sampleRate: number; channels: Float32Array[] }) {
-  const doc = createDocument({ name: 'clip.wav', sampleRate: opts.sampleRate, channels: opts.channels });
+function seedDoc(opts: { sampleRate: number; channels: Float32Array[]; channelMask?: number }) {
+  const doc = createDocument({
+    name: 'clip.wav',
+    sampleRate: opts.sampleRate,
+    channels: opts.channels,
+    channelMask: opts.channelMask,
+  });
   useAppStore.getState().addDocument(doc);
   return doc;
 }
@@ -154,5 +161,87 @@ describe('convertChannels', () => {
     expect(restored.channels).toHaveLength(2);
     expect(Array.from(restored.channels[0])).toEqual(Array.from(l));
     expect(Array.from(restored.channels[1])).toEqual(Array.from(r));
+  });
+});
+
+describe('convertChannels — R6 multichannel downmix laws', () => {
+  const MASK_5_1 = 0x3f; // FL FR FC LFE BL BR
+  function seed51(channelMask?: number) {
+    return seedDoc({
+      sampleRate: 44100,
+      channels: [
+        Float32Array.from([0.1, -0.1]), // FL
+        Float32Array.from([0.2, -0.2]), // FR
+        Float32Array.from([0.3, 0.15]), // FC
+        Float32Array.from([0.9, 0.9]), // LFE
+        Float32Array.from([0.05, 0.1]), // BL
+        Float32Array.from([-0.05, 0.2]), // BR
+      ],
+      channelMask,
+    });
+  }
+
+  it('LEGACY PINNED: >2ch -> stereo WITHOUT a law still duplicates channel 0 (pre-R6 behaviour, byte-for-byte)', () => {
+    const doc = seed51(MASK_5_1);
+    convertChannels(doc.id, 2);
+    const after = activeDoc();
+    expect(after.channels).toHaveLength(2);
+    expect(Array.from(after.channels[0])).toEqual([0.1, -0.1].map(Math.fround));
+    expect(Array.from(after.channels[1])).toEqual([0.1, -0.1].map(Math.fround));
+  });
+
+  it("law 'fold' applies the app's original −3 dB fold (downmixToStereo) to a 5.1 document", () => {
+    const doc = seed51(MASK_5_1);
+    const expected = downmixToStereo(activeDoc().channels.map((c) => c.slice()));
+    convertChannels(doc.id, 2, 'fold');
+    const after = activeDoc();
+    expect(after.channels).toHaveLength(2);
+    expect(after.channels).toEqual(expected);
+  });
+
+  it("law 'bs775' with a covered layout applies the BS.775 matrix", () => {
+    const doc = seed51(MASK_5_1);
+    const expected = downmixBs775(
+      activeDoc().channels.map((c) => c.slice()),
+      MASK_5_1
+    );
+    convertChannels(doc.id, 2, 'bs775');
+    expect(activeDoc().channels).toEqual(expected);
+  });
+
+  it("law 'bs775' WITHOUT a layout falls back to the fold — the honest degradation", () => {
+    const doc = seed51(undefined);
+    const expected = downmixToStereo(activeDoc().channels.map((c) => c.slice()));
+    convertChannels(doc.id, 2, 'bs775');
+    expect(activeDoc().channels).toEqual(expected);
+  });
+
+  it('any channel conversion clears channelMask (the mask describes the source channel set)', () => {
+    const doc = seed51(MASK_5_1);
+    convertChannels(doc.id, 2, 'bs775');
+    expect(activeDoc().channelMask).toBeUndefined();
+  });
+
+  it('undo restores the six channels AND the channelMask', () => {
+    const doc = seed51(MASK_5_1);
+    const before = activeDoc().channels.map((c) => c.slice());
+    convertChannels(doc.id, 2, 'bs775');
+    expect(activeDoc().channels).toHaveLength(2);
+    undo(doc.id);
+    const restored = activeDoc();
+    expect(restored.channels).toHaveLength(6);
+    expect(restored.channels).toEqual(before);
+    expect(restored.channelMask).toBe(MASK_5_1);
+  });
+
+  it("a plain stereo doc ignores the law argument (n <= 2 has nothing to fold): mono target still averages", () => {
+    const doc = seedDoc({
+      sampleRate: 44100,
+      channels: [Float32Array.from([0.2, 0.4]), Float32Array.from([0.0, 0.2])],
+    });
+    convertChannels(doc.id, 1, 'bs775');
+    const after = activeDoc();
+    expect(after.channels).toHaveLength(1);
+    expect(after.channels[0][0]).toBeCloseTo(0.1, 6);
   });
 });

@@ -1,4 +1,5 @@
-import { decodeArrayBuffer, downmixToStereo } from './decodeAudio';
+import { decodeArrayBuffer, downmixToStereo, downmixToStereoWithLaw } from './decodeAudio';
+import { downmixBs775 } from '../dsp/downmix';
 import { buildExtensibleWav } from './__fixtures__/extensibleWav';
 import { encodeWav } from './wavCodec';
 
@@ -156,5 +157,54 @@ describe('downmixToStereo', () => {
     // 0.9 + 0.7071*1 > 1 -> clamped to 1.
     expect(L[0]).toBe(1);
     expect(R[0]).toBeCloseTo(-0.9 + Math.SQRT1_2, 5);
+  });
+});
+
+describe('downmixToStereoWithLaw (R6 — the selectable law, one dispatcher)', () => {
+  const surround51 = () => [
+    Float32Array.from([0.1, -0.1]), // FL
+    Float32Array.from([0.2, -0.2]), // FR
+    Float32Array.from([0.3, 0.15]), // FC
+    Float32Array.from([0.9, 0.9]), // LFE
+    Float32Array.from([0.05, 0.1]), // BL
+    Float32Array.from([-0.05, 0.2]), // BR
+  ];
+  const MASK_5_1 = 0x3f;
+  const MASK_7_1 = 0x63f;
+
+  it("law 'fold' is byte-identical to downmixToStereo — the pinned default", () => {
+    const channels = surround51();
+    expect(downmixToStereoWithLaw(channels, 'fold', MASK_5_1)).toEqual(downmixToStereo(surround51()));
+  });
+
+  it("law 'bs775' with a covered layout applies the BS.775 matrix", () => {
+    const channels = surround51();
+    expect(downmixToStereoWithLaw(channels, 'bs775', MASK_5_1)).toEqual(
+      downmixBs775(surround51(), MASK_5_1)
+    );
+  });
+
+  it("law 'bs775' with NO layout falls back to the fold — never guesses a channel order", () => {
+    const channels = surround51();
+    expect(downmixToStereoWithLaw(channels, 'bs775', undefined)).toEqual(downmixToStereo(surround51()));
+  });
+
+  it("law 'bs775' with an UNSUPPORTED layout (7.1) falls back to the fold", () => {
+    const channels = [...surround51(), Float32Array.from([0.4, 0.4]), Float32Array.from([-0.4, -0.4])];
+    const twin = channels.map((c) => c.slice());
+    expect(downmixToStereoWithLaw(channels, 'bs775', MASK_7_1)).toEqual(downmixToStereo(twin));
+  });
+
+  it('the two laws genuinely differ on 5.1 content (the option is not cosmetic)', () => {
+    const bs = downmixToStereoWithLaw(surround51(), 'bs775', MASK_5_1);
+    const fold = downmixToStereoWithLaw(surround51(), 'fold', MASK_5_1);
+    expect(bs).not.toEqual(fold);
+  });
+
+  it('mono and stereo pass through unchanged under either law', () => {
+    const mono = [Float32Array.from([0.5])];
+    const stereo = [Float32Array.from([0.5]), Float32Array.from([-0.5])];
+    expect(downmixToStereoWithLaw(mono, 'bs775', undefined)).toEqual(mono);
+    expect(downmixToStereoWithLaw(stereo, 'fold', undefined)).toEqual(stereo);
   });
 });

@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { ArrowLeftRight } from 'lucide-react';
+import { bs775Applicable, type DownmixLaw } from '../../dsp/downmix';
 import type { ConvertMode } from '../../services/dialogBus';
 import { convertChannels, convertSampleRate } from '../../services/documentTools';
 import { useAppStore } from '../../stores/appStore';
@@ -38,14 +39,30 @@ export default function ConvertDialog({
     const doc = s.documents.find((d) => d.id === s.activeDocumentId);
     return doc?.channels.length === 1 ? 1 : 2;
   });
+  // R6: the selectable downmix law for a MULTICHANNEL (>2ch) doc -> stereo.
+  // Defaults to the app's original fold; BS.775 is opt-in and only offered
+  // when the document carries a layout the matrix covers — otherwise the
+  // option is disabled so the law in force is always the one displayed.
+  const [downmixLaw, setDownmixLaw] = useState<DownmixLaw>('fold');
+  const sourceChannels = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.channels.length ?? 0
+  );
+  const sourceMask = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.channelMask
+  );
+  const multichannel = sourceChannels > 2;
+  const bs775Ok = bs775Applicable(sourceMask, sourceChannels);
 
   const isRateMode = mode === 'sampleRate';
   const title = isRateMode ? 'Convert Sample Rate' : 'Convert Channels';
+  const showDownmix = !isRateMode && multichannel && channelCount === 2;
 
   const apply = () => {
     if (!activeDocumentId) return;
     if (isRateMode) {
       convertSampleRate(activeDocumentId, sampleRate);
+    } else if (showDownmix) {
+      convertChannels(activeDocumentId, channelCount, downmixLaw);
     } else {
       convertChannels(activeDocumentId, channelCount);
     }
@@ -89,6 +106,33 @@ export default function ConvertDialog({
               <option value={1}>Mono</option>
               <option value={2}>Stereo</option>
             </GlassSelect>
+            {showDownmix && (
+              <div className="mt-3">
+                <FieldLabel htmlFor="convert-downmix">Surround downmix</FieldLabel>
+                <GlassSelect
+                  id="convert-downmix"
+                  data-testid="convert-downmix"
+                  value={downmixLaw}
+                  onChange={(e) => setDownmixLaw(e.target.value === 'bs775' ? 'bs775' : 'fold')}
+                >
+                  <option value="fold">Fold extras at −3 dB (default)</option>
+                  <option value="bs775" disabled={!bs775Ok}>
+                    ITU-R BS.775 surround matrix{bs775Ok ? '' : ' — needs a known layout'}
+                  </option>
+                </GlassSelect>
+                <p
+                  className="mt-1 text-xs"
+                  style={{ color: 'var(--glass-text-muted)' }}
+                  data-testid="convert-downmix-hint"
+                >
+                  {downmixLaw === 'bs775' && bs775Ok
+                    ? 'Centre and surrounds fold in at −3 dB per ITU-R BS.775; LFE is discarded.'
+                    : bs775Ok
+                      ? 'All extra channels average into both sides at −3 dB.'
+                      : 'This file does not carry a supported speaker layout, so the −3 dB fold applies.'}
+                </p>
+              </div>
+            )}
           </div>
         )}
 

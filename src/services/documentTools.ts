@@ -1,4 +1,6 @@
 import { mixDown } from '../audio/AudioDocument';
+import { downmixToStereoWithLaw } from '../audio/decodeAudio';
+import type { DownmixLaw } from '../dsp/downmix';
 import { resampleChannel } from '../dsp/resample';
 import { useAppStore } from '../stores/appStore';
 import { applyEdit } from './editOps';
@@ -41,8 +43,18 @@ export function convertSampleRate(docId: string, toRate: number): void {
  * Converts the document to `to` channels: stereo -> mono averages the two
  * channels; mono -> stereo duplicates the single channel. Length is preserved,
  * so the selection/cursor are left untouched. No-op when the count already matches.
+ *
+ * R6: for a MULTICHANNEL (>2ch) document converting to stereo, `downmix`
+ * selects the law — 'fold' (the app's original −3 dB fold of the extras,
+ * `downmixToStereo`) or 'bs775' (the ITU-R BS.775-3 matrix; requires the
+ * document's channelMask to describe a supported layout, else it falls back
+ * to 'fold' — see `downmixToStereoWithLaw`). When `downmix` is OMITTED the
+ * legacy behaviour is preserved byte-for-byte, including the historical
+ * >2ch -> stereo path (duplicate channel 0) — the new laws are strictly
+ * opt-in via the ConvertDialog. Any conversion drops `channelMask`: the mask
+ * describes the source file's channel set, not the converted one.
  */
-export function convertChannels(docId: string, to: 1 | 2): void {
+export function convertChannels(docId: string, to: 1 | 2, downmix?: DownmixLaw): void {
   const doc = useAppStore.getState().documents.find((d) => d.id === docId);
   if (!doc || doc.channels.length === to) return;
 
@@ -50,10 +62,13 @@ export function convertChannels(docId: string, to: 1 | 2): void {
     let channels: Float32Array[];
     if (to === 1) {
       channels = [mixDown(d.channels)];
+    } else if (d.channels.length > 2 && downmix) {
+      // Always >2 channels here, so both laws return freshly-allocated pairs.
+      channels = downmixToStereoWithLaw(d.channels, downmix, d.channelMask);
     } else {
       const src = d.channels[0] ?? new Float32Array(0);
       channels = [src.slice(), src.slice()];
     }
-    return { ...d, channels, dirty: true };
+    return { ...d, channels, channelMask: undefined, dirty: true };
   });
 }
