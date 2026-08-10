@@ -5,6 +5,63 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.15.0] - 2026-08-09
+
+**Properly-written surround WAVs did not open at all** — any 5.1/7.1 file whose writer
+followed the WAV spec was rejected with `Unsupported WAV audio format code: 65534`. That
+rejection is fixed, the file's speaker layout is now read alongside the audio, and the
+layout unblocks this release's feature: a user-selectable surround-to-stereo downmix
+(ITU-R BS.775) in Convert Channels. A second, quieter data-loss fix rides along: Convert
+Channels on a multichannel document used to keep only the front-left channel.
+
+### Fixed
+
+- **Spec-conforming 5.1/7.1 WAVs were rejected outright with "Unsupported WAV audio
+  format code: 65534" (R6).** Symptom: File > Open failed on any multichannel WAV from a
+  conforming writer (ffmpeg, Audacity, DAW exports…) — if you hit that exact message,
+  this is the fix. Cause: such files carry format tag 0xFFFE (`WAVE_FORMAT_EXTENSIBLE`),
+  mandatory per spec for more than two channels, and `validateFmt` accepted only tags 1
+  (PCM) and 3 (IEEE float) — the wrapper tag was refused before the real sample format
+  inside the extension was ever read. The only multichannel WAVs that opened were
+  out-of-spec plain-tag ones, i.e. precisely the files carrying no layout information.
+  Fix: the fmt parser resolves the real format from the SubFormat GUID (KSDATAFORMAT
+  suffix verified), validates bit depth against the RESOLVED format, and reads
+  `dwChannelMask` as the document's optional speaker layout — mask 0 is legal
+  "unspecified" and stays absent; a mask whose bit count disagrees with the channel
+  count is dropped rather than half-trusted; a truncated extension is rejected cleanly
+  (decoding without the GUID would mean guessing int32-PCM vs float32);
+  `wValidBitsPerSample` is advisory (valid bits are left-justified per spec, so
+  container-scale decode is exact). No previously-openable file changes its decoded
+  output — pinned by plain-tag-twin tests. Affects: `src/audio/wavCodec.ts`,
+  `src/audio/decodeAudio.ts`, `src/services/fileService.ts`.
+- **Convert Channels on a multichannel document silently kept only the front-left
+  channel (R6).** Symptom: converting a 5.1 document to stereo produced dual-mono of
+  channel 0 — the centre (on a film mix, all the dialogue), the surrounds and the LFE
+  were discarded with no indication anywhere. That is data loss, not a downmix. Cause:
+  `convertChannels`' stereo target predates multichannel documents and simply duplicated
+  channel 0. Fix: the Convert Channels dialog performs a real downmix for >2-channel
+  documents — by default the app's documented −3 dB fold, so every channel is
+  represented in the output. (The historical duplicate-channel-0 behaviour survives only
+  for API callers that pass no law, pinned by test.) Affects:
+  `src/services/documentTools.ts`, `src/components/Dialogs/ConvertDialog.tsx`.
+
+### Added
+
+- **User-selectable surround downmix — ITU-R BS.775 (R6).** Why: the fixed fold treats
+  centre, surrounds and LFE identically; the broadcast standard does not. How to use:
+  `Edit → Convert Channels…` on a >2-channel document shows a "Surround downmix" select.
+  **The default is unchanged** (the original −3 dB fold, byte-identical to before);
+  BS.775 is **opt-in**: `L' = L + 0.7071·C + 0.7071·Ls`, `R' = R + 0.7071·C + 0.7071·Rs`
+  (Rec. ITU-R BS.775-3 (08/2012), Annex 4 Table 2, 2/0 row; 0.7071 = 1/√2), with LFE
+  discarded per the Recommendation (§5 Fig. 9, §7) and the output hard-clamped to ±1
+  like every other render path. It **requires a known layout**: the option is enabled
+  only when the file carried a speaker mask the matrix covers (5.1 back or side
+  variants, 5.0, quad, 3/0, 2.1); an unknown or uncovered layout (7.1, height channels,
+  inconsistent masks) falls back to the fold — and the dialog says which law is in
+  force — because a wrong matrix misplaces content silently while a crude one is merely
+  crude. Affects: `src/dsp/downmix.ts` (new), `src/audio/decodeAudio.ts`,
+  `src/services/documentTools.ts`, `src/components/Dialogs/ConvertDialog.tsx`.
+
 ## [1.14.0] - 2026-08-09
 
 **Every finalized WebM/Matroska file over 512 KB was silently playing at the wrong

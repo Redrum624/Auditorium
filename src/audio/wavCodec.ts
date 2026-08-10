@@ -362,6 +362,11 @@ export function decodeWav(buf: ArrayBuffer): {
         // 3 = IEEE float). Resolve it and validate bit depth against the
         // RESOLVED format below — never against the 0xFFFE wrapper tag.
         fmt.audioFormat = guid[0] | (guid[1] << 8);
+        // NOTE: `mask !== 0` is intent-documentation, not reachable behaviour —
+        // popcount32(0) is 0 and can never equal a channel count that survives
+        // validateFmt (>= 1). It stays because the spec rule it states ("a mask
+        // of 0 means unspecified") is load-bearing for readers; do not "fix" it
+        // into something reachable or delete it as dead code.
         if (mask !== 0 && popcount32(mask) === fmt.numChannels) {
           channelMask = mask;
         }

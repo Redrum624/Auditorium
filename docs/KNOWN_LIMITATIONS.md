@@ -34,14 +34,54 @@ layouts for 18+ hours of material while a tiny-element flood stays
 microsecond-bounded). Deep `moov` (after a large `mdat`, the non-faststart
 layout) needed no change — the size-driven MP4 walk already reached it, now
 pinned by test. Only genuinely unrecognized container layouts still fall back
-to **48000 Hz**. Audio with more than two channels is down-mixed to stereo —
-the extra channels (index ≥ 2) are folded into both L and R at −3 dB rather
-than dropped: `mix = 0.7071·mean(ch2…chN-1)`, `L' = clamp(ch0 + mix, ±1)`,
-`R' = clamp(ch1 + mix, ±1)`.
+to **48000 Hz**. NON-WAV audio with more than two channels is down-mixed to
+stereo at import — the extra channels (index ≥ 2) are folded into both L and R
+at −3 dB rather than dropped: `mix = 0.7071·mean(ch2…chN-1)`,
+`L' = clamp(ch0 + mix, ±1)`, `R' = clamp(ch1 + mix, ±1)`. That import-time fold
+is irreversible (it runs before the document exists) and its law is fixed —
+the Web Audio decode path exposes no speaker layout, so the layout-aware
+matrix below can never apply there. Multichannel **WAVs** are different: they
+open with ALL channels retained (as of v1.15 including spec-conforming
+`WAVE_FORMAT_EXTENSIBLE` 5.1/7.1 files, whose `dwChannelMask` speaker layout
+is read with them), and the downmix is an explicit, undoable
+`Edit → Convert Channels…` action with a **user-selectable law** — the
+original fold (default) or ITU-R BS.775 when the layout is known (v1.15, R6).
 
 **Intended behavior:** For unsniffable formats, add per-container parsers as
-needed; the current fallback is a bounded, safe default. The downmix is a fixed
-−3 dB fold; a user-selectable surround downmix matrix could follow.
+needed; the current fallback is a bounded, safe default. The user-selectable
+surround downmix matrix shipped in v1.15 for WAV documents; the import-time
+fold for non-WAV multichannel remains fixed because no layout metadata exists
+on that path to key a matrix from.
+
+## Surround layout is read on open but not yet written on save
+
+**Area:** WAV encoder (`src/audio/wavCodec.ts` `encodeWav`), sessions
+(`src/multitrack/sessionFile.ts`), downmix (`src/dsp/downmix.ts`,
+`src/components/Dialogs/ConvertDialog.tsx`)
+
+**v1.15 behavior (R6):** Three deferred edges of the new channel-layout
+support, all fail-safe (the BS.775 option degrades to disabled; audio is never
+misfolded):
+
+1. **WAV saves still write the plain format tag, so the speaker mask is lost
+   on a round-trip.** The encoder predates layout support and emits a
+   44-byte plain-tag header for any channel count. Open a 5.1
+   `WAVE_FORMAT_EXTENSIBLE` file → Save → reopen, and the reopened document
+   has its six channels but no `dwChannelMask`; the BS.775 downmix option
+   shows disabled ("needs a known layout") for it. Writer-side EXTENSIBLE
+   support (fmt-40 with the mask for >2-channel documents) is the natural
+   follow-up.
+2. **`.audm` sessions do not persist the mask.** Session files re-embed
+   documents as plain-tag WAV, so a session save/load drops the layout the
+   same way. Persisting it means a session-format field addition.
+3. **7.1 deliberately falls back to the fold.** BS.775-3's Annex 4 table
+   covers the 3/2 family (up to L/R/C + one surround pair, ±LFE); a 3/4
+   layout such as 7.1 is not in the cited table, and an uncited two-stage
+   7.1→5.1→2/0 chain was not invented. A 7.1 file opens fine and downmixes
+   with the fold; the dialog states which law is in force.
+
+**Intended behavior:** Items 1–2 are planned follow-ups (write the mask where
+we read it); item 3 stays until a citable 3/4 downmix is adopted.
 
 ## Ogg sources re-encode in place as Opus-in-Ogg (resolved)
 
