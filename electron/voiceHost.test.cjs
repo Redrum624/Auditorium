@@ -42,6 +42,15 @@ const {
   MAX_REFERENCE_SAMPLES,
 } = require('./voiceHost.cjs');
 
+// Several tests here drive the REAL chunk loop over a >30 s signal, which
+// means three real 661k-sample spectrograms (2,584 frames of 1024-point FFT
+// each) per run. That is seconds of genuine CPU, and under a full
+// `--maxWorkers=100%` suite it exceeds Jest's 5 s default — observed as the
+// cancel test timing out in the full gate while passing when the file runs
+// alone. The work is the point (a fake that skipped the spectrogram would not
+// exercise the loop), so the timeout is raised rather than the fixture shrunk.
+jest.setTimeout(60 * 1000);
+
 const EXTRACTOR_PATH = '/models/voice/tone_extract.onnx';
 const CONVERTER_PATH = '/models/voice/tone_color.onnx';
 
