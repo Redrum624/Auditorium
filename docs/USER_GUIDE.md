@@ -192,7 +192,7 @@ is cleared when you capture a new one — or when you close the document it was
 captured from (the print belongs to audio that no longer exists). The Noise
 Reduction dialog notices a capture or clear immediately, even while open.
 
-## Tempo, remix, stems and transcription
+## Tempo, remix, stems, transcription and the voice changer
 
 These features are opt-in: nothing here runs until you ask for it, so opening a
 file never pays for an analysis you didn't want.
@@ -423,6 +423,62 @@ audio file or the `.audm`, and closing the document — or quitting — discards
 it without asking. **Export to SRT or WebVTT before you close** if you want to
 keep it; that file holds the same timestamps, speakers and text the panel
 shows.
+
+### Changing a voice
+
+`Edit → Voice Changer…` makes a recording sound like a different speaker while
+keeping the words and the delivery. Everything runs on your own CPU — no
+account, no upload.
+
+**Setting up a voice.** The dialog holds a list of **voice profiles**: saved
+reference voices you can reuse. Add one with **From file…** (any audio file) or
+**From selection** (whatever is selected in the open document, which is the
+quickest way to try a voice you already have on the timeline). A reference of
+roughly **6–15 seconds of clean speech** is what the model was measured on;
+much shorter gives it little to work with, and it will not accept a reference
+longer than 350 seconds.
+
+**The consent affirmation.** Before a reference clip can be saved — and again
+before any conversion runs — you have to tick the statement that you have the
+right to use that voice. It is never pre-ticked, and the Convert button stays
+refused until it is set. This is deliberate and it is not a formality: the
+conversion is good enough to impersonate a real person, and since any recording
+can be a reference, the decision that matters is which clip you point it at.
+
+**Converting.** Pick a profile, tick the affirmation, and press **Convert**.
+The first run downloads a 161 MB model set (shown with byte progress); after
+that it is instant to start. Progress reports the resampling, embedding and
+conversion phases with a time estimate, and **Cancel** kills the inference
+process outright rather than waiting for it to finish. The result arrives as a
+**new mono 22050 Hz document** named after the source and the profile — your
+original is untouched. Expect roughly **4× realtime** on a modern laptop CPU:
+a three-minute vocal takes about 45 seconds.
+
+**What to expect from the result.** It is a voice *change*, not a clone.
+Measured against an independent speaker-verification encoder over nine
+conversions to five real voices, the output landed closer to the target than to
+the source in 8 of 9 cases and never still verified as the source — but only
+about half cleared the threshold that would call it the *same* person as the
+target. So the honest expectation is "clearly someone else, recognisably in the
+target's direction".
+
+Two things follow from that, and they are the difference between a good result
+and a disappointing one:
+
+- **Pick a reference that sounds different from the source.** The effect is
+  proportional to the distance between the two voices. The one conversion that
+  failed to move was between two low male voices 1.7 semitones apart. If the
+  reference already sounds like the speaker you are converting, the change will
+  be subtle by nature, not by fault.
+- **Big pitch moves cost clarity.** Word error rate against the unconverted
+  source ran from 0 % up to 27 %, and the worst case was the largest jump
+  (+8.1 semitones). The sentence stayed recoverable in every test, but if the
+  words matter more than the disguise, choose a nearer target.
+
+**Practical notes:** a run is capped at **30 minutes** of audio; long
+recordings are processed in ~30-second chunks so memory stays flat rather than
+growing with the file; and profiles persist between sessions, so a voice you
+set up once is one click away next time.
 
 ## Views
 

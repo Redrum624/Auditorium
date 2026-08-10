@@ -5,6 +5,108 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.17.0] - 2026-08-10
+
+**Auditorium can now change a voice.** `Edit → Voice Changer…` re-timbres a
+recording so it sounds like a different speaker while keeping the words and the
+delivery, using OpenVoice V2's tone-colour converter on your own CPU — no
+cloud, no account, nothing leaves the machine. You give it a **reference clip**
+(a file, or a selection from an open document), save it as a reusable **voice
+profile**, and the conversion lands as a new document.
+
+**It is a voice change, not a clone — and here is the measurement.** Nine
+conversions across five real target voices spanning 1.3 octaves were scored
+with an independent speaker-verification encoder (not the model grading its own
+work). Mean cosine similarity to the **target** was **0.795** against **0.615**
+to the source, **8 of 9** landed closer to the target, and **none** still
+verified as the source. Three controls make that conclusive rather than
+suggestive: converting a voice to *itself* stayed inside the same-speaker band,
+so the round trip does not itself destroy identity; a full confusion matrix put
+each output nearest the voice actually requested, 8 of 9; and **pitch-matched
+rivals** — pairs of targets 0.2 and 1.7 semitones apart — still resolved
+correctly, so what moves is identity and not merely pitch.
+
+**Two limits worth knowing before you use it.** First, expect "clearly a
+different person, recognisably in the target's direction", not
+"indistinguishable from the target" — 5 of the 9 conversions cleared the
+positive same-speaker threshold and the rest landed in between. Second, **a
+target close to the source barely moves**: the single miss was two low male
+voices 1.7 semitones apart. The effect is proportional to the distance between
+the two voices, so a reference that already sounds like the source will read as
+a subtle change. Intelligibility holds throughout — word error rate ran
+**0–27 %** against the unconverted source, worst at a **+8.1-semitone** jump,
+and the sentence was always recoverable — but big pitch moves are where the
+words cost the most.
+
+**Choosing a reference clip asks you to affirm that you have the right to use
+that voice, and the conversion will not run until you do.** This is part of the
+design rather than a notice to dismiss. The model is good enough to impersonate
+— a 7.8 s clip of a public figure produced output scoring 0.831 against that
+speaker, above the same-speaker threshold — and because any voice can be a
+target, the choice that matters is the reference clip, so the affirmation sits
+exactly there. It is a statement you make, not a disclaimer you acknowledge,
+and it is never pre-ticked. Nothing is watermarked, uploaded or logged; the app
+is local-first and none of that would work offline anyway.
+
+### Added
+
+- **Voice Changer.** Why: the request was to make a recording sound like a
+  different speaker, and the spike above established that this model genuinely
+  does that rather than acting as a timbre tint. How to use: `Edit → Voice
+  Changer…`, accept the one-time 161 MB model download, add a reference clip
+  from a file or the current selection, affirm the consent statement, name it,
+  and convert. Affects: `electron/voiceChunking.cjs`, `electron/voiceHost.cjs`,
+  `electron/voiceManager.cjs`, `src/services/voiceService.ts`,
+  `src/components/Dialogs/VoiceChangerDialog.tsx`.
+- **Reusable voice profiles** — a saved name plus the reference clip's tone
+  embedding, kept across sessions, so a voice you set up once is one click away
+  next time. The embedding is computed over the **whole** reference clip in a
+  single pass, which the spike's sweep measured as better for identity than
+  averaging over segments on the 6–12 s clips people actually use.
+- **The v1.7 host arrangement, again**: the 161 MB two-file model set is
+  downloaded on first use, sha256-pinned and re-verified from disk before every
+  load; inference runs on the CPU in an isolated utility process with per-chunk
+  progress and a time estimate; Cancel kills the process outright rather than
+  asking it to stop. CPU only, deliberately — DirectML measured 13.9 of
+  16.4 GB of VRAM on a 350 s input, which is certain out-of-memory on an 8 GB
+  card, and CPU already runs at about 4× realtime.
+- **Long recordings are chunked at ~30 s**, so peak memory stays flat instead
+  of growing with the file (the graph converts a whole utterance in one run — a
+  20-minute file unchunked would need roughly 6.5 GB). Measured on a 70 s
+  input: 1,355 MB chunked against 1,730 MB unchunked, and still 1,351 MB when
+  the input is doubled. Conversion is capped at 30 minutes of audio in one run.
+
+### Changed
+
+- `Edit → Voice Changer…` joins the Edit menu alongside Transcribe and Separate
+  into Stems; it is enabled only when a document with audio is active.
+
+### Fixed
+
+- **Chunk seams were being blended out of each chunk's least reliable audio.**
+  Cause: the discard margin around every join was sized from the spectrogram's
+  own geometry — an analysis window overlaps its neighbours by two frames, so
+  512 samples looked like enough. The decoder's context reaches far further
+  than its analysis window does. Measured against the real model: a chunk's
+  output starts diverging from an unchunked run **26,265 samples** before its
+  end and is audibly wrong over the last ~10,000, and the 20 ms level at a
+  chunk's head is **−6.18 dB** in the first frame, only rejoining the interior
+  by ~15 frames. The margin was therefore about **32× too small**, and put both
+  sides of every crossfade inside the corrupted region. Fix: the margin is now
+  16,384 samples (64 frames), derived from those measurements, with the overlap
+  and stride following from it — 5.3 % extra inference on a path that runs at
+  4–4.9× realtime. After the fix a chunked run is **bit-identical** to an
+  unchunked one for the first 28.5 s, envelope correlation is 0.978, and the
+  worst level change at a seam is 1.46 dB. Affects:
+  `electron/voiceChunking.cjs`, `electron/voiceHost.cjs`.
+- **Every in-app time estimate for a conversion was wrong.** Cause: the
+  renderer keeps its own copy of the chunk-plan constants (it cannot load a
+  main-process `.cjs` at runtime) and the copy had been left behind by two
+  successive seam redesigns, so it modelled a stride the host had not used for
+  some time. Fix: corrected, and the test now loads the real module and
+  compares the two rather than restating the copy's own value back at itself.
+  Affects: `src/services/voiceService.ts`.
+
 ## [1.16.0] - 2026-08-10
 
 **Auditorium now transcribes speech, and labels who is speaking.** `Edit →

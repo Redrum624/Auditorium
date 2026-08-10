@@ -911,3 +911,109 @@ WebVTT from the panel before you close. That is a lossless record of exactly
 what the panel shows — timestamps, speaker labels and text — in a format other
 tools read. Re-importing it is not supported.
 
+
+## The voice changer changes a voice; it does not clone one, and a near target barely moves
+
+**Area:** F3 voice changer (`electron/voiceHost.cjs`, `electron/voiceChunking.cjs`,
+`electron/voiceManager.cjs`, `src/services/voiceService.ts`,
+`src/components/Dialogs/VoiceChangerDialog.tsx`).
+
+**Behavior a user will notice:** `Edit → Voice Changer…` produces audio that
+sounds like a different person, but usually not *specifically and
+unmistakably* the person in the reference clip. And when the reference already
+sounds like the source, the output can be almost indistinguishable from the
+input — which reads as "the feature did nothing" rather than as "these two
+voices are close together".
+
+**The measurement.** Nine conversions were run across two source recordings and
+five real target voices spanning 1.3 octaves, scored with Resemblyzer's GE2E
+d-vector — a speaker-verification encoder independent of OpenVoice, so the
+model is not grading its own work. Calibrated on the same material, the
+same-speaker band was 0.817–0.940 (mean 0.873) and the different-speaker band
+0.391–0.845 (mean 0.628), putting the midpoint threshold at 0.750.
+
+| Result | Value |
+|---|---|
+| Mean cosine to the **target** | **0.795** |
+| Mean cosine to the **source** | 0.615 |
+| Closer to the target than the source | **8 of 9** |
+| Still verifying as the **source** (> 0.750) | **0 of 9** |
+| Verifying positively as the **target** (> 0.750) | 5 of 9 |
+| Share of the source→target pitch gap covered | 94 % |
+
+So identity genuinely moves, and it moves toward the voice actually requested —
+a full confusion matrix put each output nearest its own target in 8 of 9 cases,
+and pitch-matched rival targets (0.2 and 1.7 semitones apart) still resolved
+correctly, which rules out "it is only shifting pitch". But only 5 of 9 cleared
+the positive same-speaker threshold. **The honest expectation is "clearly a
+different person, recognisably in the target's direction", not
+"indistinguishable from the target".**
+
+**The near-target case, specifically.** The single conversion that landed closer
+to the source than the target was `trump → dingzhen`: two low male voices
+**1.7 semitones** apart, where the output's median f0 did not move at all
+(0 % of the gap covered). The effect is proportional to the distance between
+source and target, so this is inherent to the approach rather than a bug.
+
+**Intelligibility is a real cost at large pitch moves.** Word error rate against
+a transcript of the *unconverted* source, measured with this repo's own
+Whisper-base:
+
+| Conversion | WER | Conversion | WER |
+|---|---:|---|---:|
+| self-conversion (both sources) | **0.0 %** | source A → trump | 9.1 % |
+| source A → azuma | 4.5 % | source A → dingzhen | 13.6 % |
+| source A → s2p2 | 13.6 % | source B → azuma / teio / s2p2 | 20.0 % |
+| source A → **teio (+8.1 st)** | **27.3 %** | source B → dingzhen | 0.0 % |
+
+Both self-conversion controls are a perfect 0 %, so the pipeline adds no
+intrinsic word damage — the degradation scales with the size of the pitch move.
+The sentence was recoverable in every case (the worst single error was
+"ask not" → "there's not"), but **27 % is the ceiling to plan around** if the
+words matter more than the disguise.
+
+**The workaround:** choose a reference voice that is genuinely distant from the
+source, and prefer a nearer one when clarity matters more than the degree of
+change. There is no setting to trade between the two — `tau` is fixed at
+OpenVoice's default 0.3, which the spike's sweep measured as best for identity
+on 6–12 s references.
+
+## A chunk seam is a blend of two different renditions, not a continuation of one
+
+**Area:** F3 voice changer (`electron/voiceChunking.cjs`, `electron/voiceHost.cjs`).
+
+**Behavior a user will notice:** almost nothing — but it is worth knowing why
+the output of a long conversion is not reproducible from its parts. Converting
+the same audio twice gives a bit-identical result, and converting a *file* is
+deterministic; but the audio after roughly the first 28.5 seconds is not the
+audio an unchunked conversion of the same file would have produced.
+
+**Why.** The exported decoder is deterministic but **not frame-shift-equivariant**:
+extending its analysis window to the left by a single 256-sample hop leaves the
+interior completely decorrelated (measured rms difference 0.349 against a signal
+rms of 0.186 — the difference is larger than the signal). A chunk that starts
+mid-file therefore renders the same words in the same voice with entirely
+different fine structure. Long inputs must be chunked — the graph converts a
+whole utterance in one run, so an unchunked 20-minute file would need roughly
+6.5 GB of RSS — and no overlap size can buy sample-level agreement with an
+unchunked run past the first chunk.
+
+**What is guaranteed instead**, and is asserted on every run of
+`electron/voiceIntegration.test.cjs` against the real model:
+
+- the first chunk's exclusive region is **bit-identical** to an unchunked run
+  (measured over 28.5 s, max difference exactly 0);
+- the 20 ms RMS envelopes of the chunked and unchunked runs correlate at
+  **0.978**, with total RMS agreeing to **0.038 dB**;
+- no 20 ms frame within a second of a seam departs from the unchunked run by
+  more than **1.46 dB** (bounded at 6 dB, which is just past the −5.6 dB worst
+  dip the rejected equal-gain seam design measured).
+
+Seams are constant-power (sin/cos) over 25 ms, placed 16,384 samples clear of
+each chunk edge because that is the measured reach of the decoder's context
+deficiency — the spectrogram's own 2-frame overlap suggests 512 samples, and
+that figure is wrong by a factor of 32.
+
+**Practical consequence:** peak memory stays flat with input length (measured
+1,355 MB on a 70 s input and 1,351 MB on double that, against 1,730 MB for the
+unchunked path on the 70 s input) at a cost of 5.3 % extra inference.
