@@ -3031,8 +3031,13 @@ async function main() {
       // positions come from the plan law restated above; each is compared
       // against the LOCAL level either side of it, so a dip or a boost
       // introduced by the join shows up regardless of what the material does.
-      // (A -1.9 dB mean / -5.6 dB worst dip is what the rejected equal-gain
-      // design measured, so the 6 dB bound is set just past it.)
+      // LOCAL deliberately: comparing against an unchunked run instead spreads
+      // +/-14.26 dB away from any seam, purely from the decoder's
+      // rendition-to-rendition decorrelation, and cannot see a seam at all.
+      // The bound catches a join that drops the signal or double-adds it. It
+      // does NOT discriminate constant power from equal gain at this crossfade
+      // length -- equal gain measures -0.87 dB here, which is not a defect --
+      // so no such claim is made for it. Measured 1.80 dB on this fixture.
       const { frames: env, size: frameSize } = rmsFrames20ms(converted, VC_RATE);
       const CROSSFADE_OFFSET = 16492; // discard margin + centring slack
       let worstSeamDb = 0;
@@ -3065,8 +3070,8 @@ async function main() {
           (worstSeamAt >= 0 ? ` (at sample ${worstSeamAt}, ${(worstSeamAt / VC_RATE).toFixed(1)}s)` : '')
       );
       assert(
-        Math.abs(worstSeamDb) < 6,
-        `no chunk seam leaves a level discontinuity (worst ${worstSeamDb.toFixed(2)} dB against a 6 dB bound)`
+        Math.abs(worstSeamDb) < 3.5,
+        `no chunk seam leaves a level discontinuity (worst ${worstSeamDb.toFixed(2)} dB against a 3.5 dB bound)`
       );
 
       // --- (d) Cancel against a live child, with the anti-vacuous guard ----
