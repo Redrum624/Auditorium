@@ -841,8 +841,10 @@ label only when their neighbouring labelled segments agree, and are marked
 
 **Behavior a user will notice:** transcribing a song gives you plausible
 English that is not the lyrics. On clean solo singing the output is partly
-right and partly invented; over a backing band it is invented outright. There
-is no warning, because there is no signal to warn from.
+right and partly invented. Over a backing band the model is confident enough
+to be caught: those windows now come back **empty** rather than fabricated
+(see the silence rule below). Clean singing is the case with no warning,
+because there is no signal to warn from.
 
 **The measurement.** whisper-base, 16 kHz mono, against a spoken control:
 
@@ -858,15 +860,54 @@ repetition — 77 words emitted against 114 in the reference, with the third
 verse replaced by a repeat of the second. The band recording produces fluent
 sentences bearing no relation to the lyrics.
 
-**Why there is no confidence warning:** the model's own confidence does not
-notice. avgLogprob was −0.328 on 45.6 %-WER singing versus −0.297 on
-0 %-WER speech — indistinguishable. Whisper's standard silence rule
+**Why there is no confidence warning for clean singing:** the model's own
+confidence does not notice. avgLogprob was −0.328 on 45.6 %-WER singing versus
+−0.297 on 0 %-WER speech — indistinguishable. Whisper's standard silence rule
 (`noSpeechProb > 0.6` AND `avgLogprob < −1.0`, both required, as the host
-implements) never fires either: `noSpeechProb` was 0.000 in every sung
-segment. Only the heavily degraded band case drops avgLogprob below the
-threshold. So there is no threshold that separates "sung and wrong" from
-"spoken and right", and inventing one would be worse than saying this plainly.
-Separating the vocal stem first (`Edit → Separate into Stems…`) is necessary —
-it is what moves the band case from *fabricated* back to merely *corrupted* —
-but it is not sufficient.
+implements) does not fire on it either: re-measured after the no-speech signal
+was repaired, clean singing reports `noSpeechProb` **0.05 to 0.42** — real,
+varying, and below the 0.6 threshold throughout. So there is no threshold that
+separates "sung and wrong" from "spoken and right", and inventing one would be
+worse than saying this plainly.
+
+The band recording is different, and it is the one case the rule does catch:
+both halves fire (avgLogprob −1.248, below −1.0, with a high no-speech
+probability), so those windows are skipped and **nothing** is emitted. Measured
+A/B on the same 60 s file: with the no-speech signal broken it produced **7
+fabricated segments** ("One hundred and his name is A. I.", …); with it
+repaired, **0**. Separating the vocal stem first
+(`Edit → Separate into Stems…`) is still what moves that material from
+*discarded* to *usable* — but nothing rescues clean singing.
+
+*(An earlier revision of this entry reported `noSpeechProb` as 0.000 on every
+sung segment. That was measuring a defect, not singing: the probability was
+read from the wrong decoder row AND the token was looked up under a spelling
+this model does not use, so it read 0 for every input. Both are fixed; the WER
+figures and the avgLogprob comparison above were never affected by it.)*
+
+## A transcript lives only for the session
+
+**Area:** F4 transcription (`src/services/transcribeService.ts`,
+`src/components/Panels/TranscriptPanel.tsx`).
+
+**Behavior a user will notice:** a transcript is held in memory for as long as
+the document stays open. Closing the document discards it, and so does quitting
+the app — reopening the file gives you the audio back but not the words, and
+there is no prompt on the way out. On a two-hour interview that is a minute of
+inference to redo.
+
+**Why it is built this way:** the transcript is a *view* over the audio, not
+part of it. Nothing in the app's file formats has anywhere to put it: WAV, MP3,
+FLAC and OGG carry cue points but not timed text, and `.audm` sessions describe
+clips and tracks rather than document-scoped analyses (tempo analyses and remix
+plans are session-only for the same reason). Writing it into the marker list —
+the one container that does persist — was rejected deliberately: markers are
+points, they carry no speaker, and they are written into the cue chunks of
+every file you export afterwards, so a transcript would silently follow your
+audio into every deliverable.
+
+**The workaround, and it is a real one:** export the transcript to SRT or
+WebVTT from the panel before you close. That is a lossless record of exactly
+what the panel shows — timestamps, speaker labels and text — in a format other
+tools read. Re-importing it is not supported.
 

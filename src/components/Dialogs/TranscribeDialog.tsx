@@ -216,6 +216,12 @@ export default function TranscribeDialog({ onClose }: { onClose: () => void }) {
           <option value={AUTO_SPEAKERS}>
             {`Detect automatically (reliable for 1–${DIARIZATION_LIMITS.reliableUpTo})`}
           </option>
+          {/* The full range: before the run there are no embeddings, so there
+              is no tighter honest ceiling. The Transcript panel narrows it to
+              what the finished transcript can actually separate, and a count
+              this dialog accepts but the evidence cannot support is refused
+              by `validateSpeakerCount` with a message rather than silently
+              downgraded. */}
           {Array.from({ length: MAX_SPEAKERS }, (_, i) => i + 1).map((n) => (
             <option key={n} value={String(n)}>
               {n === 1 ? '1 speaker' : `${n} speakers`}

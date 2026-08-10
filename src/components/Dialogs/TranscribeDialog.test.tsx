@@ -204,6 +204,45 @@ describe('TranscribeDialog — running', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Transcribe' }));
     await waitFor(() => expect(isTranscribing()).toBe(true));
     await act(async () => {
+      // THREE embedded segments, so a count of 3 is something the evidence
+      // can actually support — one segment cannot be split three ways and is
+      // now refused rather than silently downgraded.
+      for (let i = 0; i < 3; i++) {
+        backend.emit.segment({
+          index: i,
+          startSample: i * 8000,
+          endSample: (i + 1) * 8000,
+          text: `line ${i}`,
+          avgLogprob: -0.3,
+          noSpeechProb: 0.02,
+          compressionRatio: 1.4,
+        });
+      }
+      for (let i = 0; i < 3; i++) {
+        const v = voiceVector(EMBED_DIM, i, i + 1);
+        backend.emit.embedding({
+          segmentIndex: i,
+          vector: v.buffer.slice(v.byteOffset, v.byteOffset + v.byteLength) as ArrayBuffer,
+        });
+      }
+      backend.settle({ ok: true, segmentCount: 3 });
+    });
+    await waitFor(() => expect(getTranscript(doc.id)).not.toBeNull());
+    expect(getTranscript(doc.id)?.requestedSpeakerCount).toBe(3);
+  });
+
+  it('shows the refusal inline when the audio cannot support the chosen count', async () => {
+    // One embeddable segment, three speakers asked for: impossible, and the
+    // dialog must say so rather than quietly transcribing with automatic
+    // detection and letting the user believe they got what they picked.
+    const doc = seedDoc();
+    const onClose = jest.fn();
+    render(<TranscribeDialog onClose={onClose} />);
+    await settle();
+    fireEvent.change(screen.getByTestId('transcribe-speakers'), { target: { value: '3' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Transcribe' }));
+    await waitFor(() => expect(isTranscribing()).toBe(true));
+    await act(async () => {
       backend.emit.segment({
         index: 0,
         startSample: 0,
@@ -220,8 +259,11 @@ describe('TranscribeDialog — running', () => {
       });
       backend.settle({ ok: true, segmentCount: 1 });
     });
-    await waitFor(() => expect(getTranscript(doc.id)).not.toBeNull());
-    expect(getTranscript(doc.id)?.requestedSpeakerCount).toBe(3);
+    await waitFor(() =>
+      expect(screen.getByTestId('transcribe-error')).toHaveTextContent(/between 1 and 1/)
+    );
+    expect(onClose).not.toHaveBeenCalled();
+    expect(getTranscript(doc.id)).toBeNull();
   });
 
   it('sends the user to the Transcript panel and closes on success', async () => {

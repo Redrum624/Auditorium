@@ -418,6 +418,12 @@ even on a clean solo vocal (see
 and if you edit the audio after transcribing, the panel warns you that the
 times no longer line up rather than quietly throwing the transcript away.
 
+**A transcript lasts only as long as the session.** It is not saved into the
+audio file or the `.audm`, and closing the document — or quitting — discards
+it without asking. **Export to SRT or WebVTT before you close** if you want to
+keep it; that file holds the same timestamps, speakers and text the panel
+shows.
+
 ## Views
 
 Switch between views from the toolbar pill's view segment or **View** menu:

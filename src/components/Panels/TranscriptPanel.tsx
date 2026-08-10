@@ -4,7 +4,6 @@ import { formatTime } from '../../utils/timeFormat';
 import { openTranscribeDialog } from '../../services/dialogBus';
 import {
   DIARIZATION_LIMITS,
-  MAX_SPEAKERS,
   exportTranscript,
   getTranscript,
   isTranscriptStale,
@@ -124,7 +123,10 @@ export default function TranscriptPanel() {
             }
           >
             <option value={AUTO}>{`Detected: ${transcript.speakerCount}`}</option>
-            {Array.from({ length: MAX_SPEAKERS }, (_, i) => i + 1).map((n) => (
+            {/* Capped at what THIS transcript's evidence can separate: one
+                cluster per embedded segment. Offering more would store a
+                number the list below then contradicts. */}
+            {Array.from({ length: transcript.maxUsableSpeakers }, (_, i) => i + 1).map((n) => (
               <option key={n} value={String(n)}>
                 {n === 1 ? '1 speaker' : `${n} speakers`}
               </option>

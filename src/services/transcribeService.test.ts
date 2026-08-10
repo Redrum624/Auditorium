@@ -668,15 +668,55 @@ describe('transcribeDocument — a completed run', () => {
     expect(r.transcript.speakerCount).toBe(3);
   });
 
-  it('ignores a speaker count outside the clusterer\'s bound rather than clamping it', async () => {
+  it('REFUSES a speaker count outside the bound rather than silently falling back to auto', () => {
+    // The two paths used to disagree: `setTranscriptSpeakerCount` refused an
+    // out-of-range count while this one quietly downgraded it to automatic,
+    // so the same number meant two different things. Both refuse now.
+    return (async () => {
+      // 3 s at 48 kHz = 1 s at the model rate, so six 0.1 s cues fit.
+      const doc = seedDoc({ length: 48000 * 3 });
+      const segs = [0, 1, 2, 3, 4, 5].map((i) => hostSegment(i, i * 1600, (i + 1) * 1600));
+      const embeddings = segs.map((sg) => ({
+        segmentIndex: sg.index,
+        vector: voiceVector(EMBED_DIM, 0, sg.index + 1),
+      }));
+      const r = await runWith(doc, segs, embeddings, { speakerCount: MAX_SPEAKERS + 1 });
+      expect(r.ok).toBe(false);
+      if (r.ok) return;
+      expect(r.status).toBe('bad-speaker-count');
+      expect(r.message).toMatch(/between 1 and/);
+      expect(getTranscript(doc.id)).toBeNull();
+    })();
+  });
+
+  it('refuses a speaker count the EVIDENCE cannot support, naming the real ceiling', async () => {
+    // Two embedded segments cannot be split into three speakers. Asking for it
+    // is impossible, not merely ambitious — the clusterer would clamp and the
+    // UI would then show a number the result contradicts.
     const doc = seedDoc();
-    const segs = [hostSegment(0, 0, 1600)];
-    const r = await runWith(doc, segs, [{ segmentIndex: 0, vector: voiceVector(EMBED_DIM, 0, 1) }], {
-      speakerCount: MAX_SPEAKERS + 1,
-    });
+    const segs = [0, 1].map((i) => hostSegment(i, i * 1600, (i + 1) * 1600));
+    const embeddings = segs.map((sg) => ({
+      segmentIndex: sg.index,
+      vector: voiceVector(EMBED_DIM, sg.index, sg.index + 1),
+    }));
+    const r = await runWith(doc, segs, embeddings, { speakerCount: 3 });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.status).toBe('bad-speaker-count');
+    expect(r.message).toMatch(/between 1 and 2/);
+  });
+
+  it('records the ceiling the evidence supports on the transcript', async () => {
+    const doc = seedDoc();
+    const segs = [0, 1, 2].map((i) => hostSegment(i, i * 1600, (i + 1) * 1600));
+    // Only two of the three segments were embeddable.
+    const r = await runWith(doc, segs, [
+      { segmentIndex: 0, vector: voiceVector(EMBED_DIM, 0, 1) },
+      { segmentIndex: 2, vector: voiceVector(EMBED_DIM, 0, 2) },
+    ]);
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.transcript.requestedSpeakerCount).toBeNull();
+    expect(r.transcript.maxUsableSpeakers).toBe(2);
   });
 
   it('sorts segments by the host index even when they arrive out of order', async () => {
@@ -1111,12 +1151,18 @@ describe('setTranscriptSpeakerCount', () => {
     expect(setTranscriptSpeakerCount(doc.id, 1)?.requestedSpeakerCount).toBe(1);
   });
 
-  it('accepts a count of exactly MAX_SPEAKERS (the high bound)', async () => {
+  it('accepts a count of exactly the evidence ceiling (4 embedded segments)', async () => {
     const doc = await twoVoices();
-    expect(setTranscriptSpeakerCount(doc.id, MAX_SPEAKERS)?.requestedSpeakerCount).toBe(MAX_SPEAKERS);
+    expect(getTranscript(doc.id)?.maxUsableSpeakers).toBe(4);
+    expect(setTranscriptSpeakerCount(doc.id, 4)?.requestedSpeakerCount).toBe(4);
   });
 
-  it('refuses a count one above MAX_SPEAKERS rather than clamping it', async () => {
+  it('refuses a count one above the evidence ceiling rather than clamping it', async () => {
+    const doc = await twoVoices();
+    expect(setTranscriptSpeakerCount(doc.id, 5)).toBeNull();
+  });
+
+  it('refuses a count above MAX_SPEAKERS too', async () => {
     const doc = await twoVoices();
     expect(setTranscriptSpeakerCount(doc.id, MAX_SPEAKERS + 1)).toBeNull();
   });

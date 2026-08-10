@@ -6,7 +6,13 @@
  * fsImpl })`) so these tests drive the REAL message loop, validation, seek
  * loop, segment extraction and embedding pass with a fake onnxruntime and an
  * in-memory model config — the real-ORT path is covered by
- * transcribeIntegration.test.cjs.
+ * transcribeIntegration.test.cjs (same directory), which runs the actual
+ * pinned models through a child process and asserts the two things a fake
+ * ORT cannot reach: that `noSpeechProb` carries a real signal (0.932 on
+ * digital silence versus 0.044 on speech, measured) and that the KV cache is
+ * correct against the real graph (the spoken control comes back verbatim).
+ * It skips - reported, never silently green - when the model set is not in
+ * the repo-local cache.
  *
  * The fake vocabulary mirrors whisperDecode.test.cjs's mini world:
  * text 0..19, eot 20, sot 21, en 22, fr 23, transcribe 24, translate 25,
@@ -77,12 +83,19 @@ function row(overrides = {}) {
 }
 
 /**
- * Fake onnxruntime. `script(fullSeq)` returns the last-position logits row
- * for the decoder given the reconstructed full token sequence — the fake
- * keeps its own KV bookkeeping exactly like the scripted decoder in
- * whisperDecode.test.cjs, so cache-choreography bugs change its output.
+ * Fake onnxruntime. `script(fullSeq)` returns the LAST-position logits row for
+ * the decoder given the reconstructed full token sequence; `sotRow(fullSeq)`,
+ * when given, fills the row at the `<|startoftranscript|>` POSITION of an
+ * uncached pass. The fake keeps its own KV bookkeeping exactly like the
+ * scripted decoder in whisperDecode.test.cjs, so cache-choreography bugs
+ * change its output.
+ *
+ * The two rows are separate on purpose. openai reads the no-speech
+ * probability at the SOT position, not the last one, and a fake that filled
+ * every row from one script could not tell a correct implementation from one
+ * reading the wrong row — which is exactly the bug this fake used to hide.
  */
-function fakeOrt({ script } = {}) {
+function fakeOrt({ script, sotRow } = {}) {
   class Tensor {
     constructor(type, data, dims) {
       this.type = type;
@@ -148,6 +161,12 @@ function fakeOrt({ script } = {}) {
             const n = ids.length;
             const data = new Float32Array(n * VOCAB).fill(-30);
             data.set(last, (n - 1) * VOCAB);
+            if (sotRow && !useCache) {
+              const sotIndex = ids.indexOf(SOT);
+              // Only when SOT is not itself the last position — the language
+              // detection pass sends [SOT] alone, where the two coincide.
+              if (sotIndex >= 0 && sotIndex !== n - 1) data.set(sotRow(seq), sotIndex * VOCAB);
+            }
             const out = { logits: new Tensor('float32', data, [1, n, VOCAB]) };
             for (let l = 0; l < 2; l++) {
               for (const side of ['decoder', 'encoder']) {
@@ -155,15 +174,28 @@ function fakeOrt({ script } = {}) {
                 out[`present.${l}.${side}.value`] = new Tensor('float32', new Float32Array(4), [1, 2, seq.length, 4]);
               }
             }
+            // Every decoder call recorded, feeds AND outputs, so a test can
+            // assert the cache choreography BY VALUE rather than merely that
+            // the past_key_values keys exist. `toBeDefined()` above is
+            // satisfied by feeding the empty tensor forever — which destroys
+            // cross-attention reuse and changes nothing observable.
+            session.runLog.push({ useCache, ids: ids.slice(), feeds, out });
             return out;
           },
         };
+        session.runLog = [];
         created.push(session);
         return session;
       },
     },
   };
   return ort;
+}
+
+/** Logits row where <|nospeech|> takes essentially all the mass — what a
+ * genuinely silent window looks like at the SOT position. */
+function noSpeechRow() {
+  return row({ 26: 20 });
 }
 
 function makeHost(opts = {}) {
@@ -427,20 +459,185 @@ describe('transcription run', () => {
     expect(embs[0].segmentIndex).toBe(0);
   });
 
-  test('a silence window (noSpeech high, logprob low) emits no segments but still finishes', async () => {
-    // nospeech dominant at step 0 -> noSpeechProb ~1; then junk text with low
-    // logprob until the cap; both thresholds fire -> the window is skipped.
-    const script = (seq) => {
-      if (seq.length === 1 && seq[0] === SOT) return row({ [EN]: 6 });
-      const step = seq.length - 3;
-      if (step === 0) return row({ 26: 9, [TS]: 0.1, 5: 0 });
-      return row({ 5: 0.1, 6: 0 }); // near-uniform: avgLogprob well below -1
+  // ---------------------------------------------------------------------
+  // openai's silence rule: skip the window only when
+  // `noSpeechProb > 0.6 AND avgLogprob < -1.0`. Both operands are probed in
+  // both directions below, because the rule is an AND and either half alone
+  // must NOT skip. The no-speech probability comes from the SOT ROW of the
+  // uncached pass — a host that read the last row instead reports ~0 for
+  // every window, the rule becomes dead code, and Whisper's silence
+  // hallucinations land as real segments.
+  // ---------------------------------------------------------------------
+
+  /**
+   * A structurally VALID one-segment decode — the same <ts> text <ts> eot
+   * shape as `defaultScript` — but every choice is barely ahead of a large
+   * field, so avgLogprob lands well below -1 while the tokens still form a
+   * proper timestamp pair. That is what makes the 2x2 below decidable: the
+   * SKIPPED cell must differ from the DECODED cells by a segment, not merely
+   * by an internal counter.
+   */
+  const lowConfidenceScript = (seq) => {
+    if (seq.length === 1 && seq[0] === SOT) return row({ [EN]: 6 });
+    const spread = (ids, winner) => {
+      const o = {};
+      for (const id of ids) o[id] = 0;
+      o[winner] = 0.001;
+      return row(o);
     };
-    const h = makeHost({ script });
+    const timestamps = Array.from({ length: 51 }, (_, i) => TS + i);
+    const texts = Array.from({ length: 17 }, (_, i) => i); // 0..16 (17,18 suppressed)
+    const step = seq.length - 3;
+    if (step === 0) return spread(timestamps, TS);
+    if (step === 1) return spread(texts, 0);
+    if (step === 2) return spread(timestamps, TS + 40);
+    return row({ [EOT]: 9 });
+  };
+
+  /** A confident one-segment window: <|0.00|> "hi" <|0.80|> eot. */
+  const confidentScript = defaultScript;
+
+  // The truth table. Same two scripts, same two SOT rows, four combinations;
+  // exactly one skips.
+  test('BOTH halves true: the window is skipped, no segments, and the job finishes', async () => {
+    const h = makeHost({ script: lowConfidenceScript, sotRow: noSpeechRow });
     await initHost(h);
     await runJob(h);
     expect(h.posted.filter((m) => m.type === 'segment')).toHaveLength(0);
     expect(h.posted[h.posted.length - 1]).toMatchObject({ type: 'done', segmentCount: 0 });
+  });
+
+  test('low logprob ALONE does not skip: the identical decode yields its segment', async () => {
+    // Byte-for-byte the same script as the skipped case; only the SOT row
+    // differs. A segment here is what makes the skip above non-vacuous.
+    const h = makeHost({ script: lowConfidenceScript });
+    await initHost(h);
+    await runJob(h);
+    const segs = h.posted.filter((m) => m.type === 'segment');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].text).toBe('hi');
+  });
+
+  test('high noSpeech ALONE does not skip: a confident window survives', async () => {
+    // <|nospeech|> owns the SOT row, but the decode is confident, so openai's
+    // rule does not skip. This is the half a "noSpeechProb only" rule would
+    // wrongly throw away.
+    const h = makeHost({ script: confidentScript, sotRow: noSpeechRow });
+    await initHost(h);
+    await runJob(h);
+    const segs = h.posted.filter((m) => m.type === 'segment');
+    expect(segs).toHaveLength(1);
+    expect(segs[0].text).toBe('hi');
+  });
+
+  test('neither half true: a confident window with no <|nospeech|> mass decodes (the control)', async () => {
+    const h = makeHost({ script: confidentScript });
+    await initHost(h);
+    await runJob(h);
+    expect(h.posted.filter((m) => m.type === 'segment')).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------
+  // The KV-cache choreography, BY VALUE.
+  //
+  // `greedyDecodeWindow`'s own equivalence test (whisperDecode.test.cjs)
+  // proves the LOOP asks for the right tokens, but it drives an injected
+  // callback and structurally cannot see this layer: which tensors
+  // `createOrtDecoderRunner` actually feeds back. Asserting only that the
+  // `past_key_values.*` keys are DEFINED is satisfied by feeding the empty
+  // tensor on every step — which destroys cross-attention reuse entirely and
+  // changes nothing else observable, because the fake's logits are scripted
+  // from the token sequence rather than computed from the cache.
+  //
+  // So: assert the tensors are the RIGHT OBJECTS. Decoder pasts must be the
+  // previous step's presents; encoder pasts must be step 0's presents, for
+  // every cached step.
+  // ---------------------------------------------------------------------
+
+  test('the decoder KV fed at each cached step IS the previous present', async () => {
+    const h = makeHost({ script: confidentScript });
+    await initHost(h);
+    await runJob(h);
+    const decoder = h.ort.created.find((s) => s.kind === 'decoder');
+    // Drop the language-detection pass ([SOT] alone, uncached) and keep the
+    // window's own run: one uncached pass then cached steps.
+    const window = decoder.runLog.slice(decoder.runLog.findIndex((c) => c.ids.length === 3));
+    expect(window.length).toBeGreaterThan(2);
+    expect(window[0].useCache).toBe(false);
+    for (let i = 1; i < window.length; i++) {
+      expect(window[i].useCache).toBe(true);
+      for (let l = 0; l < 2; l++) {
+        expect(window[i].feeds[`past_key_values.${l}.decoder.key`]).toBe(
+          window[i - 1].out[`present.${l}.decoder.key`]
+        );
+        expect(window[i].feeds[`past_key_values.${l}.decoder.value`]).toBe(
+          window[i - 1].out[`present.${l}.decoder.value`]
+        );
+      }
+    }
+  });
+
+  test('the encoder KV fed at every cached step IS step 0 present (captured once)', async () => {
+    const h = makeHost({ script: confidentScript });
+    await initHost(h);
+    await runJob(h);
+    const decoder = h.ort.created.find((s) => s.kind === 'decoder');
+    const window = decoder.runLog.slice(decoder.runLog.findIndex((c) => c.ids.length === 3));
+    const step0 = window[0];
+    for (let i = 1; i < window.length; i++) {
+      for (let l = 0; l < 2; l++) {
+        expect(window[i].feeds[`past_key_values.${l}.encoder.key`]).toBe(
+          step0.out[`present.${l}.encoder.key`]
+        );
+        expect(window[i].feeds[`past_key_values.${l}.encoder.value`]).toBe(
+          step0.out[`present.${l}.encoder.value`]
+        );
+      }
+    }
+    // ...and NOT the previous step's, which would also be "defined" and would
+    // silently re-derive cross-attention from a decoder-length cache.
+    if (window.length > 2) {
+      expect(window[2].feeds['past_key_values.0.encoder.key']).not.toBe(
+        window[1].out['present.0.encoder.key']
+      );
+    }
+  });
+
+  test('the uncached pass feeds EMPTY pasts on all four slots, not stale ones', async () => {
+    const h = makeHost({ script: confidentScript });
+    await initHost(h);
+    await runJob(h);
+    const decoder = h.ort.created.find((s) => s.kind === 'decoder');
+    for (const call of decoder.runLog.filter((c) => !c.useCache)) {
+      for (let l = 0; l < 2; l++) {
+        for (const side of ['decoder', 'encoder']) {
+          for (const part of ['key', 'value']) {
+            const t = call.feeds[`past_key_values.${l}.${side}.${part}`];
+            expect(t.data).toHaveLength(0);
+            // [1, heads, 0, headDim] from the model config: 2 heads, d_model
+            // 8 / 2 heads = 4.
+            expect(t.dims).toEqual([1, 2, 0, 4]);
+          }
+        }
+      }
+    }
+  });
+
+  test('a cached step feeds ONE token and a non-empty decoder past', async () => {
+    // The pair the two tests above rest on: if the runner ever fed the empty
+    // tensor on a cached step, the assertions above would still hold for
+    // "defined" but the cache would be doing nothing.
+    const h = makeHost({ script: confidentScript });
+    await initHost(h);
+    await runJob(h);
+    const decoder = h.ort.created.find((s) => s.kind === 'decoder');
+    const cached = decoder.runLog.filter((c) => c.useCache);
+    expect(cached.length).toBeGreaterThan(0);
+    for (const call of cached) {
+      expect(call.ids).toHaveLength(1);
+      expect(call.feeds['past_key_values.0.decoder.key'].data.length).toBeGreaterThan(0);
+      expect(call.feeds['past_key_values.0.encoder.key'].data.length).toBeGreaterThan(0);
+    }
   });
 
   test('cancel during the decode loop aborts between steps: cancelled, no done', async () => {

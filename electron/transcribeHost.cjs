@@ -57,7 +57,11 @@
  *     (`sample_len or self.n_ctx // 2`).
  *   - NO_SPEECH_THRESHOLD 0.6, LOGPROB_THRESHOLD −1.0 — openai/whisper
  *     transcribe() defaults; a window is skipped as silence only when BOTH
- *     say so (their rule verbatim).
+ *     say so (their rule verbatim). The no-speech probability is read at the
+ *     SOT POSITION of the uncached pass (openai `probs_at_sot`), which is
+ *     why the decoder runner returns every row rather than only the last —
+ *     `<|nospeech|>` carries no mass after `<|transcribe|>`, so reading the
+ *     last row makes the rule dead code.
  *   - suppress lists, max_initial_timestamp_index — parsed from the model's
  *     own sha256-pinned generation_config.json.
  *   - MIN_EMBED_SAMPLES 0.5 s — the reference diarizer's own floor (the
@@ -156,11 +160,13 @@ function createOrtDecoderRunner({ ort, session, encoderHidden, dims, shouldCance
         encoderPasts[`${l}.value`] = out[`present.${l}.encoder.value`];
       }
     }
-    const logits = out.logits;
-    const vocab = logits.dims[logits.dims.length - 1];
-    const data = logits.data;
-    // Last position's logits, copied out of the ORT-owned buffer.
-    return Float32Array.from(data.subarray(data.length - vocab));
+    // EVERY position's logits, copied out of the ORT-owned buffer (which the
+    // next `session.run` may reuse). The uncached pass returns one row per
+    // prompt token and the decode loop reads TWO of them: the last, for
+    // sampling, and the SOT row, for `<|nospeech|>` (openai's `probs_at_sot`).
+    // Returning only the last row — as this did — makes the no-speech
+    // probability ~0 for every window, so the silence rule can never fire.
+    return Float32Array.from(out.logits.data);
   };
 }
 
@@ -247,6 +253,8 @@ function createTranscribeHost({ ort, postMessage, exit, fsImpl = require('node:f
         eot: tokenizer.eot,
         noTimestamps: tokenizer.noTimestamps,
         noSpeech: tokenizer.noSpeech,
+        // Locates the row `noSpeech` is read from (openai `sot_index`).
+        sot: tokenizer.sot,
         maxInitialTimestampIndex: Number.isInteger(genCfg.max_initial_timestamp_index)
           ? genCfg.max_initial_timestamp_index
           : 50,
@@ -379,6 +387,9 @@ function createTranscribeHost({ ort, postMessage, exit, fsImpl = require('node:f
    * tokens. */
   async function detectLanguage(thisJob, encoderHidden) {
     const run = createDecoderRunner(thisJob, encoderHidden);
+    // ONE token in, so the returned grid is exactly one row and the SOT row
+    // and the last row are the same thing — openai's `detect_language` reads
+    // that single position too (`logits[:, 0]` over `[sot]`).
     const logits = await run({ tokens: [tokenizer.sot], useCache: false });
     const entries = [...tokenizer.langIds.entries()];
     const lp = logSoftmax(logits);

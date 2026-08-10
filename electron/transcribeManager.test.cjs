@@ -8,9 +8,11 @@
  */
 
 const crypto = require('node:crypto');
+const fs = require('node:fs');
 const path = require('node:path');
 const {
   TRANSCRIBE_FILES,
+  TRANSCRIBE_TOTAL_BYTES,
   TRANSCRIBE_MODEL_DIR,
   TRANSCRIBE_IPC,
   getTranscribeModelPaths,
@@ -23,28 +25,31 @@ const { MAX_TOTAL_SAMPLES } = require('./transcribeHost.cjs');
 
 const USER_DATA = 'C:\\fake\\userData';
 
-/** Two small fake files standing in for the six real pins. */
+/**
+ * THREE small fake files standing in for the six real pins — a first, a
+ * MIDDLE and a LAST. Two would have been enough to exercise the ensure loop
+ * but not to pin it: with a single file corrupted, a loop narrowed to
+ * `files.slice(0, 1)` still refuses, and a tampered decoder ONNX would then be
+ * loaded unhashed. Every position is probed below.
+ */
 function makeFakeFiles() {
-  const a = Buffer.from('encoder-bytes-0123456789');
-  const b = Buffer.from('tokenizer-bytes');
+  const payloads = {
+    encoder: Buffer.from('encoder-bytes-0123456789'),
+    decoder: Buffer.from('decoder-bytes-abcdefghijklmnop'),
+    tokenizer: Buffer.from('tokenizer-bytes'),
+  };
   return [
-    {
-      key: 'encoder',
-      filename: 'enc.onnx',
-      url: 'https://example.com/enc.onnx',
-      sha256: crypto.createHash('sha256').update(a).digest('hex'),
-      bytes: a.length,
-      payload: a,
-    },
-    {
-      key: 'tokenizer',
-      filename: 'tok.json',
-      url: 'https://example.com/tok.json',
-      sha256: crypto.createHash('sha256').update(b).digest('hex'),
-      bytes: b.length,
-      payload: b,
-    },
-  ];
+    ['encoder', 'enc.onnx'],
+    ['decoder', 'dec.onnx'],
+    ['tokenizer', 'tok.json'],
+  ].map(([key, filename]) => ({
+    key,
+    filename,
+    url: `https://example.com/${filename}`,
+    sha256: crypto.createHash('sha256').update(payloads[key]).digest('hex'),
+    bytes: payloads[key].length,
+    payload: payloads[key],
+  }));
 }
 
 /** Minimal async in-memory fs (the shape verifyModelFile/ensure use). */
@@ -122,15 +127,19 @@ describe('ensureTranscriptionModels', () => {
         fsImpl.store.set(dest, buf);
       },
     });
-    expect(request.calls).toHaveLength(2);
-    expect(written).toHaveLength(2);
+    // Derived from the fixture, not hardcoded: growing the fake set must not
+    // silently weaken these into "some files were fetched".
+    expect(request.calls).toHaveLength(files.length);
+    expect(request.calls.sort()).toEqual(files.map((f) => f.url).sort());
+    expect(written).toHaveLength(files.length);
     expect(paths.encoder).toBe(path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, 'enc.onnx'));
-    const total = files[0].bytes + files[1].bytes;
+    const total = files.reduce((n, f) => n + f.bytes, 0);
     expect(progress[progress.length - 1]).toMatchObject({ received: total, total });
-    // the second file's progress includes the first file's bytes (overall bar)
-    const second = progress.find((p) => p.file === 'tokenizer' && p.received > files[0].bytes);
-    expect(second).toBeDefined();
-    expect(second.fileCount).toBe(2);
+    // the LAST file's progress includes every earlier file's bytes (one bar)
+    const earlier = files.slice(0, -1).reduce((n, f) => n + f.bytes, 0);
+    const last = progress.find((p) => p.file === files[files.length - 1].key && p.received > earlier);
+    expect(last).toBeDefined();
+    expect(last.fileCount).toBe(files.length);
   });
 
   test('already-verified files are not re-downloaded', async () => {
@@ -146,8 +155,32 @@ describe('ensureTranscriptionModels', () => {
       requestImpl: request,
       atomicWrite: async (dest, buf) => fsImpl.store.set(dest, buf),
     });
-    expect(request.calls).toEqual([files[1].url]);
+    expect(request.calls).toEqual(files.slice(1).map((f) => f.url));
   });
+
+  test.each([0, 1, 2])(
+    'a corrupt file at position %i is deleted and re-downloaded — every position, not just the first',
+    async (index) => {
+      const files = makeFakeFiles();
+      const dest = path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, files[index].filename);
+      const fsImpl = memFs();
+      // Right length, wrong bytes: only the sha256 can catch it.
+      fsImpl.store.set(dest, Buffer.alloc(files[index].bytes, 7));
+      const statuses = [];
+      const request = fakeRequest(files);
+      await ensureTranscriptionModels({
+        userDataDir: USER_DATA,
+        files,
+        fsImpl,
+        requestImpl: request,
+        onStatus: (s) => statuses.push(s),
+        atomicWrite: async (d, buf) => fsImpl.store.set(d, buf),
+      });
+      expect(statuses).toContain(`corrupt-deleted:${files[index].key}`);
+      expect(request.calls).toContain(files[index].url);
+      expect(fsImpl.store.get(dest).equals(files[index].payload)).toBe(true);
+    }
+  );
 
   test('a corrupt existing file is deleted and re-downloaded (ruling 1)', async () => {
     const files = makeFakeFiles();
@@ -207,19 +240,26 @@ describe('ensureTranscriptionModels', () => {
 });
 
 /** Fake utility-process child. */
-function fakeChild() {
+function fakeChild({ killReturns = true } = {}) {
   const child = {
     posted: [],
     listeners: {},
     killed: false,
+    killCalls: 0,
     postMessage(msg) {
       child.posted.push(msg);
     },
     on(ev, cb) {
       child.listeners[ev] = cb;
     },
+    // `utilityProcess.kill()` returns a boolean: false when the signal could
+    // not be delivered. The fake mirrors that so the wedged-child path is
+    // reachable.
     kill() {
+      child.killCalls++;
+      if (killReturns === false) return false;
       child.killed = true;
+      return true;
     },
     emit(msg) {
       child.listeners.message?.(msg);
@@ -245,23 +285,25 @@ async function nextChild(children, index = 0) {
 }
 
 /** Manager whose model files all verify (in-memory). */
-function makeManager({ files = makeFakeFiles() } = {}) {
+function makeManager({ files = makeFakeFiles(), killReturns = true } = {}) {
   const stores = {};
   const paths = getTranscribeModelPaths(USER_DATA);
   for (const f of files) stores[path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, f.filename)] = f.payload;
   const fsImpl = memFs(stores);
   const children = [];
+  const warnings = [];
   const manager = createTranscribeManager({
     userDataDir: USER_DATA,
     files,
     fsImpl,
+    onWarn: (m) => warnings.push(m),
     utilityProcessFactory: () => {
-      const c = fakeChild();
+      const c = fakeChild({ killReturns });
       children.push(c);
       return c;
     },
   });
-  return { manager, children, fsImpl, files };
+  return { manager, children, fsImpl, files, warnings };
 }
 
 const SAMPLES = new Float32Array(16000).fill(0.1);
@@ -328,18 +370,52 @@ describe('createTranscribeManager.startTranscription', () => {
     await first;
   });
 
-  test('a failed pin refuses to spawn the host', async () => {
+  // Ruling 1's real content: EVERY pinned file is verified before ANY load.
+  // Probing only the first file leaves the loop free to be narrowed to
+  // `files.slice(0, 1)` with the suite still green — and a tampered decoder
+  // ONNX handed to onnxruntime unhashed is a code-execution vector, which is
+  // the entire reason the pinning exists. So: every position, by name.
+  test.each([0, 1, 2])(
+    'a failed pin at position %i refuses to spawn the host, naming that file',
+    async (index) => {
+      const files = makeFakeFiles();
+      const { manager, children, fsImpl } = makeManager({ files });
+      // Every file present and correct...
+      for (const f of files) {
+        fsImpl.store.set(path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, f.filename), f.payload);
+      }
+      // ...except this one, corrupted at its pinned length so only the
+      // sha256 can catch it.
+      const target = files[index];
+      fsImpl.store.set(
+        path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, target.filename),
+        Buffer.alloc(target.bytes, 7)
+      );
+      const result = await manager.startTranscription({
+        sampleRate: 16000,
+        samples: SAMPLES,
+        language: 'auto',
+      });
+      expect(result.ok).toBe(false);
+      expect(result.error).toMatch(/verification/);
+      // Named, so the message tells the user WHICH file to re-download and a
+      // loop that verified a different file cannot pass this.
+      expect(result.error).toContain(target.filename);
+      expect(children).toHaveLength(0);
+    }
+  );
+
+  test('a fully-verified set DOES spawn — the refusals above are not vacuous', async () => {
     const files = makeFakeFiles();
-    const { manager, children } = makeManager({ files });
-    // corrupt the encoder on "disk"
-    const { manager: m2, children: c2, fsImpl } = makeManager({ files });
-    fsImpl.store.set(path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, 'enc.onnx'), Buffer.from('bad'));
-    const result = await m2.startTranscription({ sampleRate: 16000, samples: SAMPLES, language: 'auto' });
-    expect(result.ok).toBe(false);
-    expect(result.error).toMatch(/verification/);
-    expect(c2).toHaveLength(0);
-    expect(children).toHaveLength(0);
-    void manager;
+    const { manager, children, fsImpl } = makeManager({ files });
+    for (const f of files) {
+      fsImpl.store.set(path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, f.filename), f.payload);
+    }
+    const run = manager.startTranscription({ sampleRate: 16000, samples: SAMPLES, language: 'auto' });
+    await nextChild(children);
+    expect(children).toHaveLength(1);
+    manager.cancel();
+    await run;
   });
 
   test('stale-id messages are ignored; host-level errors without id settle', async () => {
@@ -405,20 +481,120 @@ describe('createTranscribeManager.startTranscription', () => {
   });
 });
 
+describe('killing the child', () => {
+  test('a successful kill is silent', async () => {
+    const { manager, children, warnings } = makeManager();
+    const run = manager.startTranscription({ sampleRate: 16000, samples: SAMPLES, language: 'auto' });
+    const child = await nextChild(children);
+    manager.cancel();
+    await run;
+    expect(child.killed).toBe(true);
+    expect(child.killCalls).toBe(1);
+    expect(warnings).toEqual([]);
+  });
+
+  test('a child that will not die is retried once and REPORTED, not silently abandoned', async () => {
+    // Discarding kill()'s return leaves a wedged child holding its ~1 GB ORT
+    // arena while the next run spawns a second one — two arenas, silently.
+    const { manager, children, warnings } = makeManager({ killReturns: false });
+    const run = manager.startTranscription({ sampleRate: 16000, samples: SAMPLES, language: 'auto' });
+    const child = await nextChild(children);
+    manager.cancel();
+    await run;
+    expect(child.killCalls).toBe(2); // one retry, not an infinite loop
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toMatch(/did not respond to kill/);
+  });
+
+  test('the slot is still freed when the kill fails, so a later run is not blocked forever', async () => {
+    const { manager, children } = makeManager({ killReturns: false });
+    const first = manager.startTranscription({ sampleRate: 16000, samples: SAMPLES, language: 'auto' });
+    await nextChild(children);
+    manager.cancel();
+    await first;
+    expect(manager.isRunning()).toBe(false);
+    const second = manager.startTranscription({ sampleRate: 16000, samples: SAMPLES, language: 'auto' });
+    await nextChild(children, 1);
+    expect(children).toHaveLength(2);
+    manager.cancel();
+    await second;
+  });
+});
+
+describe('the pinned file set', () => {
+  test('TRANSCRIBE_TOTAL_BYTES is the sum of the six pins', () => {
+    expect(TRANSCRIBE_TOTAL_BYTES).toBe(TRANSCRIBE_FILES.reduce((n, f) => n + f.bytes, 0));
+  });
+
+  test('every pin carries a full sha256 and a positive size', () => {
+    expect(TRANSCRIBE_FILES).toHaveLength(6);
+    for (const f of TRANSCRIBE_FILES) {
+      expect(f.sha256).toMatch(/^[0-9a-f]{64}$/);
+      expect(f.bytes).toBeGreaterThan(0);
+      expect(f.url.startsWith('https://')).toBe(true);
+    }
+    expect(new Set(TRANSCRIBE_FILES.map((f) => f.key)).size).toBe(6);
+    expect(new Set(TRANSCRIBE_FILES.map((f) => f.filename)).size).toBe(6);
+  });
+
+  test("the renderer's copy of the total agrees with the pins", () => {
+    // The renderer MUST NOT import from electron/ (these are CommonJS
+    // main-process modules that pull in onnxruntime-node), so
+    // `transcribeService.ts` carries its own literal for the "no preload"
+    // fallback. Two hand-maintained copies of one number drift silently — a
+    // wrong figure would tell the user to expect a download size the app
+    // never fetches. This is the cross-check that stops it, and it reads the
+    // renderer source as TEXT for the same reason: it cannot be imported here.
+    const src = fs.readFileSync(
+      path.join(__dirname, '..', 'src', 'services', 'transcribeService.ts'),
+      'utf8'
+    );
+    const m = /export const TRANSCRIBE_MODEL_BYTES = (\d+);/.exec(src);
+    expect(m).not.toBeNull();
+    expect(Number(m[1])).toBe(TRANSCRIBE_TOTAL_BYTES);
+  });
+});
+
 describe('getModelState', () => {
-  test('complete, partial and missing states', async () => {
+  test('a complete set reports downloaded with the whole size', async () => {
     const files = makeFakeFiles();
+    const total = files.reduce((n, f) => n + f.bytes, 0);
     const { manager } = makeManager({ files });
     expect(await manager.getModelState()).toEqual({
       downloaded: true,
-      bytes: files[0].bytes + files[1].bytes,
-      expectedBytes: files[0].bytes + files[1].bytes,
+      bytes: total,
+      expectedBytes: total,
     });
-    const { manager: m2, fsImpl } = makeManager({ files });
-    fsImpl.store.delete(path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, 'tok.json'));
-    expect(await m2.getModelState()).toMatchObject({ downloaded: false, bytes: files[0].bytes });
-    const m3 = createTranscribeManager({ userDataDir: USER_DATA, files, fsImpl: memFs() });
-    expect(await m3.getModelState()).toMatchObject({ downloaded: false, bytes: null });
+  });
+
+  // Every position, for the same reason the pin tests probe every position:
+  // a state check that only notices the LAST file missing would report a
+  // half-downloaded set as ready and send the user straight into a
+  // verification failure.
+  test.each([0, 1, 2])('a set missing the file at position %i is NOT downloaded', async (index) => {
+    const files = makeFakeFiles();
+    const total = files.reduce((n, f) => n + f.bytes, 0);
+    const { manager, fsImpl } = makeManager({ files });
+    fsImpl.store.delete(path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, files[index].filename));
+    expect(await manager.getModelState()).toEqual({
+      downloaded: false,
+      bytes: total - files[index].bytes,
+      expectedBytes: total,
+    });
+  });
+
+  test.each([0, 1, 2])('a WRONG-SIZED file at position %i is NOT downloaded', async (index) => {
+    const files = makeFakeFiles();
+    const { manager, fsImpl } = makeManager({ files });
+    const dest = path.join(USER_DATA, TRANSCRIBE_MODEL_DIR, files[index].filename);
+    fsImpl.store.set(dest, Buffer.alloc(files[index].bytes + 1, 7));
+    expect(await manager.getModelState()).toMatchObject({ downloaded: false });
+  });
+
+  test('an empty model directory reports nothing downloaded', async () => {
+    const files = makeFakeFiles();
+    const m = createTranscribeManager({ userDataDir: USER_DATA, files, fsImpl: memFs() });
+    expect(await m.getModelState()).toMatchObject({ downloaded: false, bytes: null });
   });
 });
 

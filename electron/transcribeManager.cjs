@@ -248,6 +248,10 @@ function createTranscribeManager({
   sleep,
   fsImpl = fs,
   atomicWrite = atomicWriteFile,
+  // Injected so a test can observe it; `console.warn` reaches the packaged
+  // app's stderr, which is where a wedged inference process has to be
+  // visible. There is nothing better to do here — see `settle` below.
+  onWarn = (msg) => console.warn(msg),
 } = {}) {
   let active = null;
   let nextRunId = 1;
@@ -320,10 +324,33 @@ function createTranscribeManager({
       entry.result = result;
       if (active === entry) active = null;
       if (entry.child) {
+        // `utilityProcess.kill()` returns false when the signal could not be
+        // delivered. Discarding that return and freeing the slot anyway means
+        // a wedged child keeps its ~1 GB ORT arena while the NEXT run spawns a
+        // second one — two arenas, silently, for the rest of the session.
+        //
+        // The slot is still freed (refusing every later run because one child
+        // hung would be worse), but the failure is retried once and then
+        // REPORTED rather than swallowed.
+        let killed = false;
         try {
-          entry.child.kill();
+          killed = entry.child.kill() !== false;
         } catch {
           // already dead — the point was that it isn't alive after this line
+          killed = true;
+        }
+        if (!killed) {
+          try {
+            killed = entry.child.kill() !== false;
+          } catch {
+            killed = true;
+          }
+        }
+        entry.childKilled = killed;
+        if (!killed) {
+          onWarn(
+            `transcription host for run ${entry.runId} did not respond to kill — its ONNX Runtime arena (~1 GB) may still be resident`
+          );
         }
       }
       if (entry.resolve) entry.resolve(result);

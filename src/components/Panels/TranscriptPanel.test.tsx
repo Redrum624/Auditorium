@@ -214,7 +214,36 @@ describe('TranscriptPanel — the speaker-count control', () => {
     expect(getTranscript(doc.id)?.speakerCount).toBe(2);
   });
 
-  it('never offers a count the clusterer would clamp', () => {
+  it('never offers a count the EVIDENCE cannot support', () => {
+    // Four embedded segments: 5 and 6 are impossible, and offering them would
+    // store a number the list below then contradicts.
+    render(<TranscriptPanel />);
+    expect(getTranscript(doc.id)?.maxUsableSpeakers).toBe(4);
+    const options = Array.from(
+      screen.getByTestId('transcript-speaker-count').querySelectorAll('option')
+    ).map((o) => o.value);
+    expect(options).toEqual(['auto', '1', '2', '3', '4']);
+  });
+
+  it('offers at most MAX_SPEAKERS however many segments were embedded', async () => {
+    // Eight embeddable segments, but the clusterer only considers six.
+    const many = seedDoc();
+    await act(async () => {
+      await seedTranscript(
+        backend,
+        many.id,
+        Array.from({ length: 8 }, (_, i) => ({
+          index: i,
+          startSample: i * 4000,
+          endSample: (i + 1) * 4000,
+          text: `line ${i}`,
+          vector: voiceVector(EMBED_DIM, i % 4, i + 1),
+        }))
+      );
+    });
+    act(() => {
+      useAppStore.getState().setActiveDocument(many.id);
+    });
     render(<TranscriptPanel />);
     const options = Array.from(
       screen.getByTestId('transcript-speaker-count').querySelectorAll('option')

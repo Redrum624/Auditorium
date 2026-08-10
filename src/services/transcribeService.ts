@@ -220,6 +220,14 @@ export interface Transcript {
   /** Segments too short to embed (< 0.5 s, the host's MIN_EMBED_SAMPLES) and
    * therefore not clustered on their own evidence. */
   unembeddedSegments: number;
+  /**
+   * The largest speaker count this transcript's EVIDENCE can support: one
+   * cluster per embedded segment, capped at {@link MAX_SPEAKERS}. Asking for
+   * more than there are embeddings to split is not a stricter request, it is
+   * an impossible one — `clusterSpeakers` clamps it and the UI would then
+   * display a number the result contradicts.
+   */
+  maxUsableSpeakers: number;
   /** Segments left with `speaker === null` after neighbour inheritance. */
   unlabelledSegments: number;
   /** Parallel to `segments`; `null` where the host sent no embedding. Kept so
@@ -233,6 +241,7 @@ export interface Transcript {
 export type TranscribeStatus =
   | 'no-document'
   | 'empty-document'
+  | 'bad-speaker-count'
   | 'too-long'
   | 'busy'
   | 'model-missing'
@@ -428,6 +437,36 @@ export function modelSampleToDoc(modelSample: number, sampleRate: number, docLen
  *
  * Returns speakers parallel to `embeddings`.
  */
+/**
+ * The ONE speaker-count contract, shared by the request path and the
+ * re-cluster path so the two cannot disagree.
+ *
+ * `null` means auto-detect and is always valid. A number is valid only if it
+ * is an integer in `[1, min(MAX_SPEAKERS, maxUsable)]`. Out of range is
+ * REFUSED, never silently downgraded to auto and never clamped: a caller who
+ * asked for 8 speakers and got 6 without being told has been lied to, and one
+ * who asked for 8 and got auto-detection has been lied to differently.
+ */
+export function validateSpeakerCount(
+  count: number | null | undefined,
+  maxUsable: number
+): { ok: true; value: number | null } | { ok: false; message: string } {
+  if (count === null || count === undefined) return { ok: true, value: null };
+  const ceiling = Math.min(MAX_SPEAKERS, Math.max(1, maxUsable));
+  if (!Number.isInteger(count) || count < 1 || count > ceiling) {
+    return {
+      ok: false,
+      message: `Speaker count must be a whole number between 1 and ${ceiling}, or left on automatic (got ${count}).`,
+    };
+  }
+  return { ok: true, value: count };
+}
+
+/** How many distinct speakers this many embeddings could possibly separate. */
+export function maxUsableSpeakerCount(embeddedSegments: number): number {
+  return Math.max(1, Math.min(MAX_SPEAKERS, embeddedSegments));
+}
+
 export function assignSpeakerLabels(
   embeddings: readonly (Float32Array | null)[],
   options: { speakerCount?: number } = {}
@@ -541,7 +580,8 @@ export function invalidateTranscript(docId: string): void {
 export function setTranscriptSpeakerCount(docId: string, count: number | null): Transcript | null {
   const current = transcripts.get(docId);
   if (!current) return null;
-  if (count !== null && (!Number.isInteger(count) || count < 1 || count > MAX_SPEAKERS)) return null;
+  const validated = validateSpeakerCount(count, current.maxUsableSpeakers);
+  if (!validated.ok) return null;
   if (current.requestedSpeakerCount === count) return current;
 
   const assigned = assignSpeakerLabels(
@@ -996,13 +1036,12 @@ export async function transcribeDocument(req: TranscribeRequest): Promise<Transc
 
     const ordered = run.segments.slice().sort((a, b) => a.index - b.index);
     const embeddings = ordered.map((s) => run.embeddings.get(s.index) ?? null);
-    const requested =
-      req.speakerCount !== undefined &&
-      Number.isInteger(req.speakerCount) &&
-      req.speakerCount >= 1 &&
-      req.speakerCount <= MAX_SPEAKERS
-        ? req.speakerCount
-        : null;
+    const maxUsableSpeakers = maxUsableSpeakerCount(embeddings.filter((e) => e !== null).length);
+    // Validated HERE rather than at entry, because the ceiling is not known
+    // until the embeddings are in. Same contract as the re-cluster path.
+    const validated = validateSpeakerCount(req.speakerCount, maxUsableSpeakers);
+    if (!validated.ok) return fail('bad-speaker-count', validated.message);
+    const requested = validated.value;
     const assigned = assignSpeakerLabels(embeddings, requested === null ? {} : { speakerCount: requested });
 
     const transcript: Transcript = {
@@ -1026,6 +1065,7 @@ export async function transcribeDocument(req: TranscribeRequest): Promise<Transc
       requestedSpeakerCount: requested,
       silhouette: assigned.silhouette,
       unembeddedSegments: embeddings.filter((e) => e === null).length,
+      maxUsableSpeakers,
       unlabelledSegments: assigned.speakers.filter((s) => s === null).length,
       embeddings,
       channelRefs: live.channels.slice(),

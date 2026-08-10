@@ -32,7 +32,9 @@ const LONG70 = path.join(ROOT, 'test-assets', 'long70.wav');
 // gitignored and this is NEVER required — the transcript-surface half of the
 // transcription step falls back to whatever the synthetic fixture produced,
 // and reports when that is nothing.
-const SPEECH = path.join(ROOT, 'test-assets', 'speech.wav');
+// Same file the opt-in integration test uses (electron/transcribeIntegration.test.cjs),
+// so a machine only has to provide one speech fixture.
+const SPEECH = path.join(ROOT, 'test-assets', 'speech16k.wav');
 const OUT_DIR = path.join(ROOT, 'test-output');
 const OUT_MP3 = path.join(OUT_DIR, 'out.mp3');
 const OUT_WAV = path.join(OUT_DIR, 'out.wav');
@@ -2640,7 +2642,7 @@ async function main() {
         console.log(
           '  Transcript surface: SKIPPED (REPORTED) — the synthetic sweep produced no speech ' +
             'segments, so there is no transcript to render. The panel, ribbon and export are ' +
-            'covered by the jsdom component tests; drop a speech WAV at test-assets/speech.wav ' +
+            'covered by the jsdom component tests; drop a speech WAV at test-assets/speech16k.wav ' +
             'to exercise them against the packaged app too.'
         );
       } else {
@@ -2691,14 +2693,19 @@ async function main() {
           Math.max(...surface.segments.map((s) => s.startSample))
         );
         const gotoTarget = surface.segments[gotoIndex].startSample;
-        assert(
-          gotoTarget > 0,
-          `the Go-to target is a NON-ZERO sample (${gotoTarget}), so the assertion below cannot pass vacuously`
-        );
+        // Park the cursor somewhere else FIRST, with a real gesture — clicking
+        // the time ruler seeks. Without this the assertion below is vacuous
+        // whenever the target segment starts at sample 0, which is exactly
+        // what a one-segment transcript of a short clip looks like.
+        const rulerBox = await page.evaluate(() => {
+          const r = document.querySelector('[data-testid="timeline-ruler"]').getBoundingClientRect();
+          return { x: r.x, y: r.y, width: r.width, height: r.height };
+        });
+        await realClick(page, rulerBox.x + rulerBox.width * 0.6, rulerBox.y + rulerBox.height / 2);
         const beforeGoto = await page.evaluate(() => window.__test.getEditorViewState());
         assert(
           beforeGoto.cursorSample !== gotoTarget,
-          `the cursor was NOT already at the target before the click (${beforeGoto.cursorSample} !== ${gotoTarget})`
+          `a ruler click parked the cursor away from the target first (${beforeGoto.cursorSample} !== ${gotoTarget}) — so the Go-to assertion cannot pass vacuously`
         );
         await gotoButtons[gotoIndex].click();
         const afterGoto = await page.evaluate(() => window.__test.getEditorViewState());

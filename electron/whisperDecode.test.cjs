@@ -34,6 +34,9 @@ const CFG = {
   eot: EOT,
   noTimestamps: NO_TS,
   noSpeech: NO_SPEECH,
+  // openai's `sot_index` source: the row `noSpeech` is read from. Required
+  // whenever `noSpeech` is set — see the greedyDecodeWindow block below.
+  sot: SOT,
   maxInitialTimestampIndex: 3,
   suppressTokens: [17, 18],
   beginSuppressTokens: [19, EOT],
@@ -100,6 +103,48 @@ describe('createTokenizer', () => {
     expect(tok.decode([TS, 0, EOT, 1, TS + 9, SOT])).toBe(' hi there');
     expect(tok.decode([3, 4])).toBe('ab');
     expect(tok.decode([])).toBe('');
+  });
+
+  // -------------------------------------------------------------------
+  // The no-speech token has TWO spellings across Whisper vocab revisions.
+  // The model this app PINS (onnx-community/whisper-base) ships
+  // `<|nocaptions|>`; looking only for `<|nospeech|>` left `noSpeech`
+  // undefined, which silently disabled the whole silence rule — measured:
+  // 30 s of digital silence transcribed as the word "you", and a sung
+  // recording over a dance band emitted 7 fabricated segments. Both
+  // spellings are therefore resolved, and both are pinned here.
+  // -------------------------------------------------------------------
+
+  test('resolves the no-speech token spelled <|nospeech|>', () => {
+    expect(createTokenizer(MINI_TOKENIZER).noSpeech).toBe(NO_SPEECH);
+  });
+
+  test('resolves the no-speech token spelled <|nocaptions|> (what whisper-base actually ships)', () => {
+    const older = {
+      ...MINI_TOKENIZER,
+      added_tokens: MINI_TOKENIZER.added_tokens.map((t) =>
+        t.content === '<|nospeech|>' ? { id: t.id, content: '<|nocaptions|>' } : t
+      ),
+    };
+    expect(createTokenizer(older).noSpeech).toBe(NO_SPEECH);
+  });
+
+  test('prefers <|nospeech|> when a vocab somehow carries both', () => {
+    const both = {
+      ...MINI_TOKENIZER,
+      added_tokens: [...MINI_TOKENIZER.added_tokens, { id: 19, content: '<|nocaptions|>' }],
+    };
+    expect(createTokenizer(both).noSpeech).toBe(NO_SPEECH);
+  });
+
+  test('a vocab with neither spelling leaves noSpeech undefined rather than guessing an id', () => {
+    const neither = {
+      ...MINI_TOKENIZER,
+      added_tokens: MINI_TOKENIZER.added_tokens.filter((t) => t.content !== '<|nospeech|>'),
+    };
+    // Undefined, NOT 0 — id 0 is a real text token, and a wrong id would read
+    // some word's probability as "this window is silence".
+    expect(createTokenizer(neither).noSpeech).toBeUndefined();
   });
 
   test('rejects objects that are not a tokenizer.json', () => {
@@ -186,7 +231,7 @@ describe('greedyDecodeWindow', () => {
    * bookkeeping error in the loop produces different logits and the
    * equivalence test below goes red.
    */
-  function scriptedDecoder(logitsFor) {
+  function scriptedDecoder(logitsFor, sotFor) {
     let full = null;
     return async ({ tokens, useCache }) => {
       if (!useCache) {
@@ -195,9 +240,25 @@ describe('greedyDecodeWindow', () => {
         expect(tokens).toHaveLength(1);
         full.push(tokens[0]);
       }
-      return logitsFor(full);
+      // The contract is one row per REQUESTED position, row-major. Every row
+      // other than the last (and the SOT row, when the caller scripts one) is
+      // filled with a DIFFERENT constant, so a loop that samples from — or
+      // reads the no-speech probability from — the wrong row produces visibly
+      // wrong numbers instead of quietly working.
+      const rows = tokens.length;
+      const grid = new Float32Array(rows * VOCAB).fill(FILLER_LOGIT);
+      grid.set(logitsFor(full), (rows - 1) * VOCAB);
+      if (sotFor && !useCache) {
+        const sotIndex = tokens.indexOf(SOT);
+        if (sotIndex >= 0 && sotIndex !== rows - 1) grid.set(sotFor(full), sotIndex * VOCAB);
+      }
+      return grid;
     };
   }
+
+  /** Fills the rows nobody should be reading. Distinct from `mk`'s baseline
+   * so a wrong-row read is a wrong NUMBER, not merely a wrong index. */
+  const FILLER_LOGIT = -12;
 
   /** Deterministic pseudo-random logits from the sequence — enough structure
    * to exercise several rule branches over a decode. */
@@ -259,16 +320,102 @@ describe('greedyDecodeWindow', () => {
     expect(out.tokens.length).toBeLessThanOrEqual(5);
   });
 
+  // -------------------------------------------------------------------------
+  // noSpeechProb — openai reads it at the SOT POSITION of the uncached pass
+  // (decoding.py `_main_loop`: `probs_at_sot = logits[:, self.sot_index]`),
+  // NOT at the last position. `<|nospeech|>` is only ever a training target
+  // for the token after `<|startoftranscript|>`; after `<|transcribe|>` it
+  // carries no mass, so reading the last row returns ~0 for every window and
+  // the silence rule becomes dead code. The three tests below pin the ROW.
+  // -------------------------------------------------------------------------
+
   test('noSpeechProb is measured on the RAW first-step logits, before suppression', async () => {
     // nospeech is in neither suppress list of this cfg, but the timestamp
     // rules would zero it at sampling time; the probability must still see it.
-    const first = mk(0, { [NO_SPEECH]: 3, [TS]: 4 });
-    const expected = Math.exp(logSoftmax(first)[NO_SPEECH]);
-    const run = scriptedDecoder((full) =>
-      full.length === PROMPT.length ? mk(0, { [NO_SPEECH]: 3, [TS]: 4 }) : mk(0, { [EOT]: 50 })
+    const sot = mk(0, { [NO_SPEECH]: 3, [TS]: 4 });
+    const expected = Math.exp(logSoftmax(sot)[NO_SPEECH]);
+    const run = scriptedDecoder(
+      (full) => (full.length === PROMPT.length ? mk(0, { [TS]: 4 }) : mk(0, { [EOT]: 50 })),
+      () => sot
     );
     const out = await greedyDecodeWindow(run, PROMPT, CFG);
     expect(out.noSpeechProb).toBeCloseTo(expected, 10);
+  });
+
+  test('noSpeechProb comes from the SOT row, NOT the last prompt row', async () => {
+    // The two rows disagree as loudly as they can: nospeech dominates the SOT
+    // row and is absent from the last row. Reading the last row would report
+    // near-zero; reading the SOT row reports near-one.
+    const sot = mk(0, { [NO_SPEECH]: 20 });
+    const last = mk(0, { [TS]: 4 });
+    const run = scriptedDecoder(
+      (full) => (full.length === PROMPT.length ? last : mk(0, { [EOT]: 50 })),
+      () => sot
+    );
+    const out = await greedyDecodeWindow(run, PROMPT, CFG);
+    expect(out.noSpeechProb).toBeCloseTo(Math.exp(logSoftmax(sot)[NO_SPEECH]), 10);
+    expect(out.noSpeechProb).toBeGreaterThan(0.99);
+    // and the last row's own answer is what it must NOT have reported
+    expect(Math.exp(logSoftmax(last)[NO_SPEECH])).toBeLessThan(0.05);
+  });
+
+  test('nospeech mass in the LAST row alone does NOT raise noSpeechProb', async () => {
+    // The converse, and the shape the real model actually has: a confident
+    // <|nospeech|> at the sampling position with nothing at SOT must NOT be
+    // read as silence.
+    const sot = mk(0, { [TS]: 4 });
+    const last = mk(0, { [NO_SPEECH]: 20 });
+    const run = scriptedDecoder(
+      (full) => (full.length === PROMPT.length ? last : mk(0, { [EOT]: 50 })),
+      () => sot
+    );
+    const out = await greedyDecodeWindow(run, PROMPT, CFG);
+    expect(out.noSpeechProb).toBeLessThan(0.05);
+    expect(out.noSpeechProb).toBeCloseTo(Math.exp(logSoftmax(sot)[NO_SPEECH]), 10);
+  });
+
+  test('the SOT row is located by cfg.sot, not assumed to be row 0', async () => {
+    // A prompt whose SOT is NOT first (openai supports exactly this via
+    // prefix/prompt conditioning, where sot_index > 0). The probability must
+    // follow the token, not the index.
+    const prefixed = [99, SOT, 22, 24];
+    const sot = mk(0, { [NO_SPEECH]: 20 });
+    const run = scriptedDecoder(
+      (full) => (full.length === prefixed.length ? mk(0, { [TS]: 4 }) : mk(0, { [EOT]: 50 })),
+      () => sot
+    );
+    const out = await greedyDecodeWindow(run, prefixed, CFG);
+    expect(out.noSpeechProb).toBeGreaterThan(0.99);
+  });
+
+  test('cfg.noSpeech without cfg.sot is refused rather than guessed', async () => {
+    const run = scriptedDecoder(() => mk(0, { [EOT]: 50 }));
+    await expect(greedyDecodeWindow(run, PROMPT, { ...CFG, sot: undefined })).rejects.toThrow(
+      /requires cfg\.sot/
+    );
+  });
+
+  test('a prompt that does not contain cfg.sot is refused', async () => {
+    const run = scriptedDecoder(() => mk(0, { [EOT]: 50 }));
+    await expect(greedyDecodeWindow(run, [22, 24], CFG)).rejects.toThrow(/is not in the prompt/);
+  });
+
+  test('a decoder returning a partial row is refused rather than mis-sliced', async () => {
+    const run = async () => new Float32Array(VOCAB + 1);
+    await expect(greedyDecodeWindow(run, PROMPT, CFG)).rejects.toThrow(
+      /not a whole number of rows/
+    );
+  });
+
+  test('sampling still reads the LAST row, not the SOT row', async () => {
+    // The mirror of the tests above: the SOT row is only for noSpeechProb.
+    // If sampling read it, the first sampled token would be NO_SPEECH.
+    const run = scriptedDecoder(
+      (full) => (full.length === PROMPT.length ? mk(0, { [TS]: 9 }) : mk(0, { [EOT]: 50 })),
+      () => mk(0, { [NO_SPEECH]: 20 })
+    );
+    const out = await greedyDecodeWindow(run, PROMPT, CFG);
+    expect(out.tokens).toEqual([TS]);
   });
 
   test('avgLogprob divides the summed logprobs by sampled count + 1 (openai)', async () => {

@@ -95,7 +95,19 @@ function createTokenizer(tokenizerJson) {
   const transcribe = specials.get('<|transcribe|>');
   const translate = specials.get('<|translate|>');
   const noTimestamps = specials.get('<|notimestamps|>');
-  const noSpeech = specials.get('<|nospeech|>');
+  // The no-speech token has TWO spellings across Whisper vocabulary
+  // revisions: the original multilingual vocab calls it `<|nocaptions|>` and
+  // later ones `<|nospeech|>`. They are the same token — openai's own
+  // tokenizer carried both spellings across that rename.
+  //
+  // This is not defensive breadth. The model this app actually pins,
+  // `onnx-community/whisper-base`, ships `<|nocaptions|>`: looking only for
+  // `<|nospeech|>` left `noSpeech` UNDEFINED, which silently disabled the
+  // entire silence rule (`cfg.noSpeech !== undefined` guards it), so
+  // `noSpeechProb` was 0 for every window and 30 s of digital silence
+  // transcribed as the word "you". Verified against the pinned
+  // tokenizer.json, not assumed.
+  const noSpeech = specials.get('<|nospeech|>') ?? specials.get('<|nocaptions|>');
   if (sot === undefined || eot === undefined || noTimestamps === undefined) {
     throw new Error('createTokenizer: tokenizer.json lacks Whisper special tokens');
   }
@@ -230,14 +242,22 @@ function compressionRatio(text) {
  * `runDecoder({tokens, useCache})` — the injected merged-decoder call:
  *   - `tokens`: number[] — the WHOLE prompt+sampled sequence when
  *     `useCache` is false, or ONLY the newest token when true.
- *   - returns Promise<Float32Array> — the logits for the LAST position
- *     ([vocab] length). The callback owns the ORT session, the KV-cache
- *     tensors and the encoder hidden state; this loop owns WHICH branch is
- *     requested, so the cache choreography above stays testable.
+ *   - returns Promise<Float32Array> — the logits for EVERY requested
+ *     position, row-major: `tokens.length * vocab` values. The callback owns
+ *     the ORT session, the KV-cache tensors and the encoder hidden state;
+ *     this loop owns WHICH branch is requested and WHICH ROW it reads, so
+ *     the cache choreography above stays testable.
+ *
+ *     It returns every row rather than only the last one because openai's
+ *     no-speech probability is read at the SOT POSITION, not the final one
+ *     (see below). `vocab` is derived as `logits.length / tokens.length`, so
+ *     no extra parameter is needed and a callback that returns the wrong
+ *     number of rows fails loudly rather than silently mis-slicing.
  *
  * `cfg`: {timestampBegin, eot, noTimestamps, maxInitialTimestampIndex,
- *         suppressTokens, beginSuppressTokens, noSpeech, maxNewTokens,
- *         useKvCache (default true)}.
+ *         suppressTokens, beginSuppressTokens, noSpeech, sot, maxNewTokens,
+ *         useKvCache (default true)}. `sot` is REQUIRED whenever `noSpeech`
+ *         is set — it locates the row the probability is read from.
  *
  * Returns {tokens (sampled, WITHOUT prompt/eot), avgLogprob, noSpeechProb}.
  */
@@ -246,20 +266,55 @@ async function greedyDecodeWindow(runDecoder, prompt, cfg) {
   const sampled = [];
   let sumLogprob = 0;
   let noSpeechProb = 0;
-  for (let step = 0; step < cfg.maxNewTokens; step++) {
-    let logits;
-    if (useKv) {
-      logits = await runDecoder({
-        tokens: step === 0 ? prompt.slice() : [sampled[sampled.length - 1]],
-        useCache: step > 0,
-      });
-    } else {
-      logits = await runDecoder({ tokens: prompt.concat(sampled), useCache: false });
+  // openai: `self.sot_index = self.initial_tokens.index(tokenizer.sot)`.
+  // Our prompts are [sot] or [sot, lang, transcribe], so this is 0 today —
+  // it is computed rather than hardcoded so a prefix/prompt prefix added
+  // later cannot silently move the row without moving this index with it.
+  let sotIndex = 0;
+  if (cfg.noSpeech !== undefined) {
+    if (cfg.sot === undefined) {
+      throw new Error('greedyDecodeWindow: cfg.noSpeech requires cfg.sot (the row it is read from)');
     }
+    sotIndex = prompt.indexOf(cfg.sot);
+    if (sotIndex < 0) {
+      throw new Error(`greedyDecodeWindow: cfg.sot (${cfg.sot}) is not in the prompt [${prompt}]`);
+    }
+  }
+  for (let step = 0; step < cfg.maxNewTokens; step++) {
+    let rows;
+    let requested;
+    if (useKv) {
+      requested = step === 0 ? prompt.slice() : [sampled[sampled.length - 1]];
+    } else {
+      requested = prompt.concat(sampled);
+    }
+    const grid = await runDecoder({ tokens: requested, useCache: useKv && step > 0 });
+    rows = requested.length;
+    if (grid.length % rows !== 0) {
+      throw new Error(
+        `greedyDecodeWindow: decoder returned ${grid.length} logits for ${rows} position(s) — not a whole number of rows`
+      );
+    }
+    const vocab = grid.length / rows;
+    // A VIEW, not a copy: applySuppress/applyTimestampRules edit in place and
+    // must edit the row that is about to be sampled.
+    const logits = grid.subarray((rows - 1) * vocab, rows * vocab);
     if (step === 0 && cfg.noSpeech !== undefined) {
-      // P(<|nospeech|>) at the transcription start (openai: probs_at_sot) —
-      // measured on the RAW logits, before any suppression edits.
-      const lp = logSoftmax(logits);
+      // P(<|nospeech|>) at the SOT POSITION (openai decoding.py `_main_loop`:
+      // `probs_at_sot = logits[:, self.sot_index].softmax(dim=-1)`), measured
+      // on the RAW logits before any suppression edits.
+      //
+      // The row matters, and getting it wrong is silent. `<|nospeech|>` is
+      // only ever a training target for the token that follows
+      // `<|startoftranscript|>`; at the LAST prompt position — after
+      // `<|transcribe|>` — the model has already been told there is speech to
+      // transcribe, so that row assigns it essentially no mass and the
+      // probability comes back ~0 for every window, silence included. The
+      // silence rule would then never fire and Whisper's classic
+      // silence hallucinations would land as real segments with real
+      // timestamps. Reading the SOT row is the whole rule.
+      const sotRow = grid.subarray(sotIndex * vocab, (sotIndex + 1) * vocab);
+      const lp = logSoftmax(sotRow);
       noSpeechProb = Math.exp(lp[cfg.noSpeech]);
     }
     applySuppress(logits, sampled, cfg);
