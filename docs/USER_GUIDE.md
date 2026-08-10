@@ -158,7 +158,10 @@ selection.
   or Equal power curve; ramp length as a % of the selection — 100 % shapes the
   whole selection exactly as before), Normalize (peak or RMS target level)
 - **EQ & Filters** — Parametric EQ, Graphic EQ
-- **Dynamics** — Compressor, Limiter, Noise Gate
+- **Dynamics** — Compressor, Limiter, Noise Gate, De-esser (tames harsh "s" and
+  "sh" sounds: Frequency sets where the sibilance band starts, Threshold and
+  Ratio how hard it is pulled down, and **Listen** plays back only what is being
+  removed so you can hear whether you are taking out sibilance or consonants)
 - **Delay & Reverb** — Echo, Reverb
 - **Modulation** — Chorus, Flanger
 - **Distortion** — Distortion

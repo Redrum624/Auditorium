@@ -307,10 +307,10 @@ describe('noiseGateEffect', () => {
 });
 
 describe('dynamics effects registration', () => {
-  it('registerAllEffects makes compressor, limiter, and noise-gate discoverable in category Dynamics', () => {
+  it('registerAllEffects makes compressor, limiter, noise-gate and de-esser discoverable in category Dynamics', () => {
     registerAllEffects();
     const all = getAllEffects();
     const dynamicsIds = all.filter((e) => e.category === 'Dynamics').map((e) => e.id);
-    expect(dynamicsIds).toEqual(expect.arrayContaining(['compressor', 'limiter', 'noise-gate']));
+    expect(dynamicsIds).toEqual(expect.arrayContaining(['compressor', 'limiter', 'noise-gate', 'de-esser']));
   });
 });

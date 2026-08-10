@@ -69,11 +69,11 @@ use `npm run dev`.
 
 ## Features
 
-**Effects (24), grouped by category:**
+**Effects (25), grouped by category:**
 
 - **Amplitude** — Amplify, Normalize, Fade.
 - **EQ & Filters** — Parametric EQ, Graphic EQ.
-- **Dynamics** — Compressor, Limiter, Noise Gate.
+- **Dynamics** — Compressor, Limiter, Noise Gate, De-esser.
 - **Delay & Reverb** — Echo, Reverb.
 - **Modulation** — Chorus, Flanger.
 - **Distortion** — Distortion.

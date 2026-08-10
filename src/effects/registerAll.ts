@@ -10,6 +10,7 @@ import { graphicEqEffect } from './eq/GraphicEqEffect';
 import { compressorEffect } from './dynamics/CompressorEffect';
 import { limiterEffect } from './dynamics/LimiterEffect';
 import { noiseGateEffect } from './dynamics/NoiseGateEffect';
+import { deEsserEffect } from './dynamics/DeEsserEffect';
 import { echoEffect } from './time/EchoEffect';
 import { reverbEffect } from './time/ReverbEffect';
 import { chorusEffect } from './time/ChorusEffect';
@@ -45,6 +46,7 @@ export function registerAllEffects(): void {
   registerEffect(compressorEffect);
   registerEffect(limiterEffect);
   registerEffect(noiseGateEffect);
+  registerEffect(deEsserEffect);
   registerEffect(echoEffect);
   registerEffect(reverbEffect);
   registerEffect(chorusEffect);

@@ -148,14 +148,13 @@ export function designBiquad(
  *
  *   1 - H(z) = (1/(1+K)) * (1 - z^-1) / (1 - ((1-K)/(1+K)) * z^-1)
  *
- * (zero at DC, unity at Nyquist). Two consequences the de-esser depends on:
- * the two bands sum back to the input SAMPLE-EXACTLY, and |H_lp|^2 + |H_hp|^2
- * = 1 at every frequency — neither band overshoots, so recombining them with
- * any band gain in [0,1] can never produce a peak or a polarity flip. A
- * subtractive split around a STEEPER lowpass has neither property: at fc a
- * Butterworth 2nd-order residual peaks at +1.76 dB and an LR4 residual at
- * +3.5 dB, and the latter cancels to a null once the band is pulled down more
- * than ~9.5 dB.
+ * (zero at DC, unity at Nyquist). Two consequences: the two bands sum back to
+ * the input SAMPLE-EXACTLY, and |H_lp|^2 + |H_hp|^2 = 1 at every frequency, so
+ * neither half overshoots. Cascading the section (the de-esser uses two, for
+ * reach) keeps the exact sum and costs a +0.97 dB bump in the residual at the
+ * corner — still far better behaved than the alternatives, where a Butterworth
+ * 2nd-order residual peaks at +1.76 dB and an LR4 residual at +3.5 dB, the
+ * latter cancelling to a null once the band is pulled down past ~9.5 dB.
  */
 export function designOnePoleLowpass(sampleRate: number, freq: number): BiquadCoeffs {
   const k = Math.tan((Math.PI * freq) / sampleRate);
