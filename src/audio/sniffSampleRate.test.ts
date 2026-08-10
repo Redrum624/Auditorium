@@ -549,6 +549,12 @@ describe('sniffSampleRate', () => {
     it('a different-sample-rate free sync does not confirm', () => {
       expect(sniffSampleRate(toBuf(mp3FreeFormat(24, [0xff, 0xfb, 0x04, 0x00])), 'a.mp3')).toBeNull();
     });
+    it('a confirming header differing only in the protection (CRC) bit still confirms', () => {
+      // First header 0xFB (protection_absent=1), confirmer 0xFA (CRC present):
+      // the mask (b1 & 0xFE) deliberately ignores that bit — a stream may mix
+      // them, and requiring exact equality would silently fall back to 48000.
+      expect(sniffSampleRate(toBuf(mp3FreeFormat(24, [0xff, 0xfa, 0x00, 0x00])), 'a.mp3')).toBe(44100);
+    });
   });
 
   describe('FLAC', () => {
@@ -583,6 +589,14 @@ describe('sniffSampleRate', () => {
     });
     it('reads the Ogg FLAC STREAMINFO rate from the 0x7F FLAC first packet', () => {
       expect(sniffSampleRate(toBuf(oggFlac(44100)), 'a.ogg')).toBe(44100);
+    });
+    it('returns null when the 0x7F FLAC packet lacks the native fLaC marker', () => {
+      // Both magics are required: corrupt only the inner 'fLaC' (payload offset
+      // 9, absolute 37). Without the second-magic check the garbage STREAMINFO
+      // bits (still 44100 here) would be returned as a rate.
+      const bytes = oggFlac(44100);
+      bytes[37] = 0x58; // 'f' -> 'X'
+      expect(sniffSampleRate(toBuf(bytes), 'a.ogg')).toBeNull();
     });
     it('returns null for an Ogg FLAC packet whose rate field is 0', () => {
       expect(sniffSampleRate(toBuf(oggFlac(0)), 'a.ogg')).toBeNull();
