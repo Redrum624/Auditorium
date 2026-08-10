@@ -57,6 +57,39 @@ const electronAPI = {
     return () => ipcRenderer.removeListener('stems:chunk', listener);
   },
 
+  // Transcription (F4). Channels, payload shapes and event layouts are
+  // documented in electron/transcribeManager.cjs's module header; this bridge
+  // adds no logic of its own beyond the on*/unsubscribe pattern used above.
+  transcribeModelState: () => ipcRenderer.invoke('transcribe:model-state'),
+  transcribeEnsureModels: () => ipcRenderer.invoke('transcribe:ensure-models'),
+  onTranscribeModelProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('transcribe:model-progress', listener);
+    return () => ipcRenderer.removeListener('transcribe:model-progress', listener);
+  },
+  transcribeRun: (req) => ipcRenderer.invoke('transcribe:run', req),
+  transcribeCancel: () => ipcRenderer.invoke('transcribe:cancel'),
+  onTranscribeProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('transcribe:progress', listener);
+    return () => ipcRenderer.removeListener('transcribe:progress', listener);
+  },
+  onTranscribeLanguage: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('transcribe:language', listener);
+    return () => ipcRenderer.removeListener('transcribe:language', listener);
+  },
+  onTranscribeSegment: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('transcribe:segment', listener);
+    return () => ipcRenderer.removeListener('transcribe:segment', listener);
+  },
+  onTranscribeEmbedding: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('transcribe:embedding', listener);
+    return () => ipcRenderer.removeListener('transcribe:embedding', listener);
+  },
+
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
   pathBasename: (p) => p.split(/[\\/]/).pop()

@@ -6,6 +6,7 @@ const { setAppPaths } = require('./writePathPolicy.cjs');
 const { isMediaAllowed } = require('./permissionPolicy.cjs');
 const { isPackagedGateOpen } = require('./prodGate.cjs');
 const { createStemManager, registerStemIpc } = require('./stemManager.cjs');
+const { createTranscribeManager, registerTranscribeIpc } = require('./transcribeManager.cjs');
 const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs');
 
 app.setName('audition_app');
@@ -120,6 +121,14 @@ app.whenReady().then(() => {
   const stemManager = createStemManager({ userDataDir: app.getPath('userData') });
   registerStemIpc({ ipcMain, manager: stemManager, getWin: () => mainWindow });
   app.on('will-quit', () => stemManager.dispose());
+
+  // Transcription (F4): same shape, a second independent manager. Its own
+  // utility process, its own model directory, its own dispose — the two
+  // features never share a child, so cancelling or quitting one cannot leave
+  // the other's inference running.
+  const transcribeManager = createTranscribeManager({ userDataDir: app.getPath('userData') });
+  registerTranscribeIpc({ ipcMain, manager: transcribeManager, getWin: () => mainWindow });
+  app.on('will-quit', () => transcribeManager.dispose());
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

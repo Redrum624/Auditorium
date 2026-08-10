@@ -19,6 +19,18 @@ export interface ElectronAPI {
   onStemsProgress(cb: (p: { segment: number; totalSegments: number }) => void): () => void; // returns unsubscribe
   onStemsChunk(cb: (c: { offset: number; samples: number; data: ArrayBuffer }) => void): () => void; // returns unsubscribe
 
+  // Transcription (F4). Renderer code goes through
+  // `src/services/transcribeService.ts`, never these directly.
+  transcribeModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  transcribeEnsureModels(): Promise<{ ok: true } | { ok: false; error: string }>;
+  onTranscribeModelProgress(cb: (p: { file: string; fileIndex: number; fileCount: number; received: number; total: number }) => void): () => void; // returns unsubscribe
+  transcribeRun(req: { sampleRate: number; samples: ArrayBuffer; language: string }): Promise<{ ok: true; segmentCount: number } | { ok: false; cancelled?: true; error?: string }>;
+  transcribeCancel(): Promise<{ cancelled: boolean }>;
+  onTranscribeProgress(cb: (p: { stage: 'transcribe' | 'embed'; done: number; total: number }) => void): () => void; // returns unsubscribe
+  onTranscribeLanguage(cb: (p: { language: string; probability: number }) => void): () => void; // returns unsubscribe
+  onTranscribeSegment(cb: (s: { index: number; startSample: number; endSample: number; text: string; avgLogprob: number; noSpeechProb: number; compressionRatio: number }) => void): () => void; // returns unsubscribe
+  onTranscribeEmbedding(cb: (e: { segmentIndex: number; vector: ArrayBuffer }) => void): () => void; // returns unsubscribe
+
   pathBasename(p: string): string;      // implemented in preload (string ops only, no IPC)
 }
 declare global { interface Window { electronAPI: ElectronAPI } }

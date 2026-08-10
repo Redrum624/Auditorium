@@ -23,6 +23,7 @@ import { releaseBeatGrid } from './beatGrid';
 // and its plan worker). Closing a document must clear both (Task T13).
 import { invalidateRemixSession } from './remixService';
 import { invalidateStemRun } from './stemService';
+import { invalidateTranscript } from './transcribeService';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -609,6 +610,12 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   // its ~5 GB utility process must not go on running — and its busy count must
   // not keep the close guard armed. Terminates the run; a no-op otherwise.
   invalidateStemRun(docId);
+  // Task F4b: the same accounting for transcription — an in-flight run for a
+  // closed document can no longer deliver anything (the delivery-time
+  // staleness gate would discard it), and a FINISHED transcript retains the
+  // closed document's channel arrays through its staleness snapshot, which is
+  // the leak class the three calls above already manage.
+  invalidateTranscript(docId);
   if (getNoiseProfile()?.docId === docId) clearNoiseProfile();
   // A closing doc can invalidate many clips' cached mini-waveforms at once
   // (every clip sourced from it); clearing the whole cache is cheap and
