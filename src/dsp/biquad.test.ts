@@ -1,4 +1,4 @@
-import { designBiquad, processBiquad, magnitudeAt, BiquadCoeffs } from './biquad';
+import { designBiquad, designOnePoleLowpass, processBiquad, magnitudeAt, BiquadCoeffs } from './biquad';
 
 const FS = 44100;
 
@@ -100,6 +100,84 @@ describe('processBiquad', () => {
     chunked.set(second, 100);
 
     for (let i = 0; i < 200; i++) expect(chunked[i]).toBeCloseTo(single[i], 6);
+  });
+});
+
+describe('designOnePoleLowpass', () => {
+  const FC = 1000;
+
+  /** Sine long enough to settle; measured over the last 0.1 s, which holds an
+   * integer number of periods for every probe frequency below (all multiples
+   * of 10 Hz), so the RMS of the input is exactly A/sqrt(2). */
+  function probe(freq: number, coeffs: BiquadCoeffs): { inR: number; lowR: number; highR: number } {
+    const n = Math.round(0.3 * FS);
+    const sine = new Float32Array(n);
+    for (let i = 0; i < n; i++) sine[i] = Math.sin((2 * Math.PI * freq * i) / FS);
+    const low = processBiquad(sine, coeffs);
+    const from = Math.round(0.2 * FS);
+    let si = 0;
+    let sl = 0;
+    let sh = 0;
+    for (let i = from; i < n; i++) {
+      const high = sine[i] - low[i];
+      si += sine[i] * sine[i];
+      sl += low[i] * low[i];
+      sh += high * high;
+    }
+    const count = n - from;
+    return { inR: Math.sqrt(si / count), lowR: Math.sqrt(sl / count), highR: Math.sqrt(sh / count) };
+  }
+
+  it('is unity at DC, exactly 1/sqrt(2) at the corner, and exactly 0 at Nyquist', () => {
+    const coeffs = designOnePoleLowpass(FS, FC);
+    expect(magnitudeAt(coeffs, 0, FS)).toBeCloseTo(1, 12);
+    expect(magnitudeAt(coeffs, FC, FS)).toBeCloseTo(Math.SQRT1_2, 12);
+    // The design has an exact zero at Nyquist (b0 + b1*z^-1 with b1 = b0);
+    // what is left is magnitudeAt's own sin(pi) residue, ~4e-18.
+    expect(magnitudeAt(coeffs, FS / 2, FS)).toBeLessThan(1e-15);
+  });
+
+  it('rolls off at 6 dB/oct (one pole), not 12', () => {
+    const coeffs = designOnePoleLowpass(FS, FC);
+    // With r = tan(pi*f/fs)/tan(pi*fc/fs) (r = 2.0099 one octave up, 8.9720
+    // three octaves up), one pole gives 1/sqrt(1+r^2) = 0.4454 / 0.1107.
+    // A two-pole Butterworth would give 1/sqrt(1+r^4) = 0.2403 / 0.0124.
+    expect(magnitudeAt(coeffs, 2 * FC, FS)).toBeCloseTo(0.4454, 3);
+    expect(magnitudeAt(coeffs, 8 * FC, FS)).toBeCloseTo(0.1107, 3);
+  });
+
+  it('the residual x - lowpass(x) is power-complementary with it at every frequency', () => {
+    const coeffs = designOnePoleLowpass(FS, FC);
+    // Below, on and above the corner - the whole extent, not just one probe.
+    for (const freq of [250, 500, 1000, 2000, 8000]) {
+      const { inR, lowR, highR } = probe(freq, coeffs);
+      const sumPower = lowR * lowR + highR * highR;
+      expect(Math.abs(sumPower - inR * inR) / (inR * inR)).toBeLessThan(1e-3);
+    }
+  });
+
+  it('splits the power evenly at the corner and hands the band over across it', () => {
+    const coeffs = designOnePoleLowpass(FS, FC);
+    const at = probe(FC, coeffs);
+    expect(at.lowR / at.inR).toBeCloseTo(Math.SQRT1_2, 3);
+    expect(at.highR / at.inR).toBeCloseTo(Math.SQRT1_2, 3);
+
+    const below = probe(FC / 4, coeffs);
+    expect(below.lowR / below.inR).toBeGreaterThan(0.96);
+    expect(below.highR / below.inR).toBeLessThan(0.26);
+
+    const above = probe(FC * 8, coeffs);
+    expect(above.lowR / above.inR).toBeLessThan(0.12);
+    expect(above.highR / above.inR).toBeGreaterThan(0.99);
+  });
+
+  it('neither band ever overshoots the input (|H| <= 1 for both halves)', () => {
+    const coeffs = designOnePoleLowpass(FS, FC);
+    for (const freq of [125, 250, 500, 1000, 2000, 4000, 8000, 16000]) {
+      const { inR, lowR, highR } = probe(freq, coeffs);
+      expect(lowR / inR).toBeLessThanOrEqual(1.0005);
+      expect(highR / inR).toBeLessThanOrEqual(1.0005);
+    }
   });
 });
 

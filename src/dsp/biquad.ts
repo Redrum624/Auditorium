@@ -132,6 +132,38 @@ export function designBiquad(
 }
 
 /**
+ * Design a FIRST-ORDER (6 dB/oct) lowpass via the bilinear transform, returned
+ * in the same biquad form (`b2 = a2 = 0`) so `processBiquad` runs it unchanged.
+ *
+ *   K = tan(pi*f/fs),  a = K/(1+K)
+ *   H(z) = a*(1 + z^-1) / (1 - ((1-K)/(1+K)) * z^-1)
+ *
+ * Prewarped, so the corner lands exactly on `freq`: |H(0)| = 1, |H(freq)| =
+ * 1/sqrt(2), |H(Nyquist)| = 0.
+ *
+ * Why first order, and why it is here: this is the LOW half of an
+ * AMPLITUDE-COMPLEMENTARY crossover. Its high half is not a second filter but
+ * the residual `x - lowpass(x)`, which for THIS design is itself a true
+ * first-order highpass sharing the same pole:
+ *
+ *   1 - H(z) = (1/(1+K)) * (1 - z^-1) / (1 - ((1-K)/(1+K)) * z^-1)
+ *
+ * (zero at DC, unity at Nyquist). Two consequences the de-esser depends on:
+ * the two bands sum back to the input SAMPLE-EXACTLY, and |H_lp|^2 + |H_hp|^2
+ * = 1 at every frequency — neither band overshoots, so recombining them with
+ * any band gain in [0,1] can never produce a peak or a polarity flip. A
+ * subtractive split around a STEEPER lowpass has neither property: at fc a
+ * Butterworth 2nd-order residual peaks at +1.76 dB and an LR4 residual at
+ * +3.5 dB, and the latter cancels to a null once the band is pulled down more
+ * than ~9.5 dB.
+ */
+export function designOnePoleLowpass(sampleRate: number, freq: number): BiquadCoeffs {
+  const k = Math.tan((Math.PI * freq) / sampleRate);
+  const a = k / (1 + k);
+  return { b0: a, b1: a, b2: 0, a1: -(1 - k) / (1 + k), a2: 0 };
+}
+
+/**
  * Filter `input` through the biquad. Returns a NEW array; never mutates the
  * input. If `state` is supplied it carries x1/x2/y1/y2 across calls and is
  * MUTATED IN PLACE so successive chunks stitch together seamlessly; omit it for
