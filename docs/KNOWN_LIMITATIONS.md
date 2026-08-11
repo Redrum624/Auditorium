@@ -761,6 +761,60 @@ toward removing *less*. The gap's END is accurate to ~1 ms (1 ms attack), so
 speech onsets are never clipped. If a bordering gap must be caught, lowering
 "Min silence" by ~100 ms compensates exactly.
 
+## The Vocal Chain evens out the envelope; it does not lower the peak-to-RMS ratio
+
+**Area:** Vocal Chain (`src/services/vocalChain.ts`), compressor and limiter stages.
+
+**Behavior a user will notice:** the chain's own before/after table reports the
+**crest factor going UP**, not down. On the reference vocal it reads 18.08 dB
+before and 22.24 dB after. That looks like the opposite of "evened out", and if
+you read crest factor as "how consistent is this take", you will read it
+backwards.
+
+**Why it happens, measured:** the compressor's shipped 10 ms attack does not
+catch a transient shorter than 10 ms, while the makeup gain derived to restore
+the level lifts that transient along with everything else. On the reference take
+the compressor stage holds programme RMS at −27.87 dBFS and moves the peak from
+−9.81 to −6.32 dBFS — very nearly the whole +3.6 dB of makeup. What the stage
+*does* even out is the envelope between roughly −27 and −18 dBFS, by up to 6.5 dB;
+peak-to-RMS is simply not the number that shows it.
+
+The limiter would catch those transients, but only if they reached its ceiling.
+On this take the output peaks at −5.69 dBFS against a −0.3 dBFS ceiling, so the
+limiter honestly reports leaving every sample unchanged. On a hotter recording it
+engages and the crest factor stops rising.
+
+**What it is not:** it is not distortion, and it is not a stage misbehaving —
+every stage did exactly what it was derived to do. Fixing the number would mean
+either shortening a compressor attack default that was chosen and reviewed on its
+own merits, or having the chain choose a delivery loudness, which is a mastering
+decision no measurement of a recording can make. Both were rejected as out of
+scope for a feature whose job is to compose already-reviewed effects.
+
+**If you want the peaks under control:** run Normalize or the Limiter on its own
+afterwards, with a ceiling you choose.
+
+## The Vocal Chain's de-esser only touches the harshest sibilants
+
+**Area:** Vocal Chain de-esser stage; the underlying threshold derivation is F8's.
+
+**Behavior a user will notice:** on the reference vocal the chain leaves
+**97.7 % of samples bit-identical** through the de-esser stage, and whole-file
+energy above 5.5 kHz moves only −48.44 → −48.63 dBFS. "The chain de-essed it" is
+a weaker claim than it sounds.
+
+**Why it is built this way:** the threshold is derived to reproduce the de-esser's
+own measured operating point (programme RMS − 2.2 dB), which sits *above* the
+median sibilant on purpose — the effect exists to remove harshness, not to remove
+every "s". Its own task measured −0.36 dB mean over sibilant frames at that
+setting, with a −4.26 dB worst frame. The chain reproduces that faithfully rather
+than pushing it harder, because a de-esser dialled in harder than its reviewed
+operating point, inside a pass where nobody is listening, is exactly the wrong
+place to be aggressive.
+
+**If you want more:** open the De-esser on its own, use its Listen switch to hear
+what is being removed, and lower the threshold until it is removing what you want.
+
 ## An open envelope lane owns its track lane; automation overrides the fader
 
 **Area:** F0 automation keys (`src/components/Multitrack/EnvelopeLane.tsx`,

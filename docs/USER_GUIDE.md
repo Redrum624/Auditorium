@@ -195,6 +195,70 @@ is cleared when you capture a new one — or when you close the document it was
 captured from (the print belongs to audio that no longer exists). The Noise
 Reduction dialog notices a capture or clear immediately, even while open.
 
+### Vocal Chain (fixing a rough vocal in one pass)
+
+**Effects → Vocal Chain…** runs the corrections a vocal usually needs, in one
+pass that lands as a single undo entry. It contains no new processing — every
+stage is an effect you can also run on its own. What the chain adds is the
+order, settings worked out from your actual recording, and a report.
+
+The stages, in the order they run:
+
+| # | Stage | On by default |
+| --- | --- | --- |
+| 1 | Remove DC Offset | yes |
+| 2 | Noise Reduction | yes |
+| 3 | DeHum | yes (runs only if hum is measured) |
+| 4 | Remove Silence | **no** |
+| 5 | Align Vocal Timing | **manual — run it before the chain** |
+| 6 | Pitch Correct | yes |
+| 7 | Compressor | yes |
+| 8 | De-esser | yes |
+| 9 | EQ (high-pass) | yes |
+| 10 | Limiter | yes |
+| 11 | Reverb | **no** |
+
+The order is not stylistic. Noise reduction comes early because the pitch
+detector will otherwise lock onto broadband noise and "correct" pitch that is
+not there. De-essing comes *after* the compressor because compression makes
+sibilance worse. Reverb is last because nothing should compress or
+pitch-correct a tail it just added.
+
+**Nothing is set by taste.** Each stage starts from its own effect's defaults
+and the chain overrides only what the recording decides:
+
+- the **de-esser's threshold** is measured at its own input — that is, after the
+  compressor, because an upstream compressor changes what its detector sees;
+- the **compressor's threshold** is the level your take is above half the time
+  while it is actually sounding, and its **makeup gain** is exactly the level
+  the compression took away;
+- the **noise print** is learned from the quietest 500 ms in the selection;
+- the **silence threshold** is the loudest that quiet passage ever reads;
+- the **high-pass** sits an octave below the lowest note actually sung.
+
+**A stage with nothing to do says so.** On a recording with no mains hum, DeHum
+reports the two readings it took and declines rather than notching a hole in
+nothing. Noise Reduction declines if there is no passage quiet enough to learn
+from, and says why. Nothing runs that you did not see.
+
+Two stages are off by default because they change the material rather than
+correct it: **Remove Silence** shortens pauses, which moves everything after
+them and takes the take out of sync with a backing track, and **Reverb** adds a
+tail no measurement of a recording can ask for. **Align Vocal Timing** is listed
+but never run automatically — it needs you to confirm the beat grid and the
+syllables first, so run it from its own dialog *before* the chain (timing
+belongs before pitch, because warping changes the windows the pitch detector
+uses).
+
+After the run, every stage reports what it did: the settings it derived and what
+it derived them from, the measured RMS and peak before and after, and how much
+of the audio it left bit-identical — plus a before/after table of loudness,
+peak, crest factor and noise floor. A stage that declined shows the measurement
+that made it decline.
+
+Pitch Correct dominates the running time (roughly 0.4× real time on its own; the
+whole chain took about 105 seconds on a 142-second stereo take).
+
 ## Tempo, remix, stems, transcription and the voice changer
 
 These features are opt-in: nothing here runs until you ask for it, so opening a

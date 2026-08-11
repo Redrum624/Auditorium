@@ -1096,6 +1096,116 @@ async function main() {
 
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
 
+    // 11c) F7 — the Vocal Chain, end to end in the PACKAGED app. The unit suite
+    // drives the chain against the synchronous worker MOCK, so the one thing it
+    // structurally cannot see is the chain running ten separate real Workers
+    // back to back through the packaged bundle — module resolution, the CSP,
+    // and the `extra` side channel carrying a noise print across a real
+    // postMessage boundary. The other two things pinned here are the promises
+    // the chain makes: exactly ONE undo entry for the whole pass, and a stage
+    // that declines saying WHY instead of quietly doing nothing.
+    //
+    // Pitch Correct is switched off for this pass: it is 55 % of the chain's
+    // runtime and it has nothing to correct on a drum loop. That is deliberate
+    // and load-bearing here — with no pitch measurement the EQ stage must
+    // DECLINE, which is exactly the path being pinned.
+    console.log('Vocal Chain (F7): the whole pass, one undo entry, in the packaged app...');
+    await page.evaluate((p) => window.__test.openPath(p), BEAT);
+    const chainBefore = await page.evaluate(() => window.__test.getStateSummary());
+    const chain = await page.evaluate(() => window.__test.runVocalChain({ pitch: false }));
+    console.log(
+      `  runVocalChain: ok=${chain.ok} applied=${chain.applied} undoDepth=${chain.undoDepth} ` +
+        `label=${JSON.stringify(chain.undoLabel)} length ${chain.lengthBefore} -> ${chain.lengthAfter}`
+    );
+    for (const stage of chain.stages) {
+      const derived = stage.derived.map((d) => `${d.label}=${d.value}`).join(', ');
+      console.log(
+        `    ${stage.id}: ${stage.status}` +
+          (derived ? ` [${derived}]` : '') +
+          (stage.detail ? ` — ${stage.detail}` : '') +
+          (stage.reason ? ` — ${stage.reason}` : '')
+      );
+    }
+
+    assert(chain.ok === true, 'the Vocal Chain ran in the packaged app (a real DSP worker per stage)');
+    assert(chain.applied === true, 'the Vocal Chain committed an edit');
+    assert(
+      chain.undoDepth === 1,
+      `the WHOLE chain is one undo entry, not one per stage (expected 1, actual ${chain.undoDepth}) ` +
+        '— the single most load-bearing promise the feature makes'
+    );
+    assert(
+      chain.undoLabel === 'Vocal Chain',
+      `the undo entry is named for what the user asked for (actual ${JSON.stringify(chain.undoLabel)})`
+    );
+    assert(
+      chain.lengthAfter === chain.lengthBefore,
+      `no default stage changes the length (before ${chain.lengthBefore}, after ${chain.lengthAfter})`
+    );
+    assert(
+      chain.lengthBefore === chainBefore.length,
+      `the chain processed the whole document (doc ${chainBefore.length}, chain ${chain.lengthBefore})`
+    );
+    assert(
+      chain.stages.length === 11,
+      `every stage is reported, run or not (expected 11, actual ${chain.stages.length})`
+    );
+
+    const chainManual = chain.stages.filter((st) => st.status === 'manual');
+    assert(
+      chainManual.length === 1 && chainManual[0].id === 'timing',
+      `Align Vocal Timing is listed but never run automatically (actual ${JSON.stringify(chainManual.map((m) => m.id))})`
+    );
+    const chainApplied = chain.stages.filter((st) => st.status === 'applied');
+    assert(
+      chainApplied.length >= 2,
+      `at least two stages actually ran (actual ${chainApplied.length}: ${chainApplied.map((st) => st.id).join(', ')})`
+    );
+    for (const stage of chain.stages) {
+      assert(
+        ['applied', 'declined', 'off', 'manual'].indexOf(stage.status) !== -1,
+        `stage ${stage.id} reports a known status (actual ${JSON.stringify(stage.status)})`
+      );
+      if (stage.status === 'declined') {
+        assert(
+          typeof stage.reason === 'string' && stage.reason.length > 0,
+          `stage ${stage.id} declined WITH a reason — a silent skip is the failure mode this rules out`
+        );
+      }
+    }
+    // Ruling 3, the specific case: with Pitch Correct off there is no measured
+    // sung range, so the high-pass corner cannot be derived and the EQ stage
+    // must say so rather than picking a corner out of the air.
+    const chainEq = chain.stages.filter((st) => st.id === 'eq')[0];
+    assert(
+      chainEq.status === 'declined' && /Pitch Correct/.test(chainEq.reason || ''),
+      `the EQ stage declines and names the missing measurement (status ${chainEq.status}, reason ${JSON.stringify(chainEq.reason)})`
+    );
+    for (const stage of chainApplied) {
+      assert(
+        Number.isFinite(stage.identicalFraction) || stage.identicalFraction === null,
+        `stage ${stage.id} reported a measured change (actual ${stage.identicalFraction})`
+      );
+    }
+    assert(
+      Number.isFinite(chain.before.rmsDb) && Number.isFinite(chain.after.rmsDb),
+      `the before/after summary carries real numbers (before ${chain.before.rmsDb}, after ${chain.after.rmsDb})`
+    );
+    console.log(
+      `  ok: ${chainApplied.length} stage(s) applied, ${chain.stages.filter((st) => st.status === 'declined').length} declined ` +
+        `with a stated reason, RMS ${chain.before.rmsDb.toFixed(2)} -> ${chain.after.rmsDb.toFixed(2)} dBFS, one undo entry`
+    );
+
+    // One Ctrl+Z has to put the WHOLE pass back, which is only meaningful
+    // because undoDepth was asserted to be 1 above.
+    const chainUndone = await page.evaluate(() => window.__test.undoActive());
+    assert(
+      chainUndone.length === chainBefore.length,
+      `one undo restores the document (expected ${chainBefore.length}, actual ${chainUndone.length})`
+    );
+
+    await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
     // 12) v1.5 step C — Auto-Remix (Task T13 acceptance): open the 64 s ABAB
     // fixture and ask for a 32 s arrangement through the real
     // createRemixDocument (analyse -> plan -> render -> new document),

@@ -34,10 +34,16 @@ import { editorSnapTargets } from '../components/Editor/editorSnapTargets';
 import { SNAP_TOLERANCE_PX } from './snap';
 import { isSnapEnabled, toggleSnap } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
-import { markSavePoint } from './undoHistory';
+import { getHistory, markSavePoint, undo as undoHistoryUndo } from './undoHistory';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { applyTempoChange } from './tempoService';
 import { applyTimingAlignment, buildAlignPlan, suggestSyllableMarkers } from './timingAlignService';
+import {
+  VOCAL_CHAIN_STAGES,
+  defaultStageSelection,
+  runVocalChain,
+  type VocalChainStageId,
+} from './vocalChain';
 import { createRemixDocument, getRemixSession } from './remixService';
 import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
 import {
@@ -217,6 +223,34 @@ export interface TestApi {
   }>;
   /** Runs the onset suggester over the active document's region. */
   suggestSyllables(sensitivity?: number): { added: number; truncated: boolean; analysedSeconds: number } | null;
+  // --- F7 -----------------------------------------------------------------
+  /** Runs the Vocal Chain over the active document through the SAME service the
+   * dialog calls, so the packaged smoke exercises the real derivations, the
+   * real worker leg and the single undo entry. `overrides` flips named stages;
+   * everything else keeps its shipped default. Scalars and flat records only,
+   * per the `getBeatGridState` precedent. */
+  /** One undo step on the ACTIVE document, through the same history the
+   * Ctrl+Z shortcut drives. Added for F7, whose whole point is that a
+   * ten-stage pass reverts in one. */
+  undoActive(): { length: number };
+  runVocalChain(overrides?: Record<string, boolean>): Promise<{
+    ok: boolean;
+    applied: boolean;
+    undoDepth: number;
+    undoLabel: string | null;
+    lengthBefore: number;
+    lengthAfter: number;
+    before: { rmsDb: number; peakDb: number; crestDb: number; noiseFloorDb: number | null };
+    after: { rmsDb: number; peakDb: number; crestDb: number; noiseFloorDb: number | null };
+    stages: {
+      id: string;
+      status: string;
+      reason: string | null;
+      derived: { label: string; value: string }[];
+      detail: string | null;
+      identicalFraction: number | null;
+    }[];
+  }>;
   remixToDuration(
     seconds: number,
     opts?: { phraseBars?: number; strict?: boolean }
@@ -1744,6 +1778,64 @@ export function installTestHooks(): void {
         automation: t.automation ? (JSON.parse(JSON.stringify(t.automation)) as AutomationLane[]) : null,
       })),
     }),
+
+    undoActive: () => {
+      const doc = activeDoc();
+      if (doc) undoHistoryUndo(doc.id);
+      const after = activeDoc();
+      return { length: after ? docLength(after) : 0 };
+    },
+
+    // F7. Drives runVocalChain for the active document, bypassing
+    // VocalChainDialog — so the smoke exercises the real derivations, the real
+    // worker leg and the ONE undo entry the chain is supposed to produce.
+    runVocalChain: async (overrides) => {
+      const before = activeDoc();
+      const lengthBefore = before ? docLength(before) : 0;
+      const zero = { rmsDb: 0, peakDb: 0, crestDb: 0, noiseFloorDb: null };
+      if (!before) {
+        return {
+          ok: false,
+          applied: false,
+          undoDepth: 0,
+          undoLabel: null,
+          lengthBefore,
+          lengthAfter: lengthBefore,
+          before: zero,
+          after: zero,
+          stages: [],
+        };
+      }
+      const enabled = defaultStageSelection();
+      for (const stage of VOCAL_CHAIN_STAGES) {
+        const override = overrides?.[stage.id];
+        if (typeof override === 'boolean') enabled[stage.id as VocalChainStageId] = override;
+      }
+      const depthBefore = getHistory(before.id).done.length;
+      const report = await runVocalChain({ enabled });
+      const after = activeDoc();
+      const history = getHistory(before.id);
+      return {
+        ok: report !== null,
+        applied: report?.applied === true,
+        // The DELTA, so the assertion is "the chain added exactly one entry"
+        // rather than "the history happens to be one deep".
+        undoDepth: history.done.length - depthBefore,
+        undoLabel: history.done.length > 0 ? history.done[history.done.length - 1] : null,
+        lengthBefore,
+        lengthAfter: after ? docLength(after) : 0,
+        before: report ? report.before : zero,
+        after: report ? report.after : zero,
+        stages: (report?.stages ?? []).map((stage) => ({
+          id: stage.id,
+          status: stage.status,
+          reason: stage.reason ?? null,
+          derived: stage.derived.map((d) => ({ label: d.label, value: d.value })),
+          detail: stage.detail ?? null,
+          identicalFraction: stage.delta?.identicalFraction ?? null,
+        })),
+      };
+    },
 
     // F0 — writes through the store's own action (THE write boundary); the
     // store rounds/clamps/validates exactly as for any other JS caller.
