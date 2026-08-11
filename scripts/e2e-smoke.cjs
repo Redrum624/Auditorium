@@ -1186,7 +1186,22 @@ async function main() {
         Number.isFinite(stage.identicalFraction) || stage.identicalFraction === null,
         `stage ${stage.id} reported a measured change (actual ${stage.identicalFraction})`
       );
+      // Ruling 3's other half: a stage that ran but changed NOTHING has to say
+      // so, or it reports a blank where its work should be. The limiter is the
+      // stage this fires on — this fixture never approaches its ceiling.
+      if (stage.identicalFraction === 1) {
+        assert(
+          stage.detail === 'nothing to do — every sample came back unchanged',
+          `stage ${stage.id} left every sample alone and SAID so (actual ${JSON.stringify(stage.detail)})`
+        );
+      }
     }
+    const chainLimiter = chain.stages.filter((st) => st.id === 'limiter')[0];
+    assert(
+      chainLimiter.status === 'applied' && chainLimiter.identicalFraction === 1,
+      `the limiter ran and had nothing to catch on this fixture (status ${chainLimiter.status}, ` +
+        `identical ${chainLimiter.identicalFraction}) — the precondition for the clause just asserted`
+    );
     assert(
       Number.isFinite(chain.before.rmsDb) && Number.isFinite(chain.after.rmsDb),
       `the before/after summary carries real numbers (before ${chain.before.rmsDb}, after ${chain.after.rmsDb})`

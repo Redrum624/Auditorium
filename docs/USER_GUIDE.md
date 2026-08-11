@@ -236,6 +236,13 @@ and the chain overrides only what the recording decides:
 - the **silence threshold** is the loudest that quiet passage ever reads;
 - the **high-pass** sits an octave below the lowest note actually sung.
 
+**One stage depends on another.** The high-pass corner comes from the lowest note
+the pitch detector measured, so **switching Pitch Correct off also switches the EQ
+off** — it declines and says so rather than guessing a corner. That matters
+because Pitch Correct is the slow stage and turning it off is the obvious way to
+speed the pass up; the stage list says so next to the EQ, before you run
+anything.
+
 **A stage with nothing to do says so.** On a recording with no mains hum, DeHum
 reports the two readings it took and declines rather than notching a hole in
 nothing. Noise Reduction declines if there is no passage quiet enough to learn

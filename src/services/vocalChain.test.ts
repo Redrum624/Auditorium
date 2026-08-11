@@ -21,6 +21,9 @@ import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
 import { measureNoiseWindow, programmeRmsDb, toDb } from '../dsp/chainAnalysis';
+import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
+import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
+import { silenceRemoverEffect } from '../effects/restoration/SilenceRemoverEffect';
 import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
 
 registerAllEffects();
@@ -498,11 +501,68 @@ describe('deriveCompressor', () => {
     expect(programmeRmsDb(out.channels)).toBeCloseTo(before, 3);
   });
 
-  it('actually compresses: the crest factor of the detector-driven output falls', () => {
-    const channels = [programme()];
+  /** Percentiles of 50 ms frame level over SOUNDING frames — the quantity a
+   * vocal compressor is there to narrow. Peak-to-RMS crest factor is NOT that
+   * quantity: a 10 ms attack does not catch a shorter transient, so crest can
+   * rise while the envelope narrows, which is exactly what happens here. */
+  function activeLevels(channels: Float32Array[]): { p10: number; p50: number; p90: number } {
+    const floor = measureNoiseWindow(channels, SR)!;
+    const gate = Math.pow(10, floor.envelopePeakDb / 20);
+    const env = envelopeFollower(maxAcrossChannels(channels), SR, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
+    const win = Math.round(0.05 * SR);
+    const hop = Math.round(0.01 * SR);
+    const vals: number[] = [];
+    for (let start = 0; start + win <= channels[0].length; start += hop) {
+      let sounding = false;
+      for (let i = start; i < start + win; i += 8) {
+        if (env[i] > gate) {
+          sounding = true;
+          break;
+        }
+      }
+      if (!sounding) continue;
+      let sum = 0;
+      for (const c of channels) for (let i = 0; i < win; i++) sum += c[start + i] * c[start + i];
+      vals.push(toDb(Math.sqrt(sum / (win * channels.length))));
+    }
+    vals.sort((a, b) => a - b);
+    const q = (f: number): number => vals[Math.min(vals.length - 1, Math.round(f * (vals.length - 1)))];
+    return { p10: q(0.1), p50: q(0.5), p90: q(0.9) };
+  }
+
+  /** Ten half-second windows spanning ~25 dB of level, one of them the quiet
+   * passage the noise floor is measured from. `programme()` spans only 6 dB,
+   * which leaves a working compressor able to narrow the spread by under 1 dB —
+   * too little to tell from nothing. */
+  function wideProgramme(): Float32Array {
+    const levels = [0.02, 0.35, 0.05, 0.5, 0.001, 0.03, 0.4, 0.06, 0.45, 0.025];
+    const out = new Float32Array(WIN * levels.length);
+    levels.forEach((level, w) => out.set(flat(WIN, level), w * WIN));
+    return out;
+  }
+
+  it('actually compresses: quiet material comes UP, loud material comes DOWN, the spread narrows', () => {
+    // Named for what it asserts. The earlier version of this test was named for
+    // the crest factor falling and asserted only `makeupDb > 0`, so it passed
+    // while the crest factor ROSE — a test named for the one property that
+    // became this task's headline concern, unable to observe it.
+    const channels = [wideProgramme()];
     const res = deriveCompressor(channels, SR);
     if (!res.run) throw new Error('expected run');
     expect(Number(res.params.makeupDb)).toBeGreaterThan(0);
+
+    const before = activeLevels(channels);
+    const after = activeLevels(compressorEffect.process(channels, SR, res.params).channels);
+
+    expect(after.p10).toBeGreaterThan(before.p10);
+    expect(after.p90).toBeLessThan(before.p90);
+    // Measured on this fixture: p10 +4.65 dB, p50 +6.37, p90 -0.46, so the
+    // spread narrows 5.11 dB. The bound sits between that and the 0 dB a
+    // compressor that stopped working would give — the same signature the
+    // reviewer measured on the real take (p10 +2.00, p90 -0.62, -2.63 dB).
+    const spreadBefore = before.p90 - before.p10;
+    const spreadAfter = after.p90 - after.p10;
+    expect(spreadBefore - spreadAfter).toBeGreaterThan(3);
   });
 
   it('declines when nothing rises above its own noise floor', () => {
@@ -694,6 +754,155 @@ describe('runVocalChain', () => {
       // is moved — so neither the count nor the median can be a placeholder.
       expect(pitch.detail).toMatch(/196 of 196 frames moved/);
       expect(pitch.detail).toMatch(/median 4[5-9]\.\d cents/);
+    });
+  });
+
+  describe('the de-esser stage inside the chain (F8 Ruling 1 — the reason F8 shipped first)', () => {
+    /** Loud material either side of a long, very quiet gap. Removing the gap
+     * raises the programme RMS a long way, which is what makes it usable as a
+     * probe for WHICH buffer a later stage measures. */
+    function withLongGap(): Float32Array {
+      const out = new Float32Array(WIN * 18);
+      out.set(flat(WIN * 3, 0.4), 0);
+      out.set(flat(WIN * 12, 0.0006), WIN * 3);
+      out.set(flat(WIN * 3, 0.4), WIN * 15);
+      return out;
+    }
+
+    it('RUNS, and reports the threshold it derived', async () => {
+      // Nothing else in this suite enables `deEsser` through runVocalChain, so
+      // without this the whole stage could be dropped from `resolveStage` and
+      // the suite would stay green (found in review — it did).
+      seedDoc([noise(WIN * 8, 0.3, 41)]);
+      const report = await runVocalChain({ enabled: only('deEsser') });
+
+      const deEsser = report!.stages.find((st) => st.id === 'deEsser')!;
+      expect(deEsser.status).toBe('applied');
+      expect(deEsser.derived.map((d) => d.label)).toEqual(['Threshold']);
+      expect(report!.applied).toBe(true);
+    });
+
+    it('derives its threshold from the SOURCE level when it is the only stage', async () => {
+      const source = noise(WIN * 8, 0.3, 42);
+      seedDoc([Float32Array.from(source)]);
+      const report = await runVocalChain({ enabled: only('deEsser') });
+      const threshold = Number(
+        report!.stages.find((st) => st.id === 'deEsser')!.derived[0].value.replace(/[^-0-9.]/g, '')
+      );
+      expect(threshold).toBeCloseTo(programmeRmsDb([source]) + DE_ESSER_RMS_OFFSET_DB, 1);
+    });
+
+    it('derives it from the UPSTREAM STAGE OUTPUT, not the source — the ordering is real', async () => {
+      // Ruling 1 says the measurement is taken at the de-esser's INPUT. Proving
+      // that needs an upstream stage that actually moves the level: the
+      // compressor cannot, because its derived makeup restores programme RMS by
+      // construction, so source and post-compressor derive the same number and
+      // a mis-wired chain would look identical. Remove Silence moves it a lot.
+      const source = withLongGap();
+
+      // What the de-esser's input will be: the same fixture after Remove
+      // Silence, produced by running the chain with ONLY that stage.
+      seedDoc([Float32Array.from(source)]);
+      await runVocalChain({ enabled: only('silence') });
+      const intermediate = Array.from(activeDoc().channels[0]);
+      const intermediateRmsDb = programmeRmsDb([Float32Array.from(intermediate)]);
+      const sourceRmsDb = programmeRmsDb([source]);
+      // The probe is only meaningful if the two levels genuinely differ.
+      expect(Math.abs(intermediateRmsDb - sourceRmsDb)).toBeGreaterThan(2);
+
+      useAppStore.setState(makeInitialState());
+      seedDoc([Float32Array.from(source)]);
+      const report = await runVocalChain({ enabled: only('silence', 'deEsser') });
+      const threshold = Number(
+        report!.stages.find((st) => st.id === 'deEsser')!.derived[0].value.replace(/[^-0-9.]/g, '')
+      );
+
+      expect(threshold).toBeCloseTo(intermediateRmsDb + DE_ESSER_RMS_OFFSET_DB, 1);
+      expect(threshold).not.toBeCloseTo(sourceRmsDb + DE_ESSER_RMS_OFFSET_DB, 1);
+    });
+
+    it('tracks a compressor that does NOT give the level back', () => {
+      // The chain's own makeup restores programme RMS exactly, so in the shipped
+      // configuration "after the compressor" is a numerical no-op. The structure
+      // still has to be right, because a user-set makeup breaks that tie — this
+      // pins the property directly on the derivation.
+      const channels = [noise(WIN * 8, 0.3, 43)];
+      const res = deriveCompressor(channels, SR);
+      if (!res.run) throw new Error('expected run');
+
+      const restoring = compressorEffect.process(channels, SR, res.params).channels;
+      const hotter = compressorEffect.process(channels, SR, {
+        ...res.params,
+        makeupDb: Number(res.params.makeupDb) + 6,
+      }).channels;
+
+      const atSource = deriveDeEsser(channels);
+      const atRestoring = deriveDeEsser(restoring);
+      const atHotter = deriveDeEsser(hotter);
+      if (!atSource.run || !atRestoring.run || !atHotter.run) throw new Error('expected run');
+
+      // Restoring makeup: same number, which is exactly why nothing caught a
+      // mis-wired chain until the Remove Silence probe above.
+      expect(Number(atRestoring.params.thresholdDb)).toBeCloseTo(Number(atSource.params.thresholdDb), 1);
+      // 6 dB of extra makeup must move the threshold 6 dB.
+      expect(Number(atHotter.params.thresholdDb) - Number(atRestoring.params.thresholdDb)).toBeCloseTo(6, 1);
+    });
+  });
+
+  describe('a stage that turned out to have nothing to do', () => {
+    it('says so, rather than reporting a blank where its work should be', async () => {
+      // The limiter on material far below its ceiling: `gain` stays exactly 1
+      // (a + (1 - a) is exact for a in [0.5, 1] by Sterbenz), so every sample
+      // comes back bit-identical.
+      seedDoc([noise(WIN * 6, 0.05, 44)]);
+      const report = await runVocalChain({ enabled: only('limiter') });
+
+      const limiter = report!.stages.find((st) => st.id === 'limiter')!;
+      expect(limiter.status).toBe('applied');
+      expect(limiter.delta!.identicalFraction).toBe(1);
+      expect(limiter.detail).toBe('nothing to do — every sample came back unchanged');
+    });
+
+    it('does not claim it when the stage DID change something', async () => {
+      seedDoc([noise(WIN * 8, 0.3, 45)]);
+      const report = await runVocalChain({ enabled: only('compressor') });
+      const compressor = report!.stages.find((st) => st.id === 'compressor')!;
+      expect(compressor.delta!.identicalFraction).toBeLessThan(1);
+      expect(compressor.detail).toBeUndefined();
+    });
+
+    it('lets a stage own account win over the generic one', async () => {
+      // Pitch Correct returns a byte-identical copy when it finds nothing to
+      // correct, so the generic clause would mask its own message. Steady
+      // digital silence is unvoiced throughout: no frame can be corrected.
+      seedDoc([new Float32Array(SR * 2)]);
+      const report = await runVocalChain({ enabled: only('pitch') });
+      const pitch = report!.stages.find((st) => st.id === 'pitch')!;
+      expect(pitch.delta!.identicalFraction).toBe(1);
+      expect(pitch.detail).toBe('already in tune — no frame was moved');
+    });
+  });
+
+  describe('the enabled map', () => {
+    it('treats an ABSENT stage as off — nothing runs that was not asked for', async () => {
+      seedDoc([noise(WIN * 6, 0.3, 46)]);
+      const started: string[] = [];
+      // Only `dc` is named at all; every other key is missing, not `false`.
+      const report = await runVocalChain({
+        enabled: { dc: true },
+        onStageStart: (st) => started.push(st.id),
+      });
+      expect(started).toEqual(['dc']);
+      for (const stage of report!.stages) {
+        if (stage.id === 'dc') expect(stage.status).toBe('applied');
+        else expect(stage.status === 'off' || stage.status === 'manual').toBe(true);
+      }
+    });
+
+    it('treats an EMPTY map as every stage off', async () => {
+      seedDoc([noise(WIN * 6, 0.3, 47)]);
+      const report = await runVocalChain({ enabled: {} });
+      expect(report!.applied).toBe(false);
     });
   });
 

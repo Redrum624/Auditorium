@@ -192,7 +192,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'EQ (high-pass)',
     effectId: 'parametric-eq',
     defaultEnabled: true,
-    note: 'A high-pass an octave below the lowest note actually sung, and nothing else — every band stays flat. Removing rumble under the voice is a measurement; boosting or cutting a band is taste, and the chain has no measurement that says this voice needs either.',
+    note: 'A high-pass an octave below the lowest note actually sung, and nothing else — every band stays flat. Removing rumble under the voice is a measurement; boosting or cutting a band is taste, and the chain has no measurement that says this voice needs either. NEEDS PITCH CORRECT: the lowest note is measured by that stage, so switching it off makes this one decline rather than guess a corner.',
     weight: 1,
   },
   {
@@ -648,20 +648,27 @@ function describeStage(
   delta: StageDelta
 ): string | undefined {
   if (output.removedSpans) return describeRemoval(output.removedSpans, sampleRate);
-  // Ruling 3: a stage that turned out to have nothing to do says so. Measured,
-  // not assumed — every sample came back bit-identical. The limiter is the
-  // stage this fires on in practice: on material that never approaches the
-  // ceiling it is a safety net that never had to catch anything.
-  if (delta.identicalFraction === 1) return 'nothing to do — every sample came back unchanged';
+
+  // A stage's OWN account comes first, because it is the more specific one.
+  // Order is load-bearing: when Pitch Correct finds nothing to correct it
+  // returns a byte-identical copy, so the generic clause below would fire and
+  // "already in tune" could never be reached. (Found in review — it never was.)
   const report: EffectReport | undefined = output.report;
-  if (stage.id === 'pitch' && report) {
-    const corrected = Number(report.correctedFrames ?? 0);
+  if (stage.id === 'pitch' && report && report.correctedFrames !== undefined) {
+    const corrected = Number(report.correctedFrames);
     if (corrected === 0) return 'already in tune — no frame was moved';
     const total = Number(report.totalFrames ?? 0);
     const median = Number(report.medianCorrectionCents ?? 0);
     const max = Number(report.maxCorrectionCents ?? 0);
     return `${corrected} of ${total} frames moved, median ${median.toFixed(1)} cents, largest ${max.toFixed(1)} cents`;
   }
+
+  // Ruling 3: a stage that turned out to have nothing to do says so. Measured,
+  // not assumed — every sample came back bit-identical. The limiter is the
+  // stage this fires on in practice: on material that never approaches the
+  // ceiling it is a safety net that never had to catch anything, and without
+  // this it would report a blank where its work should be.
+  if (delta.identicalFraction === 1) return 'nothing to do — every sample came back unchanged';
   return undefined;
 }
 

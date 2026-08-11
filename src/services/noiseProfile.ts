@@ -25,10 +25,8 @@ export interface NoiseProfile {
   spectra: Float32Array[];
 }
 
-export const NOISE_FFT_SIZE = 2048;
-export const NOISE_HOP = 512;
-const FFT_SIZE = NOISE_FFT_SIZE;
-const HOP = NOISE_HOP;
+const FFT_SIZE = 2048;
+const HOP = 512;
 
 /**
  * The noise print itself: per channel, the average STFT magnitude spectrum over
