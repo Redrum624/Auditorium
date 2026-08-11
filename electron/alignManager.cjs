@@ -85,7 +85,24 @@ const ALIGN_FILES = Object.freeze([
   },
 ]);
 
-const ALIGN_TOTAL_BYTES = ALIGN_FILES.reduce((n, f) => n + f.bytes, 0);
+/**
+ * Sum of a file set's byte pins.
+ *
+ * `files` is a parameter because every caller is handed a set — the real
+ * pins in production, an injected pair in a test — and summing the module
+ * constant instead would report the real total for a fake download.
+ */
+function totalBytes(files) {
+  return files.reduce((n, f) => n + f.bytes, 0);
+}
+
+/**
+ * The two pins added up. No production consumer: this is the number the
+ * renderer hardcodes as `ALIGN_MODEL_BYTES` for the no-preload fallback, and
+ * the electron and renderer jest projects cannot import each other, so the
+ * agreement is pinned in `alignManager.test.cjs` instead.
+ */
+const ALIGN_TOTAL_BYTES = totalBytes(ALIGN_FILES);
 const ALIGN_MODEL_DIR = path.join('models', 'align');
 
 /** ~4 MB of samples per 'audio' message (structured clone copies) — the same
@@ -138,7 +155,7 @@ async function ensureAlignModels({
   const status = (s) => {
     if (onStatus) onStatus(s);
   };
-  const overallTotal = files.reduce((n, f) => n + f.bytes, 0);
+  const overallTotal = totalBytes(files);
   let overallDone = 0;
   const report = (fileEntry, index, received) => {
     if (onProgress) {
@@ -243,7 +260,7 @@ function createAlignManager({
 
   async function getModelState() {
     const paths = getAlignModelPaths(userDataDir, files);
-    const expectedBytes = files.reduce((n, f) => n + f.bytes, 0);
+    const expectedBytes = totalBytes(files);
     let bytes = 0;
     let complete = true;
     for (const f of files) {
@@ -321,7 +338,6 @@ function createAlignManager({
             killed = true;
           }
         }
-        entry.childKilled = killed;
         if (!killed) {
           onWarn(
             `alignment host for run ${entry.runId} did not respond to kill — its ONNX Runtime arena may still be resident`

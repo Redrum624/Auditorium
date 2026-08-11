@@ -106,8 +106,21 @@ function fakeRequest(files) {
 }
 
 describe('the pinned file set', () => {
-  test('ALIGN_TOTAL_BYTES is the sum of the pins', () => {
-    expect(ALIGN_TOTAL_BYTES).toBe(ALIGN_FILES.reduce((n, f) => n + f.bytes, 0));
+  test('ALIGN_TOTAL_BYTES is the size the renderer quotes with no preload answering', () => {
+    // This used to restate the constant's own definition
+    // (`ALIGN_FILES.reduce((n, f) => n + f.bytes, 0)`), an expression that
+    // cannot fail whatever the pins say.
+    //
+    // The number has exactly one obligation, and it crosses a boundary:
+    // `ALIGN_MODEL_BYTES` in `src/services/alignLyricsService.ts` hardcodes it
+    // as the size the dialog shows before the preload answers, documented there
+    // as "the sum of the two `bytes` pins in electron/alignManager.cjs
+    // ALIGN_FILES". The `main` and `renderer` jest projects cannot import each
+    // other, so the agreement is written down rather than computed — and a
+    // re-pin of either model file now fails HERE, next to the pins, instead of
+    // silently making the renderer quote a stale megabyte count.
+    expect(ALIGN_TOTAL_BYTES).toBe(377912182);
+    expect(ALIGN_FILES).toHaveLength(2);
   });
 
   test('every pin carries a full sha256, a positive size and an https URL', () => {
@@ -268,7 +281,10 @@ describe('ensureAlignModels', () => {
     expect(written).toHaveLength(0);
   });
 
-  test('the dispose latch aborts an in-flight ensure', async () => {
+  test('an aborting shouldAbort stops an in-flight ensure', async () => {
+    // The free function's `shouldAbort` plumbing. This test used to be NAMED
+    // for the dispose latch, which it never touched — see the manager-level
+    // test below for that.
     const files = makeFakeFiles();
     let abort = false;
     await expect(
@@ -284,6 +300,32 @@ describe('ensureAlignModels', () => {
         atomicWrite: async () => {},
       })
     ).rejects.toThrow(/aborted/);
+  });
+
+  test('the manager’s dispose() latch aborts an in-flight ensure', async () => {
+    // The real latch: `disposed` is a closure variable inside
+    // `createAlignManager`, read as `shouldAbort: () => disposed` by the
+    // manager's own ensureModels. Nothing outside can set it except dispose(),
+    // so reaching it means constructing a manager and disposing it WHILE the
+    // download is in flight — which is the app-quit path this latch exists for.
+    const files = makeFakeFiles();
+    let disposedDuringRequest = false;
+    const manager = createAlignManager({
+      userDataDir: USER_DATA,
+      files,
+      fsImpl: memFs(),
+      requestImpl: async () => {
+        manager.dispose();
+        disposedDuringRequest = true;
+        throw new Error('unreachable');
+      },
+      atomicWrite: async () => {},
+    });
+
+    await expect(manager.ensureModels()).rejects.toThrow(/aborted/);
+    // The abort came from the latch, not from the thrown request: the request
+    // really did run, and the retry that follows it is what read `disposed`.
+    expect(disposedDuringRequest).toBe(true);
   });
 });
 
@@ -382,6 +424,12 @@ describe('createAlignManager.startAlignment', () => {
       sampleRate: ALIGN_SAMPLE_RATE,
       totalSamples: SAMPLES.length,
     });
+    // EVERY message of the job carries the same run id, not just the one that
+    // opens it. The host gates on the id, so an id dropped from 'audio' or
+    // 'run' strands the job — and only 'align' used to be pinned.
+    expect(child.posted[2]).toMatchObject({ type: 'audio', id: 1, offset: 0 });
+    expect(child.posted[3]).toEqual({ type: 'run', id: 1 });
+    expect(child.posted.slice(1).map((m) => m.id)).toEqual([1, 1, 1]);
     child.emit({ type: 'progress', id: 1, done: 8000, total: SAMPLES.length });
     child.emit({
       type: 'emissions',
@@ -417,6 +465,8 @@ describe('createAlignManager.startAlignment', () => {
     expect(audio[0].samples.length).toBe(sliceSamples);
     expect(audio[1].offset).toBe(sliceSamples);
     expect(audio[1].samples.length).toBe(5);
+    // Both slices belong to the same job, and say so.
+    expect(audio.map((m) => m.id)).toEqual([1, 1]);
     // .slice, not .subarray: each message owns its bytes, so structured clone
     // cannot serialise the whole track once per chunk.
     expect(audio[0].samples.buffer.byteLength).toBe(sliceSamples * 4);
@@ -674,11 +724,21 @@ describe('getModelState', () => {
 describe('parseAlignRequest (trust boundary)', () => {
   const okBuf = new Float32Array(8).buffer;
 
-  test('accepts a valid request and copies the bytes into a Float32Array', () => {
-    const parsed = parseAlignRequest({ sampleRate: ALIGN_SAMPLE_RATE, samples: okBuf });
+  test('accepts a valid request and WRAPS the transferred buffer in a Float32Array view', () => {
+    const buf = Float32Array.from([1, 2, 3, 4, 5, 6, 7, 8]).buffer;
+    const parsed = parseAlignRequest({ sampleRate: ALIGN_SAMPLE_RATE, samples: buf });
     expect(parsed).not.toBeNull();
     expect(parsed.samples).toHaveLength(8);
     expect(Object.prototype.toString.call(parsed.samples)).toBe('[object Float32Array]');
+
+    // A VIEW, not a copy. `new Float32Array(someArrayBuffer)` aliases the
+    // caller's bytes — this test used to be named for a copy, which is the
+    // opposite of what the boundary does. It is safe precisely because the
+    // buffer arrived by structured clone across IPC, so the renderer no longer
+    // shares it; naming it a copy hid which of those two facts is load-bearing.
+    expect(parsed.samples.buffer).toBe(buf);
+    new Float32Array(buf)[0] = 42;
+    expect(parsed.samples[0]).toBe(42);
   });
 
   test('sampleRate probes below/on/above', () => {
@@ -720,17 +780,28 @@ describe('parseAlignRequest (trust boundary)', () => {
     expect(parseAlignRequest({ sampleRate: ALIGN_SAMPLE_RATE, samples: new ArrayBuffer(9 * 4) }, cap)).toBeNull();
   });
 
-  test("the default cap is the HOST's cap — the two must agree or the host refuses the job", () => {
-    // Not a re-statement of the constant: it asserts the default parameter is
-    // wired to alignHost's export rather than to a second copy of the number.
-    expect(parseAlignRequest({ sampleRate: ALIGN_SAMPLE_RATE, samples: new ArrayBuffer(4) })).not.toBeNull();
-    const overCap = { byteLength: (MAX_TOTAL_SAMPLES + 1) * 4 };
-    Object.setPrototypeOf(overCap, ArrayBuffer.prototype);
-    // A real over-cap buffer would be 76.8 MB; the toString brand is what the
-    // parser tests, so a branded stand-in probes the same branch.
-    expect(Object.prototype.toString.call(new ArrayBuffer(4))).toBe('[object ArrayBuffer]');
-    expect(parseAlignRequest({ sampleRate: ALIGN_SAMPLE_RATE, samples: new ArrayBuffer(4) }, MAX_TOTAL_SAMPLES)).not.toBeNull();
-    expect(parseAlignRequest({ sampleRate: ALIGN_SAMPLE_RATE, samples: new ArrayBuffer(4) }, 0)).toBeNull();
+  test("the default cap is the HOST's cap — probed ON it and one sample over, with no cap argument", () => {
+    // The renderer's cap MUST equal the host's or a job accepted here is
+    // refused at the host with an opaque message. `MAX_TOTAL_SAMPLES` is
+    // imported from `./alignHost.cjs` above, so probing the DEFAULT against it
+    // is what ties the two together.
+    //
+    // Every probe below omits the cap argument, which is the only way to
+    // observe the default at all. The previous version passed a 4-byte buffer
+    // each time — accepted by any default >= 1 — and its only over-cap probe
+    // passed the cap explicitly, so the default's value was unobservable and
+    // the `overCap` stand-in it built was never used.
+    //
+    // A real buffer at the cap is 76.8 MB, so both probes use a branded
+    // stand-in: `Object.prototype.toString` is what the parser tests, and
+    // ArrayBuffer.prototype carries the `Symbol.toStringTag` it reads.
+    const branded = (byteLength) => Object.setPrototypeOf({ byteLength }, ArrayBuffer.prototype);
+    expect(Object.prototype.toString.call(branded(4))).toBe('[object ArrayBuffer]');
+
+    const at = (samples) => parseAlignRequest({ sampleRate: ALIGN_SAMPLE_RATE, samples });
+    expect(at(branded((MAX_TOTAL_SAMPLES - 1) * 4))).not.toBeNull(); // below
+    expect(at(branded(MAX_TOTAL_SAMPLES * 4))).not.toBeNull(); // ON
+    expect(at(branded((MAX_TOTAL_SAMPLES + 1) * 4))).toBeNull(); // over
   });
 });
 
