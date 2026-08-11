@@ -255,6 +255,14 @@ export interface TestApi {
       detail: string | null;
       identicalFraction: number | null;
     }[];
+    /** The registry's own stage ids, in registry order, so a smoke assertion
+     * compares the report against the stage LIST rather than a hardcoded count
+     * — a count rots the moment a stage is added, and it did (F6's `lyrics`
+     * stage broke a `=== 11` assertion). */
+    registryStageIds: string[];
+    /** The subset of {@link registryStageIds} with no effect id: the stages the
+     * chain reports on but does not apply. */
+    registryManualIds: string[];
   }>;
   remixToDuration(
     seconds: number,
@@ -2022,6 +2030,11 @@ export function installTestHooks(): void {
           before: zero,
           after: zero,
           stages: [],
+          // The registry is knowable without a document, so the no-document
+          // refusal reports it too — a caller comparing the report against the
+          // stage list must not have to special-case this branch.
+          registryStageIds: VOCAL_CHAIN_STAGES.map((s) => s.id),
+          registryManualIds: VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null).map((s) => s.id),
         };
       }
       const enabled = defaultStageSelection();

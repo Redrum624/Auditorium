@@ -333,10 +333,6 @@ function getSnapshot(): number {
   return version;
 }
 
-export function getAlignVersion(): number {
-  return version;
-}
-
 /** Re-renders the caller whenever alignment state changes. */
 export function useAlignVersion(): number {
   return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
@@ -491,10 +487,6 @@ export function isAligning(): boolean {
  * `getInFlightSaveCount()`). */
 export function getAlignBusyCount(): number {
   return active ? 1 : 0;
-}
-
-export function getAlignProgress(): AlignProgress | null {
-  return progressState;
 }
 
 function publishProgress(
