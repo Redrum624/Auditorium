@@ -455,9 +455,18 @@ it is given the words and asked only where each one is.
 
 What the splice does for you, none of which you have to set:
 
-- The silence around your fresh take is trimmed off, using the same rule Remove
-  Silence uses — the loudest the silence detector reads inside the quietest
-  500 ms of *your recording*.
+- The silence around your fresh take is trimmed off, against a threshold that
+  tries two rungs in turn. The first is the same rule Remove Silence uses — the
+  loudest the silence detector reads inside the quietest 500 ms of *your
+  recording*. When nothing in the take clears that, the second rung is digital
+  silence itself, and that is what makes two ordinary recordings work: one whose
+  pauses are literal zeros rather than room tone (a gated interface, a bounced
+  file), and one punched in tight with no pause either side at all — a
+  self-relative threshold cannot tell those apart from a recording that is
+  silent, and it used to refuse them. If nothing clears either rung, the take is
+  used whole rather than trimmed. A take that really is silent is refused
+  outright, and that is judged separately, against digital silence rather than
+  against the take's own level.
 - Its level is matched to the word it replaces, and its median pitch is shifted
   to that word's. (Median pitch, not the contour: the word you are replacing is
   usually the one that came out wrong, and its melody is not the one to copy.)

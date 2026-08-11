@@ -9,14 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 **A remix pin is now a promise the software actually makes.** Pinning a splice in the Remix panel used
 to be a strong preference: the planner exempted the pinned join from its penalties and gave it a small
-cost advantage, and in measurement it kept the pin 156 times out of 156 — but nothing *prevented* a
-drop, and the tooltip had to say "a preference, not a guarantee". It is a hard constraint now.
+cost advantage, but nothing *prevented* a drop, and the tooltip had to say "a preference, not a
+guarantee". It is a hard constraint now.
 
-The reason for the change is semantic, not statistical. "Pinned" is a promise, and a promise kept
-156/156 times is still a promise the software does not make. It also mattered more than the 156/156
-suggested: that measurement only ever pinned joins the planner had already chosen. Pin a splice the
-cheapest arrangement does *not* contain and the old preference kept it **0 times out of 109**. The
-guarantee keeps it 109/109.
+The reason for the change was semantic — "pinned" is a promise, and a preference is not one — and the
+re-measurement it prompted found the evidence the preference had been resting on was worthless. The
+v1.5-era "156 out of 156" came from a rig that could not fail: it only ever pinned joins the planner
+had already chosen, which is the one case a cost bonus is bound to win. Re-measured on a same-shape
+reconstruction (the original rig was never committed), the preference kept the pin **83 times out of
+102** in that ordinary case — five scales from 32 to 496 bars, five entry points per pin — and **0
+times out of 109** when the pin is a splice the cheapest arrangement does not contain. The guarantee
+keeps it **102/102** and **109/109**.
+
+It costs what forcing an edge the cost function did not want costs, and the panel keeps reporting it:
+a mean clean-cost premium of **+2.17** where it changes the arrangement in the ordinary matrix (22 of
+102 cases) and **+5.18** in the sharper one, and 13 plans over the repetition bound rather than 11.
 
 **And you can now fix one word of a vocal without singing the take again.** Paste the lyrics you
 already have, and **Align Lyrics** gives every word a position; click a word to hear exactly that
@@ -43,9 +50,13 @@ makes it reachable.
 - **The measured placement accuracy is shipped UI text, in the dialog and in the Vocal Chain stage
   note.** Word starts land within a median 20 ms and 88 % within 100 ms — the agreement between two
   acoustic models sharing no training data, label set or size, over 51 sung words of one performance
-  by one singer. The hand-marked figures the same investigation produced (median 28–48 ms) are
-  deliberately **not** quoted anywhere: that ground truth could not include legato word boundaries
-  with no amplitude or F0 cue, which can only inflate them.
+  by one singer. The same investigation also measured against a hand-marked ground truth — median
+  28 ms on the sung line whose word assignment was forced rather than chosen, 36 ms on the 22-word
+  spoken control, 48 ms to the nearest word start on 19 unlabelled sung onsets. Those figures are
+  recorded in `docs/KNOWN_LIMITATIONS.md` and deliberately **never appear in the app**, because the
+  person marking that ground truth could not listen to the audio, so legato word boundaries carrying
+  no amplitude or F0 cue are simply absent from it — which can only inflate the result. Three tests
+  pin their absence from the accuracy sentence, the stage note and the rendered dialog.
 - **A "these lyrics don't appear to match this audio" warning.** CTC forced alignment structurally
   never says "could not align" — given the wrong lyrics it returns a confident placement of the wrong
   words. The gate is the median per-word score against a threshold chosen on a held-out bank of 16
@@ -76,9 +87,14 @@ makes it reachable.
   cannot coexist with the other pins that *were* kept, or there were more than four pins. The first two
   are decided before the search runs, so they are instant and exact.
 - **A plain statement when the guarantee is not in force.** The panel's pin limit stays 8 while the
-  guarantee covers 4, so pins 5–8 are honoured on the old best-effort basis — and the panel says so,
-  before the fifth pin is pressed and again in a banner afterwards. A silently downgraded guarantee
-  would be worse than no guarantee.
+  guarantee covers 4, and past the cap the guarantee does not survive on the first four: the planner
+  degrades the *whole* set to the old best-effort preference, so with five pins none of the five is
+  guaranteed rather than one of them being unlucky. The panel says exactly that — before the fifth pin
+  is pressed and again in a banner afterwards ("treating every pin as a strong preference. Unpin down
+  to 4 to get the guarantee back") — and unpinning back to four restores it on the next re-plan. Pins
+  the planner threw out before the search, because you rejected them or they are not a legal splice,
+  use no slot at all, so more than four pins can still be fully enforced and the panel says that too.
+  A silently downgraded guarantee would be worse than no guarantee.
 
 ### Changed
 
@@ -127,9 +143,10 @@ makes it reachable.
   wrong refusal costs a re-recording. Recorded in `docs/KNOWN_LIMITATIONS.md`, which also loses the
   entry claiming this was unreachable from the microphone path.
 
-- **Closes the last outstanding item from the v1.9-era work audit (P2-5).** Its own ruling was "do it
-  if real usage ever shows dropped pins; otherwise the preference stands" — superseded, because a
-  documented trade-off is to be eliminated rather than accepted.
+- **Closes P2-5 of the v1.9-era work audit**, one of its two remaining items. Its own ruling was "do
+  it if real usage ever shows dropped pins; otherwise the preference stands" — superseded, because a
+  documented trade-off is to be eliminated rather than accepted. **P4-14 (variable-tempo material)
+  stays open**: it is queued as R7 and not built.
 
 ## [1.20.0] - 2026-08-11
 
@@ -937,7 +954,7 @@ Full-app visual rework into the "Glass · Sectioned" design language shared with
 - **Scrollbars app-wide are the 6 px Vitrine thin style** — the ported scrollbar CSS is global by nature, so every panel and dialog list scrollbar changed with it.
 - Hero screenshots (`docs/screenshot.png`, `docs/screenshot-spectral.png`) recaptured from the running v1.6 app, staged with the synthetic ABAB fixture; README and User Guide prose updated where it described the old anatomy (left/right sidebars, tab strip, bottom transport bar).
 
-## [1.5.2] - 2026-07-28
+## [1.5.2] - 2026-08-07
 
 Deferred-fixes release: the audit findings deliberately carried out of v1.5.0/v1.5.1, fixed in one pass. No feature changes.
 
@@ -951,7 +968,7 @@ Deferred-fixes release: the audit findings deliberately carried out of v1.5.0/v1
 - **`analyzeTempo` hung forever for `minBpm <= 0`.** Cause: the tempo-candidate grid is multiplicative (`bpm *= 1.005`), so a non-positive `minBpm` never advances. Latent — every in-app caller passes the 60/200 defaults — but `AnalyzeTempoOptions` is exported. Fix: a non-positive or inverted BPM range throws a `RangeError` at the entry point, before any content-based early return. Affects: `src/dsp/tempoCore.ts`.
 - **Smoke step 6b was flaky on a cold first run.** Cause: `multitrackLiveParamCheck` sampled its two playhead positions across one fixed 400 ms window, which sometimes elapsed before the player's `AudioContext` had started (`{advanced:false, pos1:0, pos2:0}`), passing on re-run. Fix (test harness only, app playback untouched): poll up to 3 s for the transport to demonstrably advance, then settle 150 ms (10× the 15 ms param-ramp time constant) before sampling — the assertions are unchanged in strength, and the volume-gain read now always lands past the ramp. Affects: `src/services/testHooks.ts`.
 
-## [1.5.1] - 2026-07-28
+## [1.5.1] - 2026-08-07
 
 Platform release: Electron upgraded four majors. No feature changes.
 
@@ -1067,7 +1084,7 @@ Integrity release. A seven-dimension audit of the v1.3 codebase produced 18 inde
 
 - `docs/KNOWN_LIMITATIONS.md`: all three v1.1-era gaps (unsniffable-container fallback, Ogg round-tripping as WAV, session-only markers) are now resolved or narrowed to their genuinely-remaining edges — see the file for exact current behavior.
 
-## [1.1.0] - 2026-07-14
+## [1.1.0] - 2026-07-15
 
 ### Added
 

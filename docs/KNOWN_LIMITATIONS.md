@@ -376,9 +376,12 @@ The residual is the `2^K` the exactness costs, and it is the reason for the
 cap. The table is 12 bytes per cell (`Float64Array` cost + `Int32Array`
 parent) over `(M+1)*(Nmax+1)*2^K` cells: at the worst case reachable
 (`M = 499`, `Nmax = 1497`, 749 000 cells, 8.99 MB at K = 0) that is 143.8 MB
-at K = 4 and 2.30 GB at K = 8. Time scales with it too — measured 1.85x per
-bit, **13.2x at K = 4** — so a four-pin Re-roll on a ten-minute source is
-seconds of worker time rather than milliseconds. The routing threshold
+at K = 4 and 2.30 GB at K = 8. Time scales with it too, and slightly worse than
+the table does: measured at `M = 496`, one DP run costs **1.00x / 1.85x /
+3.46x / 6.58x / 13.2x** of the K = 0 run at K = 0…4, so each additional pin
+costs between **1.85x and 2.01x** the run before it (1.85, 1.87, 1.90, 2.01) —
+so a four-pin Re-roll on a ten-minute source is seconds of worker time rather
+than milliseconds. The routing threshold
 multiplies by `2^K` and is re-evaluated per plan, so those seconds are always
 spent in a worker, never on the main thread.
 
@@ -389,11 +392,25 @@ costs multiply rather than add: the worst case a user can reach from the panel
 is a late Re-roll press at four pins, and it is several times the single-run
 figure — not the ~4 s a reader would derive from 13.2x alone.
 
-**The panel's pin cap stays 8, deliberately higher than 4.** Pins 5–8 are
-honoured on the old best-effort basis, and the panel says so in words ("More
-than 4 pins: the planner cannot guarantee them all…") rather than degrading
-silently. Lowering the cap to 4 would make the guarantee unconditional at the
-price of taking four pins away from a user who is arranging by hand.
+**The panel's pin cap stays 8, deliberately higher than 4.** Past the cap the
+guarantee is not partially in force, and it is worth being exact about that:
+`planRemix` assigns the WHOLE feasible set to `preferredKeys` (`preferred` is
+the `lockedJoins` behaviour — exemption plus `LOCK_BONUS`) and reports
+`mode: 'preference'`, so with five feasible pins **none of the five is
+guaranteed**, not "the first four are and the fifth is not". The panel says so
+in those terms ("More than 4 pins: the planner cannot guarantee them all, so it
+is treating **every** pin as a strong preference. Unpin down to 4 to get the
+guarantee back") rather than degrading silently, and unpinning back to four
+restores the guarantee on the next re-plan.
+
+The cap counts only the pins that reach the search. A pin you rejected
+(`forbidden`) or that is not a legal splice for the current settings
+(`no-candidate`) is dropped by triage before the DP runs and consumes no bit,
+so six pressed pins can still be fully enforced — which is why the panel reads
+its wording from the planner's own `mode` rather than from the pin count.
+
+Lowering the cap to 4 would make the guarantee unconditional at the price of
+taking four pins away from a user who is arranging by hand.
 
 Measured against the preference it replaces, over 102 pin/press cases across
 five scales (32–496 bars) and five presses per pin: the preference kept the
@@ -1262,8 +1279,11 @@ was placed on silence.
 The two models disagree by more than 100 ms on 8 of the 51, and every one of
 those is a short function word or a vowel-initial word, which is where both
 models are weakest. The same investigation also produced figures against a
-hand-marked ground truth (median 28 ms sung, 36 ms spoken); **those are
-deliberately not quoted anywhere in the app**, because the person marking them
+hand-marked ground truth — median 28 ms on the one sung line whose word
+assignment was forced rather than chosen (n = 7), 36 ms on the 22-word spoken
+control, and 48 ms to the nearest aligned word start over 19 unlabelled sung
+onsets. **Those are deliberately not quoted anywhere in the app**, because the
+person marking them
 could not listen to the audio, so word boundaries in legato singing that carry
 no amplitude, spectral-flux or pitch cue are simply absent from that ground
 truth — which can only inflate the result.

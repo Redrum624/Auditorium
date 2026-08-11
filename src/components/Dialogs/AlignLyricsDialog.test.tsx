@@ -321,15 +321,53 @@ afterEach(() => {
 // ---------------------------------------------------------------------------
 
 describe('AlignLyricsDialog — nothing here judges a word', () => {
+  /** The vocabulary of assessment this dialog is forbidden to use. */
+  const FORBIDDEN = ['pronunciation', 'mispronounce', 'coach', 'grade', 'accuracy score', 'may need attention'];
+
   it('is titled Align Lyrics, and says nowhere that it assesses pronunciation', async () => {
     seedDoc();
-    const { container } = open();
+    // Scored BELOW the match threshold, so the sweep also covers the ONE piece
+    // of this dialog that says anything evaluative at all — the lyrics-match
+    // warning — and not just the inert opening view.
+    //
+    // This test used to sweep the dialog before any alignment had run, so
+    // `alignment` was null and the results view it exists to police never
+    // rendered: not one word, no warning, no selected-word panel. The ruling it
+    // guards is the feature's hardest one (scoring measured AUC 0.642 against a
+    // 0.500 chance baseline and was cut), so the sweep has to see the screen
+    // the user actually ends up looking at.
+    bridge.alignRun.mockResolvedValue(gridResponse(Math.exp(LYRICS_MATCH_THRESHOLD - 0.5)));
+    const { container } = open(new FakeEngine());
     await settle();
+
+    const sweep = (stage: string): string => {
+      const prose = (container.textContent ?? '').toLowerCase();
+      for (const forbidden of FORBIDDEN) {
+        // Phrased so a failure names the WORD and the STAGE it appeared at.
+        expect(`${stage} — ${prose.includes(forbidden) ? forbidden : 'clean'}`).toBe(`${stage} — clean`);
+      }
+      return prose;
+    };
+
     expect(screen.getByText('Align Lyrics')).toBeInTheDocument();
-    const prose = (container.textContent ?? '').toLowerCase();
-    for (const forbidden of ['pronunciation', 'mispronounce', 'coach', 'grade', 'accuracy score', 'may need attention']) {
-      expect(prose).not.toContain(forbidden);
-    }
+    sweep('before aligning');
+
+    await alignIn();
+    // The results are genuinely on screen for this sweep: every word, and the
+    // weak-match warning.
+    expect(screen.getByTestId('align-lyrics-word-0')).toBeInTheDocument();
+    expect(screen.getByTestId('align-lyrics-word-2')).toBeInTheDocument();
+    expect(screen.getByTestId('align-lyrics-weak')).toBeInTheDocument();
+    sweep('with the words placed and the match warning up');
+
+    // …and with a word picked — the only state that renders prose about ONE
+    // word, and so the likeliest place a verdict would ever appear.
+    fireEvent.click(screen.getByTestId('align-lyrics-word-1'));
+    const selected = sweep('with a word selected');
+    // What that panel is allowed to say about a word: where it is and how long
+    // it is. Asserted positively, so "clean" cannot be achieved by rendering
+    // nothing at all.
+    expect(selected).toContain('ms long');
   });
 
   it('renders every word with the SAME appearance until one is selected', async () => {
