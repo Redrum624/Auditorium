@@ -1,4 +1,5 @@
 import {
+  ALIGN_ACCURACY,
   ALIGN_MODEL_BYTES,
   ALIGN_SAMPLE_RATE,
   MAX_ALIGN_SAMPLES,
@@ -471,6 +472,32 @@ describe('alignDocumentLyrics — the placement it stores', () => {
     // Punctuation is deliberately absent: it is dropped from every line of
     // every lyric, so listing it would bury the two cases above.
     expect(result.alignment.droppedCharacters).not.toContain(',');
+  });
+
+  // The 30 s inference chunk, probed BELOW / ON / ABOVE. Sized so the boundary
+  // can move the answer: one frame either side of the chunk is 320 samples, and
+  // the flag is what tells the user about the measured 40 ms multi-pass
+  // residual, so a stuck flag either hides that or invents it.
+  it.each([
+    ['below the chunk', -1, false],
+    ['on the chunk', 0, false],
+    ['above the chunk', 1, true],
+  ])('reports whether the run needed more than one inference pass: %s', async (_name, frameDelta, expected) => {
+    const chunkFrames = (ALIGN_ACCURACY.chunkSeconds * SR) / FRAME_SAMPLES; // 1500
+    const frames = chunkFrames + frameDelta;
+    // One word over a grid of exactly that many frames: blank, the word, blank.
+    const runs: Run[] = [
+      { klass: null, frames: 5 },
+      { klass: VOCAB.A, frames: 10 },
+      { klass: VOCAB.T, frames: 10 },
+      { klass: null, frames: frames - 25 },
+    ];
+    const docId = seedDoc([new Float32Array(frames * FRAME_SAMPLES)]);
+    bridge.alignRun.mockResolvedValue(gridResponse(runs));
+    const result = await alignDocumentLyrics({ docId, text: 'At' });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.alignment.chunked).toBe(expected);
   });
 
   it('stores the alignment under the document and reports it as fresh', async () => {
