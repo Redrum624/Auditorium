@@ -5,6 +5,80 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.20.0] - 2026-08-11
+
+**Vocal Chain** — one pass that applies the corrections a rough vocal usually needs, as a single undo
+step. `Effects → Vocal Chain…`
+
+**It contains no new processing.** Every stage is an effect Auditorium already shipped: DC offset,
+noise reduction, de-hum, silence removal, pitch correction, compression, de-essing, a high-pass,
+limiting and reverb. What is new is the *order*, *settings derived from your actual recording*, and a
+report that never hides what happened.
+
+Nothing is set by taste. Each stage starts from its own effect's defaults and the chain overrides only
+what it measured on the audio reaching that stage — the de-esser's threshold at its own input (after
+the compressor, because compression makes sibilance worse and changes what its detector sees), the
+compressor's threshold at the level the take is above half the time while it is sounding, its makeup
+gain at exactly the level the compression removed, the noise print from the quietest 500 ms, the
+silence threshold from the loudest that passage ever reads, and the high-pass an octave under the
+lowest note actually sung.
+
+**A stage with nothing to do says so.** On a recording without mains hum, DeHum reports the two
+readings it took and declines rather than notching a hole in nothing. Nothing runs that you did not
+see.
+
+### Added
+
+- **Vocal Chain** (`Effects → Vocal Chain…`). Ten stages listed in the order they run, each with the
+  note saying why it sits there and why it is on or off, each switchable on its own. After the pass
+  every stage reports the settings it derived and what it derived them from, the measured RMS and peak
+  before and after, and how much of the audio it left bit-identical; a stage that declined shows the
+  measurement that made it decline. Underneath, a before/after table of loudness, peak, crest factor
+  and noise floor. The whole pass is one undo entry.
+- **Remove Silence and Reverb ship off by default** — they change the material rather than correct it.
+  Removing pauses is length-changing, so everything after the first shortened pause moves earlier and
+  the take no longer lines up with a backing track (4.74 s would go from the reference vocal); reverb
+  adds a tail no measurement of a recording can ask for. Both are one click away.
+- **Align Vocal Timing is listed but never run automatically.** It needs you to confirm the beat grid
+  and the syllable moves first, so it is a step you run *before* the chain — timing belongs before
+  pitch, because warping moves the windows the pitch detector uses.
+
+### Changed
+
+- The worker leg of `runEffectOnSelection` is extracted and shared, so the chain runs its stages
+  through exactly the same path a single Apply uses rather than becoming a second one. Single-effect
+  behaviour is unchanged.
+- Pitch Correct now reports what it did — how many frames it moved and by how many cents — which the
+  chain shows, and the sung range it measured, which the chain's high-pass corner is derived from
+  rather than paying for a second pitch-detection pass.
+
+### Measured, on a real 142-second solo vocal
+
+| | Before | After |
+| --- | --- | --- |
+| Noise floor | −61.26 dBFS | **−67.37 dBFS** |
+| Pitch deviation from nearest semitone (median) | 23.27 cents | **14.74 cents** |
+| Programme level | −27.76 dBFS | −27.93 dBFS |
+| Length | unchanged | unchanged |
+
+**One number will look wrong, and it is worth knowing why before you measure it.** The **crest factor
+rises** (18.08 → 22.24 dB) **while the active envelope narrows 2.63 dB** — quiet material comes up
+2.00 dB, loud material comes down 0.62 dB. Both are true, and only the pair is useful. A vocal
+compressor with a 10 ms attack cannot catch a shorter transient, so the makeup gain lifts those peaks
+even as everything sustained is pulled together; peak-to-RMS measures the peak it did not catch, not
+the evenness it did produce. If you measure crest factor and conclude the chain did nothing, measure
+the envelope instead. See [Known Limitations](docs/KNOWN_LIMITATIONS.md).
+
+The de-esser is deliberately gentle for the same reason its own defaults are: it reproduces its
+measured operating point, which sits above the median sibilant, so it pulls down the harsh sibilants
+and leaves 97.7 % of samples bit-identical. Open the De-esser on its own, with Listen, if you want
+more.
+
+**Switching Pitch Correct off also switches the EQ off** — the high-pass corner comes from the lowest
+note that stage measured, so without it the EQ declines rather than guessing. The stage list says so
+before you run anything. Pitch Correct is also 55 % of the running time (about 105 s for a 142 s
+take).
+
 ## [1.19.0] - 2026-08-10
 
 **Align Vocal Timing** — warp a sung take so its syllables land on the beat when the singer drags or

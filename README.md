@@ -8,9 +8,11 @@
 
 Auditorium is a free, Audition-class desktop audio editor for Windows, built on
 Electron and React. It does destructive waveform editing and spectral-frequency
-editing, ships 24 built-in effects, spectral noise reduction, microphone
-recording, a multitrack editor with sessions, mixdown and volume/pan
-automation envelopes, tempo detection, tempo matching and auto-remix, stem
+editing, ships 25 built-in effects, spectral noise reduction, a vocal chain
+that fixes a rough take in one pass with settings derived from the recording
+itself, microphone recording, a multitrack editor with sessions, mixdown and
+volume/pan automation envelopes, tempo detection, tempo matching and
+auto-remix, stem
 separation that splits a track into drums/bass/vocals/other and a residual
 which add back up to the original sample for sample, and speech transcription
 with speaker labels that exports as SRT or WebVTT — all processing runs
