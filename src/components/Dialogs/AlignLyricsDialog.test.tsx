@@ -380,7 +380,7 @@ describe('AlignLyricsDialog — reaching a word', () => {
     expect(rows[1].textContent).toBe('on');
   });
 
-  it('plays exactly the clicked word, and nothing wider', async () => {
+  it('asks the playback engine for exactly the clicked word’s span, and nothing wider', async () => {
     const docId = seedDoc();
     open();
     await settle();
@@ -560,7 +560,7 @@ describe('AlignLyricsDialog — the Replace state machine', () => {
     expect(bridge.showMessageBox).not.toHaveBeenCalled();
   });
 
-  it('offers no way to import a replacement from a file — the mic is the only source', async () => {
+  it('has no file input for the replacement, and says where the replacement comes from instead', async () => {
     seedDoc();
     const { container } = open(new FakeEngine());
     await settle();

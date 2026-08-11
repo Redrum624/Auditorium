@@ -18,6 +18,15 @@ suggested: that measurement only ever pinned joins the planner had already chose
 cheapest arrangement does *not* contain and the old preference kept it **0 times out of 109**. The
 guarantee keeps it 109/109.
 
+**And you can now fix one word of a vocal without singing the take again.** Paste the lyrics you
+already have, and **Align Lyrics** gives every word a position; click a word to hear exactly that
+word, then record a fresh take of just that word and it is spliced in with its level, median pitch
+and seams matched to what was there — without moving a single sample position, so a backing track
+still lines up. It does **not** tell you which word is wrong: a per-phone pronunciation scorer was
+built against the same model and measured at AUC 0.642 on this material against a 0.500 chance
+baseline, flagging 46 of 51 words, and was cut rather than shipped. Your ear picks the word; the tool
+makes it reachable.
+
 ### Added
 
 - **Align Lyrics (`Effects → Align Lyrics…`) — place the words you already have, then replace one of

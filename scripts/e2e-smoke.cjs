@@ -3669,6 +3669,9 @@ async function main() {
         `a second word replaces without re-aligning - the spans still describe the audio (status ${second.status}${second.message ? `: ${second.message}` : ''})`
       );
       assert(second.lengthDelta === 0, `the second splice is length-preserving too (delta ${second.lengthDelta})`);
+
+      // Persist, so teardown does not meet a dirty document.
+      await page.evaluate((p) => window.__test.saveActiveAs(p), OUT_ALIGN_AFTER_WAV);
     }
 
     console.log('\nSMOKE PASSED');

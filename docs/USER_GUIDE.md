@@ -207,16 +207,17 @@ The stages, in the order they run:
 | # | Stage | On by default |
 | --- | --- | --- |
 | 1 | Remove DC Offset | yes |
-| 2 | Noise Reduction | yes |
-| 3 | DeHum | yes (runs only if hum is measured) |
-| 4 | Remove Silence | **no** |
-| 5 | Align Vocal Timing | **manual — run it before the chain** |
-| 6 | Pitch Correct | yes |
-| 7 | Compressor | yes |
-| 8 | De-esser | yes |
-| 9 | EQ (high-pass) | yes |
-| 10 | Limiter | yes |
-| 11 | Reverb | **no** |
+| 2 | Align Lyrics | **manual — run it before the chain** |
+| 3 | Noise Reduction | yes |
+| 4 | DeHum | yes (runs only if hum is measured) |
+| 5 | Remove Silence | **no** |
+| 6 | Align Vocal Timing | **manual — run it before the chain** |
+| 7 | Pitch Correct | yes |
+| 8 | Compressor | yes |
+| 9 | De-esser | yes |
+| 10 | EQ (high-pass) | yes |
+| 11 | Limiter | yes |
+| 12 | Reverb | **no** |
 
 The order is not stylistic. Noise reduction comes early because the pitch
 detector will otherwise lock onto broadband noise and "correct" pitch that is
@@ -251,11 +252,27 @@ from, and says why. Nothing runs that you did not see.
 Two stages are off by default because they change the material rather than
 correct it: **Remove Silence** shortens pauses, which moves everything after
 them and takes the take out of sync with a backing track, and **Reverb** adds a
-tail no measurement of a recording can ask for. **Align Vocal Timing** is listed
-but never run automatically — it needs you to confirm the beat grid and the
-syllables first, so run it from its own dialog *before* the chain (timing
-belongs before pitch, because warping changes the windows the pitch detector
-uses).
+tail no measurement of a recording can ask for.
+
+**Two more are listed but never run automatically**, because each needs you to
+say *what* to change rather than *whether* to change it. Run each from its own
+dialog before the chain:
+
+- **Align Lyrics** (stage 2) replaces one word you pick with a fresh take of it.
+  It sits second, right after DC offset, and the position is a consequence
+  rather than a preference: a replacement is a fresh microphone take carrying
+  its own room tone, so it has to be in the file before Noise Reduction learns
+  its print and before the compressor, de-esser, EQ and limiter measure the
+  levels they set themselves from — run after them and the seam joins cleaned
+  audio to a raw take, with no stage left to reconcile the two floors. It also
+  has to come before Remove Silence and Align Vocal Timing, which move every
+  sample after the point they edit and would leave the word positions describing
+  audio that has shifted. DC offset still goes first for the chain's own stated
+  reason: the splice matches the new word's level to the old one's by RMS, and a
+  DC bias inflates that measurement.
+- **Align Vocal Timing** (stage 6) needs you to confirm the beat grid and the
+  syllables first. Timing belongs before pitch, because warping changes the
+  windows the pitch detector uses.
 
 After the run, every stage reports what it did: the settings it derived and what
 it derived them from, the measured RMS and peak before and after, and how much

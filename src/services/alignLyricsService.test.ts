@@ -284,6 +284,22 @@ describe('frameToDocSample', () => {
     expect(frameToDocSample(5, FRAME_SAMPLES, SR, 0, 1_000_000)).toBe(1600);
   });
 
+  // The scaling is rounded to the NEAREST sample, not truncated, and there is a
+  // rate where that is observable. 320 x 11025/16000 = 220.5 exactly, so every
+  // ODD frame of an 11025 Hz document lands on a half-sample; truncating would
+  // put all of them 0.5 samples early, biased consistently in one direction.
+  // Every other rate this app produces is a multiple of 50, where 320 x r/16000
+  // is a whole number and the two agree — which is why this case has to be
+  // written down rather than assumed covered.
+  it.each([
+    [1, 221],
+    [3, 662],
+    [5, 1103],
+  ])('rounds to the nearest sample at a rate where truncating differs: frame %s', (frame, expected) => {
+    expect(320 * (11025 / 16000) * frame).toBe(expected - 0.5);
+    expect(frameToDocSample(frame, FRAME_SAMPLES, 11025, 0, 1_000_000)).toBe(expected);
+  });
+
   // Both clamps probed BELOW / ON / ABOVE, sized so the boundary can move the
   // answer: the last frame's span reaches one stride past the region, which is
   // a span nothing can play or splice.
@@ -563,15 +579,17 @@ describe('alignDocumentLyrics — the lyrics-match warning', () => {
     });
   });
 
-  it('surfaces no per-word verdict of any kind — only the one median', async () => {
-    const docId = seedDoc();
-    const result = await alignDocumentLyrics({ docId, text: TEXT });
-    if (!result.ok) throw new Error('unreachable');
-    // The type carries a per-word `score` because the Viterbi produces one, and
-    // the FEATURE's rule is that nothing ranks or flags a word. The only
-    // aggregate the service derives a verdict from is the median.
-    expect(Object.keys(result.alignment)).not.toContain('wordVerdicts');
-    expect(result.alignment.verdict).toBe(result.alignment.medianWordScore >= LYRICS_MATCH_THRESHOLD ? 'match' : 'weak');
+  it('derives its ONE verdict from the median word score and from nothing else', async () => {
+    // The alignment carries a per-word `score` because the Viterbi produces
+    // one, and the feature's rule is that nothing ranks or flags a word. What
+    // is checkable here is that the verdict is a pure function of the median:
+    // driven across the threshold, only the median moves it, and per-word
+    // scores that are all equal to it cannot be what is being consulted.
+    for (const offset of [-0.5, -0.01, 0, 0.01, 0.5]) {
+      const a = await verdictAtWordScore(LYRICS_MATCH_THRESHOLD + offset);
+      expect(a.verdict).toBe(a.medianWordScore >= LYRICS_MATCH_THRESHOLD ? 'match' : 'weak');
+      expect(a.verdict).toBe(offset < 0 ? 'weak' : 'match');
+    }
   });
 });
 
