@@ -455,23 +455,53 @@ describe('alignDocumentLyrics — the placement it stores', () => {
     expect(last.startSample).toBe(LAYOUT.expected[2].startFrame * FRAME_SAMPLES);
   });
 
-  it('offsets every position by the selection it was run over', async () => {
-    // The document is twice the fixture, with the fixture in the second half;
-    // the selection names that half, so a correct implementation reports
-    // positions in DOCUMENT samples, not selection-relative ones.
-    const lead = new Float32Array(TOTAL_SAMPLES);
-    const audio = new Float32Array(TOTAL_SAMPLES * 2);
-    audio.set(lead, 0);
-    audio.set(fixtureAudio(), TOTAL_SAMPLES);
+  it('sends the SELECTION’s audio to the host, and offsets every position by it', async () => {
+    // The selection is the feature's principal input, and pinning only the
+    // POSITIONS cannot observe it: `regionStart` and every `startSample` come
+    // from `region.start/end` through `frameToDocSample`, a path that never
+    // touches the audio that was actually sent. So the request payload is
+    // asserted here, sized so both ways of getting it wrong are observable:
+    //
+    //   • the lead is longer than the 30 s inference chunk, so a run over the
+    //     WHOLE FILE reports `chunked` where a run over the selection does not;
+    //   • the lead is a tone the fixture never contains, so a payload of the
+    //     right LENGTH taken from the wrong offset differs sample for sample.
+    //
+    // Verified by mutation: `monoRegion(doc.channels, 0, docLength(doc))` in
+    // place of the region call passed the whole suite before this.
+    const LEAD = ALIGN_ACCURACY.chunkSeconds * SR + FRAME_SAMPLES; // 480,320 — over the chunk
+    const selected = fixtureAudio();
+    const audio = new Float32Array(LEAD + TOTAL_SAMPLES);
+    audio.set(tone(LEAD, 110), 0);
+    audio.set(selected, LEAD);
     const docId = seedDoc([audio]);
-    useAppStore.getState().setSelection({ start: TOTAL_SAMPLES, end: TOTAL_SAMPLES * 2 });
+    useAppStore.getState().setSelection({ start: LEAD, end: LEAD + TOTAL_SAMPLES });
 
     const result = await alignDocumentLyrics({ docId, text: TEXT });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.alignment.regionStart).toBe(TOTAL_SAMPLES);
+
+    // The payload IS the selection: its rate label, its length, and its samples.
+    expect(bridge.alignRun).toHaveBeenCalledTimes(1);
+    const request = bridge.alignRun.mock.calls[0][0] as { sampleRate: number; samples: ArrayBuffer };
+    expect(request.sampleRate).toBe(ALIGN_SAMPLE_RATE);
+    const sent = new Float32Array(request.samples);
+    expect(sent).toHaveLength(TOTAL_SAMPLES);
+    expect(sent.length).toBeLessThan(audio.length); // …and not the file's
+    // The document runs at the model's own rate, so the resample is an exact
+    // copy and this is an equality, not a tolerance.
+    expect(sent).toEqual(selected);
+
+    // …and the run is single-pass, which ONLY the selection is: the file itself
+    // is longer than the chunk, so the flag would flip if the file were sent.
+    expect(audio.length).toBeGreaterThan(ALIGN_ACCURACY.chunkSeconds * SR);
+    expect(result.alignment.chunked).toBe(false);
+
+    // …and every position is a DOCUMENT position, offset by the region.
+    expect(result.alignment.regionStart).toBe(LEAD);
+    expect(result.alignment.regionEnd).toBe(LEAD + TOTAL_SAMPLES);
     LAYOUT.expected.forEach((want, i) => {
-      expect(result.alignment.words[i].startSample).toBe(TOTAL_SAMPLES + want.startFrame * FRAME_SAMPLES);
+      expect(result.alignment.words[i].startSample).toBe(LEAD + want.startFrame * FRAME_SAMPLES);
     });
   });
 
