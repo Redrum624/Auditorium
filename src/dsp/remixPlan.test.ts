@@ -1,5 +1,6 @@
-import { planRemix, MAX_USE_COUNT, DEFAULT_MAX_REPEAT_FACTOR, _runRemixDPForTest } from './remixPlan';
+import { planRemix, MAX_USE_COUNT, MAX_REQUIRED_JOINS, DEFAULT_MAX_REPEAT_FACTOR, _runRemixDPForTest } from './remixPlan';
 import type { PlanRemixOptions, PlanRemixResult, RemixSegment } from './remixPlan';
+import { REMIX_PLAN_GOLDEN } from './__fixtures__/remixPlanGolden';
 import { buildCandidateLists, joinCost, DEFAULT_REMIX_WEIGHTS } from './remixCost';
 import * as remixCostModule from './remixCost';
 import type { RemixAnalysis } from './remixFeatures';
@@ -1277,5 +1278,520 @@ describe('lockedJoins — non-degeneracy (fix round 2, measured)', () => {
     // And it must not systematically buy pin survival with worse joins:
     // measured MEAN change in clean cost is <= 0 on both fixtures.
     expect(totalDelta / cases).toBeLessThanOrEqual(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// requiredJoins (R4b) -- a pin as a HARD constraint. See `PlanRemixOptions.
+// requiredJoins` and the module doc comment's "subset axis" section.
+// ---------------------------------------------------------------------------
+
+/** The golden case matrix. One definition, replayed field-for-field against
+ * `REMIX_PLAN_GOLDEN`, which was generated from the planner as it stood
+ * BEFORE `requiredJoins` existed (see that file's header). */
+const REMIX_PLAN_GOLDEN_SPECS: { name: string; analysis: () => RemixAnalysis; opts: (a: RemixAnalysis) => PlanRemixOptions }[] = [
+  {
+    name: 'uniform-40-strict-roll0-0.75',
+    analysis: () => makeUniformAnalysis({ numBars: 40 }),
+    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 0.75), strict: true, allowRepeats: true }),
+  },
+  {
+    name: 'uniform-40-loose-roll2-1.40',
+    analysis: () => makeUniformAnalysis({ numBars: 40 }),
+    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.4), strict: false, allowRepeats: true, rollIndex: 2 }),
+  },
+  {
+    name: 'uniform-24-clustered-strict-roll1-1.00',
+    analysis: () => makeUniformAnalysis({ numBars: 24, cluster: Int32Array.from({ length: 25 }, (_, i) => i % 3) }),
+    opts: (a) => baseOptions({ targetSample: a.analyzedEndSample, strict: true, allowRepeats: true, rollIndex: 1 }),
+  },
+  {
+    name: 'varying-48-strict-roll0-0.50',
+    analysis: () => makeVaryingAnalysis(48),
+    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 0.5), strict: true, allowRepeats: true }),
+  },
+  {
+    name: 'varying-48-strict-roll3-1.25',
+    analysis: () => makeVaryingAnalysis(48),
+    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.25), strict: true, allowRepeats: true, rollIndex: 3 }),
+  },
+  {
+    name: 'varying-64-loose-roll1-2.00',
+    analysis: () => makeVaryingAnalysis(64),
+    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 2.0), strict: false, allowRepeats: true, rollIndex: 1 }),
+  },
+  {
+    name: 'varying-64-strict-exact-1.10',
+    analysis: () => makeVaryingAnalysis(64),
+    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.1), strict: true, allowRepeats: true, exactLength: true }),
+  },
+  {
+    name: 'uniform-40-strict-norepeat-0.60',
+    analysis: () => makeUniformAnalysis({ numBars: 40 }),
+    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 0.6), strict: true, allowRepeats: false }),
+  },
+];
+
+describe('requiredJoins — INERTNESS when empty (R4b, Ruling 4)', () => {
+  // THE SINGLE MOST IMPORTANT TEST IN R4b. Every other remix golden is
+  // downstream of it: the subset axis is shared by the K = 0 path, so "an
+  // empty requiredJoins changes nothing" must be a comparison against stored
+  // numbers from code that never knew the option existed — not an argument
+  // about `* 1` and `+ 0`.
+  it('reproduces the pre-R4b plan golden field-for-field', () => {
+    expect(REMIX_PLAN_GOLDEN.length).toBe(REMIX_PLAN_GOLDEN_SPECS.length);
+    let checked = 0;
+    for (const spec of REMIX_PLAN_GOLDEN_SPECS) {
+      const golden = REMIX_PLAN_GOLDEN.find((g) => g.name === spec.name);
+      if (!golden) throw new Error(`no golden row for ${spec.name}`);
+      const a = spec.analysis();
+      const plan = planRemix(a, spec.opts(a));
+      expectOk(plan);
+      expect(plan.segments.map((s) => [s.start, s.end])).toEqual(golden.segments.map((s) => [s[0], s[1]]));
+      expect(plan.joins.map(joinKeyOf)).toEqual([...golden.joins]);
+      expect(plan.joins.map((j) => j.cost.total)).toEqual([...golden.joinCosts]);
+      expect(plan.outputSample).toBe(golden.outputSample);
+      expect(plan.totalCost).toBe(golden.totalCost);
+      expect(plan.minOutputSample).toBe(golden.minOutputSample);
+      expect(plan.maxOutputSample).toBe(golden.maxOutputSample);
+      expect(plan.maxBarUse).toBe(golden.maxBarUse);
+      expect(plan.canReroll).toBe(golden.canReroll);
+      checked++;
+    }
+    expect(checked).toBe(8); // the matrix really ran, it did not short-circuit
+  });
+
+  it('an ABSENT and an EMPTY requiredJoins produce byte-identical results, including the absence of the report field', () => {
+    let compared = 0;
+    for (const spec of REMIX_PLAN_GOLDEN_SPECS) {
+      const a = spec.analysis();
+      const plain = planRemix(a, spec.opts(a));
+      const empty = planRemix(spec.analysis(), { ...spec.opts(spec.analysis()), requiredJoins: [] });
+      expect(empty).toEqual(plain);
+      // `toEqual` ignores undefined-valued keys, so assert the KEY ITSELF is
+      // absent — an always-present `requiredJoins: {...}` would slip past a
+      // deep-equality check between two post-R4b results.
+      expect('requiredJoins' in plain).toBe(false);
+      expect('requiredJoins' in empty).toBe(false);
+      compared++;
+    }
+    expect(compared).toBe(8);
+  });
+
+  it('the DP table does not grow when nothing is required, and grows by exactly 2^K when something is', () => {
+    const M = 20;
+    const phraseBars = 8;
+    const a = makeUniformAnalysis({ numBars: M });
+    const candidates = buildCandidateLists(a, {
+      weights: DEFAULT_REMIX_WEIGHTS,
+      phraseBars,
+      minRunBars: phraseBars,
+      strict: true,
+      allowRepeats: true,
+    });
+    const baseCosts = candidates.map((cand, from) =>
+      Float64Array.from(cand, (b) => joinCost(a, DEFAULT_REMIX_WEIGHTS, phraseBars, from, b).total)
+    );
+    const Nmax = 40;
+    const cells = (M + 1) * (Nmax + 1);
+
+    // BELOW / ON / ABOVE the multiplier: K = 0 must not grow the table at
+    // all, and each further bit must exactly double it.
+    for (const K of [0, 1, 2, 3, 4]) {
+      const bits = new Map<string, number>();
+      for (let i = 0; i < K; i++) bits.set(`${1 + i}>${9 + i}`, i);
+      const table = _runRemixDPForTest(
+        candidates,
+        baseCosts,
+        DEFAULT_REMIX_WEIGHTS.jump,
+        new Map(),
+        M,
+        Nmax,
+        phraseBars,
+        K === 0 ? null : bits,
+        1 << K
+      );
+      expect(table.cost.length).toBe(cells * (1 << K));
+      expect(table.parent.length).toBe(cells * (1 << K));
+      expect(table.numMasks).toBe(1 << K);
+    }
+  });
+});
+
+describe('requiredJoins — the guarantee (R4b)', () => {
+  /** A loudness ramp, so `dLoudness` varies smoothly and legal joins have
+   * genuinely different costs. Without it every candidate costs the same and
+   * "the pin made the plan dearer" cannot be observed at all — the mistake
+   * F7's 6 dB compression fixture and F9's pass-through both shipped. */
+  const rampAnalysis = (): RemixAnalysis => makeUniformAnalysis({ numBars: 40, L: (i) => i * 0.05 });
+
+  it('honours a pin the cheapest plan does NOT contain, at a strictly higher cost and the SAME length', () => {
+    const a = rampAnalysis();
+    const base = baseOptions({
+      targetSample: Math.round(a.analyzedEndSample * 0.6),
+      strict: true,
+      allowRepeats: false,
+    });
+    const plain = planRemix(a, base);
+    expectOk(plain);
+    // The fixture is sized so the pin is genuinely OFF the optimal path: the
+    // unconstrained plan splices at 15>31 and nowhere near bar 1.
+    expect(plain.joins.map(joinKeyOf)).toEqual(['15>31']);
+
+    const pinned = planRemix(a, { ...base, requiredJoins: ['1>9'] });
+    expectOk(pinned);
+
+    expect(pinned.joins.map(joinKeyOf)).toContain('1>9');
+    // The constraint MOVED the output: a different, two-join arrangement...
+    expect(pinned.joins.map(joinKeyOf)).toEqual(['1>9', '24>32']);
+    // ...at nearly DOUBLE the cost (2.207 vs 1.157) — the price of the
+    // guarantee, paid and visible...
+    expect(pinned.totalCost).toBeGreaterThan(plain.totalCost);
+    expect(pinned.totalCost).toBeCloseTo(2.2067, 3);
+    expect(plain.totalCost).toBeCloseTo(1.1567, 3);
+    // ...while still hitting the same duration, so the cost comparison is
+    // like-for-like rather than "a different length happened to cost more".
+    expect(pinned.outputSample).toBe(plain.outputSample);
+    expect(pinned.requiredJoins).toEqual({ mode: 'enforced', satisfied: ['1>9'], dropped: [] });
+  });
+
+  it('a PREFERENCE would have dropped that same pin — the measurement that makes R4b more than a rename', () => {
+    const a = rampAnalysis();
+    const base = baseOptions({
+      targetSample: Math.round(a.analyzedEndSample * 0.6),
+      strict: true,
+      allowRepeats: false,
+    });
+    const preference = planRemix(a, { ...base, lockedJoins: ['1>9'] });
+    expectOk(preference);
+    expect(preference.joins.map(joinKeyOf)).not.toContain('1>9');
+    const required = planRemix(a, { ...base, requiredJoins: ['1>9'] });
+    expectOk(required);
+    expect(required.joins.map(joinKeyOf)).toContain('1>9');
+  });
+
+  it('forces a splice into a plan whose unconstrained optimum has NO joins at all', () => {
+    const a = rampAnalysis();
+    const base = baseOptions({
+      targetSample: Math.round(a.analyzedEndSample * 0.9),
+      strict: true,
+      allowRepeats: false,
+    });
+    const plain = planRemix(a, base);
+    expectOk(plain);
+    expect(plain.joins).toEqual([]); // straight-through play is optimal here
+    expect(plain.totalCost).toBe(0);
+
+    const pinned = planRemix(a, { ...base, requiredJoins: ['1>9'] });
+    expectOk(pinned);
+    expect(pinned.joins.map(joinKeyOf)).toEqual(['1>9']);
+    expect(pinned.totalCost).toBeGreaterThan(0);
+    // The forced splice also shortens the arrangement — the pin is not free
+    // in duration either, and the reported length is the real one.
+    expect(pinned.outputSample).toBeLessThan(plain.outputSample);
+  });
+});
+
+describe('requiredJoins — mutually incompatible pins (R4b, Ruling 1)', () => {
+  const norepeat = (a: RemixAnalysis, frac: number): PlanRemixOptions =>
+    baseOptions({ targetSample: Math.round(a.analyzedEndSample * frac), strict: true, allowRepeats: false });
+
+  it('keeps the larger satisfiable set and NAMES the incompatible pin', () => {
+    // With `allowRepeats: false` every jump moves forward, so `8>16` (landing
+    // at 24) and `16>24` (landing at 32) can never both occur: after either,
+    // the other's source bar is behind the play head.
+    const a = makeUniformAnalysis({ numBars: 40 });
+    const r = planRemix(a, { ...norepeat(a, 0.75), requiredJoins: ['8>16', '16>24'] });
+    expectOk(r);
+    expect(r.joins.map(joinKeyOf)).toEqual(['8>16']);
+    expect(r.requiredJoins).toEqual({
+      mode: 'enforced',
+      satisfied: ['8>16'],
+      dropped: [{ key: '16>24', reason: 'incompatible' }],
+    });
+  });
+
+  it('is deterministic across repeated identical calls', () => {
+    const a = makeUniformAnalysis({ numBars: 40 });
+    const opts: PlanRemixOptions = { ...norepeat(a, 0.75), requiredJoins: ['8>16', '16>24'] };
+    const first = planRemix(a, opts);
+    for (let i = 0; i < 5; i++) expect(planRemix(makeUniformAnalysis({ numBars: 40 }), opts)).toEqual(first);
+  });
+
+  it('indexes bits by POSITION, not "always bit 0": with three pins the dropped one can be the FIRST', () => {
+    // `1>9` and `2>10` are mutually incompatible for the same forward-only
+    // reason; `24>32` is compatible with either. So the maximum satisfiable
+    // size is 2, and the choice between {1>9, 24>32} and {2>10, 24>32} is
+    // decided on cost — `1>9` is the cheaper of the pair on this loudness
+    // ramp. Listing `2>10` FIRST makes it bit 0, so a "satisfied = bit 0"
+    // implementation would report exactly the wrong answer here.
+    const a = makeUniformAnalysis({ numBars: 40, L: (i) => i * 0.05 });
+    const r = planRemix(a, { ...norepeat(a, 0.6), requiredJoins: ['2>10', '1>9', '24>32'] });
+    expectOk(r);
+    expect(r.requiredJoins?.satisfied).toEqual(['1>9', '24>32']);
+    expect(r.requiredJoins?.dropped).toEqual([{ key: '2>10', reason: 'incompatible' }]);
+    expect(r.joins.map(joinKeyOf)).toEqual(['1>9', '24>32']);
+
+    // ...and it is the COST that decides, not the listing order: naming the
+    // same three pins in a different order gives the same honoured set, so
+    // the bit indices are bookkeeping rather than a hidden priority.
+    const swapped = planRemix(a, { ...norepeat(a, 0.6), requiredJoins: ['1>9', '2>10', '24>32'] });
+    expectOk(swapped);
+    expect(swapped.requiredJoins?.satisfied).toEqual(['1>9', '24>32']);
+    expect(swapped.requiredJoins?.dropped).toEqual([{ key: '2>10', reason: 'incompatible' }]);
+  });
+
+  it('reports a length that only the pins made unreachable, and says how many were in force', () => {
+    const a = makeUniformAnalysis({ numBars: 40 });
+    const base = norepeat(a, 0.75);
+    expectOk(planRemix(a, base)); // the same target succeeds unpinned
+    const r = planRemix(a, { ...base, requiredJoins: ['8>24'] });
+    expectFail(r);
+    expect(r.message).toContain('1 pinned edit(s) enforced');
+    expect(r.requiredJoins).toEqual({ mode: 'enforced', satisfied: [], dropped: [] });
+  });
+});
+
+describe('requiredJoins — the pre-DP categories (R4b, Ruling 2)', () => {
+  it('distinguishes forbidden, no-candidate and incompatible from each other in ONE call', () => {
+    const a = makeUniformAnalysis({ numBars: 40 });
+    const base = baseOptions({
+      targetSample: Math.round(a.analyzedEndSample * 0.75),
+      strict: true,
+      allowRepeats: false,
+    });
+    const r = planRemix(a, {
+      ...base,
+      forbiddenJoins: ['24>32'],
+      // 24>32 is forbidden AND required (a direct contradiction);
+      // 3>4 is congruence-illegal so it is in no candidate list;
+      // 8>16 and 16>24 are individually fine but mutually exclusive.
+      requiredJoins: ['24>32', '3>4', '8>16', '16>24'],
+    });
+    expectOk(r);
+    expect(r.requiredJoins?.mode).toBe('enforced');
+    expect(r.requiredJoins?.satisfied).toEqual(['8>16']);
+    expect(r.requiredJoins?.dropped).toEqual([
+      { key: '24>32', reason: 'forbidden' },
+      { key: '3>4', reason: 'no-candidate' },
+      { key: '16>24', reason: 'incompatible' },
+    ]);
+    expect(r.joins.map(joinKeyOf)).not.toContain('24>32');
+  });
+
+  it('forbidden wins over required even when nothing else is pinned', () => {
+    const a = makeUniformAnalysis({ numBars: 40 });
+    const base = baseOptions({
+      targetSample: Math.round(a.analyzedEndSample * 0.75),
+      strict: true,
+      allowRepeats: false,
+    });
+    const r = planRemix(a, { ...base, forbiddenJoins: ['8>16'], requiredJoins: ['8>16'] });
+    expectOk(r);
+    expect(r.joins.map(joinKeyOf)).not.toContain('8>16');
+    expect(r.requiredJoins?.dropped).toEqual([{ key: '8>16', reason: 'forbidden' }]);
+  });
+
+  it('a key filtered out by strict congruence is no-candidate, and the SAME key is satisfiable in loose mode', () => {
+    const a = makeVaryingAnalysis(64);
+    const target = Math.round(a.analyzedEndSample * 1.2);
+    const strict = planRemix(a, baseOptions({ targetSample: target, strict: true, allowRepeats: true, requiredJoins: ['1>13'] }));
+    expectOk(strict);
+    // 1 !== 13 (mod 8), so strict congruence removes it before the DP runs —
+    // and the category says WHY rather than just that the pin is missing.
+    expect(strict.requiredJoins?.dropped).toEqual([{ key: '1>13', reason: 'no-candidate' }]);
+
+    const loose = planRemix(a, baseOptions({ targetSample: target, strict: false, allowRepeats: true, requiredJoins: ['1>13'] }));
+    expectOk(loose);
+    expect(loose.requiredJoins?.dropped).toEqual([]);
+    expect(loose.joins.map(joinKeyOf)).toContain('1>13');
+  });
+
+  it('triage does not consume a bit: 6 pins of which 2 are impossible stay ENFORCED', () => {
+    const a = makeVaryingAnalysis(64);
+    const base = baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.5), strict: true, allowRepeats: true });
+    const r = planRemix(a, {
+      ...base,
+      rollIndex: 2,
+      forbiddenJoins: ['9>1'],
+      requiredJoins: ['16>8', '32>24', '48>40', '24>16', '9>1', '5>6'],
+    });
+    expectOk(r);
+    // 6 > MAX_REQUIRED_JOINS, but two are decided before the DP, so the
+    // enforceable set is 4 and the guarantee stays in force.
+    expect(r.requiredJoins?.mode).toBe('enforced');
+    expect(r.requiredJoins?.satisfied).toEqual(['16>8', '32>24', '48>40', '24>16']);
+    expect(r.requiredJoins?.dropped).toEqual([
+      { key: '9>1', reason: 'forbidden' },
+      { key: '5>6', reason: 'no-candidate' },
+    ]);
+  });
+});
+
+describe('requiredJoins — the MAX_REQUIRED_JOINS cap (R4b, Ruling 3)', () => {
+  const PINS = ['16>8', '32>24', '48>40', '24>16', '40>32'];
+
+  it('is 4 — the panel cap is deliberately higher so the degradation is reachable', () => {
+    expect(MAX_REQUIRED_JOINS).toBe(4);
+  });
+
+  // BELOW / ON / ABOVE the cap, sized so the boundary genuinely moves the
+  // output: at 5 pins the mode flips and the honoured set collapses.
+  it.each([
+    [MAX_REQUIRED_JOINS - 1, 'enforced'],
+    [MAX_REQUIRED_JOINS, 'enforced'],
+    [MAX_REQUIRED_JOINS + 1, 'preference'],
+  ] as [number, 'enforced' | 'preference'][])('with %i pins the mode is %s', (count, mode) => {
+    const a = makeVaryingAnalysis(64);
+    const base = baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.5), strict: true, allowRepeats: true });
+    const r = planRemix(a, { ...base, rollIndex: 2, requiredJoins: PINS.slice(0, count) });
+    expectOk(r);
+    expect(r.requiredJoins?.mode).toBe(mode);
+    if (mode === 'enforced') {
+      expect(r.requiredJoins?.satisfied).toEqual(PINS.slice(0, count));
+      expect(r.requiredJoins?.dropped).toEqual([]);
+    } else {
+      // Degraded to `lockedJoins` semantics: nothing is guaranteed, and the
+      // report says so by category rather than by silence.
+      expect(r.requiredJoins?.dropped.length).toBeGreaterThan(0);
+      for (const d of r.requiredJoins?.dropped ?? []) expect(d.reason).toBe('not-enforced');
+    }
+  });
+
+  it('above the cap it behaves EXACTLY like lockedJoins — the fallback is the existing mechanism, not a new one', () => {
+    const a = makeVaryingAnalysis(64);
+    const base = baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.5), strict: true, allowRepeats: true, rollIndex: 2 });
+    const over = planRemix(a, { ...base, requiredJoins: PINS });
+    const locked = planRemix(a, { ...base, lockedJoins: PINS });
+    expectOk(over);
+    expectOk(locked);
+    expect(over.segments).toEqual(locked.segments);
+    expect(over.joins.map(joinKeyOf)).toEqual(locked.joins.map(joinKeyOf));
+    expect(over.totalCost).toBe(locked.totalCost);
+  });
+});
+
+describe('requiredJoins — interaction with lockedJoins and the guard (R4b, Ruling 5)', () => {
+  it('an ENFORCED key gets no LOCK_BONUS, even when the caller also passes it as lockedJoins', () => {
+    // The bonus is a preference for something already forced; a path can
+    // traverse the same join twice and would collect it twice. Measured over
+    // 102 pin/press cases it changed the plan in 4, and every change was for
+    // the worse — so passing both must be indistinguishable from passing only
+    // `requiredJoins`.
+    const a = makeVaryingAnalysis(64);
+    const base = baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.5), strict: true, allowRepeats: true, rollIndex: 2 });
+    let compared = 0;
+    for (const pin of ['16>8', '32>24', '48>40']) {
+      const only = planRemix(a, { ...base, requiredJoins: [pin] });
+      const both = planRemix(a, { ...base, requiredJoins: [pin], lockedJoins: [pin] });
+      expect(both).toEqual(only);
+      compared++;
+    }
+    expect(compared).toBe(3);
+  });
+
+  it('a required join is exempt from the re-roll penalty: it survives every roll index', () => {
+    const a = makeVaryingAnalysis(64);
+    const pin = '16>8';
+    let rolls = 0;
+    for (const rollIndex of [0, 1, 2, 3]) {
+      const r = planRemix(
+        a,
+        baseOptions({
+          targetSample: Math.round(a.analyzedEndSample * 1.5),
+          strict: true,
+          allowRepeats: true,
+          rollIndex,
+          requiredJoins: [pin],
+        })
+      );
+      expectOk(r);
+      expect(r.joins.map(joinKeyOf)).toContain(pin);
+      expect(r.requiredJoins?.dropped).toEqual([]);
+      rolls++;
+    }
+    expect(rolls).toBe(4);
+  });
+
+  it('the over-repetition guard never trades a guaranteed pin for a repetition win', () => {
+    // A target far above the source forces heavy repetition, which is exactly
+    // when the guard runs its penalised re-runs. The pin must still be there
+    // afterwards, and `maxBarUse` must be reported honestly rather than the
+    // guard pretending it fixed something.
+    const a = makeVaryingAnalysis(48);
+    const r = planRemix(
+      a,
+      baseOptions({
+        targetSample: Math.round(a.analyzedEndSample * 2.6),
+        strict: true,
+        allowRepeats: true,
+        requiredJoins: ['16>8'],
+      })
+    );
+    expectOk(r);
+    expect(r.joins.map(joinKeyOf)).toContain('16>8');
+    expect(r.maxBarUse).toBeGreaterThan(1);
+    expect(r.requiredJoins).toEqual({ mode: 'enforced', satisfied: ['16>8'], dropped: [] });
+  });
+});
+
+describe('requiredJoins — why a bitmask (R4b, the design evidence)', () => {
+  it('a single plan CAN traverse the same join key twice, so a counter would over-count', () => {
+    // The measured counter-example: if `requiredJoins` were "how many
+    // required edges have I taken", a path using pin A twice and pin B never
+    // would reach `count = 2 = K` and be declared complete.
+    const a = makeVaryingAnalysis(64);
+    const r = planRemix(
+      a,
+      baseOptions({ targetSample: Math.round(a.analyzedEndSample * 2.0), strict: false, allowRepeats: true, rollIndex: 1 })
+    );
+    expectOk(r);
+    const keys = r.joins.map(joinKeyOf);
+    expect(keys.length).toBeGreaterThan(new Set(keys).size);
+  });
+
+  it('two pinned joins are realizable in EITHER order, so a prefix index would be wrong', () => {
+    // Reachability of "A then B" and of "B then A" through the real candidate
+    // graph. Both hold, so the order pins appear in is not fixed and "which
+    // pins are done" is genuinely set-valued.
+    const M = 32;
+    const phraseBars = 8;
+    const a = makeVaryingAnalysis(M);
+    const candidates = buildCandidateLists(a, {
+      weights: DEFAULT_REMIX_WEIGHTS,
+      phraseBars,
+      minRunBars: phraseBars,
+      strict: true,
+      allowRepeats: true,
+    });
+    const Nmax = M * DEFAULT_MAX_REPEAT_FACTOR;
+    const orderReachable = (first: string, second: string): boolean => {
+      const width = Nmax + 1;
+      const seen = new Uint8Array((M + 1) * width * 3);
+      const at = (p: number, n: number, s: number): number => (p * width + n) * 3 + s;
+      seen[at(0, 0, 0)] = 1;
+      for (let n = 0; n < Nmax; n++) {
+        for (let p = 0; p <= M; p++) {
+          for (let s = 0; s < 3; s++) {
+            if (!seen[at(p, n, s)]) continue;
+            if (p < M) seen[at(p + 1, n + 1, s)] = 1;
+            const cand = candidates[p];
+            if (!cand) continue;
+            for (let i = 0; i < cand.length; i++) {
+              const landing = cand[i] + phraseBars;
+              const newN = n + phraseBars;
+              if (landing > M || newN > Nmax) continue;
+              const key = `${p}>${cand[i]}`;
+              const ns = s === 0 && key === first ? 1 : s === 1 && key === second ? 2 : s;
+              seen[at(landing, newN, ns)] = 1;
+            }
+          }
+        }
+      }
+      for (let n = 0; n <= Nmax; n++) if (seen[at(M, n, 2)]) return true;
+      return false;
+    };
+    expect(orderReachable('9>17', '10>2')).toBe(true);
+    expect(orderReachable('10>2', '9>17')).toBe(true);
   });
 });

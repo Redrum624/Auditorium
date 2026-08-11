@@ -189,6 +189,65 @@
  * regardless of ratio, so a "harmless" 2% correction would re-smear every
  * splice this planner just optimised).
  *
+ * ## `requiredJoins`: a pin as a HARD constraint, via a subset axis (R4b)
+ *
+ * `lockedJoins` (below) is a cost PREFERENCE. `requiredJoins` is the
+ * guarantee: every key in it appears in the returned plan, or the result says
+ * -- by name and by category -- why it could not.
+ *
+ * WHY A BITMASK AND NOT A COUNTER OR A PREFIX INDEX. Both cheaper designs
+ * were considered and both are WRONG here, measured on this module's own
+ * lattice (32 bars, `phraseBars = 8`, strict, `allowRepeats`):
+ * - A COUNTER ("how many required edges has this path taken") over-counts,
+ *   because a single plan can traverse the SAME join key more than once: a
+ *   loop re-enters the same `(from,to)` edge at a later `n`. Measured **28 of
+ *   126** real plans across three scales, three roll indices and both modes
+ *   contain a repeated join key (e.g. `26>10,26>10`). A path using pin A
+ *   twice and pin B never would reach `count = 2 = K` and be wrongly
+ *   declared complete.
+ * - A PREFIX INDEX ("required joins are met in a fixed order") needs that
+ *   order to be forced by the lattice. It is not. `n` increases strictly on
+ *   every edge, which is why an ascending-`n` sweep is a valid topological
+ *   order -- but `p` does NOT move monotonically, so a jump can land anywhere
+ *   `buildCandidateLists` allows and the ORDER two pinned joins appear in is
+ *   free. Measured by 3-state-automaton reachability over all 69 candidate
+ *   keys of that fixture: of 2 173 ordered-realizable key pairs, **1 326 are
+ *   realizable in BOTH orders** (847 in one order only).
+ *
+ * So "which pins have been used so far" is genuinely SET-valued, and the
+ * exact formulation is a subset DP: the state becomes `(p, n, S)` with `S`
+ * the bitmask of satisfied pins, a jump edge whose key is pin `i` sets bit
+ * `i`, and the table grows by `2^K`.
+ *
+ * THE SUBSET AXIS IS ALSO THE FALLBACK -- there is deliberately no second
+ * mechanism (no relaxation pass, no retry loop, no heuristic). At the
+ * terminal the table holds a best cost for `(M, n, S)` for EVERY reachable
+ * `S`, so the maximum-satisfiable pin set and the cheapest plan achieving it
+ * fall out of the same table: take the largest popcount reachable anywhere at
+ * `p = M`, then per `n` the cheapest mask of that popcount (ties by lower
+ * mask value), then run the ordinary terminal selection over that reduced
+ * cost vector. All pins satisfiable -> all honoured. Not all -> the largest
+ * set that is, with the specific dropped keys named as mutually
+ * `'incompatible'`.
+ *
+ * TWO INFEASIBILITIES ARE DECIDED BEFORE THE DP, because they are decidable
+ * without planning and produce far better messages: a key that is also in
+ * `forbiddenJoins` (`'forbidden'` -- `buildCandidateLists` applies that as a
+ * hard constraint and it wins), and a key that appears in NO candidate list
+ * at all (`'no-candidate'` -- filtered out by strict congruence, the edge
+ * guard, `minKeepBars`/`maxRepeatBars` or `allowRepeats`). Neither consumes a
+ * bit, so triaging them first can bring a set back under the cap.
+ *
+ * `K` IS CAPPED at `MAX_REQUIRED_JOINS`; above it the keys degrade to
+ * `lockedJoins` semantics and the result says so (`mode: 'preference'`). See
+ * that constant for the memory arithmetic the cap comes from.
+ *
+ * INERTNESS. With no required joins `K = 0`, `numMasks = 1`, and every index
+ * expression below collapses to exactly the arithmetic this module used
+ * before the axis existed (`(p*width + n)*1 + 0`). The table does not grow,
+ * no per-edge required-key lookup runs (one hoisted boolean guards it), and
+ * the plan is byte-identical -- pinned by a stored golden, not by argument.
+ *
  * ## `MAX_DP_CELLS` is exported, not enforced, here
  *
  * The brief specifies routing to a worker above `(M+1)*(Nmax+1) >
@@ -197,7 +256,11 @@
  * module always runs the DP it is asked to run. `MAX_DP_CELLS` is exported
  * purely so the service layer that owns that choice (T13) has one canonical
  * constant to compare against, matching this module's own
- * `(numBars+1)*(Nmax+1)` table shape exactly.
+ * `(numBars+1)*(Nmax+1)` table shape exactly. R4b does NOT change that
+ * division of labour: the subset axis multiplies the table by `2^K`, and it
+ * is the SERVICE that must multiply its comparison to match (a `2^K` the
+ * existing comparison would not notice is a 16x table on the main thread).
+ * `MAX_REQUIRED_JOINS` is exported for the same reason `MAX_DP_CELLS` is.
  */
 
 import type { RemixAnalysis } from './remixFeatures';
@@ -225,6 +288,56 @@ export const MAX_REPETITION_ITERATIONS = 3;
  * planning to a worker instead of the main thread. Exported for the
  * orchestration layer (T13); not enforced inside this pure module. */
 export const MAX_DP_CELLS = 250_000;
+/**
+ * Largest number of `requiredJoins` this module will enforce EXACTLY. Above
+ * it the keys degrade to `lockedJoins` semantics and the result reports
+ * `mode: 'preference'` so the caller can say so plainly -- a silently
+ * downgraded guarantee would be worse than no guarantee.
+ *
+ * THE ARITHMETIC THIS COMES FROM (not a taste call). The subset axis
+ * multiplies BOTH typed arrays of the table by `2^K`:
+ * `cost` is a `Float64Array` (8 B/cell) and `parent` an `Int32Array`
+ * (4 B/cell), over `(M+1)*(Nmax+1)*2^K` cells -- **12 bytes per cell**.
+ * At the worst case actually reachable in this app (`MAX_ANALYSIS_SECONDS =
+ * 600` at 200 BPM -> `M = 499`, `Nmax = round(499*3) = 1497`, so
+ * `500*1498 = 749 000` cells, **8.99 MB** at `K = 0`):
+ *
+ *     K = 0 ->   8.99 MB      K = 4 -> 143.8 MB
+ *     K = 1 ->  17.98 MB      K = 5 -> 287.6 MB
+ *     K = 2 ->  35.95 MB      K = 6 -> 575.2 MB
+ *     K = 3 ->  71.90 MB      K = 8 ->   2.30 GB
+ *
+ * `K = 4` (143.8 MB) is the largest that stays inside the same order of
+ * magnitude as the allocations this feature ALREADY makes on the same
+ * machine at the same moment -- `renderRemix` allocates up to ~690 MB for its
+ * output (`remixRender.ts:571`) and the source snapshot is ~105 MB for a
+ * 5-minute stereo track. `K = 5` (287.6 MB) would roughly triple the
+ * planner's own footprint while those are live; `K = 8` (the panel's
+ * `MAX_LOCKED_JOINS`) is 2.3 GB and would simply fail to allocate.
+ *
+ * TIME AGREES, and it was MEASURED rather than assumed. The hope that most
+ * `(p,n,S)` cells would stay `Infinity` (a mask being unreachable until its
+ * own pinned edges are taken) is WRONG in practice: a continue edge carries
+ * every reachable mask forward one bar, so a mask taken early is live for the
+ * rest of the sweep. Measured at `M = 496` under ts-jest (the ratios are what
+ * transfer; the absolute figures carry that harness's overhead, which is
+ * ~5.7x the 302 ms this module records for a production `M = 499` run):
+ *
+ *     K = 0 -> 1729 ms    K = 2 ->  5990 ms (3.46x)
+ *     K = 1 -> 3199 ms    K = 3 -> 11381 ms (6.58x)
+ *     (1.85x)             K = 4 -> 22877 ms (13.2x)
+ *
+ * i.e. essentially the full `2^K`. `K = 5` would be ~26x and `K = 8` ~200x on
+ * top of a run that is already the reason planning moves to a worker at all.
+ * So 4 is where BOTH budgets run out, which is the useful kind of agreement.
+ * The residual is real and recorded: a 4-pin re-roll on a 10-minute source is
+ * seconds of worker time, not milliseconds -- see `docs/KNOWN_LIMITATIONS.md`.
+ *
+ * The cap is deliberately BELOW the panel's `MAX_LOCKED_JOINS = 8`, so the
+ * degradation path is reachable in normal use rather than theoretical -- and
+ * therefore testable, and therefore something the UI must actually say.
+ */
+export const MAX_REQUIRED_JOINS = 4;
 /**
  * Cost advantage a PINNED join gets, on top of being exempt from every
  * synthetic penalty (fix round 2). NOT an invented constant: it is exactly
@@ -263,6 +376,48 @@ export interface RemixJoin {
    * is purely `joinCost(analysis, weights, phraseBars, fromBar, toBar)`, for
    * the panel's own tooltip (T13/T14). */
   cost: JoinCostTerms;
+}
+
+/**
+ * Why a `requiredJoins` key is not in the returned plan. The four are
+ * genuinely different facts and a caller should say different things about
+ * them:
+ * - `'forbidden'` — the same key is also in `forbiddenJoins`, a direct
+ *   contradiction. `buildCandidateLists` applies that as a hard constraint
+ *   and it wins; decided BEFORE the DP.
+ * - `'no-candidate'` — the key appears in no candidate list at all, so no
+ *   path can contain it: filtered out by strict congruence, the edge guard,
+ *   `minKeepBars`/`maxRepeatBars`, or `allowRepeats`. Decided BEFORE the DP.
+ * - `'incompatible'` — individually reachable, but not jointly with the other
+ *   required keys that WERE honoured. This is the only category the DP itself
+ *   decides, and it is always relative to the maximum-satisfiable set.
+ * - `'not-enforced'` — more than `MAX_REQUIRED_JOINS` keys were required, so
+ *   the constraint degraded to a preference (`mode: 'preference'`) and this
+ *   key lost on cost. NOT a guarantee that was broken; a guarantee that was
+ *   never in force, which the caller must say out loud.
+ */
+export type RequiredJoinDropReason = 'forbidden' | 'no-candidate' | 'incompatible' | 'not-enforced';
+
+export interface RequiredJoinDrop {
+  key: string;
+  reason: RequiredJoinDropReason;
+}
+
+/** Present on a result ONLY when `requiredJoins` was non-empty — an absent
+ * field and an empty report are different facts, and keeping the field absent
+ * is also what makes an empty `requiredJoins` byte-identical to a call that
+ * never passed the option (see the module doc comment, "INERTNESS"). */
+export interface RequiredJoinsReport {
+  /** `'enforced'` = every listed key below is a hard constraint the DP
+   * satisfied or proved unsatisfiable. `'preference'` = the set exceeded
+   * `MAX_REQUIRED_JOINS`, so it was planned with `lockedJoins` semantics
+   * instead (penalty exemption + `LOCK_BONUS`) and NOTHING is guaranteed. */
+  mode: 'enforced' | 'preference';
+  /** Keys the returned plan actually contains, in the order given. */
+  satisfied: string[];
+  /** Keys it does not, each with why. Ordered by the caller's own ordering of
+   * `requiredJoins`, so the report is stable across runs. */
+  dropped: RequiredJoinDrop[];
 }
 
 export interface PlanRemixOptions {
@@ -312,13 +467,49 @@ export interface PlanRemixOptions {
    * key from the penalty is the fix, and it belongs here because the penalty
    * lives here.
    *
-   * This is a STRONG PREFERENCE, not a guarantee: there is deliberately no
-   * `requiredJoins` constraint, so a pinned join can still lose to a cheaper
-   * arrangement, and it cannot survive at all if the caller also forbids it
-   * (`forbiddenJoins` wins — it is a hard constraint applied in
-   * `buildCandidateLists`, this is only a cost exemption).
+   * This is a STRONG PREFERENCE, not a guarantee: a key listed here can still
+   * lose to a cheaper arrangement, and it cannot survive at all if the caller
+   * also forbids it (`forbiddenJoins` wins — it is a hard constraint applied
+   * in `buildCandidateLists`, this is only a cost exemption). For the
+   * guarantee use `requiredJoins` (R4b); this option is retained as the
+   * distinct, cheaper thing it always was, and is what `requiredJoins` itself
+   * degrades to above `MAX_REQUIRED_JOINS`.
    */
   lockedJoins?: Iterable<string>;
+  /**
+   * `${from}>${to}` keys the plan MUST contain — the guarantee (R4b),
+   * implemented as a subset axis on the DP (see the module doc comment,
+   * "`requiredJoins`: a pin as a HARD constraint"). Duplicates are collapsed;
+   * the caller's iteration order fixes the bit indices and the report order,
+   * so it is deterministic.
+   *
+   * WHAT IT DOES BEYOND `lockedJoins`: it is a hard constraint, so every
+   * enforced key is in the returned plan or is named in
+   * `PlanRemixResult.requiredJoins.dropped` with a category saying why. It
+   * ALSO carries `lockedJoins`'s penalty exemption — penalising an edge the
+   * constraint already forces would only distort the cost of the REST of the
+   * path — for both the re-roll penalty and the over-repetition guard's.
+   *
+   * WHAT IT DELIBERATELY DOES NOT DO: an enforced key gets NO `LOCK_BONUS`.
+   * The bonus exists to win ties for something that might not otherwise be
+   * chosen; once the key is forced it can no longer change WHETHER the join
+   * appears, only how cheap the paths containing it look — and because a path
+   * can traverse the same join twice (measured: 28 of 126 plans), the bonus is
+   * collected TWICE there, which is a thumb on the scale for repeating the
+   * pinned join. `LOCK_BONUS` is NOT deleted: it is a measured constant, it
+   * still governs `lockedJoins`, and it is still what the above-cap
+   * `'preference'` mode falls back to. It is scoped out of the one case where
+   * it is no longer meaningful, and the scoping is measured too — over a
+   * 102-case pin/press matrix (5 scales, 5 presses per pin), keeping the bonus
+   * under enforcement changed the chosen arrangement in **4 of 102** cases,
+   * and every one of those changes was for the worse: mean clean `totalCost`
+   * **+0.144**, and one case where `maxBarUse` went UP. That is the predicted
+   * double-count, observed. See the R4b report.
+   *
+   * Default empty, and provably inert when empty — see the module doc
+   * comment, "INERTNESS", and the stored golden that pins it.
+   */
+  requiredJoins?: Iterable<string>;
   /** Deterministic next-best re-roll. `0` (default) = the plain best plan.
    * `>= 1` re-derives rolls `0..rollIndex-1` first and penalises the union of
    * their joins before planning `rollIndex`. See the module doc comment. */
@@ -352,6 +543,10 @@ export type PlanRemixResult =
        * a signal T13/T14 can use to disable a "Re-roll" control rather than
        * offer a button that visibly does nothing. */
       canReroll: boolean;
+      /** Present ONLY when `requiredJoins` was non-empty (R4b) — see
+       * `RequiredJoinsReport`. Its absence is what keeps an empty
+       * `requiredJoins` byte-identical to a call that never passed it. */
+      requiredJoins?: RequiredJoinsReport;
     }
   | {
       ok: false;
@@ -359,6 +554,13 @@ export type PlanRemixResult =
       minOutputSample: number;
       maxOutputSample: number;
       message: string;
+      /** Present ONLY when `requiredJoins` was non-empty AND planning got far
+       * enough to triage it (i.e. past the pre-DP refusals). `satisfied` is
+       * empty here — no plan was chosen — so this carries only the facts that
+       * were decided without a plan: the `'forbidden'` and `'no-candidate'`
+       * categories. Enforced pins are ALSO why a length can become
+       * unreachable, which is why the refusal `message` names their count. */
+      requiredJoins?: RequiredJoinsReport;
     };
 
 // ---------------------------------------------------------------------------
@@ -381,8 +583,13 @@ interface DPTable {
   M: number;
   Nmax: number;
   width: number; // Nmax + 1
-  cost: Float64Array; // (M+1)*width, Infinity = unreached
-  /** `predecessorState*2 + isJump`, `-1` = no predecessor (only state (0,0)). */
+  /** `2^K` — the subset axis (R4b). `1` when nothing is required, in which
+   * case every index below collapses to the pre-R4b `p*width + n`. */
+  numMasks: number;
+  cost: Float64Array; // (M+1)*width*numMasks, Infinity = unreached
+  /** `predecessorState*2 + isJump`, `-1` = no predecessor (only state
+   * (0,0,0)). `predecessorState` indexes the SAME `(p,n,S)` space, so
+   * reconstruction needs no separate mask trail. */
   parent: Int32Array;
 }
 
@@ -405,14 +612,27 @@ function runRemixDP(
   penalty: ReadonlyMap<string, number>,
   M: number,
   Nmax: number,
-  minRunBars: number
+  minRunBars: number,
+  /** `${from}>${to}` -> bit index, for `requiredJoins` (R4b). `null` (the
+   * default) is the pre-R4b behaviour exactly: no lookup runs at all. */
+  requiredBit: ReadonlyMap<string, number> | null = null,
+  /** `2^K`. MUST be `1` when `requiredBit` is `null`. */
+  numMasks = 1
 ): DPTable {
   const width = Nmax + 1;
-  const size = (M + 1) * width;
+  const size = (M + 1) * width * numMasks;
   const cost = new Float64Array(size).fill(Infinity);
   const parent = new Int32Array(size).fill(-1);
-  const at = (p: number, n: number): number => p * width + n;
-  cost[at(0, 0)] = 0;
+  // With `numMasks === 1` this is `p*width + n`, bit for bit -- the multiply
+  // by 1 and the `+ 0` are the whole of R4b's cost on the unpinned path.
+  const at = (p: number, n: number, s: number): number => (p * width + n) * numMasks + s;
+  const planeStride = width * numMasks;
+  // Hoisted out of the edge loop: one null test per jump, rather than a Map
+  // lookup per jump on a path that has no required joins. A genuine `const`
+  // local (not the parameter) so the narrowing inside the loop is structural
+  // and cannot silently degrade.
+  const requiredMap: ReadonlyMap<string, number> | null = numMasks > 1 ? requiredBit : null;
+  cost[at(0, 0, 0)] = 0;
 
   function relax(destIdx: number, newCost: number, predIdx: number, isJump: boolean): void {
     const cur = cost[destIdx];
@@ -422,16 +642,20 @@ function runRemixDP(
       return;
     }
     if (newCost === cur && parent[destIdx] >= 0) {
-      // Tie-break: lower predecessor p, then lower predecessor n (module doc
-      // comment, "Reconstruction is deterministic") -- an explicit
-      // comparison against the RECORDED predecessor, not an artefact of
-      // sweep order.
+      // Tie-break: lower predecessor p, then lower predecessor n, then lower
+      // predecessor MASK (module doc comment, "Reconstruction is
+      // deterministic") -- an explicit comparison against the RECORDED
+      // predecessor, not an artefact of sweep order. The mask term is inert
+      // when `numMasks === 1` (both sides are 0), so the pre-R4b tie-break is
+      // preserved exactly.
       const curPred = Math.floor(parent[destIdx] / 2);
-      const curP = Math.floor(curPred / width);
-      const curN = curPred % width;
-      const newP = Math.floor(predIdx / width);
-      const newN = predIdx % width;
-      if (newP < curP || (newP === curP && newN < curN)) {
+      const curP = Math.floor(curPred / planeStride);
+      const curN = Math.floor(curPred / numMasks) % width;
+      const curS = curPred % numMasks;
+      const newP = Math.floor(predIdx / planeStride);
+      const newN = Math.floor(predIdx / numMasks) % width;
+      const newS = predIdx % numMasks;
+      if (newP < curP || (newP === curP && (newN < curN || (newN === curN && newS < curS)))) {
         parent[destIdx] = predIdx * 2 + (isJump ? 1 : 0);
       }
     }
@@ -439,35 +663,48 @@ function runRemixDP(
 
   for (let n = 0; n < Nmax; n++) {
     for (let p = 0; p <= M; p++) {
-      const srcIdx = at(p, n);
-      const cur = cost[srcIdx];
-      if (!Number.isFinite(cur)) continue;
+      for (let s = 0; s < numMasks; s++) {
+        const srcIdx = at(p, n, s);
+        const cur = cost[srcIdx];
+        // Unreachable `(p,n,S)` cost one test and nothing else -- but do NOT
+        // read that as "the subset axis is cheap". Measured, it is not: a
+        // continue edge carries every reachable mask forward, so masks fill in
+        // and the sweep really does cost about `2^K` (see
+        // `MAX_REQUIRED_JOINS`, which is why the cap exists).
+        if (!Number.isFinite(cur)) continue;
 
-      if (p < M) {
-        relax(at(p + 1, n + 1), cur, srcIdx, false);
-      }
+        if (p < M) {
+          relax(at(p + 1, n + 1, s), cur, srcIdx, false);
+        }
 
-      const cand = candidates[p];
-      if (cand && cand.length > 0) {
-        const costs = baseCosts[p];
-        for (let i = 0; i < cand.length; i++) {
-          const b = cand[i];
-          const landing = b + minRunBars;
-          const newN = n + minRunBars;
-          // Defence in depth -- see the module doc comment,
-          // "OUT-OF-BOUNDS defence in depth". `buildCandidateLists` already
-          // guarantees this, but a relaxation must never write outside the
-          // table regardless.
-          if (landing > M || newN > Nmax) continue;
-          const extra = penalty.get(joinKey(p, b)) ?? 0;
-          const edgeCost = costs[i] + jumpToll + extra;
-          relax(at(landing, newN), cur + edgeCost, srcIdx, true);
+        const cand = candidates[p];
+        if (cand && cand.length > 0) {
+          const costs = baseCosts[p];
+          for (let i = 0; i < cand.length; i++) {
+            const b = cand[i];
+            const landing = b + minRunBars;
+            const newN = n + minRunBars;
+            // Defence in depth -- see the module doc comment,
+            // "OUT-OF-BOUNDS defence in depth". `buildCandidateLists` already
+            // guarantees this, but a relaxation must never write outside the
+            // table regardless.
+            if (landing > M || newN > Nmax) continue;
+            const key = joinKey(p, b);
+            const extra = penalty.get(key) ?? 0;
+            const edgeCost = costs[i] + jumpToll + extra;
+            let destS = s;
+            if (requiredMap !== null) {
+              const bit = requiredMap.get(key);
+              if (bit !== undefined) destS = s | (1 << bit);
+            }
+            relax(at(landing, newN, destS), cur + edgeCost, srcIdx, true);
+          }
         }
       }
     }
   }
 
-  return { M, Nmax, width, cost, parent };
+  return { M, Nmax, width, numMasks, cost, parent };
 }
 
 /** Test-only export -- see `runRemixDP`'s own doc comment. Not a supported
@@ -491,17 +728,19 @@ interface ReconstructedPath {
  * landing state's `p` uniquely determines it since `minRunBars` is fixed for
  * the whole table, so it never needs to be stored in `parent` itself.
  */
-function reconstructPath(table: DPTable, n: number, minRunBars: number): ReconstructedPath {
-  const { M, width, parent } = table;
+function reconstructPath(table: DPTable, n: number, minRunBars: number, mask = 0): ReconstructedPath {
+  const { M, width, numMasks, parent } = table;
+  const planeStride = width * numMasks;
   const edges: { isJump: boolean; predP: number; curP: number }[] = [];
-  let curIdx = M * width + n;
+  // `(M*width + n)*1 + 0` when nothing is required — the pre-R4b start state.
+  let curIdx = (M * width + n) * numMasks + mask;
   let curP = M;
   for (;;) {
     const enc = parent[curIdx];
     if (enc < 0) break;
     const isJump = enc % 2 === 1;
     const predState = Math.floor(enc / 2);
-    const predP = Math.floor(predState / width);
+    const predP = Math.floor(predState / planeStride);
     edges.push({ isJump, predP, curP });
     curIdx = predState;
     curP = predP;
@@ -536,13 +775,92 @@ function sumSegmentSamples(segs: RemixSegment[]): number {
 function pathSampleSum(
   table: DPTable,
   n: number,
+  mask: number,
   minRunBars: number,
   barBoundary: Int32Array,
   headLen: number,
   tailLen: number
 ): number {
-  const { segmentsBar } = reconstructPath(table, n, minRunBars);
+  const { segmentsBar } = reconstructPath(table, n, minRunBars, mask);
   return headLen + sumSegmentSamples(segmentsBarToSamples(segmentsBar, barBoundary)) + tailLen;
+}
+
+// ---------------------------------------------------------------------------
+// Terminal reduction over the subset axis (R4b)
+// ---------------------------------------------------------------------------
+
+interface TerminalReduction {
+  /** Best cost per terminal `n` UNDER the constraint, `Infinity` where no
+   * mask of the honoured popcount reaches `(M, n)`. */
+  cost: Float64Array;
+  /** The mask chosen at each `n`, `0` where unreachable (never read then). */
+  mask: Int32Array;
+  /** The largest number of required joins any reachable terminal state
+   * satisfies — the size of the honoured set. `0` when nothing is required. */
+  satisfiedCount: number;
+}
+
+function popcount(x: number): number {
+  let n = 0;
+  for (let v = x; v !== 0; v >>>= 1) n += v & 1;
+  return n;
+}
+
+/**
+ * Collapses the `(M, n, S)` terminal face to one cost per `n`, honouring the
+ * LARGEST satisfiable pin set (Ruling 1: the subset axis is also the
+ * fallback — no second mechanism).
+ *
+ * Two stages, in this order, and the order is the semantics:
+ * 1. `satisfiedCount` = the maximum popcount over EVERY reachable terminal
+ *    state. This is global, not per-`n`, so "which pins were dropped" is one
+ *    answer for the whole call rather than a different answer per length.
+ * 2. Per `n`, the cheapest mask of exactly that popcount; ties broken toward
+ *    the LOWER mask value, which is the caller's own `requiredJoins` ordering
+ *    read as a binary number — an explicit rule, so two equally-large,
+ *    equally-cheap satisfiable sets always resolve the same way.
+ *
+ * A length only reachable by dropping a pin therefore becomes unreachable —
+ * that is what "hard constraint" means, and it is why `minOutputSample`/
+ * `maxOutputSample` (and any `'too-short'`/`'too-long'` refusal) are reported
+ * UNDER the pins rather than under a plan the caller cannot have.
+ *
+ * With `numMasks === 1` this is `cost[M*width + n]` copied out, `mask` all
+ * zero and `satisfiedCount` 0 — no behaviour and no selection changes.
+ */
+function reduceTerminal(table: DPTable): TerminalReduction {
+  const { M, Nmax, width, numMasks, cost } = table;
+  const out = new Float64Array(Nmax + 1).fill(Infinity);
+  const mask = new Int32Array(Nmax + 1);
+  const base = M * width * numMasks;
+
+  let satisfiedCount = 0;
+  if (numMasks > 1) {
+    for (let n = 0; n <= Nmax; n++) {
+      for (let s = 0; s < numMasks; s++) {
+        if (!Number.isFinite(cost[base + n * numMasks + s])) continue;
+        const bits = popcount(s);
+        if (bits > satisfiedCount) satisfiedCount = bits;
+      }
+    }
+  }
+
+  for (let n = 0; n <= Nmax; n++) {
+    for (let s = 0; s < numMasks; s++) {
+      if (numMasks > 1 && popcount(s) !== satisfiedCount) continue;
+      const c = cost[base + n * numMasks + s];
+      if (!Number.isFinite(c)) continue;
+      if (c < out[n]) {
+        out[n] = c;
+        mask[n] = s;
+      }
+      // Equal cost keeps the lower `s`, which the ascending sweep already
+      // visited — so no `else` branch is needed and none is written, rather
+      // than a no-op branch that looks like a decision.
+    }
+  }
+
+  return { cost: out, mask, satisfiedCount };
 }
 
 // ---------------------------------------------------------------------------
@@ -578,6 +896,7 @@ type SelectionResult =
 
 function selectTerminalN(
   table: DPTable,
+  terminal: TerminalReduction,
   minRunBars: number,
   barBoundary: Int32Array,
   headLen: number,
@@ -589,11 +908,12 @@ function selectTerminalN(
   noPathFallbackSample: number,
   costMargin: number
 ): SelectionResult {
-  const { M, Nmax, width, cost } = table;
+  const { Nmax } = table;
+  const cost = terminal.cost;
   const reachable: ReachableEntry[] = [];
   for (let n = 0; n <= Nmax; n++) {
-    if (Number.isFinite(cost[M * width + n])) {
-      reachable.push({ n, sample: pathSampleSum(table, n, minRunBars, barBoundary, headLen, tailLen) });
+    if (Number.isFinite(cost[n])) {
+      reachable.push({ n, sample: pathSampleSum(table, n, terminal.mask[n], minRunBars, barBoundary, headLen, tailLen) });
     }
   }
 
@@ -641,18 +961,18 @@ function selectTerminalN(
     // planner indifferent between equally-similar options save the toll).
     let minCost = Infinity;
     for (const r of windowed) {
-      const c = cost[M * width + r.n];
+      const c = cost[r.n];
       if (c < minCost) minCost = c;
     }
-    const competitive = windowed.filter((r) => cost[M * width + r.n] <= minCost + costMargin);
+    const competitive = windowed.filter((r) => cost[r.n] <= minCost + costMargin);
 
     let best = competitive[0];
     let bestDist = Math.abs(best.sample - targetSample);
-    let bestCost = cost[M * width + best.n];
+    let bestCost = cost[best.n];
     for (let i = 1; i < competitive.length; i++) {
       const r = competitive[i];
       const dist = Math.abs(r.sample - targetSample);
-      const c = cost[M * width + r.n];
+      const c = cost[r.n];
       const better =
         dist < bestDist ||
         (dist === bestDist && (c < bestCost || (c === bestCost && r.n < best.n)));
@@ -692,6 +1012,12 @@ interface AttemptOk {
    * computed once here and reused by the repetition guard and the final
    * result, rather than recomputed at every call site. */
   maxBarUse: number;
+  /** Bitmask of the `requiredJoins` this path satisfies (R4b). Always `0`
+   * when nothing is required. */
+  mask: number;
+  /** `popcount(mask)`, hoisted so the guard can compare attempts on pin
+   * satisfaction FIRST without recomputing it. */
+  satisfiedCount: number;
 }
 interface AttemptFail {
   ok: false;
@@ -716,12 +1042,29 @@ interface AttemptContext {
   tolBars: number;
   exactLength: boolean;
   noPathFallbackSample: number;
+  /** `${from}>${to}` -> bit index for the enforced `requiredJoins`, or `null`
+   * when there are none (R4b). */
+  requiredBit: ReadonlyMap<string, number> | null;
+  /** `2^K`; `1` when nothing is enforced. */
+  numMasks: number;
 }
 
 function planOnce(ctx: AttemptContext, penalty: ReadonlyMap<string, number>): Attempt {
-  const table = runRemixDP(ctx.candidates, ctx.baseCosts, ctx.jumpToll, penalty, ctx.M, ctx.Nmax, ctx.minRunBars);
+  const table = runRemixDP(
+    ctx.candidates,
+    ctx.baseCosts,
+    ctx.jumpToll,
+    penalty,
+    ctx.M,
+    ctx.Nmax,
+    ctx.minRunBars,
+    ctx.requiredBit,
+    ctx.numMasks
+  );
+  const terminal = reduceTerminal(table);
   const sel = selectTerminalN(
     table,
+    terminal,
     ctx.minRunBars,
     ctx.barBoundary,
     ctx.headLen,
@@ -736,7 +1079,8 @@ function planOnce(ctx: AttemptContext, penalty: ReadonlyMap<string, number>): At
   if (!sel.ok) {
     return { ok: false, reason: sel.reason, minOutputSample: sel.minOutputSample, maxOutputSample: sel.maxOutputSample };
   }
-  const { segmentsBar, barJoins } = reconstructPath(table, sel.n, ctx.minRunBars);
+  const mask = terminal.mask[sel.n];
+  const { segmentsBar, barJoins } = reconstructPath(table, sel.n, ctx.minRunBars, mask);
   return {
     ok: true,
     n: sel.n,
@@ -745,6 +1089,8 @@ function planOnce(ctx: AttemptContext, penalty: ReadonlyMap<string, number>): At
     minOutputSample: sel.minOutputSample,
     maxOutputSample: sel.maxOutputSample,
     maxBarUse: maxBarUsage(countBarUsage(segmentsBar, ctx.M)),
+    mask,
+    satisfiedCount: terminal.satisfiedCount,
   };
 }
 
@@ -759,7 +1105,11 @@ function planWithRepetitionGuard(
   ctx: AttemptContext,
   basePenalty: ReadonlyMap<string, number>,
   cleanCostOf: (barJoins: { fromBar: number; toBar: number }[]) => number,
-  lockedKeys: ReadonlySet<string>
+  /** Keys no synthetic penalty may ever touch: `lockedJoins` (a pin must not
+   * be penalised for being in the plan that made the user pin it) AND
+   * `requiredJoins` (penalising an edge the constraint already forces cannot
+   * remove it — it only distorts the cost of the rest of the path). */
+  exemptKeys: ReadonlySet<string>
 ): Attempt {
   const penalty = new Map(basePenalty);
   let attempt = planOnce(ctx, penalty);
@@ -780,8 +1130,12 @@ function planWithRepetitionGuard(
       // for being in the current attempt is precisely what makes a pin
       // impossible to honour. The guard still has every OTHER join of the
       // path to penalise, and still accepts the best attempt it managed when
-      // it cannot get under `MAX_USE_COUNT`.
-      if (lockedKeys.has(key)) continue;
+      // it cannot get under `MAX_USE_COUNT` — including the case (R4b) where
+      // the over-repetition is caused BY a required join, which the guard
+      // cannot penalise away and must not pretend it can: `maxBarUse` is then
+      // reported honestly above `MAX_USE_COUNT`, exactly as it already is
+      // when the source offers no cheaper alternative.
+      if (exemptKeys.has(key)) continue;
       penalty.set(key, (penalty.get(key) ?? 0) + JOIN_PENALTY);
     }
     const next = planOnce(ctx, penalty);
@@ -791,7 +1145,15 @@ function planWithRepetitionGuard(
     usage = attempt.maxBarUse;
     if (usage <= MAX_USE_COUNT) return attempt;
     const cost = cleanCostOf(attempt.barJoins);
-    if (usage < bestUsage || (usage === bestUsage && cost < bestCost)) {
+    // Pin satisfaction outranks repetition (R4b). In practice it never
+    // decides: reachability — and therefore the maximum satisfiable set — is
+    // penalty-independent, so every attempt in this loop reports the same
+    // `satisfiedCount`. It is compared first anyway so the guard can never
+    // become the thing that trades a guaranteed pin for a repetition win.
+    if (
+      attempt.satisfiedCount > best.satisfiedCount ||
+      (attempt.satisfiedCount === best.satisfiedCount && (usage < bestUsage || (usage === bestUsage && cost < bestCost)))
+    ) {
       best = attempt;
       bestUsage = usage;
       bestCost = cost;
@@ -816,6 +1178,9 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
   // every plan byte-identical to what this module produced before the option
   // existed (asserted directly in `remixPlan.test.ts`).
   const lockedKeys = new Set(options.lockedJoins ?? []);
+  // Deduped, ORDER PRESERVED: the caller's ordering fixes both the bit
+  // indices and the report ordering, so two identical calls are identical.
+  const requiredKeys = [...new Set(options.requiredJoins ?? [])];
   const phraseBars = normalizePhraseBars(options.phraseBars);
   const maxRepeatFactor = options.maxRepeatFactor ?? DEFAULT_MAX_REPEAT_FACTOR;
   const M = analysis.numBars;
@@ -921,6 +1286,49 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
     return arr;
   });
 
+  // --- requiredJoins triage, BEFORE the DP (Ruling 2) -------------------
+  // Two infeasibilities are decidable without planning, cost nothing here,
+  // and produce a message the DP could never produce: a key the caller ALSO
+  // forbade, and a key no candidate list contains. Neither consumes a bit, so
+  // triaging first can bring an over-cap set back under `MAX_REQUIRED_JOINS`.
+  const drops: RequiredJoinDrop[] = [];
+  let enforcedKeys: string[] = [];
+  let preferredKeys: string[] = [];
+  if (requiredKeys.length > 0) {
+    const forbidden = new Set(options.forbiddenJoins ?? []);
+    const available = new Set<string>();
+    for (let from = 0; from < candidates.length; from++) {
+      const cand = candidates[from];
+      if (!cand) continue;
+      for (let i = 0; i < cand.length; i++) available.add(joinKey(from, cand[i]));
+    }
+    const feasible: string[] = [];
+    for (const key of requiredKeys) {
+      if (forbidden.has(key)) drops.push({ key, reason: 'forbidden' });
+      else if (!available.has(key)) drops.push({ key, reason: 'no-candidate' });
+      else feasible.push(key);
+    }
+    // Above the cap the table would not fit (see `MAX_REQUIRED_JOINS`), so
+    // the keys degrade to `lockedJoins` semantics — exemption plus
+    // `LOCK_BONUS` — and the result says `mode: 'preference'` so the caller
+    // can tell the user the guarantee is not in force. A silent downgrade
+    // would be worse than never promising.
+    if (feasible.length > MAX_REQUIRED_JOINS) preferredKeys = feasible;
+    else enforcedKeys = feasible;
+  }
+  // `LOCK_BONUS` is scoped OUT of enforced keys and only out of those — see
+  // `PlanRemixOptions.requiredJoins` for why (it can no longer change whether
+  // the join appears, and a path traversing it twice would collect it twice).
+  const bonusKeys = new Set([...lockedKeys, ...preferredKeys]);
+  // An ENFORCED key never carries the bonus, even when the caller ALSO listed
+  // it in `lockedJoins` — otherwise the documented rule would be true only for
+  // callers who happened not to pass both, which is not a rule.
+  for (const key of enforcedKeys) bonusKeys.delete(key);
+  const exemptKeys = new Set([...lockedKeys, ...preferredKeys, ...enforcedKeys]);
+  const requiredBit: ReadonlyMap<string, number> | null =
+    enforcedKeys.length > 0 ? new Map(enforcedKeys.map((key, i) => [key, i])) : null;
+  const numMasks = 1 << enforcedKeys.length;
+
   const ctx: AttemptContext = {
     candidates,
     baseCosts,
@@ -936,6 +1344,8 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
     tolBars,
     exactLength: options.exactLength ?? false,
     noPathFallbackSample: trivialSample,
+    requiredBit,
+    numMasks,
   };
 
   const cleanCostOf = (barJoins: { fromBar: number; toBar: number }[]): number => {
@@ -954,8 +1364,8 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
   // one channel every attempt already reads (including the repetition
   // guard's copy) rather than needing a second parallel map. Empty unless
   // the caller pinned something.
-  for (const key of lockedKeys) rollPenalty.set(key, -LOCK_BONUS);
-  let attempt: Attempt = planWithRepetitionGuard(ctx, rollPenalty, cleanCostOf, lockedKeys);
+  for (const key of bonusKeys) rollPenalty.set(key, -LOCK_BONUS);
+  let attempt: Attempt = planWithRepetitionGuard(ctx, rollPenalty, cleanCostOf, exemptKeys);
   for (let roll = 1; roll <= rollIndex; roll++) {
     if (attempt.ok) {
       for (const j of attempt.barJoins) {
@@ -964,19 +1374,27 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
         // `PlanRemixOptions.lockedJoins`). This one `continue` is the whole
         // fix: without it, being in roll `k`'s plan is exactly what costs a
         // join its place in roll `k+1`, so a pin could never survive a
-        // re-roll — measured 0/92 before, across three scales.
-        if (lockedKeys.has(key)) continue;
+        // re-roll — measured 0/92 before, across three scales. R4b widens the
+        // exemption to `requiredJoins` for a different reason: those edges
+        // are forced, so the penalty cannot remove them and would only make
+        // the rest of the path look relatively cheaper.
+        if (exemptKeys.has(key)) continue;
         rollPenalty.set(key, (rollPenalty.get(key) ?? 0) + JOIN_PENALTY);
       }
     }
-    attempt = planWithRepetitionGuard(ctx, rollPenalty, cleanCostOf, lockedKeys);
+    attempt = planWithRepetitionGuard(ctx, rollPenalty, cleanCostOf, exemptKeys);
   }
 
   if (!attempt.ok) {
+    // Enforced pins are a reason a length can become unreachable — the
+    // reachable extremes above ARE the extremes UNDER the pins — so the
+    // message says how many were in force rather than leaving the user to
+    // wonder why the same target worked a moment ago.
+    const pinNote = enforcedKeys.length > 0 ? ` with ${enforcedKeys.length} pinned edit(s) enforced` : '';
     const reasonMessage: Record<'too-short' | 'too-long' | 'no-path', string> = {
-      'too-short': `target ${options.targetSample} samples is below the shortest reachable arrangement (${attempt.minOutputSample} samples)`,
-      'too-long': `target ${options.targetSample} samples is above the longest reachable arrangement (${attempt.maxOutputSample} samples)`,
-      'no-path': 'no candidate join reaches the end of the track within the allowed state space',
+      'too-short': `target ${options.targetSample} samples is below the shortest reachable arrangement${pinNote} (${attempt.minOutputSample} samples)`,
+      'too-long': `target ${options.targetSample} samples is above the longest reachable arrangement${pinNote} (${attempt.maxOutputSample} samples)`,
+      'no-path': `no candidate join reaches the end of the track within the allowed state space${pinNote}`,
     };
     return {
       ok: false,
@@ -984,6 +1402,17 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
       minOutputSample: attempt.minOutputSample,
       maxOutputSample: attempt.maxOutputSample,
       message: reasonMessage[attempt.reason],
+      // Only the pre-DP facts are known here — no plan was chosen, so no key
+      // can honestly be called 'incompatible' and `satisfied` is empty.
+      ...(requiredKeys.length > 0
+        ? {
+            requiredJoins: {
+              mode: preferredKeys.length > 0 ? ('preference' as const) : ('enforced' as const),
+              satisfied: [],
+              dropped: orderDrops(drops, requiredKeys),
+            },
+          }
+        : {}),
     };
   }
 
@@ -1007,5 +1436,74 @@ export function planRemix(analysis: RemixAnalysis, options: PlanRemixOptions): P
     maxOutputSample: attempt.maxOutputSample,
     maxBarUse: attempt.maxBarUse,
     canReroll: joins.length > 0,
+    // SPREAD, not a plain field: with no `requiredJoins` the key is ABSENT,
+    // so the result object is byte-identical to the pre-R4b one (Ruling 4).
+    ...(requiredKeys.length > 0
+      ? {
+          requiredJoins: buildRequiredReport(
+            requiredKeys,
+            enforcedKeys,
+            preferredKeys,
+            drops,
+            attempt.mask,
+            attempt.barJoins
+          ),
+        }
+      : {}),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// requiredJoins reporting
+// ---------------------------------------------------------------------------
+
+/** Drops in the caller's own `requiredJoins` order, so the report is stable
+ * across runs and reads in the order the user pinned things — the triage
+ * drops are discovered before the DP ones, which would otherwise leak the
+ * implementation's phase order into a user-facing list. */
+function orderDrops(drops: RequiredJoinDrop[], requiredKeys: readonly string[]): RequiredJoinDrop[] {
+  const rank = new Map(requiredKeys.map((key, i) => [key, i]));
+  return [...drops].sort((a, b) => (rank.get(a.key) ?? 0) - (rank.get(b.key) ?? 0));
+}
+
+function buildRequiredReport(
+  requiredKeys: readonly string[],
+  enforcedKeys: readonly string[],
+  preferredKeys: readonly string[],
+  triageDrops: RequiredJoinDrop[],
+  mask: number,
+  barJoins: readonly { fromBar: number; toBar: number }[]
+): RequiredJoinsReport {
+  const drops = [...triageDrops];
+  const satisfied: string[] = [];
+
+  // ENFORCED: the bit IS the answer. A path sets bit `i` exactly when it
+  // traverses pin `i`'s edge, so "bit set" and "key present in `joins`" are
+  // the same fact — no set-difference against the plan is needed, and none is
+  // done (that inference is what `lockedJoinsDropped` used to have to do).
+  for (let i = 0; i < enforcedKeys.length; i++) {
+    if (mask & (1 << i)) satisfied.push(enforcedKeys[i]);
+    // Every enforced key passed the pre-DP triage, so it IS individually
+    // reachable; the only way it can be missing is that the maximum
+    // satisfiable set excludes it — i.e. it is incompatible with the pins
+    // that were honoured.
+    else drops.push({ key: enforcedKeys[i], reason: 'incompatible' });
+  }
+
+  // PREFERENCE mode (above the cap): nothing was forced, so the plan itself
+  // is the only evidence.
+  if (preferredKeys.length > 0) {
+    const present = new Set(barJoins.map((j) => joinKey(j.fromBar, j.toBar)));
+    for (const key of preferredKeys) {
+      if (present.has(key)) satisfied.push(key);
+      else drops.push({ key, reason: 'not-enforced' });
+    }
+  }
+
+  const rank = new Map(requiredKeys.map((key, i) => [key, i]));
+  return {
+    mode: preferredKeys.length > 0 ? 'preference' : 'enforced',
+    satisfied: satisfied.sort((a, b) => (rank.get(a) ?? 0) - (rank.get(b) ?? 0)),
+    dropped: orderDrops(drops, requiredKeys),
   };
 }
