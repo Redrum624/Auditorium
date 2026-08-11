@@ -122,6 +122,7 @@ function makeSession(
     rejectedJoins: [],
     lockedJoins: [],
     lockedJoinsDropped: [],
+    pinReport: null,
     rollIndex: 0,
     manual: false,
     plansInWorker: false,

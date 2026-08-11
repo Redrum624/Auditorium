@@ -79,6 +79,23 @@
  * held WEAKLY so a stale session never pins the pre-edit source. See
  * `refreshStale` and `Entry.sourceChannelRefs`.
  *
+ * ## A pin is a guarantee, and its cost is a bigger table (R4b)
+ *
+ * `toggleLockJoin`'s pins go to the planner as `requiredJoins`, which
+ * `remixPlan.ts` enforces exactly with a `2^K` subset axis on its DP. Two
+ * consequences live HERE, not there:
+ *
+ * 1. **Routing must account for `2^K`.** `dpCells` multiplies by it and the
+ *    decision is re-taken per plan rather than once per session, because a
+ *    session is created with no pins and every pin the user adds afterwards
+ *    doubles the table. See `dpCells` and `runPlan`.
+ * 2. **The degradation above `MAX_REQUIRED_JOINS` (4) must be VISIBLE.** The
+ *    panel's own cap is 8, so a user can pin more than the planner can
+ *    guarantee; the planner then falls back to the old preference behaviour
+ *    and says `mode: 'preference'`, which this module carries on the session
+ *    as `pinReport` and `RemixPanel` states in words. A silently downgraded
+ *    guarantee would be worse than no guarantee.
+ *
  * ## Planning: main thread below `MAX_DP_CELLS`, a SESSION-SCOPED worker above
  *
  * The DP is ~O(M^2) (measured: doubling `M` multiplies wall clock by
@@ -157,10 +174,12 @@ import { DEFAULT_REMIX_WEIGHTS, clusterMemberCounts, joinCost, type RemixWeights
 import {
   DEFAULT_MAX_REPEAT_FACTOR,
   MAX_DP_CELLS,
+  MAX_REQUIRED_JOINS,
   planRemix,
   type PlanRemixOptions,
   type PlanRemixResult,
   type RemixJoin,
+  type RequiredJoinsReport,
 } from '../dsp/remixPlan';
 import { renderRemix, type CrossfadeShape, type RemixPlan } from '../dsp/remixRender';
 import { createRemixPlanWorker } from '../workers/createRemixPlanWorker';
@@ -237,11 +256,19 @@ export interface RemixSession {
   rejectedJoins: string[];
   /** `${from}>${to}` keys the user pinned — see `toggleLockJoin`. */
   lockedJoins: string[];
-  /** The subset of `lockedJoins` the CURRENT plan does not contain. A pin is
-   * a strong preference, not a guarantee (`remixPlan.ts` has no
-   * `requiredJoins`), so the panel must be able to say "this pin was dropped"
-   * rather than leave a pin badge lit on a join that no longer exists. */
+  /** The subset of `lockedJoins` the CURRENT plan does not contain. Since R4b
+   * a pin is a GUARANTEE, so this is normally empty and a non-empty value is
+   * a specific, explained failure rather than "the planner preferred
+   * something else": see `pinReport` for which category. Kept as its own field
+   * because the panel's pin badges are keyed by join and need the plain set. */
   lockedJoinsDropped: string[];
+  /** Why each dropped pin was dropped, and whether the guarantee was in force
+   * at all (R4b). `null` only while no plan with pins has been made — a fresh
+   * session has no pins, so there is nothing to report yet. The panel must
+   * distinguish `mode: 'preference'` (more than `MAX_REQUIRED_JOINS` pins, so
+   * NOTHING was guaranteed) from an enforced plan that dropped a specific,
+   * named, impossible pin. */
+  pinReport: RequiredJoinsReport | null;
   /** The roll index the CURRENT plan was actually produced at — which is not
    * necessarily the one the last `reRollRemix` requested, because
    * `planWithLocks` may have kept a later roll that preserved more locks (fix
@@ -272,7 +299,15 @@ export type ToggleLockResult =
 
 /** The panel's own cap (T15: "pins the join across re-plans and re-rolls, max
  * 8"), enforced HERE as well as in the UI so the invariant does not depend on
- * a component. */
+ * a component.
+ *
+ * DELIBERATELY HIGHER than `MAX_REQUIRED_JOINS` (4), which is where the
+ * planner's exact subset DP runs out of memory (see that constant). Lowering
+ * this to 4 would make the guarantee unconditional at the price of taking four
+ * pins away from the user; keeping it at 8 means pins 5-8 are honoured on a
+ * best-effort basis and the panel says so. That is a real trade-off, made
+ * explicitly: a user who pins 8 edits is arranging by hand and is better
+ * served by 8 preferences plus an honest label than by being told "no". */
 export const MAX_LOCKED_JOINS = 8;
 
 // THE LOCK-RECOVERY SWEEP IS GONE (fix round 2). It used to re-run planning
@@ -525,11 +560,31 @@ function makeJoinMarkers(docId: string, joinSamples: readonly number[]): Marker[
 // The session-scoped plan worker
 // ---------------------------------------------------------------------------
 
-/** `(numBars+1)*(Nmax+1)` — the exact table shape `remixPlan.ts` allocates. */
-function dpCells(analysis: RemixAnalysis, maxRepeatFactor: number): number {
+/**
+ * `(numBars+1)*(Nmax+1)*2^K` — the exact table shape `remixPlan.ts` allocates,
+ * INCLUDING R4b's subset axis.
+ *
+ * The `2^K` is the whole point of this function existing at this layer. A pin
+ * is a hard constraint now, implemented as a bitmask axis on the DP, so the
+ * table a given adjustment allocates depends on how many joins the user has
+ * pinned — and the pre-R4b comparison, which only knew `(M+1)*(Nmax+1)`, would
+ * not have noticed. Four pins is 16x: at the worst case reachable that is a
+ * 12-million-cell, 144 MB table and (measured) 13x the DP time, on the main
+ * thread, with no progress and no cancel. `remixPlan.ts` stays a pure module
+ * that runs the DP it is asked to run; deciding WHERE it runs is this layer's
+ * job, and R4b does not move that line, it only corrects the arithmetic on
+ * this side of it.
+ *
+ * `K` is clamped to `MAX_REQUIRED_JOINS` because the planner clamps it too:
+ * above the cap it degrades to `lockedJoins` semantics and allocates no
+ * subset axis at all, so counting the 8th pin as another doubling would route
+ * a table that is not going to exist.
+ */
+function dpCells(analysis: RemixAnalysis, maxRepeatFactor: number, requiredCount = 0): number {
   const M = analysis.numBars;
   const Nmax = Math.max(0, Math.round(M * maxRepeatFactor));
-  return (M + 1) * (Nmax + 1);
+  const K = Math.min(Math.max(0, requiredCount), MAX_REQUIRED_JOINS);
+  return (M + 1) * (Nmax + 1) * 2 ** K;
 }
 
 let planWorkerThreshold = MAX_DP_CELLS;
@@ -665,15 +720,22 @@ function planOptionsFor(
     exactLength: options.exactLength,
     // Plain arrays, not Sets: these values are structure-cloned to the worker.
     forbiddenJoins: [...rejected],
-    lockedJoins: [...locked],
+    // R4b: pins go in as `requiredJoins`, the HARD constraint — not
+    // `lockedJoins`, which is the cost preference they used to be. The planner
+    // itself falls back to `lockedJoins` semantics above `MAX_REQUIRED_JOINS`
+    // and reports `mode: 'preference'` when it does, so this layer does not
+    // need (and must not have) a second fallback of its own: two mechanisms
+    // choosing when to guarantee is exactly how a guarantee stops being one.
+    requiredJoins: [...locked],
     rollIndex,
   };
 }
 
 /** Everything the memo must key on besides `rollIndex`. `locked` is part of
- * the signature (fix round 2): pins now change the PLAN — they exempt their
- * keys from the roll penalty — so a memo that ignored them would serve a plan
- * computed under a different pin set. */
+ * the signature (fix round 2): pins change the PLAN — since R4b they
+ * CONSTRAIN it — so a memo that ignored them would serve a plan computed
+ * under a different pin set, which is now not merely suboptimal but a broken
+ * promise. */
 function memoSignature(options: RemixOptions, rejected: readonly string[], locked: readonly string[]): string {
   return JSON.stringify([
     options.targetSample,
@@ -709,6 +771,29 @@ async function runPlan(
   const hit = entry.planMemo.get(rollIndex);
   if (hit) return hit;
 
+  // R4b: the routing decision is re-taken PER PLAN, not once per session. A
+  // session is created with no pins, so its creation-time table is the K = 0
+  // one; every pin the user adds afterwards doubles it. A session that
+  // legitimately planned on the main thread at 60 000 cells is at 960 000 —
+  // nearly 4x `MAX_DP_CELLS` — with four pins, and the old once-per-session
+  // decision would have run that on the main thread.
+  //
+  // Promotion is ONE-WAY. Unpinning could in principle demote the session back
+  // to the main thread, but terminating and respawning a worker (and re-posting
+  // the ~1.7 MB analysis) on every pin toggle would cost far more than the
+  // worker handshake it saves. Once a session has needed a worker it keeps it,
+  // which is also what `plansInWorker` has always meant to the panel.
+  if (!entry.planWorker && dpCells(entry.session.analysis, options.maxRepeatFactor, locked.length) > planWorkerThreshold) {
+    const spawned = spawnPlanWorker(entry.session.analysis);
+    // The dialog is already up (`spawnPlanWorker` surfaces its own failure).
+    // Refuse rather than fall back to the main thread — that is the same
+    // choice session creation makes, for the same reason: a multi-second
+    // freeze immediately after telling the user something went wrong.
+    if (!spawned) return null;
+    entry.planWorker = spawned;
+    entry.session.plansInWorker = true;
+  }
+
   const planOptions = planOptionsFor(options, rejected, locked, rollIndex);
   const result = entry.planWorker
     ? await requestWorkerPlan(entry.planWorker, planOptions)
@@ -719,22 +804,35 @@ async function runPlan(
 
 /** `${from}>${to}` keys in `locked` that `plan` does NOT contain — the pins
  * this arrangement dropped. Surfaced on the session so T15 can say so rather
- * than leaving a pin badge lit on a join that is no longer there. */
+ * than leaving a pin badge lit on a join that is no longer there.
+ *
+ * Still derived from the PLAN rather than from `plan.requiredJoins.dropped`,
+ * deliberately: the plan is the thing the user hears, and a pin badge must
+ * follow it even in the paths that produce no report at all (`nudgeJoin`'s
+ * hand-rebuilt plan, a `crossfadeMs` re-render of an existing arrangement).
+ * The report says WHY; this says WHICH, and the two must agree — asserted by
+ * test. */
 function droppedLocks(plan: RemixPlan, locked: readonly string[]): string[] {
   const present = new Set(keysOf(plan.joins));
   return locked.filter((key) => !present.has(key));
 }
 
 /**
- * ONE plan, with pinned joins exempted from the planner's own re-roll and
- * over-repetition penalties (`PlanRemixOptions.lockedJoins`, added in fix
- * round 2 — the pin mechanism now lives where the penalty lives, which is the
- * only place it can work).
+ * ONE plan, with pinned joins passed to the planner as `requiredJoins` — a
+ * HARD CONSTRAINT since R4b, not the cost preference they were.
  *
- * A pin remains a STRONG PREFERENCE, not a guarantee: `remixPlan.ts` has no
- * `requiredJoins` constraint, so a pinned join can still lose to a genuinely
- * cheaper arrangement. `locksKept`/`rollIndexUsed` are reported so the panel
- * can tell the user a pin was dropped instead of silently lying about it.
+ * A pin is now a guarantee: up to `MAX_REQUIRED_JOINS` of them, the returned
+ * plan contains every pinned join or names the ones it could not and why
+ * (forbidden / no-candidate / mutually incompatible). Above that cap the
+ * PLANNER — not this layer — degrades to the old preference behaviour and
+ * reports `mode: 'preference'`, which the panel states plainly. There is
+ * deliberately no second fallback here; the one that used to live here (the
+ * lock-recovery sweep, see the constant block above) was deleted for helping
+ * 0 times in 89 runs, and re-adding one would put two different pieces of code
+ * in charge of when a promise applies.
+ *
+ * `locksKept`/`rollIndexUsed` are reported so the panel can tell the user a
+ * pin was dropped instead of silently lying about it.
  *
  * `rollIndexUsed` is now always the REQUESTED index — the sweep that could
  * make it differ is gone (see the constant block above) — but it is kept as
@@ -904,6 +1002,14 @@ function commitPlan(entry: Entry, plan: RemixPlan, lockedForReport?: readonly st
   entry.session.rhos = render.rhos;
   entry.session.shapes = render.shapes;
   entry.session.lockedJoinsDropped = droppedLocks(plan, lockedForReport ?? entry.session.lockedJoins);
+  // `plan.requiredJoins` is present exactly when this plan was made WITH pins
+  // (R4b makes the field absent otherwise, which is what keeps an unpinned
+  // plan byte-identical to the pre-R4b one). `nudgeJoin`'s hand-built plan and
+  // a pure re-render both carry no report, and must not silently clear a real
+  // one — but they also cannot invent one, so the previous report stands only
+  // when there are still pins to report on.
+  entry.session.pinReport =
+    plan.requiredJoins ?? (entry.session.lockedJoins.length > 0 ? entry.session.pinReport : null);
   bumpVersion();
   return plan;
 }
@@ -1077,6 +1183,9 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
         rejectedJoins: [],
         lockedJoins: [],
         lockedJoinsDropped: [],
+        // A brand-new session has no pins, so there is nothing to report yet
+        // — and `null` is a different fact from "reported, nothing dropped".
+        pinReport: null,
         rollIndex: 0,
         manual: false,
         plansInWorker,
@@ -1191,8 +1300,10 @@ export async function updateRemixSession(
  * Forbids `${from}>${to}` for good and re-plans around it ("that one edit
  * sounds wrong, find another way to hit the same length"). Any LOCK on the
  * same join is dropped in the same step — a key that is simultaneously
- * forbidden and pinned can never be satisfied, so keeping both would make
- * `planWithLocks` retry forever for nothing.
+ * forbidden and required is a direct contradiction, and the planner would
+ * (correctly) report it as `dropped: 'forbidden'` on every subsequent plan.
+ * Dropping the pin here means the user is never shown a permanent complaint
+ * about a contradiction they resolved by rejecting the join.
  */
 export async function rejectJoin(remixDocId: string, key: string): Promise<PlanRemixResult | null> {
   const entry = liveEntry(remixDocId);

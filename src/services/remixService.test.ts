@@ -21,7 +21,8 @@ import { createDocument, docLength, replaceRegion, type AudioDocument } from '..
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { applyEdit } from './editOps';
 import { getHistory, undo, clearHistory } from './undoHistory';
-import { planRemix } from '../dsp/remixPlan';
+import { planRemix, MAX_REQUIRED_JOINS } from '../dsp/remixPlan';
+import { buildCandidateLists } from '../dsp/remixCost';
 import * as remixRenderModule from '../dsp/remixRender';
 import {
   _setTempoWorkerError,
@@ -1160,3 +1161,180 @@ function emittedBars(segments: { start: number; end: number }[], barBoundary: In
   for (const seg of segments) total += barOf(seg.end) - barOf(seg.start);
   return total;
 }
+
+// ---------------------------------------------------------------------------
+// R4b — a pin is a hard constraint, and the worker routing must know it
+// ---------------------------------------------------------------------------
+
+const keysOf = (joins: readonly { fromBar: number; toBar: number }[]): string[] =>
+  joins.map((j) => `${j.fromBar}>${j.toBar}`);
+
+/** `(M+1)*(Nmax+1)` for a live session — the K = 0 table `remixPlan.ts`
+ * allocates. Derived from the session rather than hardcoded, so the boundary
+ * probes below stay meaningful if the fixture's bar count ever changes. */
+function baseCellsOf(remixDocId: string): number {
+  const session = getRemixSession(remixDocId)!;
+  const M = session.analysis.numBars;
+  const Nmax = Math.max(0, Math.round(M * session.options.maxRepeatFactor));
+  return (M + 1) * (Nmax + 1);
+}
+
+/** Legal `${from}>${to}` keys for this session that the planner would accept
+ * as candidates — used to build a pin set larger than `MAX_REQUIRED_JOINS`
+ * without needing a fixture whose plan happens to have that many joins. */
+function candidateKeysOf(remixDocId: string, count: number): string[] {
+  const session = getRemixSession(remixDocId)!;
+  const lists = buildCandidateLists(session.analysis, {
+    weights: session.options.weights,
+    phraseBars: session.options.phraseBars,
+    minRunBars: session.options.strict ? session.options.phraseBars : 4,
+    strict: session.options.strict,
+    allowRepeats: session.options.allowRepeats,
+  });
+  const keys: string[] = [];
+  for (let from = 0; from < lists.length && keys.length < count; from++) {
+    const cand = lists[from];
+    if (!cand) continue;
+    for (let i = 0; i < cand.length && keys.length < count; i++) keys.push(`${from}>${cand[i]}`);
+  }
+  return keys;
+}
+
+describe('R4b — worker routing accounts for the 2^K subset axis', () => {
+  it('routes BELOW / ON / ABOVE the threshold as the pin count doubles the table', async () => {
+    // Created with the real threshold, so the session starts on the main
+    // thread — which is the whole problem: the creation-time decision is a
+    // K = 0 decision, and pins arrive afterwards.
+    const { remixDocId, plan } = await seedSession(TARGET_2_JOINS);
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(false);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
+
+    const cells = baseCellsOf(remixDocId);
+    _setPlanWorkerThresholdForTest(cells * 2);
+    // A re-plan trigger that works with EVERY join pinned (`reRollRemix`
+    // refuses then, by design) and that does not change the table shape:
+    // `targetSample` moves the feasibility window, never `M` or `Nmax`.
+    const replan = (seconds: number): Promise<unknown> =>
+      updateRemixSession(remixDocId, { targetSample: Math.round(seconds * SR) });
+
+    // BELOW: no pins, one table.
+    await replan(118);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(false);
+
+    // ON: one pin doubles it to exactly the threshold, and the comparison is
+    // strict `>`, so this must still stay on the main thread.
+    const first = keysOf(getRemixSession(remixDocId)!.plan.joins)[0];
+    expect(toggleLockJoin(remixDocId, first)).toMatchObject({ ok: true, locked: true });
+    await replan(119);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(false);
+
+    // ABOVE: a second pin is 4x the base table, past the threshold, so the
+    // session is promoted to a worker mid-life — which the creation-time
+    // decision could never have made, because the session was created with
+    // no pins at all.
+    getRemixSession(remixDocId)!.lockedJoins.push(candidateKeysOf(remixDocId, 8).find((k) => k !== first)!);
+    await replan(120);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(1);
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(true);
+  }, 30000);
+
+  it('clamps K at MAX_REQUIRED_JOINS — an over-cap pin set never routes a table that will not be allocated', async () => {
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const cells = baseCellsOf(remixDocId);
+    // Exactly the K = MAX_REQUIRED_JOINS table. Anything at or below it stays
+    // on the main thread; only a LARGER table may promote.
+    _setPlanWorkerThresholdForTest(cells * 2 ** MAX_REQUIRED_JOINS);
+
+    const session = getRemixSession(remixDocId)!;
+    const keys = candidateKeysOf(remixDocId, MAX_REQUIRED_JOINS + 1);
+    expect(keys.length).toBe(MAX_REQUIRED_JOINS + 1);
+
+    // Four pins: 16x the base table, exactly the threshold, main thread.
+    session.lockedJoins.splice(0, session.lockedJoins.length, ...keys.slice(0, MAX_REQUIRED_JOINS));
+    await reRollRemix(remixDocId);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
+
+    // FIVE pins: the planner clamps to 16x too (above the cap it allocates no
+    // subset axis at all), so the routing must not see 32x and promote.
+    session.lockedJoins.push(keys[MAX_REQUIRED_JOINS]);
+    await reRollRemix(remixDocId);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(false);
+  }, 30000);
+
+  it('sends pins to the planner as requiredJoins, never as lockedJoins — the wiring, not just the option', async () => {
+    _setPlanWorkerThresholdForTest(0);
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const key = keysOf(getRemixSession(remixDocId)!.plan.joins)[0];
+    toggleLockJoin(remixDocId, key);
+    await reRollRemix(remixDocId);
+
+    const last = _getLastRemixPlanMessage();
+    expect(last).not.toBeNull();
+    if (last!.type !== 'plan') throw new Error('expected a plan message');
+    expect(last!.options.requiredJoins).toEqual([key]);
+    // A pin that also arrived as `lockedJoins` would silently re-acquire
+    // LOCK_BONUS and turn the guarantee back into a preference-plus-bonus.
+    expect(last!.options.lockedJoins).toBeUndefined();
+  }, 30000);
+});
+
+describe('R4b — the guarantee, end to end through the session', () => {
+  it('keeps a pinned join across a re-roll and reports it satisfied', async () => {
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const key = keysOf(getRemixSession(remixDocId)!.plan.joins)[0];
+    expect(toggleLockJoin(remixDocId, key)).toMatchObject({ ok: true, locked: true });
+
+    let presses = 0;
+    for (let i = 0; i < 3; i++) {
+      const result = await reRollRemix(remixDocId);
+      if (!result || !result.ok) break;
+      presses++;
+      const session = getRemixSession(remixDocId)!;
+      expect(keysOf(session.plan.joins)).toContain(key);
+      expect(session.lockedJoinsDropped).toEqual([]);
+      expect(session.pinReport).toEqual({ mode: 'enforced', satisfied: [key], dropped: [] });
+    }
+    expect(presses).toBe(3);
+  }, 30000);
+
+  it('lockedJoinsDropped and pinReport.dropped always name the SAME keys', async () => {
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const session = getRemixSession(remixDocId)!;
+    // A key that is legal for the planner but cannot coexist with the plan's
+    // own length — pinned directly, the way an over-cap set is built above.
+    const keys = candidateKeysOf(remixDocId, 3);
+    session.lockedJoins.splice(0, session.lockedJoins.length, ...keys);
+    await reRollRemix(remixDocId);
+
+    const after = getRemixSession(remixDocId)!;
+    expect(after.pinReport).not.toBeNull();
+    const reported = after.pinReport!.dropped.map((d) => d.key).sort();
+    // Not vacuous: this pin set really cannot all be honoured, so there IS
+    // something for the two to agree about.
+    expect(reported.length).toBeGreaterThan(0);
+    expect([...after.lockedJoinsDropped].sort()).toEqual(reported);
+    // And every drop carries a REASON, not a bare key.
+    for (const drop of after.pinReport!.dropped) {
+      expect(['forbidden', 'no-candidate', 'incompatible', 'not-enforced']).toContain(drop.reason);
+    }
+  }, 30000);
+
+  it('above MAX_REQUIRED_JOINS the session says the guarantee is NOT in force', async () => {
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const session = getRemixSession(remixDocId)!;
+    const keys = candidateKeysOf(remixDocId, MAX_REQUIRED_JOINS + 1);
+    session.lockedJoins.splice(0, session.lockedJoins.length, ...keys);
+    await reRollRemix(remixDocId);
+
+    expect(getRemixSession(remixDocId)!.pinReport?.mode).toBe('preference');
+  }, 30000);
+
+  it('a fresh session reports no pin state at all — null is not the same as "nothing dropped"', async () => {
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    expect(getRemixSession(remixDocId)!.pinReport).toBeNull();
+    expect(getRemixSession(remixDocId)!.lockedJoinsDropped).toEqual([]);
+  }, 30000);
+});
