@@ -5,6 +5,80 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.19.0] - 2026-08-10
+
+**Align Vocal Timing** — warp a sung take so its syllables land on the beat when the singer drags or
+rushes. `Effects → Align Vocal Timing…`
+
+This is the thing **Match Tempo structurally cannot do**. Match Tempo applies one ratio across the
+whole region, so it can move a take earlier or later as a block but cannot pull a dragged line
+forward while leaving the next, rushed line alone. Alignment warps at a different rate between each
+pair of syllables, through the same variable-rate, stereo-linked, pitch-preserving stretch Pitch
+Correct already uses — no new stretcher was written, only the time map that drives it.
+
+### Added
+
+- **`Effects → Align Vocal Timing…`.** Mark the syllables you want moved (ordinary markers), pick
+  the beat grid and its subdivision, confirm it, set the strength, apply. The region keeps its exact
+  length — syllables move *within* it, so nothing after it slides — and pitch is preserved, so the
+  result can still go through Pitch Correct.
+- **`Suggest syllable markers`**, which runs an onset detector and writes its proposals in as
+  ordinary, editable markers as their own undo step. It never feeds the warp directly. See below.
+
+### The detector is a proposal, and the measurement says why
+
+Onset detection was measured against **23 hand-marked note attacks** in an 8 s excerpt of a real
+142 s solo cover vocal, cross-checked against the YIN pitch track so a portamento slide or a vibrato
+dip could be told apart from a genuine note change:
+
+| analysis parameters | best F1 @±50 ms | precision | recall | median error |
+|---|---|---|---|---|
+| as tempo detection ships it (11 kHz, 21 ms hop) | 0.65 | 0.56 | 0.78 | 36 ms |
+| 24 kHz, 10.7 ms hop | 0.74 | 0.80 | 0.70 | 32 ms |
+| **48 kHz, no decimation, 5.3 ms hop** | **0.75** | **0.88** | 0.65 | **12 ms** |
+
+Spectral flux is built for transients and a legato vowel has none, so the tempo-detection parameters
+**do not transfer**: as shipped, 44 % of the onsets reported are breaths, note *endings*, portamento
+slides or vibrato peaks. Retuning for voice — no decimation, a 5.3 ms hop, and keeping the sibilant
+energy an 11 kHz analysis throws away — triples the localisation accuracy and lifts precision to
+0.88, which is what the suggester uses. That is still one bad anchor in eight, and at the ±30 ms
+tolerance timing work actually needs, the best of the three only reaches F1 0.57.
+
+A false anchor is not a missed opportunity: it drags a syllable-sized span of audio onto a beat it
+never belonged on, **manufacturing** a timing error where there was none. So the warp acts on
+**markers you confirmed**, never on raw detections, and the dialog states the measured reliability
+next to the button rather than in a footnote.
+
+### The grid is confirmed, never guessed
+
+Tempo detection on real material put a track's drums at 159.83 BPM and its five other sources at a
+mean of 109.4 — a genuine ~3:2 feel, with every confidence between 0.003 and 0.084 against the app's
+own low-confidence threshold of 0.35. Both grids are musically defensible, so an automatic pick would
+be a coin flip that makes every correction ⅔ or 1.5× wrong. **Apply stays disabled until you tick
+that the grid is right**, and ×2 / ÷2 re-track the grid rather than relabelling it.
+
+The **subdivision** matters as much. The same 23 attacks sit a median of 120 ms from the nearest
+quarter, 63 ms from the nearest eighth and 25 ms from the nearest sixteenth — that take is on
+sixteenths, and snapping it to quarters would move syllables by up to 260 ms and destroy it. So each
+subdivision is labelled with **the median move it implies**, which is the fastest way to see which
+grid the performance is actually on.
+
+### Bounded, and honest at the bound
+
+Local stretch is clamped to **0.88–1.14×** — the range this WSOLA is transparent over, not the
+engine's 0.25–4× limits, because the spans being stretched are sung vowels. A move the clamp holds
+back lands short of the grid, and the dialog **names how many will before you apply**, with what to
+do about it.
+
+**Strength defaults to 25 %, derived rather than chosen.** Applying strength `s` to the measured take
+with the real differential between neighbouring anchors, 0.25 is the largest value at which *none* of
+the 22 inter-syllable spans needs a ratio outside the transparent band — its worst is 0.888 against a
+0.88 floor. At 100 %, 41–55 % of the spans would be clamped: a full-strength default would spend
+half its time doing something other than what it says. Fully quantised vocals also sound
+machine-made; the musical answer is usually partial.
+
+3830 tests.
+
 ## [1.18.0] - 2026-08-10
 
 **De-esser** — tame harsh "s" and "sh" sounds without dulling the voice.
