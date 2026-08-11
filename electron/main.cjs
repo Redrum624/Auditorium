@@ -8,6 +8,7 @@ const { isPackagedGateOpen } = require('./prodGate.cjs');
 const { createStemManager, registerStemIpc } = require('./stemManager.cjs');
 const { createTranscribeManager, registerTranscribeIpc } = require('./transcribeManager.cjs');
 const { createVoiceManager, registerVoiceIpc } = require('./voiceManager.cjs');
+const { createAlignManager, registerAlignIpc } = require('./alignManager.cjs');
 const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs');
 
 app.setName('audition_app');
@@ -136,6 +137,13 @@ app.whenReady().then(() => {
   const voiceManager = createVoiceManager({ userDataDir: app.getPath('userData') });
   registerVoiceIpc({ ipcMain, manager: voiceManager, getWin: () => mainWindow });
   app.on('will-quit', () => voiceManager.dispose());
+
+  // Align Lyrics (F6): same shape again, a fourth independent manager. Its own
+  // utility process and its own model directory, so cancelling or quitting an
+  // alignment cannot touch a transcription or a stem separation.
+  const alignManager = createAlignManager({ userDataDir: app.getPath('userData') });
+  registerAlignIpc({ ipcMain, manager: alignManager, getWin: () => mainWindow });
+  app.on('will-quit', () => alignManager.dispose());
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {

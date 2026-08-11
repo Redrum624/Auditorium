@@ -27,6 +27,7 @@ import {
   openTranscribeDialog,
   openVoiceChangerDialog,
   openTempoDialog,
+  openAlignLyricsDialog,
   openAlignTimingDialog,
   openVocalChainDialog,
 } from './dialogBus';
@@ -148,6 +149,7 @@ function effectsSectionItemIds(): (string | 'separator')[] {
       'tempo.detect',
       'tempo.match',
       'timing.align',
+      'lyrics.align',
       'effects.vocalChain',
       'separator',
       'effects.none',
@@ -155,8 +157,8 @@ function effectsSectionItemIds(): (string | 'separator')[] {
   }
   // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
   // Noise Reduction effect), above the category-grouped effect list. 'Detect
-  // Tempo' (Task T5), 'Match Tempo…' (Task T8), 'Align Vocal Timing…' (F9) and
-  // 'Vocal Chain…' (F7) join it there rather than
+  // Tempo' (Task T5), 'Match Tempo…' (Task T8), 'Align Vocal Timing…' (F9),
+  // 'Align Lyrics…' (F6) and 'Vocal Chain…' (F7) join it there rather than
   // widening the closed MenuSection['title'] union for a couple of analysis/
   // transform commands (Plan Ruling 5). Vocal Chain sits directly after Align
   // Vocal Timing because that is the order the two are used in: the chain's
@@ -166,6 +168,7 @@ function effectsSectionItemIds(): (string | 'separator')[] {
     'tempo.detect',
     'tempo.match',
     'timing.align',
+    'lyrics.align',
     'effects.vocalChain',
     'separator',
   ];
@@ -963,6 +966,30 @@ function registerVocalChainCommands(): void {
   ]);
 }
 
+/** F6 — Align Lyrics. It sits in the EFFECTS menu immediately BEFORE 'Vocal
+ * Chain…' and after 'Align Vocal Timing…', because that is the order the three
+ * are used in: both manual steps run before the chain, and replacing a word
+ * must happen before any length-changing stage moves the spans it was measured
+ * against (see `vocalChain.ts`'s `lyrics` stage note). It is a command rather
+ * than an `effect.<id>` entry for the same structural reason as the chain: it
+ * is not one pure `EffectDefinition.process`, it is a model run plus a
+ * per-word splice the user drives. Same `enabled` rule as `timing.align` — an
+ * active document with audio in it — and no shortcut: a 378 MB download and a
+ * multi-second inference should never be one keystroke away. */
+function registerAlignLyricsCommands(): void {
+  registerCommands([
+    {
+      id: 'lyrics.align',
+      label: 'Align Lyrics…',
+      enabled: (s) => {
+        const d = activeDoc(s);
+        return d !== null && docLength(d) > 0;
+      },
+      run: async () => openAlignLyricsDialog(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -978,3 +1005,4 @@ registerStemCommands();
 registerTranscribeCommands();
 registerVoiceCommands();
 registerVocalChainCommands();
+registerAlignLyricsCommands();

@@ -578,6 +578,7 @@ describe('tempo.match (Task T8)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -634,6 +635,7 @@ describe('timing.align (Task F9)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: openAlign,
       openVocalChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -650,19 +652,33 @@ describe('effects.vocalChain (Task F7)', () => {
     return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
   }
 
-  it('Effects section contains effects.vocalChain immediately after timing.align', () => {
+  // The three run in this order and the menu says so: both manual steps come
+  // before the chain (F9's timing note and F6's `lyrics` stage note each argue
+  // their own position), so the menu must not present them in some other one.
+  const MANUAL_THEN_CHAIN = ['timing.align', 'lyrics.align', 'effects.vocalChain'];
+
+  it('Effects section runs Align Vocal Timing, Align Lyrics and Vocal Chain back to back, in that order', () => {
     const effects = getMenuSections().find((s) => s.title === 'Effects')!;
     const ids = commandIds(effects.items);
-    expect(ids).toContain('effects.vocalChain');
-    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('timing.align') + 1);
+    for (const id of MANUAL_THEN_CHAIN) expect(ids).toContain(id);
+    expect(ids.indexOf('lyrics.align')).toBe(ids.indexOf('timing.align') + 1);
+    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('lyrics.align') + 1);
   });
 
-  it('keeps its place once the effect registry has populated the section', () => {
+  it('keeps that run of three once the effect registry has populated the section', () => {
     registerAllEffects();
     registerEffectCommands();
     const effects = getMenuSections().find((s) => s.title === 'Effects')!;
     const ids = commandIds(effects.items);
-    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('timing.align') + 1);
+    expect(ids.indexOf('lyrics.align')).toBe(ids.indexOf('timing.align') + 1);
+    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('lyrics.align') + 1);
+  });
+
+  it('registers Align Lyrics with a real label, gated on a document with audio in it', () => {
+    expect(findEffectsCmd('lyrics.align')!.label).toBe('Align Lyrics…');
+    expect(findEffectsCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(false);
+    openDoc();
+    expect(findEffectsCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(true);
   });
 
   it('is registered with a real label rather than falling back to its id', () => {
@@ -691,6 +707,7 @@ describe('effects.vocalChain (Task F7)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: openVocalChain,
+      openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -748,6 +765,7 @@ describe('edit.remix (Task T14)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -772,6 +790,7 @@ describe('edit.remix (Task T14)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -802,6 +821,7 @@ describe('edit.separateStems (Task S6)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -870,6 +890,7 @@ describe('edit.transcribe (Task F4b)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });

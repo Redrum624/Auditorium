@@ -20,6 +20,7 @@ import { compressorEffect } from '../effects/dynamics/CompressorEffect';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
+import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
 import { measureNoiseWindow, programmeRmsDb, toDb } from '../dsp/chainAnalysis';
 import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
@@ -98,6 +99,7 @@ describe('VOCAL_CHAIN_STAGES', () => {
   it('runs the corrections in the reasoned order, with the EQ before the limiter', () => {
     expect(VOCAL_CHAIN_STAGES.map((s) => s.id)).toEqual([
       'dc',
+      'lyrics',
       'noise',
       'hum',
       'silence',
@@ -141,10 +143,68 @@ describe('VOCAL_CHAIN_STAGES', () => {
     }
   });
 
-  it('has exactly one manual stage, and it is the one that needs confirmation', () => {
+  // Two stages are manual, and every property that makes a stage manual is
+  // asserted over BOTH rather than over a named one — a third manual stage
+  // added without a weight of 0, or switched on by default, would otherwise
+  // slip through a test that only ever looked at `timing`.
+  it('marks exactly the two stages that need the user to choose WHAT to change as manual', () => {
     const manual = VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null);
-    expect(manual).toHaveLength(1);
-    expect(manual[0].id).toBe('timing');
+    expect(manual.map((s) => s.id)).toEqual(['lyrics', 'timing']);
+    for (const stage of manual) {
+      expect(stage.weight).toBe(0);
+      expect(stage.defaultEnabled).toBe(false);
+      // Each one tells the user where to run it, and to run it FIRST — a
+      // manual stage that did not would be a row that does nothing and says
+      // nothing about why.
+      expect(stage.note).toContain('Not an automatic stage.');
+      expect(stage.note).toContain(`Run Effects → ${stage.label}… FIRST, then this chain`);
+    }
+  });
+
+  // F6 Ruling 4 — the `lyrics` stage's position, argued against the rules the
+  // stages around it already state rather than inherited from a proposal.
+  describe("the Align Lyrics stage's position", () => {
+    const ids = VOCAL_CHAIN_STAGES.map((s) => s.id);
+
+    it('comes after Remove DC Offset, because the splice matches level by RMS', () => {
+      expect(ids.indexOf('lyrics')).toBe(ids.indexOf('dc') + 1);
+    });
+
+    it('comes before every stage that MOVES samples, so the word positions still describe the audio', () => {
+      // Remove Silence's own note: every sample after the first shortened
+      // pause moves earlier. Align Vocal Timing warps. Either one run first
+      // would leave the spans pointing at audio that has shifted.
+      for (const mover of ['silence', 'timing'] as const) {
+        expect(ids.indexOf('lyrics')).toBeLessThan(ids.indexOf(mover));
+      }
+    });
+
+    it('comes before every stage that MEASURES the material, so the replacement is inside what they measure', () => {
+      // A replacement is a fresh microphone take with its own room tone. Every
+      // one of these derives its settings from a measurement of the audio that
+      // reaches it (the noise print, the compressor threshold, the de-esser
+      // threshold, the EQ corner, the limiter's ceiling check).
+      for (const measurer of ['noise', 'hum', 'pitch', 'compressor', 'deEsser', 'eq', 'limiter'] as const) {
+        expect(ids.indexOf('lyrics')).toBeLessThan(ids.indexOf(measurer));
+      }
+    });
+
+    it('quotes the CROSS-MODEL accuracy, and only that one', () => {
+      const note = stageById('lyrics').note;
+      expect(note).toContain(ALIGN_ACCURACY_SENTENCE);
+      // Ruling 5: the hand-marked medians (28 ms sung, 36 ms spoken, 48 ms
+      // nearest-onset) are upper bounds, because the spike could not listen and
+      // legato boundaries are missing from that ground truth. None of them may
+      // reach the UI.
+      for (const forbidden of ['28 ms', '36 ms', '48 ms']) expect(note).not.toContain(forbidden);
+    });
+
+    it('promises no assessment of how any word was sung', () => {
+      const note = stageById('lyrics').note.toLowerCase();
+      for (const forbidden of ['mispronounce', 'pronunciation', 'score', 'correct pronunciation', 'coach']) {
+        expect(note).not.toContain(forbidden);
+      }
+    });
   });
 
   it('leaves the two stages that change the material rather than correct it off by default', () => {
@@ -666,15 +726,45 @@ describe('runVocalChain', () => {
     for (let i = 0; i < original.length; i++) expect(restored[i]).toBe(original[i]);
   });
 
-  it('never runs the manual stage, even when it is switched on', async () => {
+  // ENABLES the manual stages end to end rather than trusting the table. F7
+  // shipped a whole stage that could be deleted with the suite still green
+  // because no test ever switched it on; a manual stage has the mirror risk —
+  // a wiring change that let one reach `resolveStage` would hit
+  // `defaultParamsFor(null as string)` and throw, and only a run with it ON
+  // can see that.
+  const MANUAL_IDS = VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null).map((s) => s.id);
+
+  it.each(MANUAL_IDS)('never runs the manual stage %s, even when it is switched on', async (id) => {
     seedDoc([noise(WIN * 4, 0.3, 5)]);
     const started: string[] = [];
     const report = await runVocalChain({
-      enabled: { ...only('dc'), timing: true },
+      enabled: { ...only('dc'), [id]: true },
       onStageStart: (s) => started.push(s.id),
     });
-    expect(started).not.toContain('timing');
-    expect(report!.stages.find((s) => s.id === 'timing')!.status).toBe('manual');
+    expect(started).not.toContain(id);
+    expect(report!.stages.find((s) => s.id === id)!.status).toBe('manual');
+  });
+
+  it('leaves the audio byte-identical when EVERY manual stage is switched on and nothing else is', async () => {
+    // The passthrough invariant, restated for the manual stages: switching all
+    // of them on must still apply nothing at all. `applied` false is the
+    // observable claim — the chain never even reaches `applyEdit`.
+    const original = zeroMean(WIN * 4);
+    const docId = seedDoc([Float32Array.from(original)]);
+    const historyBefore = getHistory(docId).done.length;
+    const enabled = only(...MANUAL_IDS);
+
+    const started: string[] = [];
+    const report = await runVocalChain({ enabled, onStageStart: (s) => started.push(s.id) });
+
+    expect(started).toEqual([]);
+    expect(report!.applied).toBe(false);
+    expect(getHistory(docId).done.length).toBe(historyBefore);
+    const after = activeDoc().channels[0];
+    for (let i = 0; i < original.length; i++) expect(after[i]).toBe(original[i]);
+    for (const id of MANUAL_IDS) {
+      expect(report!.stages.find((s) => s.id === id)!.status).toBe('manual');
+    }
   });
 
   it('visits the enabled stages in chain order', async () => {

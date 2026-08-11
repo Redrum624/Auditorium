@@ -55,6 +55,7 @@ import { cloneRegion, docLength, replaceRegion } from '../audio/AudioDocument';
 import { defaultParamsFor, getEffect } from '../effects/EffectRegistry';
 import type { EffectParamValue, EffectReport } from '../effects/types';
 import { reductionDb } from '../effects/dynamics/CompressorEffect';
+import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
 import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
 import {
@@ -86,6 +87,7 @@ export const VOCAL_CHAIN_UNDO_LABEL = 'Vocal Chain';
 
 export type VocalChainStageId =
   | 'dc'
+  | 'lyrics'
   | 'noise'
   | 'hum'
   | 'silence'
@@ -101,7 +103,12 @@ export interface VocalChainStage {
   id: VocalChainStageId;
   label: string;
   /** The registered effect this stage runs, or `null` when the stage is not an
-   * unattended one at all (F9 timing — see `MANUAL_STAGE_NOTE`). */
+   * unattended one at all. Two stages are like that — F9's Align Vocal Timing
+   * and F6's Align Lyrics — and both for the same reason: each needs the user
+   * to say WHICH thing to change (which syllables, which word), and neither has
+   * a measurement good enough to decide that for them. `runVocalChain` reports
+   * them as `manual` and never runs anything for them, however they are
+   * switched. */
   effectId: string | null;
   defaultEnabled: boolean;
   /** Why the stage sits where it does, and why it is on or off by default.
@@ -120,7 +127,9 @@ export interface VocalChainStage {
 
 /**
  * The order, and it is the brief's order but for the EQ/limiter swap argued at
- * the top of this file.
+ * the top of this file, plus F6's `lyrics` stage — whose position is argued in
+ * its own note against the rules the stages around it already state, not
+ * inherited from a proposal.
  */
 export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
   {
@@ -130,6 +139,14 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     defaultEnabled: true,
     note: 'First, because a DC bias skews every level measurement taken after it.',
     weight: 1,
+  },
+  {
+    id: 'lyrics',
+    label: 'Align Lyrics',
+    effectId: null,
+    defaultEnabled: false,
+    note: `Not an automatic stage. It places your own lyrics in the recording and lets you replace ONE word you pick with a fresh take of just that word — nothing in it judges which word that should be. Run Effects → Align Lyrics… FIRST, then this chain. It sits SECOND, after Remove DC Offset and before everything else, for two reasons that are both measurements rather than preferences. A replacement is a fresh microphone take carrying its own room tone, so it has to be in the file before Noise Reduction learns its print and before the compressor, de-esser and limiter measure the levels they set themselves from — put it after them and the seam joins cleaned audio to a raw take, with no stage left to reconcile the two floors. And it has to come before Remove Silence and Align Vocal Timing, which move every sample after the point they edit, leaving the word positions describing audio that has shifted. Remove DC Offset still goes first, for the chain's own stated reason: the splice matches the new word's level to the old one's by RMS, and a DC bias inflates that measurement. ${ALIGN_ACCURACY_SENTENCE}`,
+    weight: 0,
   },
   {
     id: 'noise',

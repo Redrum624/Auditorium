@@ -93,8 +93,11 @@ export interface TokenizedLyrics {
    */
   droppedWords: string[];
   /**
-   * Distinct SOUNDED characters removed from words that survived — the "2" in
-   * "24/7", the "é" in "café". Same reason: visible, not silent.
+   * Distinct SOUNDED characters this vocabulary has no id for — the "2" in
+   * "24/7", the "é" in "café". Same reason: visible, not silent. Collected
+   * across ALL words, including ones that ended up in `droppedWords`: a word
+   * lost entirely still lost it to specific characters, and naming them is what
+   * tells the user why.
    *
    * Punctuation is deliberately NOT listed. Commas, full stops and quotation
    * marks are absent from a 32-symbol phonetic vocabulary by design and are
@@ -437,6 +440,62 @@ export function alignLyrics(
  * tells the user they are wrong.
  */
 export const LYRICS_MATCH_THRESHOLD = -2.6799;
+
+/**
+ * What the aligner was MEASURED to do, in the numbers the UI is allowed to
+ * quote — F6 Ruling 5.
+ *
+ * Every figure here is CROSS-MODEL: `wav2vec2-base-960h` (95 M params,
+ * LibriSpeech, 32 graphemes) and `wav2vec2-lv-60-espeak-cv-ft` (317 M params,
+ * multilingual CommonVoice, 392 IPA phones) were each asked to place the SAME
+ * known text, and their word starts compared. Two models that share no training
+ * data, no label set and no size agreeing to 20 ms is a measurement that
+ * involves no hand-marking at all.
+ *
+ * The spike ALSO produced figures against a hand-marked ground truth (median
+ * 28–48 ms). **Those are deliberately not here.** The spike could not listen to
+ * the audio, so legato word boundaries — the ones with no amplitude, flux or F0
+ * cue — are absent from that ground truth, which can only INFLATE the
+ * hand-marked numbers. They are upper bounds, and an upper bound is not what a
+ * dialog should quote.
+ *
+ * Frozen and exported so the dialog and the Vocal Chain stage note read from
+ * ONE source: two pieces of shipped UI text describing the same measurement
+ * cannot be allowed to drift apart.
+ */
+export const ALIGN_ACCURACY = Object.freeze({
+  /** The reference sung take: 51 words, one performance, one singer. */
+  sung: Object.freeze({ words: 51, medianOnsetMs: 20, withinMs: 100, withinWords: 45 }),
+  /** The spoken control: 22 words. */
+  spoken: Object.freeze({ words: 22, medianOnsetMs: 20, withinMs: 100, withinWords: 20 }),
+  /**
+   * Audio longer than the host's 30 s inference chunk is aligned in several
+   * passes, and `scripts/align-context-bench.cjs` measured that about one word
+   * onset in six then differs from a single-pass alignment by up to 40 ms —
+   * the same order as the aligner's own precision. Stated, not hidden.
+   */
+  chunkSeconds: 30,
+  chunkedOnsetMaxMs: 40,
+});
+
+/** Percent-within, derived from the counts above rather than re-typed. */
+function withinPercent(m: { withinWords: number; words: number }): number {
+  return Math.round((m.withinWords / m.words) * 100);
+}
+
+/**
+ * The ONE sentence the dialog and the Vocal Chain stage note both show. Built
+ * from {@link ALIGN_ACCURACY} so a change to the measurement changes both, and
+ * so a test can assert the two pieces of UI carry the same claim rather than
+ * comparing two hand-written strings.
+ */
+export const ALIGN_ACCURACY_SENTENCE =
+  `Word starts land within a median ${ALIGN_ACCURACY.sung.medianOnsetMs} ms, and ` +
+  `${withinPercent(ALIGN_ACCURACY.sung)}% of them within ${ALIGN_ACCURACY.sung.withinMs} ms — ` +
+  `measured as the agreement between two acoustic models that share no training data, label set or ` +
+  `size, over ${ALIGN_ACCURACY.sung.words} sung words of one performance by one singer. Speech is ` +
+  `easier: ${withinPercent(ALIGN_ACCURACY.spoken)}% within ${ALIGN_ACCURACY.spoken.withinMs} ms on ` +
+  `the ${ALIGN_ACCURACY.spoken.words}-word spoken control, so a script against a recording is a real use.`;
 
 export type LyricsMatchVerdict = 'match' | 'weak';
 

@@ -1,4 +1,6 @@
 import {
+  ALIGN_ACCURACY,
+  ALIGN_ACCURACY_SENTENCE,
   ALIGN_FRAME_SECONDS,
   LYRICS_MATCH_THRESHOLD,
   MAX_VITERBI_CELLS,
@@ -373,6 +375,43 @@ describe('the lyrics-match gate', () => {
     expect(result.medianWordScore).toBeCloseTo(Math.log(0.99), 6);
     expect(result.pathScore).toBeLessThan(result.medianWordScore - 0.5);
     expect(result.frames).toBe(uncertainEnds.reduce((n, r) => n + r.frames, 0));
+  });
+});
+
+describe('the accuracy the UI is allowed to quote (F6 Ruling 5)', () => {
+  it('states the percentages it derives, rather than a second hand-typed number', () => {
+    // 45/51 = 88.2 % and 20/22 = 90.9 %. Derived here the same way the sentence
+    // derives them, so a change to either count moves both.
+    expect(ALIGN_ACCURACY_SENTENCE).toContain(
+      `${Math.round((ALIGN_ACCURACY.sung.withinWords / ALIGN_ACCURACY.sung.words) * 100)}%`
+    );
+    expect(ALIGN_ACCURACY_SENTENCE).toContain(
+      `${Math.round((ALIGN_ACCURACY.spoken.withinWords / ALIGN_ACCURACY.spoken.words) * 100)}%`
+    );
+    expect(ALIGN_ACCURACY_SENTENCE).toContain(`${ALIGN_ACCURACY.sung.medianOnsetMs} ms`);
+    expect(ALIGN_ACCURACY_SENTENCE).toContain(`${ALIGN_ACCURACY.sung.words} sung words`);
+  });
+
+  it('names the conditions, because a figure without them reads as a field expectation', () => {
+    expect(ALIGN_ACCURACY_SENTENCE).toContain('one performance by one singer');
+    expect(ALIGN_ACCURACY_SENTENCE).toContain('share no training data');
+  });
+
+  it('quotes NO hand-marked figure — every one of those is an upper bound', () => {
+    // The spike could not listen, so legato word boundaries with no amplitude
+    // or F0 cue are absent from its ground truth. 28 ms (sung, n=7), 36 ms
+    // (spoken, n=22) and 48 ms (nearest-onset, n=19) are therefore inflated by
+    // an unknown amount and must not reach a user.
+    for (const upperBound of ['28 ms', '36 ms', '48 ms']) {
+      expect(ALIGN_ACCURACY_SENTENCE).not.toContain(upperBound);
+    }
+  });
+
+  it('promises nothing about how a word was SUNG', () => {
+    const lower = ALIGN_ACCURACY_SENTENCE.toLowerCase();
+    for (const forbidden of ['pronunciation', 'mispronounce', 'wrong', 'grade', 'coach']) {
+      expect(lower).not.toContain(forbidden);
+    }
   });
 });
 

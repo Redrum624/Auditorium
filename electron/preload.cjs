@@ -90,6 +90,24 @@ const electronAPI = {
     return () => ipcRenderer.removeListener('transcribe:embedding', listener);
   },
 
+  // Lyrics alignment (F6). Channels, payload shapes and event layouts are
+  // documented in electron/alignManager.cjs's module header; this bridge adds
+  // no logic of its own beyond the on*/unsubscribe pattern used above.
+  alignModelState: () => ipcRenderer.invoke('align:model-state'),
+  alignEnsureModels: () => ipcRenderer.invoke('align:ensure-models'),
+  onAlignModelProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('align:model-progress', listener);
+    return () => ipcRenderer.removeListener('align:model-progress', listener);
+  },
+  alignRun: (req) => ipcRenderer.invoke('align:run', req),
+  alignCancel: () => ipcRenderer.invoke('align:cancel'),
+  onAlignProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('align:progress', listener);
+    return () => ipcRenderer.removeListener('align:progress', listener);
+  },
+
   // Voice changer (F3). Channels, payload shapes and event layouts are
   // documented in electron/voiceManager.cjs's module header; this bridge adds
   // no logic of its own beyond the on*/unsubscribe pattern used above.

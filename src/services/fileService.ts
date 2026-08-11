@@ -24,6 +24,7 @@ import { releaseBeatGrid } from './beatGrid';
 import { invalidateRemixSession } from './remixService';
 import { invalidateStemRun } from './stemService';
 import { invalidateTranscript } from './transcribeService';
+import { invalidateLyricsAlignment } from './alignLyricsService';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -616,6 +617,10 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   // closed document's channel arrays through its staleness snapshot, which is
   // the leak class the three calls above already manage.
   invalidateTranscript(docId);
+  // Task F6: and again for the lyrics alignment — same two reasons, the same
+  // retained-channels leak class, and a live 378 MB acoustic host that would
+  // otherwise go on placing words in audio nobody can see.
+  invalidateLyricsAlignment(docId);
   if (getNoiseProfile()?.docId === docId) clearNoiseProfile();
   // A closing doc can invalidate many clips' cached mini-waveforms at once
   // (every clip sourced from it); clearing the whole cache is cheap and

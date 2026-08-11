@@ -124,19 +124,24 @@ describe('VocalChainDialog — every stage is listed and switchable', () => {
     }
   });
 
-  it('gives every runnable stage its own checkbox and the manual stage none', () => {
+  it('gives every runnable stage its own checkbox and every manual stage none', () => {
     seedDoc();
     open();
     const manual = VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null);
-    expect(manual).toHaveLength(1);
+    // Asserted over ALL of them, not over a named one: a second manual stage
+    // that DID render a checkbox would offer the user a switch the run loop
+    // ignores, and a test pinned to `manual[0]` would never see it.
+    expect(manual.length).toBeGreaterThan(0);
 
     for (const stage of VOCAL_CHAIN_STAGES) {
       const row = screen.getByTestId(`vocal-chain-stage-${stage.id}`);
       expect(within(row).queryAllByRole('checkbox')).toHaveLength(stage.effectId === null ? 0 : 1);
     }
-    expect(screen.queryByTestId(`vocal-chain-toggle-${manual[0].id}`)).toBeNull();
-    // …and it says what it is instead of silently offering nothing.
-    expect(screen.getByTestId(`vocal-chain-status-${manual[0].id}`)).toHaveTextContent('Manual step');
+    for (const stage of manual) {
+      expect(screen.queryByTestId(`vocal-chain-toggle-${stage.id}`)).toBeNull();
+      // …and it says what it is instead of silently offering nothing.
+      expect(screen.getByTestId(`vocal-chain-status-${stage.id}`)).toHaveTextContent('Manual step');
+    }
   });
 
   it('opens with each checkbox on the stage default', () => {
