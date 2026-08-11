@@ -280,6 +280,14 @@ describe('spliceWord leaves nothing of the word it replaced', () => {
     // FIRST sample are the ones that carry no original.
     expect(ra.channels[0][head - 1]).toBe(rc.channels[0][head - 1]);
     expect(ra.channels[0][regionLength - tail]).toBe(rc.channels[0][regionLength - tail]);
+    // …and the outer ends are the document, which is what says each ramp
+    // REACHES its endpoint rather than stopping one step short. The head's
+    // first sample is the document exactly (gOut = cos 0 = 1, gIn = sin 0 = 0);
+    // the tail's last is the document to the bit (gIn = 1, and the 6.123e-17 of
+    // replacement that `Math.cos(Math.PI / 2)` leaves is 5 orders below the
+    // float32 ulp of the sum).
+    expect(ra.channels[0][regionLength - 1]).toBe(a.target[0][ra.report.regionEnd - 1]);
+    expect(rc.channels[0][regionLength - 1]).toBe(c.target[0][rc.report.regionEnd - 1]);
 
     // 4. The word span is the whole of what changed, so compare against the
     //    untouched document: inside the span every sample must have moved.
@@ -407,17 +415,24 @@ describe('spliceWord trimming', () => {
   });
 
   it('keeps everything between the FIRST sound and the LAST, not just one of them', () => {
-    // Two bursts with 0.15 s of room tone between them — a word with a stop
+    // Two bursts with 0.30 s of room tone between them — a word with a stop
     // consonant in it. The kept span must reach from the first burst to the
     // end of the second; a trim that took only the first run, or only the
-    // last, would keep about half of that.
+    // last, keeps about 0.32 s of that.
+    //
+    // The gap has to be longer than the follower's release OVERHANG or there
+    // is only one run to span and the test cannot see the difference. At
+    // 0.5 amplitude over this room tone the overhang is
+    // 20 ms * ln(0.4658 / 8.553e-5) = 0.172 s, so 0.15 s of gap FUSES the two
+    // bursts into a single run and 0.30 s does not.
     const burst = Math.round(0.15 * SR);
+    const gap = Math.round(0.3 * SR);
     const t = makeTarget();
     const twoBursts = [
       concat(
         roomTone(Math.round(0.6 * SR)),
         tone(burst, 220),
-        roomTone(Math.round(0.15 * SR)),
+        roomTone(gap),
         tone(burst, 220),
         roomTone(Math.round(0.6 * SR))
       ),
@@ -425,14 +440,13 @@ describe('spliceWord trimming', () => {
     const r = spliceWord(request({ ...t, replacement: twoBursts, matchPitch: false }));
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    // First burst start to last burst end is 0.45 s; the follower's release
+    // First burst start to last burst end is 0.60 s; the follower's release
     // adds its documented overhang past the final offset and nothing else.
-    const firstToLast = burst + Math.round(0.15 * SR) + burst;
+    // Either run taken alone reaches only burst + overhang = 0.32 s, which is
+    // below this lower bound, so the bound is not one a half-span trim passes.
+    const firstToLast = burst + gap + burst;
     expect(r.report.trimmedSamples).toBeGreaterThan(firstToLast);
     expect(r.report.trimmedSamples).toBeLessThan(firstToLast * 1.5);
-    // Either single run on its own is barely over half of that, so the bound
-    // above is not one a half-span trim could also satisfy.
-    expect(burst * 1.5).toBeLessThan(firstToLast);
   });
 
   it('needs a run of one release constant to call something sound, probed below / on / above', () => {
