@@ -626,7 +626,6 @@ function runRemixDP(
   // With `numMasks === 1` this is `p*width + n`, bit for bit -- the multiply
   // by 1 and the `+ 0` are the whole of R4b's cost on the unpinned path.
   const at = (p: number, n: number, s: number): number => (p * width + n) * numMasks + s;
-  const planeStride = width * numMasks;
   // Hoisted out of the edge loop: one null test per jump, rather than a Map
   // lookup per jump on a path that has no required joins. A genuine `const`
   // local (not the parameter) so the narrowing inside the loop is structural
@@ -643,19 +642,26 @@ function runRemixDP(
     }
     if (newCost === cur && parent[destIdx] >= 0) {
       // Tie-break: lower predecessor p, then lower predecessor n, then lower
-      // predecessor MASK (module doc comment, "Reconstruction is
+      // predecessor mask (module doc comment, "Reconstruction is
       // deterministic") -- an explicit comparison against the RECORDED
-      // predecessor, not an artefact of sweep order. The mask term is inert
-      // when `numMasks === 1` (both sides are 0), so the pre-R4b tie-break is
-      // preserved exactly.
+      // predecessor, not an artefact of sweep order.
+      //
+      // ONE comparison expresses all three, because the state index IS a
+      // mixed-radix number with digits `(p, n, S)`: `idx = p*width*numMasks +
+      // n*numMasks + S` with `n < width` and `S < numMasks`, so numeric order
+      // on the index is exactly lexicographic order on `(p, n, S)`. With
+      // `numMasks === 1` it reduces to `p*width + n`, i.e. bit for bit the
+      // `newP < curP || (newP === curP && newN < curN)` this module used
+      // before the subset axis existed -- pinned by the plan golden.
+      //
+      // Written instead as the decomposed three-way comparison, the MASK term
+      // would be DEAD CODE: the `s` loop ascends, so at a given `(p,n)` the
+      // lower mask is always relaxed first and never replaced. It was written
+      // that way first, and the mutation set caught it -- inverting the mask
+      // term turned zero tests red, which is the same signature as a missing
+      // test and had to be resolved as one or the other. It was the branch.
       const curPred = Math.floor(parent[destIdx] / 2);
-      const curP = Math.floor(curPred / planeStride);
-      const curN = Math.floor(curPred / numMasks) % width;
-      const curS = curPred % numMasks;
-      const newP = Math.floor(predIdx / planeStride);
-      const newN = Math.floor(predIdx / numMasks) % width;
-      const newS = predIdx % numMasks;
-      if (newP < curP || (newP === curP && (newN < curN || (newN === curN && newS < curS)))) {
+      if (predIdx < curPred) {
         parent[destIdx] = predIdx * 2 + (isJump ? 1 : 0);
       }
     }

@@ -1378,6 +1378,38 @@ describe('requiredJoins — INERTNESS when empty (R4b, Ruling 4)', () => {
     expect(compared).toBe(8);
   });
 
+  it('a REFUSAL is inert too — no requiredJoins field on either arm of the result', () => {
+    // The report field is spread onto BOTH arms, so the ok:false arm needs its
+    // own assertion: a mutation that made it unconditional there would leave
+    // every ok:true test green.
+    const a = makeUniformAnalysis({ numBars: 40 });
+    let refusals = 0;
+    for (const opts of [
+      // Pre-DP refusals (no candidate lists exist yet)...
+      baseOptions({ targetSample: -1, strict: true, allowRepeats: true }),
+      baseOptions({ targetSample: 100, strict: true, allowRepeats: true, phraseBars: 40 }),
+      // ...and the POST-DP empty-window one, which does reach the triage.
+      baseOptions({ targetSample: a.analyzedEndSample * 50, strict: true, allowRepeats: false }),
+    ]) {
+      const r = planRemix(a, opts);
+      expectFail(r);
+      expect('requiredJoins' in r).toBe(false);
+      expect(planRemix(a, { ...opts, requiredJoins: [] })).toEqual(r);
+      refusals++;
+    }
+    expect(refusals).toBe(3);
+
+    // And WITH a required key the failure arm does carry the report, so the
+    // absence above is the option being inert rather than the field being
+    // unreachable.
+    const pinnedRefusal = planRemix(a, {
+      ...baseOptions({ targetSample: a.analyzedEndSample * 50, strict: true, allowRepeats: false }),
+      requiredJoins: ['8>16'],
+    });
+    expectFail(pinnedRefusal);
+    expect(pinnedRefusal.requiredJoins).toEqual({ mode: 'enforced', satisfied: [], dropped: [] });
+  });
+
   it('the DP table does not grow when nothing is required, and grows by exactly 2^K when something is', () => {
     const M = 20;
     const phraseBars = 8;
@@ -1509,6 +1541,18 @@ describe('requiredJoins — mutually incompatible pins (R4b, Ruling 1)', () => {
       satisfied: ['8>16'],
       dropped: [{ key: '16>24', reason: 'incompatible' }],
     });
+  });
+
+  it('collapses duplicate keys instead of spending two bits on one join', () => {
+    // A caller listing the same key twice must not get a second bit: the bit
+    // map is keyed by string, so the first index would be unreachable and the
+    // DP would decide the pin set was only half satisfiable.
+    const a = makeUniformAnalysis({ numBars: 40 });
+    const once = planRemix(a, { ...norepeat(a, 0.75), requiredJoins: ['8>16'] });
+    const twice = planRemix(a, { ...norepeat(a, 0.75), requiredJoins: ['8>16', '8>16'] });
+    expectOk(twice);
+    expect(twice.requiredJoins).toEqual({ mode: 'enforced', satisfied: ['8>16'], dropped: [] });
+    expect(twice).toEqual(once);
   });
 
   it('is deterministic across repeated identical calls', () => {
@@ -1711,6 +1755,31 @@ describe('requiredJoins — interaction with lockedJoins and the guard (R4b, Rul
       rolls++;
     }
     expect(rolls).toBe(4);
+  });
+
+  it('the exemption changes the REST of the arrangement, not just whether the pin survives', () => {
+    // Exempting a required key from the re-roll/guard penalty cannot change
+    // whether the pinned join appears — the constraint already forces that —
+    // so the only way to test the exemption is to pin the arrangement AROUND
+    // it. Without the exemption the pinned edge carries `+JOIN_PENALTY` on
+    // every roll, which makes every OTHER edge look relatively cheaper and
+    // moves the plan. Measured over 4 368 pin/roll/target combinations, the
+    // exemption changes the chosen arrangement in 591 of them (13.5%); this
+    // is one, chosen because both variants keep the pin, so nothing but the
+    // exemption can explain the difference.
+    const a = makeVaryingAnalysis(48);
+    const r = planRemix(
+      a,
+      baseOptions({
+        targetSample: Math.round(a.analyzedEndSample * 1.8),
+        strict: true,
+        allowRepeats: true,
+        rollIndex: 2,
+        requiredJoins: ['30>38'],
+      })
+    );
+    expectOk(r);
+    expect(r.joins.map(joinKeyOf)).toEqual(['34>2', '18>2', '30>38']);
   });
 
   it('the over-repetition guard never trades a guaranteed pin for a repetition win', () => {
