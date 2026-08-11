@@ -534,6 +534,11 @@ describe('spliceWord refusals', () => {
     const r = spliceWord(request({ ...t, replacement: silent, matchPitch: false }));
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.reason).toBe('silent-replacement');
+    // The TRIM has to be the guard that fires. `silent-replacement` is also
+    // reachable from the pitch-shift stage further down, which reports the same
+    // reason with a message that would tell this user to re-record something
+    // longer — advice that has nothing to do with what went wrong.
+    if (!r.ok) expect(r.message).toContain('noise floor');
   });
 
   it('refuses a time fit outside WSOLA\'s ratio range, probed below / on / above', () => {
