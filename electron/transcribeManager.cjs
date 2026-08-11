@@ -346,7 +346,6 @@ function createTranscribeManager({
             killed = true;
           }
         }
-        entry.childKilled = killed;
         if (!killed) {
           onWarn(
             `transcription host for run ${entry.runId} did not respond to kill — its ONNX Runtime arena (~1 GB) may still be resident`

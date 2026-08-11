@@ -390,7 +390,6 @@ function createVoiceManager({
             killed = true;
           }
         }
-        entry.childKilled = killed;
         if (!killed) {
           onWarn(
             `voice host for run ${entry.runId} did not respond to kill — its ONNX Runtime arena may still be resident`
