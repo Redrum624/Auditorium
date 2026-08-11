@@ -382,6 +382,13 @@ seconds of worker time rather than milliseconds. The routing threshold
 multiplies by `2^K` and is re-evaluated per plan, so those seconds are always
 spent in a worker, never on the main thread.
 
+**Read that 13.2x as per-DP-run, and compound it with the paragraph above.**
+Re-roll at `rollIndex = k` re-derives rolls `0..k` to stay deterministic and
+stateless, so it runs `k+1` DPs and pays the `2^K` factor on each. The two
+costs multiply rather than add: the worst case a user can reach from the panel
+is a late Re-roll press at four pins, and it is several times the single-run
+figure — not the ~4 s a reader would derive from 13.2x alone.
+
 **The panel's pin cap stays 8, deliberately higher than 4.** Pins 5–8 are
 honoured on the old best-effort basis, and the panel says so in words ("More
 than 4 pins: the planner cannot guarantee them all…") rather than degrading

@@ -7,3 +7,5 @@ installer/
 .claude/
 test-assets/
 test-output/
+.f10-work/
+src/__scratch__/
