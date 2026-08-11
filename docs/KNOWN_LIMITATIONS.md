@@ -1183,3 +1183,175 @@ crossfade.
 **Practical consequence:** peak memory stays flat with input length (measured
 1,355 MB on a 70 s input and 1,351 MB on double that, against 1,730 MB for the
 unchunked path on the 70 s input) at a cost of 5.3 % extra inference.
+
+## Align Lyrics places words; it never judges how they were sung
+
+**Area:** F6 Align Lyrics (`electron/alignHost.cjs`, `electron/alignManager.cjs`,
+`src/dsp/ctcAlign.ts`, `src/dsp/wordSplice.ts`, `src/services/alignLyricsService.ts`,
+`src/components/Dialogs/AlignLyricsDialog.tsx`).
+
+**Behavior a user will notice:** the dialog gives every word a position and lets
+you hear and replace any one of them, but it never says which word is wrong. If
+you came looking for a pronunciation coach, this is not one, and the name says
+so.
+
+**The measurement that decided it.** Goodness of Pronunciation was implemented
+in the Witt & Young posterior-ratio form over a forced alignment of the known
+phone sequence, in three variants (spike frames with the minimum over a word's
+phones; the full realised segment with the minimum; the full segment with the
+mean), and scored against the eight word tokens in the recording's known error
+clusters.
+
+| GOP variant | AUC (suspect worse than clean) | top-10 catches | words flagged |
+|---|---|---|---|
+| spike frames, min over phones | **0.642** | 3 of 8 | 46 of 51 |
+| full segment, min over phones | 0.663 | 2 of 8 | **51 of 51** |
+| full segment, mean over phones | 0.642 | 3 of 8 | 51 of 51 |
+
+Chance is 0.500. Both halves of the test fail: the ranking barely beats a coin
+toss, *and* the scorer flags nine words in ten, so "flagged" carries no
+information. The intrusive-/r/ word the investigation was most confident about
+ranked 35th of 51.
+
+**Why, and what it would take to change.** The scorer is not broken — on the
+native spoken control the same implementation scores 19 of 22 words at exactly
+0.000 and flags only three rhotic-vowel words where the dictionary form and the
+speaker's realisation genuinely diverge. The difference is the material: the
+acoustic model's free-decode phone error rate is 14.5 % on that speech and
+**68.1 % on this singing**. Alignment only asks the model to *place* known text;
+GOP asks it to *read* the audio. Placing survives what reading does not — the
+same checkpoint free-decodes the sung take at 47.1 % word error, more than
+double the Whisper this app already ships, and still places words to a 20 ms
+cross-model median. Reviving GOP would need an acoustic model trained on
+singing, with a permissive licence and an ONNX export; none was found.
+
+**One confound is open and is stated rather than resolved:** whether the
+collapse is caused by singing or by this singer's non-native accent could not be
+measured, because no native singer's isolated vocal was available and a full mix
+would confound rather than control. The available evidence points at singing
+(the same app's transcription measured 45.6 % word error on native clean solo
+singing against 21.6 % on this singer), but that is corroboration across
+different recordings, not proof.
+
+## Alignment accuracy is 20 ms cross-model, on one performance by one singer
+
+**Area:** as above.
+
+**Behavior a user will notice:** a word's highlighted span can begin or end a
+little before or after where you would place it by ear, most visibly on short
+function words and on words that begin with a vowel.
+
+**The measurement, and why this is the figure quoted.** Two acoustic models that
+share no training data, no label set and no size — a 95 M-parameter LibriSpeech
+character model and a 317 M-parameter multilingual 392-phone model — were each
+asked to place the *same* known text, and their word starts compared. No human
+marked anything.
+
+| Material | n | median difference | within 100 ms |
+|---|---|---|---|
+| sung vocal | 51 | **20 ms** | 45 of 51 (88 %) |
+| spoken control | 22 | **20 ms** | 20 of 22 (91 %) |
+
+Two exact controls back it up with no ground truth at all: inserting exactly
+1.000 s of silence moved every later word by exactly 1.000 s (14 of 14 sung,
+15 of 15 spoken, maximum error 0.000 s — the aligner is not drifting), and all
+51 sung and 22 spoken word spans sat above a −25 dB-relative floor, so no word
+was placed on silence.
+
+**What this number is not.** It is n = 51 words, one performance, one singer.
+The two models disagree by more than 100 ms on 8 of the 51, and every one of
+those is a short function word or a vowel-initial word, which is where both
+models are weakest. The same investigation also produced figures against a
+hand-marked ground truth (median 28 ms sung, 36 ms spoken); **those are
+deliberately not quoted anywhere in the app**, because the person marking them
+could not listen to the audio, so word boundaries in legato singing that carry
+no amplitude, spectral-flux or pitch cue are simply absent from that ground
+truth — which can only inflate the result.
+
+**Audio longer than 30 seconds is aligned in several passes.** The host's
+inference chunk is 30 s, which is where its working set stays comparable to the
+app's other models (a single 180 s pass peaked at 7.6 GB and 600 s failed
+outright). Chunking perturbs the whole grid rather than its edges, because
+attention is global: measured against a single-pass reference over 197 words,
+about one word start in six differs, by up to 40 ms — the same order as the
+aligner's own precision. Audio that fits in one chunk is bit-identical to a
+single pass (0 of 73 onsets moved). Carrying context on either side of a chunk
+was measured at 0, 0.5, 1, 2 and 4 seconds and was no better, and worse on the
+worst case, so it is not carried.
+
+## The wrong-lyrics warning is a warning; it neither refuses nor catches everything
+
+**Area:** as above (`LYRICS_MATCH_THRESHOLD` in `src/dsp/ctcAlign.ts`).
+
+**Behavior a user will notice:** paste lyrics that belong to a different song and
+the words are still placed — confidently, and in the wrong places — with a
+warning above them. Occasionally the warning appears on lyrics that *are*
+correct, and occasionally lyrics that are wrong slip through without it.
+
+**Why there is no refusal.** CTC forced alignment has no "could not align"
+outcome. As long as the audio has more frames than the token sequence needs, a
+path exists and the search returns it. The only handle is the path's own score,
+and it is a real one: on the reference sung take the correct lyrics score
+−0.1766 nats/frame against −0.9506 for the *same 51 words shuffled* across five
+fixed seeds — a length-matched control, because a longer wrong text is penalised
+for its length alone.
+
+**Where the threshold came from.** Two files support "a gate is feasible", not an
+operating point, so a bank was built: the real recordings on disk cut into 15
+passages whose text is known for the whole of them, each scored against its own
+text and against length-matched wrong text (the same words under five shuffles,
+another passage's text at the closest word count, and lyrics over material with
+no voice in it) — 16 correct rows and 103 wrong ones. The split is by *material*,
+not by row, and candidate thresholds are midpoints between consecutive
+calibration scores, so no held-out value could be selected.
+
+| statistic | calibration | held out |
+|---|---|---|
+| whole-path score | 8 true / 0 false negatives, 0 false positives | 7 true / **1 false negative**, 1 false positive |
+| **median per-word score** | 8 true / 0 false negatives, 0 false positives | 8 true / **0 false negatives**, 4 false positives |
+
+The median per-word score ships. Its one false negative is the difference: the
+path score's failure is the 142-second reference take, which sings the six lines
+*twice* — the correct lyrics describe half of it, and a mean over every frame
+charges them for the half they do not describe. Telling a user their own correct
+lyrics do not match their own recording is precisely the confident-wrong failure
+this feature exists to avoid.
+
+**What is left, stated:** held-out data is **not separable**. The wrong text
+closest to the line sits 0.09 nats above the correct text furthest from it, and
+four wrong rows pass the chosen threshold — three of them shuffles over the
+two-pass take, where the aligner has seventy spare seconds to hide a wrong word
+order in. A gate that refused would eventually refuse correct work; a gate that
+accepted silently would eventually accept nonsense. So it says what it measured
+and shows the spans anyway.
+
+## A replacement can only be recorded, not imported
+
+**Area:** F6 replace-a-word (`src/dsp/wordSplice.ts`, `src/dsp/chainAnalysis.ts`,
+`src/services/alignLyricsService.ts`).
+
+**Behavior a user will notice:** the Align Lyrics dialog records the replacement
+from the microphone and offers no way to bring one in from a file. (The "Load
+from file…" button beside the lyrics box reads *words*; it never touches audio.)
+
+**Why, and it is a decision rather than an omission.** The splice trims the
+silence around your take using Remove Silence's own rule — the loudest the
+silence detector reads inside the quietest 500 ms of the recording. Finding that
+passage goes through `measureNoiseWindow`, which rejects every window at or below
+digital silence (2⁻¹⁵, one 16-bit LSB), because a window of literal zeros has no
+floor to measure. A recording whose lead-in *is* literal zeros — a DAW bounce, a
+gated export — therefore has no floor window to offer, the function hands back
+the quietest window it could find *containing the word*, the derived threshold
+becomes the word's own envelope peak, and a perfectly good replacement is refused
+as "nothing above its own noise floor".
+
+A live microphone take always carries room tone above digital silence, so the
+shipped path cannot reach this. Offering file import would make it reachable
+immediately, and the honest fix — when the recording contains a 500 ms window at
+or below digital silence, its floor is *below* digital silence and the threshold
+to trim against is that constant itself — is a new threshold path with no
+fixtures and no boundary probes of its own. Shipping the import first would have
+shipped the bug, so the import is not offered.
+
+Recording is also the better answer to the thing the feature is for: a
+replacement sung here **is** your voice, with no provenance to defend.

@@ -55,6 +55,11 @@ import {
   type TranscribeProgress,
 } from './transcribeService';
 import {
+  alignDocumentLyrics,
+  getAlignModelState as readAlignModelState,
+  replaceWord as spliceAlignedWord,
+} from './alignLyricsService';
+import {
   cancelVoiceRun,
   convertDocumentVoice,
   createVoiceProfile,
@@ -312,6 +317,19 @@ export interface TestApi {
   /** Starts a conversion of the ACTIVE document and cancels it after
    * `delayMs`. Proves Cancel against a REAL utility process. */
   convertActiveVoiceThenCancel(profileId: string, delayMs: number): Promise<VoiceConversionSummary>;
+  // --- F6 flows (Align Lyrics) -------------------------------------------
+  getAlignModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  /** Aligns `text` to the ACTIVE document, bypassing AlignLyricsDialog.
+   * Returns scalars and word spans only — no store handles. */
+  alignActiveLyrics(text: string): Promise<AlignLyricsSummary>;
+  /** Records `seconds` from the (fake-device) microphone and KEEPS the buffer
+   * in memory as the pending replacement. Deliberately does NOT create a
+   * document: the shipped dialog does not either, and a hook that did would
+   * be testing a different flow. */
+  recordReplacementSeconds(seconds: number): Promise<{ length: number; sampleRate: number; rms: number }>;
+  /** Splices the buffer `recordReplacementSeconds` captured over the aligned
+   * span of `wordIndex`. */
+  replaceAlignedWord(wordIndex: number): Promise<ReplaceWordSummary>;
   /** Re-clusters the active document's stored transcript. Returns the new
    * speaker assignment, or null when there is no transcript. */
   setTranscriptSpeakers(count: number | null): {
@@ -499,6 +517,43 @@ export interface VoiceProfileSummary {
   persistError: string | null;
 }
 
+/** Plain-JSON result of `alignActiveLyrics` (F6). Scalars and spans only. */
+export interface AlignLyricsSummary {
+  ok: boolean;
+  status: string;
+  message: string | null;
+  elapsedMs: number;
+  wordCount: number;
+  droppedWords: string[];
+  verdict: 'match' | 'weak' | null;
+  medianWordScore: number;
+  pathScore: number;
+  chunked: boolean;
+  regionStart: number;
+  regionEnd: number;
+  sampleRate: number;
+  words: { text: string; startSample: number; endSample: number }[];
+}
+
+/** Plain-JSON result of `replaceAlignedWord` (F6). */
+export interface ReplaceWordSummary {
+  ok: boolean;
+  status: string;
+  message: string | null;
+  wordText: string | null;
+  wordStart: number;
+  wordEnd: number;
+  regionStart: number;
+  regionEnd: number;
+  trimmedSamples: number;
+  stretchRatio: number;
+  gainDb: number;
+  pitchShiftSemitones: number;
+  headSeamSamples: number;
+  tailSeamSamples: number;
+  lengthDelta: number;
+}
+
 /** Plain-JSON result of the `convertActiveVoice` hooks. */
 export interface VoiceConversionSummary {
   ok: boolean;
@@ -626,6 +681,14 @@ function activeRms(): number {
   }
   return count > 0 ? Math.sqrt(sum / count) : 0;
 }
+
+/**
+ * The take `recordReplacementSeconds` captured, held in memory until
+ * `replaceAlignedWord` consumes it — the shipped dialog holds it in component
+ * state for the same span, and a hook that landed it as a document instead
+ * would be exercising a flow the app does not have.
+ */
+let pendingReplacement: { channels: Float32Array[]; sampleRate: number } | null = null;
 
 function activeDoc(): AudioDocument | null {
   const s = useAppStore.getState();
@@ -1503,6 +1566,128 @@ export function installTestHooks(): void {
       runVoiceConversionHook(profileId, consentAffirmed, null),
     convertActiveVoiceThenCancel: (profileId, delayMs) =>
       runVoiceConversionHook(profileId, true, delayMs),
+
+    // --- F6 flows (Align Lyrics) ------------------------------------------
+
+    // Whether the 378 MB two-file model set is already on disk. The smoke's
+    // Align Lyrics step is gated on this exactly as the stem, transcription
+    // and voice steps are.
+    getAlignModelState: () => readAlignModelState(),
+
+    alignActiveLyrics: async (text) => {
+      const empty: AlignLyricsSummary = {
+        ok: false,
+        status: 'no-document',
+        message: null,
+        elapsedMs: 0,
+        wordCount: 0,
+        droppedWords: [],
+        verdict: null,
+        medianWordScore: 0,
+        pathScore: 0,
+        chunked: false,
+        regionStart: 0,
+        regionEnd: 0,
+        sampleRate: 0,
+        words: [],
+      };
+      const doc = activeDoc();
+      if (!doc) return empty;
+      const startedAt = Date.now();
+      const result = await alignDocumentLyrics({ docId: doc.id, text });
+      const elapsedMs = Date.now() - startedAt;
+      if (!result.ok) {
+        return { ...empty, status: result.status, message: result.message, elapsedMs };
+      }
+      const a = result.alignment;
+      return {
+        ok: true,
+        status: 'ok',
+        message: null,
+        elapsedMs,
+        wordCount: a.words.length,
+        droppedWords: a.droppedWords,
+        verdict: a.verdict,
+        medianWordScore: a.medianWordScore,
+        pathScore: a.pathScore,
+        chunked: a.chunked,
+        regionStart: a.regionStart,
+        regionEnd: a.regionEnd,
+        sampleRate: a.sampleRate,
+        words: a.words.map((w) => ({ text: w.text, startSample: w.startSample, endSample: w.endSample })),
+      };
+    },
+
+    recordReplacementSeconds: async (seconds) => {
+      const engine = new RecordingEngine();
+      const doc = activeDoc();
+      await engine.start({ channels: 1, sampleRate: doc ? doc.sampleRate : 44100 });
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+      const { channels, sampleRate } = await engine.stop();
+      pendingReplacement = { channels, sampleRate };
+      let sum = 0;
+      let count = 0;
+      for (const ch of channels) {
+        for (let i = 0; i < ch.length; i++) sum += ch[i] * ch[i];
+        count += ch.length;
+      }
+      return {
+        length: channels[0]?.length ?? 0,
+        sampleRate,
+        rms: count > 0 ? Math.sqrt(sum / count) : 0,
+      };
+    },
+
+    replaceAlignedWord: async (wordIndex) => {
+      const empty: ReplaceWordSummary = {
+        ok: false,
+        status: 'no-document',
+        message: null,
+        wordText: null,
+        wordStart: 0,
+        wordEnd: 0,
+        regionStart: 0,
+        regionEnd: 0,
+        trimmedSamples: 0,
+        stretchRatio: 0,
+        gainDb: 0,
+        pitchShiftSemitones: 0,
+        headSeamSamples: 0,
+        tailSeamSamples: 0,
+        lengthDelta: 0,
+      };
+      const doc = activeDoc();
+      if (!doc) return empty;
+      if (!pendingReplacement) return { ...empty, status: 'no-take', message: 'record a replacement first' };
+      const before = doc.channels[0]?.length ?? 0;
+      const result = await spliceAlignedWord({
+        docId: doc.id,
+        wordIndex,
+        replacement: pendingReplacement.channels,
+        replacementSampleRate: pendingReplacement.sampleRate,
+      });
+      if (!result.ok) return { ...empty, status: result.status, message: result.message };
+      pendingReplacement = null;
+      const after = activeDoc();
+      const r = result.report;
+      return {
+        ok: true,
+        status: 'ok',
+        message: null,
+        wordText: result.word.text,
+        wordStart: result.word.startSample,
+        wordEnd: result.word.endSample,
+        regionStart: r.regionStart,
+        regionEnd: r.regionEnd,
+        trimmedSamples: r.trimmedSamples,
+        stretchRatio: r.stretchRatio,
+        gainDb: r.gainDb,
+        pitchShiftSemitones: r.pitchShiftSemitones,
+        headSeamSamples: r.headSeamSamples,
+        tailSeamSamples: r.tailSeamSamples,
+        lengthDelta: (after?.channels[0]?.length ?? 0) - before,
+      };
+    },
 
     setTranscriptSpeakers: (count) => {
       const doc = activeDoc();

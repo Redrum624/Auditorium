@@ -51,6 +51,8 @@ const OUT_AUTOMATION_SESSION = path.join(OUT_DIR, 'automation-session.audm');
 const OUT_SPATIAL_SESSION = path.join(OUT_DIR, 'spatial-session.audm');
 const OUT_TRANSCRIPT_SRT = path.join(OUT_DIR, 'transcript.srt');
 const OUT_VOICE_WAV = path.join(OUT_DIR, 'voice-converted.wav');
+const OUT_ALIGN_BEFORE_WAV = path.join(OUT_DIR, 'align-before.wav');
+const OUT_ALIGN_AFTER_WAV = path.join(OUT_DIR, 'align-after.wav');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -280,6 +282,8 @@ async function main() {
     OUT_FADES_SESSION,
     OUT_FADES_REFERENCE,
     OUT_TRANSCRIPT_SRT,
+    OUT_ALIGN_BEFORE_WAV,
+    OUT_ALIGN_AFTER_WAV,
     SHOT,
   ]) {
     if (fs.existsSync(f)) fs.rmSync(f);
@@ -3433,6 +3437,238 @@ async function main() {
         beforeConvert.docCount < (await page.evaluate(() => window.__test.getStateSummary())).docCount,
         'the session gained documents across the whole step, as expected'
       );
+    }
+
+    // 24) F6 (v1.21) - Align Lyrics, and replacing a word, in the packaged app
+    //
+    // What this discharges that unit tests structurally cannot:
+    //   (a) the acoustic host SPAWNS inside the packaged bundle, receives every
+    //       audio slice and returns a real emission grid. Every alignment test
+    //       in the suite feeds the Viterbi a grid built by construction, so the
+    //       378 MB graph has never once run under asar;
+    //   (b) the word spans it produces are STRUCTURALLY sound - strictly
+    //       ascending, non-overlapping, inside the region - checked by this
+    //       script's arithmetic over the spans the app reports, not by the app;
+    //   (c) a REAL microphone take (Chromium's fake device) is spliced over one
+    //       word and the result re-measured FROM THE WAV THE APP WROTE, decoded
+    //       by this script's own RIFF reader: the file length is unchanged, no
+    //       sample outside the seam-widened region moved by even one bit, every
+    //       sample inside the word did, and the step across each seam is no
+    //       worse than the step a hard cut at the same point would have left.
+    //
+    // GATED ON THE MODEL: the 378 MB two-file set is downloaded on first use
+    // and is never committed, so a machine without it REPORTS a skip.
+    console.log('Align Lyrics (F6): real acoustic host, word spans, replace-a-word seam...');
+    const alignModel0 = await page.evaluate(() => window.__test.getAlignModelState());
+    const alignMb = (alignModel0.expectedBytes / 1e6).toFixed(0);
+    let alignModel = alignModel0;
+    if (!alignModel.downloaded) {
+      const repoDir = path.join(ROOT, 'test-assets', 'models', 'align');
+      if (fs.existsSync(repoDir)) {
+        const userData = await app.evaluate(({ app: electronApp }) => electronApp.getPath('userData'));
+        const destDir = path.join(userData, 'models', 'align');
+        console.log(`  provisioning the align model from test-assets into ${destDir}`);
+        fs.mkdirSync(destDir, { recursive: true });
+        for (const name of fs.readdirSync(repoDir)) {
+          const dest = path.join(destDir, name);
+          if (fs.existsSync(dest)) continue;
+          try {
+            fs.linkSync(path.join(repoDir, name), dest);
+          } catch {
+            fs.copyFileSync(path.join(repoDir, name), dest);
+          }
+        }
+        alignModel = await page.evaluate(() => window.__test.getAlignModelState());
+      }
+    }
+    if (!alignModel.downloaded) {
+      console.log(
+        `Align Lyrics: SKIPPED (REPORTED) - the ${alignMb} MB alignment model is not on this ` +
+          `machine and no valid repo-local copy exists at test-assets/models/align/. Download it ` +
+          `in-app (Effects -> Align Lyrics... -> Download Model) to make this step run.`
+      );
+    } else {
+      // The real sung take and its verbatim lyrics when the machine has them;
+      // otherwise the generated fixture with a short text. The material decides
+      // ONLY whether the lyrics-match verdict is asserted - every structural and
+      // every seam assertion below runs either way, because they are about the
+      // wiring and the splice, not about the accuracy the spike measured.
+      const realTake = path.join(ROOT, 'test-assets', 'P1177605.wav');
+      const haveReal = fs.existsSync(realTake);
+      const alignSource = haveReal ? realTake : LONG70;
+      const alignText = haveReal
+        ? [
+            'You, you stole my heart with grace',
+            "And I don't want you to give it back to me",
+            'Oh, I gotta see you dancing on the edge',
+            'Every time you try to run, I lose my breath',
+            "I don't wanna see you down and far",
+            'Scarlet paintings on the bathroom floor',
+          ].join('\n')
+        : 'one two three four five six';
+      console.log(
+        haveReal
+          ? '  material: the real 142 s solo vocal with its verbatim lyrics'
+          : '  material: the generated fixture (test-assets/P1177605.wav absent) - the lyrics-match verdict is REPORTED, not asserted'
+      );
+
+      await page.evaluate(() => window.__test.setView('waveform'));
+      await page.evaluate((p) => window.__test.openPath(p), alignSource);
+      const alignSrc = await page.evaluate(() => window.__test.getStateSummary());
+
+      // --- (a) the real host ----------------------------------------------
+      const aligned = await page.evaluate((t) => window.__test.alignActiveLyrics(t), alignText);
+      const alignSeconds = aligned.elapsedMs / 1000;
+      const alignAudioSeconds = alignSrc.length / alignSrc.sampleRate;
+      console.log(
+        `  alignActiveLyrics: status=${aligned.status} ${aligned.wordCount} words ` +
+          `(${alignSeconds.toFixed(1)}s for ${alignAudioSeconds.toFixed(1)}s of audio, ` +
+          `${(alignAudioSeconds / alignSeconds).toFixed(2)}x realtime, model load included), ` +
+          `verdict=${aligned.verdict} median word score ${aligned.medianWordScore.toFixed(4)}`
+      );
+      assert(
+        aligned.ok === true,
+        `the real utility process spawned, received every audio slice and returned an emission grid (status ${aligned.status}${aligned.message ? `: ${aligned.message}` : ''})`
+      );
+      const expectedWords = alignText.split(/\s+/).filter(Boolean).length - aligned.droppedWords.length;
+      assert(
+        aligned.wordCount === expectedWords,
+        `every word the alphabet can represent got a position (${aligned.wordCount} === ${expectedWords}, ${aligned.droppedWords.length} dropped)`
+      );
+      assert(
+        aligned.regionStart === 0 && aligned.regionEnd === alignSrc.length,
+        `with no selection the whole file was placed (${aligned.regionStart}..${aligned.regionEnd} of ${alignSrc.length})`
+      );
+
+      // --- (b) the spans, checked by this script ---------------------------
+      let ascending = true;
+      let inside = true;
+      let nonEmpty = true;
+      let prevEnd = aligned.regionStart;
+      for (const w of aligned.words) {
+        if (w.startSample < prevEnd) ascending = false;
+        if (w.endSample <= w.startSample) nonEmpty = false;
+        if (w.startSample < aligned.regionStart || w.endSample > aligned.regionEnd) inside = false;
+        prevEnd = w.endSample;
+      }
+      assert(ascending, 'the word spans are strictly ascending and never overlap - the LAST one included');
+      assert(nonEmpty, 'every word span has a non-zero length');
+      assert(inside, 'every word span lies inside the region that was aligned');
+      const lastWord = aligned.words[aligned.words.length - 1];
+      assert(
+        lastWord.endSample > aligned.words[0].endSample,
+        `the last word lands after the first ("${lastWord.text}" ends at ${lastWord.endSample}, "${aligned.words[0].text}" at ${aligned.words[0].endSample}) - an aligner correct at word 1 and drifting after would still have to get here`
+      );
+      if (haveReal) {
+        assert(
+          aligned.verdict === 'match',
+          `the singer's OWN lyrics over her OWN take read as a match (median word score ${aligned.medianWordScore.toFixed(4)})`
+        );
+      } else {
+        console.log(`  (verdict on the synthetic fixture: ${aligned.verdict} - reported, not asserted)`);
+      }
+
+      // --- (c) replace a word, and measure the seams -----------------------
+      const wroteBefore = await page.evaluate((p) => window.__test.saveActiveAs(p), OUT_ALIGN_BEFORE_WAV);
+      assert(wroteBefore === true, 'the aligned document saved to disk, as the before-picture');
+
+      const takeInfo = await page.evaluate(() => window.__test.recordReplacementSeconds(1.5));
+      console.log(
+        `  recordReplacementSeconds: ${takeInfo.length} samples at ${takeInfo.sampleRate} Hz, RMS ${takeInfo.rms.toFixed(4)}`
+      );
+      assert(takeInfo.rms > 0, 'the fake microphone produced a non-silent take');
+
+      // A word in the middle, so both seams have a real neighbour on the far
+      // side of them rather than the start or the end of the file.
+      const targetIndex = Math.floor(aligned.words.length / 2);
+      const spliced = await page.evaluate((i) => window.__test.replaceAlignedWord(i), targetIndex);
+      console.log(
+        `  replaceAlignedWord(${targetIndex}): status=${spliced.status} word="${spliced.wordText}" ` +
+          `region ${spliced.regionStart}..${spliced.regionEnd}, seams ${spliced.headSeamSamples}/${spliced.tailSeamSamples}, ` +
+          `gain ${spliced.gainDb.toFixed(2)} dB, pitch ${spliced.pitchShiftSemitones.toFixed(2)} st, fit ${spliced.stretchRatio.toFixed(3)}x`
+      );
+      assert(
+        spliced.ok === true,
+        `the splice ran and committed (status ${spliced.status}${spliced.message ? `: ${spliced.message}` : ''})`
+      );
+      assert(
+        spliced.lengthDelta === 0,
+        `the document is EXACTLY the length it was - nothing after the splice moved (delta ${spliced.lengthDelta})`
+      );
+      assert(
+        spliced.regionStart === spliced.wordStart - spliced.headSeamSamples &&
+          spliced.regionEnd === spliced.wordEnd + spliced.tailSeamSamples,
+        'the rewritten region is the word widened by its two seams - the crossfades sit OUTSIDE the word'
+      );
+
+      const wroteAfter = await page.evaluate((p) => window.__test.saveActiveAs(p), OUT_ALIGN_AFTER_WAV);
+      assert(wroteAfter === true, 'the spliced document saved to disk');
+
+      const wavBefore = readWav(OUT_ALIGN_BEFORE_WAV);
+      const wavAfter = readWav(OUT_ALIGN_AFTER_WAV);
+      assert(
+        wavAfter.frames === wavBefore.frames && wavAfter.sampleRate === wavBefore.sampleRate,
+        `the WAV on disk is the same length at the same rate (${wavAfter.frames} frames, ${wavAfter.sampleRate} Hz)`
+      );
+
+      const a0 = wavBefore.channels[0];
+      const a1 = wavAfter.channels[0];
+      let movedOutside = 0;
+      let unchangedInWord = 0;
+      let nonFiniteAfter = 0;
+      for (let i = 0; i < a1.length; i++) {
+        if (!Number.isFinite(a1[i])) nonFiniteAfter++;
+        if (i < spliced.regionStart || i >= spliced.regionEnd) {
+          if (a1[i] !== a0[i]) movedOutside++;
+        } else if (i >= spliced.wordStart && i < spliced.wordEnd && a1[i] === a0[i]) {
+          unchangedInWord++;
+        }
+      }
+      assert(nonFiniteAfter === 0, `every sample on disk is finite (${nonFiniteAfter} non-finite)`);
+      assert(
+        movedOutside === 0,
+        `not one sample outside the rewritten region changed by a single bit (${movedOutside} moved)`
+      );
+      // A handful of coincidental equalities is possible between two unrelated
+      // 32-bit float signals, so the bar is a share rather than zero - but the
+      // old word cannot survive.
+      const wordSamples = spliced.wordEnd - spliced.wordStart;
+      assert(
+        unchangedInWord / wordSamples < 0.01,
+        `the old word is gone: ${wordSamples - unchangedInWord} of ${wordSamples} samples inside it were rewritten`
+      );
+
+      // The seam claim, measured rather than listened to: the step across each
+      // join must be no worse than the step a HARD CUT at the same point would
+      // have left. The cut's step is computed here from the two WAVs - the head
+      // one joins the ORIGINAL sample before the word to the SPLICED sample at
+      // its start, which is exactly what a cut with no blend would produce.
+      const headSeamStep = Math.abs(a1[spliced.wordStart] - a1[spliced.wordStart - 1]);
+      const headCutStep = Math.abs(a1[spliced.wordStart] - a0[spliced.wordStart - 1]);
+      const tailSeamStep = Math.abs(a1[spliced.wordEnd] - a1[spliced.wordEnd - 1]);
+      const tailCutStep = Math.abs(a0[spliced.wordEnd] - a1[spliced.wordEnd - 1]);
+      console.log(
+        `  seam steps: head ${headSeamStep.toExponential(2)} vs a hard cut ${headCutStep.toExponential(2)}, ` +
+          `tail ${tailSeamStep.toExponential(2)} vs ${tailCutStep.toExponential(2)}`
+      );
+      assert(
+        headSeamStep <= headCutStep,
+        `the head seam's step is no worse than a hard cut at the word's start (${headSeamStep.toExponential(2)} <= ${headCutStep.toExponential(2)})`
+      );
+      assert(
+        tailSeamStep <= tailCutStep,
+        `the tail seam's step is no worse than a hard cut at the word's end (${tailSeamStep.toExponential(2)} <= ${tailCutStep.toExponential(2)})`
+      );
+
+      // The alignment survives its own edit: the splice moved no position, so a
+      // SECOND word replaces without re-running a 378 MB model in between.
+      await page.evaluate(() => window.__test.recordReplacementSeconds(1.2));
+      const second = await page.evaluate((i) => window.__test.replaceAlignedWord(i), targetIndex + 1);
+      assert(
+        second.ok === true,
+        `a second word replaces without re-aligning - the spans still describe the audio (status ${second.status}${second.message ? `: ${second.message}` : ''})`
+      );
+      assert(second.lengthDelta === 0, `the second splice is length-preserving too (delta ${second.lengthDelta})`);
     }
 
     console.log('\nSMOKE PASSED');

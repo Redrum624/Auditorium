@@ -414,6 +414,72 @@ is transparent); a move the clamp holds back lands short of the grid, and the
 dialog says how many will before you apply rather than after. Pitch is preserved,
 so the result can still go through Pitch Correct.
 
+### Fixing one word without singing the whole take again
+
+You know which word came out wrong — you can hear it. What you want is to sing
+that one word again and drop it in, not to re-record the line. **Effects → Align
+Lyrics…** is that.
+
+It works from lyrics *you already have*. The model is never asked what was sung;
+it is given the words and asked only where each one is.
+
+1. **Effects → Align Lyrics…**. The first run downloads a 378 MB acoustic model
+   (once, kept with the app's settings).
+2. Paste the lyrics, or press **Load from file…** for a `.txt` / `.lrc`. One line
+   per line of the song — the words are laid out the way you wrote them.
+3. Press **Align**. It runs on the CPU at about 16x realtime, so a three-minute
+   song takes roughly ten seconds. With a selection active, only that selection
+   is placed.
+4. **Click a word to hear exactly that word.** Nothing else plays. Hearing one
+   word in isolation is usually all it takes to decide whether it is the one.
+5. With the word still selected, press **Record replacement** and sing just that
+   word. Press **Stop**.
+6. Press **Replace word**.
+
+What the splice does for you, none of which you have to set:
+
+- The silence around your fresh take is trimmed off, using the same rule Remove
+  Silence uses — the loudest the silence detector reads inside the quietest
+  500 ms of *your recording*.
+- Its level is matched to the word it replaces, and its median pitch is shifted
+  to that word's. (Median pitch, not the contour: the word you are replacing is
+  usually the one that came out wrong, and its melody is not the one to copy.)
+- The take is time-fitted to the span it has to fill, so **no sample position in
+  the document moves** — a backing track still lines up, and every other word's
+  position is still exact, so you can go straight on to the next word without
+  aligning again.
+- The two crossfades sit **outside** the word, not across its edges. The whole of
+  the old word is replaced; none of it is left mixed under the new one.
+
+The dialog reports what it matched — the level correction in dB, the pitch shift
+in semitones, the fit ratio and the two seam lengths — and the whole thing is one
+`Ctrl+Z`.
+
+**What the positions are worth.** Word starts land within a median 20 ms, and
+88 % of them within 100 ms. That is the agreement between two acoustic models
+that share no training data, no label set and no size, measured over 51 sung
+words of one performance by one singer — a number that involves no hand-marking
+at all. Speech is easier: 91 % within 100 ms on the 22-word spoken control, so
+aligning a podcast script against its recording is a real use of this.
+
+**It does not tell you which word is wrong, and that is deliberate.** A
+per-phone pronunciation scorer was built against this same model and measured on
+this same material: it separated the known problem words from the rest at AUC
+0.642 against a chance baseline of 0.500, and it flagged 46 of 51 words. A tool
+that flags nine words in ten while being barely better than a coin toss is worse
+than no tool, so it was cut. Every word in the dialog looks identical until you
+select it.
+
+**If the lyrics don't match, it says so — and still shows you.** Forced alignment
+always returns a position for every word, including when the words are wrong: it
+will place the wrong lyrics confidently in the wrong places. A warning appears
+when the words do not appear to match the audio. It is a warning, never a
+refusal, because the measurement behind it is not clean enough to overrule you —
+the positions are shown either way, and a few clicks tell you which it is.
+
+**Replacements come from the microphone.** There is no "import a replacement from
+a file" button; the take is recorded here, in your own voice.
+
 ### Re-arranging a track to a length (Auto-Remix)
 
 To make a song fit a 2-minute video without time-stretching it:

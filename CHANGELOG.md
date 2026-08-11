@@ -20,6 +20,41 @@ guarantee keeps it 109/109.
 
 ### Added
 
+- **Align Lyrics (`Effects → Align Lyrics…`) — place the words you already have, then replace one of
+  them without redoing the take.** Paste or load the lyrics, and every word gets a position from a
+  wav2vec2 character-CTC forced alignment running locally on the CPU. Click a word to hear exactly
+  that word; pick one, record a fresh take of just that word, and it is spliced in with the silence
+  trimmed off it, its level and median pitch matched to what it replaces, and the crossfades placed
+  OUTSIDE the word span so none of the old word survives under the new one. The splice is
+  length-preserving, so no sample position moves and the next word can be replaced without re-running
+  the model. Why: re-singing one word is the honest answer to "fix this in her own voice" — it *is*
+  her voice, with no cloned-TTS provenance to defend — and it needs no detector. How to use: Detect
+  nothing first; open the dialog, paste the lyrics, press Align, click a word, press Record
+  replacement, then Replace word.
+- **The measured placement accuracy is shipped UI text, in the dialog and in the Vocal Chain stage
+  note.** Word starts land within a median 20 ms and 88 % within 100 ms — the agreement between two
+  acoustic models sharing no training data, label set or size, over 51 sung words of one performance
+  by one singer. The hand-marked figures the same investigation produced (median 28–48 ms) are
+  deliberately **not** quoted anywhere: that ground truth could not include legato word boundaries
+  with no amplitude or F0 cue, which can only inflate them.
+- **A "these lyrics don't appear to match this audio" warning.** CTC forced alignment structurally
+  never says "could not align" — given the wrong lyrics it returns a confident placement of the wrong
+  words. The gate is the median per-word score against a threshold chosen on a held-out bank of 16
+  correct and 103 wrong rows, split by material rather than by row. The median per-word score beat the
+  whole-path score on the case that matters: a take that sings its lyrics twice charges the path score
+  for the half the text does not describe and it lands below the line, and telling a user their own
+  correct lyrics do not match their own recording is exactly the failure this feature exists to avoid.
+  Held-out data is not separable, so it is a **warning and never a refusal** — the positions are shown
+  either way.
+- **An `Align Lyrics` stage in the Vocal Chain**, manual and second in the order, right after Remove
+  DC Offset. Its position is argued from the rules the stages around it already state: a replacement
+  is a fresh microphone take with its own room tone, so it must be in the file before Noise Reduction
+  learns a print and before the compressor, de-esser, EQ and limiter measure what they set themselves
+  from; and it must precede Remove Silence and Align Vocal Timing, which move every sample after the
+  point they edit and would leave the word positions describing audio that has shifted. DC offset
+  still goes first, for the chain's own stated reason — the splice matches level by RMS, and a DC bias
+  inflates that measurement.
+
 - **`requiredJoins` in the remix planner — a pinned splice is guaranteed, for up to four pins.** The
   dynamic program gained a subset axis: its state is now `(source bar, output bar, set of pins
   satisfied)`, so the plan it returns contains every pinned splice or names the ones it could not and
@@ -50,6 +85,20 @@ guarantee keeps it 109/109.
   four and one case where a phrase was repeated an extra time.
 
 ### Fixed
+
+- **A take recorded for one word could be spliced into a different one.** Cause: clicking a word in
+  the Align Lyrics dialog is also how you *listen* to it, so a user holding a recording could move the
+  selection just by auditioning a neighbour, and Replace would then drop that recording on top of the
+  wrong word. Fix: the take carries the word it was recorded for, Replace is enabled only when the two
+  agree, and the dialog says which word the take belongs to. Affects:
+  `src/components/Dialogs/AlignLyricsDialog.tsx`. Found by asserting the Replace invariant across all
+  eight combinations of (take recorded, selection moved after it, audio changed under it) rather than
+  across the three that were obvious.
+- **A stale alignment reported itself as fresh.** Cause: the dialog derived staleness through a
+  `useMemo` keyed on the alignment's version counter, but staleness changes when the *document*
+  changes, so an edit under a finished alignment never re-derived it. Fix: both reads are cheap (a map
+  lookup and an array-identity compare) and now happen every render. Affects:
+  `src/components/Dialogs/AlignLyricsDialog.tsx`.
 
 - **Closes the last outstanding item from the v1.9-era work audit (P2-5).** Its own ruling was "do it
   if real usage ever shows dropped pins; otherwise the preference stands" — superseded, because a
