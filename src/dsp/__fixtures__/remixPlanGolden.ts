@@ -1,37 +1,44 @@
 /**
  * GENERATED FILE -- do not hand-edit the numbers.
  *
- * The auto-remix PLAN golden (R4b, Ruling 4). Every value below was produced
- * by the planner **as it stood at commit `5dfa19d` (v1.20.0), before
- * `requiredJoins` existed** -- extracted with `git show HEAD:src/dsp/
- * remixPlan.ts`, run against the same fixture builders `remixPlan.test.ts`
- * uses, and asserted field-for-field on every run.
+ * The auto-remix PLAN golden (R4b, Ruling 4). Every value below was produced by
+ * the planner **as it stood at commit `5dfa19d`**, i.e. before `requiredJoins` existed, run against the case matrix in
+ * `src/dsp/__fixtures__/remixPlanGoldenSpecs.ts`, and is asserted field-for-field
+ * on every run by `src/dsp/remixPlan.test.ts`.
+ *
+ * REGENERATE (or re-verify the provenance above) with:
+ *
+ *     node scripts/gen-remix-plan-golden.cjs --from=5dfa19d
+ *     node scripts/gen-remix-plan-golden.cjs --from=5dfa19d --check     # diff against this file, non-zero on any difference
+ *
+ * The generator and the case matrix are both COMMITTED, so this file is
+ * reproducible from a clean clone and survives `git clean -fdx`. That is
+ * deliberate: R4b's own headline finding was that the previous pin measurement
+ * (156/156) closed a backlog item for three releases on a rig that was never
+ * committed and could not be re-run. A golden whose generator only exists in
+ * someone's scratch directory repeats that mistake.
  *
  * WHAT THIS PROTECTS. `remixGolden.ts` pins the RENDERED AUDIO of four
- * hand-built plans; it cannot notice a planner that starts choosing a
- * different arrangement, because it never asks the planner for one. R4b adds
- * a `2^K` subset axis to the DP's index arithmetic, shared by the K = 0 path
- * -- so "an empty `requiredJoins` changes nothing" needed to stop being an
- * argument about `* 1` and `+ 0` and become a comparison against numbers
- * produced by code that had never heard of the option. These are those
- * numbers.
+ * hand-built plans; it cannot notice a planner that starts choosing a different
+ * arrangement, because it never asks the planner for one. R4b adds a `2^K`
+ * subset axis to the DP's index arithmetic, shared by the K = 0 path -- so "an
+ * empty `requiredJoins` changes nothing" needed to stop being an argument about
+ * `* 1` and `+ 0` and become a comparison against numbers produced by code
+ * that had never heard of the option. These are those numbers.
  *
- * The eight cases span both fixture builders (uniform and genuinely varying
- * bar lengths), strict and loose mode, `allowRepeats` on and off, roll
- * indices 0-3, `exactLength`, and targets from 0.5x to 2.0x the source --
- * including one case whose optimal plan traverses the SAME join key twice
+ * The eight cases span both fixture builders (uniform and genuinely varying bar
+ * lengths), strict and loose mode, `allowRepeats` on and off, roll indices 0-3,
+ * `exactLength`, and targets from 0.5x to 2.0x the source -- including one case
+ * whose optimal plan traverses the SAME join key twice
  * (`varying-64-loose-roll1-2.00`, joins `34>2, 34>2`), which is also the
  * measured counter-example to implementing `requiredJoins` as a counter.
  *
- * TO REGENERATE (only when a planner output change is genuinely INTENDED --
- * a regeneration is an admission that auto-remix arrangements moved, and
- * belongs in its own commit with the reason): see the generator described in
- * `.superpowers/sdd/task-R4b-report.md`; it extracts the previous planner
- * from git and prints this block.
+ * Regenerating is an ADMISSION that auto-remix arrangements moved, and belongs
+ * in its own commit with the reason.
  */
 
 export interface RemixPlanGoldenCase {
-  /** Matches the `name` in `REMIX_PLAN_GOLDEN_SPECS` in `remixPlan.test.ts`. */
+  /** Matches the `name` in `REMIX_PLAN_GOLDEN_SPECS`. */
   readonly name: string;
   /** `[start, end]` per segment, exact samples. */
   readonly segments: readonly (readonly [number, number])[];

@@ -453,17 +453,41 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     expect(title).toMatch(new RegExp(`${MAX_REQUIRED_JOINS}`));
   });
 
-  it('stops promising the guarantee once the pin count reaches the cap', () => {
+  // The over-cap tooltip is shown FROM the cap onward, so its wording has to
+  // be true at exactly the cap as well as above it. Asserting only the tail of
+  // the sentence is what let "you already have more than 4 pins" ship while
+  // being displayed at exactly 4 — so both assertions below read the WHOLE
+  // string, including the count clause.
+  it('at exactly the cap, says the next pin is the one that cannot be guaranteed — not that you are already over', () => {
     const doc = addRemixDoc();
-    // Six joins, four already pinned — the NEXT pin is the one that cannot be
-    // guaranteed, so the control must say so before it is pressed.
     mockGetSession.mockReturnValue(
-      makeSession(doc.id, SIX_JOINS, { lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS).map((j) => `${j.fromBar}>${j.toBar}`) })
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS).map((j) => `${j.fromBar}>${j.toBar}`),
+      })
     );
 
     render(<RemixPanel />);
     const title = screen.getByRole('button', { name: /^pin edit 5$/i }).getAttribute('title') ?? '';
-    expect(title).toMatch(/strong preferences rather than guarantees/i);
+    expect(title).toBe(
+      `Pin this edit. You already have ${MAX_REQUIRED_JOINS} pins, which is all the planner can guarantee — a ${MAX_REQUIRED_JOINS + 1}th would make every pin a strong preference rather than a guarantee.`
+    );
+    // The claim that is false at exactly the cap must not appear at all.
+    expect(title).not.toMatch(/more than/i);
+  });
+
+  it('above the cap, states the ACTUAL pin count rather than a fixed sentence', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS + 1).map((j) => `${j.fromBar}>${j.toBar}`),
+      })
+    );
+
+    render(<RemixPanel />);
+    const title = screen.getByRole('button', { name: /^pin edit 6$/i }).getAttribute('title') ?? '';
+    expect(title).toBe(
+      `Pin this edit. You already have ${MAX_REQUIRED_JOINS + 1} pins, more than the ${MAX_REQUIRED_JOINS} the planner can guarantee, so pins are currently strong preferences rather than guarantees.`
+    );
   });
 
   it('says PLAINLY when the guarantee is not in force at all', () => {
@@ -483,6 +507,38 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     expect(screen.getByTestId('remix-pins-not-guaranteed')).toHaveTextContent(
       new RegExp(`More than ${MAX_REQUIRED_JOINS} pins`, 'i')
     );
+    expect(screen.getByTestId('remix-pins-not-guaranteed')).toHaveTextContent(
+      new RegExp(`Unpin down to ${MAX_REQUIRED_JOINS}`, 'i')
+    );
+  });
+
+  it('after unpinning back to the cap, the banner stops telling the user to unpin — it describes the arrangement instead', () => {
+    // `toggleLockJoin` does not re-plan, so the plan on screen is still a
+    // preference plan while the pin count is already back inside the cap. The
+    // banner and the pin tooltip must not disagree about the same fact in the
+    // same render.
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS).map((j) => `${j.fromBar}>${j.toBar}`),
+        pinReport: {
+          mode: 'preference',
+          satisfied: [],
+          dropped: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS).map((j) => ({
+            key: `${j.fromBar}>${j.toBar}`,
+            reason: 'not-enforced' as const,
+          })),
+        },
+      })
+    );
+
+    render(<RemixPanel />);
+    const banner = screen.getByTestId('remix-pins-not-guaranteed');
+    // It still warns — the audio on screen really was planned without the
+    // guarantee — but it no longer asks for an unpin that already happened.
+    expect(banner).toHaveTextContent(/was planned with more than 4 pins/i);
+    expect(banner).toHaveTextContent(/Re-roll to re-plan with the guarantee/i);
+    expect(banner).not.toHaveTextContent(new RegExp(`Unpin down to ${MAX_REQUIRED_JOINS}`, 'i'));
   });
 
   it('shows no not-guaranteed banner while the guarantee IS in force', () => {

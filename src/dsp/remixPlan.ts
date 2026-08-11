@@ -823,8 +823,25 @@ function popcount(x: number): number {
  *    answer for the whole call rather than a different answer per length.
  * 2. Per `n`, the cheapest mask of exactly that popcount; ties broken toward
  *    the LOWER mask value, which is the caller's own `requiredJoins` ordering
- *    read as a binary number — an explicit rule, so two equally-large,
- *    equally-cheap satisfiable sets always resolve the same way.
+ *    read as a binary number — so two equally-large, equally-cheap satisfiable
+ *    sets always resolve the same way, and the caller controls which way by
+ *    the order it lists its pins in.
+ *
+ *    HOW that rule is implemented, stated honestly (fix round 1, I4): by the
+ *    ASCENDING `s` loop plus a STRICT `<`, not by an explicit comparison. The
+ *    lower mask is visited first and a later equal cost never displaces it.
+ *    Unlike `relax`'s predecessor tie — where candidates arrive from
+ *    arbitrary `(p,n)` and sweep order genuinely cannot be relied on — the
+ *    masks at one `n` are enumerated by this loop and by nothing else, so the
+ *    ordering is a property of the code you are reading rather than of
+ *    something far away. An explicit `s < mask[n]` term would be unreachable
+ *    for the same reason, and this module does not ship unreachable branches.
+ *
+ *    This is NOT a corner case: `makeUniformAnalysis` gives every legal
+ *    candidate the same join cost, so two distinct masks of equal popcount
+ *    reaching the same `n` at exactly equal cost is the COMMON case there.
+ *    Relaxing the `<` to `<=` flips the winner to the highest mask and turns
+ *    the dedicated tie test red.
  *
  * A length only reachable by dropping a pin therefore becomes unreachable —
  * that is what "hard constraint" means, and it is why `minOutputSample`/
@@ -856,13 +873,14 @@ function reduceTerminal(table: DPTable): TerminalReduction {
       if (numMasks > 1 && popcount(s) !== satisfiedCount) continue;
       const c = cost[base + n * numMasks + s];
       if (!Number.isFinite(c)) continue;
+      // STRICT `<` is the tie rule: `s` ascends, so an equal cost leaves the
+      // lower mask in place. See the doc comment above -- this is load-bearing
+      // and pinned by test, not an accident of loop order that happens to be
+      // acceptable.
       if (c < out[n]) {
         out[n] = c;
         mask[n] = s;
       }
-      // Equal cost keeps the lower `s`, which the ascending sweep already
-      // visited — so no `else` branch is needed and none is written, rather
-      // than a no-op branch that looks like a decision.
     }
   }
 
@@ -1019,11 +1037,11 @@ interface AttemptOk {
    * result, rather than recomputed at every call site. */
   maxBarUse: number;
   /** Bitmask of the `requiredJoins` this path satisfies (R4b). Always `0`
-   * when nothing is required. */
+   * when nothing is required. The only consumer is `buildRequiredReport`,
+   * which reads bit `i` as "pin `i` is in this plan" -- a path sets that bit
+   * exactly when it traverses pin `i`'s edge, so the bit IS the answer and no
+   * set-difference against `joins` is needed. */
   mask: number;
-  /** `popcount(mask)`, hoisted so the guard can compare attempts on pin
-   * satisfaction FIRST without recomputing it. */
-  satisfiedCount: number;
 }
 interface AttemptFail {
   ok: false;
@@ -1096,7 +1114,6 @@ function planOnce(ctx: AttemptContext, penalty: ReadonlyMap<string, number>): At
     maxOutputSample: sel.maxOutputSample,
     maxBarUse: maxBarUsage(countBarUsage(segmentsBar, ctx.M)),
     mask,
-    satisfiedCount: terminal.satisfiedCount,
   };
 }
 
@@ -1151,15 +1168,20 @@ function planWithRepetitionGuard(
     usage = attempt.maxBarUse;
     if (usage <= MAX_USE_COUNT) return attempt;
     const cost = cleanCostOf(attempt.barJoins);
-    // Pin satisfaction outranks repetition (R4b). In practice it never
-    // decides: reachability — and therefore the maximum satisfiable set — is
-    // penalty-independent, so every attempt in this loop reports the same
-    // `satisfiedCount`. It is compared first anyway so the guard can never
-    // become the thing that trades a guaranteed pin for a repetition win.
-    if (
-      attempt.satisfiedCount > best.satisfiedCount ||
-      (attempt.satisfiedCount === best.satisfiedCount && (usage < bestUsage || (usage === bestUsage && cost < bestCost)))
-    ) {
+    // The guard CANNOT trade a guaranteed pin for a repetition win, and it
+    // needs no term of its own to be prevented from it (fix round 1, I3).
+    // Every attempt in this loop differs only in `penalty`, and penalties are
+    // finite additions to edge costs: they change which paths are cheapest,
+    // never which states are REACHABLE. So the maximum satisfiable pin set is
+    // identical in every attempt, `reduceTerminal` restricts every attempt to
+    // masks of that same popcount, and a plan dropping a pin the previous
+    // attempt kept is not a candidate the guard can even see.
+    //
+    // An earlier version compared `satisfiedCount` first as defence in depth.
+    // It was DEAD by exactly the argument above, and this module removed an
+    // identically dead mask term from `relax` in the same task -- shipping the
+    // standard and its violation in one file is worse than shipping neither.
+    if (usage < bestUsage || (usage === bestUsage && cost < bestCost)) {
       best = attempt;
       bestUsage = usage;
       bestCost = cost;

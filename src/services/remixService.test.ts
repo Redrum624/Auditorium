@@ -1332,6 +1332,49 @@ describe('R4b — the guarantee, end to end through the session', () => {
     expect(getRemixSession(remixDocId)!.pinReport?.mode).toBe('preference');
   }, 30000);
 
+  it('Revert to auto CLEARS a preference-mode report — the panel must not warn about pins on a remix with none', async () => {
+    // Fix round 1, C1. `replanAndCommit` assigns `session.lockedJoins` only
+    // AFTER `commitPlan` returns, so a `pinReport` guard reading the session
+    // instead of the plan's own pin set sees the PRE-reset five pins, keeps
+    // the stale `mode: 'preference'` report, and the panel renders "More than
+    // 4 pins… unpin down to 4" on an arrangement with zero pins. That is the
+    // task's own defect pointing the other way: a loudly downgraded guarantee
+    // that is not actually downgraded.
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const session = getRemixSession(remixDocId)!;
+    session.lockedJoins.splice(
+      0,
+      session.lockedJoins.length,
+      ...candidateKeysOf(remixDocId, MAX_REQUIRED_JOINS + 1)
+    );
+    await reRollRemix(remixDocId);
+    // The precondition really holds: this IS a preference-mode plan.
+    expect(getRemixSession(remixDocId)!.pinReport?.mode).toBe('preference');
+
+    await resetRemix(remixDocId);
+
+    const after = getRemixSession(remixDocId)!;
+    expect(after.lockedJoins).toEqual([]);
+    expect(after.lockedJoinsDropped).toEqual([]);
+    expect(after.pinReport).toBeNull();
+  }, 30000);
+
+  it('rejecting the last remaining pin clears the report too — the same stale path, reached differently', async () => {
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const key = keysOf(getRemixSession(remixDocId)!.plan.joins)[0];
+    expect(toggleLockJoin(remixDocId, key)).toMatchObject({ ok: true, locked: true });
+    await reRollRemix(remixDocId);
+    expect(getRemixSession(remixDocId)!.pinReport).not.toBeNull();
+
+    // `rejectJoin` drops any lock on the same key in the same step, so this
+    // re-plans with an EMPTY pin set while the session still holds the old one.
+    await rejectJoin(remixDocId, key);
+
+    const after = getRemixSession(remixDocId)!;
+    expect(after.lockedJoins).toEqual([]);
+    expect(after.pinReport).toBeNull();
+  }, 30000);
+
   it('a fresh session reports no pin state at all — null is not the same as "nothing dropped"', async () => {
     const { remixDocId } = await seedSession(TARGET_2_JOINS);
     expect(getRemixSession(remixDocId)!.pinReport).toBeNull();

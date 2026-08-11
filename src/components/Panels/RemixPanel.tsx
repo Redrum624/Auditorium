@@ -111,8 +111,21 @@ function clock(sample: number, sampleRate: number): string {
  * rather than one fixed sentence — a promise the software sometimes cannot
  * make must not be worded as if it always can. */
 const PIN_TITLE = `Pin this edit: every re-plan and re-roll will keep it. Guaranteed for up to ${MAX_REQUIRED_JOINS} pins; beyond that the planner treats pins as strong preferences and says so.`;
-const PIN_TITLE_OVER_CAP = `Pin this edit. You already have more than ${MAX_REQUIRED_JOINS} pins, so pins are currently strong preferences rather than guarantees.`;
 const UNPIN_TITLE = 'Unpin this edit.';
+
+/**
+ * The tooltip for a pin that would take the count past what can be guaranteed.
+ * A FUNCTION of the current count, not a constant (fix round 1, I1): the
+ * over-cap tooltip is shown from `MAX_REQUIRED_JOINS` pins onward — that is
+ * the point, it has to warn on the button that would become the fifth pin —
+ * so a fixed "you already have more than 4 pins" is literally false in the
+ * commonest case it appears in, at exactly 4.
+ */
+function pinOverCapTitle(count: number): string {
+  return count === MAX_REQUIRED_JOINS
+    ? `Pin this edit. You already have ${MAX_REQUIRED_JOINS} pins, which is all the planner can guarantee — a ${MAX_REQUIRED_JOINS + 1}th would make every pin a strong preference rather than a guarantee.`
+    : `Pin this edit. You already have ${count} pins, more than the ${MAX_REQUIRED_JOINS} the planner can guarantee, so pins are currently strong preferences rather than guarantees.`;
+}
 const PIN_LIMIT_TITLE = `Pin limit reached (${MAX_LOCKED_JOINS} pins) — unpin another edit first.`;
 
 /** Why a specific pin could not be kept, in the user's terms. One sentence per
@@ -269,7 +282,18 @@ export default function RemixPanel() {
   // panel can never claim a mode the planner did not actually use (pins that
   // are rejected or illegal are triaged out first and do not count towards
   // the cap).
+  //
+  // But `toggleLockJoin` deliberately does NOT re-plan (pinning a join already
+  // in the arrangement cannot change that arrangement, and re-rendering would
+  // charge two undo entries for identical audio), so after unpinning, the mode
+  // still describes the plan ON SCREEN while the pin tooltip beside it is
+  // derived live from `lockedKeys.length`. Two controls stating the same fact
+  // differently in one render is the defect, not the lag (fix round 1, I2).
+  // Resolved by saying which is which: the banner has a second wording for
+  // "you have already unpinned; the arrangement showing has not caught up",
+  // so it never tells a user with 4 pins to unpin down to 4.
   const pinsNotGuaranteed = session.pinReport?.mode === 'preference';
+  const pinCountStillOverCap = lockedKeys.length > MAX_REQUIRED_JOINS;
   // Name the specific edits and WHY, grouped by category — "some pins were
   // dropped" is exactly the message this task exists to replace.
   const droppedDetail = (() => {
@@ -363,9 +387,18 @@ export default function RemixPanel() {
 
         {pinsNotGuaranteed && (
           <div data-testid="remix-pins-not-guaranteed" className="text-xs text-[#ffa726]">
-            More than {MAX_REQUIRED_JOINS} pins: the planner cannot guarantee them all, so it is
-            treating every pin as a strong preference. Unpin down to {MAX_REQUIRED_JOINS} to get the
-            guarantee back.
+            {pinCountStillOverCap ? (
+              <>
+                More than {MAX_REQUIRED_JOINS} pins: the planner cannot guarantee them all, so it is
+                treating every pin as a strong preference. Unpin down to {MAX_REQUIRED_JOINS} to get
+                the guarantee back.
+              </>
+            ) : (
+              <>
+                This arrangement was planned with more than {MAX_REQUIRED_JOINS} pins, so its pins
+                are strong preferences. Re-roll to re-plan with the guarantee.
+              </>
+            )}
           </div>
         )}
         {droppedPins > 0 && (
@@ -478,7 +511,7 @@ export default function RemixPanel() {
                         : pinAtCap
                           ? PIN_LIMIT_TITLE
                           : lockedKeys.length >= MAX_REQUIRED_JOINS
-                            ? PIN_TITLE_OVER_CAP
+                            ? pinOverCapTitle(lockedKeys.length)
                             : PIN_TITLE
                     }
                     aria-pressed={locked}

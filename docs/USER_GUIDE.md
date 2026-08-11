@@ -436,10 +436,21 @@ No cost function understands lyrics or phrasing, so some splice will eventually
 be musically wrong even at a low score. Fix it in the **Remix** panel rather
 than by re-tuning: each splice gets a row with a cost-coloured quality dot,
 **Go To** (jump the cursor there), **✕ Reject** (forbid that join and re-plan
-another way to hit the same length), **📌 Pin** (keep it, max 8), **◂ ▸ Nudge**
-(move the edit one bar earlier or later without changing the output length),
-plus **Re-roll** and **Revert to auto**. Every adjustment appears in the
-History panel and steps back with `Ctrl+Z`. If you edit or close the *source*
+another way to hit the same length), **📌 Pin** (keep it — see below),
+**◂ ▸ Nudge** (move the edit one bar earlier or later without changing the
+output length), plus **Re-roll** and **Revert to auto**. Every adjustment
+appears in the History panel and steps back with `Ctrl+Z`.
+
+**Pinning, and where the promise stops.** A pin is a guarantee: a pinned splice
+survives every re-plan and re-roll, or the panel tells you by name why it could
+not — you rejected it, it is not a legal splice for the current phrase and
+repeat settings, or it cannot coexist with the other pins you kept. A rejection
+always wins over a pin. **That guarantee covers up to 4 pins.** You may pin up
+to 8, but from the 5th onward the planner cannot enforce them exactly (the
+search it would need doubles in size and time with every pin), so it falls back
+to treating pins as strong preferences — and says so, both on the pin button
+before you press it and in a note above the list afterwards. Unpin back down to
+4 and re-roll to get the guarantee back. If you edit or close the *source*
 document, the remix session goes stale and read-only — the rendered audio stays
 fully editable, but it can no longer be re-planned against a grid that no
 longer describes the source.

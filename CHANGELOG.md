@@ -46,7 +46,8 @@ guarantee keeps it 109/109.
 - **A pinned splice no longer receives the tie-break cost bonus** it got as a preference. The bonus
   cannot change *whether* a forced splice appears, only how cheap the paths containing it look — and
   a plan that plays the same splice twice would collect it twice. Measured over 102 pin/press cases,
-  keeping it changed the arrangement in 4, and every change was for the worse.
+  keeping it changed the arrangement in 4 of them, for a mean cost increase of 0.144 across those
+  four and one case where a phrase was repeated an extra time.
 
 ### Fixed
 

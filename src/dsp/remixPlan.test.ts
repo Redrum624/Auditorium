@@ -1,227 +1,25 @@
 import { planRemix, MAX_USE_COUNT, MAX_REQUIRED_JOINS, DEFAULT_MAX_REPEAT_FACTOR, _runRemixDPForTest } from './remixPlan';
 import type { PlanRemixOptions, PlanRemixResult, RemixSegment } from './remixPlan';
 import { REMIX_PLAN_GOLDEN } from './__fixtures__/remixPlanGolden';
+// The fixture builders and the golden case matrix are COMMITTED and SHARED
+// with `scripts/gen-remix-plan-golden.cjs` (R4b fix round 1, I7) — a golden
+// whose generator only exists in someone's scratch directory is a number
+// nobody can re-derive, which is the exact weakness this task diagnosed in the
+// old 156-case pin rig.
+import {
+  REMIX_FIXTURE_NUM_BANDS as NUM_BANDS,
+  REMIX_FIXTURE_BEATS_PER_BAR as BEATS_PER_BAR,
+  REMIX_FIXTURE_R_DIMS as R_DIMS,
+  makeUniformAnalysis,
+  makeVaryingAnalysis,
+  makeRichAnalysis,
+  baseOptions,
+  REMIX_PLAN_GOLDEN_SPECS,
+} from './__fixtures__/remixPlanGoldenSpecs';
 import { buildCandidateLists, joinCost, DEFAULT_REMIX_WEIGHTS } from './remixCost';
 import * as remixCostModule from './remixCost';
 import type { RemixAnalysis } from './remixFeatures';
 import { CONFIDENCE_LOW } from './tempoCore';
-
-// ---------------------------------------------------------------------------
-// Hand-built RemixAnalysis fixtures -- driven from a SYNTHETIC sections array
-// plus a STUBBED (hand-controlled) join cost matrix, per the brief, so the
-// search is tested independently of the DSP (T10's `remixCost.test.ts` uses
-// the same approach for `joinCost`/`buildCandidateLists` themselves).
-// ---------------------------------------------------------------------------
-
-const NUM_BANDS = 23; // T9/T10 precedent: never 24, to catch a hardcoded stride
-const BEATS_PER_BAR = 4;
-const R_DIMS = 4 * BEATS_PER_BAR;
-
-interface UniformOverrides {
-  numBars: number;
-  barLen?: number;
-  head?: number;
-  tail?: number;
-  confidence?: number;
-  L?: (i: number) => number;
-  cluster?: Int32Array;
-  transitionSeen?: Set<string>;
-}
-
-/** Uniform bar length (every bar exactly `barLen` samples) -- deliberately
- * simple so expected `outputSample` values for structural tests (feasibility
- * window, out-of-bounds, min-run, determinism, purity, exact mode) can be
- * hand-computed as `head + n*barLen + tail`. The HEADLINE duration-accuracy
- * test below uses a separate, genuinely VARYING-bar-length fixture instead --
- * this one must never be used to assert a duration property that would only
- * hold if the planner assumed uniform spacing. */
-function makeUniformAnalysis(o: UniformOverrides): RemixAnalysis {
-  const { numBars } = o;
-  const barLen = o.barLen ?? 10000;
-  const head = o.head ?? 500;
-  const tail = o.tail ?? 800;
-  const numBoundaries = numBars + 1;
-  const barBoundary = Int32Array.from({ length: numBoundaries }, (_, i) => head + i * barLen);
-  const analyzedEndSample = barBoundary[numBars] + tail;
-  const L = new Float32Array(numBoundaries);
-  if (o.L) for (let i = 0; i < numBoundaries; i++) L[i] = o.L(i);
-
-  return {
-    bpm: 120,
-    confidence: o.confidence ?? 1,
-    beatSamples: Int32Array.from({ length: numBoundaries * BEATS_PER_BAR }, (_, i) => i * (barLen / BEATS_PER_BAR)),
-    salience: 1,
-    peakRatio: 1,
-    ibiCv: 0,
-    truncated: false,
-    analyzedEndSample,
-    odf: new Float32Array(0),
-    periodFrames: 20,
-    decimationFactor: 4,
-    bands: new Float32Array(0),
-    numBands: NUM_BANDS,
-    odfLow: new Float32Array(0),
-    chroma: new Float32Array(0),
-    numChromaFrames: 0,
-    chromaRate: 10,
-    beatsPerBar: BEATS_PER_BAR,
-    downbeatPhase: 0,
-    downbeatConfidence: 0,
-    barBoundary,
-    numBars,
-    T: new Float32Array(numBoundaries * NUM_BANDS),
-    C: new Float32Array(numBoundaries * 12),
-    L,
-    R: new Float32Array(numBoundaries * R_DIMS),
-    S: new Float32Array(numBoundaries * (NUM_BANDS + 12)),
-    cluster: o.cluster ?? Int32Array.from({ length: numBoundaries }, (_, i) => i),
-    transitionSeen: o.transitionSeen ?? new Set<string>(),
-  };
-}
-
-/** Deterministic LCG, verbatim recipe from `remixFeatures.test.ts`/
- * `fft.test.ts:104` -- this repo's own precedent for reproducible synthetic
- * jitter, not a fresh invention. */
-function makeLcg(seed: number): () => number {
-  let s = seed;
-  return () => {
-    s = (s * 1103515245 + 12345) & 0x7fffffff;
-    return s / 0x7fffffff - 0.5;
-  };
-}
-
-/** GENUINELY VARYING bar lengths (a few ms of jitter around a base length,
- * deterministic via an LCG, never uniform) -- for the headline duration-
- * accuracy test, which must never pass merely because the fixture happens to
- * be uniform. */
-function makeVaryingAnalysis(numBars: number): RemixAnalysis {
-  const baseBarLen = 22050; // ~0.5 s at 44.1 kHz
-  const head = 4000;
-  const tail = 3000;
-  const numBoundaries = numBars + 1;
-  const rand = makeLcg(7);
-  const barBoundary = new Int32Array(numBoundaries);
-  barBoundary[0] = head;
-  for (let i = 1; i <= numBars; i++) {
-    const jitter = Math.round(rand() * 400); // +/-200 samples of drift, never 0 for every bar
-    barBoundary[i] = barBoundary[i - 1] + baseBarLen + jitter;
-  }
-  const analyzedEndSample = barBoundary[numBars] + tail;
-
-  return {
-    bpm: 120,
-    confidence: 1,
-    beatSamples: Int32Array.from({ length: numBoundaries * BEATS_PER_BAR }, (_, i) => i * Math.round(baseBarLen / BEATS_PER_BAR)),
-    salience: 1,
-    peakRatio: 1,
-    ibiCv: 0,
-    truncated: false,
-    analyzedEndSample,
-    odf: new Float32Array(0),
-    periodFrames: 20,
-    decimationFactor: 4,
-    bands: new Float32Array(0),
-    numBands: NUM_BANDS,
-    odfLow: new Float32Array(0),
-    chroma: new Float32Array(0),
-    numChromaFrames: 0,
-    chromaRate: 10,
-    beatsPerBar: BEATS_PER_BAR,
-    downbeatPhase: 0,
-    downbeatConfidence: 0,
-    barBoundary,
-    numBars,
-    T: new Float32Array(numBoundaries * NUM_BANDS),
-    C: new Float32Array(numBoundaries * 12),
-    L: new Float32Array(numBoundaries),
-    R: new Float32Array(numBoundaries * R_DIMS),
-    S: new Float32Array(numBoundaries * (NUM_BANDS + 12)),
-    cluster: Int32Array.from({ length: numBoundaries }, () => 0), // one shared cluster
-    transitionSeen: (() => {
-      // Every consecutive AND every phrase-congruent pair "seen" -- a
-      // uniform-cost candidate graph (dStruct===0 everywhere legal) so
-      // selection is driven purely by the feasibility window, isolating the
-      // duration bookkeeping under test from cost-based tie-breaking.
-      const s = new Set<string>();
-      for (let i = 0; i <= numBoundaries; i++) {
-        for (let j = 0; j <= numBoundaries; j++) s.add(`0>0`);
-      }
-      return s;
-    })(),
-  };
-}
-
-/**
- * Varying bar lengths AND a genuinely non-degenerate cost landscape (R4b).
- *
- * `makeUniformAnalysis`/`makeVaryingAnalysis` leave every feature array at
- * zero, so `joinCost` returns the SAME total for every legal candidate and
- * the planner is choosing between equals. That is deliberate for the
- * structural tests (it isolates the feasibility window from cost tie-breaks)
- * and useless for anything that has to observe the planner PREFERRING one
- * arrangement over another. This fills all five feature arrays from the same
- * deterministic LCG so the cost surface has structure, and clusters bars into
- * four sections so `dStruct` varies too.
- */
-function makeRichAnalysis(numBars: number, seed = 7): RemixAnalysis {
-  const baseBarLen = 22050;
-  const head = 4000;
-  const tail = 3000;
-  const nb = numBars + 1;
-  const rand = makeLcg(seed);
-  const barBoundary = new Int32Array(nb);
-  barBoundary[0] = head;
-  for (let i = 1; i <= numBars; i++) barBoundary[i] = barBoundary[i - 1] + baseBarLen + Math.round(rand() * 400);
-  const feature = makeLcg(seed * 13 + 1);
-  const fill = (n: number): Float32Array => {
-    const arr = new Float32Array(n);
-    for (let i = 0; i < n; i++) arr[i] = feature();
-    return arr;
-  };
-
-  return {
-    bpm: 120,
-    confidence: 1,
-    beatSamples: Int32Array.from({ length: nb * BEATS_PER_BAR }, (_, i) => i * Math.round(baseBarLen / BEATS_PER_BAR)),
-    salience: 1,
-    peakRatio: 1,
-    ibiCv: 0,
-    truncated: false,
-    analyzedEndSample: barBoundary[numBars] + tail,
-    odf: new Float32Array(0),
-    periodFrames: 20,
-    decimationFactor: 4,
-    bands: new Float32Array(0),
-    numBands: NUM_BANDS,
-    odfLow: new Float32Array(0),
-    chroma: new Float32Array(0),
-    numChromaFrames: 0,
-    chromaRate: 10,
-    beatsPerBar: BEATS_PER_BAR,
-    downbeatPhase: 0,
-    downbeatConfidence: 0,
-    barBoundary,
-    numBars,
-    T: fill(nb * NUM_BANDS),
-    C: fill(nb * 12),
-    L: fill(nb),
-    R: fill(nb * R_DIMS),
-    S: fill(nb * (NUM_BANDS + 12)),
-    cluster: Int32Array.from({ length: nb }, (_, i) => i % 4),
-    transitionSeen: new Set<string>(),
-  };
-}
-
-function baseOptions(overrides: Partial<PlanRemixOptions>): PlanRemixOptions {
-  return {
-    targetSample: 0,
-    weights: DEFAULT_REMIX_WEIGHTS,
-    phraseBars: 8,
-    strict: true,
-    allowRepeats: false,
-    ...overrides,
-  };
-}
 
 function expectOk(r: PlanRemixResult): asserts r is PlanRemixResult & { ok: true } {
   if (!r.ok) throw new Error(`expected ok:true, got ok:false reason=${r.reason} message=${r.message}`);
@@ -1347,52 +1145,6 @@ describe('lockedJoins — non-degeneracy (fix round 2, measured)', () => {
 // requiredJoins` and the module doc comment's "subset axis" section.
 // ---------------------------------------------------------------------------
 
-/** The golden case matrix. One definition, replayed field-for-field against
- * `REMIX_PLAN_GOLDEN`, which was generated from the planner as it stood
- * BEFORE `requiredJoins` existed (see that file's header). */
-const REMIX_PLAN_GOLDEN_SPECS: { name: string; analysis: () => RemixAnalysis; opts: (a: RemixAnalysis) => PlanRemixOptions }[] = [
-  {
-    name: 'uniform-40-strict-roll0-0.75',
-    analysis: () => makeUniformAnalysis({ numBars: 40 }),
-    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 0.75), strict: true, allowRepeats: true }),
-  },
-  {
-    name: 'uniform-40-loose-roll2-1.40',
-    analysis: () => makeUniformAnalysis({ numBars: 40 }),
-    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.4), strict: false, allowRepeats: true, rollIndex: 2 }),
-  },
-  {
-    name: 'uniform-24-clustered-strict-roll1-1.00',
-    analysis: () => makeUniformAnalysis({ numBars: 24, cluster: Int32Array.from({ length: 25 }, (_, i) => i % 3) }),
-    opts: (a) => baseOptions({ targetSample: a.analyzedEndSample, strict: true, allowRepeats: true, rollIndex: 1 }),
-  },
-  {
-    name: 'varying-48-strict-roll0-0.50',
-    analysis: () => makeVaryingAnalysis(48),
-    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 0.5), strict: true, allowRepeats: true }),
-  },
-  {
-    name: 'varying-48-strict-roll3-1.25',
-    analysis: () => makeVaryingAnalysis(48),
-    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.25), strict: true, allowRepeats: true, rollIndex: 3 }),
-  },
-  {
-    name: 'varying-64-loose-roll1-2.00',
-    analysis: () => makeVaryingAnalysis(64),
-    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 2.0), strict: false, allowRepeats: true, rollIndex: 1 }),
-  },
-  {
-    name: 'varying-64-strict-exact-1.10',
-    analysis: () => makeVaryingAnalysis(64),
-    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 1.1), strict: true, allowRepeats: true, exactLength: true }),
-  },
-  {
-    name: 'uniform-40-strict-norepeat-0.60',
-    analysis: () => makeUniformAnalysis({ numBars: 40 }),
-    opts: (a) => baseOptions({ targetSample: Math.round(a.analyzedEndSample * 0.6), strict: true, allowRepeats: false }),
-  },
-];
-
 describe('requiredJoins — INERTNESS when empty (R4b, Ruling 4)', () => {
   // THE SINGLE MOST IMPORTANT TEST IN R4b. Every other remix golden is
   // downstream of it: the subset axis is shared by the K = 0 path, so "an
@@ -1602,6 +1354,32 @@ describe('requiredJoins — mutually incompatible pins (R4b, Ruling 1)', () => {
       satisfied: ['8>16'],
       dropped: [{ key: '16>24', reason: 'incompatible' }],
     });
+  });
+
+  it('breaks an EXACTLY equal-cost tie toward the lower mask, so the caller controls it by listing order', () => {
+    // `makeUniformAnalysis` gives every legal candidate the same join cost, so
+    // "two distinct masks of equal popcount reaching the same n at exactly
+    // equal cost" is the COMMON case here, not a corner. `8>16` and `16>24`
+    // are mutually exclusive (forward-only jumps), both delete 8 bars, and
+    // both cost 1.05 — so the honoured set is decided purely by
+    // `reduceTerminal`'s tie rule, and by nothing else.
+    const a = makeUniformAnalysis({ numBars: 40 });
+    const first = planRemix(a, { ...norepeat(a, 0.75), requiredJoins: ['8>16', '16>24'] });
+    const second = planRemix(a, { ...norepeat(a, 0.75), requiredJoins: ['16>24', '8>16'] });
+    expectOk(first);
+    expectOk(second);
+
+    // Same cost, same length: nothing but the tie rule separates them.
+    expect(first.totalCost).toBe(second.totalCost);
+    expect(first.outputSample).toBe(second.outputSample);
+
+    // Bit 0 wins in both — i.e. whichever key the caller listed FIRST.
+    expect(first.requiredJoins?.satisfied).toEqual(['8>16']);
+    expect(second.requiredJoins?.satisfied).toEqual(['16>24']);
+    expect(first.joins.map(joinKeyOf)).toEqual(['8>16']);
+    expect(second.joins.map(joinKeyOf)).toEqual(['16>24']);
+    // Relaxing `reduceTerminal`'s `c < out[n]` to `<=` picks the HIGHEST mask
+    // instead and inverts both answers above.
   });
 
   it('collapses duplicate keys instead of spending two bits on one join', () => {

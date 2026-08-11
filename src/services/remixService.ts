@@ -575,10 +575,22 @@ function makeJoinMarkers(docId: string, joinSamples: readonly number[]): Marker[
  * job, and R4b does not move that line, it only corrects the arithmetic on
  * this side of it.
  *
- * `K` is clamped to `MAX_REQUIRED_JOINS` because the planner clamps it too:
- * above the cap it degrades to `lockedJoins` semantics and allocates no
- * subset axis at all, so counting the 8th pin as another doubling would route
- * a table that is not going to exist.
+ * `K` is clamped to `MAX_REQUIRED_JOINS` because that is the largest subset
+ * axis the planner can ever allocate — `1 << MAX_REQUIRED_JOINS` is a true
+ * UPPER BOUND on the table, which is what a routing decision needs.
+ *
+ * It is deliberately NOT clamped to `2^0` above the cap, even though the
+ * planner does degrade to `lockedJoins` semantics there and allocate the
+ * K = 0 table (fix round 1, I6 — the comment here used to give that as the
+ * reason for the clamp, which argues for the opposite clamp). The count
+ * passed in is the RAW pin count, taken before the planner's own triage:
+ * six pins of which two are rejected or congruence-illegal consume four bits,
+ * not zero, so a `2^0` estimate above the cap would under-route exactly the
+ * case that still allocates the biggest table. Over-routing costs a worker
+ * handshake; under-routing freezes the window. The estimate is therefore an
+ * upper bound in both directions, and `plansInWorker` promotion is one-way
+ * anyway, so a shrinking estimate could not demote a session even if it were
+ * right to.
  */
 function dpCells(analysis: RemixAnalysis, maxRepeatFactor: number, requiredCount = 0): number {
   const M = analysis.numBars;
@@ -1008,8 +1020,18 @@ function commitPlan(entry: Entry, plan: RemixPlan, lockedForReport?: readonly st
   // a pure re-render both carry no report, and must not silently clear a real
   // one — but they also cannot invent one, so the previous report stands only
   // when there are still pins to report on.
-  entry.session.pinReport =
-    plan.requiredJoins ?? (entry.session.lockedJoins.length > 0 ? entry.session.pinReport : null);
+  //
+  // `lockedForReport`, NOT `entry.session.lockedJoins` (fix round 1, C1):
+  // `replanAndCommit` assigns the session's `lockedJoins` only AFTER this
+  // function returns, so reading the session here reads the PRE-update set.
+  // "Revert to auto" on a 5-pin preference plan would then keep the stale
+  // report and the panel would say "More than 4 pins… unpin down to 4" on an
+  // arrangement with no pins at all — a loudly downgraded guarantee that is
+  // not actually downgraded, which is the same dishonesty as a silent one
+  // pointing the other way. The line above already reads `lockedForReport`
+  // for exactly this reason.
+  const lockedNow = lockedForReport ?? entry.session.lockedJoins;
+  entry.session.pinReport = plan.requiredJoins ?? (lockedNow.length > 0 ? entry.session.pinReport : null);
   bumpVersion();
   return plan;
 }
@@ -1102,7 +1124,11 @@ export async function createRemixDocument(req: CreateRemixRequest): Promise<Crea
     maxRepeatFactor: req.maxRepeatFactor ?? DEFAULTS.maxRepeatFactor,
   };
 
-  // Routing decision, made ONCE per session — see the module doc comment.
+  // The CREATION-time routing decision, taken at zero pins because a session
+  // is always created without any. It is not the last word: `runPlan` re-takes
+  // it on every subsequent plan, since each pin doubles the table and can
+  // promote the session to a worker mid-life (see the module doc comment,
+  // "A pin is a guarantee, and its cost is a bigger table").
   const plansInWorker = dpCells(analysis, options.maxRepeatFactor) > planWorkerThreshold;
   let planWorker: PlanWorkerHandle | null = null;
   if (plansInWorker) {
