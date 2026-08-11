@@ -1264,6 +1264,35 @@ describe('R4b — worker routing accounts for the 2^K subset axis', () => {
     expect(getRemixSession(remixDocId)!.plansInWorker).toBe(false);
   }, 30000);
 
+  it('promotes at exactly 16x with four pins — the factor is pinned from BELOW as well as above', async () => {
+    // The MIRROR of the clamp probe above, and the reason the pair exists.
+    // Every other probe in this describe is one-sided: they constrain
+    // `f(1) <= 2`, `f(2) > 2` and `f(4) <= 16`, and BOTH `K+1` (5) and `2*K`
+    // (8) satisfy all three. A linear factor promotes a 4-pin session only
+    // from M ~ 129 bars (~4.3 min at 120 BPM) instead of M ~ 72 (~2.4 min),
+    // so every song in that band would run the 13.2x-slower 4-pin DP on the
+    // renderer thread with no progress and no cancel — the exact freeze the
+    // routing exists to prevent. `f(4) >= 16` is what rules those out, and
+    // only this direction can state it.
+    const { remixDocId } = await seedSession(TARGET_2_JOINS);
+    const cells = baseCellsOf(remixDocId);
+    // ONE CELL below the K = MAX_REQUIRED_JOINS table. The K = 0 estimate
+    // (`cells`) is still far under it, so nothing is promoted by the seeding
+    // itself; only the pins can cross this line.
+    _setPlanWorkerThresholdForTest(cells * 2 ** MAX_REQUIRED_JOINS - 1);
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(false);
+    expect(_getRemixPlanWorkerCreateCount()).toBe(0);
+
+    const session = getRemixSession(remixDocId)!;
+    const keys = candidateKeysOf(remixDocId, MAX_REQUIRED_JOINS);
+    expect(keys.length).toBe(MAX_REQUIRED_JOINS);
+    session.lockedJoins.splice(0, session.lockedJoins.length, ...keys);
+    await reRollRemix(remixDocId);
+
+    expect(_getRemixPlanWorkerCreateCount()).toBe(1);
+    expect(getRemixSession(remixDocId)!.plansInWorker).toBe(true);
+  }, 30000);
+
   it('sends pins to the planner as requiredJoins, never as lockedJoins — the wiring, not just the option', async () => {
     _setPlanWorkerThresholdForTest(0);
     const { remixDocId } = await seedSession(TARGET_2_JOINS);
