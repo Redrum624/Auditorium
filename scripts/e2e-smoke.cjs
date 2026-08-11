@@ -1008,6 +1008,94 @@ async function main() {
     // unsaved-changes beforeunload prompt at teardown.
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
 
+    // 11b) F9 — Align Vocal Timing, end to end in the PACKAGED app: detect the
+    // grid, place markers deliberately OFF the beat, then align them onto it.
+    // The three things worth pinning here are the three the unit suite cannot
+    // see through a real window: the region length is preserved exactly (this
+    // warp must never slide what follows it), the markers RIDE the warp (the
+    // effect runner's proportional rule is the identity at equal length, so a
+    // missing remap would leave them where they were), and each anchor ends up
+    // on its beat.
+    console.log('Align Vocal Timing (F9): markers off the beat -> on it...');
+    await page.evaluate((p) => window.__test.openPath(p), BEAT);
+    const alignGrid = await page.evaluate(() => window.__test.detectTempo());
+    console.log(`  detectTempo: ${JSON.stringify(alignGrid)}`);
+    assert(
+      alignGrid.beatCount > 8,
+      `the fixture yields a usable grid (expected > 8 beats, actual ${alignGrid.beatCount})`
+    );
+
+    // Beats are 0.5 s apart at 120 BPM; drop each marker 30 ms LATE of one, far
+    // enough to be a real correction and small enough that the 0.88-1.14x bound
+    // never bites across a half-second span.
+    const alignOffset = Math.round(0.03 * 44100);
+    const alignPlaced = await page.evaluate(
+      (args) => {
+        const grid = window.__test.getBeatGridState();
+        const first = grid.firstBeatSample ?? 0;
+        const spacing = Math.round(0.5 * 44100);
+        const positions = [3, 5, 7, 9].map((k) => first + k * spacing + args.offset);
+        positions.forEach((pos, i) => window.__test.addMarkerToActive(pos, `Syllable ${i + 1}`));
+        return positions;
+      },
+      { offset: alignOffset }
+    );
+    console.log(`  markers placed ${alignOffset} samples late of beats: ${alignPlaced.join(', ')}`);
+
+    const aligned = await page.evaluate(() => window.__test.alignVocalTiming(1, 1));
+    console.log(`  alignVocalTiming: ${JSON.stringify({ ...aligned, markerPositions: undefined })}`);
+    assert(aligned.ok === true, `alignVocalTiming applied (expected ok=true, actual reason=${aligned.reason})`);
+    assert(
+      aligned.anchorCount === alignPlaced.length,
+      `every marker became an anchor (expected ${alignPlaced.length}, actual ${aligned.anchorCount})`
+    );
+    assert(
+      aligned.clampedCount === 0,
+      `a 30 ms move across a half-second span needs no clamping (actual ${aligned.clampedCount})`
+    );
+    assert(
+      aligned.lengthAfter === aligned.lengthBefore,
+      `the region length is preserved EXACTLY (before ${aligned.lengthBefore}, after ${aligned.lengthAfter})`
+    );
+    assert(
+      aligned.markersMoved === alignPlaced.length,
+      `every marker rode the warp (expected ${alignPlaced.length} moved, actual ${aligned.markersMoved}) ` +
+        '— the effect runner proportional remap is the identity at equal length, so 0 here would mean ' +
+        'the markers were left behind by the audio they mark'
+    );
+    // Each anchor should now sit within one WSOLA synthesis hop (20 ms) of the
+    // beat it was snapped to. Measured against the ORIGINAL positions minus the
+    // deliberate offset, which is exactly where the beats were.
+    const alignBeats = alignPlaced.map((pos) => pos - alignOffset);
+    const alignAfter = aligned.markerPositions;
+    const alignTol = Math.round(0.02 * 44100);
+    for (let i = 0; i < alignBeats.length; i++) {
+      const err = Math.abs(alignAfter[i] - alignBeats[i]);
+      assert(
+        err <= alignTol,
+        `syllable ${i + 1} landed on its beat (want ${alignBeats[i]}, got ${alignAfter[i]}, ` +
+          `off by ${err} <= ${alignTol} samples)`
+      );
+      assert(
+        alignAfter[i] !== alignPlaced[i],
+        `syllable ${i + 1} actually moved (still at ${alignPlaced[i]} would mean nothing happened)`
+      );
+    }
+    console.log(
+      `  ok: ${alignBeats.length} syllables pulled from ${alignOffset} samples late onto the beat, ` +
+        `length unchanged at ${aligned.lengthAfter}`
+    );
+
+    // The suggester runs the real detector in the packaged app.
+    const suggested = await page.evaluate(() => window.__test.suggestSyllables(0.5));
+    console.log(`  suggestSyllables: ${JSON.stringify(suggested)}`);
+    assert(
+      suggested !== null && suggested.added > 0,
+      `the onset suggester produced markers in the packaged build (actual ${JSON.stringify(suggested)})`
+    );
+
+    await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
     // 12) v1.5 step C — Auto-Remix (Task T13 acceptance): open the 64 s ABAB
     // fixture and ask for a 32 s arrangement through the real
     // createRemixDocument (analyse -> plan -> render -> new document),

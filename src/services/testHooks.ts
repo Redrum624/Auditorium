@@ -37,6 +37,7 @@ import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { markSavePoint } from './undoHistory';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { applyTempoChange } from './tempoService';
+import { applyTimingAlignment, buildAlignPlan, suggestSyllableMarkers } from './timingAlignService';
 import { createRemixDocument, getRemixSession } from './remixService';
 import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
 import {
@@ -195,6 +196,27 @@ export interface TestApi {
     stale: boolean;
   }>;
   changeTempo(sourceBpm: number, targetBpm: number): Promise<{ ok: boolean; length: number }>;
+  // --- F9 -----------------------------------------------------------------
+  /** Drives Align Vocal Timing end to end for the active document: builds the
+   * plan from the markers already placed and the cached beat grid, then applies
+   * it. Scalars only, per the `getBeatGridState` precedent. */
+  alignVocalTiming(
+    division: number,
+    strength: number
+  ): Promise<{
+    ok: boolean;
+    reason: string | null;
+    anchorCount: number;
+    clampedCount: number;
+    medianOffsetSamples: number;
+    maxOffsetSamples: number;
+    markersMoved: number;
+    lengthBefore: number;
+    lengthAfter: number;
+    markerPositions: number[];
+  }>;
+  /** Runs the onset suggester over the active document's region. */
+  suggestSyllables(sensitivity?: number): { added: number; truncated: boolean; analysedSeconds: number } | null;
   remixToDuration(
     seconds: number,
     opts?: { phraseBars?: number; strict?: boolean }
@@ -1238,6 +1260,49 @@ export function installTestHooks(): void {
       const after = activeDoc();
       return { ok: outcome.ok, length: after ? docLength(after) : 0 };
     },
+
+    // F9. Drives buildAlignPlan + applyTimingAlignment for the active document,
+    // bypassing AlignTimingDialog — so the smoke test exercises the same
+    // service the dialog calls, including the marker remap.
+    alignVocalTiming: async (division, strength) => {
+      const before = activeDoc();
+      const lengthBefore = before ? docLength(before) : 0;
+      const empty = {
+        ok: false,
+        reason: 'no-document',
+        anchorCount: 0,
+        clampedCount: 0,
+        medianOffsetSamples: 0,
+        maxOffsetSamples: 0,
+        markersMoved: 0,
+        lengthBefore,
+        lengthAfter: lengthBefore,
+        markerPositions: [] as number[],
+      };
+      if (!before) return empty;
+
+      const planned = buildAlignPlan({ division, strength });
+      if (!planned.ok) return { ...empty, reason: planned.reason };
+
+      const outcome = await applyTimingAlignment({ plan: planned.plan, strength });
+      const after = activeDoc();
+      return {
+        ok: outcome.ok,
+        reason: outcome.ok ? null : outcome.reason,
+        anchorCount: planned.plan.anchors.length,
+        clampedCount: planned.plan.clampedIndices.length,
+        medianOffsetSamples: planned.plan.medianOffsetSamples,
+        maxOffsetSamples: planned.plan.maxOffsetSamples,
+        markersMoved: outcome.ok ? outcome.markersMoved : 0,
+        lengthBefore,
+        lengthAfter: after ? docLength(after) : 0,
+        markerPositions: (useAppStore.getState().markers[before.id] ?? []).map(
+          (m) => m.positionSample
+        ),
+      };
+    },
+
+    suggestSyllables: (sensitivity) => suggestSyllableMarkers({ sensitivity }),
 
     // Drives the real createRemixDocument (analyse -> plan -> render -> new
     // 'Remix N' document) for the active document, bypassing the Auto-Remix
