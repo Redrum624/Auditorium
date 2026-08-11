@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Pin, X } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
+import { MAX_REQUIRED_JOINS, type RequiredJoinDropReason } from '../../dsp/remixPlan';
 import {
   MAX_LOCKED_JOINS,
   getRemixSession,
@@ -88,6 +89,14 @@ function costTooltip(cost: JoinCostTerms): string {
   return `Join cost ${cost.total.toFixed(2)} = ${terms}`;
 }
 
+/** `26>10` -> `bar 26 → 10`. A dropped pin's join no longer exists in the
+ * plan, so it has no '#k' row number to refer to — bars are the only stable
+ * name it still has, and they are the same numbers the join rows show. */
+function joinLabel(key: string): string {
+  const [from, to] = key.split('>');
+  return `bar ${from} → ${to}`;
+}
+
 /** `m:ss` — the panel's own clock. `formatTime` always carries milliseconds,
  * which is the right resolution for a marker position and the wrong one for an
  * arrangement summary. */
@@ -95,15 +104,26 @@ function clock(sample: number, sampleRate: number): string {
   return formatTime(sample, sampleRate).replace(/\.\d+$/, '');
 }
 
-/** A pin is a STRONG PREFERENCE, never a promise: `remixPlan.ts` has no
- * `requiredJoins` constraint — pinned keys are merely exempted from the
- * re-roll penalty and given a tie-break bonus, so a genuinely cheaper
- * arrangement can still drop one. `session.lockedJoinsDropped` says when that
- * happened. */
-const PIN_TITLE =
-  'Pin this edit: the planner strongly prefers keeping it across re-plans and re-rolls. A pin is a preference, not a guarantee — a much cheaper arrangement can still drop it.';
+/** A pin is a GUARANTEE (R4b): `remixPlan.ts` enforces `requiredJoins` exactly,
+ * with a subset axis on its DP, for up to `MAX_REQUIRED_JOINS` pins. Beyond
+ * that it degrades to the old preference behaviour and SAYS SO
+ * (`session.pinReport.mode`), which is why the wording below is conditional
+ * rather than one fixed sentence — a promise the software sometimes cannot
+ * make must not be worded as if it always can. */
+const PIN_TITLE = `Pin this edit: every re-plan and re-roll will keep it. Guaranteed for up to ${MAX_REQUIRED_JOINS} pins; beyond that the planner treats pins as strong preferences and says so.`;
+const PIN_TITLE_OVER_CAP = `Pin this edit. You already have more than ${MAX_REQUIRED_JOINS} pins, so pins are currently strong preferences rather than guarantees.`;
 const UNPIN_TITLE = 'Unpin this edit.';
 const PIN_LIMIT_TITLE = `Pin limit reached (${MAX_LOCKED_JOINS} pins) — unpin another edit first.`;
+
+/** Why a specific pin could not be kept, in the user's terms. One sentence per
+ * category, because the categories mean genuinely different things and "some
+ * pins were dropped" tells the user nothing they can act on. */
+const PIN_DROP_REASON: Record<RequiredJoinDropReason, string> = {
+  forbidden: 'you rejected this edit, and a rejection wins over a pin',
+  'no-candidate': 'this edit is not a legal splice for the current phrase and repeat settings',
+  incompatible: 'it cannot coexist with the other pins that were kept',
+  'not-enforced': `only ${MAX_REQUIRED_JOINS} pins can be guaranteed at once`,
+};
 
 /** The History cost of an adjustment, stated rather than hidden (plan T15).
  * The count is CONDITIONAL: `commitPlan` pushes the marker entry only when
@@ -244,6 +264,23 @@ export default function RemixPanel() {
   const bpmLabel = analysis.bpm === null ? 'no BPM' : `${Math.round(analysis.bpm)} BPM`;
   const editCount = `${joins.length} ${joins.length === 1 ? 'edit' : 'edits'}`;
   const droppedPins = session.lockedJoinsDropped.length;
+  // The guarantee is only OFF when the planner says so — read from the plan's
+  // own report rather than re-derived from `lockedJoins.length` here, so the
+  // panel can never claim a mode the planner did not actually use (pins that
+  // are rejected or illegal are triaged out first and do not count towards
+  // the cap).
+  const pinsNotGuaranteed = session.pinReport?.mode === 'preference';
+  // Name the specific edits and WHY, grouped by category — "some pins were
+  // dropped" is exactly the message this task exists to replace.
+  const droppedDetail = (() => {
+    const drops = session.pinReport?.dropped ?? [];
+    if (drops.length === 0) return '';
+    const byReason = new Map<RequiredJoinDropReason, string[]>();
+    for (const d of drops) byReason.set(d.reason, [...(byReason.get(d.reason) ?? []), joinLabel(d.key)]);
+    return [...byReason.entries()]
+      .map(([reason, labels]) => `${labels.join(', ')}: ${PIN_DROP_REASON[reason]}`)
+      .join('; ');
+  })();
 
   return (
     <div data-testid="remix-panel" className="flex flex-col text-sm">
@@ -324,10 +361,17 @@ export default function RemixPanel() {
           </div>
         )}
 
+        {pinsNotGuaranteed && (
+          <div data-testid="remix-pins-not-guaranteed" className="text-xs text-[#ffa726]">
+            More than {MAX_REQUIRED_JOINS} pins: the planner cannot guarantee them all, so it is
+            treating every pin as a strong preference. Unpin down to {MAX_REQUIRED_JOINS} to get the
+            guarantee back.
+          </div>
+        )}
         {droppedPins > 0 && (
           <div data-testid="remix-dropped-pins" className="text-xs text-[#ffa726]">
-            {droppedPins} pinned {droppedPins === 1 ? 'edit' : 'edits'} could not be kept — a pin is
-            a preference, not a guarantee.
+            {droppedPins} pinned {droppedPins === 1 ? 'edit' : 'edits'} could not be kept
+            {droppedDetail ? ` — ${droppedDetail}` : ''}.
           </div>
         )}
         {lockNote && (
@@ -428,7 +472,15 @@ export default function RemixPanel() {
                   <button
                     type="button"
                     aria-label={locked ? `Unpin edit ${n}` : `Pin edit ${n}`}
-                    title={locked ? UNPIN_TITLE : pinAtCap ? PIN_LIMIT_TITLE : PIN_TITLE}
+                    title={
+                      locked
+                        ? UNPIN_TITLE
+                        : pinAtCap
+                          ? PIN_LIMIT_TITLE
+                          : lockedKeys.length >= MAX_REQUIRED_JOINS
+                            ? PIN_TITLE_OVER_CAP
+                            : PIN_TITLE
+                    }
                     aria-pressed={locked}
                     disabled={stale || pinAtCap}
                     onClick={() => onToggleLock(key)}

@@ -15,7 +15,7 @@ import {
   type RemixSession,
 } from '../../services/remixService';
 import { DEFAULT_REMIX_WEIGHTS, type JoinCostTerms } from '../../dsp/remixCost';
-import type { RemixJoin } from '../../dsp/remixPlan';
+import { MAX_REQUIRED_JOINS, type RemixJoin } from '../../dsp/remixPlan';
 import type { RemixPlan } from '../../dsp/remixRender';
 import type { RemixAnalysis } from '../../services/tempoAnalysis';
 
@@ -439,24 +439,110 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     );
   });
 
-  it('words the pin control as a preference, never as a guarantee', () => {
+  // R4b: the wording flipped with the mechanism. A pin IS a guarantee now, up
+  // to `MAX_REQUIRED_JOINS`; the panel must promise that, and must stop
+  // promising it in exactly the case where the planner stops delivering it.
+  it('words the pin control as a GUARANTEE below the cap, and names the cap', () => {
     const doc = addRemixDoc();
     mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS));
 
     render(<RemixPanel />);
     const title = screen.getByRole('button', { name: /^pin edit 1$/i }).getAttribute('title') ?? '';
-    expect(title).toMatch(/preference/i);
-    expect(title).toMatch(/not a guarantee/i);
+    expect(title).toMatch(/guaranteed/i);
+    expect(title).not.toMatch(/not a guarantee/i);
+    expect(title).toMatch(new RegExp(`${MAX_REQUIRED_JOINS}`));
   });
 
-  it('says so when the planner could not keep a pin', () => {
+  it('stops promising the guarantee once the pin count reaches the cap', () => {
     const doc = addRemixDoc();
+    // Six joins, four already pinned — the NEXT pin is the one that cannot be
+    // guaranteed, so the control must say so before it is pressed.
     mockGetSession.mockReturnValue(
-      makeSession(doc.id, SIX_JOINS, { lockedJoins: ['16>24', '99>100'], lockedJoinsDropped: ['99>100'] })
+      makeSession(doc.id, SIX_JOINS, { lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS).map((j) => `${j.fromBar}>${j.toBar}`) })
     );
 
     render(<RemixPanel />);
-    expect(screen.getByTestId('remix-dropped-pins')).toHaveTextContent(/1 pinned edit/i);
+    const title = screen.getByRole('button', { name: /^pin edit 5$/i }).getAttribute('title') ?? '';
+    expect(title).toMatch(/strong preferences rather than guarantees/i);
+  });
+
+  it('says PLAINLY when the guarantee is not in force at all', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: SIX_JOINS.map((j) => `${j.fromBar}>${j.toBar}`),
+        pinReport: {
+          mode: 'preference',
+          satisfied: [],
+          dropped: SIX_JOINS.map((j) => ({ key: `${j.fromBar}>${j.toBar}`, reason: 'not-enforced' as const })),
+        },
+      })
+    );
+
+    render(<RemixPanel />);
+    expect(screen.getByTestId('remix-pins-not-guaranteed')).toHaveTextContent(
+      new RegExp(`More than ${MAX_REQUIRED_JOINS} pins`, 'i')
+    );
+  });
+
+  it('shows no not-guaranteed banner while the guarantee IS in force', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: ['16>24'],
+        pinReport: { mode: 'enforced', satisfied: ['16>24'], dropped: [] },
+      })
+    );
+
+    render(<RemixPanel />);
+    expect(screen.queryByTestId('remix-pins-not-guaranteed')).not.toBeInTheDocument();
+  });
+
+  it('names the dropped pin and WHY, per category — never a bare "some pins were dropped"', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: ['16>24', '99>100'],
+        lockedJoinsDropped: ['99>100'],
+        pinReport: {
+          mode: 'enforced',
+          satisfied: ['16>24'],
+          dropped: [{ key: '99>100', reason: 'incompatible' }],
+        },
+      })
+    );
+
+    render(<RemixPanel />);
+    const note = screen.getByTestId('remix-dropped-pins');
+    expect(note).toHaveTextContent(/1 pinned edit/i);
+    expect(note).toHaveTextContent(/bar 99 → 100/);
+    expect(note).toHaveTextContent(/cannot coexist with the other pins/i);
+  });
+
+  it('gives each drop CATEGORY its own explanation, grouped', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: ['99>100', '98>99', '97>98'],
+        lockedJoinsDropped: ['99>100', '98>99', '97>98'],
+        pinReport: {
+          mode: 'enforced',
+          satisfied: [],
+          dropped: [
+            { key: '99>100', reason: 'forbidden' },
+            { key: '98>99', reason: 'no-candidate' },
+            { key: '97>98', reason: 'incompatible' },
+          ],
+        },
+      })
+    );
+
+    render(<RemixPanel />);
+    const note = screen.getByTestId('remix-dropped-pins');
+    expect(note).toHaveTextContent(/you rejected this edit/i);
+    expect(note).toHaveTextContent(/not a legal splice/i);
+    expect(note).toHaveTextContent(/cannot coexist/i);
+    expect(note).toHaveTextContent(/3 pinned edits/i);
   });
 
   it('shows no dropped-pin note when every pin was kept', () => {
