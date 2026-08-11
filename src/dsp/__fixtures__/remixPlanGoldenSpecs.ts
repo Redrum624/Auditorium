@@ -158,17 +158,18 @@ export function makeVaryingAnalysis(numBars: number): RemixAnalysis {
     R: new Float32Array(numBoundaries * R_DIMS),
     S: new Float32Array(numBoundaries * (NUM_BANDS + 12)),
     cluster: Int32Array.from({ length: numBoundaries }, () => 0), // one shared cluster
-    transitionSeen: (() => {
-      // Every consecutive AND every phrase-congruent pair "seen" -- a
-      // uniform-cost candidate graph (dStruct===0 everywhere legal) so
-      // selection is driven purely by the feasibility window, isolating the
-      // duration bookkeeping under test from cost-based tie-breaking.
-      const s = new Set<string>();
-      for (let i = 0; i <= numBoundaries; i++) {
-        for (let j = 0; j <= numBoundaries; j++) s.add(`0>0`);
-      }
-      return s;
-    })(),
+    // EVERY pair "seen", in one key. `structCost` looks transitions up by
+    // CLUSTER id (`${cluster[from]}>${cluster[to]}`), and the line above puts
+    // every bar in cluster 0, so `'0>0'` IS every pair -- a uniform-cost
+    // candidate graph (dStruct === 0 everywhere legal) that leaves selection
+    // to the feasibility window alone, isolating the duration bookkeeping
+    // under test from cost-based tie-breaking.
+    //
+    // This used to be a nested loop over bar indices adding the same constant
+    // key `numBoundaries^2` times: dead code that described a set it did not
+    // build, in the file that is the golden's generator input (fix round 3).
+    // The set it actually built is this one, so no golden moves.
+    transitionSeen: new Set<string>(['0>0']),
   };
 }
 

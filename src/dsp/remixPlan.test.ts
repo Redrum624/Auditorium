@@ -1341,6 +1341,14 @@ describe('requiredJoins — mutually incompatible pins (R4b, Ruling 1)', () => {
   const norepeat = (a: RemixAnalysis, frac: number): PlanRemixOptions =>
     baseOptions({ targetSample: Math.round(a.analyzedEndSample * frac), strict: true, allowRepeats: false });
 
+  /** The `i * 0.05` level ramp with one extra step at bar `at`, which makes
+   * every join landing on or leaving that bar dearer than its neighbours.
+   * The plain ramp cannot separate `1>9` from `2>10` — both span 8 bars, so
+   * both cost the same level jump — and this is the smallest change that
+   * gives one of them a real cost advantage without touching anything else. */
+  const rampWithLevelStepAt = (at: number): RemixAnalysis =>
+    makeUniformAnalysis({ numBars: 40, L: (i) => i * 0.05 + (i === at ? 0.5 : 0) });
+
   it('keeps the larger satisfiable set and NAMES the incompatible pin', () => {
     // With `allowRepeats: false` every jump moves forward, so `8>16` (landing
     // at 24) and `16>24` (landing at 32) can never both occur: after either,
@@ -1401,27 +1409,50 @@ describe('requiredJoins — mutually incompatible pins (R4b, Ruling 1)', () => {
     for (let i = 0; i < 5; i++) expect(planRemix(makeUniformAnalysis({ numBars: 40 }), opts)).toEqual(first);
   });
 
-  it('indexes bits by POSITION, not "always bit 0": with three pins the dropped one can be the FIRST', () => {
+  it('indexes bits by POSITION, not "always bit 0", and it is the COST that picks the honoured pair', () => {
     // `1>9` and `2>10` are mutually incompatible for the same forward-only
     // reason; `24>32` is compatible with either. So the maximum satisfiable
-    // size is 2, and the choice between {1>9, 24>32} and {2>10, 24>32} is
-    // decided on cost — `1>9` is the cheaper of the pair on this loudness
-    // ramp. Listing `2>10` FIRST makes it bit 0, so a "satisfied = bit 0"
-    // implementation would report exactly the wrong answer here.
-    const a = makeUniformAnalysis({ numBars: 40, L: (i) => i * 0.05 });
-    const r = planRemix(a, { ...norepeat(a, 0.6), requiredJoins: ['2>10', '1>9', '24>32'] });
-    expectOk(r);
-    expect(r.requiredJoins?.satisfied).toEqual(['1>9', '24>32']);
-    expect(r.requiredJoins?.dropped).toEqual([{ key: '2>10', reason: 'incompatible' }]);
-    expect(r.joins.map(joinKeyOf)).toEqual(['1>9', '24>32']);
+    // size is 2 and something has to choose between {1>9, 24>32} and
+    // {2>10, 24>32}.
+    //
+    // TWO fixtures, differing ONLY in which of the pair is dearer, because on
+    // one fixture this test cannot tell cost from order (fix round 3). On the
+    // plain `L(i) = i*0.05` ramp both joins span exactly 8 bars, so their
+    // level costs are equal to within float noise (measured: 1.5e-9) and the
+    // honoured pair could as easily have been decided by the listing order —
+    // which is the thing the old comment claimed to have ruled out. One extra
+    // step of level at bar 10 makes `2>10` genuinely dearer, the same step at
+    // bar 9 makes `1>9` dearer, and the honoured pair follows the cost while
+    // the listing order is held FIXED.
+    const dearer210 = rampWithLevelStepAt(10);
+    const dearer19 = rampWithLevelStepAt(9);
+    // The premise, measured here rather than asserted in prose above.
+    const cost = (a: RemixAnalysis, from: number, to: number): number =>
+      joinCost(a, DEFAULT_REMIX_WEIGHTS, 8, from, to).total;
+    expect(cost(dearer210, 1, 9)).toBeLessThan(cost(dearer210, 2, 10));
+    expect(cost(dearer19, 2, 10)).toBeLessThan(cost(dearer19, 1, 9));
 
-    // ...and it is the COST that decides, not the listing order: naming the
-    // same three pins in a different order gives the same honoured set, so
-    // the bit indices are bookkeeping rather than a hidden priority.
-    const swapped = planRemix(a, { ...norepeat(a, 0.6), requiredJoins: ['1>9', '2>10', '24>32'] });
-    expectOk(swapped);
-    expect(swapped.requiredJoins?.satisfied).toEqual(['1>9', '24>32']);
-    expect(swapped.requiredJoins?.dropped).toEqual([{ key: '2>10', reason: 'incompatible' }]);
+    // Same three pins, same order, both times: `2>10` is bit 0, so a
+    // "satisfied = bit 0" implementation reports the wrong answer on the first
+    // fixture, and an "always honour the earliest listed" one on the second.
+    const listed = ['2>10', '1>9', '24>32'];
+    const first = planRemix(dearer210, { ...norepeat(dearer210, 0.6), requiredJoins: listed });
+    expectOk(first);
+    expect(first.requiredJoins?.satisfied).toEqual(['1>9', '24>32']);
+    expect(first.requiredJoins?.dropped).toEqual([{ key: '2>10', reason: 'incompatible' }]);
+    expect(first.joins.map(joinKeyOf)).toEqual(['1>9', '24>32']);
+
+    const second = planRemix(dearer19, { ...norepeat(dearer19, 0.6), requiredJoins: listed });
+    expectOk(second);
+    expect(second.requiredJoins?.satisfied).toEqual(['2>10', '24>32']);
+    expect(second.requiredJoins?.dropped).toEqual([{ key: '1>9', reason: 'incompatible' }]);
+    expect(second.joins.map(joinKeyOf)).toEqual(['2>10', '24>32']);
+
+    // ...and the bit indices really are bookkeeping: naming the same three
+    // pins in a different order changes nothing, on either fixture.
+    const swapped = ['1>9', '2>10', '24>32'];
+    expect(planRemix(dearer210, { ...norepeat(dearer210, 0.6), requiredJoins: swapped })).toEqual(first);
+    expect(planRemix(dearer19, { ...norepeat(dearer19, 0.6), requiredJoins: swapped })).toEqual(second);
   });
 
   it('reports a length that only the pins made unreachable, and says how many were in force', () => {
@@ -1514,7 +1545,12 @@ describe('requiredJoins — the pre-DP categories (R4b, Ruling 2)', () => {
 describe('requiredJoins — the MAX_REQUIRED_JOINS cap (R4b, Ruling 3)', () => {
   const PINS = ['16>8', '32>24', '48>40', '24>16', '40>32'];
 
-  it('is 4 — the panel cap is deliberately higher so the degradation is reachable', () => {
+  it('is 4 — the largest subset axis the memory arithmetic allows', () => {
+    // Named for what it asserts (fix round 3). The relationship the old name
+    // was about — this cap being BELOW the panel's `MAX_LOCKED_JOINS`, which
+    // is what makes the degradation reachable at all — is asserted in
+    // `remixService.test.ts`, where both constants are in scope; importing the
+    // service here would drag the store and the workers into a pure DSP suite.
     expect(MAX_REQUIRED_JOINS).toBe(4);
   });
 
@@ -1605,21 +1641,35 @@ describe('requiredJoins — interaction with lockedJoins and the guard (R4b, Rul
     expect(compared).toBe(3);
   });
 
-  it('a required join is exempt from the re-roll penalty: it survives every roll index', () => {
+  it('a required join survives every roll index, including the rolls that would otherwise have moved it', () => {
+    // NAMED for what it observes (fix round 3). The old name said "is exempt
+    // from the re-roll penalty", which this body cannot see: the hard
+    // constraint puts the pin in the plan at every roll whether or not its
+    // edge is exempt from the penalty. The EXEMPTION is observed by the next
+    // test down, which watches it move the rest of the arrangement.
+    //
+    // What this body does observe — and now asserts, so it is not vacuous —
+    // is that the constraint overrides a genuinely different choice at every
+    // one of these rolls: the unpinned plan at the same roll index does not
+    // contain the key at all.
     const a = makeVaryingAnalysis(64);
     const pin = '16>8';
+    const opts = (rollIndex: number, requiredJoins?: string[]): PlanRemixOptions =>
+      baseOptions({
+        targetSample: Math.round(a.analyzedEndSample * 1.5),
+        strict: true,
+        allowRepeats: true,
+        rollIndex,
+        ...(requiredJoins ? { requiredJoins } : {}),
+      });
     let rolls = 0;
     for (const rollIndex of [0, 1, 2, 3]) {
-      const r = planRemix(
-        a,
-        baseOptions({
-          targetSample: Math.round(a.analyzedEndSample * 1.5),
-          strict: true,
-          allowRepeats: true,
-          rollIndex,
-          requiredJoins: [pin],
-        })
-      );
+      const free = planRemix(a, opts(rollIndex));
+      expectOk(free);
+      // The roll's own choice, which the pin has to override.
+      expect(free.joins.map(joinKeyOf)).not.toContain(pin);
+
+      const r = planRemix(a, opts(rollIndex, [pin]));
       expectOk(r);
       expect(r.joins.map(joinKeyOf)).toContain(pin);
       expect(r.requiredJoins?.dropped).toEqual([]);
@@ -1670,7 +1720,23 @@ describe('requiredJoins — interaction with lockedJoins and the guard (R4b, Rul
     );
     expectOk(r);
     expect(r.joins.map(joinKeyOf)).toContain('16>8');
-    expect(r.maxBarUse).toBeGreaterThan(1);
+    // "Honestly" means: recounted from the CHOSEN path, not from what the
+    // guard hoped to achieve. `toBeGreaterThan(1)` could not tell a plan the
+    // guard fixed from one it did not (fix round 3), which is the whole point
+    // of the comment above — so recount bar usage straight out of `segments`
+    // and require exact agreement, then state the number.
+    const barOf = (sample: number): number => {
+      const bar = a.barBoundary.indexOf(sample);
+      if (bar < 0) throw new Error(`${sample} is not a bar boundary`);
+      return bar;
+    };
+    const use = new Array<number>(a.numBars).fill(0);
+    for (const seg of r.segments) for (let b = barOf(seg.start); b < barOf(seg.end); b++) use[b]++;
+    expect(r.maxBarUse).toBe(Math.max(...use));
+    // And the guard genuinely did NOT fix this one: 5 uses against a
+    // MAX_USE_COUNT of 3. The report says so rather than reporting the bound.
+    expect(r.maxBarUse).toBe(5);
+    expect(r.maxBarUse).toBeGreaterThan(MAX_USE_COUNT);
     expect(r.requiredJoins).toEqual({ mode: 'enforced', satisfied: ['16>8'], dropped: [] });
   });
 });

@@ -1311,6 +1311,16 @@ describe('R4b — worker routing accounts for the 2^K subset axis', () => {
 });
 
 describe('R4b — the guarantee, end to end through the session', () => {
+  it('the panel cap is STRICTLY above the planner cap, so the degradation is reachable at all', () => {
+    // The cross-module relationship both constants' doc comments are about,
+    // asserted where both are in scope (fix round 3 — nothing asserted it
+    // anywhere). Lowering MAX_LOCKED_JOINS to 4 would make the guarantee
+    // unconditional and silently delete every test below that exercises the
+    // preference mode through the session; raising MAX_REQUIRED_JOINS to 8
+    // would allocate a 256x DP table. The gap between them IS the feature.
+    expect(MAX_REQUIRED_JOINS).toBeLessThan(MAX_LOCKED_JOINS);
+  });
+
   it('keeps a pinned join across a re-roll and reports it satisfied', async () => {
     const { remixDocId } = await seedSession(TARGET_2_JOINS);
     const key = keysOf(getRemixSession(remixDocId)!.plan.joins)[0];
