@@ -104,29 +104,57 @@ function clock(sample: number, sampleRate: number): string {
   return formatTime(sample, sampleRate).replace(/\.\d+$/, '');
 }
 
-/** A pin is a GUARANTEE (R4b): `remixPlan.ts` enforces `requiredJoins` exactly,
- * with a subset axis on its DP, for up to `MAX_REQUIRED_JOINS` pins. Beyond
- * that it degrades to the old preference behaviour and SAYS SO
- * (`session.pinReport.mode`), which is why the wording below is conditional
- * rather than one fixed sentence — a promise the software sometimes cannot
- * make must not be worded as if it always can. */
-const PIN_TITLE = `Pin this edit: every re-plan and re-roll will keep it. Guaranteed for up to ${MAX_REQUIRED_JOINS} pins; beyond that the planner treats pins as strong preferences and says so.`;
 const UNPIN_TITLE = 'Unpin this edit.';
+const PIN_LIMIT_TITLE = `Pin limit reached (${MAX_LOCKED_JOINS} pins) — unpin another edit first.`;
 
 /**
- * The tooltip for a pin that would take the count past what can be guaranteed.
- * A FUNCTION of the current count, not a constant (fix round 1, I1): the
- * over-cap tooltip is shown from `MAX_REQUIRED_JOINS` pins onward — that is
- * the point, it has to warn on the button that would become the fifth pin —
- * so a fixed "you already have more than 4 pins" is literally false in the
- * commonest case it appears in, at exactly 4.
+ * The pin control's tooltip. A FUNCTION of BOTH the live pin count AND whether
+ * the plan on screen was actually made under the guarantee — never of one
+ * alone, and the phrase "strong preference" appears in exactly the two states
+ * where the `remix-pins-not-guaranteed` banner also appears. That is the
+ * invariant a test asserts directly: banner and tooltip, one render, same
+ * answer.
+ *
+ * COUNT ALONE WAS WRONG THREE TIMES, each one state further in:
+ *
+ * 1. (fix round 1, I1) A fixed "you already have more than 4 pins" was shown
+ *    from `MAX_REQUIRED_JOINS` onward — it has to warn on the button that
+ *    would become the fifth pin — so it was false at exactly 4, its commonest
+ *    case.
+ * 2. (fix round 2, I2) `toggleLockJoin` deliberately does not re-plan, so
+ *    after pin 5 → Re-roll → unpin the live count is back inside the cap while
+ *    the arrangement on screen is still a preference plan. A count-only
+ *    tooltip then said "you have 4 pins, which is all the planner can
+ *    guarantee" — implying those four ARE guaranteed — in the same render as a
+ *    banner saying they are not.
+ * 3. (fix round 2, found by the property test written for 2) The mirror image:
+ *    triage means pins that are rejected or not a legal splice consume no
+ *    guarantee slot, so SIX pins can be fully enforced. A count-only over-cap
+ *    tooltip told those users their pins were "currently strong preferences"
+ *    while the planner had enforced every one of them and the banner was
+ *    correctly absent.
+ *
+ * The lesson is in the shape rather than the strings: a fact the planner
+ * decides must not be re-derived in the panel from a proxy, however obvious
+ * the proxy looks.
  */
-function pinOverCapTitle(count: number): string {
-  return count === MAX_REQUIRED_JOINS
-    ? `Pin this edit. You already have ${MAX_REQUIRED_JOINS} pins, which is all the planner can guarantee — a ${MAX_REQUIRED_JOINS + 1}th would make every pin a strong preference rather than a guarantee.`
-    : `Pin this edit. You already have ${count} pins, more than the ${MAX_REQUIRED_JOINS} the planner can guarantee, so pins are currently strong preferences rather than guarantees.`;
+function pinTitle(count: number, plannedWithoutGuarantee: boolean): string {
+  const lead = 'Pin this edit.';
+  if (plannedWithoutGuarantee) {
+    return count > MAX_REQUIRED_JOINS
+      ? `${lead} You already have ${count} pins, more than the ${MAX_REQUIRED_JOINS} the planner can guarantee, so pins are currently strong preferences rather than guarantees.`
+      : `${lead} This arrangement's pins are strong preferences, not guarantees — it was planned with more than ${MAX_REQUIRED_JOINS}. Re-roll to re-plan with the guarantee.`;
+  }
+  if (count > MAX_REQUIRED_JOINS) {
+    // Over the cap and STILL enforced: triage removed enough keys to fit. Say
+    // that rather than the count's usual implication, which is false here.
+    return `${lead} You already have ${count} pins. Only ${MAX_REQUIRED_JOINS} can be guaranteed at once, but pins you rejected or that are not a legal splice do not use a slot — this arrangement's are all enforced. One more pin may tip it over.`;
+  }
+  if (count === MAX_REQUIRED_JOINS) {
+    return `${lead} You already have ${MAX_REQUIRED_JOINS} pins, which is all the planner can guarantee — a ${MAX_REQUIRED_JOINS + 1}th would put every pin beyond what it can enforce.`;
+  }
+  return `${lead} Every re-plan and re-roll will keep it — guaranteed for up to ${MAX_REQUIRED_JOINS} pins; beyond that the planner cannot enforce them all, and says so.`;
 }
-const PIN_LIMIT_TITLE = `Pin limit reached (${MAX_LOCKED_JOINS} pins) — unpin another edit first.`;
 
 /** Why a specific pin could not be kept, in the user's terms. One sentence per
  * category, because the categories mean genuinely different things and "some
@@ -294,6 +322,11 @@ export default function RemixPanel() {
   // so it never tells a user with 4 pins to unpin down to 4.
   const pinsNotGuaranteed = session.pinReport?.mode === 'preference';
   const pinCountStillOverCap = lockedKeys.length > MAX_REQUIRED_JOINS;
+  // `pinsNotGuaranteed` — the planner's own verdict on the plan on screen —
+  // feeds BOTH the banner and the pin tooltip (fix round 2, I2). Neither
+  // re-derives it from the pin count, which is a proxy that disagrees with it
+  // in two reachable states: unpinned-but-not-yet-re-planned, and over the cap
+  // but rescued by triage.
   // Name the specific edits and WHY, grouped by category — "some pins were
   // dropped" is exactly the message this task exists to replace.
   const droppedDetail = (() => {
@@ -510,9 +543,7 @@ export default function RemixPanel() {
                         ? UNPIN_TITLE
                         : pinAtCap
                           ? PIN_LIMIT_TITLE
-                          : lockedKeys.length >= MAX_REQUIRED_JOINS
-                            ? pinOverCapTitle(lockedKeys.length)
-                            : PIN_TITLE
+                          : pinTitle(lockedKeys.length, pinsNotGuaranteed)
                     }
                     aria-pressed={locked}
                     disabled={stale || pinAtCap}

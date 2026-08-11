@@ -799,11 +799,18 @@ interface TerminalReduction {
   /** Best cost per terminal `n` UNDER the constraint, `Infinity` where no
    * mask of the honoured popcount reaches `(M, n)`. */
   cost: Float64Array;
-  /** The mask chosen at each `n`, `0` where unreachable (never read then). */
+  /** The mask chosen at each `n`, `0` where unreachable (never read then).
+   *
+   * There is deliberately NO `satisfiedCount` field beside these two. The
+   * honoured-set SIZE is load-bearing inside `reduceTerminal` (it is the
+   * popcount filter), but outside it the MASK carries the same information in
+   * a more useful form — `buildRequiredReport` needs to know WHICH pins were
+   * honoured, not how many. It was briefly returned here, read only by a guard
+   * comparison that fix round 1 removed as dead; returning it afterwards left
+   * a write-only field, which is the same defect one level up. Removed in fix
+   * round 2 (re-review): removing dead code can create dead code, which is
+   * precisely why this project re-runs its mutation set after a refactor. */
   mask: Int32Array;
-  /** The largest number of required joins any reachable terminal state
-   * satisfies — the size of the honoured set. `0` when nothing is required. */
-  satisfiedCount: number;
 }
 
 function popcount(x: number): number {
@@ -818,9 +825,10 @@ function popcount(x: number): number {
  * fallback — no second mechanism).
  *
  * Two stages, in this order, and the order is the semantics:
- * 1. `satisfiedCount` = the maximum popcount over EVERY reachable terminal
- *    state. This is global, not per-`n`, so "which pins were dropped" is one
- *    answer for the whole call rather than a different answer per length.
+ * 1. `satisfiedCount` (a LOCAL, never returned — see `TerminalReduction`) =
+ *    the maximum popcount over EVERY reachable terminal state. This is global,
+ *    not per-`n`, so "which pins were dropped" is one answer for the whole
+ *    call rather than a different answer per length.
  * 2. Per `n`, the cheapest mask of exactly that popcount; ties broken toward
  *    the LOWER mask value, which is the caller's own `requiredJoins` ordering
  *    read as a binary number — so two equally-large, equally-cheap satisfiable
@@ -848,8 +856,9 @@ function popcount(x: number): number {
  * `maxOutputSample` (and any `'too-short'`/`'too-long'` refusal) are reported
  * UNDER the pins rather than under a plan the caller cannot have.
  *
- * With `numMasks === 1` this is `cost[M*width + n]` copied out, `mask` all
- * zero and `satisfiedCount` 0 — no behaviour and no selection changes.
+ * With `numMasks === 1` this is `cost[M*width + n]` copied out and `mask` all
+ * zero (the popcount filter is skipped entirely) — no behaviour and no
+ * selection changes.
  */
 function reduceTerminal(table: DPTable): TerminalReduction {
   const { M, Nmax, width, numMasks, cost } = table;
@@ -884,7 +893,7 @@ function reduceTerminal(table: DPTable): TerminalReduction {
     }
   }
 
-  return { cost: out, mask, satisfiedCount };
+  return { cost: out, mask };
 }
 
 // ---------------------------------------------------------------------------

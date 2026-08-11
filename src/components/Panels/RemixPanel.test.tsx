@@ -469,17 +469,21 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     render(<RemixPanel />);
     const title = screen.getByRole('button', { name: /^pin edit 5$/i }).getAttribute('title') ?? '';
     expect(title).toBe(
-      `Pin this edit. You already have ${MAX_REQUIRED_JOINS} pins, which is all the planner can guarantee — a ${MAX_REQUIRED_JOINS + 1}th would make every pin a strong preference rather than a guarantee.`
+      `Pin this edit. You already have ${MAX_REQUIRED_JOINS} pins, which is all the planner can guarantee — a ${MAX_REQUIRED_JOINS + 1}th would put every pin beyond what it can enforce.`
     );
     // The claim that is false at exactly the cap must not appear at all.
     expect(title).not.toMatch(/more than/i);
+    // Nor may it claim the pins ALREADY are preferences — the planner enforced
+    // this plan.
+    expect(title).not.toMatch(/strong preference/i);
   });
 
-  it('above the cap, states the ACTUAL pin count rather than a fixed sentence', () => {
+  it('above the cap on a preference plan, states the ACTUAL pin count rather than a fixed sentence', () => {
     const doc = addRemixDoc();
     mockGetSession.mockReturnValue(
       makeSession(doc.id, SIX_JOINS, {
         lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS + 1).map((j) => `${j.fromBar}>${j.toBar}`),
+        pinReport: { mode: 'preference', satisfied: [], dropped: [] },
       })
     );
 
@@ -488,6 +492,34 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     expect(title).toBe(
       `Pin this edit. You already have ${MAX_REQUIRED_JOINS + 1} pins, more than the ${MAX_REQUIRED_JOINS} the planner can guarantee, so pins are currently strong preferences rather than guarantees.`
     );
+  });
+
+  it('above the cap but ENFORCED — triage freed the slots — the tooltip must not call the pins preferences', () => {
+    // The mirror of the round-2 finding, and the one the property test caught:
+    // rejected or illegal pins consume no guarantee slot, so more than
+    // MAX_REQUIRED_JOINS pins can still be fully enforced. A count-only
+    // tooltip told those users their pins were "currently strong preferences"
+    // while the planner had enforced every one and the banner was — correctly
+    // — absent.
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS + 1).map((j) => `${j.fromBar}>${j.toBar}`),
+        pinReport: {
+          mode: 'enforced',
+          satisfied: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS).map((j) => `${j.fromBar}>${j.toBar}`),
+          dropped: [{ key: `${SIX_JOINS[MAX_REQUIRED_JOINS].fromBar}>${SIX_JOINS[MAX_REQUIRED_JOINS].toBar}`, reason: 'no-candidate' }],
+        },
+      })
+    );
+
+    render(<RemixPanel />);
+    const title = screen.getByRole('button', { name: /^pin edit 6$/i }).getAttribute('title') ?? '';
+    expect(title).toMatch(new RegExp(`You already have ${MAX_REQUIRED_JOINS + 1} pins`));
+    expect(title).toMatch(/do not use a slot/i);
+    expect(title).toMatch(/are all enforced/i);
+    expect(title).not.toMatch(/strong preference/i);
+    expect(screen.queryByTestId('remix-pins-not-guaranteed')).not.toBeInTheDocument();
   });
 
   it('says PLAINLY when the guarantee is not in force at all', () => {
@@ -510,6 +542,84 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     expect(screen.getByTestId('remix-pins-not-guaranteed')).toHaveTextContent(
       new RegExp(`Unpin down to ${MAX_REQUIRED_JOINS}`, 'i')
     );
+  });
+
+  // Fix round 2, I2. The banner became mode-aware in round 1; the pin tooltip
+  // did not, so in the ONE state the new banner wording exists for — plan
+  // still `mode: 'preference'`, live pin count back inside the cap — the two
+  // controls stated opposite things about the same arrangement in the same
+  // render. These tests read BOTH elements from ONE render, which is the only
+  // way that class of contradiction is observable at all.
+  const stalePreferenceSession = (docId: string, pinCount: number): RemixSession =>
+    makeSession(docId, SIX_JOINS, {
+      lockedJoins: SIX_JOINS.slice(0, pinCount).map((j) => `${j.fromBar}>${j.toBar}`),
+      pinReport: {
+        mode: 'preference',
+        satisfied: [],
+        dropped: SIX_JOINS.slice(0, pinCount).map((j) => ({
+          key: `${j.fromBar}>${j.toBar}`,
+          reason: 'not-enforced' as const,
+        })),
+      },
+    });
+
+  it('at exactly the cap on a preference plan, the tooltip does NOT imply the current pins are guaranteed', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(stalePreferenceSession(doc.id, MAX_REQUIRED_JOINS));
+
+    render(<RemixPanel />);
+    const title = screen.getByRole('button', { name: /^pin edit 5$/i }).getAttribute('title') ?? '';
+    // It states the fact the banner states, so the two agree in this render...
+    expect(title).toBe(
+      `Pin this edit. This arrangement's pins are strong preferences, not guarantees — it was planned with more than ${MAX_REQUIRED_JOINS}. Re-roll to re-plan with the guarantee.`
+    );
+    // ...and specifically does NOT say "all the planner can guarantee", which
+    // is what implied these four were guaranteed when they were not.
+    expect(title).not.toMatch(/all the planner can guarantee/i);
+  });
+
+  it('below the cap on a preference plan, the tooltip says so too — the same contradiction one count further down', () => {
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(stalePreferenceSession(doc.id, 2));
+
+    render(<RemixPanel />);
+    const title = screen.getByRole('button', { name: /^pin edit 3$/i }).getAttribute('title') ?? '';
+    expect(title).toMatch(/this arrangement's pins are strong preferences, not guarantees/i);
+  });
+
+  it('the banner and the pin tooltip never disagree in one render, at, below or above the cap', () => {
+    // The property, asserted directly rather than inferred from two separate
+    // tests: whenever the banner says this arrangement's pins are strong
+    // preferences, so does every pin tooltip in the same render — and when it
+    // says nothing, no tooltip claims otherwise.
+    let checked = 0;
+    for (const pinCount of [0, 2, MAX_REQUIRED_JOINS, MAX_REQUIRED_JOINS + 1]) {
+      for (const mode of ['enforced', 'preference'] as const) {
+        const doc = addRemixDoc();
+        mockGetSession.mockReturnValue(
+          makeSession(doc.id, SIX_JOINS, {
+            lockedJoins: SIX_JOINS.slice(0, pinCount).map((j) => `${j.fromBar}>${j.toBar}`),
+            pinReport: { mode, satisfied: [], dropped: [] },
+          })
+        );
+
+        const view = render(<RemixPanel />);
+        const banner = view.container.querySelector('[data-testid="remix-pins-not-guaranteed"]');
+        const nextUnpinned = pinCount + 1;
+        const title =
+          view.container
+            .querySelector(`button[aria-label="Pin edit ${nextUnpinned}"]`)
+            ?.getAttribute('title') ?? '';
+        const bannerSaysPreference = /strong preference/i.test(banner?.textContent ?? '');
+        const tooltipSaysPreference = /strong preference/i.test(title);
+
+        expect(title).not.toBe(''); // the row really rendered — not a vacuous pass
+        expect(bannerSaysPreference).toBe(tooltipSaysPreference);
+        checked++;
+        view.unmount();
+      }
+    }
+    expect(checked).toBe(8);
   });
 
   it('after unpinning back to the cap, the banner stops telling the user to unpin — it describes the arrangement instead', () => {
