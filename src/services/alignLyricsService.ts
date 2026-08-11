@@ -60,17 +60,21 @@
  *
  * ## Replacements come from the microphone, and only from the microphone
  *
- * There is no "import a replacement from a file" affordance, and its absence is
- * a decision rather than an omission. `measureNoiseWindow` — which
- * `wordSplice`'s trim derives its threshold from — rejects every window at or
- * below `SILENCE_RMS` (2^-15). A recording whose lead-in is LITERAL ZEROS (a
- * DAW export, a gated bounce) therefore has no floor window to offer, the trim
- * threshold becomes the word's own envelope peak, and a perfectly good
- * replacement is refused as `silent-replacement`. A live microphone take always
- * carries room tone above digital silence, so the shipped path cannot reach it.
- * Fixing it properly means a new threshold path with its own fixtures and its
- * own boundary probes; offering file import first would ship the bug. See
- * `docs/KNOWN_LIMITATIONS.md`.
+ * There is no "import a replacement from a file" affordance. It is a scope
+ * decision, not a technical one: a replacement sung here IS your voice, with no
+ * provenance to defend.
+ *
+ * It USED to be a technical one as well, and that reason is gone.
+ * `measureNoiseWindow` — which `wordSplice`'s trim derives its threshold from —
+ * rejects every window at or below `SILENCE_RMS` (2^-15), so a recording whose
+ * pauses are LITERAL ZEROS (a DAW export, a gated bounce) had no floor window
+ * to offer, the trim threshold became the word's own envelope peak, and a
+ * perfectly good replacement was refused as `silent-replacement`. That was
+ * recorded as unreachable from the live-mic path — wrongly: Chromium's fake
+ * capture device records exactly that shape, and the packaged smoke hit it.
+ * `wordSplice.ts`'s trim now falls back to the absolute digital-silence floor
+ * when the recording's own floor yields nothing, and the refusal is judged
+ * against that absolute floor too.
  *
  * ## Lifetime
  *

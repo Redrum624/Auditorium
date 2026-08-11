@@ -1,7 +1,7 @@
 import { MIN_SEAM_MS, deriveSeamSamples, spliceWord, type WordSpliceRequest } from './wordSplice';
 import { DETECT_RELEASE_MS, SPLICE_XFADE_MS } from './silenceDetect';
 import { MAX_RATIO, MIN_RATIO } from './wsola';
-import { detectPitch } from './pitchDetect';
+import { SILENCE_RMS, detectPitch } from './pitchDetect';
 
 const SR = 44100;
 
@@ -45,6 +45,28 @@ function roomTone(lengthSamples: number, amplitude = 1e-4): Float32Array {
     out[i] = ((s / 0x7fffffff) * 2 - 1) * amplitude;
   }
   return out;
+}
+
+/**
+ * A signal whose every sample has magnitude `amplitude`, so its RMS is
+ * `amplitude` EXACTLY — `sqrt(N * a^2 / N)` with `a` a float32, which for
+ * `a = SILENCE_RMS = 2^-15` is exact in float64 at every step. That is what
+ * lets a fixture sit ON the digital-silence boundary rather than near it: a
+ * noise generator can only be scaled until its RMS is close.
+ *
+ * The sign alternates so the signal carries no DC — a constant `+a` would be a
+ * DC offset, which `spliceWord` removes, and the removal would change the RMS
+ * the boundary is being probed with.
+ */
+function constant(lengthSamples: number, amplitude: number): Float32Array {
+  const out = new Float32Array(lengthSamples);
+  for (let i = 0; i < lengthSamples; i++) out[i] = i % 2 === 0 ? amplitude : -amplitude;
+  return out;
+}
+
+/** Literal zeros — a muted microphone, or a gated DAW bounce. */
+function silence(lengthSamples: number): Float32Array {
+  return new Float32Array(lengthSamples);
 }
 
 /**
@@ -111,11 +133,15 @@ function makeReplacement({
   tailSeconds = 0.6,
   dc = 0,
   channels = 1,
+  /** What the pauses either side of the word are made of. Defaults to the room
+   * tone a microphone actually records; the digital-silence probes below pass a
+   * generator that puts the pause at or under the 16-bit LSB instead. */
+  pad = roomTone as (n: number) => Float32Array,
 } = {}) {
   const mono = concat(
-    roomTone(Math.round(leadSeconds * SR)),
+    pad(Math.round(leadSeconds * SR)),
     tone(Math.round(soundSeconds * SR), freq, amplitude),
-    roomTone(Math.round(tailSeconds * SR))
+    pad(Math.round(tailSeconds * SR))
   );
   if (dc !== 0) for (let i = 0; i < mono.length; i++) mono[i] += dc;
   return Array.from({ length: channels }, () => Float32Array.from(mono));
@@ -455,13 +481,18 @@ describe('spliceWord trimming', () => {
     // own LENGTH is what decides whether the run reaches the bar. That makes
     // the bar reachable from both sides with a one-sample step.
     //
-    // The word span is small so that ~882 trimmed samples is still a fittable
-    // length; with the 0.4 s word used elsewhere it would refuse as unfittable
-    // before the trim's verdict could be read.
-    const word = 2200;
-    const doc = concat(tone(SR, 200), tone(word, 330), tone(SR, 200));
-    const at = (burstSamples: number) =>
-      spliceWord({
+    // What the bar MOVES is the kept span, and by 60x: below it the recording's
+    // own floor yields no run that lasts, the trim falls to the absolute floor —
+    // which this room tone is above from end to end — and the whole 1.2 s is
+    // kept; on it, the burst alone is kept. `word` differs between the two
+    // probes for that reason and that reason only: the time fit has to be able
+    // to express each answer (52 932 samples into a 2 200-sample word is far
+    // outside MIN_RATIO, and 886 into a 20 000-sample word is far outside
+    // MAX_RATIO). `trimmedSamples` is measured before the fit and does not
+    // depend on the document at all.
+    const at = (burstSamples: number, word: number) => {
+      const doc = concat(tone(SR, 200), tone(word, 330), tone(SR, 200));
+      return spliceWord({
         target: [doc],
         startSample: SR,
         endSample: SR + word,
@@ -472,27 +503,74 @@ describe('spliceWord trimming', () => {
         seamSamples: 100,
         matchPitch: false,
       });
+    };
     const minRun = Math.round((DETECT_RELEASE_MS / 1000) * SR);
+    const wholeRecording = 2 * Math.round(0.6 * SR) + 53;
 
-    const below = at(53);
-    expect(below.ok).toBe(false);
-    if (!below.ok) expect(below.reason).toBe('silent-replacement');
+    const below = at(53, 20000);
+    expect(below.ok).toBe(true);
+    if (!below.ok) return;
+    // Everything but the 41 samples the follower takes to climb over one LSB
+    // from a standing start — i.e. nothing was trimmed, because at this bar
+    // there is nothing in the recording that lasts.
+    expect(below.report.trimmedSamples).toBe(wholeRecording - 41);
 
     // One sample more of burst carries the run over the bar. It lands at 886
     // rather than exactly 882 because each extra burst sample also lifts the
     // envelope's peak, which lengthens the release tail — the run steps by ~18
     // samples here, not by 1, so `>= minRun` and `> minRun` are the same rule
     // on any fixture this follower can produce.
-    const on = at(54);
+    const on = at(54, 2200);
     expect(on.ok).toBe(true);
     if (!on.ok) return;
     expect(on.report.trimmedSamples).toBeGreaterThanOrEqual(minRun);
     expect(on.report.trimmedSamples).toBe(886);
+    expect(on.report.trimmedSamples).toBeLessThan(below.report.trimmedSamples / 50);
 
-    const above = at(120);
+    const above = at(120, 2200);
     expect(above.ok).toBe(true);
     if (!above.ok) return;
     expect(above.report.trimmedSamples).toBeGreaterThan(on.report.trimmedSamples);
+  });
+
+  it('trims a recording whose pauses are DIGITAL SILENCE down to the word', () => {
+    // What Chromium's fake capture device records, and what a gated DAW bounce
+    // exports: a real word with literal zeros either side. `measureNoiseWindow`
+    // rejects every window at or below one LSB, so it hands back a window
+    // CONTAINING the word and the recording's own floor comes out at the word's
+    // own envelope peak — nothing clears that, and before the absolute-floor
+    // rung existed this recording was refused as silent.
+    const soundSamples = Math.round(0.4 * SR);
+    const t = makeTarget();
+    const replacement = makeReplacement({ pad: silence });
+    const r = spliceWord(request({ ...t, replacement }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.report.trimSkipped).toBe(false);
+    // The same bound the room-tone trim above is held to: the whole word, plus
+    // the follower's release overhang and nothing else. The recording is 70 560
+    // samples, so "kept everything" — the answer a trim that declined would
+    // give — is nearly three times this upper bound and cannot pass it.
+    expect(r.report.trimmedSamples).toBeGreaterThanOrEqual(soundSamples);
+    expect(r.report.trimmedSamples).toBeLessThan(soundSamples * 1.5);
+    expect(replacement[0].length).toBeGreaterThan(soundSamples * 2.5);
+  });
+
+  it('keeps a recording with no quiet part in it whole, instead of calling it silent', () => {
+    // A word punched in tight, with no room tone either side — one second of
+    // continuous tone. Its quietest 500 ms is exactly as loud as the rest, so
+    // NOTHING in it rises above its own floor and the self-relative rule reads
+    // it as silent. Against the absolute floor it is one unbroken run.
+    const t = makeTarget();
+    const continuous = [tone(Math.round(1.0 * SR), 220, 0.5)];
+    const r = spliceWord(request({ ...t, replacement: continuous }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.report.trimSkipped).toBe(false);
+    // Every sample but the first: `tone` starts at phase 0, so `x[0]` is 0 and
+    // the follower's first output is `(1 - attackCoef) * 0` — the one sample of
+    // this recording that is not above one LSB.
+    expect(r.report.trimmedSamples).toBe(continuous[0].length - 1);
   });
 
   it('declines to trim a recording too short for the noise window it derives its threshold from', () => {
@@ -528,17 +606,64 @@ describe('spliceWord refusals', () => {
     if (!three.ok) expect(three.reason).toBe('channel-mismatch');
   });
 
-  it('refuses a replacement with nothing above its own noise floor', () => {
+  it('refuses a replacement at or below DIGITAL SILENCE, probed one float32 ulp either side', () => {
+    // The boundary is `SILENCE_RMS`, one LSB of 16-bit PCM, and it is probed to
+    // the ulp rather than approached: `constant` puts every sample at the same
+    // magnitude, so the recording's RMS IS that magnitude, exactly, in float64.
+    // The assertion below proves that rather than assuming it.
     const t = makeTarget();
-    const silent = [roomTone(Math.round(1.5 * SR))];
-    const r = spliceWord(request({ ...t, replacement: silent, matchPitch: false }));
-    expect(r.ok).toBe(false);
-    if (!r.ok) expect(r.reason).toBe('silent-replacement');
-    // The TRIM has to be the guard that fires. `silent-replacement` is also
+    const length = Math.round(1.0 * SR);
+    // 2^-15 is a power of two, so its float32 neighbours are 2^-15 + 2^-38
+    // above and 2^-15 - 2^-39 below (the gap halves at the exponent step).
+    const above = Math.fround(SILENCE_RMS + 2 ** -38);
+    const below = Math.fround(SILENCE_RMS - 2 ** -39);
+    expect(above).toBeGreaterThan(SILENCE_RMS);
+    expect(below).toBeLessThan(SILENCE_RMS);
+    expect(rmsOf(constant(length, SILENCE_RMS), 0, length)).toBe(SILENCE_RMS);
+
+    const probe = (replacement: Float32Array) =>
+      spliceWord(request({ ...t, replacement: [replacement], matchPitch: false }));
+
+    // Literal zeros — a muted or unplugged microphone.
+    const zeros = probe(silence(length));
+    expect(zeros.ok).toBe(false);
+    if (!zeros.ok) expect(zeros.reason).toBe('silent-replacement');
+    // The message has to name the ABSOLUTE floor: `silent-replacement` is also
     // reachable from the pitch-shift stage further down, which reports the same
     // reason with a message that would tell this user to re-record something
     // longer — advice that has nothing to do with what went wrong.
-    if (!r.ok) expect(r.message).toContain('noise floor');
+    if (!zeros.ok) expect(zeros.message).toContain('digital silence');
+
+    const under = probe(constant(length, below));
+    expect(under.ok).toBe(false);
+    if (!under.ok) expect(under.reason).toBe('silent-replacement');
+
+    const on = probe(constant(length, SILENCE_RMS));
+    expect(on.ok).toBe(false);
+    if (!on.ok) expect(on.reason).toBe('silent-replacement');
+
+    // One ulp more and the splice runs to completion — the recording is sized
+    // (1.0 s against a 0.4 s word) so the time fit is well inside its range and
+    // the boundary is the only thing deciding refused from spliced.
+    const over = probe(constant(length, above));
+    expect(over.ok).toBe(true);
+    if (!over.ok) return;
+    expect(over.report.stretchRatio).toBeGreaterThan(MIN_RATIO);
+    expect(over.report.stretchRatio).toBeLessThan(MAX_RATIO);
+  });
+
+  it('splices a recording that is nothing but room tone rather than refusing it', () => {
+    // The trade the absolute floor makes, stated as a test so it is a decision
+    // rather than a surprise. Room tone with no word in it is not digital
+    // silence, and NOTHING distinguishes it from a word punched in tight
+    // without inventing a level — so it is spliced, level-matched, and audibly
+    // wrong, which one undo fixes. The self-relative rule refused this one
+    // correctly and refused a good take with it; see `docs/KNOWN_LIMITATIONS.md`.
+    const t = makeTarget();
+    const r = spliceWord(request({ ...t, replacement: [roomTone(Math.round(1.5 * SR))], matchPitch: false }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.report.gainDb).toBeGreaterThan(0);
   });
 
   it('refuses a time fit outside WSOLA\'s ratio range, probed below / on / above', () => {

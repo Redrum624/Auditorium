@@ -108,6 +108,24 @@ makes it reachable.
   changes, so an edit under a finished alignment never re-derived it. Fix: both reads are cheap (a map
   lookup and an array-identity compare) and now happen every render. Affects:
   `src/components/Dialogs/AlignLyricsDialog.tsx`.
+- **A perfectly good replacement recording was refused as silent.** Cause: the splice trimmed the
+  silence off your take against a threshold derived from the take's *own* quietest 500 ms — and that
+  is only a noise floor when the recording has one above digital silence. Two ordinary recordings do
+  not. A take whose pauses are **literal zeros** (a gated interface, a DAW bounce) makes
+  `measureNoiseWindow` reject every quiet window and hand back one *containing the word*, so the
+  threshold becomes the word's own envelope peak: measured on Chromium's fake capture device, a take
+  carrying two full-scale beeps produced a threshold of 0.973 and a longest run of 14 samples against
+  a bar of 960 — refused as silent. And a word **punched in tight**, with no room tone either side,
+  has a quietest 500 ms as loud as everything else: 0 samples of 72 960 rose above it. A self-relative
+  threshold cannot tell "uniformly loud" from "uniformly silent", and it was firing on the wrong one.
+  Fix: the threshold is a two-rung ladder — the recording's own floor when it has one, and digital
+  silence itself (`SILENCE_RMS`, 2⁻¹⁵, the same constant `measureNoiseWindow` already rejects windows
+  at) when that finds nothing; and "silent" is now judged against that absolute floor rather than
+  against the recording's own level. Affects: `src/dsp/wordSplice.ts`. Trade, deliberately this way
+  round: a take that is nothing but room tone is now spliced instead of refused, because nothing
+  separates it from a tight punch-in without inventing a level — a wrong splice costs one undo, a
+  wrong refusal costs a re-recording. Recorded in `docs/KNOWN_LIMITATIONS.md`, which also loses the
+  entry claiming this was unreachable from the microphone path.
 
 - **Closes the last outstanding item from the v1.9-era work audit (P2-5).** Its own ruling was "do it
   if real usage ever shows dropped pins; otherwise the preference stands" — superseded, because a

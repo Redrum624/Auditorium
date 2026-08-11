@@ -874,12 +874,15 @@ describe('replaceWord', () => {
   it('surfaces the splice’s own refusal instead of committing a bad edit', async () => {
     const { docId } = await seedAligned();
     const historyBefore = getHistory(docId).done.length;
-    // Nothing above its own noise floor: `spliceWord` refuses, and the document
-    // must be untouched.
+    // Digital silence — a muted microphone. `spliceWord` refuses, and the
+    // document must be untouched. (Room tone would NOT refuse: the trim judges
+    // silence against the absolute 16-bit LSB, not against the recording's own
+    // level, so a take with a floor above that floor is spliced. See
+    // `wordSplice.ts`.)
     const result = await replaceWord({
       docId,
       wordIndex: 1,
-      replacement: [roomTone(SR, 1e-4, 99)],
+      replacement: [new Float32Array(SR)],
       replacementSampleRate: SR,
     });
     expect(result).toMatchObject({ ok: false, status: 'refused' });

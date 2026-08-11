@@ -541,7 +541,10 @@ describe('AlignLyricsDialog — the Replace state machine', () => {
   it('surfaces the splice’s refusal inline rather than as a native error box', async () => {
     seedDoc();
     const engine = new FakeEngine();
-    engine.result = { channels: [roomTone(SR, 1e-4, 99)], sampleRate: SR };
+    // Digital silence — a muted microphone, the one recording `spliceWord`
+    // refuses. Room tone does NOT refuse: silence is judged against the
+    // absolute 16-bit LSB, not the recording's own level (see `wordSplice.ts`).
+    engine.result = { channels: [new Float32Array(SR)], sampleRate: SR };
     open(engine);
     await settle();
     await alignIn();

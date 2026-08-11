@@ -55,6 +55,7 @@ import { crossfadeGains, type FadeCurve } from './fades';
 import { detectPitch } from './pitchDetect';
 import { envelopeFollower, maxAcrossChannels } from './envelope';
 import { measureNoiseWindow } from './chainAnalysis';
+import { SILENCE_RMS } from './pitchDetect';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS, SPLICE_XFADE_MS } from './silenceDetect';
 import { resampleChannel } from './resample';
 import { MAX_RATIO, MIN_RATIO, timeStretchLinked } from './wsola';
@@ -97,8 +98,9 @@ export interface WordSpliceReport {
   regionEnd: number;
   /** Samples of the replacement kept after silence trimming. */
   trimmedSamples: number;
-  /** True when the recording was too short for the noise window the trim
-   * threshold is derived from, so no trim was attempted. */
+  /** True when no trim was attempted and the whole recording is used, because
+   * the recording offered no threshold to trim against — see
+   * {@link trimSilence}. */
   trimSkipped: boolean;
   /** Net WSOLA ratio applied to reach the target length, after any pitch
    * shift. 1 means the fitted length already matched. */
@@ -217,8 +219,43 @@ function rms(channels: readonly Float32Array[], start: number, end: number): num
  * exactly the cost `silenceDetect.ts` documents for the same follower, and it
  * errs toward keeping sound, never toward clipping it.
  *
- * No qualifying run at all means the recording is its own noise floor from end
- * to end; the empty span returned says so, and the caller refuses.
+ * ## Why the threshold is a LADDER, and not that one number
+ *
+ * The threshold above is the peak of the quietest 500 ms `measureNoiseWindow`
+ * hands back — and that window is the recording's FLOOR only when the recording
+ * HAS one above digital silence. Two recordings break that, and both were
+ * measured on the shipped app rather than imagined:
+ *
+ * - **The pauses are literal zeros.** `measureNoiseWindow` rejects every window
+ *   at or below `SILENCE_RMS` — it must, because an all-zero noise print makes
+ *   Noise Reduction a silent no-op — so it returns the quietest window it could
+ *   find CONTAINING THE SOUND, and the derived threshold becomes the sound's
+ *   own envelope peak. Measured on what the packaged smoke records, Chromium's
+ *   fake capture device: 20 ms full-scale beeps 500 ms apart over literal
+ *   zeros, threshold **0.973**, and the longest of the 8 runs above it **14
+ *   samples** against a bar of 960. A take carrying two FULL-SCALE beeps was
+ *   refused as silent.
+ * - **There is no pause at all** — a word punched in tight, with no room tone
+ *   either side. The quietest 500 ms is then as loud as everything else and
+ *   nothing clears it: measured on 1.52 s of stationary tone, **0 samples of
+ *   72 960** rose above the threshold.
+ *
+ * Both are one mistake: a SELF-RELATIVE threshold cannot tell "uniformly loud"
+ * from "uniformly silent", and it refuses the wrong one. So the threshold is a
+ * two-rung ladder — the recording's own floor when it has one, and digital
+ * silence itself when that finds nothing. `SILENCE_RMS` is not a new number
+ * either: it is the same 2^-15 that `measureNoiseWindow` already rejects
+ * windows at and that `pitchDetect` already gates frames on, restated — one LSB
+ * of 16-bit PCM, the level below which the most common source format cannot
+ * carry anything at all. On the fake-device take the second rung returns the
+ * beeps and nothing else; on the tight punch-in it returns the whole recording,
+ * which is the right answer for a recording with no silence in it.
+ *
+ * Nothing above EITHER rung means this recording offers no threshold to trim
+ * against, so the trim declines and says so — the same answer, for the same
+ * reason, as a recording too short to measure. Whether the recording is SILENT
+ * is a different question, and {@link spliceWord} answers it against an
+ * absolute floor rather than this one.
  */
 function trimSilence(
   channels: readonly Float32Array[],
@@ -226,16 +263,33 @@ function trimSilence(
 ): { start: number; end: number; skipped: boolean } {
   const length = channels[0]?.length ?? 0;
   const noise = measureNoiseWindow(channels as Float32Array[], sampleRate);
-  if (!noise) return { start: 0, end: length, skipped: true };
-  const threshold = Math.pow(10, noise.envelopePeakDb / 20);
-  const env = envelopeFollower(maxAcrossChannels(channels as Float32Array[]), sampleRate, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
-  const minRun = Math.max(1, Math.round((DETECT_RELEASE_MS / 1000) * sampleRate));
+  if (noise) {
+    const env = envelopeFollower(maxAcrossChannels(channels as Float32Array[]), sampleRate, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
+    const minRun = Math.max(1, Math.round((DETECT_RELEASE_MS / 1000) * sampleRate));
+    for (const threshold of [Math.pow(10, noise.envelopePeakDb / 20), SILENCE_RMS]) {
+      const span = firstToLastRun(env, threshold, minRun);
+      if (span) return { start: span.start, end: span.end, skipped: false };
+    }
+  }
+  return { start: 0, end: length, skipped: true };
+}
+
+/**
+ * Start of the first run of more than `minRun` consecutive samples above
+ * `threshold` to the end of the last, or null when no run is that long.
+ *
+ * `> threshold` is sound and `<= threshold` is floor, the convention
+ * `findRunsBelow` uses; the `i === env.length` pass closes a run that reaches
+ * the end of the buffer.
+ */
+function firstToLastRun(
+  env: Float32Array,
+  threshold: number,
+  minRun: number
+): { start: number; end: number } | null {
   let start = -1;
   let end = -1;
   let runStart = -1;
-  // `> threshold` is sound and `<= threshold` is floor, the convention
-  // `findRunsBelow` uses; the `i === env.length` pass closes a run that reaches
-  // the end of the buffer.
   for (let i = 0; i <= env.length; i++) {
     if (i < env.length && env[i] > threshold) {
       if (runStart < 0) runStart = i;
@@ -249,7 +303,7 @@ function trimSilence(
       runStart = -1;
     }
   }
-  return start < 0 ? { start: 0, end: 0, skipped: false } : { start, end, skipped: false };
+  return start < 0 ? null : { start, end };
 }
 
 /**
@@ -288,6 +342,21 @@ export function spliceWord(request: WordSpliceRequest): WordSpliceResult {
       message: `The replacement has ${replacement.length} channels and the document has ${target.length}.`,
     };
   }
+  // "Silent" judged against an ABSOLUTE floor, not the recording's own. The
+  // recording's own floor says nothing about whether anything was recorded —
+  // it is by construction the level the recording sits at — so a threshold
+  // derived from it calls a uniformly LOUD take silent (see `trimSilence`).
+  // `SILENCE_RMS` is the same 2^-15 `measureNoiseWindow` accepts a window
+  // strictly above and `pitchDetect` gates a frame strictly below: one LSB of
+  // 16-bit PCM. At or under it there is nothing here a 16-bit file could have
+  // carried, which is what a muted or unplugged microphone produces.
+  if (rms(replacement, 0, replacement[0].length) <= SILENCE_RMS) {
+    return {
+      ok: false,
+      reason: 'silent-replacement',
+      message: 'Nothing in the replacement recording rises above digital silence.',
+    };
+  }
 
   // ── geometry ────────────────────────────────────────────────────────────
   const seam = Math.max(0, Math.round(seamSamples));
@@ -298,15 +367,11 @@ export function spliceWord(request: WordSpliceRequest): WordSpliceResult {
   const regionLength = regionEnd - regionStart;
 
   // ── trim ────────────────────────────────────────────────────────────────
+  // Always a non-empty span: a qualifying run is at least `minRun` long, and
+  // the declining path returns the whole recording, which the empty-replacement
+  // check above has already established is not empty.
   const trim = trimSilence(replacement, sampleRate);
   const trimmedLength = trim.end - trim.start;
-  if (trimmedLength <= 0) {
-    return {
-      ok: false,
-      reason: 'silent-replacement',
-      message: 'Nothing in the replacement recording rises above its own noise floor.',
-    };
-  }
   // Fan mono out to the target's channel count, and remove the recording's own
   // DC while copying — one pass, and the copy is needed anyway because
   // everything after this mutates.

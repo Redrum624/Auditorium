@@ -1325,33 +1325,51 @@ order in. A gate that refused would eventually refuse correct work; a gate that
 accepted silently would eventually accept nonsense. So it says what it measured
 and shows the spans anyway.
 
-## A replacement can only be recorded, not imported
+## A replacement that is nothing but room tone is spliced, not refused
 
 **Area:** F6 replace-a-word (`src/dsp/wordSplice.ts`, `src/dsp/chainAnalysis.ts`,
 `src/services/alignLyricsService.ts`).
+
+**Behavior a user will notice:** record a replacement, say nothing into the
+microphone, and press Replace. The splice runs. It level-matches the room tone
+it captured up to the replaced word's level, so you hear a burst of hiss where
+the word was. One undo removes it.
+
+**Why.** "Silent" is judged against an **absolute** floor — `SILENCE_RMS`, one
+LSB of 16-bit PCM — and room tone sits above it. It used to be judged against
+the recording's **own** floor, which refused this case correctly and refused two
+legitimate recordings with it:
+
+- a take whose pauses are **literal zeros** (a gated interface, a DAW bounce —
+  and Chromium's fake capture device, which is what the packaged smoke records).
+  `measureNoiseWindow` rejects every window at or below digital silence, so it
+  hands back the quietest window it could find *containing the word*, the derived
+  threshold becomes the word's own envelope peak, and nothing clears it. Measured
+  on the fake device: threshold **0.973**, longest run above it **14 samples**
+  against a bar of 960 — a take carrying two full-scale beeps, refused as silent.
+- a word **punched in tight**, with no room tone either side. The quietest 500 ms
+  is then as loud as the rest. Measured on 1.52 s of stationary tone: **0 samples
+  of 72 960** rose above the threshold.
+
+A self-relative threshold cannot tell "uniformly loud" from "uniformly silent",
+and it was firing on the wrong one. The trim now falls back to the absolute floor
+when the recording's own floor yields no run, and the refusal is judged against
+that absolute floor too.
+
+**What is left, stated:** room tone and a tight punch-in are indistinguishable at
+the absolute floor, and nothing separates them without inventing a level this app
+has not measured. So the trade is deliberate and it runs this way round: a wrong
+splice costs one undo, a wrong refusal costs a re-recording.
+
+## A replacement can only be recorded, not imported
+
+**Area:** F6 replace-a-word (`src/services/alignLyricsService.ts`).
 
 **Behavior a user will notice:** the Align Lyrics dialog records the replacement
 from the microphone and offers no way to bring one in from a file. (The "Load
 from file…" button beside the lyrics box reads *words*; it never touches audio.)
 
-**Why, and it is a decision rather than an omission.** The splice trims the
-silence around your take using Remove Silence's own rule — the loudest the
-silence detector reads inside the quietest 500 ms of the recording. Finding that
-passage goes through `measureNoiseWindow`, which rejects every window at or below
-digital silence (2⁻¹⁵, one 16-bit LSB), because a window of literal zeros has no
-floor to measure. A recording whose lead-in *is* literal zeros — a DAW bounce, a
-gated export — therefore has no floor window to offer, the function hands back
-the quietest window it could find *containing the word*, the derived threshold
-becomes the word's own envelope peak, and a perfectly good replacement is refused
-as "nothing above its own noise floor".
-
-A live microphone take always carries room tone above digital silence, so the
-shipped path cannot reach this. Offering file import would make it reachable
-immediately, and the honest fix — when the recording contains a 500 ms window at
-or below digital silence, its floor is *below* digital silence and the threshold
-to trim against is that constant itself — is a new threshold path with no
-fixtures and no boundary probes of its own. Shipping the import first would have
-shipped the bug, so the import is not offered.
-
-Recording is also the better answer to the thing the feature is for: a
-replacement sung here **is** your voice, with no provenance to defend.
+**Why.** Scope, and only scope — the technical reason this entry used to give (a
+file whose lead-in is literal zeros would be refused) is fixed, above. Recording
+is also the better answer to the thing the feature is for: a replacement sung
+here **is** your voice, with no provenance to defend.
