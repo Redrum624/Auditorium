@@ -136,6 +136,28 @@ function layout(
   return { runs, expected };
 }
 
+/**
+ * {@link layout}'s frame script for `text`, with a DIFFERENT per-frame
+ * confidence for each word: `ps[i]` owns word `i`'s character runs, so word `i`
+ * scores about `log(ps[i])` and no two words score the same double.
+ *
+ * The blanks and the `|` separators keep the default confidence, so the
+ * intended path still wins by construction — at the lowest confidence used
+ * here the owning class still beats each of the other 31 by more than 20:1 per
+ * frame.
+ */
+function wordConfidences(text: string, ps: number[]): Run[] {
+  let word = 0;
+  return layout(text).runs.map((run) => {
+    if (run.klass === null) return run;
+    if (run.klass === VOCAB['|']) {
+      word++;
+      return run;
+    }
+    return { ...run, p: ps[word] };
+  });
+}
+
 function align(text: string, runs: Run[], p?: number) {
   const { logProbs, frames } = buildEmissions(runs, p);
   return alignLyrics(logProbs, frames, CLASSES, tokenizeLyrics(text, VOCAB), BLANK);
@@ -289,21 +311,54 @@ describe('alignLyrics on a fixture whose word boundaries are known by constructi
     expect(result.reason).toBe('empty-text');
   });
 
-  it('refuses a trellis over the cell cap, and accepts one exactly on it', () => {
-    // states = 2n+1; pick n so frames * states straddles the cap.
+  it('refuses a trellis over the cell cap and accepts one exactly on it, at an injected cap', () => {
+    // BELOW / ON / ABOVE, all three RUN. The real cap cannot be probed this way
+    // — a trellis sitting exactly on 512 M cells is 128 MB of back-pointers and
+    // half a billion DP steps — so the acceptance half used to be asserted only
+    // as arithmetic in a comment, which is the "on" case missing from a
+    // below/on/above rule. `forcedAlign` takes the cap as an injectable
+    // parameter for exactly this reason; the DEFAULT is pinned separately
+    // below, against the real constant.
+    const tokens = tokenizeLyrics('SET', VOCAB).tokens; // 3 tokens
+    const states = 2 * tokens.length + 1; // 7
+    const frames = 6; // comfortably over the 3-frame minimum for 'SET'
+    const cells = frames * states; // 42
+    const grid = buildEmissions([{ klass: null, frames }]);
+
+    for (const [name, cap, expected] of [
+      ['below the cap', cells + 1, true],
+      ['on the cap', cells, true],
+      ['over the cap', cells - 1, false],
+    ] as const) {
+      const result = forcedAlign(grid.logProbs, frames, CLASSES, tokens, BLANK, cap);
+      // Named in the assertion so a failure says WHICH side of the boundary
+      // moved rather than just `false !== true`.
+      expect(`${name}: ${result.ok}`).toBe(`${name}: ${expected}`);
+      if (!result.ok) expect(result.reason).toBe('too-large');
+    }
+  });
+
+  it('defaults that cap to MAX_VITERBI_CELLS, and says so in the refusal', () => {
+    // The default is what production runs under, so it is pinned against the
+    // real constant rather than left to the seam above. Probed one cell over
+    // the real cap, which refuses without allocating anything.
     const n = 1000;
     const tokens = Array.from({ length: n }, (_, i) => 5 + (i % 26));
     const states = 2 * n + 1;
     const onCap = Math.floor(MAX_VITERBI_CELLS / states);
     // The refusal must be about the CAP, not about the audio being short.
     expect(onCap).toBeGreaterThan(n * 2);
-    const over = { logProbs: new Float32Array(0), frames: onCap + 1 };
-    const refused = forcedAlign(over.logProbs, over.frames, CLASSES, tokens, BLANK);
+    expect((onCap + 1) * states).toBeGreaterThan(MAX_VITERBI_CELLS);
+    expect(onCap * states).toBeLessThanOrEqual(MAX_VITERBI_CELLS);
+
+    const refused = forcedAlign(new Float32Array(0), onCap + 1, CLASSES, tokens, BLANK);
     expect(refused.ok).toBe(false);
     if (refused.ok) return;
     expect(refused.reason).toBe('too-large');
-    expect((onCap + 1) * states).toBeGreaterThan(MAX_VITERBI_CELLS);
-    expect(onCap * states).toBeLessThanOrEqual(MAX_VITERBI_CELLS);
+    // The message quotes the limit it applied, so this pins the default's VALUE
+    // and not merely that some default exists.
+    expect(refused.message).toContain(MAX_VITERBI_CELLS.toLocaleString('en-US'));
+    expect(refused.message).toContain(((onCap + 1) * states).toLocaleString('en-US'));
   });
 });
 
@@ -343,21 +398,38 @@ describe('the lyrics-match gate', () => {
   });
 
   it('takes the MEDIAN word score, not the mean, for both parities of word count', () => {
-    // Three words, the middle one placed on frames that are not its own: the
-    // median is the middle value and is unmoved by one bad word.
-    const odd = layout('ONE TWO SIX');
-    const oddResult = align('ONE TWO SIX', odd.runs);
+    // Every word gets its OWN per-frame confidence, so the scores are distinct.
+    // This test used to run on the plain fixture, where every word scores the
+    // identical double — and when all the scores are the same number the mean,
+    // the median, the minimum and the maximum are all that same number, so the
+    // test could not observe the statistic it is named for.
+    const mean = (xs: number[]) => xs.reduce((a, b) => a + b, 0) / xs.length;
+
+    // ODD — the middle value. Distinct from the mean, the smallest and the
+    // largest, so a mutation to any of those fails here.
+    const oddText = 'ONE TWO SIX';
+    const oddResult = align(oddText, wordConfidences(oddText, [0.3, 0.7, 0.99]));
     expect(oddResult.ok).toBe(true);
     if (!oddResult.ok) return;
-    const oddScores = oddResult.words.map((w) => w.score).sort((a, b) => a - b);
-    expect(oddResult.medianWordScore).toBe(oddScores[1]);
+    const odd = oddResult.words.map((w) => w.score).sort((a, b) => a - b);
+    expect(new Set(odd).size).toBe(3); // the fixture really did separate them
+    expect(oddResult.medianWordScore).toBe(odd[1]);
+    expect(oddResult.medianWordScore).not.toBeCloseTo(mean(odd), 2);
+    expect(oddResult.medianWordScore).not.toBeCloseTo(odd[0], 2);
+    expect(oddResult.medianWordScore).not.toBeCloseTo(odd[2], 2);
 
-    const even = layout('ONE TWO SIX TEN');
-    const evenResult = align('ONE TWO SIX TEN', even.runs);
+    // EVEN — the mean of the TWO MIDDLE values, which are themselves different
+    // here, so returning either one alone fails as well.
+    const evenText = 'ONE TWO SIX TEN';
+    const evenResult = align(evenText, wordConfidences(evenText, [0.3, 0.7, 0.9, 0.99]));
     expect(evenResult.ok).toBe(true);
     if (!evenResult.ok) return;
-    const evenScores = evenResult.words.map((w) => w.score).sort((a, b) => a - b);
-    expect(evenResult.medianWordScore).toBeCloseTo((evenScores[1] + evenScores[2]) / 2, 12);
+    const even = evenResult.words.map((w) => w.score).sort((a, b) => a - b);
+    expect(new Set(even).size).toBe(4);
+    expect(evenResult.medianWordScore).toBeCloseTo((even[1] + even[2]) / 2, 12);
+    expect(evenResult.medianWordScore).not.toBeCloseTo(even[1], 2);
+    expect(evenResult.medianWordScore).not.toBeCloseTo(even[2], 2);
+    expect(evenResult.medianWordScore).not.toBeCloseTo(mean(even), 2);
   });
 
   it('the path score is reported too, and is NOT the same quantity as the median word score', () => {

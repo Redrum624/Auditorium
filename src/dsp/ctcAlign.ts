@@ -229,7 +229,16 @@ export function forcedAlign(
   frames: number,
   classes: number,
   tokens: readonly number[],
-  blankId: number
+  blankId: number,
+  /**
+   * Cell ceiling, injectable ONLY so the below/on/above boundary can be probed
+   * — a trellis sitting exactly on the real cap is 512 M cells and cannot be
+   * run in a test, so without this seam the "accepts one exactly on it" half of
+   * the rule is unreachable. Same shape as `parseAlignRequest(req, maxSamples =
+   * MAX_TOTAL_SAMPLES)` in `electron/alignManager.cjs`. Production never passes
+   * it.
+   */
+  maxCells: number = MAX_VITERBI_CELLS
 ): { ok: true; spans: TokenSpan[]; pathScore: number } | AlignFailure {
   const n = tokens.length;
   if (n === 0) {
@@ -252,11 +261,11 @@ export function forcedAlign(
   }
 
   const cells = frames * states;
-  if (cells > MAX_VITERBI_CELLS) {
+  if (cells > maxCells) {
     return {
       ok: false,
       reason: 'too-large',
-      message: `Aligning ${n} characters against ${frames} frames needs ${cells.toLocaleString('en-US')} search cells, over the ${MAX_VITERBI_CELLS.toLocaleString('en-US')} limit. Select a shorter passage, or paste only the lyrics for the part you selected.`,
+      message: `Aligning ${n} characters against ${frames} frames needs ${cells.toLocaleString('en-US')} search cells, over the ${maxCells.toLocaleString('en-US')} limit. Select a shorter passage, or paste only the lyrics for the part you selected.`,
     };
   }
 
