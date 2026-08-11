@@ -163,10 +163,18 @@ class CancelledError extends Error {}
 /**
  * Output frame count for `samples` input samples, as the conv stack computes
  * it: `L = floor((L - kernel)/stride) + 1` per layer. Written as the recursion
- * rather than as `floor((L - 400)/320) + 1` so it stays correct if the layer
- * table is ever checked against another checkpoint — and because the two forms
- * are NOT the same function (they differ for some short lengths, where an
- * intermediate layer's floor bites before the last one does).
+ * rather than as the closed form so it stays correct if the layer table is ever
+ * checked against another checkpoint.
+ *
+ * For THIS table the two forms are the same function. Swept over every integer
+ * length from 0 to 200,000, the recursion equals
+ * `max(0, floor((L - 400)/320) + 1)` at every one — receptive field 400, hop
+ * 320, i.e. RECEPTIVE_FIELD_SAMPLES and FRAME_SAMPLES. The clamp is the whole
+ * of the difference: below 80 samples the bare closed form evaluates to -1
+ * where the recursion's `length < layer.kernel` guard returns 0. An earlier
+ * version of this comment claimed they diverge at some short lengths because an
+ * intermediate layer's floor bites before the last one does; no such length
+ * exists, and the claim is corrected rather than kept as folklore.
  */
 const CONV_LAYERS = Object.freeze([
   { kernel: 10, stride: 5 },
@@ -195,10 +203,19 @@ function framesForSamples(samples) {
  * whose global index is `s / FRAME_SAMPLES + local`, with no resampling of the
  * frame grid and no fractional offset to round.
  *
- * Each chunk carries {@link CONTEXT_SAMPLES} of audio on both sides of the
- * frames it contributes; those context frames are computed and thrown away, so
- * every kept frame was produced with real audio on both sides (except at the
- * file's own ends, where there is none to have).
+ * Each chunk carries `contextSamples` of audio on both sides of the frames it
+ * contributes, to be computed and thrown away. {@link CONTEXT_SAMPLES} is
+ * **0**, so that margin is NOT taken in production: a pass spans exactly the
+ * frames it keeps, extended only by the {@link RECEPTIVE_FIELD_SAMPLES} its own
+ * last frame needs to exist at all. No context frame is computed or discarded,
+ * and a kept frame at a chunk's leading edge has no real audio to its left.
+ *
+ * That is the measured answer, not an omission: context is a parameter here
+ * precisely because the sweep that chose 0 varies it (see
+ * {@link CONTEXT_SAMPLES} and `scripts/align-context-bench.cjs`). A margin
+ * cannot help, because chunking perturbs the emission grid globally rather than
+ * at its edges — attention is global, so there is no edge for a margin to
+ * cover.
  *
  * Returns `[{ start, end, keepFrom, keepTo }]` — `start`/`end` are input-sample
  * bounds of the pass, `keepFrom`/`keepTo` are GLOBAL frame indices, end

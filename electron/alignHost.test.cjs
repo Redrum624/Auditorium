@@ -929,6 +929,29 @@ describe('framesForSamples', () => {
       previous = frames;
     }
   });
+
+  test('IS the closed form max(0, floor((L - 400)/320) + 1), at every length', async () => {
+    // The doc block used to claim the recursion and the closed form "are NOT
+    // the same function (they differ for some short lengths, where an
+    // intermediate layer's floor bites before the last one does)". No such
+    // length exists for this layer table. Swept exhaustively rather than
+    // spot-checked, because "they differ SOMEWHERE" is precisely the claim a
+    // handful of samples cannot refute.
+    const closedForm = (n) =>
+      Math.max(0, Math.floor((n - RECEPTIVE_FIELD_SAMPLES) / FRAME_SAMPLES) + 1);
+    const divergences = [];
+    for (let n = 0; n <= 200000; n++) {
+      if (framesForSamples(n) !== closedForm(n)) divergences.push(n);
+      if (divergences.length > 4) break;
+    }
+    expect(divergences).toEqual([]);
+    // The clamp is load-bearing and is the whole of the difference: the BARE
+    // closed form goes negative below the receptive field, which is where the
+    // "they differ" story came from.
+    expect(Math.floor((79 - RECEPTIVE_FIELD_SAMPLES) / FRAME_SAMPLES) + 1).toBe(-1);
+    expect(framesForSamples(79)).toBe(0);
+    expect(Math.floor((80 - RECEPTIVE_FIELD_SAMPLES) / FRAME_SAMPLES) + 1).toBe(0);
+  });
 });
 
 describe('planChunks', () => {
