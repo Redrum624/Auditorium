@@ -246,6 +246,85 @@ describe('getRemixJoins', () => {
   });
 });
 
+describe('getRemixPinState (R4b)', () => {
+  test('flattens the session pin state, including the planner report', () => {
+    addDoc('Remix 1');
+    jest.spyOn(remixService, 'getRemixSession').mockReturnValue({
+      lockedJoins: ['8>16', '24>4'],
+      lockedJoinsDropped: ['24>4'],
+      pinReport: {
+        mode: 'enforced',
+        satisfied: ['8>16'],
+        dropped: [{ key: '24>4', reason: 'incompatible' }],
+      },
+      rollIndex: 2,
+      plansInWorker: true,
+    } as never);
+
+    const result = api().getRemixPinState();
+
+    expect(result).toStrictEqual({
+      lockedJoins: ['8>16', '24>4'],
+      lockedJoinsDropped: ['24>4'],
+      pinMode: 'enforced',
+      pinSatisfied: ['8>16'],
+      pinDropped: [{ key: '24>4', reason: 'incompatible' }],
+      rollIndex: 2,
+      plansInWorker: true,
+    });
+    // Crosses `page.evaluate`'s structured clone in the smoke, so it must be
+    // plain JSON — no Set, no typed array, no class instance.
+    expectPlainJson(result);
+  });
+
+  test('reports a session with no pins as an empty state, not as null', () => {
+    addDoc('Remix 1');
+    jest.spyOn(remixService, 'getRemixSession').mockReturnValue({
+      lockedJoins: [],
+      lockedJoinsDropped: [],
+      pinReport: null,
+      rollIndex: 0,
+      plansInWorker: false,
+    } as never);
+
+    expect(api().getRemixPinState()).toStrictEqual({
+      lockedJoins: [],
+      lockedJoinsDropped: [],
+      pinMode: null,
+      pinSatisfied: [],
+      pinDropped: [],
+      rollIndex: 0,
+      plansInWorker: false,
+    });
+  });
+
+  test('is null for a document that is not a remix, and with nothing open', () => {
+    addDoc('plain');
+    jest.spyOn(remixService, 'getRemixSession').mockReturnValue(null);
+    expect(api().getRemixPinState()).toBeNull();
+
+    useAppStore.setState(makeInitialState());
+    expect(api().getRemixPinState()).toBeNull();
+  });
+
+  test('copies the arrays — a caller cannot mutate the live session through them', () => {
+    addDoc('Remix 1');
+    const session = {
+      lockedJoins: ['8>16'],
+      lockedJoinsDropped: [],
+      pinReport: { mode: 'enforced', satisfied: ['8>16'], dropped: [] },
+      rollIndex: 0,
+      plansInWorker: false,
+    };
+    jest.spyOn(remixService, 'getRemixSession').mockReturnValue(session as never);
+
+    const result = api().getRemixPinState()!;
+    result.lockedJoins.push('99>100');
+
+    expect(session.lockedJoins).toEqual(['8>16']);
+  });
+});
+
 describe('toggleBeatGrid / getBeatGridState (Task B2)', () => {
   function fullGrid(over: Partial<BeatGrid> = {}): BeatGrid {
     return {

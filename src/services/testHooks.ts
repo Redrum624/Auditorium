@@ -267,6 +267,21 @@ export interface TestApi {
     bars: number;
   }>;
   getRemixJoins(): { fromBar: number; toBar: number; atSample: number; cost: number }[] | null;
+  /** The active remix's PIN state (R4b): which joins are pinned, which the
+   * current plan dropped, the planner's own report of why, and the roll index
+   * the plan was produced at. The smoke drives the Pin and Re-roll BUTTONS in
+   * the panel and reads this to assert the pin actually survived — `rollIndex`
+   * is what tells it the asynchronous re-plan has landed. Null when the active
+   * document is not a remix. */
+  getRemixPinState(): {
+    lockedJoins: string[];
+    lockedJoinsDropped: string[];
+    pinMode: string | null;
+    pinSatisfied: string[];
+    pinDropped: { key: string; reason: string }[];
+    rollIndex: number;
+    plansInWorker: boolean;
+  } | null;
   // --- v1.7 flows ---------------------------------------------------------
   getStemModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   separateStems(): Promise<StemSeparationSummary>;
@@ -1399,6 +1414,24 @@ export function installTestHooks(): void {
         atSample: session.joinSamples[i] ?? 0,
         cost: join.cost.total,
       }));
+    },
+
+    // R4b. Flattened rather than handing back `pinReport` itself, because this
+    // crosses `page.evaluate`'s structured clone in the smoke and a plain
+    // shape is what survives it unambiguously.
+    getRemixPinState: () => {
+      const doc = activeDoc();
+      const session = doc ? getRemixSession(doc.id) : null;
+      if (!session) return null;
+      return {
+        lockedJoins: session.lockedJoins.slice(),
+        lockedJoinsDropped: session.lockedJoinsDropped.slice(),
+        pinMode: session.pinReport?.mode ?? null,
+        pinSatisfied: session.pinReport?.satisfied.slice() ?? [],
+        pinDropped: (session.pinReport?.dropped ?? []).map((d) => ({ key: d.key, reason: d.reason })),
+        rollIndex: session.rollIndex,
+        plansInWorker: session.plansInWorker,
+      };
     },
 
     // --- v1.7 flows -------------------------------------------------------

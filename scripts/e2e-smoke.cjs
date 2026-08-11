@@ -1305,6 +1305,81 @@ async function main() {
       `every join sits inside [0, ${remix.length}] (expected none outside, actual ${JSON.stringify(badAt)})`
     );
 
+    // 12a) R4b — a PIN is a guarantee, driven through the Remix panel's own
+    // buttons rather than through a test hook. The hook only READS state
+    // afterwards: the click path (Pin -> Re-roll) is the thing under test,
+    // because a `requiredJoins` that is accepted, threaded through three
+    // layers and never actually constrains anything would pass every unit
+    // test in the suite.
+    console.log('Pin a remix edit and re-roll, through the panel...');
+    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Remix"]');
+    await page.waitForSelector('[data-testid="remix-panel"]', { timeout: 5000 });
+    const rowCount = await page.evaluate(
+      () => document.querySelectorAll('[data-testid="remix-item"]').length
+    );
+    assert(
+      rowCount === joins.length,
+      `the Remix panel lists one row per join (expected ${joins.length}, actual ${rowCount})`
+    );
+
+    const pinnedKey = `${joins[0].fromBar}>${joins[0].toBar}`;
+    const pinTitle = await page.getAttribute('button[aria-label="Pin edit 1"]', 'title');
+    console.log(`  pin tooltip: ${JSON.stringify(pinTitle)}`);
+    assert(
+      /guaranteed/i.test(pinTitle || '') && !/not a guarantee/i.test(pinTitle || ''),
+      `the pin control promises the guarantee (actual ${JSON.stringify(pinTitle)})`
+    );
+
+    await page.click('button[aria-label="Pin edit 1"]');
+    const pinnedState = await page.evaluate(() => window.__test.getRemixPinState());
+    console.log(`  after pin: ${JSON.stringify(pinnedState)}`);
+    assert(
+      pinnedState !== null && pinnedState.lockedJoins.includes(pinnedKey),
+      `clicking Pin recorded ${pinnedKey} (actual ${JSON.stringify(pinnedState && pinnedState.lockedJoins)})`
+    );
+
+    const rollBefore = pinnedState.rollIndex;
+    await page.click('[data-testid="remix-header"] button:has-text("Re-roll")');
+    // The re-plan is asynchronous (and would be in a worker on a longer
+    // track), so wait on the state it produces, never on a fixed delay.
+    await page.waitForFunction(
+      (before) => {
+        const s = window.__test.getRemixPinState();
+        return s !== null && s.rollIndex > before;
+      },
+      rollBefore,
+      { timeout: 20000 }
+    );
+
+    const afterRoll = await page.evaluate(() => window.__test.getRemixPinState());
+    const joinsAfter = await page.evaluate(() => window.__test.getRemixJoins());
+    const keysAfter = (joinsAfter || []).map((j) => `${j.fromBar}>${j.toBar}`);
+    console.log(`  after re-roll: rollIndex=${afterRoll.rollIndex} joins=${JSON.stringify(keysAfter)}`);
+    console.log(`  pin report: ${JSON.stringify(afterRoll)}`);
+    assert(
+      keysAfter.includes(pinnedKey),
+      `the pinned edit ${pinnedKey} survived the re-roll (actual ${JSON.stringify(keysAfter)})`
+    );
+    assert(
+      afterRoll.pinMode === 'enforced',
+      `the guarantee was in force (expected 'enforced', actual ${JSON.stringify(afterRoll.pinMode)})`
+    );
+    assert(
+      afterRoll.pinSatisfied.includes(pinnedKey) && afterRoll.pinDropped.length === 0,
+      `the planner reports the pin satisfied and nothing dropped (actual satisfied=${JSON.stringify(afterRoll.pinSatisfied)} dropped=${JSON.stringify(afterRoll.pinDropped)})`
+    );
+    const pinNotices = await page.evaluate(() => ({
+      dropped: document.querySelectorAll('[data-testid="remix-dropped-pins"]').length,
+      notGuaranteed: document.querySelectorAll('[data-testid="remix-pins-not-guaranteed"]').length,
+    }));
+    assert(
+      pinNotices.dropped === 0 && pinNotices.notGuaranteed === 0,
+      `the panel shows no dropped-pin or not-guaranteed notice (actual ${JSON.stringify(pinNotices)})`
+    );
+    // The remix document was rewritten by the re-roll; leave the rail where
+    // the following steps expect it.
+    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
+
     // 12b) OPTIONAL real-song validation — runs only when the user's local
     // real-material fixture exists (it is copyrighted, gitignored, and never
     // required). Exercises the whole real-world chain the synthetic fixtures

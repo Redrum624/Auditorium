@@ -360,19 +360,41 @@ or its source is closed.
 Two residual costs are accepted rather than engineered around. Each Re-roll
 press is dearer than the last, because `planRemix` re-derives every previous
 roll to stay deterministic and stateless; a per-session memo removes the
-REPEATED work across presses but not the cost of one cold roll. And a pinned
-("locked") join is a **strong preference, not a guarantee**: the planner has
-no "required joins" constraint, so a pin is honoured by exempting that join
-from the re-roll and over-repetition penalties and giving it one join-toll of
-cost advantage. It can still lose to a genuinely cheaper arrangement, and it
-cannot survive being rejected — a rejection is a hard constraint and wins.
-Measured over 156 pin/press cases across three scales (32, 128 and 496 bars,
-both the Re-roll and Reject paths): **preserved 156/156**, against **38/156
-before this mechanism existed** (and 0/106 on the Re-roll path specifically,
-where the re-roll penalty used to push a join out precisely because it was in
-the plan being re-rolled). When a pin is dropped the session reports it
-(`lockedJoinsDropped`) instead of leaving a pin badge on a join that no longer
-exists.
+REPEATED work across presses but not the cost of one cold roll.
+
+**A pin used to be a strong preference; since v1.21.0 (R4b) it is a
+guarantee** — for up to `MAX_REQUIRED_JOINS = 4` pins. `planRemix` takes
+`requiredJoins` and enforces it exactly with a subset axis on its DP (state
+`(p, n, S)`, `S` the bitmask of satisfied pins), so the returned plan contains
+every pinned join or names the ones it could not and why: the key is also
+rejected (`forbidden`), it is not a legal splice for the current settings
+(`no-candidate`), or it cannot coexist with the pins that were kept
+(`incompatible`). The maximum satisfiable pin set falls out of the same table,
+so there is no relaxation pass or retry loop.
+
+The residual is the `2^K` the exactness costs, and it is the reason for the
+cap. The table is 12 bytes per cell (`Float64Array` cost + `Int32Array`
+parent) over `(M+1)*(Nmax+1)*2^K` cells: at the worst case reachable
+(`M = 499`, `Nmax = 1497`, 749 000 cells, 8.99 MB at K = 0) that is 143.8 MB
+at K = 4 and 2.30 GB at K = 8. Time scales with it too — measured 1.85x per
+bit, **13.2x at K = 4** — so a four-pin Re-roll on a ten-minute source is
+seconds of worker time rather than milliseconds. The routing threshold
+multiplies by `2^K` and is re-evaluated per plan, so those seconds are always
+spent in a worker, never on the main thread.
+
+**The panel's pin cap stays 8, deliberately higher than 4.** Pins 5–8 are
+honoured on the old best-effort basis, and the panel says so in words ("More
+than 4 pins: the planner cannot guarantee them all…") rather than degrading
+silently. Lowering the cap to 4 would make the guarantee unconditional at the
+price of taking four pins away from a user who is arranging by hand.
+
+Measured against the preference it replaces, over 102 pin/press cases across
+five scales (32–496 bars) and five presses per pin: the preference kept the
+pin **83/102**, the guarantee **102/102**, changing the chosen arrangement in
+22 cases at a mean clean-cost premium of **+2.17**. On the sharper case — a
+pin the cheapest plan does not contain, 109 cases — the preference kept it
+**0/109** and the guarantee **109/109**, at a mean premium of **+5.18**. A
+rejection still wins over a pin, and is reported as such by name.
 
 **Intended behavior:** No further work planned — this is complete.
 

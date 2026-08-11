@@ -5,6 +5,55 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.21.0] - 2026-08-11
+
+**A remix pin is now a promise the software actually makes.** Pinning a splice in the Remix panel used
+to be a strong preference: the planner exempted the pinned join from its penalties and gave it a small
+cost advantage, and in measurement it kept the pin 156 times out of 156 — but nothing *prevented* a
+drop, and the tooltip had to say "a preference, not a guarantee". It is a hard constraint now.
+
+The reason for the change is semantic, not statistical. "Pinned" is a promise, and a promise kept
+156/156 times is still a promise the software does not make. It also mattered more than the 156/156
+suggested: that measurement only ever pinned joins the planner had already chosen. Pin a splice the
+cheapest arrangement does *not* contain and the old preference kept it **0 times out of 109**. The
+guarantee keeps it 109/109.
+
+### Added
+
+- **`requiredJoins` in the remix planner — a pinned splice is guaranteed, for up to four pins.** The
+  dynamic program gained a subset axis: its state is now `(source bar, output bar, set of pins
+  satisfied)`, so the plan it returns contains every pinned splice or names the ones it could not and
+  why. Two cheaper designs were ruled out by measurement rather than argument — a counter over-counts,
+  because 28 of 126 real plans traverse the same splice twice; a fixed pin order does not exist,
+  because 1 326 of 2 173 candidate splice pairs are realizable in *both* orders.
+- **Named, categorised reasons when a pin cannot be kept.** "Some pins were dropped" is gone. The panel
+  now names the splice by its bars and says which of four things happened: you rejected it (a rejection
+  still wins over a pin), it is not a legal splice for the current phrase and repeat settings, it
+  cannot coexist with the other pins that *were* kept, or there were more than four pins. The first two
+  are decided before the search runs, so they are instant and exact.
+- **A plain statement when the guarantee is not in force.** The panel's pin limit stays 8 while the
+  guarantee covers 4, so pins 5–8 are honoured on the old best-effort basis — and the panel says so,
+  before the fifth pin is pressed and again in a banner afterwards. A silently downgraded guarantee
+  would be worse than no guarantee.
+
+### Changed
+
+- **Auto-Remix planning moves to a background worker sooner, and can move there mid-session.** Each pin
+  doubles the planner's table (`2^K` for K pins: 143.8 MB and 13.2x the time at four pins, on a
+  ten-minute source). The threshold that decides main-thread-versus-worker now multiplies by that
+  factor and is re-checked on every re-plan, because a remix is created with no pins and acquires them
+  afterwards — without this, four pins on a large track would have frozen the window.
+- **A pinned splice no longer receives the tie-break cost bonus** it got as a preference. The bonus
+  cannot change *whether* a forced splice appears, only how cheap the paths containing it look — and
+  a plan that plays the same splice twice would collect it twice. Measured over 102 pin/press cases,
+  keeping it changed the arrangement in 4, and every change was for the worse.
+
+### Fixed
+
+- **Closes the last outstanding item from the v1.9-era work audit (P2-5).** Its own ruling was "do it
+  if real usage ever shows dropped pins; otherwise the preference stands" — superseded, because a
+  documented trade-off is to be eliminated rather than accepted.
+
 ## [1.20.0] - 2026-08-11
 
 **Vocal Chain** — one pass that applies the corrections a rough vocal usually needs, as a single undo

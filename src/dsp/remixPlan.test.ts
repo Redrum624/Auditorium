@@ -151,6 +151,67 @@ function makeVaryingAnalysis(numBars: number): RemixAnalysis {
   };
 }
 
+/**
+ * Varying bar lengths AND a genuinely non-degenerate cost landscape (R4b).
+ *
+ * `makeUniformAnalysis`/`makeVaryingAnalysis` leave every feature array at
+ * zero, so `joinCost` returns the SAME total for every legal candidate and
+ * the planner is choosing between equals. That is deliberate for the
+ * structural tests (it isolates the feasibility window from cost tie-breaks)
+ * and useless for anything that has to observe the planner PREFERRING one
+ * arrangement over another. This fills all five feature arrays from the same
+ * deterministic LCG so the cost surface has structure, and clusters bars into
+ * four sections so `dStruct` varies too.
+ */
+function makeRichAnalysis(numBars: number, seed = 7): RemixAnalysis {
+  const baseBarLen = 22050;
+  const head = 4000;
+  const tail = 3000;
+  const nb = numBars + 1;
+  const rand = makeLcg(seed);
+  const barBoundary = new Int32Array(nb);
+  barBoundary[0] = head;
+  for (let i = 1; i <= numBars; i++) barBoundary[i] = barBoundary[i - 1] + baseBarLen + Math.round(rand() * 400);
+  const feature = makeLcg(seed * 13 + 1);
+  const fill = (n: number): Float32Array => {
+    const arr = new Float32Array(n);
+    for (let i = 0; i < n; i++) arr[i] = feature();
+    return arr;
+  };
+
+  return {
+    bpm: 120,
+    confidence: 1,
+    beatSamples: Int32Array.from({ length: nb * BEATS_PER_BAR }, (_, i) => i * Math.round(baseBarLen / BEATS_PER_BAR)),
+    salience: 1,
+    peakRatio: 1,
+    ibiCv: 0,
+    truncated: false,
+    analyzedEndSample: barBoundary[numBars] + tail,
+    odf: new Float32Array(0),
+    periodFrames: 20,
+    decimationFactor: 4,
+    bands: new Float32Array(0),
+    numBands: NUM_BANDS,
+    odfLow: new Float32Array(0),
+    chroma: new Float32Array(0),
+    numChromaFrames: 0,
+    chromaRate: 10,
+    beatsPerBar: BEATS_PER_BAR,
+    downbeatPhase: 0,
+    downbeatConfidence: 0,
+    barBoundary,
+    numBars,
+    T: fill(nb * NUM_BANDS),
+    C: fill(nb * 12),
+    L: fill(nb),
+    R: fill(nb * R_DIMS),
+    S: fill(nb * (NUM_BANDS + 12)),
+    cluster: Int32Array.from({ length: nb }, (_, i) => i % 4),
+    transitionSeen: new Set<string>(),
+  };
+}
+
 function baseOptions(overrides: Partial<PlanRemixOptions>): PlanRemixOptions {
   return {
     targetSample: 0,
@@ -1716,6 +1777,38 @@ describe('requiredJoins — the MAX_REQUIRED_JOINS cap (R4b, Ruling 3)', () => {
 });
 
 describe('requiredJoins — interaction with lockedJoins and the guard (R4b, Ruling 5)', () => {
+  it('the removed LOCK_BONUS was making the planner REPEAT the pinned join', () => {
+    // The reason an enforced key must not carry the bonus, pinned as an
+    // arrangement rather than as an argument. A path can traverse the pinned
+    // join twice and would collect `-LOCK_BONUS` twice, so the bonus is a
+    // standing discount on repeating it. Measured against a bonus-enabled
+    // build of this module over the same 102-case matrix: 4 arrangements
+    // changed, and in every one the bonus build played the pinned join one
+    // more time. This is that case at `M = 128`:
+    //
+    //   without the bonus  44>12, 73>57, 77>45   totalCost 8.6688
+    //   with the bonus     44>12, 44>12, 73>57   totalCost 8.7962
+    //
+    // The assertion is the WITHOUT plan: the pinned join appears exactly
+    // once, and the arrangement is the cheaper of the two. Re-adding the
+    // bonus turns this red.
+    const a = makeRichAnalysis(128);
+    const r = planRemix(
+      a,
+      baseOptions({
+        targetSample: Math.round(a.analyzedEndSample * 1.6),
+        strict: true,
+        allowRepeats: true,
+        rollIndex: 1,
+        requiredJoins: ['44>12'],
+      })
+    );
+    expectOk(r);
+    expect(r.joins.map(joinKeyOf)).toEqual(['44>12', '73>57', '77>45']);
+    expect(r.joins.filter((j) => joinKeyOf(j) === '44>12')).toHaveLength(1);
+    expect(r.totalCost).toBeCloseTo(8.6688, 3);
+  });
+
   it('an ENFORCED key gets no LOCK_BONUS, even when the caller also passes it as lockedJoins', () => {
     // The bonus is a preference for something already forced; a path can
     // traverse the same join twice and would collect it twice. Measured over
