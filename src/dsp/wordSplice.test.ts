@@ -1,5 +1,5 @@
 import { MIN_SEAM_MS, deriveSeamSamples, spliceWord, type WordSpliceRequest } from './wordSplice';
-import { SPLICE_XFADE_MS } from './silenceDetect';
+import { DETECT_RELEASE_MS, SPLICE_XFADE_MS } from './silenceDetect';
 import { MAX_RATIO, MIN_RATIO } from './wsola';
 import { detectPitch } from './pitchDetect';
 
@@ -404,6 +404,81 @@ describe('spliceWord trimming', () => {
     // the 1.2 s of silence and kept the whole 0.4 s of sound.
     expect(r.report.trimmedSamples).toBeGreaterThanOrEqual(soundSamples);
     expect(r.report.trimmedSamples).toBeLessThan(soundSamples * 1.5);
+  });
+
+  it('keeps everything between the FIRST sound and the LAST, not just one of them', () => {
+    // Two bursts with 0.15 s of room tone between them — a word with a stop
+    // consonant in it. The kept span must reach from the first burst to the
+    // end of the second; a trim that took only the first run, or only the
+    // last, would keep about half of that.
+    const burst = Math.round(0.15 * SR);
+    const t = makeTarget();
+    const twoBursts = [
+      concat(
+        roomTone(Math.round(0.6 * SR)),
+        tone(burst, 220),
+        roomTone(Math.round(0.15 * SR)),
+        tone(burst, 220),
+        roomTone(Math.round(0.6 * SR))
+      ),
+    ];
+    const r = spliceWord(request({ ...t, replacement: twoBursts, matchPitch: false }));
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // First burst start to last burst end is 0.45 s; the follower's release
+    // adds its documented overhang past the final offset and nothing else.
+    const firstToLast = burst + Math.round(0.15 * SR) + burst;
+    expect(r.report.trimmedSamples).toBeGreaterThan(firstToLast);
+    expect(r.report.trimmedSamples).toBeLessThan(firstToLast * 1.5);
+    // Either single run on its own is barely over half of that, so the bound
+    // above is not one a half-span trim could also satisfy.
+    expect(burst * 1.5).toBeLessThan(firstToLast);
+  });
+
+  it('needs a run of one release constant to call something sound, probed below / on / above', () => {
+    // A burst at 2e-4 sits 7.4 dB over this room tone's own envelope peak, so
+    // its release tail is SHORTER than one release constant and the burst's
+    // own LENGTH is what decides whether the run reaches the bar. That makes
+    // the bar reachable from both sides with a one-sample step.
+    //
+    // The word span is small so that ~882 trimmed samples is still a fittable
+    // length; with the 0.4 s word used elsewhere it would refuse as unfittable
+    // before the trim's verdict could be read.
+    const word = 2200;
+    const doc = concat(tone(SR, 200), tone(word, 330), tone(SR, 200));
+    const at = (burstSamples: number) =>
+      spliceWord({
+        target: [doc],
+        startSample: SR,
+        endSample: SR + word,
+        replacement: [
+          concat(roomTone(Math.round(0.6 * SR)), tone(burstSamples, 220, 2e-4), roomTone(Math.round(0.6 * SR))),
+        ],
+        sampleRate: SR,
+        seamSamples: 100,
+        matchPitch: false,
+      });
+    const minRun = Math.round((DETECT_RELEASE_MS / 1000) * SR);
+
+    const below = at(53);
+    expect(below.ok).toBe(false);
+    if (!below.ok) expect(below.reason).toBe('silent-replacement');
+
+    // One sample more of burst carries the run over the bar. It lands at 886
+    // rather than exactly 882 because each extra burst sample also lifts the
+    // envelope's peak, which lengthens the release tail — the run steps by ~18
+    // samples here, not by 1, so `>= minRun` and `> minRun` are the same rule
+    // on any fixture this follower can produce.
+    const on = at(54);
+    expect(on.ok).toBe(true);
+    if (!on.ok) return;
+    expect(on.report.trimmedSamples).toBeGreaterThanOrEqual(minRun);
+    expect(on.report.trimmedSamples).toBe(886);
+
+    const above = at(120);
+    expect(above.ok).toBe(true);
+    if (!above.ok) return;
+    expect(above.report.trimmedSamples).toBeGreaterThan(on.report.trimmedSamples);
   });
 
   it('declines to trim a recording too short for the noise window it derives its threshold from', () => {

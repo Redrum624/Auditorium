@@ -196,16 +196,20 @@ function rms(channels: readonly Float32Array[], start: number, end: number): num
  *
  * The bar is `DETECT_RELEASE_MS` worth of consecutive samples above the
  * threshold, and it is not a chosen number — it is the follower's own release
- * constant, restated. The follower decays as
- * `env[n] = env[0] * exp(-n / (release * sampleRate))`, so an above-threshold
- * run of exactly `release * sampleRate` samples means the excursion peaked
- * exactly `e` times the threshold. One time constant IS one neper IS 8.686 dB:
- * "a run at least one release constant long" and "the signal exceeded this
- * recording's own floor peak by at least 8.686 dB" are the same requirement
- * stated twice, and both fall out of a constant `silenceDetect.ts` already
- * derives. The same fixture measures 0.4 s of tone as a single run of
- * **26 214** samples against pure room tone's **1** — four orders of magnitude
- * of separation, so neither case sits near the bar.
+ * constant, restated. For the case the bar exists to reject — an INSTANTANEOUS
+ * excursion, which is what an extreme-value blip in stationary noise is — the
+ * run is pure release decay, `env[n] = env[0] * exp(-n / (release *
+ * sampleRate))`, so a run of exactly `release * sampleRate` samples means the
+ * excursion peaked exactly `e` times the threshold. One time constant IS one
+ * neper IS 8.686 dB, so for a blip the bar reads "clear this recording's own
+ * floor peak by 8.686 dB". Sound that LASTS clears the bar on duration alone
+ * and needs no headroom at all, which is the right asymmetry: the rule costs a
+ * real word nothing and costs a blip everything. Both readings come out of a
+ * constant `silenceDetect.ts` already derives, and neither is chosen here.
+ *
+ * The same fixture measures 0.4 s of tone as a single run of **26 214** samples
+ * against pure room tone's **1** — four orders of magnitude of separation, so
+ * neither case sits anywhere near the bar.
  *
  * The kept span runs from the FIRST qualifying run's start to the LAST one's
  * end, so an internal stop consonant does not cut a word in half. The tail
