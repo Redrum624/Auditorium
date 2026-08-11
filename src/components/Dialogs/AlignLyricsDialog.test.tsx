@@ -1,6 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import AlignLyricsDialog, { runLabel } from './AlignLyricsDialog';
-import type { RecordingEngine } from '../../audio/RecordingEngine';
+import {
+  RecordingEngine,
+  type RecordingContextLike,
+  type WorkletNodeLike,
+} from '../../audio/RecordingEngine';
 import {
   ALIGN_MODEL_BYTES,
   ALIGN_SAMPLE_RATE,
@@ -183,8 +187,55 @@ class FakeEngine {
   }
 }
 
-function asEngine(e: FakeEngine): RecordingEngine {
+function asEngine(e: FakeEngine | RecordingEngine): RecordingEngine {
   return e as unknown as RecordingEngine;
+}
+
+/**
+ * A REAL {@link RecordingEngine} over a fake capture graph, with `getUserMedia`
+ * held open until `grant()` is called.
+ *
+ * `FakeEngine` above cannot express the window this models: the real `start()`
+ * claims the recording slot SYNCHRONOUSLY (`RecordingEngine.ts:156`) and only
+ * acquires the microphone when `getUserMedia` resolves, so there is a stretch —
+ * the whole permission prompt — during which `isRecording` is already true and
+ * the engine owns nothing at all. Measuring what an unmount does inside that
+ * stretch needs the real object.
+ */
+function heldMicEngine() {
+  const track = { stopped: false, kind: 'audio', stop(): void { track.stopped = true; } };
+  const stream = { getTracks: () => [track] };
+  const ctxState = { closed: false };
+  const port = {
+    onmessage: null as ((ev: { data: unknown }) => void) | null,
+    postMessage(message: unknown): void {
+      // Answer the flush immediately, so a stop() in this test resolves on the
+      // final batch rather than on the engine's 3 s safety timeout.
+      if (message === 'flush') port.onmessage?.({ data: { channels: [take()], final: true } });
+    },
+  };
+  const node = { port, connect: () => undefined, disconnect: () => undefined };
+  const ctx = {
+    sampleRate: SR,
+    destination: {},
+    audioWorklet: { addModule: async () => undefined },
+    createMediaStreamSource: () => ({ connect: () => undefined, disconnect: () => undefined }),
+    createGain: () => ({ gain: { value: 1 }, connect: () => undefined, disconnect: () => undefined }),
+    close: async () => {
+      ctxState.closed = true;
+    },
+  };
+  let release: () => void = () => {};
+  const engine = new RecordingEngine({
+    getUserMedia: () =>
+      new Promise<MediaStream>((resolve) => {
+        release = () => resolve(stream as unknown as MediaStream);
+      }),
+    createContext: () => ctx as unknown as RecordingContextLike,
+    createWorkletNode: () => node as unknown as WorkletNodeLike,
+    createModuleUrl: () => 'blob:test',
+  });
+  return { engine, track, ctxState, grant: () => release() };
 }
 
 function seedDoc(channels: Float32Array[] = [docAudio()]): string {
@@ -206,8 +257,8 @@ async function settle(): Promise<void> {
   });
 }
 
-function open(engine?: FakeEngine) {
-  return render(<AlignLyricsDialog onClose={() => {}} engine={engine ? asEngine(engine) : undefined} />);
+function open(engine?: FakeEngine | RecordingEngine, onClose: () => void = () => {}) {
+  return render(<AlignLyricsDialog onClose={onClose} engine={engine ? asEngine(engine) : undefined} />);
 }
 
 /** Types the lyrics in and runs the alignment to completion. */
@@ -589,6 +640,58 @@ describe('AlignLyricsDialog — the Replace state machine', () => {
     await settle();
     expect(engine.stopped).toBe(1);
     expect(engine.isRecording).toBe(false);
+  });
+
+  /**
+   * The microphone is acquired ASYNCHRONOUSLY, and the dialog used to be
+   * dismissable for the whole of it.
+   *
+   * `recording` was set only after `await engine.start(...)` resolved, so during
+   * the permission prompt `busy` was false: Escape, a backdrop click and the
+   * Close button were all live. And the unmount cleanup keyed off
+   * `engine.isRecording`, which `start()` sets synchronously before it has
+   * acquired anything — so the cleanup stopped an engine that owned nothing,
+   * dropped the reference, and the resolving `start()` then handed a LIVE
+   * MediaStream and an open AudioContext to an engine nothing could reach. The
+   * microphone stayed lit for the rest of the session.
+   *
+   * Both halves are pinned here: the window is closed (nothing dismisses it),
+   * and the leak is closed (an unmount inside it still releases the mic).
+   */
+  it('holds the dialog shut while the mic is being acquired, and releases it if the dialog goes anyway', async () => {
+    seedDoc();
+    const mic = heldMicEngine();
+    const onClose = jest.fn();
+    const view = open(mic.engine, onClose);
+    await settle();
+    await alignIn();
+    fireEvent.click(screen.getByTestId('align-lyrics-word-1'));
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('align-lyrics-record'));
+    });
+    // Inside the window: the slot is claimed, nothing is acquired yet.
+    expect(mic.engine.isRecording).toBe(true);
+    expect(mic.track.stopped).toBe(false);
+
+    // …and the dialog is NOT dismissable through any of its three routes.
+    fireEvent.mouseDown(screen.getByTestId('dialog-overlay'));
+    fireEvent.keyDown(document, { key: 'Escape' });
+    expect(onClose).not.toHaveBeenCalled();
+    expect((screen.getByText('Close').closest('button') as HTMLButtonElement).disabled).toBe(true);
+
+    // Unmount anyway — the parent can drop this dialog for reasons Escape
+    // cannot reach (the document closes, the app quits). The mic must still be
+    // released once the acquisition it cannot cancel finally lands.
+    view.unmount();
+    await act(async () => {
+      mic.grant();
+      await settle();
+    });
+
+    expect(mic.track.stopped).toBe(true); // the mic indicator goes out
+    expect(mic.ctxState.closed).toBe(true); // …and the AudioContext is not leaked
+    expect(mic.engine.isRecording).toBe(false);
   });
 });
 

@@ -83,6 +83,14 @@ function formatMs(samples: number, sampleRate: number): string {
  * discard a running download, alignment or take, and the unmount cleanup
  * cancels an in-flight alignment AND stops a running recorder — an orphaned
  * `RecordingEngine` holds the microphone open for the rest of the session.
+ *
+ * `busy` counts the microphone ACQUISITION too, not just the recording. The
+ * engine claims its recording slot synchronously and only takes the microphone
+ * when `getUserMedia` resolves, so the permission prompt used to be a stretch
+ * in which this dialog called itself idle: dismissable, and with a cleanup that
+ * "stopped" an engine holding nothing and then let the resolving `start()` hand
+ * a live stream to an engine nothing could reach. The window is closed by
+ * `acquiring`, and the cleanup waits on the pending `start()` before stopping.
  */
 export default function AlignLyricsDialog({
   onClose,
@@ -110,6 +118,17 @@ export default function AlignLyricsDialog({
   const [selectedWord, setSelectedWord] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
   /**
+   * The microphone is being ACQUIRED — `getUserMedia` is outstanding.
+   *
+   * Separate from `recording` because it is not the same state to the user (no
+   * Stop button yet, nothing being captured) but it is the same state to
+   * `busy`: without it the whole permission prompt was a window in which the
+   * dialog reported itself idle, so Escape, a backdrop click and the Close
+   * button could all discard a dialog that was in the middle of taking the
+   * microphone.
+   */
+  const [acquiring, setAcquiring] = useState(false);
+  /**
    * The fresh take, and the word it was recorded FOR.
    *
    * `forWord` is not bookkeeping. Clicking a word is also how you LISTEN to
@@ -134,7 +153,7 @@ export default function AlignLyricsDialog({
   const alignment: LyricsAlignment | null = doc ? getLyricsAlignment(doc.id) : null;
   const stale = doc ? isLyricsAlignmentStale(doc.id) : false;
 
-  const busy = downloading || running || recording || splicing;
+  const busy = downloading || running || acquiring || recording || splicing;
 
   // The unmount mirror (SeparateDialog.tsx:94's unmountedRef): a ref, because
   // the cleanup must read the CURRENT value, not the one captured when the
@@ -142,6 +161,8 @@ export default function AlignLyricsDialog({
   const unmountedRef = useRef(false);
   const runningRef = useRef(false);
   const engineRef = useRef<RecordingEngine | null>(injectedEngine ?? null);
+  /** The in-flight `engine.start()`, or null. See {@link acquiring}. */
+  const startRef = useRef<Promise<void> | null>(null);
 
   useEffect(() => {
     unmountedRef.current = false;
@@ -153,10 +174,22 @@ export default function AlignLyricsDialog({
       }
       const engine = engineRef.current;
       engineRef.current = null;
+      const acquisition = startRef.current;
+      startRef.current = null;
       // A recorder left running holds the microphone (and its AudioContext)
       // open for the rest of the session. `stop()` rejects when it is not
       // recording, which is the ordinary case on close.
-      if (engine?.isRecording) void engine.stop().catch(() => {});
+      if (acquisition) {
+        // …but a start() that has not resolved owns NOTHING yet, and
+        // `isRecording` is already true because the slot is claimed
+        // synchronously. Stopping now would release nothing and clear the flag,
+        // and the resolving start() would then hand a live MediaStream to an
+        // engine this ref no longer points at — an orphaned capture for the
+        // rest of the session. Wait for the acquisition to land, then stop.
+        void acquisition.then(() => engine?.stop()).catch(() => {});
+      } else if (engine?.isRecording) {
+        void engine.stop().catch(() => {});
+      }
     };
   }, []);
 
@@ -254,16 +287,33 @@ export default function AlignLyricsDialog({
     setError(null);
     if (!engineRef.current) engineRef.current = new RecordingEngine();
     const engine = engineRef.current;
+    setAcquiring(true);
     try {
       // The document's own rate is REQUESTED, not assumed: the browser may hand
       // back a different one, and `stop()` reports what it actually got — which
       // is what the service resamples from.
-      await engine.start({ channels: 1, sampleRate: target.sampleRate });
+      //
+      // The promise is PUBLISHED on a ref before it is awaited, because the
+      // unmount cleanup cannot deal with this engine correctly without it:
+      // `start()` claims the recording slot synchronously but only acquires the
+      // microphone when `getUserMedia` resolves, so a `stop()` fired inside that
+      // window releases NOTHING and then the resolving `start()` hands a live
+      // stream to an engine no one holds a reference to any more.
+      startRef.current = engine.start({ channels: 1, sampleRate: target.sampleRate });
+      await startRef.current;
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      if (!unmountedRef.current) {
+        setAcquiring(false);
+        setError(err instanceof Error ? err.message : String(err));
+      }
       return;
+    } finally {
+      startRef.current = null;
     }
-    if (!unmountedRef.current) setRecording(true);
+    if (!unmountedRef.current) {
+      setAcquiring(false);
+      setRecording(true);
+    }
   }
 
   async function handleStopRecording(): Promise<void> {
