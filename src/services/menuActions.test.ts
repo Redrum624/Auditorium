@@ -577,6 +577,7 @@ describe('tempo.match (Task T8)', () => {
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
+      openVocalChainDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -632,6 +633,7 @@ describe('timing.align (Task F9)', () => {
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: openAlign,
+      openVocalChainDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -639,6 +641,63 @@ describe('timing.align (Task F9)', () => {
     await runCommand('timing.align');
 
     expect(openAlign).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('effects.vocalChain (Task F7)', () => {
+  function findEffectsCmd(id: string): MenuCommand | undefined {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  }
+
+  it('Effects section contains effects.vocalChain immediately after timing.align', () => {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    const ids = commandIds(effects.items);
+    expect(ids).toContain('effects.vocalChain');
+    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('timing.align') + 1);
+  });
+
+  it('keeps its place once the effect registry has populated the section', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    const ids = commandIds(effects.items);
+    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('timing.align') + 1);
+  });
+
+  it('is registered with a real label rather than falling back to its id', () => {
+    expect(findEffectsCmd('effects.vocalChain')!.label).toBe('Vocal Chain…');
+  });
+
+  it('is disabled with no active document and enabled with one', () => {
+    expect(findEffectsCmd('effects.vocalChain')!.enabled(useAppStore.getState())).toBe(false);
+    openDoc();
+    expect(findEffectsCmd('effects.vocalChain')!.enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("effects.vocalChain") opens the dialog through the bus', async () => {
+    openDoc();
+    const openVocalChain = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      openSeparateDialog: () => {},
+      openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
+      openVocalChainDialog: openVocalChain,
+      focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
+    });
+
+    await runCommand('effects.vocalChain');
+
+    expect(openVocalChain).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -688,6 +747,7 @@ describe('edit.remix (Task T14)', () => {
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
+      openVocalChainDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -711,6 +771,7 @@ describe('edit.remix (Task T14)', () => {
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
+      openVocalChainDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -740,6 +801,7 @@ describe('edit.separateStems (Task S6)', () => {
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
+      openVocalChainDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -807,6 +869,7 @@ describe('edit.transcribe (Task F4b)', () => {
       openTranscribeDialog: openTranscribe,
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
+      openVocalChainDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });

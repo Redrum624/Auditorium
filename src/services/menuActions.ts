@@ -28,6 +28,7 @@ import {
   openVoiceChangerDialog,
   openTempoDialog,
   openAlignTimingDialog,
+  openVocalChainDialog,
 } from './dialogBus';
 import { getVisibleEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
@@ -142,19 +143,30 @@ function fallbackCommand(id: string): MenuCommand {
 function effectsSectionItemIds(): (string | 'separator')[] {
   const effects = getVisibleEffects();
   if (effects.length === 0) {
-    return ['noise.capture', 'tempo.detect', 'tempo.match', 'timing.align', 'separator', 'effects.none'];
+    return [
+      'noise.capture',
+      'tempo.detect',
+      'tempo.match',
+      'timing.align',
+      'effects.vocalChain',
+      'separator',
+      'effects.none',
+    ];
   }
   // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
   // Noise Reduction effect), above the category-grouped effect list. 'Detect
-  // Tempo' (Task T5), 'Match Tempo…' (Task T8) and 'Align Vocal Timing…' (F9)
-  // join it there rather than
+  // Tempo' (Task T5), 'Match Tempo…' (Task T8), 'Align Vocal Timing…' (F9) and
+  // 'Vocal Chain…' (F7) join it there rather than
   // widening the closed MenuSection['title'] union for a couple of analysis/
-  // transform commands (Plan Ruling 5).
+  // transform commands (Plan Ruling 5). Vocal Chain sits directly after Align
+  // Vocal Timing because that is the order the two are used in: the chain's
+  // timing stage is manual by design and must be run BEFORE the chain.
   const ids: (string | 'separator')[] = [
     'noise.capture',
     'tempo.detect',
     'tempo.match',
     'timing.align',
+    'effects.vocalChain',
     'separator',
   ];
   let lastCategory: string | null = null;
@@ -931,6 +943,26 @@ function registerVoiceCommands(): void {
   ]);
 }
 
+/** F7 — the Vocal Chain. It sits in the EFFECTS menu, immediately after 'Align
+ * Vocal Timing…', because it is a same-document, in-place transform of the
+ * selection — unlike Auto-Remix / Separate / Transcribe, which produce NEW
+ * documents and therefore live in Edit. It is a command rather than an
+ * `effect.<id>` entry because it is not one `EffectDefinition`: it composes
+ * several of them, deriving each one's settings from the audio that reaches it,
+ * which scalar params in an EffectDialog cannot express. Same `enabled` rule as
+ * `timing.align` — an active document — and no shortcut: this is a multi-stage
+ * pass that should never be one keystroke away. */
+function registerVocalChainCommands(): void {
+  registerCommands([
+    {
+      id: 'effects.vocalChain',
+      label: 'Vocal Chain…',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openVocalChainDialog(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -945,3 +977,4 @@ registerRemixCommands();
 registerStemCommands();
 registerTranscribeCommands();
 registerVoiceCommands();
+registerVocalChainCommands();

@@ -20,6 +20,7 @@ let openSeparate: OpenSetter | null = null;
 let openTranscribe: OpenSetter | null = null;
 let openVoiceChanger: OpenSetter | null = null;
 let openAlignTiming: OpenSetter | null = null;
+let openVocalChain: OpenSetter | null = null;
 let focusRemix: OpenSetter | null = null;
 let focusTranscript: OpenSetter | null = null;
 
@@ -36,6 +37,8 @@ export function registerDialogSetters(setters: {
   openVoiceChangerDialog: OpenSetter;
   /** F9's Align Vocal Timing dialog. */
   openAlignTimingDialog: OpenSetter;
+  /** F7's Vocal Chain dialog. */
+  openVocalChainDialog: OpenSetter;
   /** Not a dialog: switches the sidebar to the Remix tab once a remix
    * document exists (Task T14). It rides this bus for the same reason the
    * dialog openers do — the caller must not import React or reach into
@@ -56,6 +59,7 @@ export function registerDialogSetters(setters: {
   openTranscribe = setters.openTranscribeDialog;
   openVoiceChanger = setters.openVoiceChangerDialog;
   openAlignTiming = setters.openAlignTimingDialog;
+  openVocalChain = setters.openVocalChainDialog;
   focusRemix = setters.focusRemixPanel;
   focusTranscript = setters.focusTranscriptPanel;
   return () => {
@@ -70,6 +74,7 @@ export function registerDialogSetters(setters: {
     openTranscribe = null;
     openVoiceChanger = null;
     openAlignTiming = null;
+    openVocalChain = null;
     focusRemix = null;
     focusTranscript = null;
   };
@@ -117,6 +122,10 @@ export function openVoiceChangerDialog(): void {
 
 export function openAlignTimingDialog(): void {
   openAlignTiming?.();
+}
+
+export function openVocalChainDialog(): void {
+  openVocalChain?.();
 }
 
 export function focusRemixPanel(): void {
