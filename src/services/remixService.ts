@@ -107,8 +107,9 @@
  * at 120 BPM 4/4, a 4-minute song (120 bars) is **19 ms** and a 10-minute set
  * (300 bars, already 1.08x the limit) is **120 ms**.
  *
- * So planning is routed to a worker when `(numBars+1)*(Nmax+1) >
- * MAX_DP_CELLS`, and the worker is **session-scoped**: the whole
+ * So planning is routed to a worker when
+ * `(numBars+1)*(Nmax+1)*2^min(pins, MAX_REQUIRED_JOINS) > MAX_DP_CELLS`, and
+ * the worker is **session-scoped**: the whole
  * `RemixAnalysis` is posted ONCE at session creation and stays RESIDENT
  * (`remixPlan.worker.ts`), so every subsequent plan request is a small
  * message in and a small `PlanRemixResult` out. Shipping the analysis
@@ -304,10 +305,20 @@ export type ToggleLockResult =
  * DELIBERATELY HIGHER than `MAX_REQUIRED_JOINS` (4), which is where the
  * planner's exact subset DP runs out of memory (see that constant). Lowering
  * this to 4 would make the guarantee unconditional at the price of taking four
- * pins away from the user; keeping it at 8 means pins 5-8 are honoured on a
- * best-effort basis and the panel says so. That is a real trade-off, made
- * explicitly: a user who pins 8 edits is arranging by hand and is better
- * served by 8 preferences plus an honest label than by being told "no". */
+ * pins away from the user; keeping it at 8 means that once the set the planner
+ * can enforce exceeds 4, EVERY pin degrades to a preference — not just the
+ * fifth onward. `remixPlan.ts` sets `preferredKeys = feasible`, the whole set,
+ * because there is no principled way to choose which four keep a guarantee the
+ * user never ranked. The panel says exactly that ("pins are currently strong
+ * preferences rather than guarantees"), which is the honest label; an earlier
+ * version of this comment claimed pins 1-4 kept the guarantee above the cap,
+ * which the planner has never done. That is a real trade-off, made explicitly:
+ * a user who pins 8 edits is arranging by hand and is better served by 8
+ * preferences plus an honest label than by being told "no".
+ *
+ * Triage runs FIRST, so the cap is on the set that is still standing: pins the
+ * user also rejected, and pins that are not a legal splice, are dropped before
+ * the count is taken and can bring an over-cap set back under it. */
 export const MAX_LOCKED_JOINS = 8;
 
 // THE LOCK-RECOVERY SWEEP IS GONE (fix round 2). It used to re-run planning
