@@ -31,6 +31,24 @@ export interface EffectParamDef {
   readout?: (value: EffectParamValue, ctx: EffectReadoutContext) => string;
 }
 
+/**
+ * Optional (F7): flat, display-oriented facts an effect knows about its own run
+ * that a CALLER CANNOT MEASURE from the before/after buffers.
+ *
+ * The bar is deliberately high, because almost everything is measurable from
+ * outside: level change, peak change, how many samples moved, the RMS of what
+ * was removed — the Vocal Chain computes all of those itself for every stage
+ * (`measureStageDelta`). What it cannot recover is a quantity that exists only
+ * as an intermediate inside `process`: Pitch Correct's correction curve is the
+ * shipped example — the cents it applied are gone by the time the resynthesized
+ * audio comes back, and re-deriving them means running the pitch detector a
+ * second time, which measured 282 ms per audio-second.
+ *
+ * Rides back through the worker beside `removedSpans`, for the same reason and
+ * on the same shared message type.
+ */
+export type EffectReport = Record<string, number | string>;
+
 export interface EffectResult {
   channels: Float32Array[]; // may differ in length (time-stretch)
   /** Optional (F2): a length-changing effect that DELETES discontiguous
@@ -41,6 +59,9 @@ export interface EffectResult {
    * instead of the proportional 'stretch' heuristic, which mis-places every
    * marker after a removed gap. Absent for all other effects. */
   removedSpans?: { start: number; end: number }[];
+  /** Optional (F7) — see `EffectReport`. Display only: nothing in the audio
+   * path may read it, so an effect that omits it behaves identically. */
+  report?: EffectReport;
 }
 
 export type EffectCategory =

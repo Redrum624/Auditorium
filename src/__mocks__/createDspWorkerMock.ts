@@ -67,6 +67,7 @@ class FakeDspWorker {
           id: msg.id,
           channels: result.channels,
           removedSpans: result.removedSpans,
+          report: result.report,
         };
         this.emit(done);
       } catch (err) {

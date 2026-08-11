@@ -1,4 +1,4 @@
-import type { EffectParamValue } from '../effects/types';
+import type { EffectParamValue, EffectReport } from '../effects/types';
 
 /**
  * The DSP worker's message contract — the ONE definition imported by all
@@ -33,6 +33,11 @@ export interface DspWorkerDoneMessage {
    * input-relative deleted spans, mirrored from `EffectResult.removedSpans`
    * — effectRunner turns them into the exact 'cuts' marker remap. */
   removedSpans?: { start: number; end: number }[];
+  /** Present only for effects that report something a caller cannot measure
+   * from the buffers (F7), mirrored from `EffectResult.report`. Plain
+   * numbers/strings, so no transfer-list entry — and display-only, so an
+   * effect that omits it is indistinguishable in the audio path. */
+  report?: EffectReport;
 }
 
 export type DspWorkerReply =

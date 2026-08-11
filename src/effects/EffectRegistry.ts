@@ -1,4 +1,4 @@
-import type { EffectDefinition } from './types';
+import type { EffectDefinition, EffectParamValue } from './types';
 
 /** Module-level registry keyed by effect id. Populated by `registerAll.ts`, which
  * both the app (`App.tsx`) and the dsp worker import. */
@@ -35,4 +35,24 @@ export function getAllEffects(): EffectDefinition[] {
  */
 export function getVisibleEffects(): EffectDefinition[] {
   return getAllEffects().filter((e) => !e.hidden);
+}
+
+/**
+ * Every declared default for one effect, as the params record `process` takes.
+ * Throws on an unknown id rather than returning `{}`, because an empty record
+ * silently means "every default" to `process` and would hide the typo.
+ *
+ * F7 uses this as the Vocal Chain's starting point for EVERY stage: the chain
+ * does not restate any effect's defaults, it inherits them and overrides ONLY
+ * the ones whose derivation the chain context provably changes (the de-esser's
+ * threshold, per F8's Ruling 1, and the compressor's). That way a default
+ * re-derived in the effect reaches the chain automatically, and there is no
+ * second copy to drift.
+ */
+export function defaultParamsFor(id: string): Record<string, EffectParamValue> {
+  const def = registry.get(id);
+  if (!def) throw new Error(`Unknown effect: ${id}`);
+  const params: Record<string, EffectParamValue> = {};
+  for (const p of def.params) params[p.id] = p.default;
+  return params;
 }

@@ -1,4 +1,4 @@
-import type { EffectDefinition } from '../types';
+import type { EffectDefinition, EffectReport } from '../types';
 import { detectPitch, type PitchTrack } from '../../dsp/pitchDetect';
 import { MAX_RATIO, MIN_RATIO, timeStretchVariableLinked } from '../../dsp/wsola';
 import { resampleVariable } from '../../dsp/resample';
@@ -131,6 +131,51 @@ export function correctionCurve(
 }
 
 /**
+ * What the corrector actually did, and the one measurement of the SOURCE that
+ * only this effect has already paid for (F7).
+ *
+ * `detectPitch` measured 282 ms of work per audio-second on the reference take,
+ * so anything downstream that needs the sung range — the Vocal Chain's
+ * high-pass corner is the shipped case — takes it from here rather than running
+ * the detector a second time. `f0P1Hz` is the 1st percentile rather than the
+ * minimum deliberately: on that take the minimum voiced f0 is 76.1 Hz against a
+ * p1 of 195.2 Hz and a p50 of 330.9 Hz, i.e. the extreme tail is octave-error
+ * contamination, and a corner placed under it would be placed under nothing.
+ *
+ * Cents are reported as the MEDIAN and MAX of |correction| over frames the
+ * corrector actually moved, which is the number Ruling 3 asks the chain to
+ * show; frames it left alone are excluded so a mostly-in-tune take does not
+ * report "0 cents" for the notes it did fix.
+ */
+export function summarizeCorrection(track: PitchTrack, corr: ArrayLike<number>): EffectReport {
+  const voiced: number[] = [];
+  for (const f of track.frames) if (f.f0Hz !== null && f.f0Hz > 0) voiced.push(f.f0Hz);
+  voiced.sort((a, b) => a - b);
+
+  const moved: number[] = [];
+  for (let k = 0; k < corr.length; k++) {
+    const cents = Math.abs(corr[k]) * 100;
+    if (cents > 0) moved.push(cents);
+  }
+  moved.sort((a, b) => a - b);
+
+  const report: EffectReport = {
+    voicedFrames: voiced.length,
+    totalFrames: track.frames.length,
+    correctedFrames: moved.length,
+    medianCorrectionCents: moved.length === 0 ? 0 : moved[moved.length >> 1],
+    maxCorrectionCents: moved.length === 0 ? 0 : moved[moved.length - 1],
+  };
+  // Omitted rather than zeroed when there is nothing voiced: 0 Hz would be read
+  // downstream as a measured fundamental of zero.
+  if (voiced.length > 0) {
+    report.f0P1Hz = voiced[Math.min(voiced.length - 1, Math.round(0.01 * (voiced.length - 1)))];
+    report.f0MedianHz = voiced[voiced.length >> 1];
+  }
+  return report;
+}
+
+/**
  * Cumulative stretch map from the per-frame correction curve. S[i] is the
  * stretched-signal position of input sample i (S[0] = 0, S[N] = the stretched
  * total length); the per-sample ratio is ρ(i) = 2^(c(i)/12) where c(i)
@@ -233,13 +278,19 @@ export const pitchCorrectEffect: EffectDefinition = {
     const strength01 = Math.min(1, Math.max(0, Number(params.strength ?? 100) / 100));
     const retuneMs = Number(params.retuneMs ?? 50);
 
-    const copy = () => ({ channels: channels.map((c) => Float32Array.from(c)) });
+    const copy = (report?: EffectReport) => ({
+      channels: channels.map((c) => Float32Array.from(c)),
+      report,
+    });
 
     // Ruling 4: zero strength is a byte-identical pass-through (the
-    // PitchShiftEffect 0-semitone precedent — exact copy, new arrays).
+    // PitchShiftEffect 0-semitone precedent — exact copy, new arrays). No
+    // report beyond the fact itself: the detector never ran, so there is no
+    // pitch measurement to hand on (F7's chain reads that as "unknown", not
+    // as "no voiced material").
     if (strength01 === 0) {
       onProgress?.(1);
-      return copy();
+      return copy({ strengthPercent: 0 });
     }
 
     const numCh = channels.length;
@@ -279,7 +330,7 @@ export const pitchCorrectEffect: EffectDefinition = {
     }
     if (!anyCorrection) {
       onProgress?.(1);
-      return copy();
+      return copy(summarizeCorrection(track, corr));
     }
 
     // Per-sample ratio and its cumulative map S (S[i] = stretched position of
@@ -319,6 +370,6 @@ export const pitchCorrectEffect: EffectDefinition = {
       resampleVariable(c, positions, fc, (f) => onProgress?.(base + (1 - base) * ((ch + f) / numCh)))
     );
     onProgress?.(1);
-    return { channels: out };
+    return { channels: out, report: summarizeCorrection(track, corr) };
   },
 };

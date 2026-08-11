@@ -49,6 +49,7 @@ ctx.onmessage = (e) => {
       id: msg.id,
       channels: result.channels,
       removedSpans: result.removedSpans,
+      report: result.report,
     };
     ctx.postMessage(done, transfer);
   } catch (err) {

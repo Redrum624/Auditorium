@@ -70,6 +70,14 @@ function docBytes(doc: AudioDocument): number {
  *   assumed: at pos === cut.start the snap equals the keep-side formula, and
  *   at pos === cut.end the snap equals the shift-side formula (both reduce
  *   to cut.start - removedBefore), so the rule is seamless at both edges.
+ * - compose (F7, Vocal Chain): apply `steps` LEFT TO RIGHT, each in the
+ *   coordinates the previous one produced; a step that drops a marker ends
+ *   the chain for that marker (null propagates). It exists because the chain
+ *   is a composition of edits committed as ONE undo entry, so its marker rule
+ *   has to be the composition of its stages' rules — Remove Silence's 'cuts'
+ *   followed by the 'insert' of a Reverb tail is the shipped case. An empty
+ *   `steps` is the identity, which is what a chain of equal-length stages
+ *   correctly produces.
  */
 export type MarkerRemap =
   | { type: 'delete'; start: number; end: number }
@@ -78,7 +86,8 @@ export type MarkerRemap =
   | { type: 'trim'; start: number; end: number }
   | { type: 'rescale'; fromRate: number; toRate: number }
   | { type: 'stretch'; start: number; end: number; length: number }
-  | { type: 'cuts'; cuts: { start: number; end: number }[] };
+  | { type: 'cuts'; cuts: { start: number; end: number }[] }
+  | { type: 'compose'; steps: MarkerRemap[] };
 
 /** Maps a single marker position per `remap`'s rule; `null` means "drop". */
 function remapPosition(pos: number, remap: MarkerRemap): number | null {
@@ -114,6 +123,14 @@ function remapPosition(pos: number, remap: MarkerRemap): number | null {
         removedBefore += cut.end - cut.start;
       }
       return pos - removedBefore;
+    }
+    case 'compose': {
+      let p: number | null = pos;
+      for (const step of remap.steps) {
+        if (p === null) return null;
+        p = remapPosition(p, step);
+      }
+      return p;
     }
   }
 }

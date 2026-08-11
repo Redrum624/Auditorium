@@ -25,8 +25,34 @@ export interface NoiseProfile {
   spectra: Float32Array[];
 }
 
-const FFT_SIZE = 2048;
-const HOP = 512;
+export const NOISE_FFT_SIZE = 2048;
+export const NOISE_HOP = 512;
+const FFT_SIZE = NOISE_FFT_SIZE;
+const HOP = NOISE_HOP;
+
+/**
+ * The noise print itself: per channel, the average STFT magnitude spectrum over
+ * every frame of the given audio (`fftSize/2+1` bins). Extracted from
+ * `captureNoiseProfile` (F7) so the Vocal Chain can learn a print from the
+ * quiet passage it measured without duplicating the transform — one definition
+ * of "what a noise print is", used by both the manual capture and the chain.
+ *
+ * A channel with no complete frame (shorter than `fftSize`) yields an all-zero
+ * spectrum, which Noise Reduction treats as "subtract nothing".
+ */
+export function averageMagnitudeSpectra(channels: Float32Array[]): Float32Array[] {
+  const bins = FFT_SIZE / 2 + 1;
+  return channels.map((channel) => {
+    const { frames } = stft(channel, FFT_SIZE, HOP);
+    const avg = new Float32Array(bins);
+    if (frames.length === 0) return avg;
+    for (const frame of frames) {
+      for (let k = 0; k < bins; k++) avg[k] += frame[k];
+    }
+    for (let k = 0; k < bins; k++) avg[k] /= frames.length;
+    return avg;
+  });
+}
 
 let profile: NoiseProfile | null = null;
 let version = 0;
@@ -58,17 +84,7 @@ export function captureNoiseProfile(): void {
   const end = selection ? selection.end : docLength(doc);
   const region = cloneRegion(doc, start, end);
 
-  const bins = FFT_SIZE / 2 + 1;
-  const spectra = region.map((channel) => {
-    const { frames } = stft(channel, FFT_SIZE, HOP);
-    const avg = new Float32Array(bins);
-    if (frames.length === 0) return avg;
-    for (const frame of frames) {
-      for (let k = 0; k < bins; k++) avg[k] += frame[k];
-    }
-    for (let k = 0; k < bins; k++) avg[k] /= frames.length;
-    return avg;
-  });
+  const spectra = averageMagnitudeSpectra(region);
 
   profile = { docId: doc.id, docSampleRate: doc.sampleRate, spectra };
   bumpVersion();

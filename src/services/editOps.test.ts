@@ -755,6 +755,125 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
   });
 });
 
+describe("marker remap 'compose' (F7 Vocal Chain)", () => {
+  function setMarkers(docId: string, positions: number[]): void {
+    useAppStore
+      .getState()
+      .setMarkersForDoc(
+        docId,
+        positions.map((p, i) => ({ id: `c${i}`, name: `C${i}`, positionSample: p }))
+      );
+  }
+  function markerPositions(docId: string): number[] {
+    return (useAppStore.getState().markers[docId] ?? []).map((m) => m.positionSample);
+  }
+
+  it('an EMPTY step list is the identity — a chain of equal-length stages moves nothing', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [0, 3, 7, 9]);
+    applyEdit('noop', doc.id, (d) => d, undefined, { type: 'compose', steps: [] });
+    expect(markerPositions(doc.id)).toEqual([0, 3, 7, 9]);
+  });
+
+  it('a single step behaves exactly as that step alone would', () => {
+    const a = addDoc([ramp(10)]);
+    setMarkers(a.id, [0, 2, 6, 9]);
+    applyEdit('alone', a.id, (d) => d, undefined, { type: 'insert', start: 4, length: 3 });
+    const direct = markerPositions(a.id);
+
+    const b = addDoc([ramp(10)]);
+    setMarkers(b.id, [0, 2, 6, 9]);
+    applyEdit('composed', b.id, (d) => d, undefined, {
+      type: 'compose',
+      steps: [{ type: 'insert', start: 4, length: 3 }],
+    });
+    expect(markerPositions(b.id)).toEqual(direct);
+  });
+
+  it('applies the steps LEFT TO RIGHT, each in the coordinates the previous produced', () => {
+    const doc = addDoc([ramp(20)]);
+    setMarkers(doc.id, [12]);
+    // Cut [2,6) moves 12 -> 8; then inserting 5 at 7 (post-cut coords) moves 8 -> 13.
+    applyEdit('chain', doc.id, (d) => d, undefined, {
+      type: 'compose',
+      steps: [
+        { type: 'cuts', cuts: [{ start: 2, end: 6 }] },
+        { type: 'insert', start: 7, length: 5 },
+      ],
+    });
+    expect(markerPositions(doc.id)).toEqual([13]);
+  });
+
+  it('is ORDER-DEPENDENT — swapping the steps gives a different answer, so order is really honoured', () => {
+    const doc = addDoc([ramp(20)]);
+    setMarkers(doc.id, [12]);
+    // Insert first (12 -> 17), then cut [2,6) (17 -> 13)... same here, so use a
+    // step pair whose composition genuinely differs: an insert INSIDE the cut.
+    applyEdit('swapped', doc.id, (d) => d, undefined, {
+      type: 'compose',
+      steps: [
+        { type: 'insert', start: 3, length: 5 },
+        { type: 'cuts', cuts: [{ start: 2, end: 6 }] },
+      ],
+    });
+    // 12 -> 17 (insert before it) -> 13 (cut of 4 before it).
+    expect(markerPositions(doc.id)).toEqual([13]);
+
+    const other = addDoc([ramp(20)]);
+    setMarkers(other.id, [4]);
+    applyEdit('a', other.id, (d) => d, undefined, {
+      type: 'compose',
+      steps: [
+        { type: 'insert', start: 3, length: 5 },
+        { type: 'cuts', cuts: [{ start: 2, end: 6 }] },
+      ],
+    });
+    // 4 -> 9 (after the insert point) -> 5.
+    expect(markerPositions(other.id)).toEqual([5]);
+
+    const reversed = addDoc([ramp(20)]);
+    setMarkers(reversed.id, [4]);
+    applyEdit('b', reversed.id, (d) => d, undefined, {
+      type: 'compose',
+      steps: [
+        { type: 'cuts', cuts: [{ start: 2, end: 6 }] },
+        { type: 'insert', start: 3, length: 5 },
+      ],
+    });
+    // 4 -> 2 (inside the cut, snaps to the join) -> 2 (before the insert point).
+    expect(markerPositions(reversed.id)).toEqual([2]);
+  });
+
+  it('a drop in ANY step is final — a later step cannot resurrect the marker', () => {
+    const doc = addDoc([ramp(20)]);
+    setMarkers(doc.id, [3, 12]);
+    applyEdit('drop', doc.id, (d) => d, undefined, {
+      type: 'compose',
+      steps: [
+        { type: 'delete', start: 2, end: 6 },
+        { type: 'insert', start: 0, length: 4 },
+      ],
+    });
+    // 3 was inside the delete and is gone; 12 -> 8 -> 12.
+    expect(markerPositions(doc.id)).toEqual([12]);
+  });
+
+  it('runs every step, not just the first', () => {
+    const doc = addDoc([ramp(30)]);
+    setMarkers(doc.id, [20]);
+    applyEdit('three', doc.id, (d) => d, undefined, {
+      type: 'compose',
+      steps: [
+        { type: 'insert', start: 0, length: 1 },
+        { type: 'insert', start: 0, length: 2 },
+        { type: 'insert', start: 0, length: 4 },
+      ],
+    });
+    // Only the first step -> 21; only the first two -> 23; all three -> 27.
+    expect(markerPositions(doc.id)).toEqual([27]);
+  });
+});
+
 describe('silenceSelection', () => {
   it('zeroes the region in place, preserving length, outside data and the selection', () => {
     const doc = addDoc([ramp(10), ramp(10, 10)]);

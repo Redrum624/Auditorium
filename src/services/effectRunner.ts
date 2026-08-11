@@ -1,6 +1,6 @@
 import { cloneRegion, docLength, replaceRegion } from '../audio/AudioDocument';
 import { getEffect } from '../effects/EffectRegistry';
-import type { EffectParamValue } from '../effects/types';
+import type { EffectParamValue, EffectReport } from '../effects/types';
 import { useAppStore } from '../stores/appStore';
 import { createDspWorker } from '../workers/createDspWorker';
 import type { DspWorkerReply, DspWorkerRunMessage } from '../workers/dspWorkerMessages';
@@ -26,6 +26,119 @@ export function describeRemoval(spans: { start: number; end: number }[], sampleR
 }
 
 let nextRunId = 1;
+
+/** What one worker run produced — the `done` message, minus its routing id. */
+export interface EffectRunOutput {
+  channels: Float32Array[];
+  removedSpans?: { start: number; end: number }[];
+  report?: EffectReport;
+}
+
+/** Options for `runEffectOnChannels` — the subset of `RunEffectOptions` that
+ * concerns the worker leg rather than the commit leg. */
+export interface RunOnChannelsOptions {
+  onProgress?: (fraction: number) => void;
+  extra?: unknown;
+}
+
+/**
+ * THE worker leg, shared by every caller (F7). Ships `channels` to a one-shot
+ * DSP worker, runs `effectId` on them, and resolves with what came back. It
+ * does NOT touch the store, does not commit an edit, and shows no dialog.
+ *
+ * REJECTS on failure — worker error reply, worker load failure, or an
+ * unpostable message — where `runEffectOnSelection` swallows the same failures
+ * into an error dialog. That asymmetry is the point: a single Apply has nothing
+ * left to do after a failure, while the Vocal Chain has to stop the remaining
+ * stages and leave the document untouched, and it can only do that if the
+ * failure propagates. Both surfaces still end at the same error dialog, one
+ * level up.
+ *
+ * The worker is terminated on every exit path, and the input channel buffers
+ * are TRANSFERRED (detached) — callers must not read `channels` afterwards.
+ */
+export function runEffectOnChannels(
+  effectId: string,
+  channels: Float32Array[],
+  sampleRate: number,
+  params: Record<string, EffectParamValue>,
+  opts: RunOnChannelsOptions = {}
+): Promise<EffectRunOutput> {
+  const { onProgress, extra } = opts;
+  const runId = nextRunId++;
+  const worker = createDspWorker();
+
+  return new Promise<EffectRunOutput>((resolve, reject) => {
+    // Every settle path goes through here so the worker cannot outlive the
+    // promise, and so a late duplicate reply cannot settle it twice.
+    let settled = false;
+    const finish = (fn: () => void): void => {
+      if (settled) return;
+      settled = true;
+      worker.terminate();
+      fn();
+    };
+
+    worker.onmessage = (e: MessageEvent) => {
+      const msg = e.data as DspWorkerReply;
+      if (msg.id !== runId) return;
+      if (msg.type === 'progress') {
+        onProgress?.(msg.fraction);
+        return;
+      }
+      if (msg.type === 'done') {
+        finish(() =>
+          resolve({ channels: msg.channels, removedSpans: msg.removedSpans, report: msg.report })
+        );
+        return;
+      }
+      finish(() => reject(new Error(msg.message)));
+    };
+
+    // A worker that fails to even LOAD (missing/unparsable script, blocked by
+    // CSP, ...) never reaches `onmessage` — without this the promise would
+    // never settle, hanging the caller forever and leaking the worker
+    // (Task M9 / F28).
+    worker.onerror = (ev: ErrorEvent) => {
+      finish(() => reject(new Error(ev.message || 'DSP worker failed to load')));
+    };
+
+    // The post is wrapped for the same reason `tempoAnalysis.ts` wraps its
+    // own: a throw here (an unclonable `params`/`extra`, an already-detached
+    // transfer buffer, ...) is caught by the Promise machinery and would
+    // silently reject WITHOUT terminating, leaking one thread per call. A
+    // `try` around `new Promise(...)` cannot catch it; it has to be inside
+    // the executor.
+    try {
+      const transfer = channels.map((c) => c.buffer as ArrayBuffer);
+      // Typed for the same reason as the worker's done message: postMessage
+      // takes `unknown`, so the shared contract is enforced at the literal.
+      const runMessage: DspWorkerRunMessage = {
+        type: 'run',
+        id: runId,
+        effectId,
+        channels,
+        sampleRate,
+        params,
+        extra,
+      };
+      worker.postMessage(runMessage, transfer);
+    } catch (err) {
+      finish(() => reject(err instanceof Error ? err : new Error(String(err))));
+    }
+  });
+}
+
+/** Shows the standard "Effect failed" dialog. Shared by every surface that
+ * turns a `runEffectOnChannels` rejection into something the user can see, so
+ * one failure never produces two different-looking reports. */
+export function reportEffectFailure(err: unknown): void {
+  void window.electronAPI?.showMessageBox({
+    type: 'error',
+    title: 'Effect failed',
+    message: err instanceof Error ? err.message : String(err),
+  });
+}
 
 /** Trailing options for `runEffectOnSelection`. An options object rather than
  * more positionals (v1.9.2): with `extra` typed `unknown`, a transposed
@@ -74,126 +187,52 @@ export async function runEffectOnSelection(
   const sampleRate = doc.sampleRate;
   const regionChannels = cloneRegion(doc, start, end);
 
-  const runId = nextRunId++;
-  const worker = createDspWorker();
+  let output: EffectRunOutput;
+  try {
+    output = await runEffectOnChannels(effectId, regionChannels, sampleRate, params, { onProgress, extra });
+  } catch (err) {
+    // Worker error / load failure / unpostable message — all three used to be
+    // handled by three separate copies of this dialog call inside the executor.
+    reportEffectFailure(err);
+    return;
+  }
 
-  await new Promise<void>((resolve) => {
-    worker.onmessage = (e: MessageEvent) => {
-      const msg = e.data as DspWorkerReply;
-      if (msg.id !== runId) return;
-
-      if (msg.type === 'progress') {
-        onProgress?.(msg.fraction);
-        return;
-      }
-
-      if (msg.type === 'done') {
-        worker.terminate();
-        const resultChannels = msg.channels;
-        const resultLen = resultChannels[0]?.length ?? 0;
-        // Most effects are equal-length (no remap needed), but length-changing
-        // ones (Time Stretch, Pitch Shift) TRANSFORM the region rather than
-        // replacing it with unrelated content, so interior markers ride the
-        // stretch proportionally instead of dropping (Task M3 fix round 2 —
-        // 'replace' was ruled wrong here: it drops every interior marker,
-        // including all of them on a whole-file Time Stretch). Markers at/
-        // after the region still shift by the same length delta either way.
-        //
-        // A proportional stretch is WRONG, however, for an effect that deletes
-        // discontiguous interior spans (Remove Silence, F2): there a marker on
-        // speech after a removed gap must shift by exactly the removal before
-        // it, not by the region's average shrink ratio. Such effects report
-        // their `removedSpans` (region-relative; made absolute here) and get
-        // the exact piecewise 'cuts' remap instead.
-        const remap: MarkerRemap = msg.removedSpans
-          ? { type: 'cuts', cuts: msg.removedSpans.map((s) => ({ start: start + s.start, end: start + s.end })) }
-          : { type: 'stretch', start, end, length: resultLen };
-        try {
-          applyEdit(
-            // Ruling 5 (F2): a span-deleting effect's default label reports
-            // what it removed; an explicit caller label still wins.
-            label ??
-              (msg.removedSpans
-                ? `Effect: ${def.name} (${describeRemoval(msg.removedSpans, sampleRate)})`
-                : `Effect: ${def.name}`),
-            docId,
-            (d) => replaceRegion(d, start, end, resultChannels),
-            { selection: { start, end: start + resultLen }, cursorSample: start },
-            remap
-          );
-          onProgress?.(1);
-        } catch (err) {
-          // The doc may have been closed/removed while the worker was busy.
-          // Surface it and settle — no edit was applied.
-          void window.electronAPI?.showMessageBox({
-            type: 'error',
-            title: 'Effect failed',
-            message: err instanceof Error ? err.message : String(err),
-          });
-        } finally {
-          resolve();
-        }
-        return;
-      }
-
-      // error
-      worker.terminate();
-      void window.electronAPI?.showMessageBox({
-        type: 'error',
-        title: 'Effect failed',
-        message: msg.message,
-      });
-      resolve();
-    };
-
-    // A worker that fails to even LOAD (missing/unparsable script, blocked by
-    // CSP, ...) never reaches the `onmessage` handler above — without this,
-    // the promise would never settle, hanging the Apply call forever and
-    // leaking the worker (Task M9 / F28). Mirrors the in-band 'error' branch:
-    // terminate + discard the worker, surface via the same error dialog.
-    worker.onerror = (ev: ErrorEvent) => {
-      worker.terminate();
-      void window.electronAPI?.showMessageBox({
-        type: 'error',
-        title: 'Effect failed',
-        message: ev.message || 'DSP worker failed to load',
-      });
-      resolve();
-    };
-
-    // The post is wrapped for the same reason `tempoAnalysis.ts:636-643`
-    // wraps its own: a throw here (an unclonable `params`/`extra`, an
-    // already-detached transfer buffer, ...) is caught by the Promise
-    // machinery and would silently REJECT this promise — so the `terminate()`
-    // calls above are never reached and the worker created at :50 leaks, one
-    // thread per Apply. A `try` around `new Promise(...)` cannot catch it;
-    // it has to be inside the executor.
-    try {
-      const transfer = regionChannels.map((c) => c.buffer as ArrayBuffer);
-      // Typed for the same reason as the worker's done message: postMessage
-      // takes `unknown`, so the shared contract is enforced at the literal.
-      const runMessage: DspWorkerRunMessage = {
-        type: 'run',
-        id: runId,
-        effectId,
-        channels: regionChannels,
-        sampleRate,
-        params,
-        extra,
-      };
-      worker.postMessage(runMessage, transfer);
-    } catch (err) {
-      try {
-        worker.terminate();
-      } catch {
-        /* best-effort — the worker never successfully posted, nothing more to clean up */
-      }
-      void window.electronAPI?.showMessageBox({
-        type: 'error',
-        title: 'Effect failed',
-        message: err instanceof Error ? err.message : String(err),
-      });
-      resolve();
-    }
-  });
+  const resultChannels = output.channels;
+  const resultLen = resultChannels[0]?.length ?? 0;
+  // Most effects are equal-length (no remap needed), but length-changing
+  // ones (Time Stretch, Pitch Shift) TRANSFORM the region rather than
+  // replacing it with unrelated content, so interior markers ride the
+  // stretch proportionally instead of dropping (Task M3 fix round 2 —
+  // 'replace' was ruled wrong here: it drops every interior marker,
+  // including all of them on a whole-file Time Stretch). Markers at/
+  // after the region still shift by the same length delta either way.
+  //
+  // A proportional stretch is WRONG, however, for an effect that deletes
+  // discontiguous interior spans (Remove Silence, F2): there a marker on
+  // speech after a removed gap must shift by exactly the removal before
+  // it, not by the region's average shrink ratio. Such effects report
+  // their `removedSpans` (region-relative; made absolute here) and get
+  // the exact piecewise 'cuts' remap instead.
+  const remap: MarkerRemap = output.removedSpans
+    ? { type: 'cuts', cuts: output.removedSpans.map((s) => ({ start: start + s.start, end: start + s.end })) }
+    : { type: 'stretch', start, end, length: resultLen };
+  try {
+    applyEdit(
+      // Ruling 5 (F2): a span-deleting effect's default label reports
+      // what it removed; an explicit caller label still wins.
+      label ??
+        (output.removedSpans
+          ? `Effect: ${def.name} (${describeRemoval(output.removedSpans, sampleRate)})`
+          : `Effect: ${def.name}`),
+      docId,
+      (d) => replaceRegion(d, start, end, resultChannels),
+      { selection: { start, end: start + resultLen }, cursorSample: start },
+      remap
+    );
+    onProgress?.(1);
+  } catch (err) {
+    // The doc may have been closed/removed while the worker was busy.
+    // Surface it and settle — no edit was applied.
+    reportEffectFailure(err);
+  }
 }

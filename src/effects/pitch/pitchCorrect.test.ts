@@ -12,6 +12,7 @@ import {
   hzToMidi,
   snapMidiToScale,
   SCALE_INTERVALS,
+  summarizeCorrection,
 } from './PitchCorrectEffect';
 import { MAX_RATIO, MIN_RATIO } from '../../dsp/wsola';
 import { getAllEffects } from '../EffectRegistry';
@@ -465,5 +466,101 @@ describe('pitchCorrectEffect — progress reporting', () => {
     );
     expect(seen[seen.length - 1]).toBe(1);
     for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1]);
+  });
+});
+
+
+describe('summarizeCorrection (F7) — the facts only this effect can know', () => {
+  /** A track whose voiced frames carry the given fundamentals; `null` is
+   * unvoiced. Hop/frame sizes are irrelevant to the summary. */
+  function track(f0s: (number | null)[]): PitchTrack {
+    return {
+      frames: f0s.map((f0Hz) => ({ f0Hz, confidence: f0Hz === null ? 0 : 0.95 })),
+      hopSamples: 100,
+      frameSamples: 400,
+    };
+  }
+
+  it('counts only the frames the corrector actually MOVED', () => {
+    // Six frames, three of them left alone. A summary that counted every frame
+    // would report 6 and would also drag the median down to 0.
+    const report = summarizeCorrection(track([100, 100, 100, 100, 100, 100]), [0, 0.1, 0, 0.2, 0, 0.3]);
+    expect(report.correctedFrames).toBe(3);
+    expect(report.totalFrames).toBe(6);
+  });
+
+  it('reports the median and the maximum of |correction| in cents', () => {
+    const report = summarizeCorrection(track([100, 100, 100]), [0.1, -0.3, 0.2]);
+    // |0.1|, |0.2|, |0.3| semitones -> 10, 20, 30 cents.
+    expect(report.medianCorrectionCents).toBeCloseTo(20, 6);
+    expect(report.maxCorrectionCents).toBeCloseTo(30, 6);
+  });
+
+  it('takes the ABSOLUTE correction, so a flat note and a sharp one both count', () => {
+    const sharp = summarizeCorrection(track([100, 100]), [0.4, 0.4]);
+    const flat = summarizeCorrection(track([100, 100]), [-0.4, -0.4]);
+    expect(flat.maxCorrectionCents).toBeCloseTo(Number(sharp.maxCorrectionCents), 9);
+    expect(flat.maxCorrectionCents).toBeCloseTo(40, 6);
+  });
+
+  it('reports zeros — not NaN — when nothing was moved', () => {
+    const report = summarizeCorrection(track([100, 100]), [0, 0]);
+    expect(report.correctedFrames).toBe(0);
+    expect(report.medianCorrectionCents).toBe(0);
+    expect(report.maxCorrectionCents).toBe(0);
+  });
+
+  it('reports the 1st PERCENTILE of the voiced fundamental, not its minimum', () => {
+    // 100 voiced frames: one octave-error outlier at 40 Hz, the rest 200-299 Hz.
+    // The minimum is 40; the 1st percentile is the second-lowest, 200.
+    const f0s: number[] = [40];
+    for (let k = 0; k < 99; k++) f0s.push(200 + k);
+    const report = summarizeCorrection(track(f0s), new Array(100).fill(0.1));
+    expect(report.f0P1Hz).toBe(200);
+    expect(report.f0P1Hz).not.toBe(40);
+    expect(report.f0MedianHz).toBeGreaterThan(240);
+  });
+
+  it('sorts before taking the percentile — input order must not matter', () => {
+    const ascending = [100, 200, 300, 400, 500];
+    const descending = [500, 400, 300, 200, 100];
+    const a = summarizeCorrection(track(ascending), new Array(5).fill(0.1));
+    const b = summarizeCorrection(track(descending), new Array(5).fill(0.1));
+    expect(a.f0P1Hz).toBe(b.f0P1Hz);
+    expect(a.f0MedianHz).toBe(b.f0MedianHz);
+  });
+
+  it('ignores unvoiced frames when measuring the sung range, but still counts them as frames', () => {
+    const report = summarizeCorrection(track([null, 300, null, 400, null]), [0, 0.1, 0, 0.1, 0]);
+    expect(report.voicedFrames).toBe(2);
+    expect(report.totalFrames).toBe(5);
+    expect(report.f0P1Hz).toBe(300);
+  });
+
+  it('OMITS the fundamental rather than reporting 0 Hz when nothing is voiced', () => {
+    // 0 Hz downstream would be read as a measured fundamental of zero; absent
+    // is the honest answer, and it is what makes the EQ stage decline.
+    const report = summarizeCorrection(track([null, null]), [0, 0]);
+    expect(report.f0P1Hz).toBeUndefined();
+    expect(report.f0MedianHz).toBeUndefined();
+    expect(report.voicedFrames).toBe(0);
+  });
+
+  it('rides back from a real run of the effect, not just from the helper', () => {
+    const sr = 8000;
+    const n = sr * 2;
+    const x = new Float32Array(n);
+    for (let i = 0; i < n; i++) {
+      x[i] = 0.4 * Math.sin((2 * Math.PI * 226 * i) / sr) + 0.15 * Math.sin((2 * Math.PI * 452 * i) / sr);
+    }
+    const result = pitchCorrectEffect.process([x], sr, {
+      key: 'C',
+      scale: 'chromatic',
+      strength: 100,
+      retuneMs: 50,
+    });
+    expect(result.report).toBeDefined();
+    expect(Number(result.report!.f0P1Hz)).toBeCloseTo(226, 0);
+    expect(Number(result.report!.correctedFrames)).toBeGreaterThan(0);
   });
 });

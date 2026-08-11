@@ -9,7 +9,7 @@ import { envelopeFollower, maxAcrossChannels, maybeReportProgress } from './enve
  * - `2*|overDb| <= kneeDb`: inside the knee, quadratic interpolation.
  * - otherwise: above the knee, linear `overDb * slope`.
  */
-function reductionDb(overDb: number, ratio: number, kneeDb: number): number {
+export function reductionDb(overDb: number, ratio: number, kneeDb: number): number {
   const slope = 1 - 1 / ratio;
   if (kneeDb <= 0) {
     return overDb > 0 ? overDb * slope : 0;
