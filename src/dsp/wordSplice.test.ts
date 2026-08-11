@@ -650,6 +650,20 @@ describe('spliceWord refusals', () => {
     if (!over.ok) return;
     expect(over.report.stretchRatio).toBeGreaterThan(MIN_RATIO);
     expect(over.report.stretchRatio).toBeLessThan(MAX_RATIO);
+
+    // …and the reading is over the WHOLE recording, not one end of it. Starting
+    // the recorder early and singing late, or singing and then leaving it
+    // running, are both ordinary — and two thirds of literal zeros on either
+    // side of the word must not read as silence. Every other fixture here is
+    // uniform end to end, so only these two can tell a whole-recording
+    // measurement from a half of one, and it takes both to pin both halves.
+    const lateWord = concat(silence(2 * length), tone(length, 220, 0.5));
+    expect(rmsOf(lateWord, 0, Math.floor(lateWord.length / 2))).toBe(0);
+    expect(probe(lateWord).ok).toBe(true);
+
+    const earlyWord = concat(tone(length, 220, 0.5), silence(2 * length));
+    expect(rmsOf(earlyWord, Math.floor(earlyWord.length / 2), earlyWord.length)).toBe(0);
+    expect(probe(earlyWord).ok).toBe(true);
   });
 
   it('splices a recording that is nothing but room tone rather than refusing it', () => {
