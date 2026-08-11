@@ -486,6 +486,9 @@ before anything is committed, and the ◂ ▸ shift is the correction.
 **3. Match Tempo assumes a FIXED source tempo; the remix assumes a CONSTANT
 one.** Match Tempo applies a single ratio across the whole region, so material
 that speeds up or slows down inside the selection is corrected only on average.
+(For a *sung* take that drags in one line and rushes in the next, **Align Vocal
+Timing** is the answer instead — it warps at a different rate between each pair
+of confirmed syllables. Its own limits are in section 3b below.)
 The remix's bar boundaries come from real tracked beats (so late splices still
 land on the beat on a drifting take — a genuine improvement over a rigid grid),
 but the phrase arithmetic (`a ≡ b mod Φ`) and the duration model still assume a
@@ -498,6 +501,55 @@ a join can score 0.05 and still cut a vocal mid-syllable. Chroma is also
 key-blind but not transposition-aware, so a final-chorus key change reads as
 harmonically distant and the planner avoids precisely the join a producer would
 make.
+
+**3b. Align Vocal Timing will not find your syllables for you, and says so.**
+Its onset detector was measured against 23 hand-marked note attacks in an 8 s
+excerpt of a real 142 s solo cover vocal. At the parameters tempo detection
+ships with, **44 % of the onsets it reports are not note attacks** — they are
+breaths, note *endings*, portamento slides and vibrato peaks (best F1 0.65 at a
+±50 ms tolerance; precision 0.56, recall 0.78, median localisation error
+36 ms). Retuning for voice — no decimation, a 5.3 ms hop instead of 21 ms —
+lifts that to precision 0.88, recall 0.65 and 12 ms median error, and that is
+what `Suggest syllable markers` uses; at the ±30 ms tolerance timing work
+actually needs, the best of the three parameterisations still only reaches
+F1 0.57. Each of those "best" thresholds was also chosen on the same 8 s it was
+scored on, so they are optimistic in-sample figures.
+
+Spectral flux is built for transients and a legato vowel has none; this is a
+property of the signal, not a tuning bug. So the feature does **not** warp
+detected onsets. It warps **markers** — which you placed, or kept after looking
+at what the detector proposed — and the suggestion step deliberately produces
+ordinary, editable markers rather than anchors. A false anchor is not a missed
+opportunity: it drags a syllable-sized span of audio onto a beat it never
+belonged on, manufacturing a timing error where there was none.
+
+**3c. Align Vocal Timing cannot pick the grid, and a wrong one is worse than
+none.** Tempo detection on real material put a track's drums at 159.83 BPM and
+its five other sources at a mean of 109.4 — a genuine ~3:2 feel, with every
+confidence between 0.003 and 0.084 against the app's own `CONFIDENCE_LOW` of
+0.35. Both grids are musically defensible, so an automatic pick would be a coin
+flip that makes every correction ⅔ or 1.5× wrong. The **subdivision** matters
+just as much: the same 23 attacks sit a median of 120 ms from the nearest
+quarter note, 63 ms from the nearest eighth and 25 ms from the nearest
+sixteenth. That take is on sixteenths with ~31 ms rms of human micro-timing;
+snapping it to quarters would move syllables by up to 260 ms and destroy it.
+Apply is therefore gated on an explicit confirmation, and the dialog labels each
+subdivision with the median move it implies so the choice is made from the
+measurement rather than from the label.
+
+**3d. The local stretch is bounded, and a bounded move lands short.** Local
+ratio is clamped to 0.88–1.14× — the range this WSOLA is transparent over
+(section 3's quality bands), not the engine's 0.25–4× limits, because the spans
+being stretched are sung vowels. A correction that would need more than that is
+applied as far as the bound allows and the anchor lands short of the grid; the
+dialog names how many moves that will affect before you apply. Adding more
+markers spreads each move over a longer span and is usually the fix. Strength
+defaults to 25 % for the same reason: at 100 % on the measured take, 41–55 % of
+the inter-syllable spans would need a ratio outside the transparent band, so a
+full-strength default would spend half its time clamped. Finally, the region's
+**duration is pinned** — alignment moves syllables within a region, never
+changes its length — so a syllable close to the region edge has little room to
+absorb its move and is the most likely to be held back.
 
 **4. In strict phrase mode the set of reachable lengths is COARSE.** Every run
 must be at least Φ = 8 bars long and every join must be phrase-congruent, so a

@@ -1,10 +1,10 @@
-import { getAllEffects } from '../../effects/EffectRegistry';
+import { getVisibleEffects } from '../../effects/EffectRegistry';
 import type { EffectDefinition } from '../../effects/types';
 import { openEffectDialog } from '../../services/dialogBus';
 import { useAppStore } from '../../stores/appStore';
 import { SectionLabel } from '../UI/glass';
 
-/** Groups effects by category, preserving the getAllEffects() sort order. */
+/** Groups effects by category, preserving the getVisibleEffects() sort order. */
 function groupByCategory(effects: EffectDefinition[]): [string, EffectDefinition[]][] {
   const groups: [string, EffectDefinition[]][] = [];
   for (const e of effects) {
@@ -22,7 +22,7 @@ function groupByCategory(effects: EffectDefinition[]): [string, EffectDefinition
  */
 export default function EffectsPanel() {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
-  const groups = groupByCategory(getAllEffects());
+  const groups = groupByCategory(getVisibleEffects());
 
   if (groups.length === 0) {
     return <div className="p-2 text-sm text-[#8b8b92]">No effects loaded.</div>;

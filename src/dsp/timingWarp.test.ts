@@ -7,6 +7,7 @@ import {
   detectVocalOnsets,
   pickOnsetFrames,
   subdivideBeats,
+  synthesisPosAt,
   warpRatios,
   DEFAULT_ONSET_THRESHOLD,
   DEFAULT_STRENGTH,
@@ -609,6 +610,75 @@ describe('analysisPosAt', () => {
     // proportionally.
     expect(analysisPosAt(map, 55000)).toBeCloseTo(50000, 3);
     expect(analysisPosAt(map, 110000)).toBeCloseTo(100000, 3);
+  });
+});
+
+describe('synthesisPosAt', () => {
+  const N = 480000;
+
+  it('is the identity for an identity map', () => {
+    const map = buildWarpMap([], N, { strength: 1 });
+    for (const u of [0, 1, 12345, N / 2, N - 1, N]) expect(synthesisPosAt(map, u)).toBeCloseTo(u, 6);
+  });
+
+  it('sends every knot input position to its own output position — every knot, not the first', () => {
+    const anchors: TimingAnchor[] = [];
+    const rnd = lcg(555);
+    for (let s = 20000; s < N - 20000; s += 11000) {
+      anchors.push({ source: s, target: s + Math.round((rnd() - 0.5) * 5000) });
+    }
+    const map = buildWarpMap(anchors, N, { strength: 1 });
+    expect(map.knotsIn.length).toBeGreaterThan(40);
+    for (let j = 0; j < map.knotsIn.length; j++) {
+      expect(synthesisPosAt(map, map.knotsIn[j])).toBeCloseTo(map.knotsOut[j], 4);
+    }
+  });
+
+  it('round-trips with analysisPosAt across the whole range', () => {
+    const anchors: TimingAnchor[] = [];
+    const rnd = lcg(8080);
+    for (let s = 10000; s < N - 10000; s += 9000) {
+      anchors.push({ source: s, target: s + Math.round((rnd() - 0.5) * 8000) });
+    }
+    const map = buildWarpMap(anchors, N, { strength: 1 });
+    for (let u = 0; u <= N; u += 313) {
+      expect(analysisPosAt(map, synthesisPosAt(map, u))).toBeCloseTo(u, 3);
+    }
+  });
+
+  it('is monotone non-decreasing and stays in [0, outLen], including outside the range', () => {
+    const anchors: TimingAnchor[] = [];
+    const rnd = lcg(1234);
+    for (let s = 5000; s < N - 5000; s += 6000) {
+      anchors.push({ source: s, target: s + Math.round((rnd() - 0.5) * 30000) });
+    }
+    const map = buildWarpMap(anchors, N, { strength: 1 });
+    let prev = -1;
+    for (let u = -5000; u <= N + 5000; u += 101) {
+      const p = synthesisPosAt(map, u);
+      expect(p).toBeGreaterThanOrEqual(prev - 1e-9);
+      expect(p).toBeGreaterThanOrEqual(0);
+      expect(p).toBeLessThanOrEqual(map.outLen);
+      prev = p;
+    }
+  });
+
+  it('is NOT the proportional remap — which is the identity here, and wrong', () => {
+    // `effectRunner`'s 'stretch' rule maps u -> u * outLen / inLen. The warp
+    // preserves the region length, so that rule is the identity: it would leave
+    // every marker exactly where it was. This is the discriminator — a test
+    // that only checked "the marker is inside the region" could not tell the
+    // two apart.
+    const map = buildWarpMap([{ source: 200000, target: 220000 }], N, { strength: 1 });
+    expect(map.outLen).toBe(N); // so proportional == identity, exactly
+    const proportional = (u: number): number => (u * map.outLen) / map.inLen;
+
+    for (const u of [50000, 150000, 200000, 300000, 400000]) {
+      expect(proportional(u)).toBeCloseTo(u, 9);
+      expect(Math.abs(synthesisPosAt(map, u) - u)).toBeGreaterThan(1000);
+    }
+    // The anchor itself lands on its target, not on itself.
+    expect(synthesisPosAt(map, 200000)).toBeCloseTo(220000, 3);
   });
 });
 

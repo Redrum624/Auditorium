@@ -27,8 +27,9 @@ import {
   openTranscribeDialog,
   openVoiceChangerDialog,
   openTempoDialog,
+  openAlignTimingDialog,
 } from './dialogBus';
-import { getAllEffects } from '../effects/EffectRegistry';
+import { getVisibleEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
 import { toggleSpectralScale } from './spectralScale';
 import { toggleBeatGrid } from './beatGridDisplay';
@@ -139,16 +140,23 @@ function fallbackCommand(id: string): MenuCommand {
  * `registerEffectCommands`). Falls back to the `effects.none` stub until any
  * effect is registered. */
 function effectsSectionItemIds(): (string | 'separator')[] {
-  const effects = getAllEffects();
+  const effects = getVisibleEffects();
   if (effects.length === 0) {
-    return ['noise.capture', 'tempo.detect', 'tempo.match', 'separator', 'effects.none'];
+    return ['noise.capture', 'tempo.detect', 'tempo.match', 'timing.align', 'separator', 'effects.none'];
   }
   // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
   // Noise Reduction effect), above the category-grouped effect list. 'Detect
-  // Tempo' (Task T5) and 'Match Tempo…' (Task T8) join it there rather than
+  // Tempo' (Task T5), 'Match Tempo…' (Task T8) and 'Align Vocal Timing…' (F9)
+  // join it there rather than
   // widening the closed MenuSection['title'] union for a couple of analysis/
   // transform commands (Plan Ruling 5).
-  const ids: (string | 'separator')[] = ['noise.capture', 'tempo.detect', 'tempo.match', 'separator'];
+  const ids: (string | 'separator')[] = [
+    'noise.capture',
+    'tempo.detect',
+    'tempo.match',
+    'timing.align',
+    'separator',
+  ];
   let lastCategory: string | null = null;
   for (const e of effects) {
     if (e.category !== lastCategory) {
@@ -530,12 +538,14 @@ function registerSessionCommands(): void {
 
 /** Registers one command per registered effect (`effect.<id>`, opens the effect
  * dialog, enabled when a document is active) plus one disabled category-label
- * command per category (`effects.cat.<Category>`). Idempotent by id: re-running
+ * command per category (`effects.cat.<Category>`). HIDDEN effects (F9) get no
+ * command at all: their input cannot come from the generic dialog, so a menu
+ * entry for one would only lead to a refusal. Idempotent by id: re-running
  * after new effects register just overwrites/extends. Call after `registerAll`
  * has populated the effect registry (App.tsx does this at startup). */
 export function registerEffectCommands(): void {
   const cmds: MenuCommand[] = [];
-  for (const effect of getAllEffects()) {
+  for (const effect of getVisibleEffects()) {
     cmds.push({
       id: `effects.cat.${effect.category}`,
       label: effect.category,
@@ -823,6 +833,18 @@ function registerTempoCommands(): void {
       label: 'Match Tempo…',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => openTempoDialog(),
+    },
+    {
+      // F9. Sits beside Match Tempo because it answers the same user question
+      // ("this is not in time") with the one thing Match Tempo structurally
+      // cannot do -- a per-syllable rate instead of one ratio for the whole
+      // region. It is a command rather than an `effect.<id>` entry because its
+      // input is a confirmed anchor list, not scalar params (see
+      // `EffectDefinition.hidden`).
+      id: 'timing.align',
+      label: 'Align Vocal Timing…',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openAlignTimingDialog(),
     },
   ]);
 }

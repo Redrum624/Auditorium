@@ -307,6 +307,42 @@ single write path as everything else, so markers remap proportionally and undo
 behaves normally — the History entry reads `Match Tempo`, with `Add Beat
 Markers` as its own entry when you asked for the grid.
 
+### Making a sung take land on the beat
+
+Match Tempo cannot fix this. It applies one ratio to the whole region, so it can
+move a take earlier or later as a block but cannot pull a dragged line forward
+while leaving the next, rushed line alone. **Align Vocal Timing** can, because it
+warps at a different rate between each pair of syllables.
+
+It works from *anchors you confirm*, never from a detector's guess:
+
+1. Detect the tempo first (**Effects → Detect Tempo**) — the alignment needs a
+   beat grid and will never start an analysis on its own.
+2. Drop a marker on each syllable you want moved (`M`). Or open the dialog and
+   press **Suggest syllable markers**, which runs an onset detector and writes
+   its proposals in as ordinary markers — then delete the wrong ones. On a real
+   solo vocal roughly one proposal in eight is not a syllable (it is a breath, a
+   note ending, or a slide), and about a third of the syllables are missed, so
+   this step is a starting point, not an answer.
+3. **Effects → Align Vocal Timing…**.
+4. Check the grid. The dialog shows the BPM the tracked beats imply and the
+   detector's confidence, with ×2 / ÷2 to re-track if the octave is wrong.
+5. Choose the subdivision. Each option is labelled with the median move it would
+   make — that number is the fastest way to tell which grid the performance is
+   actually on. A median of 120 ms on **Beat** and 25 ms on **¼ beat** means the
+   line is sitting on sixteenths, and snapping it to beats would wreck it.
+6. Tick **Grid and subdivision are correct**. Apply stays disabled until you do.
+7. Set **Strength**. It defaults to 25 %, and the dialog reports how much of the
+   median move is left in place. Fully quantised vocals sound machine-made; the
+   musical answer is usually partial.
+8. **Apply**.
+
+The region keeps its exact length — syllables move *within* it, so nothing after
+it slides. Local stretch is clamped to 0.88–1.14× (the range where this stretch
+is transparent); a move the clamp holds back lands short of the grid, and the
+dialog says how many will before you apply rather than after. Pitch is preserved,
+so the result can still go through Pitch Correct.
+
 ### Re-arranging a track to a length (Auto-Remix)
 
 To make a song fit a 2-minute video without time-stretching it:

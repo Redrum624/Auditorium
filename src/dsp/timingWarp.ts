@@ -474,6 +474,40 @@ export function analysisPosAt(map: WarpMap, v: number): number {
 }
 
 /**
+ * The FORWARD map: where the content currently at input position `u` ends up in
+ * the output. The exact inverse of {@link analysisPosAt}, and the same
+ * piecewise-linear geometry read the other way round.
+ *
+ * This exists so anything ANNOTATING the audio — markers, above all — can be
+ * moved by the same function the samples were moved by. `effectRunner`'s
+ * marker remap has two rules, `'stretch'` (proportional across the region) and
+ * `'cuts'`, and **both are wrong for a variable-rate warp**: proportional is
+ * correct only where the local ratio equals the region's average ratio, which
+ * here is exactly 1 everywhere and therefore leaves every marker where it was
+ * while the syllable it marks moves out from under it. F2 hit the same class of
+ * bug from the other side — a proportional remap scattered every marker after a
+ * removed gap — and the fix was the same: map each annotation through the
+ * transform the audio actually underwent.
+ */
+export function synthesisPosAt(map: WarpMap, u: number): number {
+  const { knotsIn, knotsOut, outLen } = map;
+  const last = knotsIn.length - 1;
+
+  let lo = 0;
+  let hi = last;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (knotsIn[mid] <= u) lo = mid;
+    else hi = mid;
+  }
+  const dIn = knotsIn[hi] - knotsIn[lo];
+  if (dIn <= 0) return knotsOut[lo];
+  const frac = (u - knotsIn[lo]) / dIn;
+  const pos = knotsOut[lo] + frac * (knotsOut[hi] - knotsOut[lo]);
+  return pos < 0 ? 0 : pos > outLen ? outLen : pos;
+}
+
+/**
  * Builds the monotonic, ratio-bounded time map that moves each anchor's source
  * toward its target.
  *

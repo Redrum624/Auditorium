@@ -24,6 +24,7 @@ import { panEffect } from './stereo/PanEffect';
 import { timeStretchEffect } from './pitch/TimeStretchEffect';
 import { pitchShiftEffect } from './pitch/PitchShiftEffect';
 import { pitchCorrectEffect } from './pitch/PitchCorrectEffect';
+import { alignTimingEffect } from './time/AlignTimingEffect';
 
 let registered = false;
 
@@ -60,4 +61,8 @@ export function registerAllEffects(): void {
   registerEffect(timeStretchEffect);
   registerEffect(pitchShiftEffect);
   registerEffect(pitchCorrectEffect);
+  // Hidden (F9): registered so the worker can run it, kept out of the menu and
+  // the effects browser because it is driven by AlignTimingDialog's confirmed
+  // anchor list, not by the generic params dialog.
+  registerEffect(alignTimingEffect);
 }

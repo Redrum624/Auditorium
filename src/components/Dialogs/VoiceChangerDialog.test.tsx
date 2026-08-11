@@ -93,6 +93,7 @@ beforeEach(() => {
     openSeparateDialog: () => {},
     openTranscribeDialog: () => {},
     openVoiceChangerDialog: () => {},
+    openAlignTimingDialog: () => {},
     focusRemixPanel: () => {},
     focusTranscriptPanel: () => {},
   });

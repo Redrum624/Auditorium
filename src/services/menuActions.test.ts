@@ -1,4 +1,5 @@
-import { registerCommands, runCommand, getMenuSections } from './menuActions';
+import { registerCommands, registerEffectCommands, runCommand, getMenuSections } from './menuActions';
+import { registerAllEffects } from '../effects/registerAll';
 import type { MenuCommand, MenuSection } from './menuActions';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
@@ -575,6 +576,7 @@ describe('tempo.match (Task T8)', () => {
       openSeparateDialog: () => {},
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -582,6 +584,61 @@ describe('tempo.match (Task T8)', () => {
     await runCommand('tempo.match');
 
     expect(openTempo).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('timing.align (Task F9)', () => {
+  function findEffectsCmd(id: string): MenuCommand | undefined {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  }
+
+  it('Effects section contains timing.align immediately after tempo.match', () => {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    const ids = commandIds(effects.items);
+    expect(ids.indexOf('timing.align')).toBe(ids.indexOf('tempo.match') + 1);
+  });
+
+  it('does NOT list the hidden align-timing effect among the per-effect commands', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    const ids = commandIds(effects.items);
+    expect(ids).not.toContain('effect.align-timing');
+    // The visible ones are still all there — this is a filter, not a truncation.
+    expect(ids).toContain('effect.pitch-correct');
+    expect(ids).toContain('effect.time-stretch');
+    expect(ids).toContain('effect.amplify');
+  });
+
+  it('is disabled with no active document and enabled with one', () => {
+    expect(findEffectsCmd('timing.align')!.enabled(useAppStore.getState())).toBe(false);
+    openDoc();
+    expect(findEffectsCmd('timing.align')!.enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("timing.align") opens the dialog through the bus', async () => {
+    openDoc();
+    const openAlign = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      openSeparateDialog: () => {},
+      openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: openAlign,
+      focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
+    });
+
+    await runCommand('timing.align');
+
+    expect(openAlign).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -630,6 +687,7 @@ describe('edit.remix (Task T14)', () => {
       openSeparateDialog: () => {},
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -652,6 +710,7 @@ describe('edit.remix (Task T14)', () => {
       openSeparateDialog: () => {},
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -680,6 +739,7 @@ describe('edit.separateStems (Task S6)', () => {
       openSeparateDialog: openSeparate,
       openTranscribeDialog: () => {},
       openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });
@@ -746,6 +806,7 @@ describe('edit.transcribe (Task F4b)', () => {
       openSeparateDialog: () => {},
       openTranscribeDialog: openTranscribe,
       openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
     });

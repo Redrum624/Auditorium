@@ -61,6 +61,19 @@ export interface EffectDefinition {
   category: EffectCategory;
   params: EffectParamDef[];
   /**
+   * F9: keep this effect OUT of the Effects menu and the effects browser.
+   *
+   * An effect is normally a self-contained transform of the selection plus a
+   * few scalar params, which is exactly what the generic `EffectDialog` can
+   * drive. A hidden one cannot be driven that way — its essential input arrives
+   * through the `__effectExtra` side channel from its own dialog (Align Vocal
+   * Timing needs a confirmed anchor list), so offering it in the generic list
+   * would present a control that opens a params-only dialog and then refuses.
+   * It is still fully registered, so the worker can run it and `getEffect`
+   * finds it; only `getVisibleEffects` filters it out.
+   */
+  hidden?: boolean;
+  /**
    * Pure & synchronous — the worker provides the async boundary. MUST NOT mutate
    * the input channel arrays; always allocate new Float32Arrays for the result.
    */
