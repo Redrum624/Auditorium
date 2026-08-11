@@ -2052,6 +2052,14 @@ export function installTestHooks(): void {
           detail: stage.detail ?? null,
           identicalFraction: stage.delta?.identicalFraction ?? null,
         })),
+        // The registry's OWN ids and its OWN manual set, so a caller compares
+        // the report against the stage list rather than against a hardcoded
+        // number. That number rots the moment a stage is added, and it did:
+        // F6's `lyrics` stage broke a smoke assertion reading `=== 11`, and
+        // the `manual` assertion one line below it would have broken next.
+        // Comparing lists also pins ORDER and MEMBERSHIP, which a count cannot.
+        registryStageIds: VOCAL_CHAIN_STAGES.map((s) => s.id),
+        registryManualIds: VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null).map((s) => s.id),
       };
     },
 

@@ -1150,15 +1150,26 @@ async function main() {
       chain.lengthBefore === chainBefore.length,
       `the chain processed the whole document (doc ${chainBefore.length}, chain ${chain.lengthBefore})`
     );
+    // Compared against the app's OWN registry, not a hardcoded count. A count
+    // rots the moment a stage is added — F6's `lyrics` stage broke `=== 11`
+    // here, and the manual assertion below it would have broken next. A list
+    // comparison also pins ORDER and MEMBERSHIP, which a count cannot.
+    const chainReported = chain.stages.map((st) => st.id);
     assert(
-      chain.stages.length === 11,
-      `every stage is reported, run or not (expected 11, actual ${chain.stages.length})`
+      JSON.stringify(chainReported) === JSON.stringify(chain.registryStageIds),
+      `every stage is reported, run or not, in registry order (registry ${JSON.stringify(chain.registryStageIds)}, reported ${JSON.stringify(chainReported)})`
     );
 
-    const chainManual = chain.stages.filter((st) => st.status === 'manual');
+    // The manual stages are exactly the ones the registry declares manual (the
+    // ones with no effect to run), and none of them ran.
+    const chainManual = chain.stages.filter((st) => st.status === 'manual').map((m) => m.id);
     assert(
-      chainManual.length === 1 && chainManual[0].id === 'timing',
-      `Align Vocal Timing is listed but never run automatically (actual ${JSON.stringify(chainManual.map((m) => m.id))})`
+      JSON.stringify(chainManual) === JSON.stringify(chain.registryManualIds),
+      `the stages with no automatic effect are listed but never run (registry ${JSON.stringify(chain.registryManualIds)}, manual ${JSON.stringify(chainManual)})`
+    );
+    assert(
+      chain.registryManualIds.includes('timing') && chain.registryManualIds.includes('lyrics'),
+      `Align Vocal Timing and Align Lyrics are both manual by design (actual ${JSON.stringify(chain.registryManualIds)})`
     );
     const chainApplied = chain.stages.filter((st) => st.status === 'applied');
     assert(
