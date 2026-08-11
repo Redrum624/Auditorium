@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Pin, X } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
-import { MAX_REQUIRED_JOINS, type RequiredJoinDropReason } from '../../dsp/remixPlan';
+import {
+  MAX_REQUIRED_JOINS,
+  type RequiredJoinDropReason,
+  type RequiredJoinsReport,
+} from '../../dsp/remixPlan';
 import {
   MAX_LOCKED_JOINS,
   getRemixSession,
@@ -108,14 +112,18 @@ const UNPIN_TITLE = 'Unpin this edit.';
 const PIN_LIMIT_TITLE = `Pin limit reached (${MAX_LOCKED_JOINS} pins) — unpin another edit first.`;
 
 /**
- * The pin control's tooltip. A FUNCTION of BOTH the live pin count AND whether
- * the plan on screen was actually made under the guarantee — never of one
- * alone, and the phrase "strong preference" appears in exactly the two states
- * where the `remix-pins-not-guaranteed` banner also appears. That is the
- * invariant a test asserts directly: banner and tooltip, one render, same
- * answer.
+ * The pin control's tooltip. A FUNCTION of BOTH the live pin count AND the
+ * planner's own report on the arrangement currently on screen — never of one
+ * alone, and never of a boolean reading of that report, which is three-valued
+ * (`null` / `'enforced'` / `'preference'`). The phrase "strong preference"
+ * appears in exactly the two states where the `remix-pins-not-guaranteed`
+ * banner also appears, and the claim that every pin is enforced appears in
+ * exactly the one state where the `remix-dropped-pins` note is absent. Those
+ * are the invariants a property test asserts directly, over the whole
+ * cross-product: banner, dropped-pins note and tooltip, one render, one answer.
  *
- * COUNT ALONE WAS WRONG THREE TIMES, each one state further in:
+ * READING LESS THAN THE WHOLE REPORT WAS WRONG FIVE TIMES, each one state
+ * further in:
  *
  * 1. (fix round 1, I1) A fixed "you already have more than 4 pins" was shown
  *    from `MAX_REQUIRED_JOINS` onward — it has to warn on the button that
@@ -133,22 +141,52 @@ const PIN_LIMIT_TITLE = `Pin limit reached (${MAX_LOCKED_JOINS} pins) — unpin 
  *    tooltip told those users their pins were "currently strong preferences"
  *    while the planner had enforced every one of them and the banner was
  *    correctly absent.
+ * 4. (fix round 3) `mode === 'preference'` collapsed the report to a boolean,
+ *    so `pinReport === null` — no plan has EVER been made with pins, because
+ *    pinning does not re-plan — took the `else` branch and claimed the
+ *    arrangement's pins were "all enforced" when the planner had never seen
+ *    one of them.
+ * 5. (fix round 3) "this arrangement's are all enforced" contradicted the
+ *    `remix-dropped-pins` note ~100 px above it in the same header:
+ *    `remixPlan.ts` keeps `mode: 'enforced'` while triage drops keys, and
+ *    above the cap it MUST have dropped at least `count - MAX_REQUIRED_JOINS`
+ *    of them — otherwise `feasible.length` would have exceeded the cap and the
+ *    mode would be `'preference'`. So in that branch the "all enforced" claim
+ *    was not merely sometimes wrong, it was never right.
  *
  * The lesson is in the shape rather than the strings: a fact the planner
  * decides must not be re-derived in the panel from a proxy, however obvious
- * the proxy looks.
+ * the proxy looks — and a three-valued fact must not be read as two.
+ *
+ * `hasUnplannedPins` is the third input for the same reason: `satisfied` and
+ * `dropped` together ARE the pin set the plan on screen was made with, so a
+ * live pin in neither is one the planner has not seen, and nothing may be
+ * claimed about its enforcement.
  */
-function pinTitle(count: number, plannedWithoutGuarantee: boolean): string {
+function pinTitle(
+  count: number,
+  report: RequiredJoinsReport | null,
+  hasUnplannedPins: boolean
+): string {
   const lead = 'Pin this edit.';
-  if (plannedWithoutGuarantee) {
+  if (report?.mode === 'preference') {
     return count > MAX_REQUIRED_JOINS
       ? `${lead} You already have ${count} pins, more than the ${MAX_REQUIRED_JOINS} the planner can guarantee, so pins are currently strong preferences rather than guarantees.`
       : `${lead} This arrangement's pins are strong preferences, not guarantees — it was planned with more than ${MAX_REQUIRED_JOINS}. Re-roll to re-plan with the guarantee.`;
   }
   if (count > MAX_REQUIRED_JOINS) {
-    // Over the cap and STILL enforced: triage removed enough keys to fit. Say
-    // that rather than the count's usual implication, which is false here.
-    return `${lead} You already have ${count} pins. Only ${MAX_REQUIRED_JOINS} can be guaranteed at once, but pins you rejected or that are not a legal splice do not use a slot — this arrangement's are all enforced. One more pin may tip it over.`;
+    if (report !== null && !hasUnplannedPins) {
+      // Over the cap, every live pin went through the planner, and the mode is
+      // still 'enforced' — which is only reachable when triage dropped enough
+      // keys to bring the feasible set back under the cap. So there are always
+      // drops here, they are always named in `remix-dropped-pins` above, and
+      // the honest sentence is which pins were kept, not "all of them".
+      return `${lead} You already have ${count} pins. Only ${MAX_REQUIRED_JOINS} can be guaranteed at once, but pins you rejected or that are not a legal splice do not use a slot — the ${report.satisfied.length} this arrangement kept are enforced, and the rest are named above. One more pin may tip it over.`;
+    }
+    // `pinReport === null` (nothing has been planned with pins at all) or pins
+    // added since the last plan. Either way the planner has not ruled on this
+    // set, so the only true statement is about the NEXT re-plan.
+    return `${lead} You already have ${count} pins, more than the ${MAX_REQUIRED_JOINS} the planner can guarantee, and this arrangement was not planned with all of them. Re-roll to re-plan: pins you rejected or that are not a legal splice do not use a slot, so more than ${MAX_REQUIRED_JOINS} can sometimes still be enforced.`;
   }
   if (count === MAX_REQUIRED_JOINS) {
     return `${lead} You already have ${MAX_REQUIRED_JOINS} pins, which is all the planner can guarantee — a ${MAX_REQUIRED_JOINS + 1}th would put every pin beyond what it can enforce.`;
@@ -320,17 +358,28 @@ export default function RemixPanel() {
   // Resolved by saying which is which: the banner has a second wording for
   // "you have already unpinned; the arrangement showing has not caught up",
   // so it never tells a user with 4 pins to unpin down to 4.
-  const pinsNotGuaranteed = session.pinReport?.mode === 'preference';
+  const pinReport = session.pinReport;
+  const pinsNotGuaranteed = pinReport?.mode === 'preference';
   const pinCountStillOverCap = lockedKeys.length > MAX_REQUIRED_JOINS;
-  // `pinsNotGuaranteed` — the planner's own verdict on the plan on screen —
-  // feeds BOTH the banner and the pin tooltip (fix round 2, I2). Neither
-  // re-derives it from the pin count, which is a proxy that disagrees with it
-  // in two reachable states: unpinned-but-not-yet-re-planned, and over the cap
-  // but rescued by triage.
+  // The report — the planner's own verdict on the plan on screen — feeds BOTH
+  // the banner and the pin tooltip (fix round 2, I2), and the tooltip gets it
+  // WHOLE rather than as `pinsNotGuaranteed` (fix round 3): `null` is a third
+  // value, not a quieter `'enforced'`. Neither control re-derives the verdict
+  // from the pin count, which is a proxy that disagrees with it in three
+  // reachable states: unpinned-but-not-yet-re-planned, over the cap but
+  // rescued by triage, and pinned-but-never-planned.
+  //
+  // `satisfied` and `dropped` together ARE the pin set the plan on screen was
+  // made with (`remixPlan.ts`'s `buildRequiredReport`), so a live pin in
+  // neither is one no plan has ruled on.
+  const plannedPinKeys = new Set(
+    pinReport ? [...pinReport.satisfied, ...pinReport.dropped.map((d) => d.key)] : []
+  );
+  const hasUnplannedPins = lockedKeys.some((key) => !plannedPinKeys.has(key));
   // Name the specific edits and WHY, grouped by category — "some pins were
   // dropped" is exactly the message this task exists to replace.
   const droppedDetail = (() => {
-    const drops = session.pinReport?.dropped ?? [];
+    const drops = pinReport?.dropped ?? [];
     if (drops.length === 0) return '';
     const byReason = new Map<RequiredJoinDropReason, string[]>();
     for (const d of drops) byReason.set(d.reason, [...(byReason.get(d.reason) ?? []), joinLabel(d.key)]);
@@ -543,7 +592,7 @@ export default function RemixPanel() {
                         ? UNPIN_TITLE
                         : pinAtCap
                           ? PIN_LIMIT_TITLE
-                          : pinTitle(lockedKeys.length, pinsNotGuaranteed)
+                          : pinTitle(lockedKeys.length, pinReport, hasUnplannedPins)
                     }
                     aria-pressed={locked}
                     disabled={stale || pinAtCap}

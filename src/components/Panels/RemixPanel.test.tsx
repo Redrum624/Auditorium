@@ -501,14 +501,25 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     // tooltip told those users their pins were "currently strong preferences"
     // while the planner had enforced every one and the banner was — correctly
     // — absent.
+    //
+    // The fixture is now a state the SERVICE can actually produce (fix round
+    // 3). `lockedJoinsDropped` was left at `makeSession`'s default `[]` while
+    // `pinReport.dropped` named a key, and `remixService.test.ts`'s "always
+    // name the SAME keys" test says those two move together — so this
+    // certified a state that cannot occur and proved nothing about the real
+    // one. With the note rendered, the round-3 contradiction is visible: the
+    // tooltip may not claim every pin is enforced while the header says one
+    // could not be kept.
     const doc = addRemixDoc();
+    const dropped = `${SIX_JOINS[MAX_REQUIRED_JOINS].fromBar}>${SIX_JOINS[MAX_REQUIRED_JOINS].toBar}`;
     mockGetSession.mockReturnValue(
       makeSession(doc.id, SIX_JOINS, {
         lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS + 1).map((j) => `${j.fromBar}>${j.toBar}`),
+        lockedJoinsDropped: [dropped],
         pinReport: {
           mode: 'enforced',
           satisfied: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS).map((j) => `${j.fromBar}>${j.toBar}`),
-          dropped: [{ key: `${SIX_JOINS[MAX_REQUIRED_JOINS].fromBar}>${SIX_JOINS[MAX_REQUIRED_JOINS].toBar}`, reason: 'no-candidate' }],
+          dropped: [{ key: dropped, reason: 'no-candidate' }],
         },
       })
     );
@@ -517,9 +528,60 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     const title = screen.getByRole('button', { name: /^pin edit 6$/i }).getAttribute('title') ?? '';
     expect(title).toMatch(new RegExp(`You already have ${MAX_REQUIRED_JOINS + 1} pins`));
     expect(title).toMatch(/do not use a slot/i);
-    expect(title).toMatch(/are all enforced/i);
+    // It names what WAS enforced rather than claiming everything was...
+    expect(title).toMatch(new RegExp(`the ${MAX_REQUIRED_JOINS} this arrangement kept are enforced`));
+    expect(title).not.toMatch(/strong preference/i);
+    // ...because the note directly above it says one pin could not be kept.
+    expect(screen.getByTestId('remix-dropped-pins')).toHaveTextContent(/could not be kept/i);
+    expect(title).not.toMatch(/all enforced/i);
+    expect(screen.queryByTestId('remix-pins-not-guaranteed')).not.toBeInTheDocument();
+  });
+
+  it('above the cap with pins the planner has never seen, it promises nothing about them', () => {
+    // Fix round 3. `pinReport === null` is a THIRD value, not a quieter
+    // 'enforced': `toggleLockJoin` does not re-plan, so five pins on a session
+    // whose plan was made with none is one click away from a fresh remix. The
+    // old two-valued reading sent that state into the "triage freed the slots"
+    // branch and told the user this arrangement's pins were all enforced —
+    // about an arrangement the planner had never seen a pin for.
+    const doc = addRemixDoc();
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS + 1).map((j) => `${j.fromBar}>${j.toBar}`),
+        pinReport: null,
+      })
+    );
+
+    render(<RemixPanel />);
+    const title = screen.getByRole('button', { name: /^pin edit 6$/i }).getAttribute('title') ?? '';
+    expect(title).toMatch(new RegExp(`You already have ${MAX_REQUIRED_JOINS + 1} pins`));
+    expect(title).toMatch(/was not planned with all of them/i);
+    expect(title).toMatch(/Re-roll to re-plan/i);
+    // Neither of the two claims it is not entitled to make.
+    expect(title).not.toMatch(/all enforced/i);
     expect(title).not.toMatch(/strong preference/i);
     expect(screen.queryByTestId('remix-pins-not-guaranteed')).not.toBeInTheDocument();
+  });
+
+  it('above the cap, pins added SINCE the enforced plan are not described as enforced either', () => {
+    // The same hole one state along: the report is 'enforced' and honest about
+    // the three keys it was given, but two more have been pinned since. Those
+    // two are in the arrangement only because a pin can only be placed on a
+    // join already in it — nothing enforced them.
+    const doc = addRemixDoc();
+    const planned = SIX_JOINS.slice(0, 3).map((j) => `${j.fromBar}>${j.toBar}`);
+    mockGetSession.mockReturnValue(
+      makeSession(doc.id, SIX_JOINS, {
+        lockedJoins: SIX_JOINS.slice(0, MAX_REQUIRED_JOINS + 1).map((j) => `${j.fromBar}>${j.toBar}`),
+        pinReport: { mode: 'enforced', satisfied: planned, dropped: [] },
+      })
+    );
+
+    render(<RemixPanel />);
+    const title = screen.getByRole('button', { name: /^pin edit 6$/i }).getAttribute('title') ?? '';
+    expect(title).toMatch(/was not planned with all of them/i);
+    expect(title).not.toMatch(/all enforced/i);
+    expect(title).not.toMatch(/strong preference/i);
   });
 
   it('says PLAINLY when the guarantee is not in force at all', () => {
@@ -587,39 +649,143 @@ describe('RemixPanel — pin (acceptance 8)', () => {
     expect(title).toMatch(/this arrangement's pins are strong preferences, not guarantees/i);
   });
 
-  it('the banner and the pin tooltip never disagree in one render, at, below or above the cap', () => {
-    // The property, asserted directly rather than inferred from two separate
-    // tests: whenever the banner says this arrangement's pins are strong
-    // preferences, so does every pin tooltip in the same render — and when it
-    // says nothing, no tooltip claims otherwise.
+  // THE property test for the banner / dropped-pins note / pin tooltip trio.
+  // It exists because this trio has produced six defects across three rounds,
+  // every one of them a state one field further in than the last, so it is
+  // written over the FULL cross-product of every value every field the trio
+  // reads can take — including `pinReport: null`, whose absence from the round-2
+  // version is exactly what let round 3 find two more:
+  //
+  //   pinReport.mode      null | 'enforced' | 'preference'   (three-valued)
+  //   pinReport.dropped   none | some       — drives `remix-dropped-pins`
+  //   the report's keys   cover every live pin | do not      — pinning never
+  //                                                            re-plans, so
+  //                                                            drift is one
+  //                                                            click away
+  //   live pin count      0 | 2 | at the cap | above it
+  //
+  // `lockedJoinsDropped` is kept equal to `pinReport.dropped`'s keys throughout,
+  // because `remixService.test.ts`'s "always name the SAME keys" test says the
+  // service can produce no other combination — a fixture that separates them
+  // certifies a state that cannot occur (fix round 3).
+  const REASON = 'incompatible' as const;
+  type PinFixtureMode = 'enforced' | 'preference' | null;
+
+  /** Which of the pin tooltip's sentences is on screen. TOTAL and EXCLUSIVE by
+   * construction: a tooltip matching none of them, or more than one, is a
+   * defect on its own — that is how a "this arrangement's are all enforced"
+   * hybrid gets caught rather than sliding past a `/are enforced/` probe that
+   * happens not to span the word it added. */
+  const TOOLTIP_KINDS = [
+    ['preference-over-cap', /so pins are currently strong preferences rather than guarantees/i],
+    ['preference-plan', /This arrangement's pins are strong preferences, not guarantees/i],
+    ['over-cap-enforced', /this arrangement kept are enforced/i],
+    ['over-cap-unplanned', /this arrangement was not planned with all of them/i],
+    ['at-cap', /which is all the planner can guarantee/i],
+    ['below-cap', /Every re-plan and re-roll will keep it/i],
+  ] as const;
+
+  function tooltipKind(title: string): string {
+    const hits = TOOLTIP_KINDS.filter(([, re]) => re.test(title)).map(([kind]) => kind);
+    if (hits.length !== 1) throw new Error(`unclassifiable pin tooltip [${hits.join()}]: ${title}`);
+    return hits[0];
+  }
+
+  function pinFixture(
+    mode: PinFixtureMode,
+    dropCount: 0 | 1,
+    coverage: 'planned' | 'unplanned',
+    pinCount: number
+  ): Partial<RemixSession> {
+    const locked = SIX_JOINS.slice(0, pinCount).map((j) => `${j.fromBar}>${j.toBar}`);
+    if (mode === null) return { lockedJoins: locked, lockedJoinsDropped: [], pinReport: null };
+    // The pin set the plan ON SCREEN was made with. 'unplanned' keeps only the
+    // oldest pin: the rest were added after the plan, which `toggleLockJoin` —
+    // deliberately not a re-plan — makes reachable at any count.
+    const planned = coverage === 'planned' ? [...locked] : locked.slice(0, 1);
+    // A report with drops but no live pins is the round-2 state reached from
+    // the other side: planned with pins, then unpinned without re-planning.
+    if (dropCount > 0 && planned.length === 0) planned.push(`${SIX_JOINS[0].fromBar}>${SIX_JOINS[0].toBar}`);
+    const dropped = planned.slice(0, dropCount).map((key) => ({ key, reason: REASON }));
+    return {
+      lockedJoins: locked,
+      lockedJoinsDropped: dropped.map((d) => d.key),
+      pinReport: { mode, satisfied: planned.slice(dropCount), dropped },
+    };
+  }
+
+  it('the banner, the dropped-pins note and the pin tooltip agree in one render, over every value of every field', () => {
     let checked = 0;
-    for (const pinCount of [0, 2, MAX_REQUIRED_JOINS, MAX_REQUIRED_JOINS + 1]) {
-      for (const mode of ['enforced', 'preference'] as const) {
-        const doc = addRemixDoc();
-        mockGetSession.mockReturnValue(
-          makeSession(doc.id, SIX_JOINS, {
-            lockedJoins: SIX_JOINS.slice(0, pinCount).map((j) => `${j.fromBar}>${j.toBar}`),
-            pinReport: { mode, satisfied: [], dropped: [] },
-          })
-        );
+    for (const mode of [null, 'enforced', 'preference'] as PinFixtureMode[]) {
+      // `null` carries no keys, so its drop/coverage axes have one value each.
+      for (const dropCount of (mode === null ? [0] : [0, 1]) as (0 | 1)[]) {
+        for (const coverage of (mode === null ? ['planned'] : ['planned', 'unplanned']) as (
+          | 'planned'
+          | 'unplanned'
+        )[]) {
+          for (const pinCount of [0, 2, MAX_REQUIRED_JOINS, MAX_REQUIRED_JOINS + 1]) {
+            const over = pinFixture(mode, dropCount, coverage, pinCount);
+            const doc = addRemixDoc();
+            mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS, over));
 
-        const view = render(<RemixPanel />);
-        const banner = view.container.querySelector('[data-testid="remix-pins-not-guaranteed"]');
-        const nextUnpinned = pinCount + 1;
-        const title =
-          view.container
-            .querySelector(`button[aria-label="Pin edit ${nextUnpinned}"]`)
-            ?.getAttribute('title') ?? '';
-        const bannerSaysPreference = /strong preference/i.test(banner?.textContent ?? '');
-        const tooltipSaysPreference = /strong preference/i.test(title);
+            const view = render(<RemixPanel />);
+            const where = `mode=${mode} drops=${dropCount} coverage=${coverage} pins=${pinCount}`;
+            const banner = view.container.querySelector('[data-testid="remix-pins-not-guaranteed"]');
+            const note = view.container.querySelector('[data-testid="remix-dropped-pins"]');
+            const title =
+              view.container
+                .querySelector(`button[aria-label="Pin edit ${pinCount + 1}"]`)
+                ?.getAttribute('title') ?? '';
 
-        expect(title).not.toBe(''); // the row really rendered — not a vacuous pass
-        expect(bannerSaysPreference).toBe(tooltipSaysPreference);
-        checked++;
-        view.unmount();
+            // The row really rendered — not a vacuous pass.
+            expect(`${where}: ${title}`).not.toBe(`${where}: `);
+
+            // 1. The banner is the planner's verdict, never the pin count.
+            expect(`${where}: ${banner !== null}`).toBe(`${where}: ${mode === 'preference'}`);
+            // 2. Round 2: banner and tooltip give the same answer, one render.
+            expect(`${where}: ${/strong preference/i.test(title)}`).toBe(
+              `${where}: ${/strong preference/i.test(banner?.textContent ?? '')}`
+            );
+            // 3. The note is the report's own drop list.
+            expect(`${where}: ${note !== null}`).toBe(`${where}: ${dropCount > 0}`);
+            // 4. Round 3, both findings at once: WHICH sentence the tooltip
+            //    shows, in every state, written from what is true rather than
+            //    from the component's own branches. The tooltip may speak about
+            //    this arrangement's enforcement ONLY when the planner enforced
+            //    it AND was given every live pin; `pinReport === null` and pins
+            //    added since the plan both fail that and get the sentence that
+            //    promises nothing. This is the assertion the round-2 version
+            //    lacked, and the two states it lacked it for.
+            const expectedKind =
+              mode === 'preference'
+                ? pinCount > MAX_REQUIRED_JOINS
+                  ? 'preference-over-cap'
+                  : 'preference-plan'
+                : pinCount > MAX_REQUIRED_JOINS
+                  ? mode === 'enforced' && coverage === 'planned'
+                    ? 'over-cap-enforced'
+                    : 'over-cap-unplanned'
+                  : pinCount === MAX_REQUIRED_JOINS
+                    ? 'at-cap'
+                    : 'below-cap';
+            expect(`${where}: ${tooltipKind(title)}`).toBe(`${where}: ${expectedKind}`);
+            // 5. And the enforcement claim quotes the REPORT's own count, not
+            //    the pin count — the two differ by exactly the pins triage
+            //    dropped, which are the ones the note above names.
+            if (expectedKind === 'over-cap-enforced') {
+              expect(title).toContain(
+                `the ${over.pinReport?.satisfied.length} this arrangement kept are enforced`
+              );
+            }
+            checked++;
+            view.unmount();
+          }
+        }
       }
     }
-    expect(checked).toBe(8);
+    // 4 null + 16 enforced + 16 preference — the whole cross-product, counted
+    // so a silently skipped axis cannot masquerade as a pass.
+    expect(checked).toBe(36);
   });
 
   it('after unpinning back to the cap, the banner stops telling the user to unpin — it describes the arrangement instead', () => {
