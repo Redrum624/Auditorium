@@ -84,7 +84,16 @@ function formatMs(samples: number, sampleRate: number): string {
  * cancels an in-flight alignment AND stops a running recorder — an orphaned
  * `RecordingEngine` holds the microphone open for the rest of the session.
  */
-export default function AlignLyricsDialog({ onClose }: { onClose: () => void }) {
+export default function AlignLyricsDialog({
+  onClose,
+  engine: injectedEngine,
+}: {
+  onClose: () => void;
+  /** Injectable for tests, exactly as `RecordDialog` takes one — jsdom has no
+   * `navigator.mediaDevices`, so the microphone half is otherwise unreachable
+   * and its state machine would go unpinned. */
+  engine?: RecordingEngine;
+}) {
   const doc = useAppStore((s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null);
   const selection = useAppStore((s) => s.selection);
   const length = doc ? docLength(doc) : 0;
@@ -100,19 +109,30 @@ export default function AlignLyricsDialog({ onClose }: { onClose: () => void }) 
   const [note, setNote] = useState<string | null>(null);
   const [selectedWord, setSelectedWord] = useState<number | null>(null);
   const [recording, setRecording] = useState(false);
-  const [take, setTake] = useState<{ channels: Float32Array[]; sampleRate: number } | null>(null);
+  /**
+   * The fresh take, and the word it was recorded FOR.
+   *
+   * `forWord` is not bookkeeping. Clicking a word is also how you LISTEN to
+   * one, so a user with a take in hand can move the selection just by
+   * auditioning the neighbours — and without this, the next Replace would drop
+   * their recording of one word on top of a different one. Found by driving
+   * every combination of (take recorded, selection moved, alignment stale)
+   * rather than the three that were obvious.
+   */
+  const [take, setTake] = useState<{ channels: Float32Array[]; sampleRate: number; forWord: number } | null>(
+    null
+  );
   const [splicing, setSplicing] = useState(false);
 
-  const alignment: LyricsAlignment | null = useMemo(
-    () => (doc ? getLyricsAlignment(doc.id) : null),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- alignVersion is the change token
-    [doc?.id, alignVersion]
-  );
-  const stale = useMemo(
-    () => (doc ? isLyricsAlignmentStale(doc.id) : false),
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- alignVersion is the change token
-    [doc?.id, alignVersion]
-  );
+  // Read on every render rather than memoised. Both are cheap — a Map lookup
+  // and an array-identity compare — and memoising them was WRONG: staleness
+  // changes when the DOCUMENT changes, not when the alignment version does, so
+  // a memo keyed on `alignVersion` reported a stale alignment as fresh after an
+  // edit. `alignVersion` is still subscribed above, because a change with no
+  // store update (a finished run) must also re-render.
+  void alignVersion;
+  const alignment: LyricsAlignment | null = doc ? getLyricsAlignment(doc.id) : null;
+  const stale = doc ? isLyricsAlignmentStale(doc.id) : false;
 
   const busy = downloading || running || recording || splicing;
 
@@ -121,7 +141,7 @@ export default function AlignLyricsDialog({ onClose }: { onClose: () => void }) 
   // effect was installed.
   const unmountedRef = useRef(false);
   const runningRef = useRef(false);
-  const engineRef = useRef<RecordingEngine | null>(null);
+  const engineRef = useRef<RecordingEngine | null>(injectedEngine ?? null);
 
   useEffect(() => {
     unmountedRef.current = false;
@@ -261,7 +281,8 @@ export default function AlignLyricsDialog({ onClose }: { onClose: () => void }) 
     }
     if (unmountedRef.current) return;
     setRecording(false);
-    setTake(result);
+    if (selectedWord === null) return; // the button is gated on one; belt and braces
+    setTake({ ...result, forWord: selectedWord });
   }
 
   async function handleReplace(): Promise<void> {
@@ -287,7 +308,8 @@ export default function AlignLyricsDialog({ onClose }: { onClose: () => void }) 
       return;
     }
     const r = result.report;
-    setTake(null);
+    setTake(null); // consumed — one take splices once, not once per click
+
     setNote(
       `Replaced “${result.word.text}”. Level ${r.gainDb >= 0 ? '+' : ''}${r.gainDb.toFixed(1)} dB, ` +
         `pitch ${r.pitchShiftSemitones >= 0 ? '+' : ''}${r.pitchShiftSemitones.toFixed(2)} semitones, ` +
@@ -300,7 +322,8 @@ export default function AlignLyricsDialog({ onClose }: { onClose: () => void }) 
   const modelMissing = model !== null && !model.downloaded;
   const hasText = text.trim().length > 0;
   const canAlign = !busy && doc !== null && length > 0 && hasText && model?.downloaded === true;
-  const canReplace = !busy && selectedWord !== null && take !== null && alignment !== null && !stale;
+  const takeMatchesSelection = take !== null && selectedWord !== null && take.forWord === selectedWord;
+  const canReplace = !busy && takeMatchesSelection && alignment !== null && !stale;
   const message = error ?? (doc === null ? 'No document is open.' : null);
   const regionSamples = selection && selection.end > selection.start ? selection.end - selection.start : length;
   const estimateSeconds = doc ? regionSamples / doc.sampleRate / MEASURED_ALIGN_REALTIME_FACTOR : 0;
@@ -545,9 +568,11 @@ export default function AlignLyricsDialog({ onClose }: { onClose: () => void }) 
             <p data-testid="align-lyrics-take" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
               {recording
                 ? 'Recording — sing just the one word, then Stop.'
-                : take
-                  ? `Take ready: ${formatMs(take.channels[0]?.length ?? 0, take.sampleRate)}. Silence around the word is trimmed off, the level and the median pitch are matched to what it replaces, and the crossfades sit OUTSIDE the word so none of the old one survives.`
-                  : 'Replacements are recorded here, in your own voice, from your own microphone — there is no file to import.'}
+                : take && !takeMatchesSelection
+                  ? `That take was recorded for “${alignment.words[take.forWord]?.text ?? '?'}”. Select that word again to use it, or record a new one${word ? ` for “${word.text}”` : ''}.`
+                  : take && word
+                    ? `Take ready for “${word.text}”: ${formatMs(take.channels[0]?.length ?? 0, take.sampleRate)}. Silence around the word is trimmed off, the level and the median pitch are matched to what it replaces, and the crossfades sit OUTSIDE the word so none of the old one survives.`
+                    : 'Replacements are recorded here, in your own voice, from your own microphone — there is no file to import.'}
             </p>
           </>
         )}
