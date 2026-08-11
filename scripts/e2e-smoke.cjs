@@ -1312,17 +1312,44 @@ async function main() {
     // layers and never actually constrains anything would pass every unit
     // test in the suite.
     console.log('Pin a remix edit and re-roll, through the panel...');
+    // Re-roll is disabled — correctly — when EVERY edit is pinned, so the pin
+    // step needs an arrangement with at least two. Re-activate the source and
+    // remix it to a longer target, which splices more.
+    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
+    await page.waitForSelector('[data-testid="files-list"]', { timeout: 5000 });
+    await page.click('[data-testid="files-list"] button:has-text("abab120.wav")');
+    let multi = null;
+    for (const seconds of [150, 180, 120, 200]) {
+      // eslint-disable-next-line no-await-in-loop
+      const attempt = await page.evaluate(
+        (s) => window.__test.remixToDuration(s, { strict: false }),
+        seconds
+      );
+      console.log(`  remixToDuration(${seconds}, {strict:false}): joins=${attempt.joins} ok=${attempt.ok}`);
+      if (attempt.ok && attempt.joins >= 2) {
+        multi = attempt;
+        break;
+      }
+      // eslint-disable-next-line no-await-in-loop
+      await page.click('[data-testid="files-list"] button:has-text("abab120.wav")');
+    }
+    assert(
+      multi !== null,
+      'a remix with at least two edits exists to pin one of (expected joins >= 2 at one of the tried targets)'
+    );
+
     await page.click('[data-testid="sidebar-tabs"] button[aria-label="Remix"]');
     await page.waitForSelector('[data-testid="remix-panel"]', { timeout: 5000 });
+    const multiJoins = await page.evaluate(() => window.__test.getRemixJoins());
     const rowCount = await page.evaluate(
       () => document.querySelectorAll('[data-testid="remix-item"]').length
     );
     assert(
-      rowCount === joins.length,
-      `the Remix panel lists one row per join (expected ${joins.length}, actual ${rowCount})`
+      rowCount === multiJoins.length,
+      `the Remix panel lists one row per join (expected ${multiJoins.length}, actual ${rowCount})`
     );
 
-    const pinnedKey = `${joins[0].fromBar}>${joins[0].toBar}`;
+    const pinnedKey = `${multiJoins[0].fromBar}>${multiJoins[0].toBar}`;
     const pinTitle = await page.getAttribute('button[aria-label="Pin edit 1"]', 'title');
     console.log(`  pin tooltip: ${JSON.stringify(pinTitle)}`);
     assert(
