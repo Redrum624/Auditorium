@@ -250,6 +250,39 @@ describe('SeparateDialog', () => {
     expect(screen.getByTestId('separate-progress').style.width).toBe('25%');
   });
 
+  it('6b. names all THREE phases of a run, not just inference', async () => {
+    seedDoc();
+    const { onProgress } = await startRun();
+    const label = () => screen.getByTestId('separate-progress-label').textContent ?? '';
+
+    // Before the host has said anything: the run is already visible, and the
+    // label may not claim a segment it has no number for.
+    expect(label()).toBe('Preparing the audio…');
+
+    // The resample leg — minutes on a long file, and it carries the seed
+    // estimate rather than a countdown from nothing.
+    act(() => {
+      onProgress(progressAt({ phase: 'resampling', segment: 0, totalSegments: 0, fraction: 0 }));
+    });
+    expect(label()).toBe('Preparing the audio… 2:38 left');
+
+    act(() => {
+      onProgress(progressAt());
+    });
+    expect(label()).toBe('Separating — segment 3 of 12 · 2:38 left');
+
+    // The partition is its own minutes-long leg with every segment already in.
+    // Without its branch it reads "segment 12 of 12 · 0:00 left" and then sits
+    // there — a finished-looking line in front of the longest wait.
+    act(() => {
+      onProgress(
+        progressAt({ phase: 'partitioning', segment: 12, fraction: 1, estimatedRemainingMs: 0 })
+      );
+    });
+    expect(label()).toBe('Building the stems…');
+    expect(label()).not.toContain('0:00 left');
+  });
+
   it('7. Cancel while running kills the run through the service', async () => {
     seedDoc();
     const { pending } = await startRun();
