@@ -25,6 +25,7 @@ import {
   accelerandoBeats,
   burstTrain,
   energyCentroid,
+  meterChangeBeats,
   rubatoBeats,
   stepTempoBeats,
 } from './__fixtures__/tempoFixtures';
@@ -76,6 +77,76 @@ function absStats(values: readonly number[]): { median: number; max: number; n: 
   const a = values.filter((v) => Number.isFinite(v)).map(Math.abs).sort((x, y) => x - y);
   return { median: a[Math.floor(a.length / 2)], max: a[a.length - 1], n: a.length };
 }
+
+describe('the fixtures themselves vary as advertised', () => {
+  // A measurement is only as good as the signal it was made on. The accelerando
+  // and rubato assertions below all say "the error is SMALL", which is equally
+  // true of a fixture that does not vary at all — so mutations flattening
+  // `rubatoBeats` and `stepTempoBeats` into even grids survived the entire
+  // suite. Each generator's own defining property is now pinned here, before
+  // anything is measured against it.
+  function intervals(beats: readonly number[]): number[] {
+    const out: number[] = [];
+    for (let i = 1; i < beats.length; i++) out.push(beats[i] - beats[i - 1]);
+    return out;
+  }
+
+  it('accelerandoBeats ramps from bpmStart to bpmEnd', () => {
+    const iv = intervals(accelerandoBeats(100, 120, 24, SR));
+    // 100 BPM = 0.6 s, 120 BPM = 0.5 s at the ends.
+    expect(iv[0] / SR).toBeCloseTo(0.6, 2);
+    expect(iv[iv.length - 1] / SR).toBeCloseTo(0.5, 2);
+    // Monotonically shortening — an accelerando, not a wobble.
+    for (let i = 1; i < iv.length; i++) expect(iv[i]).toBeLessThanOrEqual(iv[i - 1]);
+  });
+
+  it('rubatoBeats really oscillates by its stated amplitude', () => {
+    const iv = intervals(rubatoBeats(110, 0.08, 6, 24, SR));
+    const base = (60 / 110) * SR;
+    const min = Math.min(...iv);
+    const max = Math.max(...iv);
+    // ±8 % in BPM is 1/1.08 .. 1/0.92 in period.
+    expect(min / base).toBeLessThan(0.94);
+    expect(max / base).toBeGreaterThan(1.06);
+    // And it comes BACK — a ramp would not revisit the base period.
+    const returns = iv.filter((v) => Math.abs(v / base - 1) < 0.01).length;
+    expect(returns).toBeGreaterThan(3);
+  });
+
+  it('stepTempoBeats actually switches, once, at the stated time', () => {
+    const beats = stepTempoBeats(100, 125, 12, 24, SR);
+    const iv = intervals(beats);
+    const before = iv.filter((_, i) => beats[i] < 11 * SR);
+    const after = iv.filter((_, i) => beats[i] > 13 * SR);
+    expect(before.length).toBeGreaterThan(5);
+    expect(after.length).toBeGreaterThan(5);
+    const meanBefore = before.reduce((a, b) => a + b, 0) / before.length;
+    const meanAfter = after.reduce((a, b) => a + b, 0) / after.length;
+    expect(meanBefore / SR).toBeCloseTo(0.6, 2); // 100 BPM
+    expect(meanAfter / SR).toBeCloseTo(0.48, 2); // 125 BPM
+    expect(meanBefore / meanAfter).toBeCloseTo(1.25, 2);
+  });
+
+  it('meterChangeBeats places its downbeats where the sections say', () => {
+    const { beats, downbeats, beatsPerBarOfBar } = meterChangeBeats(120, [[4, 2], [3, 2], [4, 2]], SR);
+    expect(beats).toHaveLength(4 * 2 + 3 * 2 + 4 * 2);
+    expect(downbeats).toHaveLength(6);
+    expect(beatsPerBarOfBar).toEqual([4, 4, 3, 3, 4, 4]);
+    const period = (60 / 120) * SR;
+    // Bars start at beats 0, 4, 8, 11, 14, 18.
+    expect(downbeats.map((d) => Math.round(d / period))).toEqual([0, 4, 8, 11, 14, 18]);
+  });
+
+  it('burstTrain centres each burst on its beat, and energyCentroid recovers it', () => {
+    const beats = [5000, 15000, 25000];
+    const sig = burstTrain(beats, 30000, SR);
+    for (const b of beats) {
+      const c = energyCentroid(sig, b - 4000, b + 4000);
+      expect(c).not.toBeNull();
+      expect(Math.abs((c as number) - b)).toBeLessThan(2);
+    }
+  });
+});
 
 describe('buildTempoMap — the ratio bound (RULING 3)', () => {
   it('defaults to the ENGINE band, pinned equal to wsola.ts so the two cannot drift', () => {
@@ -219,6 +290,41 @@ describe('buildTempoMap — structure and monotonicity', () => {
     expect(ratios[2]).toBeCloseTo(2, 12);
   });
 
+  it('the HEAD follows the first interval even when the last one differs', () => {
+    // The earlier head/tail test has only ONE beat interval, so first and last
+    // ratio are the same number and swapping them is invisible — a mutation
+    // that made the head use `lastRatio` survived the whole suite. This fixture
+    // has a head knot AND two different ratios, so each provenance is pinned on
+    // its own.
+    //
+    // beats 1000, 2000, 2200 in a 3000-sample region, target spacing 1000:
+    //   interval 1000 -> 1000 (ratio 1); interval 200 -> clamped to 200*4 = 800
+    //   (ratio 4). head = 1000 * 1 = 1000; tail = 800 * 4 = 3200.
+    const map = buildTempoMap([1000, 2000, 2200], 3000, 1000);
+    expect(Array.from(map.knotsIn)).toEqual([0, 1000, 2000, 2200, 3000]);
+    expect(Array.from(map.knotsOut)).toEqual([0, 1000, 2000, 2800, 6000]);
+    const ratios = Array.from(warpRatios(map));
+    expect(ratios[0]).toBeCloseTo(1, 12); // head, from the FIRST interval
+    expect(ratios[ratios.length - 1]).toBeCloseTo(4, 12); // tail, from the LAST
+  });
+
+  it('is NOT the identity when only the LATER knots move', () => {
+    // Same fixture: knots 1 and 2 land exactly on their input positions and only
+    // knot 3 moves. An identity check that inspected just the first interior
+    // knot would call this map the identity, `applyTempoMap` would short-circuit
+    // to a copy, and a 6000-sample result would come back 3000 samples long.
+    // (A mutation shortening that loop to `j < 2` survived until this test.)
+    const map = buildTempoMap([1000, 2000, 2200], 3000, 1000);
+    expect(map.knotsOut[1]).toBe(map.knotsIn[1]);
+    expect(map.knotsOut[2]).toBe(map.knotsIn[2]);
+    expect(map.knotsOut[3]).not.toBe(map.knotsIn[3]);
+    expect(map.identity).toBe(false);
+    expect(map.outLen).toBe(6000);
+    // And the short circuit really is skipped: the output is the map's length.
+    const out = applyTempoMap([noise(3000, 11)], SR, map)[0];
+    expect(out.length).toBe(6000);
+  });
+
   it('analysisPosAt and synthesisPosAt invert each other across the whole map', () => {
     const beats = accelerandoBeats(90, 140, 10, SR);
     const inLen = 10 * SR;
@@ -246,6 +352,19 @@ describe('buildTempoMap — which beats are used, and what is refused', () => {
   it('keeps a beat one sample inside the region end and drops it one sample later', () => {
     expect(buildTempoMap([0, 1000, 2999], 3000, 1000).acceptedIndices).toEqual([0, 1, 2]);
     expect(buildTempoMap([0, 1000, 3000], 3000, 1000).acceptedIndices).toEqual([0, 1]);
+  });
+
+  it('drops a FRACTIONAL negative, which the ordering guard alone would admit', () => {
+    // The range guard and the ordering guard must not overlap: a `prev` seeded
+    // at -1 would reject -5 for being out of ORDER and never exercise `b < 0`
+    // at all, leaving that guard unpinned (a mutation deleting it survived the
+    // whole suite until this case existed). -0.5 is greater than -1, so only a
+    // real range check can reject it.
+    expect(buildTempoMap([-0.5, 1000, 2000], 3000, 1000).acceptedIndices).toEqual([1, 2]);
+    // And the knot map still starts at the region start, not at -0.5.
+    expect(buildTempoMap([-0.5, 1000, 2000], 3000, 1000).knotsIn[0]).toBe(0);
+    // A beat AT 0 is kept — the boundary on the other side.
+    expect(buildTempoMap([0, 1000, 2000], 3000, 1000).acceptedIndices).toEqual([0, 1, 2]);
   });
 
   it.each([

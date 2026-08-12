@@ -218,7 +218,13 @@ export function buildTempoMap(
   // --- accept beats --------------------------------------------------------
   const acceptedIndices: number[] = [];
   const sources: number[] = [];
-  let prev = -1;
+  // `-Infinity`, not `-1`: with `-1` the ordering guard below ALSO rejected
+  // every integer negative, so the range guard and the ordering guard overlapped
+  // and neither was pinned — a mutation deleting `b < 0` survived the whole
+  // suite. They now have one job each, and `b < 0` is the only thing that
+  // rejects a position outside the region (including a fractional one in
+  // `(-1, 0)`, which `-1` silently admitted).
+  let prev = -Infinity;
   for (let i = 0; i < beatSamples.length; i++) {
     const b = beatSamples[i];
     if (!Number.isFinite(b)) continue;
