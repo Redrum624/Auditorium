@@ -900,16 +900,23 @@ describe('staleness', () => {
 // ---------------------------------------------------------------------------
 
 describe('progress and busy state', () => {
-  it('streams per-segment progress with a time estimate that shrinks as segments land', async () => {
+  it('streams per-segment progress with the time estimate its law produces', async () => {
     const backend = installStemApi();
     const doc = seedDoc();
     const seen: StemSeparationProgress[] = [];
+    // A clock the TEST drives. Real elapsed time here is 0-2 ms, so "at least
+    // zero" and "did not grow" hold for any formula — including a hardcoded 0,
+    // and including one that charges for the segments already delivered. The
+    // published number is arithmetic, so it is asserted as arithmetic.
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
 
     const promise = separateStems({ sourceDocId: doc.id, onProgress: (p) => seen.push({ ...p }) });
     await waitForRequest(backend);
 
     expect(seen.some((p) => p.phase === 'resampling')).toBe(true);
 
+    now += 4000; // 4 s spent on the first two of four segments
     backend.emitProgress({ segment: 1, totalSegments: 4 });
     backend.emitProgress({ segment: 2, totalSegments: 4 });
     const afterTwo = getStemProgress();
@@ -917,12 +924,13 @@ describe('progress and busy state', () => {
     expect(afterTwo!.segment).toBe(2);
     expect(afterTwo!.totalSegments).toBe(4);
     expect(afterTwo!.fraction).toBeCloseTo(0.5, 6);
-    expect(afterTwo!.estimatedRemainingMs).not.toBeNull();
-    expect(afterTwo!.estimatedRemainingMs!).toBeGreaterThanOrEqual(0);
+    // (4000 ms / 2 done) x 2 STILL TO COME. Charging for all four gives 8000.
+    expect(afterTwo!.estimatedRemainingMs).toBe(4000);
 
+    now += 4000;
     backend.emitProgress({ segment: 4, totalSegments: 4 });
-    const afterAll = getStemProgress();
-    expect(afterAll!.estimatedRemainingMs!).toBeLessThanOrEqual(afterTwo!.estimatedRemainingMs!);
+    // Nothing is still to come, so nothing is left to wait for: 2000 x 0.
+    expect(getStemProgress()!.estimatedRemainingMs).toBe(0);
 
     backend.emitChunk(buildChunk(requestChannels(backend)));
     backend.settle({ ok: true, totalSegments: 4 });
