@@ -44,6 +44,7 @@ import type { Marker } from '../stores/appStore';
 import { nextId, useAppStore } from '../stores/appStore';
 import { analyzeTempo } from '../dsp/tempoCore';
 import { buildTempoMap, type TempoMap } from '../dsp/tempoMap';
+import { synthesisPosAt } from '../dsp/timingWarp';
 import { MIN_RATIO, MAX_RATIO } from '../dsp/wsola';
 import {
   MATCH_TEMPO_VARIABLE_EFFECT_ID,
@@ -141,6 +142,35 @@ export const MAX_BEAT_MARKERS = 512;
 function activeDoc(): AudioDocument | null {
   const s = useAppStore.getState();
   return s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
+}
+
+/**
+ * The region every tempo operation acts on: the live selection, or the whole
+ * document when there is none, clamped into `[0, docLength]` **exactly as
+ * `cloneRegion`'s own `clampRange` clamps it** (`AudioDocument.ts`).
+ *
+ * ONE resolution that every path in this module reads, and that is a
+ * correctness requirement rather than tidiness — the same ruling
+ * `VariableTempoPlan.regionStart` records. R7 applied the clamp in
+ * `checkVariableTempoChange` and left the constant path and the ratio-1 grid
+ * path resolving their own `start`/`end` from the selection unclamped, which is
+ * that identical defect one door along. `setSelection` stores whatever it is
+ * handed, so a selection starting at −5000 gave `computeBeatMarkerPositions` a
+ * NEGATIVE `newFirstBeat`, and its `Math.max(0, …)` floor then piled every early
+ * beat marker onto sample 0 instead of describing beats inside the region; an
+ * `end` past the document did the mirror of it, piling the late markers onto the
+ * document's last sample. No UI route builds such a selection (the editor
+ * gestures clamp, select-all uses `docLength`), so it was latent — but two
+ * clamps that have to agree is that bug waiting to recur, and one resolved value
+ * cannot drift.
+ */
+function resolveRegion(doc: AudioDocument): { start: number; end: number } {
+  const len = docLength(doc);
+  const selection = useAppStore.getState().selection;
+  return {
+    start: Math.min(Math.max(selection ? selection.start : 0, 0), len),
+    end: Math.min(Math.max(selection ? selection.end : len, 0), len),
+  };
 }
 
 /** `sourceBpm/targetBpm` — the output/input length ratio `timeStretchLinked`
@@ -256,16 +286,11 @@ export function checkVariableTempoChange(req: ApplyTempoChangeRequest): Variable
   const { targetBpm } = req;
   if (!Number.isFinite(targetBpm) || targetBpm <= 0) return { ok: false, reason: 'invalid-bpm' };
 
-  // Clamped exactly as `cloneRegion` clamps it (`AudioDocument.ts`), so the
-  // region this plan describes and the region the worker is handed cannot
-  // differ. No store path is known that produces an out-of-bounds selection —
-  // the reviewer looked and could not construct one — but the two resolutions
-  // disagreeing is the ONLY route by which the previewed map and the applied
-  // map could describe different audio, and matching the clamp costs nothing.
-  const len = docLength(doc);
-  const selection = useAppStore.getState().selection;
-  const start = Math.min(Math.max(selection ? selection.start : 0, 0), len);
-  const end = Math.min(Math.max(selection ? selection.end : len, 0), len);
+  // Clamped exactly as `cloneRegion` clamps it, so the region this plan
+  // describes and the region the worker is handed cannot differ — through the
+  // shared {@link resolveRegion}, which is what keeps the constant path's
+  // resolution from drifting away from this one again.
+  const { start, end } = resolveRegion(doc);
   const regionLength = end - start;
 
   const beats = regionRelativeBeats(req.variableRate.beatSamples, start, end);
@@ -328,6 +353,14 @@ export function tempoQualityBand(ratio: number): TempoQualityBand {
  * finding): an un-clamped value below `start` maps to a negative offset,
  * which then piles multiple early candidates onto the same `Math.max(0, ...)`
  * floor instead of describing beats inside the region.
+ *
+ * `start`/`end` are the caller's RESOLVED region and must already be inside
+ * `[0, docLength]` — {@link resolveRegion} is the only thing that produces
+ * them. That precondition is what the `firstBeatSample` clamp above relies on:
+ * a negative `start` survives `Math.max(start, firstBeatSample)` untouched and
+ * puts `newFirstBeat` below zero anyway, which is the very pile-up this clamp
+ * exists to prevent, and an `end` past the document pushes `regionEnd` past
+ * `newLen` so the trailing candidates collapse onto the last sample instead.
  */
 function computeBeatMarkerPositions(
   start: number,
@@ -429,6 +462,72 @@ function addBeatMarkersFromMap(docId: string, start: number, map: TempoMap): boo
   return writeBeatMarkers(docId, positions, truncated);
 }
 
+/**
+ * The markers the variable-rate warp displaced, put back onto the audio they
+ * mark — one separately-labelled undo entry, in `'Align Markers'`'s shape.
+ *
+ * `applyEdit`'s shared `'stretch'` remap has already moved every interior
+ * marker PROPORTIONALLY by the time this runs, and proportional is exact only
+ * where the local ratio equals the region's average ratio — which for a
+ * variable-rate match is true almost nowhere, since the whole point is that the
+ * rate differs bar by bar. On the measured 100→120 BPM accelerando a marker
+ * drifts from its audio by up to ~525 ms.
+ *
+ * `originals` is the marker list captured BEFORE the run, and using it is what
+ * makes this a re-computation rather than an unwind: each position is sent
+ * through the map the audio actually went through, exactly as
+ * `timingAlignService` sends its markers through the warp map, instead of
+ * trying to invert a proportional remap that has already lost information.
+ * Markers the user added DURING the run have no original position and are left
+ * alone; markers deleted during it simply never come back.
+ *
+ * Three rules, matching `remapPosition`'s own partition of the timeline:
+ * before the region, untouched; inside it, `regionStart +
+ * round(synthesisPosAt(map, pos - regionStart))`; at or after its end, shifted
+ * by the region's length change — which is what the proportional remap already
+ * did for trailing markers, so those never count as moved.
+ *
+ * The undo baseline is the POST-edit list, not `originals`: `applyEdit` has
+ * already committed its own remap inside the stretch's entry, so undoing this
+ * entry must restore what that produced, and undoing the stretch after it
+ * restores the originals.
+ */
+function correctMarkersForWarp(docId: string, originals: Marker[], plan: VariableTempoPlan): number {
+  if (originals.length === 0) return 0;
+
+  const { map, regionStart, regionLength, outLength } = plan;
+  const regionEnd = regionStart + regionLength;
+  const delta = outLength - regionLength;
+
+  const corrected = new Map<string, number>();
+  for (const m of originals) {
+    const pos = m.positionSample;
+    if (pos < regionStart) continue; // before the region — the warp cannot touch it
+    corrected.set(
+      m.id,
+      pos >= regionEnd
+        ? pos + delta
+        : regionStart + Math.round(synthesisPosAt(map, pos - regionStart))
+    );
+  }
+  if (corrected.size === 0) return 0;
+
+  const before: Marker[] = useAppStore.getState().markers[docId] ?? [];
+  let moved = 0;
+  const after = before.map((m) => {
+    const pos = corrected.get(m.id);
+    if (pos === undefined || pos === m.positionSample) return m;
+    moved++;
+    return { ...m, positionSample: pos };
+  });
+  if (moved === 0) return 0;
+
+  const store = useAppStore.getState();
+  store.setMarkersForDoc(docId, after);
+  pushMarkerUndo('Match Tempo Markers', docId, before, useAppStore.getState().markers[docId] ?? []);
+  return moved;
+}
+
 /** The write half of both beat-grid paths: one combined `setMarkersForDoc`, one
  * separately-labelled undo entry, one truncation notice. Split out by R7 so the
  * constant and variable paths share the write and differ only in where the
@@ -487,9 +586,7 @@ function layBeatGridAtCurrentTempo(req: ApplyTempoChangeRequest): TempoChangeOut
   if (!doc) return { ok: false, reason: 'no-document' };
   if (req.firstBeatSample == null) return { ok: false, reason: 'no-op' };
 
-  const selection = useAppStore.getState().selection;
-  const start = selection ? selection.start : 0;
-  const end = selection ? selection.end : docLength(doc);
+  const { start, end } = resolveRegion(doc);
 
   const laid = addBeatMarkersAfterStretch(
     doc.id,
@@ -583,9 +680,7 @@ export async function applyTempoChange(
   if (!doc) return { ok: false, reason: 'no-document' };
   const docId = doc.id;
   const sampleRate = doc.sampleRate;
-  const selection = useAppStore.getState().selection;
-  const start = selection ? selection.start : 0;
-  const end = selection ? selection.end : docLength(doc);
+  const { start, end } = resolveRegion(doc);
 
   await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, {
     onProgress,
@@ -620,6 +715,14 @@ export async function applyTempoChange(
  *
  * The beat grid, when asked for, is laid from `plan.map.placed` — where the
  * beats actually went — not re-derived from the target BPM.
+ *
+ * Up to THREE undo entries per Apply, in this order: `Match Tempo` (the audio
+ * plus `applyEdit`'s own proportional remap), `Match Tempo Markers` (that remap
+ * corrected through the map — see {@link correctMarkersForWarp}), and
+ * `Add Beat Markers`. The cost is stated rather than hidden: one Ctrl+Z leaves
+ * the pre-existing markers transiently at their proportional positions, which
+ * is the same property `'Align Markers'` and `'Add Beat Markers'` already ship
+ * with, and a second undo removes the audio edit and its remap together.
  */
 async function applyVariableTempoChange(
   req: ApplyTempoChangeRequest,
@@ -631,6 +734,10 @@ async function applyVariableTempoChange(
   const doc = activeDoc();
   if (!doc) return { ok: false, reason: 'no-document' };
   const docId = doc.id;
+  // Captured BEFORE the run, because `applyEdit`'s proportional `'stretch'`
+  // remap runs inside it and these are the positions the correction has to be
+  // computed from. See {@link correctMarkersForWarp}.
+  const markersBefore: Marker[] = useAppStore.getState().markers[docId] ?? [];
 
   await runEffectOnSelection(
     MATCH_TEMPO_VARIABLE_EFFECT_ID,
@@ -662,14 +769,48 @@ async function applyVariableTempoChange(
   // `plannedDelta` is legitimately 0 whenever the map redistributes time
   // without changing the total — which includes the case this feature exists
   // for, material wobbling around 110 BPM matched to 110 — and there the
-  // comparison degenerates to `0 === 0` and an identity short circuit would
-  // pass it. No fixture has been constructed that lands exactly on 0 after
-  // rounding; this is a known gap in the check's reach, not a demonstrated
-  // failure. Catching that case would need the run's own map back from the
-  // worker, not a scalar.
+  // comparison degenerates to `0 === 0`.
+  //
+  // Two DIFFERENT things live inside that gap, and the earlier version of this
+  // comment ran them together:
+  //
+  //  - The IDENTITY short circuit *could* be caught without the map. It returns
+  //    `Float32Array.from(c)` — byte-identical copies (`tempoMap.ts`) — and the
+  //    pre-edit `doc.channels` is still live here, because `replaceRegion`
+  //    allocates fresh arrays for the commit rather than writing into the old
+  //    ones. Comparing the returned region against the input therefore decides
+  //    it exactly. It is not done because it cannot fire: `checkVariableTempoChange`
+  //    already refuses `map.identity` with `'no-op'` before any run starts.
+  //  - A DIFFERENT, non-identity map of equal length could not be caught that
+  //    way, or by any scalar. The service holds no reference output to compare
+  //    against, so seeing it would need the run's own map back from the worker.
+  //
+  // And the check as a whole is UNREACHABLE, not merely unexercised — no input
+  // can reach it, which is a stronger statement than "no fixture has been
+  // constructed". Both maps come from the same pure `buildTempoMap` on provably
+  // identical arguments: `beats` and `targetSpacing` cross the worker boundary
+  // as a `number[]` and a double (exact under structured clone), and the
+  // worker's `inputLength` is `channels[0].length` where `channels =
+  // cloneRegion(doc, start, end)` — clamped by the same `clampRange` that
+  // `resolveRegion` mirrors, so it equals `plan.regionLength` exactly. Both
+  // store reads happen in the same synchronous tick, and the output length is
+  // exactly `map.outLen` (`wsola.ts`). So `realisedDelta === plannedDelta`
+  // always, including the wobble-110→110 case where both are 0 correctly.
+  //
+  // It STAYS because unreachable-today is a property of the current contract,
+  // not an invariant: worker/service version skew, or a future divergence in
+  // how the two sides resolve the region, would break it silently and this is
+  // the only place that would notice. `tempoService.test.ts` pins the equal-
+  // arguments property the guard actually rests on.
   const realisedDelta = docLength(postDoc) - docLength(doc);
   const plannedDelta = check.plan.outLength - check.plan.regionLength;
   if (realisedDelta !== plannedDelta) return { ok: false, reason: 'plan-mismatch' };
+
+  // BEFORE the beat grid, so the grid appends to the corrected list rather than
+  // to the proportionally-displaced one — `correctMarkersForWarp` writes the
+  // whole list, so a grid laid first would be overwritten by a snapshot taken
+  // before it existed.
+  correctMarkersForWarp(docId, markersBefore, check.plan);
 
   // The PLAN's resolved start, never a freshly-resolved one — see
   // `VariableTempoPlan.regionStart`.
@@ -714,9 +855,7 @@ export function detectRegionTempo(): RegionTempoDetection | null {
   const doc = activeDoc();
   if (!doc) return null;
 
-  const selection = useAppStore.getState().selection;
-  const start = selection ? selection.start : 0;
-  const end = selection ? selection.end : docLength(doc);
+  const { start, end } = resolveRegion(doc);
   const excerpt = centeredExcerpt(start, end, doc.sampleRate);
 
   const mono = mixDown(cloneRegion(doc, excerpt.start, excerpt.end));

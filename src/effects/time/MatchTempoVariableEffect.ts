@@ -75,9 +75,12 @@ export const matchTempoVariableEffect: EffectDefinition = {
     // No `removedSpans`: the map deletes nothing. The region's LENGTH does
     // change, so `effectRunner`'s proportional 'stretch' remap applies — which
     // is an approximation for a variable-rate map (it is exact only where the
-    // local ratio equals the region's average). `tempoService` therefore lays
-    // the beat grid from `map.placed` afterwards rather than relying on it, and
-    // the limitation is recorded in docs/KNOWN_LIMITATIONS.md.
+    // local ratio equals the region's average). `tempoService` therefore does
+    // not rely on it: it lays the beat grid from `map.placed`, and (v1.23.1)
+    // recomputes every PRE-EXISTING marker from its pre-run position through
+    // this same map afterwards, as its own undo entry. Both corrections live in
+    // the service because the shared remap has already committed by then; the
+    // reasoning is recorded in docs/KNOWN_LIMITATIONS.md.
     return { channels: out };
   },
 };

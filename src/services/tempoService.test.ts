@@ -22,6 +22,10 @@ import { fft } from '../dsp/fft';
 import { registerAllEffects } from '../effects/registerAll';
 import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
 import * as effectRunner from './effectRunner';
+// Namespace import so `buildTempoMap` can be spied on at BOTH of its call sites
+// — the service's plan and the effect's rebuild inside the worker mock, which
+// runs in this same realm and therefore against this same module object.
+import * as tempoMapModule from '../dsp/tempoMap';
 
 // App.tsx registers effects at startup; tempoService's applyTempoChange goes
 // through runEffectOnSelection('time-stretch', ...), which looks the effect
@@ -1275,5 +1279,242 @@ describe('the region is clamped exactly as cloneRegion clamps it (finding 7)', (
       .forEach((m, i) => {
         expect(m.positionSample).toBe(planned.plan.regionStart + Math.round(placed[i]));
       });
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// L1 â€” the loose ends R7 left behind
+// ---------------------------------------------------------------------------
+
+describe('L1-1 â€” the CONSTANT path resolves its region through the same clamp', () => {
+  it('a NEGATIVE selection start does not pile every early beat marker onto sample 0', async () => {
+    // R7 clamped `checkVariableTempoChange`'s region and left `applyTempoChange`
+    // resolving its own `start`/`end` straight off the selection. `setSelection`
+    // stores whatever it is handed, so start = -40000 reached
+    // `computeBeatMarkerPositions`, whose `Math.max(start, firstBeatSample)`
+    // leaves a negative start untouched: `newFirstBeat` came out at -30000 and
+    // every candidate before zero collapsed onto the `Math.max(0, ...)` floor.
+    // Unclamped this writes FOUR markers all at position 0.
+    const doc = seedDoc([sine(220, 4)]); // 176400 samples
+    const docId = doc.id;
+    useAppStore.getState().setSelection({ start: -40000, end: 88200 });
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 480, // ratio 0.25 â€” exactly MIN_RATIO, accepted
+      addBeatMarkers: true,
+      firstBeatSample: 0,
+    });
+    expect(result.ok).toBe(true);
+
+    // The audio edit always used the clamped region (`cloneRegion` clamps), so
+    // the document length is the same either way â€” only the markers differ.
+    expect(docLength(liveDoc(docId))).toBe(176400 - 88200 + 22050);
+
+    const positions = liveMarkers(docId)
+      .filter((m) => m.name.startsWith('Beat '))
+      .map((m) => m.positionSample)
+      .sort((a, b) => a - b);
+    // `newFirstBeat = 0`, spacing `(60/480)*44100 = 5512.5`, region end
+    // `round(88200*0.25) = 22050`. Literal, so it cannot drift with the code.
+    expect(positions).toEqual([0, 5513, 11025, 16538]);
+  }, 20000);
+
+  it('an END past the document does not pile the late markers onto its last sample', async () => {
+    // The mirror of the same defect, on the ratio-1 grid path
+    // (`layBeatGridAtCurrentTempo`), which had its own unclamped resolution too.
+    // Unclamped, `regionEnd` is 4365900 and the loop emits 198 candidates of
+    // which 190 collapse onto `Math.min(newLen, pos)` â€” the document's last
+    // sample â€” instead of stopping at the end of the real audio.
+    const doc = seedDoc([sine(220, 4)]); // 176400 samples
+    const docId = doc.id;
+    useAppStore.getState().setSelection({ start: 0, end: 99 * SR });
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 120, // ratio 1 -> the no-stretch beat-grid path
+      addBeatMarkers: true,
+      firstBeatSample: 0,
+    });
+    expect(result.ok).toBe(true);
+    expect(docLength(liveDoc(docId))).toBe(176400); // no audio edit at all
+    expect(getHistory(docId).done).toEqual(['Add Beat Markers']);
+
+    const positions = liveMarkers(docId)
+      .filter((m) => m.name.startsWith('Beat '))
+      .map((m) => m.positionSample)
+      .sort((a, b) => a - b);
+    // spacing `(60/120)*44100 = 22050`, region end 176400.
+    expect(positions).toEqual([0, 22050, 44100, 66150, 88200, 110250, 132300, 154350]);
+  }, 20000);
+});
+
+describe('L1-5 â€” the two buildTempoMap call sites receive equal arguments', () => {
+  it('the worker rebuilds the map from the same beats, region length and spacing', async () => {
+    // This is the property the `plan-mismatch` guard actually rests on, and it
+    // was unpinned. The guard is unreachable precisely BECAUSE both maps come
+    // from the same pure function on identical arguments; if that ever stops
+    // being true the guard starts firing, so the equality is what has to be
+    // tested, not the refusal.
+    //
+    // The selection is out of bounds at BOTH ends on purpose: `regionLength` is
+    // the one argument the two sides derive independently â€” the service from the
+    // selection, the worker from `channels[0].length` after `cloneRegion` â€” so
+    // it is the only one that can drift, and only an out-of-bounds selection
+    // makes the clamped and unclamped values differ.
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const len = docLength(doc);
+    const start = -5000;
+    const end = 99 * SR;
+    expect(start).toBeLessThan(0);
+    expect(end).toBeGreaterThan(len);
+    useAppStore.getState().setSelection({ start, end });
+
+    const spy = jest.spyOn(tempoMapModule, 'buildTempoMap');
+    try {
+      const targetBpm = 130;
+      const result = await applyTempoChange({
+        sourceBpm: 110,
+        targetBpm,
+        variableRate: { beatSamples: accelGrid(100, 120, seconds) },
+      });
+      expect(result.ok).toBe(true);
+      expect(result.reason).toBeUndefined();
+
+      // Exactly two derivations: the service's plan, then the worker's rebuild.
+      expect(spy.mock.calls).toHaveLength(2);
+      const [serviceCall, workerCall] = spy.mock.calls;
+
+      expect(Array.from(workerCall[0])).toEqual(Array.from(serviceCall[0]));
+
+      const clampedLength = Math.min(len, Math.max(end, 0)) - Math.min(len, Math.max(start, 0));
+      expect(clampedLength).toBe(len);
+      expect(serviceCall[1]).toBe(clampedLength);
+      expect(workerCall[1]).toBe(clampedLength);
+
+      // Bit for bit: `targetSpacing` crosses the worker boundary as a double and
+      // is deliberately not rounded, so `toBe` is the right strictness here.
+      expect(serviceCall[2]).toBe((60 / targetBpm) * SR);
+      expect(Object.is(workerCall[2], serviceCall[2])).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30000);
+});
+
+describe('L1-6 â€” markers inside a VARIABLE match follow the map, not the average ratio', () => {
+  it('puts each marker where its own audio went, as its own undo step before the beat grid', async () => {
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    // A NON-ZERO region start: with start 0 the region-relative and
+    // document-absolute coordinates coincide and an offset bug cannot be seen.
+    const start = 2 * SR;
+    const end = 6 * SR;
+    useAppStore.getState().setSelection({ start, end });
+
+    const req = {
+      sourceBpm: 110,
+      targetBpm: 150,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: accelGrid(100, 130, seconds) },
+    };
+    const planned = checkVariableTempoChange(req);
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+    const { map, regionStart, regionLength, outLength } = planned.plan;
+    expect(regionStart).toBe(start);
+
+    // Pin the marker to a TRACKED BEAT, whose landing place the map reports
+    // independently as `placed[k]` â€” a different quantity from the
+    // `synthesisPosAt` interpolation the service runs, agreeing with it only
+    // because beats are knots. And pick the beat the region's AVERAGE ratio gets
+    // most wrong, since that is the case the correction exists for.
+    const beatsRel = planned.plan.extra.beatSamples;
+    const meanRatio = outLength / regionLength;
+    let k = 0;
+    let worstDrift = -1;
+    for (let i = 0; i < map.acceptedIndices.length; i++) {
+      const rel = beatsRel[map.acceptedIndices[i]];
+      const drift = Math.abs(Math.round(map.placed[i]) - Math.round(rel * meanRatio));
+      if (drift > worstDrift) {
+        worstDrift = drift;
+        k = i;
+      }
+    }
+    // If the fixture did not actually vary, this test would prove nothing.
+    expect(worstDrift).toBeGreaterThan(1000);
+
+    const beatRel = beatsRel[map.acceptedIndices[k]];
+    const markerPos = regionStart + beatRel;
+    const expectedPos = regionStart + Math.round(map.placed[k]);
+    // What `applyEdit`'s shared proportional stretch remap produces, and what
+    // shipped in v1.23.0.
+    const proportionalPos = regionStart + Math.round(beatRel * meanRatio);
+    expect(expectedPos).not.toBe(proportionalPos);
+
+    const before: Marker[] = [
+      { id: 'm-before', name: 'before the region', positionSample: start - 1000 },
+      { id: 'm-beat', name: 'on a tracked beat', positionSample: markerPos },
+      { id: 'm-after', name: 'after the region', positionSample: end + 3000 },
+    ];
+    useAppStore.getState().setMarkersForDoc(docId, before);
+
+    const result = await applyTempoChange(req);
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBeUndefined();
+
+    const after = liveMarkers(docId);
+    const posOf = (id: string) => after.find((m) => m.id === id)!.positionSample;
+    expect(posOf('m-before')).toBe(start - 1000); // the warp cannot reach it
+    expect(posOf('m-beat')).toBe(expectedPos);
+    expect(posOf('m-after')).toBe(end + 3000 + (outLength - regionLength));
+
+    // Three entries, in this order â€” the correction lands BEFORE the grid, so
+    // the grid appends to the corrected list rather than being overwritten by a
+    // snapshot taken before it existed.
+    expect(getHistory(docId).done).toEqual([
+      'Match Tempo',
+      'Match Tempo Markers',
+      'Add Beat Markers',
+    ]);
+    expect(after.filter((m) => m.name.startsWith('Beat ')).length).toBeGreaterThan(0);
+
+    // Undo the grid: the correction survives.
+    undo(docId);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+    expect(liveMarkers(docId).find((m) => m.id === 'm-beat')!.positionSample).toBe(expectedPos);
+    // Undo the correction: the marker falls back to the proportional position
+    // `applyEdit` left it at. That transient state is the stated cost of doing
+    // this as a separate entry, and it is what Align Markers already ships.
+    undo(docId);
+    expect(liveMarkers(docId).find((m) => m.id === 'm-beat')!.positionSample).toBe(proportionalPos);
+    // Undo the stretch: audio and markers both back to the start.
+    undo(docId);
+    expect(docLength(liveDoc(docId))).toBe(seconds * SR);
+    expect(liveMarkers(docId).find((m) => m.id === 'm-beat')!.positionSample).toBe(markerPos);
+  }, 30000);
+
+  it('pushes no marker entry when nothing outside the beat grid moves', async () => {
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    const start = 2 * SR;
+    useAppStore.getState().setSelection({ start, end: 6 * SR });
+    useAppStore
+      .getState()
+      .setMarkersForDoc(docId, [{ id: 'm-before', name: 'before', positionSample: start - 1000 }]);
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 150,
+      variableRate: { beatSamples: accelGrid(100, 130, seconds) },
+    });
+    expect(result.ok).toBe(true);
+    expect(getHistory(docId).done).toEqual(['Match Tempo']);
+    expect(liveMarkers(docId)).toEqual([
+      { id: 'm-before', name: 'before', positionSample: start - 1000 },
+    ]);
   }, 30000);
 });

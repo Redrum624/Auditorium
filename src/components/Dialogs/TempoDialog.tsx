@@ -186,8 +186,24 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
     docEntry !== null && docEntry.bpm !== null && !docEntry.stale && docEntry.beatSamples.length > 0;
   const selectionChanged = !sameSelection(lastEstimateSelection, selection);
 
-  const regionStart = selection ? selection.start : 0;
-  const regionEnd = selection ? selection.end : docLength(doc);
+  // Resolved through the SAME clamp `tempoService`'s `resolveRegion` (and
+  // therefore `cloneRegion`) applies, so what this dialog measures and what
+  // Apply acts on cannot describe different audio.
+  //
+  // The premise is unreachable — no UI path produces an out-of-bounds selection
+  // (the editor gestures clamp, select-all uses `docLength`) — and the earlier
+  // justification for leaving it unclamped, that these values are "display
+  // only", was simply wrong: `beatsInRegion` below gates the Correction select
+  // and `variableCheck`, and `regionStart` feeds `firstBeatAtOrAfter` for
+  // `firstBeatSample`. Neither is display. What is true is that both are
+  // INSENSITIVE to the clamp rather than unused: every element of `beatSamples`
+  // lies in `[0, docLength)`, so moving `start` into `[0, len]` cannot change
+  // which beats satisfy `regionStart <= b < regionEnd`, nor which is the first
+  // at or after it. Clamped anyway, because "insensitive today" is a property of
+  // the consumers and not of the value.
+  const docLen = docLength(doc);
+  const regionStart = Math.min(Math.max(selection ? selection.start : 0, 0), docLen);
+  const regionEnd = Math.min(Math.max(selection ? selection.end : docLen, 0), docLen);
   const regionSeconds = (regionEnd - regionStart) / doc.sampleRate;
 
   const scopeText = selection
@@ -255,18 +271,30 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
       // recorded rather than papered over with a test that reaches it through
       // internals a user cannot touch.
       //
-      // The argument is entirely about the render gate, and does NOT depend on
-      // `docEntry` being one-way: the line above can and does set it back to
-      // null when `runTempoAnalysis` finds no tempo, which is what the
-      // `result?.bpm` on the next line concedes. What holds is simpler — the
-      // Detect button renders only while `docEntry === null`, and in that state
-      // there is no `confirmableGrid`, so the Correction select is disabled and
-      // the tick never renders. `gridConfirmed` is therefore already false
-      // whenever this line runs, whichever way `docEntry` went.
+      // The argument is about `docEntry`'s TRANSITIONS, not about what renders
+      // now. An earlier version of this comment reasoned from the render gate —
+      // "the tick never renders in this state" — which does not close: this
+      // function runs asynchronously and `gridConfirmed` is persistent state, so
+      // what renders at THIS moment says nothing about whether an earlier render
+      // set it. What actually closes it is the property that comment disclaimed,
+      // and it holds more strongly than "one-way":
       //
-      // It stays because this call REPLACES the grid, so the moment that render
-      // gate widens the reset becomes load-bearing — and the gate is pinned by
-      // test in both states so that widening cannot pass unnoticed.
+      //  - `setDocEntry` has exactly two call sites, the line above and the one
+      //    in `correctOctave`. `correctOctave`'s is inside `result && result.bpm
+      //    !== null`, so it never passes null.
+      //  - The line above CAN pass null, but `handleDetect` is called from one
+      //    place only, the Detect button, which renders solely while
+      //    `docEntry === null`.
+      //
+      // So NO non-null → null transition of `docEntry` exists at all, and
+      // `gridConfirmed` can only be set by a checkbox that requires a non-null
+      // `docEntry` to render. `handleDetect` can therefore never run while
+      // `gridConfirmed` is true.
+      //
+      // It stays because this call REPLACES the grid, so the moment a second
+      // caller or a wider render gate breaks either premise the reset becomes
+      // load-bearing — and the gate is pinned by test in both states so that
+      // widening cannot pass unnoticed.
       setGridConfirmed(false);
       setLastEstimateSelection(useAppStore.getState().selection);
       if (result?.bpm != null) setSourceDraft(String(result.bpm));
