@@ -1319,6 +1319,69 @@ describe('runVocalChain', () => {
       expect(started).toEqual(['pitch', 'compressor', 'deEsser', 'reverb', 'limiter']);
       expect(started.slice(started.indexOf('reverb') + 1)).toEqual(['limiter']);
     });
+
+    // ── …and the path the reorder does NOT close ──────────────────────────
+    // The reorder makes the limiter's promise true while the limiter is
+    // RUNNING. Switched off, the reverb is the last stage that touches the
+    // audio again and the same over-scale buffer reaches both writers. It is
+    // WARNED, in the cover chain's Ruling C shape, not blocked.
+    it('names the peak when Reverb runs with the Limiter switched off, and still runs', async () => {
+      seedDoc([noise(WIN * 6, 1.0, 81)]);
+      const report = await runVocalChain({ enabled: only('reverb') });
+
+      const reverb = report!.stages.find((s) => s.id === 'reverb')!;
+      expect(reverb.status).toBe('applied');
+      // The fixture really does come back over full scale, so the warning has
+      // something to be about — it is not firing on a code path.
+      expect(reverb.delta!.peakAfterDb).toBeGreaterThan(0);
+      expect(report!.after.peakDb).toBeGreaterThan(0);
+
+      expect(reverb.warning).toBeDefined();
+      expect(reverb.warning).toMatch(/above full scale/);
+      expect(reverb.warning).toMatch(/Limiter/);
+      expect(reverb.warning).toMatch(/hard-clip/);
+      // THE number, this run's own, not a figure from a document.
+      expect(reverb.warning).toContain(`+${reverb.delta!.peakAfterDb.toFixed(1)} dBFS`);
+
+      // A warning, not a refusal: the stage ran and the document was edited.
+      expect(report!.applied).toBe(true);
+      expect(getHistory(activeDoc().id).done.length).toBeGreaterThan(0);
+    });
+
+    it('says nothing when the Limiter is on, because then the ceiling holds', async () => {
+      // Same fixture, same over-scale tail at the reverb's OWN output — the one
+      // difference is the stage that catches it. A warning that showed here too
+      // would be a warning nobody reads.
+      seedDoc([noise(WIN * 6, 1.0, 81)]);
+      const report = await runVocalChain({ enabled: only('reverb', 'limiter') });
+
+      const reverb = report!.stages.find((s) => s.id === 'reverb')!;
+      expect(reverb.status).toBe('applied');
+      expect(reverb.delta!.peakAfterDb).toBeGreaterThan(0);
+      expect(reverb.warning).toBeUndefined();
+      expect(report!.after.peakDb).toBeLessThanOrEqual(ceilingDb() + 0.01);
+    });
+
+    it('says nothing on material the tail never takes over full scale', async () => {
+      // The limiter is off here too, so this is the peak doing the deciding and
+      // not the stage selection.
+      seedDoc([noise(WIN * 6, 0.02, 82)]);
+      const report = await runVocalChain({ enabled: only('reverb') });
+
+      const reverb = report!.stages.find((s) => s.id === 'reverb')!;
+      expect(reverb.status).toBe('applied');
+      expect(reverb.delta!.peakAfterDb).toBeLessThan(0);
+      expect(reverb.warning).toBeUndefined();
+    });
+
+    it('leaves every other stage unwarned — it is the reverb that is unguarded, not the run', async () => {
+      // Full-scale noise with the limiter off and the reverb off: the stages
+      // that run are level stages too, but none of them SUMS a tail, and none of
+      // them may claim the reverb's caveat.
+      seedDoc([noise(WIN * 6, 1.0, 83)]);
+      const report = await runVocalChain({ enabled: only('dc', 'compressor', 'deEsser') });
+      for (const s of report!.stages) expect(s.warning).toBeUndefined();
+    });
   });
 
   it('moves markers by the exact cuts rule when Remove Silence shortened the take', async () => {
@@ -1365,5 +1428,52 @@ describe('runVocalChain', () => {
     const markers = useAppStore.getState().markers[docId];
     expect(markers.find((m) => m.id === 'inside')!.positionSample).toBe(WIN);
     expect(markers.find((m) => m.id === 'end')!.positionSample).toBe(length + grew);
+  });
+
+  it('composes the cuts and the tail together when a shortening stage and a growing one both run', async () => {
+    // No test ever enabled a stage that SHORTENS and a stage that GROWS in the
+    // same run, so `removedTotal` was zero wherever the insert rule reads it:
+    // both the tail's LENGTH and the POINT it is inserted at could ignore the
+    // cuts entirely and every marker still landed where the suite expected. The
+    // two errors do not cancel — they compound, and the marker at the end of the
+    // region comes out a whole reverb tail early.
+    const signal = new Float32Array(WIN * 12);
+    signal.set(flat(WIN * 2, 0.5), 0);
+    signal.set(flat(WIN * 6, 0.0005), WIN * 2);
+    signal.set(flat(WIN * 4, 0.5), WIN * 8);
+    const docId = seedDoc([signal]);
+    const length = docLength(activeDoc());
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'head', positionSample: WIN, name: 'head' },
+      { id: 'afterGap', positionSample: WIN * 9, name: 'after the gap' },
+      { id: 'end', positionSample: length, name: 'end' },
+    ]);
+    useAppStore.getState().setSelection({ start: 0, end: length });
+
+    const report = await runVocalChain({ enabled: only('silence', 'reverb') });
+    expect(report!.stages.find((s) => s.id === 'silence')!.status).toBe('applied');
+    expect(report!.stages.find((s) => s.id === 'reverb')!.status).toBe('applied');
+
+    // How much Remove Silence takes out, measured from the effect ITSELF on the
+    // same audio and the chain's own derived parameters — not read back from the
+    // report, whose only length figures are the two the rule under test uses.
+    const resolution = deriveRemoveSilence([signal], SR);
+    if (!resolution.run) throw new Error('expected run');
+    const cut = silenceRemoverEffect.process([Float32Array.from(signal)], SR, resolution.params);
+    const removed = signal.length - cut.channels[0].length;
+    const tail = report!.outputSamples - (report!.regionSamples - removed);
+    // Both stages really did move the length, in opposite directions — without
+    // this the test would silently fall back to the single-stage cases above.
+    expect(removed).toBeGreaterThan(0);
+    expect(tail).toBeGreaterThan(0);
+
+    const markers = useAppStore.getState().markers[docId];
+    // Before the gap: untouched by either rule.
+    expect(markers.find((m) => m.id === 'head')!.positionSample).toBe(WIN);
+    // After the gap and before the tail: moved by the cuts only.
+    expect(markers.find((m) => m.id === 'afterGap')!.positionSample).toBe(WIN * 9 - removed);
+    // At the end of the region: pulled back by the cuts and pushed forward by
+    // the whole tail, which lands it on the region's new end exactly.
+    expect(markers.find((m) => m.id === 'end')!.positionSample).toBe(report!.outputSamples);
   });
 });

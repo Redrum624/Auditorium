@@ -81,6 +81,14 @@
  * which is the actual reason its own note gives for being late, that nothing
  * should compress or pitch-correct a tail it just added. Only the limiter now
  * sees the tail, and seeing it is its job. Everything else follows the brief.
+ *
+ * ── The path the reorder does not close ─────────────────────────────────────
+ * The reorder makes the limiter's promise true while the limiter is RUNNING.
+ * Switch it off and the reverb is once again the last stage that touches the
+ * audio, and the same +6.53 dBFS arrives at both writers. That case is WARNED
+ * rather than blocked, in the cover chain's Ruling C shape: `stageWarning`
+ * below names the measured peak on the reverb's own result, the dialog renders
+ * it in amber, and the run goes ahead.
  */
 
 import { cloneRegion, docLength, replaceRegion } from '../audio/AudioDocument';
@@ -628,6 +636,10 @@ export interface VocalChainStageResult {
   status: StageStatus;
   /** Present for `declined`: what was measured, and why that means nothing to do. */
   reason?: string;
+  /** Present when the stage RAN but the user must read something about what it
+   * produced. Not a refusal — the same field, and the same amber, the cover
+   * chain uses for Ruling C. */
+  warning?: string;
   derived: DerivedValue[];
   /** Present for `applied`: what the stage did to the audio, measured. */
   delta?: StageDelta;
@@ -726,6 +738,41 @@ function describeStage(
   // this it would report a blank where its work should be.
   if (delta.identicalFraction === 1) return 'nothing to do — every sample came back unchanged';
   return undefined;
+}
+
+/**
+ * The one over-scale path the L8 reorder leaves open, said out loud.
+ *
+ * Moving the reverb ahead of the limiter makes the limiter's promise true —
+ * nothing downstream can lift the output back over the ceiling — but only while
+ * the limiter is RUNNING. Switch it off and the reverb becomes the last stage
+ * that touches the audio, and it is a level stage: it sums a wet tail on top of
+ * the dry signal, which is exactly how the +6.53 dBFS measured through this
+ * chain came about. Both `encodeWav` and the MP3 encoder hard-clip that, and
+ * nothing between here and the file says so.
+ *
+ * The cover chain already had this case and the ruling that goes with it
+ * (Ruling C, `deriveMatchLoudness`): a stage that WILL run but whose result
+ * needs a caveat says the caveat with the number on it, and the run is not
+ * blocked. Refusing would be worse — a user who wants a tail over an already-hot
+ * take and intends to lower it afterwards is asking for something legitimate,
+ * and the chain has no measurement that says otherwise.
+ *
+ * Three conditions, and all three are observations rather than settings: the
+ * stage is the reverb, the limiter that would have caught it is off, and the
+ * output ACTUALLY came back over full scale. The last one is why this is not a
+ * banner: on material the tail never takes over 0 dBFS there is nothing to warn
+ * about, and a warning that always shows is a warning nobody reads.
+ */
+function stageWarning(
+  stage: VocalChainStage,
+  delta: StageDelta,
+  enabled: Partial<Record<VocalChainStageId, boolean>>
+): string | undefined {
+  if (stage.id !== 'reverb') return undefined;
+  if (enabled.limiter === true) return undefined;
+  if (!(delta.peakAfterDb > 0)) return undefined;
+  return `this stage summed a tail on top of the audio and the output now peaks at +${delta.peakAfterDb.toFixed(1)} dBFS, above full scale. The Limiter — the only stage that runs after this one, and the one that would have caught it — is switched off, and both the WAV writer and the MP3 encoder hard-clip anything over full scale. Switch the Limiter on, or bring the level down before you export.`;
 }
 
 export interface RunVocalChainOptions {
@@ -838,6 +885,7 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
       label: stage.label,
       status: 'applied',
       derived: resolution.derived,
+      warning: stageWarning(stage, delta, enabled),
       delta,
       detail: describeStage(stage, output, sampleRate, delta),
       elapsedMs: Date.now() - stageStartedAt,

@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same three fixtures now land at **−0.30 dBFS**, on the committed document rather than on the report.
   Reverb is off by default, so only a user who opted in was affected. Affects:
   `src/services/vocalChain.ts`, `docs/USER_GUIDE.md`.
+- **…and the one path that reorder does not close is now named rather than shipped silently.** Cause:
+  the limiter's promise only holds while the limiter is RUNNING. Switch it off with Reverb on and the
+  reverb is once again the last stage that touches the audio, the same over-scale buffer reaches both
+  writers, and nothing between the chain and the file said so — while the Cover Chain has warned for
+  its equivalent since Ruling C. Fix: when the Reverb ran, the Limiter is off, and the output actually
+  came back above full scale, the reverb's own result carries a warning naming **this run's measured
+  peak**, and the dialog renders it in amber above that stage's measurements. The run is NOT blocked —
+  a tail over a hot take that the user intends to bring down afterwards is a legitimate thing to want,
+  and the chain has no measurement that says otherwise. All three conditions are observations, so the
+  line stays quiet on material the tail never takes over 0 dBFS. Affects:
+  `src/services/vocalChain.ts`, `src/components/Dialogs/VocalChainDialog.tsx`.
 - **Four comments that described code that does something else.** The Cover Chain's "Vocal Chain on
   the Take" note said the vocal chain sets a *limiter* from the take's own levels; it does not, and
   says so itself — a ceiling is an absolute level, so that stage runs on the effect's own −0.3 dBFS.

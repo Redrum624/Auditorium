@@ -87,6 +87,27 @@ const APPLIED_COMPRESSOR: VocalChainStageResult = {
   elapsedMs: 2100,
 };
 
+/** The reverb with the Limiter switched off: a stage that RAN and still needs
+ * reading. The warning text is the engine's own sentence verbatim — invented
+ * copy here would let the two drift and the dialog would still look right. */
+const WARNED_REVERB: VocalChainStageResult = {
+  id: 'reverb',
+  label: 'Reverb',
+  status: 'applied',
+  warning:
+    'this stage summed a tail on top of the audio and the output now peaks at +6.5 dBFS, above full scale. The Limiter — the only stage that runs after this one, and the one that would have caught it — is switched off, and both the WAV writer and the MP3 encoder hard-clip anything over full scale. Switch the Limiter on, or bring the level down before you export.',
+  derived: [],
+  delta: {
+    rmsBeforeDb: -20.4,
+    rmsAfterDb: -18.9,
+    peakBeforeDb: -0.3,
+    peakAfterDb: 6.53,
+    identicalFraction: null,
+    differenceRmsDb: null,
+  },
+  elapsedMs: 900,
+};
+
 const DECLINED_HUM: VocalChainStageResult = {
   id: 'hum',
   label: 'DeHum',
@@ -257,6 +278,24 @@ describe('VocalChainDialog — the report says what each stage did', () => {
     expect(screen.getByTestId('vocal-chain-status-hum')).toHaveTextContent('Did not run');
     expect(screen.queryByTestId('vocal-chain-delta-hum')).toBeNull();
     expect(screen.queryByTestId('vocal-chain-derived-hum')).toBeNull();
+  });
+
+  it('renders a warning on a stage that DID run, distinct from a refusal and from a blank', async () => {
+    seedDoc();
+    mockRun.mockResolvedValue(makeReport({ stages: stagesWith(APPLIED_COMPRESSOR, WARNED_REVERB) }));
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+
+    await waitFor(() => expect(screen.getByTestId('vocal-chain-warning-reverb')).toBeInTheDocument());
+    expect(screen.getByTestId('vocal-chain-status-reverb')).toHaveTextContent('Ran');
+    expect(screen.getByTestId('vocal-chain-warning-reverb')).toHaveTextContent('+6.5 dBFS');
+    expect(screen.getByTestId('vocal-chain-warning-reverb')).toHaveTextContent('above full scale');
+    // It ran, so its measurements are there too — a warning is not a refusal,
+    // and it does not replace what the stage reported.
+    expect(screen.getByTestId('vocal-chain-delta-reverb')).toBeInTheDocument();
+    expect(screen.queryByTestId('vocal-chain-reason-reverb')).toBeNull();
+    // …and an applied stage with nothing to warn about renders no warning line.
+    expect(screen.queryByTestId('vocal-chain-warning-compressor')).toBeNull();
   });
 
   it('marks a stage that was switched off as switched off, not as having run', async () => {

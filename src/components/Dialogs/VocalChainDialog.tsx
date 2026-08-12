@@ -75,7 +75,9 @@ function deltaText(delta: StageDelta): string {
 
 /** What one stage did, under that stage's own row: the settings it worked out
  * and what from, the measured change, and whatever the stage knows that the
- * buffers do not show. A declined stage renders its reason INSTEAD, in amber. */
+ * buffers do not show. A declined stage renders its reason INSTEAD, in amber; a
+ * stage that RAN but needs a caveat renders the caveat as well, in the same
+ * amber, because both are "read this" — the cover chain's shape exactly. */
 function StageResult({ result }: { result: VocalChainStageResult }) {
   if (result.status === 'declined') {
     return (
@@ -91,6 +93,15 @@ function StageResult({ result }: { result: VocalChainStageResult }) {
   if (result.status !== 'applied') return null;
   return (
     <div className="mt-1 flex flex-col gap-0.5">
+      {result.warning && (
+        <p
+          data-testid={`vocal-chain-warning-${result.id}`}
+          className="text-xs"
+          style={{ color: STATUS_COLOR.declined }}
+        >
+          Warning — {result.warning}
+        </p>
+      )}
       {result.derived.map((d) => (
         <p
           key={d.label}
@@ -142,7 +153,10 @@ function StageResult({ result }: { result: VocalChainStageResult }) {
  * derived them FROM, the measured before/after RMS and peak, and how much of the
  * audio it left bit-identical. A stage that declined says so in amber with the
  * measurement that made it decline — never anything that could be mistaken for
- * having run.
+ * having run. A stage that RAN but produced something the user has to know
+ * about — the reverb's tail with the Limiter switched off, which lands over full
+ * scale and is hard-clipped by both writers — carries its warning in the same
+ * amber, above its measurements rather than instead of them.
  *
  * The one stage with `effectId === null` (Align Vocal Timing) is listed without
  * a checkbox: it needs a confirmed beat grid and confirmed syllable anchors, so
