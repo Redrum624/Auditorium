@@ -15,9 +15,18 @@
  *   - `solveCascadeGains` PRE-COMPENSATES — it searches for the band gains whose
  *     realised response equals the requested curve, so the audio receives the
  *     curve the measurement asked for.
- *   - `realisedCascadeDb` MEASURES what the solved cascade actually does at every
- *     centre, including the bands the solve was not allowed to touch, and that
- *     measurement is what the chain reports.
+ *   - `realisedBandEnergyDb` MEASURES what the solved cascade actually does to
+ *     every octave's ENERGY, including the bands the solve was not allowed to
+ *     touch, and that measurement is what the chain reports.
+ *
+ * The second bullet says ENERGY rather than "response at the centre", and the
+ * distinction turned out to matter more than the leak the ruling named. The
+ * curve is a difference of octave-band energies, so realising it means moving
+ * those energies; a cascade whose CENTRE response equals the curve moves them by
+ * measurably less, because a peaking filter delivers its full gain only at its
+ * centre. Measured end to end on the reference material: matching the centres
+ * closed 70 % of the spectral distance to the original vocal (1.94 -> 0.58 dB),
+ * matching the band energies closed 82 % (1.94 -> 0.34 dB).
  *
  * ── The skip rule is copied, not approximated ───────────────────────────────
  * `GraphicEqEffect` builds a biquad only for a band with `|gain| > 0.01` dB and
@@ -34,6 +43,7 @@
  */
 
 import { designBiquad, magnitudeAt } from './biquad';
+import { LTAS_FFT_SIZE } from './coverMatch';
 
 /** The cascade's peaking Q. Pinned equal to `GraphicEqEffect`'s own `Q`. */
 export const GRAPHIC_EQ_CASCADE_Q = 1.4;
@@ -80,12 +90,68 @@ export function realisedCascadeDb(
   });
 }
 
+/** Octave band edges: centre / sqrt(2) .. centre * sqrt(2). The same edges
+ * `matchCurve` uses, because the curve being realised is expressed in them. */
+const BAND_EDGE_RATIO = Math.SQRT2;
+
+/**
+ * The cascade's response as OCTAVE-BAND ENERGY, in dB per band — the quantity
+ * the cover chain's match curve is actually expressed in, and therefore the one
+ * that has to be pre-compensated and reported.
+ *
+ * ── Why the centre response is the wrong measure here ───────────────────────
+ * `matchCurve` compares the MEAN POWER of an octave in each spectrum. A peaking
+ * biquad set to +3 dB delivers +3 dB at its centre and progressively less
+ * towards the band edges, so a cascade whose centre response equals the curve
+ * moves the band's ENERGY by measurably less than the curve asked for. Measured
+ * end to end on the reference material: matching the centres closed 70 % of the
+ * shape difference (1.94 -> 0.58 dB), matching the band energies closed 82 %
+ * (1.94 -> 0.34 dB). Reporting the centre
+ * response as "realised" against a target that means band energy would be
+ * comparing two different quantities and calling the difference zero.
+ *
+ * Integrated over the SAME bins `bandLevelDb` averages — the 2048-point grid at
+ * this sample rate — so the two are the same measurement of the same band. Bins
+ * of an octave that reaches past Nyquist are simply absent, exactly as they are
+ * absent from the spectrum; a band with no bin at all returns 0.
+ */
+export function realisedBandEnergyDb(
+  gainsDb: readonly number[],
+  centresHz: readonly number[],
+  sampleRate: number
+): number[] {
+  const coeffs = centresHz
+    .map((freq, i) => ({ freq, gainDb: gainsDb[i] ?? 0 }))
+    .filter((b) => bandApplies(b.gainDb, b.freq, sampleRate))
+    .map((b) => designBiquad('peaking', sampleRate, b.freq, GRAPHIC_EQ_CASCADE_Q, b.gainDb));
+
+  const bins = LTAS_FFT_SIZE / 2 + 1;
+  return centresHz.map((centre) => {
+    const lo = centre / BAND_EDGE_RATIO;
+    const hi = centre * BAND_EDGE_RATIO;
+    let sum = 0;
+    let count = 0;
+    for (let k = 1; k < bins; k++) {
+      const f = (k * sampleRate) / LTAS_FFT_SIZE;
+      if (f < lo || f >= hi) continue;
+      let magnitude = 1;
+      for (const c of coeffs) magnitude *= magnitudeAt(c, f, sampleRate);
+      sum += magnitude * magnitude;
+      count++;
+    }
+    return count === 0 ? 0 : 10 * Math.log10(Math.max(sum / count, 1e-30));
+  });
+}
+
 /** How many refinement passes the solve is allowed. The correction each pass
  * applies is the residual error, and the cascade's off-diagonal leakage is a
- * fraction of its diagonal (1.15 dB out of 6 dB an octave away), so the residual
- * shrinks by roughly that fraction per pass — eight passes take a 1 dB error
- * below 1e-5 dB. Measured convergence is reported in `iterations`. */
-const SOLVE_MAX_PASSES = 8;
+ * fraction of its diagonal, so the residual shrinks by roughly that fraction per
+ * pass. Twelve is enough for the band-energy target, whose diagonal is weaker
+ * than the centre response's (a band has to be pushed HARDER than its target to
+ * move its energy by the target). Convergence is reported in `iterations` and a
+ * run that used them all is one that did NOT converge — `worstErrorDb` says by
+ * how much, and that number is what the chain reports. */
+const SOLVE_MAX_PASSES = 12;
 /** Stop once every solvable centre is within this of its target. 0.01 dB is the
  * effect's own skip threshold — below it a band is not applied at all, so
  * chasing a smaller error would be chasing a difference the effect cannot make. */
@@ -94,7 +160,8 @@ const SOLVE_TOLERANCE_DB = 0.01;
 export interface CascadeSolution {
   /** The gains to hand the effect, parallel to `centresHz`. */
   gainsDb: number[];
-  /** What those gains actually produce at each centre. Report THIS. */
+  /** The octave-band ENERGY those gains actually produce, per band. Report THIS:
+   * it is the same quantity the target is expressed in. */
   realisedDb: number[];
   /** Passes taken. Fewer than `SOLVE_MAX_PASSES` means it converged. */
   iterations: number;
@@ -119,9 +186,16 @@ export interface CascadeSolution {
  * MEASURED by `realisedCascadeDb`, and the chain reports it.
  *
  * ── The iteration ───────────────────────────────────────────────────────────
- * `g <- g + (target - realised(g))`, clamped to the effect's range each pass.
+ * `g <- g + (target - realised(g))`, clamped to the effect's range each pass,
+ * where `realised` is the BAND-ENERGY response (see `realisedBandEnergyDb`).
  * The cascade's dB response is very nearly additive across bands, so this is a
  * fixed-point iteration on a diagonally dominant system rather than a search.
+ *
+ * It does not always converge, and that is reported rather than hidden: a band
+ * whose octave runs into Nyquist, or whose target needs more than the effect's
+ * own +-12 dB once the roll-off is compensated, ends short. `worstErrorDb` is
+ * the shortfall and `realisedDb` is what was actually delivered — never the
+ * target dressed up as an outcome.
  */
 export function solveCascadeGains(
   targetDb: readonly number[],
@@ -131,7 +205,7 @@ export function solveCascadeGains(
 ): CascadeSolution {
   const gainsDb = centresHz.map((_, i) => (solvable[i] ? (targetDb[i] ?? 0) : 0));
   let clamped = false;
-  let realisedDb = realisedCascadeDb(gainsDb, centresHz, sampleRate);
+  let realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate);
   let iterations = 0;
 
   const worst = (r: number[]): number => {
@@ -157,7 +231,7 @@ export function solveCascadeGains(
       }
       gainsDb[i] = next;
     }
-    realisedDb = realisedCascadeDb(gainsDb, centresHz, sampleRate);
+    realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate);
     iterations++;
   }
 

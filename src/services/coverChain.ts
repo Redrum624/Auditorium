@@ -168,13 +168,20 @@ export interface CoverChainStage {
    * a stage the user cannot reason about is a stage that ran without being
    * seen. */
   note: string;
-  /** Share of the progress bar. MEASURED wall times on the reference material —
-   * the 142 s take at 48 kHz stereo against the 178 s separated original vocal
-   * at 44.1 kHz — as a percentage of the total the four automatic stages take
-   * together, with a floor of 1 so no stage is invisible. Match EQ carries the
-   * reference's long-term spectrum (both files' worth of FFTs), Match Reverb
-   * carries the decay fit over the reference, and the two audio stages are a
-   * gain and a limiter over the take only. */
+  /**
+   * Share of the progress bar. MEASURED in-loop wall times on the reference
+   * material — the 142 s take at 48 kHz stereo against the 178 s separated
+   * original vocal at 44.1 kHz — as a percentage of the 4.04 s the four
+   * automatic stages take together, with a floor of 1 so no stage is invisible:
+   * Match EQ 2.28 s (the take's long-term spectrum is 1.75 s of it, the EQ pass
+   * 0.52 s, the pre-compensating solve 1 ms), Match Loudness 0.03 s, Limiter
+   * 0.43 s, Match Reverb 1.31 s WHEN IT ENGAGES — its decline costs nothing.
+   *
+   * The reference's own measurements are NOT in these shares because they are
+   * not in the loop: they run once before the first stage (its spectrum 1.86 s,
+   * its gated level 0.33 s, its decay fit 0.06 s), which is what the dialog's
+   * "Starting…" line covers.
+   */
   weight: number;
 }
 
@@ -217,7 +224,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     effectId: 'graphic-eq',
     defaultEnabled: true,
     note: `Compares the long-term octave-band energy of your take with the separated original vocal's and realises the difference on the Graphic EQ. From ${MATCH_MIN_CENTRE_HZ} Hz up ONLY, and bounded to ±${MATCH_BOUND_DB} dB — both measured: below ${MATCH_MIN_CENTRE_HZ} Hz the separated reference is mostly not the vocal (at 125 Hz its own separation error EXCEEDS it by 5.1 dB), and ${MATCH_BOUND_DB} dB is the weakest retained band's own signal-to-separation-error ratio, past which a "match" would be correcting the separation rather than the singer. The broadband level difference is taken out of this curve and handed to Match Loudness, so this stage carries shape only. The curve it reports is the one the EQ cascade MEASURABLY delivers, not the one it was asked for: the cascade's bands overlap, so a request of +6 dB leaks 1.15 dB an octave away, and the gains are pre-compensated for that.`,
-    weight: 74,
+    weight: 56,
   },
   {
     id: 'matchLoudness',
@@ -225,15 +232,15 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     effectId: 'amplify',
     defaultEnabled: true,
     note: 'Sets your take to the original vocal\'s level, measured over the SOUNDING parts of each — an ungated comparison carries a bias that is a fact about how much silence each file contains rather than about how loud the singing is (0.7 dB of it on the reference material). Runs after the EQ, because the EQ handed it the level it deliberately left out of its curve.',
-    weight: 3,
+    weight: 1,
   },
   {
     id: 'headroom',
     label: 'Limiter (headroom)',
     effectId: 'limiter',
     defaultEnabled: true,
-    note: 'The loudness match is arithmetic and has no view on headroom: on the reference material its +9.6 dB puts the take\'s peak at −0.07 dBFS, a hair under full scale. This catches that at −0.3 dBFS. Last, so nothing downstream can lift the output back over the ceiling. On a take that never reaches it, it reports that it did nothing. Switch it off and Match Loudness will say, with the number, if the result would pass 0 dBFS.',
-    weight: 1,
+    note: 'The loudness match is arithmetic and has no view on headroom, so this stage owns it, at −0.3 dBFS. Last, so nothing downstream can lift the output back over the ceiling. Measured end to end on the song this was built from it had NOTHING to catch, and says so: the match asked for +9.50 dB and the peak landed at −0.84 dBFS, because the EQ\'s cuts at 1–4 kHz had already taken 0.67 dB off the peak before the gain went on. It earns its place on a take with more crest than that one. Switch it off and Match Loudness will say, with the number, if the result would pass 0 dBFS.',
+    weight: 11,
   },
   {
     id: 'matchReverb',
@@ -241,7 +248,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     effectId: 'reverb',
     defaultEnabled: false,
     note: `Off by default, and on most material it will DECLINE rather than run. It estimates the original vocal's decay by ISO 3382-1's T20 method — validated against the app's own reverb at 1.26 s where the closed form says 1.45 s and 2.92 s where it says 3.20 s — and then compares it with the shortest decay this app's Reverb can produce. On the song this was measured on the original vocal reads 0.40 s against a floor of 0.710 s, so matching it would add nearly twice the space that is actually there, and the stage says so instead. Turning it on lengthens the region by the tail.`,
-    weight: 22,
+    weight: 32,
   },
   {
     id: 'place',
@@ -415,19 +422,31 @@ export function deriveMatchEq(
     });
   }
 
-  return {
-    run: true,
-    params,
-    derived,
-    eq: {
-      bands,
-      levelDb: curve.levelDb,
-      worstErrorDb: solution.worstErrorDb,
-      iterations: solution.iterations,
-      clamped: solution.clamped,
-      matchedCount: curve.matchedCount,
-    },
+  const eq: MatchEqDetail = {
+    bands,
+    levelDb: curve.levelDb,
+    worstErrorDb: solution.worstErrorDb,
+    iterations: solution.iterations,
+    clamped: solution.clamped,
+    matchedCount: curve.matchedCount,
   };
+
+  // The pre-compensation does not always reach the target: a band-energy move
+  // near the ±10.9 dB bound needs about 12.5 dB of band gain once the cascade's
+  // roll-off across the octave is compensated, and the Graphic EQ stops at ±12.
+  // Ruling B's requirement is that the shortfall is SAID, not that it never
+  // happens — the realised column above already shows it band by band, and this
+  // is the line that makes it impossible to miss.
+  const worstShort = matched.reduce(
+    (worst, b) => (Math.abs(b.realisedDb - b.targetDb) > Math.abs(worst.realisedDb - worst.targetDb) ? b : worst),
+    matched[0]
+  );
+  const warning =
+    solution.worstErrorDb > 0.01
+      ? `the EQ could not fully deliver this curve: at ${worstShort.centreHz} Hz it wanted ${dbStr(worstShort.targetDb)} and realised ${dbStr(worstShort.realisedDb)}, ${solution.worstErrorDb.toFixed(2)} dB short${solution.clamped ? ` — the band gain hit the Graphic EQ's own ±12 dB limit` : ''}. The realised figures above are what the audio received.`
+      : undefined;
+
+  return { run: true, params, derived, eq, warning };
 }
 
 /**

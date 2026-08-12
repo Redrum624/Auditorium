@@ -44,6 +44,12 @@ import {
   runVocalChain,
   type VocalChainStageId,
 } from './vocalChain';
+import {
+  COVER_CHAIN_STAGES,
+  defaultCoverStageSelection,
+  runCoverChain,
+  type CoverChainStageId,
+} from './coverChain';
 import { createRemixDocument, getRemixSession } from './remixService';
 import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
 import {
@@ -86,6 +92,17 @@ export interface TestStateSummary {
    * written to a file (a recording, a Mix Down, `Remix N`, a stem). Gates the
    * close prompt and the quit guard's count alongside `dirty`. */
   neverSaved: boolean | null;
+}
+
+/** F10's four before/after numbers, as plain JSON scalars. `null` is a real
+ * answer for three of them — nothing sounding, no passage above digital
+ * silence, no reference to measure a distance against. */
+export interface CoverMetricsJson {
+  gatedLevelDb: number | null;
+  peakDb: number;
+  spreadDb: number | null;
+  noiseFloorDb: number | null;
+  matchDistanceDb: number | null;
 }
 
 export interface TestApi {
@@ -238,6 +255,60 @@ export interface TestApi {
    * Ctrl+Z shortcut drives. Added for F7, whose whole point is that a
    * ten-stage pass reverts in one. */
   undoActive(): { length: number };
+  // --- F10 -----------------------------------------------------------------
+  /** Runs the Cover Chain over the active document through the SAME service the
+   * dialog calls, so the packaged smoke exercises the real derivations, three
+   * real DSP workers back to back, and the single undo entry. `referenceName`
+   * names the OPEN document to match against (the separated original vocal);
+   * `null` runs with no reference, which is the path where every matching stage
+   * declines. `overrides` flips named stages; everything else keeps its shipped
+   * default. Scalars and flat records only, per the `getBeatGridState`
+   * precedent. */
+  runCoverChain(
+    referenceName: string | null,
+    overrides?: Record<string, boolean>
+  ): Promise<{
+    ok: boolean;
+    applied: boolean;
+    undoDepth: number;
+    undoLabel: string | null;
+    referenceName: string | null;
+    /** True when the reference document's samples are bit-identical to what
+     * they were before the run. The chain READS the reference; a run that
+     * detached or edited it would be a defect the unit suite's synchronous
+     * worker mock cannot see, because only the real worker transfers buffers. */
+    referenceIntact: boolean | null;
+    lengthBefore: number;
+    lengthAfter: number;
+    before: CoverMetricsJson;
+    after: CoverMetricsJson;
+    reference: CoverMetricsJson | null;
+    stages: {
+      id: string;
+      status: string;
+      reason: string | null;
+      warning: string | null;
+      derived: { label: string; value: string }[];
+      detail: string | null;
+      identicalFraction: number | null;
+      /** The realised match curve, per band — Ruling B's claim, measured in the
+       * packaged app rather than against the predictor alone. */
+      eqBands: {
+        centreHz: number;
+        status: string;
+        targetDb: number;
+        realisedDb: number;
+        bandGainDb: number;
+        bounded: boolean;
+      }[];
+      eqWorstErrorDb: number | null;
+    }[];
+    /** The registry's own ids and manual set, so a caller compares the report
+     * against the stage LIST rather than a hardcoded count — a count rots the
+     * moment a stage is added, and it has, twice. */
+    registryStageIds: string[];
+    registryManualIds: string[];
+  }>;
   runVocalChain(overrides?: Record<string, boolean>): Promise<{
     ok: boolean;
     applied: boolean;
@@ -2073,6 +2144,108 @@ export function installTestHooks(): void {
         // Comparing lists also pins ORDER and MEMBERSHIP, which a count cannot.
         registryStageIds: VOCAL_CHAIN_STAGES.map((s) => s.id),
         registryManualIds: VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null).map((s) => s.id),
+      };
+    },
+
+    // F10. Drives runCoverChain for the active document, bypassing
+    // CoverChainDialog — so the smoke exercises the real derivations, three
+    // real DSP workers back to back, the ONE undo entry, and the promise the
+    // unit suite structurally cannot check: that the reference document comes
+    // back untouched after the real worker leg has transferred buffers.
+    runCoverChain: async (referenceName, overrides) => {
+      const zero: CoverMetricsJson = {
+        gatedLevelDb: null,
+        peakDb: 0,
+        spreadDb: null,
+        noiseFloorDb: null,
+        matchDistanceDb: null,
+      };
+      const registry = {
+        registryStageIds: COVER_CHAIN_STAGES.map((s) => s.id),
+        registryManualIds: COVER_CHAIN_STAGES.filter((s) => s.effectId === null).map((s) => s.id),
+      };
+      const before = activeDoc();
+      const lengthBefore = before ? docLength(before) : 0;
+      if (!before) {
+        return {
+          ok: false,
+          applied: false,
+          undoDepth: 0,
+          undoLabel: null,
+          referenceName: null,
+          referenceIntact: null,
+          lengthBefore,
+          lengthAfter: lengthBefore,
+          before: zero,
+          after: zero,
+          reference: null,
+          stages: [],
+          ...registry,
+        };
+      }
+
+      const refDoc =
+        referenceName === null
+          ? null
+          : (useAppStore.getState().documents.find((d) => d.name === referenceName) ?? null);
+      // Copied BEFORE the run, so "the reference is intact" is a comparison
+      // against what it held rather than against itself.
+      const refCopy = refDoc ? refDoc.channels.map((c) => Float32Array.from(c)) : null;
+
+      const enabled = defaultCoverStageSelection();
+      for (const stage of COVER_CHAIN_STAGES) {
+        const override = overrides?.[stage.id];
+        if (typeof override === 'boolean') enabled[stage.id as CoverChainStageId] = override;
+      }
+      const depthBefore = getHistory(before.id).done.length;
+      const report = await runCoverChain({ enabled, referenceDocId: refDoc ? refDoc.id : null });
+      const after = activeDoc();
+      const history = getHistory(before.id);
+
+      let referenceIntact: boolean | null = null;
+      if (refCopy) {
+        const now = useAppStore.getState().documents.find((d) => d.id === refDoc!.id) ?? null;
+        referenceIntact =
+          now !== null &&
+          now.channels.length === refCopy.length &&
+          now.channels.every(
+            (c, i) => c.length === refCopy[i].length && refCopy[i].every((v, k) => v === c[k])
+          );
+      }
+
+      return {
+        ok: report !== null,
+        applied: report?.applied === true,
+        // The DELTA, so the assertion is "the chain added exactly one entry"
+        // rather than "the history happens to be one deep".
+        undoDepth: history.done.length - depthBefore,
+        undoLabel: history.done.length > 0 ? history.done[history.done.length - 1] : null,
+        referenceName: report?.referenceName ?? null,
+        referenceIntact,
+        lengthBefore,
+        lengthAfter: after ? docLength(after) : 0,
+        before: report ? report.before : zero,
+        after: report ? report.after : zero,
+        reference: report?.reference ?? null,
+        stages: (report?.stages ?? []).map((stage) => ({
+          id: stage.id,
+          status: stage.status,
+          reason: stage.reason ?? null,
+          warning: stage.warning ?? null,
+          derived: stage.derived.map((d) => ({ label: d.label, value: d.value })),
+          detail: stage.detail ?? null,
+          identicalFraction: stage.delta?.identicalFraction ?? null,
+          eqBands: (stage.eq?.bands ?? []).map((b) => ({
+            centreHz: b.centreHz,
+            status: b.status,
+            targetDb: b.targetDb,
+            realisedDb: b.realisedDb,
+            bandGainDb: b.bandGainDb,
+            bounded: b.bounded,
+          })),
+          eqWorstErrorDb: stage.eq ? stage.eq.worstErrorDb : null,
+        })),
+        ...registry,
       };
     },
 

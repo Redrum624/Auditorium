@@ -435,17 +435,35 @@ describe('deriveMatchEq', () => {
     // that matters, is that the correction is CONTINUOUS across it — bounding
     // or not bounding at the boundary produces the same number.
     expect(Math.abs(on.targetDb)).toBeCloseTo(MATCH_BOUND_DB, 9);
-    expect(Math.abs(on.realisedDb)).toBeCloseTo(MATCH_BOUND_DB, 1);
     // And the bound is what ACTS: the raw difference asked for 0.05 dB more,
     // and the correction that came out is the bound to the last digit.
     expect(above.targetDb).toBe(MATCH_BOUND_DB);
-    expect(above.realisedDb).toBeCloseTo(MATCH_BOUND_DB, 1);
 
-    // The three bands that were nowhere near it are untouched by the bound.
+    // A 10.9 dB band-ENERGY move is more than a single octave band of this
+    // cascade can deliver inside the effect's own ±12 dB — once its roll-off is
+    // compensated it would need about 12.5 dB. So the realised figure falls
+    // SHORT of the bound, in the right direction, and the shortfall is
+    // reported rather than the target being echoed back as an outcome. That is
+    // Ruling B's actual requirement, and this is the fixture that reaches it.
     const others = probe(onBound + 0.05 * (4 / 3)).resolution;
     if (!others.run) throw new Error('unreachable');
+    expect(above.realisedDb).toBeGreaterThan(0);
+    expect(above.realisedDb).toBeLessThan(MATCH_BOUND_DB);
+    expect(others.eq!.clamped).toBe(true);
+    expect(others.eq!.worstErrorDb).toBeGreaterThan(0.01);
+
+    // The three bands that were nowhere near the bound are untouched by it.
     expect(others.eq!.bands.filter((b) => b.bounded)).toHaveLength(1);
     expect(others.derived.find((d) => d.label === 'Bounded')!.value).toContain('1 band');
+
+    // ...and the shortfall is said in a sentence, not left to be read off the
+    // table. A curve the EQ CAN deliver carries no such warning, so the line
+    // observes the outcome rather than the code path.
+    expect(others.warning).toMatch(/could not fully deliver/);
+    expect(others.warning).toMatch(/4000 Hz/);
+    expect(others.warning).toMatch(/±12 dB limit/);
+    const easy = probe(0).resolution;
+    expect(easy.run && easy.warning).toBeUndefined();
     // ...and a curve that never reaches the bound reports no `Bounded` line at
     // all, so the line observes the material rather than the code path.
     expect(probe(0).resolution.run && probe(0).resolution.derived.some((d) => d.label === 'Bounded')).toBe(

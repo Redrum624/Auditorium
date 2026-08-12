@@ -2,12 +2,13 @@ import {
   GRAPHIC_EQ_CASCADE_Q,
   GRAPHIC_EQ_MAX_ABS_DB,
   GRAPHIC_EQ_SKIP_DB,
+  realisedBandEnergyDb,
   realisedCascadeDb,
   solveCascadeGains,
 } from './graphicEqCascade';
 import { GRAPHIC_EQ_BANDS, graphicEqEffect } from '../effects/eq/GraphicEqEffect';
 import { designBiquad, magnitudeAt } from './biquad';
-import { MATCH_BAND_CENTRES_HZ } from './coverMatch';
+import { MATCH_BAND_CENTRES_HZ, bandLevelDb, longTermAverageSpectrum } from './coverMatch';
 
 const SR = 48000;
 const CENTRES = GRAPHIC_EQ_BANDS.map((b) => b.freq);
@@ -41,6 +42,26 @@ function measuredEffectDb(gainsDb: number[], freqHz: number, sampleRate = SR): n
 
 function gainsAt(map: Record<number, number>): number[] {
   return CENTRES.map((f) => map[f] ?? 0);
+}
+
+function paramsFrom(gainsDb: readonly number[]): Record<string, number> {
+  const params: Record<string, number> = {};
+  GRAPHIC_EQ_BANDS.forEach((b, i) => {
+    params[b.id] = gainsDb[i] ?? 0;
+  });
+  return params;
+}
+
+/** Deterministic white noise — flat enough across an octave that the band level
+ * measured after a filter is that filter's band-energy response. */
+function whiteNoise(n: number, seed = 0x9e3779b9): Float32Array {
+  const out = new Float32Array(n);
+  let s = seed >>> 0;
+  for (let i = 0; i < n; i++) {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    out[i] = ((s / 0xffffffff) * 2 - 1) * 0.25;
+  }
+  return out;
 }
 
 describe('graphicEqCascade — the realised response is the effect\'s own (Ruling B)', () => {
@@ -151,28 +172,96 @@ describe('graphicEqCascade — the leak Ruling B is about', () => {
   });
 });
 
+describe('graphicEqCascade — band energy is a different quantity from the centre', () => {
+  it('predicts what the effect does to an octave\'s ENERGY, measured through real audio', () => {
+    // The strongest available pin: white noise through the real effect, and the
+    // band levels measured with the SAME function the match curve is built
+    // from. If the predictor and the audio disagree, the chain's report is a
+    // claim about audio that did not happen.
+    const gains = gainsAt({ 500: 4, 1000: -4, 2000: 3, 4000: -3, 8000: 5 });
+    const predicted = realisedBandEnergyDb(gains, CENTRES, SR);
+    const input = [whiteNoise(SR * 2)];
+    const output = graphicEqEffect.process([Float32Array.from(input[0])], SR, paramsFrom(gains))
+      .channels;
+    const beforeLtas = longTermAverageSpectrum(input, SR);
+    const afterLtas = longTermAverageSpectrum(output, SR);
+
+    let checked = 0;
+    for (const centre of [500, 1000, 2000, 4000, 8000]) {
+      const lo = centre / Math.SQRT2;
+      const hi = centre * Math.SQRT2;
+      const measured =
+        bandLevelDb(afterLtas, lo, hi)! - bandLevelDb(beforeLtas, lo, hi)!;
+      expect(measured).toBeCloseTo(predicted[CENTRES.indexOf(centre)], 1);
+      checked++;
+    }
+    expect(checked).toBe(5);
+  });
+
+  it('is NOT the centre response — a peaking filter moves less energy than its peak', () => {
+    // The distinction the module exists to make. A lone +6 dB band delivers
+    // 6 dB at its centre and measurably less across its octave.
+    const gains = gainsAt({ 1000: 6 });
+    const i1k = CENTRES.indexOf(1000);
+    const centre = realisedCascadeDb(gains, CENTRES, SR)[i1k];
+    const energy = realisedBandEnergyDb(gains, CENTRES, SR)[i1k];
+    expect(centre).toBeCloseTo(6, 1);
+    expect(energy).toBeLessThan(centre - 0.5);
+    expect(energy).toBeGreaterThan(3);
+  });
+
+  it('reports nothing for a band with no bin under Nyquist, and the partial band above it', () => {
+    // 16 kHz's octave runs 11.3–22.6 kHz. At 24 kHz sample rate Nyquist is
+    // 12 kHz, so only its bottom slice has bins; at 16 kHz there are none.
+    const gains = gainsAt({ 8000: 6, 16000: 6 });
+    expect(realisedBandEnergyDb(gains, CENTRES, 16000)[CENTRES.indexOf(16000)]).toBe(0);
+    expect(realisedBandEnergyDb(gains, CENTRES, 24000)[CENTRES.indexOf(16000)]).not.toBe(0);
+  });
+});
+
 describe('graphicEqCascade — the pre-compensating solve', () => {
   const solvableFrom = (freqs: number[]): boolean[] => CENTRES.map((f) => freqs.includes(f));
 
-  it('lands the realised response on the target, where an unsolved curve would not', () => {
+  it('lands the realised band energy on the target, where an unsolved curve would not', () => {
     const target = gainsAt({ 500: 0.54, 1000: -1.15, 2000: -1.9, 4000: -1.04, 8000: 3.54 });
     const solvable = solvableFrom([500, 1000, 2000, 4000, 8000]);
-    const raw = realisedCascadeDb(target, CENTRES, SR);
+    const raw = realisedBandEnergyDb(target, CENTRES, SR);
     let rawWorst = 0;
     for (let i = 0; i < CENTRES.length; i++) {
       if (!solvable[i]) continue;
       rawWorst = Math.max(rawWorst, Math.abs(raw[i] - target[i]));
     }
-    // The error the solve exists to remove is real on this very curve.
-    expect(rawWorst).toBeGreaterThan(0.2);
+    // The error the solve exists to remove is real on this very curve — the
+    // one measured on the reference material.
+    expect(rawWorst).toBeGreaterThan(0.5);
 
     const solution = solveCascadeGains(target, CENTRES, SR, solvable);
     expect(solution.worstErrorDb).toBeLessThanOrEqual(0.01);
-    expect(solution.iterations).toBeLessThan(8); // it converged rather than ran out
+    expect(solution.iterations).toBeLessThan(12); // it converged rather than ran out
     expect(solution.clamped).toBe(false);
-    // Pinned against the EFFECT, not against the predictor it was solved with.
+    // A band solved ALONE needs a LARGER gain than its target, because it is
+    // compensating its own roll-off across the octave. (In the full curve the
+    // neighbours' leakage can push either way, so this is stated where it is
+    // actually a property of the cascade rather than of one fixture.)
+    const lone = solveCascadeGains(gainsAt({ 1000: 3 }), CENTRES, SR, solvableFrom([1000]));
+    expect(lone.gainsDb[CENTRES.indexOf(1000)]).toBeGreaterThan(3.3);
+    expect(lone.realisedDb[CENTRES.indexOf(1000)]).toBeCloseTo(3, 2);
+
+    // Pinned against the EFFECT and real audio, not against the predictor it
+    // was solved with.
+    const input = [whiteNoise(SR * 2)];
+    const output = graphicEqEffect.process(
+      [Float32Array.from(input[0])],
+      SR,
+      paramsFrom(solution.gainsDb)
+    ).channels;
+    const beforeLtas = longTermAverageSpectrum(input, SR);
+    const afterLtas = longTermAverageSpectrum(output, SR);
     for (const f of [500, 1000, 2000, 4000, 8000]) {
-      expect(measuredEffectDb(solution.gainsDb, f)).toBeCloseTo(target[CENTRES.indexOf(f)], 1);
+      const measured =
+        bandLevelDb(afterLtas, f / Math.SQRT2, f * Math.SQRT2)! -
+        bandLevelDb(beforeLtas, f / Math.SQRT2, f * Math.SQRT2)!;
+      expect(measured).toBeCloseTo(target[CENTRES.indexOf(f)], 1);
     }
   });
 
@@ -193,17 +282,24 @@ describe('graphicEqCascade — the pre-compensating solve', () => {
     expect(Math.abs(solution.realisedDb[CENTRES.indexOf(250)])).toBeGreaterThan(0.1);
   });
 
-  it('clamps to the effect\'s own range and says it did, on a target that needs more', () => {
+  it('clamps to the effect\'s own range, says it did, and reports the SHORTFALL', () => {
     const target = gainsAt({ 500: 11.5, 1000: -11.5, 2000: 11.5 });
     const solution = solveCascadeGains(target, CENTRES, SR, solvableFrom([500, 1000, 2000]));
     expect(solution.clamped).toBe(true);
     for (const g of solution.gainsDb) {
       expect(Math.abs(g)).toBeLessThanOrEqual(GRAPHIC_EQ_MAX_ABS_DB);
     }
+    // It did NOT reach the target, and the report says so rather than echoing
+    // the target back — the failure mode Ruling B is about.
+    expect(solution.worstErrorDb).toBeGreaterThan(0.01);
+    const i500 = CENTRES.indexOf(500);
+    expect(Math.abs(solution.realisedDb[i500])).toBeLessThan(Math.abs(target[i500]));
+
     // A curve that does not need the clamp does not report one — the flag
     // observes the target, not the code path.
     const easy = solveCascadeGains(gainsAt({ 1000: 2 }), CENTRES, SR, solvableFrom([1000]));
     expect(easy.clamped).toBe(false);
+    expect(easy.worstErrorDb).toBeLessThanOrEqual(0.01);
   });
 
   it('returns the requested gains unchanged when there is nothing to solve', () => {
