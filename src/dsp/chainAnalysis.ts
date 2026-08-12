@@ -88,7 +88,7 @@ export function monoMix(channels: Float32Array[]): Float32Array {
  *
  * WINDOWS AT OR BELOW DIGITAL SILENCE ARE REJECTED (`SILENCE_RMS`, 2^-15, this
  * project's documented digital-silence floor). Measured need: the reference
- * take opens with a stretch of literal zeros, and a 250 ms search window lands
+ * take opens with a stretch of literal zeros, and a 500 ms search window lands
  * on it and returns -240 dBFS. An all-zero noise print makes Noise Reduction a
  * silent no-op — it would subtract nothing and report nothing — which is the
  * failure Ruling 3 forbids. Rejecting them makes the chain say "no usable quiet
@@ -292,7 +292,7 @@ export function humMeasurable(sampleCount: number, sampleRate: number): boolean 
 }
 
 /**
- * What one stage did to the audio, measured from outside it — the same four
+ * What one stage did to the audio, measured from outside it — the same six
  * numbers for every stage, so a regression in any one of them is attributable.
  *
  * `identicalFraction` and `differenceRmsDb` are `null` when the stage changed

@@ -437,6 +437,37 @@ describe('CoverChainDialog — the run and the report', () => {
     expect(screen.queryByTestId('cover-chain-derived-matchReverb')).toBeNull();
   });
 
+  it('gives each of the four statuses its own words, so a switched-off stage never reads as one that ran', async () => {
+    // 'Switched off' was asserted nowhere in this suite: `off: 'Switched off'`
+    // could be changed to 'Ran' and all 25 tests stayed green, which is a stage
+    // the user deliberately left off claiming to have processed the take. The
+    // badge is the only thing on the card that says what happened, so all four
+    // words are pinned here, each on a stage that actually carries that status.
+    seedDoc();
+    const stages = stagesWith(APPLIED_EQ, DECLINED_REVERB);
+    mockRun.mockResolvedValue(makeReport({ stages }));
+    render(<CoverChainDialog onClose={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    });
+    await waitFor(() => expect(screen.getByTestId('cover-chain-status-matchEq')).toHaveTextContent('Ran'));
+
+    const words = {
+      applied: 'Ran',
+      declined: 'Did not run',
+      off: 'Switched off',
+      manual: 'Manual step',
+    } as const;
+    // The fixture exercises every one of them — otherwise this loop could go on
+    // passing while a status it never reaches loses its words.
+    expect(new Set(stages.map((s) => s.status))).toEqual(
+      new Set<CoverChainStageResult['status']>(['applied', 'declined', 'off', 'manual'])
+    );
+    for (const s of stages) {
+      expect(screen.getByTestId(`cover-chain-status-${s.id}`).textContent).toContain(words[s.status]);
+    }
+  });
+
   it('renders a warning on a stage that DID run (Ruling C), distinct from a refusal', async () => {
     seedDoc();
     mockRun.mockResolvedValue(makeReport({ stages: stagesWith(WARNED_LOUDNESS) }));
@@ -460,16 +491,35 @@ describe('CoverChainDialog — the run and the report', () => {
     });
     await waitFor(() => expect(screen.getByTestId('cover-chain-summary')).toBeInTheDocument());
 
-    const loudness = screen.getByTestId('cover-chain-summary-gatedLevelDb');
-    expect(loudness).toHaveTextContent('-26.0 dBFS'); // before
-    expect(loudness).toHaveTextContent('-16.4 dBFS'); // after AND target
-    expect(screen.getByTestId('cover-chain-summary-spreadDb')).toHaveTextContent('13.6 dB');
-    expect(screen.getByTestId('cover-chain-summary-noiseFloorDb')).toHaveTextContent('-50.4 dBFS');
-    const distance = screen.getByTestId('cover-chain-summary-matchDistanceDb');
-    expect(distance).toHaveTextContent('2.1 dB');
-    expect(distance).toHaveTextContent('0.4 dB');
-    // A quantity that has no meaning for the reference reads 'n/a', not 0.
-    expect(distance).toHaveTextContent('n/a');
+    // BY POSITION. `toHaveTextContent` on the row is position-blind: every
+    // number stayed present when the Before and After cells were swapped, so the
+    // table could show the take getting QUIETER where it got louder and this
+    // suite read it as correct. Which column a figure lands in is the whole
+    // content of a before/after table.
+    const cellsOf = (key: string): HTMLElement[] =>
+      within(screen.getByTestId(`cover-chain-summary-${key}`)).getAllByRole('cell');
+
+    const loudness = cellsOf('gatedLevelDb');
+    expect(loudness).toHaveLength(4); // measure · before · after · the original
+    expect(loudness[0]).toHaveTextContent('Loudness (sounding parts)');
+    expect(loudness[1]).toHaveTextContent('-26.0 dBFS');
+    expect(loudness[2]).toHaveTextContent('-16.4 dBFS');
+    expect(loudness[3]).toHaveTextContent('-16.4 dBFS');
+
+    const peak = cellsOf('peakDb');
+    expect(peak[1]).toHaveTextContent('-9.7 dBFS');
+    expect(peak[2]).toHaveTextContent('-0.3 dBFS');
+    expect(peak[3]).toHaveTextContent('-1.2 dBFS');
+
+    expect(cellsOf('spreadDb')[1]).toHaveTextContent('13.6 dB');
+    expect(cellsOf('noiseFloorDb')[1]).toHaveTextContent('-50.4 dBFS');
+
+    const distance = cellsOf('matchDistanceDb');
+    expect(distance[1]).toHaveTextContent('2.1 dB');
+    expect(distance[2]).toHaveTextContent('0.4 dB');
+    // A quantity that has no meaning for the reference reads 'n/a', not 0 — and
+    // it reads it in the REFERENCE column, not somewhere in the row.
+    expect(distance[3]).toHaveTextContent('n/a');
     expect(screen.getByTestId('cover-chain-summary')).toHaveTextContent('Scarlet Paintings — Vocals');
   });
 

@@ -579,7 +579,7 @@ export function estimateDecay(channels: Float32Array[], sampleRate: number): Dec
  *
  * At `roomSize = 0`, the effect's own minimum, this is 0.710 s at both 44.1 and
  * 48 kHz: THE SHORTEST REVERB THE APP CAN MAKE. The reference material's
- * original vocal measures 0.38 s, so the closest this effect could offer is
+ * original vocal measures 0.40 s, so the closest this effect could offer is
  * nearly twice the decay that is actually there.
  */
 export const REVERB_LONGEST_COMB_44K = 1617;
