@@ -238,7 +238,11 @@ export interface CascadeSolution {
   iterations: number;
   /** Largest |realised - target| over the SOLVED centres, dB. */
   worstErrorDb: number;
-  /** True when a solved gain hit the effect's own +-12 dB range. */
+  /** True when the solve RAN INTO the effect's own +-12 dB range — at any pass,
+   * whether or not a gain in the returned iterate still sits on it. It is a
+   * statement about what limited the solve, which is what makes it worth
+   * reporting: a shortfall the effect's range caused is a different fact from a
+   * shortfall the arithmetic caused. */
   clamped: boolean;
 }
 
@@ -273,12 +277,33 @@ export interface CascadeSolution {
  * ── Why the BEST iterate is kept, not the last ──────────────────────────────
  * Once the +-12 dB clamp saturates, the iteration is no longer a contraction:
  * it can settle on a fixed point strictly FURTHER from the target than the
- * gains it started from. Measured over 4000 targets of the shape `matchCurve`
+ * gains it started from. Measured over targets of the shape `matchCurve`
  * produces (mean-centred, bounded to +-10.9), a third of the runs ended worse
  * than their own starting point, and on an alternating +-8 dB target the leak
  * into 250 Hz — a band the chain's measurement forbids touching — grew across
  * the solve. So every iterate is scored and the best one is returned, which
  * makes "pre-compensated" a claim the returned gains can always support.
+ *
+ * But it is the LAST iterate that is preferred, and only the harm above is
+ * guarded against — because "keep whichever iterate scores best" is a different
+ * and worse rule, and the packaged smoke caught it doing damage. Scoring on the
+ * worst band freezes every OTHER band the moment one of them clamps: the worst
+ * error stops moving, no later iterate can beat it, and bands the EQ could have
+ * delivered exactly are left wherever they happened to be. On the smoke's own
+ * fixture that left 500 Hz 0.15 dB and 4 kHz 0.25 dB short of targets the
+ * cascade reaches to three decimals, in exchange for 0.04 dB on a 16 kHz band
+ * pinned at the rail and short by 2.1 dB either way. Measured over 300
+ * mean-centred targets: keeping the last iterate leaves ZERO deliverable bands
+ * short but ends worse than its own starting point in 48 of them; keeping the
+ * best-scoring one never ends worse but leaves 749 deliverable bands short.
+ *
+ * So: return the last iterate — the fixed point, where every band the cascade
+ * can reach is reached — UNLESS it is worse than the un-compensated gains the
+ * solve started from, in which case return the best iterate seen. That is 2 of
+ * 300 ending worse (all of them inside `SOLVE_TOLERANCE_DB`, which is the
+ * effect's own skip threshold: below it a band is not applied at all) and 203
+ * deliverable bands left short, in the 16 % of runs where the fixed point is
+ * genuinely worse than not compensating.
  */
 export function solveCascadeGains(
   targetDb: readonly number[],
@@ -287,48 +312,53 @@ export function solveCascadeGains(
   solvable: readonly boolean[],
   signal: Ltas
 ): CascadeSolution {
-  const worst = (r: readonly number[]): number => {
-    let w = 0;
+  /** The worst band error and the total squared error, over the solved bands. */
+  const score = (r: readonly number[]): { errorDb: number; sumSq: number } => {
+    let errorDb = 0;
+    let sumSq = 0;
     for (let i = 0; i < centresHz.length; i++) {
       if (!solvable[i]) continue;
       const e = Math.abs(r[i] - (targetDb[i] ?? 0));
-      if (e > w) w = e;
+      if (e > errorDb) errorDb = e;
+      sumSq += e * e;
     }
-    return w;
+    return { errorDb, sumSq };
   };
+  const snapshot = (g: readonly number[], r: readonly number[]) => ({
+    gainsDb: [...g],
+    realisedDb: [...r],
+    ...score(r),
+  });
 
   const gainsDb = centresHz.map((_, i) => (solvable[i] ? (targetDb[i] ?? 0) : 0));
-  let clamped = false;
   let realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate, signal);
   let iterations = 0;
-  let best = { gainsDb: [...gainsDb], realisedDb: [...realisedDb], errorDb: worst(realisedDb) };
+  let clamped = false;
+  /** The un-compensated gains. Whatever else happens, the result must not be
+   * worse than this — that is what "pre-compensated" has to mean. */
+  const start = snapshot(gainsDb, realisedDb);
+  let best = start;
+  let last = start;
 
   while (iterations < SOLVE_MAX_PASSES && best.errorDb > SOLVE_TOLERANCE_DB) {
     for (let i = 0; i < centresHz.length; i++) {
       if (!solvable[i]) continue;
-      let next = gainsDb[i] + ((targetDb[i] ?? 0) - realisedDb[i]);
-      if (next > GRAPHIC_EQ_MAX_ABS_DB) {
-        next = GRAPHIC_EQ_MAX_ABS_DB;
-        clamped = true;
-      } else if (next < -GRAPHIC_EQ_MAX_ABS_DB) {
-        next = -GRAPHIC_EQ_MAX_ABS_DB;
-        clamped = true;
-      }
-      gainsDb[i] = next;
+      const next = gainsDb[i] + ((targetDb[i] ?? 0) - realisedDb[i]);
+      if (Math.abs(next) > GRAPHIC_EQ_MAX_ABS_DB) clamped = true;
+      gainsDb[i] = Math.max(-GRAPHIC_EQ_MAX_ABS_DB, Math.min(GRAPHIC_EQ_MAX_ABS_DB, next));
     }
     realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate, signal);
     iterations++;
-    const errorDb = worst(realisedDb);
-    if (errorDb < best.errorDb) {
-      best = { gainsDb: [...gainsDb], realisedDb: [...realisedDb], errorDb };
-    }
+    last = snapshot(gainsDb, realisedDb);
+    if (last.errorDb < best.errorDb) best = last;
   }
 
+  const pick = last.errorDb > start.errorDb + SOLVE_TOLERANCE_DB ? best : last;
   return {
-    gainsDb: best.gainsDb,
-    realisedDb: best.realisedDb,
+    gainsDb: pick.gainsDb,
+    realisedDb: pick.realisedDb,
     iterations,
-    worstErrorDb: best.errorDb,
+    worstErrorDb: pick.errorDb,
     clamped,
   };
 }

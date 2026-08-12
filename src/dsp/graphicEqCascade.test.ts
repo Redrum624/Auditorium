@@ -514,7 +514,11 @@ describe('graphicEqCascade — the pre-compensating solve', () => {
         return i === -1 ? 0 : Math.max(-10.9, Math.min(10.9, vals[i] - mean));
       });
       const solution = solveCascadeGains(target, CENTRES, SR, solvable, signal);
-      expect(solution.worstErrorDb).toBeLessThanOrEqual(naiveWorst(target) + 1e-9);
+      // Within SOLVE_TOLERANCE_DB, because the iterate comparison treats a
+      // difference smaller than the effect's own skip threshold as no
+      // difference and then prefers the smaller TOTAL error — which is what
+      // stops one clamped band freezing every other band where it stands.
+      expect(solution.worstErrorDb).toBeLessThanOrEqual(naiveWorst(target) + SOLVE_TOLERANCE_DB);
       if (solution.clamped) sawClamped++;
       checked++;
     }

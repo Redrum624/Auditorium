@@ -65,7 +65,7 @@ import {
   type MatchBandStatus,
 } from '../dsp/coverMatch';
 import { measureNoiseWindow, measureStageDelta, type StageDelta } from '../dsp/chainAnalysis';
-import { solveCascadeGains } from '../dsp/graphicEqCascade';
+import { SOLVE_TOLERANCE_DB, solveCascadeGains } from '../dsp/graphicEqCascade';
 import { useAppStore } from '../stores/appStore';
 import { applyEdit, type MarkerRemap } from './editOps';
 import { reportEffectFailure, runEffectOnChannels, type EffectRunOutput } from './effectRunner';
@@ -451,7 +451,7 @@ export function deriveMatchEq(
     {
       label: 'Realised',
       value:
-        solution.worstErrorDb > 0.01
+        solution.worstErrorDb > SOLVE_TOLERANCE_DB
           ? `up to ${solution.worstErrorDb.toFixed(2)} dB SHORT of the target`
           : `within ${solution.worstErrorDb.toFixed(3)} dB of the target`,
       from: `the cascade's measured effect on THIS take's octave-band energy after ${solution.iterations} pre-compensation pass${solution.iterations === 1 ? '' : 'es'} — the Realised column in the table below is what the audio receives, not what was requested`,
@@ -485,13 +485,24 @@ export function deriveMatchEq(
   // sentence and the derived row above point DOWN at that table, because
   // `StageResult` renders the warning first, then the derived rows, then the
   // table (CoverChainDialog.tsx:149-171).
-  const worstShort = matched.reduce(
-    (worst, b) => (Math.abs(b.realisedDb - b.targetDb) > Math.abs(worst.realisedDb - worst.targetDb) ? b : worst),
-    matched[0]
-  );
+  // EVERY band that fell short, not just the worst one. Naming only the worst
+  // leaves the others "short and silent" — shown in the table, but not in the
+  // line that exists to make a shortfall impossible to miss — and which bands
+  // fall short is not a property of one fixture: any run whose solve ends above
+  // tolerance can leave several.
+  const short = matched
+    .filter((b) => Math.abs(b.realisedDb - b.targetDb) > SOLVE_TOLERANCE_DB)
+    .sort((a, b) => Math.abs(b.realisedDb - b.targetDb) - Math.abs(a.realisedDb - a.targetDb));
   const warning =
-    solution.worstErrorDb > 0.01
-      ? `the EQ could not fully deliver this curve: at ${worstShort.centreHz} Hz it wanted ${dbStr(worstShort.targetDb)} and realised ${dbStr(worstShort.realisedDb)}, ${solution.worstErrorDb.toFixed(2)} dB short${solution.clamped ? ` — the band gain hit the Graphic EQ's own ±12 dB limit` : ''}. The Realised column in the table below is what the audio received.`
+    short.length > 0
+      ? `the EQ could not fully deliver this curve. ` +
+        short
+          .map(
+            (b) =>
+              `At ${b.centreHz} Hz it wanted ${dbStr(b.targetDb)} and realised ${dbStr(b.realisedDb)}, ${Math.abs(b.realisedDb - b.targetDb).toFixed(2)} dB short`
+          )
+          .join('; ') +
+        `${solution.clamped ? ` — the solve ran into the Graphic EQ's own ±12 dB limit` : ''}. The Realised column in the table below is what the audio received.`
       : undefined;
 
   return { run: true, params, derived, eq, warning };

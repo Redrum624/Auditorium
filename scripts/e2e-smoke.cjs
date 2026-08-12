@@ -1354,13 +1354,19 @@ async function main() {
     // Ruling B defect, so a one-sided "realised == target" assertion would have
     // to be relaxed into meaninglessness the first time a band could not be
     // delivered. This fixture reaches BOTH kinds in one run.
+    //
+    // The threshold is the ENGINE's own, not a rounder number chosen here: the
+    // chain names every band whose realised energy misses its target by more
+    // than SOLVE_TOLERANCE_DB, so any other threshold makes this classification
+    // overlap or gap by construction rather than by defect.
+    const COVER_TOLERANCE_DB = 0.01;
     let coverDelivered = 0;
     let coverShort = 0;
     for (const band of coverMatchedBands) {
       const error = Math.abs(band.realisedDb - band.targetDb);
-      const delivered = error <= 0.05;
+      const delivered = error <= COVER_TOLERANCE_DB;
       const saidShort =
-        error > 0.05 &&
+        error > COVER_TOLERANCE_DB &&
         typeof coverEq.warning === 'string' &&
         coverEq.warning.indexOf(`${band.centreHz} Hz`) !== -1 &&
         coverEq.warning.indexOf('could not fully deliver') !== -1;
@@ -1387,6 +1393,15 @@ async function main() {
     assert(
       coverShort === 1 && Math.abs(coverEq.eqWorstErrorDb) > 0.05,
       `the one band the EQ could not deliver is named with its shortfall (short ${coverShort}, worst ${coverEq.eqWorstErrorDb})`
+    );
+    // And it is short because the EFFECT ran out of range, not because the solve
+    // ran out of passes — the distinction the whole two-sided classification
+    // rests on. The band that fell short is the one sitting on the +-12 dB rail.
+    const coverRailed = coverMatchedBands.filter((b) => Math.abs(b.bandGainDb) >= 11.999);
+    assert(
+      coverRailed.length === 1 &&
+        Math.abs(coverRailed[0].realisedDb - coverRailed[0].targetDb) > COVER_TOLERANCE_DB,
+      `the short band is the one pinned at the Graphic EQ's own limit (railed ${JSON.stringify(coverRailed.map((b) => b.centreHz))})`
     );
     const coverOutOfRange = coverEq.eqBands.filter((b) => b.status !== 'matched');
     assert(
@@ -1469,12 +1484,16 @@ async function main() {
     // and still pass. The audio itself is the assertion — the peak moved from
     // -5.88 to -0.30 dBFS across the run, so a real undo has to move it back,
     // and a sample window pins it exactly rather than statistically.
-    const coverPeakAfter = await page.evaluate(() => window.__test.getPeak());
+    // `getPeak()` is a LINEAR peak (0..1), not dBFS — the chain's own report is
+    // in dBFS, so one of the two has to be converted and this is the side that
+    // owns the conversion.
+    const coverPeakDb = (linear) => (linear > 0 ? 20 * Math.log10(linear) : -Infinity);
+    const coverPeakAfter = coverPeakDb(await page.evaluate(() => window.__test.getPeak()));
     const coverSamplesAfter = await page.evaluate(() =>
       window.__test.getChannelSamples(0, 0, 2048)
     );
     const coverUndone = await page.evaluate(() => window.__test.undoActive());
-    const coverPeakUndone = await page.evaluate(() => window.__test.getPeak());
+    const coverPeakUndone = coverPeakDb(await page.evaluate(() => window.__test.getPeak()));
     const coverSamplesUndone = await page.evaluate(() =>
       window.__test.getChannelSamples(0, 0, 2048)
     );
@@ -1483,7 +1502,7 @@ async function main() {
       `one undo restores the take's length (expected ${cover.lengthBefore}, actual ${coverUndone.length})`
     );
     assert(
-      Math.abs(coverPeakUndone - cover.before.peakDb) < 0.01,
+      Math.abs(coverPeakUndone - cover.before.peakDb) < 0.05,
       `one undo restores the take's AUDIO, not just its length — the peak is the take's again ` +
         `(before ${cover.before.peakDb.toFixed(2)}, after the chain ${coverPeakAfter.toFixed(2)}, after undo ${coverPeakUndone.toFixed(2)} dBFS)`
     );

@@ -839,7 +839,9 @@ its octave's energy by only +9.73 dB at 500 Hz falling to +9.17 dB at 8 kHz, and
 not the derived ±10.9 dB bound, and the top of that bound cannot be delivered. When that
 happens the realised column
 shows what was actually delivered, the summary line reads "up to X dB SHORT of the target", and
-a sentence names the band and both numbers. What is never shown is the requested curve dressed
+a sentence names EVERY band that fell short with both of its numbers — not just the worst one, or
+the others would be shown in the table and absent from the line that exists to make a shortfall
+impossible to miss. What is never shown is the requested curve dressed
 up as an outcome.
 
 ## The beat grid shows only what was measured; snapping targets beats, not clip edges
