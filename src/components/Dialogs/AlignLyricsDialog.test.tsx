@@ -754,11 +754,16 @@ describe('AlignLyricsDialog — model, run and refusals', () => {
   });
 
   it('states the measured realtime factor and an estimate for this file', async () => {
-    seedDoc();
+    // 32.8 s of audio, so the estimate this factor implies is a legible 2 s.
+    // The factor alone was asserted before, and a `/ factor` that became
+    // `* factor` still prints "16.4x realtime" — while promising 8:58 here,
+    // and five and a half hours for a twenty-minute file.
+    seedDoc([new Float32Array(Math.round(32.8 * SR))]);
     open();
     await settle();
     expect(screen.getByTestId('align-lyrics-estimate')).toHaveTextContent(
-      `${MEASURED_ALIGN_REALTIME_FACTOR.toFixed(1)}x realtime`
+      `Runs on the CPU at about ${MEASURED_ALIGN_REALTIME_FACTOR.toFixed(1)}x realtime — ` +
+        'roughly 0:02 for this file.'
     );
   });
 

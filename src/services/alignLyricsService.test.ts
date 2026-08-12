@@ -3,6 +3,7 @@ import {
   ALIGN_MODEL_BYTES,
   ALIGN_SAMPLE_RATE,
   MAX_ALIGN_SAMPLES,
+  MEASURED_ALIGN_REALTIME_FACTOR,
   REPLACE_WORD_UNDO_LABEL,
   _resetAlignmentsForTest,
   _setAlignStaleWatchForTest,
@@ -22,6 +23,7 @@ import {
   previewWord,
   replaceWord,
   wordGaps,
+  type AlignProgress,
 } from './alignLyricsService';
 import { LYRICS_MATCH_THRESHOLD } from '../dsp/ctcAlign';
 import { deriveSeamSamples } from '../dsp/wordSplice';
@@ -729,7 +731,7 @@ describe('alignDocumentLyrics — the host contract and the always-resolves prom
 
   it('publishes progress from the host and unsubscribes when the run settles', async () => {
     seedDoc();
-    const seen: number[] = [];
+    const seen: AlignProgress[] = [];
     bridge.alignRun.mockImplementation(async () => {
       for (const l of progressListeners) l({ done: 1600, total: TOTAL_SAMPLES });
       return gridResponse();
@@ -737,10 +739,24 @@ describe('alignDocumentLyrics — the host contract and the always-resolves prom
     await alignDocumentLyrics({
       docId: activeDoc().id,
       text: TEXT,
-      onProgress: (p) => seen.push(p.fraction),
+      onProgress: (p) => seen.push({ ...p }),
     });
-    expect(seen.some((f) => f > 0 && f < 1)).toBe(true);
+    expect(seen.some((p) => p.fraction > 0 && p.fraction < 1)).toBe(true);
     expect(progressListeners).toHaveLength(0);
+
+    // The seed estimate is the region's duration DIVIDED by the measured
+    // realtime factor — 2.24 s of audio at 16.4x is 137 ms. Multiplying
+    // instead would advertise 37 s for this fixture and 5.5 hours for a
+    // 20-minute file, and nothing here ever looked at the number.
+    const seed = seen.find((p) => p.phase === 'resampling');
+    expect(seed).toBeDefined();
+    expect(seed!.estimatedRemainingMs).toBeCloseTo(136.585, 3);
+    expect(seed!.estimatedRemainingMs).toBeCloseTo(
+      ((TOTAL_SAMPLES / SR) * 1000) / MEASURED_ALIGN_REALTIME_FACTOR,
+      9
+    );
+    // …and the last thing published before the words land promises no wait.
+    expect(seen[seen.length - 1].estimatedRemainingMs).toBe(0);
   });
 });
 
