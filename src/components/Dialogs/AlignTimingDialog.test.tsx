@@ -161,6 +161,27 @@ describe('AlignTimingDialog — showing what will happen before it happens', () 
     expect(screen.getByTestId('align-grid-summary')).toHaveTextContent('24 beats');
   });
 
+  it('takes the MEDIAN gap, so one DROPPED beat cannot move the headline BPM', () => {
+    const doc = seedDoc();
+    // `BEATS` is perfectly uniform, where the median, the mean and every
+    // individual gap are the same number — so `gaps.sort(...)` could be deleted
+    // outright and all 22 tests stayed green, even though this figure is what
+    // the user ticks 'Grid and subdivision are correct' against.
+    //
+    // Here beat 12 is missing, exactly the tracking failure the median exists to
+    // absorb. That leaves 22 gaps, 21 of 24 000 samples and one of 48 000 — and
+    // the doubled one sits at index 11, which is `floor(22 / 2)`: read
+    // UNSORTED the headline would be 60.0 BPM, half the real tempo, on a grid
+    // that is 120 BPM everywhere but one bar.
+    const dropped = Int32Array.from(Array.from(BEATS).filter((_, i) => i !== 12));
+    mockGetBeatGrid.mockReturnValue(makeGrid({ beatSamples: dropped }));
+    offBeatMarkers(doc.id, 1500);
+    open();
+
+    expect(screen.getByTestId('align-grid-summary')).toHaveTextContent('120.0 BPM');
+    expect(screen.getByTestId('align-grid-summary')).toHaveTextContent('23 beats');
+  });
+
   it('reports the median and largest move over the whole marker list', () => {
     const doc = seedDoc();
     // 1440, 960, 480 and 2400 samples off the beat = 30, 20, 10 and 50 ms.
