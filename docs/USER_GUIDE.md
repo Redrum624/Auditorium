@@ -283,6 +283,69 @@ that made it decline.
 Pitch Correct dominates the running time (roughly 0.4× real time on its own; the
 whole chain took about 105 seconds on a 142-second stereo take).
 
+### Cover Chain (matching your take to the record's vocal)
+
+`Effects → Cover Chain…` takes the vocal you recorded and the *separated original vocal*
+of the song you are covering, and matches your take's tone and level to it.
+
+**Do this first, in this order.** The chain lists all of it, and refuses to do any of
+it for you, because each step needs a decision only you can make:
+
+1. Open the original song and run `Edit → Separate into Stems…`. That gives you a
+   five-track session and, among the new documents, `<song> — Vocals`: the original
+   vocal *as a signal*, carrying whatever was done to it in the mix. That document is
+   what everything below matches against.
+2. Open your take and run `Effects → Vocal Chain…` on it. The match is a correction to
+   a **clean** take — match the timbre of a noisy one and you match the noise too.
+3. If a word came out wrong, `Effects → Align Lyrics…` before the vocal chain. Nothing
+   in the app judges which word is wrong; you pick it.
+4. If your take drifts against the record, `Effects → Align Vocal Timing…`. It needs you
+   to confirm the beat grid — see the note in that section about why nothing picks it
+   for you.
+
+**Then run the chain.** With your take active, open `Effects → Cover Chain…`, choose the
+`— Vocals` document in the **Reference** picker, and press Apply. Three automatic stages
+are on by default:
+
+- **Match EQ to the Original Vocal** — compares the long-term octave-band energy of the
+  two recordings and realises the difference on the Graphic EQ. It works from 500 Hz up
+  and never asks for more than ±10.9 dB; both limits are measured, not chosen, and the
+  stage's own note says why. The report gives you a table per band: what the match
+  **wanted**, what it **realised**, and the **gain** the EQ was handed. Those are three
+  different numbers on purpose — a cascade of overlapping filters does not deliver the
+  gains it is given, so the gains are pre-compensated and what you are shown in the
+  realised column is what the audio actually received. If a band could not be reached
+  inside the EQ's own ±12 dB, the stage says so with both numbers.
+- **Match Loudness** — moves your take to the original vocal's level, measured over the
+  *sounding* parts of each. It runs after the EQ, because the EQ deliberately leaves the
+  broadband level out of its curve and hands it here.
+- **Limiter (headroom)** — catches the peak at −0.3 dBFS. On a take that never reaches
+  the ceiling it reports that it did nothing. Switch it off and Match Loudness will tell
+  you, with the number, if the result is going to pass 0 dBFS.
+
+**Match Reverb** is off by default and will usually decline even when you switch it on.
+It measures the original vocal's decay and compares it with the shortest decay this
+app's Reverb can produce (0.710 s); most recorded vocals are drier than that, and the
+stage says which two numbers made it refuse rather than adding space that is not there.
+
+The whole pass is **one undo entry**. Every stage reports what it did or why it did
+nothing, and the before/after table gives loudness, envelope spread, noise floor and the
+spectral distance from the original vocal — with the original vocal's own column beside
+them as the target you were aiming at.
+
+**The envelope spread is reported and never corrected.** A "matched compressor" was
+built and cut: the move it asks for changes sign depending on how the measurement is
+gated, which makes it a property of the analysis rather than of the singer.
+
+**Two things to expect.** The instrumental you lay the cover over is **not clean** — it
+still contains the original singer, about 18 dB below the music and only 10 dB below it
+in the band your own voice occupies. And the match is a *shaping*: on the song it was
+built against it moved about ±1.2 dB across 500 Hz–4 kHz with +3.5 dB of air at 8 kHz. It
+is a real, measured correction. It will not turn a poor take into a good one.
+
+**Finally, place it.** Open the `— Stems` session the separation created, mute its
+**Vocals** track, and drag your corrected take in as a new track.
+
 ## Tempo, remix, stems, transcription and the voice changer
 
 These features are opt-in: nothing here runs until you ask for it, so opening a

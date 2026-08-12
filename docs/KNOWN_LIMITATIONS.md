@@ -701,6 +701,114 @@ property of the model: a better or newer checkpoint (or a user-selectable stem
 count beyond the fixed 4 + Residual of v1.7) is the only lever, and would be a
 model/UI change rather than a fix to this pipeline.
 
+## A cover sits on an instrumental that still contains the original singer
+
+**This is the headline limitation of the Cover Chain, and it is stated in the dialog before
+you run it rather than here alone.**
+
+v1.7's separation guarantee is **exact sum** — the five stems add back to the mix sample for
+sample, measured bit-exact and re-confirmed at 1.4e−14 on this song. It is not, and never was,
+perceptual cleanliness. So the instrumental you get by muting the Vocals track still contains
+the original singer.
+
+How much was measured against a ground truth a user will not have: the official instrumental
+release of the same song is a separate master, so `mix − g·instrumental` **is** the original
+vocal, sample for sample, and `bed − g·instrumental` is exactly what separation left behind.
+Over the 132 vocal-active usable seconds of a real song:
+
+| | |
+|---|---|
+| The residual, below the bed | **−17.95 dB** |
+| The residual, below the original vocal | **−11.28 dB** |
+| Worst usable second (t = 146 s) | **−8.9 dB** |
+| Measurement floor | −39.7 dB |
+
+It is the **singer**, not damage to the band: the same measure on instrumental-only seconds
+reads −39.69 dB, so 21.7 dB more error appears the moment the singer sings. And it sits
+exactly where it hurts — per octave, over vocal-active frames, it is 11.49 dB below the music
+at 250–500 Hz, **9.52 dB** at 500 Hz–1 kHz, 11.79 dB at 1–2 kHz and 11.45 dB at 2–4 kHz. That
+is the band a lead vocal occupies, the band the ear is most sensitive in, and the band your
+own cover will compete for. A 10 dB margin is not masking.
+
+**In practice:** you will hear a ghost of the original singer under your cover, most audibly
+in sparse passages.
+
+**The figure is documentation, not a per-song estimate**, and that is deliberate. Three
+run-time estimators were built and all three were measured wrong. Complex-STFT coherence
+between the bed and the vocal stem is degenerate by construction for this separator (both
+outputs are real masks over the *same* mix spectrum, so they share phase in every bin and
+coherence is 1 regardless of leakage). A per-band least-squares projection of the bed onto
+the vocal failed its own null test, claiming 84 % of the bed's bass was leaked vocal on
+seconds containing no vocal at all. A mask-only proxy agreed to 0.5 dB computed per frame per
+bin and was out by 11 dB computed from frame-summed energies — one agreement in one
+formulation on one song is not validation. A number wearing the authority of a measurement it
+has not earned is worse than a stated fact.
+
+## The Cover Chain matches tone and level. It does not match dynamics, and it will usually refuse to match reverb
+
+**There is no matched compressor, on purpose.** The active-envelope spread (F7's measure: the
+p90 − p10 of the compressor's own detector while the material is sounding) reads 13.62 dB on
+the reference take and 12.74 dB on the separated original vocal — a required move of
+**−0.88 dB**, which is smaller than the measurement's own reference error. Sweeping the
+analysis gate shows why no other answer is available either:
+
+| gate | 15 dB | 20 dB | 25 dB | 30 dB | 40 dB |
+|---|---|---|---|---|---|
+| move the match would ask for | **+0.43** | −0.88 | −3.55 | −9.71 | −6.71 |
+| the same from ground truth | +0.83 | −0.44 | −2.13 | −5.50 | **+2.90** |
+| reference vs ground-truth disagreement | 0.40 | 0.44 | 1.41 | 4.21 | **9.61** |
+
+The answer **changes sign** between 15 and 20 dB, and the ground truth changes sign again at
+40. Where the reference is trustworthy (gate ≤ 20 dB, disagreement < 0.5 dB) the move is under
+1 dB — i.e. nothing. Where a substantial move appears (gate ≥ 30 dB) the reference has stopped
+agreeing with the ground truth by 4 to 10 dB, because the gate has reached into the take's room
+noise and the separator's near-silence. A quantity whose sign depends on an analysis parameter
+is not a measurement. The spread is **reported**, before and after; nothing is derived from it.
+
+**Match Reverb ships as a stage that usually declines.** The estimator itself is sound —
+ISO 3382-1's T20 fit, validated against the app's own Freeverb at 1.26 s where the closed form
+says 1.45 s (−13 %) and 2.92 s where it says 3.20 s (−9 %), and reading 0.28 s on a dry take.
+The problem is the effect: `ReverbEffect` is Freeverb with `combFeedback = 0.7 + 0.28 · roomSize`
+and a longest comb of 1617 samples at 44.1 kHz, so at `roomSize = 0` — its own minimum — **the
+shortest reverb the app can produce is 0.710 s**. The reference song's original vocal measures
+0.40 s. There is no setting of this effect that matches it, and the closest offer would add
+roughly twice the decay that is there. The stage compares the two numbers and says so, which
+also means it will correctly *engage* on a song whose vocal really does carry a room.
+
+Two further limits on the estimate, stated rather than corrected. It reads 9–13 % **short** of
+the closed form on the app's own reverb, so a matched room size errs slightly dry. And its
+linearity check cannot tell a curved fall from a real decay: a pure amplitude ramp — falling
+linearly in amplitude, strongly bent in dB, containing no reverberation whatever — scores a
+minimum r² of 0.910, *higher* than either validated reverb control (0.883 and 0.859). What the
+check removes is **ragged** fits, not curved ones. A decay this estimator reports is evidence of
+a fall, not proof of a room.
+
+## The match curve is realised in band energy, and the Graphic EQ cannot always reach it
+
+The Cover Chain's match curve is a difference of octave-band **energies**, and the Graphic EQ
+that realises it is a cascade of overlapping peaking filters at Q = 1.4. Two consequences, both
+measured, both surfaced rather than hidden:
+
+- **The gain a band is given is not the response it produces.** A lone +6 dB band leaks 1.15 dB
+  into each neighbour an octave away, and on an alternating ±3 dB curve the response at the
+  centres is off by up to 1.0 dB — comparable to the entire correction on this material.
+- **A peaking filter delivers its full gain only at its centre**, so a cascade whose centre
+  response equals the curve moves each band's *energy* by measurably less. Measured end to end:
+  matching the centres closed 70 % of the spectral distance to the original vocal
+  (1.94 → 0.58 dB); matching the band energies closed **82 %** (1.94 → 0.34 dB).
+
+The chain therefore solves for the band gains whose *band-energy* response equals the requested
+curve, and reports the realised figure beside the requested one for every band, including the
+bands outside the matched range — which receive no gain of their own and still show the leak
+from their neighbours.
+
+**It does not always reach the target, and says so.** A band-energy move near the ±10.9 dB
+bound needs roughly 12.5 dB of band gain once the roll-off across the octave is compensated,
+and the Graphic EQ's own parameter range stops at ±12 dB. When that happens the realised column
+shows what was actually delivered, the summary line reads "up to X dB SHORT of the target", and
+a sentence names the band and both numbers. What is never shown is the requested curve dressed
+up as an outcome.
+
 ## The beat grid shows only what was measured; snapping targets beats, not clip edges
 
 **Area:** Beat grid (`src/services/beatGrid.ts`,

@@ -5,6 +5,116 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.22.0] - 2026-08-11
+
+**Sing over a song you love, and have your take match the record's vocal.** `Effects → Cover Chain…`
+takes the vocal you just recorded and the *separated original vocal* of the song you are covering, and
+matches your take's tone and level to it. The hard-sounding half of that — "work out what was done to
+the voice in the finished mix" — turns out not to be blind reverse-engineering of a plugin chain,
+because separation hands the processed original vocal over **as a signal**. So it is matching against
+a reference, and every setting comes from a measurement of the two recordings rather than from taste.
+
+**The headline limitation is stated in the dialog, above the button, not in a footnote.** The
+instrumental separation leaves behind is *not* clean: it still contains the original singer, measured
+**17.95 dB below the music** overall and only **9.5–11.8 dB below it across 250 Hz–4 kHz** — the band
+your own voice occupies — with a worst measured second of **8.9 dB**. You will hear a ghost of the
+original singer under your cover, most audibly in sparse passages. v1.7's separation guarantee is that
+the stems sum back to the mix exactly; it never was that each stem is perceptually clean. That figure
+is stated as the measurement it is, and deliberately **not** computed per song: three plausible
+run-time estimators were built and all three were measured wrong (one degenerate by construction, one
+claiming 84 % of the bed's bass was leaked vocal on seconds containing no vocal at all, one agreeing
+to 0.5 dB in one formulation and out by 11 dB in another).
+
+**And the name is not a promise the DSP cannot keep.** On the song this was built against, the match
+is a shaping of about ±1.2 dB across 500 Hz–4 kHz with +3.5 dB of air at 8 kHz. It is a real,
+correctly-signed, measured correction, and it is a small one. A single take still has to be a good
+take.
+
+### Added
+
+- **Cover Chain (`Effects → Cover Chain…`) — match a new vocal take to the original singer's.** Nine
+  stages listed in the order they run, each with the note that says why it sits there, each automatic
+  one switchable on its own, the whole pass landing as **one undo entry**. Five stages are manual by
+  design and say so rather than pretending: separating the original (it runs a model and produces new
+  documents), the Vocal Chain on your take (its own pass, with its own undo entry), Align Lyrics (you
+  pick the word — nothing here judges which one is wrong), Align Vocal Timing (you confirm the grid),
+  and placing the cover on the instrumental (it builds a session rather than editing the take).
+  Afterwards every stage reports what it did, and a before/after table gives loudness, envelope
+  spread, noise floor and the spectral distance from the original vocal, against the original vocal's
+  own column as the target.
+- **Match EQ, bounded and restricted by measurement.** The long-term octave-band energy of your take
+  is compared with the separated original vocal's and the difference realised on the Graphic EQ —
+  **from 500 Hz up only**, and bounded to **±10.9 dB**. Both limits are measured against ground truth
+  rather than chosen: below 500 Hz the separated reference is mostly not the vocal (at 125 Hz its own
+  separation error *exceeds* it by 5.1 dB, and the raw curve asks for its largest boosts exactly
+  there), and 10.9 dB is the weakest retained band's own signal-to-separation-error ratio, past which
+  a "match" would be correcting the separation instead of the singer. Above 500 Hz the curve computed
+  from a separated vocal and the curve computed from the true vocal agree to within **0.28 dB** in
+  every band.
+- **Match Loudness, on a gated level.** Your take is moved to the original vocal's level measured over
+  the *sounding* parts of each. That gating is not decoration: an ungated comparison of the same two
+  files carries a 0.7 dB bias purely because 88.5 % of the take is sounding against 75.8 % of the
+  separated reference. (It is not called LUFS, because it is not: there is no K-weighting and no
+  400 ms block structure, only BS.1770-4's relative-gate structure.)
+- **A Limiter stage that owns the headroom the loudness match has no view on**, at −0.3 dBFS, last so
+  nothing downstream can lift the output back over the ceiling. Switch it off and Match Loudness names
+  the peak it is about to produce instead of clipping silently.
+- **A Match Reverb stage that derives its own refusal.** It estimates the original vocal's decay by
+  ISO 3382-1's T20 method — validated first against the app's own reverb at 1.26 s where the closed
+  form says 1.45 s, and 2.92 s where it says 3.20 s — and compares it with the shortest decay this
+  app's Reverb can produce. On the reference song the original vocal reads **0.40 s** against a floor
+  of **0.710 s**, so the stage declines and says exactly that, rather than being absent or quietly
+  adding twice the space that is there. It will engage on a song whose vocal really does carry a room.
+
+### Changed
+
+- **The Graphic EQ's band gains are pre-compensated, and the chain reports what the audio actually
+  received.** The EQ is a cascade of overlapping peaking filters, so the gain a band is given is not
+  the response it produces: a lone +6 dB band leaks 1.15 dB into each neighbour an octave away. Worse,
+  the match curve is a difference of octave-band *energies*, and a peaking filter delivers its full
+  gain only at its centre — so a cascade whose centre response equals the curve moves the band's
+  energy by measurably less. The chain solves for the gains whose *band-energy* response equals the
+  requested curve, and shows the realised figure next to the requested one, per band. Measured end to
+  end on the reference song, the spectral distance to the original vocal closed 70 % when the centres
+  were matched and **82 % (1.94 → 0.34 dB)** when the band energies were. Where the EQ cannot reach a
+  band's target — a move near the ±10.9 dB bound needs about 12.5 dB of band gain once the roll-off is
+  compensated, and the Graphic EQ stops at ±12 — the shortfall is named with both numbers rather than
+  the target being echoed back as an outcome.
+
+### Not shipped, and why
+
+- **There is no matched compressor.** The move a dynamics match would ask for on this material changes
+  **sign** across the analysis gate (+0.43 / −0.88 / −3.55 / −9.71 / −6.71 dB at gates of
+  15 / 20 / 25 / 30 / 40 dB), and where the reference is trustworthy the required move is under 1 dB —
+  i.e. nothing. A quantity whose sign depends on an analysis parameter is not a measurement, and a
+  knob that moves for reasons you cannot attribute is worse than no knob. The active-envelope spread
+  is still **reported**, before and after, because the number is informative; nothing is derived from
+  it.
+- **Key and tempo are still yours to confirm.** Pitch and timing both need you to pick the target, and
+  the reference song is the proof: its drums track at ~160 BPM while five other sources agree at ~109,
+  every confidence between 0.003 and 0.167 against the app's own 0.35 threshold. Both grids are
+  musically defensible, so an automatic pick would be a coin flip that silently makes every correction
+  ⅔ or 1.5× wrong.
+
+### Measured end to end
+
+On the reference material — a 142 s solo vocal take at 48 kHz against the separated original vocal of
+a 178 s song at 44.1 kHz — the whole chain, with Match EQ, Match Loudness and the Limiter on:
+
+| | before | after | target (the original vocal) |
+|---|---|---|---|
+| Loudness (sounding parts) | −25.96 dBFS | **−16.35 dBFS** | −16.35 dBFS |
+| Peak | −9.68 dBFS | −0.84 dBFS | −0.18 dBFS |
+| Envelope spread | 13.62 dB | 12.92 dB | 12.73 dB |
+| Noise floor | −61.26 dBFS | −52.44 dBFS | — |
+| Spectral distance from the original vocal | 1.94 dB | **0.34 dB** | 0 by definition |
+
+The applied curve was +0.54 / −1.15 / −1.90 / −1.04 / +3.54 dB at 500 Hz – 8 kHz, realised to within
+0.008 dB (against 0.280 dB if the requested gains had been used as-is), with 10.19 dB of broadband
+level handed to the loudness stage rather than baked into the shape. The Limiter had nothing to catch
+and said so — the EQ's cuts had already taken 0.67 dB off the peak before the +9.50 dB gain went on.
+The noise floor rises with the gain, as it must: the match lifts the whole take.
+
 ## [1.21.0] - 2026-08-11
 
 **A remix pin is now a promise the software actually makes.** Pinning a splice in the Remix panel used
