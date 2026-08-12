@@ -152,6 +152,13 @@ describe('buildTempoMap — the ratio bound (RULING 3)', () => {
     const narrowed = buildTempoMap(beats, 3000, 1, { minRatio: 1.2, maxRatio: 1.5 });
     // minRatio 1.2 is forced down to 1, not honoured as a floor above unity.
     expect(Math.min(...Array.from(warpRatios(narrowed)))).toBeCloseTo(1, 9);
+    // ... and symmetrically: a CEILING below 1 is forced up to 1, so the
+    // identity placement stays feasible. Without the force, this map's
+    // intervals — which want exactly ratio 1 — would be clamped to 0.5.
+    const cappedBelowUnity = buildTempoMap(beats, 3000, 1000, { maxRatio: 0.5 });
+    expect(Math.max(...Array.from(warpRatios(cappedBelowUnity)))).toBeCloseTo(1, 9);
+    expect(cappedBelowUnity.clampedIndices).toEqual([]);
+    expect(cappedBelowUnity.identity).toBe(true);
     // And a band wider than the engine's is narrowed to the engine's.
     const beyond = buildTempoMap(beats, 3000, 100000, { maxRatio: 99 });
     expect(Math.max(...Array.from(warpRatios(beyond)))).toBeCloseTo(MAX_RATIO, 9);

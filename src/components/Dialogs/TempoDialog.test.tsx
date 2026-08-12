@@ -370,3 +370,264 @@ describe('G5 glass header', () => {
     expect(screen.getByText('song.wav')).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// R7 — the opt-in variable-rate correction
+// ---------------------------------------------------------------------------
+
+describe('R7 — Correction mode', () => {
+  /** A grid whose two intervals DIFFER, so the map is genuinely variable. */
+  function varyingEntry() {
+    return makeEntry({ bpm: 120, confidence: 0.8, beatSamples: Int32Array.from([1000, 23000, 43000]) });
+  }
+
+  it('defaults to one ratio — today’s behaviour — and Apply needs no confirmation for it', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    expect((screen.getByTestId('tempo-correction') as HTMLSelectElement).value).toBe('one-ratio');
+    expect(screen.queryByTestId('tempo-grid-confirmed')).not.toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+  });
+
+  it('sends NO variableRate in one-ratio mode', async () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+    expect(mockApplyTempoChange).toHaveBeenCalledTimes(1);
+    expect(mockApplyTempoChange.mock.calls[0][0].variableRate).toBeUndefined();
+  });
+
+  it('offers following the beats only when the grid has TWO beats in the region', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(makeEntry({ beatSamples: Int32Array.from([1000]) }));
+    const { unmount } = render(<TempoDialog onClose={jest.fn()} />);
+    expect(screen.getByTestId('tempo-correction')).toBeDisabled();
+    expect(screen.getByTestId('tempo-follow-unavailable')).toBeInTheDocument();
+    unmount();
+
+    mockGetTempo.mockReturnValue(makeEntry({ beatSamples: Int32Array.from([1000, 23000]) }));
+    render(<TempoDialog onClose={jest.fn()} />);
+    expect(screen.getByTestId('tempo-correction')).toBeEnabled();
+    expect(screen.queryByTestId('tempo-follow-unavailable')).not.toBeInTheDocument();
+  });
+
+  it('refuses a STALE grid — it describes audio from before an edit', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    const { unmount } = render(<TempoDialog onClose={jest.fn()} />);
+    expect(screen.getByTestId('tempo-correction')).toBeEnabled();
+    unmount();
+
+    mockGetTempo.mockReturnValue(makeEntry({ ...varyingEntry(), stale: true }));
+    render(<TempoDialog onClose={jest.fn()} />);
+    expect(screen.getByTestId('tempo-correction')).toBeDisabled();
+  });
+
+  it('will not Apply until the grid is confirmed (RULING 1)', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+
+    const tick = screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement;
+    expect(tick.checked).toBe(false);
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+
+    fireEvent.click(tick);
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+  });
+
+  it.each([
+    ['x2', 'tempo-double-button'],
+    ['/2', 'tempo-halve-button'],
+  ])('a %s re-track clears the confirmation — it cannot outlive the grid it confirmed', async (_l, testId) => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    mockRegridTempo.mockResolvedValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    fireEvent.click(screen.getByTestId('tempo-grid-confirmed'));
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId(testId));
+    });
+
+    expect((screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement).checked).toBe(false);
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeDisabled();
+  });
+
+  it('Re-detect from selection clears the confirmation too', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    mockDetectRegionTempo.mockReturnValue({ bpm: 118, confidence: 0.6 });
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    fireEvent.click(screen.getByTestId('tempo-grid-confirmed'));
+
+    fireEvent.click(screen.getByTestId('tempo-redetect-button'));
+    expect((screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('a full Detect clears the confirmation as well', async () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(null);
+    mockRunTempoAnalysis.mockResolvedValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('tempo-detect-button'));
+    });
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    fireEvent.click(screen.getByTestId('tempo-grid-confirmed'));
+    expect((screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement).checked).toBe(true);
+
+    mockRunTempoAnalysis.mockResolvedValue(varyingEntry());
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('tempo-redetect-button'));
+    });
+    expect((screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement).checked).toBe(false);
+  });
+
+  it('reports the beat count, the local-ratio RANGE and the new duration', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+
+    const summary = screen.getByTestId('tempo-variable-summary');
+    // Three beats, and the two intervals (22000 and 20000 samples) give two
+    // DIFFERENT local ratios — the readout must show a range, not one number.
+    expect(summary).toHaveTextContent('3 beats');
+    const spacing = (60 / 110) * 44100;
+    expect(summary).toHaveTextContent(`x${(spacing / 22000).toFixed(4)}`);
+    expect(summary).toHaveTextContent(`x${(spacing / 20000).toFixed(4)}`);
+    expect(summary).toHaveTextContent('pitch unchanged');
+  });
+
+  it('names how many beats the ratio bound held back', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    // 20 BPM against ~120 BPM intervals needs ratio ~6, past MAX_RATIO 4.
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '20' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+
+    expect(screen.getByTestId('tempo-variable-clamped')).toHaveTextContent('2 of 3 beats');
+    expect(screen.getByTestId('tempo-variable-clamped')).toHaveTextContent('as far as the 0.25x–4x limit allows');
+  });
+
+  it('says nothing about clamping when nothing was clamped', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    expect(screen.queryByTestId('tempo-variable-clamped')).not.toBeInTheDocument();
+  });
+
+  it('labels the WORST segment, never an average', () => {
+    seedDoc();
+    // Intervals 22000 and 2000: at target 110 the ratios are 1.09 (transparent)
+    // and 12 -> clamped to 4 (extreme). An average would read 'good' and lie.
+    mockGetTempo.mockReturnValue(
+      makeEntry({ bpm: 120, confidence: 0.8, beatSamples: Int32Array.from([1000, 23000, 25000]) })
+    );
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    expect(screen.getByTestId('tempo-variable-quality')).toHaveTextContent('Worst segment: extreme');
+  });
+
+  it('hides the one-ratio summary and quality line while following the beats', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    expect(screen.getByTestId('tempo-summary')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    expect(screen.queryByTestId('tempo-summary')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('tempo-quality')).not.toBeInTheDocument();
+  });
+
+  it('accepts source === target on this path — the case one ratio calls a no-op', () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-source'), { target: { value: '120' } });
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '120' } });
+    // One ratio refuses it...
+    expect(screen.getByTestId('tempo-quality')).toHaveTextContent('Target equals source tempo.');
+
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    fireEvent.click(screen.getByTestId('tempo-grid-confirmed'));
+    // ...and following the beats does not, because the beats are uneven.
+    expect(screen.getByTestId('tempo-variable-summary')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+  });
+
+  it('sends the confirmed grid to the service, and closes on success', async () => {
+    const onClose = jest.fn();
+    seedDoc();
+    const entry = varyingEntry();
+    mockGetTempo.mockReturnValue(entry);
+    render(<TempoDialog onClose={onClose} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    fireEvent.click(screen.getByTestId('tempo-grid-confirmed'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+
+    expect(mockApplyTempoChange).toHaveBeenCalledTimes(1);
+    const req = mockApplyTempoChange.mock.calls[0][0];
+    expect(req.variableRate?.beatSamples).toBe(entry.beatSamples);
+    expect(req.targetBpm).toBe(110);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it('surfaces a no-grid refusal from the service rather than closing', async () => {
+    const onClose = jest.fn();
+    seedDoc();
+    mockGetTempo.mockReturnValue(varyingEntry());
+    mockApplyTempoChange.mockResolvedValue({ ok: false, reason: 'no-grid' } as TempoChangeOutcome);
+    render(<TempoDialog onClose={onClose} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    fireEvent.click(screen.getByTestId('tempo-grid-confirmed'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+
+    expect(screen.getByTestId('tempo-apply-error')).toHaveTextContent(
+      'The confirmed beat grid has fewer than two beats in this region.'
+    );
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});

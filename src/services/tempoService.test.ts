@@ -1,6 +1,7 @@
 import {
   tempoRatio,
   checkTempoChange,
+  checkVariableTempoChange,
   applyTempoChange,
   detectRegionTempo,
   tempoQualityBand,
@@ -583,4 +584,340 @@ describe('detectRegionTempo', () => {
   it('returns null when there is no active document', () => {
     expect(detectRegionTempo()).toBeNull();
   });
+});
+
+// ---------------------------------------------------------------------------
+// R7 — the OPT-IN variable-rate path
+// ---------------------------------------------------------------------------
+
+/** A confirmed grid that ACCELERATES: intervals shrink from `bpmStart` to
+ * `bpmEnd` over `seconds`. Document-absolute, as `BeatGrid.beatSamples` is. */
+function accelGrid(bpmStart: number, bpmEnd: number, seconds: number, sr = SR): number[] {
+  const beats: number[] = [];
+  let t = 0;
+  while (t < seconds) {
+    beats.push(Math.round(t * sr));
+    t += 60 / (bpmStart + (bpmEnd - bpmStart) * (t / seconds));
+  }
+  return beats;
+}
+
+/** An exactly even grid at `bpm`. */
+function evenGrid(bpm: number, seconds: number, sr = SR): number[] {
+  const beats: number[] = [];
+  const spacing = (60 / bpm) * sr;
+  for (let i = 0; i * spacing < seconds * sr; i++) beats.push(Math.round(i * spacing));
+  return beats;
+}
+
+describe('R7 — the default is unchanged, and that is what keeps this a minor', () => {
+  it('a request WITHOUT variableRate never reaches the new code', async () => {
+    const seconds = 4;
+    const doc = seedDoc([sine(220, seconds)]);
+    const before = docLength(liveDoc(doc.id));
+
+    const result = await applyTempoChange({ sourceBpm: 120, targetBpm: 60 });
+    expect(result.ok).toBe(true);
+    // The constant path's exact contract: round(N * source/target).
+    expect(docLength(liveDoc(doc.id))).toBe(Math.round(before * 2));
+    expect(getHistory(doc.id).done).toEqual(['Match Tempo']);
+  }, 20000);
+
+  it('and the constant path still refuses a no-op ratio, grid or no grid', async () => {
+    const doc = seedDoc([sine(220, 2)]);
+    const before = docLength(liveDoc(doc.id));
+    const result = await applyTempoChange({ sourceBpm: 120, targetBpm: 120 });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('no-op');
+    expect(docLength(liveDoc(doc.id))).toBe(before);
+  });
+});
+
+describe('checkVariableTempoChange — guards and the plan', () => {
+  it('refuses with no document', () => {
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: [0, 1000] },
+    });
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe('no-document');
+  });
+
+  it('refuses without a variableRate request at all', () => {
+    seedDoc([sine(220, 2)]);
+    const check = checkVariableTempoChange({ sourceBpm: 110, targetBpm: 110 });
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe('no-grid');
+  });
+
+  it.each([
+    ['zero', 0],
+    ['negative', -10],
+    ['non-finite', Number.NaN],
+  ])('refuses a %s target BPM', (_label, targetBpm) => {
+    seedDoc([sine(220, 2)]);
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm,
+      variableRate: { beatSamples: [0, 1000, 2000] },
+    });
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe('invalid-bpm');
+  });
+
+  it('refuses a grid with fewer than two beats INSIDE the region', () => {
+    seedDoc([sine(220, 2)]);
+    // One beat in range, one far past the end.
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: [1000, 10 * SR] },
+    });
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe('no-grid');
+  });
+
+  it('does NOT refuse source === target — that is the CENTRAL use of this path', () => {
+    // The constant path calls this a no-op, correctly: one ratio of 1.0 does
+    // nothing. A variable-rate pass at MEAN ratio 1 moves every interior beat,
+    // which is exactly what varying material needs.
+    seedDoc([sine(220, 8)]);
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: accelGrid(100, 120, 8) },
+    });
+    expect(check.ok).toBe(true);
+    expect(check.ok && check.plan.beatCount).toBeGreaterThan(10);
+  });
+
+  it('DOES report a no-op when the grid genuinely already matches the target', () => {
+    seedDoc([sine(220, 8)]);
+    const check = checkVariableTempoChange({
+      sourceBpm: 120,
+      targetBpm: 120,
+      variableRate: { beatSamples: evenGrid(120, 8) },
+    });
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe('no-op');
+  });
+
+  it('scopes the grid to the SELECTION, not the document', () => {
+    const doc = seedDoc([sine(220, 8)]);
+    const all = accelGrid(100, 120, 8);
+    const whole = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: all },
+    });
+    useAppStore.getState().setSelection({ start: 2 * SR, end: 4 * SR });
+    const scoped = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: all },
+    });
+    expect(whole.ok).toBe(true);
+    expect(scoped.ok).toBe(true);
+    expect(scoped.ok && scoped.plan.beatCount).toBeLessThan((whole.ok && whole.plan.beatCount) as number);
+    expect(scoped.ok && scoped.plan.regionLength).toBe(2 * SR);
+    // Region-relative: the first beat handed to the effect is measured from
+    // the selection start, not from sample 0.
+    expect(scoped.ok && scoped.plan.extra.beatSamples[0]).toBeLessThan(SR);
+  });
+
+  it('reports the clamp count rather than silently under-delivering', () => {
+    seedDoc([sine(220, 8)]);
+    // A grid at 120 BPM asked to become 20 BPM needs ratio 6 > MAX_RATIO 4.
+    const check = checkVariableTempoChange({
+      sourceBpm: 120,
+      targetBpm: 20,
+      variableRate: { beatSamples: evenGrid(120, 8) },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.plan.clampedCount).toBe(check.plan.beatCount - 1);
+    expect(check.plan.map.maxLocalRatio).toBeCloseTo(MAX_RATIO, 6);
+  });
+
+  it('the target spacing it hands the worker is NOT rounded', () => {
+    seedDoc([sine(220, 8)]);
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 111,
+      variableRate: { beatSamples: accelGrid(100, 120, 8) },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    const exact = (60 / 111) * SR;
+    expect(check.plan.extra.targetSpacing).toBe(exact);
+    expect(Number.isInteger(check.plan.extra.targetSpacing)).toBe(false);
+  });
+});
+
+describe('applyTempoChange — the variable path end to end', () => {
+  it('stretches through the worker and lands the plan’s own outLength', async () => {
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    const grid = accelGrid(100, 120, seconds);
+
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: grid },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: grid },
+    });
+    expect(result.ok).toBe(true);
+    // The plan previewed the length the run produced — the preview and the
+    // worker build the map from the same pure function on the same inputs.
+    expect(docLength(liveDoc(docId))).toBe(check.plan.outLength);
+    expect(getHistory(docId).done).toEqual(['Match Tempo']);
+  }, 30000);
+
+  it('preserves pitch (the whole point of using WSOLA rather than resampling)', async () => {
+    const seconds = 8;
+    const doc = seedDoc([sine(441, seconds)]);
+    const docId = doc.id;
+    const before = dominantFreq(liveDoc(docId).channels[0], SR, 8192);
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 118,
+      variableRate: { beatSamples: accelGrid(100, 120, seconds) },
+    });
+    expect(result.ok).toBe(true);
+    const after = dominantFreq(liveDoc(docId).channels[0], SR, 8192);
+    expect(Math.abs(after - before)).toBeLessThan(15);
+  }, 30000);
+
+  it('reports failure and writes NOTHING when the stretch never lands', async () => {
+    // The fix-round-1 CRITICAL, re-armed for the new path: a worker load
+    // failure must not report success and must not write a beat grid
+    // describing a tempo change that never happened.
+    const seconds = 8;
+    const doc = seedDoc([sine(220, seconds)]);
+    const docId = doc.id;
+    const before = docLength(liveDoc(docId));
+    _setDspWorkerLoadFailure('boom');
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 130,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: accelGrid(100, 120, seconds) },
+    });
+    expect(result.ok).toBe(false);
+    expect(docLength(liveDoc(docId))).toBe(before);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+    expect(getHistory(docId).done).toEqual([]);
+  }, 30000);
+
+  it('refuses before touching the document when the grid is unusable', async () => {
+    const doc = seedDoc([sine(220, 4)]);
+    const before = docLength(liveDoc(doc.id));
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 130,
+      variableRate: { beatSamples: [500] },
+    });
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('no-grid');
+    expect(docLength(liveDoc(doc.id))).toBe(before);
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+});
+
+describe('applyTempoChange — beat markers after a VARIABLE match', () => {
+  it('lays them where the beats actually WENT, not at first + i*spacing', async () => {
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    // 120 BPM asked to become 30 BPM: ratio 4 exactly at the ceiling, so
+    // nothing clamps; then a grid whose intervals differ makes `placed`
+    // diverge from an arithmetic re-derivation.
+    const grid = accelGrid(100, 140, seconds);
+
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: grid },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: grid },
+    });
+    expect(result.ok).toBe(true);
+
+    const markers = liveMarkers(docId)
+      .filter((m) => m.name.startsWith('Beat '))
+      .sort((a, b) => a.positionSample - b.positionSample);
+    expect(markers).toHaveLength(check.plan.map.placed.length);
+    // EVERY marker, not just the first — a grid right at beat 0 and wrong
+    // after is the expected failure mode for anything derived from a map.
+    markers.forEach((m, i) => {
+      expect(m.positionSample).toBe(Math.round(check.plan.map.placed[i]));
+    });
+    expect(getHistory(docId).done).toEqual(['Match Tempo', 'Add Beat Markers']);
+  }, 30000);
+
+  it('offsets them by the SELECTION start', async () => {
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    const start = 2 * SR;
+    useAppStore.getState().setSelection({ start, end: 6 * SR });
+    const grid = accelGrid(100, 130, seconds);
+
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: grid },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: grid },
+    });
+    expect(result.ok).toBe(true);
+
+    const markers = liveMarkers(docId)
+      .filter((m) => m.name.startsWith('Beat '))
+      .sort((a, b) => a.positionSample - b.positionSample);
+    expect(markers.length).toBeGreaterThan(2);
+    markers.forEach((m, i) => {
+      expect(m.positionSample).toBe(start + Math.round(check.plan.map.placed[i]));
+    });
+    // And they are genuinely inside the selection, not at the file head.
+    expect(markers[0].positionSample).toBeGreaterThanOrEqual(start);
+  }, 30000);
+
+  it('does not lay a grid when it was not asked for', async () => {
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: accelGrid(100, 130, seconds) },
+    });
+    expect(result.ok).toBe(true);
+    expect(liveMarkers(doc.id).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+    expect(getHistory(doc.id).done).toEqual(['Match Tempo']);
+  }, 30000);
 });

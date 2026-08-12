@@ -2,6 +2,11 @@ import { echoEffect } from './EchoEffect';
 import { reverbEffect } from './ReverbEffect';
 import { chorusEffect } from './ChorusEffect';
 import { flangerEffect } from './FlangerEffect';
+import {
+  matchTempoVariableEffect,
+  MATCH_TEMPO_VARIABLE_EFFECT_ID,
+  type MatchTempoVariableExtra,
+} from './MatchTempoVariableEffect';
 import { getAllEffects } from '../EffectRegistry';
 import { registerAllEffects } from '../registerAll';
 import type { EffectDefinition, EffectParamValue } from '../types';
@@ -265,5 +270,94 @@ describe('time effects registration', () => {
   it('at least 15 effects are registered in total (6 basic + 2 eq + 3 dynamics + 4 time)', () => {
     registerAllEffects();
     expect(getAllEffects().length).toBeGreaterThanOrEqual(15);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// R7 — matchTempoVariableEffect: the side channel and the registration
+// ---------------------------------------------------------------------------
+
+describe('matchTempoVariableEffect registration', () => {
+  afterEach(() => {
+    delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+  });
+
+  it('is registered, hidden, and out of the effects browser', () => {
+    registerAllEffects();
+    const found = getAllEffects().find((e) => e.id === MATCH_TEMPO_VARIABLE_EFFECT_ID);
+    expect(found).toBeDefined();
+    expect(matchTempoVariableEffect.hidden).toBe(true);
+    expect(matchTempoVariableEffect.category).toBe('Time & Pitch');
+    // No params: everything it needs is the confirmed grid on the side channel,
+    // so a params-only dialog could never drive it.
+    expect(matchTempoVariableEffect.params).toEqual([]);
+  });
+
+  it.each([
+    ['no extra at all', undefined],
+    ['no beats', { beatSamples: undefined, targetSpacing: 1000 }],
+    ['one beat', { beatSamples: [0], targetSpacing: 1000 }],
+    ['a non-array grid', { beatSamples: 'nope', targetSpacing: 1000 }],
+    ['no spacing', { beatSamples: [0, 1000], targetSpacing: undefined }],
+    ['a zero spacing', { beatSamples: [0, 1000], targetSpacing: 0 }],
+    ['a non-finite spacing', { beatSamples: [0, 1000], targetSpacing: Number.NaN }],
+  ])('THROWS rather than silently passing the audio through: %s', (_label, extra) => {
+    // Thrown, not swallowed: effectRunner shows an error dialog and applies no
+    // edit. Returning the input unchanged would push an undo entry that did
+    // nothing and look like the feature silently failing.
+    (globalThis as { __effectExtra?: unknown }).__effectExtra = extra;
+    const x = new Float32Array(SR).fill(0.25);
+    expect(() => matchTempoVariableEffect.process([x], SR, {})).toThrow(/confirmed beat grid/i);
+  });
+
+  it('reads the grid off the side channel and actually stretches by it', () => {
+    // The wiring test: a map that is computed, threaded through and then not
+    // used is the defect F7 shipped 3999/3999 green with. An even 1000-sample
+    // grid asked for 2000 must double the LENGTH, and no other value proves
+    // the payload arrived.
+    const n = 8 * SR;
+    const beats: number[] = [];
+    for (let i = 0; i * 1000 < n; i++) beats.push(i * 1000);
+    (globalThis as { __effectExtra?: MatchTempoVariableExtra }).__effectExtra = {
+      beatSamples: beats,
+      targetSpacing: 2000,
+    };
+    const x = new Float32Array(n);
+    for (let i = 0; i < n; i++) x[i] = Math.sin((2 * Math.PI * 220 * i) / SR);
+    const out = matchTempoVariableEffect.process([x], SR, {});
+    expect(out.channels[0].length).toBe(2 * n);
+  });
+
+  it('honours the spacing it is given, not one it re-derives', () => {
+    const n = 4 * SR;
+    const beats: number[] = [];
+    for (let i = 0; i * 1000 < n; i++) beats.push(i * 1000);
+    const x = new Float32Array(n).fill(0.1);
+
+    (globalThis as { __effectExtra?: MatchTempoVariableExtra }).__effectExtra = {
+      beatSamples: beats,
+      targetSpacing: 500,
+    };
+    const half = matchTempoVariableEffect.process([x], SR, {});
+    expect(half.channels[0].length).toBe(n / 2);
+
+    (globalThis as { __effectExtra?: MatchTempoVariableExtra }).__effectExtra = {
+      beatSamples: beats,
+      targetSpacing: 1500,
+    };
+    const longer = matchTempoVariableEffect.process([x], SR, {});
+    expect(longer.channels[0].length).toBe(n * 1.5);
+  });
+
+  it('reports no removedSpans — it deletes nothing', () => {
+    const n = 2 * SR;
+    const beats: number[] = [];
+    for (let i = 0; i * 1000 < n; i++) beats.push(i * 1000);
+    (globalThis as { __effectExtra?: MatchTempoVariableExtra }).__effectExtra = {
+      beatSamples: beats,
+      targetSpacing: 1200,
+    };
+    const out = matchTempoVariableEffect.process([new Float32Array(n).fill(0.2)], SR, {});
+    expect(out.removedSpans).toBeUndefined();
   });
 });

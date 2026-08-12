@@ -255,6 +255,12 @@ export function buildTempoMap(
     const lo = d * minRatio;
     const hi = d * maxRatio;
     let w = targetSpacing;
+    // `<` and `<=` are interchangeable in both arms, and that is proven rather
+    // than assumed: at `w === lo` the assignment `w = lo` is a no-op, so the
+    // realised width, the ratio and the `w !== targetSpacing` clamp report all
+    // evaluate identically either way. Both forms were run as mutations and
+    // scored EQUIVALENT. The strict form is kept because it says what it means:
+    // only a request OUTSIDE the band is altered.
     if (w < lo) w = lo;
     else if (w > hi) w = hi;
     if (w !== targetSpacing) clampedIndices.push(acceptedIndices[j]);
