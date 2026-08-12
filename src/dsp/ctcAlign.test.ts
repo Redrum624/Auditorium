@@ -464,6 +464,28 @@ describe('the accuracy the UI is allowed to quote (F6 Ruling 5)', () => {
     expect(ALIGN_ACCURACY_SENTENCE).toContain(`${ALIGN_ACCURACY.sung.words} sung words`);
   });
 
+  it('quotes the figures that were MEASURED — written out here, not recomputed from the source', () => {
+    // Every expectation above derives its number from ALIGN_ACCURACY exactly
+    // the way the sentence does, so moving a count moves BOTH sides and the
+    // claim inflates in silence: withinWords 45 -> 51 turns "88%" into "100%"
+    // with the whole suite still green. These are the bank's own numbers,
+    // typed once, so changing what ships means re-typing them here.
+    expect(ALIGN_ACCURACY).toEqual({
+      sung: { words: 51, medianOnsetMs: 20, withinMs: 100, withinWords: 45 },
+      spoken: { words: 22, medianOnsetMs: 20, withinMs: 100, withinWords: 20 },
+      chunkSeconds: 30,
+      chunkedOnsetMaxMs: 40,
+    });
+    expect(ALIGN_ACCURACY_SENTENCE).toContain('within a median 20 ms');
+    expect(ALIGN_ACCURACY_SENTENCE).toContain('88% of them within 100 ms');
+    expect(ALIGN_ACCURACY_SENTENCE).toContain('over 51 sung words');
+    expect(ALIGN_ACCURACY_SENTENCE).toContain('91% within 100 ms');
+    expect(ALIGN_ACCURACY_SENTENCE).toContain('22-word spoken control');
+    // Six of the fifty-one are missed. A sentence that claimed otherwise would
+    // be promising something no measurement supports.
+    expect(ALIGN_ACCURACY_SENTENCE).not.toContain('100% of them');
+  });
+
   it('names the conditions, because a figure without them reads as a field expectation', () => {
     expect(ALIGN_ACCURACY_SENTENCE).toContain('one performance by one singer');
     expect(ALIGN_ACCURACY_SENTENCE).toContain('share no training data');
