@@ -568,6 +568,13 @@ describe('R7 — Correction mode', () => {
     expect(summary).toHaveTextContent(`x${(spacing / 22000).toFixed(4)}`);
     expect(summary).toHaveTextContent(`x${(spacing / 20000).toFixed(4)}`);
     expect(summary).toHaveTextContent('pitch unchanged');
+    // The DURATION segment the test's own name promises, and the one thing here
+    // that is not the region's own length: 30 s of region become 36.02 s,
+    // because the map's tail carries the slower of the two local ratios across
+    // the 29 s that follow the last beat. Written as a literal — replacing
+    // `outLength / sampleRate` with `regionSeconds` made the readout say
+    // "30.00 s → 30.00 s" and the whole suite stayed green.
+    expect(summary).toHaveTextContent('30.00 s → 36.02 s');
   });
 
   it('names how many beats the ratio bound held back', () => {
@@ -605,6 +612,38 @@ describe('R7 — Correction mode', () => {
     fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
     fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
     expect(screen.getByTestId('tempo-variable-quality')).toHaveTextContent('Worst segment: extreme');
+  });
+
+  it.each([
+    // The test above only ever exercises the FAST side: its ratios are 1.09 and
+    // a clamped 4, so `minLocalRatio` is the transparent one and dropping the
+    // `minLocalRatio` arm of `worstBand` entirely left the suite green — a bar
+    // slowed to 0.40x would have read "Transparent everywhere", the exact
+    // reassurance the code comment forbids. Every row below keeps the FAST side
+    // transparent (interval 22000 -> ratio 1.0934 at 110 BPM) and moves the SLOW
+    // side, so only the min arm can produce the expected label. The two band
+    // strings that appeared in no test at all are pinned here in full.
+    ['both sides transparent', 47000, 'Transparent everywhere'],
+    ['the slow side merely good (0.60x)', 63000, 'Worst segment: good — slight transient smearing'],
+    [
+      'the slow side extreme (0.40x), unclamped',
+      83000,
+      'Worst segment: extreme — expect flanging on sustained tones',
+    ],
+  ])('labels the worst segment when the SLOW side is the bad one: %s', (_label, lastBeat, expected) => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(
+      makeEntry({ bpm: 120, confidence: 0.8, beatSamples: Int32Array.from([1000, 23000, lastBeat as number]) })
+    );
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+
+    // Nothing was clamped, so the slow ratio really is the realised one and not
+    // a bound the map hit on the way past.
+    expect(screen.queryByTestId('tempo-variable-clamped')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tempo-variable-quality')).toHaveTextContent(expected as string);
   });
 
   it('hides the one-ratio summary and quality line while following the beats', () => {
