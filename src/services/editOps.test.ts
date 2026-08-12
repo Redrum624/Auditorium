@@ -909,6 +909,115 @@ describe("marker remap 'compose' (F7 Vocal Chain)", () => {
   });
 });
 
+/**
+ * The clamp family's EIGHTH member (W1-1). Every operation below pairs a
+ * mutator that clamps into `[0, docLength]` internally with consumers that do
+ * not — the marker remap, the post-edit cursor, and Silence's zeros allocation.
+ * The fixtures are the review's verified reproductions, on a 4000-sample
+ * document, and each one is sized so that BOTH the resolved answer and the
+ * raw-selection answer are non-zero, in range, and different: a fixture whose
+ * wrong answer collapses onto 0 (or onto the document end) cannot tell a fixed
+ * clamp from a floor that happens to catch it.
+ */
+describe('out-of-bounds selections resolve ONCE (clamp family, fifth application)', () => {
+  const LEN = 4000;
+
+  function setMarkers(docId: string, positions: number[]): void {
+    const list = positions.map((p, i) => ({ id: `m${i}`, name: `M${i}`, positionSample: p }));
+    useAppStore.getState().setMarkersForDoc(docId, list);
+  }
+
+  function markerPositions(docId: string): number[] {
+    return (useAppStore.getState().markers[docId] ?? []).map((m) => m.positionSample);
+  }
+
+  it('Silence with an end past the document leaves the length unchanged (it grew 4000 -> 9000)', () => {
+    const doc = addDoc([ramp(LEN)]);
+    useAppStore.getState().setSelection({ start: 2000, end: 9000 });
+
+    silenceSelection();
+
+    // The zeros allocation used to be `end - start` = 7000 while `replaceRegion`
+    // removed only the 2000 samples that exist: 4000 - 2000 + 7000 = 9000.
+    expect(docLength(activeDoc())).toBe(LEN);
+    const out = activeDoc().channels[0];
+    expect(out[1999]).toBe(2000); // outside the region, untouched
+    expect(out[2000]).toBe(0);
+    expect(out[LEN - 1]).toBe(0); // zeroed to the true end of the document
+  });
+
+  it('Cut with a start below zero remaps markers and the cursor against the region the audio used', () => {
+    const doc = addDoc([ramp(LEN)]);
+    setMarkers(doc.id, [500]);
+    useAppStore.getState().setSelection({ start: -5000, end: 100 });
+
+    cutSelection();
+
+    // Audio removes [0,100); the marker at 500 therefore lands at 400. Against
+    // the raw pair the 'delete' remap shifted it by 5100, into the floor at 0.
+    expect(docLength(activeDoc())).toBe(LEN - 100);
+    expect(markerPositions(doc.id)).toEqual([400]);
+    expect(useAppStore.getState().cursorSample).toBe(0); // not -5000
+    expect(getClipboard()!.channels[0].length).toBe(100);
+  });
+
+  it('Delete with a start below zero shifts by what was removed, not by the raw span', () => {
+    const doc = addDoc([ramp(LEN)]);
+    setMarkers(doc.id, [1000]);
+    useAppStore.getState().setSelection({ start: -100, end: 200 });
+
+    deleteSelection();
+
+    // Removed [0,200) -> 1000 lands at 800. The raw span (300) gave 700.
+    expect(docLength(activeDoc())).toBe(LEN - 200);
+    expect(markerPositions(doc.id)).toEqual([800]);
+    expect(useAppStore.getState().cursorSample).toBe(0); // not -100
+  });
+
+  it('Trim with a start below zero shifts markers by the kept region start, not by the raw one', () => {
+    const doc = addDoc([ramp(LEN)]);
+    setMarkers(doc.id, [500]);
+    useAppStore.getState().setSelection({ start: -1000, end: 3000 });
+
+    trimToSelection();
+
+    // Keeps [0,3000): the marker at 500 stays at 500. The raw 'trim' start of
+    // -1000 shifted it right by 1000 instead.
+    expect(docLength(activeDoc())).toBe(3000);
+    expect(markerPositions(doc.id)).toEqual([500]);
+  });
+
+  it('Paste over a selection starting below zero remaps and places the cursor from the resolved start', () => {
+    const doc = addDoc([ramp(LEN)]);
+    setMarkers(doc.id, [2000]);
+    setClipboard({ channels: [ramp(10, 1000)], sampleRate: 44100 });
+    useAppStore.getState().setSelection({ start: -500, end: 1000 });
+
+    pasteAtCursor();
+
+    // Replaced [0,1000) with 10 samples: 2000 shifts by (10 - 1000) to 1010,
+    // and the cursor lands at 0 + 10. The raw pair gave 510 and -490.
+    expect(docLength(activeDoc())).toBe(LEN - 1000 + 10);
+    expect(markerPositions(doc.id)).toEqual([1010]);
+    expect(useAppStore.getState().cursorSample).toBe(10);
+  });
+
+  it('Paste at a cursor past the document inserts at the end and says so to the remap and the cursor', () => {
+    const doc = addDoc([ramp(LEN)]);
+    setMarkers(doc.id, [1000, LEN]);
+    setClipboard({ channels: [ramp(10, 1000)], sampleRate: 44100 });
+    useAppStore.getState().setCursor(9000);
+
+    pasteAtCursor();
+
+    // `insertAt` clamps to 4000, so the marker sitting exactly at the old end
+    // rides the insert to 4010; the raw start of 9000 left it behind at 4000.
+    expect(docLength(activeDoc())).toBe(LEN + 10);
+    expect(markerPositions(doc.id)).toEqual([1000, LEN + 10]);
+    expect(useAppStore.getState().cursorSample).toBe(LEN + 10); // not 9010
+  });
+});
+
 describe('silenceSelection', () => {
   it('zeroes the region in place, preserving length, outside data and the selection', () => {
     const doc = addDoc([ramp(10), ramp(10, 10)]);

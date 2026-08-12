@@ -295,12 +295,48 @@ function activeDoc(): AudioDocument | null {
   return s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
 }
 
+/**
+ * The region ONE edit operation acts on: the live selection clamped into
+ * `[0, docLength]` **exactly as `clampRange` clamps it** (`AudioDocument.ts`),
+ * so the region the audio mutator uses and the region every other consumer
+ * describes cannot differ.
+ *
+ * Fifth application of one ruling (R7's `VariableTempoPlan.regionStart`, L1's
+ * `resolveRegion` in `tempoService.ts`, L9's `runEffectOnSelection`, and the
+ * chain/align readers): **resolve once, do not clamp twice and hope the two
+ * agree.** The operations below pair a mutator that clamps internally
+ * (`deleteRegion`/`replaceRegion`/`cloneRegion`) with three consumers that do
+ * not — the {@link MarkerRemap} descriptor, the post-edit `cursorSample`, and
+ * Silence's zeros allocation — so reading the raw selection here gave the
+ * markers, the cursor and the allocation a different region from the one the
+ * audio used. Two verified consequences on a 4000-sample document:
+ * Cut with `{-5000, 100}` removed `[0,100)` but emitted a `delete` remap over
+ * `[-5000,100)`, shifting a marker at 500 by 5100 into `remapMarkers`' floor at
+ * 0 instead of 400, and left the cursor at −5000; Silence with `{2000, 9000}`
+ * allocated 7000 zeros while `replaceRegion` removed only the 2000 samples that
+ * exist, GROWING the document 4000 → 9000 — the one operation documented as
+ * leaving length unchanged. No UI route builds such a selection (the editor
+ * gestures clamp, select-all uses `docLength`), so both were latent; the store
+ * API is public and `setSelection`/`setCursor` store whatever they are handed.
+ *
+ * Inverted selections (`start > end` after clamping) are deliberately NOT
+ * handled here: `clampRange` throws `RangeError` on them, which is the recorded
+ * ruling deferred to this family's next round.
+ */
+function resolveSelection(doc: AudioDocument, selection: SelectionRange): { start: number; end: number } {
+  const len = docLength(doc);
+  return {
+    start: Math.min(Math.max(selection.start, 0), len),
+    end: Math.min(Math.max(selection.end, 0), len),
+  };
+}
+
 /** Copies the selection to the clipboard, then removes it. Requires a selection. */
 export function cutSelection(): void {
   const doc = activeDoc();
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
-  const { start, end } = selection;
+  const { start, end } = resolveSelection(doc, selection);
   setClipboard({ channels: cloneRegion(doc, start, end), sampleRate: doc.sampleRate });
   applyEdit(
     'Cut',
@@ -340,7 +376,7 @@ export function pasteAtCursor(): void {
   const { selection, cursorSample } = useAppStore.getState();
 
   if (selection) {
-    const { start, end } = selection;
+    const { start, end } = resolveSelection(doc, selection);
     applyEdit(
       'Paste',
       doc.id,
@@ -349,12 +385,20 @@ export function pasteAtCursor(): void {
       { type: 'replace', start, end, length: insertLength }
     );
   } else {
+    // The insert arm's single coordinate gets the same treatment for the same
+    // reason: `insertAt` clamps the position into `[0, docLength]` internally,
+    // while the 'insert' remap and the post-edit cursor read it raw — a cursor
+    // past the end inserted the material AT the end but told the remap the
+    // insertion happened beyond it, so a marker sitting exactly at the old
+    // length stayed put instead of riding the insert, and the cursor landed
+    // outside the document.
+    const insertPos = Math.min(Math.max(cursorSample, 0), docLength(doc));
     applyEdit(
       'Paste',
       doc.id,
-      (d) => insertAt(d, cursorSample, data),
-      { selection: null, cursorSample: cursorSample + insertLength },
-      { type: 'insert', start: cursorSample, length: insertLength }
+      (d) => insertAt(d, insertPos, data),
+      { selection: null, cursorSample: insertPos + insertLength },
+      { type: 'insert', start: insertPos, length: insertLength }
     );
   }
 }
@@ -364,7 +408,7 @@ export function deleteSelection(): void {
   const doc = activeDoc();
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
-  const { start, end } = selection;
+  const { start, end } = resolveSelection(doc, selection);
   applyEdit(
     'Delete',
     doc.id,
@@ -379,7 +423,7 @@ export function trimToSelection(): void {
   const doc = activeDoc();
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
-  const { start, end } = selection;
+  const { start, end } = resolveSelection(doc, selection);
   applyEdit(
     'Trim',
     doc.id,
@@ -397,7 +441,7 @@ export function silenceSelection(): void {
   const doc = activeDoc();
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
-  const { start, end } = selection;
+  const { start, end } = resolveSelection(doc, selection);
   const zeros = doc.channels.map(() => new Float32Array(end - start));
   // No `after`: leaving selection/cursor as-is preserves them (and redo restores them).
   applyEdit('Silence', doc.id, (d) => replaceRegion(d, start, end, zeros));
