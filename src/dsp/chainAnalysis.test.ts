@@ -454,12 +454,22 @@ describe('measureStageDelta', () => {
   });
 
   it('leaves the sample-wise fields null when the length changed, and still reports levels', () => {
+    // The two fills are DIFFERENT (0.5 in, 0.25 out) and each of the four level
+    // fields is asserted against its own literal. With 0.5 on both sides — which
+    // is what this fixture used to be, and the untouched-copy fixture above is by
+    // construction — before and after are the same number, so swapping the two
+    // arguments in `measureStageDelta` changed nothing any test could see, and
+    // every stage line in both chain dialogs would have read backwards: a stage
+    // that lifted the level would be shown lowering it.
     const a = [Float32Array.from(new Array(100).fill(0.5))];
-    const b = [Float32Array.from(new Array(50).fill(0.5))];
+    const b = [Float32Array.from(new Array(50).fill(0.25))];
     const delta = measureStageDelta(a, b);
     expect(delta.identicalFraction).toBeNull();
     expect(delta.differenceRmsDb).toBeNull();
-    expect(delta.rmsAfterDb).toBeCloseTo(toDb(0.5), 6);
+    expect(delta.rmsBeforeDb).toBeCloseTo(toDb(0.5), 6);
+    expect(delta.rmsAfterDb).toBeCloseTo(toDb(0.25), 6);
+    expect(delta.peakBeforeDb).toBeCloseTo(toDb(0.5), 6);
+    expect(delta.peakAfterDb).toBeCloseTo(toDb(0.25), 6);
   });
 
   it('leaves them null when the CHANNEL COUNT changed', () => {

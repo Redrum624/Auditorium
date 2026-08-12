@@ -49,6 +49,16 @@ function scaled(x: Float32Array, g: number): Float32Array {
   return out;
 }
 
+/** Alternating +/-amplitude at exactly `levelDb`: |x| is that amplitude at every
+ * sample, so the detector envelope settles ON the figure rather than near it and
+ * a percentile can be asserted against a literal. */
+function flatAt(n: number, levelDb: number): Float32Array {
+  const amp = Math.pow(10, levelDb / 20);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = i % 2 === 0 ? amp : -amp;
+  return out;
+}
+
 /** A signal at `loudAmp` for `loudSec`, then `quietAmp` for `quietSec`. */
 function loudThenQuiet(loudSec: number, quietSec: number, loudAmp: number, quietAmp: number): Float32Array {
   const loud = Math.round(loudSec * SR);
@@ -161,15 +171,41 @@ describe('activeEnvelopeSpread', () => {
     }
   });
 
-  it('reports p10 <= p50 <= p90 and a spread that is their difference', () => {
-    const s = activeEnvelopeSpread([loudThenQuiet(4, 1, 0.4, 0.001)], SR);
+  it('reports each percentile as the level it actually is, on a fixture whose answer is arithmetic', () => {
+    // The fixture this test used to run on was `loudThenQuiet(4, 1, 0.4, 0.001)`,
+    // whose quiet second is 52 dB down and therefore GATED OUT — leaving a
+    // single-level active set where p10, p50 and p90 all read the same number.
+    // Against that, `spreadDb === p90 - p10` is a restatement of the line above
+    // it and every percentile could be any percentile.
+    //
+    // Two settled levels 18 dB apart, both inside the 20 dB gate, and the quiet
+    // one occupying 16 % of the run: p10 lands in it, p25 and p90 do not. The
+    // levels are exact because |x| is constant at each of them, so the detector
+    // settles ON the figure rather than near it.
+    const signal = new Float32Array(Math.round(10 * SR));
+    const quietSamples = Math.round(1.6 * SR);
+    signal.set(flatAt(quietSamples, -24), 0);
+    signal.set(flatAt(signal.length - quietSamples, -6), quietSamples);
+
+    const s = activeEnvelopeSpread([signal], SR);
     expect(s).not.toBeNull();
     const v = s as NonNullable<typeof s>;
+
+    expect(v.p10Db).toBeCloseTo(-24, 1);
+    expect(v.p50Db).toBeCloseTo(-6, 1);
+    expect(v.p90Db).toBeCloseTo(-6, 1);
+    expect(v.spreadDb).toBeCloseTo(18, 1);
+
+    // The ordering and the identity still hold, but they are no longer the only
+    // thing said about the three numbers.
     expect(v.p10Db).toBeLessThanOrEqual(v.p50Db);
     expect(v.p50Db).toBeLessThanOrEqual(v.p90Db);
     expect(v.spreadDb).toBeCloseTo(v.p90Db - v.p10Db, 10);
-    expect(v.thresholdDb).toBeCloseTo(activeThresholdDb([loudThenQuiet(4, 1, 0.4, 0.001)], SR) as number, 10);
-    expect(v.activeFraction).toBeGreaterThan(0);
+    expect(v.thresholdDb).toBeCloseTo(activeThresholdDb([signal], SR) as number, 10);
+    expect(v.thresholdDb).toBeCloseTo(-6 - ACTIVE_GATE_DB, 1);
+    // The quiet level is INSIDE the gate — the whole point of the fixture — so
+    // essentially everything counts as active.
+    expect(v.activeFraction).toBeGreaterThan(0.99);
     expect(v.activeFraction).toBeLessThanOrEqual(1);
   });
 
