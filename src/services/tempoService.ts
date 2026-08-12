@@ -62,13 +62,26 @@ import { pushMarkerUndo } from './editOps';
  * `'plan-mismatch'` is R7's too, and is the only refusal reported AFTER an edit
  * has already been committed: the audio the worker returned does not have the
  * length the plan said it would, so the plan can no longer be trusted to say
- * where anything is. See {@link applyVariableTempoChange}. */
+ * where anything is. See {@link applyVariableTempoChange}.
+ *
+ * `'empty-region'` is the RESOLVED region collapsing to nothing — a selection
+ * that clamps to `end <= start`, e.g. `{4000, 9000}` on a 4000-sample document
+ * once {@link resolveRegion} has done its work. Both chains already refuse this
+ * case (`end <= start` -> `null`, test-pinned); the tempo paths did not, and
+ * the constant one ran the whole way through on it: `planStretch` returned its
+ * 'empty' plan, `replaceRegion` allocated fresh channels holding the same
+ * samples, the `postDoc.channels !== doc.channels` gate passed on that fresh
+ * allocation, and the call returned `{ok: true}` having pushed a 'Match Tempo'
+ * undo entry and dirtied the document for an edit that changed nothing. The
+ * guard is placed BEFORE any effect runs, so nothing is committed to refuse
+ * afterwards. */
 export type TempoRefusal =
   | 'no-document'
   | 'invalid-bpm'
   | 'no-op'
   | 'out-of-range'
   | 'no-grid'
+  | 'empty-region'
   | 'plan-mismatch';
 
 export interface TempoChangeRequest {
@@ -291,6 +304,12 @@ export function checkVariableTempoChange(req: ApplyTempoChangeRequest): Variable
   // shared {@link resolveRegion}, which is what keeps the constant path's
   // resolution from drifting away from this one again.
   const { start, end } = resolveRegion(doc);
+  // A resolved region that collapsed to nothing, refused by name. `buildTempoMap`
+  // already refuses it — `inLen <= 0` returns its own 'empty-region' identity map,
+  // which the `map.refusal` arm below turns into `'no-grid'` — so this path never
+  // ran an effect on it; what this line adds is the RIGHT reason, and the same one
+  // the constant path now gives, rather than blaming a grid that was fine.
+  if (end <= start) return { ok: false, reason: 'empty-region' };
   const regionLength = end - start;
 
   const beats = regionRelativeBeats(req.variableRate.beatSamples, start, end);
@@ -593,6 +612,12 @@ function layBeatGridAtCurrentTempo(req: ApplyTempoChangeRequest): TempoChangeOut
   if (req.firstBeatSample == null) return { ok: false, reason: 'no-op' };
 
   const { start, end } = resolveRegion(doc);
+  // Named rather than reported as a bare `{ok: false}`. This path already
+  // no-ops on an empty region by arithmetic — `regionEnd === start` makes
+  // `computeBeatMarkerPositions` produce no candidate, so no marker is written
+  // and no undo entry is pushed — but "the grid laid nothing" and "there was no
+  // region to lay it over" are different answers and the dialog shows one line.
+  if (end <= start) return { ok: false, reason: 'empty-region' };
 
   const laid = addBeatMarkersAfterStretch(
     doc.id,
@@ -687,6 +712,13 @@ export async function applyTempoChange(
   const docId = doc.id;
   const sampleRate = doc.sampleRate;
   const { start, end } = resolveRegion(doc);
+  // BEFORE the effect, because after it there is an undo entry to un-push.
+  // A region that clamps to nothing has no samples to stretch, and running
+  // anyway committed a 'Match Tempo' entry over a byte-identical document: the
+  // 'empty' plan returns the input unchanged, `replaceRegion` still allocates
+  // fresh channel arrays, and the `postDoc.channels !== doc.channels` gate below
+  // reads that fresh allocation as "applied". Same refusal both chains make.
+  if (end <= start) return { ok: false, reason: 'empty-region' };
 
   await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, {
     onProgress,

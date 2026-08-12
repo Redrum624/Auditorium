@@ -97,6 +97,8 @@ function refusalMessage(reason: TempoRefusal | undefined): string {
       return 'Target tempo is out of the supported range.';
     case 'no-grid':
       return 'The confirmed beat grid has fewer than two beats in this region.';
+    case 'empty-region':
+      return 'The selected region is empty.';
     case 'no-document':
       return 'No document is open.';
     default:

@@ -840,6 +840,107 @@ describe('applyTempoChange — the variable path end to end', () => {
   });
 });
 
+/**
+ * W1-5 — the resolved region that collapsed to nothing.
+ *
+ * The chains refuse `end <= start` outright (test-pinned, `runVocalChain` /
+ * `runCoverChain` resolve `null`); the tempo paths did not. The constant path
+ * ran the whole way through: `planStretch` returns its 'empty' plan,
+ * `replaceRegion` allocates fresh channel arrays holding the same samples, the
+ * `postDoc.channels !== doc.channels` gate reads that fresh allocation as
+ * "applied", and the call returned `{ok: true}` with a 'Match Tempo' undo entry
+ * pushed and the document dirtied for an edit that changed nothing.
+ */
+describe('applyTempoChange — a selection that clamps to an empty region', () => {
+  const SECONDS = 2;
+  const LEN = SECONDS * SR;
+
+  function seedAndSelect(sel: { start: number; end: number }): AudioDocument {
+    const doc = seedDoc([sine(220, SECONDS)]);
+    useAppStore.getState().setSelection(sel);
+    return doc;
+  }
+
+  it.each([
+    ['entirely past the end', { start: LEN, end: LEN * 3 }],
+    ['starting past the end', { start: LEN + 5000, end: LEN * 3 }],
+    ['entirely below zero', { start: -9000, end: -5000 }],
+  ])('refuses the constant path and commits nothing (%s)', async (_label, sel) => {
+    const doc = seedAndSelect(sel);
+    const channelsBefore = liveDoc(doc.id).channels;
+
+    const result = await applyTempoChange({ sourceBpm: 110, targetBpm: 130 });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('empty-region');
+    // Not merely "the length is the same": the exact pre-call channel arrays
+    // are still in the store, so no `replaceRegion` allocation happened at all.
+    expect(liveDoc(doc.id).channels).toBe(channelsBefore);
+    expect(liveDoc(doc.id).dirty).toBe(false);
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('refuses the variable path by the same name, before the map is built', async () => {
+    const doc = seedAndSelect({ start: LEN, end: LEN * 3 });
+    const channelsBefore = liveDoc(doc.id).channels;
+    const req = {
+      sourceBpm: 110,
+      targetBpm: 130,
+      variableRate: { beatSamples: accelGrid(100, 120, SECONDS) },
+    };
+
+    // `buildTempoMap` already refused this by its own `inLen <= 0` arm, so the
+    // effect never ran — but it reported `'no-grid'`, blaming a grid that was
+    // fine. The plan the dialog previews and the outcome Apply returns now
+    // agree, and both name the region.
+    const check = checkVariableTempoChange(req);
+    expect(check.ok).toBe(false);
+    expect(check.ok === false && check.reason).toBe('empty-region');
+
+    const result = await applyTempoChange(req);
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('empty-region');
+    expect(liveDoc(doc.id).channels).toBe(channelsBefore);
+    expect(liveDoc(doc.id).dirty).toBe(false);
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('refuses the ratio-1 beat-grid path by name rather than as a bare failure', async () => {
+    const doc = seedAndSelect({ start: LEN, end: LEN * 3 });
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110, // ratio 1 -> the no-stretch grid path
+      addBeatMarkers: true,
+      firstBeatSample: 0,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.reason).toBe('empty-region');
+    expect(liveMarkers(doc.id)).toHaveLength(0);
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('still runs when the selection merely OVERHANGS the end — the guard is on the resolved region', async () => {
+    // The other side of the boundary, and the reason the guard reads the
+    // RESOLVED pair: this selection is just as out of bounds, but it clamps to
+    // a second of real audio and must be stretched, not refused.
+    const doc = seedAndSelect({ start: LEN / 2, end: LEN * 3 });
+
+    const result = await applyTempoChange({ sourceBpm: 110, targetBpm: 130 });
+
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBeUndefined();
+    // 110 -> 130 BPM is ratio 0.846, so the stretched half gets SHORTER while
+    // the untouched half does not: the new length sits strictly between them,
+    // which is the signature of exactly the resolved region having been warped.
+    const newLen = docLength(liveDoc(doc.id));
+    expect(newLen).toBeLessThan(LEN);
+    expect(newLen).toBeGreaterThan(LEN / 2);
+    expect(getHistory(doc.id).done).toEqual(['Match Tempo']);
+  }, 30000);
+});
+
 describe('applyTempoChange — beat markers after a VARIABLE match', () => {
   it('lays them where the beats actually WENT, not at first + i*spacing', async () => {
     const seconds = 8;
