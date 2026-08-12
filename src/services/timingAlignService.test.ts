@@ -15,6 +15,7 @@ import {
   MAX_SYLLABLE_MARKERS,
 } from './timingAlignService';
 import { alignTimingEffect, ALIGN_TIMING_EFFECT_ID, type AlignTimingExtra } from '../effects/time/AlignTimingEffect';
+import { MATCH_TEMPO_VARIABLE_EFFECT_ID } from '../effects/time/MatchTempoVariableEffect';
 import { getVisibleEffects, getAllEffects } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
 import { runTempoAnalysis, clearAllTempo } from './tempoAnalysis';
@@ -90,8 +91,19 @@ describe('alignTimingEffect registration', () => {
   it('is HIDDEN from every user-facing list', () => {
     expect(alignTimingEffect.hidden).toBe(true);
     expect(getVisibleEffects().map((e) => e.id)).not.toContain(ALIGN_TIMING_EFFECT_ID);
+    // The hidden roster, named. `- 1` used to stand here and it encoded "there
+    // is exactly one hidden effect" — a fact, not a property, and R7's hidden
+    // `match-tempo-variable` falsified it. Deriving the count from `!e.hidden`
+    // instead would mirror `getVisibleEffects` line for line and could never
+    // fail, so the roster is asserted by ID: a third hidden effect has to be
+    // added here deliberately rather than sliding a count along.
+    const hiddenIds = getAllEffects()
+      .filter((e) => e.hidden)
+      .map((e) => e.id)
+      .sort();
+    expect(hiddenIds).toEqual([ALIGN_TIMING_EFFECT_ID, MATCH_TEMPO_VARIABLE_EFFECT_ID].sort());
     // The filter is a filter, not a truncation: everything else survives it.
-    expect(getVisibleEffects()).toHaveLength(getAllEffects().length - 1);
+    expect(getVisibleEffects()).toHaveLength(getAllEffects().length - hiddenIds.length);
     expect(getVisibleEffects().map((e) => e.id)).toContain('pitch-correct');
     expect(getVisibleEffects().map((e) => e.id)).toContain('amplify');
   });
