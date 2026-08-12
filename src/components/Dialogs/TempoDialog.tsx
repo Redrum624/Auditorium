@@ -11,6 +11,7 @@ import {
 import {
   applyTempoChange,
   checkTempoChange,
+  checkVariableTempoChange,
   detectRegionTempo,
   tempoQualityBand,
   tempoRatio,
@@ -28,6 +29,20 @@ import DialogShell from './DialogShell';
 const CHIP = { padding: '2px 8px', fontSize: 11 } as const;
 
 type Mode = 'bpm' | 'percent';
+
+/**
+ * R7 — how the correction is applied across the region.
+ *
+ * `'one-ratio'` is the DEFAULT and is today's behaviour, byte for byte: one
+ * ratio for the whole region. `'follow-beats'` builds a tempo map from the
+ * confirmed grid and corrects beat by beat. Opt-in, because a user who reached
+ * for Match Tempo on a steady loop does not want per-bar correction applied to
+ * it — and because a wrong tempo map is wrong differently in every bar, which
+ * is far harder to hear than a uniformly wrong ratio and impossible to undo by
+ * ear. So the variable path is entered deliberately, against a grid the user
+ * has confirmed (RULING 1).
+ */
+type Correction = 'one-ratio' | 'follow-beats';
 
 /** A lightweight view over either a doc-scoped `TempoEntry` (cache read) or an
  * ad-hoc `RegionTempoDetection` (`detectRegionTempo`) -- whichever is
@@ -80,6 +95,8 @@ function refusalMessage(reason: TempoRefusal | undefined): string {
       return 'Enter a valid source and target tempo.';
     case 'out-of-range':
       return 'Target tempo is out of the supported range.';
+    case 'no-grid':
+      return 'The confirmed beat grid has fewer than two beats in this region.';
     case 'no-document':
       return 'No document is open.';
     default:
@@ -135,6 +152,11 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   const [targetBpmDraft, setTargetBpmDraft] = useState('');
   const [percentDraft, setPercentDraft] = useState('');
   const [addBeatMarkers, setAddBeatMarkers] = useState(false);
+  // R7. `correction` defaults to today's behaviour; `gridConfirmed` is RULING
+  // 1's gate and is cleared by every action that changes the grid, so it can
+  // never outlive the thing it confirmed (F9's `AlignTimingDialog` precedent).
+  const [correction, setCorrection] = useState<Correction>('one-ratio');
+  const [gridConfirmed, setGridConfirmed] = useState(false);
 
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -193,7 +215,33 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   // "no stretch at ratio 1" half; this only re-enables the button for it.
   const noOpWithMarkers =
     check !== null && !check.ok && check.reason === 'no-op' && addBeatMarkers && hasBeatPhase;
-  const canApply = validSource && validTarget && !busy && ((check !== null && check.ok) || noOpWithMarkers);
+
+  // R7. The variable path needs a fresh, own-analysis grid with at least two
+  // beats INSIDE the region — one measured interval is the minimum from which a
+  // local tempo can be read at all. `hasBeatPhase` already carries the
+  // fresh-and-own half (a stale grid describes pre-edit audio).
+  // Held as the ARRAY rather than as a boolean so every use below is narrowed
+  // by construction: there is no path on which the variable request is built
+  // from a grid this dialog has not established is present and fresh.
+  const confirmableGrid: Int32Array | null = hasBeatPhase && docEntry ? docEntry.beatSamples : null;
+  const beatsInRegion = confirmableGrid
+    ? Array.from(confirmableGrid).filter((b) => b >= regionStart && b < regionEnd).length
+    : 0;
+  const canFollowBeats = beatsInRegion >= 2;
+  const variableCheck =
+    correction === 'follow-beats' && confirmableGrid !== null && canFollowBeats && validTarget
+      ? checkVariableTempoChange({
+          sourceBpm: sourceNum,
+          targetBpm: targetNum,
+          variableRate: { beatSamples: confirmableGrid },
+        })
+      : null;
+  const variablePlan = variableCheck?.ok ? variableCheck.plan : null;
+
+  const canApply =
+    correction === 'follow-beats'
+      ? !busy && gridConfirmed && variablePlan !== null
+      : validSource && validTarget && !busy && ((check !== null && check.ok) || noOpWithMarkers);
 
   async function handleDetect() {
     if (!doc || detecting) return;
@@ -203,6 +251,7 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
       setDocEntry(result);
       setRegionOverride(null);
       setCorrectionFailed(false);
+      setGridConfirmed(false);
       setLastEstimateSelection(useAppStore.getState().selection);
       if (result?.bpm != null) setSourceDraft(String(result.bpm));
     } finally {
@@ -214,6 +263,7 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
     const result = detectRegionTempo();
     setRegionOverride(result);
     setCorrectionFailed(false);
+    setGridConfirmed(false);
     setLastEstimateSelection(useAppStore.getState().selection);
     if (result?.bpm != null) setSourceDraft(String(result.bpm));
   }
@@ -225,6 +275,9 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   async function correctOctave(periodMultiplier: 2 | 0.5) {
     if (!doc || !docEntry || docEntry.bpm === null) return;
     setCorrectionFailed(false);
+    // A ×2 / ÷2 re-track replaces the beat positions themselves, so any earlier
+    // confirmation described a grid that no longer exists (RULING 1).
+    setGridConfirmed(false);
     const newPeriodFrames = docEntry.periodFrames / periodMultiplier;
     const result = await regridTempo(doc.id, newPeriodFrames);
     if (result && result.bpm !== null) {
@@ -254,7 +307,17 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
     try {
       const firstBeatSample = docEntry ? firstBeatAtOrAfter(docEntry.beatSamples, regionStart) : null;
       const outcome = await applyTempoChange(
-        { sourceBpm: sourceNum, targetBpm: targetNum, addBeatMarkers, firstBeatSample },
+        {
+          sourceBpm: sourceNum,
+          targetBpm: targetNum,
+          addBeatMarkers,
+          firstBeatSample,
+          // Absent unless the user explicitly chose it AND confirmed the grid;
+          // absent is today's behaviour, byte for byte.
+          ...(correction === 'follow-beats' && gridConfirmed && confirmableGrid !== null
+            ? { variableRate: { beatSamples: confirmableGrid } }
+            : {}),
+        },
         setProgress
       );
       if (outcome.ok) {
@@ -295,6 +358,31 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
       qualityClass = 'text-[#e0a458]';
     }
   }
+
+  // R7. The variable path has a RANGE of local ratios, so it is labelled by its
+  // WORST segment, never by an average: an average that reads 'transparent'
+  // while one bar is stretched 3x is precisely the reassurance this dialog must
+  // not give. `BAND_RANK` orders the three bands so "worst" is a lookup rather
+  // than a chain of comparisons that could disagree with `tempoQualityBand`.
+  const BAND_RANK = { transparent: 0, good: 1, extreme: 2 } as const;
+  const BAND_TEXT = {
+    transparent: 'Transparent everywhere',
+    good: 'Worst segment: good — slight transient smearing',
+    extreme: 'Worst segment: extreme — expect flanging on sustained tones',
+  } as const;
+  const BAND_CLASS = {
+    transparent: 'text-[#26c6da]',
+    good: 'text-[#8b8b92]',
+    extreme: 'text-[#e0a458]',
+  } as const;
+  const worstBand = variablePlan
+    ? BAND_RANK[tempoQualityBand(variablePlan.map.minLocalRatio)] >=
+      BAND_RANK[tempoQualityBand(variablePlan.map.maxLocalRatio)]
+      ? tempoQualityBand(variablePlan.map.minLocalRatio)
+      : tempoQualityBand(variablePlan.map.maxLocalRatio)
+    : 'transparent';
+  const worstBandText = BAND_TEXT[worstBand];
+  const worstBandClass = BAND_CLASS[worstBand];
 
   return (
     <DialogShell
@@ -455,15 +543,88 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
           </div>
         )}
 
-        {ratio !== null && (
+        {ratio !== null && correction === 'one-ratio' && (
           <div data-testid="tempo-summary" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
             {`x${ratio.toFixed(4)} · ${regionSeconds.toFixed(2)} s → ${(regionSeconds * ratio).toFixed(2)} s · pitch unchanged`}
           </div>
         )}
 
-        {qualityText && (
+        {qualityText && correction === 'one-ratio' && (
           <div data-testid="tempo-quality" className={`text-xs ${qualityClass}`}>
             {qualityText}
+          </div>
+        )}
+
+        <SectionLabel>Correction</SectionLabel>
+
+        <div>
+          <FieldLabel htmlFor="tempo-correction">Across the region</FieldLabel>
+          <GlassSelect
+            id="tempo-correction"
+            data-testid="tempo-correction"
+            value={correction}
+            disabled={!canFollowBeats}
+            onChange={(e) => setCorrection(e.target.value as Correction)}
+          >
+            <option value="one-ratio">One ratio (steady material)</option>
+            <option value="follow-beats">Follow the tracked beats (varying tempo)</option>
+          </GlassSelect>
+          {!canFollowBeats && (
+            <p data-testid="tempo-follow-unavailable" className="mt-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              Following the beats needs a fresh beat grid with at least two beats in this
+              region — press Detect, then check the grid.
+            </p>
+          )}
+        </div>
+
+        {correction === 'follow-beats' && canFollowBeats && (
+          <div className="flex flex-col gap-2">
+            <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              Each tracked beat is moved onto the target grid instead of the whole region
+              sharing one ratio. A wrong grid is corrected differently in every bar, so
+              check the tics on the waveform — and the x2 / /2 buttons above — before
+              applying.
+            </p>
+
+            <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
+              <input
+                type="checkbox"
+                data-testid="tempo-grid-confirmed"
+                checked={gridConfirmed}
+                onChange={(e) => setGridConfirmed(e.target.checked)}
+                className="accent-[#26c6da]"
+              />
+              The beat grid is correct
+            </label>
+
+            {variablePlan !== null ? (
+              <>
+                <div
+                  data-testid="tempo-variable-summary"
+                  className="text-xs"
+                  style={{ color: 'var(--glass-text-label)' }}
+                >
+                  {`${variablePlan.beatCount} beats · x${variablePlan.map.minLocalRatio.toFixed(4)}–x${variablePlan.map.maxLocalRatio.toFixed(4)} · ${regionSeconds.toFixed(2)} s → ${(variablePlan.outLength / doc.sampleRate).toFixed(2)} s · pitch unchanged`}
+                </div>
+                {/* The WORST segment's band, not the average's: an average that
+                    reads 'transparent' while one bar is stretched 3x is exactly
+                    the reassurance this dialog must not give. */}
+                <div data-testid="tempo-variable-quality" className={`text-xs ${worstBandClass}`}>
+                  {worstBandText}
+                </div>
+                {variablePlan.clampedCount > 0 && (
+                  <div data-testid="tempo-variable-clamped" className="text-xs text-[#e0a458]">
+                    {`${variablePlan.clampedCount} of ${variablePlan.beatCount} beats could not reach the target — they were moved as far as the ${MIN_RATIO}x–${MAX_RATIO}x limit allows.`}
+                  </div>
+                )}
+              </>
+            ) : (
+              <div data-testid="tempo-variable-refusal" className="text-xs text-[#8b8b92]">
+                {variableCheck === null
+                  ? 'Enter a target tempo.'
+                  : refusalMessage(variableCheck.ok ? undefined : variableCheck.reason)}
+              </div>
+            )}
           </div>
         )}
 

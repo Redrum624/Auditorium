@@ -43,12 +43,21 @@ import { cloneRegion, docLength, mixDown } from '../audio/AudioDocument';
 import type { Marker } from '../stores/appStore';
 import { nextId, useAppStore } from '../stores/appStore';
 import { analyzeTempo } from '../dsp/tempoCore';
+import { buildTempoMap, type TempoMap } from '../dsp/tempoMap';
 import { MIN_RATIO, MAX_RATIO } from '../dsp/wsola';
+import {
+  MATCH_TEMPO_VARIABLE_EFFECT_ID,
+  type MatchTempoVariableExtra,
+} from '../effects/time/MatchTempoVariableEffect';
 import { runEffectOnSelection } from './effectRunner';
 import { pushMarkerUndo } from './editOps';
 
-/** Why `checkTempoChange`/`applyTempoChange` refused to run. */
-export type TempoRefusal = 'no-document' | 'invalid-bpm' | 'no-op' | 'out-of-range';
+/** Why `checkTempoChange`/`applyTempoChange` refused to run.
+ *
+ * `'no-grid'` is R7's, and belongs only to the variable-rate path: the
+ * confirmed grid holds fewer than two beats inside the region, so there is not
+ * one MEASURED beat interval to follow and any map would be invention. */
+export type TempoRefusal = 'no-document' | 'invalid-bpm' | 'no-op' | 'out-of-range' | 'no-grid';
 
 export interface TempoChangeRequest {
   sourceBpm: number;
@@ -56,6 +65,28 @@ export interface TempoChangeRequest {
 }
 
 export interface ApplyTempoChangeRequest extends TempoChangeRequest {
+  /**
+   * R7 — OPT IN to the variable-rate path: correct the tempo beat by beat
+   * against a CONFIRMED grid instead of applying one ratio to the whole region.
+   *
+   * **Absent (the default) means today's behaviour, byte for byte.** That is
+   * deliberate on two counts. It keeps R7 a MINOR rather than a major, because
+   * no existing caller's behaviour changes; and it is the better product
+   * decision anyway — a user who reached for Match Tempo on a steady loop does
+   * not want per-bar correction applied to it, and a wrong tempo map is wrong
+   * differently in every bar rather than uniformly wrong, which is far harder
+   * to hear and to undo.
+   *
+   * Positions are DOCUMENT-absolute tracked beats (`BeatGrid.beatSamples`);
+   * this function converts them to region-relative itself. `sourceBpm` is
+   * ignored on this path — the grid IS the source tempo, per beat — but is
+   * still required, because `checkTempoChange`'s guards run first and a user
+   * who typed nonsense should be refused before any grid is consulted.
+   */
+  variableRate?: {
+    /** Confirmed, document-absolute beat positions, ascending. */
+    beatSamples: ArrayLike<number>;
+  };
   /** When true, and `firstBeatSample` is known, lays down a beat grid over
    * the stretched region as a second, separately-labelled undo step. */
   addBeatMarkers?: boolean;
@@ -119,6 +150,101 @@ export function checkTempoChange(req: TempoChangeRequest): TempoCheckResult {
   if (ratio < MIN_RATIO || ratio > MAX_RATIO) return { ok: false, reason: 'out-of-range' };
 
   return { ok: true, ratio };
+}
+
+// ---------------------------------------------------------------------------
+// R7 — the variable-rate path
+// ---------------------------------------------------------------------------
+
+/** Everything the dialog needs to describe a variable-rate match BEFORE it is
+ * applied, and everything `applyTempoChange` needs to run it. Built by the
+ * PURE `buildTempoMap` from the same inputs the worker will use, so the preview
+ * and the run cannot disagree (F9's precedent for its clamp preview). */
+export interface VariableTempoPlan {
+  /** The map itself — `placed`, `clampedIndices` and the ratio extremes are
+   * what the dialog reports. */
+  map: TempoMap;
+  /** Region-relative beats that became knots. */
+  beatCount: number;
+  /** How many beat intervals the ratio bound held back. Non-zero means the
+   * result will not reach the target tempo everywhere, and the dialog says so
+   * rather than under-delivering silently (RULING 3). */
+  clampedCount: number;
+  /** Region length before and after, in samples. */
+  regionLength: number;
+  outLength: number;
+  /** The payload the effect reads off `__effectExtra`. */
+  extra: MatchTempoVariableExtra;
+}
+
+export type VariableTempoCheck =
+  | { ok: true; plan: VariableTempoPlan }
+  | { ok: false; reason: TempoRefusal };
+
+/** Document-absolute beats -> region-relative, keeping only those strictly
+ * inside the region. A beat exactly at `end` belongs to whatever follows the
+ * region, not to it. */
+function regionRelativeBeats(beatSamples: ArrayLike<number>, start: number, end: number): number[] {
+  const out: number[] = [];
+  for (let i = 0; i < beatSamples.length; i++) {
+    const b = beatSamples[i];
+    if (!Number.isFinite(b) || b < start || b >= end) continue;
+    out.push(b - start);
+  }
+  return out;
+}
+
+/**
+ * The variable-rate path's guards and plan, in one place so the dialog can
+ * preview exactly what Apply will do.
+ *
+ * Deliberately does NOT run `checkTempoChange`'s `'no-op'` or `'out-of-range'`
+ * arms:
+ *
+ *  - **`'no-op'` is wrong here.** Material that wobbles around 110 BPM matched
+ *    to 110 BPM is the CENTRAL use of this feature, not a no-op — the whole
+ *    point is that the average is already right and the individual beats are
+ *    not. The constant path's `|ratio - 1| < 1e-6` guard exists because a WSOLA
+ *    pass at ratio 1 would seam both region edges for zero benefit; a
+ *    variable-rate pass at mean ratio 1 moves every interior beat.
+ *  - **`'out-of-range'` is subsumed.** `buildTempoMap` bounds every LOCAL ratio
+ *    by the same `[MIN_RATIO, MAX_RATIO]` the global guard uses, per interval
+ *    rather than once for the region, and reports which intervals it held back.
+ *    That is a strictly finer guard than the global one, applied where the
+ *    stretch actually happens.
+ */
+export function checkVariableTempoChange(req: ApplyTempoChangeRequest): VariableTempoCheck {
+  const doc = activeDoc();
+  if (!doc) return { ok: false, reason: 'no-document' };
+  if (!req.variableRate) return { ok: false, reason: 'no-grid' };
+  const { targetBpm } = req;
+  if (!Number.isFinite(targetBpm) || targetBpm <= 0) return { ok: false, reason: 'invalid-bpm' };
+
+  const selection = useAppStore.getState().selection;
+  const start = selection ? selection.start : 0;
+  const end = selection ? selection.end : docLength(doc);
+  const regionLength = end - start;
+
+  const beats = regionRelativeBeats(req.variableRate.beatSamples, start, end);
+  const targetSpacing = (60 / targetBpm) * doc.sampleRate;
+  const map = buildTempoMap(beats, regionLength, targetSpacing);
+  // Every identity outcome here is a refusal EXCEPT "the grid already matches
+  // the target", which is a legitimate no-op the caller should not be charged
+  // an undo entry for.
+  if (map.refusal !== null) return { ok: false, reason: 'no-grid' };
+  if (map.identity) return { ok: false, reason: 'no-op' };
+
+  return {
+    ok: true,
+    plan: {
+      map,
+      beatCount: map.acceptedIndices.length,
+      clampedCount: map.clampedIndices.length,
+      regionLength,
+      outLength: map.outLen,
+      extra: { beatSamples: beats, targetSpacing },
+    },
+  };
 }
 
 /** Ratio boundaries for `tempoQualityBand`, exactly as ruled in the T7 brief
@@ -218,6 +344,42 @@ function addBeatMarkersAfterStretch(
     firstBeatSample,
     docLength(newDoc)
   );
+  return writeBeatMarkers(docId, positions, truncated);
+}
+
+/**
+ * R7 — the beat grid AFTER a variable-rate match, taken from the map's own
+ * `placed` positions rather than re-derived from the target BPM.
+ *
+ * `computeBeatMarkerPositions` lays `newFirstBeat + i*spacing`, which is right
+ * only when every beat got exactly the requested spacing. As soon as ONE
+ * interval is clamped by the ratio bound, every beat after it carries the
+ * deficit and a re-derived grid would draw markers where the audio's beats are
+ * not — the "never invent a value the DSP did not produce" rule applied to
+ * positions. `map.placed` is where the beats actually went.
+ */
+function addBeatMarkersFromMap(docId: string, start: number, map: TempoMap): boolean {
+  const newDoc = useAppStore.getState().documents.find((d) => d.id === docId);
+  if (!newDoc) return false; // document closed while the stretch was running
+
+  const newLen = docLength(newDoc);
+  const positions: number[] = [];
+  let truncated = false;
+  for (let i = 0; i < map.placed.length; i++) {
+    if (positions.length >= MAX_BEAT_MARKERS) {
+      truncated = true;
+      break;
+    }
+    positions.push(Math.max(0, Math.min(newLen, start + Math.round(map.placed[i]))));
+  }
+  return writeBeatMarkers(docId, positions, truncated);
+}
+
+/** The write half of both beat-grid paths: one combined `setMarkersForDoc`, one
+ * separately-labelled undo entry, one truncation notice. Split out by R7 so the
+ * constant and variable paths share the write and differ only in where the
+ * positions came from. */
+function writeBeatMarkers(docId: string, positions: number[], truncated: boolean): boolean {
   if (positions.length === 0) return false;
 
   const store = useAppStore.getState();
@@ -340,6 +502,13 @@ export async function applyTempoChange(
   req: ApplyTempoChangeRequest,
   onProgress?: (fraction: number) => void
 ): Promise<TempoChangeOutcome> {
+  // R7 — the OPT-IN variable-rate path. Taken before `checkTempoChange`
+  // because that function's `'no-op'` and `'out-of-range'` arms do not apply
+  // here; see `checkVariableTempoChange` for why each is wrong or subsumed. A
+  // request without `variableRate` never reaches this branch, which is what
+  // makes today's behaviour byte-identical for every existing caller.
+  if (req.variableRate) return applyVariableTempoChange(req, onProgress);
+
   const check = checkTempoChange(req);
   if (!check.ok) {
     // v1.9.1 item 2 (trap T1): the 1e-6 no-op guard is CORRECT and stays — a
@@ -378,6 +547,50 @@ export async function applyTempoChange(
   if (req.addBeatMarkers && req.firstBeatSample != null) {
     addBeatMarkersAfterStretch(docId, start, end, ratio, req.targetBpm, sampleRate, req.firstBeatSample);
   }
+
+  return { ok: true };
+}
+
+/**
+ * R7 — the variable-rate half of {@link applyTempoChange}.
+ *
+ * Structurally identical to the constant path: guards, then ONE
+ * `runEffectOnSelection` call (so the one-shot DSP worker, transferred buffers,
+ * throttled progress, always-settling error handling and the undoable
+ * `applyEdit` commit all come for free), then the SAME `channels` identity
+ * success gate — `applyEdit` always replaces the `channels` array on a genuine
+ * edit and is never called at all on any failure path, while every
+ * metadata-only replacement (`markDirty`, `addMarker`, …) preserves it. The
+ * fix-round-2 ruling that comparing the whole document reference
+ * false-POSITIVES applies here unchanged.
+ *
+ * The beat grid, when asked for, is laid from `plan.map.placed` — where the
+ * beats actually went — not re-derived from the target BPM.
+ */
+async function applyVariableTempoChange(
+  req: ApplyTempoChangeRequest,
+  onProgress?: (fraction: number) => void
+): Promise<TempoChangeOutcome> {
+  const check = checkVariableTempoChange(req);
+  if (!check.ok) return { ok: false, reason: check.reason };
+
+  const doc = activeDoc();
+  if (!doc) return { ok: false, reason: 'no-document' };
+  const docId = doc.id;
+  const selection = useAppStore.getState().selection;
+  const start = selection ? selection.start : 0;
+
+  await runEffectOnSelection(
+    MATCH_TEMPO_VARIABLE_EFFECT_ID,
+    {},
+    { onProgress, extra: check.plan.extra, label: 'Match Tempo' }
+  );
+
+  const postDoc = useAppStore.getState().documents.find((d) => d.id === docId);
+  const applied = postDoc !== undefined && postDoc.channels !== doc.channels;
+  if (!applied) return { ok: false };
+
+  if (req.addBeatMarkers) addBeatMarkersFromMap(docId, start, check.plan.map);
 
   return { ok: true };
 }

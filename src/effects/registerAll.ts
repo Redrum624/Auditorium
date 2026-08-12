@@ -25,6 +25,7 @@ import { timeStretchEffect } from './pitch/TimeStretchEffect';
 import { pitchShiftEffect } from './pitch/PitchShiftEffect';
 import { pitchCorrectEffect } from './pitch/PitchCorrectEffect';
 import { alignTimingEffect } from './time/AlignTimingEffect';
+import { matchTempoVariableEffect } from './time/MatchTempoVariableEffect';
 
 let registered = false;
 
@@ -65,4 +66,7 @@ export function registerAllEffects(): void {
   // the effects browser because it is driven by AlignTimingDialog's confirmed
   // anchor list, not by the generic params dialog.
   registerEffect(alignTimingEffect);
+  // Hidden (R7): same reason — it is driven by TempoDialog's CONFIRMED beat
+  // grid, and a params-only dialog could never supply one.
+  registerEffect(matchTempoVariableEffect);
 }
