@@ -345,3 +345,183 @@ export function jitterDrumLoop(
   }
   return out;
 }
+
+// ---------------------------------------------------------------------------
+// R7 generators — VARYING-tempo material with exact ground truth.
+//
+// The R4 bank above answers "what BPM is this?"; these answer "where is beat k,
+// exactly?". They return BEAT POSITIONS rather than only audio, because the R7
+// measurement is an ABSOLUTE beat-position error in milliseconds against a grid
+// that is exact by construction — a correlation against a re-detected grid
+// would measure the detector, which is the thing R7's Ruling 1 refuses to
+// trust. Every one is deterministic and closed-form: no LCG, no Math.random.
+//
+// `test-assets/[music].mp3` is nearly steady and is therefore the CONTROL for
+// this feature, not a test case; the varying cases have to be generated, and
+// generated IN THE REPO, because an earlier uncommitted fixture bank made its
+// own headline number permanently uninterpretable (see the R4 note above).
+// ---------------------------------------------------------------------------
+
+/**
+ * Beat sample positions for a tempo that ramps LINEARLY IN TIME from `bpmStart`
+ * to `bpmEnd` over `seconds` — an accelerando (or, with `bpmEnd < bpmStart`, a
+ * ritardando). The instantaneous tempo at time t is
+ * `bpmStart + (bpmEnd - bpmStart) * t / seconds`, so the SLOPE in BPM/s is
+ * `(bpmEnd - bpmStart) / seconds` and every reported error can be quoted
+ * against it.
+ *
+ * Same recurrence as {@link rampClickTrain} (which renders the audio for the
+ * detector bank); this returns the positions alone so a caller can render its
+ * own signal — R7 needs tone bursts, not impulses, because an impulse under
+ * WSOLA is copied by up to two overlapping synthesis frames and its position
+ * stops being well defined.
+ */
+export function accelerandoBeats(
+  bpmStart: number,
+  bpmEnd: number,
+  seconds: number,
+  sr = 44100
+): number[] {
+  const beats: number[] = [];
+  let t = 0;
+  while (t < seconds) {
+    beats.push(Math.round(t * sr));
+    t += 60 / (bpmStart + (bpmEnd - bpmStart) * (t / seconds));
+  }
+  return beats;
+}
+
+/**
+ * Beat sample positions for a tempo that is CONSTANT at `bpmBefore` until
+ * `switchSec` and then jumps ABRUPTLY to `bpmAfter` — the mid-song tempo change
+ * the KNOWN_LIMITATIONS entry names, as opposed to
+ * {@link accelerandoBeats}'s smooth drift. The interval containing the switch
+ * is the one a single ratio cannot straddle at all.
+ */
+export function stepTempoBeats(
+  bpmBefore: number,
+  bpmAfter: number,
+  switchSec: number,
+  seconds: number,
+  sr = 44100
+): number[] {
+  const beats: number[] = [];
+  let t = 0;
+  while (t < seconds) {
+    beats.push(Math.round(t * sr));
+    t += 60 / (t < switchSec ? bpmBefore : bpmAfter);
+  }
+  return beats;
+}
+
+/**
+ * Beat sample positions for RUBATO: a sinusoidal tempo modulation of amplitude
+ * `ampFrac` (a fraction of `bpmBase`, so 0.08 is ±8 %) and period `periodSec`
+ * around `bpmBase`. Unlike an accelerando the mean tempo is right, which is
+ * exactly why a single ratio looks correct on paper and still leaves every
+ * interior beat displaced: the error oscillates rather than accumulating.
+ */
+export function rubatoBeats(
+  bpmBase: number,
+  ampFrac: number,
+  periodSec: number,
+  seconds: number,
+  sr = 44100
+): number[] {
+  const beats: number[] = [];
+  let t = 0;
+  while (t < seconds) {
+    beats.push(Math.round(t * sr));
+    t += 60 / (bpmBase * (1 + ampFrac * Math.sin((2 * Math.PI * t) / periodSec)));
+  }
+  return beats;
+}
+
+/**
+ * Beat and TRUE-DOWNBEAT positions for a track whose METER changes, at a
+ * constant `bpm`. `sections` is a list of `[beatsPerBar, bars]` pairs, so
+ * `[[4,16],[3,5],[4,16]]` is sixteen bars of 4/4, a five-bar 3/4 bridge, then
+ * sixteen more bars of 4/4.
+ *
+ * This is the fixture for the SECOND half of the KNOWN_LIMITATIONS entry, which
+ * has a different cause from the first: the beats are perfectly even here — the
+ * tempo never varies — and what moves is how many of them make a bar. Bar
+ * boundaries derived by a CONSTANT beat stride (`remixFeatures.ts`'s
+ * `idx += beatsPerBar`) therefore walk off the real downbeats at the first
+ * section whose beat count is not a multiple of the assumed meter, and stay off
+ * for the rest of the track.
+ */
+export function meterChangeBeats(
+  bpm: number,
+  sections: readonly (readonly [number, number])[],
+  sr = 44100
+): { beats: number[]; downbeats: number[]; beatsPerBarOfBar: number[] } {
+  const period = (60 / bpm) * sr;
+  const beats: number[] = [];
+  const downbeats: number[] = [];
+  const beatsPerBarOfBar: number[] = [];
+  let k = 0;
+  for (const [beatsPerBar, bars] of sections) {
+    for (let b = 0; b < bars; b++) {
+      downbeats.push(Math.round(k * period));
+      beatsPerBarOfBar.push(beatsPerBar);
+      for (let j = 0; j < beatsPerBar; j++) beats.push(Math.round((k + j) * period));
+      k += beatsPerBar;
+    }
+  }
+  return { beats, downbeats, beatsPerBarOfBar };
+}
+
+/**
+ * Renders `beats` as Hann-windowed tone bursts CENTRED on each beat sample.
+ *
+ * A symmetric window's ENERGY CENTROID is its centre, so "where is beat k in
+ * this signal?" has an exact answer with no envelope-shape bias to cancel —
+ * which is the whole reason not to use {@link clickTrain} here. F9 measured the
+ * alternative the hard way: comparing an absolute centroid against a target
+ * measured the FIXTURE's envelope shape (a constant ~14 ms) rather than the
+ * warp's placement error. A centred symmetric burst removes that term
+ * structurally instead of cancelling it arithmetically.
+ *
+ * `burstMs` must be shorter than the closest beat spacing or two bursts overlap
+ * and neither centroid means anything; 40 ms is safe to 1500 BPM.
+ */
+export function burstTrain(
+  beats: readonly number[],
+  totalLen: number,
+  sr = 44100,
+  freq = 1000,
+  burstMs = 40
+): Float32Array {
+  const out = new Float32Array(Math.max(0, Math.floor(totalLen)));
+  const len = Math.round((burstMs / 1000) * sr);
+  if (len < 2) return out;
+  const half = Math.floor(len / 2);
+  for (const b of beats) {
+    for (let j = 0; j < len; j++) {
+      const i = b - half + j;
+      if (i < 0 || i >= out.length) continue;
+      const w = 0.5 - 0.5 * Math.cos((2 * Math.PI * j) / (len - 1));
+      out[i] += w * Math.sin((2 * Math.PI * freq * j) / sr);
+    }
+  }
+  return out;
+}
+
+/**
+ * Energy centroid of `signal` over `[lo, hi)`, or `null` when that span holds no
+ * energy. The measurement half of {@link burstTrain}: for an isolated centred
+ * burst this returns the burst's centre exactly.
+ */
+export function energyCentroid(signal: Float32Array, lo: number, hi: number): number | null {
+  let num = 0;
+  let den = 0;
+  const from = Math.max(0, Math.floor(lo));
+  const to = Math.min(signal.length, Math.ceil(hi));
+  for (let i = from; i < to; i++) {
+    const e = signal[i] * signal[i];
+    num += e * i;
+    den += e;
+  }
+  return den > 0 ? num / den : null;
+}

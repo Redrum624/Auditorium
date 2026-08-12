@@ -399,16 +399,32 @@ export interface WarpMapOptions {
   maxRatio?: number;
 }
 
-export interface WarpMap {
+/**
+ * The geometry every knot-based time map in this repo shares: two parallel,
+ * strictly ascending knot arrays and the two lengths they span.
+ * {@link analysisPosAt} and {@link synthesisPosAt} need nothing else, so they
+ * are typed against THIS rather than against {@link WarpMap} — which is what
+ * lets `tempoMap.ts`'s variable-rate Match Tempo map (R7) reuse the same
+ * piecewise-linear inverse instead of carrying a second copy of the binary
+ * search. The two maps differ only in how their knots are CHOSEN; reading them
+ * is identical, and a second implementation would be a second thing to keep
+ * correct.
+ */
+export interface PiecewiseTimeMap {
   /** Input length, in samples. */
   inLen: number;
-  /** Output length. ALWAYS equal to {@link inLen} — see {@link buildWarpMap}. */
+  /** Output length, in samples. */
   outLen: number;
   /** Knot input positions, ascending, starting at 0 and ending at `inLen`. */
   knotsIn: Float64Array;
   /** Knot output positions, ascending, starting at 0 and ending at `outLen`.
    * Parallel to {@link knotsIn}. */
   knotsOut: Float64Array;
+}
+
+export interface WarpMap extends PiecewiseTimeMap {
+  /** Output length. ALWAYS equal to {@link inLen} — see {@link buildWarpMap}. */
+  outLen: number;
   /** Where each accepted anchor actually landed, parallel to the accepted
    * anchors (i.e. to {@link acceptedIndices}). */
   placed: Float64Array;
@@ -427,7 +443,7 @@ export interface WarpMap {
 /** Whether every knot pair's ratio is inside `[minRatio, maxRatio]` — the
  * invariant `buildWarpMap` establishes, exported so tests assert the property
  * rather than a sample of it. */
-export function warpRatios(map: WarpMap): Float64Array {
+export function warpRatios(map: PiecewiseTimeMap): Float64Array {
   const n = map.knotsIn.length;
   const out = new Float64Array(Math.max(0, n - 1));
   for (let i = 0; i < n - 1; i++) {
@@ -445,7 +461,7 @@ export function warpRatios(map: WarpMap): Float64Array {
  * construction (every knot interval has a strictly positive width in both
  * domains), with range clamped into `[0, inLen]`.
  */
-export function analysisPosAt(map: WarpMap, v: number): number {
+export function analysisPosAt(map: PiecewiseTimeMap, v: number): number {
   const { knotsIn, knotsOut, inLen } = map;
   const last = knotsOut.length - 1;
 
@@ -489,7 +505,7 @@ export function analysisPosAt(map: WarpMap, v: number): number {
  * removed gap — and the fix was the same: map each annotation through the
  * transform the audio actually underwent.
  */
-export function synthesisPosAt(map: WarpMap, u: number): number {
+export function synthesisPosAt(map: PiecewiseTimeMap, u: number): number {
   const { knotsIn, knotsOut, outLen } = map;
   const last = knotsIn.length - 1;
 
