@@ -512,6 +512,47 @@ describe('over-unity sources — the ±1 master clamp', () => {
     return doc;
   }
 
+  /** The same fixture with one sample driven to exactly +1 and one to exactly
+   * −1 — a normalised master, the commonest thing a user drops on this app. It
+   * sits ON the boundary, which is the one place `<= 1` and `< 1` disagree. */
+  function addFullScaleSource(sampleRate: number): AudioDocument {
+    const raw = makeSourceChannels(2, FIXTURE_LENGTH, sampleRate);
+    const peak = Math.max(...raw.map((ch) => ch.reduce((m, v) => Math.max(m, Math.abs(v)), 0)));
+    const channels = raw.map((ch) => {
+      const out = new Float32Array(ch.length);
+      for (let i = 0; i < ch.length; i++) out[i] = ch[i] * (0.9 / peak);
+      return out;
+    });
+    channels[0][1234] = 1;
+    channels[1][5678] = -1;
+    const doc = createDocument({ name: 'Normalised', sampleRate, channels, filePath: 'C:/fixtures/norm.wav' });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('reports exactSumHolds:true at a peak of EXACTLY 1, where the sum still reconstructs', () => {
+    const source = addFullScaleSource(44100);
+    const sourceCopy = source.channels.map((ch) => Float32Array.from(ch));
+    const result = landStems(makeOutput(source));
+
+    // ON the boundary, not near it: nothing else in this suite sits here, and
+    // `< 1` would flag the amber "won't add back exactly" on every normalised
+    // master that ships.
+    expect(result.sourcePeak).toBe(1);
+    expect(result.exactSumHolds).toBe(true);
+
+    // …and the claim is true: the clamp never engages, so the identity holds
+    // sample for sample. An amber warning here would be a lie.
+    const report = measureIdentity(mixdownCurrentSession(), sourceCopy);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[S5 identity @ peak 1.0] worst |err| = ${report.worstAbs.toExponential(3)}, ` +
+        `bit-exact ${(report.exactFraction * 100).toFixed(4)}%`
+    );
+    expect(report.exactFraction).toBe(1);
+    expect(report.worstAbs).toBe(0);
+  });
+
   it('reports exactSumHolds:false and the peak, instead of claiming an identity it cannot deliver', () => {
     const source = addHotSource(44100);
     const sourceCopy = source.channels.map((ch) => Float32Array.from(ch));
