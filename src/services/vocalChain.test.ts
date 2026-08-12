@@ -584,6 +584,138 @@ describe('deriveCompressor', () => {
     expect(programmeRmsDb(out.channels)).toBeCloseTo(before, 3);
   });
 
+  // ── The knee, pinned against arithmetic the chain does not share ──────────
+  // `deriveCompressor` predicts the makeup gain by running the effect's OWN
+  // `reductionDb` over the envelope. That is deliberate — it is what stops a
+  // second copy of the compression law drifting — but it makes the prediction
+  // BLIND to that law being wrong: break the knee and the prediction and the
+  // rendering move together, so `predicts the makeup gain exactly` above still
+  // passes. Measured: the mutation `/(2 * kneeDb)` -> `/kneeDb` in
+  // `CompressorEffect.reductionDb` survives this entire suite.
+  //
+  // So this test computes the expected makeup from a knee formula written out
+  // HERE, and never calls `reductionDb`. Everything else it takes from the
+  // chain (the threshold, which the knee does not enter) or from the shared
+  // envelope code (which the mutation does not touch), so what is left under
+  // test is the compression law itself.
+  describe('the makeup prediction, against arithmetic that does not call reductionDb', () => {
+    /** Ten half-second windows only ~1.2 dB apart, plus the quiet passage the
+     * noise floor needs. The narrow spread is the point: the derived threshold
+     * is the median of the sounding envelope, so a programme this tight puts
+     * essentially every sounding sample INSIDE the +/- kneeDb/2 knee, where the
+     * quadratic branch is the only one that runs. `programme()` spans 6 dB and
+     * straddles the knee edge, which is how a broken knee hid there. */
+    function kneeProgramme(): Float32Array {
+      const levels = [0.14, 0.16, 0.14, 0.16, 0.001, 0.16, 0.14, 0.16, 0.14, 0.16];
+      const out = new Float32Array(WIN * levels.length);
+      levels.forEach((level, w) => out.set(flat(WIN, level), w * WIN));
+      return out;
+    }
+
+    /** The standard soft knee, written from the definition rather than
+     * imported: no reduction below the knee, `overDb * slope` above it, and a
+     * quadratic across a knee `kneeDb` wide centred on the threshold. Reaching
+     * for `reductionDb` here would make the whole test a tautology. */
+    function expectedReductionDb(overDb: number, ratio: number, kneeDb: number): number {
+      const slope = 1 - 1 / ratio;
+      const half = kneeDb / 2;
+      if (overDb <= -half) return 0;
+      if (overDb >= half) return overDb * slope;
+      const x = overDb + half; // 0 at the bottom of the knee, kneeDb at the top
+      return (slope * x * x) / (2 * kneeDb);
+    }
+
+    /** The chain's own prediction loop, with `expectedReductionDb` in place of
+     * `reductionDb` and nothing else changed. */
+    function expectedMakeupDb(channels: Float32Array[], params: Record<string, unknown>): number {
+      const thresholdDb = Number(params.thresholdDb);
+      const ratio = Number(params.ratio);
+      const kneeDb = Number(params.kneeDb);
+      const env = envelopeFollower(
+        maxAcrossChannels(channels),
+        SR,
+        Number(params.attackMs),
+        Number(params.releaseMs)
+      );
+      let sumSqIn = 0;
+      let sumSqOut = 0;
+      for (let i = 0; i < env.length; i++) {
+        const gain = Math.pow(10, -expectedReductionDb(toDb(env[i]) - thresholdDb, ratio, kneeDb) / 20);
+        for (const c of channels) {
+          const x = c[i];
+          sumSqIn += x * x;
+          const y = x * gain;
+          sumSqOut += y * y;
+        }
+      }
+      return 10 * Math.log10(sumSqIn / sumSqOut);
+    }
+
+    it('sits inside the knee, so the quadratic branch is what the number is made of', () => {
+      // Guards the test above: if the fixture ever drifted out of the knee, the
+      // assertion would still pass and would have stopped measuring anything.
+      const channels = [kneeProgramme()];
+      const res = deriveCompressor(channels, SR);
+      if (!res.run) throw new Error('expected run');
+      const kneeDb = Number(res.params.kneeDb);
+      expect(kneeDb).toBeGreaterThan(0);
+
+      const floor = measureNoiseWindow(channels, SR)!;
+      const gate = Math.pow(10, floor.envelopePeakDb / 20);
+      const gateEnv = envelopeFollower(maxAcrossChannels(channels), SR, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
+      const compEnv = envelopeFollower(
+        maxAcrossChannels(channels),
+        SR,
+        Number(res.params.attackMs),
+        Number(res.params.releaseMs)
+      );
+      let sounding = 0;
+      let inKnee = 0;
+      for (let i = 0; i < compEnv.length; i++) {
+        if (gateEnv[i] <= gate) continue;
+        sounding++;
+        if (Math.abs(toDb(compEnv[i]) - Number(res.params.thresholdDb)) <= kneeDb / 2) inKnee++;
+      }
+      expect(sounding).toBeGreaterThan(0);
+      expect(inKnee / sounding).toBeGreaterThan(0.9);
+    });
+
+    it('predicts the makeup the soft-knee law actually implies', () => {
+      const channels = [kneeProgramme()];
+      const res = deriveCompressor(channels, SR);
+      if (!res.run) throw new Error('expected run');
+      // Tight rather than "close": both sides are the same arithmetic identity
+      // in float64, differing only in association.
+      expect(Number(res.params.makeupDb)).toBeCloseTo(expectedMakeupDb(channels, res.params), 9);
+    });
+
+    it('and that prediction really does depend on the knee', () => {
+      // Resolving power. Without this, a knee whose contribution rounded away
+      // would let the assertion above pass while measuring nothing: the same
+      // loop with the knee taken out has to land somewhere else.
+      const channels = [kneeProgramme()];
+      const res = deriveCompressor(channels, SR);
+      if (!res.run) throw new Error('expected run');
+      const withKnee = expectedMakeupDb(channels, res.params);
+      const hardKnee = expectedMakeupDb(channels, { ...res.params, kneeDb: 0 });
+      expect(Math.abs(withKnee - hardKnee)).toBeGreaterThan(0.05);
+    });
+
+    it('predicts it for STEREO too, inside the knee', () => {
+      // The prediction loop sums over every channel. A right channel carrying
+      // its quiet window somewhere else has a different in/out energy ratio, so
+      // a loop that only ever read channel 0 lands on a different number.
+      const left = kneeProgramme();
+      const rightLevels = [0.15, 0.13, 0.15, 0.13, 0.15, 0.13, 0.15, 0.0009, 0.15, 0.13];
+      const right = new Float32Array(left.length);
+      rightLevels.forEach((level, w) => right.set(flat(WIN, level), w * WIN));
+      const channels = [left, right];
+      const res = deriveCompressor(channels, SR);
+      if (!res.run) throw new Error('expected run');
+      expect(Number(res.params.makeupDb)).toBeCloseTo(expectedMakeupDb(channels, res.params), 9);
+    });
+  });
+
   /** Percentiles of 50 ms frame level over SOUNDING frames — the quantity a
    * vocal compressor is there to narrow. Peak-to-RMS crest factor is NOT that
    * quantity: a 10 ms attack does not catch a shorter transient, so crest can
