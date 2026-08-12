@@ -448,9 +448,25 @@ const DECAY_LOWER_DB = -25;
 /** A fit needs at least this many points — 8 points at a 10 ms hop is 80 ms, so
  * a "decay" shorter than that is a gap between syllables, not a tail. */
 const DECAY_MIN_POINTS = 8;
-/** ISO 3382-1 requires the decay to be evaluated for linearity; a fit that is
- * not straight is not a decay. 0.9 of variance explained. */
-const DECAY_MIN_R2 = 0.9;
+/**
+ * ISO 3382-1 requires a decay to be evaluated for linearity, so a fit is
+ * rejected when too little of its variance is explained by the straight line.
+ *
+ * 0.85, DERIVED FROM WHAT REAL REVERB SCORES rather than picked: across the two
+ * validated Freeverb controls the lowest r-squared any fit produced was 0.883
+ * (roomSize 0.5) and 0.859 (roomSize 0.8), so 0.85 sits below every genuine
+ * decay measured here and the check cannot throw one away. The 0.9 this was
+ * first written as would have rejected the quietest 5 % of a real 2.9 s reverb.
+ *
+ * WHAT IT DOES NOT DO, measured, because the obvious reading of "linearity
+ * check" is wrong: it does not reject a decay for being CURVED. An amplitude
+ * ramp — falling linearly in amplitude, so strongly bent in dB, and containing
+ * no reverberation at all — scores a minimum of 0.910, HIGHER than either real
+ * reverb control's minimum. What it removes is RAGGED fits: on a decay with
+ * +-6 dB of block jitter it rejects half of them (67 accepted, against 137 with
+ * the check disabled). Both behaviours are pinned in the tests.
+ */
+const DECAY_MIN_R2 = 0.85;
 
 export interface DecayEstimate {
   /** Median RT60 over the accepted decays, seconds. */

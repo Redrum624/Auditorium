@@ -199,14 +199,17 @@ describe('activeEnvelopeSpread', () => {
     expect(sweep[sweep.length - 1].fraction).toBeLessThan(0.75);
     expect(sweep[sweep.length - 1].fraction).toBeGreaterThan(0.6);
 
-    // Monotone, and the crossing sits at the constant. A mutation of
-    // ACTIVE_GATE_DB by more than 3 dB moves the crossing out of this window.
+    // Monotone, and the crossing sits where the constant says. The window is
+    // ABSOLUTE on purpose: comparing the crossing with ACTIVE_GATE_DB itself
+    // would move with the constant and so could never fail.
     for (let i = 1; i < sweep.length; i++) {
       expect(sweep[i].fraction).toBeLessThanOrEqual(sweep[i - 1].fraction + 1e-9);
     }
     const crossing = sweep.find((s) => s.fraction < 0.85);
     expect(crossing).toBeDefined();
-    expect(Math.abs((crossing as { belowDb: number }).belowDb - ACTIVE_GATE_DB)).toBeLessThanOrEqual(3);
+    expect((crossing as { belowDb: number }).belowDb).toBeGreaterThanOrEqual(17);
+    expect((crossing as { belowDb: number }).belowDb).toBeLessThanOrEqual(23);
+    expect(ACTIVE_GATE_DB).toBe(20);
   });
 
   it('returns null when there is nothing to measure', () => {
@@ -356,6 +359,17 @@ describe('matchCurve', () => {
     expect(statusAt(22628)).toBe('matched'); // Nyquist 11314 > 11313.7, just
     expect(statusAt(22626)).toBe('above-nyquist'); // Nyquist 11313 < 11313.7
     expect(statusAt(16000)).toBe('above-nyquist');
+
+    // EITHER side can be the binding one — the rule is min(reference, take), so
+    // the same sweep is repeated with the roles swapped.
+    const statusWithTakeRate = (takeRate: number): MatchBandStatus =>
+      matchCurve(syntheticLtas(96000, () => 0), syntheticLtas(takeRate, () => 0)).bands.find(
+        (b) => b.centreHz === 8000
+      )!.status;
+    expect(statusWithTakeRate(24000)).toBe('matched');
+    expect(statusWithTakeRate(22628)).toBe('matched');
+    expect(statusWithTakeRate(22626)).toBe('above-nyquist');
+    expect(statusWithTakeRate(16000)).toBe('above-nyquist');
   });
 
   it('carries the SHAPE and not the level: a pure gain difference produces a flat zero curve', () => {
@@ -541,6 +555,84 @@ describe('estimateDecay', () => {
     expect(v.p25Seconds).toBeLessThanOrEqual(v.seconds);
     expect(v.seconds).toBeLessThanOrEqual(v.p75Seconds);
     expect(v.count).toBeGreaterThan(0);
+  });
+
+  it('rejects a fall that never reaches the bottom of the T20 range', () => {
+    // Decays 15 dB and then holds. There is a long, clean, straight fall here —
+    // it just is not a 20 dB one, and measuring T20 off it would extrapolate a
+    // decay that is not happening. Without the -25 dB requirement the flat tail
+    // joins the fit and the slope collapses.
+    const burstLen = Math.round(2 * SR);
+    const out = new Float32Array(burstLen * 10);
+    const floor = 0.6 * Math.pow(10, -15 / 20);
+    for (let b = 0; b < 10; b++) {
+      const src = noise(burstLen, 1, 500 + b);
+      const perSample = Math.pow(10, -60 / (20 * 0.5 * SR));
+      let amp = 0.6;
+      for (let i = 0; i < burstLen; i++) {
+        out[b * burstLen + i] = src[i] * Math.max(amp, floor);
+        amp *= perSample;
+      }
+    }
+    expect(estimateDecay([out], SR)).toBeNull();
+  });
+
+  it('throws RAGGED fits away — that is what the linearity check does', () => {
+    // The same 0.6 s decay with a swept amount of block-to-block jitter on it.
+    // Ragged material still contains clean sub-stretches, so the check does not
+    // (and should not) return null; what it does is refuse most of them. The
+    // bounds below are two-sided on purpose: the clean floor fails if the
+    // threshold is raised until real decays are rejected, and the ragged
+    // ceilings fail if it is lowered until it accepts everything (measured with
+    // the check disabled: 137 fits at 6 dB and 83 at 12 dB, against 67 and 29).
+    const ragged = (jitterDb: number): Float32Array => {
+      const burstLen = Math.round(2 * SR);
+      const blockLen = Math.round(0.05 * SR);
+      const out = new Float32Array(burstLen * 10);
+      for (let b = 0; b < 10; b++) {
+        const src = noise(burstLen, 1, 700 + b);
+        const jitter = noise(Math.ceil(burstLen / blockLen), jitterDb, 800 + b);
+        const perSample = Math.pow(10, -60 / (20 * 0.6 * SR));
+        let amp = 0.6;
+        for (let i = 0; i < burstLen; i++) {
+          out[b * burstLen + i] = src[i] * amp * Math.pow(10, jitter[Math.floor(i / blockLen)] / 20);
+          amp *= perSample;
+        }
+      }
+      return out;
+    };
+    const clean = estimateDecay([ragged(0)], SR) as NonNullable<ReturnType<typeof estimateDecay>>;
+    expect(clean.count).toBeGreaterThanOrEqual(8);
+    expect(clean.seconds).toBeGreaterThan(0.55);
+    expect(clean.seconds).toBeLessThan(0.65);
+
+    const at6 = estimateDecay([ragged(6)], SR) as NonNullable<ReturnType<typeof estimateDecay>>;
+    const at12 = estimateDecay([ragged(12)], SR) as NonNullable<ReturnType<typeof estimateDecay>>;
+    expect(at6.count).toBeLessThan(100);
+    expect(at12.count).toBeLessThan(60);
+    // and raggedness shows up where it should: in the quartile spread.
+    expect(at12.p75Seconds / at12.p25Seconds).toBeGreaterThan(clean.p75Seconds / clean.p25Seconds);
+    expect(at12.p75Seconds / at12.p25Seconds).toBeLessThan(2.2);
+  });
+
+  it('LIMITATION: a curved fall with no reverb in it is accepted, and read as reverb', () => {
+    // Pinned because the module claims it. Amplitude falling linearly is bent in
+    // dB and contains no reverberation whatsoever, yet it clears the linearity
+    // check by more than either validated reverb control does — so a decay this
+    // estimator reports is evidence of a fall, not proof of a room. It is why
+    // the report recommends the matched-reverb stage stay off rather than
+    // trusting a number this returns.
+    const burstLen = Math.round(2 * SR);
+    const out = new Float32Array(burstLen * 10);
+    for (let b = 0; b < 10; b++) {
+      const src = noise(burstLen, 1, 700 + b);
+      for (let i = 0; i < burstLen; i++) {
+        out[b * burstLen + i] = src[i] * 0.6 * Math.max(0, 1 - i / burstLen);
+      }
+    }
+    const est = estimateDecay([out], SR);
+    expect(est).not.toBeNull();
+    expect((est as { seconds: number }).seconds).toBeGreaterThan(1);
   });
 
   it('returns null rather than a number when nothing decays cleanly', () => {
