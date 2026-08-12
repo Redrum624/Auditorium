@@ -2,13 +2,19 @@
  * Task F9 — vocal timing alignment: warp a sung take so its syllables land on
  * the beat when the singer drags or rushes.
  *
- * Match Tempo cannot do this. It applies ONE ratio across the whole region
- * (`docs/KNOWN_LIMITATIONS.md:487`), so it can move a take earlier or later as
- * a block but cannot pull a dragged line forward while leaving the next,
- * rushed line alone. What is needed is a *variable* rate — and the engine for
- * that already exists: `timeStretchVariableLinked` (`wsola.ts:336`), built for
- * F1's Pitch Correct, does variable-rate, stereo-linked, pitch-preserving
- * stretching from a caller-supplied time map. This module supplies the map.
+ * Match Tempo cannot do this — not even in the follow-the-beats mode R7 added,
+ * and the distinction is worth stating precisely because the two features now
+ * look similar. Follow-the-beats warps by the TRACKED BEATS OF THE MATERIAL:
+ * it puts the beats where the target grid wants them. This module warps by
+ * SYLLABLES THE USER MARKED. A singer who drags one line and rushes the next is
+ * off relative to beats that are already in the right place, so a tempo map
+ * moves the beats she is late against and leaves her just as late. Use
+ * follow-the-beats when the music's tempo moves; use this when the singer moves
+ * against a tempo that does not.
+ *
+ * The engine both share is `timeStretchVariableLinked` (`wsola.ts`), built for
+ * F1's Pitch Correct: variable-rate, stereo-linked, pitch-preserving stretching
+ * from a caller-supplied time map. This module supplies the map.
  *
  * ---------------------------------------------------------------------------
  * WHAT THIS MODULE IS AND IS NOT

@@ -39,11 +39,16 @@ const PROGRESS_FRAME_BATCH = 32;
 /**
  * Finds the input index in [nominalStart - search, nominalStart + search] whose
  * `compare`-sample leading segment best matches the reference segment starting at
- * `refStart`, by normalized cross-correlation. Ties resolve to the smallest |offset|
- * because the scan starts at -search and only strictly-greater scores replace the
- * best — combined with off=0 scoring exactly 1.0 for an identity stretch, this makes
- * ratio 1.0 reduce to a near-perfect passthrough. A silent reference (norm ≈ 0) carries
- * no phase information, so the nominal position is used unchanged.
+ * `refStart`, by normalized cross-correlation. The scan runs from -search upward and
+ * only strictly-greater scores replace the best, so an exact tie resolves to the
+ * FIRST candidate scanned — `-search`, the largest negative offset, not the smallest
+ * |offset|. That does not spoil the identity case: at ratio 1.0 off=0 scores exactly
+ * 1.0 and every other offset scores below it on non-degenerate material, so the
+ * stretch reduces to a near-perfect passthrough; only a signal periodic at exactly
+ * the offset spacing can tie 1.0 earlier and win. (Every golden fixture in the repo
+ * encodes this behaviour — the comparison is the contract, not a bug to flip.)
+ * A silent reference (norm ≈ 0) carries no phase information, so the nominal position
+ * is used unchanged.
  */
 function bestMatchOffset(
   read: (idx: number) => number,

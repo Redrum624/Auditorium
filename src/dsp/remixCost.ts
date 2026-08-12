@@ -100,9 +100,13 @@
  * sentinel value, which would just relocate the same silent-poisoning
  * problem one level up) -- matching this codebase's own convention
  * (`AudioDocument.ts` throws `RangeError` for invalid region args). The
- * check lives only in `joinCost` and `buildCandidateLists`' outer setup, not
- * inside `computeJoinCostTerms`/`cosineDistance`, so the hot per-candidate
- * loop stays branch-free.
+ * check lives ONLY in `joinCost` -- not inside `computeJoinCostTerms`/
+ * `cosineDistance`, so the hot per-candidate loop stays branch-free, and not
+ * in `buildCandidateLists` either, which calls `computeJoinCostTerms` directly
+ * and so bypasses the guard entirely. That is safe for the reason above (its
+ * own loops enumerate `[0, numBars]` and cannot emit anything else) and it is
+ * why the guard is worth having on the public export: the unvalidated path is
+ * the one the module controls, the validated one is the one it does not.
  *
  * ## `phraseBars <= 0` is clamped, not left to propagate NaN (fix round 1,
  * Minor 6)

@@ -107,7 +107,8 @@
  * distinguish a genuine ending from an artificial one. What DOES distinguish
  * them: whether `analysis.analyzedEndSample` (where the tail we copy stops)
  * reaches the true physical end of `source` (`source[0].length`). If it does
- * not (analysis was truncated, e.g. the 5-minute cap, or `source` simply
+ * not (analysis was truncated -- e.g. by `MAX_ANALYSIS_SECONDS = 600`, the
+ * 10-minute whole-document cap -- or `source` simply
  * carries more audio than was analysed), the tail we produce is an
  * ARTIFICIAL cutoff and gets the 1500 ms quarter-cosine fade; if it does, the
  * tail already trails into the recording's own real ending and is left

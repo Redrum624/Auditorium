@@ -40,11 +40,18 @@
  *
  * Every valid plan runs off the end of the lattice at `p = M` (there is no
  * other absorbing state -- `buildCandidateLists`'s edge guard makes `p = M`
- * itself candidate-free, so nothing ever departs from it). `n* =
- * argmin f(M,n)` over `{n : abs(n-targetBars) <= tolBars}`
+ * itself candidate-free, so nothing ever departs from it). The terminal `n*`
+ * is chosen from the feasibility window `{n : abs(n-targetBars) <= tolBars}`
  * (`tolBars = ceil(phraseBars/2)` strict, `2` loose -- the grid step IS
  * `phraseBars` bars in strict mode, so half a step is the tightest
- * meaningful tolerance). This deliberately drops a `wDuration` weight
+ * meaningful tolerance) -- but NOT by `argmin f(M,n)`. Cost first narrows the
+ * field to the candidates within `costMargin` of the window's cheapest, and
+ * among those the one closest to `targetSample` IN SAMPLES wins (ties: cheaper
+ * first, then smaller `n`). So a costlier `n` can and does win, deliberately:
+ * bars vary in length, and a pure cost pick inside the window measured up to
+ * +7.2 % duration error on an accelerando. A candidate more than `costMargin`
+ * cheaper than every other is the sole member of the competitive set and still
+ * wins outright. See `selectTerminalN`. This deliberately drops a `wDuration` weight
  * entirely: calibrating bars-of-error against cost-units is exactly the kind
  * of magic number that can only be judged by ear, whereas "filter to
  * feasible, then minimise cost" needs no such calibration. If the window is
@@ -340,11 +347,14 @@ export const MAX_DP_CELLS = 250_000;
 export const MAX_REQUIRED_JOINS = 4;
 /**
  * Cost advantage a PINNED join gets, on top of being exempt from every
- * synthetic penalty (fix round 2). NOT an invented constant: it is exactly
- * `weights.jump`, this module's own per-join toll and the same unit
- * `selectTerminalN` already uses as `costMargin` to mean "no real quality
- * difference" -- so a pin is worth precisely one join's worth of preference,
- * enough to win ties and near-ties and no more.
+ * synthetic penalty (fix round 2). NOT an invented constant: 0.35 is
+ * `DEFAULT_REMIX_WEIGHTS.jump` (`remixCost.ts`), this module's own per-join
+ * toll at the shipped weights and the same unit `selectTerminalN` uses as
+ * `costMargin` to mean "no real quality difference" -- so at the defaults a pin
+ * is worth precisely one join's worth of preference, enough to win ties and
+ * near-ties and no more. It is a LITERAL, not a read of `options.weights.jump`:
+ * a caller who moves the jump weight moves the toll but not this bonus, so the
+ * "one join's worth" equivalence is a statement about the defaults.
  *
  * MEASURED (fix round 2). Pin preservation over 156 pin/press cases across
  * three scales and both entry points: exemption alone 140/156 (89.7%),

@@ -274,36 +274,36 @@ export interface CascadeSolution {
  * the shortfall and `realisedDb` is what was actually delivered — never the
  * target dressed up as an outcome.
  *
- * ── Why the BEST iterate is kept, not the last ──────────────────────────────
+ * ── Why the LAST iterate is kept, with the best one only as a fallback ──────
  * Once the +-12 dB clamp saturates, the iteration is no longer a contraction:
  * it can settle on a fixed point strictly FURTHER from the target than the
  * gains it started from. Measured over targets of the shape `matchCurve`
  * produces (mean-centred, bounded to +-10.9), a third of the runs ended worse
  * than their own starting point, and on an alternating +-8 dB target the leak
  * into 250 Hz — a band the chain's measurement forbids touching — grew across
- * the solve. So every iterate is scored and the best one is returned, which
- * makes "pre-compensated" a claim the returned gains can always support.
+ * the solve. That harm has to be guarded against for "pre-compensated" to be a
+ * claim the returned gains can support.
  *
- * But it is the LAST iterate that is preferred, and only the harm above is
- * guarded against — because "keep whichever iterate scores best" is a different
- * and worse rule, and the packaged smoke caught it doing damage. Scoring on the
- * worst band freezes every OTHER band the moment one of them clamps: the worst
- * error stops moving, no later iterate can beat it, and bands the EQ could have
- * delivered exactly are left wherever they happened to be. On the smoke's own
- * fixture that left 500 Hz 0.15 dB and 4 kHz 0.25 dB short of targets the
- * cascade reaches to three decimals, in exchange for 0.04 dB on a 16 kHz band
- * pinned at the rail and short by 2.1 dB either way. Measured over 300
- * mean-centred targets: keeping the last iterate leaves ZERO deliverable bands
- * short but ends worse than its own starting point in 48 of them; keeping the
- * best-scoring one never ends worse but leaves 749 deliverable bands short.
+ * But "keep whichever iterate scores best" is the wrong guard, and the packaged
+ * smoke caught it doing damage. Scoring on the worst band freezes every OTHER
+ * band the moment one of them clamps: the worst error stops moving, no later
+ * iterate can beat it, and bands the EQ could have delivered exactly are left
+ * wherever they happened to be. On the smoke's own fixture that left 500 Hz
+ * 0.15 dB and 4 kHz 0.25 dB short of targets the cascade reaches to three
+ * decimals, in exchange for 0.04 dB on a 16 kHz band pinned at the rail and
+ * short by 2.1 dB either way. Measured over 300 mean-centred targets: keeping
+ * the last iterate leaves ZERO deliverable bands short but ends worse than its
+ * own starting point in 48 of them; keeping the best-scoring one never ends
+ * worse but leaves 749 deliverable bands short.
  *
- * So: return the last iterate — the fixed point, where every band the cascade
- * can reach is reached — UNLESS it is worse than the un-compensated gains the
- * solve started from, in which case return the best iterate seen. That is 2 of
- * 300 ending worse (all of them inside `SOLVE_TOLERANCE_DB`, which is the
- * effect's own skip threshold: below it a band is not applied at all) and 203
- * deliverable bands left short, in the 16 % of runs where the fixed point is
- * genuinely worse than not compensating.
+ * So the rule is: return the LAST iterate — the fixed point, where every band
+ * the cascade can reach is reached — UNLESS it is worse than the un-compensated
+ * gains the solve started from by more than `SOLVE_TOLERANCE_DB`, in which case
+ * return the best iterate seen. That is 2 of 300 ending worse (all of them
+ * inside `SOLVE_TOLERANCE_DB`, which is the effect's own skip threshold: below
+ * it a band is not applied at all)
+ * and 203 deliverable bands left short, in the 16 % of runs where the fixed
+ * point is genuinely worse than not compensating.
  */
 export function solveCascadeGains(
   targetDb: readonly number[],

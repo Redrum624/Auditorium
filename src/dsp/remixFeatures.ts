@@ -102,16 +102,20 @@
  * vary in length by a few ms and nothing downstream assumes otherwise. Every
  * per-boundary descriptor (`T`/`C`/`L`) is defined over "the one beat of
  * audio immediately preceding boundary `m`", i.e. `[beatSamples[idx-1],
- * beatSamples[idx])` where `idx` is boundary `m`'s own beat index. Boundary 0
- * has no earlier tracked beat by construction (`idx-1 < 0`); this module
- * falls back to `[0, barBoundary[0])` for that one boundary (and, for `R`,
- * falls back to the same `[0, barBoundary[0])` range as the substitute
- * "preceding bar" when `m === 0`) rather than leaving it undefined -- a
- * documented interpretation where the brief is silent on this edge, not a
- * silently-invented default (see the task report for why this choice, rather
+ * beatSamples[idx])` where `idx = effectiveB0 + m*beatsPerBar` is boundary
+ * `m`'s own beat index. Boundary 0 has an earlier tracked beat whenever the
+ * downbeat phase is non-zero (`idx-1 = effectiveB0-1 >= 0`), and the REAL beat
+ * is used there; only at phase 0 is there no earlier beat, and that is the one
+ * case `T`/`C`/`L` fall back to `[0, barBoundary[0])`. `R` is different: its
+ * "preceding BAR" falls back to `[0, barBoundary[0])` whenever `m === 0`,
+ * phase or no phase, since `barBoundary[-1]` never exists. Both fallbacks are
+ * documented interpretations where the brief is silent on this edge, not
+ * silently-invented defaults (see the task report for why this choice, rather
  * than e.g. an all-zero descriptor, was made: an all-zero contribution would
  * only dilute, not qualitatively change, boundary 0's clustering direction,
- * since it is one of `2*SMOOTH_BARS+1` terms in `S[0]`'s own average).
+ * since it is one of the terms in `S[0]`'s own average -- at most
+ * `SMOOTH_BARS+1` of them at boundary 0, where the `+-SMOOTH_BARS` window is
+ * clamped on the left, not the `2*SMOOTH_BARS+1` an interior boundary gets).
  *
  * ## `downbeatShiftBeats` wraps, it does not shift the array window
  *
