@@ -21,6 +21,7 @@ import { resampleChannel } from '../dsp/resample';
 import { fft } from '../dsp/fft';
 import { registerAllEffects } from '../effects/registerAll';
 import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
+import * as effectRunner from './effectRunner';
 
 // App.tsx registers effects at startup; tempoService's applyTempoChange goes
 // through runEffectOnSelection('time-stretch', ...), which looks the effect
@@ -1063,5 +1064,116 @@ describe('beat markers after a CLAMPED variable match', () => {
     expect(markers).toHaveLength(MAX_BEAT_MARKERS);
     expect(showMessageBox).toHaveBeenCalledTimes(1);
     expect(showMessageBox.mock.calls[0][0].message).toContain(String(MAX_BEAT_MARKERS));
+  }, 30000);
+});
+
+// ---------------------------------------------------------------------------
+// R7 fix round 1 — the run is checked against the plan it was given
+// ---------------------------------------------------------------------------
+
+describe('the variable path checks the RESULT against the PLAN', () => {
+  it('does not report success when a concurrent metadata change is the only thing that moved', async () => {
+    // The variable half of the constant path's fix-round-2 finding, and the one
+    // mutation that survived the first service sweep: comparing the whole
+    // DOCUMENT reference instead of its `channels` false-POSITIVES, because
+    // `markDirty` — and therefore an ordinary `addMarker` during the await —
+    // returns a NEW document object holding the SAME channels array.
+    const seconds = 8;
+    const doc = seedDoc([sine(220, seconds)]);
+    const docId = doc.id;
+    const lenBefore = docLength(liveDoc(docId));
+    const historyBefore = getHistory(docId).done.length;
+
+    _setDspWorkerLoadFailure('boom');
+    const promise = applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 130,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: accelGrid(100, 120, seconds) },
+    });
+
+    // Interleaved DURING the await, exactly as the constant path's test does.
+    useAppStore.getState().addMarker(docId, { id: 'user-marker-var', name: 'User Marker', positionSample: 500 });
+
+    const result = await promise;
+
+    expect(result.ok).toBe(false);
+    // Specifically the `applied` gate, NOT the post-edit `plan-mismatch`:
+    // nothing was applied at all. Distinguishing the two is what makes the
+    // next unexplained failure say which one it was.
+    expect(result.reason).toBeUndefined();
+    expect(docLength(liveDoc(docId))).toBe(lenBefore);
+    expect(getHistory(docId).done.length).toBe(historyBefore);
+    expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+    expect(liveMarkers(docId).some((m) => m.id === 'user-marker-var')).toBe(true);
+  }, 30000);
+
+  it('refuses with plan-mismatch, and writes no grid, when the run disagrees with the plan', async () => {
+    // The plan and the worker build the map from the same pure function on the
+    // same inputs, so they agree BY CONSTRUCTION — which is exactly why this
+    // check has to be provoked deliberately to be pinned at all. Halving the
+    // target spacing the worker receives, while leaving the plan untouched, is
+    // the smallest faithful model of the two disagreeing: still a legal map,
+    // just a different length.
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    const grid = accelGrid(100, 120, seconds);
+    const req = { sourceBpm: 110, targetBpm: 130, variableRate: { beatSamples: grid } };
+
+    const planned = checkVariableTempoChange(req);
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    // The real implementation captured BEFORE spying. `jest.requireActual` is
+    // wrong here: this module is not mocked at module level, so requireActual
+    // hands back the very same object the spy has already replaced — and the
+    // mock calls itself forever.
+    const realRunEffect = effectRunner.runEffectOnSelection;
+    const spy = jest
+      .spyOn(effectRunner, 'runEffectOnSelection')
+      .mockImplementation((effectId, params, opts) => {
+        const extra = opts?.extra as { beatSamples: number[]; targetSpacing: number };
+        return realRunEffect(effectId, params, {
+          ...opts,
+          extra: { ...extra, targetSpacing: extra.targetSpacing / 2 },
+        });
+      });
+
+    try {
+      const result = await applyTempoChange({ ...req, addBeatMarkers: true });
+      expect(result.ok).toBe(false);
+      expect(result.reason).toBe('plan-mismatch');
+      // The audio edit itself happened and stays undoable — the refusal is
+      // about the plan no longer describing it, not about the edit failing.
+      expect(getHistory(docId).done).toEqual(['Match Tempo']);
+      // And NO beat grid was written from a plan that no longer describes the
+      // audio. That silent wrong answer is the whole point of the check.
+      expect(liveMarkers(docId).filter((m) => m.name.startsWith('Beat '))).toHaveLength(0);
+      expect(docLength(liveDoc(docId))).not.toBe(planned.plan.outLength);
+    } finally {
+      spy.mockRestore();
+    }
+  }, 30000);
+
+  it('and the spy really can change the outcome — the same run, unspied, succeeds', async () => {
+    // Without this, the test above would pass just as well if the spy silently
+    // did nothing and `applyTempoChange` were failing for an unrelated reason.
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const req = {
+      sourceBpm: 110,
+      targetBpm: 130,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: accelGrid(100, 120, seconds) },
+    };
+    const planned = checkVariableTempoChange(req);
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    const result = await applyTempoChange(req);
+    expect(result.ok).toBe(true);
+    expect(docLength(liveDoc(doc.id))).toBe(planned.plan.outLength);
+    expect(liveMarkers(doc.id).filter((m) => m.name.startsWith('Beat ')).length).toBeGreaterThan(0);
   }, 30000);
 });

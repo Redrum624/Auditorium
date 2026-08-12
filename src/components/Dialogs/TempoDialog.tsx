@@ -251,6 +251,15 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
       setDocEntry(result);
       setRegionOverride(null);
       setCorrectionFailed(false);
+      // Kept for correctness, but UNREACHABLE WITH EFFECT today, and that is
+      // recorded rather than papered over with a test that reaches it through
+      // internals a user cannot touch. The Detect button renders only while
+      // `docEntry === null`; with no `docEntry` there is no `confirmableGrid`,
+      // so the Correction select is disabled and the tick never renders — and
+      // nothing sets `docEntry` back to null once this call has set it. So
+      // `gridConfirmed` is already false whenever this line runs. It stays
+      // because this call REPLACES the grid, and the moment that render gate
+      // changes the reset becomes load-bearing.
       setGridConfirmed(false);
       setLastEstimateSelection(useAppStore.getState().selection);
       if (result?.bpm != null) setSourceDraft(String(result.bpm));
@@ -614,7 +623,12 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
                 </div>
                 {variablePlan.clampedCount > 0 && (
                   <div data-testid="tempo-variable-clamped" className="text-xs text-[#e0a458]">
-                    {`${variablePlan.clampedCount} of ${variablePlan.beatCount} beats could not reach the target — they were moved as far as the ${MIN_RATIO}x–${MAX_RATIO}x limit allows.`}
+                    {/* GAPS, not beats: `clampedIndices` counts the intervals
+                        BETWEEN beats, so its ceiling is beatCount - 1. Reading
+                        "N of M beats" against M beats made the worst case look
+                        like a fraction of the whole when it was already all of
+                        it. */}
+                    {`${variablePlan.clampedCount} of ${Math.max(0, variablePlan.beatCount - 1)} gaps between beats could not reach the target — they were stretched as far as the ${MIN_RATIO}x–${MAX_RATIO}x limit allows.`}
                   </div>
                 )}
               </>

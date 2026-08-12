@@ -484,25 +484,52 @@ describe('R7 — Correction mode', () => {
     expect((screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement).checked).toBe(false);
   });
 
-  it('a full Detect clears the confirmation as well', async () => {
+  it('the Detect button and the Correction control are never on screen together', () => {
+    // Replaces a test that claimed to exercise `handleDetect`'s confirmation
+    // reset but clicked `tempo-redetect-button` — a different handler — and so
+    // only duplicated the test above it.
+    //
+    // `handleDetect`'s `setGridConfirmed(false)` is unreachable with effect,
+    // and this is the property that makes it so: Detect renders only while
+    // there is no cached entry, and without one the Correction select is
+    // disabled and the tick never renders. Pinned here so that if the render
+    // gate ever changes, the reset stops being dead and this test says so.
     seedDoc();
     mockGetTempo.mockReturnValue(null);
-    mockRunTempoAnalysis.mockResolvedValue(varyingEntry());
     render(<TempoDialog onClose={jest.fn()} />);
 
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('tempo-detect-button'));
-    });
+    expect(screen.getByTestId('tempo-detect-button')).toBeInTheDocument();
+    expect(screen.getByTestId('tempo-correction')).toBeDisabled();
+    expect(screen.queryByTestId('tempo-grid-confirmed')).not.toBeInTheDocument();
+  });
+
+  it('RULING 1 — the grid comes from the cached analysis, NEVER from a region re-detect', () => {
+    // The ruling this task was most explicitly bound by, and it had no test.
+    // `detectRegionTempo` returns a BPM and a confidence and no beats at all,
+    // so a re-detect must be able to change every number on screen without
+    // changing one position in the grid the warp is built from.
+    const onClose = jest.fn();
+    seedDoc();
+    const entry = varyingEntry();
+    mockGetTempo.mockReturnValue(entry);
+    mockDetectRegionTempo.mockReturnValue({ bpm: 137, confidence: 0.9 });
+    render(<TempoDialog onClose={onClose} />);
+
     fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.click(screen.getByTestId('tempo-redetect-button'));
+
+    // The re-detect really did land — otherwise this proves nothing.
+    expect((screen.getByTestId('tempo-source') as HTMLInputElement).value).toBe('137');
+    expect(screen.getByTestId('tempo-detected')).toHaveTextContent('137');
+
     fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
     fireEvent.click(screen.getByTestId('tempo-grid-confirmed'));
-    expect((screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement).checked).toBe(true);
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
 
-    mockRunTempoAnalysis.mockResolvedValue(varyingEntry());
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('tempo-redetect-button'));
-    });
-    expect((screen.getByTestId('tempo-grid-confirmed') as HTMLInputElement).checked).toBe(false);
+    expect(mockApplyTempoChange).toHaveBeenCalledTimes(1);
+    // The SAME array object the cached analysis holds — not a grid derived from
+    // the 137 BPM the region detector just reported.
+    expect(mockApplyTempoChange.mock.calls[0][0].variableRate?.beatSamples).toBe(entry.beatSamples);
   });
 
   it('reports the beat count, the local-ratio RANGE and the new duration', () => {
@@ -532,7 +559,7 @@ describe('R7 — Correction mode', () => {
     fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '20' } });
     fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
 
-    expect(screen.getByTestId('tempo-variable-clamped')).toHaveTextContent('2 of 3 beats');
+    expect(screen.getByTestId('tempo-variable-clamped')).toHaveTextContent('2 of 2 gaps between beats');
     expect(screen.getByTestId('tempo-variable-clamped')).toHaveTextContent('as far as the 0.25x–4x limit allows');
   });
 

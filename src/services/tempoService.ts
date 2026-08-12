@@ -56,8 +56,19 @@ import { pushMarkerUndo } from './editOps';
  *
  * `'no-grid'` is R7's, and belongs only to the variable-rate path: the
  * confirmed grid holds fewer than two beats inside the region, so there is not
- * one MEASURED beat interval to follow and any map would be invention. */
-export type TempoRefusal = 'no-document' | 'invalid-bpm' | 'no-op' | 'out-of-range' | 'no-grid';
+ * one MEASURED beat interval to follow and any map would be invention.
+ *
+ * `'plan-mismatch'` is R7's too, and is the only refusal reported AFTER an edit
+ * has already been committed: the audio the worker returned does not have the
+ * length the plan said it would, so the plan can no longer be trusted to say
+ * where anything is. See {@link applyVariableTempoChange}. */
+export type TempoRefusal =
+  | 'no-document'
+  | 'invalid-bpm'
+  | 'no-op'
+  | 'out-of-range'
+  | 'no-grid'
+  | 'plan-mismatch';
 
 export interface TempoChangeRequest {
   sourceBpm: number;
@@ -78,10 +89,20 @@ export interface ApplyTempoChangeRequest extends TempoChangeRequest {
    * to hear and to undo.
    *
    * Positions are DOCUMENT-absolute tracked beats (`BeatGrid.beatSamples`);
-   * this function converts them to region-relative itself. `sourceBpm` is
-   * ignored on this path — the grid IS the source tempo, per beat — but is
-   * still required, because `checkTempoChange`'s guards run first and a user
-   * who typed nonsense should be refused before any grid is consulted.
+   * this function converts them to region-relative itself.
+   *
+   * **`sourceBpm` is not read on this path at all**, and nothing validates it
+   * here: {@link applyTempoChange} takes the variable branch as its FIRST
+   * statement, before `checkTempoChange` runs, and
+   * {@link checkVariableTempoChange} validates only `targetBpm`. So
+   * `applyTempoChange({ sourceBpm: NaN, targetBpm: 110, variableRate })` warps
+   * successfully, and `TempoDialog`'s follow-the-beats Apply is deliberately
+   * not gated on a valid Source either. That is correct — the grid IS the
+   * source tempo, per beat, so a source BPM would be a second, redundant
+   * answer to a question the grid already answers — and it is stated here
+   * because an earlier version of this comment claimed the opposite.
+   * `sourceBpm` remains on the type only because it is inherited from
+   * {@link TempoChangeRequest}, which the constant path needs.
    */
   variableRate?: {
     /** Confirmed, document-absolute beat positions, ascending. */
@@ -220,9 +241,16 @@ export function checkVariableTempoChange(req: ApplyTempoChangeRequest): Variable
   const { targetBpm } = req;
   if (!Number.isFinite(targetBpm) || targetBpm <= 0) return { ok: false, reason: 'invalid-bpm' };
 
+  // Clamped exactly as `cloneRegion` clamps it (`AudioDocument.ts`), so the
+  // region this plan describes and the region the worker is handed cannot
+  // differ. No store path is known that produces an out-of-bounds selection —
+  // the reviewer looked and could not construct one — but the two resolutions
+  // disagreeing is the ONLY route by which the previewed map and the applied
+  // map could describe different audio, and matching the clamp costs nothing.
+  const len = docLength(doc);
   const selection = useAppStore.getState().selection;
-  const start = selection ? selection.start : 0;
-  const end = selection ? selection.end : docLength(doc);
+  const start = Math.min(Math.max(selection ? selection.start : 0, 0), len);
+  const end = Math.min(Math.max(selection ? selection.end : len, 0), len);
   const regionLength = end - start;
 
   const beats = regionRelativeBeats(req.variableRate.beatSamples, start, end);
@@ -362,7 +390,15 @@ function addBeatMarkersFromMap(docId: string, start: number, map: TempoMap): boo
   const newDoc = useAppStore.getState().documents.find((d) => d.id === docId);
   if (!newDoc) return false; // document closed while the stretch was running
 
-  const newLen = docLength(newDoc);
+  // No clamp into `[0, docLength]`. Every placed position is inside the map by
+  // construction — `placed[i] <= knotsOut[last]` and `outLen =
+  // round(knotsOut[last])`, so `start + round(placed[i]) <= start + outLen`,
+  // which is the new region's end — and `applyVariableTempoChange` has already
+  // REFUSED if the realised length disagreed with the plan. A clamp here could
+  // therefore never fire on a consistent plan, and on an inconsistent one its
+  // only effect would be to convert a detectable disagreement into a pile of
+  // markers silently stacked on the document's last sample. The refusal is the
+  // honest handling; the clamp was hiding the case it was written for.
   const positions: number[] = [];
   let truncated = false;
   for (let i = 0; i < map.placed.length; i++) {
@@ -370,7 +406,7 @@ function addBeatMarkersFromMap(docId: string, start: number, map: TempoMap): boo
       truncated = true;
       break;
     }
-    positions.push(Math.max(0, Math.min(newLen, start + Math.round(map.placed[i]))));
+    positions.push(start + Math.round(map.placed[i]));
   }
   return writeBeatMarkers(docId, positions, truncated);
 }
@@ -589,6 +625,25 @@ async function applyVariableTempoChange(
   const postDoc = useAppStore.getState().documents.find((d) => d.id === docId);
   const applied = postDoc !== undefined && postDoc.channels !== doc.channels;
   if (!applied) return { ok: false };
+
+  // THE RUN IS CHECKED AGAINST THE PLAN IT WAS GIVEN.
+  //
+  // `applied` only says the channels array is a different object. It cannot
+  // tell a real warp from `applyTempoMap`'s identity short circuit, which also
+  // returns fresh arrays — of the SAME length. So on its own it would accept a
+  // run that did nothing, report `ok: true`, and then lay a beat grid from
+  // `plan.map.placed` describing positions the audio does not have.
+  //
+  // The realised length delta is the one quantity that can distinguish them,
+  // and it is exactly predicted: the region `[start, end)` was replaced by
+  // `plan.outLength` samples, so the document must grow by
+  // `outLength - regionLength`. The packaged smoke already treats this equality
+  // as load-bearing (`lengthAfter === plannedLength`); until now the service
+  // did not, and a disagreement between the previewed map and the applied one
+  // would have surfaced as silently misplaced markers rather than as an error.
+  const realisedDelta = docLength(postDoc) - docLength(doc);
+  const plannedDelta = check.plan.outLength - check.plan.regionLength;
+  if (realisedDelta !== plannedDelta) return { ok: false, reason: 'plan-mismatch' };
 
   if (req.addBeatMarkers) addBeatMarkersFromMap(docId, start, check.plan.map);
 

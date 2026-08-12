@@ -176,6 +176,21 @@ get an exact piecewise remap; a marker INSIDE a removed span (a cue placed in
 the pause — podcast chapters live there) snaps to the splice point instead of
 dropping, unlike an explicit user delete.
 
+**v1.23 refinement (R7):** the proportional rule is exact only where the local
+ratio equals the region's AVERAGE ratio — which for a variable-rate Match Tempo
+("Follow the tracked beats") is true almost nowhere, since the whole point is
+that the rate differs bar by bar. A variable-rate match therefore still remaps
+interior markers proportionally, and on strongly varying material a marker can
+drift from the audio it marks by the same order of magnitude the feature just
+removed from the audio: on the measured 100→120 BPM accelerando, up to ~525 ms.
+The beat grid the feature lays afterwards is NOT affected — it is written from
+the tempo map's own placed positions, so it is exact — but other markers inside
+the region are. Unlike F2's case this cannot be fixed in the service, because a
+variable-rate match CHANGES the region's length, so `applyEdit`'s proportional
+remap has already fired by the time a service-level correction could run; F2 and
+F9 both worked at equal length. Fixing it properly means teaching the remap
+about the map, which is a change to a rule every length-changing effect shares.
+
 **Remaining notes (interop granularity, not persistence gaps):** third-party
 tools read the standard chapter fields at millisecond granularity (that is all
 ID3 `CHAP`/vorbis `CHAPTER` timestamps can express); Auditorium itself reopens
@@ -556,6 +571,15 @@ the middle of the region off by nearly a whole beat. The remaining few
 milliseconds on the right-hand column are WSOLA's own placement error, not the
 map's, and they do not grow with the slope.
 
+**Your other markers inside the region drift.** The beat grid this mode lays is
+exact — it comes from the tempo map's own placed positions — but every OTHER
+marker inside the corrected region is still remapped proportionally, which is
+right only where the local rate equals the region average. On strongly varying
+material that error is the same order as the one being removed from the audio
+(up to ~525 ms on the 100→120 fixture above). See the marker-persistence entry
+('Markers persist in every container', v1.23 refinement) for why this cannot be
+fixed in the service the way F2 and F9 fixed their equivalents.
+
 **What it still cannot do, and says so:** the local ratio is bounded by the same
 `0.25x–4x` limit the constant path enforces, per beat interval rather than once
 for the region. A beat the bound holds back is moved as far as it allows and
@@ -580,16 +604,25 @@ downbeats, through the real `analyzeTempo` → `deriveRemixFeatures` pipeline:
 | fixture | boundaries landing on a true downbeat | median boundary error | phrase-congruent joins that are musically congruent |
 |---|---|---|---|
 | 4/4 throughout, 36 bars (control) | 35 / 36 | 0.6 ms | **100 %** |
-| 4/4 ×16, **3/4 ×4**, 4/4 ×16 | 32 / 35 | 0.6 ms | **33 %** |
-| 4/4 ×16, **3/4 ×5**, 4/4 ×16 | 17 / 35 | **499 ms** (a full beat) | 13 % |
+| 4/4 ×16, **3/4 ×4**, 4/4 ×16 | 32 / 35 | 0.6 ms | **32 / 96 = 33 %** |
+| 4/4 ×16, **3/4 ×5**, 4/4 ×16 | 17 / 35 | **499 ms** (a full beat) | 16 / 20 identifiable = 80 % |
+
+The last column counts only pairs whose BOTH endpoints can still be matched to
+a real downbeat; pairs that cannot are excluded from the numerator *and* the
+denominator, which is why the control scores 100 % rather than being charged
+for its trailing partial bar. That convention is also why row 3's percentage
+looks better than row 2's while the material is worse: the 3/4 × 5 bridge
+destroys so many boundaries that only **20 of 120** phrase-congruent pairs
+remain identifiable at all. Read row 3's first two columns, not its last.
 
 A bridge whose beat count is a multiple of the assumed meter (3/4 × 4 = 12
 beats) lets the boundary *positions* re-align afterwards, but the bar
 *numbering* is permanently shifted — so `a ≡ b mod Φ` congruence still holds
-arithmetically while only a third of those joins connect the same position in
-the real phrase. A bridge whose beat count is **not** a multiple (3/4 × 5 = 15
-beats) is worse: half the bar lines sit a full beat off the downbeat for the
-rest of the track.
+arithmetically while only a third of those joins (32 of 96) connect the same
+position in the real phrase. A bridge whose beat count is **not** a multiple
+(3/4 × 5 = 15 beats) is worse: **18 of 35** bar lines sit a full beat off the
+downbeat for the rest of the track, and most bar pairs stop being identifiable
+at all.
 
 **Why it is not fixed yet, stated rather than hidden:** the app has **no meter
 detector at all** — `beatsPerBar` is a single time signature the user picks in
