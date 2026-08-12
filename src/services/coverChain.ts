@@ -410,7 +410,10 @@ export function deriveMatchEq(
     },
     {
       label: 'Realised',
-      value: `within ${solution.worstErrorDb.toFixed(3)} dB of the target`,
+      value:
+        solution.worstErrorDb > 0.01
+          ? `up to ${solution.worstErrorDb.toFixed(2)} dB SHORT of the target`
+          : `within ${solution.worstErrorDb.toFixed(3)} dB of the target`,
       from: `the cascade's own measured response at the band centres after ${solution.iterations} pre-compensation pass${solution.iterations === 1 ? '' : 'es'} — the figures above are what the audio receives, not what was requested`,
     },
   ];

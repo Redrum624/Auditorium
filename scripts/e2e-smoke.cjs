@@ -16,6 +16,11 @@ const { _electron: electron } = require('playwright');
 const ROOT = path.resolve(__dirname, '..');
 const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
 const BEAT = path.join(ROOT, 'test-assets', 'beat120.wav');
+// F10 Cover Chain fixtures. Two files by design: the chain matches ONE document
+// to ANOTHER, so a single fixture cannot exercise it at all. See
+// scripts/make-test-cover.cjs for what each property is chosen to reach.
+const COVER_REFERENCE = path.join(ROOT, 'test-assets', 'cover-reference.wav');
+const COVER_TAKE = path.join(ROOT, 'test-assets', 'cover-take.wav');
 // Optional real-material fixture: a full commercial track the user placed
 // locally. Copyrighted, so it is NEVER committed (test-assets/ is gitignored)
 // and NEVER required — the real-song step skips cleanly when it is absent.
@@ -262,6 +267,8 @@ async function main() {
     [BEAT, 'make-test-beat.cjs', '120 BPM click train'],
     [ABAB, 'make-test-abab.cjs', 'ABAB structure fixture'],
     [LONG70, 'make-test-long.cjs', '70 s multi-slice transcription fixture'],
+    [COVER_REFERENCE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
+    [COVER_TAKE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
   ]) {
     if (!fs.existsSync(file)) {
       console.log(`Generating ${label}...`);
@@ -1235,6 +1242,227 @@ async function main() {
     );
 
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
+    // 11d) F10 — the Cover Chain, end to end in the PACKAGED app. Two documents
+    // are open at once here and that is the point: the chain matches ONE
+    // recording to ANOTHER, so everything below is a claim the vocal chain's
+    // step structurally cannot make.
+    //
+    // Four things are pinned that the unit suite cannot see. Three real DSP
+    // workers run back to back through the packaged bundle. The REFERENCE
+    // document has to come back untouched — `runEffectOnChannels` TRANSFERS the
+    // buffers it is handed, and only the real worker does that, so a chain that
+    // handed the reference to a worker would pass every unit test and destroy
+    // the user's separated vocal here. The realised match curve is compared
+    // against the target on audio the real Graphic EQ produced. And the fixture
+    // is built so the loudness match lands the peak OVER full scale, which is
+    // the case Ruling C exists for.
+    console.log('Cover Chain (F10): match one recording to another, in the packaged app...');
+    await page.evaluate((p) => window.__test.openPath(p), COVER_REFERENCE);
+    await page.evaluate((p) => window.__test.openPath(p), COVER_TAKE);
+    const coverBefore = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      coverBefore.activeName === 'cover-take.wav',
+      `the take is the active document and the reference is the other one (active ${JSON.stringify(coverBefore.activeName)})`
+    );
+
+    const cover = await page.evaluate(() =>
+      window.__test.runCoverChain('cover-reference.wav', { matchReverb: true })
+    );
+    console.log(
+      `  runCoverChain: ok=${cover.ok} applied=${cover.applied} undoDepth=${cover.undoDepth} ` +
+        `label=${JSON.stringify(cover.undoLabel)} reference=${JSON.stringify(cover.referenceName)}`
+    );
+    for (const stage of cover.stages) {
+      const derived = stage.derived.map((d) => `${d.label}=${d.value}`).join(', ');
+      console.log(
+        `    ${stage.id}: ${stage.status}` +
+          (derived ? ` [${derived}]` : '') +
+          (stage.detail ? ` — ${stage.detail}` : '') +
+          (stage.warning ? ` — WARNING ${stage.warning}` : '') +
+          (stage.reason ? ` — ${stage.reason}` : '')
+      );
+    }
+
+    assert(cover.ok === true, 'the Cover Chain ran in the packaged app (a real DSP worker per stage)');
+    assert(cover.applied === true, 'the Cover Chain committed an edit');
+    assert(
+      cover.undoDepth === 1,
+      `the WHOLE chain is one undo entry, not one per stage (expected 1, actual ${cover.undoDepth}) ` +
+        '— the single most load-bearing promise the feature makes'
+    );
+    assert(
+      cover.undoLabel === 'Cover Chain',
+      `the undo entry is named for what the user asked for (actual ${JSON.stringify(cover.undoLabel)})`
+    );
+    assert(
+      cover.referenceName === 'cover-reference.wav',
+      `the chain matched against the document it was given (actual ${JSON.stringify(cover.referenceName)})`
+    );
+    // THE one the unit suite cannot reach: the real worker detaches what it is
+    // handed, so this is the only place a chain that posted the reference to a
+    // worker would be caught — and it would have destroyed a user's separated
+    // vocal in the process.
+    assert(
+      cover.referenceIntact === true,
+      `the reference document is bit-identical after the run — the chain READS it (actual ${cover.referenceIntact})`
+    );
+
+    // Compared against the app's OWN registry, never a hardcoded count: a count
+    // rots the moment a stage is added, and it has twice in this repo.
+    const coverReported = cover.stages.map((st) => st.id);
+    assert(
+      JSON.stringify(coverReported) === JSON.stringify(cover.registryStageIds),
+      `every stage is reported, run or not, in registry order (registry ${JSON.stringify(cover.registryStageIds)}, reported ${JSON.stringify(coverReported)})`
+    );
+    const coverManual = cover.stages.filter((st) => st.status === 'manual').map((m) => m.id);
+    assert(
+      JSON.stringify(coverManual) === JSON.stringify(cover.registryManualIds),
+      `the stages with no automatic effect are listed but never run (registry ${JSON.stringify(cover.registryManualIds)}, manual ${JSON.stringify(coverManual)})`
+    );
+    for (const stage of cover.stages) {
+      assert(
+        ['applied', 'declined', 'off', 'manual'].indexOf(stage.status) !== -1,
+        `stage ${stage.id} reports a known status (actual ${JSON.stringify(stage.status)})`
+      );
+      if (stage.status === 'declined') {
+        assert(
+          typeof stage.reason === 'string' && stage.reason.length > 0,
+          `stage ${stage.id} declined WITH a reason — a silent skip is the failure mode this rules out`
+        );
+      }
+    }
+
+    // Ruling B, on audio the real Graphic EQ produced: the curve the chain
+    // REPORTS is the one the octave energies actually moved by.
+    const coverEq = cover.stages.filter((st) => st.id === 'matchEq')[0];
+    assert(coverEq.status === 'applied', `the match EQ ran (status ${coverEq.status})`);
+    const coverMatchedBands = coverEq.eqBands.filter((b) => b.status === 'matched');
+    assert(
+      coverMatchedBands.length >= 5,
+      `the fixture pair leaves the match real work to do (matched bands ${coverMatchedBands.length})`
+    );
+    // Every matched band is classified TOTALLY and EXCLUSIVELY into one of two
+    // kinds: delivered, or short-and-said-so. A band that is neither (short and
+    // silent) or both is a failure — and "short and silent" is precisely the
+    // Ruling B defect, so a one-sided "realised == target" assertion would have
+    // to be relaxed into meaninglessness the first time a band could not be
+    // delivered. This fixture reaches BOTH kinds in one run.
+    let coverDelivered = 0;
+    let coverShort = 0;
+    for (const band of coverMatchedBands) {
+      const error = Math.abs(band.realisedDb - band.targetDb);
+      const delivered = error <= 0.05;
+      const saidShort =
+        error > 0.05 &&
+        typeof coverEq.warning === 'string' &&
+        coverEq.warning.indexOf(`${band.centreHz} Hz`) !== -1 &&
+        coverEq.warning.indexOf('could not fully deliver') !== -1;
+      assert(
+        (delivered ? 1 : 0) + (saidShort ? 1 : 0) === 1,
+        `${band.centreHz} Hz: the realised band energy is either the target or reported short — never short and silent ` +
+          `(wanted ${band.targetDb.toFixed(3)}, realised ${band.realisedDb.toFixed(3)} dB, warning ${JSON.stringify(coverEq.warning)})`
+      );
+      if (delivered) coverDelivered++;
+      else coverShort++;
+      assert(
+        Math.abs(band.bandGainDb) <= 12.0001,
+        `${band.centreHz} Hz: the gain stays inside the Graphic EQ's own range (actual ${band.bandGainDb.toFixed(3)} dB)`
+      );
+    }
+    assert(
+      coverDelivered >= 5,
+      `most of the curve was delivered exactly (${coverDelivered} of ${coverMatchedBands.length} bands)`
+    );
+    // The fixture's top octave asks for ~9.7 dB of band ENERGY, which needs more
+    // than the Graphic EQ's own +-12 dB once its roll-off across the octave is
+    // compensated. That is the case that must be REPORTED rather than rounded
+    // away, and it is why the classification above is two-sided.
+    assert(
+      coverShort === 1 && Math.abs(coverEq.eqWorstErrorDb) > 0.05,
+      `the one band the EQ could not deliver is named with its shortfall (short ${coverShort}, worst ${coverEq.eqWorstErrorDb})`
+    );
+    const coverOutOfRange = coverEq.eqBands.filter((b) => b.status !== 'matched');
+    assert(
+      coverOutOfRange.length >= 1 && coverOutOfRange.every((b) => b.bandGainDb === 0),
+      `no band outside the measured range receives a deliberate gain (${coverOutOfRange.map((b) => `${b.centreHz}=${b.bandGainDb}`).join(', ')})`
+    );
+    assert(
+      coverOutOfRange.some((b) => Math.abs(b.realisedDb) > 0.05),
+      `the cascade's leak into those bands is REPORTED rather than shown as zero (${coverOutOfRange.map((b) => `${b.centreHz}=${b.realisedDb.toFixed(2)}`).join(', ')})`
+    );
+
+    // The measurement the EQ exists to move, taken on the real output.
+    assert(
+      cover.after.matchDistanceDb < cover.before.matchDistanceDb * 0.6,
+      `the spectral distance to the reference closed (before ${cover.before.matchDistanceDb.toFixed(2)}, after ${cover.after.matchDistanceDb.toFixed(2)} dB)`
+    );
+    // The loudness claim, end to end.
+    assert(
+      Math.abs(cover.after.gatedLevelDb - cover.reference.gatedLevelDb) < 0.6,
+      `the take now sits at the reference's sounding level (after ${cover.after.gatedLevelDb.toFixed(2)}, target ${cover.reference.gatedLevelDb.toFixed(2)} dBFS)`
+    );
+
+    // Ruling C, in the packaged app: this fixture's peak WOULD pass full scale
+    // after the match, and the limiter is what stops it.
+    const coverLimiter = cover.stages.filter((st) => st.id === 'headroom')[0];
+    assert(
+      coverLimiter.status === 'applied' && /caught \d+\.\d\d dB of peak/.test(coverLimiter.detail || ''),
+      `the limiter had something to catch and said how much (status ${coverLimiter.status}, detail ${JSON.stringify(coverLimiter.detail)})`
+    );
+    assert(
+      cover.after.peakDb <= -0.3 + 0.01,
+      `the output respects the -0.3 dBFS ceiling (actual ${cover.after.peakDb.toFixed(2)} dBFS)`
+    );
+    assert(
+      cover.before.peakDb > cover.after.peakDb - 12,
+      `the fixture really needed the catch (before ${cover.before.peakDb.toFixed(2)} dBFS, matched by ${(cover.after.gatedLevelDb - cover.before.gatedLevelDb).toFixed(2)} dB)`
+    );
+
+    // The reverb stage was switched ON and still refused, deriving the refusal.
+    // Classified TOTALLY and EXCLUSIVELY: a reason matching neither known kind,
+    // or both, fails — a substring sweep would pass on a sentence that said
+    // nothing useful.
+    const coverReverb = cover.stages.filter((st) => st.id === 'matchReverb')[0];
+    assert(coverReverb.status === 'declined', `the reverb stage declined (status ${coverReverb.status})`);
+    const reverbKinds = [
+      ['no-measurable-decay', /decays cleanly enough to measure/],
+      ['below-the-effects-floor', /the shortest this reverb can produce is \d+\.\d\d s/],
+    ].filter(([, re]) => re.test(coverReverb.reason || ''));
+    assert(
+      reverbKinds.length === 1,
+      `the refusal is exactly one known DERIVED kind, not zero and not two (matched ${JSON.stringify(reverbKinds.map((k) => k[0]))}, reason ${JSON.stringify(coverReverb.reason)})`
+    );
+
+    console.log(
+      `  ok: loudness ${cover.before.gatedLevelDb.toFixed(2)} -> ${cover.after.gatedLevelDb.toFixed(2)} dBFS ` +
+        `(target ${cover.reference.gatedLevelDb.toFixed(2)}), spectral distance ${cover.before.matchDistanceDb.toFixed(2)} -> ` +
+        `${cover.after.matchDistanceDb.toFixed(2)} dB, peak ${cover.before.peakDb.toFixed(2)} -> ${cover.after.peakDb.toFixed(2)} dBFS, ` +
+        `spread ${cover.before.spreadDb.toFixed(2)} -> ${cover.after.spreadDb.toFixed(2)} dB (reported, never corrected)`
+    );
+
+    // One Ctrl+Z puts the WHOLE pass back, which is only meaningful because
+    // undoDepth was asserted to be 1 above.
+    const coverUndone = await page.evaluate(() => window.__test.undoActive());
+    assert(
+      coverUndone.length === cover.lengthBefore,
+      `one undo restores the take (expected ${cover.lengthBefore}, actual ${coverUndone.length})`
+    );
+
+    // And with no reference chosen, every matching stage declines saying so
+    // rather than the chain refusing to start or quietly doing nothing.
+    const coverNoRef = await page.evaluate(() => window.__test.runCoverChain(null));
+    assert(
+      coverNoRef.ok === true && coverNoRef.applied === false,
+      `with no reference the chain runs and changes nothing (ok ${coverNoRef.ok}, applied ${coverNoRef.applied})`
+    );
+    for (const id of ['matchEq', 'matchLoudness']) {
+      const stage = coverNoRef.stages.filter((st) => st.id === id)[0];
+      assert(
+        stage.status === 'declined' && /no original vocal chosen/.test(stage.reason || ''),
+        `${id} declines and says what to do about it (status ${stage.status}, reason ${JSON.stringify(stage.reason)})`
+      );
+    }
 
     // 12) v1.5 step C — Auto-Remix (Task T13 acceptance): open the 64 s ABAB
     // fixture and ask for a 32 s arrangement through the real
