@@ -331,10 +331,12 @@ function writeClipFade(
 /** X5 — facing-fade maintenance: the store's half of X3's canonical-pair
  * contract ("the gesture keeps both facing fades exactly equal to the overlap
  * width, or the overlap silently renders as solo fades"). Runs after a
- * `moveClip`/`trimClip` edit has been applied to `tracks` (a draft whose
- * affected clips arrays are fresh copies), with `pre` snapshotted via
- * `preOverlapStates` before the edit. For each track-mate N of the edited
- * (pivot) clip:
+ * `moveClip`/`trimClip`/`removeClip` edit has been applied to `tracks` (a draft
+ * whose affected clips arrays are fresh copies), with `pre` snapshotted via
+ * `preOverlapStates` before the edit — for `removeClip`, before the pivot
+ * leaves the array, which is what lets the disarm loop clear the survivor's
+ * now-stale facing fade (see that caller's own note). For each track-mate N of
+ * the edited (pivot) clip:
  *
  *  - ARM — write `a.fadeOutSample = b.fadeInSample = width` — exactly when
  *    the post-edit pair has crossfade-capable geometry (`crossfadableOverlap`,

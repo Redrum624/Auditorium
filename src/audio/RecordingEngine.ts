@@ -313,7 +313,20 @@ export class RecordingEngine {
   }
 
   /** Concatenate accumulated chunks into one Float32Array per channel, clamped
-   * to the first two channels and never fewer than the requested count. */
+   * to the first two.
+   *
+   * The COUNT follows the DEVICE, not the request. `opts.channels` is passed as
+   * a bare `channelCount` constraint, which is `ideal`, not `exact` — a mono
+   * interface asked for 2 returns 1, and a device that only opens in stereo
+   * asked for 1 returns 2 (clamped here at 2). The worklet's first chunk sizes
+   * `this.chunks`, so whatever the device delivered is what comes out. Only the
+   * no-chunk-ever-arrived case falls back to the requested count, and then
+   * every array is empty. Consumers must therefore treat the result as 1-or-2
+   * channels regardless of what they asked for: all of them do today
+   * (`RecordDialog`, `multitrackRecord`, `AlignLyricsDialog` and the test hooks
+   * all iterate or read `[0]`, and a mono document is first-class everywhere
+   * downstream), and any future consumer that indexes `[1]` unconditionally
+   * would be reading `undefined`. */
   private concatChannels(): Float32Array[] {
     let sources = this.chunks;
     if (sources.length === 0) {

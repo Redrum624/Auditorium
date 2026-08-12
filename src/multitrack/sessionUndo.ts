@@ -222,8 +222,10 @@ export function endSessionGesture(): void {
 
 /** Brackets `fn` in a gesture — the one-call form for commits that are a
  * single user act spanning several store writes (Arm crossfade writes two
- * fades; the spatial drop batches three params) or that need a UI-intent
- * label/coalesceKey the store cannot know (Set elevation). */
+ * fades; a recording stop adds one clip per armed track) or that batch several
+ * params behind one intent label the store cannot know (the spatial drop writes
+ * azimuth and distance, plus elevation when one is pending, under 'Set spatial
+ * position'; 'Set elevation' relabels a single key write). */
 export function withSessionGesture(
   label: string,
   fn: () => void,

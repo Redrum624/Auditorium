@@ -346,13 +346,17 @@ interface Mp4Box {
 
 /**
  * Bounded scan: at most this many SIBLING boxes are collected per level. Every
- * other sniffer here is bounded too (WebM 512 KB, Ogg 2 MB, FLAC MAX_BLOCKS);
- * without this one, a 200 MB `.m4a` padded with ~25 million empty 8-byte
+ * other sniffer here is bounded too, by its own shape: the EBML walk by
+ * `EBML_MAX_CHILDREN` (a per-level sibling count, like this one — the 512 KB
+ * byte cap it used to have was removed as the wrong shape), and the Ogg and
+ * FLAC sniffers by having no loop at all, reading fixed offsets in the first
+ * page / stream header. Without this one, a 200 MB `.m4a` padded with ~25 million empty 8-byte
  * `free` boxes made this loop run 25 million iterations on the MAIN THREAD and
  * build a 25-million-element array of box records before OOMing — reachable
  * from nothing more than opening a file.
  *
- * A byte-range cap (the WebM/Ogg shape) would have been the WRONG bound here
+ * A byte-range cap — the shape the EBML walk used before `EBML_MAX_CHILDREN`
+ * replaced it, for the same reason — would have been the WRONG bound here
  * and is deliberately not used: this walk is size-driven, so it steps over a
  * multi-hundred-megabyte `mdat` in ONE iteration, and `moov` legitimately sits
  * AFTER that `mdat` in every non-faststart file — capping the byte range would

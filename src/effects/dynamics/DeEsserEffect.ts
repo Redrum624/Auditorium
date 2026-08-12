@@ -28,9 +28,12 @@ export function sibilanceReductionDb(overDb: number, ratio: number): number {
 
 /**
  * Sidechain detector: the input band-limited to the sibilance region by a
- * 24 dB/oct highpass, linked across channels with the shared max(|ch|)
- * detector, then smoothed by the shared attack/release envelope follower — the
- * same detector the compressor, limiter and gate use.
+ * 24 dB/oct highpass, linked across channels with `maxAcrossChannels` — the
+ * same linking every dynamics effect here uses, the limiter included — then
+ * smoothed by the shared attack/release `envelopeFollower`, which is the
+ * compressor's and the gate's detector exactly. The limiter is NOT in that
+ * second list: it has no attack, and smooths its own gain from a forward
+ * lookahead window instead of following an input envelope.
  *
  * The intermediates are scoped to this function so the filtered band (one
  * Float32Array per channel) is collectable before the output pass allocates.
@@ -76,9 +79,10 @@ function sibilanceEnvelope(
  * (-9.5 dB) but widen the residual's bump at the corner for less and less
  * return.
  *
- * The residual of a cascade is `1 - H^2`, which peaks +0.97 dB at the corner
- * (one section's residual peaks nowhere). That bump cannot make the OUTPUT
- * boost: the recombined response is `1 - (1 - g)(1 - H^2)`, and since
+ * The residual of a cascade is `1 - H^2`, which rises ABOVE unity: +0.97 dB at
+ * the corner itself and peaking at +1.25 dB near `sqrt(2)*fc` (one section's
+ * residual peaks nowhere — `1 - H` is monotonic up to 0 dB). That bump cannot
+ * make the OUTPUT boost: the recombined response is `1 - (1 - g)(1 - H^2)`, and since
  * |H^2| <= 1 everywhere, Re(1 - H^2) >= 0, so pulling the band down can only
  * shrink the response, never lift it and never invert it. A 4th-order
  * Linkwitz-Riley low half would break that — its residual peaks +3.5 dB and

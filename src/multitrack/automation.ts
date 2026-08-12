@@ -122,8 +122,8 @@ export function clampAutomationValue(param: AutomationParam, value: number): num
 
 /** Index of the LAST key at or before `sample` (-1 when `sample` precedes the
  * first key) — the segment-start lookup. Binary search over the ascending
- * `positionSample` order; the `firstAtOrAfter` idiom from `snap.ts` /
- * `beatGrid.ts`, inverted. */
+ * `positionSample` order; `snap.ts`'s `firstAtOrAfter` idiom, inverted (the
+ * same lower-bound loop, returning `lo - 1`). */
 function lastAtOrBefore(keys: readonly AutomationKey[], sample: number): number {
   let lo = 0;
   let hi = keys.length;

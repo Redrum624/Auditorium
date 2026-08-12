@@ -148,10 +148,19 @@ function clamp1(v: number): number {
 /**
  * Reads the clip's source region as per-channel Float32Arrays at the SESSION
  * sample rate. `offsetSample`/`lengthSample` are interpreted so the clip
- * occupies exactly `lengthSample` samples on the session timeline: the number
- * of source samples read is `round(lengthSample · docRate / sessionRate)`
+ * occupies `lengthSample` samples on the session timeline: the number of source
+ * samples read is `round(lengthSample · docRate / sessionRate)`
  * (== lengthSample when rates match), and those source samples are resampled up
  * to the session rate. Out-of-range source reads are zero-filled.
+ *
+ * The returned arrays are exactly `lengthSample` long only when the rates
+ * match. Otherwise the length is rounded TWICE — here, and again by
+ * `resampleChannel`'s own `round(input.length · toRate / fromRate)` — so a
+ * rate-mismatched clip's slice can come back a sample longer or shorter than
+ * `lengthSample`. That is why consumers index fades and gains by
+ * `lengthSample` and NEVER by the slice length (see `ClipFadeSpec` below):
+ * anchoring to the slice tail would put the same fade on different samples in
+ * the offline and realtime paths.
  *
  * Exported so the realtime MultitrackPlayer builds its AudioBuffers from the
  * exact same slice/resample logic the offline mixdown uses.
