@@ -202,6 +202,21 @@ describe('buildTempoMap — the ratio bound (RULING 3)', () => {
     expect(map.acceptedIndices).toEqual([0, 1, 2, 3]);
   });
 
+  it('names it by the CALLER’s index even when an earlier beat was DROPPED', () => {
+    // The fixture above accepts every beat, so `acceptedIndices[j] === j` and
+    // `clampedIndices.push(acceptedIndices[j])` -> `push(j)` survived it. Here
+    // the leading beat is refused (non-finite), so the two disagree by one and
+    // only the caller-index form can be right: the caller looks these numbers up
+    // in the array IT passed, which still contains the dropped beat.
+    const beats = [Number.NaN, 0, 1000, 1200, 2200];
+    const map = buildTempoMap(beats, 3200, 1000);
+    expect(map.acceptedIndices).toEqual([1, 2, 3, 4]);
+    // The 200-sample interval is closed by the beat at index 3 of the CALLER's
+    // array (index 2 among the accepted ones).
+    expect(map.clampedIndices).toEqual([3]);
+    expect(beats[map.clampedIndices[0]]).toBe(1200);
+  });
+
   it('a clamped interval SHIFTS every beat after it — the honest consequence', () => {
     const target = 1000;
     const beats = [0, 1000, 1200, 2200];
@@ -306,6 +321,19 @@ describe('buildTempoMap — structure and monotonicity', () => {
     const ratios = Array.from(warpRatios(map));
     expect(ratios[0]).toBeCloseTo(1, 12); // head, from the FIRST interval
     expect(ratios[ratios.length - 1]).toBeCloseTo(4, 12); // tail, from the LAST
+
+    // And `placed` skips the HEAD knot. This is the only literal `placed`
+    // assertion in the suite whose region does not start on a beat, and it is
+    // the one that pins the `firstBeatKnot` offset: the other literal (the
+    // clamp-shift test below) uses a grid beginning at sample 0, where
+    // `headKnot === false` makes the offset a no-op. Dropping it
+    // (`knotsOut[firstBeatKnot + j]` -> `knotsOut[j]`) shifts EVERY beat marker
+    // back one knot for any region that does not begin exactly on a beat — the
+    // ordinary case — and the whole suite stayed green until this line. A
+    // literal, deliberately, not `knotsOut[j + 1]`: a recomputation restates
+    // the production line and cannot disagree with it.
+    expect(Array.from(map.placed)).toEqual([1000, 2000, 2800]);
+    expect(map.placed[0]).not.toBe(map.knotsOut[0]);
   });
 
   it('is NOT the identity when only the LATER knots move', () => {
@@ -506,7 +534,13 @@ describe('absolute beat-position error on varying material', () => {
   it('a step tempo change is corrected on BOTH sides of the step', () => {
     const secs = 24;
     const beats = stepTempoBeats(100, 125, 12, secs, SR);
-    const { errs } = place(beats, secs, 112);
+    const { errs, map } = place(beats, secs, 112);
+    // Same guard the accelerando cases carry: a beat that landed nowhere near
+    // where the map says gives a null centroid, which becomes NaN and is
+    // silently dropped by `absStats` — so without this line the two maxima below
+    // would measure only the beats that DID land and partial breakage would read
+    // as success.
+    expect(absStats(errs).n).toBe(map.placed.length);
     const before = absStats(errs.slice(0, Math.floor(errs.length / 2) - 1));
     const after = absStats(errs.slice(Math.floor(errs.length / 2) + 1));
     expect(before.max).toBeLessThan(12);
@@ -516,8 +550,10 @@ describe('absolute beat-position error on varying material', () => {
   it('rubato of known amplitude is flattened', () => {
     const secs = 24;
     const beats = rubatoBeats(110, 0.08, 6, secs, SR);
-    const { errs } = place(beats, secs, 110);
+    const { errs, map } = place(beats, secs, 110);
     const stats = absStats(errs);
+    // Every beat was measured — see the step-tempo case above.
+    expect(stats.n).toBe(map.placed.length);
     expect(stats.median).toBeLessThan(3);
     expect(stats.max).toBeLessThan(12);
   });
