@@ -757,10 +757,14 @@ export async function applyTempoChange(
  * Up to THREE undo entries per Apply, in this order: `Match Tempo` (the audio
  * plus `applyEdit`'s own proportional remap), `Match Tempo Markers` (that remap
  * corrected through the map — see {@link correctMarkersForWarp}), and
- * `Add Beat Markers`. The cost is stated rather than hidden: one Ctrl+Z leaves
- * the pre-existing markers transiently at their proportional positions, which
- * is the same property `'Align Markers'` and `'Add Beat Markers'` already ship
- * with, and a second undo removes the audio edit and its remap together.
+ * `Add Beat Markers`. The cost is stated rather than hidden, and stated by the
+ * COUNT: with all three present, Ctrl+Z unwinds them newest first, so the first
+ * removes the grid and leaves the pre-existing markers corrected, the SECOND
+ * puts them transiently back at their proportional positions — the same
+ * property `'Align Markers'` and `'Add Beat Markers'` already ship with — and
+ * the THIRD removes the audio edit and its remap together. With no grid asked
+ * for there are two entries and the sequence is one step shorter. Same counts in
+ * `docs/KNOWN_LIMITATIONS.md`, which must agree with this.
  */
 async function applyVariableTempoChange(
   req: ApplyTempoChangeRequest,

@@ -405,10 +405,11 @@ analysis, so re-run it.
 The beats are *tracked*, not extrapolated from a rigid grid, so the result
 follows a take that drifts. What the detector cannot judge is the **octave**: a
 60 BPM loop can be reported as 120 with high confidence. That is what the
-**×2** and **÷2** buttons on the TEMPO card — and in the Match Tempo, Align
-Vocal Timing and Auto-Remix dialogs, where they read `x2` and `/2` — are for:
-they re-track the beats at the corrected period rather than just relabelling
-the number, so everything built on the grid moves with it.
+octave-correction buttons on the TEMPO card — and in the Match Tempo, Align
+Vocal Timing and Auto-Remix dialogs — are for: they re-track the beats at the
+corrected period rather than just relabelling the number, so everything built on
+the grid moves with it. They are labelled `x2` and `/2` in all but one place:
+the **Align Vocal Timing** dialog renders them as **×2** and **÷2**.
 
 Whole-document analysis is capped at the first 10 minutes; past that the result
 is reported as describing the first 10 min rather than the whole file.
@@ -486,9 +487,10 @@ To make a 128 BPM loop sit in a 124 BPM track:
    document).
 2. **Effects → Match Tempo…**. The dialog prefills the source BPM from the
    detection; **Re-detect from selection** re-runs it against the region the
-   ratio will be applied to — measuring a **centred 30-second excerpt** of that
-   region, not all of it, however long the selection is. Detection wants a
-   representative stretch, not a complete one.
+   ratio will be applied to. A selection of 30 seconds or less is analysed in
+   full; a longer one is measured over a **centred 30-second excerpt** of it
+   rather than end to end, because detection wants a representative stretch, not
+   a complete one.
 3. Enter the target BPM — or switch to a plain ratio. The dialog shows which
    quality band the resulting stretch falls in (transparent / good / extreme).
 4. Optionally tick the beat-marker grid, which lays down markers at the *new*
@@ -517,11 +519,15 @@ One thing it does not do: it follows the **beats**, not the singing — see belo
 
 Match Tempo runs through the same WSOLA **Time Stretch** effect and the same
 single write path as everything else, so undo behaves normally — the History
-entry reads `Match Tempo`. Markers you already had inside the region are moved
-through the tempo map itself rather than proportionally, so they stay on the
-audio they mark; that correction is its own `Match Tempo Markers` entry, and the
-beat grid, when you ask for it, is a third `Add Beat Markers` entry. One Ctrl+Z
-therefore steps back through them one at a time.
+entry reads `Match Tempo`. How many entries one Apply leaves depends on the
+mode. The **default one-ratio** path leaves at most two: `Match Tempo`, which
+carries the marker remap inside it, and — only if you ticked the grid —
+`Add Beat Markers`. **Follow the tracked beats** adds one in between: markers
+you already had inside the region are moved through the tempo map itself rather
+than proportionally, so they stay on the audio they mark, and that correction is
+its own `Match Tempo Markers` entry. Its full sequence is therefore
+`Match Tempo`, `Match Tempo Markers`, `Add Beat Markers`. One Ctrl+Z steps back
+through them one at a time, newest first.
 
 ### Making a sung take land on the beat
 

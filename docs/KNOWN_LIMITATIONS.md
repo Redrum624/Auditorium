@@ -198,11 +198,15 @@ BEFORE the beat grid so the grid appends to the corrected list.
 Stretch, Pitch Shift and every other length-changing effect that stretches a
 region uniformly, where proportional IS exact.
 
-**The cost, stated rather than hidden:** a third undo entry per Apply —
-`Match Tempo`, then `Match Tempo Markers`, then `Add Beat Markers` — so one
-Ctrl+Z leaves the pre-existing markers transiently at their proportional
-positions, and a second removes the audio edit and its remap together. That is
-the same property `Align Markers` and `Add Beat Markers` already ship with: a
+**The cost, stated rather than hidden:** an extra undo entry per Apply. With the
+beat grid on, the sequence is `Match Tempo`, then `Match Tempo Markers`, then
+`Add Beat Markers`, and Ctrl+Z unwinds it newest first: the first removes the
+grid and leaves the pre-existing markers corrected, the second puts them
+transiently back at their proportional positions, and the third removes the
+audio edit and its remap together. With the grid off there are two entries and
+the same sequence is one step shorter — the first Ctrl+Z leaves the markers
+proportional, the second removes the audio edit. That is the same property
+`Align Markers` and `Add Beat Markers` already ship with: a
 marker write cannot ride inside `applyEdit`'s own entry, because `applyEdit` has
 already committed by the time a service-level correction can run.
 

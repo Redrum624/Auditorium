@@ -35,6 +35,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the chain has no measurement that says otherwise. All three conditions are observations, so the
   line stays quiet on material the tail never takes over 0 dBFS. Affects:
   `src/services/vocalChain.ts`, `src/components/Dialogs/VocalChainDialog.tsx`.
+- **…and the Cover Chain, whose Ruling C the warning above was borrowed from, now has it too.** Cause:
+  Ruling C lives inside `deriveMatchLoudness`, and that function is only ever resolved for a stage the
+  user switched ON. With **Match Reverb on and both level stages off** — Match Loudness and the
+  Limiter — the wet tail is the last thing to touch the audio and nothing anywhere warned: the case
+  the Limiter's own note measures at **+0.37 dBFS** on a 220 Hz tone and **+5.34 dBFS** on noise at
+  the reverb's shortest room, rising to **+2.66** and **+7.76** at its longest. Fix: the same measured
+  post-hoc warning the Vocal Chain just got, on the same three observations — the stage is Match
+  Reverb, neither level stage after it is on, and the output actually came back above full scale —
+  carried on the reverb stage's own result and naming this run's peak. The run is not blocked.
+  Affects: `src/services/coverChain.ts`.
+- **Match Tempo refuses a selection that clamps to nothing instead of committing an edit that changed
+  nothing.** Cause: a selection resolving to an empty region (`{4000, 9000}` on a 4000-sample
+  document) ran the whole constant-ratio path — `planStretch` returned its 'empty' plan,
+  `replaceRegion` allocated fresh channel arrays holding the same samples, and the
+  `postDoc.channels !== doc.channels` success gate read that fresh allocation as a real edit. The call
+  reported success having pushed a `Match Tempo` undo entry and marked the document unsaved. Fix: both
+  tempo paths, and the ratio-1 beat-grid path, refuse an empty resolved region BEFORE any effect runs,
+  with a named reason the dialog renders — the same refusal both chains already make. The variable
+  path already declined, but blamed the beat grid; it now names the region too. Affects:
+  `src/services/tempoService.ts`, `src/components/Dialogs/TempoDialog.tsx`.
 - **Four comments that described code that does something else.** The Cover Chain's "Vocal Chain on
   the Take" note said the vocal chain sets a *limiter* from the take's own levels; it does not, and
   says so itself — a ceiling is an absolute level, so that stage runs on the effect's own −0.3 dBFS.
