@@ -1025,6 +1025,82 @@ async function main() {
     // unsaved-changes beforeunload prompt at teardown.
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
 
+    // 11a) R7 — the OPT-IN variable-rate Match Tempo, in the PACKAGED app.
+    // Re-opens the clean 120 BPM fixture, detects its grid, then matches to 90
+    // BPM through the variable branch: the tempo map, the __effectExtra side
+    // channel and the real DSP worker.
+    //
+    // Four things are pinned here that the unit suite cannot see through a real
+    // window: (a) the branch is reachable at all once packaged — a hidden effect
+    // that failed to register would throw inside the worker and report ok=false;
+    // (b) the length the dialog PREVIEWED is the length the run produced, which
+    // is what makes that readout trustworthy rather than decorative; (c) on a
+    // steady fixture the variable path agrees with the one-ratio path's exact
+    // round(N * 4/3), so the new branch does not disturb the old contract; and
+    // (d) the post-match beat grid is laid from the map's own placed positions.
+    console.log('Match Tempo 120 -> 90 BPM, FOLLOWING the tracked beats (R7)...');
+    await page.evaluate((f) => window.__test.openPath(f), BEAT);
+    const varSummary = await page.evaluate(() => window.__test.getStateSummary());
+    const varGrid = await page.evaluate(() => window.__test.detectTempo());
+    console.log(`  detectTempo: ${JSON.stringify(varGrid)}`);
+    assert(
+      varGrid.beatCount >= 2,
+      `the fixture yields a grid the variable path can use (expected >= 2 beats, actual ${varGrid.beatCount})`
+    );
+    const varTempo = await page.evaluate(() => window.__test.changeTempoVariable(90, true));
+    console.log(`  changeTempoVariable: ${JSON.stringify({ ...varTempo, beatMarkers: varTempo.beatMarkers.length })}`);
+    assert(
+      varTempo.ok === true,
+      `changeTempoVariable(90) applied (expected ok=true, actual ok=${varTempo.ok}, reason=${varTempo.reason})`
+    );
+    assert(
+      varTempo.beatCount === varGrid.beatCount,
+      `every tracked beat became a knot (expected ${varGrid.beatCount}, actual ${varTempo.beatCount})`
+    );
+    assert(
+      varTempo.clampedCount === 0,
+      `a 120 -> 90 match needs no clamping (expected 0, actual ${varTempo.clampedCount})`
+    );
+    assert(
+      varTempo.lengthAfter === varTempo.plannedLength,
+      `the previewed length is the length produced (expected ${varTempo.plannedLength}, actual ${varTempo.lengthAfter})`
+    );
+    // The fixture is a steady 120 BPM click train, so every local ratio is the
+    // same 4/3 the one-ratio path would have used. This is the packaged form of
+    // the byte-identity property the unit suite pins on synthetic grids.
+    assert(
+      Math.abs(varTempo.minLocalRatio - 4 / 3) < 0.02 && Math.abs(varTempo.maxLocalRatio - 4 / 3) < 0.02,
+      `a steady fixture yields a near-uniform 4/3 local ratio (actual ${varTempo.minLocalRatio.toFixed(4)}..${varTempo.maxLocalRatio.toFixed(4)})`
+    );
+    assert(
+      Math.abs(varTempo.lengthAfter - Math.round((varTempo.lengthBefore * 4) / 3)) <= 2,
+      `and therefore the same length one ratio gives (expected ~${Math.round((varTempo.lengthBefore * 4) / 3)}, actual ${varTempo.lengthAfter})`
+    );
+    assert(
+      varTempo.beatMarkers.length === varTempo.beatCount,
+      `the post-match grid has one marker per placed beat (expected ${varTempo.beatCount}, actual ${varTempo.beatMarkers.length})`
+    );
+    // Laid from the map's placed positions: at 90 BPM the markers must be
+    // 60/90 s apart, and the LAST gap matters as much as the first — a grid
+    // right at beat 0 and wrong after is the expected failure mode.
+    if (varTempo.beatMarkers.length >= 3) {
+      const rate = varSummary.sampleRate;
+      const want = (60 / 90) * rate;
+      const first = varTempo.beatMarkers[1] - varTempo.beatMarkers[0];
+      const last =
+        varTempo.beatMarkers[varTempo.beatMarkers.length - 1] -
+        varTempo.beatMarkers[varTempo.beatMarkers.length - 2];
+      assert(
+        Math.abs(first - want) < want * 0.05,
+        `the FIRST post-match beat gap is 60/90 s (expected ~${Math.round(want)}, actual ${first})`
+      );
+      assert(
+        Math.abs(last - want) < want * 0.05,
+        `the LAST post-match beat gap is too (expected ~${Math.round(want)}, actual ${last})`
+      );
+    }
+    await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
+
     // 11b) F9 — Align Vocal Timing, end to end in the PACKAGED app: detect the
     // grid, place markers deliberately OFF the beat, then align them onto it.
     // The three things worth pinning here are the three the unit suite cannot

@@ -5,6 +5,92 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.23.0] - 2026-08-12
+
+**Match Tempo can follow a tempo that moves.** Until now it applied one ratio across the whole
+region, so a take that speeds up was corrected only *on average* — and `docs/KNOWN_LIMITATIONS.md`
+recorded that as an **inherent** limit. It was not one. `timeStretchVariableLinked` has done
+variable-rate, stereo-linked, pitch-preserving stretching since the Pitch Correct release, and Align
+Vocal Timing already drove it; Match Tempo simply never supplied it a map. Now it can, and the new
+**Correction → "Follow the tracked beats"** mode moves each tracked beat onto the target grid
+individually instead of sharing one ratio between them.
+
+**How much that was costing, measured rather than asserted.** On synthetic accelerandi whose beat
+positions are exact by construction (24 s, 48 kHz, through the real engine), compared against the
+*most favourable single ratio there is* — the one matching the region's total duration, which pins
+the first and last beat exactly:
+
+| material | tempo slope | one ratio: median / worst beat error | following the beats |
+|---|---|---|---|
+| 108→112 BPM, target 110 | 0.17 BPM/s | 78.8 ms / 104.4 ms | 0.36 ms / 4.6 ms |
+| 100→120 BPM, target 110 | 0.83 BPM/s | 393.9 ms / 525.8 ms | 1.8 ms / 4.6 ms |
+| 90→140 BPM, target 115 | 2.08 BPM/s | 951.3 ms / 1274.4 ms | 4.4 ms / 9.8 ms |
+
+525.8 ms is **0.96 of a 545 ms beat**: on a gentle accelerando, one ratio leaves the middle of the
+region off by nearly a whole beat. The few milliseconds remaining in the last column are WSOLA's own
+placement error, not the map's, and unlike the single ratio's they do not grow with the slope.
+
+**It is opt-in, and the default is unchanged byte for byte.** A user who reached for Match Tempo on a
+steady loop does not want per-bar correction applied to it. The mode is entered deliberately, and only
+against a beat grid the user has **confirmed** — the tick is cleared by every ×2 / ÷2 re-track and
+every re-detect, so it can never outlive the grid it confirmed. That gate is not ceremony: a wrong
+single ratio is uniformly wrong and a musician hears it immediately, while **a wrong tempo map is
+wrong differently in every bar** — harder to hear, harder to attribute, and impossible to undo by ear.
+
+**And half of the old limitation is still open, now stated as its own entry.** The remix's phrase
+arithmetic still assumes a constant meter, which is a *different* limitation with a different cause;
+running the two together in one paragraph is part of why neither got fixed. It is now measured and
+recorded separately — see `KNOWN_LIMITATIONS.md` §3b.
+
+### Added
+
+- **`Effects → Match Tempo…` → Correction → "Follow the tracked beats".** Builds a tempo map from the
+  confirmed beat grid and corrects each beat interval on its own. Available only when the grid is the
+  document's own, fresh, and has at least two beats inside the region — one measured interval is the
+  minimum from which a local tempo can be read at all. The dialog reports the beat count, the range of
+  local ratios, the resulting duration, and how many beats the ratio bound had to hold back.
+- **The quality label reports the WORST segment, never an average.** An average that reads
+  "transparent" while one bar is stretched 4× is exactly the reassurance this dialog must not give.
+- **Beat markers after a variable-rate match are laid where the beats actually went**, from the map's
+  own placed positions rather than re-derived as `first + i × spacing` — which is wrong the moment one
+  interval is held back by the ratio bound, and would draw markers where the audio's beats are not.
+- **Deterministic varying-tempo fixture generators** (`src/dsp/__fixtures__/tempoFixtures.ts`):
+  linear accelerando, step tempo change, rubato of known amplitude, and a meter change with known bar
+  boundaries — plus a centred tone-burst renderer whose energy centroid *is* the beat, so the reported
+  error is an absolute millisecond figure and not a correlation against a re-detected grid.
+
+### Changed
+
+- **`docs/KNOWN_LIMITATIONS.md` §3 is split into the two limitations it always was**: §3a (Match
+  Tempo's single ratio — now fixed, with the numbers) and §3b (the remix's constant-meter assumption
+  — still open, with the numbers). The section heading no longer claims "both tempo features assume a
+  steady tempo", because one of them no longer does.
+- `analysisPosAt` / `synthesisPosAt` / `warpRatios` now take a structural `PiecewiseTimeMap`, so the
+  tempo map reuses one implementation of the piecewise-linear inverse instead of carrying a second
+  copy. No behaviour change; the timing-warp suite is unchanged.
+
+### Fixed
+
+- Nothing user-visible. The variable path is new surface; every existing Match Tempo call takes the
+  same code it did in 1.22.0.
+
+### Known limitations (unchanged or newly measured)
+
+- **The remix still assumes a constant meter.** Measured at 120 BPM with exactly-known downbeats: a
+  4/4 control keeps 35/36 bar boundaries on a true downbeat and **100 %** of phrase-congruent joins
+  musically congruent; a **3/4 × 4** bridge keeps the positions but shifts the bar numbering, dropping
+  that to **33 %**; a **3/4 × 5** bridge puts **18 of 35** bar lines a full beat (499 ms) off for the
+  rest of the track. Not fixed here: the app has no meter detector at all, so it needs a surface for
+  the user to declare where the meter changes, and the per-bar descriptor matrix the planner scores
+  against would have to become ragged — a reshape of the matrices the remix DP indexes, in the same
+  release that already reshaped that DP with the required-joins subset axis.
+- **The local ratio is bounded by the same 0.25×–4× limit the constant path enforces**, applied per
+  beat interval rather than once for the region. A beat the bound holds back is moved as far as it
+  allows and counted in the dialog, never silently under-delivered.
+- **A variable-rate match remaps interior markers proportionally**, which is exact only where the
+  local ratio equals the region's average. The beat grid it lays afterwards is exact; other markers
+  inside a heavily varying region can drift from the audio they mark.
+
 ## [1.22.0] - 2026-08-11
 
 **Sing over a song you love, and have your take match the record's vocal.** `Effects → Cover Chain…`

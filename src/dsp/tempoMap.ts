@@ -207,7 +207,7 @@ export function buildTempoMap(
 ): TempoMap {
   const inLen = Math.max(0, Math.floor(inputLength));
   if (inLen <= 0) return identityMap(inLen, 'empty-region');
-  if (!Number.isFinite(targetSpacing) || targetSpacing <= 0) return identityMap(inLen, 'invalid-spacing');
+  if (!Number.isFinite(targetSpacing) || targetSpacing < 0) return identityMap(inLen, 'invalid-spacing');
 
   // The band is held inside the engine's own limits and forced to contain 1, so
   // the identity placement is always feasible and a caller cannot ask for a

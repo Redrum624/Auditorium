@@ -489,7 +489,7 @@ describes the source.
 
 **Intended behavior:** No further work planned — this is complete.
 
-## Tempo detection makes octave errors; both tempo features assume a steady tempo
+## Tempo detection makes octave errors; Match Tempo can follow a varying tempo, the remix still assumes a constant meter
 
 **Area:** Tempo analysis (`src/dsp/tempoCore.ts`, `src/services/tempoAnalysis.ts`),
 Match Tempo (`src/services/tempoService.ts`), Auto-Remix (`src/dsp/remixPlan.ts`)
@@ -529,26 +529,91 @@ hint and is explicitly **not** a gate — its log compression flattens a genuine
 The Auto-Remix dialog's structure strip is where a wrong grid becomes visible
 before anything is committed, and the ◂ ▸ shift is the correction.
 
-**3. Match Tempo assumes a FIXED source tempo; the remix assumes a CONSTANT
-one.** Match Tempo applies a single ratio across the whole region, so material
-that speeds up or slows down inside the selection is corrected only on average.
-(For a *sung* take that drags in one line and rushes in the next, **Align Vocal
-Timing** is the answer instead — it warps at a different rate between each pair
-of confirmed syllables. Its own limits are in section 3b below.)
-The remix's bar boundaries come from real tracked beats (so late splices still
-land on the beat on a drifting take — a genuine improvement over a rigid grid),
-but the phrase arithmetic (`a ≡ b mod Φ`) and the duration model still assume a
-stable meter: heavy rubato or a mid-song tempo change produces phrase-congruent
-joins that are musically wrong. `ibiCv` in the analysis carries real information
-about drift and is the only signal the user gets. Related: the achieved length
-is **bar-quantised** — a target is met to within one bar, measured at **+7.2 %**
-on accelerating material — and the cost function models nothing about lyrics, so
-a join can score 0.05 and still cut a vocal mid-syllable. Chroma is also
-key-blind but not transposition-aware, so a final-chorus key change reads as
-harmonically distant and the planner avoids precisely the join a producer would
-make.
+**3. Varying material: TWO different limits, with different causes and
+different fixes.** They were run together in one paragraph until v1.23.0, which
+is part of why neither got fixed. A tempo that *varies* and a meter that
+*changes* break different things:
 
-**3b. Align Vocal Timing will not find your syllables for you, and says so.**
+**3a. Match Tempo can now FOLLOW a varying tempo — opt in (v1.23.0).** Match
+Tempo's default is still ONE ratio for the whole region, which is right for
+steady material and is what a user reaching for it on a loop wants. When the
+tempo drifts, the **Correction → "Follow the tracked beats"** mode builds a
+tempo *map* from the confirmed beat grid and moves each tracked beat onto the
+target grid individually. Measured on synthetic accelerandi whose beat positions
+are exact by construction (24 s, 48 kHz, through the real engine), against the
+*most favourable* single ratio there is — the one matching the region's total
+duration, which pins the first and last beat exactly:
+
+| material | tempo slope | one ratio: median / worst beat error | following the beats |
+|---|---|---|---|
+| 108→112 BPM, target 110 | 0.17 BPM/s | 78.8 ms / 104.4 ms | 0.36 ms / 4.6 ms |
+| 100→120 BPM, target 110 | 0.83 BPM/s | 393.9 ms / 525.8 ms | 1.8 ms / 4.6 ms |
+| 90→140 BPM, target 115 | 2.08 BPM/s | 951.3 ms / 1274.4 ms | 4.4 ms / 9.8 ms |
+| steady 120, target 110 | 0 | 0 ms / 0 ms | identical, byte for byte |
+
+525.8 ms is **0.96 of a 545 ms beat** — on a gentle accelerando one ratio leaves
+the middle of the region off by nearly a whole beat. The remaining few
+milliseconds on the right-hand column are WSOLA's own placement error, not the
+map's, and they do not grow with the slope.
+
+**What it still cannot do, and says so:** the local ratio is bounded by the same
+`0.25x–4x` limit the constant path enforces, per beat interval rather than once
+for the region. A beat the bound holds back is moved as far as it allows and
+**counted in the dialog** rather than silently under-delivered. And the map is
+only ever built from a beat grid the user has **confirmed** — the tick is
+cleared by every ×2 / ÷2 re-track and every re-detect — because a wrong single
+ratio is uniformly wrong and audible at once, while a wrong tempo map is wrong
+*differently in every bar*: harder to hear, harder to attribute, impossible to
+undo by ear. (For a *sung* take that drags in one line and rushes in the next,
+**Align Vocal Timing** is still the better answer — it warps between confirmed
+syllables rather than between beats. Its own limits are in section 3c.)
+
+**3b. The remix still assumes a CONSTANT METER, and this half is open.** The
+remix's bar boundaries come from real tracked beats, so late splices still land
+on the beat on a drifting take — a genuine improvement over a rigid grid, and it
+is why 3a's fix does not carry over here. What breaks is different: bar
+boundaries are derived by striding the beat list at a *constant* beats-per-bar
+(`remixFeatures.ts`), so a section in another meter walks the bar grid off the
+real downbeats. Measured on synthetic 120 BPM fixtures with exactly-known
+downbeats, through the real `analyzeTempo` → `deriveRemixFeatures` pipeline:
+
+| fixture | boundaries landing on a true downbeat | median boundary error | phrase-congruent joins that are musically congruent |
+|---|---|---|---|
+| 4/4 throughout, 36 bars (control) | 35 / 36 | 0.6 ms | **100 %** |
+| 4/4 ×16, **3/4 ×4**, 4/4 ×16 | 32 / 35 | 0.6 ms | **33 %** |
+| 4/4 ×16, **3/4 ×5**, 4/4 ×16 | 17 / 35 | **499 ms** (a full beat) | 13 % |
+
+A bridge whose beat count is a multiple of the assumed meter (3/4 × 4 = 12
+beats) lets the boundary *positions* re-align afterwards, but the bar
+*numbering* is permanently shifted — so `a ≡ b mod Φ` congruence still holds
+arithmetically while only a third of those joins connect the same position in
+the real phrase. A bridge whose beat count is **not** a multiple (3/4 × 5 = 15
+beats) is worse: half the bar lines sit a full beat off the downbeat for the
+rest of the track.
+
+**Why it is not fixed yet, stated rather than hidden:** the app has **no meter
+detector at all** — `beatsPerBar` is a single time signature the user picks in
+the Auto-Remix dialog — so variable meter needs a new surface for the user to
+say where the meter changes, and it may not be driven from an unconfirmed
+detection (see the octave-error entry above for why detector confidence cannot
+gate this class of error). Beyond that, the per-bar descriptor matrix the
+planner scores against is `4 × beatsPerBar` columns wide in `remixFeatures.ts`
+and re-derived at that width in `remixCost.ts`; variable meter makes it ragged.
+That is a reshape of the matrices the DP indexes, in the same release that
+already reshaped the DP itself with the required-joins subset axis — two
+structural changes to one DP is how a golden corpus stops meaning anything. It
+is recorded as open work, with these numbers, rather than attempted at the end
+of a release. `ibiCv` in the analysis carries real information about drift and
+remains the only automatic signal the user gets.
+
+Related, and unchanged: the achieved length is **bar-quantised** — a target is
+met to within one bar, measured at **+7.2 %** on accelerating material — and the
+cost function models nothing about lyrics, so a join can score 0.05 and still cut
+a vocal mid-syllable. Chroma is also key-blind but not transposition-aware, so a
+final-chorus key change reads as harmonically distant and the planner avoids
+precisely the join a producer would make.
+
+**3c. Align Vocal Timing will not find your syllables for you, and says so.**
 Its onset detector was measured against 23 hand-marked note attacks in an 8 s
 excerpt of a real 142 s solo cover vocal. At the parameters tempo detection
 ships with, **44 % of the onsets it reports are not note attacks** — they are
@@ -569,7 +634,7 @@ ordinary, editable markers rather than anchors. A false anchor is not a missed
 opportunity: it drags a syllable-sized span of audio onto a beat it never
 belonged on, manufacturing a timing error where there was none.
 
-**3c. Align Vocal Timing cannot pick the grid, and a wrong one is worse than
+**3d. Align Vocal Timing cannot pick the grid, and a wrong one is worse than
 none.** Tempo detection on real material put a track's drums at 159.83 BPM and
 its five other sources at a mean of 109.4 — a genuine ~3:2 feel, with every
 confidence between 0.003 and 0.084 against the app's own `CONFIDENCE_LOW` of
@@ -583,7 +648,7 @@ Apply is therefore gated on an explicit confirmation, and the dialog labels each
 subdivision with the median move it implies so the choice is made from the
 measurement rather than from the label.
 
-**3d. The local stretch is bounded, and a bounded move lands short.** Local
+**3e. The local stretch is bounded, and a bounded move lands short.** Local
 ratio is clamped to 0.88–1.14× — the range this WSOLA is transparent over
 (section 3's quality bands), not the engine's 0.25–4× limits, because the spans
 being stretched are sung vowels. A correction that would need more than that is
@@ -615,9 +680,16 @@ rather than silently describing a prefix.
 
 **Intended behavior:** The corrections (×2 / ÷2, manual BPM, downbeat shift,
 per-join reject/nudge) are the design, not a stopgap — a detector that cannot
-reliably self-assess must not gate. A 12-rotation transposition-aware chroma
-comparison would fix the key-change case at 12× the cost of the chroma term;
-not included, and recorded here rather than left to be discovered as a bug.
+reliably self-assess must not gate. **3a shipped in v1.23.0** and is complete;
+what it deliberately did NOT do is 3b, which stays open with the numbers above
+and needs two things this release could not responsibly add: a surface for the
+user to declare where the meter changes (there is no meter detector, and an
+unconfirmed one may not drive it), and a ragged per-bar descriptor matrix — a
+reshape of the matrices the remix DP indexes, in the same release that already
+reshaped the DP with the required-joins subset axis. A 12-rotation
+transposition-aware chroma comparison would fix the key-change case at 12× the
+cost of the chroma term; not included, and recorded here rather than left to be
+discovered as a bug.
 
 ## Stem bleed is model-bounded; the exact sum is guaranteed but conditional
 

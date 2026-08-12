@@ -35,8 +35,8 @@ import { SNAP_TOLERANCE_PX } from './snap';
 import { isSnapEnabled, toggleSnap } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { getHistory, markSavePoint, undo as undoHistoryUndo } from './undoHistory';
-import { runTempoAnalysis } from './tempoAnalysis';
-import { applyTempoChange } from './tempoService';
+import { getTempo, runTempoAnalysis } from './tempoAnalysis';
+import { applyTempoChange, checkVariableTempoChange } from './tempoService';
 import { applyTimingAlignment, buildAlignPlan, suggestSyllableMarkers } from './timingAlignService';
 import {
   VOCAL_CHAIN_STAGES,
@@ -224,6 +224,28 @@ export interface TestApi {
     stale: boolean;
   }>;
   changeTempo(sourceBpm: number, targetBpm: number): Promise<{ ok: boolean; length: number }>;
+  // --- R7 -----------------------------------------------------------------
+  /** Drives the OPT-IN variable-rate Match Tempo end to end for the active
+   * document, against its own cached beat grid, so the packaged run exercises
+   * the real map, the real side channel and the real worker leg. Scalars and
+   * flat arrays only, per the `getBeatGridState` precedent. `beatMarkers`
+   * additionally proves the post-match grid is laid from the map's placed
+   * positions rather than re-derived. */
+  changeTempoVariable(
+    targetBpm: number,
+    addBeatMarkers?: boolean
+  ): Promise<{
+    ok: boolean;
+    reason: string | null;
+    beatCount: number;
+    clampedCount: number;
+    minLocalRatio: number;
+    maxLocalRatio: number;
+    lengthBefore: number;
+    lengthAfter: number;
+    plannedLength: number;
+    beatMarkers: number[];
+  }>;
   // --- F9 -----------------------------------------------------------------
   /** Drives Align Vocal Timing end to end for the active document: builds the
    * plan from the markers already placed and the cached beat grid, then applies
@@ -1454,6 +1476,62 @@ export function installTestHooks(): void {
       const outcome = await applyTempoChange({ sourceBpm, targetBpm });
       const after = activeDoc();
       return { ok: outcome.ok, length: after ? docLength(after) : 0 };
+    },
+
+    // R7. Drives the real applyTempoChange down its VARIABLE branch, using the
+    // document's own cached beat grid as the confirmed grid the dialog would
+    // supply. `plannedLength` is what checkVariableTempoChange previewed BEFORE
+    // the run, so the smoke can assert the preview and the result agree — the
+    // property that makes the dialog's readout trustworthy rather than
+    // decorative.
+    changeTempoVariable: async (targetBpm, addBeatMarkers = false) => {
+      const doc = activeDoc();
+      const lengthBefore = doc ? docLength(doc) : 0;
+      const empty = {
+        ok: false,
+        reason: 'no-document',
+        beatCount: 0,
+        clampedCount: 0,
+        minLocalRatio: 0,
+        maxLocalRatio: 0,
+        lengthBefore,
+        lengthAfter: lengthBefore,
+        plannedLength: 0,
+        beatMarkers: [] as number[],
+      };
+      if (!doc) return empty;
+      const entry = getTempo(doc);
+      if (!entry || entry.beatSamples.length < 2) {
+        return { ...empty, reason: 'no-grid' };
+      }
+
+      const req = {
+        sourceBpm: entry.bpm ?? targetBpm,
+        targetBpm,
+        addBeatMarkers,
+        variableRate: { beatSamples: entry.beatSamples },
+      };
+      const planned = checkVariableTempoChange(req);
+      if (!planned.ok) return { ...empty, reason: planned.reason };
+
+      const outcome = await applyTempoChange(req);
+      const after = activeDoc();
+      const markers = after ? (useAppStore.getState().markers[after.id] ?? []) : [];
+      return {
+        ok: outcome.ok,
+        reason: outcome.reason ?? null,
+        beatCount: planned.plan.beatCount,
+        clampedCount: planned.plan.clampedCount,
+        minLocalRatio: planned.plan.map.minLocalRatio,
+        maxLocalRatio: planned.plan.map.maxLocalRatio,
+        lengthBefore,
+        lengthAfter: after ? docLength(after) : 0,
+        plannedLength: planned.plan.outLength,
+        beatMarkers: markers
+          .filter((m) => m.name.startsWith('Beat '))
+          .map((m) => m.positionSample)
+          .sort((a, b) => a - b),
+      };
     },
 
     // F9. Drives buildAlignPlan + applyTimingAlignment for the active document,
