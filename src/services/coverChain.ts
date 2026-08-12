@@ -499,7 +499,12 @@ export function deriveMatchEq(
         short
           .map(
             (b) =>
-              `At ${b.centreHz} Hz it wanted ${dbStr(b.targetDb)} and realised ${dbStr(b.realisedDb)}, ${Math.abs(b.realisedDb - b.targetDb).toFixed(2)} dB short`
+              // The direction word FOLLOWS the sign. `Math.abs` alone printed
+              // "short" over a band the cascade landed ABOVE its target — on a
+              // cut band that is the common case (wanted -10.90 dB, realised
+              // -6.61 dB, reported "4.29 dB short"), and it contradicts the two
+              // signed figures standing beside it in the same sentence.
+              `At ${b.centreHz} Hz it wanted ${dbStr(b.targetDb)} and realised ${dbStr(b.realisedDb)}, ${Math.abs(b.realisedDb - b.targetDb).toFixed(2)} dB ${b.realisedDb > b.targetDb ? 'over' : 'short'}`
           )
           .join('; ') +
         `${solution.clamped ? ` — the solve ran into the Graphic EQ's own ±12 dB limit` : ''}. The Realised column in the table below is what the audio received.`

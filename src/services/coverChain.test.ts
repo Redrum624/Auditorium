@@ -645,7 +645,21 @@ describe('deriveMatchEq', () => {
     // Worst first, so the sentence leads with the biggest miss.
     expect(warning.indexOf('At 1000 Hz')).toBeLessThan(warning.indexOf('At 2000 Hz'));
     expect(warning.indexOf('At 2000 Hz')).toBeLessThan(warning.indexOf('At 4000 Hz'));
-    expect(warning).toContain('4.29 dB short');
+
+    // The direction word follows the SIGN, not the magnitude. This fixture
+    // misses in BOTH directions at once — the two cut bands land above their
+    // targets and the two boosted ones below — and the sentence used to call
+    // every one of them "short", contradicting the two signed figures printed
+    // immediately before it in the same clause (L11).
+    const over = short.find((b) => b.centreHz === 1000)!;
+    expect(over.realisedDb).toBeGreaterThan(over.targetDb);
+    expect(warning).toContain(`${Math.abs(over.realisedDb - over.targetDb).toFixed(2)} dB over`);
+    expect(warning).toContain('4.29 dB over');
+    expect(warning).not.toContain('4.29 dB short');
+
+    const under = short.find((b) => b.centreHz === 4000)!;
+    expect(under.realisedDb).toBeLessThan(under.targetDb);
+    expect(warning).toContain(`${Math.abs(under.realisedDb - under.targetDb).toFixed(2)} dB short`);
   });
 
   it('hands the broadband level to the loudness stage instead of baking it into the curve', () => {
