@@ -180,9 +180,21 @@ export async function runEffectOnSelection(
   const def = getEffect(effectId);
   if (!def) return;
 
+  // ONE resolved region, read by every consumer below — the worker's audio, the
+  // `replaceRegion` write, the marker remap, and the post-edit selection/cursor.
+  // `cloneRegion` and `replaceRegion` clamp to [0, docLength] internally, while
+  // `setSelection` stores whatever it is handed, so reading the raw selection
+  // HERE gave the markers a different region from the one the audio used: an
+  // `end` past the document scaled interior markers against a span that was
+  // never stretched, and a negative `start` mapped them below zero, where
+  // `remapMarkers`' floor piled them onto sample 0 — and left the document
+  // selected from a negative sample afterwards. Third instance of one defect
+  // (R7's plan.regionStart, L1's resolveRegion): the ruling is resolve once, not
+  // clamp twice and hope the two agree.
   const selection = state.selection;
-  const start = selection ? selection.start : 0;
-  const end = selection ? selection.end : docLength(doc);
+  const length = docLength(doc);
+  const start = Math.min(Math.max(selection ? selection.start : 0, 0), length);
+  const end = Math.min(Math.max(selection ? selection.end : length, 0), length);
   const docId = doc.id;
   const sampleRate = doc.sampleRate;
   const regionChannels = cloneRegion(doc, start, end);

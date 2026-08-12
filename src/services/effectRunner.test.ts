@@ -174,6 +174,114 @@ describe('runEffectOnSelection', () => {
     expect(useAppStore.getState().markers[docId]).toEqual(before);
   });
 
+  // --- One resolved region, every consumer (L9) ------------------------------
+  // `setSelection` stores whatever it is handed — no UI gesture builds an
+  // out-of-bounds selection, but the store API accepts one, and `cloneRegion`/
+  // `replaceRegion` clamp it while the marker remap used to be built from the
+  // RAW pair. Same defect family as R7 (plan.regionStart) and L1 (the constant
+  // tempo path): two readings of "the region", only one of which the audio used.
+
+  it('remaps markers against the CLAMPED region the audio actually used when the selection starts before sample 0 (L9)', async () => {
+    registerEffect({
+      id: 'test-third-oob-start',
+      name: 'Shrink To Third (oob start)',
+      category: 'Utility',
+      params: [],
+      process: (channels) => ({
+        channels: channels.map((c) => c.slice(0, Math.ceil(c.length / 3))),
+      }),
+    });
+    const docId = seedDoc(Array.from({ length: 20 }, (_, i) => i / 32));
+    // Clamps to [0, 12): the worker sees 12 samples, not the raw span of 20.
+    useAppStore.getState().setSelection({ start: -8, end: 12 });
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'm0', name: 'inside', positionSample: 6 },
+      { id: 'm1', name: 'insideLate', positionSample: 9 },
+      { id: 'm2', name: 'atEnd', positionSample: 12 },
+      { id: 'm3', name: 'after', positionSample: 18 },
+    ]);
+
+    await runEffectOnSelection('test-third-oob-start', {});
+
+    // Region [0,12) -> resultLen ceil(12/3) = 4, so delta = -8 and the doc is 12
+    // long. INSIDE rides the stretch against 12: 6 -> round(6*4/12) = 2,
+    // 9 -> round(9*4/12) = 3. AT/AFTER shifts by the clamped delta: 12 -> 4,
+    // 18 -> 10. Against the raw pair (span 20 starting at -8) all four map
+    // negative or near-zero and clamp to [0, 0, 0, 2] — three cue points
+    // collapsed onto sample 0, which is the data loss the remap exists to stop.
+    expect(useAppStore.getState().markers[docId].map((m) => m.positionSample)).toEqual([2, 3, 4, 10]);
+    // The post-edit selection/cursor read the same resolved pair; the raw one
+    // left the document selected from -8 to -4 with the cursor at -8.
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 4 });
+    expect(useAppStore.getState().cursorSample).toBe(0);
+  });
+
+  it('remaps markers against the CLAMPED region when a NON-ZERO start pairs with an end past the document (L9)', async () => {
+    registerEffect({
+      id: 'test-halve-oob-end',
+      name: 'Halve (oob end)',
+      category: 'Utility',
+      params: [],
+      process: (channels) => ({
+        channels: channels.map((c) => c.slice(0, Math.floor(c.length / 2))),
+      }),
+    });
+    const docId = seedDoc(Array.from({ length: 10 }, (_, i) => i / 16));
+    // Clamps to [2, 10): region length 8, not the raw 16.
+    useAppStore.getState().setSelection({ start: 2, end: 18 });
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'm0', name: 'before', positionSample: 1 },
+      { id: 'm1', name: 'inside', positionSample: 6 },
+      { id: 'm2', name: 'atEnd', positionSample: 10 },
+    ]);
+
+    await runEffectOnSelection('test-halve-oob-end', {});
+
+    // resultLen 4, delta -4, doc 6 long. 1 is before the region and keeps;
+    // 6 rides the stretch against 8: 2 + round(4*4/8) = 4; 10 is the region END
+    // (= docLength) and shifts by the clamped delta to 6. Against the raw pair
+    // (end 18) the last two are treated as interior of a 16-long span and land
+    // at 3 and 4 — inside re-timed audio, at positions nothing produced.
+    expect(useAppStore.getState().markers[docId].map((m) => m.positionSample)).toEqual([1, 4, 6]);
+    expect(useAppStore.getState().selection).toEqual({ start: 2, end: 6 });
+  });
+
+  it('makes removedSpans absolute against the CLAMPED region start too — the cuts path rides the same geometry (L9)', async () => {
+    registerEffect({
+      id: 'test-remove-spans-oob',
+      name: 'Remove Spans OOB',
+      category: 'Utility',
+      params: [],
+      // Deletes region-relative [2, 6) from the region it was handed.
+      process: (channels) => ({
+        channels: channels.map((c) => {
+          const out = new Float32Array(c.length - 4);
+          out.set(c.subarray(0, 2), 0);
+          out.set(c.subarray(6), 2);
+          return out;
+        }),
+        removedSpans: [{ start: 2, end: 6 }],
+      }),
+    });
+    const docId = seedDoc(Array.from({ length: 20 }, (_, i) => i / 32));
+    useAppStore.getState().setSelection({ start: -5, end: 12 }); // clamps to [0, 12)
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'm0', name: 'inPause', positionSample: 3 },
+      { id: 'm1', name: 'inPauseLate', positionSample: 5 },
+      { id: 'm2', name: 'afterCut', positionSample: 10 },
+      { id: 'm3', name: 'afterRegion', positionSample: 18 },
+    ]);
+
+    await runEffectOnSelection('test-remove-spans-oob', {});
+
+    // The worker's spans are relative to the region it RECEIVED, which started
+    // at the clamped 0 — so the absolute cut is [2, 6): 3 and 5 sit inside it
+    // and snap to the join at 2; 10 and 18 shift left by the 4 removed.
+    // Offset by the raw -5 the cut becomes [-3, 1), and the two in-pause cue
+    // points land at 0 and 1 instead — before the audio they mark.
+    expect(useAppStore.getState().markers[docId].map((m) => m.positionSample)).toEqual([2, 2, 6, 14]);
+  });
+
   it('passes extra through to the worker-side channel (__effectExtra) and cleans it up', async () => {
     let seen: unknown = 'unset';
     registerEffect({
