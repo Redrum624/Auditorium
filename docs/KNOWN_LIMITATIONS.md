@@ -703,6 +703,10 @@ model/UI change rather than a fix to this pipeline.
 
 ## A cover sits on an instrumental that still contains the original singer
 
+**Area:** Cover Chain (`src/services/coverChain.ts` — `COVER_CHAIN_RESIDUAL_SENTENCE`
+and the `RESIDUAL_*` constants), Separate into Stems
+(`src/services/stemService.ts`), `src/components/Dialogs/CoverChainDialog.tsx`
+
 **This is the headline limitation of the Cover Chain, and it is stated in the dialog before
 you run it rather than here alone.**
 
@@ -746,6 +750,11 @@ has not earned is worse than a stated fact.
 
 ## The Cover Chain matches tone and level. It does not match dynamics, and it will usually refuse to match reverb
 
+**Area:** Cover Chain (`src/services/coverChain.ts` — `SPREAD_GATE_SWEEP`,
+`deriveMatchReverb`), the measures behind it (`src/dsp/coverMatch.ts` —
+`activeEnvelopeSpread`, `estimateDecay`, `reverbRt60Seconds`),
+`src/effects/time/ReverbEffect.ts`
+
 **There is no matched compressor, on purpose.** The active-envelope spread (F7's measure: the
 p90 − p10 of the compressor's own detector while the material is sounding) reads 13.62 dB on
 the reference take and 12.74 dB on the separated original vocal — a required move of
@@ -773,7 +782,16 @@ and a longest comb of 1617 samples at 44.1 kHz, so at `roomSize = 0` — its own
 shortest reverb the app can produce is 0.710 s**. The reference song's original vocal measures
 0.40 s. There is no setting of this effect that matches it, and the closest offer would add
 roughly twice the decay that is there. The stage compares the two numbers and says so, which
-also means it will correctly *engage* on a song whose vocal really does carry a room.
+also means it *will* engage on a song whose vocal carries a decay longer than 0.710 s.
+
+**What "will engage" is and is not.** That the comparison fires is pinned — against the
+effect's own closed-form decay law and against synthetic decays, and, since v1.22.0, in the
+packaged app against a generated reverberant reference. What has never been tested is the
+engage path on **real reverberant material**: every vocal this feature was measured on was dry
+(0.28 s on the take, 0.40 s on the separated original), so no real recording has ever driven
+this stage to derive a room size. Combined with the linearity blind spot below, that means a
+take with a long non-reverberant fall — a slow fade, a sustained note dying away — can engage
+the stage, and the room size it then derives is derived from a fall that is not a room.
 
 Two further limits on the estimate, stated rather than corrected. It reads 9–13 % **short** of
 the closed form on the app's own reverb, so a matched room size errs slightly dry. And its
@@ -784,6 +802,11 @@ check removes is **ragged** fits, not curved ones. A decay this estimator report
 a fall, not proof of a room.
 
 ## The match curve is realised in band energy, and the Graphic EQ cannot always reach it
+
+**Area:** the cascade solve (`src/dsp/graphicEqCascade.ts` — `realisedBandEnergyDb`,
+`solveCascadeGains`, `GRAPHIC_EQ_MAX_ABS_DB`), the curve
+(`src/dsp/coverMatch.ts` — `matchCurve`, `MATCH_MIN_CENTRE_HZ`, `MATCH_BOUND_DB`),
+`src/services/coverChain.ts` `deriveMatchEq`, `src/effects/eq/GraphicEqEffect.ts`
 
 The Cover Chain's match curve is a difference of octave-band **energies**, and the Graphic EQ
 that realises it is a cascade of overlapping peaking filters at Q = 1.4. Two consequences, both
@@ -796,15 +819,25 @@ measured, both surfaced rather than hidden:
   response equals the curve moves each band's *energy* by measurably less. Measured end to end:
   matching the centres closed 70 % of the spectral distance to the original vocal
   (1.94 → 0.58 dB); matching the band energies closed **82 %** (1.94 → 0.34 dB).
+- **How much energy a filter takes out of an octave depends on where inside that octave the
+  signal's energy sits**, so the band average has to be weighted by the take's own spectrum.
+  Averaging the filter's response over the octave's bins *unweighted* — which is the same as
+  assuming every recording is flat across every octave — misreported what the audio received by
+  up to **0.94 dB** on a real 30 s vocal while the chain printed "within 0.008 dB of the
+  target". The weighted figure tracks the delivered value to 0.04 dB. Fixed in v1.22.0 before
+  release; recorded here because it is the shape of mistake this section exists to prevent.
 
-The chain therefore solves for the band gains whose *band-energy* response equals the requested
-curve, and reports the realised figure beside the requested one for every band, including the
-bands outside the matched range — which receive no gain of their own and still show the leak
-from their neighbours.
+The chain therefore solves for the band gains whose *band-energy* response, **in this take's own
+spectrum**, equals the requested curve, and reports the realised figure beside the requested one
+for every band, including the bands outside the matched range — which receive no gain of their
+own and still show the leak from their neighbours.
 
 **It does not always reach the target, and says so.** A band-energy move near the ±10.9 dB
-bound needs roughly 12.5 dB of band gain once the roll-off across the octave is compensated,
-and the Graphic EQ's own parameter range stops at ±12 dB. When that happens the realised column
+bound is not reachable at all: measured at 48 kHz, a lone band pushed to the +12 dB rail moves
+its octave's energy by only +9.73 dB at 500 Hz falling to +9.17 dB at 8 kHz, and by −8.91 to
+−7.94 dB at the −12 dB rail. So above roughly ±9 dB it is the **effect's** clamp that acts and
+not the derived ±10.9 dB bound, and the top of that bound cannot be delivered. When that
+happens the realised column
 shows what was actually delivered, the summary line reads "up to X dB SHORT of the target", and
 a sentence names the band and both numbers. What is never shown is the requested curve dressed
 up as an outcome.

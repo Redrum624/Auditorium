@@ -226,7 +226,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Separate the Original',
     effectId: null,
     defaultEnabled: false,
-    note: `Not an automatic stage — it runs a model over the whole song and produces five new documents, so it is its own pass. Run Edit → Separate Stems… on the original mix FIRST, then pick its “— Vocals” document as the reference above: that separated vocal, carrying whatever was done to it in the mix, is what everything below matches against. ${COVER_CHAIN_RESIDUAL_SENTENCE}`,
+    note: `Not an automatic stage — it runs a model over the whole song and produces five new documents, so it is its own pass. Run Edit → Separate into Stems… on the original mix FIRST, then pick its “— Vocals” document as the reference above: that separated vocal, carrying whatever was done to it in the mix, is what everything below matches against. ${COVER_CHAIN_RESIDUAL_SENTENCE}`,
     weight: 0,
   },
   {
@@ -290,7 +290,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Place on the Instrumental',
     effectId: null,
     defaultEnabled: false,
-    note: `Not an automatic stage — it builds a session rather than editing this take. Separate Stems already laid the original down as a five-track session; mute its “Vocals” track, then drag this document in as a new track. ${COVER_CHAIN_RESIDUAL_SENTENCE}`,
+    note: `Not an automatic stage — it builds a session rather than editing this take. Separate into Stems already laid the original down as a five-track session; mute its “Vocals” track, then drag this document in as a new track. ${COVER_CHAIN_RESIDUAL_SENTENCE}`,
     weight: 0,
   },
 ];

@@ -33,8 +33,11 @@ take.
 ### Added
 
 - **Cover Chain (`Effects → Cover Chain…`) — match a new vocal take to the original singer's.** Nine
-  stages listed in the order they run, each with the note that says why it sits there, each automatic
-  one switchable on its own, the whole pass landing as **one undo entry**. Five stages are manual by
+  stages in registry order — which is the order the four automatic ones run in (Match EQ, Match
+  Reverb, Match Loudness, then the Limiter, last of everything that touches the audio) and the order
+  the five manual ones are *listed* in, not the order to do them; each says so in its own note. Each
+  stage carries the note that says why it sits there, each automatic one is switchable on its own, and
+  the whole pass lands as **one undo entry**. Five stages are manual by
   design and say so rather than pretending: separating the original (it runs a model and produces new
   documents), the Vocal Chain on your take (its own pass, with its own undo entry), Align Lyrics (you
   pick the word — nothing here judges which one is wrong), Align Vocal Timing (you confirm the grid),
@@ -56,30 +59,51 @@ take.
   files carries a 0.7 dB bias purely because 88.5 % of the take is sounding against 75.8 % of the
   separated reference. (It is not called LUFS, because it is not: there is no K-weighting and no
   400 ms block structure, only BS.1770-4's relative-gate structure.)
-- **A Limiter stage that owns the headroom the loudness match has no view on**, at −0.3 dBFS, last so
-  nothing downstream can lift the output back over the ceiling. Switch it off and Match Loudness names
-  the peak it is about to produce instead of clipping silently.
+- **A Limiter stage that owns the headroom the loudness match has no view on**, at −0.3 dBFS, **last
+  of every stage that touches the audio** so nothing downstream can lift the output back over the
+  ceiling. That ordering is load-bearing rather than tidy: Match Reverb sums a wet tail onto the dry
+  signal, and a take limited to −0.3 dBFS with this reverb on top of it comes back at +0.37 dBFS on a
+  220 Hz tone and +5.34 dBFS on noise at the reverb's shortest room — which both the WAV and the MP3
+  writer hard-clip. Switch the limiter off and Match Loudness names the peak it is about to produce
+  instead of clipping silently.
 - **A Match Reverb stage that derives its own refusal.** It estimates the original vocal's decay by
   ISO 3382-1's T20 method — validated first against the app's own reverb at 1.26 s where the closed
   form says 1.45 s, and 2.92 s where it says 3.20 s — and compares it with the shortest decay this
   app's Reverb can produce. On the reference song the original vocal reads **0.40 s** against a floor
   of **0.710 s**, so the stage declines and says exactly that, rather than being absent or quietly
-  adding twice the space that is there. It will engage on a song whose vocal really does carry a room.
+  adding twice the space that is there. It engages on a vocal whose decay is longer than that floor —
+  a path pinned against the effect's own closed-form decay law, against synthetic decays, and in the
+  packaged app against a generated reverberant reference, but **never yet on real reverberant
+  material**, because both vocals this was measured on were dry (0.28 s and 0.40 s). Read with the
+  estimator's disclosed blind spot — its linearity check cannot tell a curved fall from a room — that
+  means a long non-reverberant fall can engage it. When it does engage it runs after the EQ and before
+  the two level stages, because the tail it adds moves both the level and the peak.
 
-### Changed
+### How the match is realised
 
-- **The Graphic EQ's band gains are pre-compensated, and the chain reports what the audio actually
-  received.** The EQ is a cascade of overlapping peaking filters, so the gain a band is given is not
-  the response it produces: a lone +6 dB band leaks 1.15 dB into each neighbour an octave away. Worse,
-  the match curve is a difference of octave-band *energies*, and a peaking filter delivers its full
-  gain only at its centre — so a cascade whose centre response equals the curve moves the band's
+Nothing in this release changes an existing user-visible behaviour, so there is no `Changed` section.
+The Graphic EQ effect itself is unaltered — dial +6 dB into one of its bands by hand and it still
+leaks 1.15 dB into each neighbour an octave away, exactly as before. What follows happens **inside the
+Cover Chain**, which is what solves for the gains it hands that effect.
+
+- **The band gains the chain derives are pre-compensated, and the chain reports what the audio
+  actually received.** The EQ is a cascade of overlapping peaking filters, so the gain a band is given
+  is not the response it produces: a lone +6 dB band leaks 1.15 dB into each neighbour an octave away.
+  Worse, the match curve is a difference of octave-band *energies*, and a peaking filter delivers its
+  full gain only at its centre — so a cascade whose centre response equals the curve moves the band's
   energy by measurably less. The chain solves for the gains whose *band-energy* response equals the
   requested curve, and shows the realised figure next to the requested one, per band. Measured end to
   end on the reference song, the spectral distance to the original vocal closed 70 % when the centres
-  were matched and **82 % (1.94 → 0.34 dB)** when the band energies were. Where the EQ cannot reach a
-  band's target — a move near the ±10.9 dB bound needs about 12.5 dB of band gain once the roll-off is
-  compensated, and the Graphic EQ stops at ±12 — the shortfall is named with both numbers rather than
-  the target being echoed back as an outcome.
+  were matched and **82 % (1.94 → 0.34 dB)** when the band energies were.
+- **That band energy is measured in your take's own spectrum**, not in a flat one. How much energy a
+  filter removes from an octave depends on where inside that octave the signal's energy sits, so the
+  average has to be weighted by the spectrum the cascade acts on. An unweighted average — the same as
+  assuming every recording is flat across every octave — misreports what the audio received by up to
+  **0.94 dB** on a real 30 s vocal; the weighted one tracks it to **0.04 dB**.
+- **Where the EQ cannot reach a band's target, the shortfall is named with both numbers** rather than
+  the target being echoed back as an outcome. The top of the ±10.9 dB bound is not reachable at all:
+  measured at 48 kHz, a lone band at the +12 dB rail moves its octave's energy by only +9.73 dB at
+  500 Hz falling to +9.17 dB at 8 kHz, so above roughly ±9 dB it is the effect's own clamp that acts.
 
 ### Not shipped, and why
 
@@ -101,17 +125,25 @@ take.
 On the reference material — a 142 s solo vocal take at 48 kHz against the separated original vocal of
 a 178 s song at 44.1 kHz — the whole chain, with Match EQ, Match Loudness and the Limiter on:
 
-| | before | after | target (the original vocal) |
-|---|---|---|---|
-| Loudness (sounding parts) | −25.96 dBFS | **−16.35 dBFS** | −16.35 dBFS |
-| Peak | −9.68 dBFS | −0.84 dBFS | −0.18 dBFS |
-| Envelope spread | 13.62 dB | 12.92 dB | 12.73 dB |
-| Noise floor | −61.26 dBFS | −52.44 dBFS | — |
-| Spectral distance from the original vocal | 1.94 dB | **0.34 dB** | 0 by definition |
+Only two of the five rows are targets, and the table says which — the original vocal's peak, envelope
+spread and noise floor are readings the chain reports beside yours, not numbers any stage moves
+towards. (The Peak row's target is the Limiter's own −0.3 dBFS ceiling.)
 
-The applied curve was +0.54 / −1.15 / −1.90 / −1.04 / +3.54 dB at 500 Hz – 8 kHz, realised to within
-0.008 dB (against 0.280 dB if the requested gains had been used as-is), with 10.19 dB of broadband
-level handed to the loudness stage rather than baked into the shape. The Limiter had nothing to catch
+| | before | after | the original vocal | matched to it? |
+|---|---|---|---|---|
+| Loudness (sounding parts) | −25.96 dBFS | **−16.35 dBFS** | −16.35 dBFS | yes |
+| Peak | −9.68 dBFS | −0.84 dBFS | −0.18 dBFS | no — the ceiling is the target |
+| Envelope spread | 13.62 dB | 12.92 dB | 12.73 dB | no — reported, never corrected |
+| Noise floor | −61.26 dBFS | −52.44 dBFS | — | no |
+| Spectral distance from the original vocal | 1.94 dB | **0.34 dB** | 0 by definition | yes |
+
+The applied curve was +0.54 / −1.15 / −1.90 / −1.04 / +3.54 dB at 500 Hz – 8 kHz, realised to inside
+the solve's own 0.01 dB tolerance, with 10.19 dB of broadband level handed to the loudness stage rather
+than baked into the shape. Handing those gains to the EQ *as-is* would have missed the curve by
+**1.15 dB** of band energy — the like-for-like figure, measured on a flat spectrum at 48 kHz and larger
+on a shaped one. (An earlier draft of this entry quoted 0.280 dB for that baseline. That number is the
+error in **centre response**, which is not the quantity the target is expressed in; comparing the two
+understated the un-compensated error fourfold.) The Limiter had nothing to catch
 and said so — the EQ's cuts had already taken 0.67 dB off the peak before the +9.50 dB gain went on.
 The noise floor rises with the gain, as it must: the match lifts the whole take.
 

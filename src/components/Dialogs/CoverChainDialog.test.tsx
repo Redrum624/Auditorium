@@ -240,7 +240,7 @@ describe('CoverChainDialog — the reference picker', () => {
     useAppStore.setState({ activeDocumentId: take.id });
     render(<CoverChainDialog onClose={() => {}} />);
 
-    expect(screen.getByTestId('cover-chain-no-reference')).toHaveTextContent('Separate Stems');
+    expect(screen.getByTestId('cover-chain-no-reference')).toHaveTextContent('Separate into Stems…');
     fireEvent.change(screen.getByTestId('cover-chain-reference'), { target: { value: vocals.id } });
     expect(screen.queryByTestId('cover-chain-no-reference')).toBeNull();
   });

@@ -295,13 +295,22 @@ it for you, because each step needs a decision only you can make:
    five-track session and, among the new documents, `<song> — Vocals`: the original
    vocal *as a signal*, carrying whatever was done to it in the mix. That document is
    what everything below matches against.
-2. Open your take and run `Effects → Vocal Chain…` on it. The match is a correction to
-   a **clean** take — match the timbre of a noisy one and you match the noise too.
-3. If a word came out wrong, `Effects → Align Lyrics…` before the vocal chain. Nothing
-   in the app judges which word is wrong; you pick it.
-4. If your take drifts against the record, `Effects → Align Vocal Timing…`. It needs you
-   to confirm the beat grid — see the note in that section about why nothing picks it
-   for you.
+2. If a word came out wrong, `Effects → Align Lyrics…`. This is **before** the vocal
+   chain and not after it: the replacement has to be in the file before any stage
+   measures a level or learns a noise print from it, or the new word sits in a
+   de-noised, level-matched take with none of that applied to it. Nothing in the app
+   judges which word is wrong; you pick it.
+3. If your take drifts against the record, `Effects → Align Vocal Timing…`. Also before
+   the vocal chain, for the same reason. It needs you to confirm the beat grid — see the
+   note in that section about why nothing picks it for you.
+4. Open your take and run `Effects → Vocal Chain…` on it, last of the four. The match is
+   a correction to a **clean** take — match the timbre of a noisy one and you match the
+   noise too.
+
+(The Cover Chain dialog lists these four in registry order, which is the order they are
+*listed* rather than the order to *do* them: they are manual stages, so nothing runs them
+and the registry's order carries no promise about them. The order to do them is the one
+above, and each stage's own note repeats it.)
 
 **Then run the chain.** With your take active, open `Effects → Cover Chain…`, choose the
 `— Vocals` document in the **Reference** picker, and press Apply. Three automatic stages
@@ -318,20 +327,32 @@ are on by default:
   inside the EQ's own ±12 dB, the stage says so with both numbers.
 - **Match Loudness** — moves your take to the original vocal's level, measured over the
   *sounding* parts of each. It runs after the EQ, because the EQ deliberately leaves the
-  broadband level out of its curve and hands it here.
-- **Limiter (headroom)** — catches the peak at −0.3 dBFS. On a take that never reaches
-  the ceiling it reports that it did nothing. Switch it off and Match Loudness will tell
-  you, with the number, if the result is going to pass 0 dBFS.
+  broadband level out of its curve and hands it here, and after Match Reverb, because a
+  tail moves the level this stage is setting.
+- **Limiter (headroom)** — catches the peak at −0.3 dBFS, **last of every stage that
+  touches the audio**, so nothing after it can put the output back over the ceiling. On a
+  take that never reaches the ceiling it reports that it did nothing. Switch it off and
+  Match Loudness will tell you, with the number, if the result is going to pass 0 dBFS.
 
 **Match Reverb** is off by default and will usually decline even when you switch it on.
 It measures the original vocal's decay and compares it with the shortest decay this
-app's Reverb can produce (0.710 s); most recorded vocals are drier than that, and the
-stage says which two numbers made it refuse rather than adding space that is not there.
+app's Reverb can produce (0.710 s); if the original is drier than that — as both vocals
+this was measured on were, at 0.28 s and 0.40 s — the stage says which two numbers made
+it refuse rather than adding space that is not there. When it does engage it runs after
+the EQ and before the two level stages, because the tail it adds moves both the level and
+the peak. Two things it cannot tell you: its estimator has only ever been *validated* on
+this app's own reverb and on synthetic decays, never on a real reverberant vocal, and its
+linearity check cannot tell a curved fall from a room — a slow fade with no reverberation
+in it at all scores higher than either validated control. So a decay it reports is
+evidence of a fall, not proof of a room.
 
 The whole pass is **one undo entry**. Every stage reports what it did or why it did
 nothing, and the before/after table gives loudness, envelope spread, noise floor and the
-spectral distance from the original vocal — with the original vocal's own column beside
-them as the target you were aiming at.
+spectral distance from the original vocal, with the original vocal's own reading of each
+beside them. Only two of those five rows are **targets** — the loudness and the spectral
+distance. The Peak row's target is the Limiter's own −0.3 dBFS ceiling, not the original
+vocal's peak; the envelope spread is reported and never corrected; and nothing here
+matches a noise floor. The table marks the two rows that are matched.
 
 **The envelope spread is reported and never corrected.** A "matched compressor" was
 built and cut: the move it asks for changes sign depending on how the measurement is

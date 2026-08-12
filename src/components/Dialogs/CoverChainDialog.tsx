@@ -224,7 +224,9 @@ function StageResult({ result }: { result: CoverChainStageResult }) {
  * single undo entry. This dialog owns two jobs.
  *
  * The first is the vocal chain's: make the pass ACCOUNTABLE. Every stage listed
- * in the order it runs, with the note that says why it sits there, individually
+ * in registry order — which IS the order the four automatic ones run in, and is
+ * only the order the five manual ones are listed in, since nothing here runs
+ * them — with the note that says why it sits there, individually
  * switchable; afterwards, every stage saying what it did, with the settings it
  * derived and what it derived them from — and, for the match, the curve the EQ
  * MEASURABLY DELIVERED rather than the one it was asked for.
@@ -270,7 +272,7 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
     : `Whole file — ${secs(regionSamples, rate)}`;
 
   // Anything open except the take itself. The one you want is the "— Vocals"
-  // document Separate Stems produced, but the list is not filtered by name: a
+  // document Separate into Stems produced, but the list is not filtered by name: a
   // renamed or re-imported vocal is still a valid reference, and a filter that
   // hid it would be a rule the user cannot see.
   const candidates = documents.filter((d) => d.id !== doc.id);
@@ -372,7 +374,7 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
 
         {referenceDocId === '' && (
           <p data-testid="cover-chain-no-reference" className="text-xs" style={{ color: AMBER }}>
-            Nothing to match against yet. Run Edit → Separate Stems… on the original song, then choose its “—
+            Nothing to match against yet. Run Edit → Separate into Stems… on the original song, then choose its “—
             Vocals” document here. Without it every matching stage below will decline.
           </p>
         )}
