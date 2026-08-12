@@ -1050,6 +1050,54 @@ describe('applyTimingWarp', () => {
     expect(Array.from(channels[0])).not.toEqual(Array.from(a));
   });
 
+  it('the ONE search reads the channel MEAN — a per-channel search is a different answer', () => {
+    // The test above cannot see the difference it is named for. Its two channels
+    // are byte-identical, so the mean IS each channel and a per-channel search
+    // returns bit-identical offsets: the mutation
+    // `channels.map(c => timeStretchVariableLinked([c], …))` — every channel
+    // searching itself, the exact stereo-drift bug — passed the whole suite.
+    //
+    // The discriminator is a pair whose mean is NEITHER channel. Then the same
+    // left channel, warped once beside a DIFFERENT right and once beside a copy
+    // of itself, must come back differently, because only the search signal
+    // changed between the two runs. A per-channel search cannot tell the two
+    // runs apart: in both it is handed nothing but the left channel.
+    // Broadband noise, not the burst train: bursts leave long silences where
+    // every candidate offset scores the same, and the two runs then agree by
+    // accident. Continuous content makes the similarity search sensitive
+    // everywhere, which is the condition under which "which signal was
+    // searched" is observable at all.
+    const anchors: TimingAnchor[] = [{ source: 96000, target: 104000 }];
+    const noise = (seed: number, n = 192000): Float32Array => {
+      const rnd = lcg(seed);
+      const out = new Float32Array(n);
+      for (let i = 0; i < n; i++) out[i] = rnd() * 2 - 1;
+      return out;
+    };
+    const l = noise(20260812);
+    const r = noise(77778888);
+
+    const beside = applyTimingWarp([l, r], SR, anchors, { strength: 1 }).channels;
+    const alone = applyTimingWarp([l, Float32Array.from(l)], SR, anchors, { strength: 1 }).channels;
+
+    // Same channel counts, same map, same anchors — only the mid signal differs.
+    expect(beside[0]).toHaveLength(alone[0].length);
+    expect(Array.from(beside[0])).not.toEqual(Array.from(alone[0]));
+    // Symmetrically for the right channel, so this is a property of the search
+    // rather than of which slot a channel happens to occupy.
+    const rAlone = applyTimingWarp([r, Float32Array.from(r)], SR, anchors, { strength: 1 }).channels;
+    expect(Array.from(beside[1])).not.toEqual(Array.from(rAlone[0]));
+    // And the pair stays locked to EACH OTHER: both channels were displaced by
+    // the same offsets, so a known relation between them survives the warp.
+    // `-l` is the relation that is exact under a linear operator: the mid is
+    // silent, and both channels still move together.
+    const negated = applyTimingWarp([l, l.map((v) => -v)], SR, anchors, { strength: 1 }).channels;
+    let broken = 0;
+    for (let i = 0; i < negated[0].length; i++) if (negated[1][i] !== -negated[0][i]) broken++;
+    expect(broken).toBe(0);
+    expect(negated[0].some((v) => v !== 0)).toBe(true);
+  });
+
   it('does not mutate its input channels', () => {
     const l = burstTrain([48000, 96000], 144000);
     const r = sine(440, 3);
