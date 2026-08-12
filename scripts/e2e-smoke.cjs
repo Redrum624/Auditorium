@@ -4324,10 +4324,20 @@ async function main() {
       );
     const stateOf = () => page.evaluate(() => window.__test.getStateSummary());
     const historyOf = () => page.evaluate(() => window.__test.getHistoryState());
-    /** Runs an effect with a hard in-page deadline. A failing effect resolves
-     * through `reportEffectFailure`'s error dialog rather than rejecting, and a
-     * wedged worker would hang `page.evaluate` forever with no diagnosis at
-     * all; racing a timer turns both into a named, RED assertion. */
+    /**
+     * Runs an effect with a hard in-page deadline, and resolves 'ok',
+     * 'TIMED OUT' or 'THREW: …'.
+     *
+     * The timer catches ONE failure mode: a wedged worker, which would
+     * otherwise hang `page.evaluate` forever with no diagnosis at all. It does
+     * NOT catch a failing effect, and an earlier version of this comment
+     * claimed it did. `runEffectOnSelection` converts every worker rejection
+     * into a fire-and-forget `reportEffectFailure` dialog and then returns
+     * normally, so a crashed effect resolves 'ok' here and is indistinguishable
+     * from a clean refusal by outcome alone. Callers that need to tell the two
+     * apart read `window.__test.effectFailureCount()` either side of the run
+     * (see L7-9); 'THREW' only ever reports a throw on the hook path itself.
+     */
     const applyEffectGuarded = (effectId, params, extra, timeoutMs = 120000) =>
       page.evaluate(
         async ({ id, p, x, ms }) => {
@@ -4951,7 +4961,26 @@ async function main() {
     // A brand-new document is silent, and a zero-second one has no samples at
     // all. Both are one Ctrl+N away, and the effects most likely to divide by
     // something that is zero there are the ones run.
+    //
+    // What this step CAN and CANNOT see, stated because the earlier version of
+    // it could not fail at all. `applyEffectGuarded` resolving 'ok' means only
+    // that `applyEffect` settled: `runEffectOnSelection` catches every worker
+    // rejection, hands it to `reportEffectFailure` — a fire-and-forget error
+    // dialog — and returns normally, so a CRASHED effect resolves 'ok' with the
+    // document untouched, which is exactly what a clean refusal looks like. The
+    // timer race catches a WEDGED worker and nothing else. Two assertions make
+    // the difference observable: the failure-dialog counter must not move, and
+    // the length must be the one the effect's own contract predicts. The old
+    // `newAfter.length >= 0` was true of every possible result — a length is
+    // non-negative by construction — so an effect that truncated the 44-sample
+    // document to nothing stayed green.
     console.log('File > New (0 s and 1 ms), then the effects most likely to divide by zero...');
+    // `timeStretchLinked`'s contract is `outLen = round(N*ratio)` exactly
+    // (wsola.ts), and 120 % is the ratio asked for below; every other effect
+    // here is length-preserving. Derived from the before-length rather than
+    // hardcoded, so the 0-sample and 44-sample rows share one rule.
+    const expectedNewLength = (id, before) =>
+      id === 'time-stretch' ? Math.round(before * 1.2) : before;
     for (const [seconds, label] of [
       [0, 'a zero-length'],
       [0.001, 'a 44-sample'],
@@ -4967,14 +4996,23 @@ async function main() {
           [44100, 2, seconds]
         );
         const newBefore = await stateOf();
+        const failuresBefore = await page.evaluate(() => window.__test.effectFailureCount());
         const newOutcome = await applyEffectGuarded(id, params, undefined, 30000);
         const newAfter = await stateOf();
+        const failuresAfter = await page.evaluate(() => window.__test.effectFailureCount());
         const newProbe = await samplesOf(0, 0, Math.max(1, Math.min(64, newAfter.length)));
         const newNonFinite = newProbe.filter((v) => !Number.isFinite(v)).length;
+        const expectedLength = expectedNewLength(id, newBefore.length);
         assert(
-          newOutcome === 'ok' && newAfter.length >= 0 && newNonFinite === 0,
-          `${id} on ${label} document is a clean no-op or a clean refusal: no throw, ` +
-            `no negative length, no NaN (${newOutcome}, ${newBefore.length} -> ${newAfter.length} samples, ${newNonFinite} non-finite)`
+          newOutcome === 'ok' && failuresAfter === failuresBefore,
+          `${id} on ${label} document neither threw nor raised an "Effect failed" dialog ` +
+            `(${newOutcome}, ${failuresAfter - failuresBefore} new failure dialogs)`
+        );
+        assert(
+          newAfter.length === expectedLength && newNonFinite === 0,
+          `and it came back at exactly the length its contract predicts, with no NaN ` +
+            `(${newBefore.length} -> ${newAfter.length} samples, expected ${expectedLength}; ` +
+            `${newNonFinite} non-finite of ${newProbe.length} probed)`
         );
         await page.evaluate(() => window.__test.closeActive());
       }

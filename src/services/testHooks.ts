@@ -22,7 +22,7 @@ import type { AutomationLane, AutomationParam } from '../multitrack/automation';
 import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
-import { runEffectOnSelection } from './effectRunner';
+import { getEffectFailureCount, runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import {
   encodeExport,
@@ -137,6 +137,16 @@ export interface TestApi {
     params: Record<string, EffectParamValue>,
     extra?: unknown
   ): Promise<number>;
+  /**
+   * Running total of "Effect failed" dialogs raised in this renderer session.
+   *
+   * `applyEffect` cannot report a crash: `runEffectOnSelection` turns every
+   * worker rejection into a fire-and-forget error dialog and resolves normally,
+   * so a crashed effect and a clean refusal look identical from the script — the
+   * promise settled, the document did not change. Read this either side of a run
+   * and assert it did not move, and the two become distinguishable.
+   */
+  effectFailureCount(): number;
   setView(view: EditorView): void;
   captureNoisePrint(): void;
   getNoiseProfileSpectra(): number[][] | null;
@@ -1052,6 +1062,8 @@ export function installTestHooks(): void {
       await runEffectOnSelection(effectId, params, { extra });
       return activePeak();
     },
+
+    effectFailureCount: () => getEffectFailureCount(),
 
     setView: (view) => useAppStore.getState().setView(view),
 

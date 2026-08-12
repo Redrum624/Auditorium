@@ -129,10 +129,30 @@ export function runEffectOnChannels(
   });
 }
 
+/**
+ * How many "Effect failed" dialogs have been raised in this renderer session.
+ *
+ * A counter, not new behaviour: nothing in the app reads it, and the dialog it
+ * counts is unchanged. It exists because the failure path is FIRE AND FORGET —
+ * `reportEffectFailure` shows the dialog and the surrounding call resolves
+ * normally — so from outside, a crashed effect and a clean refusal are the same
+ * observation: the promise settled and the document did not change. The
+ * packaged smoke's tiny-document step asserted exactly that pair and therefore
+ * could not fail, whatever the worker did. `testHooks` reads this so the step
+ * can assert the counter did not move.
+ */
+let effectFailureCount = 0;
+
+/** The reading `testHooks.effectFailureCount()` exposes. */
+export function getEffectFailureCount(): number {
+  return effectFailureCount;
+}
+
 /** Shows the standard "Effect failed" dialog. Shared by every surface that
  * turns a `runEffectOnChannels` rejection into something the user can see, so
  * one failure never produces two different-looking reports. */
 export function reportEffectFailure(err: unknown): void {
+  effectFailureCount++;
   void window.electronAPI?.showMessageBox({
     type: 'error',
     title: 'Effect failed',

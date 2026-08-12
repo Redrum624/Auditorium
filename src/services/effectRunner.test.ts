@@ -1,4 +1,4 @@
-import { describeRemoval, runEffectOnSelection } from './effectRunner';
+import { describeRemoval, getEffectFailureCount, runEffectOnSelection } from './effectRunner';
 import { registerEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, docLength } from '../audio/AudioDocument';
@@ -332,15 +332,34 @@ describe('runEffectOnSelection', () => {
     _setDspWorkerLoadFailure('DSP worker script failed to load');
     const values = [0.1, 0.2, 0.3];
     const docId = seedDoc(values);
+    // The failure counter the packaged smoke reads: a crash and a clean refusal
+    // are otherwise the SAME observation from outside (the promise settled, the
+    // document did not change), which is what made its tiny-document step
+    // unable to fail.
+    const failuresBefore = getEffectFailureCount();
 
     await expect(runEffectOnSelection('amplify', { gainDb: 6 })).resolves.toBeUndefined();
 
     expect(showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', title: 'Effect failed' })
     );
+    expect(getEffectFailureCount()).toBe(failuresBefore + 1);
     expect(_getDspWorkerTerminateCount()).toBe(1); // the failed worker was discarded
     expect(canUndo(docId)).toBe(false); // no edit was applied
     expect(Array.from(activeChannel())).toEqual(f32(values));
+  });
+
+  it('does NOT move the failure counter on a run that succeeds', async () => {
+    // The other arm, and the one that makes the assertion in the smoke step
+    // meaningful: if every run bumped it, "the counter did not move" would be
+    // unsatisfiable, and if no run ever did, it would be vacuous.
+    const docId = seedDoc([0.1, 0.2, 0.3]);
+    const failuresBefore = getEffectFailureCount();
+
+    await runEffectOnSelection('amplify', { gainDb: 6 });
+
+    expect(getEffectFailureCount()).toBe(failuresBefore);
+    expect(canUndo(docId)).toBe(true); // the run really did apply
   });
 
   // Same shape as tempoAnalysis.test.ts's "worker.postMessage throwing
