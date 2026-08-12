@@ -474,6 +474,29 @@ To make a 128 BPM loop sit in a 124 BPM track:
    tempo as a separate, separately-undoable step.
 5. **Apply**.
 
+If the material's own tempo *moves* — an accelerando, a ritardando, rubato, or a
+step change partway through — one ratio is the wrong tool, because it corrects
+the drift only on average and leaves the middle of the region furthest out. Set
+**Correction** to **Follow the tracked beats**. That builds a tempo *map* from
+the beat grid and moves each tracked beat onto the target grid individually
+instead of sharing one ratio between them. On synthetic accelerandi with exact
+ground truth, the worst interior beat improves from 526 ms off to 4.6 ms at a
+0.83 BPM/s drift — 526 ms being 0.96 of a beat, so nearly a full beat out in the
+middle of a passage most listeners would call steady.
+
+It is opt-in and the default is unchanged, deliberately: a steady loop does not
+want per-bar correction, and a wrong single ratio is uniformly wrong and audible
+at once, while a wrong tempo map is wrong *differently in every bar* — much
+harder to hear and impossible to undo by ear. So it is only ever built from a
+grid you have confirmed with the tick, and that tick is cleared by every ×2 / ÷2
+re-track and every re-detect. On a perfectly steady grid it reproduces the
+one-ratio result byte for byte.
+
+Two things it does not do. Beat markers it lays afterwards are exact, but *other*
+markers inside the region are still remapped proportionally by the shared write
+path, so on heavily varying material they drift from the audio they mark. And it
+follows the **beats**, not the singing — see below.
+
 Match Tempo runs through the same WSOLA **Time Stretch** effect and the same
 single write path as everything else, so markers remap proportionally and undo
 behaves normally — the History entry reads `Match Tempo`, with `Add Beat
@@ -481,10 +504,18 @@ Markers` as its own entry when you asked for the grid.
 
 ### Making a sung take land on the beat
 
-Match Tempo cannot fix this. It applies one ratio to the whole region, so it can
-move a take earlier or later as a block but cannot pull a dragged line forward
-while leaving the next, rushed line alone. **Align Vocal Timing** can, because it
-warps at a different rate between each pair of syllables.
+Match Tempo cannot fix this — including in its follow-the-beats mode, and the
+reason is worth being precise about, because the two features now look similar
+and are not. Follow-the-beats warps by the **tracked beats of the material**: it
+puts the beats where the target grid wants them. Align Vocal Timing warps by
+**syllables you marked**. A singer who drags one line and rushes the next is off
+*relative to beats that are already in the right place*, so a tempo map moves the
+beats she is already late against and leaves her just as late. **Align Vocal
+Timing** can fix it, because it warps at a different rate between each pair of
+syllables — anchors that describe the singing rather than the pulse.
+
+Use follow-the-beats when the *music's* tempo moves; use Align Vocal Timing when
+the *singer* moves against a tempo that does not.
 
 It works from *anchors you confirm*, never from a detector's guess:
 
