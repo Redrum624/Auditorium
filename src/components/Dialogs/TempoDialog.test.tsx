@@ -494,13 +494,33 @@ describe('R7 — Correction mode', () => {
     // there is no cached entry, and without one the Correction select is
     // disabled and the tick never renders. Pinned here so that if the render
     // gate ever changes, the reset stops being dead and this test says so.
+    // WITHOUT a cached entry: Detect is offered, the Correction control is not.
     seedDoc();
     mockGetTempo.mockReturnValue(null);
-    render(<TempoDialog onClose={jest.fn()} />);
+    const { unmount } = render(<TempoDialog onClose={jest.fn()} />);
 
     expect(screen.getByTestId('tempo-detect-button')).toBeInTheDocument();
     expect(screen.getByTestId('tempo-correction')).toBeDisabled();
     expect(screen.queryByTestId('tempo-grid-confirmed')).not.toBeInTheDocument();
+    unmount();
+
+    // WITH one: the Correction control is live and Detect is GONE. This half is
+    // what makes the test able to fail on its own claim — the first half passes
+    // with or without the `docEntry === null` gate, because a widened gate
+    // still renders Detect in the no-entry state. Only asserting Detect's
+    // ABSENCE once an entry exists can catch the widening, which is precisely
+    // the change that would make `handleDetect`'s reset reachable again.
+    mockGetTempo.mockReturnValue(varyingEntry());
+    render(<TempoDialog onClose={jest.fn()} />);
+
+    expect(screen.queryByTestId('tempo-detect-button')).not.toBeInTheDocument();
+    expect(screen.getByTestId('tempo-correction')).toBeEnabled();
+
+    fireEvent.change(screen.getByTestId('tempo-correction'), { target: { value: 'follow-beats' } });
+    expect(screen.getByTestId('tempo-grid-confirmed')).toBeInTheDocument();
+    // The tick and Detect are never both reachable, which is the whole basis of
+    // the unreachability claim recorded at `handleDetect`.
+    expect(screen.queryByTestId('tempo-detect-button')).not.toBeInTheDocument();
   });
 
   it('RULING 1 — the grid comes from the cached analysis, NEVER from a region re-detect', () => {

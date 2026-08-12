@@ -185,11 +185,25 @@ drift from the audio it marks by the same order of magnitude the feature just
 removed from the audio: on the measured 100→120 BPM accelerando, up to ~525 ms.
 The beat grid the feature lays afterwards is NOT affected — it is written from
 the tempo map's own placed positions, so it is exact — but other markers inside
-the region are. Unlike F2's case this cannot be fixed in the service, because a
-variable-rate match CHANGES the region's length, so `applyEdit`'s proportional
-remap has already fired by the time a service-level correction could run; F2 and
-F9 both worked at equal length. Fixing it properly means teaching the remap
-about the map, which is a change to a rule every length-changing effect shares.
+the region are.
+
+**F2 is the precedent, and it points AT the fix rather than away from it.**
+Remove Silence also changes length, and it is fixed exactly the right way: the
+effect reports `removedSpans`, `effectRunner` turns them into a `'cuts'`
+remap, and `editOps` applies it — the shared remap is taught about the
+transform. R7's equivalent is to report the tempo map and add a remap that sends
+each marker through the map's forward function. That is a new variant on a
+`MarkerRemap` union every length-changing effect shares, sitting on the undo
+path, and it was not worth adding at the end of a release without its own review
+— which is a scheduling reason, not a technical obstacle, and it is recorded as
+one.
+
+What is *not* available here is F9's route. Align Vocal Timing preserves length,
+so `applyEdit`'s proportional remap is the identity for it and its service can
+simply move the markers afterwards. A variable-rate match changes length, so
+that remap has already displaced every interior marker before any service-level
+code could run; correcting it there would mean unwinding a transform this
+feature did not apply.
 
 **Remaining notes (interop granularity, not persistence gaps):** third-party
 tools read the standard chapter fields at millisecond granularity (that is all
@@ -577,8 +591,8 @@ marker inside the corrected region is still remapped proportionally, which is
 right only where the local rate equals the region average. On strongly varying
 material that error is the same order as the one being removed from the audio
 (up to ~525 ms on the 100→120 fixture above). See the marker-persistence entry
-('Markers persist in every container', v1.23 refinement) for why this cannot be
-fixed in the service the way F2 and F9 fixed their equivalents.
+('Markers persist in every container', v1.23 refinement) for the shape of the
+proper fix — the one Remove Silence already uses — and why it was not taken here.
 
 **What it still cannot do, and says so:** the local ratio is bounded by the same
 `0.25x–4x` limit the constant path enforces, per beat interval rather than once
@@ -612,8 +626,9 @@ a real downbeat; pairs that cannot are excluded from the numerator *and* the
 denominator, which is why the control scores 100 % rather than being charged
 for its trailing partial bar. That convention is also why row 3's percentage
 looks better than row 2's while the material is worse: the 3/4 × 5 bridge
-destroys so many boundaries that only **20 of 120** phrase-congruent pairs
-remain identifiable at all. Read row 3's first two columns, not its last.
+destroys so many boundaries that only **20** phrase-congruent pairs remain
+identifiable at all, against 96 for row 2. Read row 3's first two columns, not
+its last.
 
 A bridge whose beat count is a multiple of the assumed meter (3/4 × 4 = 12
 beats) lets the boundary *positions* re-align afterwards, but the bar

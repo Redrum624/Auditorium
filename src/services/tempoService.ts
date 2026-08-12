@@ -191,6 +191,21 @@ export interface VariableTempoPlan {
    * result will not reach the target tempo everywhere, and the dialog says so
    * rather than under-delivering silently (RULING 3). */
   clampedCount: number;
+  /**
+   * The region's RESOLVED start, clamped into `[0, docLength]` exactly as
+   * `cloneRegion` clamps it.
+   *
+   * Carried on the plan rather than re-resolved by each caller, and that is a
+   * correctness requirement rather than tidiness: `applyVariableTempoChange`
+   * used to resolve its own `start` from the selection UNCLAMPED and hand it to
+   * the beat-marker writer, while this plan and `cloneRegion` both clamped. A
+   * selection starting at −5000 (which `setSelection` stores verbatim) then
+   * produced `realisedDelta === plannedDelta` — so the plan check passed — with
+   * every early beat marker written at a NEGATIVE position. Two clamps that
+   * have to agree is that bug waiting to recur; one resolved value both paths
+   * read cannot drift.
+   */
+  regionStart: number;
   /** Region length before and after, in samples. */
   regionLength: number;
   outLength: number;
@@ -268,6 +283,7 @@ export function checkVariableTempoChange(req: ApplyTempoChangeRequest): Variable
       map,
       beatCount: map.acceptedIndices.length,
       clampedCount: map.clampedIndices.length,
+      regionStart: start,
       regionLength,
       outLength: map.outLen,
       extra: { beatSamples: beats, targetSpacing },
@@ -390,15 +406,17 @@ function addBeatMarkersFromMap(docId: string, start: number, map: TempoMap): boo
   const newDoc = useAppStore.getState().documents.find((d) => d.id === docId);
   if (!newDoc) return false; // document closed while the stretch was running
 
-  // No clamp into `[0, docLength]`. Every placed position is inside the map by
-  // construction — `placed[i] <= knotsOut[last]` and `outLen =
-  // round(knotsOut[last])`, so `start + round(placed[i]) <= start + outLen`,
-  // which is the new region's end — and `applyVariableTempoChange` has already
-  // REFUSED if the realised length disagreed with the plan. A clamp here could
-  // therefore never fire on a consistent plan, and on an inconsistent one its
-  // only effect would be to convert a detectable disagreement into a pile of
-  // markers silently stacked on the document's last sample. The refusal is the
-  // honest handling; the clamp was hiding the case it was written for.
+  // No clamp into `[0, docLength]`, and the reason is a precondition on
+  // `start`, not a property of `placed` alone. Every placed position is inside
+  // the map by construction (`placed[i] <= knotsOut[last]`, `outLen =
+  // round(knotsOut[last])`), so `start + round(placed[i]) <= start + outLen` —
+  // the new region's end — **provided `0 <= start <= docLength`**. That is
+  // exactly what the caller now guarantees by passing `plan.regionStart`, which
+  // is clamped once where the region is resolved. When this function took a
+  // caller-resolved `start` instead, an unclamped negative selection wrote
+  // negative marker positions straight past the check above, and a clamp here
+  // hid it by silently collapsing them; the removal is only sound because the
+  // precondition is now structural.
   const positions: number[] = [];
   let truncated = false;
   for (let i = 0; i < map.placed.length; i++) {
@@ -613,8 +631,6 @@ async function applyVariableTempoChange(
   const doc = activeDoc();
   if (!doc) return { ok: false, reason: 'no-document' };
   const docId = doc.id;
-  const selection = useAppStore.getState().selection;
-  const start = selection ? selection.start : 0;
 
   await runEffectOnSelection(
     MATCH_TEMPO_VARIABLE_EFFECT_ID,
@@ -634,18 +650,30 @@ async function applyVariableTempoChange(
   // run that did nothing, report `ok: true`, and then lay a beat grid from
   // `plan.map.placed` describing positions the audio does not have.
   //
-  // The realised length delta is the one quantity that can distinguish them,
-  // and it is exactly predicted: the region `[start, end)` was replaced by
+  // The realised length delta is exactly predicted — the region was replaced by
   // `plan.outLength` samples, so the document must grow by
-  // `outLength - regionLength`. The packaged smoke already treats this equality
-  // as load-bearing (`lengthAfter === plannedLength`); until now the service
-  // did not, and a disagreement between the previewed map and the applied one
-  // would have surfaced as silently misplaced markers rather than as an error.
+  // `outLength - regionLength` — and the packaged smoke already treats that
+  // equality as load-bearing (`lengthAfter === plannedLength`). Until now the
+  // service did not, and a disagreement between the previewed map and the
+  // applied one surfaced as silently misplaced markers rather than an error.
+  //
+  // WHAT IT DOES NOT COVER, stated rather than over-claimed: it is a check on
+  // LENGTH, so it cannot see a disagreement that happens to preserve it.
+  // `plannedDelta` is legitimately 0 whenever the map redistributes time
+  // without changing the total — which includes the case this feature exists
+  // for, material wobbling around 110 BPM matched to 110 — and there the
+  // comparison degenerates to `0 === 0` and an identity short circuit would
+  // pass it. No fixture has been constructed that lands exactly on 0 after
+  // rounding; this is a known gap in the check's reach, not a demonstrated
+  // failure. Catching that case would need the run's own map back from the
+  // worker, not a scalar.
   const realisedDelta = docLength(postDoc) - docLength(doc);
   const plannedDelta = check.plan.outLength - check.plan.regionLength;
   if (realisedDelta !== plannedDelta) return { ok: false, reason: 'plan-mismatch' };
 
-  if (req.addBeatMarkers) addBeatMarkersFromMap(docId, start, check.plan.map);
+  // The PLAN's resolved start, never a freshly-resolved one — see
+  // `VariableTempoPlan.regionStart`.
+  if (req.addBeatMarkers) addBeatMarkersFromMap(docId, check.plan.regionStart, check.plan.map);
 
   return { ok: true };
 }

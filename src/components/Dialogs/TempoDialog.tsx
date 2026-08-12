@@ -253,13 +253,20 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
       setCorrectionFailed(false);
       // Kept for correctness, but UNREACHABLE WITH EFFECT today, and that is
       // recorded rather than papered over with a test that reaches it through
-      // internals a user cannot touch. The Detect button renders only while
-      // `docEntry === null`; with no `docEntry` there is no `confirmableGrid`,
-      // so the Correction select is disabled and the tick never renders — and
-      // nothing sets `docEntry` back to null once this call has set it. So
-      // `gridConfirmed` is already false whenever this line runs. It stays
-      // because this call REPLACES the grid, and the moment that render gate
-      // changes the reset becomes load-bearing.
+      // internals a user cannot touch.
+      //
+      // The argument is entirely about the render gate, and does NOT depend on
+      // `docEntry` being one-way: the line above can and does set it back to
+      // null when `runTempoAnalysis` finds no tempo, which is what the
+      // `result?.bpm` on the next line concedes. What holds is simpler — the
+      // Detect button renders only while `docEntry === null`, and in that state
+      // there is no `confirmableGrid`, so the Correction select is disabled and
+      // the tick never renders. `gridConfirmed` is therefore already false
+      // whenever this line runs, whichever way `docEntry` went.
+      //
+      // It stays because this call REPLACES the grid, so the moment that render
+      // gate widens the reset becomes load-bearing — and the gate is pinned by
+      // test in both states so that widening cannot pass unnoticed.
       setGridConfirmed(false);
       setLastEstimateSelection(useAppStore.getState().selection);
       if (result?.bpm != null) setSourceDraft(String(result.bpm));

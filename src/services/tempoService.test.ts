@@ -1213,27 +1213,67 @@ describe('the region is clamped exactly as cloneRegion clamps it (finding 7)', (
     }
   });
 
-  it('and an over-long selection still applies, with the plan matching the result', async () => {
-    // The end-to-end consequence: unclamped, `plan.regionLength` would exceed
-    // the audio the worker actually receives, `plan.outLength` would be
-    // computed for the wrong length, and the new plan-vs-realised check would
-    // refuse a run that was in fact correct.
+  it.each([
+    ['a start of zero', 0, 99 * SR],
+    ['a non-zero start', 2 * SR, 99 * SR],
+    ['a NEGATIVE start', -5000, 6 * SR],
+  ])('applies end to end and keeps every marker inside the document: %s', async (_label, start, end) => {
+    // Unclamped, `plan.regionLength` would exceed the audio the worker actually
+    // receives, `plan.outLength` would be computed for the wrong length, and
+    // the plan-vs-realised check would refuse a run that was in fact correct.
+    //
+    // The NEGATIVE start is the case that matters most and the one an earlier
+    // version of this test lacked. With the write path resolving its OWN start
+    // from the selection, the plan and `cloneRegion` both clamped — so
+    // `realisedDelta === plannedDelta` and the check PASSED — while the beat
+    // grid was written at `-5000 + placed[i]`, negative for every early beat,
+    // stored unclamped by `setMarkersForDoc` and silently collapsed to 0 only
+    // at save time. Using `start: 0` alone could never see it.
     const seconds = 8;
     const doc = seedDoc([amSine(441, 110, seconds)]);
-    useAppStore.getState().setSelection({ start: 0, end: 99 * SR });
+    useAppStore.getState().setSelection({ start, end });
 
     const req = {
       sourceBpm: 110,
       targetBpm: 130,
+      addBeatMarkers: true,
       variableRate: { beatSamples: accelGrid(100, 120, seconds) },
     };
     const planned = checkVariableTempoChange(req);
     expect(planned.ok).toBe(true);
     if (!planned.ok) return;
 
+    const lenBefore = docLength(liveDoc(doc.id));
     const result = await applyTempoChange(req);
     expect(result.ok).toBe(true);
     expect(result.reason).toBeUndefined();
-    expect(docLength(liveDoc(doc.id))).toBe(planned.plan.outLength);
+    // outLength is the REGION's new length, not the document's: the document
+    // grows by the difference. (Only equal when the region IS the document,
+    // which is why the single start-0 case never caught this.)
+    expect(docLength(liveDoc(doc.id))).toBe(
+      lenBefore - planned.plan.regionLength + planned.plan.outLength
+    );
+
+    // The plan's resolved start is the clamped one, and it is what the markers
+    // were written from.
+    expect(planned.plan.regionStart).toBe(Math.min(docLength(doc), Math.max(start, 0)));
+
+    const markers = liveMarkers(doc.id).filter((m) => m.name.startsWith('Beat '));
+    expect(markers.length).toBeGreaterThan(0);
+    const newLen = docLength(liveDoc(doc.id));
+    for (const m of markers) {
+      // every beat marker lands inside the document
+      expect(m.positionSample).toBeGreaterThanOrEqual(0);
+      expect(m.positionSample).toBeLessThanOrEqual(newLen);
+    }
+    // And at the plan's own positions, offset by the plan's own start — not by
+    // a start resolved a second time somewhere else.
+    const placed = Array.from(planned.plan.map.placed);
+    markers
+      .slice()
+      .sort((a, b) => a.positionSample - b.positionSample)
+      .forEach((m, i) => {
+        expect(m.positionSample).toBe(planned.plan.regionStart + Math.round(placed[i]));
+      });
   }, 30000);
 });
