@@ -7,7 +7,9 @@ import {
   COVER_CHAIN_GOOD_TAKE_SENTENCE,
   COVER_CHAIN_RESIDUAL_SENTENCE,
   COVER_CHAIN_SHAPING_SENTENCE,
+  COVER_CHAIN_SPREAD_SENTENCE,
   COVER_CHAIN_STAGES,
+  SPREAD_GATE_SWEEP,
   runCoverChain,
   type CoverChainMetrics,
   type CoverChainReport,
@@ -80,8 +82,16 @@ const APPLIED_EQ: CoverChainStageResult = {
   label: 'Match EQ to the Original Vocal',
   status: 'applied',
   derived: [
-    { label: 'Curve', value: '5 bands, -1.90 dB to +3.54 dB', from: 'the octave-band energy' },
+    // The engine's OWN strings, verbatim. Invented `from` text is how the
+    // dialog's tests missed that both realised-curve sentences pointed the user
+    // 'above' at a table this component renders BELOW them.
+    { label: 'Curve', value: '5 bands, -1.90 dB to +3.54 dB', from: 'the octave-band energy of the reference' },
     { label: 'Level removed', value: '+10.19 dB', from: 'the broadband difference' },
+    {
+      label: 'Realised',
+      value: 'within 0.004 dB of the target',
+      from: "the cascade's measured effect on THIS take's octave-band energy after 3 pre-compensation passes — the Realised column in the table below is what the audio receives, not what was requested",
+    },
   ],
   delta: {
     rmsBeforeDb: -27.8,
@@ -96,6 +106,10 @@ const APPLIED_EQ: CoverChainStageResult = {
       { centreHz: 250, status: 'below-range', targetDb: 0, realisedDb: 0.21, bandGainDb: 0, bounded: false },
       { centreHz: 500, status: 'matched', targetDb: 0.54, realisedDb: 0.54, bandGainDb: 0.31, bounded: false },
       { centreHz: 1000, status: 'matched', targetDb: -1.15, realisedDb: -1.15, bandGainDb: -1.02, bounded: false },
+      // The fourth status. `coverMatch` produces it for a spectrum whose gate
+      // found nothing sounding, and nothing rendered it until this row existed:
+      // the label map could be emptied for it and the suite stayed green.
+      { centreHz: 2000, status: 'no-signal', targetDb: 0, realisedDb: 0.02, bandGainDb: 0, bounded: false },
       { centreHz: 8000, status: 'matched', targetDb: 3.54, realisedDb: 3.54, bandGainDb: 3.29, bounded: true },
       { centreHz: 16000, status: 'above-nyquist', targetDb: 0, realisedDb: 0, bandGainDb: 0, bounded: false },
     ],
@@ -328,7 +342,11 @@ describe('CoverChainDialog — the honesty block (Rulings A, D, E)', () => {
 });
 
 describe('CoverChainDialog — the run and the report', () => {
-  it('sends the tick state to the engine and disables Apply when nothing is ticked', async () => {
+  it('sends the tick state to the engine, every stage of it', async () => {
+    // Renamed: this test never asserted anything about Apply being disabled —
+    // that is the NEXT test's property, and crediting it here meant a reader
+    // auditing coverage by name would have found the guard pinned twice and
+    // removable once.
     seedDoc();
     render(<CoverChainDialog onClose={() => {}} />);
     fireEvent.click(screen.getByTestId('cover-chain-toggle-matchReverb'));
@@ -336,8 +354,15 @@ describe('CoverChainDialog — the run and the report', () => {
       fireEvent.click(screen.getByTestId('cover-chain-apply'));
     });
     const sent = mockRun.mock.calls[0][0].enabled;
+    // Every stage the registry declares, not the two that were on the mind of
+    // whoever wrote it: a stage added to the engine and forgotten in the
+    // dialog's state would be `undefined` here.
+    for (const stage of COVER_CHAIN_STAGES) {
+      expect(typeof sent[stage.id]).toBe('boolean');
+    }
     expect(sent.matchEq).toBe(true);
     expect(sent.matchReverb).toBe(true);
+    expect(sent.separate).toBe(false);
   });
 
   it('disables Apply once every automatic stage is off', () => {
@@ -377,8 +402,23 @@ describe('CoverChainDialog — the run and the report', () => {
     expect(row250.textContent).toContain('+0.21 dB');
     expect(row250.textContent).toContain('+0.00 dB');
 
+    // Every one of the four statuses renders its OWN words. 'no-signal' had no
+    // row anywhere: its entry could be emptied and the table read "2 kHz — "
+    // with a dangling em-dash, with the suite green.
     expect(screen.getByTestId('cover-chain-eq-row-16000').textContent).toContain('above Nyquist');
+    expect(screen.getByTestId('cover-chain-eq-row-2000').textContent).toContain('— no signal');
     expect(screen.getByTestId('cover-chain-eq-row-8000').textContent).toContain('bounded');
+    // A matched band gets NO status text — the entry for it was dead code.
+    expect(screen.getByTestId('cover-chain-eq-row-500').textContent).not.toContain('—');
+
+    // The kHz/Hz boundary is `>= 1000`, and it was probed only from below: the
+    // 1 kHz, 8 kHz and 16 kHz rows were checked for substrings that exclude the
+    // band label, so changing `>=` to `>` rendered "1000 Hz" among "8 kHz" rows
+    // with nothing failing. Below / ON / above, full text.
+    expect(screen.getByTestId('cover-chain-eq-row-500').textContent).toContain('500 Hz');
+    expect(screen.getByTestId('cover-chain-eq-row-1000').textContent).toContain('1 kHz');
+    expect(screen.getByTestId('cover-chain-eq-row-1000').textContent).not.toContain('1000 Hz');
+    expect(screen.getByTestId('cover-chain-eq-row-8000').textContent).toContain('8 kHz');
     expect(screen.getByTestId('cover-chain-eq-row-500').textContent).not.toContain('bounded');
   });
 
@@ -433,7 +473,7 @@ describe('CoverChainDialog — the run and the report', () => {
     expect(screen.getByTestId('cover-chain-summary')).toHaveTextContent('Scarlet Paintings — Vocals');
   });
 
-  it('says the spread is reported and never corrected, with the sweep that decided it', async () => {
+  it('says the spread is reported and never corrected, with the WHOLE sweep that decided it', async () => {
     seedDoc();
     render(<CoverChainDialog onClose={() => {}} />);
     await act(async () => {
@@ -441,8 +481,54 @@ describe('CoverChainDialog — the run and the report', () => {
     });
     await waitFor(() => expect(screen.getByTestId('cover-chain-spread-note')).toBeInTheDocument());
     const note = screen.getByTestId('cover-chain-spread-note');
+
+    // BOTH halves of this test's name, because neither was observed before: the
+    // sentence that discharges the "dynamics matching does not ship" ruling
+    // could be deleted, or reworded into a claim that the spread IS matched,
+    // and the suite stayed green.
+    expect(note).toHaveTextContent('reported and NEVER corrected');
     expect(note).toHaveTextContent('changes sign');
-    expect(note).toHaveTextContent('−9.7 dB');
+
+    // And the WHOLE sweep — five points, not four. The dropped one (−6.71 at
+    // K = 40) is the point that breaks monotonicity, which is the strongest
+    // evidence that the quantity belongs to the gate rather than to the singer;
+    // without it the four numbers read as one clean downward trend, a weaker and
+    // different claim than the measurement made.
+    expect(SPREAD_GATE_SWEEP).toHaveLength(5);
+    for (const point of SPREAD_GATE_SWEEP) {
+      expect(note).toHaveTextContent(`${point.gateDb} dB`);
+      expect(note).toHaveTextContent(
+        `${point.moveDb >= 0 ? '+' : '−'}${Math.abs(point.moveDb).toFixed(2)} dB`
+      );
+    }
+    // Rendered from the engine's constant rather than typed here, so the dialog
+    // and the module cannot state the same sweep differently — they already had.
+    expect(note).toHaveTextContent(COVER_CHAIN_SPREAD_SENTENCE);
+  });
+
+  it('calls the reference column what it is, and marks only the rows a stage aims at', async () => {
+    // Heading the column "Target" told the user the chain had under-delivered by
+    // the difference on three of the five rows: the limiter's peak target is its
+    // own ceiling, the envelope spread is never corrected, and nothing matches a
+    // noise floor.
+    seedDoc();
+    render(<CoverChainDialog onClose={() => {}} />);
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    });
+    await waitFor(() => expect(screen.getByTestId('cover-chain-summary')).toBeInTheDocument());
+    const summary = screen.getByTestId('cover-chain-summary');
+    expect(summary).toHaveTextContent('The original vocal — Scarlet Paintings — Vocals');
+    expect(summary).not.toHaveTextContent('Target');
+
+    for (const key of ['gatedLevelDb', 'matchDistanceDb']) {
+      expect(screen.getByTestId(`cover-chain-summary-${key}`)).toHaveTextContent('matched to it');
+    }
+    for (const key of ['peakDb', 'spreadDb', 'noiseFloorDb']) {
+      expect(screen.getByTestId(`cover-chain-summary-${key}`)).not.toHaveTextContent('matched to it');
+    }
+    // And the note says which target the Peak row actually has.
+    expect(screen.getByTestId('cover-chain-target-note')).toHaveTextContent('−0.3 dBFS ceiling');
   });
 
   it('names the single undo entry, and the new length when a stage grew the region', async () => {

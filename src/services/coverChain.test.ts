@@ -14,6 +14,7 @@ import {
   RESIDUAL_WORST_SECOND_DB,
   coverStageById,
   defaultCoverStageSelection,
+  describeStage,
   deriveMatchEq,
   deriveMatchLoudness,
   deriveMatchReverb,
@@ -43,7 +44,7 @@ import {
   type Ltas,
 } from '../dsp/coverMatch';
 import { SOLVE_TOLERANCE_DB, realisedBandEnergyDb } from '../dsp/graphicEqCascade';
-import { _resetDspWorkerTestState } from '../__mocks__/createDspWorkerMock';
+import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
 import type { StageStatus } from './vocalChain';
 
 registerAllEffects();
@@ -203,9 +204,9 @@ describe('COVER_CHAIN_STAGES', () => {
     // Not tidiness — the stage's own note tells the user that nothing
     // downstream can lift the output back over the ceiling, and `runCoverChain`
     // iterates this array in order. Match Reverb used to sit after it: a signal
-    // limited to -0.3 dBFS with the reverb's defaults on top came back at
-    // +0.18 dBFS on a 220 Hz tone and +5.16 dBFS on noise, and `encodeWav` and
-    // the MP3 encoder both hard-clip. The end-to-end proof is in the Ruling C
+    // limited to -0.3 dBFS with this reverb on top comes back at +0.37 dBFS on a
+    // 220 Hz tone and +5.34 dBFS on noise at its SHORTEST room, and `encodeWav`
+    // and the MP3 encoder both hard-clip. The end-to-end proof is in the Ruling C
     // test below; this is the structural half, so the order cannot drift back
     // without a failure that names the reason.
     const touchesAudio = COVER_CHAIN_STAGES.filter((s) => s.effectId !== null);
@@ -275,8 +276,27 @@ describe('Ruling A — the residual is stated with its measured numbers', () => 
   });
 
   it('renders every one of them into the sentence the user reads', () => {
-    for (const n of ['17.95 dB', '8.9 dB', '250 Hz', '4 kHz', '9.5\u201311.8 dB']) {
-      expect(COVER_CHAIN_RESIDUAL_SENTENCE).toContain(n);
+    // All SEVEN constants, not six: 11.28 dB was exported, asserted as a
+    // literal above, and then rendered nowhere \u2014 a measured figure the user
+    // never saw, which is the one thing Ruling A's premise rules out. The loop
+    // below is checked against the constants themselves for extent, so a new
+    // constant that goes unrendered fails here rather than being forgotten.
+    // One row per exported constant, paired with the text it turns into \u2014 4000
+    // reads "4 kHz" and the two in-band figures share one range, so a sweep over
+    // the raw numbers would not do.
+    const shown: { value: number; text: string }[] = [
+      { value: RESIDUAL_BELOW_BED_DB, text: '17.95 dB' },
+      { value: RESIDUAL_BELOW_VOCAL_DB, text: '11.28 dB' },
+      { value: RESIDUAL_WORST_SECOND_DB, text: '8.9 dB' },
+      { value: RESIDUAL_BAND_LO_HZ, text: '250 Hz' },
+      { value: RESIDUAL_BAND_HI_HZ, text: '4 kHz' },
+      { value: RESIDUAL_IN_BAND_WORST_DB, text: '9.5\u201311.8 dB' },
+      { value: RESIDUAL_IN_BAND_BEST_DB, text: '9.5\u201311.8 dB' },
+    ];
+    expect(shown).toHaveLength(7);
+    for (const { value, text } of shown) {
+      expect(Number.isFinite(value)).toBe(true);
+      expect(COVER_CHAIN_RESIDUAL_SENTENCE).toContain(text);
     }
   });
 
@@ -785,6 +805,32 @@ describe('matchDistanceDb', () => {
     expect(matchDistanceDb(tilted, flat)!).toBeGreaterThan(4);
   });
 
+  it('does NOT saturate at the correction bound — it measures the gap, not the fix', () => {
+    // The metric used to sum `gainDb`, which `matchCurve` has already cut to
+    // +-MATCH_BOUND_DB, so it stopped growing once a band passed 10.9 dB of
+    // centred difference. Two spectra can be further apart than the EQ is
+    // allowed to correct, and saying so is the whole point of reporting a
+    // distance: with both readings saturating the same way, the before/after
+    // IMPROVEMENT this number exists to show would be compressed too.
+    const take = synthLtas({ 500: -30, 1000: -30, 2000: -30, 4000: -30 });
+    const near = synthLtas({ 500: -30, 1000: -30, 2000: -30, 4000: -20 });
+    const far = synthLtas({ 500: -30, 1000: -30, 2000: -30, 4000: 0 });
+
+    // The far pair is past the bound: 30 dB in one of four bands centres to
+    // +22.5 there and -7.5 in the other three, so the EQ's correction is cut.
+    const farCurve = MATCH_BOUND_DB; // the value the cut lands on
+    expect(farCurve).toBe(10.9);
+    // sqrt((22.5^2 + 3*7.5^2) / 4) = 12.99 dB of shape difference...
+    expect(matchDistanceDb(far, take)!).toBeCloseTo(12.99, 1);
+    // ...where the bounded sum would have returned 8.48.
+    expect(matchDistanceDb(far, take)!).toBeGreaterThan(9);
+
+    // And it is still monotone below the bound, where the two agree: 10 dB in
+    // one band centres to +7.5 / -2.5.
+    expect(matchDistanceDb(near, take)!).toBeCloseTo(Math.sqrt((7.5 * 7.5 + 3 * 2.5 * 2.5) / 4), 6);
+    expect(matchDistanceDb(far, take)!).toBeGreaterThan(matchDistanceDb(near, take)!);
+  });
+
   it('is null when no band is in range', () => {
     const lowRate = 1200;
     const a = synthLtas({ 500: -30 }, lowRate);
@@ -1092,6 +1138,51 @@ describe('runCoverChain', () => {
     expect(resultFor(report!.stages, 'headroom').delta!.identicalFraction).toBe(1);
   });
 
+  it('the limiter always says something, on both sides of the 0.01 dB boundary', () => {
+    // Probed on the `StageDelta` the function reads, because 0.01 dB of caught
+    // peak is not a quantity a fixture can be built to land either side of
+    // through the real limiter — and the boundary was untested from below at a
+    // size that could move it. The gap it hid: a run that caught 0.008 dB fell
+    // past `> 0.01`, past `identicalFraction === 1` (samples DID change), and
+    // reported as applied with no detail at all.
+    const limiter = coverStageById('headroom');
+    // The two peaks are given directly, and `peakAfterDb` is 0 for the boundary
+    // probes, so the subtraction the function makes is exact: -0.3 + 0.01 minus
+    // -0.3 is 0.010000000000000009 in binary floating point, which would put the
+    // "on the boundary" probe on the wrong side of a `>` for a reason that has
+    // nothing to do with the constant.
+    const delta = (peakBeforeDb: number, peakAfterDb: number, identicalFraction: number | null) => ({
+      rmsBeforeDb: -20,
+      rmsAfterDb: -20,
+      peakBeforeDb,
+      peakAfterDb,
+      identicalFraction,
+      differenceRmsDb: identicalFraction === 1 ? null : -60,
+    });
+    const quiet = 'nothing to catch — the peak was already under the ceiling';
+
+    // Below / on / above, 0.001 dB either side — a tenth of the step still
+    // resolves, so the constant cannot move without a failure.
+    expect(describeStage(limiter, delta(0.009, 0, 0.5))).toBe(quiet);
+    expect(describeStage(limiter, delta(0.01, 0, 0.5))).toBe(quiet); // `> 0.01`, so 0.01 is not caught
+    expect(describeStage(limiter, delta(0.011, 0, 0.5))).toBe('caught 0.01 dB of peak');
+    expect(describeStage(limiter, delta(4.26, -0.3, 0.5))).toBe('caught 4.56 dB of peak');
+    // And an untouched buffer still gets the stronger sentence, which is the
+    // more specific of the two.
+    expect(describeStage(limiter, delta(-0.3, -0.3, 1))).toMatch(/every sample came back unchanged/);
+
+    // Every case is covered: no input to this branch returns undefined.
+    for (const caught of [0, 0.005, 0.01, 0.02, 1]) {
+      for (const fraction of [null, 0, 0.5, 1]) {
+        expect(typeof describeStage(limiter, delta(caught, 0, fraction))).toBe('string');
+      }
+    }
+    // A stage that is NOT the limiter still reports only the one thing it can
+    // know from the buffers.
+    expect(describeStage(coverStageById('matchEq'), delta(-0.3, -5, 0.5))).toBeUndefined();
+    expect(describeStage(coverStageById('matchEq'), delta(-5, -5, 1))).toMatch(/came back unchanged/);
+  });
+
   it('a stage that lengthens the region is still one undo entry, and the length is reported', async () => {
     const decayed = new Float32Array(N);
     const src = noise(N, 0.5, 3);
@@ -1137,6 +1228,34 @@ describe('runCoverChain', () => {
     const markers = useAppStore.getState().markers[takeId];
     expect(markers.find((m) => m.id === 'inside')!.positionSample).toBe(N >> 1);
     expect(markers.find((m) => m.id === 'after')!.positionSample).toBe(N + 1000 + grew);
+  });
+
+  it('aborts without touching the document when a stage fails', async () => {
+    // The `catch` around `runEffectOnChannels` had no test at all: `return null`
+    // could have been `continue` and the whole suite stayed green, because
+    // nothing here ever made a stage fail. The docstring promises a failure
+    // aborts the remaining stages and leaves the document exactly as it was.
+    const original = takeAudio()[0];
+    const { refId, takeId } = seedPair([Float32Array.from(original)], refAudio());
+    const historyBefore = getHistory(takeId).done.length;
+    const showMessageBox = jest.fn();
+    (window as { electronAPI?: unknown }).electronAPI = { showMessageBox };
+    _setDspWorkerLoadFailure('worker exploded');
+
+    const report = await runCoverChain({
+      enabled: only('matchEq', 'matchLoudness', 'headroom'),
+      referenceDocId: refId,
+    });
+
+    // Resolves null rather than rejecting — the dialog awaits this, and a
+    // rejection would leave it busy for ever.
+    expect(report).toBeNull();
+    // No undo entry, and not one sample changed.
+    expect(getHistory(takeId).done.length).toBe(historyBefore);
+    expect(Array.from(activeDoc().channels[0])).toEqual(Array.from(original));
+    // Reported ONCE, on the first failure, rather than once per remaining stage
+    // — which is what `return null` buys over `continue`.
+    expect(showMessageBox).toHaveBeenCalledTimes(1);
   });
 
   it('runs over the SELECTION when there is one, leaving the rest untouched', async () => {

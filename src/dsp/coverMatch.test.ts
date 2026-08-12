@@ -321,7 +321,20 @@ describe('matchCurve', () => {
     const curve = matchCurve(ref, take);
     expect(curve.bands.map((b) => b.centreHz)).toEqual(Array.from(MATCH_BAND_CENTRES_HZ));
 
-    const all: MatchBandStatus[] = ['matched', 'below-range', 'above-nyquist', 'no-signal'];
+    // Enumerated BY THE COMPILER. A `MatchBandStatus[]` literal is not
+    // exhaustiveness-checked — the annotation permits any subset — so the list
+    // this was written with could neither notice a fifth member being added nor
+    // one being deleted, and the assertion under it only checked that `seen` was
+    // a SUBSET of the list, a direction that cannot observe the type at all.
+    // The Record cannot be short, and `Object.keys` cannot be long.
+    const EVERY_STATUS: Record<MatchBandStatus, true> = {
+      matched: true,
+      'below-range': true,
+      'above-nyquist': true,
+      'no-signal': true,
+    };
+    const all = Object.keys(EVERY_STATUS) as MatchBandStatus[];
+    expect(all).toHaveLength(4);
     const seen = new Set(curve.bands.map((b) => b.status));
     for (const s of seen) expect(all).toContain(s);
     // Below-range and above-nyquist must both actually occur on this pair, or
@@ -329,6 +342,31 @@ describe('matchCurve', () => {
     expect(seen.has('below-range')).toBe(true);
     expect(seen.has('above-nyquist')).toBe(true);
     expect(curve.matchedCount).toBe(curve.bands.filter((b) => b.status === 'matched').length);
+  });
+
+  it('produces no-signal — the fourth status, which no other fixture reaches', () => {
+    // The status the type declares and nothing else in this suite exercised.
+    // Its trigger is a spectrum whose gate found NOTHING sounding: `frames` is
+    // zero, so the band levels it holds are an average over no frames and there
+    // is nothing to compare. That is a real answer rather than a zero, and it
+    // is the case the dialog has a label for.
+    const silent: Ltas = { power: new Float64Array(LTAS_FFT_SIZE / 2 + 1), frames: 0, sampleRate: 48000 };
+    const curve = matchCurve(silent, syntheticLtas(48000, () => 0));
+    const inRange = curve.bands.filter(
+      (b) => b.centreHz >= MATCH_MIN_CENTRE_HZ && b.status !== 'above-nyquist'
+    );
+    expect(inRange.length).toBeGreaterThan(0);
+    for (const band of inRange) {
+      expect(band.status).toBe('no-signal');
+      expect(band.gainDb).toBe(0);
+      expect(band.rawDb).toBeNull();
+      expect(band.bounded).toBe(false);
+    }
+    expect(curve.matchedCount).toBe(0);
+    // It is the TAKE's gate as well as the reference's — both operands, so the
+    // branch is not observed through one of them only.
+    const other = matchCurve(syntheticLtas(48000, () => 0), silent);
+    expect(other.bands.some((b) => b.status === 'no-signal')).toBe(true);
   });
 
   it('excludes every centre below MATCH_MIN_CENTRE_HZ and no centre above it', () => {

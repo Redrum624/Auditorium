@@ -85,7 +85,11 @@ export const COVER_CHAIN_UNDO_LABEL = 'Cover Chain';
 
 /** The residual original vocal, dB below the bed, over vocal-active seconds. */
 export const RESIDUAL_BELOW_BED_DB = 17.95;
-/** The same residual, dB below the original vocal itself. */
+/** The same residual, dB below the original vocal itself — i.e. how far under
+ * YOUR cover the ghost of the original singer will sit once the loudness match
+ * has put your take at the original vocal's level. Stated in the sentence
+ * because Ruling A's premise is that every measured figure here is one the user
+ * is actually shown. */
 export const RESIDUAL_BELOW_VOCAL_DB = 11.28;
 /** The worst usable second measured (t = 146 s). */
 export const RESIDUAL_WORST_SECOND_DB = 8.9;
@@ -103,7 +107,8 @@ export const RESIDUAL_IN_BAND_WORST_DB = 9.5;
  */
 export const COVER_CHAIN_RESIDUAL_SENTENCE =
   `The instrumental separation leaves behind is NOT clean: it still contains the original singer, ` +
-  `measured ${RESIDUAL_BELOW_BED_DB} dB below the music overall and only ` +
+  `measured ${RESIDUAL_BELOW_BED_DB} dB below the music overall — ${RESIDUAL_BELOW_VOCAL_DB} dB below ` +
+  `the original vocal itself — and only ` +
   `${RESIDUAL_IN_BAND_WORST_DB}–${RESIDUAL_IN_BAND_BEST_DB} dB below it across ` +
   `${RESIDUAL_BAND_LO_HZ} Hz–${RESIDUAL_BAND_HI_HZ / 1000} kHz, the band your own voice occupies ` +
   `(worst measured second: ${RESIDUAL_WORST_SECOND_DB} dB). You will hear a ghost of the original ` +
@@ -119,6 +124,36 @@ export const COVER_CHAIN_SHAPING_SENTENCE =
   `This matches your take's TONE and LEVEL to the original singer's — on the song it was measured ` +
   `on, a shaping of about ±1.2 dB across 500 Hz–4 kHz with +3.5 dB of air at 8 kHz. It is a real, ` +
   `measured correction and it is a small one.`;
+
+/**
+ * The gate sweep that cut the dynamics match, as data rather than as prose.
+ *
+ * FIVE points, and the fifth is the one that matters: the move changes SIGN
+ * between K = 15 and K = 20 and then reverses direction again at K = 40, so the
+ * quantity is a property of the analysis gate rather than of the singer. Quoting
+ * only the first four reads as a single clean downward trend, which is a weaker
+ * and different claim than the measurement made.
+ *
+ * A constant rather than a sentence typed twice: the dialog and the module
+ * header state the same sweep, and they had already drifted.
+ */
+export const SPREAD_GATE_SWEEP: readonly { gateDb: number; moveDb: number }[] = [
+  { gateDb: 15, moveDb: 0.43 },
+  { gateDb: 20, moveDb: -0.88 },
+  { gateDb: 25, moveDb: -3.55 },
+  { gateDb: 30, moveDb: -9.71 },
+  { gateDb: 40, moveDb: -6.71 },
+];
+
+/** Ruling D's dynamics half, rendered verbatim wherever the spread is shown. */
+export const COVER_CHAIN_SPREAD_SENTENCE =
+  `The envelope spread is reported and NEVER corrected. A “matched compressor” was measured and cut: ` +
+  `the move it would have asked for changes sign, and then changes direction again, depending only on ` +
+  `how the measurement is gated (` +
+  SPREAD_GATE_SWEEP.map(
+    (p) => `${p.moveDb >= 0 ? '+' : '−'}${Math.abs(p.moveDb).toFixed(2)} dB at ${p.gateDb} dB`
+  ).join(' / ') +
+  `). A quantity whose sign depends on an analysis parameter is not a measurement of the singer.`;
 
 /** Ruling D, second half. Correction cannot invent a performance. */
 export const COVER_CHAIN_GOOD_TAKE_SENTENCE =
@@ -651,29 +686,51 @@ export interface CoverChainReport {
   applied: boolean;
 }
 
-/** The shape distance between two long-term spectra: RMS of the centred
- * per-band differences over the bands the match is allowed to touch. Uses
- * `matchCurve`'s own band selection and centring, so "the distance" and "what
- * the EQ corrects" cannot describe different sets. `null` when no band matched. */
+/**
+ * The shape distance between two long-term spectra: RMS of the centred per-band
+ * differences over the bands the match is allowed to touch. Uses `matchCurve`'s
+ * own band selection and centring, so "the distance" and "what the EQ corrects"
+ * cannot describe different sets. `null` when no band matched.
+ *
+ * It is measured on `rawDb - levelDb` — the centred difference BEFORE the bound
+ * — and not on `gainDb`, which is the same quantity after `MATCH_BOUND_DB` has
+ * cut it. That is not a detail: `gainDb` saturates at 10.9 dB per band, so a
+ * take sitting 30 dB below the reference in one octave would report a distance
+ * of 8.48 dB where the shape difference is 12.99 dB, and because the before and
+ * after readings saturate the same way the IMPROVEMENT this metric exists to
+ * show would be compressed too. The bound is a limit on what the EQ may correct;
+ * it is not a limit on how far apart two spectra are.
+ */
 export function matchDistanceDb(reference: Ltas, take: Ltas): number | null {
   const curve = matchCurve(reference, take);
-  const matched = curve.bands.filter((b) => b.status === 'matched');
+  const matched = curve.bands.filter((b) => b.status === 'matched' && b.rawDb !== null);
   if (matched.length === 0) return null;
   let sum = 0;
-  for (const b of matched) sum += b.gainDb * b.gainDb;
+  for (const b of matched) {
+    const centred = (b.rawDb as number) - curve.levelDb;
+    sum += centred * centred;
+  }
   return Math.sqrt(sum / matched.length);
 }
 
+/**
+ * `ownLtas` is this signal's OWN long-term spectrum when the caller already has
+ * it. It exists to stop the reference document's spectrum being computed twice:
+ * a three-minute LTAS is 1.86 s of work on the reference material, and the
+ * second pass would produce a value that is zero by construction — the
+ * reference's distance from itself.
+ */
 function measureMetrics(
   channels: Float32Array[],
   sampleRate: number,
-  referenceLtas: Ltas | null
+  referenceLtas: Ltas | null,
+  ownLtas: Ltas | null = null
 ): CoverChainMetrics {
   const spread: ActiveSpread | null = activeEnvelopeSpread(channels, sampleRate);
   const noise = measureNoiseWindow(channels, sampleRate);
   let distance: number | null = null;
   if (referenceLtas && referenceLtas.frames > 0) {
-    const ltas = longTermAverageSpectrum(channels, sampleRate);
+    const ltas = ownLtas ?? longTermAverageSpectrum(channels, sampleRate);
     if (ltas.frames > 0) distance = matchDistanceDb(referenceLtas, ltas);
   }
   return {
@@ -686,11 +743,19 @@ function measureMetrics(
 }
 
 /**
- * Everything the reference contributes, measured ONCE per run and only when a
- * stage that needs it is actually enabled. The long-term spectrum of a
- * three-minute file is thousands of FFTs and the decay fit is a second scan of
- * it; paying for either when its stage is off would be a cost with no
- * corresponding stage in the report.
+ * Everything the reference's STAGES need, measured once per run and only for the
+ * stages that are actually switched on. The long-term spectrum of a three-minute
+ * file is thousands of FFTs (1.86 s on the reference material) and the decay fit
+ * is a second scan of it; paying for either when its stage is off would be a
+ * cost with no corresponding stage in the report.
+ *
+ * "Only for the stages that are on" is about the STAGES, and it is worth being
+ * exact because the reference's spectrum is computed for one more reason: the
+ * before/after `matchDistanceDb` is reported whenever a reference document is
+ * open, whether or not Match EQ is on, because a run with only the loudness
+ * stage still tells the user how far the timbre sits from the target. See
+ * `metricLtas` in `runCoverChain`, which REUSES this one when Match EQ asked
+ * for it and computes it once otherwise — never twice.
  */
 export function measureReference(
   channels: Float32Array[],
@@ -729,18 +794,32 @@ function resolveStage(
   }
 }
 
-/** The one-line "what it did" for a stage that knows something the buffers do
- * not show. `LimiterEffect` returns no `EffectReport`, so how much it caught is
- * read from the measured peaks rather than from a field that does not exist. */
-function describeStage(stage: CoverChainStage, delta: StageDelta): string | undefined {
-  // The stage's OWN account first, because it is the more specific one — and
-  // it cannot fire on a limiter that did nothing, whose peaks are equal.
+/**
+ * The one-line "what it did" for a stage that knows something the buffers do not
+ * show. `LimiterEffect` returns no `EffectReport`, so how much it caught is read
+ * from the measured peaks rather than from a field that does not exist.
+ *
+ * The limiter's three cases are TOTAL, which they were not: a run that caught
+ * 0.008 dB fell past the `> 0.01` branch, past `identicalFraction === 1`
+ * (samples did change), and reported as applied with no detail at all. Below
+ * 0.01 dB there is nothing worth printing to two decimals, so it says that
+ * instead of saying nothing.
+ *
+ * Exported for its test: 0.01 dB of peak is not a quantity a fixture can be
+ * built to land either side of through the real limiter, so the boundary is
+ * probed on the `StageDelta` this function actually reads.
+ */
+export function describeStage(stage: CoverChainStage, delta: StageDelta): string | undefined {
+  // The stage's OWN account first, because it is the more specific one.
   if (stage.id === 'headroom') {
     const caught = delta.peakBeforeDb - delta.peakAfterDb;
     if (caught > 0.01) return `caught ${caught.toFixed(2)} dB of peak`;
+    // Ruling F: a stage that turned out to have nothing to do says so, measured
+    // rather than assumed.
+    return delta.identicalFraction === 1
+      ? 'nothing to do — every sample came back unchanged'
+      : 'nothing to catch — the peak was already under the ceiling';
   }
-  // Ruling F: a stage that turned out to have nothing to do says so, measured
-  // rather than assumed. The limiter is what this fires on in practice.
   if (delta.identicalFraction === 1) return 'nothing to do — every sample came back unchanged';
   return undefined;
 }
@@ -802,7 +881,10 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
 
   // The before/after spectral distance needs the reference's spectrum whether or
   // not Match EQ is on — a run with only the loudness stage still reports how
-  // far the timbre sits from the target, it just does not correct it.
+  // far the timbre sits from the target, it just does not correct it. Match EQ
+  // may already have paid for it, in which case this REUSES it: the spectrum of
+  // a three-minute file is 1.86 s of work and the progress bar has not started
+  // moving yet.
   const metricLtas =
     reference?.ltas ??
     (refDoc && docLength(refDoc) > 0
@@ -811,9 +893,13 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
 
   let channels = cloneRegion(doc, start, end);
   const before = measureMetrics(channels, sampleRate, metricLtas);
+  // The reference's own metrics are measured against the reference's own
+  // spectrum, which is `metricLtas` — handed in rather than recomputed, because
+  // recomputing it would be a second 1.86 s pass to produce a distance that is
+  // zero by construction.
   const referenceMetrics =
     refDoc && docLength(refDoc) > 0
-      ? measureMetrics(refDoc.channels, refDoc.sampleRate, metricLtas)
+      ? measureMetrics(refDoc.channels, refDoc.sampleRate, metricLtas, metricLtas)
       : null;
   const startedAt = Date.now();
 

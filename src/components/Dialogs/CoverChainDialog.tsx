@@ -7,6 +7,7 @@ import {
   COVER_CHAIN_GOOD_TAKE_SENTENCE,
   COVER_CHAIN_RESIDUAL_SENTENCE,
   COVER_CHAIN_SHAPING_SENTENCE,
+  COVER_CHAIN_SPREAD_SENTENCE,
   COVER_CHAIN_STAGES,
   COVER_CHAIN_UNDO_LABEL,
   defaultCoverStageSelection,
@@ -17,6 +18,7 @@ import {
   type CoverChainStageResult,
   type MatchEqDetail,
 } from '../../services/coverChain';
+import type { MatchBandStatus } from '../../dsp/coverMatch';
 import type { StageStatus } from '../../services/vocalChain';
 import { GlassButton, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
@@ -49,12 +51,32 @@ const STATUS_COLOR: Record<StageStatus, string> = {
 
 const AMBER = '#e0a458';
 
-const METRIC_ROWS: { key: keyof CoverChainMetrics; label: string; unit: 'dbfs' | 'db' }[] = [
-  { key: 'gatedLevelDb', label: 'Loudness (sounding parts)', unit: 'dbfs' },
-  { key: 'peakDb', label: 'Peak', unit: 'dbfs' },
-  { key: 'spreadDb', label: 'Envelope spread', unit: 'db' },
-  { key: 'noiseFloorDb', label: 'Noise floor', unit: 'dbfs' },
-  { key: 'matchDistanceDb', label: 'Distance from the original vocal', unit: 'db' },
+/**
+ * The before/after table's rows.
+ *
+ * `aimedAt` is load-bearing rather than decoration. The last column holds the
+ * REFERENCE's own reading of each measure, and for three of the five rows that
+ * reading is not a target and nothing in the chain moves towards it: the
+ * limiter's peak target is its own −0.3 dBFS ceiling, the envelope spread is
+ * explicitly never corrected (the dynamics match was measured and cut), and no
+ * stage matches a noise floor. Heading that column "Target" told the user the
+ * chain had under-delivered by the difference — on a successful run the Peak row
+ * read "After −0.30 dBFS / Target −1.20 dBFS", which is a 0.9 dB miss against a
+ * number nothing aimed at, and the spread row implied exactly the dynamics match
+ * the measurements refused to ship.
+ */
+const METRIC_ROWS: {
+  key: keyof CoverChainMetrics;
+  label: string;
+  unit: 'dbfs' | 'db';
+  /** True when a stage actually moves this measure towards the reference's. */
+  aimedAt: boolean;
+}[] = [
+  { key: 'gatedLevelDb', label: 'Loudness (sounding parts)', unit: 'dbfs', aimedAt: true },
+  { key: 'peakDb', label: 'Peak', unit: 'dbfs', aimedAt: false },
+  { key: 'spreadDb', label: 'Envelope spread', unit: 'db', aimedAt: false },
+  { key: 'noiseFloorDb', label: 'Noise floor', unit: 'dbfs', aimedAt: false },
+  { key: 'matchDistanceDb', label: 'Distance from the original vocal', unit: 'db', aimedAt: true },
 ];
 
 /** `null` is a real answer here — nothing was sounding, or there was no
@@ -76,10 +98,18 @@ function deltaText(delta: StageDelta): string {
   return parts.join(' · ');
 }
 
-/** What a band's non-matched status means, in words. Exhaustive over
- * `MatchBandStatus` — a band with no correction says WHY it has none. */
-const BAND_STATUS_TEXT: Record<string, string> = {
-  matched: '',
+/**
+ * What a band's non-matched status means, in words — a band with no correction
+ * says WHY it has none.
+ *
+ * Keyed by `Exclude<MatchBandStatus, 'matched'>` rather than by `string`, so the
+ * comment's claim to be exhaustive is one the COMPILER makes: a fifth member of
+ * the union is a compile error here rather than a dangling em-dash followed by
+ * "undefined" in the table. The `matched` entry is excluded because it is never
+ * read — the render guard below is `status !== 'matched'` — and an entry that
+ * cannot be reached is one nobody can tell is wrong.
+ */
+const BAND_STATUS_TEXT: Record<Exclude<MatchBandStatus, 'matched'>, string> = {
   'below-range': 'below the measured range',
   'above-nyquist': 'above Nyquist',
   'no-signal': 'no signal',
@@ -436,14 +466,19 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
                   <th className="text-right font-normal">Before</th>
                   <th className="text-right font-normal">After</th>
                   <th className="text-right font-normal">
-                    {report.referenceName ? `Target — ${report.referenceName}` : 'Target'}
+                    {report.referenceName ? `The original vocal — ${report.referenceName}` : 'The original vocal'}
                   </th>
                 </tr>
               </thead>
               <tbody>
                 {METRIC_ROWS.map((row) => (
                   <tr key={row.key} data-testid={`cover-chain-summary-${row.key}`}>
-                    <td style={{ color: 'var(--glass-text-label)', padding: '2px 0' }}>{row.label}</td>
+                    <td style={{ color: 'var(--glass-text-label)', padding: '2px 0' }}>
+                      {row.label}
+                      {row.aimedAt && (
+                        <span style={{ color: 'var(--accent)' }}> — matched to it</span>
+                      )}
+                    </td>
                     <td className="text-right font-mono" style={{ color: 'var(--glass-text-secondary)' }}>
                       {metricText(report.before[row.key], row.unit)}
                     </td>
@@ -458,10 +493,14 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
               </tbody>
             </table>
 
+            <p data-testid="cover-chain-target-note" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              The last column is the original vocal&rsquo;s own reading of each measure. Only the two rows marked
+              &ldquo;matched to it&rdquo; are targets: the Peak row&rsquo;s target is the Limiter&rsquo;s own
+              &minus;0.3&nbsp;dBFS ceiling, and nothing here matches an envelope spread or a noise floor.
+            </p>
+
             <p data-testid="cover-chain-spread-note" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-              The envelope spread is reported and never corrected. A “matched compressor” was measured and cut:
-              the move it would have asked for changes sign depending on how the measurement is gated
-              (+0.4 / −0.9 / −3.6 / −9.7 dB across the sweep), so it is not a measurement of the singer.
+              {COVER_CHAIN_SPREAD_SENTENCE}
             </p>
 
             <p data-testid="cover-chain-outcome" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>

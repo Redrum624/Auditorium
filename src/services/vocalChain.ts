@@ -569,9 +569,12 @@ export function deriveEq(f0P1Hz: number | null): StageResolution {
  * the effect's, never new numbers — and a derivation that lands outside them is
  * a derivation the effect could not have honoured anyway.
  *
- * Exported for F10's cover chain, which derives settings for four more effects
- * and must clamp them the same way. Sharing the helper is what stops a second
- * chain inventing a second set of bounds. */
+ * Exported for F10's cover chain, which derives settings for three more effects
+ * — the graphic EQ's band gains, the amplify stage's gain and the reverb's room
+ * size — and must clamp them the same way. Sharing the helper is what stops a
+ * second chain inventing a second set of bounds. Its fourth automatic stage, the
+ * limiter, derives NOTHING: a ceiling is an absolute level, so that stage runs
+ * on the effect's own default and has nothing to clamp. */
 export function clampToParam(effectId: string, paramId: string, value: number): number {
   const def = getEffect(effectId);
   if (!def) throw new Error(`Unknown effect: ${effectId}`);

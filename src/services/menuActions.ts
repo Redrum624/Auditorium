@@ -160,11 +160,14 @@ function effectsSectionItemIds(): (string | 'separator')[] {
   // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
   // Noise Reduction effect), above the category-grouped effect list. 'Detect
   // Tempo' (Task T5), 'Match Tempo…' (Task T8), 'Align Vocal Timing…' (F9),
-  // 'Align Lyrics…' (F6) and 'Vocal Chain…' (F7) join it there rather than
-  // widening the closed MenuSection['title'] union for a couple of analysis/
-  // transform commands (Plan Ruling 5). Vocal Chain sits directly after Align
-  // Vocal Timing because that is the order the two are used in: the chain's
-  // timing stage is manual by design and must be run BEFORE the chain.
+  // 'Align Lyrics…' (F6), 'Vocal Chain…' (F7) and 'Cover Chain…' (F10) join it
+  // there rather than widening the closed MenuSection['title'] union for a
+  // handful of analysis/transform commands (Plan Ruling 5). Vocal Chain sits
+  // directly after Align Vocal Timing because that is the order the two are used
+  // in: the chain's timing stage is manual by design and must be run BEFORE the
+  // chain. Cover Chain sits last of the six for the same reason — the Vocal
+  // Chain is a manual stage of it, and its own note says to run it first.
+  // The same list appears in the empty-registry branch above; both are here.
   const ids: (string | 'separator')[] = [
     'noise.capture',
     'tempo.detect',
