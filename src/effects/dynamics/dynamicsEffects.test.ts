@@ -1,5 +1,5 @@
 import { envelopeFollower } from './envelope';
-import { compressorEffect } from './CompressorEffect';
+import { compressorEffect, reductionDb } from './CompressorEffect';
 import { limiterEffect } from './LimiterEffect';
 import { noiseGateEffect } from './NoiseGateEffect';
 import { getAllEffects } from '../EffectRegistry';
@@ -99,6 +99,41 @@ describe('envelopeFollower', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// The soft knee is the SHIPPED default (kneeDb default = 6) and is what the
+// Vocal Chain inherits, so its law is pinned here directly rather than only
+// through the kneeDb: 0 early return the process-level tests below take.
+// ---------------------------------------------------------------------------
+describe('reductionDb — soft-knee law at ratio 4, knee 6dB (slope = 0.75)', () => {
+  // Quadratic interpolation inside the knee: slope*(over + knee/2)^2 / (2*knee).
+  // The knee spans over ∈ [-3, +3]; at both edges it must meet the neighbouring
+  // branch exactly (0 below, over*slope above), and the /(2*knee) divisor is
+  // what makes those two joins line up.
+  it.each([
+    [-4, 0], // below the knee entirely: 2*over < -knee
+    [-3, 0], // lower knee edge: joins the "no reduction" branch
+    [0, 0.5625], // knee centre: 0.75 * 3^2 / 12
+    [3, 2.25], // upper knee edge: joins over*slope = 3*0.75
+    [6, 4.5], // above the knee: linear over*slope
+  ])('reductionDb(%f, 4, 6) === %f', (over, expected) => {
+    expect(reductionDb(over, 4, 6)).toBeCloseTo(expected, 10);
+  });
+
+  it('starts reducing BELOW threshold and rises monotonically across the knee', () => {
+    // The knee is centred on the threshold, so unlike a hard knee it is already
+    // reducing at over = -1.5 (where a hard knee does nothing at all).
+    expect(reductionDb(-1.5, 4, 6)).toBeGreaterThan(0);
+    expect(reductionDb(-1.5, 4, 0)).toBe(0);
+    const curve = [-3, -1.5, 0, 1.5, 3].map((o) => reductionDb(o, 4, 6));
+    for (let i = 1; i < curve.length; i++) expect(curve[i]).toBeGreaterThan(curve[i - 1]);
+  });
+
+  it('kneeDb <= 0 takes the hard-knee branch', () => {
+    expect(reductionDb(4, 4, 0)).toBeCloseTo(3, 10);
+    expect(reductionDb(-4, 4, 0)).toBe(0);
+  });
+});
+
 describe('compressorEffect', () => {
   it('registers as compressor in category Dynamics', () => {
     expect(compressorEffect.id).toBe('compressor');
@@ -174,6 +209,23 @@ describe('compressorEffect', () => {
     // shared (max) sidechain detector should apply L's ~10.5dB reduction to it too.
     expect(gainR).toBeGreaterThan(-12);
     expect(gainR).toBeLessThan(-9);
+  });
+
+  it('the DEFAULT knee (6dB) is the soft one: a signal exactly at threshold is reduced by ~0.5625dB, where knee 0 leaves it alone', () => {
+    // Constant 0.1 = -20dBFS, so the settled envelope sits exactly on the
+    // -20dB threshold (overDb = 0) — the middle of the 6dB knee. Hard knee:
+    // no reduction at all. Soft knee: 0.75 * (0 + 3)^2 / (2*6) = 0.5625dB.
+    const input = new Float32Array(Math.round(0.5 * SR)).fill(0.1);
+    const common = { thresholdDb: -20, ratio: 4, attackMs: 5, releaseMs: 20, makeupDb: 0 };
+    const skip = 5000;
+
+    const softOut = run(compressorEffect, [input], common); // kneeDb omitted -> default 6
+    const softGain = dbGain(input, softOut[0], skip, input.length);
+    expect(softGain).toBeCloseTo(-0.5625, 2);
+
+    const hardOut = run(compressorEffect, [input], { ...common, kneeDb: 0 });
+    const hardGain = dbGain(input, hardOut[0], skip, input.length);
+    expect(hardGain).toBeCloseTo(0, 3);
   });
 });
 

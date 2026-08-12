@@ -119,13 +119,25 @@ describe('distortionEffect', () => {
     expect(atMinus6 / at0).toBeCloseTo(Math.pow(10, -6 / 20), 4);
   });
 
-  it('processes stereo independently without mutating inputs', () => {
+  it('processes stereo independently without mutating inputs: each channel equals its own mono render', () => {
+    // Distinct L/R content — the shaper is memoryless, so a stereo render must
+    // be bit-identical to two separate mono renders. Anything that folds L into
+    // R (or reuses one channel for both) breaks this exactly.
     const l = sine(440, 0.05, 0.8);
-    const r = sine(660, 0.05, 0.8);
-    const out = run(distortionEffect, [l, r], { drive: 15, mode: 'tanh', outputDb: -3 });
+    const r = sine(660, 0.05, 0.3);
+    const params = { drive: 15, mode: 'tanh', outputDb: -3 };
+    const out = run(distortionEffect, [l, r], params);
     expect(out).toHaveLength(2);
     expect(out[0].length).toBe(l.length);
     out[0].forEach((v) => expect(Number.isFinite(v)).toBe(true));
+
+    const monoL = run(distortionEffect, [l], params)[0];
+    const monoR = run(distortionEffect, [r], params)[0];
+    expect(Array.from(out[0])).toEqual(Array.from(monoL));
+    expect(Array.from(out[1])).toEqual(Array.from(monoR));
+    // Sanity: the two channels really are different material, so the equality
+    // above is a genuine constraint and not two names for the same buffer.
+    expect(Array.from(out[1])).not.toEqual(Array.from(out[0]));
   });
 
   it('is discoverable via registerAllEffects in category Distortion', () => {

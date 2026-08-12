@@ -330,10 +330,14 @@ describe('pitchCorrectEffect — key and scale route to different target notes (
   // 460 Hz = midi 69.77: nearest chromatic note is A#4 (466.16 Hz, 0.23 st away);
   // nearest C-MAJOR note is A4 (440 Hz — A# is not in the scale); nearest
   // C-MINOR note is A#4 again (it IS in the scale). Same input, three targets.
+  // The F-major row is what makes the KEY load-bearing: Bb (= A#4, 466.16 Hz)
+  // is in F major but not in C major, so a root pitch class stuck at 0 retunes
+  // this row to A4 (440 Hz) instead — every C-keyed row above stays green.
   it.each([
     ['chromatic', 'C', 466.16],
     ['major', 'C', 440],
     ['minor', 'C', 466.16],
+    ['major', 'F', 466.16],
   ] as const)('scale %s (key %s) retunes 460 Hz to %f Hz within 3 cents', (scale, key, target) => {
     // Measured: 466.15 / 440.00 / 466.15 Hz.
     const out = run([sine(460, 1.0)], { key, scale, strength: 100, retuneMs: 0 });

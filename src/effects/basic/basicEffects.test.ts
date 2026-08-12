@@ -65,6 +65,29 @@ describe('NormalizeEffect', () => {
     expect(maxAbs(out)).toBeCloseTo(target, 4);
   });
 
+  it('peak mode measures ACROSS channels: stereo balance survives, only the loudest channel reaches the target', () => {
+    // L peaks at 0.5, R at 0.4 — a 0.8 balance the effect must not touch. One
+    // global scale factor preserves it; measuring per channel would drive BOTH
+    // to the target and silently re-centre the image.
+    const target = Math.pow(10, -0.3 / 20);
+    const input = [Float32Array.from([0.25, -0.5, 0.1]), Float32Array.from([0.2, 0.3, -0.4])];
+    const out = run(normalizeEffect, input, { targetDb: -0.3, mode: 'peak' });
+
+    const peakL = maxAbs([out[0]]);
+    const peakR = maxAbs([out[1]]);
+    expect(peakL).toBeCloseTo(target, 5); // the loud channel defines the scale
+    expect(peakR).toBeCloseTo(target * 0.8, 5); // the quiet one stays 0.8 of it
+    expect(peakR / peakL).toBeCloseTo(0.4 / 0.5, 5);
+  });
+
+  it('rms mode measures ACROSS channels too: a quiet channel is not pumped up to match a loud one', () => {
+    const loud = Float32Array.from([0.5, -0.5, 0.5, -0.5]);
+    const quiet = Float32Array.from([0.05, -0.05, 0.05, -0.05]);
+    const out = run(normalizeEffect, [loud, quiet], { targetDb: -20, mode: 'rms' });
+    // One global RMS scale keeps the 10:1 level relationship intact.
+    expect(maxAbs([out[1]]) / maxAbs([out[0]])).toBeCloseTo(0.1, 5);
+  });
+
   it('leaves an all-zero (silent) input unchanged', () => {
     const input = [new Float32Array(8)];
     const out = run(normalizeEffect, input, { targetDb: -0.3, mode: 'peak' });

@@ -76,6 +76,26 @@ describe('deHumEffect', () => {
     expect(before / after).toBeGreaterThan(20);
   });
 
+  it('notches the LAST requested harmonic: with harmonics=4 the 4th (200Hz) is attenuated too', () => {
+    // The 4th is the boundary of the `k <= harmonics` loop — an off-by-one there
+    // leaves the strongest upper partial of the hum completely un-notched.
+    const input = sine(200, 1.0, 0.5);
+    const out = run(deHumEffect, [input], { baseFreq: '50', harmonics: 4, q: 30 });
+    const skip = Math.round(0.4 * SR);
+    const before = rms(input, skip, input.length);
+    const after = rms(out[0], skip, input.length);
+    expect(before / after).toBeGreaterThan(20);
+  });
+
+  it('does NOT notch beyond the requested harmonic count: with harmonics=3 the 4th (200Hz) survives', () => {
+    const input = sine(200, 1.0, 0.5);
+    const out = run(deHumEffect, [input], { baseFreq: '50', harmonics: 3, q: 30 });
+    const skip = Math.round(0.4 * SR);
+    const before = rms(input, skip, input.length);
+    const after = rms(out[0], skip, input.length);
+    expect(after / before).toBeGreaterThan(0.9);
+  });
+
   it('skips harmonics at or above Nyquist (no NaN/Infinity)', () => {
     // 60Hz base, 8 harmonics -> up to 480Hz, all under Nyquist; keep it simple by
     // asserting finiteness with a high harmonic count.

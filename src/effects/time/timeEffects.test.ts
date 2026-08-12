@@ -222,6 +222,37 @@ describe('chorusEffect', () => {
     const out = run(chorusEffect, [input], {});
     expectFinite(out[0]);
   });
+
+  it('mix=0 is a BIT-IDENTICAL dry passthrough (not merely close)', () => {
+    const input = sine(440, 0.1, 0.5);
+    const out = run(chorusEffect, [input], { rateHz: 0.8, depthMs: 7, mix: 0, voices: '2' });
+    expect(Array.from(out[0])).toEqual(Array.from(input));
+  });
+
+  it('mix=1 carries NO dry component: the pre-delay head is exactly silent', () => {
+    // Every voice reads at BASE_DELAY_MS (20ms) +/- depthMs (7ms), so the
+    // earliest possible tap is 13ms = 573 samples back; before that the wet
+    // signal is exactly 0. Any dry leakage would show up immediately here.
+    const input = sine(440, 0.1, 0.5);
+    const out = run(chorusEffect, [input], { rateHz: 0.8, depthMs: 7, mix: 1, voices: '2' });
+    for (let i = 0; i < 500; i++) expect(out[0][i]).toBe(0);
+    expect(rms(input, 0, 500)).toBeGreaterThan(0.1); // the dry signal is loud there
+    expect(rms(out[0], 2000, out[0].length)).toBeGreaterThan(0.1); // and wet arrives later
+  });
+
+  it('every declared parameter is actually read: moving each off its default changes the output', () => {
+    const input = sine(440, 0.2, 0.5);
+    const base = { rateHz: 0.8, depthMs: 7, mix: 0.5, voices: '2' };
+    const ref = run(chorusEffect, [input], base);
+    const differs = (params: Record<string, EffectParamValue>): boolean => {
+      const out = run(chorusEffect, [input], { ...base, ...params });
+      return out[0].some((v, i) => v !== ref[0][i]);
+    };
+    expect(differs({ rateHz: 4 })).toBe(true);
+    expect(differs({ depthMs: 1 })).toBe(true);
+    expect(differs({ mix: 0.9 })).toBe(true);
+    expect(differs({ voices: '3' })).toBe(true);
+  });
 });
 
 describe('flangerEffect', () => {
@@ -253,6 +284,37 @@ describe('flangerEffect', () => {
     const input = sine(440, 0.3, 0.5);
     const out = run(flangerEffect, [input], { feedback: 0.85 });
     expectFinite(out[0]);
+  });
+
+  it('mix=0 is a BIT-IDENTICAL dry passthrough (not merely close)', () => {
+    const input = sine(440, 0.1, 0.5);
+    const out = run(flangerEffect, [input], { rateHz: 0.25, depthMs: 2, feedback: 0.5, mix: 0 });
+    expect(Array.from(out[0])).toEqual(Array.from(input));
+  });
+
+  it('mix=1 carries NO dry component: the pre-delay head is exactly silent', () => {
+    // The unipolar sweep runs from BASE_DELAY_MS (1ms = 44.1 samples) upward,
+    // so the tap is exactly 0 for the first 44 output samples; a dry leak would
+    // be visible there at once.
+    const input = sine(440, 0.1, 0.5);
+    const out = run(flangerEffect, [input], { rateHz: 0.25, depthMs: 2, feedback: 0.5, mix: 1 });
+    for (let i = 0; i < 40; i++) expect(out[0][i]).toBe(0);
+    expect(rms(input, 0, 40)).toBeGreaterThan(0.1); // the dry signal is loud there
+    expect(rms(out[0], 2000, out[0].length)).toBeGreaterThan(0.1); // and wet arrives later
+  });
+
+  it('every declared parameter is actually read: moving each off its default changes the output', () => {
+    const input = sine(440, 0.2, 0.5);
+    const base = { rateHz: 0.25, depthMs: 2, feedback: 0.5, mix: 0.5 };
+    const ref = run(flangerEffect, [input], base);
+    const differs = (params: Record<string, EffectParamValue>): boolean => {
+      const out = run(flangerEffect, [input], { ...base, ...params });
+      return out[0].some((v, i) => v !== ref[0][i]);
+    };
+    expect(differs({ rateHz: 2 })).toBe(true);
+    expect(differs({ depthMs: 5 })).toBe(true);
+    expect(differs({ feedback: 0 })).toBe(true);
+    expect(differs({ mix: 0.9 })).toBe(true);
   });
 });
 

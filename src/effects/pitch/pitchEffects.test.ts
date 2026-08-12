@@ -95,12 +95,19 @@ describe('timeStretchEffect', () => {
     expect(Math.abs(out[0].length - expected) / expected).toBeLessThan(0.1);
   }, 15000);
 
-  it('processes stereo channels independently to equal length', () => {
+  it('stereo: equal length, and each output channel carries ITS OWN source content', () => {
+    // The stretch is stereo-LINKED (one WSOLA search on the channel mean, the
+    // same offsets applied to both), so out[1] is NOT a mono render of R — but
+    // it must still be built from R's samples. Pitch is preserved by a
+    // time-stretch, so the surviving tone in each channel identifies its source.
     const l = sine(300, 0.2);
     const r = sine(500, 0.2);
     const out = run(timeStretchEffect, [l, r], { stretchPercent: 150 });
     expect(out.length).toBe(2);
     expect(out[0].length).toBe(out[1].length);
+    expect(Math.abs(dominantFreq(out[0], SR, 8192) - 300) / 300).toBeLessThan(0.06);
+    expect(Math.abs(dominantFreq(out[1], SR, 8192) - 500) / 500).toBeLessThan(0.06);
+    expect(Array.from(out[1])).not.toEqual(Array.from(out[0]));
   }, 15000);
 });
 

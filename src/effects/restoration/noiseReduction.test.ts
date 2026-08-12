@@ -105,6 +105,38 @@ describe('noiseReductionEffect', () => {
     expect(Math.abs(sineDelta)).toBeLessThanOrEqual(3);
   });
 
+  it('the Reduction slider sets the gain FLOOR: 6dB reduces the noise floor by ~6dB, not by everything', () => {
+    // floor = 10^(-reductionDb/20). In a noise-only region the raw gain
+    // (m - sensitivity*noise)/m is at or below the floor almost everywhere, so
+    // the measured attenuation tracks reductionDb directly. The band is
+    // two-sided on purpose: a floor stuck at 0 (or at any smaller value) gates
+    // the region far harder than the slider asked for.
+    const { signal, noiseEnd } = buildSignal();
+    const profile = averageMagnitude(signal.subarray(2048, noiseEnd - 2048));
+    setProfile([profile]);
+
+    const nStart = 4096;
+    const nEnd = noiseEnd - 3000;
+    const before = rms(signal, nStart, nEnd);
+
+    const measure = (reductionDb: number): number => {
+      const out = noiseReductionEffect.process([signal], SR, {
+        reductionDb,
+        sensitivity: 2,
+        smoothing: 0.5,
+      }).channels[0];
+      return 20 * Math.log10(before / rms(out, nStart, nEnd));
+    };
+
+    const at6 = measure(6);
+    expect(at6).toBeGreaterThan(4);
+    expect(at6).toBeLessThan(9);
+
+    const at18 = measure(18);
+    expect(at18).toBeGreaterThan(15);
+    expect(at18).toBeLessThan(21);
+  });
+
   it('does not mutate the input channels', () => {
     const { signal } = buildSignal();
     const before = Array.from(signal);

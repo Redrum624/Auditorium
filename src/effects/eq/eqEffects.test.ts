@@ -114,18 +114,28 @@ describe('parametricEqEffect', () => {
     expect(rms(diff, SKIP)).toBeLessThan(1e-3);
   });
 
-  it('does not mutate stereo input channels', () => {
+  it('does not mutate stereo input channels, and filters each channel with its OWN content', () => {
     const l = sine(300, 0.1);
     const r = sine(500, 0.1);
     const beforeL = Array.from(l);
     const beforeR = Array.from(r);
-    parametricEqEffect.process([l, r], SR, {
+    const params = {
       ...disableAllBands,
       band1Enabled: true,
       band1Gain: 6,
-    });
+    };
+    const out = parametricEqEffect.process([l, r], SR, params).channels;
     expect(Array.from(l)).toEqual(beforeL);
     expect(Array.from(r)).toEqual(beforeR);
+
+    // Each biquad chain starts from zero state per channel, so a stereo render
+    // must be bit-identical to two mono renders. This is what catches a channel
+    // loop that reads channels[0] for every output channel.
+    const monoL = parametricEqEffect.process([sine(300, 0.1)], SR, params).channels[0];
+    const monoR = parametricEqEffect.process([sine(500, 0.1)], SR, params).channels[0];
+    expect(Array.from(out[0])).toEqual(Array.from(monoL));
+    expect(Array.from(out[1])).toEqual(Array.from(monoR));
+    expect(Array.from(out[1])).not.toEqual(Array.from(out[0]));
   });
 
   it('skips a band whose frequency is at/above Nyquist instead of throwing', () => {
@@ -266,11 +276,20 @@ describe('graphicEqEffect', () => {
     expect(rms(diff, SKIP)).toBeLessThan(1e-3);
   });
 
-  it('does not mutate input channels', () => {
+  it('does not mutate input channels, and filters each channel with its OWN content', () => {
     const l = sine(300, 0.1);
-    const before = Array.from(l);
-    graphicEqEffect.process([l], SR, { g250: 8 });
-    expect(Array.from(l)).toEqual(before);
+    const r = sine(500, 0.1);
+    const beforeL = Array.from(l);
+    const beforeR = Array.from(r);
+    const out = graphicEqEffect.process([l, r], SR, { g250: 8 }).channels;
+    expect(Array.from(l)).toEqual(beforeL);
+    expect(Array.from(r)).toEqual(beforeR);
+
+    const monoL = graphicEqEffect.process([sine(300, 0.1)], SR, { g250: 8 }).channels[0];
+    const monoR = graphicEqEffect.process([sine(500, 0.1)], SR, { g250: 8 }).channels[0];
+    expect(Array.from(out[0])).toEqual(Array.from(monoL));
+    expect(Array.from(out[1])).toEqual(Array.from(monoR));
+    expect(Array.from(out[1])).not.toEqual(Array.from(out[0]));
   });
 
   it('skips a band at/above Nyquist instead of throwing', () => {
