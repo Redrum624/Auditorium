@@ -82,24 +82,38 @@ const VOCAB: Record<string, number> = {
 };
 const CLASSES = 32;
 
-type Run = { klass: number | null; frames: number };
+type Run = { klass: number | null; frames: number; p?: number };
 
 /** Every frame is a proper distribution: the owning class takes `p`, the other
  * 31 share `1 - p`. At p = 0.99 the intended path beats any other by 3069:1 per
- * frame, so the placement is construction, not luck. */
-function buildEmissions(runs: Run[], p = 0.99): Float32Array {
+ * frame, so the placement is construction, not luck. A run may carry its OWN
+ * `p`, which is how the path score and the median word score are driven apart
+ * (`ctcAlign.test.ts` uses the same seam, for the same reason). */
+function buildEmissions(runs: Run[], defaultP = 0.99): Float32Array {
   const frames = runs.reduce((n, r) => n + r.frames, 0);
   const grid = new Float32Array(frames * CLASSES);
-  const hit = Math.log(p);
-  const miss = Math.log((1 - p) / (CLASSES - 1));
   let t = 0;
   for (const run of runs) {
+    const p = run.p === undefined ? defaultP : run.p;
+    const hit = Math.log(p);
+    const miss = Math.log((1 - p) / (CLASSES - 1));
     const owner = run.klass ?? VOCAB['<pad>'];
     for (let i = 0; i < run.frames; i++, t++) {
       for (let v = 0; v < CLASSES; v++) grid[t * CLASSES + v] = v === owner ? hit : miss;
     }
   }
   return grid;
+}
+
+/** The same frame script with ONE confidence for the frames the lyrics
+ * describe and another for every frame they do not (lead, gaps, separators,
+ * tail). `pathScore` is charged for all of them; `medianWordScore` sees only
+ * the first kind — so these two knobs move the two quantities independently. */
+function withSplitConfidence(runs: Run[], wordP: number, restP: number): Run[] {
+  return runs.map((r) => ({
+    ...r,
+    p: r.klass !== null && r.klass !== VOCAB['|'] ? wordP : restP,
+  }));
 }
 
 /**
@@ -607,6 +621,43 @@ describe('alignDocumentLyrics — the lyrics-match warning', () => {
     LAYOUT.expected.forEach((want, i) => {
       expect(weak.words[i].startSample).toBe(want.startFrame * FRAME_SAMPLES);
     });
+  });
+
+  /** Aligns TEXT against an arbitrary frame script, over a document long
+   * enough to hold it, and hands back the stored alignment. */
+  async function alignRuns(runs: Run[]) {
+    const frames = runs.reduce((n, r) => n + r.frames, 0);
+    const docId = seedDoc([roomTone(frames * FRAME_SAMPLES)]);
+    bridge.alignRun.mockResolvedValue(gridResponse(runs));
+    const result = await alignDocumentLyrics({ docId, text: TEXT });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error('unreachable');
+    return result.alignment;
+  }
+
+  it('reads the median and NOT the path score, in both directions where they disagree', async () => {
+    // The path score is charged for every frame, including the ones the lyrics
+    // do not describe; the median never sees them. Reading the path score
+    // instead is the swap `ctcAlign.ts` documents as producing a false "these
+    // lyrics don't match" on a correct take, so BOTH arms are probed here.
+
+    // Quiet words inside confident silence: the median is below the threshold
+    // and the path score is above it. The verdict must follow the median.
+    const quietWords = await alignRuns(withSplitConfidence(LAYOUT.runs, 0.05, 0.99));
+    expect(quietWords.medianWordScore).toBeCloseTo(Math.log(0.05), 4);
+    expect(quietWords.medianWordScore).toBeLessThan(LYRICS_MATCH_THRESHOLD);
+    expect(quietWords.pathScore).toBeGreaterThan(LYRICS_MATCH_THRESHOLD);
+    expect(quietWords.verdict).toBe('weak');
+
+    // …and the mirror: confident words adrift in a long, uncertain silence.
+    // The median says match, the path score says weak — this is the bank's own
+    // false negative, the take that sings its six lines twice.
+    const spacious = layout(TEXT, { leadFrames: 200, tailFrames: 200 });
+    const loudWords = await alignRuns(withSplitConfidence(spacious.runs, 0.99, 0.035));
+    expect(loudWords.medianWordScore).toBeCloseTo(Math.log(0.99), 4);
+    expect(loudWords.medianWordScore).toBeGreaterThan(LYRICS_MATCH_THRESHOLD);
+    expect(loudWords.pathScore).toBeLessThan(LYRICS_MATCH_THRESHOLD);
+    expect(loudWords.verdict).toBe('match');
   });
 
   it('derives its ONE verdict from the median word score and from nothing else', async () => {
