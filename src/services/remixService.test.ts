@@ -229,13 +229,44 @@ describe('createRemixDocument — document creation (acceptance 1, 2)', () => {
     expect(useAppStore.getState().activeDocumentId).toBe(result.remixDocId);
     expect(useAppStore.getState().view).toBe('waveform');
 
-    // One 'Edit k' marker per join, every one inside the document.
+    // One 'Edit k' marker per join, each AT the splice it names. `0 <= pos <=
+    // docLength` — the assertion this replaces — only restated
+    // `makeJoinMarkers`' own clamp (`remixService.ts:566`), so seeding the
+    // markers from `render.nudgeSamples` (the +/-441-sample micro-alignment
+    // lags) instead of `render.joinSamples` passed it, with every marker piled
+    // up near sample 0 (L3-1).
+    //
+    // The invariant that actually locates them: `renderRemix` writes the head,
+    // then each segment in turn, so join k's crossfade centre lands at
+    // `headLen + sum(spans[0..k])` — exactly, for the centred and butt-splice
+    // shapes (the fade straddles the bar line, or there is no fade), and up to
+    // `ceil(X/2)` EARLIER for the pre-roll shape, which puts the whole fade
+    // before it. Never later, under any shape.
     const markers = markersOf(result.remixDocId);
+    const segments = result.plan.segments;
     expect(result.plan.joins.length).toBeGreaterThan(0);
+    expect(segments.length).toBe(result.plan.joins.length + 1);
     expect(markers.length).toBe(result.plan.joins.length);
-    for (const m of markers) {
-      expect(m.positionSample).toBeGreaterThanOrEqual(0);
-      expect(m.positionSample).toBeLessThanOrEqual(docLength(remix));
+
+    const headLen = getRemixSession(result.remixDocId)!.analysis.barBoundary[0];
+    // `crossfadeMs` defaults to 25 ms and `renderRemix` only ever clamps X
+    // DOWN from there (`crossfadeBaseSample`), so this is a true upper bound.
+    const maxHalfFade = Math.ceil(Math.round((25 / 1000) * SR) / 2);
+    let cumulative = headLen;
+    let previous = -1;
+    for (let k = 0; k < markers.length; k++) {
+      cumulative += segments[k].end - segments[k].start;
+      // BY NAME, not by index: the store sorts markers by position, so index
+      // order would silently stop being join order the moment positions did.
+      const marker = markers.find((m) => m.name === `Edit ${k + 1}`);
+      expect(marker).toBeDefined();
+      const pos = marker!.positionSample;
+      expect(cumulative - pos).toBeGreaterThanOrEqual(0);
+      expect(cumulative - pos).toBeLessThanOrEqual(maxHalfFade);
+      // Still inside the document, and strictly ordered.
+      expect(pos).toBeGreaterThan(previous);
+      expect(pos).toBeLessThanOrEqual(docLength(remix));
+      previous = pos;
     }
 
     // The SOURCE is untouched — reference identity on each channel.
@@ -440,24 +471,39 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(back!.outputSample).toBe(plan.outputSample);
   }, 15000);
 
-  it('(5, bound) a nudge past +/-floor(phraseBars/2) bars is refused (null) and leaves the document untouched', async () => {
-    const { remixDocId, plan } = await seedSession();
-    let key = `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`;
-    // phraseBars defaults to 8, so 4 nudges are legal and the 5th is not.
-    for (let i = 0; i < 4; i++) {
-      const step = await nudgeJoin(remixDocId, key, +1);
-      expect(step).not.toBeNull();
-      const s = getRemixSession(remixDocId)!;
-      key = `${s.plan.joins[0].fromBar}>${s.plan.joins[0].toBar}`;
-    }
-    const channelsBefore = liveDoc(remixDocId).channels;
-    const historyBefore = getHistory(remixDocId).done.length;
+  // BOTH directions, in one loop: the bound is `Math.abs(nextTotal) > limit`
+  // and a `+1`-only walk cannot tell it apart from `nextTotal > limit`, under
+  // which a join could be nudged BACKWARDS without end (L3-5). Two independent
+  // sessions rather than one walked back through zero, so each direction gets
+  // a clean `nudgeBars` of 0 to start from.
+  it.each([[+1], [-1]])(
+    '(5, bound) a nudge past +/-floor(phraseBars/2) bars is refused (null) and leaves the document untouched — direction %i',
+    async (dir) => {
+      const { remixDocId, plan } = await seedSession();
+      let key = `${plan.joins[0].fromBar}>${plan.joins[0].toBar}`;
+      // phraseBars defaults to 8, so 4 nudges are legal and the 5th is not.
+      for (let i = 0; i < 4; i++) {
+        const step = await nudgeJoin(remixDocId, key, dir);
+        expect(step).not.toBeNull();
+        const s = getRemixSession(remixDocId)!;
+        key = `${s.plan.joins[0].fromBar}>${s.plan.joins[0].toBar}`;
+      }
+      const channelsBefore = liveDoc(remixDocId).channels;
+      const historyBefore = getHistory(remixDocId).done.length;
 
-    expect(await nudgeJoin(remixDocId, key, +1)).toBeNull();
+      expect(await nudgeJoin(remixDocId, key, dir)).toBeNull();
 
-    expect(liveDoc(remixDocId).channels).toBe(channelsBefore);
-    expect(getHistory(remixDocId).done.length).toBe(historyBefore);
-  }, 15000);
+      expect(liveDoc(remixDocId).channels).toBe(channelsBefore);
+      expect(getHistory(remixDocId).done.length).toBe(historyBefore);
+
+      // What was refused is the BOUND, not the join: stepping back the other
+      // way from exactly the position the refusal left behind is still
+      // accepted. Without this, a `return null` bolted to the front of
+      // `nudgeJoin` would satisfy everything above.
+      expect(await nudgeJoin(remixDocId, key, -dir)).not.toBeNull();
+    },
+    20000
+  );
 
   it("(6) reRollRemix produces a DIFFERENT joins array whose length stays inside the planner's own tolerance window, and is deterministic across two identically-seeded sessions", async () => {
     const a = await seedSession();
@@ -636,6 +682,15 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(docLength(liveDoc(remixDocId))).toBe(longer!.outputSample);
 
     const joinsBefore = getRemixSession(remixDocId)!.plan.joins;
+    // The AUDIO before the crossfade change, and where the first splice sits.
+    // Everything below this line exists because `joins`/`outputSample`/
+    // `options.crossfadeMs` all still match when the `!needsReplan` arm returns
+    // the cached plan without re-rendering — i.e. with the slider permanently
+    // inert (L3-2). Only the samples can tell.
+    const ch0Before = liveDoc(remixDocId).channels[0];
+    const joinSample = getRemixSession(remixDocId)!.joinSamples[0];
+    const headBefore = ch0Before.slice(0, 1000);
+
     const faded = await updateRemixSession(remixDocId, { crossfadeMs: 60 });
     expect(faded).not.toBeNull();
     expect(faded!.ok).toBe(true);
@@ -644,7 +699,32 @@ describe('adjustments (acceptance 3, 4, 5, 6)', () => {
     expect(faded!.joins).toEqual(joinsBefore);
     expect(faded!.outputSample).toBe(longer!.outputSample);
     expect(getRemixSession(remixDocId)!.options.crossfadeMs).toBe(60);
-  }, 15000);
+
+    // RE-RENDERED: `replaceRegion` installs fresh channel arrays, so a render
+    // that happened is visible as a reference change...
+    const ch0After = liveDoc(remixDocId).channels[0];
+    expect(ch0After).not.toBe(ch0Before);
+    expect(ch0After.length).toBe(ch0Before.length);
+
+    // ...and the samples around the first splice genuinely moved. 25 ms -> 60 ms
+    // widens X from ~1102 to ~2646 samples, so the band between the two
+    // half-widths flips from a plain read of the incoming side to a blend.
+    // The window is the WIDER fade's full span, because the centred shape's
+    // exact centre is `t = 0.5` under BOTH widths and is therefore very nearly
+    // unchanged — a single-sample probe at `joinSample` would be the one place
+    // this cannot be seen.
+    const half = Math.ceil((60 / 1000) * SR);
+    const lo = Math.max(0, joinSample - half);
+    const hi = Math.min(ch0After.length, joinSample + half);
+    let moved = 0;
+    for (let i = lo; i < hi; i++) if (Math.abs(ch0After[i] - ch0Before[i]) > 1e-7) moved++;
+    expect(moved).toBeGreaterThan(100);
+
+    // ...while the head — which no crossfade touches — is byte-identical, so
+    // the assertion above is measuring a WIDER FADE and not merely "the whole
+    // buffer was rewritten with something else".
+    expect(Array.from(ch0After.slice(0, 1000))).toEqual(Array.from(headBefore));
+  }, 20000);
 
   it("(update, weights identity) a VALUE-IDENTICAL weights object must NOT force a re-plan — it would silently discard the user's nudges", async () => {
     const { remixDocId, plan } = await seedSession();
@@ -1109,10 +1189,24 @@ describe('session lifecycle and reactivity', () => {
     expect(session.remixDocId).toBe(result.remixDocId);
     expect(session.sourceName).toBe('Song.wav');
     expect(session.analysis.numBars).toBe(MEASURED_NUM_BARS);
+    // Same positional invariant the marker test pins (L3-1) — asserted here on
+    // the SESSION's copy, which is what the panel draws from. `0 <= pos <=
+    // docLength` alone was satisfied by `nudgeSamples` (the micro-alignment
+    // lags), so a swap of the two fields on the way into the session would
+    // have been invisible.
     expect(session.joinSamples.length).toBe(session.plan.joins.length);
-    for (const pos of session.joinSamples) {
-      expect(pos).toBeGreaterThanOrEqual(0);
+    expect(session.plan.segments.length).toBe(session.plan.joins.length + 1);
+    const maxHalfFade = Math.ceil(Math.round((25 / 1000) * SR) / 2);
+    let cumulative = session.analysis.barBoundary[0];
+    let previous = -1;
+    for (let k = 0; k < session.joinSamples.length; k++) {
+      cumulative += session.plan.segments[k].end - session.plan.segments[k].start;
+      const pos = session.joinSamples[k];
+      expect(cumulative - pos).toBeGreaterThanOrEqual(0);
+      expect(cumulative - pos).toBeLessThanOrEqual(maxHalfFade);
+      expect(pos).toBeGreaterThan(previous);
       expect(pos).toBeLessThanOrEqual(docLength(liveDoc(result.remixDocId)));
+      previous = pos;
     }
     expect(getRemixSession('doc-not-a-remix')).toBeNull();
     expect(await rejectJoin('doc-not-a-remix', '1>2')).toBeNull();
