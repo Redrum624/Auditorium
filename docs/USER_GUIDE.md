@@ -216,14 +216,19 @@ The stages, in the order they run:
 | 8 | Compressor | yes |
 | 9 | De-esser | yes |
 | 10 | EQ (high-pass) | yes |
-| 11 | Limiter | yes |
-| 12 | Reverb | **no** |
+| 11 | Reverb | **no** |
+| 12 | Limiter | yes |
 
 The order is not stylistic. Noise reduction comes early because the pitch
 detector will otherwise lock onto broadband noise and "correct" pitch that is
 not there. De-essing comes *after* the compressor because compression makes
-sibilance worse. Reverb is last because nothing should compress or
-pitch-correct a tail it just added.
+sibilance worse. Reverb comes after everything that measures or shapes the
+voice, because nothing should compress or pitch-correct a tail it just added.
+The **limiter is last of everything**, and that is load-bearing rather than
+tidy: reverb sums a wet tail on top of the dry signal, so a reverb placed after
+the limiter takes the output back over full scale — measured through this chain,
+a take limited to −0.3 dBFS came back at **+6.53 dBFS** on noise, and both the
+WAV writer and the MP3 encoder hard-clip that.
 
 **Nothing is set by taste.** Each stage starts from its own effect's defaults
 and the chain overrides only what the recording decides:

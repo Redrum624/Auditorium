@@ -18,8 +18,10 @@
  * overrides only the parameters whose derivation the chain context provably
  * changes. There is no second table of defaults to drift.
  *
- * Three overrides exist, and all three are level-relative quantities that an
- * absolute dBFS default cannot get right when nobody is listening:
+ * FIVE effects get an override, and every one of the overridden values is
+ * MEASURED from the audio that reaches that stage. Three of them are
+ * level-relative quantities that an absolute dBFS default cannot get right when
+ * nobody is listening:
  *
  *   - De-esser threshold (F8 Ruling 1, binding). Measured at the DE-ESSER'S
  *     INPUT, i.e. after the compressor, because an upstream compressor changes
@@ -31,6 +33,18 @@
  *     bury inside a seven-stage pass.
  *   - Remove Silence threshold, derived from the measured noise floor.
  *
+ * The other two are not levels but they are measurements all the same, and an
+ * effect default cannot carry either:
+ *
+ *   - DeHum base frequency, set to the mains frequency actually detected — 50
+ *     or 60 Hz is a fact about the recording, not a preference.
+ *   - EQ high-pass: `hpEnabled` and `hpFreq`, the corner placed an octave below
+ *     the lowest note Pitch Correct measured.
+ *
+ * Noise Reduction is NOT in that count. It hands the stage a noise print
+ * measured from the quietest passage, but it changes no parameter: the print
+ * travels as `extra`, and every declared default is left as the effect set it.
+ *
  * Audited and deliberately NOT overridden:
  *   - Limiter ceiling (-0.3 dBFS). Absolute by definition — the ceiling IS an
  *     absolute level, and a "relative ceiling" would not be one.
@@ -41,14 +55,32 @@
  *   - Pitch Correct, DeHum, Reverb, EQ band gains. No level-dependent
  *     parameter among them.
  *
- * ── One deviation from the brief's order, with the measurement ──────────────
+ * ── Two deviations from the brief's order, and both are the same rule ───────
  * The brief orders ... compressor -> de-esser -> limiter -> EQ -> reverb. The
- * chain runs the EQ BEFORE the limiter. Measured on the reference take: a
- * 2nd-order Butterworth high-pass at 98 Hz applied to already-limited audio
- * raises the peak from -9.68 to -8.73 dBFS, +0.95 dB. Filtering re-phases
- * components and the sum can exceed the input peak even though |H| <= 1 at
- * every frequency — so a limiter followed by an EQ has a ceiling its output
- * does not respect. Everything else follows the brief exactly.
+ * chain runs BOTH the EQ and the Reverb before the limiter, so that the limiter
+ * is last of every stage that touches the audio. The rule behind both: the
+ * limiter's note promises the user that nothing downstream can lift the output
+ * back over the ceiling, and that promise is only true if nothing is
+ * downstream.
+ *
+ *   - EQ before the limiter. Measured on the reference take: a 2nd-order
+ *     Butterworth high-pass at 98 Hz applied to already-limited audio raises
+ *     the peak from -9.68 to -8.73 dBFS, +0.95 dB. Filtering re-phases
+ *     components and the sum can exceed the input peak even though |H| <= 1 at
+ *     every frequency.
+ *   - Reverb before the limiter. `ReverbEffect` sums a wet tail on top of the
+ *     dry signal, so it is a level stage whatever its purpose is. Measured
+ *     through `runVocalChain` itself with the limiter and reverb on, in the
+ *     order that shipped through v1.23.0: full-scale noise limited to
+ *     -0.3 dBFS came back at +6.53 dBFS, a 220 Hz tone at +0.98 dBFS, and the
+ *     default stage selection with Reverb switched on at +5.51 dBFS. Both the
+ *     WAV writer and the MP3 encoder hard-clip that. With the reverb moved
+ *     ahead of the limiter the same three fixtures land at -0.30 dBFS.
+ *
+ * Reverb still runs after every stage that measures or shapes the voice —
+ * which is the actual reason its own note gives for being late, that nothing
+ * should compress or pitch-correct a tail it just added. Only the limiter now
+ * sees the tail, and seeing it is its job. Everything else follows the brief.
  */
 
 import { cloneRegion, docLength, replaceRegion } from '../audio/AudioDocument';
@@ -96,8 +128,8 @@ export type VocalChainStageId =
   | 'compressor'
   | 'deEsser'
   | 'eq'
-  | 'limiter'
-  | 'reverb';
+  | 'reverb'
+  | 'limiter';
 
 export interface VocalChainStage {
   id: VocalChainStageId;
@@ -119,17 +151,17 @@ export interface VocalChainStage {
    * stereo reference take, as a percentage of the 104.7 s the ten stages take
    * together, rounded to integers with a floor of 1 so no stage is invisible:
    * DC 0.1 s, Noise Reduction 27.0 s, DeHum 0.5 s, Remove Silence 2.4 s, Pitch
-   * Correct 57.7 s, Compressor 5.7 s, De-esser 5.8 s, EQ 0.4 s, Limiter 3.6 s,
-   * Reverb 1.4 s. Equal weights would park the bar for the minute Pitch Correct
-   * alone takes and then jump to done. */
+   * Correct 57.7 s, Compressor 5.7 s, De-esser 5.8 s, EQ 0.4 s, Reverb 1.4 s,
+   * Limiter 3.6 s. Equal weights would park the bar for the minute Pitch
+   * Correct alone takes and then jump to done. */
   weight: number;
 }
 
 /**
- * The order, and it is the brief's order but for the EQ/limiter swap argued at
- * the top of this file, plus F6's `lyrics` stage — whose position is argued in
- * its own note against the rules the stages around it already state, not
- * inherited from a proposal.
+ * The order, and it is the brief's order but for the two stages moved ahead of
+ * the limiter at the top of this file, plus F6's `lyrics` stage — whose
+ * position is argued in its own note against the rules the stages around it
+ * already state, not inherited from a proposal.
  */
 export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
   {
@@ -213,20 +245,20 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     weight: 1,
   },
   {
-    id: 'limiter',
-    label: 'Limiter',
-    effectId: 'limiter',
-    defaultEnabled: true,
-    note: 'Last of the level stages so nothing downstream can lift the output back over the ceiling. It is a safety net: on material that never reaches the ceiling it will report that it did nothing.',
-    weight: 3,
-  },
-  {
     id: 'reverb',
     label: 'Reverb',
     effectId: 'reverb',
     defaultEnabled: false,
-    note: 'Off by default: it adds a tail rather than correcting anything, and no measurement of a recording says how much of a room it wants. Last in the order because nothing should compress or pitch-correct a tail it just added. Turning it on lengthens the selection by the tail.',
+    note: 'Off by default: it adds a tail rather than correcting anything, and no measurement of a recording says how much of a room it wants. After every stage that measures or shapes the voice, because nothing should compress or pitch-correct a tail it just added — but BEFORE the Limiter, because a wet tail summed on top of a limited signal comes back over full scale: measured through this chain, a take limited to −0.3 dBFS came back at +6.53 dBFS on noise and +0.98 dBFS on a 220 Hz tone, and both the WAV and the MP3 writer hard-clip that. Turning it on lengthens the selection by the tail.',
     weight: 1,
+  },
+  {
+    id: 'limiter',
+    label: 'Limiter',
+    effectId: 'limiter',
+    defaultEnabled: true,
+    note: 'Last of every stage that touches the audio, so nothing downstream can lift the output back over the ceiling. It is a safety net: on material that never reaches the ceiling it will report that it did nothing.',
+    weight: 3,
   },
 ];
 
@@ -707,12 +739,16 @@ export interface RunVocalChainOptions {
  * Runs the chain over the active selection (or the whole document when there is
  * none) and commits the result as ONE undo entry.
  *
- * Resolves `null` without touching the document when there is nothing to run
- * (no document, empty region, every stage off) or when a stage fails — a
- * failure aborts the remaining stages and leaves the document exactly as it
- * was, because a half-applied chain is the one outcome the user could not
- * reason about. The failure is surfaced through the same error dialog a single
- * Apply uses.
+ * Resolves `null` without touching the document in exactly two cases: when
+ * there is nothing to run ON — no active document, or an empty region — and
+ * when a stage fails. A failure aborts the remaining stages and leaves the
+ * document exactly as it was, because a half-applied chain is the one outcome
+ * the user could not reason about; it is surfaced through the same error dialog
+ * a single Apply uses.
+ *
+ * A run where every stage was off or declined is NOT one of them. It resolves a
+ * full report with `applied: false`, so the dialog can show which stage said
+ * what: a chain that did nothing still owes the user the reason each stage gave.
  */
 export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalChainReport | null> {
   const { enabled, onProgress, onStageStart } = opts;

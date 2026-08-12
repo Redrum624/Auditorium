@@ -96,7 +96,7 @@ afterEach(() => {
 // ── The stage table ─────────────────────────────────────────────────────────
 
 describe('VOCAL_CHAIN_STAGES', () => {
-  it('runs the corrections in the reasoned order, with the EQ before the limiter', () => {
+  it('runs the corrections in the reasoned order, with the EQ and the reverb before the limiter', () => {
     expect(VOCAL_CHAIN_STAGES.map((s) => s.id)).toEqual([
       'dc',
       'lyrics',
@@ -108,8 +108,8 @@ describe('VOCAL_CHAIN_STAGES', () => {
       'compressor',
       'deEsser',
       'eq',
-      'limiter',
       'reverb',
+      'limiter',
     ]);
   });
 
@@ -123,8 +123,31 @@ describe('VOCAL_CHAIN_STAGES', () => {
     expect(ids.indexOf('noise')).toBeLessThan(ids.indexOf('pitch'));
   });
 
-  it('puts reverb last, so nothing compresses or pitch-corrects a tail it just added', () => {
-    expect(VOCAL_CHAIN_STAGES[VOCAL_CHAIN_STAGES.length - 1].id).toBe('reverb');
+  // The reverb used to be the last entry in this array, and this test asserted
+  // exactly that. It was changed deliberately: `reverb` sums a wet tail on top
+  // of the dry signal, so a reverb AFTER the limiter takes the output back over
+  // full scale — measured through `runVocalChain` at +6.53 dBFS on noise
+  // limited to -0.3 dBFS. The reason the old assertion gave for reverb being
+  // last is preserved below and is what is actually asserted now: nothing that
+  // COMPRESSES OR PITCH-CORRECTS may see the tail. The limiter is neither; its
+  // whole job is to see the final peak.
+  it('runs reverb after every stage that measures or shapes the voice', () => {
+    const ids = VOCAL_CHAIN_STAGES.map((s) => s.id);
+    for (const shaper of ['dc', 'noise', 'hum', 'silence', 'pitch', 'compressor', 'deEsser', 'eq'] as const) {
+      expect(ids.indexOf('reverb')).toBeGreaterThan(ids.indexOf(shaper));
+    }
+  });
+
+  it('runs the Limiter LAST of every stage that touches the audio, reverb included', () => {
+    // Not tidiness. The limiter's own note, rendered verbatim to the user,
+    // promises that nothing downstream can lift the output back over the
+    // ceiling — a promise that is only true when nothing is downstream. The
+    // end-to-end proof is the Ruling-C test far below; this one pins the array
+    // that decides it, because `runVocalChain` iterates it in order.
+    const last = VOCAL_CHAIN_STAGES[VOCAL_CHAIN_STAGES.length - 1];
+    expect(last.id).toBe('limiter');
+    const audible = VOCAL_CHAIN_STAGES.filter((s) => s.effectId !== null);
+    expect(audible[audible.length - 1].id).toBe('limiter');
   });
 
   it('names every stage after what it does, never after how good the result is', () => {
@@ -1078,6 +1101,92 @@ describe('runVocalChain', () => {
     seedDoc([new Float32Array(WIN * 4)]);
     const report = await runVocalChain({ enabled: only() });
     expect(report!.before.noiseFloorDb).toBeNull();
+  });
+
+  // ── The ceiling, with Reverb ON ───────────────────────────────────────────
+  // The defect this section exists for: `reverb` was registered AFTER `limiter`
+  // through v1.23.0, while the limiter's note — rendered verbatim to the user —
+  // promised that nothing downstream could lift the output back over the
+  // ceiling. Reverb sums a wet tail on top of the dry signal, so it is a level
+  // stage whatever its purpose is, and it is downstream of nothing now.
+  //
+  // Every assertion here is on a fixture that MEASURABLY breaks without the
+  // reorder: in the shipped order these three came back at +6.53, +0.98 and
+  // +5.51 dBFS, and both `encodeWav` and the MP3 encoder hard-clip that.
+  describe('the limiter ceiling holds with Reverb switched on', () => {
+    const ceilingDb = () => Number(getEffect('limiter')!.params.find((p) => p.id === 'ceilingDb')!.default);
+
+    /** The peak of what actually landed IN THE DOCUMENT, not of the report —
+     * the promise is about the file the user will export. */
+    function committedPeakDb(): number {
+      let peak = 0;
+      for (const c of activeDoc().channels) for (const v of c) peak = Math.max(peak, Math.abs(v));
+      return toDb(peak);
+    }
+
+    it('catches the tail the reverb summed on top: +6.53 dBFS in the shipped order', async () => {
+      // Full-scale noise: the limiter has real work before the reverb even
+      // starts, so the take reaching the reverb is genuinely AT the ceiling.
+      seedDoc([noise(WIN * 6, 1.0, 77)]);
+      const report = await runVocalChain({ enabled: only('limiter', 'reverb') });
+
+      const reverb = report!.stages.find((s) => s.id === 'reverb')!;
+      const limiter = report!.stages.find((s) => s.id === 'limiter')!;
+      expect(reverb.status).toBe('applied');
+      expect(limiter.status).toBe('applied');
+
+      // The fixture really did threaten the ceiling — this is the number the
+      // OUTPUT used to be, measured at the reverb's own output, so the test
+      // cannot pass because the fixture stopped clipping.
+      expect(reverb.delta!.peakAfterDb).toBeGreaterThan(0);
+      expect(limiter.delta!.peakBeforeDb).toBe(reverb.delta!.peakAfterDb);
+
+      // THE promise.
+      expect(report!.after.peakDb).toBeLessThanOrEqual(ceilingDb() + 0.01);
+      expect(report!.after.peakDb).toBeLessThan(0);
+      expect(committedPeakDb()).toBeLessThanOrEqual(ceilingDb() + 0.01);
+    });
+
+    it('holds on a tone too, where the overshoot was only +0.98 dBFS', async () => {
+      // A 220 Hz tone is the cover chain's own probe for this defect, and it
+      // overshoots by under a dB — a guard sized to the noise case would miss
+      // it, and it would clip just the same.
+      seedDoc([tone(WIN * 6, 220, 1.0)]);
+      const report = await runVocalChain({ enabled: only('limiter', 'reverb') });
+
+      expect(report!.stages.find((s) => s.id === 'reverb')!.delta!.peakAfterDb).toBeGreaterThan(0);
+      expect(report!.after.peakDb).toBeLessThanOrEqual(ceilingDb() + 0.01);
+      expect(committedPeakDb()).toBeLessThanOrEqual(ceilingDb() + 0.01);
+    });
+
+    it('holds on the path a user actually takes: the default selection with Reverb opted in', async () => {
+      // Reverb is `defaultEnabled: false`, which is why this survived — no test
+      // ran the default stage list with it on. That list is read from the
+      // engine, so a stage added or defaulted differently is covered here too.
+      seedDoc([noise(WIN * 6, 1.0, 78)]);
+      const enabled = { ...defaultStageSelection(), reverb: true };
+      const report = await runVocalChain({ enabled });
+
+      expect(report!.stages.find((s) => s.id === 'reverb')!.status).toBe('applied');
+      expect(report!.stages.find((s) => s.id === 'limiter')!.status).toBe('applied');
+      expect(report!.after.peakDb).toBeLessThanOrEqual(ceilingDb() + 0.01);
+      expect(committedPeakDb()).toBeLessThanOrEqual(ceilingDb() + 0.01);
+    });
+
+    it('leaves the tail shaped by the limiter alone — no compressor or pitch stage sees it', async () => {
+      // The reason the reverb is late at all. Moving it ahead of the limiter
+      // must not move it ahead of anything that would compress or retune a tail
+      // the chain just invented, so this asserts against the RUN, not the table:
+      // every stage that started before the reverb, and only the limiter after.
+      seedDoc([noise(WIN * 6, 0.5, 79)]);
+      const started: VocalChainStageId[] = [];
+      await runVocalChain({
+        enabled: only('pitch', 'compressor', 'deEsser', 'reverb', 'limiter'),
+        onStageStart: (s) => started.push(s.id),
+      });
+      expect(started).toEqual(['pitch', 'compressor', 'deEsser', 'reverb', 'limiter']);
+      expect(started.slice(started.indexOf('reverb') + 1)).toEqual(['limiter']);
+    });
   });
 
   it('moves markers by the exact cuts rule when Remove Silence shortened the take', async () => {

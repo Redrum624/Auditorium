@@ -234,7 +234,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Vocal Chain on the Take',
     effectId: null,
     defaultEnabled: false,
-    note: 'Not an automatic stage — it is its own multi-stage pass with its own single undo entry, and running it inside this one would hide ten stages behind one line. Run Effects → Vocal Chain… on the take FIRST. It removes noise, hum and DC, corrects pitch, and sets a compressor, de-esser, high-pass and limiter from the take\'s own levels. The match below is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.',
+    note: 'Not an automatic stage — it is its own multi-stage pass with its own single undo entry, and running it inside this one would hide ten stages behind one line. Run Effects → Vocal Chain… on the take FIRST. It removes noise, hum and DC, corrects pitch, and sets a compressor, de-esser and high-pass from the take\'s own levels. It ends on a limiter, but that one derives nothing: a ceiling is an absolute level, so it runs at the effect\'s own −0.3 dBFS. The match below is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.',
     weight: 0,
   },
   {
@@ -849,11 +849,16 @@ export interface RunCoverChainOptions {
  * Runs the chain over the active selection (or the whole document when there is
  * none) and commits the result as ONE undo entry.
  *
- * Resolves `null` without touching the document when there is nothing to run
- * (no document, empty region, every automatic stage off) or when a stage fails —
- * a failure aborts the remaining stages and leaves the document exactly as it
- * was, because a half-applied chain is the one outcome the user could not reason
- * about.
+ * Resolves `null` without touching the document in exactly two cases: when
+ * there is nothing to run ON — no active document, or an empty region — and
+ * when a stage fails. A failure aborts the remaining stages and leaves the
+ * document exactly as it was, because a half-applied chain is the one outcome
+ * the user could not reason about.
+ *
+ * A run where every automatic stage was off or declined is NOT one of them. It
+ * resolves a full report with `applied: false`, so the dialog can show which
+ * stage said what — a chain that did nothing still owes the user the reason each
+ * stage gave, and Match Reverb's decline is the most common outcome there is.
  */
 export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverChainReport | null> {
   const { enabled, referenceDocId, onProgress, onStageStart } = opts;

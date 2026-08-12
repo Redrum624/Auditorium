@@ -5,6 +5,37 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **The Vocal Chain's Limiter now runs last, so its ceiling is one the output actually keeps.** Cause:
+  the chain registered `reverb` AFTER `limiter` and iterates the stage array in order with no
+  post-loop clamp — while the limiter's note, rendered verbatim in the dialog, promised the user that
+  "nothing downstream can lift the output back over the ceiling". `ReverbEffect` sums a wet tail on
+  top of the dry signal, so it is a level stage whatever its purpose is, and it was downstream. This
+  is the same defect the Cover Chain was fixed for by reordering; the Cover Chain got the reorder and
+  the Vocal Chain kept the copy. Measured through `runVocalChain` itself, in the order that shipped
+  through v1.23.0: full-scale noise limited to −0.3 dBFS came back at **+6.53 dBFS**, a 220 Hz tone at
+  **+0.98 dBFS**, and the default stage selection with Reverb switched on at **+5.51 dBFS**. Both the
+  WAV writer and the MP3 encoder hard-clip that. Fix: `reverb` moves ahead of `limiter`, which makes
+  BOTH stage notes true at once — reverb still runs after everything that compresses or pitch-corrects,
+  which is the only reason its own note gives for being late, and the limiter is genuinely last. The
+  same three fixtures now land at **−0.30 dBFS**, on the committed document rather than on the report.
+  Reverb is off by default, so only a user who opted in was affected. Affects:
+  `src/services/vocalChain.ts`, `docs/USER_GUIDE.md`.
+- **Four comments that described code that does something else.** The Cover Chain's "Vocal Chain on
+  the Take" note said the vocal chain sets a *limiter* from the take's own levels; it does not, and
+  says so itself — a ceiling is an absolute level, so that stage runs on the effect's own −0.3 dBFS.
+  `EffectRegistry.defaultParamsFor` and `vocalChain.ts` both undercounted the chain's parameter
+  overrides (two and three respectively); there are **five** — de-esser threshold, compressor
+  threshold and makeup, Remove Silence threshold, DeHum base frequency, EQ high-pass corner — and
+  Noise Reduction is not one of them, because its noise print travels as `extra` and changes no
+  parameter. Both `runVocalChain` and `runCoverChain` documented resolving `null` "when every stage is
+  off"; both always resolve a report with `applied: false` there, which is what lets the dialog show
+  the reason each stage gave. Affects: `src/services/vocalChain.ts`, `src/services/coverChain.ts`,
+  `src/effects/EffectRegistry.ts`.
+
 ## [1.23.0] - 2026-08-12
 
 **Match Tempo can follow a tempo that moves.** Until now it applied one ratio across the whole

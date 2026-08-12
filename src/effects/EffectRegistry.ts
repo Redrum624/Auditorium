@@ -44,10 +44,14 @@ export function getVisibleEffects(): EffectDefinition[] {
  *
  * F7 uses this as the Vocal Chain's starting point for EVERY stage: the chain
  * does not restate any effect's defaults, it inherits them and overrides ONLY
- * the ones whose derivation the chain context provably changes (the de-esser's
- * threshold, per F8's Ruling 1, and the compressor's). That way a default
- * re-derived in the effect reaches the chain automatically, and there is no
- * second copy to drift.
+ * the ones whose derivation the chain context provably changes. FIVE effects
+ * get one — the de-esser's threshold (per F8's Ruling 1), the compressor's
+ * threshold and makeup, Remove Silence's threshold, DeHum's base frequency and
+ * the EQ's high-pass corner — and every overridden value is measured from the
+ * audio reaching that stage. Everything else, including the limiter's ceiling,
+ * runs on what the effect itself declared. That way a default re-derived in the
+ * effect reaches the chain automatically, and there is no second copy to drift.
+ * The full argument, stage by stage, is at the top of `services/vocalChain.ts`.
  */
 export function defaultParamsFor(id: string): Record<string, EffectParamValue> {
   const def = registry.get(id);
