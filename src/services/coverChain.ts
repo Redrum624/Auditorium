@@ -840,6 +840,46 @@ export function describeStage(stage: CoverChainStage, delta: StageDelta): string
   return undefined;
 }
 
+/**
+ * The over-scale path Ruling C left open in THIS chain, back-ported from the
+ * vocal chain that borrowed the ruling (`vocalChain.ts`'s `stageWarning`, L4).
+ *
+ * Ruling C is that a stage whose result needs a caveat says the caveat with the
+ * number on it and the run goes ahead — and `deriveMatchLoudness` is where it
+ * was implemented. But that function is only ever resolved for a stage that is
+ * SWITCHED ON, so with `{matchReverb: on, matchLoudness: off, headroom: off}`
+ * nothing in the chain warned at all: the reverb sums a wet tail on top of the
+ * dry signal and is then the last stage that touches the audio, which is
+ * exactly the case the Limiter's own note measures at +0.37 dBFS on a 220 Hz
+ * tone and +5.34 dBFS on noise at the reverb's SHORTEST room, rising to +2.66
+ * and +7.76 at its longest. Both `encodeWav` and the MP3 encoder hard-clip
+ * that, and nothing between here and the file said so.
+ *
+ * Three conditions, all observations rather than settings: the stage is Match
+ * Reverb, neither level stage that runs after it is on, and the output ACTUALLY
+ * came back over full scale. The last one is why this is not a banner — on
+ * material the tail never takes over 0 dBFS there is nothing to warn about.
+ *
+ * `enabled` rather than "did it apply" is the same narrowing the vocal chain
+ * has, and the residue is stated rather than hidden: Match Loudness switched ON
+ * but DECLINING (a reference with no sounding level) leaves the peak
+ * un-warned-about, because whether it declines is not known until after this
+ * result is pushed. Every other arm is covered — with Match Loudness on and
+ * running, `deriveMatchLoudness` measures the post-reverb take itself and
+ * carries Ruling C's warning; with the Limiter on, the peak cannot pass the
+ * ceiling in the first place.
+ */
+export function stageWarning(
+  stage: CoverChainStage,
+  delta: StageDelta,
+  enabled: Partial<Record<CoverChainStageId, boolean>>
+): string | undefined {
+  if (stage.id !== 'matchReverb') return undefined;
+  if (enabled.matchLoudness === true || enabled.headroom === true) return undefined;
+  if (!(delta.peakAfterDb > 0)) return undefined;
+  return `this stage summed a tail on top of the audio and the output now peaks at ${dbfsStr(delta.peakAfterDb)}, above full scale. Both level stages that run after it — Match Loudness, which would have said so with the number, and the Limiter, which would have caught it — are switched off, and both the WAV writer and the MP3 encoder hard-clip anything over full scale. Switch the Limiter on, or bring the level down before you export.`;
+}
+
 export interface RunCoverChainOptions {
   enabled: Partial<Record<CoverChainStageId, boolean>>;
   /** The document holding the separated original vocal. `null` is a legal run:
@@ -991,7 +1031,10 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
       label: stage.label,
       status: 'applied',
       derived: resolution.derived,
-      warning: resolution.warning,
+      // The resolved (pre-run, predicted) warning is Match Loudness's; the
+      // post-hoc measured one is Match Reverb's. No stage carries both, so the
+      // coalesce cannot drop one.
+      warning: resolution.warning ?? stageWarning(stage, delta, enabled),
       delta,
       eq: resolution.eq,
       detail: describeStage(stage, delta),

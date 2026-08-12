@@ -1260,6 +1260,101 @@ describe('runCoverChain', () => {
     expect(peakDb(thenReverbed)).toBeGreaterThan(0);
   });
 
+  // ── Ruling C's remaining hole, back-ported from the chain that borrowed it ──
+  // `deriveMatchLoudness` is the only place Ruling C was implemented, and it is
+  // resolved ONLY for a stage that is switched on. With Match Reverb on and
+  // both level stages off, the tail goes over full scale and nothing anywhere
+  // said so — the case the Limiter's own note measures at +0.37 to +7.76 dBFS.
+  // Same three conditions the vocal chain's `stageWarning` uses, one door along.
+  describe('the over-scale tail with both level stages off (W1-4)', () => {
+    // Loud, low-crest AND decaying: 2 s RT60 against the effect's 0.711 s floor,
+    // so Match Reverb ENGAGES instead of taking its usual decline.
+    const decayingRef = () => {
+      const out = new Float32Array(N);
+      const cycle = Math.round(SR * 1.0);
+      for (let i = 0; i < N; i++) {
+        out[i] = (i % 2 === 0 ? 0.95 : -0.95) * Math.pow(10, (-30 * ((i % cycle) / SR)) / 20);
+      }
+      return [out];
+    };
+
+    it('names the peak when Match Reverb runs with both level stages off, and still runs', async () => {
+      // Near-full-scale take: the tail is summed onto a signal that has no room
+      // left, which is the measured case.
+      const { refId, takeId } = seedPair([noise(N, 1.0, 81)], decayingRef());
+      const report = await runCoverChain({ enabled: only('matchReverb'), referenceDocId: refId });
+
+      const reverb = resultFor(report!.stages, 'matchReverb');
+      expect(reverb.status).toBe('applied');
+      // The fixture really does come back over full scale, so the warning has
+      // something to be about — it is not firing on a code path.
+      expect(reverb.delta!.peakAfterDb).toBeGreaterThan(0);
+      expect(report!.after.peakDb).toBeGreaterThan(0);
+
+      expect(reverb.warning).toBeDefined();
+      expect(reverb.warning).toMatch(/above full scale/);
+      expect(reverb.warning).toMatch(/hard-clip/);
+      // THE number, this run's own, not a figure from a document.
+      expect(reverb.warning).toContain(`${reverb.delta!.peakAfterDb.toFixed(2)} dBFS`);
+
+      // A warning, not a refusal: the stage ran and the document was edited.
+      expect(report!.applied).toBe(true);
+      expect(getHistory(takeId).done.length).toBeGreaterThan(0);
+    });
+
+    it('says nothing when the Limiter is on, because then the ceiling holds', async () => {
+      const { refId } = seedPair([noise(N, 1.0, 81)], decayingRef());
+      const report = await runCoverChain({
+        enabled: only('matchReverb', 'headroom'),
+        referenceDocId: refId,
+      });
+
+      const reverb = resultFor(report!.stages, 'matchReverb');
+      expect(reverb.status).toBe('applied');
+      // Same fixture, same over-scale peak at the reverb's OWN output — the one
+      // difference is the stage that catches it afterwards.
+      expect(reverb.delta!.peakAfterDb).toBeGreaterThan(0);
+      expect(reverb.warning).toBeUndefined();
+      const ceiling = Number(getEffect('limiter')!.params.find((p) => p.id === 'ceilingDb')!.default);
+      expect(report!.after.peakDb).toBeLessThanOrEqual(ceiling + 0.01);
+    });
+
+    it('says nothing when Match Loudness is on, because that stage carries Ruling C itself', async () => {
+      const { refId } = seedPair([noise(N, 1.0, 81)], decayingRef());
+      const report = await runCoverChain({
+        enabled: only('matchReverb', 'matchLoudness'),
+        referenceDocId: refId,
+      });
+
+      const reverb = resultFor(report!.stages, 'matchReverb');
+      expect(reverb.status).toBe('applied');
+      expect(reverb.delta!.peakAfterDb).toBeGreaterThan(0);
+      expect(reverb.warning).toBeUndefined();
+      // And the stage that owns the caveat in this arm really did run.
+      expect(resultFor(report!.stages, 'matchLoudness').status).toBe('applied');
+    });
+
+    it('says nothing on material the tail never takes over full scale', async () => {
+      // Both level stages are off here too, so it is the PEAK doing the
+      // deciding and not the stage selection.
+      const { refId } = seedPair([noise(N, 0.02, 82)], decayingRef());
+      const report = await runCoverChain({ enabled: only('matchReverb'), referenceDocId: refId });
+
+      const reverb = resultFor(report!.stages, 'matchReverb');
+      expect(reverb.status).toBe('applied');
+      expect(reverb.delta!.peakAfterDb).toBeLessThan(0);
+      expect(reverb.warning).toBeUndefined();
+    });
+
+    it('leaves every other stage unwarned — it is the tail that is unguarded, not the run', async () => {
+      // Full-scale take with both level stages off and the reverb off: the
+      // stages that run change the audio too, but none of them SUMS a tail.
+      const { refId } = seedPair([noise(N, 1.0, 83)], decayingRef());
+      const report = await runCoverChain({ enabled: only('matchEq'), referenceDocId: refId });
+      for (const s of report!.stages) expect(s.warning).toBeUndefined();
+    });
+  });
+
   it('the limiter says it did nothing when it had nothing to catch', async () => {
     const { refId } = seedPair([tone(N, 1000, 0.1)], refAudio());
     const report = await runCoverChain({ enabled: only('headroom'), referenceDocId: refId });
