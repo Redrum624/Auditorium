@@ -492,15 +492,15 @@ grid you have confirmed with the tick, and that tick is cleared by every ×2 / �
 re-track and every re-detect. On a perfectly steady grid it reproduces the
 one-ratio result byte for byte.
 
-Two things it does not do. Beat markers it lays afterwards are exact, but *other*
-markers inside the region are still remapped proportionally by the shared write
-path, so on heavily varying material they drift from the audio they mark. And it
-follows the **beats**, not the singing — see below.
+One thing it does not do: it follows the **beats**, not the singing — see below.
 
 Match Tempo runs through the same WSOLA **Time Stretch** effect and the same
-single write path as everything else, so markers remap proportionally and undo
-behaves normally — the History entry reads `Match Tempo`, with `Add Beat
-Markers` as its own entry when you asked for the grid.
+single write path as everything else, so undo behaves normally — the History
+entry reads `Match Tempo`. Markers you already had inside the region are moved
+through the tempo map itself rather than proportionally, so they stay on the
+audio they mark; that correction is its own `Match Tempo Markers` entry, and the
+beat grid, when you ask for it, is a third `Add Beat Markers` entry. One Ctrl+Z
+therefore steps back through them one at a time.
 
 ### Making a sung take land on the beat
 

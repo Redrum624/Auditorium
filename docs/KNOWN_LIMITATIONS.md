@@ -179,31 +179,49 @@ dropping, unlike an explicit user delete.
 **v1.23 refinement (R7):** the proportional rule is exact only where the local
 ratio equals the region's AVERAGE ratio — which for a variable-rate Match Tempo
 ("Follow the tracked beats") is true almost nowhere, since the whole point is
-that the rate differs bar by bar. A variable-rate match therefore still remaps
-interior markers proportionally, and on strongly varying material a marker can
-drift from the audio it marks by the same order of magnitude the feature just
-removed from the audio: on the measured 100→120 BPM accelerando, up to ~525 ms.
-The beat grid the feature lays afterwards is NOT affected — it is written from
-the tempo map's own placed positions, so it is exact — but other markers inside
-the region are.
+that the rate differs bar by bar. The shared `'stretch'` remap therefore drifted
+every interior marker away from the audio it marks, on strongly varying material
+by the same order of magnitude the feature had just removed from the audio: on
+the measured 100→120 BPM accelerando, up to ~525 ms.
 
-**F2 is the precedent, and it points AT the fix rather than away from it.**
-Remove Silence also changes length, and it is fixed exactly the right way: the
-effect reports `removedSpans`, `effectRunner` turns them into a `'cuts'`
-remap, and `editOps` applies it — the shared remap is taught about the
-transform. R7's equivalent is to report the tempo map and add a remap that sends
-each marker through the map's forward function. That is a new variant on a
-`MarkerRemap` union every length-changing effect shares, sitting on the undo
-path, and it was not worth adding at the end of a release without its own review
-— which is a scheduling reason, not a technical obstacle, and it is recorded as
-one.
+**Corrected in v1.23.1 (L1-6), at the service.** `tempoService` captures the
+marker list BEFORE the run and, after the commit, recomputes each position from
+those ORIGINAL positions through the map the audio actually went through —
+`regionStart + round(synthesisPosAt(map, pos - regionStart))` inside the region,
+`pos + (outLength - regionLength)` at or after it, unchanged before it. That is
+a re-computation, not an unwind: nothing tries to invert the proportional remap,
+which has already lost the information needed to do so. It is the same shape
+`timingAlignService` uses to move markers through its warp map, and it runs
+BEFORE the beat grid so the grid appends to the corrected list.
 
-What is *not* available here is F9's route. Align Vocal Timing preserves length,
-so `applyEdit`'s proportional remap is the identity for it and its service can
-simply move the markers afterwards. A variable-rate match changes length, so
-that remap has already displaced every interior marker before any service-level
-code could run; correcting it there would mean unwinding a transform this
-feature did not apply.
+`applyEdit`'s shared `'stretch'` remap is unchanged and still applies to Time
+Stretch, Pitch Shift and every other length-changing effect that stretches a
+region uniformly, where proportional IS exact.
+
+**The cost, stated rather than hidden:** a third undo entry per Apply —
+`Match Tempo`, then `Match Tempo Markers`, then `Add Beat Markers` — so one
+Ctrl+Z leaves the pre-existing markers transiently at their proportional
+positions, and a second removes the audio edit and its remap together. That is
+the same property `Align Markers` and `Add Beat Markers` already ship with: a
+marker write cannot ride inside `applyEdit`'s own entry, because `applyEdit` has
+already committed by the time a service-level correction can run.
+
+**Why not a `'warp'` member on the `MarkerRemap` union** (F2's route, which
+earlier notes here recommended): it costs six production files plus a worker
+contract change and a worker mock that fails SILENTLY if missed — an optional
+field simply drops, and every unit test then passes against the old `'stretch'`
+behaviour. `synthesisPosAt` also clamps into `[0, outLen]`, so a naive union
+member would pin every marker at or after the region TO the region end rather
+than shifting it: silent corruption, worse than the drift it replaces. The
+service-side correction is one file and reaches the same positions. The union
+variant remains the right long-term shape if a second variable-rate effect ever
+needs it.
+
+**The earlier note ruled out F9's route, and that ruling was over-strong.**
+Align Vocal Timing preserves length, so `applyEdit`'s proportional remap is the
+identity for it — but F9 does not *unwind* that remap either, and neither does
+this: it recomputes from positions captured before the run. Length-changing
+makes the proportional remap non-identity, not un-correctable.
 
 **Remaining notes (interop granularity, not persistence gaps):** third-party
 tools read the standard chapter fields at millisecond granularity (that is all
@@ -585,14 +603,18 @@ the middle of the region off by nearly a whole beat. The remaining few
 milliseconds on the right-hand column are WSOLA's own placement error, not the
 map's, and they do not grow with the slope.
 
-**Your other markers inside the region drift.** The beat grid this mode lays is
-exact — it comes from the tempo map's own placed positions — but every OTHER
-marker inside the corrected region is still remapped proportionally, which is
-right only where the local rate equals the region average. On strongly varying
-material that error is the same order as the one being removed from the audio
-(up to ~525 ms on the 100→120 fixture above). See the marker-persistence entry
-('Markers persist in every container', v1.23 refinement) for the shape of the
-proper fix — the one Remove Silence already uses — and why it was not taken here.
+**Your other markers inside the region follow the map too (fixed in v1.23.1).**
+The beat grid this mode lays has always been exact — it comes from the tempo
+map's own placed positions — but in v1.23.0 every OTHER marker inside the
+corrected region was remapped proportionally by the shared write path, which is
+right only where the local rate equals the region average; on strongly varying
+material that error was the same order as the one being removed from the audio
+(up to ~525 ms on the 100→120 fixture above). `tempoService` now recomputes each
+of those markers from its PRE-run position through the map itself, as a separate
+`Match Tempo Markers` undo entry. See the marker-persistence entry ('Markers
+persist in every container', v1.23 refinement / v1.23.1 correction) for the
+mechanism, the undo cost it carries, and why the `MarkerRemap` union variant was
+not the route taken.
 
 **What it still cannot do, and says so:** the local ratio is bounded by the same
 `0.25x–4x` limit the constant path enforces, per beat interval rather than once
