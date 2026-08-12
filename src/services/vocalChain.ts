@@ -567,8 +567,12 @@ export function deriveEq(f0P1Hz: number | null): StageResolution {
 
 /** Clamps a derived value into the param's own declared range. The bounds are
  * the effect's, never new numbers — and a derivation that lands outside them is
- * a derivation the effect could not have honoured anyway. */
-function clampToParam(effectId: string, paramId: string, value: number): number {
+ * a derivation the effect could not have honoured anyway.
+ *
+ * Exported for F10's cover chain, which derives settings for four more effects
+ * and must clamp them the same way. Sharing the helper is what stops a second
+ * chain inventing a second set of bounds. */
+export function clampToParam(effectId: string, paramId: string, value: number): number {
   const def = getEffect(effectId);
   if (!def) throw new Error(`Unknown effect: ${effectId}`);
   const param = def.params.find((p) => p.id === paramId);
