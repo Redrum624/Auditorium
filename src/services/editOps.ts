@@ -250,11 +250,25 @@ export function applyEdit(
  * Records an undo entry for a marker-list mutation (add/rename/delete —
  * Task M2 / F5): the undo/redo closures replace the WHOLE marker list for
  * `docId` with the captured `before`/`after` snapshots via `setMarkersForDoc`,
- * which never touches `dirty` itself. That's intentional: the marker action
- * that produced `after` already dirtied the doc on the way in (`markDirty` in
- * appStore), and undoHistory re-derives `dirty` from position vs. save point
- * after applying this entry — restoration must not independently dirty or
- * clean the document.
+ * which never touches `dirty` itself. That's intentional for the RESTORE path —
+ * undoHistory re-derives `dirty` from position vs. save point after applying
+ * this entry, so restoration must not independently dirty or clean the doc.
+ *
+ * THE FORWARD path is dirtied HERE, and this is the layer that can do it. The
+ * per-marker store actions (`addMarker`/`renameMarker`/`removeMarker`) dirty on
+ * the way in, but every BULK writer — `suggestSyllableMarkers`, the beat-grid
+ * writes, `Align Markers`, `Remix Markers` — goes through `setMarkersForDoc`,
+ * which deliberately does not (the load paths in `fileService`/`sessionFile`
+ * use it too, and opening a file with cues must not report it edited). Pushing
+ * an entry only advances `position`, so before this the document stayed CLEAN
+ * with changed markers — and markers are persisted by save (WAV cues, ID3
+ * chapters, vorbis/Opus tags) while `hasUnsavedWork` is `dirty || neverSaved`,
+ * so a file opened from disk closed with no prompt and lost them. `dirty: true`
+ * is exactly what `position !== savePoint` derives immediately after a push
+ * (`pushUndo` either advances past the save point or invalidates it), so the
+ * stamp cannot disagree with the derivation on the next undo. It also replaces
+ * the doc OBJECT, which is what makes a marker-only edit visible to
+ * fileService's reference-identity staleness check (Task M2 finding 1).
  *
  * No `bytes` is attached (Task M9 / F15): `before`/`after` are plain marker
  * lists, never a channel array, so their retained cost is negligible next to
@@ -271,6 +285,9 @@ export function pushMarkerUndo(label: string, docId: string, before: Marker[], a
       useAppStore.getState().setMarkersForDoc(docId, after);
     },
   });
+  const store = useAppStore.getState();
+  const doc = store.documents.find((d) => d.id === docId);
+  if (doc) store.updateDocument({ ...doc, dirty: true });
 }
 
 function activeDoc(): AudioDocument | null {

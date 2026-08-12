@@ -430,6 +430,41 @@ describe('pushMarkerUndo (Task M2 / F5)', () => {
     redo(doc.id);
     expect(useAppStore.getState().markers[doc.id]).toEqual(after);
   });
+
+  it('dirties the document, so a bulk marker write that never went through addMarker still prompts on close', () => {
+    // The `setMarkersForDoc` + `pushMarkerUndo` shape every bulk marker writer
+    // uses (`suggestSyllableMarkers`, `addBeatMarkers`, `Align Markers`,
+    // `Remix Markers`). `setMarkersForDoc` deliberately does not dirty — the
+    // load paths use it too — and `pushUndo` only advances the counter, so
+    // before this fix the doc stayed CLEAN with changed markers. Markers are
+    // persisted by save (cue chunks / chapters / tags), and `hasUnsavedWork`
+    // is `dirty || neverSaved`, so a file opened from disk closed silently and
+    // took the markers with it.
+    const doc = addDoc([ramp(5)]);
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+
+    const before = useAppStore.getState().markers[doc.id] ?? [];
+    const after = [{ id: 'm1', name: 'Syllable 1', positionSample: 2 }];
+    useAppStore.getState().setMarkersForDoc(doc.id, after);
+    expect(useAppStore.getState().documents[0].dirty).toBe(false); // the write itself never dirties
+
+    pushMarkerUndo('Suggest Syllable Markers', doc.id, before, after);
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
+  });
+
+  it('leaves the derived dirty flag in charge: undo back to the save point reports clean', () => {
+    const doc = addDoc([ramp(5)]);
+    const before = useAppStore.getState().markers[doc.id] ?? [];
+    const after = [{ id: 'm1', name: 'A', positionSample: 1 }];
+    useAppStore.getState().setMarkersForDoc(doc.id, after);
+    pushMarkerUndo('Add Marker', doc.id, before, after);
+    expect(useAppStore.getState().documents[0].dirty).toBe(true);
+
+    // The dirty stamped at push time is the same value `position !== savePoint`
+    // derives, so undoing back to the save point still clears it.
+    undo(doc.id);
+    expect(useAppStore.getState().documents[0].dirty).toBe(false);
+  });
 });
 
 describe('save-point-derived dirty (Task M2 / F9)', () => {
