@@ -5,7 +5,7 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.24.0] - 2026-08-12
 
 ### Fixed
 
@@ -66,6 +66,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   off"; both always resolve a report with `applied: false` there, which is what lets the dialog show
   the reason each stage gave. Affects: `src/services/vocalChain.ts`, `src/services/coverChain.ts`,
   `src/effects/EffectRegistry.ts`.
+- **Markers added with no other edit are no longer silently discarded on close.** Cause:
+  `setMarkersForDoc` never marks a document dirty (the file-load paths share it and must not), and
+  `pushUndo` only advances a counter — so `Effects → Align Vocal Timing… → Suggest syllable markers`
+  on a document loaded from disk left it flagged clean with new markers, and File → Close (or quit)
+  discarded them without a prompt, even though markers persist to WAV cue chunks, ID3 chapters and
+  FLAC/Opus tags on save. Fix: `pushMarkerUndo` — the layer that means "a marker edit happened" —
+  stamps dirty with exactly the `position !== savePoint` expression the undo path derives, so the
+  flag and the derivation cannot disagree after undo. Affects: `src/services/editOps.ts`.
+- **One resolved region everywhere a selection is read.** Cause: nine code paths resolved
+  `start`/`end` (or a paste cursor) from the raw store value while the audio path clamps through
+  `cloneRegion`/`clampRange` — so the audio and everything derived from it (marker remaps, cut
+  offsets, the silence zero-fill, post-edit selection and cursor, chain region metrics,
+  syllable-marker proposals) could disagree about what the region was. Through the store API a
+  negative start produced markers at negative positions and a cursor at −8000; Silence — the
+  documented "length unchanged" operation — grew a 4000-sample document to 9000; `alignRegion`
+  proposed a syllable at sample −22084. No UI gesture constructs such a selection (gestures clamp),
+  so in the shipped app this was latent — fixed because the store API is public surface and the
+  packaged smoke now drives it. Fix, applied identically in all nine: resolve and clamp ONCE, and
+  every consumer reads the same resolved pair — `tempoService` (variable in v1.23.0, constant now),
+  `effectRunner` (four consumers of one raw read), `vocalChain`, `coverChain`, `alignRegion`, and
+  `editOps`'s Cut / Delete / Paste (both arms) / Trim / Silence. `noiseProfile` carries the same
+  shape and is verified benign (its only reader is the clamping clone). Affects:
+  `src/services/tempoService.ts`, `src/services/effectRunner.ts`, `src/services/vocalChain.ts`,
+  `src/services/coverChain.ts`, `src/services/timingAlignService.ts`, `src/services/editOps.ts`.
+- **Match Tempo also refuses a region that resolves empty on the variable path with the true
+  reason** — it refused before, but blamed the grid (`'no-grid'`) for what was a region problem;
+  the refusal reason is now `'empty-region'` on both paths, previewed in the dialog where the
+  variable path already previews. Affects: `src/services/tempoService.ts`.
+- **The Cover Chain's EQ shortfall message says which direction it missed in.** Cause: the sentence
+  printed `Math.abs(realised − target)` with "short" hardcoded, so an overshoot read as "4.29 dB
+  short". Fix: the word follows the sign. Affects: `src/services/coverChain.ts`.
+- **Comments and docs corrected against the code, repo-wide — twice, because the first corrections
+  contained their own errors.** A claims audit checked every number, ordering guarantee, precedent
+  citation and exhaustiveness claim in comments, dialog copy and docs against the implementing
+  code: 13 of 15 flagged claims plus ~20 smaller ones were false and are fixed — among them the
+  user guide's promise that Re-detect measures "exactly the audio the ratio will be applied to"
+  (it measures a centred excerpt capped at 30 s), a WSOLA tie-break documented backwards, a stale
+  "not implemented" header, and a KNOWN_LIMITATIONS paragraph that justified a splice seam by
+  citing a precedent that in fact corrects the very overshoot it was cited to excuse. A follow-up
+  adversarial review of the corrections themselves then caught four NEW false sentences the fixes
+  had introduced (an octave-button label claim wrong for the third time in three authors, an
+  unconditional "not all of it", an undo count off by one in exactly the scenario it premised) —
+  all rewritten against the code and, for the label sentence, against all five rendering
+  components read individually. Behaviour unchanged except as listed above.
+
+### Changed
+
+- **The test suite can no longer be green while the behaviour it names is broken (39 cases, plus
+  what the review of the fixes found).** An audit found 39 tests that passed regardless of the
+  production code — fixtures pinned at identity values (`start: 0`, `key: 'C'`, `kneeDb: 0`, mono,
+  all defaults), assertions that restated the implementation, substring matches blind to swapped
+  table cells, and one assertion that was flaky rather than weak (it caught its mutation on
+  millisecond jitter about half the time). Every fix was demonstrated by reproducing the named
+  mutation GREEN, then proving it RED. Among what is now actually pinned: the compressor's
+  soft-knee law (executed by no test before, inherited by the Vocal Chain's gain prediction),
+  stereo stem routing (104 tests were green with the instruments swapped between channels), the
+  lyrics-match verdict source, and the remix crossfade slider actually re-rendering audio.
+- **The packaged smoke now drives the app the way a user does: 512 → 711 assertions.** New test
+  hooks (`setSelection`, `redoActive`, `editOp`, `convertChannels`, `newDocument`) opened the
+  region-boundary class that had zero packaged coverage; the smoke now selects before it
+  processes, verifies a region effect leaves everything outside bit-identical (including the
+  off-by-one probe at the boundary), round-trips undo → redo → undo byte-exactly with an
+  anti-vacuous guard, exercises every one of the 25 visible effects against real material with
+  undo byte-restores (up from 2), cuts and deletes with seam and clipboard invariants, survives a
+  file that will not decode, distinguishes a clean refusal from an effect that crashed behind an
+  error dialog, and unwinds the variable Match Tempo's documented three-entry undo. Every new
+  assertion class was demonstrated able to fail by mutating the production code it names and
+  watching the packaged run go red. The run's window geometry is now pinned at startup and
+  asserted (this machine's two displays previously decided how many beats were on screen, which
+  made one honest pixel assertion flaky), and every tracked beat in view must be drawn, exactly.
 
 ## [1.23.0] - 2026-08-12
 
