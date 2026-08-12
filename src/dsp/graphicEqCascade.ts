@@ -16,8 +16,8 @@
  *     realised response equals the requested curve, so the audio receives the
  *     curve the measurement asked for.
  *   - `realisedBandEnergyDb` MEASURES what the solved cascade actually does to
- *     every octave's ENERGY, including the bands the solve was not allowed to
- *     touch, and that measurement is what the chain reports.
+ *     every octave's ENERGY IN THE TAKE, including the bands the solve was not
+ *     allowed to touch, and that measurement is what the chain reports.
  *
  * The second bullet says ENERGY rather than "response at the centre", and the
  * distinction turned out to matter more than the leak the ruling named. The
@@ -27,6 +27,16 @@
  * centre. Measured end to end on the reference material: matching the centres
  * closed 70 % of the spectral distance to the original vocal (1.94 -> 0.58 dB),
  * matching the band energies closed 82 % (1.94 -> 0.34 dB).
+ *
+ * It also says IN THE TAKE, and that is the second half of the same lesson. How
+ * much energy a filter removes from an octave depends on where in that octave
+ * the signal's energy sits, so the band average has to be weighted by the
+ * spectrum the cascade will act on. Weighting it by nothing — the plain mean of
+ * |H|^2 — is the same as assuming every recording is flat across every octave,
+ * and on `test-assets/vocal-30s.wav` that assumption misreported what the audio
+ * received by up to 0.94 dB while the chain printed "within 0.008 dB of the
+ * target". Ruling B does not distinguish between showing the user a wrong curve
+ * on purpose and showing them one by approximation.
  *
  * ── The skip rule is copied, not approximated ───────────────────────────────
  * `GraphicEqEffect` builds a biquad only for a band with `|gain| > 0.01` dB and
@@ -43,7 +53,7 @@
  */
 
 import { designBiquad, magnitudeAt } from './biquad';
-import { LTAS_FFT_SIZE } from './coverMatch';
+import { LTAS_FFT_SIZE, type Ltas } from './coverMatch';
 
 /** The cascade's peaking Q. Pinned equal to `GraphicEqEffect`'s own `Q`. */
 export const GRAPHIC_EQ_CASCADE_Q = 1.4;
@@ -66,9 +76,15 @@ function bandApplies(gainDb: number, freqHz: number, sampleRate: number): boolea
  * gains the effect would be handed.
  *
  * `gainsDb[i]` is the gain of the band at `centresHz[i]`; the two arrays are
- * parallel and must be the same length. The response is evaluated at the same
- * centres, which is what makes the result directly comparable with the curve the
- * match asked for.
+ * parallel and must be the same length.
+ *
+ * This is the POINT response at the centre frequency, and it is NOT the quantity
+ * the cover chain reports — `realisedBandEnergyDb` is. It is deliberately kept
+ * as a separate measurement rather than folded in, because the leak Ruling B
+ * names is stated at the centres (a lone +6 dB band leaks 1.15 dB an octave
+ * away) and this is the function that measures it. Nothing in the chain calls
+ * it; comparing it with a band-energy target would be comparing two different
+ * quantities, which is exactly what `realisedBandEnergyDb`'s doc is about.
  */
 export function realisedCascadeDb(
   gainsDb: readonly number[],
@@ -95,9 +111,9 @@ export function realisedCascadeDb(
 const BAND_EDGE_RATIO = Math.SQRT2;
 
 /**
- * The cascade's response as OCTAVE-BAND ENERGY, in dB per band — the quantity
- * the cover chain's match curve is actually expressed in, and therefore the one
- * that has to be pre-compensated and reported.
+ * The change the cascade makes to each octave's ENERGY IN `signal`, in dB per
+ * band — the quantity the cover chain's match curve is expressed in, and
+ * therefore the one that has to be pre-compensated and reported.
  *
  * ── Why the centre response is the wrong measure here ───────────────────────
  * `matchCurve` compares the MEAN POWER of an octave in each spectrum. A peaking
@@ -106,64 +122,119 @@ const BAND_EDGE_RATIO = Math.SQRT2;
  * moves the band's ENERGY by measurably less than the curve asked for. Measured
  * end to end on the reference material: matching the centres closed 70 % of the
  * shape difference (1.94 -> 0.58 dB), matching the band energies closed 82 %
- * (1.94 -> 0.34 dB). Reporting the centre
- * response as "realised" against a target that means band energy would be
- * comparing two different quantities and calling the difference zero.
+ * (1.94 -> 0.34 dB). Reporting the centre response as "realised" against a
+ * target that means band energy would be comparing two different quantities and
+ * calling the difference zero.
  *
- * Integrated over the SAME bins `bandLevelDb` averages — the 2048-point grid at
- * this sample rate — so the two are the same measurement of the same band. Bins
- * of an octave that reaches past Nyquist are simply absent, exactly as they are
- * absent from the spectrum; a band with no bin at all returns 0.
+ * ── Why `signal` is not optional ────────────────────────────────────────────
+ * `bandLevelDb` averages the SIGNAL's power over the octave's bins, so the
+ * change it will report after the cascade runs is
+ *
+ *     10*log10( SUM_k P_k*|H_k|^2 / SUM_k P_k )
+ *
+ * — the mean of |H|^2 WEIGHTED BY THE SPECTRUM IT ACTS ON, not the plain mean of
+ * |H|^2. The two are equal only when P is flat across the octave, which no real
+ * recording is. This function used to take the plain mean and was measurably
+ * wrong for it: solving the reference curve on `test-assets/vocal-30s.wav` and
+ * re-measuring end to end through the real `graphicEqEffect`, the plain mean
+ * missed what the audio received by up to 0.94 dB (4 kHz reported -1.03 dB and
+ * delivered -1.77 dB) while the weighted mean tracked it to 0.04 dB. That was
+ * Ruling B's forbidden case — a curve shown to the user that the audio did not
+ * receive — so the weighting is REQUIRED rather than defaulted: there is no
+ * argument a caller can omit that quietly reinstates the flat assumption.
+ *
+ * `signal` must be measured at `sampleRate`, because the bin grid is shared:
+ * both are the 2048-point grid `bandLevelDb` averages over, so the prediction
+ * and the measurement are the same measurement of the same band. Bins of an
+ * octave that reaches past Nyquist are simply absent, exactly as they are absent
+ * from the spectrum; a band with no bin, or with no energy in the bins it has,
+ * returns 0.
  */
 export function realisedBandEnergyDb(
   gainsDb: readonly number[],
   centresHz: readonly number[],
-  sampleRate: number
+  sampleRate: number,
+  signal: Ltas
 ): number[] {
+  if (signal.sampleRate !== sampleRate) {
+    throw new Error(
+      `realisedBandEnergyDb: the weighting spectrum is at ${signal.sampleRate} Hz but the cascade runs at ${sampleRate} Hz — ` +
+        'they share a bin grid, so they must share a sample rate'
+    );
+  }
   const coeffs = centresHz
     .map((freq, i) => ({ freq, gainDb: gainsDb[i] ?? 0 }))
     .filter((b) => bandApplies(b.gainDb, b.freq, sampleRate))
     .map((b) => designBiquad('peaking', sampleRate, b.freq, GRAPHIC_EQ_CASCADE_Q, b.gainDb));
 
-  const bins = LTAS_FFT_SIZE / 2 + 1;
+  const bins = Math.min(LTAS_FFT_SIZE / 2 + 1, signal.power.length);
   return centresHz.map((centre) => {
     const lo = centre / BAND_EDGE_RATIO;
     const hi = centre * BAND_EDGE_RATIO;
-    let sum = 0;
-    let count = 0;
+    let weighted = 0;
+    let total = 0;
     for (let k = 1; k < bins; k++) {
       const f = (k * sampleRate) / LTAS_FFT_SIZE;
       if (f < lo || f >= hi) continue;
+      const power = signal.power[k];
+      if (power <= 0) continue;
       let magnitude = 1;
       for (const c of coeffs) magnitude *= magnitudeAt(c, f, sampleRate);
-      sum += magnitude * magnitude;
-      count++;
+      weighted += power * magnitude * magnitude;
+      total += power;
     }
-    return count === 0 ? 0 : 10 * Math.log10(Math.max(sum / count, 1e-30));
+    return total <= 0 ? 0 : 10 * Math.log10(Math.max(weighted / total, 1e-30));
   });
 }
 
-/** How many refinement passes the solve is allowed. The correction each pass
- * applies is the residual error, and the cascade's off-diagonal leakage is a
- * fraction of its diagonal, so the residual shrinks by roughly that fraction per
- * pass. Twelve is enough for the band-energy target, whose diagonal is weaker
- * than the centre response's (a band has to be pushed HARDER than its target to
- * move its energy by the target). Convergence is reported in `iterations` and a
- * run that used them all is one that did NOT converge — `worstErrorDb` says by
- * how much, and that number is what the chain reports. */
-const SOLVE_MAX_PASSES = 12;
+/**
+ * How many refinement passes the solve is allowed.
+ *
+ * The correction each pass applies is the residual error, and the cascade's
+ * off-diagonal leakage is a fraction of its diagonal, so the residual shrinks by
+ * roughly that fraction per pass. The budget is MEASURED against the thing that
+ * must never happen: a run reporting a shortfall the EQ could actually have
+ * delivered, given one more pass.
+ *
+ * Twelve — what this was first written as — was too few. On an alternating
+ * +-4 dB target over 500 Hz-8 kHz at 48 kHz the residual contracts by about 0.64
+ * per pass and crosses the tolerance on the THIRTEENTH; at twelve it stopped at
+ * 0.011 dB, just outside, and the chain printed a delivery warning produced
+ * entirely by the pass budget.
+ *
+ * Weighting the realisation by the take's own spectrum (see
+ * `realisedBandEnergyDb`) makes the diagonal weaker still on a steeply shaped
+ * signal, and therefore slower. Measured over 600 random mean-centred curves per
+ * span, at five spans, against two weighting spectra — white noise and a
+ * formant-shaped noise with two Q = 8 resonances over a falling tail — the
+ * slowest run that the effect's +-12 dB range could actually deliver needed
+ * TWENTY-THREE passes (formant, +-10.9 dB span). At twenty-four, every single
+ * unclamped run in all 6000 finished inside tolerance; every run that did not
+ * was one where a gain hit +-12 dB, which is a limit of the effect and not of
+ * the arithmetic. `worstErrorDb` says by how much, and that is what the chain
+ * reports.
+ *
+ * The margin is free: the whole solve is 1 ms of the 2.28 s the Match EQ stage
+ * takes, and the loop exits as soon as it converges.
+ */
+const SOLVE_MAX_PASSES = 24;
 /** Stop once every solvable centre is within this of its target. 0.01 dB is the
  * effect's own skip threshold — below it a band is not applied at all, so
  * chasing a smaller error would be chasing a difference the effect cannot make. */
-const SOLVE_TOLERANCE_DB = 0.01;
+export const SOLVE_TOLERANCE_DB = 0.01;
 
 export interface CascadeSolution {
   /** The gains to hand the effect, parallel to `centresHz`. */
   gainsDb: number[];
-  /** The octave-band ENERGY those gains actually produce, per band. Report THIS:
-   * it is the same quantity the target is expressed in. */
+  /** The octave-band ENERGY those gains actually produce in the signal the solve
+   * was given, per band. Report THIS: it is the same quantity the target is
+   * expressed in, measured on the spectrum the audio actually has. */
   realisedDb: number[];
-  /** Passes taken. Fewer than `SOLVE_MAX_PASSES` means it converged. */
+  /** Passes taken — a cost figure, NOT the convergence signal. The loop tests
+   * the residual at the top of a pass, so a run whose last allowed pass lands
+   * inside tolerance is indistinguishable by this number from one that ran out.
+   * `worstErrorDb <= SOLVE_TOLERANCE_DB` is the test that observes convergence,
+   * and it is the one the chain makes. */
   iterations: number;
   /** Largest |realised - target| over the SOLVED centres, dB. */
   worstErrorDb: number;
@@ -183,32 +254,40 @@ export interface CascadeSolution {
  * into it, the EQ would carry a deliberate correction in a band the chain's own
  * measurement forbids — and "the match runs from 500 Hz upward" would stop being
  * true of the audio. So the excluded bands are held at exactly 0, their leak is
- * MEASURED by `realisedCascadeDb`, and the chain reports it.
+ * MEASURED by `realisedBandEnergyDb` along with every other band, and the chain
+ * reports it.
  *
  * ── The iteration ───────────────────────────────────────────────────────────
  * `g <- g + (target - realised(g))`, clamped to the effect's range each pass,
- * where `realised` is the BAND-ENERGY response (see `realisedBandEnergyDb`).
- * The cascade's dB response is very nearly additive across bands, so this is a
- * fixed-point iteration on a diagonally dominant system rather than a search.
+ * where `realised` is the BAND-ENERGY response in `signal` (see
+ * `realisedBandEnergyDb`). The cascade's dB response is very nearly additive
+ * across bands, so this is a fixed-point iteration on a diagonally dominant
+ * system rather than a search.
  *
  * It does not always converge, and that is reported rather than hidden: a band
  * whose octave runs into Nyquist, or whose target needs more than the effect's
  * own +-12 dB once the roll-off is compensated, ends short. `worstErrorDb` is
  * the shortfall and `realisedDb` is what was actually delivered — never the
  * target dressed up as an outcome.
+ *
+ * ── Why the BEST iterate is kept, not the last ──────────────────────────────
+ * Once the +-12 dB clamp saturates, the iteration is no longer a contraction:
+ * it can settle on a fixed point strictly FURTHER from the target than the
+ * gains it started from. Measured over 4000 targets of the shape `matchCurve`
+ * produces (mean-centred, bounded to +-10.9), a third of the runs ended worse
+ * than their own starting point, and on an alternating +-8 dB target the leak
+ * into 250 Hz — a band the chain's measurement forbids touching — grew across
+ * the solve. So every iterate is scored and the best one is returned, which
+ * makes "pre-compensated" a claim the returned gains can always support.
  */
 export function solveCascadeGains(
   targetDb: readonly number[],
   centresHz: readonly number[],
   sampleRate: number,
-  solvable: readonly boolean[]
+  solvable: readonly boolean[],
+  signal: Ltas
 ): CascadeSolution {
-  const gainsDb = centresHz.map((_, i) => (solvable[i] ? (targetDb[i] ?? 0) : 0));
-  let clamped = false;
-  let realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate);
-  let iterations = 0;
-
-  const worst = (r: number[]): number => {
+  const worst = (r: readonly number[]): number => {
     let w = 0;
     for (let i = 0; i < centresHz.length; i++) {
       if (!solvable[i]) continue;
@@ -218,7 +297,13 @@ export function solveCascadeGains(
     return w;
   };
 
-  while (iterations < SOLVE_MAX_PASSES && worst(realisedDb) > SOLVE_TOLERANCE_DB) {
+  const gainsDb = centresHz.map((_, i) => (solvable[i] ? (targetDb[i] ?? 0) : 0));
+  let clamped = false;
+  let realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate, signal);
+  let iterations = 0;
+  let best = { gainsDb: [...gainsDb], realisedDb: [...realisedDb], errorDb: worst(realisedDb) };
+
+  while (iterations < SOLVE_MAX_PASSES && best.errorDb > SOLVE_TOLERANCE_DB) {
     for (let i = 0; i < centresHz.length; i++) {
       if (!solvable[i]) continue;
       let next = gainsDb[i] + ((targetDb[i] ?? 0) - realisedDb[i]);
@@ -231,9 +316,19 @@ export function solveCascadeGains(
       }
       gainsDb[i] = next;
     }
-    realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate);
+    realisedDb = realisedBandEnergyDb(gainsDb, centresHz, sampleRate, signal);
     iterations++;
+    const errorDb = worst(realisedDb);
+    if (errorDb < best.errorDb) {
+      best = { gainsDb: [...gainsDb], realisedDb: [...realisedDb], errorDb };
+    }
   }
 
-  return { gainsDb, realisedDb, iterations, worstErrorDb: worst(realisedDb), clamped };
+  return {
+    gainsDb: best.gainsDb,
+    realisedDb: best.realisedDb,
+    iterations,
+    worstErrorDb: best.errorDb,
+    clamped,
+  };
 }

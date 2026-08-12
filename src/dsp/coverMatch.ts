@@ -317,8 +317,18 @@ export const MATCH_MIN_CENTRE_HZ = 500;
  * On the reference material it does not bind — the curve there peaks at 3.5 dB —
  * which is the point: it is a guard against material this song did not produce,
  * and the test that pins it uses a fixture whose raw difference exceeds it.
- * It is also inside the Graphic EQ's own +-12 dB parameter range, so the derived
- * bound is the one that acts, not the effect's clamp.
+ *
+ * WHAT IT IS NOT: it is not the only limit that can act. The bound is a
+ * correction in octave-band ENERGY, and the Graphic EQ's own +-12 dB is a band
+ * GAIN, which is a different quantity — a peaking filter delivers its full gain
+ * only at its centre, so a band pushed to the +12 dB rail moves its octave's
+ * energy by less than 12 dB. Measured at 48 kHz on a flat spectrum, a lone band
+ * at +12 dB delivers +9.73 dB of band energy at 500 Hz falling to +9.17 dB at
+ * 8 kHz, and at -12 dB delivers -8.91 dB falling to -7.94 dB. So the top of this
+ * bound is not reachable at all, and above roughly +-9 dB it is the effect's
+ * clamp that acts rather than this constant. That is not hidden: the solve
+ * reports `clamped`, and the chain names the shortfall band by band
+ * (`coverChain.ts`'s `warning`).
  */
 export const MATCH_BOUND_DB = 10.9;
 

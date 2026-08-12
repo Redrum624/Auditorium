@@ -376,7 +376,12 @@ export function deriveMatchEq(
 
   const targets = curve.bands.map((b) => b.gainDb);
   const solvable = curve.bands.map((b) => b.status === 'matched');
-  const solution = solveCascadeGains(targets, MATCH_BAND_CENTRES_HZ, sampleRate, solvable);
+  // `takeLtas` is the weighting, not a convenience: the realised figures are the
+  // change this cascade makes to THIS take's octave energies, which is what
+  // `bandLevelDb` will read back off the processed audio. Solving and reporting
+  // against an unweighted average would assume the take is flat across every
+  // octave — measurably wrong by up to 0.94 dB on real singing.
+  const solution = solveCascadeGains(targets, MATCH_BAND_CENTRES_HZ, sampleRate, solvable, takeLtas);
 
   const params = defaultParamsFor('graphic-eq');
   GRAPHIC_EQ_BANDS.forEach((band, i) => {
@@ -414,7 +419,7 @@ export function deriveMatchEq(
         solution.worstErrorDb > 0.01
           ? `up to ${solution.worstErrorDb.toFixed(2)} dB SHORT of the target`
           : `within ${solution.worstErrorDb.toFixed(3)} dB of the target`,
-      from: `the cascade's own measured response at the band centres after ${solution.iterations} pre-compensation pass${solution.iterations === 1 ? '' : 'es'} — the figures above are what the audio receives, not what was requested`,
+      from: `the cascade's measured effect on THIS take's octave-band energy after ${solution.iterations} pre-compensation pass${solution.iterations === 1 ? '' : 'es'} — the Realised column in the table below is what the audio receives, not what was requested`,
     },
   ];
   if (boundedCount > 0) {
@@ -435,18 +440,23 @@ export function deriveMatchEq(
   };
 
   // The pre-compensation does not always reach the target: a band-energy move
-  // near the ±10.9 dB bound needs about 12.5 dB of band gain once the cascade's
-  // roll-off across the octave is compensated, and the Graphic EQ stops at ±12.
+  // near the ±10.9 dB bound is not reachable at all through a ±12 dB band gain
+  // once the cascade's roll-off across the octave is accounted for. Measured at
+  // 48 kHz, a lone band at the +12 dB rail delivers +9.73 dB of band energy at
+  // 500 Hz and +9.17 dB at 8 kHz, and −12 dB delivers −8.91 to −7.94 dB.
   // Ruling B's requirement is that the shortfall is SAID, not that it never
-  // happens — the realised column above already shows it band by band, and this
-  // is the line that makes it impossible to miss.
+  // happens — the Realised column of the per-band table already shows it band by
+  // band, and this is the line that makes it impossible to miss. Both this
+  // sentence and the derived row above point DOWN at that table, because
+  // `StageResult` renders the warning first, then the derived rows, then the
+  // table (CoverChainDialog.tsx:149-171).
   const worstShort = matched.reduce(
     (worst, b) => (Math.abs(b.realisedDb - b.targetDb) > Math.abs(worst.realisedDb - worst.targetDb) ? b : worst),
     matched[0]
   );
   const warning =
     solution.worstErrorDb > 0.01
-      ? `the EQ could not fully deliver this curve: at ${worstShort.centreHz} Hz it wanted ${dbStr(worstShort.targetDb)} and realised ${dbStr(worstShort.realisedDb)}, ${solution.worstErrorDb.toFixed(2)} dB short${solution.clamped ? ` — the band gain hit the Graphic EQ's own ±12 dB limit` : ''}. The realised figures above are what the audio received.`
+      ? `the EQ could not fully deliver this curve: at ${worstShort.centreHz} Hz it wanted ${dbStr(worstShort.targetDb)} and realised ${dbStr(worstShort.realisedDb)}, ${solution.worstErrorDb.toFixed(2)} dB short${solution.clamped ? ` — the band gain hit the Graphic EQ's own ±12 dB limit` : ''}. The Realised column in the table below is what the audio received.`
       : undefined;
 
   return { run: true, params, derived, eq, warning };

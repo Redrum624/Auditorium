@@ -42,7 +42,7 @@ import {
   reverbRt60Seconds,
   type Ltas,
 } from '../dsp/coverMatch';
-import { realisedCascadeDb } from '../dsp/graphicEqCascade';
+import { SOLVE_TOLERANCE_DB, realisedBandEnergyDb } from '../dsp/graphicEqCascade';
 import { _resetDspWorkerTestState } from '../__mocks__/createDspWorkerMock';
 import type { StageStatus } from './vocalChain';
 
@@ -368,11 +368,15 @@ describe('deriveMatchEq', () => {
     const eq = resolution.eq!;
 
     // The pre-compensation was needed: the raw target, applied as-is, would NOT
-    // have produced itself.
-    const naive = realisedCascadeDb(
+    // have produced itself. Measured in the SAME quantity the solve works in —
+    // this take's octave-band energy — because a baseline taken in the centre
+    // response would be comparing the un-compensated curve against one thing and
+    // the compensated one against another.
+    const naive = realisedBandEnergyDb(
       eq.bands.map((b) => b.targetDb),
       MATCH_BAND_CENTRES_HZ,
-      SR
+      SR,
+      longTermAverageSpectrum(take, SR)
     );
     let naiveWorst = 0;
     eq.bands.forEach((b, i) => {
@@ -382,7 +386,7 @@ describe('deriveMatchEq', () => {
     expect(naiveWorst).toBeGreaterThan(0.2);
 
     // And after it, the realised response IS the target.
-    expect(eq.worstErrorDb).toBeLessThanOrEqual(0.01);
+    expect(eq.worstErrorDb).toBeLessThanOrEqual(SOLVE_TOLERANCE_DB);
     for (const band of eq.bands) {
       if (band.status !== 'matched') continue;
       expect(band.realisedDb).toBeCloseTo(band.targetDb, 1);
@@ -391,9 +395,51 @@ describe('deriveMatchEq', () => {
       // gain (or the gain as if it were the response) is what Ruling B forbids.
       expect(band.bandGainDb).not.toBeCloseTo(band.targetDb, 5);
     }
-    // The `Realised` line says so in the words the dialog renders.
+    // The `Realised` line says so in the words the dialog renders — including
+    // WHICH quantity it is, because naming the wrong one is the same defect in
+    // a different place: it once said "the cascade's own measured response at
+    // the band centres" while reporting octave-band energy.
     const realisedLine = resolution.derived.find((d) => d.label === 'Realised')!;
     expect(realisedLine.from).toMatch(/what the audio receives, not what was requested/);
+    expect(realisedLine.from).toMatch(/octave-band energy/);
+    expect(realisedLine.from).not.toMatch(/at the band centres/);
+  });
+
+  it('realises the curve on THIS take\'s spectrum, not on a flat one', () => {
+    // Ruling B, in the place it was broken: the realised figure is what
+    // `bandLevelDb` will read back off the processed audio, and that depends on
+    // where inside each octave the take's own energy sits. A take whose 4 kHz
+    // octave is dominated by a tone near the band's top edge and one whose
+    // energy is spread across it must NOT be told the same realised number for
+    // the same target.
+    const edgeHeavy = [
+      (() => {
+        const out = noise(N, 0.05, 7);
+        const spike = tone(N, 4000 * 1.3, 0.5);
+        for (let i = 0; i < N; i++) out[i] += spike[i];
+        return out;
+      })(),
+    ];
+    const flatIsh = [noise(N, 0.2, 7)];
+
+    const levels = takeBandLevels(edgeHeavy);
+    const ltas = synthLtas({
+      500: levels[500] + 3,
+      1000: levels[1000] - 3,
+      2000: levels[2000] + 3,
+      4000: levels[4000] - 3,
+    });
+    const onEdgeHeavy = deriveMatchEq(reference({ ltas }), edgeHeavy, SR);
+    const onFlatIsh = deriveMatchEq(reference({ ltas }), flatIsh, SR);
+    if (!onEdgeHeavy.run || !onFlatIsh.run) throw new Error('unreachable');
+
+    const gainOf = (r: typeof onEdgeHeavy, centreHz: number): number =>
+      Number(r.params[GRAPHIC_EQ_BANDS.find((b) => b.freq === centreHz)!.id]);
+    // The same 4 kHz target needs a different band gain on the two takes,
+    // because the same filter moves their octave energies by different amounts.
+    expect(Math.abs(gainOf(onEdgeHeavy, 4000) - gainOf(onFlatIsh, 4000))).toBeGreaterThan(0.1);
+    // And both are still solved to the target they were given.
+    expect(onEdgeHeavy.eq!.worstErrorDb).toBeLessThanOrEqual(SOLVE_TOLERANCE_DB);
   });
 
   it('bounds a correction larger than the reference can justify, and leaves smaller ones alone', () => {
