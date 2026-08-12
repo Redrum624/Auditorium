@@ -239,8 +239,10 @@ exceeds parity here.
 **Area:** File writes (`electron/ipc.cjs`, `electron/atomicWrite.cjs`)
 
 **v1.4 behavior:** Every `file:write` (in-place Save, format-faithful
-re-encode, Save Session) writes to a sibling temp file (`<target>.<pid>.<seq>.tmp`,
-same directory as the target — so the follow-up rename stays on one volume),
+re-encode, Save Session) writes to a sibling temp file
+(`<target>.<pid>.<seq>.<random>.tmp` — the random suffix on top of pid+seq makes
+the name unguessable, so there is nothing for an attacker to pre-plant a symlink
+at; same directory as the target, so the follow-up rename stays on one volume),
 fsyncs it, closes it, then renames it over the target. A failure at any step
 (encode error, disk full, permission denied) unlinks the temp file and leaves
 the original untouched — an interrupted or failed save can no longer destroy
@@ -1027,15 +1029,17 @@ assumed.
 **3. The grid stops at the analysed end, and can vanish when a fifth document is
 analysed.** Whole-document analysis is capped at `MAX_ANALYSIS_SECONDS = 600`, so
 on a longer file the tics end at the 10-minute mark and nothing is extrapolated
-past it. Separately, the tempo cache holds `MAX_ENTRIES = 4` and evicts in
-**insertion order, not least-recently-used** — reading a grid does not protect
-it, so a grid on screen can disappear when a fifth document is analysed, with no
-error anywhere. Promoting a row on read was considered and rejected: it would
+past it. Separately, the tempo cache holds `MAX_ENTRIES = 4` and evicts the
+**least-recently-WRITTEN** row — analysing a document moves its row to the front
+(the write is a delete+set re-insertion), but **reading a grid does not protect
+it**, so a grid on screen can disappear when a fifth document is analysed, with
+no error anywhere. Promoting a row on read was considered and rejected: it would
 make a repaint reorder eviction, trading this surprise for a worse one. What
 keeps the workflow this feature exists for inside four rows is inheritance —
 a source plus its five stems occupy one row, not six.
 
-**4. Snapping targets beats, bar lines and markers — not clip edges.**
+**4. Snapping targets beats, bar lines, markers and the playhead — not clip
+edges.**
 Butt-joining two clips is the other classic multitrack magnet and it is not
 here. Same-track clip boundaries became first-class crossfade joins in v1.9,
 but clip-edge snap targets still did not land with them; the precise butt-join
@@ -1043,9 +1047,10 @@ affordance is instead the Ctrl-drag nudge (below), which lands a clip exactly
 at its neighbour's end. In practice head-to-head alignment mostly works
 anyway, because a clip's first beat usually coincides with its start. Bar lines
 add nothing to the target set even when they exist, and that is arithmetic rather
-than an omission: every bar line already *is* one of the beats. The timeline
-ruler does not snap either — it is a seek surface showing seconds, with its own
-zoom and time base.
+than an omission: every bar line already *is* one of the beats. The multitrack
+cursor IS a target (`buildSessionSnapTargets` takes it as `extra`); the editor's
+own set is beats plus markers only. The timeline ruler does not snap either — it
+is a seek surface showing seconds, with its own zoom and time base.
 
 **5. The Ctrl-drag nudge commits somewhere the preview does not show.** v1.8's
 "overlap nudge outranks the magnet" limitation resolved exactly as predicted:
@@ -1463,11 +1468,32 @@ over-sums. Constant power is kept anyway because it is exactly right in the
 structural case (ρ = 0, which is what the shift-invariance measurement says the
 decoder does) and errs by at most +3 dB in the coherent case, whereas equal
 gain has the mirror-image failure and dips 3 dB on genuinely decorrelated
-material; it is also the app's own established join law (the v1.9 crossfade
-ruling, and `remixService.ts`'s default). An earlier revision of this entry
-claimed the two renditions were simply "decorrelated" at the seam and that a
-6 dB bound would fail the rejected equal-gain design. Neither was true: the
-measured correlation is about 0.45, and −5.6 dB passes a 6 dB bound.
+material. An earlier revision of this entry claimed the two renditions were
+simply "decorrelated" at the seam and that a 6 dB bound would fail the rejected
+equal-gain design. Neither was true: the measured correlation is about 0.45, and
+−5.6 dB passes a 6 dB bound.
+
+**The precedent this used to cite argues the other way, and that is worth being
+honest about.** The paragraph above once justified the +2.08 dB by calling
+constant power "the app's own established join law (the v1.9 crossfade ruling,
+and `remixService.ts`'s default)". Auto-Remix does not default to constant
+power. It MEASURES the correlation at the join it is about to make
+(`bestAlignLag` returns the normalised correlation at the chosen lag) and hands
+that ρ to `crossfadeGains`, whose `1/k` normaliser — `k = sqrt(g0² + g1² +
+2ρg0g1)` — makes the summed level hold exactly at that ρ. In other words, the
+app's real join law CANCELS precisely the over-sum this entry accepts, and it
+would cancel this one: at ρ ≈ 0.45 the exact law is available and the +2.08 dB
+is not a law, it is an un-normalised sin/cos pair. The one place the app does
+pass ρ = 0 is multitrack (`CROSSFADE_RHO`), and its own comment says why —
+nothing there measures anything, so 0 is the honest assumption rather than an
+invented estimate. Here something IS measurable.
+
+So the seam is what it is: constant power over 25 ms, +2.08 dB on tonal
+material, kept because it is exactly right at ρ = 0 (which is what the
+shift-invariance measurement says the decoder does globally) and bounded at
++3 dB in the coherent case, whereas equal gain fails the other way. That is a
+defensible trade-off on its own terms. It is not one the remix renderer
+endorses.
 
 Seams are placed 16,384 samples clear of each chunk edge because that is the
 measured reach of the decoder's context deficiency — the spectrogram's own

@@ -230,6 +230,19 @@ the limiter takes the output back over full scale — measured through this chai
 a take limited to −0.3 dBFS came back at **+6.53 dBFS** on noise, and both the
 WAV writer and the MP3 encoder hard-clip that.
 
+That ordering only protects you while the limiter is actually running. **Switch
+the limiter off and leave Reverb on**, and the reverb becomes the last stage
+that touches the audio — a level stage with nothing after it — so the output can
+come back above full scale, and both the WAV writer and the MP3 encoder will
+hard-clip it on export. The chain says so when it happens: the reverb's row in
+the results shows a warning naming the peak it actually reached (for example
+*"the output now peaks at +2.4 dBFS, above full scale"*) and telling you to
+switch the Limiter on or bring the level down before exporting. It appears only
+when the output really did go over — on material where the tail never crosses
+0 dBFS there is nothing to warn about — and it never blocks the run: a tail over
+an already-hot take is a legitimate thing to want if you intend to lower it
+afterwards.
+
 **Nothing is set by taste.** Each stage starts from its own effect's defaults
 and the chain overrides only what the recording decides:
 
@@ -392,7 +405,8 @@ analysis, so re-run it.
 The beats are *tracked*, not extrapolated from a rigid grid, so the result
 follows a take that drifts. What the detector cannot judge is the **octave**: a
 60 BPM loop can be reported as 120 with high confidence. That is what the
-**×2** and **÷2** buttons on the TEMPO card (and in both dialogs) are for —
+**×2** and **÷2** buttons on the TEMPO card — and in the Match Tempo, Align
+Vocal Timing and Auto-Remix dialogs, where they read `x2` and `/2` — are for:
 they re-track the beats at the corrected period rather than just relabelling
 the number, so everything built on the grid moves with it.
 
@@ -471,8 +485,10 @@ To make a 128 BPM loop sit in a 124 BPM track:
 1. Select the region to retarget (or select nothing, to retarget the whole
    document).
 2. **Effects → Match Tempo…**. The dialog prefills the source BPM from the
-   detection; **Re-detect from selection** re-runs it against exactly the audio
-   the ratio will be applied to.
+   detection; **Re-detect from selection** re-runs it against the region the
+   ratio will be applied to — measuring a **centred 30-second excerpt** of that
+   region, not all of it, however long the selection is. Detection wants a
+   representative stretch, not a complete one.
 3. Enter the target BPM — or switch to a plain ratio. The dialog shows which
    quality band the resulting stretch falls in (transparent / good / extreme).
 4. Optionally tick the beat-marker grid, which lays down markers at the *new*
@@ -764,9 +780,10 @@ keeping the words and the delivery. Everything runs on your own CPU — no
 account, no upload.
 
 **Setting up a voice.** The dialog holds a list of **voice profiles**: saved
-reference voices you can reuse. Add one with **From file…** (any audio file) or
-**From selection** (whatever is selected in the open document, which is the
-quickest way to try a voice you already have on the timeline). A reference of
+reference voices you can reuse. Add one with **New voice from file…** (any audio
+file) or **New voice from selection** (whatever is selected in the open document,
+which is the quickest way to try a voice you already have on the timeline; it
+stays disabled until something is selected). A reference of
 roughly **6–12 seconds of clean speech** is what the model was measured on;
 much shorter gives it little to work with, and it will not accept a reference
 longer than 350 seconds.
