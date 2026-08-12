@@ -213,7 +213,7 @@ export function buildTempoMap(
   // the identity placement is always feasible and a caller cannot ask for a
   // band like [1.2, 1.5] that no in-range interval could satisfy.
   const minRatio = Math.min(1, Math.max(MIN_RATIO, opts.minRatio ?? MIN_RATIO));
-  const maxRatio = Math.max(1, Math.min(2, opts.maxRatio ?? 2));
+  const maxRatio = Math.max(1, Math.min(MAX_RATIO, opts.maxRatio ?? MAX_RATIO));
 
   // --- accept beats --------------------------------------------------------
   const acceptedIndices: number[] = [];
