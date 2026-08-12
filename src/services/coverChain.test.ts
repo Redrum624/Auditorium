@@ -75,6 +75,16 @@ function tone(n: number, freqHz: number, amplitude: number, sampleRate = SR): Fl
   return out;
 }
 
+/** Alternating +/-amplitude at exactly `levelDb`: |x| is that amplitude at every
+ * sample, so both the RMS and the detector envelope settle ON the figure rather
+ * than near it, and a reported level can be asserted against a literal. */
+function flatAt(n: number, levelDb: number): Float32Array {
+  const amp = Math.pow(10, levelDb / 20);
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = i % 2 === 0 ? amp : -amp;
+  return out;
+}
+
 /**
  * A long-term spectrum with EXACTLY the given octave-band levels. Built rather
  * than measured so a fixture can be placed on a dB boundary by arithmetic: every
@@ -588,6 +598,56 @@ describe('deriveMatchEq', () => {
     );
   });
 
+  it('names EVERY band that fell short, not just the worst one', () => {
+    // Ruling B's sentence exists so a shortfall is impossible to miss, and which
+    // bands fall short is not a property of one fixture: any solve that ends
+    // above tolerance can leave several. Every fixture in this suite left exactly
+    // ONE band short, so `short.map` and `short.slice(0, 1).map` wrote the same
+    // sentence and the remaining bands could go short in silence — shown in the
+    // table, absent from the line that exists to be impossible to miss.
+    //
+    // The centring is zero-mean, so two bands cannot be pushed up without two
+    // being pushed down as far: ±13 dB of offset puts all four matched bands past
+    // the ±10.9 dB bound, and the Graphic EQ's own ±12 dB rail then leaves three
+    // of them measurably away from their targets.
+    const levels = takeBandLevels(take);
+    const offset = 13;
+    const ltas = synthLtas({
+      500: levels[500] - offset,
+      1000: levels[1000] - offset,
+      2000: levels[2000] + offset,
+      4000: levels[4000] + offset,
+    });
+    const resolution = deriveMatchEq(reference({ ltas }), take, SR);
+    if (!resolution.run) throw new Error('unreachable');
+
+    // The fixture really does miss on more than one band — without this guard the
+    // test would quietly fall back to the single-band case it exists to escape.
+    const short = resolution.eq!.bands.filter(
+      (b) => b.status === 'matched' && Math.abs(b.realisedDb - b.targetDb) > SOLVE_TOLERANCE_DB
+    );
+    expect(short.map((b) => b.centreHz)).toEqual([1000, 2000, 4000]);
+
+    const warning = resolution.warning as string;
+    expect(warning).toMatch(/could not fully deliver/);
+    // Every one of them is named, with ITS OWN two numbers rather than the worst
+    // band's repeated.
+    const signed = (v: number): string => `${v >= 0 ? '+' : ''}${v.toFixed(2)} dB`;
+    for (const b of short) {
+      expect(warning).toContain(
+        `At ${b.centreHz} Hz it wanted ${signed(b.targetDb)} and realised ${signed(b.realisedDb)}`
+      );
+    }
+    expect(warning.match(/At \d+ Hz it wanted/g)).toHaveLength(3);
+    // …and ONLY them: the band the EQ did deliver is not named, so the sentence
+    // observes the outcome rather than listing the table.
+    expect(warning).not.toContain('At 500 Hz');
+    // Worst first, so the sentence leads with the biggest miss.
+    expect(warning.indexOf('At 1000 Hz')).toBeLessThan(warning.indexOf('At 2000 Hz'));
+    expect(warning.indexOf('At 2000 Hz')).toBeLessThan(warning.indexOf('At 4000 Hz'));
+    expect(warning).toContain('4.29 dB short');
+  });
+
   it('hands the broadband level to the loudness stage instead of baking it into the curve', () => {
     const levels = takeBandLevels(take);
     const flatOffset = 6;
@@ -777,7 +837,29 @@ describe('deriveMatchReverb', () => {
 // ── measureReference ────────────────────────────────────────────────────────
 
 describe('measureReference', () => {
-  const channels = [tone(N, 1000, 0.5)];
+  /** Exponentially decaying noise bursts with a known RT60 — material on which
+   * `estimateDecay` returns a NUMBER. This fixture used to be a steady 1 kHz
+   * tone, which the estimator declines on whether or not the gate is honoured:
+   * `none.decay === null` was then true for a reason that had nothing to do with
+   * `need.decay`, and dropping the gate — paying for a second full scan of a
+   * three-minute reference on every run whose Match Reverb stage is off — left
+   * this test green. Same shape as `coverMatch.test.ts`'s own decay fixtures. */
+  function decayingBursts(rt60: number, count: number, gapSec: number): Float32Array {
+    const burst = Math.round(gapSec * SR);
+    const out = new Float32Array(burst * count);
+    const perSample = Math.pow(10, -60 / (20 * rt60 * SR));
+    for (let b = 0; b < count; b++) {
+      const src = noise(burst, 1, 300 + b);
+      let amp = 0.6;
+      for (let i = 0; i < burst; i++) {
+        out[b * burst + i] = src[i] * amp;
+        amp *= perSample;
+      }
+    }
+    return out;
+  }
+
+  const channels = [decayingBursts(0.3, 12, 1.2)];
 
   it('measures only what the enabled stages need', () => {
     const none = measureReference(channels, SR, 'ref', { ltas: false, level: false, decay: false });
@@ -787,6 +869,12 @@ describe('measureReference', () => {
 
     const all = measureReference(channels, SR, 'ref', { ltas: true, level: true, decay: true });
     expect(all.ltas!.frames).toBeGreaterThan(0);
+    // The fixture really does carry a decay the estimator can find, so the
+    // `none.decay === null` above is `need.decay` acting and not the estimator
+    // declining on material with nothing to fit.
+    expect(all.decay).not.toBeNull();
+    expect(all.decay!.seconds).toBeGreaterThan(0.3 * 0.85);
+    expect(all.decay!.seconds).toBeLessThan(0.3 * 1.15);
     expect(all.gatedLevelDb).toBeCloseTo(gatedLevelDb(channels, SR)!, 6);
     expect(all.name).toBe('ref');
     expect(all.sampleRate).toBe(SR);
@@ -1026,6 +1114,33 @@ describe('runCoverChain', () => {
     // The loudness stage did its job: the take's gated level is now the
     // reference's, which is the claim the stage makes.
     expect(report!.after.gatedLevelDb!).toBeCloseTo(report!.reference!.gatedLevelDb!, 1);
+  });
+
+  it('reports the spread and the floor as the numbers they are, not merely as non-null', async () => {
+    // `not.toBeNull()` above is satisfied by any number at all, and two of these
+    // fields are quantities the summary shows the user: putting the 90th
+    // percentile of the envelope where the SPREAD belongs ships a wrong figure
+    // under a right label, and passed the whole suite.
+    //
+    // Two settled levels 18 dB apart, both inside the 20 dB active gate, with the
+    // quiet quarter first so it is also the quietest 500 ms. |x| is constant at
+    // each level, so the spread is 18.0 dB and the floor -24.0 dBFS by
+    // arithmetic rather than by measurement luck. Every stage is off, so the
+    // after side must read back the same two numbers.
+    const quietSamples = Math.round(1 * SR);
+    const totalSamples = Math.round(4 * SR);
+    const twoLevel = new Float32Array(totalSamples);
+    twoLevel.set(flatAt(quietSamples, -24), 0);
+    twoLevel.set(flatAt(totalSamples - quietSamples, -6), quietSamples);
+
+    const { refId } = seedPair([twoLevel], refAudio());
+    const report = await runCoverChain({ enabled: only(), referenceDocId: refId });
+
+    expect(report!.before.spreadDb).toBeCloseTo(18, 1);
+    expect(report!.before.noiseFloorDb).toBeCloseTo(-24, 1);
+    expect(report!.before.peakDb).toBeCloseTo(-6, 1);
+    expect(report!.after.spreadDb).toBeCloseTo(18, 1);
+    expect(report!.after.noiseFloorDb).toBeCloseTo(-24, 1);
   });
 
   it('Ruling C: a match that would clip is caught by the limiter, and named when it is not', async () => {
