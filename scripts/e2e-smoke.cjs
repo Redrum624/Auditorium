@@ -1451,18 +1451,34 @@ async function main() {
 
     // And with no reference chosen, every matching stage declines saying so
     // rather than the chain refusing to start or quietly doing nothing.
-    const coverNoRef = await page.evaluate(() => window.__test.runCoverChain(null));
-    assert(
-      coverNoRef.ok === true && coverNoRef.applied === false,
-      `with no reference the chain runs and changes nothing (ok ${coverNoRef.ok}, applied ${coverNoRef.applied})`
-    );
-    for (const id of ['matchEq', 'matchLoudness']) {
+    const coverNoRef = await page.evaluate(() => window.__test.runCoverChain(null, { matchReverb: true }));
+    assert(coverNoRef.ok === true, `with no reference the chain still runs (ok ${coverNoRef.ok})`);
+    for (const id of ['matchEq', 'matchLoudness', 'matchReverb']) {
       const stage = coverNoRef.stages.filter((st) => st.id === id)[0];
       assert(
         stage.status === 'declined' && /no original vocal chosen/.test(stage.reason || ''),
         `${id} declines and says what to do about it (status ${stage.status}, reason ${JSON.stringify(stage.reason)})`
       );
     }
+    // The limiter is NOT a matching stage and does not pretend to be: it needs
+    // no reference, it was ticked, so it runs. The first version of this step
+    // asserted the whole chain changed nothing here and was wrong about its own
+    // feature — which is the sort of thing a packaged run is for.
+    const coverNoRefApplied = coverNoRef.stages.filter((st) => st.status === 'applied').map((st) => st.id);
+    assert(
+      JSON.stringify(coverNoRefApplied) === JSON.stringify(['headroom']),
+      `only the stage that needs no reference ran (applied ${JSON.stringify(coverNoRefApplied)})`
+    );
+    assert(
+      coverNoRef.referenceName === null && coverNoRef.reference === null,
+      `no reference is reported anywhere in the summary (name ${JSON.stringify(coverNoRef.referenceName)})`
+    );
+    assert(
+      coverNoRef.before.matchDistanceDb === null && coverNoRef.after.matchDistanceDb === null,
+      'the distance from the original vocal reads n/a rather than 0 when there is no original vocal'
+    );
+    // Leave the document as this step found it.
+    await page.evaluate(() => window.__test.undoActive());
 
     // 12) v1.5 step C — Auto-Remix (Task T13 acceptance): open the 64 s ABAB
     // fixture and ask for a 32 s arrangement through the real
