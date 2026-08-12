@@ -8,6 +8,7 @@ import {
   RESIDUAL_BAND_HI_HZ,
   RESIDUAL_BAND_LO_HZ,
   RESIDUAL_BELOW_BED_DB,
+  RESIDUAL_BELOW_VOCAL_DB,
   RESIDUAL_IN_BAND_BEST_DB,
   RESIDUAL_IN_BAND_WORST_DB,
   RESIDUAL_WORST_SECOND_DB,
@@ -216,15 +217,22 @@ describe('COVER_CHAIN_STAGES', () => {
 });
 
 describe('Ruling A — the residual is stated with its measured numbers', () => {
-  it('carries every figure the measurement produced', () => {
-    for (const n of [
-      String(RESIDUAL_BELOW_BED_DB),
-      String(RESIDUAL_WORST_SECOND_DB),
-      String(RESIDUAL_BAND_LO_HZ),
-      String(RESIDUAL_BAND_HI_HZ / 1000),
-      String(RESIDUAL_IN_BAND_WORST_DB),
-      String(RESIDUAL_IN_BAND_BEST_DB),
-    ]) {
+  it('holds the figures the measurement produced, as literals', () => {
+    // LITERAL, not `String(THE_CONSTANT)`. A sweep caught the first version of
+    // this test: comparing the sentence against the constant it is built from
+    // moves both sides together, so the assertion could not fail whatever the
+    // constant said. These are the numbers from the report's §1, written out.
+    expect(RESIDUAL_BELOW_BED_DB).toBe(17.95);
+    expect(RESIDUAL_BELOW_VOCAL_DB).toBe(11.28);
+    expect(RESIDUAL_WORST_SECOND_DB).toBe(8.9);
+    expect(RESIDUAL_BAND_LO_HZ).toBe(250);
+    expect(RESIDUAL_BAND_HI_HZ).toBe(4000);
+    expect(RESIDUAL_IN_BAND_WORST_DB).toBe(9.5);
+    expect(RESIDUAL_IN_BAND_BEST_DB).toBe(11.8);
+  });
+
+  it('renders every one of them into the sentence the user reads', () => {
+    for (const n of ['17.95 dB', '8.9 dB', '250 Hz', '4 kHz', '9.5\u201311.8 dB']) {
       expect(COVER_CHAIN_RESIDUAL_SENTENCE).toContain(n);
     }
   });
@@ -932,6 +940,36 @@ describe('runCoverChain', () => {
 
     undo(takeId);
     expect(docLength(activeDoc())).toBe(N);
+  });
+
+  it('pushes a marker past the region back by the tail Match Reverb added', async () => {
+    // The grow remap. A sweep found it could be deleted with every other test
+    // still green, because nothing observed a marker through a length-changing
+    // stage — the one stage in this chain that changes length.
+    const decayed = new Float32Array(N);
+    const src = noise(N, 0.5, 3);
+    for (let i = 0; i < N; i++) decayed[i] = src[i] * Math.pow(10, (-60 * (i / SR)) / (2.0 * 20));
+    const refId = seedDoc([decayed], 'Song \u2014 Vocals');
+    // Room after the region for a marker to sit in, so the shift is observable.
+    const takeChannels = new Float32Array(N * 2);
+    takeChannels.set(tone(N, 1000, 0.25), 0);
+    const takeId = seedDoc([takeChannels], 'take');
+    useAppStore.setState({ activeDocumentId: takeId, selection: { start: 0, end: N } });
+    useAppStore
+      .getState()
+      .setMarkersForDoc(takeId, [
+        { id: 'inside', positionSample: N >> 1, name: 'inside' },
+        { id: 'after', positionSample: N + 1000, name: 'after' },
+      ]);
+
+    const report = await runCoverChain({ enabled: only('matchReverb'), referenceDocId: refId });
+    expect(resultFor(report!.stages, 'matchReverb').status).toBe('applied');
+    const grew = report!.outputSamples - report!.regionSamples;
+    expect(grew).toBeGreaterThan(0);
+
+    const markers = useAppStore.getState().markers[takeId];
+    expect(markers.find((m) => m.id === 'inside')!.positionSample).toBe(N >> 1);
+    expect(markers.find((m) => m.id === 'after')!.positionSample).toBe(N + 1000 + grew);
   });
 
   it('runs over the SELECTION when there is one, leaving the rest untouched', async () => {
