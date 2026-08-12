@@ -201,6 +201,17 @@ export function tempoRatio(sourceBpm: number, targetBpm: number): number {
  * silent clamp, which would otherwise hand back a duration that doesn't
  * match the requested tempo.
  */
+/**
+ * A DELIBERATE asymmetry with the variable path, recorded rather than hidden:
+ * this check is a pure ratio validator and never resolves the region, so an
+ * `'empty-region'` refusal is NOT previewed here — the dialog's Apply stays
+ * enabled and the constant path refuses only at {@link applyTempoChange}
+ * (before any effect runs). `checkVariableTempoChange` DOES preview it,
+ * because it must resolve the region to build its map anyway. The gap is
+ * unreachable through the UI (gestures clamp selections and cannot produce an
+ * empty resolved region on a non-empty document), so the preview would guard
+ * only store-API callers, who get the same refusal one call later.
+ */
 export function checkTempoChange(req: TempoChangeRequest): TempoCheckResult {
   if (!activeDoc()) return { ok: false, reason: 'no-document' };
 
@@ -763,7 +774,11 @@ export async function applyTempoChange(
  * puts them transiently back at their proportional positions — the same
  * property `'Align Markers'` and `'Add Beat Markers'` already ship with — and
  * the THIRD removes the audio edit and its remap together. With no grid asked
- * for there are two entries and the sequence is one step shorter. Same counts in
+ * for there are two entries and the sequence is one step shorter — and "up to"
+ * is doing real work in both counts: `Match Tempo Markers` is pushed only when
+ * a pre-existing marker actually MOVED ({@link correctMarkersForWarp} pushes
+ * nothing for an empty or unmoved list — the arm `fc2a06e` pinned), so each
+ * count drops by one over a marker-less region. Same counts in
  * `docs/KNOWN_LIMITATIONS.md`, which must agree with this.
  */
 async function applyVariableTempoChange(

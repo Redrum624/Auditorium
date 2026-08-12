@@ -205,7 +205,10 @@ grid and leaves the pre-existing markers corrected, the second puts them
 transiently back at their proportional positions, and the third removes the
 audio edit and its remap together. With the grid off there are two entries and
 the same sequence is one step shorter — the first Ctrl+Z leaves the markers
-proportional, the second removes the audio edit. That is the same property
+proportional, the second removes the audio edit. (`Match Tempo Markers` exists
+only when a pre-existing marker actually moved — over a region with no markers,
+or a map that leaves them all in place, that entry is skipped and each count
+above drops by one.) That is the same property
 `Align Markers` and `Add Beat Markers` already ship with: a
 marker write cannot ride inside `applyEdit`'s own entry, because `applyEdit` has
 already committed by the time a service-level correction can run.

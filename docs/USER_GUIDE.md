@@ -405,11 +405,14 @@ analysis, so re-run it.
 The beats are *tracked*, not extrapolated from a rigid grid, so the result
 follows a take that drifts. What the detector cannot judge is the **octave**: a
 60 BPM loop can be reported as 120 with high confidence. That is what the
-octave-correction buttons on the TEMPO card — and in the Match Tempo, Align
-Vocal Timing and Auto-Remix dialogs — are for: they re-track the beats at the
-corrected period rather than just relabelling the number, so everything built on
-the grid moves with it. They are labelled `x2` and `/2` in all but one place:
-the **Align Vocal Timing** dialog renders them as **×2** and **÷2**.
+octave-correction buttons on the TEMPO card — and in the Properties panel's
+Tempo row, and in the Match Tempo, Align Vocal Timing and Auto-Remix dialogs —
+are for: they re-track the beats at the corrected period rather than just
+relabelling the number, so everything built on the grid moves with it. The
+labels vary by surface: the **TEMPO card** and the **Align Vocal Timing** dialog
+render them as **×2** and **÷2**; the **Match Tempo** and **Auto-Remix** dialogs
+and the **Properties** Tempo row use plain `x2` and `/2` (the Properties row
+lists `/2` first). Same operation everywhere, whatever the glyph.
 
 Whole-document analysis is capped at the first 10 minutes; past that the result
 is reported as describing the first 10 min rather than the whole file.
