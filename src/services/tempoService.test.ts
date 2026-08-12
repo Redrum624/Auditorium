@@ -921,3 +921,147 @@ describe('applyTempoChange — beat markers after a VARIABLE match', () => {
     expect(getHistory(doc.id).done).toEqual(['Match Tempo']);
   }, 30000);
 });
+
+// ---------------------------------------------------------------------------
+// R7 — gaps the service mutation sweep found
+// ---------------------------------------------------------------------------
+
+describe('the payload handed to the worker is exactly the region’s beats', () => {
+  it('pins every converted position, not just the count', () => {
+    // The earlier scoping test compared COUNTS and looked at the first element,
+    // which is not enough: dropping the `b < start` guard, or loosening
+    // `b >= end` to `b > end`, lets an out-of-region beat through as a NEGATIVE
+    // or over-long region-relative value — and `buildTempoMap`'s own range
+    // guard then silently drops it, so the count and the first element come out
+    // unchanged. Both mutations survived until this test pinned the array
+    // itself. The service must not hand the worker a position outside the
+    // region in the first place.
+    seedDoc([sine(220, 8)]);
+    const start = 2 * SR;
+    const end = 6 * SR;
+    useAppStore.getState().setSelection({ start, end });
+
+    const beats = [
+      0, // before the region
+      start - 1, // one sample before it
+      start, // exactly the region start — INSIDE
+      start + 1000,
+      start + 2000,
+      end - 1, // one sample before the end — INSIDE
+      end, // exactly the region end — OUTSIDE (belongs to what follows)
+      end + 1000,
+    ];
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: beats },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+
+    expect(check.plan.extra.beatSamples).toEqual([0, 1000, 2000, end - start - 1]);
+    for (const b of check.plan.extra.beatSamples) {
+      expect(b).toBeGreaterThanOrEqual(0);
+      expect(b).toBeLessThan(check.plan.regionLength);
+    }
+  });
+
+  it('is document-absolute minus the start, with no selection meaning zero', () => {
+    seedDoc([sine(220, 8)]);
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: [0, 1000, 2500] },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.plan.extra.beatSamples).toEqual([0, 1000, 2500]);
+  });
+});
+
+describe('beat markers after a CLAMPED variable match', () => {
+  it('follow the map, which is no longer an arithmetic grid', async () => {
+    // The earlier marker test used a map where nothing clamped — and on such a
+    // map every beat lands exactly one target spacing after the last, so
+    // `placed` IS the arithmetic grid `first + i*spacing` and the two cannot be
+    // told apart. A mutation replacing `map.placed[i]` with that extrapolation
+    // survived it. Clamping is precisely the case `placed` exists for, so the
+    // grid here contains one interval far too short to reach the target.
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    // Target 60 BPM -> one beat per second. The 1000-sample interval would need
+    // ratio 44.1 and is held at MAX_RATIO 4, so every later beat carries the
+    // deficit and `placed` stops being evenly spaced.
+    const grid = [0, SR, 2 * SR, 2 * SR + 1000, 3 * SR + 1000, 4 * SR + 1000];
+
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 60,
+      variableRate: { beatSamples: grid },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    // The fixture really does clamp — otherwise this proves nothing.
+    expect(check.plan.clampedCount).toBeGreaterThan(0);
+    const placed = Array.from(check.plan.map.placed);
+    const arithmetic = placed.map((_, i) => placed[0] + i * (placed[1] - placed[0]));
+    // ...and `placed` really has departed from the arithmetic grid.
+    expect(Math.round(placed[placed.length - 1])).not.toBe(Math.round(arithmetic[arithmetic.length - 1]));
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 60,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: grid },
+    });
+    expect(result.ok).toBe(true);
+
+    const markers = liveMarkers(docId)
+      .filter((m) => m.name.startsWith('Beat '))
+      .sort((a, b) => a.positionSample - b.positionSample);
+    expect(markers).toHaveLength(placed.length);
+    markers.forEach((m, i) => {
+      expect(m.positionSample).toBe(Math.round(placed[i]));
+    });
+    // And explicitly NOT where re-deriving from the target BPM would have put
+    // the last one.
+    expect(markers[markers.length - 1].positionSample).not.toBe(Math.round(arithmetic[arithmetic.length - 1]));
+  }, 30000);
+
+  it('caps at MAX_BEAT_MARKERS and says so once', async () => {
+    const showMessageBox = installShowMessageBox();
+    // A deliberately extreme grid: 600 beats 147 samples apart in a 2 s
+    // document, matched to a 100-sample spacing. The BPM is absurd, and that is
+    // the point — reaching the 512 cap with a musical tempo would need a
+    // 256-second fixture, and the cap is about the marker COUNT, not the audio.
+    const seconds = 2;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    const docId = doc.id;
+    const grid: number[] = [];
+    for (let i = 0; i < 600; i++) grid.push(i * 147);
+    const targetBpm = (60 * SR) / 100; // 100-sample target spacing
+
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm,
+      variableRate: { beatSamples: grid },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+    expect(check.plan.beatCount).toBeGreaterThan(MAX_BEAT_MARKERS);
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm,
+      addBeatMarkers: true,
+      variableRate: { beatSamples: grid },
+    });
+    expect(result.ok).toBe(true);
+
+    const markers = liveMarkers(docId).filter((m) => m.name.startsWith('Beat '));
+    expect(markers).toHaveLength(MAX_BEAT_MARKERS);
+    expect(showMessageBox).toHaveBeenCalledTimes(1);
+    expect(showMessageBox.mock.calls[0][0].message).toContain(String(MAX_BEAT_MARKERS));
+  }, 30000);
+});
