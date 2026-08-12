@@ -81,6 +81,26 @@ const OUT_TRUNCATED_MP3 = path.join(OUT_DIR, 'truncated.mp3');
 const OUT_TAKE_MP3 = path.join(OUT_DIR, 'take.mp3');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
+// The window geometry every pixel assertion in this file is measured against.
+// It is the app's own design size (electron/main.cjs creates the window at
+// 1600x1000), so the smoke drives the layout the app was built for rather than
+// a shape only the harness ever sees.
+//
+// Why pin it at all: a NEW window is fitted to the work area of the display it
+// is born on, floored by the window's minimum size (1100x700). This machine has
+// two displays, and a run that opened on the smaller one got a 1100x700 window
+// — a 624 CSS px waveform canvas instead of 1129. Canvas width is what decides
+// how much of the document is on screen (zoom is `ceil(length / 1600)` samples
+// per pixel, appStore.defaultZoom), so the tic-ruler count below moved with the
+// display the window happened to land on: 6 groups there, 11 here. The
+// assertion was honest; the geometry was not deterministic. Pinning the content
+// size makes every canvas readback in this file reproducible.
+const SMOKE_WINDOW = { width: 1600, height: 1000 };
+// Content size is set in DIP but realised in whole device pixels, so at a
+// fractional display scale (1.75 here) the readback can land a pixel off the
+// request. Only a real refusal to resize should fail the check.
+const SMOKE_WINDOW_TOLERANCE_PX = 4;
+
 function assert(cond, msg) {
   if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
   console.log(`  ok: ${msg}`);
@@ -275,6 +295,44 @@ async function realClick(page, clientX, clientY, { alt = false } = {}) {
   }
 }
 
+/** Pins the app window to `SMOKE_WINDOW` from the MAIN process, through the
+ * real BrowserWindow — the only place a window's size can be set, since the
+ * renderer cannot resize its own frameless shell.
+ *
+ * The window is first moved to the roomiest display: Windows fits a window to
+ * the work area it is created on, so a window born on a small screen is created
+ * at its minimum size, and that is the shape the resize has to undo. Any
+ * maximized/fullscreen/minimized state is cleared for the same reason — a
+ * restored window would silently take its own size back.
+ *
+ * Returns the geometry actually realised, so the caller can assert the pin took
+ * rather than discovering it later as a mysterious pixel count. */
+async function pinWindowGeometry(app, want) {
+  return app.evaluate(({ BrowserWindow, screen }, size) => {
+    const win = BrowserWindow.getAllWindows()[0];
+    if (!win) return null;
+    if (win.isMinimized()) win.restore();
+    if (win.isFullScreen()) win.setFullScreen(false);
+    if (win.isMaximized()) win.unmaximize();
+    const displays = screen.getAllDisplays();
+    const roomiest = displays.reduce(
+      (best, d) =>
+        d.workArea.width * d.workArea.height > best.workArea.width * best.workArea.height ? d : best,
+      displays[0]
+    );
+    win.setPosition(roomiest.workArea.x + 8, roomiest.workArea.y + 8);
+    win.setContentSize(size.width, size.height);
+    const [contentWidth, contentHeight] = win.getContentSize();
+    return {
+      contentWidth,
+      contentHeight,
+      displayCount: displays.length,
+      scaleFactor: roomiest.scaleFactor,
+      workArea: roomiest.workArea,
+    };
+  }, want);
+}
+
 async function main() {
   // Preconditions ----------------------------------------------------------
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
@@ -343,6 +401,56 @@ async function main() {
     // Wait for the renderer to install its test hooks.
     await page.waitForFunction(() => Boolean(window.__test), null, { timeout: 20000 });
     console.log('window.__test is available.');
+
+    // 0) Pin the window geometry -------------------------------------------
+    // Done BEFORE the first document is opened, so every canvas in the run is
+    // laid out at the same size on every machine and every display. See
+    // SMOKE_WINDOW for the flake this closes.
+    const geom = await pinWindowGeometry(app, SMOKE_WINDOW);
+    console.log(
+      `Window geometry: content ${geom && geom.contentWidth}x${geom && geom.contentHeight} CSS px ` +
+        `on the roomiest of ${geom && geom.displayCount} display(s) ` +
+        `(work area ${geom && geom.workArea.width}x${geom && geom.workArea.height} @ scale ${geom && geom.scaleFactor})`
+    );
+    assert(
+      geom !== null &&
+        Math.abs(geom.contentWidth - SMOKE_WINDOW.width) <= SMOKE_WINDOW_TOLERANCE_PX &&
+        Math.abs(geom.contentHeight - SMOKE_WINDOW.height) <= SMOKE_WINDOW_TOLERANCE_PX,
+      `the window is pinned to ${SMOKE_WINDOW.width}x${SMOKE_WINDOW.height} CSS px so every ` +
+        `canvas readback is deterministic (actual ${geom === null ? 'no window' : `${geom.contentWidth}x${geom.contentHeight}`})`
+    );
+    // The renderer resizes its canvases from a ResizeObserver, so wait for the
+    // new size to reach the document rather than for a fixed delay.
+    await page.waitForFunction(
+      (want) =>
+        Math.abs(window.innerWidth - want.width) <= want.tol &&
+        Math.abs(window.innerHeight - want.height) <= want.tol,
+      { ...SMOKE_WINDOW, tol: SMOKE_WINDOW_TOLERANCE_PX },
+      { timeout: 10000 }
+    );
+    // The viewport the whole run's CSS measurements come from, re-measured and
+    // asserted with its real numbers rather than waved through.
+    //
+    // It is checked against the REQUEST, not against the main process's
+    // `getContentSize()`: at a fractional display scale the two legitimately
+    // disagree by a few pixels — measured here at scale 1.75, main reported
+    // 1599x1000 while the renderer's viewport was 1602x1002, because each
+    // rounds the same physical box to whole units in its own space. Both land
+    // within tolerance of what was asked for, which is the property the pixel
+    // assertions actually need; asserting the two APIs against each other
+    // asserts a rounding rule neither of them promises.
+    const laidOut = await page.evaluate(() => ({
+      width: window.innerWidth,
+      height: window.innerHeight,
+      dpr: window.devicePixelRatio,
+    }));
+    assert(
+      Math.abs(laidOut.width - SMOKE_WINDOW.width) <= SMOKE_WINDOW_TOLERANCE_PX &&
+        Math.abs(laidOut.height - SMOKE_WINDOW.height) <= SMOKE_WINDOW_TOLERANCE_PX,
+      `the renderer laid out at the pinned size (expected ${SMOKE_WINDOW.width}x${SMOKE_WINDOW.height} ` +
+        `+/-${SMOKE_WINDOW_TOLERANCE_PX} CSS px, actual ${laidOut.width}x${laidOut.height} at dpr ` +
+        `${laidOut.dpr}; main reports content ${geom.contentWidth}x${geom.contentHeight})`
+    );
 
     // 1) Open the tone WAV --------------------------------------------------
     console.log(`Opening ${TONE} ...`);
@@ -2197,14 +2305,42 @@ async function main() {
       const view = await page.evaluate(() => window.__test.getEditorViewState());
       const band = await beatTicBand(page, 'waveform-canvas', 9);
       assert(band !== null, 'the waveform canvas is readable for the tic-band check');
+      // How many tics the canvas can hold is arithmetic, not a guess. A beat's
+      // x is `(beat - scrollSample) / samplesPerPixel`, so the visible ones are
+      // those landing in [0, cssWidth). The beats are taken as evenly spaced
+      // across the tracked grid — true of this fixture by construction (an
+      // exact 120 BPM click train, detected at confidence ~0.9999) and the only
+      // option available, since the hooks pass scalars and never the beat array
+      // itself. Deriving the count from the geometry the run actually has is
+      // the belt to the pinned window's braces: the `>= 8` floor stays as the
+      // "this is a ruler" statement, and the derived equality below is the
+      // stronger claim that EVERY beat the canvas can hold is drawn, and no
+      // stray tic besides.
+      const beatSpacing =
+        gridState.beatCount > 1
+          ? (gridState.lastBeatSample - gridState.firstBeatSample) / (gridState.beatCount - 1)
+          : 0;
+      let expectedTics = 0;
+      for (let i = 0; i < gridState.beatCount; i++) {
+        const x =
+          (gridState.firstBeatSample + i * beatSpacing - view.scrollSample) / view.samplesPerPixel;
+        if (x >= 0 && x < band.cssWidth) expectedTics++;
+      }
       console.log(
         `  editor tic band: ${band.groupCount} tic groups / ${band.columnCount} lit device ` +
           `columns, widest ${band.widestGroupPx}px, ${band.aboveBandColumns} lit above the band ` +
-          `(canvas ${band.cssWidth.toFixed(0)}x${band.cssHeight.toFixed(0)} CSS, dpr ${band.dpr})`
+          `(canvas ${band.cssWidth.toFixed(0)}x${band.cssHeight.toFixed(0)} CSS, dpr ${band.dpr}, ` +
+          `${expectedTics} of ${gridState.beatCount} beats fit at ${view.samplesPerPixel} samples/px)`
       );
       assert(
         band.groupCount >= 8,
         `the editor draws a RULER of tics, not one stray mark (expected >= 8 groups, actual ${band.groupCount})`
+      );
+      assert(
+        Math.abs(band.groupCount - expectedTics) <= 1,
+        `every tracked beat the pinned canvas can hold is drawn, and no tic besides (expected ` +
+          `${expectedTics} groups +/-1 for a beat landing on the right edge, actual ${band.groupCount} ` +
+          `over ${band.cssWidth.toFixed(0)} CSS px)`
       );
       assert(
         band.groupCount <= gridState.beatCount,
@@ -4996,6 +5132,19 @@ async function main() {
           [44100, 2, seconds]
         );
         const newBefore = await stateOf();
+        // The PREMISE of every assertion below, asserted rather than assumed.
+        // `expectedNewLength` derives its expectation from this observation, so
+        // if `newDocument` ever stopped honouring `durationSeconds` both arms
+        // would collapse to a zero-length buffer, the expectation would follow
+        // them down, and all sixteen assertions would still pass while the
+        // tiny-buffer case they exist for went unexercised. The rule is
+        // fileService's own: `round(sampleRate * durationSeconds)` (:510).
+        const expectedStartLength = Math.round(44100 * seconds);
+        assert(
+          newBefore.length === expectedStartLength,
+          `File > New really produced ${label} document to run ${id} on ` +
+            `(expected ${expectedStartLength} samples for ${seconds} s, actual ${newBefore.length})`
+        );
         const failuresBefore = await page.evaluate(() => window.__test.effectFailureCount());
         const newOutcome = await applyEffectGuarded(id, params, undefined, 30000);
         const newAfter = await stateOf();
