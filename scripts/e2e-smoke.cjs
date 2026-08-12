@@ -21,6 +21,11 @@ const BEAT = path.join(ROOT, 'test-assets', 'beat120.wav');
 // scripts/make-test-cover.cjs for what each property is chosen to reach.
 const COVER_REFERENCE = path.join(ROOT, 'test-assets', 'cover-reference.wav');
 const COVER_TAKE = path.join(ROOT, 'test-assets', 'cover-take.wav');
+// The reverberant reference. Match Reverb declines on the dry one — correctly,
+// it is dry — so without this file no packaged run ever has the reverb stage
+// engaged, and the chain's LAST stage is never the one that can lift the output
+// back over the ceiling. That ordering shipped broken once.
+const COVER_REFERENCE_ROOM = path.join(ROOT, 'test-assets', 'cover-reference-room.wav');
 // Optional real-material fixture: a full commercial track the user placed
 // locally. Copyrighted, so it is NEVER committed (test-assets/ is gitignored)
 // and NEVER required — the real-song step skips cleanly when it is absent.
@@ -269,6 +274,7 @@ async function main() {
     [LONG70, 'make-test-long.cjs', '70 s multi-slice transcription fixture'],
     [COVER_REFERENCE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_TAKE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
+    [COVER_REFERENCE_ROOM, 'make-test-cover.cjs', 'Cover Chain reverberant reference'],
   ]) {
     if (!fs.existsSync(file)) {
       console.log(`Generating ${label}...`);
@@ -1414,9 +1420,22 @@ async function main() {
       cover.after.peakDb <= -0.3 + 0.01,
       `the output respects the -0.3 dBFS ceiling (actual ${cover.after.peakDb.toFixed(2)} dBFS)`
     );
+    // The claim this step's comment makes at the top: the loudness match lands
+    // the peak OVER full scale, and the limiter is what brings it back. The
+    // chain's own before/after cannot see that — every stage between them has
+    // already run — so it is read off the LIMITER's own input peak. The first
+    // version of this assertion compared `before.peakDb` against
+    // `after.peakDb - 12`, which the -0.29 ceiling assertion above had already
+    // reduced to `before.peakDb > -12.3`: it observed nothing.
     assert(
-      cover.before.peakDb > cover.after.peakDb - 12,
-      `the fixture really needed the catch (before ${cover.before.peakDb.toFixed(2)} dBFS, matched by ${(cover.after.gatedLevelDb - cover.before.gatedLevelDb).toFixed(2)} dB)`
+      coverLimiter.peakBeforeDb > 0,
+      `the fixture really needed the catch — the peak handed to the limiter passed full scale ` +
+        `(pre-limiter ${coverLimiter.peakBeforeDb.toFixed(2)} dBFS, post ${coverLimiter.peakAfterDb.toFixed(2)}, ` +
+        `take ${cover.before.peakDb.toFixed(2)} dBFS matched by ${(cover.after.gatedLevelDb - cover.before.gatedLevelDb).toFixed(2)} dB)`
+    );
+    assert(
+      coverLimiter.peakBeforeDb - coverLimiter.peakAfterDb > 1,
+      `and it caught a real amount of it (${(coverLimiter.peakBeforeDb - coverLimiter.peakAfterDb).toFixed(2)} dB)`
     );
 
     // The reverb stage was switched ON and still refused, deriving the refusal.
@@ -1443,10 +1462,44 @@ async function main() {
 
     // One Ctrl+Z puts the WHOLE pass back, which is only meaningful because
     // undoDepth was asserted to be 1 above.
+    //
+    // Length alone cannot observe it: every stage that ran here is
+    // length-preserving, so `lengthBefore === lengthAfter` and a history entry
+    // that captured the POST-edit buffer as its "before" would restore nothing
+    // and still pass. The audio itself is the assertion — the peak moved from
+    // -5.88 to -0.30 dBFS across the run, so a real undo has to move it back,
+    // and a sample window pins it exactly rather than statistically.
+    const coverPeakAfter = await page.evaluate(() => window.__test.getPeak());
+    const coverSamplesAfter = await page.evaluate(() =>
+      window.__test.getChannelSamples(0, 0, 2048)
+    );
     const coverUndone = await page.evaluate(() => window.__test.undoActive());
+    const coverPeakUndone = await page.evaluate(() => window.__test.getPeak());
+    const coverSamplesUndone = await page.evaluate(() =>
+      window.__test.getChannelSamples(0, 0, 2048)
+    );
     assert(
       coverUndone.length === cover.lengthBefore,
-      `one undo restores the take (expected ${cover.lengthBefore}, actual ${coverUndone.length})`
+      `one undo restores the take's length (expected ${cover.lengthBefore}, actual ${coverUndone.length})`
+    );
+    assert(
+      Math.abs(coverPeakUndone - cover.before.peakDb) < 0.01,
+      `one undo restores the take's AUDIO, not just its length — the peak is the take's again ` +
+        `(before ${cover.before.peakDb.toFixed(2)}, after the chain ${coverPeakAfter.toFixed(2)}, after undo ${coverPeakUndone.toFixed(2)} dBFS)`
+    );
+    assert(
+      Math.abs(coverPeakAfter - coverPeakUndone) > 1,
+      `and that is a real restoration rather than a run that changed nothing ` +
+        `(chain output ${coverPeakAfter.toFixed(2)} dBFS vs restored ${coverPeakUndone.toFixed(2)} dBFS)`
+    );
+    let coverSamplesChanged = 0;
+    for (let i = 0; i < coverSamplesUndone.length; i++) {
+      if (coverSamplesAfter[i] !== coverSamplesUndone[i]) coverSamplesChanged++;
+    }
+    assert(
+      coverSamplesChanged > coverSamplesUndone.length / 2,
+      `the samples themselves came back, not only the summary statistics ` +
+        `(${coverSamplesChanged} of ${coverSamplesUndone.length} differ from the processed buffer)`
     );
 
     // And with no reference chosen, every matching stage declines saying so
@@ -1478,6 +1531,84 @@ async function main() {
       'the distance from the original vocal reads n/a rather than 0 when there is no original vocal'
     );
     // Leave the document as this step found it.
+    await page.evaluate(() => window.__test.undoActive());
+
+    // 11e) The same chain against a REVERBERANT reference, so Match Reverb
+    // ENGAGES instead of declining. This is the configuration in which the
+    // chain's last stage is one that RAISES peaks, and it shipped wrong: the
+    // registry had matchReverb after the limiter, whose own note told the user
+    // that nothing downstream could lift the output back over the ceiling.
+    // Measured through the real stages on this exact fixture, that order ends
+    // at +2.42 dBFS — over full scale, and `encodeWav` hard-clips it.
+    //
+    // The unit suite pins the order structurally and pins the ceiling against
+    // the synchronous worker mock. This is the same claim in the packaged app,
+    // with four real DSP workers back to back and a region that grows under
+    // them, which is the part the mock cannot reach.
+    console.log('Cover Chain (F10): the same chain with Match Reverb ENGAGED...');
+    // The room reference first, then a FRESH copy of the take on top of it, so
+    // the take this pass runs on is the file rather than the document the pass
+    // above processed and undid. `openPath` makes what it opens active, which is
+    // why the order is this way round.
+    await page.evaluate((p) => window.__test.openPath(p), COVER_REFERENCE_ROOM);
+    await page.evaluate((p) => window.__test.openPath(p), COVER_TAKE);
+    const coverRoomBefore = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      coverRoomBefore.activeName === 'cover-take.wav',
+      `the take is active for the second pass (active ${JSON.stringify(coverRoomBefore.activeName)})`
+    );
+
+    const coverRoom = await page.evaluate(() =>
+      window.__test.runCoverChain('cover-reference-room.wav', { matchReverb: true })
+    );
+    for (const stage of coverRoom.stages) {
+      if (stage.status === 'off' || stage.status === 'manual') continue;
+      console.log(
+        `    ${stage.id}: ${stage.status}` +
+          (stage.peakBeforeDb === null
+            ? ''
+            : ` [peak ${stage.peakBeforeDb.toFixed(2)} -> ${stage.peakAfterDb.toFixed(2)} dBFS]`) +
+          (stage.detail ? ` — ${stage.detail}` : '') +
+          (stage.reason ? ` — ${stage.reason}` : '')
+      );
+    }
+    assert(coverRoom.ok === true && coverRoom.applied === true, 'the reverberant pass ran and committed');
+    const coverRoomReverb = coverRoom.stages.filter((st) => st.id === 'matchReverb')[0];
+    assert(
+      coverRoomReverb.status === 'applied',
+      `Match Reverb ENGAGED on a reference that has a room — the whole point of this pass ` +
+        `(status ${coverRoomReverb.status}, reason ${JSON.stringify(coverRoomReverb.reason)})`
+    );
+    assert(
+      coverRoom.lengthAfter > coverRoom.lengthBefore,
+      `and it lengthened the region by its tail (${coverRoom.lengthBefore} -> ${coverRoom.lengthAfter} samples)`
+    );
+    // THE assertion. In the order that shipped this reads +2.42 dBFS.
+    assert(
+      coverRoom.after.peakDb <= -0.3 + 0.01,
+      `the ceiling holds with the reverb ON — nothing downstream of the limiter (actual ${coverRoom.after.peakDb.toFixed(2)} dBFS)`
+    );
+    // Two-sided: the reverb is only a threat to the ceiling if the limiter was
+    // working, and it is only the LAST stage if nothing ran after it.
+    const coverRoomLimiter = coverRoom.stages.filter((st) => st.id === 'headroom')[0];
+    assert(
+      coverRoomLimiter.peakBeforeDb > 0,
+      `the limiter was handed a signal over full scale, so the ceiling above is an outcome ` +
+        `(pre-limiter ${coverRoomLimiter.peakBeforeDb.toFixed(2)} dBFS)`
+    );
+    const coverRoomRan = coverRoom.stages.filter((st) => st.status === 'applied').map((st) => st.id);
+    assert(
+      coverRoomRan[coverRoomRan.length - 1] === 'headroom',
+      `the limiter is the last stage that touched the audio (ran ${JSON.stringify(coverRoomRan)})`
+    );
+    assert(
+      coverRoom.undoDepth === 1,
+      `the reverberant pass is still ONE undo entry (actual ${coverRoom.undoDepth})`
+    );
+    console.log(
+      `  ok: reverb engaged, ${coverRoom.lengthBefore} -> ${coverRoom.lengthAfter} samples, ` +
+        `pre-limiter ${coverRoomLimiter.peakBeforeDb.toFixed(2)} -> output ${coverRoom.after.peakDb.toFixed(2)} dBFS`
+    );
     await page.evaluate(() => window.__test.undoActive());
 
     // 12) v1.5 step C — Auto-Remix (Task T13 acceptance): open the 64 s ABAB

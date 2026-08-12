@@ -154,27 +154,70 @@ afterEach(() => {
 // ── The registry ────────────────────────────────────────────────────────────
 
 describe('COVER_CHAIN_STAGES', () => {
-  /** Enumerated from the TYPE, not from the cases that came to mind — v1.21.0
+  /**
+   * Enumerated from the TYPE, not from the cases that came to mind — v1.21.0
    * shipped a property test asserting an invariant across "all eight
    * combinations" that was eight of twelve because a three-valued field was
-   * hardcoded to two of its values. The annotation is what makes the compiler
-   * check the list: adding a member to `CoverChainStageId` without adding it
-   * here fails to compile, and the count below fails if one is dropped. */
+   * hardcoded to two of its values.
+   *
+   * The `Record<CoverChainStageId, true>` is what makes the COMPILER check the
+   * list, and it has to be a Record rather than an array: a
+   * `CoverChainStageId[]` literal is not exhaustiveness-checked at all
+   * (`const a: ('x'|'y')[] = ['x']` compiles), so the annotation this was first
+   * written with enforced nothing. With the Record, adding a member to the union
+   * without adding it here is a compile error, and removing one is too.
+   */
+  const EVERY_STAGE_ID: Record<CoverChainStageId, true> = {
+    separate: true,
+    clean: true,
+    lyrics: true,
+    timing: true,
+    matchEq: true,
+    matchReverb: true,
+    matchLoudness: true,
+    headroom: true,
+    place: true,
+  };
+  /** The ORDER is a separate claim from the membership, so it is a separate
+   * list — and it is checked against the Record above, which is the half the
+   * compiler can enforce. */
   const ALL_STAGE_IDS: CoverChainStageId[] = [
     'separate',
     'clean',
     'lyrics',
     'timing',
     'matchEq',
+    'matchReverb',
     'matchLoudness',
     'headroom',
-    'matchReverb',
     'place',
   ];
 
   it('registers every id the type declares, in order, and only those', () => {
+    expect([...ALL_STAGE_IDS].sort()).toEqual(Object.keys(EVERY_STAGE_ID).sort());
     expect(ALL_STAGE_IDS).toHaveLength(9);
     expect(COVER_CHAIN_STAGES.map((s) => s.id)).toEqual(ALL_STAGE_IDS);
+  });
+
+  it('runs the Limiter LAST of every stage that touches the audio', () => {
+    // Not tidiness — the stage's own note tells the user that nothing
+    // downstream can lift the output back over the ceiling, and `runCoverChain`
+    // iterates this array in order. Match Reverb used to sit after it: a signal
+    // limited to -0.3 dBFS with the reverb's defaults on top came back at
+    // +0.18 dBFS on a 220 Hz tone and +5.16 dBFS on noise, and `encodeWav` and
+    // the MP3 encoder both hard-clip. The end-to-end proof is in the Ruling C
+    // test below; this is the structural half, so the order cannot drift back
+    // without a failure that names the reason.
+    const touchesAudio = COVER_CHAIN_STAGES.filter((s) => s.effectId !== null);
+    expect(touchesAudio[touchesAudio.length - 1].id).toBe('headroom');
+    expect(coverStageById('headroom').note).toMatch(/Last of every stage that touches the audio/);
+    // And the two stages that can raise a peak both sit ahead of it.
+    const order = COVER_CHAIN_STAGES.map((s) => s.id);
+    expect(order.indexOf('matchReverb')).toBeLessThan(order.indexOf('headroom'));
+    expect(order.indexOf('matchLoudness')).toBeLessThan(order.indexOf('headroom'));
+    // Match Reverb also precedes Match Loudness, because the tail moves the
+    // level that stage promises to set.
+    expect(order.indexOf('matchReverb')).toBeLessThan(order.indexOf('matchLoudness'));
   });
 
   it('names a registered effect for every automatic stage and none for a manual one', () => {
@@ -814,8 +857,17 @@ describe('runCoverChain', () => {
   });
 
   it('reaches all four stage statuses the type declares, and each on the right stage', async () => {
-    // Enumerated from `StageStatus`, not from the ones that came to mind.
-    const ALL_STATUSES: StageStatus[] = ['applied', 'declined', 'off', 'manual'];
+    // Enumerated from `StageStatus` by the COMPILER: a bare `StageStatus[]`
+    // literal is not exhaustiveness-checked, so adding a fifth member (a
+    // 'failed' for the abort path, say) would leave this list at four and the
+    // test still claiming completeness. The Record cannot be short.
+    const EVERY_STATUS: Record<StageStatus, true> = {
+      applied: true,
+      declined: true,
+      off: true,
+      manual: true,
+    };
+    const ALL_STATUSES = Object.keys(EVERY_STATUS) as StageStatus[];
     expect(ALL_STATUSES).toHaveLength(4);
 
     const { refId } = seedPair(takeAudio(), refAudio());
@@ -962,6 +1014,75 @@ describe('runCoverChain', () => {
     });
     expect(resultFor(unguarded!.stages, 'matchLoudness').warning).toMatch(/above full scale/);
     expect(unguarded!.after.peakDb).toBeGreaterThan(0);
+  });
+
+  it('Ruling C holds with Match Reverb ENGAGED, which is when it used to fail', async () => {
+    // The defect this test exists for: Match Reverb was registered AFTER the
+    // limiter, so the last thing to touch the audio was a stage that sums a wet
+    // path onto the dry one and raises peaks. The limiter's own note told the
+    // user that could not happen, `encodeWav` hard-clips, and no test enabled
+    // the two stages together.
+    //
+    // The reference is loud, low-crest AND decaying — alternating near-full-scale
+    // samples under a 30 dB/s fall, an RT60 of 2 s against the effect's 0.711 s
+    // floor — so Match Reverb ENGAGES rather than taking its usual decline. The
+    // take is dense noise 23 dB quieter, so the loudness match lifts it to within
+    // 3 dB of the ceiling and leaves the reverb a signal with real energy to
+    // work on. In the shipped order that combination ends at +3.09 dBFS.
+    const decayingRef = (() => {
+      const out = new Float32Array(N);
+      const cycle = Math.round(SR * 1.0);
+      for (let i = 0; i < N; i++) {
+        out[i] = (i % 2 === 0 ? 0.95 : -0.95) * Math.pow(10, (-30 * ((i % cycle) / SR)) / 20);
+      }
+      return [out];
+    })();
+    const denseTake = [noise(N, 0.05, 5)];
+    const { refId } = seedPair(denseTake, decayingRef);
+
+    const report = await runCoverChain({
+      enabled: only('matchLoudness', 'matchReverb', 'headroom'),
+      referenceDocId: refId,
+    });
+    // The fixture really did exercise the path: the reverb ran, and the
+    // loudness match really did push the peak up towards the ceiling.
+    expect(resultFor(report!.stages, 'matchReverb').status).toBe('applied');
+    expect(resultFor(report!.stages, 'matchLoudness').status).toBe('applied');
+    expect(resultFor(report!.stages, 'headroom').status).toBe('applied');
+    expect(report!.after.peakDb).toBeGreaterThan(report!.before.peakDb);
+
+    // THE promise: the ceiling holds on the OUTPUT. In the shipped order this
+    // came back at +3.09 dBFS.
+    const ceiling = Number(getEffect('limiter')!.params.find((p) => p.id === 'ceilingDb')!.default);
+    expect(report!.after.peakDb).toBeLessThanOrEqual(ceiling + 0.01);
+    expect(report!.after.peakDb).toBeLessThan(0);
+    // And the limiter had real work to do, so that is an outcome the chain
+    // produced rather than one the fixture never threatened.
+    expect(resultFor(report!.stages, 'headroom').detail).toMatch(/caught \d+\.\d\d dB of peak/);
+
+    // Two-sided, because "the ceiling held" is worth nothing unless the stage
+    // after it could have broken it. Run the same two effects in the ORDER THAT
+    // SHIPPED — limiter, then reverb — on the same fixture, and the peak comes
+    // back OVER full scale. The defect is reproduced from the effects
+    // themselves rather than described.
+    const gainDb = gatedLevelDb(decayingRef, SR)! - gatedLevelDb(denseTake, SR)!;
+    const amplified = getEffect('amplify')!.process(
+      denseTake.map((c) => Float32Array.from(c)),
+      SR,
+      { gainDb }
+    ).channels;
+    const limited = getEffect('limiter')!.process(
+      amplified.map((c) => Float32Array.from(c)),
+      SR,
+      { ceilingDb: ceiling, releaseMs: 50 }
+    ).channels;
+    expect(peakDb(limited)).toBeLessThanOrEqual(ceiling + 0.01);
+    const thenReverbed = getEffect('reverb')!.process(
+      limited.map((c) => Float32Array.from(c)),
+      SR,
+      { roomSize: 0.646, damping: 0.5, mix: 0.3, preDelayMs: 10 }
+    ).channels;
+    expect(peakDb(thenReverbed)).toBeGreaterThan(0);
   });
 
   it('the limiter says it did nothing when it had nothing to catch', async () => {

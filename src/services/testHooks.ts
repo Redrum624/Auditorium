@@ -291,6 +291,10 @@ export interface TestApi {
       derived: { label: string; value: string }[];
       detail: string | null;
       identicalFraction: number | null;
+      /** The peaks either side of THIS stage, so a caller can observe what the
+       * limiter was handed rather than only what the whole chain produced. */
+      peakBeforeDb: number | null;
+      peakAfterDb: number | null;
       /** The realised match curve, per band — Ruling B's claim, measured in the
        * packaged app rather than against the predictor alone. */
       eqBands: {
@@ -2235,6 +2239,12 @@ export function installTestHooks(): void {
           derived: stage.derived.map((d) => ({ label: d.label, value: d.value })),
           detail: stage.detail ?? null,
           identicalFraction: stage.delta?.identicalFraction ?? null,
+          // The peaks either side of THIS stage. Exposed because the packaged
+          // step's Ruling C claim is about the peak the LIMITER was handed, and
+          // the chain's own before/after cannot see it — every stage between
+          // them has already run.
+          peakBeforeDb: stage.delta?.peakBeforeDb ?? null,
+          peakAfterDb: stage.delta?.peakAfterDb ?? null,
           eqBands: (stage.eq?.bands ?? []).map((b) => ({
             centreHz: b.centreHz,
             status: b.status,

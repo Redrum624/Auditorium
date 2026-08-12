@@ -146,9 +146,9 @@ export type CoverChainStageId =
   | 'lyrics'
   | 'timing'
   | 'matchEq'
+  | 'matchReverb'
   | 'matchLoudness'
   | 'headroom'
-  | 'matchReverb'
   | 'place';
 
 export interface CoverChainStage {
@@ -227,11 +227,19 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     weight: 56,
   },
   {
+    id: 'matchReverb',
+    label: 'Match Reverb',
+    effectId: 'reverb',
+    defaultEnabled: false,
+    note: `Off by default, and on most material it will DECLINE rather than run. It estimates the original vocal's decay by ISO 3382-1's T20 method — validated against the app's own reverb at 1.26 s where the closed form says 1.45 s and 2.92 s where it says 3.20 s — and then compares it with the shortest decay this app's Reverb can produce. On the song this was measured on the original vocal reads 0.40 s against a floor of 0.710 s, so matching it would add nearly twice the space that is actually there, and the stage says so instead. Turning it on lengthens the region by the tail. It runs AFTER the EQ and BEFORE both level stages, because a tail moves the level and the peak — measured on a 30 s vocal, this reverb's own default room lifts the sounding level by 1.88 dB — so Match Loudness and the Limiter have to be the ones that see it last.`,
+    weight: 32,
+  },
+  {
     id: 'matchLoudness',
     label: 'Match Loudness',
     effectId: 'amplify',
     defaultEnabled: true,
-    note: 'Sets your take to the original vocal\'s level, measured over the SOUNDING parts of each — an ungated comparison carries a bias that is a fact about how much silence each file contains rather than about how loud the singing is (0.7 dB of it on the reference material). Runs after the EQ, because the EQ handed it the level it deliberately left out of its curve.',
+    note: 'Sets your take to the original vocal\'s level, measured over the SOUNDING parts of each — an ungated comparison carries a bias that is a fact about how much silence each file contains rather than about how loud the singing is (0.7 dB of it on the reference material). Runs after the EQ, because the EQ handed it the level it deliberately left out of its curve, and after Match Reverb, because a tail moves the very level this stage is setting.',
     weight: 1,
   },
   {
@@ -239,16 +247,8 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Limiter (headroom)',
     effectId: 'limiter',
     defaultEnabled: true,
-    note: 'The loudness match is arithmetic and has no view on headroom, so this stage owns it, at −0.3 dBFS. Last, so nothing downstream can lift the output back over the ceiling. Measured end to end on the song this was built from it had NOTHING to catch, and says so: the match asked for +9.50 dB and the peak landed at −0.84 dBFS, because the EQ\'s cuts at 1–4 kHz had already taken 0.67 dB off the peak before the gain went on. It earns its place on a take with more crest than that one. Switch it off and Match Loudness will say, with the number, if the result would pass 0 dBFS.',
+    note: 'The loudness match is arithmetic and has no view on headroom, so this stage owns it, at −0.3 dBFS. Last of every stage that touches the audio, so nothing downstream can lift the output back over the ceiling — and that is load-bearing rather than tidy. Match Reverb used to run after it, and a signal limited to −0.3 dBFS with this reverb on top of it comes back OVER full scale: measured at the reverb\'s SHORTEST room, +0.37 dBFS on a 220 Hz tone and +5.34 dBFS on noise, rising to +2.66 and +7.76 at its longest. Both the WAV and the MP3 writer hard-clip that. Measured end to end on the song this was built from it had NOTHING to catch, and says so: the match asked for +9.50 dB and the peak landed at −0.84 dBFS, because the EQ\'s cuts at 1–4 kHz had already taken 0.67 dB off the peak before the gain went on. It earns its place on a take with more crest than that one — and on any take with Match Reverb on. Switch it off and Match Loudness will say, with the number, if the result would pass 0 dBFS.',
     weight: 11,
-  },
-  {
-    id: 'matchReverb',
-    label: 'Match Reverb',
-    effectId: 'reverb',
-    defaultEnabled: false,
-    note: `Off by default, and on most material it will DECLINE rather than run. It estimates the original vocal's decay by ISO 3382-1's T20 method — validated against the app's own reverb at 1.26 s where the closed form says 1.45 s and 2.92 s where it says 3.20 s — and then compares it with the shortest decay this app's Reverb can produce. On the song this was measured on the original vocal reads 0.40 s against a floor of 0.710 s, so matching it would add nearly twice the space that is actually there, and the stage says so instead. Turning it on lengthens the region by the tail.`,
-    weight: 32,
   },
   {
     id: 'place',
