@@ -547,8 +547,11 @@ function writeBeatMarkers(docId: string, positions: number[], truncated: boolean
   // O(n^2 log n) and n renders for a bulk write. Every other bulk marker
   // write in this repo (`fileService.ts`, `sessionFile.ts`) already uses
   // `setMarkersForDoc` for exactly this reason. `setMarkersForDoc` does not
-  // itself mark the document dirty, but the stretch's own `applyEdit` already
-  // did on the success path this function is only reached from.
+  // itself mark the document dirty (the file-load paths share it), but this
+  // path is covered twice over: the stretch's own `applyEdit` already dirtied
+  // the document on the success path this function is only reached from, and
+  // `pushMarkerUndo` below now stamps dirty as well (the L10 fix for marker
+  // writes that arrive with no prior edit, e.g. Suggest Syllable Markers).
   const added: Marker[] = positions.map((positionSample, i) => ({
     id: nextId('marker'),
     name: `Beat ${i + 1}`,
