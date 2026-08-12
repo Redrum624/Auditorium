@@ -270,11 +270,12 @@ export interface RemixSession {
    * NOTHING was guaranteed) from an enforced plan that dropped a specific,
    * named, impossible pin. */
   pinReport: RequiredJoinsReport | null;
-  /** The roll index the CURRENT plan was actually produced at — which is not
-   * necessarily the one the last `reRollRemix` requested, because
-   * `planWithLocks` may have kept a later roll that preserved more locks (fix
-   * round 1). The next press advances from here, so it can never re-serve the
-   * arrangement already on screen. */
+  /** The roll index the CURRENT plan was produced at. Always the index the
+   * caller asked for: the lock-recovery sweep that used to try `rollIndex+1..
+   * +3` and keep whichever attempt preserved more pins is gone (fix round 2 —
+   * see the note on `MAX_LOCKED_JOINS`), so `planWithLocks` returns the
+   * requested index unchanged. The next press advances from here, so it can
+   * never re-serve the arrangement already on screen. */
   rollIndex: number;
   /** True once `nudgeJoin` has hand-edited the arrangement, so the current
    * `plan` is NOT what `planRemix` would return for these options. Any
@@ -316,9 +317,12 @@ export type ToggleLockResult =
  * a user who pins 8 edits is arranging by hand and is better served by 8
  * preferences plus an honest label than by being told "no".
  *
- * Triage runs FIRST, so the cap is on the set that is still standing: pins the
- * user also rejected, and pins that are not a legal splice, are dropped before
- * the count is taken and can bring an over-cap set back under it. */
+ * This cap is enforced at TOGGLE time, on the raw length of
+ * `session.lockedJoins` (`toggleLockJoin` refuses with `'limit-reached'`) —
+ * before any planning, so no triage has happened and none can bring an
+ * over-cap set back under it. The triage-first rule belongs to the OTHER cap:
+ * `remixPlan.ts`'s `MAX_REQUIRED_JOINS = 4`, where pins the caller also forbade
+ * and pins no candidate list contains are dropped before the count is taken. */
 export const MAX_LOCKED_JOINS = 8;
 
 // THE LOCK-RECOVERY SWEEP IS GONE (fix round 2). It used to re-run planning

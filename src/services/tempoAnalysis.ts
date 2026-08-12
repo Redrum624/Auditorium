@@ -1,9 +1,19 @@
 /**
  * THE shared tempo/remix analysis layer (Task T4, v15-architecture.md "Shared
- * analysis layer"). Every consumer (feature 1's BPM readout, feature 2's
- * Change-BPM prefill, feature 3's Auto-Remix) reads through this module —
- * never the worker or `analyzeTempo` directly — so the cache, invalidation
- * and worker choreography live in exactly one place.
+ * analysis layer"). The rule is about the WHOLE-DOCUMENT analysis: every
+ * consumer of it (feature 1's BPM readout, feature 2's Change-BPM prefill,
+ * feature 3's Auto-Remix) reads through this module — never the worker
+ * directly — so the cache, invalidation and worker choreography live in
+ * exactly one place.
+ *
+ * The one deliberate exception is REGION-scoped, uncached analysis:
+ * `tempoService.ts`'s `detectRegionTempo` ('Re-detect from selection') calls
+ * the pure `analyzeTempo` core synchronously on a centred excerpt of the
+ * selection. It bypasses this module BECAUSE it must not write here — caching
+ * an arbitrary region's result under the document's id would poison the
+ * whole-document analysis features 1 and 3 read (see that function's own
+ * comment). So: nothing but this module runs the WORKER, and nothing but a
+ * region-scoped, deliberately uncached read calls `analyzeTempo` itself.
  *
  * ## Cache
  *
@@ -882,15 +892,17 @@ export function regridTempo(docId: string, newPeriodFrames: number): Promise<Tem
 
 /**
  * Test-only: promotes the CURRENT cache row for `docId` (if any) to
- * `level:'remix'` in place, without running the worker. `tempo.worker.ts`'s
- * `deriveRemixFeatures` still throws 'not implemented' (T9 not landed), so a
- * genuine level:'remix' row cannot be produced end-to-end via
- * `runRemixAnalysis` yet — this lets `getRemixAnalysis`'s hard rule
- * (`level !== 'remix' || stale` -> null) be exercised on BOTH arms ahead of
- * T9, rather than only the `level !== 'remix'` arm a tempo-only flow can
- * reach today. Does not fabricate analysis content — it relabels a real,
- * already-cached `TempoAnalysis` (structurally a valid `RemixAnalysis` today,
- * since the latter is still a type alias of the former).
+ * `level:'remix'` in place, without running the worker. T9 has landed —
+ * `tempo.worker.ts` imports and calls the real `deriveRemixFeatures`, so a
+ * genuine level:'remix' row IS producible end-to-end through
+ * `runRemixAnalysis` — but producing one costs the full chroma/bar pass in a
+ * worker. This hook exists so `getRemixAnalysis`'s hard rule
+ * (`level !== 'remix' || stale` -> null) can be exercised on BOTH arms from a
+ * plain tempo-level fixture, at no analysis cost. It does not fabricate
+ * analysis content: it relabels a real, already-cached row, so what it
+ * produces is a `TempoAnalysis` wearing a remix label — enough for the
+ * level/staleness rule under test, and not a substitute for a real
+ * `RemixAnalysis` in tests that read chroma or bar boundaries.
  */
 export function _promoteToRemixLevelForTest(docId: string): void {
   const entry = cache.get(docId);

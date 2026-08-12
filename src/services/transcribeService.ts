@@ -180,7 +180,12 @@ export interface TranscribeProgress {
   fraction: number;
   elapsedMs: number;
   /** Seeded from {@link MEASURED_REALTIME_FACTOR}, then refined from this
-   * run's own measured rate. Never null once a run is under way. */
+   * run's own measured rate. Null while the EMBEDDING phase has nothing to
+   * extrapolate from (`done === 0 || total === 0`): that phase runs at its own
+   * rate, so reusing the decode seed there would be wrong by an order of
+   * magnitude, and a null that renders as "estimating…" is the honest answer.
+   * The resampling/transcribing phases always carry a number (the seed until
+   * their own rate is measurable), and clustering reports 0. */
   estimatedRemainingMs: number | null;
 }
 

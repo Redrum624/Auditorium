@@ -62,8 +62,9 @@ export const UNDO_LIMIT = 50;
  * always kept — once this is exceeded, exactly like `UNDO_LIMIT` (Task M9 /
  * F15). Without this, 50 retained entries of a 2-hour stereo file (each
  * pinning its own pre-edit document snapshot in addition to the live
- * document) would pin roughly 11 GB of PCM; entry-count alone doesn't bound
- * memory, size does. */
+ * document) would pin roughly 127 GB of PCM — one snapshot is
+ * `7200 s * 44100 * 2 ch * 4 B = 2.54 GB`, and the stack retains up to 50 of
+ * them. Entry-count alone doesn't bound memory, size does. */
 export const MAX_UNDO_BYTES = 800 * 1024 * 1024;
 
 /** Sum of `bytes` (0 for entries that omit it) currently retained in `done`. */

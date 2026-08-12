@@ -163,9 +163,11 @@ function effectsSectionItemIds(): (string | 'separator')[] {
   // 'Align Lyrics…' (F6), 'Vocal Chain…' (F7) and 'Cover Chain…' (F10) join it
   // there rather than widening the closed MenuSection['title'] union for a
   // handful of analysis/transform commands (Plan Ruling 5). Vocal Chain sits
-  // directly after Align Vocal Timing because that is the order the two are used
-  // in: the chain's timing stage is manual by design and must be run BEFORE the
-  // chain. Cover Chain sits last of the six for the same reason — the Vocal
+  // after BOTH manual stages — Align Vocal Timing and then Align Lyrics —
+  // because that is the order the three are used in: the chain's timing and
+  // lyrics stages are manual by design and must be run BEFORE the chain (see
+  // `vocalChain.ts`'s stage notes). Cover Chain sits last of the six for the
+  // same reason — the Vocal
   // Chain is a manual stage of it, and its own note says to run it first.
   // The same list appears in the empty-registry branch above; both are here.
   const ids: (string | 'separator')[] = [
@@ -999,9 +1001,12 @@ function registerCoverChainCommands(): void {
  * against (see `vocalChain.ts`'s `lyrics` stage note). It is a command rather
  * than an `effect.<id>` entry for the same structural reason as the chain: it
  * is not one pure `EffectDefinition.process`, it is a model run plus a
- * per-word splice the user drives. Same `enabled` rule as `timing.align` — an
- * active document with audio in it — and no shortcut: a 378 MB download and a
- * multi-second inference should never be one keystroke away. */
+ * per-word splice the user drives. Its `enabled` rule is `timing.align`'s PLUS
+ * one condition: an active document AND `docLength > 0`. `timing.align` asks
+ * only for the document — it opens a dialog that reports its own refusals —
+ * whereas this one hands the region to a model, and an empty document has
+ * nothing to align. No shortcut either: a 378 MB download and a multi-second
+ * inference should never be one keystroke away. */
 function registerAlignLyricsCommands(): void {
   registerCommands([
     {
