@@ -614,7 +614,12 @@ describe('AlignLyricsDialog — the Replace state machine', () => {
 
     const note = screen.getByTestId('align-lyrics-note').textContent ?? '';
     expect(note).toContain('Replaced');
-    expect(note).toContain('semitones');
+    // The FIGURE, not just the word: word 1 is the 220 Hz burst and the take is
+    // 260 Hz, so matching transposes it by 12·log2(220/260) = −2.90 semitones.
+    // A splice that quietly stopped matching pitch reports "+0.00 semitones",
+    // which `toContain('semitones')` accepts.
+    expect(note).toContain('pitch -2.89 semitones');
+    expect(note).not.toContain('+0.00 semitones');
     expect(note).toContain('Undo is one step');
 
     const after = activeDoc().channels[0];

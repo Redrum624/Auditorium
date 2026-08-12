@@ -928,6 +928,28 @@ describe('replaceWord', () => {
     expect(bridge.alignRun.mock.calls.length).toBe(runsBefore);
   });
 
+  it('matches the take to the replaced word’s pitch by default, and reports the shift it made', async () => {
+    const { docId } = await seedAligned();
+    // Word 1 is the 220 Hz burst; the take is 260 Hz. Matching transposes it
+    // by 12·log2(220/260) = −2.90 semitones. `matchPitch` is left unset, which
+    // is what the dialog does — `wordSplice` defaults it to ON, and passing
+    // `req.matchPitch === true` instead of `req.matchPitch` would silently
+    // turn pitch matching off for every replacement the app makes.
+    const result = await replaceWord({
+      docId,
+      wordIndex: 1,
+      replacement: [makeTake(260)],
+      replacementSampleRate: SR,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.report.originalF0Hz).toBeCloseTo(220, 0);
+    expect(result.report.replacementF0Hz).toBeCloseTo(260, 0);
+    expect(result.report.pitchShiftSemitones).toBeCloseTo(12 * Math.log2(220 / 260), 1);
+    // Stated as a number, not just as "non-zero": a disabled match reports 0.
+    expect(result.report.pitchShiftSemitones).toBeCloseTo(-2.9, 1);
+  });
+
   it('resamples a take captured at another rate rather than splicing it at the wrong speed', async () => {
     const { docId, alignment } = await seedAligned();
     const word = alignment.words[1];
