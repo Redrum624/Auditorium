@@ -35,6 +35,17 @@ const REAL_SONG = path.join(
   'DJ Tiësto - Adagio For Strings (Original Album Version).mp3'
 );
 const ABAB = path.join(ROOT, 'test-assets', 'abab120.wav');
+// L7's effect-sweep fixture: four segments (detuned tone / digital silence /
+// noise / tone again) so that EVERY visible effect has material it can change.
+// See scripts/make-test-sweep.cjs for why tone.wav cannot serve — on a pure,
+// in-tune, DC-free, gap-free sine a third of the registry is an exact identity.
+const SWEEP = path.join(ROOT, 'test-assets', 'sweep.wav');
+// Segment boundaries, copied from the generator's own arithmetic (1.2 s / 2.1 s
+// / 3.2 s at 44100). Asserted against the file's real length below.
+const SWEEP_LENGTH = 220500;
+const SWEEP_SILENCE_START = 52920;
+const SWEEP_NOISE_START = 92610;
+const SWEEP_NOISE_END = 141120;
 // F4b transport fixture: 70 s, deliberately longer than one IPC audio slice
 // (see scripts/make-test-long.cjs for the arithmetic).
 const LONG70 = path.join(ROOT, 'test-assets', 'long70.wav');
@@ -63,6 +74,11 @@ const OUT_TRANSCRIPT_SRT = path.join(OUT_DIR, 'transcript.srt');
 const OUT_VOICE_WAV = path.join(OUT_DIR, 'voice-converted.wav');
 const OUT_ALIGN_BEFORE_WAV = path.join(OUT_DIR, 'align-before.wav');
 const OUT_ALIGN_AFTER_WAV = path.join(OUT_DIR, 'align-after.wav');
+// L7: the two files that must NOT open, and the take that must survive a chain
+// and an MP3 round trip.
+const OUT_NOT_AUDIO = path.join(OUT_DIR, 'not-audio.txt');
+const OUT_TRUNCATED_MP3 = path.join(OUT_DIR, 'truncated.mp3');
+const OUT_TAKE_MP3 = path.join(OUT_DIR, 'take.mp3');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 function assert(cond, msg) {
@@ -271,6 +287,7 @@ async function main() {
     [TONE, 'make-test-tone.cjs', 'test tone'],
     [BEAT, 'make-test-beat.cjs', '120 BPM click train'],
     [ABAB, 'make-test-abab.cjs', 'ABAB structure fixture'],
+    [SWEEP, 'make-test-sweep.cjs', 'effect-sweep fixture'],
     [LONG70, 'make-test-long.cjs', '70 s multi-slice transcription fixture'],
     [COVER_REFERENCE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_TAKE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
@@ -297,6 +314,9 @@ async function main() {
     OUT_TRANSCRIPT_SRT,
     OUT_ALIGN_BEFORE_WAV,
     OUT_ALIGN_AFTER_WAV,
+    OUT_NOT_AUDIO,
+    OUT_TRUNCATED_MP3,
+    OUT_TAKE_MP3,
     SHOT,
   ]) {
     if (fs.existsSync(f)) fs.rmSync(f);
@@ -882,7 +902,15 @@ async function main() {
     );
     console.log(`  reopened session: ${JSON.stringify(sessionOpen)}`);
     assert(sessionOpen.docCount === 1, `reopened session recreated 1 document (got ${sessionOpen.docCount})`);
-    assert(sessionOpen.trackCount >= 1, `reopened session has at least 1 track (got ${sessionOpen.trackCount})`);
+    // `>= 1` could not fail: `newSession()` seeds FOUR tracks (sessionStore.ts),
+    // so the old bound passed just as happily on a round trip that restored one
+    // track, or on none at all with the default session still standing. Step 19
+    // already pins `=== 4` for the automation session; this is the same file
+    // format and the same writer, so it gets the same exactness (L7).
+    assert(
+      sessionOpen.trackCount === 4,
+      `reopened session restored all 4 tracks, not just the one carrying a clip (got ${sessionOpen.trackCount})`
+    );
     assert(
       sessionOpen.droppedClipCount === 0,
       `reopened session dropped no clips (got ${sessionOpen.droppedClipCount})`
@@ -990,9 +1018,26 @@ async function main() {
       tempo.stale === false,
       `analysis is fresh against the live audio (expected stale=false, actual stale=${tempo.stale})`
     );
+    // `>= 0` could not fail: a sample INDEX is non-negative by construction, so
+    // any number the tracker returned satisfied it — including a grid a whole
+    // beat out of phase. make-test-beat.cjs places its clicks at exact multiples
+    // of 22050 from sample 0, so the falsifiable statement is that the first
+    // tracked beat lands ON that grid, and on one of its first two clicks (the
+    // tracker legitimately misses the click at sample 0 — there is no onset
+    // context before it — and reports 15 beats, which this suite's beatCount
+    // assertion already tolerates). Measured: 22051, one sample late of the
+    // second click; the 64-sample window is 345x tighter than the beat spacing
+    // it has to distinguish (L7).
+    const BEAT_CLICK_SPACING = 22050;
+    const beatPhase = tempo.firstBeatSample === null ? null : tempo.firstBeatSample % BEAT_CLICK_SPACING;
+    const beatGridError = beatPhase === null ? null : Math.min(beatPhase, BEAT_CLICK_SPACING - beatPhase);
     assert(
-      tempo.firstBeatSample !== null && tempo.firstBeatSample >= 0,
-      `first tracked beat has a real sample position (expected >= 0, actual ${tempo.firstBeatSample})`
+      tempo.firstBeatSample !== null &&
+        tempo.firstBeatSample < 2 * BEAT_CLICK_SPACING &&
+        beatGridError <= 64,
+      `the first tracked beat sits ON the click grid, at one of the first two clicks ` +
+        `(expected < ${2 * BEAT_CLICK_SPACING} and within 64 samples of a multiple of ${BEAT_CLICK_SPACING}, ` +
+        `actual ${tempo.firstBeatSample}, off-grid by ${beatGridError})`
     );
     await waitNonUniform(page, 'waveform-canvas');
     assert(true, 'waveform canvas painted the click train (non-uniform pixels)');
@@ -1047,6 +1092,34 @@ async function main() {
       varGrid.beatCount >= 2,
       `the fixture yields a grid the variable path can use (expected >= 2 beats, actual ${varGrid.beatCount})`
     );
+    // L7 (P1-7): a pre-existing user marker, an audio window and the history
+    // depth, all captured BEFORE the run — this is the code that just shipped
+    // and nothing had ever exercised its undo path.
+    const VAR_MARKER_AT = 30000;
+    const varMarkerId = await page.evaluate(
+      (at) => window.__test.addMarkerToActive(at, 'Vamp'),
+      VAR_MARKER_AT
+    );
+    assert(varMarkerId !== null, 'a user marker sits on the take before the variable match');
+    const varLengthBefore = varSummary.length;
+    // A window that straddles the click at 44100 — beat120.wav is a click TRAIN,
+    // so most of it is digital silence and a window between two clicks warps to
+    // silence-shaped silence. (The anti-vacuous guard below caught exactly that
+    // when this window was first placed at 40000: 0 of 4096 samples "moved",
+    // because there was nothing there to move.)
+    const VAR_WINDOW_AT = 43000;
+    const VAR_WINDOW_LEN = 10000;
+    const varWindowBefore = await page.evaluate(
+      ([at, n]) => window.__test.getChannelSamples(0, at, n),
+      [VAR_WINDOW_AT, VAR_WINDOW_LEN]
+    );
+    const varWindowSignal = varWindowBefore.filter((v) => v !== 0).length;
+    assert(
+      varWindowSignal > 1000,
+      `the window under test holds a real transient, not silence between clicks ` +
+        `(${varWindowSignal} of ${VAR_WINDOW_LEN} samples are non-zero)`
+    );
+    const varHistoryBefore = await page.evaluate(() => window.__test.getHistoryState());
     const varTempo = await page.evaluate(() => window.__test.changeTempoVariable(90, true));
     console.log(`  changeTempoVariable: ${JSON.stringify({ ...varTempo, beatMarkers: varTempo.beatMarkers.length })}`);
     assert(
@@ -1102,6 +1175,78 @@ async function main() {
         `the LAST post-match beat gap is too (expected ~${Math.round(want)}, actual ${last})`
       );
     }
+
+    // L7 (P1-7) — AND BACK AGAIN. The variable path had shipped with no packaged
+    // coverage of the way out of it, which is the half a user reaches for when a
+    // match sounds wrong. Its documented cost (tempoService.ts) is up to THREE
+    // history entries per Apply — `Match Tempo`, `Match Tempo Markers`,
+    // `Add Beat Markers` — so the assertion is on the depth the run declares and
+    // on what unwinding exactly that many entries restores. Nothing here is a
+    // proxy: the length is `===`, the audio is compared sample by sample, and the
+    // user's own marker has to come back to the sample it was placed on, not to
+    // the proportionally-displaced position the stretch's own remap left it at.
+    const varHistoryAfter = await page.evaluate(() => window.__test.getHistoryState());
+    const varEntries = varHistoryAfter.done.length - varHistoryBefore.done.length;
+    console.log(`  history after the match: ${JSON.stringify(varHistoryAfter.done)}`);
+    assert(
+      varEntries === 3 &&
+        varHistoryAfter.done.slice(-3).join(' | ') ===
+          'Match Tempo | Match Tempo Markers | Add Beat Markers',
+      `one Apply left exactly the three history entries it documents ` +
+        `(got ${varEntries}: ${JSON.stringify(varHistoryAfter.done.slice(-3))})`
+    );
+    const varMarkersAfter = await page.evaluate(() => window.__test.getActiveMarkers());
+    const varVampAfter = varMarkersAfter.filter((m) => m.name === 'Vamp')[0];
+    assert(
+      varVampAfter !== undefined && varVampAfter.positionSample !== VAR_MARKER_AT,
+      `the user marker MOVED with the warp — without this the restore below would ` +
+        `pass on a match that never touched it (was ${VAR_MARKER_AT}, now ${varVampAfter && varVampAfter.positionSample})`
+    );
+    const varWindowAfter = await page.evaluate(
+      ([at, n]) => window.__test.getChannelSamples(0, at, n),
+      [VAR_WINDOW_AT, VAR_WINDOW_LEN]
+    );
+    let varWindowMoved = 0;
+    for (let i = 0; i < varWindowBefore.length; i++) {
+      if (varWindowAfter[i] !== varWindowBefore[i]) varWindowMoved++;
+    }
+    // The threshold is derived from the window's OWN content rather than picked:
+    // the warp carries this click away from where it was, so at minimum every
+    // sample that used to be non-zero has to have changed.
+    assert(
+      varWindowMoved >= varWindowSignal,
+      `and the AUDIO moved too, so a restore has something to restore ` +
+        `(${varWindowMoved} of ${VAR_WINDOW_LEN} samples differ, and ${varWindowSignal} carried the transient)`
+    );
+    for (let i = 0; i < varEntries; i++) {
+      await page.evaluate(() => window.__test.undoActive());
+    }
+    const varRestored = await page.evaluate(() => window.__test.getStateSummary());
+    const varWindowRestored = await page.evaluate(
+      ([at, n]) => window.__test.getChannelSamples(0, at, n),
+      [VAR_WINDOW_AT, VAR_WINDOW_LEN]
+    );
+    let varWindowMismatch = 0;
+    for (let i = 0; i < varWindowBefore.length; i++) {
+      if (varWindowRestored[i] !== varWindowBefore[i]) varWindowMismatch++;
+    }
+    assert(
+      varRestored.length === varLengthBefore,
+      `${varEntries} undos restore the take's exact length (expected ${varLengthBefore}, actual ${varRestored.length})`
+    );
+    assert(
+      varWindowMismatch === 0,
+      `and its exact SAMPLES — not a dB proxy, a bit-for-bit window ` +
+        `(${varWindowMismatch} of ${varWindowBefore.length} still differ)`
+    );
+    const varMarkersRestored = await page.evaluate(() => window.__test.getActiveMarkers());
+    assert(
+      varMarkersRestored.length === 1 &&
+        varMarkersRestored[0].name === 'Vamp' &&
+        varMarkersRestored[0].positionSample === VAR_MARKER_AT,
+      `the beat grid is gone and the user's marker is back on its own sample ` +
+        `(expected one 'Vamp' at ${VAR_MARKER_AT}, actual ${JSON.stringify(varMarkersRestored)})`
+    );
     await page.evaluate((out) => window.__test.saveActiveAs(out), OUT_WAV);
 
     // 11b) F9 — Align Vocal Timing, end to end in the PACKAGED app: detect the
@@ -4157,6 +4302,743 @@ async function main() {
       // Persist, so teardown does not meet a dirty document.
       await page.evaluate((p) => window.__test.saveActiveAs(p), OUT_ALIGN_AFTER_WAV);
     }
+
+    // ======================================================================
+    // L7 — the edits a user makes every minute, driven the way a user makes
+    // them. Everything above this line runs whole-document, because until L7
+    // no hook could WRITE a selection; these steps are the ones that can see
+    // the region-boundary defect class at all.
+    // ======================================================================
+    await page.evaluate(() => window.__test.setView('waveform'));
+
+    /** Bit-for-bit difference count between two sample windows. */
+    const diffCount = (a, b) => {
+      let n = 0;
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++;
+      return n;
+    };
+    const samplesOf = (channel, start, count) =>
+      page.evaluate(
+        ([c, s, n]) => window.__test.getChannelSamples(c, s, n),
+        [channel, start, count]
+      );
+    const stateOf = () => page.evaluate(() => window.__test.getStateSummary());
+    const historyOf = () => page.evaluate(() => window.__test.getHistoryState());
+    /** Runs an effect with a hard in-page deadline. A failing effect resolves
+     * through `reportEffectFailure`'s error dialog rather than rejecting, and a
+     * wedged worker would hang `page.evaluate` forever with no diagnosis at
+     * all; racing a timer turns both into a named, RED assertion. */
+    const applyEffectGuarded = (effectId, params, extra, timeoutMs = 120000) =>
+      page.evaluate(
+        async ({ id, p, x, ms }) => {
+          let timer = null;
+          const deadline = new Promise((resolve) => {
+            timer = setTimeout(() => resolve('TIMED OUT'), ms);
+          });
+          const run = window.__test.applyEffect(id, p, x).then(
+            () => 'ok',
+            (err) => `THREW: ${(err && err.message) || String(err)}`
+          );
+          const outcome = await Promise.race([run, deadline]);
+          if (timer !== null) clearTimeout(timer);
+          return outcome;
+        },
+        { id: effectId, p: params, x: extra, ms: timeoutMs }
+      );
+
+    // L7-1) A REGION effect leaves the rest of the file alone -----------------
+    // The single highest-value thing this file did not do. `runEffectOnSelection`
+    // clones [s,e), runs the worker on that clone and splices it back; every
+    // packaged run so far had s=0 and e=length, so the splice was the whole file
+    // and neither edge was ever observed. What is asserted here is exactly what
+    // the user believes when they drag a selection: outside it, nothing moved —
+    // not "moved a little", `=== 0` worst error — and the two samples either side
+    // of the closing edge fall on opposite sides of the change.
+    console.log('Selection + region effect: Amplify -12 dB over [20000, 50000)...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const REGION_S = 20000;
+    const REGION_E = 50000;
+    const regionBefore = await stateOf();
+    const regionInsideBefore = await samplesOf(0, REGION_S, REGION_E - REGION_S);
+    const regionHeadBefore = await samplesOf(0, 0, REGION_S);
+    const regionTailBefore = await samplesOf(0, REGION_E, 4096);
+    const regionEdgeBefore = await samplesOf(0, REGION_E - 1, 2); // samples e-1 and e
+    const regionSel = await page.evaluate(
+      ([s, e]) => window.__test.setSelection(s, e),
+      [REGION_S, REGION_E]
+    );
+    const regionView = await page.evaluate(() => window.__test.getEditorViewState());
+    assert(
+      regionSel !== null &&
+        regionView.selectionStart === REGION_S &&
+        regionView.selectionEnd === REGION_E,
+      `the store holds the selection the gesture would have committed (${regionView.selectionStart}..${regionView.selectionEnd})`
+    );
+    const regionOutcome = await applyEffectGuarded('amplify', { gainDb: -12 });
+    assert(regionOutcome === 'ok', `the region effect ran (${regionOutcome})`);
+    const regionInsideAfter = await samplesOf(0, REGION_S, REGION_E - REGION_S);
+    const regionHeadAfter = await samplesOf(0, 0, REGION_S);
+    const regionTailAfter = await samplesOf(0, REGION_E, 4096);
+    const regionEdgeAfter = await samplesOf(0, REGION_E - 1, 2);
+    const regionAfter = await stateOf();
+
+    const REGION_GAIN = Math.pow(10, -12 / 20);
+    let regionWorstInside = 0;
+    for (let i = 0; i < regionInsideBefore.length; i++) {
+      const err = Math.abs(regionInsideAfter[i] - regionInsideBefore[i] * REGION_GAIN);
+      if (err > regionWorstInside) regionWorstInside = err;
+    }
+    let regionWorstOutside = 0;
+    for (let i = 0; i < regionHeadBefore.length; i++) {
+      const err = Math.abs(regionHeadAfter[i] - regionHeadBefore[i]);
+      if (err > regionWorstOutside) regionWorstOutside = err;
+    }
+    for (let i = 0; i < regionTailBefore.length; i++) {
+      const err = Math.abs(regionTailAfter[i] - regionTailBefore[i]);
+      if (err > regionWorstOutside) regionWorstOutside = err;
+    }
+    console.log(
+      `  worst error inside ${regionWorstInside.toExponential(3)}, outside ${regionWorstOutside}, ` +
+        `edge ${regionEdgeBefore[0].toFixed(6)}->${regionEdgeAfter[0].toFixed(6)} | ` +
+        `${regionEdgeBefore[1].toFixed(6)}->${regionEdgeAfter[1].toFixed(6)}`
+    );
+    assert(
+      regionAfter.length === regionBefore.length,
+      `an equal-length effect over a region leaves the document length alone (${regionAfter.length})`
+    );
+    assert(
+      regionWorstOutside === 0,
+      `not one sample OUTSIDE the selection moved by a single bit (worst absolute error ${regionWorstOutside})`
+    );
+    assert(
+      regionWorstInside < 1e-6,
+      `every sample inside is the source scaled by 10^(-12/20) (worst error ${regionWorstInside.toExponential(3)})`
+    );
+    assert(
+      regionEdgeAfter[0] !== regionEdgeBefore[0],
+      `the LAST selected sample (e-1 = ${REGION_E - 1}) changed — the region is half-open at the right, not one short`
+    );
+    assert(
+      regionEdgeAfter[1] === regionEdgeBefore[1],
+      `and the FIRST unselected one (e = ${REGION_E}) did not — not one long either`
+    );
+    const regionViewAfter = await page.evaluate(() => window.__test.getEditorViewState());
+    assert(
+      regionViewAfter.selectionStart === REGION_S && regionViewAfter.selectionEnd === REGION_E,
+      `the selection still spans the region that was processed, so Apply can be repeated ` +
+        `(${regionViewAfter.selectionStart}..${regionViewAfter.selectionEnd})`
+    );
+
+    // L7-2) Undo, redo, undo — the two keys pressed most often ---------------
+    // The cover chain's undo block is the strongest in this file; this is that
+    // block's rigor on Ctrl+Z / Ctrl+Y, which had NO packaged coverage of redo
+    // at all (no hook existed) and only ever checked undo through a length or a
+    // peak. The window is compared with `===`, and the anti-vacuous guard is the
+    // load-bearing part: without "pre differs from post" the whole round trip
+    // passes on an effect that did nothing.
+    console.log('Undo -> Redo -> Undo, byte-for-byte...');
+    const undoWindowPre = regionInsideBefore.slice(0, 4096);
+    const undoWindowPost = regionInsideAfter.slice(0, 4096);
+    assert(
+      diffCount(undoWindowPre, undoWindowPost) > undoWindowPre.length / 2,
+      `the effect actually changed the window under test — without this guard every ` +
+        `assertion below passes on a no-op (${diffCount(undoWindowPre, undoWindowPost)} of ${undoWindowPre.length} differ)`
+    );
+    const historyAfterEffect = await historyOf();
+    assert(
+      historyAfterEffect.done.slice(-1)[0] === 'Effect: Amplify' &&
+        historyAfterEffect.undone.length === 0,
+      `History shows the entry the user would click (${JSON.stringify(historyAfterEffect)})`
+    );
+    const undone = await page.evaluate(() => window.__test.undoActive());
+    const undoneWindow = await samplesOf(0, REGION_S, 4096);
+    assert(
+      undone.length === regionBefore.length && diffCount(undoneWindow, undoWindowPre) === 0,
+      `Ctrl+Z restores the pre-effect samples EXACTLY (${diffCount(undoneWindow, undoWindowPre)} of ${undoWindowPre.length} still differ)`
+    );
+    const historyAfterUndo = await historyOf();
+    assert(
+      historyAfterUndo.done.length === historyAfterEffect.done.length - 1 &&
+        historyAfterUndo.undone.slice(-1)[0] === 'Effect: Amplify',
+      `and the entry moved to the redo side of History (${JSON.stringify(historyAfterUndo)})`
+    );
+    const redone = await page.evaluate(() => window.__test.redoActive());
+    const redoneWindow = await samplesOf(0, REGION_S, 4096);
+    assert(
+      redone.length === regionAfter.length && diffCount(redoneWindow, undoWindowPost) === 0,
+      `Ctrl+Y puts the processed samples back EXACTLY (${diffCount(redoneWindow, undoWindowPost)} of ${undoWindowPost.length} differ)`
+    );
+    const undoneAgain = await page.evaluate(() => window.__test.undoActive());
+    const undoneAgainWindow = await samplesOf(0, REGION_S, 4096);
+    assert(
+      undoneAgain.length === regionBefore.length && diffCount(undoneAgainWindow, undoWindowPre) === 0,
+      `and a second Ctrl+Z after the redo lands on the original again, not somewhere new ` +
+        `(${diffCount(undoneAgainWindow, undoWindowPre)} differ)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-3) The four edit operations, each over a real region -----------------
+    console.log('Cut / Delete / Trim / Silence over [20000, 50000)...');
+    const EDIT_LEN = REGION_E - REGION_S;
+
+    // Cut: the join is the assertion. After removing [s,e) the sample sitting at
+    // index s must be the one that used to sit at index e — a seam that dropped
+    // or duplicated a sample still has the right LENGTH.
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const cutBefore = await stateOf();
+    const cutAtStart = await samplesOf(0, REGION_S, 32);
+    const cutAtEnd = await samplesOf(0, REGION_E, 32);
+    await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
+    await page.evaluate(() => window.__test.editOp('cut'));
+    const cutAfter = await stateOf();
+    const cutJoin = await samplesOf(0, REGION_S, 32);
+    const cutClip = await page.evaluate(() => window.__test.getClipboardInfo());
+    console.log(`  cut: ${cutBefore.length} -> ${cutAfter.length}, clipboard ${JSON.stringify(cutClip)}`);
+    assert(
+      cutAfter.length === cutBefore.length - EDIT_LEN,
+      `Cut removed exactly the selection (expected ${cutBefore.length - EDIT_LEN}, actual ${cutAfter.length})`
+    );
+    assert(
+      diffCount(cutJoin, cutAtEnd) === 0,
+      `the join is seamless: what now sits at ${REGION_S} is what used to sit at ${REGION_E} ` +
+        `(${diffCount(cutJoin, cutAtEnd)} of 32 differ)`
+    );
+    assert(
+      cutClip !== null &&
+        cutClip.length === EDIT_LEN &&
+        cutClip.sampleRate === cutBefore.sampleRate &&
+        cutClip.channels === cutBefore.channels,
+      `and the removed audio is on the clipboard, whole (${JSON.stringify(cutClip)})`
+    );
+    const cutUndone = await page.evaluate(() => window.__test.undoActive());
+    const cutRestored = await samplesOf(0, REGION_S, 32);
+    assert(
+      cutUndone.length === cutBefore.length && diffCount(cutRestored, cutAtStart) === 0,
+      `one undo restores the length AND the bytes (${cutUndone.length} samples, ${diffCount(cutRestored, cutAtStart)} of 32 differ)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // Delete: same removal, and the clipboard is NOT touched. A distinctive
+    // 1000-sample copy is put on the clipboard first, so "unchanged" is a real
+    // observation rather than the absence of one.
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const delBefore = await stateOf();
+    const delAtEnd = await samplesOf(0, REGION_E, 32);
+    await page.evaluate(() => window.__test.setSelection(0, 1000));
+    await page.evaluate(() => window.__test.editOp('copy'));
+    await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
+    await page.evaluate(() => window.__test.editOp('delete'));
+    const delAfter = await stateOf();
+    const delJoin = await samplesOf(0, REGION_S, 32);
+    const delClip = await page.evaluate(() => window.__test.getClipboardInfo());
+    assert(
+      delAfter.length === delBefore.length - EDIT_LEN && diffCount(delJoin, delAtEnd) === 0,
+      `Delete removes the selection and joins it seamlessly (${delAfter.length} samples, ${diffCount(delJoin, delAtEnd)} of 32 differ at the join)`
+    );
+    assert(
+      delClip !== null && delClip.length === 1000,
+      `and leaves the clipboard exactly as it was — Delete is not a Cut (clipboard holds ${delClip && delClip.length} samples)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // Trim to selection: everything but the selection goes, and what survives
+    // starts with the sample that used to be at s.
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const trimAtStart = await samplesOf(0, REGION_S, 32);
+    const trimBefore = await stateOf();
+    await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
+    await page.evaluate(() => window.__test.editOp('trim'));
+    const trimAfter = await stateOf();
+    const trimHead = await samplesOf(0, 0, 32);
+    assert(
+      trimAfter.length === EDIT_LEN,
+      `Trim keeps exactly the selection (expected ${EDIT_LEN}, actual ${trimAfter.length})`
+    );
+    assert(
+      diffCount(trimHead, trimAtStart) === 0,
+      `and what it kept starts at the selection's own first sample (${diffCount(trimHead, trimAtStart)} of 32 differ)`
+    );
+    const trimUndone = await page.evaluate(() => window.__test.undoActive());
+    const trimRestored = await samplesOf(0, REGION_S, 32);
+    assert(
+      trimUndone.length === trimBefore.length && diffCount(trimRestored, trimAtStart) === 0,
+      `one undo brings the whole file back, bytes included (${trimUndone.length} samples, ${diffCount(trimRestored, trimAtStart)} differ)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // Silence: length unchanged, the region is EXACTLY zero, and — the part a
+    // length check cannot see — the samples on both sides are untouched.
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const silBefore = await stateOf();
+    const silHeadBefore = await samplesOf(0, REGION_S - 32, 32);
+    const silTailBefore = await samplesOf(0, REGION_E, 32);
+    await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
+    await page.evaluate(() => window.__test.editOp('silence'));
+    const silAfter = await stateOf();
+    const silInside = await samplesOf(0, REGION_S, 4096);
+    const silHeadAfter = await samplesOf(0, REGION_S - 32, 32);
+    const silTailAfter = await samplesOf(0, REGION_E, 32);
+    const silNonZero = silInside.filter((v) => v !== 0).length;
+    assert(
+      silAfter.length === silBefore.length && silNonZero === 0,
+      `Silence zero-fills the region in place (${silAfter.length} samples, ${silNonZero} non-zero inside)`
+    );
+    assert(
+      diffCount(silHeadAfter, silHeadBefore) === 0 && diffCount(silTailAfter, silTailBefore) === 0,
+      `and stops at both edges (${diffCount(silHeadAfter, silHeadBefore)} before, ${diffCount(silTailAfter, silTailBefore)} after)`
+    );
+    const silUndone = await page.evaluate(() => window.__test.undoActive());
+    const silRestored = await samplesOf(0, REGION_S, 4096);
+    assert(
+      silUndone.length === silBefore.length && silRestored.filter((v) => v !== 0).length > 4000,
+      `and one undo brings the audio back into the hole (${silRestored.filter((v) => v !== 0).length} of 4096 non-zero again)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-4) An edit moves the markers -----------------------------------------
+    // Markers had only ever round-tripped through FILE FORMATS in this file,
+    // never through an EDIT. Deleting [s,e): a marker before it stays put, one
+    // inside it is dropped (editOps' 'delete' rule), and one after it lands at
+    // exactly P - (e - s) — an exact integer, so no tolerance is warranted.
+    console.log('An edit moves the markers: delete a region under three of them...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const MARK_BEFORE = 10000;
+    const MARK_INSIDE = 30000;
+    const MARK_AFTER = 60000;
+    for (const [at, name] of [
+      [MARK_BEFORE, 'Intro'],
+      [MARK_INSIDE, 'Doomed'],
+      [MARK_AFTER, 'Chorus'],
+    ]) {
+      const id = await page.evaluate(
+        ([p, n]) => window.__test.addMarkerToActive(p, n),
+        [at, name]
+      );
+      assert(id !== null, `marker '${name}' placed at ${at}`);
+    }
+    await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
+    await page.evaluate(() => window.__test.editOp('delete'));
+    const markersAfterEdit = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  markers after deleting [${REGION_S}, ${REGION_E}): ${JSON.stringify(markersAfterEdit)}`);
+    const markIntro = markersAfterEdit.filter((m) => m.name === 'Intro')[0];
+    const markChorus = markersAfterEdit.filter((m) => m.name === 'Chorus')[0];
+    assert(
+      markIntro !== undefined && markIntro.positionSample === MARK_BEFORE,
+      `the marker BEFORE the cut did not move (expected ${MARK_BEFORE}, actual ${markIntro && markIntro.positionSample})`
+    );
+    assert(
+      markChorus !== undefined && markChorus.positionSample === MARK_AFTER - EDIT_LEN,
+      `the marker AFTER it moved left by exactly the removed length ` +
+        `(expected ${MARK_AFTER - EDIT_LEN}, actual ${markChorus && markChorus.positionSample})`
+    );
+    assert(
+      markersAfterEdit.filter((m) => m.name === 'Doomed').length === 0,
+      `and the one INSIDE the deleted region went with the audio it marked (${markersAfterEdit.length} markers left)`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+    const markersAfterUndo = await page.evaluate(() => window.__test.getActiveMarkers());
+    assert(
+      markersAfterUndo.length === 3 &&
+        markersAfterUndo[0].positionSample === MARK_BEFORE &&
+        markersAfterUndo[1].positionSample === MARK_INSIDE &&
+        markersAfterUndo[2].positionSample === MARK_AFTER,
+      `one undo brings all three back to their own samples — the marker remap rides ` +
+        `inside the SAME history entry as the audio (${JSON.stringify(markersAfterUndo)})`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-5) Every effect in the menu applies ----------------------------------
+    // Twelve of the twenty-five had never executed in the packaged app at all.
+    // The roster comes from the registry's OWN visible list (a hardcoded one is
+    // how a stale count broke a release here), and each id is run at settings
+    // that give it something to do on sweep.wav — its declared defaults, with an
+    // override ONLY where the default is the identity (0 dB of gain, a ceiling
+    // above the peak, ...). There is no no-op allowlist: sweep.wav exists
+    // precisely so every visible effect has material it must change.
+    console.log('Every effect in the menu, applied for real in the packaged app...');
+    const sweepProbeAt = 150000; // inside the fixture's second tone segment
+    const sweepNoiseProbeAt = 100000; // inside its noise segment
+    const SWEEP_PROBE_LEN = 4096;
+    const sweepOpen = await page.evaluate(async (p) => {
+      await window.__test.openPath(p);
+      return window.__test.getStateSummary();
+    }, SWEEP);
+    assert(
+      sweepOpen.length === SWEEP_LENGTH && sweepOpen.channels === 2 && sweepOpen.sampleRate === 44100,
+      `sweep.wav is the fixture this step's segment offsets describe (${JSON.stringify(sweepOpen)})`
+    );
+    const sweepSilence = await page.evaluate(
+      ([s, n]) => window.__test.getChannelSamples(0, s, n),
+      [SWEEP_SILENCE_START + 1000, 1024]
+    );
+    assert(
+      sweepSilence.filter((v) => v !== 0).length === 0,
+      `its silent segment really is digital zero, so Remove Silence has a gap to find ` +
+        `(${sweepSilence.filter((v) => v !== 0).length} non-zero samples)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // The only settings that differ from the effect's own declared defaults, and
+    // why each one has to.
+    const SWEEP_OVERRIDES = {
+      amplify: { gainDb: -3 }, // default 0 dB is unity
+      limiter: { ceilingDb: -12 }, // the fixture peaks at -4.7 dBFS, under the -0.3 default
+      'noise-gate': { thresholdDb: -20 }, // the -50 default never closes on this material
+      'graphic-eq': { g1k: 6 }, // every band defaults to 0 dB (skipped as identity)
+      'parametric-eq': { band2Gain: 6 }, // band 2 is on by default at 400 Hz, at 0 dB
+      'channel-mixer': { lrGain: 30 }, // the default matrix is the identity
+      pan: { pan: 40 }, // 0 is centre, i.e. unchanged
+      'time-stretch': { stretchPercent: 120 }, // 100% is unity
+      'pitch-shift': { semitones: 2 }, // 0 semitones is a documented byte-identical pass-through
+    };
+    const sweepEffects = await page.evaluate(() => window.__test.listEffects());
+    console.log(`  the Effects menu offers ${sweepEffects.length} effects; running every one`);
+    assert(
+      sweepEffects.length >= 25,
+      `the registry's own visible roster is what is being swept (${sweepEffects.length} effects)`
+    );
+    for (const effect of sweepEffects) {
+      await page.evaluate((p) => window.__test.openPath(p), SWEEP);
+      await page.evaluate(() => window.__test.clearSelection());
+      const lengthBefore = (await stateOf()).length;
+      const toneBefore = await samplesOf(0, sweepProbeAt, SWEEP_PROBE_LEN);
+      const noiseBefore = await samplesOf(0, sweepNoiseProbeAt, SWEEP_PROBE_LEN);
+
+      // Noise Reduction is the one effect the app itself feeds a side channel:
+      // EffectDialog hands it the captured print. Capture it the way a user
+      // would — select the noise, Capture Noise Print, drop the selection —
+      // rather than inventing a spectrum here.
+      let extra;
+      if (effect.id === 'noise-reduction') {
+        await page.evaluate(
+          ([s, e]) => window.__test.setSelection(s, e),
+          [SWEEP_NOISE_START, SWEEP_NOISE_END]
+        );
+        await page.evaluate(() => window.__test.captureNoisePrint());
+        const spectra = await page.evaluate(() => window.__test.getNoiseProfileSpectra());
+        await page.evaluate(() => window.__test.clearSelection());
+        assert(
+          spectra !== null && spectra.length === 2,
+          `a noise print was captured from the fixture's noise segment (${spectra && spectra.length} channels)`
+        );
+        extra = { spectra };
+      }
+
+      const params = { ...effect.params, ...(SWEEP_OVERRIDES[effect.id] || {}) };
+      const historyBefore = await historyOf();
+      const outcome = await applyEffectGuarded(effect.id, params, extra);
+      const historyAfter = await historyOf();
+      const lengthAfter = (await stateOf()).length;
+      const toneAfter = await samplesOf(0, sweepProbeAt, SWEEP_PROBE_LEN);
+      const noiseAfter = await samplesOf(0, sweepNoiseProbeAt, SWEEP_PROBE_LEN);
+      const label = historyAfter.done.slice(-1)[0] || null;
+      const changed = diffCount(toneBefore, toneAfter) + diffCount(noiseBefore, noiseAfter);
+      const nonFinite =
+        toneAfter.filter((v) => !Number.isFinite(v)).length +
+        noiseAfter.filter((v) => !Number.isFinite(v)).length;
+      console.log(
+        `  ${effect.id}: ${outcome}, ${lengthBefore} -> ${lengthAfter} samples, ` +
+          `${changed} of ${2 * SWEEP_PROBE_LEN} probe samples changed, history "${label}"`
+      );
+      assert(
+        outcome === 'ok' &&
+          historyAfter.done.length === historyBefore.done.length + 1 &&
+          String(label).indexOf(`Effect: ${effect.name}`) === 0,
+        `${effect.id} ran in the packaged worker and committed ONE undoable edit ` +
+          `(${outcome}, +${historyAfter.done.length - historyBefore.done.length} entries, label ${JSON.stringify(label)})`
+      );
+      assert(
+        changed > 0,
+        `${effect.id} actually changed the audio — no allowlist, the fixture gives it something to do ` +
+          `(${changed} of ${2 * SWEEP_PROBE_LEN} probe samples)`
+      );
+      assert(
+        nonFinite === 0,
+        `${effect.id} produced no NaN or Infinity (${nonFinite} non-finite samples)`
+      );
+      const restored = await page.evaluate(() => window.__test.undoActive());
+      const toneRestored = await samplesOf(0, sweepProbeAt, SWEEP_PROBE_LEN);
+      const noiseRestored = await samplesOf(0, sweepNoiseProbeAt, SWEEP_PROBE_LEN);
+      assert(
+        restored.length === lengthBefore &&
+          diffCount(toneRestored, toneBefore) === 0 &&
+          diffCount(noiseRestored, noiseBefore) === 0,
+        `and one undo restores ${effect.id} byte-for-byte in both probed regions ` +
+          `(${restored.length} samples, ${diffCount(toneRestored, toneBefore) + diffCount(noiseRestored, noiseBefore)} differ)`
+      );
+      await page.evaluate(() => window.__test.closeActive());
+    }
+
+    // Two free, genuinely falsifiable identities: an effect that is its own
+    // inverse must return the file to itself EXACTLY, and a floating-point
+    // pipeline that quietly resampled or requantised would not.
+    for (const id of ['invert', 'reverse']) {
+      await page.evaluate((p) => window.__test.openPath(p), SWEEP);
+      await page.evaluate(() => window.__test.clearSelection());
+      const identityBefore = await samplesOf(0, sweepProbeAt, SWEEP_PROBE_LEN);
+      const once = await applyEffectGuarded(id, {});
+      const identityOnce = await samplesOf(0, sweepProbeAt, SWEEP_PROBE_LEN);
+      const twice = await applyEffectGuarded(id, {});
+      const identityTwice = await samplesOf(0, sweepProbeAt, SWEEP_PROBE_LEN);
+      assert(
+        once === 'ok' && twice === 'ok' && diffCount(identityBefore, identityOnce) > 0,
+        `${id} applied twice, and the first pass really moved the samples ` +
+          `(${diffCount(identityBefore, identityOnce)} of ${SWEEP_PROBE_LEN} differ after one)`
+      );
+      assert(
+        diffCount(identityBefore, identityTwice) === 0,
+        `${id} twice is the exact identity — bit for bit, not nearly ` +
+          `(${diffCount(identityBefore, identityTwice)} of ${SWEEP_PROBE_LEN} differ)`
+      );
+      await page.evaluate(() => window.__test.closeActive());
+    }
+
+    // L7-6) A file that will not decode ---------------------------------------
+    // The failure has to be survivable, not just reported: no half-added
+    // document, and the next open still works. `openFilesViaDialog` catches per
+    // file and carries on, which is exactly what is reproduced here.
+    console.log('Files that will not decode: a .txt and a truncated .mp3...');
+    fs.writeFileSync(OUT_NOT_AUDIO, 'This is a sentence, not a waveform.\n');
+    fs.writeFileSync(OUT_TRUNCATED_MP3, fs.readFileSync(OUT_MP3).subarray(0, 400));
+    const docsBeforeBadOpen = (await stateOf()).docCount;
+    for (const [bad, what] of [
+      [OUT_NOT_AUDIO, 'a text file'],
+      [OUT_TRUNCATED_MP3, 'a truncated MP3'],
+    ]) {
+      const failure = await page.evaluate(async (p) => {
+        try {
+          await window.__test.openPath(p);
+          return null;
+        } catch (err) {
+          return (err && err.message) || String(err);
+        }
+      }, bad);
+      const docsNow = (await stateOf()).docCount;
+      console.log(`  ${what}: ${JSON.stringify(failure)}, docCount ${docsNow}`);
+      assert(
+        failure !== null,
+        `opening ${what} reports a failure instead of pretending to succeed (${JSON.stringify(failure)})`
+      );
+      assert(
+        docsNow === docsBeforeBadOpen,
+        `and adds no document, not even a half-built one (${docsNow} open, was ${docsBeforeBadOpen})`
+      );
+    }
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const afterBadOpens = await stateOf();
+    assert(
+      afterBadOpens.docCount === docsBeforeBadOpen + 1 && afterBadOpens.length === 88200,
+      `and the app is still usable afterwards — the next open works normally (${JSON.stringify(afterBadOpens)})`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-7) Stereo -> mono -> stereo -------------------------------------------
+    // Edit > Convert Channels had ZERO packaged coverage. The downmix law is
+    // documented as (L+R)/2 (AudioDocument.mixDown), so it is asserted as
+    // arithmetic rather than as "the level looks about right".
+    console.log('Convert Channels: stereo -> mono -> stereo...');
+    await page.evaluate((p) => window.__test.openPath(p), SWEEP);
+    const convBefore = await stateOf();
+    const convL = await samplesOf(0, 1000, 1024);
+    const convR = await samplesOf(1, 1000, 1024);
+    await page.evaluate(() => window.__test.convertChannels(1));
+    const convMonoState = await stateOf();
+    const convMono = await samplesOf(0, 1000, 1024);
+    let convWorst = 0;
+    for (let i = 0; i < convMono.length; i++) {
+      const err = Math.abs(convMono[i] - (convL[i] + convR[i]) / 2);
+      if (err > convWorst) convWorst = err;
+    }
+    assert(
+      convMonoState.channels === 1 && convMonoState.length === convBefore.length,
+      `the document reads as mono, at its original length (${convMonoState.channels} ch, ${convMonoState.length} samples)`
+    );
+    assert(
+      diffCount(convL, convR) > convL.length / 2,
+      `the source's two channels really were different, so the downmix below is not ` +
+        `a comparison of a signal with itself (${diffCount(convL, convR)} of ${convL.length} differ)`
+    );
+    assert(
+      convWorst < 1e-6,
+      `and the mono channel is exactly the documented (L+R)/2 (worst error ${convWorst.toExponential(3)})`
+    );
+    await page.evaluate(() => window.__test.convertChannels(2));
+    const convStereoState = await stateOf();
+    const convBackL = await samplesOf(0, 1000, 1024);
+    const convBackR = await samplesOf(1, 1000, 1024);
+    assert(
+      convStereoState.channels === 2 && diffCount(convBackL, convBackR) === 0,
+      `re-expanding gives two channels carrying the same mono signal — the stereo image ` +
+        `is gone for good, as documented (${convStereoState.channels} ch, ${diffCount(convBackL, convBackR)} samples differ between them)`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+    await page.evaluate(() => window.__test.undoActive());
+    const convRestored = await stateOf();
+    const convRestoredL = await samplesOf(0, 1000, 1024);
+    const convRestoredR = await samplesOf(1, 1000, 1024);
+    assert(
+      convRestored.channels === 2 &&
+        diffCount(convRestoredL, convL) === 0 &&
+        diffCount(convRestoredR, convR) === 0,
+      `and two undos bring the ORIGINAL stereo back, both channels bit-exact ` +
+        `(${diffCount(convRestoredL, convL)} + ${diffCount(convRestoredR, convR)} differ)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-8) Boundary selections -------------------------------------------------
+    console.log('Boundary selections: one sample, the last sample, and up to the end...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const edgeState = await stateOf();
+    const edgeLength = edgeState.length;
+    const oneBefore = await samplesOf(0, 0, 16);
+    await page.evaluate(() => window.__test.setSelection(4, 5));
+    const oneOutcome = await applyEffectGuarded('amplify', { gainDb: -20 });
+    const oneAfter = await samplesOf(0, 0, 16);
+    const oneState = await stateOf();
+    assert(
+      oneOutcome === 'ok' && oneState.length === edgeLength,
+      `a one-sample selection is a legal region (${oneOutcome}, ${oneState.length} samples)`
+    );
+    assert(
+      diffCount(oneBefore, oneAfter) === 1 && oneAfter[4] !== oneBefore[4],
+      `and EXACTLY one sample changed, the selected one ` +
+        `(${diffCount(oneBefore, oneAfter)} of 16 changed; index 4 ${oneBefore[4]} -> ${oneAfter[4]})`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+
+    const lastBefore = await samplesOf(0, edgeLength - 2, 2);
+    await page.evaluate((l) => window.__test.setSelection(l - 1, l), edgeLength);
+    const lastOutcome = await applyEffectGuarded('amplify', { gainDb: -20 });
+    const lastAfter = await samplesOf(0, edgeLength - 2, 2);
+    const lastState = await stateOf();
+    assert(
+      lastOutcome === 'ok' && lastState.length === edgeLength,
+      `selecting the very last sample is legal and changes no length (${lastOutcome}, ${lastState.length} samples)`
+    );
+    assert(
+      lastAfter[1] !== lastBefore[1] &&
+        Math.abs(lastAfter[1] - lastBefore[1] * 0.1) < 1e-6 &&
+        lastAfter[0] === lastBefore[0],
+      `the file's final sample was processed and its neighbour was not ` +
+        `(${lastBefore[1]} -> ${lastAfter[1]}, neighbour ${lastBefore[0]} -> ${lastAfter[0]})`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+
+    // A 1024-sample window whose last 1000 samples ARE the selection, so index
+    // 23 of it is the sample immediately before the selection's start.
+    const clampedWindowStart = edgeLength - 1024;
+    const clampedLastOutside = edgeLength - 1000 - 1 - clampedWindowStart; // = 23
+    const clampedBefore = await samplesOf(0, clampedWindowStart, 1024);
+    await page.evaluate((l) => window.__test.setSelection(l - 1000, l), edgeLength);
+    const clampedOutcome = await applyEffectGuarded('reverse', {});
+    const clampedState = await stateOf();
+    const clampedAfter = await samplesOf(0, clampedWindowStart, 1024);
+    assert(
+      clampedOutcome === 'ok' && clampedState.length === edgeLength,
+      `a selection ending exactly AT the document length neither throws nor extends it ` +
+        `(${clampedOutcome}, ${clampedState.length} samples, was ${edgeLength})`
+    );
+    assert(
+      diffCount(clampedBefore, clampedAfter) > 0 &&
+        clampedAfter[clampedLastOutside] === clampedBefore[clampedLastOutside],
+      `it reversed the last 1000 samples and left the sample before them alone ` +
+        `(${diffCount(clampedBefore, clampedAfter)} of 1024 changed)`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-9) File > New, then an effect ------------------------------------------
+    // A brand-new document is silent, and a zero-second one has no samples at
+    // all. Both are one Ctrl+N away, and the effects most likely to divide by
+    // something that is zero there are the ones run.
+    console.log('File > New (0 s and 1 ms), then the effects most likely to divide by zero...');
+    for (const [seconds, label] of [
+      [0, 'a zero-length'],
+      [0.001, 'a 44-sample'],
+    ]) {
+      for (const [id, params] of [
+        ['normalize', { targetDb: -0.3, mode: 'peak' }],
+        ['fade', { direction: 'in', curve: 'linear', lengthPercent: 100 }],
+        ['time-stretch', { stretchPercent: 120 }],
+        ['pitch-correct', { key: 'C', scale: 'chromatic', strength: 100, retuneMs: 50 }],
+      ]) {
+        await page.evaluate(
+          ([rate, channels, secs]) => window.__test.newDocument(rate, channels, secs),
+          [44100, 2, seconds]
+        );
+        const newBefore = await stateOf();
+        const newOutcome = await applyEffectGuarded(id, params, undefined, 30000);
+        const newAfter = await stateOf();
+        const newProbe = await samplesOf(0, 0, Math.max(1, Math.min(64, newAfter.length)));
+        const newNonFinite = newProbe.filter((v) => !Number.isFinite(v)).length;
+        assert(
+          newOutcome === 'ok' && newAfter.length >= 0 && newNonFinite === 0,
+          `${id} on ${label} document is a clean no-op or a clean refusal: no throw, ` +
+            `no negative length, no NaN (${newOutcome}, ${newBefore.length} -> ${newAfter.length} samples, ${newNonFinite} non-finite)`
+        );
+        await page.evaluate(() => window.__test.closeActive());
+      }
+    }
+
+    // L7-10) Record -> Vocal Chain -> export MP3 -> reopen ------------------------
+    // Every step here is covered on its own; the SEQUENCE never was — the
+    // recorded document was only ever saved, never processed, and nothing had
+    // ever carried a processed take out through an encoder and back in.
+    console.log('Record -> Vocal Chain -> export MP3 -> reopen...');
+    const take = await page.evaluate(() => window.__test.recordSeconds(3));
+    console.log(`  recorded ${take.length} samples at ${take.sampleRate} Hz, RMS ${take.rms.toFixed(4)}`);
+    assert(take.rms > 0 && take.length > 0, `the fake microphone produced a non-silent take (RMS ${take.rms.toFixed(4)})`);
+    const takeState = await stateOf();
+    const takeChain = await page.evaluate(() => window.__test.runVocalChain());
+    console.log(
+      `  vocal chain: applied=${takeChain.applied}, ${takeChain.stages.filter((s) => s.status === 'applied').length} stages applied, ` +
+        `RMS ${takeChain.before.rmsDb.toFixed(2)} -> ${takeChain.after.rmsDb.toFixed(2)} dBFS`
+    );
+    assert(
+      takeChain.ok === true && takeChain.applied === true && takeChain.undoDepth === 1,
+      `the chain ran on the RECORDING (not on a file off disk) and left one undo entry ` +
+        `(ok=${takeChain.ok}, applied=${takeChain.applied}, depth=${takeChain.undoDepth})`
+    );
+    assert(
+      takeChain.stages.filter((s) => s.status === 'applied').length >= 3,
+      `and at least three stages actually engaged on it (${takeChain.stages.map((s) => `${s.id}:${s.status}`).join(' ')})`
+    );
+    const processed = await stateOf();
+    const processedRms = await page.evaluate(() => window.__test.getRms());
+    const takeMp3Ok = await page.evaluate(
+      (out) => window.__test.exportActive({ format: 'mp3', wavBitDepth: 16, mp3Kbps: 192 }, out),
+      OUT_TAKE_MP3
+    );
+    assert(takeMp3Ok === true && fs.existsSync(OUT_TAKE_MP3), 'the processed take exported to MP3');
+    await page.evaluate(() => window.__test.closeActive());
+    await page.evaluate((p) => window.__test.openPath(p), OUT_TAKE_MP3);
+    const reopened = await stateOf();
+    const reopenedRms = await page.evaluate(() => window.__test.getRms());
+    const toDb = (x) => (x > 0 ? 20 * Math.log10(x) : -Infinity);
+    const rmsDelta = toDb(reopenedRms) - toDb(processedRms);
+    const lengthDelta = reopened.length - processed.length;
+    console.log(
+      `  reopened: ${reopened.length} samples (source ${processed.length}, +${lengthDelta}), ` +
+        `RMS ${toDb(reopenedRms).toFixed(2)} vs ${toDb(processedRms).toFixed(2)} dBFS (${rmsDelta.toFixed(3)} dB)`
+    );
+    assert(
+      takeState.length === processed.length && processed.length === take.length,
+      `the chain is length-preserving on a recording (${take.length} -> ${processed.length})`
+    );
+    // MP3 is frame-based: the encoder pads the tail up to a whole 1152-sample
+    // frame and the decoder hands back one frame of encoder delay, so the file
+    // that comes home is up to TWO frames longer and never shorter. (Measured
+    // here: exactly ceil(N/1152)*1152 + 1152.)
+    assert(
+      lengthDelta >= 0 && lengthDelta <= 2 * 1152,
+      `it came back within two MP3 frames of the length it left at (delta ${lengthDelta} samples)`
+    );
+    assert(
+      Math.abs(rmsDelta) < 1,
+      `and at the same level, so the encode/decode round trip is transparent to the chain's work ` +
+        `(${rmsDelta.toFixed(3)} dB)`
+    );
+    await page.evaluate(() => window.__test.closeActive());
 
     console.log('\nSMOKE PASSED');
   } finally {

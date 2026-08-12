@@ -6,6 +6,7 @@ import { createDocument, docLength, type AudioDocument } from '../audio/AudioDoc
 import { RecordingEngine } from '../audio/RecordingEngine';
 import { encodeWav } from '../audio/wavCodec';
 import { encodeOggOpus } from '../audio/oggOpusEncoder';
+import { defaultParamsFor, getVisibleEffects } from '../effects/EffectRegistry';
 import type { EffectParamValue } from '../effects/types';
 import type { EditorView, Marker } from '../stores/appStore';
 import { nextId, useAppStore } from '../stores/appStore';
@@ -23,9 +24,22 @@ import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/session
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
-import { encodeExport, openFilePath, saveDocument, type ExportOptions } from './fileService';
-import { convertSampleRate } from './documentTools';
-import { copySelection, pasteAtCursor } from './editOps';
+import {
+  encodeExport,
+  newDocument as newBlankDocument,
+  openFilePath,
+  saveDocument,
+  type ExportOptions,
+} from './fileService';
+import { convertChannels as convertDocChannels, convertSampleRate } from './documentTools';
+import {
+  copySelection,
+  cutSelection,
+  deleteSelection,
+  pasteAtCursor,
+  silenceSelection,
+  trimToSelection,
+} from './editOps';
 import { getClipboard } from './clipboard';
 import { getSpectralScale, toggleSpectralScale, type SpectralScale } from './spectralScale';
 import { getBeatGrid, isDownbeat } from './beatGrid';
@@ -34,7 +48,12 @@ import { editorSnapTargets } from '../components/Editor/editorSnapTargets';
 import { SNAP_TOLERANCE_PX } from './snap';
 import { isSnapEnabled, toggleSnap } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
-import { getHistory, markSavePoint, undo as undoHistoryUndo } from './undoHistory';
+import {
+  getHistory,
+  markSavePoint,
+  redo as undoHistoryRedo,
+  undo as undoHistoryUndo,
+} from './undoHistory';
 import { getTempo, runTempoAnalysis } from './tempoAnalysis';
 import { applyTempoChange, checkVariableTempoChange } from './tempoService';
 import { applyTimingAlignment, buildAlignPlan, suggestSyllableMarkers } from './timingAlignService';
@@ -121,6 +140,37 @@ export interface TestApi {
   setView(view: EditorView): void;
   captureNoisePrint(): void;
   getNoiseProfileSpectra(): number[][] | null;
+  // --- L7: the edit surface a user touches every minute -----------------------
+  /** Writes the store's selection exactly as the editor's drag gesture does.
+   * NOT clamped here on purpose: `useEditorGestures.sampleAtClientX` clamps the
+   * pointer to `[0, length]` BEFORE the store ever sees it, so the store's own
+   * contract is "whatever the gesture committed". Callers pass UI-producible
+   * ranges; the boundary smoke deliberately uses `end === length`, which is
+   * exactly what a drag off the right edge produces. Returns what was stored. */
+  setSelection(start: number, end: number): { start: number; end: number } | null;
+  /** Clears it, the way a click without a drag does. */
+  clearSelection(): void;
+  /** One step FORWARD through the same history Ctrl+Y drives. */
+  redoActive(): { length: number };
+  /** The active document's history, as the History panel renders it. */
+  getHistoryState(): { done: string[]; undone: string[] };
+  /** The four selection edits behind Ctrl+X / Del / Trim / Silence, plus the
+   * clipboard's other two ends, dispatched by name. */
+  editOp(op: 'cut' | 'copy' | 'paste' | 'delete' | 'trim' | 'silence'): void;
+  /** What the clipboard is holding, so a Cut's promise can be checked. */
+  getClipboardInfo(): { length: number; sampleRate: number; channels: number } | null;
+  /** Edit > Convert Channels (`documentTools.convertChannels`). */
+  convertChannels(to: 1 | 2): void;
+  /** File > New, through the same `fileService.newDocument` the dialog calls. */
+  newDocument(sampleRate: number, channels: 1 | 2, seconds: number): void;
+  /** The effects menu's OWN list — visible ids with their declared defaults, so
+   * a sweep can never go stale against a hardcoded roster. */
+  listEffects(): {
+    id: string;
+    name: string;
+    category: string;
+    params: Record<string, EffectParamValue>;
+  }[];
   recordSeconds(seconds: number): Promise<{ length: number; sampleRate: number; rms: number }>;
   newSession(sampleRate: number): void;
   insertActiveDocAsClip(
@@ -1011,6 +1061,100 @@ export function installTestHooks(): void {
       const profile = getNoiseProfile();
       return profile ? profile.spectra.map((s) => Array.from(s)) : null;
     },
+
+    // --- L7: selection, history and the edit menu -------------------------
+    //
+    // Until L7 nothing in the packaged smoke could WRITE a selection, so every
+    // packaged effect run was whole-document and the whole region-boundary
+    // defect class had no packaged coverage at all — in an editor whose primary
+    // verb is "select, then process". These hooks are the smallest set that
+    // closes it, and each is a thin pass-through to the exact production call
+    // the corresponding menu item / gesture makes — none of them reimplements
+    // an edit, because a hook that did would only be testing itself.
+    setSelection: (start, end) => {
+      const sel = { start, end };
+      useAppStore.getState().setSelection(sel);
+      return sel;
+    },
+
+    clearSelection: () => useAppStore.getState().setSelection(null),
+
+    redoActive: () => {
+      const doc = activeDoc();
+      if (doc) undoHistoryRedo(doc.id);
+      const after = activeDoc();
+      return { length: after ? docLength(after) : 0 };
+    },
+
+    getHistoryState: () => {
+      const doc = activeDoc();
+      if (!doc) return { done: [], undone: [] };
+      const history = getHistory(doc.id);
+      return { done: [...history.done], undone: [...history.undone] };
+    },
+
+    // Dispatch by name rather than six hooks: every branch is one call to the
+    // editOps function the menu command already calls, with no logic of its own
+    // (a hook that reimplemented an edit would be testing itself).
+    editOp: (op) => {
+      switch (op) {
+        case 'cut':
+          cutSelection();
+          return;
+        case 'copy':
+          copySelection();
+          return;
+        case 'paste':
+          pasteAtCursor();
+          return;
+        case 'delete':
+          deleteSelection();
+          return;
+        case 'trim':
+          trimToSelection();
+          return;
+        case 'silence':
+          silenceSelection();
+          return;
+      }
+    },
+
+    getClipboardInfo: () => {
+      const clip = getClipboard();
+      if (!clip) return null;
+      return {
+        length: clip.channels[0]?.length ?? 0,
+        sampleRate: clip.sampleRate,
+        channels: clip.channels.length,
+      };
+    },
+
+    convertChannels: (to) => {
+      const doc = activeDoc();
+      if (!doc) return;
+      convertDocChannels(doc.id, to);
+    },
+
+    newDocument: (sampleRate, channels, seconds) => {
+      newBlankDocument({
+        name: `Untitled ${nextId('untitled').split('-')[1]}`,
+        sampleRate,
+        channels,
+        durationSeconds: seconds,
+      });
+    },
+
+    // getVisibleEffects() + defaultParamsFor() — the registry's OWN roster, the
+    // same pair `menuActions.ts` builds the Effects menu from. A sweep that
+    // hardcoded the list would go stale the moment an effect is added, which is
+    // how a stale count broke a release here before.
+    listEffects: () =>
+      getVisibleEffects().map((def) => ({
+        id: def.id,
+        name: def.name,
+        category: def.category,
+        params: defaultParamsFor(def.id),
+      })),
 
     // Drives a real RecordingEngine end-to-end (bypassing the dialog) for the
     // headed mic smoke: records `seconds` from the (fake-device) mic, creates a
