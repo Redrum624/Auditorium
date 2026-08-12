@@ -275,14 +275,34 @@ describe('VocalChainDialog — the report says what each stage did', () => {
     fireEvent.click(screen.getByTestId('vocal-chain-apply'));
 
     await waitFor(() => expect(screen.getByTestId('vocal-chain-summary')).toBeInTheDocument());
-    expect(screen.getByTestId('vocal-chain-summary-rmsDb')).toHaveTextContent('-27.8 dBFS');
-    expect(screen.getByTestId('vocal-chain-summary-rmsDb')).toHaveTextContent('-20.4 dBFS');
-    expect(screen.getByTestId('vocal-chain-summary-peakDb')).toHaveTextContent('-9.7 dBFS');
-    expect(screen.getByTestId('vocal-chain-summary-peakDb')).toHaveTextContent('-0.3 dBFS');
-    expect(screen.getByTestId('vocal-chain-summary-crestDb')).toHaveTextContent('18.1 dB');
-    expect(screen.getByTestId('vocal-chain-summary-crestDb')).toHaveTextContent('20.1 dB');
-    expect(screen.getByTestId('vocal-chain-summary-noiseFloorDb')).toHaveTextContent('-61.2 dBFS');
-    expect(screen.getByTestId('vocal-chain-summary-noiseFloorDb')).toHaveTextContent('n/a');
+
+    // BY POSITION. `toHaveTextContent` on the row is position-blind: swapping
+    // the Before and After cells leaves every one of these substrings present in
+    // its row, so a chain that LOWERED the level would be read as having raised
+    // it and this suite would call the table correct. Which column a figure lands
+    // in is the entire content of a before/after table.
+    const cellsOf = (key: string): HTMLElement[] =>
+      within(screen.getByTestId(`vocal-chain-summary-${key}`)).getAllByRole('cell');
+
+    const rms = cellsOf('rmsDb');
+    expect(rms).toHaveLength(3); // measure · before · after
+    expect(rms[0]).toHaveTextContent('RMS');
+    expect(rms[1]).toHaveTextContent('-27.8 dBFS');
+    expect(rms[2]).toHaveTextContent('-20.4 dBFS');
+
+    const peak = cellsOf('peakDb');
+    expect(peak[1]).toHaveTextContent('-9.7 dBFS');
+    expect(peak[2]).toHaveTextContent('-0.3 dBFS');
+
+    const crest = cellsOf('crestDb');
+    expect(crest[1]).toHaveTextContent('18.1 dB');
+    expect(crest[2]).toHaveTextContent('20.1 dB');
+
+    // The floor that could not be measured reads 'n/a' in the AFTER column
+    // specifically — the before side still carries a real number.
+    const floor = cellsOf('noiseFloorDb');
+    expect(floor[1]).toHaveTextContent('-61.2 dBFS');
+    expect(floor[2]).toHaveTextContent('n/a');
   });
 
   it('reports a run that changed nothing as such, and one that failed as an error with no summary', async () => {
@@ -293,6 +313,10 @@ describe('VocalChainDialog — the report says what each stage did', () => {
     await waitFor(() =>
       expect(screen.getByTestId('vocal-chain-outcome')).toHaveTextContent('No stage ran')
     );
+    // …and it does NOT lock: `done` is `report.applied`, not merely "a report
+    // came back", so a pass that changed nothing stays re-runnable.
+    expect(screen.getByTestId('vocal-chain-apply')).toBeInTheDocument();
+    expect(screen.queryByTestId('vocal-chain-close')).toBeNull();
     nothing.unmount();
 
     mockRun.mockResolvedValue(null);
@@ -305,12 +329,14 @@ describe('VocalChainDialog — the report says what each stage did', () => {
 });
 
 describe('VocalChainDialog — while it runs', () => {
-  it('disables Apply and every switch until the run resolves', async () => {
+  it('disables Apply and every switch until the run resolves, then locks the finished pass', async () => {
     seedDoc();
     let resolveRun: (value: VocalChainReport | null) => void = () => {};
+    let report: ((fraction: number) => void) | undefined;
     mockRun.mockImplementation(
-      () =>
+      (opts) =>
         new Promise<VocalChainReport | null>((resolve) => {
+          report = opts.onProgress;
           resolveRun = resolve;
         })
     );
@@ -323,12 +349,33 @@ describe('VocalChainDialog — while it runs', () => {
     await waitFor(() => expect(apply).toBeDisabled());
     expect(screen.getByTestId('vocal-chain-cancel')).toBeDisabled();
     expect(screen.getByTestId('vocal-chain-toggle-pitch')).toBeDisabled();
-    expect(screen.getByTestId('vocal-chain-progress')).toBeInTheDocument();
+
+    // The bar is WIRED, not merely present. `toBeInTheDocument()` holds at any
+    // width, and no test ever invoked the engine's `onProgress` — so dropping
+    // that callback from the `runVocalChain` call left the bar pinned at 0 % for
+    // the whole of a pass whose slowest stage alone takes a minute, with this
+    // suite green.
+    expect(screen.getByTestId('vocal-chain-progress')).toHaveStyle({ width: '0%' });
+    expect(report).toBeDefined();
+    act(() => report!(0.42));
+    expect(screen.getByTestId('vocal-chain-progress')).toHaveStyle({ width: '42%' });
 
     await act(async () => {
       resolveRun(makeReport());
     });
     expect(screen.getByTestId('vocal-chain-summary')).toBeInTheDocument();
+
+    // …and an APPLIED pass locks. Nothing asserted the post-run state: with
+    // `done` forced false the dialog kept Apply live, and a second click re-runs
+    // a destructive chain over audio the first run already changed — the run
+    // whose whole design is that it lands as ONE undo entry.
+    expect(screen.getByTestId('vocal-chain-close')).toBeInTheDocument();
+    expect(screen.queryByTestId('vocal-chain-apply')).toBeNull();
+    expect(screen.queryByTestId('vocal-chain-cancel')).toBeNull();
+    for (const stage of VOCAL_CHAIN_STAGES) {
+      if (stage.effectId === null) continue;
+      expect(screen.getByTestId(`vocal-chain-toggle-${stage.id}`)).toBeDisabled();
+    }
   });
 
   it('names the stage currently running', async () => {
