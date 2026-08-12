@@ -95,6 +95,7 @@ beforeEach(() => {
     openVoiceChangerDialog: () => {},
     openAlignTimingDialog: () => {},
     openVocalChainDialog: () => {},
+    openCoverChainDialog: () => {},
     openAlignLyricsDialog: () => {},
     focusRemixPanel: () => {},
     focusTranscriptPanel: () => {},

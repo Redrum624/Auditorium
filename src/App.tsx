@@ -17,6 +17,7 @@ import VoiceChangerDialog from './components/Dialogs/VoiceChangerDialog';
 import AlignTimingDialog from './components/Dialogs/AlignTimingDialog';
 import AlignLyricsDialog from './components/Dialogs/AlignLyricsDialog';
 import VocalChainDialog from './components/Dialogs/VocalChainDialog';
+import CoverChainDialog from './components/Dialogs/CoverChainDialog';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
@@ -128,6 +129,7 @@ export default function App() {
   const [voiceChangerOpen, setVoiceChangerOpen] = useState(false);
   const [alignTimingOpen, setAlignTimingOpen] = useState(false);
   const [vocalChainOpen, setVocalChainOpen] = useState(false);
+  const [coverChainOpen, setCoverChainOpen] = useState(false);
   const [alignLyricsOpen, setAlignLyricsOpen] = useState(false);
   const [sidebarTab, setSidebarTab] = useState<SidebarTab>('history');
   const activeTab = SIDEBAR_TABS.find((t) => t.id === sidebarTab) ?? SIDEBAR_TABS[0];
@@ -164,6 +166,7 @@ export default function App() {
         openVoiceChangerDialog: () => setVoiceChangerOpen(true),
         openAlignTimingDialog: () => setAlignTimingOpen(true),
         openVocalChainDialog: () => setVocalChainOpen(true),
+        openCoverChainDialog: () => setCoverChainOpen(true),
         openAlignLyricsDialog: () => setAlignLyricsOpen(true),
         focusRemixPanel: () => setSidebarTab('remix'),
         focusTranscriptPanel: () => setSidebarTab('transcript'),
@@ -344,6 +347,7 @@ export default function App() {
       {voiceChangerOpen && <VoiceChangerDialog onClose={() => setVoiceChangerOpen(false)} />}
       {alignTimingOpen && <AlignTimingDialog onClose={() => setAlignTimingOpen(false)} />}
       {vocalChainOpen && <VocalChainDialog onClose={() => setVocalChainOpen(false)} />}
+      {coverChainOpen && <CoverChainDialog onClose={() => setCoverChainOpen(false)} />}
       {alignLyricsOpen && <AlignLyricsDialog onClose={() => setAlignLyricsOpen(false)} />}
     </div>
   );

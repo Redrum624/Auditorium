@@ -21,6 +21,7 @@ let openTranscribe: OpenSetter | null = null;
 let openVoiceChanger: OpenSetter | null = null;
 let openAlignTiming: OpenSetter | null = null;
 let openVocalChain: OpenSetter | null = null;
+let openCoverChain: OpenSetter | null = null;
 let openAlignLyrics: OpenSetter | null = null;
 let focusRemix: OpenSetter | null = null;
 let focusTranscript: OpenSetter | null = null;
@@ -40,6 +41,8 @@ export function registerDialogSetters(setters: {
   openAlignTimingDialog: OpenSetter;
   /** F7's Vocal Chain dialog. */
   openVocalChainDialog: OpenSetter;
+  /** F10's Cover Chain dialog. */
+  openCoverChainDialog: OpenSetter;
   /** F6's Align Lyrics dialog. */
   openAlignLyricsDialog: OpenSetter;
   /** Not a dialog: switches the sidebar to the Remix tab once a remix
@@ -63,6 +66,7 @@ export function registerDialogSetters(setters: {
   openVoiceChanger = setters.openVoiceChangerDialog;
   openAlignTiming = setters.openAlignTimingDialog;
   openVocalChain = setters.openVocalChainDialog;
+  openCoverChain = setters.openCoverChainDialog;
   openAlignLyrics = setters.openAlignLyricsDialog;
   focusRemix = setters.focusRemixPanel;
   focusTranscript = setters.focusTranscriptPanel;
@@ -79,6 +83,7 @@ export function registerDialogSetters(setters: {
     openVoiceChanger = null;
     openAlignTiming = null;
     openVocalChain = null;
+    openCoverChain = null;
     openAlignLyrics = null;
     focusRemix = null;
     focusTranscript = null;
@@ -131,6 +136,10 @@ export function openAlignTimingDialog(): void {
 
 export function openVocalChainDialog(): void {
   openVocalChain?.();
+}
+
+export function openCoverChainDialog(): void {
+  openCoverChain?.();
 }
 
 export function openAlignLyricsDialog(): void {

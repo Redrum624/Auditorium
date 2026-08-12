@@ -32,6 +32,7 @@ function registerSetters(overrides: Partial<Parameters<typeof registerDialogSett
     openVoiceChangerDialog: () => {},
     openAlignTimingDialog: () => {},
     openVocalChainDialog: () => {},
+    openCoverChainDialog: () => {},
     openAlignLyricsDialog: () => {},
     focusRemixPanel: () => {},
     focusTranscriptPanel: () => {},

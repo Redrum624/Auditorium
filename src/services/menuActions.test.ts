@@ -578,6 +578,7 @@ describe('tempo.match (Task T8)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
@@ -635,6 +636,7 @@ describe('timing.align (Task F9)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: openAlign,
       openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
@@ -707,6 +709,7 @@ describe('effects.vocalChain (Task F7)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: openVocalChain,
+      openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
@@ -715,6 +718,75 @@ describe('effects.vocalChain (Task F7)', () => {
     await runCommand('effects.vocalChain');
 
     expect(openVocalChain).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('effects.coverChain (Task F10)', () => {
+  function findEffectsCmd(id: string): MenuCommand | undefined {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  }
+
+  // The FOUR run in this order and the menu says so. The cover chain's own
+  // `clean` stage note argues its position against the chain before it: the
+  // match is a correction to a CLEAN take, so the vocal chain runs first.
+  const IN_ORDER = ['timing.align', 'lyrics.align', 'effects.vocalChain', 'effects.coverChain'];
+
+  it('sits immediately after Vocal Chain…, both before and after the registry populates', () => {
+    for (const populate of [false, true]) {
+      if (populate) {
+        registerAllEffects();
+        registerEffectCommands();
+      }
+      const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+      const ids = commandIds(effects.items);
+      for (const id of IN_ORDER) expect(ids).toContain(id);
+      expect(ids.indexOf('effects.coverChain')).toBe(ids.indexOf('effects.vocalChain') + 1);
+    }
+  });
+
+  it('is registered with a real label rather than falling back to its id', () => {
+    expect(findEffectsCmd('effects.coverChain')!.label).toBe('Cover Chain…');
+  });
+
+  it('is disabled with no active document and enabled with one', () => {
+    expect(findEffectsCmd('effects.coverChain')!.enabled(useAppStore.getState())).toBe(false);
+    openDoc();
+    expect(findEffectsCmd('effects.coverChain')!.enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('has no keyboard shortcut — a nine-stage pass is never one keystroke away', () => {
+    expect(findEffectsCmd('effects.coverChain')!.shortcut).toBeUndefined();
+  });
+
+  it('runCommand("effects.coverChain") opens the dialog through the bus', async () => {
+    openDoc();
+    const openCoverChain = jest.fn();
+    const openVocalChain = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      openSeparateDialog: () => {},
+      openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
+      openVocalChainDialog: openVocalChain,
+      openCoverChainDialog: openCoverChain,
+      openAlignLyricsDialog: () => {},
+      focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
+    });
+
+    await runCommand('effects.coverChain');
+
+    expect(openCoverChain).toHaveBeenCalledTimes(1);
+    // ...and it is not the neighbouring command wired twice.
+    expect(openVocalChain).not.toHaveBeenCalled();
   });
 });
 
@@ -765,6 +837,7 @@ describe('edit.remix (Task T14)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
@@ -790,6 +863,7 @@ describe('edit.remix (Task T14)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
@@ -821,6 +895,7 @@ describe('edit.separateStems (Task S6)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
@@ -890,6 +965,7 @@ describe('edit.transcribe (Task F4b)', () => {
       openVoiceChangerDialog: () => {},
       openAlignTimingDialog: () => {},
       openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},

@@ -30,6 +30,7 @@ import {
   openAlignLyricsDialog,
   openAlignTimingDialog,
   openVocalChainDialog,
+  openCoverChainDialog,
 } from './dialogBus';
 import { getVisibleEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
@@ -151,6 +152,7 @@ function effectsSectionItemIds(): (string | 'separator')[] {
       'timing.align',
       'lyrics.align',
       'effects.vocalChain',
+      'effects.coverChain',
       'separator',
       'effects.none',
     ];
@@ -170,6 +172,7 @@ function effectsSectionItemIds(): (string | 'separator')[] {
     'timing.align',
     'lyrics.align',
     'effects.vocalChain',
+    'effects.coverChain',
     'separator',
   ];
   let lastCategory: string | null = null;
@@ -966,6 +969,26 @@ function registerVocalChainCommands(): void {
   ]);
 }
 
+/** F10 — the Cover Chain. It sits in the EFFECTS menu immediately AFTER 'Vocal
+ * Chain…', because that is the order the two are used in and the cover chain
+ * says so in its own `clean` stage note: the match is a correction to a CLEAN
+ * take, so the vocal chain runs first. Like the vocal chain it is a command
+ * rather than an `effect.<id>` entry, because it is not one `EffectDefinition`:
+ * it composes four of them and derives each one's settings from a SECOND
+ * document — the separated original vocal — which scalar params in an
+ * EffectDialog cannot express. Same `enabled` rule, and no shortcut: a pass this
+ * long should never be one keystroke away. */
+function registerCoverChainCommands(): void {
+  registerCommands([
+    {
+      id: 'effects.coverChain',
+      label: 'Cover Chain…',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openCoverChainDialog(),
+    },
+  ]);
+}
+
 /** F6 — Align Lyrics. It sits in the EFFECTS menu immediately BEFORE 'Vocal
  * Chain…' and after 'Align Vocal Timing…', because that is the order the three
  * are used in: both manual steps run before the chain, and replacing a word
@@ -1005,4 +1028,5 @@ registerStemCommands();
 registerTranscribeCommands();
 registerVoiceCommands();
 registerVocalChainCommands();
+registerCoverChainCommands();
 registerAlignLyricsCommands();

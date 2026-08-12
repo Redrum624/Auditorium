@@ -157,6 +157,7 @@ function installBus(): void {
     openVoiceChangerDialog: () => {},
     openAlignTimingDialog: () => {},
     openVocalChainDialog: () => {},
+    openCoverChainDialog: () => {},
     openAlignLyricsDialog: () => {},
     focusRemixPanel,
     focusTranscriptPanel: () => {},
