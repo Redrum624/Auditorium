@@ -180,6 +180,21 @@ const EXPECTED_MASKS = [
   (HOST_GAINS[2] * HOST_GAINS[2]) / GAIN_ENERGY,
 ];
 
+/** Per-channel gains that DISAGREE between the two sides: the host order is
+ * reversed on the right. Every mask is then channel-dependent, so a partition
+ * that masked channel 1 with channel 0's estimates is decidable from the
+ * output. (With the symmetric `HOST_GAINS` it is not: the mask is the same
+ * constant on both sides, and exact-sum hides the swap in the residual.) */
+function asymmetricGain(s: number, c: number): number {
+  return c === 0 ? HOST_GAINS[s] : HOST_GAINS[HOST_GAINS.length - 1 - s];
+}
+
+/** m_i = g_i(c)²/Σ_j g_j(c)² for channel `c`, in the RESULT's ruling-6 order. */
+function expectedMasksFor(gainFor: (s: number, c: number) => number, c: number): number[] {
+  const energy = [0, 1, 2, 3].reduce((a, s) => a + gainFor(s, c) * gainFor(s, c), 0);
+  return [0, 1, 3, 2].map((host) => (gainFor(host, c) * gainFor(host, c)) / energy);
+}
+
 const MODEL_CHANNELS = 2;
 const STEM_COUNT = 4;
 
@@ -434,6 +449,28 @@ describe('separateStems — happy path', () => {
       expect(rms(output.stems[i].channels[0]) / mixRms).toBeCloseTo(EXPECTED_MASKS[i], 2);
     }
     expect(EXPECTED_MASKS[2]).toBeLessThan(EXPECTED_MASKS[3]); // Vocals quieter than Other here
+  });
+
+  it('masks each channel with the estimate for THAT channel, not with channel 0’s', async () => {
+    const backend = installStemApi();
+    const doc = seedDoc();
+
+    const promise = separateStems({ sourceDocId: doc.id });
+    await driveSuccess(backend, { gainFor: asymmetricGain });
+    const output = expectOk(await promise);
+
+    const left = expectedMasksFor(asymmetricGain, 0);
+    const right = expectedMasksFor(asymmetricGain, 1);
+    // The two sides genuinely disagree — otherwise this test would pass on a
+    // partition that never looked at the channel index at all.
+    expect(left).not.toEqual(right);
+    for (let i = 0; i < 4; i++) {
+      expect(rms(output.stems[i].channels[0]) / rms(doc.channels[0])).toBeCloseTo(left[i], 2);
+      expect(rms(output.stems[i].channels[1]) / rms(doc.channels[1])).toBeCloseTo(right[i], 2);
+      // Explicitly NOT the other side's fraction: a dropped channel index in
+      // the analysis loop lands exactly there.
+      expect(rms(output.stems[i].channels[1]) / rms(doc.channels[1])).not.toBeCloseTo(left[i], 2);
+    }
   });
 
   it('reports mask stats and leaves no listener behind', async () => {

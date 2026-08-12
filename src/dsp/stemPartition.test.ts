@@ -539,6 +539,56 @@ describe('partitionStems — stem content follows the estimates (band-split net)
     expect(interiorRms(res.stems[0][0], 1024)).toBeGreaterThan(0);
     expect(interiorRms(res.stems[1][0], 1024)).toBeGreaterThan(0);
   });
+
+  // Every content case above is MONO, so nothing in them can tell
+  // `estimates[s][c]` from `estimates[s][0]`: a channel index dropped in the
+  // analysis loop would mask channel 1 with channel 0's estimates, and
+  // exact-sum absorbs the whole swap in the residual. This fixture makes the
+  // two channels disagree about WHICH source owns the low band, so a stem that
+  // followed the wrong channel's estimate is audible as a flipped centroid.
+  it('masks each channel with ITS OWN estimate — swapped stereo routing does not leak across channels', () => {
+    const len = 16000;
+    const randL = makeRand(4242);
+    const randR = makeRand(90210);
+    const xL = new Float32Array(len);
+    const xR = new Float32Array(len);
+    for (let n = 0; n < len; n++) {
+      xL[n] = randL();
+      xR[n] = randR();
+    }
+    const [lpL, hpL] = bandSplit(xL);
+    const [lpR, hpR] = bandSplit(xR);
+    // Source 0 is the LOW band on the left and the HIGH band on the right;
+    // source 1 is its mirror. Nothing about channel 0 predicts channel 1.
+    const res = partitionStems([xL, xR], [[lpL, hpR], [hpL, lpR]]);
+
+    const centL = spectralCentroid(xL);
+    const centR = spectralCentroid(xR);
+    const s0L = spectralCentroid(res.stems[0][0]);
+    const s1L = spectralCentroid(res.stems[1][0]);
+    const s0R = spectralCentroid(res.stems[0][1]);
+    const s1R = spectralCentroid(res.stems[1][1]);
+    // eslint-disable-next-line no-console
+    console.log(
+      `[stemPartition] swapped stereo routing (centroid, bins): L mix=${centL.toFixed(1)} ` +
+        `s0=${s0L.toFixed(1)} s1=${s1L.toFixed(1)} | R mix=${centR.toFixed(1)} ` +
+        `s0=${s0R.toFixed(1)} s1=${s1R.toFixed(1)}`
+    );
+
+    // Channel 0: source 0 low, source 1 high.
+    expect(s0L).toBeLessThan(centL);
+    expect(s1L).toBeGreaterThan(centL);
+    expect(s1L).toBeGreaterThan(s0L * 2);
+    // Channel 1: the ORDER IS REVERSED. A stem masked with channel 0's
+    // estimates would come back low here, not high.
+    expect(s0R).toBeGreaterThan(centR);
+    expect(s1R).toBeLessThan(centR);
+    expect(s0R).toBeGreaterThan(s1R * 2);
+    // Neither channel of either stem is silenced by the routing.
+    for (const s of [0, 1]) {
+      for (const c of [0, 1]) expect(interiorRms(res.stems[s][c], 1024)).toBeGreaterThan(0);
+    }
+  });
 });
 
 describe('partitionStems — input validation', () => {
