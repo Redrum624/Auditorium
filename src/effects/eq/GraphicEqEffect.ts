@@ -3,8 +3,11 @@ import { designBiquad, processBiquad } from '../../dsp/biquad';
 
 const Q = 1.4;
 
-/** 10 ISO-ish octave bands, doubling from 31.25 Hz to 16 kHz. */
-const BANDS: { id: string; label: string; freq: number }[] = [
+/** 10 ISO-ish octave bands, doubling from 31.25 Hz to 16 kHz. Exported because
+ * F10's match curve is delivered through this effect and declares the same
+ * centres in `src/dsp/coverMatch.ts` (DSP may not import from effects); its test
+ * pins the two lists equal so a change here cannot silently diverge. */
+export const GRAPHIC_EQ_BANDS: { id: string; label: string; freq: number }[] = [
   { id: 'g31', label: '31 Hz', freq: 31.25 },
   { id: 'g63', label: '63 Hz', freq: 62.5 },
   { id: 'g125', label: '125 Hz', freq: 125 },
@@ -18,7 +21,7 @@ const BANDS: { id: string; label: string; freq: number }[] = [
 ];
 
 function buildParams(): EffectParamDef[] {
-  return BANDS.map((b) => ({
+  return GRAPHIC_EQ_BANDS.map((b) => ({
     id: b.id,
     label: b.label,
     type: 'number',
@@ -44,7 +47,7 @@ export const graphicEqEffect: EffectDefinition = {
   params: buildParams(),
   process(channels, sampleRate, params, onProgress) {
     const nyquist = sampleRate / 2;
-    const coeffsList = BANDS.filter((b) => {
+    const coeffsList = GRAPHIC_EQ_BANDS.filter((b) => {
       const gainDb = Number(params[b.id] ?? 0);
       return Math.abs(gainDb) > 0.01 && b.freq < nyquist;
     }).map((b) => designBiquad('peaking', sampleRate, b.freq, Q, Number(params[b.id] ?? 0)));
