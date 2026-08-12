@@ -554,17 +554,45 @@ describe('buildCandidateLists -- hard constraints (acceptance 6)', () => {
     for (let to = 6; to <= 11; to++) expect(emitted).not.toContain(to);
   });
 
-  it('never emits a forbidden key', () => {
+  it('never emits a forbidden key — the key is one the unforbidden call provably DOES emit, and only that one direction is removed', () => {
     const a = makeConstraintAnalysis();
-    const lists = buildCandidateLists(a, {
+    // `minKeepBars: 4` is what makes this test mean anything (fix, L3-6). On
+    // the DEFAULT `minKeepBars = 2*PHI = 16` at `numBars = 20`, a deletion
+    // needs `to - from <= 20 - 16 = 4` while the phrase bound needs
+    // `abs(to-from) >= 8` — no deletion is legal at all, so `5>13` could never
+    // have been emitted and this test passed with the `forbidden.has` guard
+    // DELETED. At `minKeepBars: 4` the deletion bound becomes `to - from <=
+    // 16`, so `5>13` is legal on every other clause; and `13>5` is legal as a
+    // repeat, which is what lets the reverse direction be asserted too.
+    const opts = {
       weights: DEFAULT_REMIX_WEIGHTS,
       phraseBars: PHI,
       minRunBars: 4,
       strict: false,
       allowRepeats: true,
-      forbiddenJoins: ['5>13'],
-    });
+      minKeepBars: 4,
+    };
+
+    // CONTROL: both directions really are in the unforbidden lists. `from = 5`
+    // has only `to in {13..16}` legal and `from = 13` only `to in {1..5}`,
+    // both far under `CANDIDATE_LIST_K = 24`, so legal here means emitted —
+    // the control cannot be passing for the trivial reason that the list was
+    // truncated.
+    const control = buildCandidateLists(a, opts);
+    expect(Array.from(control[5])).toContain(13);
+    expect(Array.from(control[13])).toContain(5);
+
+    const lists = buildCandidateLists(a, { ...opts, forbiddenJoins: ['5>13'] });
     expect(Array.from(lists[5])).not.toContain(13);
+    // Exactly one key removed, not a wholesale prune of `from = 5`...
+    expect(Array.from(lists[5])).toEqual(Array.from(control[5]).filter((to) => to !== 13));
+    // ...and the key is DIRECTIONAL: forbidding '5>13' leaves '13>5' alone.
+    expect(Array.from(lists[13])).toContain(5);
+    // Every other `from` is untouched.
+    for (let from = 0; from <= NUM_BARS; from++) {
+      if (from === 5) continue;
+      expect(Array.from(lists[from])).toEqual(Array.from(control[from]));
+    }
   });
 
   it('strict mode: every emitted pair satisfies from === to (mod Phi)', () => {

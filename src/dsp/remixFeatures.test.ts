@@ -498,6 +498,37 @@ describe('TRANSITION TABLE (acceptance 4)', () => {
     expect(r.transitionSeen.has(reverseKey)).toBe(true);
     expect(r.transitionSeen.has('9999>9998')).toBe(false);
   }, 20000);
+
+  it('the table is DIRECTIONAL: on a one-way A A B B fixture every recorded step is forward-only and no reverse key exists', () => {
+    // ABAB (above) contains BOTH directions of the same step, so its
+    // `reverseKey` assertion cannot distinguish a directional table from a
+    // symmetric one — adding `transitionSeen.add(reverse)` to
+    // `remixFeatures.ts` leaves it green (L3-4). A A B B has exactly ONE
+    // structural change, so the whole cluster sequence is monotone and the
+    // reverse of every step it does contain must be absent.
+    const sig = abab(['A', 'A', 'B', 'B']);
+    const r = analyzeRemix(sig, SR);
+    const seq = Array.from(r.cluster);
+
+    const changes: Array<[number, number]> = [];
+    for (let m = 0; m < seq.length - 1; m++) {
+      if (seq[m] !== seq[m + 1]) changes.push([seq[m], seq[m + 1]]);
+    }
+    // The fixture really does change label at least once...
+    expect(changes.length).toBeGreaterThan(0);
+    // ...and never walks a step back. Asserted, not assumed: SMOOTH_BARS = 4
+    // turns the single A->B change into a multi-step blend (see the test
+    // above), and if any of those steps reversed, the "reverse key absent"
+    // assertion below would be passing for the wrong reason.
+    for (const [from, to] of changes) {
+      expect(changes).not.toContainEqual([to, from]);
+    }
+
+    for (const [from, to] of changes) {
+      expect(r.transitionSeen.has(`${from}>${to}`)).toBe(true);
+      expect(r.transitionSeen.has(`${to}>${from}`)).toBe(false);
+    }
+  }, 20000);
 });
 
 describe('DESCRIPTOR LEVEL-BLINDNESS (acceptance 6)', () => {

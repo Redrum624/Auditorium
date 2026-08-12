@@ -732,6 +732,31 @@ describe('renderRemix -- shape selector', () => {
     expect(result.rhos[0]).toBeGreaterThanOrEqual(0.35);
     expect(result.shapes[0]).toBe('centred');
   });
+
+  // The selector is `rho >= 0.35 || onsetTo < onsetMedian`, and the two cells
+  // above are the two where BOTH clauses agree — so `rho` alone decided them
+  // and deleting the onset clause outright left the whole suite green (L3-6...
+  // L3-3). These two are the disagreeing corners: one per clause, each with
+  // the other clause voting 'pre-roll'.
+
+  it("sustained pad destination at LOW rho -> centred on the ONSET clause alone (rho ~0.1 says 'pre-roll')", () => {
+    const { src, analysis, plan } = buildFixture(0.1, false);
+    const result = renderRemix(src, analysis, plan, { sampleRate: SR, crossfadeMs: 25 });
+    // The rho clause is FALSE here, so 'centred' can only have come from
+    // `onsetTo < onsetMedian`: the destination boundary's onset peak is 0.05
+    // against the other three boundaries' 0.1, i.e. a median of 0.1.
+    expect(result.rhos[0]).toBeLessThan(0.35);
+    expect(result.shapes[0]).toBe('centred');
+  });
+
+  it("percussive destination at HIGH rho -> centred on the RHO clause alone (the strong onset says 'pre-roll')", () => {
+    const { src, analysis, plan } = buildFixture(0.6, true);
+    const result = renderRemix(src, analysis, plan, { sampleRate: SR, crossfadeMs: 25 });
+    // Mirror image: `onsetTo` is 8.0 against a median of 0.1, so the onset
+    // clause is FALSE and only `rho >= 0.35` can be carrying this.
+    expect(result.rhos[0]).toBeGreaterThanOrEqual(0.35);
+    expect(result.shapes[0]).toBe('centred');
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -201,7 +201,13 @@ describe('RemixDialog', () => {
     await renderReady();
 
     expect(screen.getByTestId('remix-summary')).toHaveTextContent('120.0 BPM · 4/4 · 8 bars');
-    expect(screen.getByTestId('remix-confidence')).toHaveTextContent('0.80');
+    // WHOLE textContent, not `toHaveTextContent('0.80')` — that substring-
+    // matches, so the five-dot meter in front of the number was unasserted and
+    // `round(confidence * 5)` could degrade to `round(confidence)` unnoticed.
+    // 0.80 -> round(4.0) = 4 filled + 1 hollow, and the hollow count is the
+    // complement, so this one equality pins the scale, the rounding AND the
+    // `'○'.repeat(5 - n)` remainder.
+    expect(screen.getByTestId('remix-confidence').textContent).toBe('●●●●○ 0.80');
 
     const blocks = screen.getAllByTestId('remix-structure-block');
     expect(blocks).toHaveLength(2);
