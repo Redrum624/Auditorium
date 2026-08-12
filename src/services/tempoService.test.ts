@@ -1177,3 +1177,63 @@ describe('the variable path checks the RESULT against the PLAN', () => {
     expect(liveMarkers(doc.id).filter((m) => m.name.startsWith('Beat ')).length).toBeGreaterThan(0);
   }, 30000);
 });
+
+describe('the region is clamped exactly as cloneRegion clamps it (finding 7)', () => {
+  it.each([
+    ['an end past the document', 0, 99 * SR],
+    ['a negative start', -5000, 4 * SR],
+    ['both ends out of bounds', -5000, 99 * SR],
+  ])('describes the real audio when the selection runs %s', (_label, start, end) => {
+    // `setSelection` does NOT clamp — it stores whatever it is handed — while
+    // `runEffectOnSelection`/`cloneRegion` DO. So the two resolutions
+    // disagreeing is reachable through the ordinary store API even though the
+    // reviewer could find no UI path to it, and an unclamped plan would
+    // describe a region longer than the audio the worker is handed: the map
+    // would be built for one length and applied to another.
+    const seconds = 8;
+    const doc = seedDoc([sine(220, seconds)]);
+    const len = docLength(doc);
+    useAppStore.getState().setSelection({ start, end });
+
+    const check = checkVariableTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: accelGrid(100, 120, seconds) },
+    });
+    expect(check.ok).toBe(true);
+    if (!check.ok) return;
+
+    // The region never claims to be longer than the document.
+    expect(check.plan.regionLength).toBeLessThanOrEqual(len);
+    expect(check.plan.regionLength).toBe(Math.min(len, Math.max(end, 0)) - Math.min(len, Math.max(start, 0)));
+    // And every beat handed to the worker is inside it.
+    for (const b of check.plan.extra.beatSamples) {
+      expect(b).toBeGreaterThanOrEqual(0);
+      expect(b).toBeLessThan(check.plan.regionLength);
+    }
+  });
+
+  it('and an over-long selection still applies, with the plan matching the result', async () => {
+    // The end-to-end consequence: unclamped, `plan.regionLength` would exceed
+    // the audio the worker actually receives, `plan.outLength` would be
+    // computed for the wrong length, and the new plan-vs-realised check would
+    // refuse a run that was in fact correct.
+    const seconds = 8;
+    const doc = seedDoc([amSine(441, 110, seconds)]);
+    useAppStore.getState().setSelection({ start: 0, end: 99 * SR });
+
+    const req = {
+      sourceBpm: 110,
+      targetBpm: 130,
+      variableRate: { beatSamples: accelGrid(100, 120, seconds) },
+    };
+    const planned = checkVariableTempoChange(req);
+    expect(planned.ok).toBe(true);
+    if (!planned.ok) return;
+
+    const result = await applyTempoChange(req);
+    expect(result.ok).toBe(true);
+    expect(result.reason).toBeUndefined();
+    expect(docLength(liveDoc(doc.id))).toBe(planned.plan.outLength);
+  }, 30000);
+});
