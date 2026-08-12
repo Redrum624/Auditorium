@@ -510,6 +510,9 @@ function correctMarkersForWarp(docId: string, originals: Marker[], plan: Variabl
         : regionStart + Math.round(synthesisPosAt(map, pos - regionStart))
     );
   }
+  // Fast path only, and subsumed by the `moved === 0` check below — an empty
+  // candidate set can never move anything. Recorded as an equivalent mutation
+  // rather than left looking like a guard that nothing tests.
   if (corrected.size === 0) return 0;
 
   const before: Marker[] = useAppStore.getState().markers[docId] ?? [];

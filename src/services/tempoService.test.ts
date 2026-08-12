@@ -1496,15 +1496,25 @@ describe('L1-6 â€” markers inside a VARIABLE match follow the map, not the 
     expect(liveMarkers(docId).find((m) => m.id === 'm-beat')!.positionSample).toBe(markerPos);
   }, 30000);
 
-  it('pushes no marker entry when nothing outside the beat grid moves', async () => {
+  it('pushes no marker entry when every candidate lands where it already is', async () => {
+    // Both no-move routes in one fixture, because they are different guards.
+    // `m-before` is skipped outright — the warp cannot reach it. `m-at-start`
+    // IS a candidate: it sits exactly on the region start, where
+    // `synthesisPosAt` returns 0 and the proportional remap also returned 0, so
+    // it is considered and found already correct. Without the `moved === 0`
+    // check that second marker still buys a `Match Tempo Markers` undo entry
+    // that changes nothing — a mutation sweep found that arm unpinned when this
+    // test carried only the first marker.
     const seconds = 8;
     const doc = seedDoc([amSine(441, 110, seconds)]);
     const docId = doc.id;
     const start = 2 * SR;
     useAppStore.getState().setSelection({ start, end: 6 * SR });
-    useAppStore
-      .getState()
-      .setMarkersForDoc(docId, [{ id: 'm-before', name: 'before', positionSample: start - 1000 }]);
+    const before: Marker[] = [
+      { id: 'm-before', name: 'before', positionSample: start - 1000 },
+      { id: 'm-at-start', name: 'on the region start', positionSample: start },
+    ];
+    useAppStore.getState().setMarkersForDoc(docId, before);
 
     const result = await applyTempoChange({
       sourceBpm: 110,
@@ -1513,8 +1523,6 @@ describe('L1-6 â€” markers inside a VARIABLE match follow the map, not the 
     });
     expect(result.ok).toBe(true);
     expect(getHistory(docId).done).toEqual(['Match Tempo']);
-    expect(liveMarkers(docId)).toEqual([
-      { id: 'm-before', name: 'before', positionSample: start - 1000 },
-    ]);
+    expect(liveMarkers(docId)).toEqual(before);
   }, 30000);
 });
