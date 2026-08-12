@@ -71,7 +71,7 @@ const toggleActive: CSSProperties = {
 };
 
 function Divider() {
-  return <div aria-hidden="true" style={divider} />;
+  return <div data-testid="toolbar-divider" aria-hidden="true" style={divider} />;
 }
 
 interface PillButtonProps {
@@ -324,6 +324,14 @@ export default function Toolbar() {
         <PillButton label="Open" title="Open (Ctrl+O)" onClick={() => void runCommand('file.open')}>
           Open
         </PillButton>
+
+        {/* Open and Save sat 3 px apart with nothing between them, and a click
+            meant for Open landed on Save during a frozen frame — a full
+            re-encode-and-write of a document the user never edited. The divider
+            is the same one the other groups use; here it buys the pointer a
+            target that is not a destructive command. */}
+        <Divider />
+
         <PillButton
           label="Save"
           title="Save (Ctrl+S)"

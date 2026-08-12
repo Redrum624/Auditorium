@@ -66,10 +66,18 @@ describe('SHORTCUT_TABLE', () => {
       { combo: 'ctrl+o', commandId: 'file.open' },
       { combo: 'ctrl+s', commandId: 'file.save' },
       { combo: 'ctrl+n', commandId: 'file.new' },
+      { combo: 'ctrl+w', commandId: 'file.close' },
       { combo: 'm', commandId: 'marker.add' },
       { combo: 'ctrl+e', commandId: 'file.export' },
       { combo: 'escape', commandId: 'edit.deselect' },
     ]);
+  });
+
+  it('carries the Ctrl+W the File > Close menu row advertises', () => {
+    // The menu row and the key that runs it are two separate tables, and they
+    // drifted: `file.close` has advertised Ctrl+W since Task 11 with no entry
+    // here, so the label named a key that did nothing.
+    expect(SHORTCUT_TABLE).toContainEqual({ combo: 'ctrl+w', commandId: 'file.close' });
   });
 });
 
@@ -89,6 +97,17 @@ describe('installShortcuts', () => {
     window.dispatchEvent(keydown({ key: 'z', ctrlKey: true }));
 
     expect(runCommandSpy).toHaveBeenCalledWith('edit.undo');
+  });
+
+  it('dispatches runCommand("file.close") for ctrl+w', () => {
+    const runCommandSpy = jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
+    uninstall = installShortcuts(window);
+
+    window.dispatchEvent(keydown({ key: 'w', ctrlKey: true }));
+
+    // `file.close` is `closeDocumentFlow`, which prompts before discarding
+    // unsaved work — the accelerator inherits that guard for free.
+    expect(runCommandSpy).toHaveBeenCalledWith('file.close');
   });
 
   it('dispatches runCommand("transport.playPause") for the space key', () => {

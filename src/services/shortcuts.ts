@@ -23,6 +23,12 @@ export const SHORTCUT_TABLE: Shortcut[] = [
   { combo: 'ctrl+o', commandId: 'file.open' },
   { combo: 'ctrl+s', commandId: 'file.save' },
   { combo: 'ctrl+n', commandId: 'file.new' },
+  // The File menu has advertised `Ctrl+W` on its Close row since Task 11, but
+  // this table never carried the combo, so the label named a key that did
+  // nothing. It routes to `file.close`, i.e. `closeDocumentFlow` — the
+  // prompt-first path — so the accelerator can never discard unsaved work
+  // silently.
+  { combo: 'ctrl+w', commandId: 'file.close' },
   { combo: 'm', commandId: 'marker.add' },
   { combo: 'ctrl+e', commandId: 'file.export' },
   { combo: 'escape', commandId: 'edit.deselect' },

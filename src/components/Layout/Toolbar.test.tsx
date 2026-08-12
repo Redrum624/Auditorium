@@ -224,6 +224,25 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
     expect(screen.getByRole('button', { name: 'Fit' })).toBeInTheDocument();
   });
 
+  it('separates Open from Save with a divider', () => {
+    // The two pills sat 3 px apart with nothing between them: a click aimed at
+    // Open that landed one pill to the right ran Save — a full re-encode and
+    // overwrite of the file on disk. Save must not be Open's immediate
+    // neighbour.
+    render(<Toolbar />);
+    const pill = screen.getByTestId('toolbar-pill');
+    const children = Array.from(pill.children);
+    const openIndex = children.indexOf(screen.getByRole('button', { name: 'Open' }));
+    const saveIndex = children.indexOf(screen.getByRole('button', { name: 'Save' }));
+    expect(openIndex).toBeGreaterThanOrEqual(0);
+    expect(saveIndex).toBeGreaterThan(openIndex);
+
+    const dividerBetween = children
+      .slice(openIndex + 1, saveIndex)
+      .some((el) => el.getAttribute('data-testid') === 'toolbar-divider');
+    expect(dividerBetween).toBe(true);
+  });
+
   it('Open is always enabled; Save/Export/zoom need an active document', () => {
     render(<Toolbar />);
     expect(screen.getByRole('button', { name: 'Open' })).toBeEnabled();
