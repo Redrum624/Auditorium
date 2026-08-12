@@ -1476,4 +1476,84 @@ describe('runVocalChain', () => {
     // the whole tail, which lands it on the region's new end exactly.
     expect(markers.find((m) => m.id === 'end')!.positionSample).toBe(report!.outputSamples);
   });
+
+  // ── One resolved region, every consumer (L11) ─────────────────────────────
+  // `setSelection` stores whatever it is handed. `cloneRegion` and
+  // `replaceRegion` clamp into `[0, docLength]`, but `regionSamples`, the marker
+  // rules' absolute offsets and the post-edit selection/cursor were all built
+  // from the RAW pair — so an out-of-bounds selection gave the chain's arithmetic
+  // a region the audio never used. Same defect family as R7's `plan.regionStart`,
+  // L1's constant tempo path and L9's `runEffectOnSelection`: resolve ONCE, and
+  // every consumer reads that pair.
+
+  it('measures and remaps against the CLAMPED region when a NON-ZERO start pairs with an end past the document (L11)', async () => {
+    const docId = seedDoc([noise(WIN * 4, 0.3, 21)]);
+    const length = docLength(activeDoc());
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'inside', positionSample: WIN * 2, name: 'inside' },
+      { id: 'end', positionSample: length, name: 'end' },
+    ]);
+    // Clamps to [WIN, length): three windows of audio, not the raw five.
+    useAppStore.getState().setSelection({ start: WIN, end: length + WIN * 2 });
+
+    const report = await runVocalChain({ enabled: only('reverb') });
+
+    // The region the chain SAYS it worked on is the region `cloneRegion` handed
+    // the stages — against the raw pair this read WIN * 5, a span longer than
+    // the whole document.
+    expect(report!.regionSamples).toBe(WIN * 3);
+    const grew = report!.outputSamples - report!.regionSamples;
+    expect(grew).toBeGreaterThan(0);
+    // Which makes `grew` the tail the reverb actually added: the raw pair turned
+    // it into `tail - WIN * 2`, and the document's own length disagreed with it.
+    expect(docLength(activeDoc())).toBe(length + grew);
+
+    const markers = useAppStore.getState().markers[docId];
+    // Before the region's end: untouched either way.
+    expect(markers.find((m) => m.id === 'inside')!.positionSample).toBe(WIN * 2);
+    // At the region's end, which IS the document's end: pushed back by the whole
+    // tail. Against the raw pair the insert point landed at `length + WIN * 2`,
+    // past every marker there is, so this one stayed at `length` — a cue point
+    // left sitting inside the tail instead of after it.
+    expect(markers.find((m) => m.id === 'end')!.positionSample).toBe(length + grew);
+  });
+
+  it('offsets the cuts, the selection and the cursor from the CLAMPED start when the selection begins before sample 0 (L11)', async () => {
+    // Loud / long silence / loud, with the region stopping one window short of
+    // the end so the clamp is the only thing moving `start`.
+    const signal = new Float32Array(WIN * 12);
+    signal.set(flat(WIN * 2, 0.5), 0);
+    signal.set(flat(WIN * 6, 0.0005), WIN * 2);
+    signal.set(flat(WIN * 4, 0.5), WIN * 8);
+    const docId = seedDoc([signal]);
+    const length = docLength(activeDoc());
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'atGap', positionSample: WIN * 2, name: 'at the gap' },
+      { id: 'afterGap', positionSample: WIN * 9, name: 'after the gap' },
+    ]);
+    // Clamps to [0, WIN * 11): eleven windows, not the raw thirteen.
+    useAppStore.getState().setSelection({ start: -WIN * 2, end: WIN * 11 });
+
+    const report = await runVocalChain({ enabled: only('silence') });
+    expect(report!.stages.find((s) => s.id === 'silence')!.status).toBe('applied');
+
+    // Measured off the DOCUMENT, not read back from the report — the report's
+    // own length figures are half of what is under test here.
+    const removed = length - docLength(activeDoc());
+    expect(removed).toBeGreaterThan(0);
+    expect(report!.regionSamples).toBe(WIN * 11);
+    expect(report!.outputSamples).toBe(WIN * 11 - removed);
+
+    const markers = useAppStore.getState().markers[docId];
+    // The cut the worker reported is relative to the region it RECEIVED, which
+    // began at the clamped 0. Offset by the raw -WIN * 2 the whole gap slid two
+    // windows earlier, swallowing this marker and snapping it onto the join.
+    expect(markers.find((m) => m.id === 'atGap')!.positionSample).toBe(WIN * 2);
+    expect(markers.find((m) => m.id === 'afterGap')!.positionSample).toBe(WIN * 9 - removed);
+
+    // The post-edit state reads the same resolved pair; the raw one left the
+    // document selected from -WIN * 2 with the cursor there too.
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: WIN * 11 - removed });
+    expect(useAppStore.getState().cursorSample).toBe(0);
+  });
 });

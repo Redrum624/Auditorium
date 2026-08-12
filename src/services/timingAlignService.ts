@@ -127,11 +127,30 @@ function activeDoc(): AudioDocument | null {
   return s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
 }
 
-/** The region an effect run would target: the selection, or the whole document
- * — the same fallback `runEffectOnSelection` applies. */
+/**
+ * The region an effect run would target: the selection clamped into the
+ * document, or the whole document when there is none — the same resolve
+ * `runEffectOnSelection` applies, which is what makes this the region the warp
+ * will actually be handed.
+ *
+ * The clamp is not decoration. `setSelection` stores whatever it is handed while
+ * `cloneRegion` clamps what it slices, so an out-of-bounds selection used to
+ * give `buildAlignPlan` a `regionStart` the audio never started at (every
+ * `effectAnchors.source` offset by the difference) and `suggestSyllableMarkers`
+ * a start it wrote its proposals from, at negative samples. This function
+ * claimed to mirror `runEffectOnSelection` throughout, and that claim became
+ * FALSE the moment L9 made the runner resolve once — the runner clamped, this
+ * did not. Fourth instance of one defect (R7's `plan.regionStart`, L1's
+ * `resolveRegion`, L9's runner): resolve once, and every consumer reads that
+ * pair.
+ */
 export function alignRegion(doc: AudioDocument): { start: number; end: number } {
   const selection = useAppStore.getState().selection;
-  return selection ? { start: selection.start, end: selection.end } : { start: 0, end: docLength(doc) };
+  const length = docLength(doc);
+  return {
+    start: Math.min(Math.max(selection ? selection.start : 0, 0), length),
+    end: Math.min(Math.max(selection ? selection.end : length, 0), length),
+  };
 }
 
 function mixDown(channels: Float32Array[]): Float32Array {

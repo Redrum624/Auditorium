@@ -1385,4 +1385,73 @@ describe('runCoverChain', () => {
     const after = activeDoc().channels[0];
     for (let i = N / 2; i < N; i++) expect(after[i]).toBe(before[0][i]);
   });
+
+  // ── One resolved region, every consumer (L11) ─────────────────────────────
+  // `setSelection` stores whatever it is handed. `cloneRegion` and
+  // `replaceRegion` clamp into `[0, docLength]`, but `regionSamples` (which the
+  // report shows and the tail's own length is measured against), the grow
+  // remap's insert point and the post-edit selection/cursor were all built from
+  // the RAW pair — so an out-of-bounds selection gave the chain's arithmetic a
+  // region the audio never used. Same defect family as R7's `plan.regionStart`,
+  // L1's `resolveRegion` and L9's `runEffectOnSelection`: resolve ONCE, and
+  // every consumer reads that pair.
+
+  it('measures and remaps against the CLAMPED region when a NON-ZERO start pairs with an end past the document (L11)', async () => {
+    // The one stage in this chain that changes length, on the reference the
+    // grow test above uses: a 2.0 s decay, which Match Reverb accepts.
+    const decayed = new Float32Array(N);
+    const src = noise(N, 0.5, 3);
+    for (let i = 0; i < N; i++) decayed[i] = src[i] * Math.pow(10, (-60 * (i / SR)) / (2.0 * 20));
+    const refId = seedDoc([decayed], 'Song — Vocals');
+    const takeId = seedDoc([tone(N, 1000, 0.25)], 'take');
+    useAppStore.setState({ activeDocumentId: takeId });
+    useAppStore
+      .getState()
+      .setMarkersForDoc(takeId, [
+        { id: 'inside', positionSample: N >> 1, name: 'inside' },
+        { id: 'end', positionSample: N, name: 'end' },
+      ]);
+    // Clamps to [N / 4, N): three quarters of the take, not the raw five.
+    useAppStore.getState().setSelection({ start: N / 4, end: N + N / 2 });
+
+    const report = await runCoverChain({ enabled: only('matchReverb'), referenceDocId: refId });
+    expect(resultFor(report!.stages, 'matchReverb').status).toBe('applied');
+
+    // The region the chain SAYS it worked on is the region `cloneRegion` handed
+    // the stages — against the raw pair this read 5N/4, a span longer than the
+    // whole document.
+    expect(report!.regionSamples).toBe((N * 3) / 4);
+    const grew = report!.outputSamples - report!.regionSamples;
+    expect(grew).toBeGreaterThan(0);
+    // Which makes `grew` the tail Match Reverb actually added, and the document
+    // agrees with it.
+    expect(docLength(activeDoc())).toBe(N + grew);
+
+    const markers = useAppStore.getState().markers[takeId];
+    expect(markers.find((m) => m.id === 'inside')!.positionSample).toBe(N >> 1);
+    // At the region's end, which IS the document's end: pushed back by the whole
+    // tail. Against the raw pair the insert point landed at 3N/2, past every
+    // marker there is, so this one stayed at N — a cue point left sitting inside
+    // the tail instead of after it.
+    expect(markers.find((m) => m.id === 'end')!.positionSample).toBe(N + grew);
+  });
+
+  it('offsets the post-edit selection and cursor from the CLAMPED start when the selection begins before sample 0 (L11)', async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    // Clamps to [0, 3N/4): three quarters, not the raw five.
+    useAppStore.getState().setSelection({ start: -N / 2, end: (N * 3) / 4 });
+
+    const report = await runCoverChain({ enabled: only('matchLoudness'), referenceDocId: refId });
+    expect(resultFor(report!.stages, 'matchLoudness').status).toBe('applied');
+
+    // Match Loudness preserves length, so the document is untouched in size and
+    // the ONLY things the raw start reached are the report's arithmetic and the
+    // state the user is left holding.
+    expect(docLength(activeDoc())).toBe(N);
+    expect(report!.regionSamples).toBe((N * 3) / 4);
+    expect(report!.outputSamples).toBe((N * 3) / 4);
+    // The raw pair left the document selected from -N/2 with the cursor there.
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: (N * 3) / 4 });
+    expect(useAppStore.getState().cursorSample).toBe(0);
+  });
 });

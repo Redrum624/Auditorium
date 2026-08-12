@@ -203,6 +203,49 @@ describe('buildAlignPlan', () => {
     expect(alignRegion(doc)).toEqual({ start: SR, end: 5 * SR });
   });
 
+  // ── One resolved region, every consumer (L11) ─────────────────────────────
+  // `alignRegion`'s docstring claims it applies "the same fallback
+  // `runEffectOnSelection` applies", and `applyTimingAlignment` really does hand
+  // the plan's geometry to that runner. L9 made the runner clamp its region into
+  // the document; this one still read the selection raw, so the claim was false
+  // and the two disagreed on exactly the selections the store lets through —
+  // `setSelection` stores whatever it is handed. Same defect family as R7's
+  // `plan.regionStart`, L1's `resolveRegion` and L9's runner.
+
+  it('clamps a selection the store accepted into the document, as runEffectOnSelection does (L11)', async () => {
+    const doc = await seedAnalysedDoc();
+    const length = docLength(doc);
+    // A NON-ZERO start with an end past the document.
+    useAppStore.getState().setSelection({ start: 2 * SR, end: length + 5 * SR });
+    expect(alignRegion(doc)).toEqual({ start: 2 * SR, end: length });
+    // …and a start before sample 0 with a non-zero end inside it.
+    useAppStore.getState().setSelection({ start: -3 * SR, end: 4 * SR });
+    expect(alignRegion(doc)).toEqual({ start: 0, end: 4 * SR });
+  });
+
+  it('builds the plan on the CLAMPED region, which is the audio the warp will receive (L11)', async () => {
+    const doc = await seedAnalysedDoc(120, 12);
+    const beats = Array.from(getBeatGrid(doc.id)!.beatSamples);
+    const positions = [beats[3] + 1500, beats[5] - 1200];
+    setMarkers(doc.id, positions);
+    const length = docLength(doc);
+    useAppStore.getState().setSelection({ start: -2 * SR, end: length + 3 * SR });
+
+    const r = buildAlignPlan({ division: 1, strength: 1 });
+    if (!r.ok) throw new Error('expected a plan');
+    expect(r.plan.regionStart).toBe(0);
+    expect(r.plan.regionEnd).toBe(length);
+    // `effectAnchors` are region-RELATIVE, and `runEffectOnSelection` clamps its
+    // own region into the document before slicing it. An unclamped `regionStart`
+    // therefore measured every anchor from a point the audio the worker receives
+    // does not begin at — two seconds of offset on a map whose whole purpose is
+    // to land syllables on the sample the user saw.
+    expect(r.plan.effectAnchors.map((a) => a.source)).toEqual(positions);
+    // `remapRegionMarkers` reads the same pair back to move the markers through
+    // the map afterwards, so the plan's region is the marker geometry too.
+    expect(r.plan.anchors.map((a) => a.sourceSample)).toEqual(positions);
+  });
+
   it('snaps EVERY marker to its own nearest grid point, not just the first', async () => {
     const doc = await seedAnalysedDoc(120, 12);
     const grid = getBeatGrid(doc.id)!;
@@ -406,6 +449,34 @@ describe('suggestSyllableMarkers', () => {
     expect(outcome).toEqual({ added: 0, truncated: false, analysedSeconds: 4 });
     expect(useAppStore.getState().markers[doc.id] ?? []).toHaveLength(0);
     expect(getHistory(doc.id).done).toHaveLength(historyBefore);
+  });
+
+  it('analyses and places against the CLAMPED region when the selection begins before sample 0 (L11)', async () => {
+    const doc = seedDoc([clickTrain(120, 8)]);
+    // The region the audio actually has — `cloneRegion` clamps to this pair
+    // whichever way the selection is spelled, so this run is the control.
+    useAppStore.getState().setSelection({ start: 0, end: 5 * SR });
+    const control = suggestSyllableMarkers({ sensitivity: 0.5 });
+    expect(control!.added).toBeGreaterThan(2);
+    const controlPositions = (useAppStore.getState().markers[doc.id] ?? []).map((m) => m.positionSample);
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id] ?? []).toHaveLength(0);
+
+    // The SAME region, spelled with a start the document does not have.
+    useAppStore.getState().setSelection({ start: -SR, end: 5 * SR });
+    const outcome = suggestSyllableMarkers({ sensitivity: 0.5 });
+
+    // The span reported is the span analysed: the raw start claimed a second of
+    // audio nothing looked at (6 s over a 5 s region).
+    expect(outcome!.analysedSeconds).toBe(5);
+    expect(outcome!.added).toBe(control!.added);
+    // Every proposal is written at `start + offset`, and the offsets came out of
+    // a region `cloneRegion` had already clamped to [0, 5 * SR) — so the raw
+    // start slid all of them a whole second early, the first ones to NEGATIVE
+    // samples, positions no waveform has.
+    const positions = (useAppStore.getState().markers[doc.id] ?? []).map((m) => m.positionSample);
+    expect(positions[0]).toBeGreaterThanOrEqual(0);
+    expect(positions).toEqual(controlPositions);
   });
 
   it('returns null with no document', () => {

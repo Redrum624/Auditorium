@@ -866,9 +866,22 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
   if (!doc) return null;
 
+  // ONE resolved region, read by every consumer below — the audio the stages
+  // receive, the `replaceRegion` write, `regionSamples` (which the report shows
+  // and Match Reverb's tail is measured against), the grow remap's insert point,
+  // and the post-edit selection/cursor. `cloneRegion` and `replaceRegion` clamp
+  // to [0, docLength] internally while `setSelection` stores whatever it is
+  // handed, so reading the raw selection HERE gave the arithmetic a region the
+  // audio never used: an `end` past the document inflated `regionSamples` and
+  // put the tail's insert point past every marker there is, and a `start` before
+  // 0 left the document selected from a negative sample. Same defect family as
+  // R7's `plan.regionStart`, L1's `resolveRegion` and L9's
+  // `runEffectOnSelection`: resolve once, not clamp twice and hope the two
+  // agree.
   const selection = state.selection;
-  const start = selection ? selection.start : 0;
-  const end = selection ? selection.end : docLength(doc);
+  const length = docLength(doc);
+  const start = Math.min(Math.max(selection ? selection.start : 0, 0), length);
+  const end = Math.min(Math.max(selection ? selection.end : length, 0), length);
   if (end <= start) return null;
   const docId = doc.id;
   const sampleRate = doc.sampleRate;
