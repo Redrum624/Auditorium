@@ -185,7 +185,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Align Lyrics',
     effectId: null,
     defaultEnabled: false,
-    note: `Not an automatic stage. It places your own lyrics in the recording and lets you replace ONE word you pick with a fresh take of just that word — nothing in it judges which word that should be. Run Effects → Align Lyrics… FIRST, then this chain. It sits SECOND, after Remove DC Offset and before everything else, for two reasons that are both measurements rather than preferences. A replacement is a fresh microphone take carrying its own room tone, so it has to be in the file before Noise Reduction learns its print and before the compressor, de-esser and limiter measure the levels they set themselves from — put it after them and the seam joins cleaned audio to a raw take, with no stage left to reconcile the two floors. And it has to come before Remove Silence and Align Vocal Timing, which move every sample after the point they edit, leaving the word positions describing audio that has shifted. Remove DC Offset still goes first, for the chain's own stated reason: the splice matches the new word's level to the old one's by RMS, and a DC bias inflates that measurement. ${ALIGN_ACCURACY_SENTENCE}`,
+    note: `Not an automatic stage. It places your own lyrics in the recording and lets you replace ONE word you pick with a fresh take of just that word — nothing in it judges which word that should be. Run Pipeline → Align Lyrics… FIRST, then this chain. It sits SECOND, after Remove DC Offset and before everything else, for two reasons that are both measurements rather than preferences. A replacement is a fresh microphone take carrying its own room tone, so it has to be in the file before Noise Reduction learns its print and before the compressor, de-esser and limiter measure the levels they set themselves from — put it after them and the seam joins cleaned audio to a raw take, with no stage left to reconcile the two floors. And it has to come before Remove Silence and Align Vocal Timing, which move every sample after the point they edit, leaving the word positions describing audio that has shifted. Remove DC Offset still goes first, for the chain's own stated reason: the splice matches the new word's level to the old one's by RMS, and a DC bias inflates that measurement. ${ALIGN_ACCURACY_SENTENCE}`,
     weight: 0,
   },
   {
@@ -217,7 +217,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Align Vocal Timing',
     effectId: null,
     defaultEnabled: false,
-    note: 'Not an automatic stage. It needs you to confirm the beat grid and the syllable moves before it warps anything, by design — automatic onset detection measured 0.56 precision on a legato vocal, so an unconfirmed pass would move syllables that were never there. Run Effects → Align Vocal Timing… FIRST, then this chain: warping changes the analysis windows the pitch detector uses, so timing belongs before pitch.',
+    note: 'Not an automatic stage. It needs you to confirm the beat grid and the syllable moves before it warps anything, by design — automatic onset detection measured 0.56 precision on a legato vocal, so an unconfirmed pass would move syllables that were never there. Run Pipeline → Align Vocal Timing… FIRST, then this chain: warping changes the analysis windows the pitch detector uses, so timing belongs before pitch.',
     weight: 0,
   },
   {

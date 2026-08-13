@@ -180,7 +180,14 @@ describe('VOCAL_CHAIN_STAGES', () => {
       // manual stage that did not would be a row that does nothing and says
       // nothing about why.
       expect(stage.note).toContain('Not an automatic stage.');
-      expect(stage.note).toContain(`Run Effects → ${stage.label}… FIRST, then this chain`);
+      // F11-7: both stages moved to the Pipeline menu, so the path they name
+      // moved with them. Still built from `stage.label` rather than written
+      // out, so a note that named the wrong stage still fails — and still
+      // built from a literal section name, so a note left pointing at Effects
+      // fails too. (`menuActions.test.ts` sweeps the whole of src/ for that
+      // second failure mode across every command, not just these two.)
+      expect(stage.note).toContain(`Run Pipeline → ${stage.label}… FIRST, then this chain`);
+      expect(stage.note).not.toContain('Effects →');
     }
   });
 

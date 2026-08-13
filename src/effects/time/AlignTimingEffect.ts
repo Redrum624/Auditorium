@@ -38,7 +38,7 @@ function readAnchors(): TimingAnchor[] {
     // applies no edit. Returning the input unchanged would push an undo entry
     // that did nothing and look like the feature silently failing.
     throw new Error(
-      'Align Vocal Timing needs confirmed anchors. Open Effects → Align Vocal Timing… rather than running this effect directly.'
+      'Align Vocal Timing needs confirmed anchors. Open Pipeline → Align Vocal Timing… rather than running this effect directly.'
     );
   }
   return anchors;

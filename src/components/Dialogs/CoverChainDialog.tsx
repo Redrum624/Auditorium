@@ -374,8 +374,8 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
 
         {referenceDocId === '' && (
           <p data-testid="cover-chain-no-reference" className="text-xs" style={{ color: AMBER }}>
-            Nothing to match against yet. Run Edit → Separate into Stems… on the original song, then choose its “—
-            Vocals” document here. Without it every matching stage below will decline.
+            Nothing to match against yet. Run Pipeline → Separate into Stems… on the original song, then choose its
+            “— Vocals” document here. Without it every matching stage below will decline.
           </p>
         )}
 

@@ -917,6 +917,67 @@ describe('the Pipeline section (F11-7)', () => {
   });
 });
 
+// This repo's signature defect class: a command moves menus and the prose that
+// tells the user where to find it does not. F11-7 moved ten of them at once and
+// left eight stale strings behind across dialogs, effect refusal messages and
+// chain stage notes — which is exactly why this is a sweep of the whole tree
+// rather than eight assertions someone has to remember to add a ninth to.
+//
+// It reads the menu it is testing: for every command the menu builds, no source
+// file may name that command's label behind a DIFFERENT section's name. Nothing
+// is hardcoded, so a command that moves again is covered the day it moves.
+describe('no source file names a stale menu path (F11-7)', () => {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const fs = require('fs') as typeof import('fs');
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const path = require('path') as typeof import('path');
+
+  const SRC = path.resolve(__dirname, '..');
+
+  function sourceFiles(dir: string, out: string[] = []): string[] {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        sourceFiles(full, out);
+      } else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it('finds source files to sweep at all', () => {
+    // A silent zero here would make every assertion below vacuously true.
+    expect(sourceFiles(SRC).length).toBeGreaterThan(50);
+  });
+
+  it('names every command behind the section that actually holds it', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const sections = getMenuSections();
+    const titles = sections.map((s) => s.title);
+    const files = sourceFiles(SRC).map((file) => ({ file, text: fs.readFileSync(file, 'utf8') }));
+
+    const stale: string[] = [];
+    for (const section of sections) {
+      for (const item of section.items) {
+        if (item === 'separator') continue;
+        for (const wrongTitle of titles) {
+          if (wrongTitle === section.title) continue;
+          const needle = `${wrongTitle} → ${item.label}`;
+          for (const { file, text } of files) {
+            if (text.includes(needle)) {
+              stale.push(`${path.relative(SRC, file)}: "${needle}" (it is in ${section.title})`);
+            }
+          }
+        }
+      }
+    }
+
+    expect(stale).toEqual([]);
+  });
+});
+
 describe('tempo.detect (Task T5)', () => {
   it('Pipeline section opens with tempo.detect', () => {
     const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;

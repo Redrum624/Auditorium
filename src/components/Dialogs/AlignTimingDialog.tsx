@@ -32,7 +32,7 @@ function refusalMessage(reason: AlignRefusal): string {
     case 'no-document':
       return 'No document is open.';
     case 'no-grid':
-      return 'No beat grid for this file yet — run Effects → Detect Tempo first.';
+      return 'No beat grid for this file yet — run Pipeline → Detect Tempo first.';
     case 'no-anchors':
       return 'No markers inside the region. Place a marker on each syllable you want moved, or use Suggest syllable markers.';
     case 'region-too-short':

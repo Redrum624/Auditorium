@@ -226,7 +226,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Separate the Original',
     effectId: null,
     defaultEnabled: false,
-    note: `Not an automatic stage — it runs a model over the whole song and produces five new documents, so it is its own pass. Run Edit → Separate into Stems… on the original mix FIRST, then pick its “— Vocals” document as the reference above: that separated vocal, carrying whatever was done to it in the mix, is what everything below matches against. ${COVER_CHAIN_RESIDUAL_SENTENCE}`,
+    note: `Not an automatic stage — it runs a model over the whole song and produces five new documents, so it is its own pass. Run Pipeline → Separate into Stems… on the original mix FIRST, then pick its “— Vocals” document as the reference above: that separated vocal, carrying whatever was done to it in the mix, is what everything below matches against. ${COVER_CHAIN_RESIDUAL_SENTENCE}`,
     weight: 0,
   },
   {
@@ -234,7 +234,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Vocal Chain on the Take',
     effectId: null,
     defaultEnabled: false,
-    note: 'Not an automatic stage — it is its own multi-stage pass with its own single undo entry, and running it inside this one would hide ten stages behind one line. Run Effects → Vocal Chain… on the take FIRST. It removes noise, hum and DC, corrects pitch, and sets a compressor, de-esser and high-pass from the take\'s own levels. It ends on a limiter, but that one derives nothing: a ceiling is an absolute level, so it runs at the effect\'s own −0.3 dBFS. The match below is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.',
+    note: 'Not an automatic stage — it is its own multi-stage pass with its own single undo entry, and running it inside this one would hide ten stages behind one line. Run Pipeline → Vocal Chain… on the take FIRST. It removes noise, hum and DC, corrects pitch, and sets a compressor, de-esser and high-pass from the take\'s own levels. It ends on a limiter, but that one derives nothing: a ceiling is an absolute level, so it runs at the effect\'s own −0.3 dBFS. The match below is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.',
     weight: 0,
   },
   {
@@ -242,7 +242,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Align Lyrics (word repair)',
     effectId: null,
     defaultEnabled: false,
-    note: `Not an automatic stage, and deliberately never will be: it lets you replace ONE word you pick with a fresh take of just that word, and nothing in it judges which word that should be — a per-phone quality scorer was built, measured 0.642 AUC against a 0.500 chance baseline, and was cut. Run Effects → Align Lyrics… BEFORE the vocal chain, so the replacement is in the file before any stage measures a level or learns a noise print from it. ${COVER_CHAIN_GOOD_TAKE_SENTENCE}`,
+    note: `Not an automatic stage, and deliberately never will be: it lets you replace ONE word you pick with a fresh take of just that word, and nothing in it judges which word that should be — a per-phone quality scorer was built, measured 0.642 AUC against a 0.500 chance baseline, and was cut. Run Pipeline → Align Lyrics… BEFORE the vocal chain, so the replacement is in the file before any stage measures a level or learns a noise print from it. ${COVER_CHAIN_GOOD_TAKE_SENTENCE}`,
     weight: 0,
   },
   {
@@ -250,7 +250,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Align Vocal Timing',
     effectId: null,
     defaultEnabled: false,
-    note: `Not an automatic stage. Run Effects → Align Vocal Timing… FIRST if your take drifts against the original: it needs you to confirm the beat grid and the syllable moves before it warps anything. ${COVER_CHAIN_CONFIRM_SENTENCE}`,
+    note: `Not an automatic stage. Run Pipeline → Align Vocal Timing… FIRST if your take drifts against the original: it needs you to confirm the beat grid and the syllable moves before it warps anything. ${COVER_CHAIN_CONFIRM_SENTENCE}`,
     weight: 0,
   },
   {
