@@ -1176,7 +1176,7 @@ useSessionStore.subscribe((s) => {
 // the `ratio === 1` arm and write nothing but the session and the selection,
 // so `sessionStore.undo.test.ts`'s ruling-3 pin holds unchanged.
 //
-// The I2 shrink-subscription below is NOT this: it re-resolves a zoom whose
+// The I2 shrink-subscription above is NOT this: it re-resolves a zoom whose
 // CEILING moved, which after a rate revert happens to catch the illegal cases
 // but never the merely mis-denominated ones (a stale samples/px under the new
 // fit is legal and still shows the wrong number of seconds).
