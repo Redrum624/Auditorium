@@ -103,11 +103,16 @@ function makeEstimates(mix: Float32Array[]): Float32Array[][] {
   return perSource;
 }
 
-function addSourceDocument(channelCount: number, sampleRate: number, name = 'Song'): AudioDocument {
+function addSourceDocument(
+  channelCount: number,
+  sampleRate: number,
+  name = 'Song',
+  length = FIXTURE_LENGTH
+): AudioDocument {
   const doc = createDocument({
     name,
     sampleRate,
-    channels: makeSourceChannels(channelCount, FIXTURE_LENGTH, sampleRate),
+    channels: makeSourceChannels(channelCount, length, sampleRate),
     filePath: `C:/fixtures/${name}.wav`,
   });
   useAppStore.getState().addDocument(doc);
@@ -194,14 +199,39 @@ beforeEach(() => {
  * symptom, on a surface the report never mentioned because separating a song
  * is how you MOST often arrive at a long multitrack session.
  */
+/**
+ * The fixture LENGTH is the load-bearing part of this guard, and it was wrong.
+ *
+ * 512 samples/px is only a wrong zoom when it is a REACHABLE one. The shared
+ * `FIXTURE_LENGTH` is 12 000 samples, whose fit is 8.72 samples/px — so a
+ * hardcoded 512 is coarser than the zoom-out ceiling and `resolveSessionZoom`
+ * CLAMPS it back to the fit before any assertion below can see it. This whole
+ * describe therefore passed against the original bug: proven by reverting
+ * `stemLanding.ts` to `{ samplesPerPixel: 512 }` and watching it stay green.
+ *
+ * At 20 s the fit is ~641 samples/px, 512 sits inside the range and stands. The
+ * length is local to this test rather than raised on the shared constant for
+ * two reasons: `FIXTURE_LENGTH` is deliberately not a multiple of the 256-sample
+ * hop and other tests lean on that, and raising it globally took this suite from
+ * 31 s to over 600 s (measured) because every case then partitions a 20 s source
+ * into five stems. Same shape as `coverJourney.test.ts`'s own fitted-session
+ * guard, for the same reason.
+ */
+const ZOOM_FIXTURE_LENGTH = 44100 * 20;
+
 describe('MT1 C1: a landed stem session opens fitted', () => {
   it('lays the longest stem across the lane instead of the hardcoded 512', () => {
     _resetSessionLaneWidth();
-    const source = addSourceDocument(2, 44100);
+    const source = addSourceDocument(2, 44100, 'Song', ZOOM_FIXTURE_LENGTH);
     landStems(makeOutput(source));
 
     const landed = useSessionStore.getState();
-    expect(landed.mtZoom).toEqual(defaultSessionZoom(landed.session));
+    const fit = defaultSessionZoom(landed.session);
+    // The fixture must be able to EXPRESS the bug, or everything below is green
+    // against broken code. This is the precondition the 12 000-sample fixture
+    // silently failed.
+    expect(fit.samplesPerPixel).toBeGreaterThan(512);
+    expect(landed.mtZoom).toEqual(fit);
     expect(landed.mtZoom.scrollSample).toBe(0);
     // Every stem spans the whole source, so the fit is the source's length.
     expect(landed.mtZoom.samplesPerPixel).toBe(
