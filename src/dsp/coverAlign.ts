@@ -4,10 +4,19 @@
  * ── What this is, said plainly ──────────────────────────────────────────────
  * ONE number: where the take's first sample belongs on the original's timeline.
  * It is a PLACEMENT, not a warp — nothing here stretches, nudges a syllable or
- * touches a sample. A take that drifts against the original stays drifting; the
- * app's warp tools (Align Vocal Timing, Align Lyrics) are deliberately manual
- * because they need a confirmed grid and a chosen word, and this stage does not
- * pretend to replace them.
+ * touches a sample. The app's warp tools (Align Vocal Timing, Align Lyrics) are
+ * deliberately manual because they need a confirmed grid and a chosen word, and
+ * this stage does not pretend to replace them.
+ *
+ * A take that drifts against the original therefore stays drifting — and CC2
+ * MEASURES how much rather than asserting it does not matter. The header used to
+ * say a drifting take "stays drifting", i.e. still gets placed, which was false:
+ * measured, a take running 0.5 % slow over 20 s scored 0.34–0.41 and was refused
+ * outright, its best lag wrong by up to 17 s. What is true now is stated in the
+ * outcomes: below {@link ALIGN_MAX_DRIFT_SPAN_SECONDS} a drifting take is
+ * still placed and the drift is reported alongside; above it the placement
+ * becomes a `'weak'` guess with the drift named, because one rigid lag has
+ * stopped being an answer to the question.
  *
  * ── It composes; it does not re-implement ───────────────────────────────────
  * The feature this correlates is the app's OWN onset-strength envelope:
@@ -69,16 +78,31 @@
  * cancels in a cross-correlation. It would matter to an absolute beat position;
  * it does not matter to a difference of two.
  *
- * ── Confidence: two numbers, both measured, and an honest refusal ───────────
- * `peakCorrelation` is the Pearson correlation of the two coarse envelopes at
- * the winning lag. `prominence` is that peak minus the best rival lag at least
- * {@link ALIGN_GUARD_SECONDS} away — "is there ONE lag that stands out", which
- * is the question, because a flat correlation surface with a high peak is a
- * coincidence and a sharp peak at a modest correlation is an alignment.
+ * ── Confidence: three measurements, and four honest answers ────────────────
+ * `peakCorrelation` is the Pearson correlation of the two coarse envelopes —
+ * LOW-PASSED first, see {@link ALIGN_SMOOTHING_MS} — at the winning lag.
+ * `prominence` is that peak minus the best rival lag at least
+ * {@link ALIGN_GUARD_SECONDS} away: "is there ONE lag that stands out".
+ * `windowLagSpreadSeconds` is what independently-aligned windows of the take say
+ * about each other: "does that one lag hold across the whole take".
  *
- * Both thresholds come from the sweep in `coverAlign.test.ts` and the test
- * asserts the shipped constants still sit strictly inside the measured gap. See
- * the constants for the figures.
+ * CC2 rebuilt this arm because it refused a real user's real cover. The floors
+ * were calibrated on constructed takes that shared the reference's onsets TO THE
+ * SAMPLE, and a human being does not: at ±40 ms of per-syllable variance the
+ * peak fell to 0.43–0.57 while the recovered offset stayed correct to 29 ms.
+ * That was not a threshold in the wrong place — the user's 0.423 sat INSIDE the
+ * unrelated population's own range, so no floor could have separated them. The
+ * evidence had to change: the envelopes are smoothed so onset lobes span human
+ * timing, and the piecewise windows add a second, independent opinion.
+ *
+ * The answer is then one of four (see {@link AlignmentOutcome}) rather than a
+ * boolean, because "not believable" was being said to a take that matches
+ * several places, to a take that drifts, and to a take with no relation at all —
+ * three different sentences, only one of them true.
+ *
+ * Every threshold comes from the sweep in `coverAlign.test.ts` and the test
+ * asserts the shipped constants still sit inside the measured gap by a stated
+ * margin. See the constants for the figures.
  */
 
 import { monoMix } from './chainAnalysis';
@@ -147,51 +171,189 @@ export const ALIGN_MIN_OVERLAP_SECONDS = 2;
 export const ALIGN_MIN_OVERLAP_FRACTION = 0.2;
 
 /**
- * The prominence a result must reach to be BELIEVED.
+ * CC2. How much the two COARSE onset envelopes are low-passed before the
+ * Pearson pass, in milliseconds of Hann kernel.
  *
- * MEASURED, in `coverAlign.test.ts` → "the measured separation", which prints
- * both populations every run and asserts this constant still sits between them.
- * Sixteen constructed cover pairs — one syllable schedule sung at pitches scaled
- * 1.26×, with ±50 % dynamics jitter and noise on top, 44.1 kHz against 48 kHz —
- * against sixteen pairs with no relation at all:
+ * MEASURED, in `coverAlign.test.ts` → "derives the smoothing width from the
+ * populations it has to separate", which sweeps candidate widths over the same
+ * populations the floors come from and asserts this constant is the argmax.
  *
- *     cover prominence      0.2092 … 0.5093
- *     unrelated prominence  0.0002 … 0.1635
+ * WHY there is a kernel at all. An onset envelope is near-zero everywhere
+ * except at an attack, and the shipped floors were calibrated on takes that
+ * shared the reference's attacks TO THE SAMPLE — same seed, same schedule. A
+ * human being is early on one word and late on the next; at ±40 ms the two sets
+ * of lobes barely touch at ANY lag, peak correlation falls to 0.43–0.57, and
+ * the run is refused WHILE THE RECOVERED OFFSET IS STILL CORRECT to 29 ms.
+ * That is not a threshold that needs moving — the user's 0.423 sat inside the
+ * unrelated population's own range, so no floor could have separated them. The
+ * EVIDENCE had to change. Widening each lobe so it spans the variance is the
+ * change; the width is swept rather than chosen because too wide turns both
+ * envelopes into slow curves that correlate whatever they are.
  *
- * 0.186 is the middle of that gap. It is not rounded to something prettier on
- * purpose: it is a point inside a measured interval, not a preference.
+ * The FINE envelopes are deliberately left alone: the coarse pass answers "can
+ * this be believed", the fine pass answers "exactly where", and blurring the
+ * one that has to be exact would trade the ±10 ms for nothing.
  */
-export const ALIGN_MIN_PROMINENCE = 0.186;
+export const ALIGN_SMOOTHING_MS = 240;
 
 /**
- * …and the floor on the peak correlation itself, which catches the other
- * failure: a low, flat correlation surface can produce a prominent peak out of
- * noise. Same sweep, same test, and a much wider gap:
+ * The prominence a result must reach for the answer to be ONE PLACE.
  *
- *     cover correlation     0.7674 … 0.8325
- *     unrelated correlation 0.2937 … 0.4476
+ * CC2 changed what this floor is FOR. It used to be half of the "is this even
+ * the same song" test, derived against unrelated audio — and at the smoothing
+ * width the correlation arm now needs, that gap has closed: an unrelated pair
+ * reaches 0.237 while the worst cover reaches 0.247. Prominence cannot carry
+ * relatedness any more, and pretending otherwise would be a floor with no
+ * margin.
  *
- * 0.607 is the middle of THAT gap. Both floors must be cleared: a run is
- * believed only when the surface has a peak worth having AND one lag that stands
- * out from the field.
+ * What prominence separates CLEANLY is a different question, and the one it was
+ * always really asking: does ONE lag stand out, or do several? MEASURED, in
+ * `coverAlign.test.ts` → "the measured separation", against a population the
+ * calibration never had — a song whose section repeats three times, where the
+ * rival lag one section away is a GENUINE partial match:
+ *
+ *     aperiodic cover prominence   see the printed sweep
+ *     repeated-section prominence  collapses to ~0.01 with the peak still ~0.89
+ *
+ * A run below this floor is not refused as unbelievable — it is reported as
+ * {@link AlignmentMeasurement.outcome} `'ambiguous'`, with the guard-separated
+ * rivals on `candidates`, because "this take matches several places" is a
+ * different sentence from "this take matches nothing" and the user can answer
+ * only the first one.
  */
-export const ALIGN_MIN_CORRELATION = 0.607;
+export const ALIGN_MIN_PROMINENCE = 0.115;
+
+/**
+ * …and the floor on the peak correlation itself, which is what now carries
+ * relatedness. Same sweep, same test, over a cover population that includes the
+ * ±40 ms human timing variance the shipped 0.607 was never calibrated against.
+ * See the printed populations; the constant is the middle of the measured gap.
+ *
+ * A run below this floor is only 'unrelated' when the piecewise arm ALSO fails
+ * (see {@link ALIGN_MAX_LAG_SPREAD_SECONDS}) — the two are OR'd for "is there a
+ * relation at all" and AND'ed for "can it be believed".
+ */
+export const ALIGN_MIN_CORRELATION = 0.731;
 
 /**
  * CP1 fix-round. How far each floor must sit from BOTH population edges.
  *
  * The gap being non-empty is not enough, and asserting membership with bare
- * `<`/`>` said only that: with the prominence gap 0.0457 wide, a floor could
- * drift to within 0.0001 of the unrelated population and every test would still
- * pass while an unrelated pair at 0.187 was accepted. These are the margins the
- * shipped floors ACTUALLY clear today — measured 0.0225 below and 0.0232 above
- * for prominence, 0.1594 and 0.1604 for correlation — each rounded DOWN to a
- * blunt figure, so the assertion has real teeth now and any erosion of the gap
- * trips it rather than silently eating the slack.
+ * `<`/`>` said only that: a floor could drift to within 0.0001 of the population
+ * it exists to exclude and every test would still pass. These are the margins
+ * the shipped floors ACTUALLY clear, each rounded DOWN to a blunt figure, so the
+ * assertion has real teeth and any erosion of a gap trips it rather than
+ * silently eating the slack.
+ *
+ * CC2 re-derived both against the new populations. The correlation margin fell
+ * from 0.15 to 0.07 and that is the honest cost of the change: a cover sung with
+ * human timing scores lower than a sample-identical one, so the gap it has to
+ * sit in is narrower. It is a real 0.07 on both sides of a measured gap rather
+ * than a comfortable number over a population no user will ever produce.
  */
-export const ALIGN_PROMINENCE_MARGIN = 0.02;
-/** …and the same for the (much wider) correlation gap. */
-export const ALIGN_CORRELATION_MARGIN = 0.15;
+export const ALIGN_PROMINENCE_MARGIN = 0.1;
+/** …and the same for the correlation gap. */
+export const ALIGN_CORRELATION_MARGIN = 0.07;
+
+/**
+ * CC2. How long each piecewise window is, in seconds of overlap.
+ *
+ * The global answer is ONE rigid lag over the whole take, which cannot tell "the
+ * whole take sits 8 s late" from "the take starts right and slides". So the
+ * overlap is cut into windows and each is aligned INDEPENDENTLY, full lag range,
+ * against the whole reference. Three seconds is the shortest window the sweep
+ * still recovers a lag from reliably; below it the Pearson denominator is
+ * computed over a few hundred frames and starts preferring coincidences (the
+ * same edge the min-overlap gate exists for).
+ */
+export const ALIGN_PIECEWISE_WINDOW_SECONDS = 3;
+/** Fewer than three windows cannot show a trend at all — two points are a line
+ * whatever they are. */
+export const ALIGN_PIECEWISE_MIN_WINDOWS = 3;
+/** …and past a dozen the windows get shorter than the material needs without
+ * telling anyone anything new about a straight line. */
+export const ALIGN_PIECEWISE_MAX_WINDOWS = 12;
+
+/**
+ * CC2. How far the independently-aligned windows may disagree, in seconds,
+ * before the take is not one placement at all.
+ *
+ * MEASURED, in `coverAlign.test.ts` → "the measured separation". This is the
+ * evidence that survives when the correlation arm is marginal, and it is a far
+ * wider gap than either floor above: every cover population — sample-identical,
+ * ±40 ms human, and drifting — keeps its windows within a few tens of
+ * milliseconds of one another, while unrelated audio's windows land half a
+ * second to four seconds apart, because there is no lag for them to agree ON.
+ */
+export const ALIGN_MAX_LAG_SPREAD_SECONDS = 0.34;
+
+/** …and how far that ceiling must sit from BOTH population edges, on the same
+ * principle as the two floor margins above. */
+export const ALIGN_LAG_SPREAD_MARGIN = 0.3;
+
+/**
+ * CC2. How far the take may SLIDE across the overlap, in seconds, before one
+ * rigid lag stops being an answer.
+ *
+ * The piecewise window lags are fitted with a straight line; its slope is the
+ * drift. The gate is not on the slope itself but on `|slope| × overlap` — how
+ * far the take has moved from one end of the shared audio to the other —
+ * because a slope estimated over three windows of a ten-second take is far
+ * noisier than the same slope over a four-minute song, and a rate threshold
+ * would refuse short takes for measurement noise while letting long ones drift.
+ * The SPAN is the quantity that actually costs the user a placement, and it is
+ * the one that is scale-correct.
+ *
+ * MEASURED, in `coverAlign.test.ts` → "derives the drift ceiling against a
+ * no-drift control", against controls of the same lengths and constructions with
+ * `tempoScale` 1, so the figure separates real drift from the slope a straight
+ * line finds in a few noisy points rather than from zero.
+ *
+ * Above it the outcome is `'weak'` — a usable guess with a stated drift, not a
+ * refusal. Below it the drift is still REPORTED
+ * ({@link AlignmentMeasurement.driftSecondsPerMinute}), because the sweep
+ * measured 15–30 ms of placement error at a drift this gate deliberately lets
+ * through, and a caller quoting the module's ±10 ms deserves to know.
+ */
+export const ALIGN_MAX_DRIFT_SPAN_SECONDS = 0.057;
+
+/** …and its margin from both edges of the measured populations. */
+export const ALIGN_DRIFT_MARGIN = 0.02;
+
+/** CC2. How many guard-separated lags are carried on `candidates`. Three: the
+ * chosen one and the two rivals a repeated section produces. */
+export const ALIGN_CANDIDATE_COUNT = 3;
+
+/**
+ * CC2. What the evidence adds up to. Four outcomes rather than one boolean,
+ * because "not believable" was being said to four different situations and only
+ * one of them was true.
+ *
+ * - `confident` — one lag, agreed on by independently-aligned windows, standing
+ *   out from the field. Applied automatically; the pre-CC2 `confident: true`.
+ * - `ambiguous` — a strong peak that several lags share, which is what a song
+ *   with a repeated chorus looks like. `candidates` carries the guard-separated
+ *   rivals. NEVER auto-accepted: the peak lands on the wrong repeat about half
+ *   the time, so this is a question for the user, not an answer.
+ * - `weak` — below acceptance, but distinguishable from unrelated audio: either
+ *   the peak clears its floor without the windows agreeing, or the windows agree
+ *   without the peak clearing. A usable guess to OFFER, not to apply.
+ * - `unrelated` — inside the measured unrelated band on both arms. No guess
+ *   worth showing.
+ */
+export type AlignmentOutcome = 'confident' | 'ambiguous' | 'weak' | 'unrelated';
+
+/** CC2. One lag the correlation surface likes, guard-separated from the others.
+ * `candidates[0]` is always the lag `offsetSeconds` reports. */
+export interface AlignmentCandidate {
+  /** Same meaning as {@link AlignmentMeasurement.offsetSeconds}, refined by the
+   * fine pass in the same way. */
+  offsetSeconds: number;
+  /** Its peak on the coarse surface. */
+  correlation: number;
+  /** …minus the best rival at least {@link ALIGN_GUARD_SECONDS} from IT. */
+  prominence: number;
+}
 
 export interface AlignmentMeasurement {
   /**
@@ -205,16 +367,67 @@ export interface AlignmentMeasurement {
   peakCorrelation: number;
   /** The best rival at least {@link ALIGN_GUARD_SECONDS} away. */
   rivalCorrelation: number;
-  /** `peakCorrelation − rivalCorrelation`. The confidence. */
+  /** `peakCorrelation − rivalCorrelation`. Does ONE lag stand out. */
   prominence: number;
-  /** True when BOTH measured thresholds are met. */
+  /** CC2. What the evidence adds up to. See {@link AlignmentOutcome}. */
+  outcome: AlignmentOutcome;
+  /** `outcome === 'confident'`. Kept as a field so every existing consumer of
+   * the boolean keeps compiling and keeps meaning what it meant. */
   confident: boolean;
+  /** CC2. The guard-separated lags the surface likes, best first, at most
+   * {@link ALIGN_CANDIDATE_COUNT}. Always present when a surface was formed;
+   * `candidates[0].offsetSeconds === offsetSeconds`. The reason an `'ambiguous'`
+   * outcome can be shown as a choice rather than as a refusal. */
+  candidates?: AlignmentCandidate[];
+  /**
+   * CC2. How fast the take slides against the reference, in seconds per minute,
+   * from the straight line fitted through the piecewise window lags. Negative
+   * means the take falls progressively BEHIND (it is the slower of the two).
+   * Absent when the overlap was too short to cut into
+   * {@link ALIGN_PIECEWISE_MIN_WINDOWS} windows.
+   *
+   * Present even when small: at a drift this arm cannot resolve from timing
+   * jitter on a 20 s take the sweep still measured 25–30 ms of placement error,
+   * so a caller quoting the module's ±10 ms needs the number rather than a
+   * boolean.
+   */
+  driftSecondsPerMinute?: number;
+  /**
+   * CC2. How far that drift moves the take from one end of the overlap to the
+   * other, in seconds — `|driftSecondsPerMinute| / 60 × overlapSeconds`. This is
+   * the quantity the confidence gate is on (see
+   * {@link ALIGN_MAX_DRIFT_SPAN_SECONDS}) and the one worth saying out loud:
+   * "your take slides 90 ms across the part that overlaps".
+   */
+  driftSpanSeconds?: number;
+  /**
+   * CC2. How far the independently-aligned windows disagree once that line is
+   * taken out, in seconds — the median deviation from their own median lag.
+   * Absent for the same reason `driftSecondsPerMinute` is.
+   */
+  windowLagSpreadSeconds?: number;
+  /** CC2. How many windows the piecewise pass actually aligned. 0 when it could
+   * not run. */
+  windowsMeasured: number;
   /** What the coarse pass alone said, before the fine pass refined it. Reported
    * because the difference between the two is the only evidence that the
    * refinement stayed inside its window rather than finding a new answer. */
   coarseOffsetSeconds: number;
   /** How many coarse lags carried enough overlap to be evaluated. */
   lagsEvaluated: number;
+  /** CC2. How many coarse lags EXIST between the two recordings. */
+  lagsTotal: number;
+  /**
+   * CC2. How much of the lag range the min-overlap gate never looked at, in
+   * seconds — `(lagsTotal − lagsEvaluated)` on the coarse frame grid.
+   *
+   * Reported because a refusal that says "the best alignment found was X" while
+   * a fifth of the timeline was never searched is implying a search that did not
+   * happen. The gate is deliberate (`ALIGN_MIN_OVERLAP_FRACTION`, and the test
+   * that pins a genuine alignment it refuses), but the caller has to be able to
+   * say so.
+   */
+  unevaluatedLagSeconds: number;
   /** The overlap, in seconds, at the winning coarse lag. */
   overlapSeconds: number;
   /**
@@ -314,6 +527,39 @@ export function alignmentOdf(
   const fine = odfOrNull(mono, sampleRate, ALIGN_FRAME_RATE_HZ);
   if (!fine) return null;
   return { coarse, fine };
+}
+
+/**
+ * CC2. Hann low-pass of an envelope, `ms` wide, edges included by dividing by
+ * the weight actually used rather than by the whole kernel — an envelope's ends
+ * are real frames, and a kernel that fades them to zero would invent a ramp the
+ * correlation then matches against the other signal's ramp.
+ *
+ * Hann rather than a box: a box's sidelobes put ripple back into the very
+ * quantity being smoothed, and the ripple lands at the lag spacing the rival
+ * search reads.
+ */
+export function smoothEnvelope(env: Float32Array, frameRate: number, ms: number): Float32Array {
+  if (!(ms > 0)) return env;
+  const half = Math.floor((ms * frameRate) / 2000);
+  if (half < 1) return env;
+  const width = half * 2 + 1;
+  const kernel = new Float64Array(width);
+  for (let i = 0; i < width; i++) kernel[i] = 0.5 - 0.5 * Math.cos((2 * Math.PI * (i + 1)) / (width + 1));
+  const out = new Float32Array(env.length);
+  for (let i = 0; i < env.length; i++) {
+    let acc = 0;
+    let weight = 0;
+    for (let k = -half; k <= half; k++) {
+      const j = i + k;
+      if (j < 0 || j >= env.length) continue;
+      const w = kernel[k + half];
+      acc += env[j] * w;
+      weight += w;
+    }
+    out[i] = weight > 0 ? acc / weight : env[i];
+  }
+  return out;
 }
 
 /** Prefix sums of `v` and of `v²`, as float64 — the Pearson denominators are
@@ -453,6 +699,153 @@ function rivalOf(s: LagSurface, guardFrames: number): number {
   return rival === -1 ? 0 : rival;
 }
 
+/**
+ * CC2. The best `count` guard-separated lags, best first — the same greedy walk
+ * `rivalOf` does, kept going. Each carries its own prominence: its correlation
+ * minus the best evaluated lag at least a guard away FROM IT, so a candidate's
+ * number means the same thing the top-level `prominence` means.
+ */
+function candidatesOf(s: LagSurface, guardFrames: number, count: number): number[] {
+  const taken: number[] = [];
+  while (taken.length < count) {
+    let bestIdx = -1;
+    for (let idx = 0; idx < s.rho.length; idx++) {
+      if (s.overlap[idx] === 0) continue;
+      if (taken.some((t) => Math.abs(idx - t) < guardFrames)) continue;
+      if (bestIdx < 0 || s.rho[idx] > s.rho[bestIdx]) bestIdx = idx;
+    }
+    if (bestIdx < 0) break;
+    taken.push(bestIdx);
+  }
+  return taken;
+}
+
+/** The best evaluated lag at least `guardFrames` from `idx`, or 0 when the guard
+ * swallows the surface — `rivalOf` for a lag that is not the winner. */
+function rivalOfIndex(s: LagSurface, idx: number, guardFrames: number): number {
+  let rival = -1;
+  for (let i = 0; i < s.rho.length; i++) {
+    if (s.overlap[i] === 0) continue;
+    if (Math.abs(i - idx) < guardFrames) continue;
+    if (s.rho[i] > rival) rival = s.rho[i];
+  }
+  return rival === -1 ? 0 : rival;
+}
+
+/** Median of a copy — the piecewise statistics are medians so that one window
+ * landing on a wrong repeat does not become the whole verdict. */
+function median(v: number[]): number {
+  const sorted = [...v].sort((x, y) => x - y);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+export interface PiecewiseEvidence {
+  /** Where each window's own best alignment puts it, in seconds of lag, in take
+   * order. */
+  windowLagSeconds: number[];
+  /** …and the centre of each window in the take's own time. */
+  windowCentreSeconds: number[];
+  /** Median deviation of those lags from their median. */
+  spreadSeconds: number;
+  /** The slope of the straight line through them, in seconds per MINUTE. */
+  driftSecondsPerMinute: number;
+}
+
+/**
+ * CC2. The drift-robust half of the evidence: the overlap cut into windows, each
+ * aligned to the whole reference INDEPENDENTLY over the full lag range.
+ *
+ * Independently is the load-bearing word. Searching near the global lag would
+ * only ever confirm it — the windows have to be able to disagree, and their
+ * disagreement is the signal. Two things come out of the same measurement: how
+ * far they scatter (unrelated audio has no lag to agree on, so its windows land
+ * seconds apart) and the slope of the line through them, which IS the tempo
+ * drift the rigid single-lag model cannot express.
+ *
+ * `null` when the overlap cannot be cut into {@link ALIGN_PIECEWISE_MIN_WINDOWS}
+ * windows of {@link ALIGN_PIECEWISE_WINDOW_SECONDS} — this arm can refuse, but
+ * it can never be the reason something is believed, so being unable to run must
+ * not be read as agreement.
+ */
+export function piecewiseEvidence(
+  reference: Float32Array,
+  take: Float32Array,
+  bestLagFrames: number,
+  frameRate: number
+): PiecewiseEvidence | null {
+  const La = reference.length;
+  const Lb = take.length;
+  const iLo = Math.max(0, bestLagFrames);
+  const iHi = Math.min(La - 1, Lb - 1 + bestLagFrames);
+  const jLo = iLo - bestLagFrames;
+  const overlapFrames = iHi - iLo + 1;
+  if (overlapFrames <= 0) return null;
+
+  const windowFrames = Math.round(ALIGN_PIECEWISE_WINDOW_SECONDS * frameRate);
+  const windows = Math.min(
+    ALIGN_PIECEWISE_MAX_WINDOWS,
+    Math.floor(overlapFrames / windowFrames)
+  );
+  if (windows < ALIGN_PIECEWISE_MIN_WINDOWS) return null;
+  const span = Math.floor(overlapFrames / windows);
+  if (span > La) return null;
+
+  const pa = prefixSums(reference);
+  const windowLagSeconds: number[] = [];
+  const windowCentreSeconds: number[] = [];
+
+  for (let w = 0; w < windows; w++) {
+    const j0 = jLo + w * span;
+    const slice = take.subarray(j0, j0 + span);
+    const pb = prefixSums(slice);
+    const sb = pb.sum[span];
+    const sbb = pb.sumSq[span];
+    const varB = span * sbb - sb * sb;
+    if (varB <= 0) return null;
+
+    const { c, n: N } = rawCorrelation(reference, slice);
+    let best = -Infinity;
+    let bestStart = -1;
+    for (let i0 = 0; i0 + span <= La; i0++) {
+      const sa = pa.sum[i0 + span] - pa.sum[i0];
+      const saa = pa.sumSq[i0 + span] - pa.sumSq[i0];
+      const varA = span * saa - sa * sa;
+      if (varA <= 0) continue;
+      const sab = c[i0];
+      const rho = (span * sab - sa * sb) / Math.sqrt(varA * varB);
+      if (rho > best) {
+        best = rho;
+        bestStart = i0;
+      }
+    }
+    if (bestStart < 0) return null;
+    windowLagSeconds.push((bestStart - j0) / frameRate);
+    windowCentreSeconds.push((j0 + span / 2) / frameRate);
+  }
+
+  const mid = median(windowLagSeconds);
+  const spreadSeconds = median(windowLagSeconds.map((l) => Math.abs(l - mid)));
+
+  // Least squares through (centre, lag). The slope is seconds of lag per second
+  // of take; a minute is the unit a drift is worth saying out loud in.
+  const meanT = windowCentreSeconds.reduce((a, t) => a + t, 0) / windows;
+  const meanL = windowLagSeconds.reduce((a, l) => a + l, 0) / windows;
+  let num = 0;
+  let den = 0;
+  for (let w = 0; w < windows; w++) {
+    num += (windowCentreSeconds[w] - meanT) * (windowLagSeconds[w] - meanL);
+    den += (windowCentreSeconds[w] - meanT) ** 2;
+  }
+  const slope = den > 0 ? num / den : 0;
+
+  return {
+    windowLagSeconds,
+    windowCentreSeconds,
+    spreadSeconds,
+    driftSecondsPerMinute: slope * 60,
+  };
+}
+
 function minOverlapFrames(La: number, Lb: number, frameRate: number): number {
   return Math.max(
     Math.round(ALIGN_MIN_OVERLAP_SECONDS * frameRate),
@@ -478,7 +871,25 @@ export function alignTakeToReference(
   const a = alignmentOdf(reference, referenceRate);
   const b = alignmentOdf(take, takeRate);
   if (!a || !b) return null;
+  return alignEnvelopes({ a, b });
+}
 
+/**
+ * CC2. The correlation half of {@link alignTakeToReference}, taking the two
+ * envelope pairs directly.
+ *
+ * Exported for the same reason `alignmentOdf` is: the DERIVATION has to run
+ * over one set of envelopes at many smoothing widths, and re-rendering and
+ * re-framing twenty seconds of audio per width would make the sweep that
+ * chooses {@link ALIGN_SMOOTHING_MS} unaffordable — so the constant would have
+ * gone back to being a preference. `smoothingMs` defaults to the shipped width;
+ * passing another is what the sweep does and nothing else should.
+ */
+export function alignEnvelopes(
+  pair: { a: AlignmentEnvelopes; b: AlignmentEnvelopes },
+  smoothingMs: number = ALIGN_SMOOTHING_MS
+): AlignmentMeasurement | null {
+  const { a, b } = pair;
   const coarseMin = minOverlapFrames(
     a.coarse.length,
     b.coarse.length,
@@ -486,35 +897,106 @@ export function alignTakeToReference(
   );
   if (Math.min(a.coarse.length, b.coarse.length) < coarseMin) return null;
 
-  const coarse = lagSurface(a.coarse, b.coarse, coarseMin);
+  const aCoarse = smoothEnvelope(a.coarse, ALIGN_COARSE_FRAME_RATE_HZ, smoothingMs);
+  const bCoarse = smoothEnvelope(b.coarse, ALIGN_COARSE_FRAME_RATE_HZ, smoothingMs);
+
+  const coarse = lagSurface(aCoarse, bCoarse, coarseMin);
   if (!coarse) return null;
 
+  const guardFrames = Math.round(ALIGN_GUARD_SECONDS * ALIGN_COARSE_FRAME_RATE_HZ);
   const peak = coarse.rho[coarse.bestIdx];
-  const rival = rivalOf(coarse, Math.round(ALIGN_GUARD_SECONDS * ALIGN_COARSE_FRAME_RATE_HZ));
+  const rival = rivalOf(coarse, guardFrames);
   const prominence = peak - rival;
   const coarseOffsetSeconds = interpolatedLag(coarse) / ALIGN_COARSE_FRAME_RATE_HZ;
 
   // The fine pass never gets to disagree about WHICH alignment this is — only
-  // about where inside ±ALIGN_REFINE_SECONDS of it the peak really sits.
+  // about where inside ±ALIGN_REFINE_SECONDS of it the peak really sits. It runs
+  // on UNSMOOTHED envelopes: the coarse pass has already decided which alignment
+  // this is, and blurring the pass whose whole job is precision would spend the
+  // ±10 ms for nothing.
   const fineMin = minOverlapFrames(a.fine.length, b.fine.length, ALIGN_FRAME_RATE_HZ);
-  const fine = lagSurface(a.fine, b.fine, fineMin, {
-    centre: coarseOffsetSeconds * ALIGN_FRAME_RATE_HZ,
-    halfWidth: ALIGN_REFINE_SECONDS * ALIGN_FRAME_RATE_HZ,
+  const refine = (coarseSeconds: number): number => {
+    const fine = lagSurface(a.fine, b.fine, fineMin, {
+      centre: coarseSeconds * ALIGN_FRAME_RATE_HZ,
+      halfWidth: ALIGN_REFINE_SECONDS * ALIGN_FRAME_RATE_HZ,
+    });
+    return fine ? interpolatedLag(fine) / ALIGN_FRAME_RATE_HZ : NaN;
+  };
+  const refinedBest = refine(coarseOffsetSeconds);
+  const refined = Number.isFinite(refinedBest);
+  const offsetSeconds = refined ? refinedBest : coarseOffsetSeconds;
+
+  // Every candidate is refined the same way the winner is, so a caller offering
+  // the user a choice is offering three answers of one accuracy rather than one
+  // good one and two coarse ones.
+  const candidates: AlignmentCandidate[] = candidatesOf(
+    coarse,
+    guardFrames,
+    ALIGN_CANDIDATE_COUNT
+  ).map((idx, rank) => {
+    const lagSeconds =
+      rank === 0 ? coarseOffsetSeconds : (idx + coarse.kLo) / ALIGN_COARSE_FRAME_RATE_HZ;
+    // Rank 0 IS the winner, whose refinement has already been paid for.
+    const candidateRefined = rank === 0 ? refinedBest : refine(lagSeconds);
+    return {
+      offsetSeconds: Number.isFinite(candidateRefined) ? candidateRefined : lagSeconds,
+      correlation: coarse.rho[idx],
+      prominence: coarse.rho[idx] - rivalOfIndex(coarse, idx, guardFrames),
+    };
   });
 
-  const offsetSeconds = fine
-    ? interpolatedLag(fine) / ALIGN_FRAME_RATE_HZ
-    : coarseOffsetSeconds;
+  const piecewise = piecewiseEvidence(
+    aCoarse,
+    bCoarse,
+    coarse.bestIdx + coarse.kLo,
+    ALIGN_COARSE_FRAME_RATE_HZ
+  );
+
+  // ── The verdict ───────────────────────────────────────────────────────────
+  // Order matters, and it is an argument rather than a preference. AMBIGUITY is
+  // asked first: when several lags match equally well the windows disagreeing is
+  // a SYMPTOM of that, not separate evidence, and reading it as disagreement
+  // would report "your take does not hold one lag" about a take that holds three
+  // of them perfectly.
+  const peakClears = peak >= ALIGN_MIN_CORRELATION;
+  const windowsAgree =
+    piecewise === null || piecewise.spreadSeconds <= ALIGN_MAX_LAG_SPREAD_SECONDS;
+  const overlapSeconds = coarse.overlap[coarse.bestIdx] / ALIGN_COARSE_FRAME_RATE_HZ;
+  const driftSpanSeconds =
+    piecewise === null
+      ? undefined
+      : (Math.abs(piecewise.driftSecondsPerMinute) / 60) * overlapSeconds;
+  const drifts = driftSpanSeconds !== undefined && driftSpanSeconds > ALIGN_MAX_DRIFT_SPAN_SECONDS;
+  const measuredAgreement = piecewise !== null && windowsAgree;
+
+  let outcome: AlignmentOutcome;
+  if (!peakClears && !measuredAgreement) outcome = 'unrelated';
+  else if (peakClears && prominence < ALIGN_MIN_PROMINENCE) outcome = 'ambiguous';
+  else if (peakClears && windowsAgree && !drifts) outcome = 'confident';
+  else outcome = 'weak';
 
   return {
     offsetSeconds,
     peakCorrelation: peak,
     rivalCorrelation: rival,
     prominence,
-    confident: prominence >= ALIGN_MIN_PROMINENCE && peak >= ALIGN_MIN_CORRELATION,
+    outcome,
+    confident: outcome === 'confident',
+    candidates,
+    ...(piecewise
+      ? {
+          driftSecondsPerMinute: piecewise.driftSecondsPerMinute,
+          driftSpanSeconds,
+          windowLagSpreadSeconds: piecewise.spreadSeconds,
+        }
+      : {}),
+    windowsMeasured: piecewise ? piecewise.windowLagSeconds.length : 0,
     coarseOffsetSeconds,
     lagsEvaluated: coarse.evaluated,
-    overlapSeconds: coarse.overlap[coarse.bestIdx] / ALIGN_COARSE_FRAME_RATE_HZ,
-    refined: fine !== null,
+    lagsTotal: coarse.rho.length,
+    unevaluatedLagSeconds:
+      (coarse.rho.length - coarse.evaluated) / ALIGN_COARSE_FRAME_RATE_HZ,
+    overlapSeconds,
+    refined,
   };
 }

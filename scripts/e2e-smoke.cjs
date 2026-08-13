@@ -70,10 +70,20 @@ const COVER_SYNC_OFFSET_SECONDS = -0.75;
  * ground-truth cases to. Measured on this pair through the raw files (the
  * harshest path, with separation contributing nothing): 7.94 ms. */
 const COVER_SYNC_TOLERANCE_SECONDS = 0.01;
-/** `coverAlign`'s shipped floors, quoted so this step fails if a pass is
- * believed on numbers that do not actually clear them. */
-const ALIGN_MIN_CORRELATION = 0.607;
-const ALIGN_MIN_PROMINENCE = 0.186;
+/**
+ * `coverAlign`'s shipped floors, quoted so this step fails if a pass is
+ * believed on numbers that do not actually clear them.
+ *
+ * CC2 re-derived both. The correlation floor ROSE (0.607 -> 0.731) because the
+ * coarse envelopes are now low-passed before the Pearson pass, which lifts every
+ * peak; the prominence floor FELL (0.186 -> 0.115) because it stopped being
+ * derived against unrelated audio and is now derived against a song whose
+ * section repeats — the regime where a rival lag is a genuine partial match.
+ * Measured on THIS fixture pair through the raw files: peak 0.9977, prominence
+ * 0.5184, offset -0.75007 s against a built-in -0.75.
+ */
+const ALIGN_MIN_CORRELATION = 0.731;
+const ALIGN_MIN_PROMINENCE = 0.115;
 // Optional real-material fixture: a full commercial track the user placed
 // locally. Copyrighted, so it is NEVER committed (test-assets/ is gitignored)
 // and NEVER required — the real-song step skips cleanly when it is absent.

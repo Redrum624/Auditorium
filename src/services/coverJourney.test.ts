@@ -122,9 +122,18 @@ const confidentAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurem
   peakCorrelation: 0.81,
   rivalCorrelation: 0.3,
   prominence: 0.51,
+  // CC2: the measurement gained an outcome and the piecewise/search-coverage
+  // fields; `confident` is now `outcome === 'confident'` and stays the boolean
+  // every consumer here already reads.
+  outcome: 'confident',
   confident: true,
+  windowsMeasured: 3,
+  windowLagSpreadSeconds: 0.005,
+  driftSecondsPerMinute: 0.01,
   coarseOffsetSeconds: offsetSeconds,
   lagsEvaluated: 900,
+  lagsTotal: 900,
+  unevaluatedLagSeconds: 0,
   overlapSeconds: 5,
   refined: true,
 });
