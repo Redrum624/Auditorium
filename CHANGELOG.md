@@ -149,6 +149,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/stores/appStore.ts`, `src/components/Editor/useEditorGestures.ts`,
   `src/components/Layout/Toolbar.tsx`, `src/services/editorViewport.ts`.
 
+- **The cursor and a dragged selection now always land on a whole sample.** Cause: the editor's gesture
+  resolver (`snapped()`) returned its raw, pixel-derived value untouched whenever the magnet was
+  suspended with Alt or the document carried no snap targets — and `pixelToSample` produces a fraction
+  of a sample at any zoom that is not a whole number of samples per pixel, which since F11-3 is the
+  *normal* state of a freshly-opened document (a fitted zoom is `docLength / laneWidth`). The result
+  was committed straight to `setCursor` and to `dragToSelection`, so both the cursor and a dragged
+  selection could sit between two samples; the packaged navigation walker caught a cursor resting at
+  sample 121308.03126517865. It was never only a display nit, because `marker.add` writes
+  `positionSample: cursorSample` verbatim — the fraction became marker DATA, and travelled from there
+  into the cue chunk of every export written from it. `TimelineRuler`, the other surface that writes
+  this same field, had always rounded its own seek, so the two disagreed about whether `cursorSample`
+  is an integer at all. Fix: `snapped()` rounds on both arms, settling it where the value is produced.
+  The snapping arm is unaffected in practice — snap targets are integer sample positions already, so
+  the round is a no-op there and only the raw path moves, by less than one sample. Affects:
+  `src/components/Editor/useEditorGestures.ts`.
+
 ### Added
 <!-- F11: the F11 series' Added entries start here. -->
 - **The position line has a red handle you can drag.** Why: the line could be placed by clicking but
@@ -314,6 +330,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document back, so the stages that had reported are cleared rather than left looking like an
   outcome. Affects: `src/services/vocalChain.ts`, `src/services/coverChain.ts`,
   `src/components/Dialogs/VocalChainDialog.tsx`, `src/components/Dialogs/CoverChainDialog.tsx`.
+
+- **A second packaged pass — `npm run navigate` — walks every surface the app can open.** Why: the
+  scripted smoke is a *scenario* — one long round trip through open/edit/chain/export/reopen, deep and
+  narrow, driven mostly through `window.__test` because that is where the numbers are. Nothing walked
+  the app the way a user does, so whole surfaces had no packaged coverage at all, and three shipped
+  mechanisms had no runtime observer of any kind. The walker's law is that **every surface opens, does
+  one real thing, and closes, leaving the app healthy**: after each step two real animation frames must
+  land, the store must answer, nothing may be left open, and a real pointer click must still drive a
+  React round trip. Its rosters are **derived, never listed** — the menu sections from
+  `menuActions.ts`'s LAYOUT table, the dialogs from the `src/components/Dialogs/` directory listing
+  (each mapped to the command that opens it, including one hop out through a service, so a dialog with
+  no reachable door FAILS the run), the module panels from `MODULE_PANELS`, the views from the
+  toolbar's own segment array, the effects from the live registry. Enabled state is asserted as a
+  *difference* — the same menu read with no document and with one — because asking the same predicate
+  twice proves nothing. It is what finally observed P1's **Measuring** paint: a MutationObserver over
+  the real Vocal Chain dialog records every stage row transition with the frame it happened on, and
+  asserts a row read *Measuring*, that a frame was rendered, and only then *Rendering* — the yield
+  itself, not just the two words in order. Native OS pickers are stubbed in the main process (a real
+  `showSaveDialog` blocks Electron with a window no harness can reach), which proves the renderer path
+  and its cancel handling, not the OS widget. The smoke's launch/pin/assert/pointer plumbing moved to
+  `scripts/e2e-lib.cjs` so both passes drive one rig rather than two copies; the smoke is unchanged in
+  behaviour and still reports its 763 assertions. How to use: `npm run build && npm run navigate`.
+  Affects: `scripts/e2e-navigate.cjs`, `scripts/e2e-lib.cjs`, `scripts/e2e-smoke.cjs`, `package.json`.
 
 ### Changed
 <!-- F11: the F11 series' Changed entry. -->

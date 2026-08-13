@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "jest",
     "smoke": "node scripts/e2e-smoke.cjs",
+    "navigate": "node scripts/e2e-navigate.cjs",
     "make-test-tone": "node scripts/make-test-tone.cjs",
     "make-test-beat": "node scripts/make-test-beat.cjs",
     "make-test-abab": "node scripts/make-test-abab.cjs",
