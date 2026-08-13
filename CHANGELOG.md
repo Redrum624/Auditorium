@@ -229,9 +229,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   highlights and a ghost line shows the snapped start while dragging, so "no highlight, no action" is
   readable before you let go. One drop is one session-history entry (`Add clip` / `Add clips`),
   following the `Record clip`/`Record clips` precedent, so a single undo lifts a whole multi-file
-  drop. Affects: `src/components/Multitrack/{clipDropPosition,TrackLane,ClipView}.tsx`,
+  drop. A dropped path is also the first one that reaches `file:read` without having been through the
+  open or save dialog, so it needed read-approval of its own: the preload mints it beside
+  `webUtils.getPathForFile`, over a channel the renderer cannot reach, and only for a path
+  `getPathForFile` returned non-empty — which it does only for a genuine user drop, never for a `File`
+  web content constructed itself. Affects:
+  `src/components/Multitrack/{clipDropPosition,TrackLane,ClipView}.tsx`,
   `src/multitrack/{laneDrop,session}.ts`, `src/components/Panels/FilesPanel.tsx`,
-  `electron/preload.cjs`.
+  `electron/{preload,ipc}.cjs`.
+- **A file dropped anywhere that is not a track lane does nothing.** Why: belt and braces around the
+  drop target above. `navigateOnDragDrop` — the flag that would make Chromium replace the whole app
+  with a file viewer — has defaulted to false since Electron 3 and this app never sets it, so this is
+  insurance against config drift rather than a fix for a live bug, and the code says so. It fires only
+  for drags carrying `Files`: an earlier unconditional version also suppressed the default action of
+  TEXT drags, which is what inserts dropped text into a field. Affects: `src/App.tsx`.
 
 
 - **DevTools open by themselves on a dev run.** Why: a standing user rule — while developing, the
