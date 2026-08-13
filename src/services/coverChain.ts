@@ -69,7 +69,14 @@ import { SOLVE_TOLERANCE_DB, solveCascadeGains } from '../dsp/graphicEqCascade';
 import { useAppStore } from '../stores/appStore';
 import { applyEdit, type MarkerRemap } from './editOps';
 import { reportEffectFailure, runEffectOnChannels, type EffectRunOutput } from './effectRunner';
-import { clampToParam, type DerivedValue, type StageStatus } from './vocalChain';
+import {
+  STAGE_MEASURING_DETAIL,
+  clampToParam,
+  stageRenderingDetail,
+  type ChainStageProgress,
+  type DerivedValue,
+  type StageStatus,
+} from './vocalChain';
 
 export const COVER_CHAIN_UNDO_LABEL = 'Cover Chain';
 
@@ -880,6 +887,18 @@ export function stageWarning(
   return `this stage summed a tail on top of the audio and the output now peaks at ${dbfsStr(delta.peakAfterDb)}, above full scale. Both level stages that run after it — Match Loudness, which would have said so with the number, and the Limiter, which would have caught it — are switched off, and both the WAV writer and the MP3 encoder hard-clip anything over full scale. Switch the Limiter on, or bring the level down before you export.`;
 }
 
+/**
+ * The live view (P1), in the vocal chain's vocabulary — `ChainStageProgress`,
+ * `STAGE_MEASURING_DETAIL` and `stageRenderingDetail` are imported rather than
+ * restated, so the two chains' steppers cannot describe the same thing in
+ * different words.
+ *
+ * It matters more here than it does there: the four automatic stages are
+ * weighted 56/32/1/11, so the overall bar spends most of a run inside Match EQ
+ * saying nothing about what Match EQ is doing.
+ */
+export type CoverChainStageProgress = ChainStageProgress<CoverChainStageId>;
+
 export interface RunCoverChainOptions {
   enabled: Partial<Record<CoverChainStageId, boolean>>;
   /** The document holding the separated original vocal. `null` is a legal run:
@@ -888,6 +907,12 @@ export interface RunCoverChainOptions {
   referenceDocId: string | null;
   onProgress?: (fraction: number) => void;
   onStageStart?: (stage: CoverChainStage) => void;
+  /** Fires repeatedly while a stage is in flight, scoped to that stage. */
+  onStageProgress?: (progress: CoverChainStageProgress) => void;
+  /** Fires as each stage's result is decided, with the VERY object that lands
+   * in `report.stages` rather than a copy — so a live view shows the finished
+   * report's own strings by construction. Fires for every stage, run or not. */
+  onStageResult?: (result: CoverChainStageResult) => void;
 }
 
 /**
@@ -906,7 +931,7 @@ export interface RunCoverChainOptions {
  * stage gave, and Match Reverb's decline is the most common outcome there is.
  */
 export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverChainReport | null> {
-  const { enabled, referenceDocId, onProgress, onStageStart } = opts;
+  const { enabled, referenceDocId, onProgress, onStageStart, onStageProgress, onStageResult } = opts;
   const state = useAppStore.getState();
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
   if (!doc) return null;
@@ -982,20 +1007,34 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
   let doneWeight = 0;
   let anyApplied = false;
 
+  // ONE place a stage result is recorded, so the live callback cannot be given a
+  // different object — or a different set of stages — from the report's.
+  const record = (result: CoverChainStageResult): void => {
+    results.push(result);
+    onStageResult?.(result);
+  };
+
   for (const stage of COVER_CHAIN_STAGES) {
     if (stage.effectId === null) {
-      results.push({ id: stage.id, label: stage.label, status: 'manual', derived: [] });
+      record({ id: stage.id, label: stage.label, status: 'manual', derived: [] });
       continue;
     }
     if (enabled[stage.id] !== true) {
-      results.push({ id: stage.id, label: stage.label, status: 'off', derived: [] });
+      record({ id: stage.id, label: stage.label, status: 'off', derived: [] });
       continue;
     }
 
     onStageStart?.(stage);
+    onStageProgress?.({
+      stageId: stage.id,
+      label: stage.label,
+      phase: 'measuring',
+      stageFraction: 0,
+      detail: STAGE_MEASURING_DETAIL,
+    });
     const resolution = resolveStage(stage, channels, sampleRate, reference, enabled);
     if (!resolution.run) {
-      results.push({
+      record({
         id: stage.id,
         label: stage.label,
         status: 'declined',
@@ -1007,6 +1046,18 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
       continue;
     }
 
+    // The measurement it just took, phrased once — the same string for every
+    // rendering event of this stage, so the line does not flicker between the
+    // settings and a generic verb while the worker runs.
+    const renderingDetail = stageRenderingDetail(resolution.derived);
+    onStageProgress?.({
+      stageId: stage.id,
+      label: stage.label,
+      phase: 'rendering',
+      stageFraction: 0,
+      detail: renderingDetail,
+    });
+
     // Kept alive only until the delta is measured: the worker DETACHES the
     // buffers it is handed, so a before/after comparison needs its own copy.
     let inputCopy: Float32Array[] | null = channels.map((c) => Float32Array.from(c));
@@ -1014,8 +1065,16 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
     let output: EffectRunOutput;
     try {
       output = await runEffectOnChannels(stage.effectId, channels, sampleRate, resolution.params, {
-        onProgress: (f) =>
-          onProgress?.(totalWeight === 0 ? 1 : (doneWeight + stage.weight * f) / totalWeight),
+        onProgress: (f) => {
+          onProgress?.(totalWeight === 0 ? 1 : (doneWeight + stage.weight * f) / totalWeight);
+          onStageProgress?.({
+            stageId: stage.id,
+            label: stage.label,
+            phase: 'rendering',
+            stageFraction: f,
+            detail: renderingDetail,
+          });
+        },
       });
     } catch (err) {
       reportEffectFailure(err);
@@ -1026,7 +1085,7 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
     inputCopy = null;
     channels = output.channels;
 
-    results.push({
+    record({
       id: stage.id,
       label: stage.label,
       status: 'applied',

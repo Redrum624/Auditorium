@@ -22,6 +22,7 @@ import {
   measureReference,
   runCoverChain,
   type CoverChainStageId,
+  type CoverChainStageProgress,
   type CoverChainStageResult,
   type ReferenceMeasurements,
 } from './coverChain';
@@ -45,7 +46,12 @@ import {
 } from '../dsp/coverMatch';
 import { SOLVE_TOLERANCE_DB, realisedBandEnergyDb } from '../dsp/graphicEqCascade';
 import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
-import type { StageStatus } from './vocalChain';
+import {
+  STAGE_MEASURING_DETAIL,
+  STAGE_RENDERING_DETAIL,
+  stageRenderingDetail,
+  type StageStatus,
+} from './vocalChain';
 
 registerAllEffects();
 
@@ -1002,6 +1008,159 @@ describe('runCoverChain', () => {
     const { refId } = seedPair(takeAudio(), refAudio());
     const report = await runCoverChain({ enabled: only('matchEq'), referenceDocId: refId });
     expect(report!.stages.map((s) => s.id)).toEqual(COVER_CHAIN_STAGES.map((s) => s.id));
+  });
+
+  // ── The live view (P1) ────────────────────────────────────────────────────
+  // `onProgress` is ONE number over the whole pass, and the four automatic
+  // stages here are weighted 56/32/1/11 — so it spends most of a run inside
+  // Match EQ saying nothing about what Match EQ is doing. The same additive
+  // contract the vocal chain carries, over this chain's own stage table.
+
+  const STEPPER_IDS: CoverChainStageId[] = ['matchEq', 'matchLoudness', 'headroom'];
+
+  it('runs every stage the live-view tests assume runs — the fixture, guarded', async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const report = await runCoverChain({ enabled: only(...STEPPER_IDS), referenceDocId: refId });
+    for (const id of STEPPER_IDS) expect(resultFor(report!.stages, id).status).toBe('applied');
+  });
+
+  it('reports stage-scoped progress against the stage that is actually running, in chain order', async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const seen: CoverChainStageProgress[] = [];
+    await runCoverChain({
+      enabled: only(...STEPPER_IDS),
+      referenceDocId: refId,
+      onStageProgress: (p) => seen.push(p),
+    });
+    // GROUPED, not merely present: a set comparison is satisfied by an
+    // implementation that interleaves every stage's events, which tells a
+    // stepper nothing about which row to highlight.
+    const runs: CoverChainStageId[] = [];
+    for (const e of seen) if (runs[runs.length - 1] !== e.stageId) runs.push(e.stageId);
+    expect(runs).toEqual(STEPPER_IDS);
+    for (const e of seen) expect(e.label).toBe(coverStageById(e.stageId).label);
+  });
+
+  it('scopes every fraction to the ONE stage it describes, inside [0, 1]', async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    // Both callbacks captured TOGETHER, in arrival order, because the claim is a
+    // relation between them: `stageFraction` must not be the overall fraction
+    // under a new name, and a range-only assertion cannot reach that.
+    const seen: (CoverChainStageProgress & { overall: number })[] = [];
+    let overall = 0;
+    await runCoverChain({
+      enabled: only(...STEPPER_IDS),
+      referenceDocId: refId,
+      onProgress: (f) => {
+        overall = f;
+      },
+      onStageProgress: (p) => seen.push({ ...p, overall }),
+    });
+
+    for (const e of seen) {
+      expect(e.stageFraction).toBeGreaterThanOrEqual(0);
+      expect(e.stageFraction).toBeLessThanOrEqual(1);
+    }
+    // It restarts at 0 for every stage; the overall fraction never returns to 0
+    // once the first stage has moved.
+    expect(seen.filter((e) => e.stageFraction === 0)).toHaveLength(6); // measuring + rendering-0, × 3
+    // Match EQ carries 56 of the 68 weight, so mid-way through ITSELF it is
+    // further along than the pass is; Match Loudness carries 1, so mid-way
+    // through itself the pass is far ahead of it. Both directions, so no
+    // rescaling of the overall fraction can pass.
+    const inFlight = seen.filter((e) => e.stageFraction > 0 && e.stageFraction < 1);
+    expect(inFlight.length).toBeGreaterThan(0);
+    expect(inFlight.some((e) => e.stageFraction > e.overall)).toBe(true);
+    expect(inFlight.some((e) => e.stageFraction < e.overall)).toBe(true);
+    for (let i = 1; i < seen.length; i++) {
+      if (seen[i].stageId !== seen[i - 1].stageId) continue;
+      expect(seen[i].stageFraction).toBeGreaterThanOrEqual(seen[i - 1].stageFraction);
+    }
+  });
+
+  it('measures before it renders, on every stage, and says so', async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const seen: CoverChainStageProgress[] = [];
+    await runCoverChain({
+      enabled: only(...STEPPER_IDS),
+      referenceDocId: refId,
+      onStageProgress: (p) => seen.push(p),
+    });
+    for (const id of STEPPER_IDS) {
+      const phases = seen.filter((e) => e.stageId === id).map((e) => e.phase);
+      expect(phases[0]).toBe('measuring');
+      expect(phases.indexOf('rendering')).toBeGreaterThan(-1);
+      expect(phases.lastIndexOf('measuring')).toBeLessThan(phases.indexOf('rendering'));
+    }
+    for (const e of seen.filter((p) => p.phase === 'measuring')) {
+      expect(e.detail).toBe(STAGE_MEASURING_DETAIL);
+    }
+  });
+
+  it("makes the rendering line the stage's OWN derived settings, not a second copy of them", async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const seen: CoverChainStageProgress[] = [];
+    const report = await runCoverChain({
+      enabled: only(...STEPPER_IDS),
+      referenceDocId: refId,
+      onStageProgress: (p) => seen.push(p),
+    });
+
+    // The expectation is read out of the REPORT rather than written here, so a
+    // drift between the live line and the finished report is a failure rather
+    // than a difference nobody notices.
+    const loudness = resultFor(report!.stages, 'matchLoudness');
+    expect(loudness.derived.length).toBeGreaterThan(0);
+    const rendering = seen.filter((e) => e.stageId === 'matchLoudness' && e.phase === 'rendering');
+    expect(rendering.length).toBeGreaterThan(0);
+    for (const e of rendering) {
+      expect(e.detail).toBe(stageRenderingDetail(loudness.derived));
+      for (const d of loudness.derived) expect(e.detail).toContain(d.value);
+    }
+
+    // The limiter derives NOTHING here either — a ceiling is an absolute level —
+    // and says that instead of showing an empty line.
+    const headroom = resultFor(report!.stages, 'headroom');
+    expect(headroom.derived).toEqual([]);
+    for (const e of seen.filter((p) => p.stageId === 'headroom' && p.phase === 'rendering')) {
+      expect(e.detail).toBe(STAGE_RENDERING_DETAIL);
+    }
+  });
+
+  it('hands out each stage result the moment it lands — the very objects the report carries', async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const seen: CoverChainStageResult[] = [];
+    const report = await runCoverChain({
+      enabled: only(...STEPPER_IDS),
+      referenceDocId: refId,
+      onStageResult: (r) => seen.push(r),
+    });
+
+    // Every stage, run or not, in registry order — the same list the smoke
+    // compares against `registryStageIds`, so a live view built on this cannot
+    // show a different set of rows from the finished report.
+    expect(seen.map((r) => r.id)).toEqual(COVER_CHAIN_STAGES.map((s) => s.id));
+    // IDENTITY, not equality: there is only one object, so there is nothing to
+    // keep in sync between the live row and the report.
+    expect(seen).toHaveLength(report!.stages.length);
+    for (let i = 0; i < seen.length; i++) expect(seen[i]).toBe(report!.stages[i]);
+  });
+
+  it('fires the result callback for a stage that DECLINES too, with its reason', async () => {
+    // Match Reverb on a noise reference is the most common decline this chain
+    // has. The live view must be able to say so while the rest of the pass is
+    // still running, which it cannot do if only applied stages report.
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const seen: CoverChainStageResult[] = [];
+    const report = await runCoverChain({
+      enabled: only('matchEq', 'matchReverb'),
+      referenceDocId: refId,
+      onStageResult: (r) => seen.push(r),
+    });
+    const reverb = seen.find((r) => r.id === 'matchReverb')!;
+    expect(reverb.status).toBe('declined');
+    expect(reverb.reason).toEqual(expect.any(String));
+    expect(reverb).toBe(resultFor(report!.stages, 'matchReverb'));
   });
 
   it('reaches all four stage statuses the type declares, and each on the right stage', async () => {
