@@ -1,6 +1,11 @@
 import { act, render, screen } from '@testing-library/react';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
-import { endDocumentDrag } from '../../multitrack/laneDrop';
+import {
+  beginDocumentDrag,
+  draggedClipLength,
+  endDocumentDrag,
+  placeDocumentClips,
+} from '../../multitrack/laneDrop';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import {
   SESSION_UNDO_KEY,
@@ -324,5 +329,145 @@ describe('a drop that is not ours does nothing, visibly', () => {
     expect(droppedClips()).toHaveLength(0);
     expect(doneLabels()).toEqual([]);
     expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11 fix round (I4) — the assertions this suite was missing.
+//
+// Everything above proved the drop's EFFECTS. None of it proved the two things
+// a browser actually requires of a drop target, and one of them (`dragover`) is
+// the single most likely real-world failure: a drop whose dragover was not
+// preventDefault'd never produces a `drop` event at all. jsdom dispatches one
+// regardless, so this suite could not tell the difference.
+// ---------------------------------------------------------------------------
+describe('what the browser requires of an accepted drop (I4)', () => {
+  it('preventDefaults the accepted dragover — without it no drop event ever fires', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[1], 'dragenter', dt);
+
+    const over = fireDrag(lanes()[1], 'dragover', dt, { clientX: 100 });
+
+    expect(over.defaultPrevented).toBe(true);
+    expect(dt.dropEffect).toBe('copy');
+  });
+
+  it('preventDefaults the accepted drop itself', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[1], 'dragenter', dt);
+    fireDrag(lanes()[1], 'dragover', dt, { clientX: 100 });
+
+    const drop = fireDrag(lanes()[1], 'drop', dt, { clientX: 100 });
+
+    expect(drop.defaultPrevented).toBe(true);
+    expect(droppedClips()).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11 fix round (I4) — the TAIL edge, which is the drag record's whole reason
+// for existing.
+//
+// `dataTransfer.getData` is unreadable during `dragover`, so `beginDocumentDrag`
+// records the dragged document separately purely so the ghost knows how LONG
+// the clip will be — and a clip snaps on either edge. Every test above drops a
+// 200 000-sample document whose tail cannot reach a target, so deleting
+// `beginDocumentDrag` outright left the suite green: with only the head able to
+// snap, the documented head-only degradation is indistinguishable from the
+// real thing.
+// ---------------------------------------------------------------------------
+describe('the dragged clip snaps on its TAIL as well as its head (I4)', () => {
+  // Targets are the seeded clip's mapped beats: 100 000, 122 050, 144 100,
+  // 166 150, 188 200. Tolerance is 8 px x 512 spp = 4 096 samples.
+  const SHORT_LEN = 30_000;
+  const TAIL_TARGET = 144_100;
+  /** Raw start whose TAIL is 2 000 samples past a beat (inside tolerance) and
+   * whose HEAD is 5 950 from the nearest one (outside it). */
+  const RAW_START = TAIL_TARGET - SHORT_LEN + 2_000; // 116 100
+
+  function dragShortDoc(): { short: AudioDocument; dt: StubDataTransfer } {
+    const short = createDocument({
+      name: 'short.wav',
+      sampleRate: SESSION_RATE,
+      channels: [new Float32Array(SHORT_LEN)],
+    });
+    useAppStore.getState().addDocument(short);
+    render(
+      <>
+        <FilesPanel />
+        <MultitrackView />
+      </>
+    );
+    const row = screen
+      .getAllByTestId('files-item')
+      .find((li) => li.textContent?.includes('short.wav'))!;
+    const dt = stubDataTransfer();
+    fireDrag(row, 'dragstart', dt);
+    return { short, dt };
+  }
+
+  it('moves the drop so the clip END lands on a beat, leaving the head off-grid', () => {
+    const { short, dt } = dragShortDoc();
+
+    // Sanity: the head really is outside the magnet's reach, so a head-only
+    // snap would leave the raw position untouched — this cannot pass by
+    // accident.
+    expect(
+      Math.min(Math.abs(RAW_START - 122_050), Math.abs(RAW_START - 100_000))
+    ).toBeGreaterThan(8 * SPP);
+
+    fireDrag(lanes()[1], 'dragenter', dt);
+    fireDrag(lanes()[1], 'dragover', dt, { clientX: RAW_START / SPP });
+    fireDrag(lanes()[1], 'drop', dt, { clientX: RAW_START / SPP });
+
+    const placed = droppedClips().find((c) => c.documentId === short.id)!;
+    expect(placed.startSample).toBe(TAIL_TARGET - SHORT_LEN);
+    expect(placed.startSample + placed.lengthSample).toBe(TAIL_TARGET);
+  });
+
+  it('the ghost shows that tail-snapped position DURING the drag', () => {
+    const { dt } = dragShortDoc();
+
+    fireDrag(lanes()[1], 'dragenter', dt);
+    fireDrag(lanes()[1], 'dragover', dt, { clientX: RAW_START / SPP });
+
+    expect(parseFloat(ghost()!.style.left)).toBeCloseTo((TAIL_TARGET - SHORT_LEN) / SPP, 5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11 fix round (I4) — the degradations `laneDrop`'s header describes, asserted
+// rather than described. Each returned its documented value under a mutation
+// that broke nothing else in this file.
+// ---------------------------------------------------------------------------
+describe('laneDrop degrades the way its header says it does (I4)', () => {
+  it('reports a zero-length span when no drag is in flight — a head-only snap', () => {
+    endDocumentDrag();
+    expect(draggedClipLength(SESSION_RATE)).toBe(0);
+  });
+
+  it('reports zero for a document that was closed mid-drag, rather than guessing', () => {
+    beginDocumentDrag('doc-that-never-existed');
+    expect(draggedClipLength(SESSION_RATE)).toBe(0);
+  });
+
+  it('reports the real length for a document that IS open', () => {
+    beginDocumentDrag(doc.id);
+    // 200 000 samples at the session's own rate — no conversion to hide a bug.
+    expect(draggedClipLength(SESSION_RATE)).toBe(200_000);
+  });
+
+  it('places nothing on a track id no session track answers to', () => {
+    const placed = placeDocumentClips([doc.id], 'track-that-does-not-exist', 1_000);
+    expect(placed).toEqual([]);
+    expect(droppedClips()).toHaveLength(0);
+    expect(doneLabels()).toEqual([]);
+  });
+
+  it('places nothing for an empty document list, and writes no history entry', () => {
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    const placed = placeDocumentClips([], trackId, 1_000);
+    expect(placed).toEqual([]);
+    expect(doneLabels()).toEqual([]);
   });
 });

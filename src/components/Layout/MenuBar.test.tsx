@@ -1,7 +1,10 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import MenuBar from './MenuBar';
 import { registerAllEffects } from '../../effects/registerAll';
 import { getMenuSections, registerEffectCommands } from '../../services/menuActions';
+// Namespace import as well, so `runCommand` can be spied: MenuBar calls it
+// through the module object under ts-jest's CommonJS output.
+import * as menuActions from '../../services/menuActions';
 
 describe('MenuBar', () => {
   // F11-7 made this six: Pipeline joined the bar, after Effects.
@@ -192,5 +195,46 @@ describe('MenuBar dropdown overlay (F11-5)', () => {
     fireEvent.mouseDown(about);
 
     expect(screen.getByRole('button', { name: 'About Auditorium' })).toBeInTheDocument();
+  });
+
+  // F11 fix round (I4): the suite above proves the panel is positioned,
+  // clamped, scrollable and not closed by its own mousedown — and every one of
+  // those survived deleting the item's `onClick` entirely. A menu that renders
+  // perfectly and does nothing is the failure this file could not see.
+  it('RUNS the clicked item’s command, and closes the menu afterwards', async () => {
+    const run = jest.spyOn(menuActions, 'runCommand').mockResolvedValue(undefined);
+    try {
+      render(<MenuBar />);
+      fireEvent.click(screen.getByRole('button', { name: 'Help' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'About Auditorium' }));
+
+      expect(run).toHaveBeenCalledWith('help.about');
+      // ...and the dropdown is gone, so the next click goes to the app rather
+      // than to a menu still hanging over it.
+      await waitFor(() =>
+        expect(screen.queryByRole('button', { name: 'About Auditorium' })).not.toBeInTheDocument()
+      );
+    } finally {
+      run.mockRestore();
+    }
+  });
+
+  it('routes a DISABLED item nowhere — the predicate is the menu’s, not a style', () => {
+    const run = jest.spyOn(menuActions, 'runCommand').mockResolvedValue(undefined);
+    try {
+      render(<MenuBar />);
+      fireEvent.click(screen.getByRole('button', { name: 'File' }));
+      // Export needs an active document; this suite opens none. (Matched by
+      // regex because a row's accessible name includes its shortcut label.)
+      const exportItem = screen.getByRole('button', { name: /Export…/ });
+      expect(exportItem).toBeDisabled();
+
+      fireEvent.click(exportItem);
+
+      expect(run).not.toHaveBeenCalled();
+    } finally {
+      run.mockRestore();
+    }
   });
 });
