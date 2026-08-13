@@ -1,4 +1,10 @@
-import { registerCommands, registerEffectCommands, runCommand, getMenuSections } from './menuActions';
+import {
+  getMenuSections,
+  isCommandEnabled,
+  registerCommands,
+  registerEffectCommands,
+  runCommand,
+} from './menuActions';
 import { registerAllEffects } from '../effects/registerAll';
 import type { MenuCommand, MenuSection } from './menuActions';
 import { useAppStore, makeInitialState } from '../stores/appStore';
@@ -85,6 +91,56 @@ describe('runCommand', () => {
     await runCommand('test.state');
 
     expect(enabled).toHaveBeenCalledWith(useAppStore.getState());
+  });
+});
+
+// U1: the E2 edit toolbar reads enablement through `isCommandEnabled` instead
+// of restating five predicates the Edit menu already owns, and needs commands
+// in front of `trimToSelection`/`silenceSelection`, which shipped in editOps
+// with no caller but the test hooks.
+describe('isCommandEnabled (U1)', () => {
+  it('returns the command’s own predicate against the live store', () => {
+    const enabled = jest.fn((s: { view: string }) => s.view === 'waveform');
+    registerCommands([
+      { id: 'test.live', label: 'Live', enabled: enabled as never, run: jest.fn() },
+    ]);
+
+    expect(isCommandEnabled('test.live')).toBe(true);
+    useAppStore.getState().setView('multitrack');
+    expect(isCommandEnabled('test.live')).toBe(false);
+    expect(enabled).toHaveBeenLastCalledWith(useAppStore.getState());
+  });
+
+  it('reports an unregistered id disabled, matching runCommand’s no-op', () => {
+    expect(isCommandEnabled('test.never-registered')).toBe(false);
+  });
+});
+
+describe('edit.trim / edit.silence (U1)', () => {
+  it('both require a selection, and run the existing editOps', async () => {
+    const doc = openDoc();
+    expect(isCommandEnabled('edit.trim')).toBe(false);
+    expect(isCommandEnabled('edit.silence')).toBe(false);
+
+    useAppStore.getState().setSelection({ start: 100, end: 400 });
+    expect(isCommandEnabled('edit.trim')).toBe(true);
+    expect(isCommandEnabled('edit.silence')).toBe(true);
+
+    await runCommand('edit.silence');
+    const silenced = useAppStore.getState().documents.find((d) => d.id === doc.id);
+    expect(docLength(silenced!)).toBe(1000); // in place, length unchanged
+    expect(silenced!.channels[0].slice(100, 400).every((v) => v === 0)).toBe(true);
+
+    useAppStore.getState().setSelection({ start: 100, end: 400 });
+    await runCommand('edit.trim');
+    const trimmed = useAppStore.getState().documents.find((d) => d.id === doc.id);
+    expect(docLength(trimmed!)).toBe(300);
+  });
+
+  it('stays out of the Edit menu — the toolbar is their only surface', () => {
+    const editIds = commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items);
+    expect(editIds).not.toContain('edit.trim');
+    expect(editIds).not.toContain('edit.silence');
   });
 });
 

@@ -24,6 +24,7 @@ import PropertiesPanel from './components/Panels/PropertiesPanel';
 import RemixPanel from './components/Panels/RemixPanel';
 import SpatialPanel from './components/Panels/SpatialPanel';
 import TranscriptPanel from './components/Panels/TranscriptPanel';
+import EditToolbar from './components/Layout/EditToolbar';
 import ModuleStrip, {
   MODULE_COLUMN_WIDTH,
   SIDEBAR_TABS,
@@ -300,12 +301,15 @@ export default function App() {
             below it. */}
         <ModuleStrip activeTab={sidebarTab} onSelect={setSidebarTab} />
 
-        {/* U1 bottom band (mockup E2): the G2 status pill, centred on the
-            WAVEFORM's axis rather than the window's — the stage-inset tokens
-            do the centring as padding, so opening or closing the module card
-            re-centres it in the same layout pass. A flex COLUMN because the
-            edit pill joins it above the status pill with a gap this container
-            guarantees, whatever either pill's content does to its height. */}
+        {/* U1 bottom band (mockup E2): the edit pill floating ABOVE the G2
+            status pill, both centred on the WAVEFORM's axis rather than the
+            window's — the stage-inset tokens do the centring as padding, so
+            opening or closing the module card re-centres both in the same
+            layout pass. A flex COLUMN owns the 16px of clear air between
+            them, so they read as two things (mockup E2's spacing, against
+            option A's touching stack) whatever either pill's content does to
+            its height. The edit pill renders nothing in the empty app, and
+            the column collapses to the status pill alone. */}
         <div
           className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex flex-col items-center"
           style={{
@@ -314,6 +318,7 @@ export default function App() {
             paddingRight: 'var(--stage-inset-right)',
           }}
         >
+          <EditToolbar />
           <StatusBar />
         </div>
       </div>

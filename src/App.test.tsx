@@ -334,6 +334,34 @@ describe('G6: the canvas is the stage; the chrome floats over it', () => {
       expect(band.className).toContain('z-20');
     }
   });
+
+  // U1 (layout E2, element 5): the edit pill shares the status pill's band —
+  // same axis, 16px of clear air above it, and absent altogether in the empty
+  // app. Mounted here rather than inside StatusBar so the gap is a property of
+  // the container, not of either pill's height.
+  it('floats the edit pill above the status pill on the same waveform axis, once a file is loaded', () => {
+    render(<App />);
+    expect(screen.queryByTestId('edit-pill')).not.toBeInTheDocument();
+
+    act(() =>
+      useAppStore.getState().addDocument(
+        createDocument({ name: 'e.wav', sampleRate: 44100, channels: [new Float32Array(1024)] })
+      )
+    );
+
+    const editPill = screen.getByTestId('edit-pill');
+    const statusPill = screen.getByTestId('status-pill');
+    const band = editPill.parentElement as HTMLElement;
+    expect(statusPill.parentElement).toBe(band);
+    expect(band.className).toContain('absolute');
+    expect(band.className).toContain('z-20');
+    expect(band.className).toContain('flex-col');
+    expect(band.style.gap).toBe('16px');
+    expect(band.style.paddingLeft).toBe('var(--stage-inset-left)');
+    expect(band.style.paddingRight).toBe('var(--stage-inset-right)');
+    // Above, not below: the edit pill is the band's first child.
+    expect(band.firstElementChild).toBe(editPill);
+  });
 });
 
 describe('view-change stops both playback engines (Task 23 / Task 22 review finding)', () => {

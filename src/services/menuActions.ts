@@ -11,6 +11,8 @@ import {
   pasteAtCursor,
   deleteSelection,
   pushMarkerUndo,
+  silenceSelection,
+  trimToSelection,
 } from './editOps';
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { canRedoSession, canUndoSession, redoSession, undoSession } from '../multitrack/sessionUndo';
@@ -67,6 +69,21 @@ export async function runCommand(id: string): Promise<void> {
   if (!cmd) return;
   if (!cmd.enabled(useAppStore.getState())) return;
   await cmd.run();
+}
+
+/**
+ * Whether a registered command would run right now — the command's OWN
+ * predicate, read against the live store, so no second surface has to restate
+ * a rule the menu already owns. An unregistered id is disabled, matching
+ * `fallbackCommand` (and `runCommand`, which silently no-ops on one).
+ *
+ * U1: added for the E2 edit toolbar's per-button greying. The Edit menu reads
+ * `item.enabled(...)` directly off the section it was handed; a toolbar holds
+ * ids, not commands, and this is the honest way to ask the same question.
+ */
+export function isCommandEnabled(id: string): boolean {
+  const cmd = registry.get(id);
+  return cmd !== undefined && cmd.enabled(useAppStore.getState());
 }
 
 /** Fixed section/item layout. Ids are resolved against the registry live at
@@ -449,6 +466,27 @@ function registerEditCommands(): void {
         }
         deleteSelection();
       },
+    },
+    // U1: `trimToSelection` and `silenceSelection` have existed in editOps
+    // since Task 22 with no command in front of them — the Edit menu never
+    // listed them, so the only way to reach either was the test hooks. The E2
+    // edit toolbar puts a button on each, and the app's rule is that a button
+    // calls a COMMAND: the registry is what re-checks enablement at run time,
+    // so a surface can never outrun it. Neither entry is added to the Edit
+    // menu's LAYOUT — that would be a menu change this task did not ask for —
+    // and neither op is touched. Same `hasSelection` predicate as Cut/Copy,
+    // which is what both functions already require and return early without.
+    {
+      id: 'edit.trim',
+      label: 'Trim to Selection',
+      enabled: hasSelection,
+      run: async () => trimToSelection(),
+    },
+    {
+      id: 'edit.silence',
+      label: 'Silence Selection',
+      enabled: hasSelection,
+      run: async () => silenceSelection(),
     },
   ]);
 }
