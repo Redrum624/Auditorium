@@ -842,6 +842,65 @@ export interface ChainStageProgress<Id extends string> {
 
 export type VocalChainStageProgress = ChainStageProgress<VocalChainStageId>;
 
+/**
+ * Hand the main thread back long enough for a frame to actually be PRESENTED.
+ *
+ * Announcing a measurement is worthless if the announcement cannot be seen, and
+ * that is what shipped first: `resolveStage` is a plain synchronous call, so the
+ * `measuring` emission, the measurement itself and the `rendering` emission all
+ * ran inside one non-yielding block. React collapses the two state updates into
+ * a single flush — the final value wins — and no frame can paint until the task
+ * ends, so the word "Measuring" was emitted in the right order and never
+ * reached a screen. The worst case is the exact one the live view was built
+ * for: the cover chain's Match Reverb, whose entire cost IS the measurement,
+ * went from Waiting to Did not run while the main thread sat frozen on the
+ * previous stage's row.
+ *
+ * A MICROTASK IS NOT ENOUGH. `await Promise.resolve()` drains before the browser
+ * paints, so it would satisfy an ordering test and present nothing. The yield
+ * has to cross a real task boundary: `requestAnimationFrame` runs immediately
+ * before a paint, and a `setTimeout` scheduled from inside it resolves after
+ * that frame has been presented. The `setTimeout`-only path is the fallback for
+ * a context with no rAF at all — a worker or a bare Node test environment —
+ * where there is nothing to paint and the task boundary is all that is left to
+ * honour.
+ */
+function yieldToPaint(): Promise<void> {
+  return new Promise<void>((resolve) => {
+    if (typeof requestAnimationFrame !== 'function') {
+      setTimeout(resolve, 0);
+      return;
+    }
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
+}
+
+/**
+ * The `measuring` announcement, and the paint that makes it visible — or
+ * nothing at all.
+ *
+ * The whole thing is gated on the callback being present. A frame per stage is
+ * real work, and `testHooks` and the packaged smoke drive both chains with no
+ * callbacks whatsoever: they must keep bit-for-bit today's timing, so the gate
+ * is part of the additive contract rather than an optimisation. Shared by both
+ * chains so neither can quietly stop yielding.
+ */
+export async function announceMeasuring<Id extends string>(
+  onStageProgress: ((progress: ChainStageProgress<Id>) => void) | undefined,
+  stageId: Id,
+  label: string
+): Promise<void> {
+  if (!onStageProgress) return;
+  onStageProgress({
+    stageId,
+    label,
+    phase: 'measuring',
+    stageFraction: 0,
+    detail: STAGE_MEASURING_DETAIL,
+  });
+  await yieldToPaint();
+}
+
 export interface RunVocalChainOptions {
   enabled: Partial<Record<VocalChainStageId, boolean>>;
   onProgress?: (fraction: number) => void;
@@ -937,13 +996,11 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
     }
 
     onStageStart?.(stage);
-    onStageProgress?.({
-      stageId: stage.id,
-      label: stage.label,
-      phase: 'measuring',
-      stageFraction: 0,
-      detail: STAGE_MEASURING_DETAIL,
-    });
+    // Announced AND painted before the measurement runs — see `announceMeasuring`.
+    // Every stage gets this, including the ones about to decline: a decline is
+    // the verdict of a measurement that has to happen first, and Match Reverb's
+    // is the longest in either chain.
+    await announceMeasuring(onStageProgress, stage.id, stage.label);
     const resolution = resolveStage(stage, channels, sampleRate, f0P1Hz);
     if (!resolution.run) {
       record({

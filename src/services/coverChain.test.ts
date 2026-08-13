@@ -44,6 +44,7 @@ import {
   reverbRt60Seconds,
   type Ltas,
 } from '../dsp/coverMatch';
+import * as coverMatch from '../dsp/coverMatch';
 import { SOLVE_TOLERANCE_DB, realisedBandEnergyDb } from '../dsp/graphicEqCascade';
 import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
 import {
@@ -1076,6 +1077,126 @@ describe('runCoverChain', () => {
       if (seen[i].stageId !== seen[i - 1].stageId) continue;
       expect(seen[i].stageFraction).toBeGreaterThanOrEqual(seen[i - 1].stageFraction);
     }
+  });
+
+  // Emission ORDER is not emission VISIBILITY, and the first version of this
+  // block only pinned the order. `resolveStage` is synchronous, so announcing
+  // the measurement, taking it and announcing the render happened in ONE
+  // non-yielding block: React collapses the two state updates into a single
+  // flush and no frame paints until the task ends. This chain has the app's
+  // worst case — `deriveMatchEq` computes the take's whole long-term spectrum
+  // inside the loop, 1.75 s of the 2.28 s that makes Match EQ 56 of the 68
+  // weight, and every bit of it ran with the previous row still on screen.
+  //
+  // (Match Reverb, which the symptom is easy to blame, is NOT the expensive
+  // one in-loop: its decay fit is hoisted into `measureReference` before the
+  // first stage. Its declining row was frozen by Match EQ's measurement, not
+  // by its own.)
+  //
+  // The observation is a TIMER, because a timer can only have run if the engine
+  // gave the main thread back. A microtask would not do: it drains before
+  // paint, so a `Promise.resolve()` yield would pass an ordering test and
+  // present nothing.
+
+  it('hands the main thread back between announcing a measurement and taking it', async () => {
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const yielded = new Set<CoverChainStageId>();
+    const sawYield = new Map<CoverChainStageId, boolean>();
+    await runCoverChain({
+      enabled: only(...STEPPER_IDS),
+      referenceDocId: refId,
+      onStageProgress: (p) => {
+        if (p.phase === 'measuring') {
+          yielded.delete(p.stageId);
+          setTimeout(() => yielded.add(p.stageId), 0);
+          return;
+        }
+        if (!sawYield.has(p.stageId)) sawYield.set(p.stageId, yielded.has(p.stageId));
+      },
+    });
+    expect([...sawYield.keys()]).toEqual(STEPPER_IDS);
+    for (const id of STEPPER_IDS) expect(sawYield.get(id)).toBe(true);
+  });
+
+  it('yields before a DECLINE too, so the stage that refuses is still seen deciding', async () => {
+    // A stage that declines still took a measurement to decide, and it is the
+    // one whose row a user is most likely to be watching — Match Reverb
+    // declines on most material. Announcing only the stages that go on to
+    // render would leave the most common outcome in this chain with no live
+    // state at all between Waiting and Did not run.
+    const { refId } = seedPair(takeAudio(), refAudio());
+    let yielded = false;
+    let sawYield: boolean | null = null;
+    const report = await runCoverChain({
+      enabled: only('matchReverb'),
+      referenceDocId: refId,
+      onStageProgress: (p) => {
+        if (p.stageId !== 'matchReverb' || p.phase !== 'measuring') return;
+        setTimeout(() => {
+          yielded = true;
+        }, 0);
+      },
+      onStageResult: (r) => {
+        if (r.id === 'matchReverb') sawYield = yielded;
+      },
+    });
+    expect(resultFor(report!.stages, 'matchReverb').status).toBe('declined');
+    expect(sawYield).toBe(true);
+  });
+
+  it('paints the announcement BEFORE the measurement runs, not after it', async () => {
+    // The timer test proves a task boundary fell between the two
+    // announcements; it cannot say which SIDE of the expensive part it is on.
+    // Moving the announcement below `resolveStage` still yields, still emits in
+    // order, and still freezes the main thread through the measurement with the
+    // previous row on screen — and that mutation SURVIVED this suite until this
+    // test existed, while the vocal chain's equivalent already killed it.
+    //
+    // Match EQ is the stage to aim this at, not Match Reverb: the reverb's
+    // decay estimate is hoisted OUT of the loop into `measureReference`, so its
+    // in-loop resolve is cheap, whereas `deriveMatchEq` computes the take's
+    // whole long-term spectrum inside the loop — 1.75 s of the 2.28 s that
+    // makes this stage 56 of the 68 weight.
+    const { refId } = seedPair(takeAudio(), refAudio());
+    const raf = jest.spyOn(window, 'requestAnimationFrame');
+    const ltas = jest.spyOn(coverMatch, 'longTermAverageSpectrum');
+
+    await runCoverChain({ enabled: only('matchEq'), referenceDocId: refId, onStageProgress: () => {} });
+
+    expect(raf).toHaveBeenCalledTimes(1);
+    const paint = raf.mock.invocationCallOrder[0];
+    const spectra = ltas.mock.invocationCallOrder;
+    // Two before the paint — the reference's own spectrum and the run's
+    // before-metrics, neither of which is the STAGE's work — and two after it:
+    // `deriveMatchEq`'s own pass over the take, and the after-metrics.
+    expect(spectra).toHaveLength(4);
+    expect(spectra.filter((o) => o < paint)).toHaveLength(2);
+    expect(spectra.filter((o) => o > paint)).toHaveLength(2);
+
+    ltas.mockRestore();
+    raf.mockRestore();
+  });
+
+  it('yields ONLY for a consumer that asked for stage progress — the contract stays additive', async () => {
+    // `testHooks` and the packaged smoke drive this chain with no callbacks and
+    // must keep exactly today's timing, so the gate is part of the contract
+    // rather than an optimisation. Observed at the scheduler.
+    const raf = jest.spyOn(window, 'requestAnimationFrame');
+
+    const first = seedPair(takeAudio(), refAudio());
+    await runCoverChain({ enabled: only(...STEPPER_IDS), referenceDocId: first.refId });
+    expect(raf).not.toHaveBeenCalled();
+
+    useAppStore.setState(makeInitialState());
+    const second = seedPair(takeAudio(), refAudio());
+    await runCoverChain({
+      enabled: only(...STEPPER_IDS),
+      referenceDocId: second.refId,
+      onStageProgress: () => {},
+    });
+    expect(raf.mock.calls.length).toBeGreaterThanOrEqual(STEPPER_IDS.length);
+
+    raf.mockRestore();
   });
 
   it('measures before it renders, on every stage, and says so', async () => {

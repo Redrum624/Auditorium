@@ -70,7 +70,7 @@ import { useAppStore } from '../stores/appStore';
 import { applyEdit, type MarkerRemap } from './editOps';
 import { reportEffectFailure, runEffectOnChannels, type EffectRunOutput } from './effectRunner';
 import {
-  STAGE_MEASURING_DETAIL,
+  announceMeasuring,
   clampToParam,
   stageRenderingDetail,
   type ChainStageProgress,
@@ -1025,13 +1025,18 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
     }
 
     onStageStart?.(stage);
-    onStageProgress?.({
-      stageId: stage.id,
-      label: stage.label,
-      phase: 'measuring',
-      stageFraction: 0,
-      detail: STAGE_MEASURING_DETAIL,
-    });
+    // Announced AND painted before the measurement runs — see `announceMeasuring`
+    // in vocalChain.ts.
+    //
+    // Match EQ is the stage that needed it, and it is worth being exact about
+    // which measurement is which. The reverb's ISO 3382-1 decay fit is hoisted
+    // OUT of this loop into `measureReference` above, so Match Reverb's in-loop
+    // resolve is cheap and its decline is nearly free. What is NOT hoisted is
+    // `deriveMatchEq`'s own long-term spectrum of the take — 1.75 s of the
+    // 2.28 s that makes this stage 56 of the 68 weight — and without a yield
+    // that whole pass ran with the main thread frozen and the PREVIOUS stage's
+    // row still on screen, which is the symptom the live view exists to remove.
+    await announceMeasuring(onStageProgress, stage.id, stage.label);
     const resolution = resolveStage(stage, channels, sampleRate, reference, enabled);
     if (!resolution.run) {
       record({

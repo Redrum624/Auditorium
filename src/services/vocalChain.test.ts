@@ -27,6 +27,7 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
 import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
 import { measureNoiseWindow, programmeRmsDb, toDb } from '../dsp/chainAnalysis';
+import * as chainAnalysis from '../dsp/chainAnalysis';
 import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
 import { silenceRemoverEffect } from '../effects/restoration/SilenceRemoverEffect';
@@ -1313,6 +1314,101 @@ describe('runVocalChain', () => {
       if (seen[i].stageId !== seen[i - 1].stageId) continue;
       expect(seen[i].stageFraction).toBeGreaterThanOrEqual(seen[i - 1].stageFraction);
     }
+  });
+
+  // Emission ORDER is not the same claim as emission VISIBILITY, and the first
+  // version of this block only pinned the order. `resolveStage` is a plain
+  // synchronous call, so announcing the measurement, taking it and announcing
+  // the render all happened inside ONE non-yielding block: React collapses the
+  // two state updates into a single flush, the final value wins, and no frame
+  // can be presented until the task ends. The word "Measuring" was emitted in
+  // the right order and could never reach a screen — worst on Cover Chain's
+  // Match Reverb, whose entire cost IS the measurement, which went straight
+  // from Waiting to Did not run while the main thread sat frozen on the
+  // previous row. That is the looks-like-a-hang symptom this feature exists to
+  // remove.
+  //
+  // The observation is a TIMER, because a timer is the thing that can only have
+  // run if the engine gave the main thread back. A microtask would not do: it
+  // drains before paint, so a `Promise.resolve()` yield would satisfy an
+  // ordering test while presenting nothing.
+
+  it('hands the main thread back between announcing a measurement and taking it', async () => {
+    seedDoc([stepperFixture()]);
+    const yielded = new Set<VocalChainStageId>();
+    const sawYield = new Map<VocalChainStageId, boolean>();
+    await runVocalChain({
+      enabled: only(...STEPPER_IDS),
+      onStageProgress: (p) => {
+        if (p.phase === 'measuring') {
+          yielded.delete(p.stageId);
+          setTimeout(() => yielded.add(p.stageId), 0);
+          return;
+        }
+        // The first rendering event of this stage is the far side of
+        // `resolveStage`. If the timer above has already fired by now, a task
+        // boundary — and therefore a paint — happened in between.
+        if (!sawYield.has(p.stageId)) sawYield.set(p.stageId, yielded.has(p.stageId));
+      },
+    });
+    expect([...sawYield.keys()]).toEqual([...STEPPER_IDS]);
+    for (const id of STEPPER_IDS) expect(sawYield.get(id)).toBe(true);
+  });
+
+  it('paints the announcement BEFORE the measurement runs, not after it', async () => {
+    // The timer test proves a task boundary fell between the two
+    // announcements. It cannot say which SIDE of the expensive part the
+    // boundary is on — moving the announcement below `resolveStage` still
+    // yields, still emits in the right order, and still leaves the user
+    // staring at the previous stage's row for the whole of the measurement,
+    // which is the entire defect. So the paint and the measurement are
+    // interleaved into one ordered list and the position is asserted.
+    //
+    // `invocationCallOrder` is a single monotonic counter shared by every jest
+    // mock, which is what makes an ordering across two unrelated functions
+    // observable at all.
+    seedDoc([stepperFixture()]);
+    const raf = jest.spyOn(window, 'requestAnimationFrame');
+    const noiseWindow = jest.spyOn(chainAnalysis, 'measureNoiseWindow');
+
+    // ONE stage, so the call sequence is short enough to assert exactly:
+    // before-metrics measures the noise window, then the stage announces
+    // itself, then `deriveCompressor` measures it again, then after-metrics.
+    await runVocalChain({ enabled: only('compressor'), onStageProgress: () => {} });
+
+    expect(raf).toHaveBeenCalledTimes(1);
+    const paint = raf.mock.invocationCallOrder[0];
+    const measurements = noiseWindow.mock.invocationCallOrder;
+    expect(measurements).toHaveLength(3);
+    // One before the paint (the run's own before-metrics, which is not the
+    // stage's work) and TWO after it: the compressor's derivation and the
+    // after-metrics. A yield placed below `resolveStage` moves the derivation
+    // to the wrong side and leaves one.
+    expect(measurements.filter((o) => o < paint)).toHaveLength(1);
+    expect(measurements.filter((o) => o > paint)).toHaveLength(2);
+
+    noiseWindow.mockRestore();
+    raf.mockRestore();
+  });
+
+  it('yields ONLY for a consumer that asked for stage progress — the contract stays additive', async () => {
+    // The yield is real work: a frame per stage. `testHooks` and the packaged
+    // smoke drive these chains with no callbacks at all and must keep exactly
+    // today's timing, so the gate is part of the contract rather than an
+    // optimisation. Observed at the scheduler, which is where a stray yield
+    // would show up.
+    const raf = jest.spyOn(window, 'requestAnimationFrame');
+
+    seedDoc([stepperFixture()]);
+    await runVocalChain({ enabled: only(...STEPPER_IDS) });
+    expect(raf).not.toHaveBeenCalled();
+
+    useAppStore.setState(makeInitialState());
+    seedDoc([stepperFixture()]);
+    await runVocalChain({ enabled: only(...STEPPER_IDS), onStageProgress: () => {} });
+    expect(raf.mock.calls.length).toBeGreaterThanOrEqual(STEPPER_IDS.length);
+
+    raf.mockRestore();
   });
 
   it('measures before it renders, on every stage, and says so', async () => {
