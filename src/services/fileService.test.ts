@@ -585,6 +585,10 @@ describe('saveDocument', () => {
     installApi();
     const doc = seedDoc({
       filePath: 'D:\\audio\\track.flac',
+      // O1-2: a plain Save on a clean saved document is a no-op now, so this
+      // test states the edit its subject (the in-place encode routing)
+      // presupposes. Its sibling above already did.
+      dirty: true,
       name: 'track.flac',
       sourceFormat: 'flac',
       sourceBitDepth: 16,
@@ -599,6 +603,7 @@ describe('saveDocument', () => {
     installApi();
     const doc = seedDoc({
       filePath: 'D:\\audio\\track.flac',
+      dirty: true, // see the sibling above (O1-2)
       name: 'track.flac',
       sourceFormat: 'flac',
       sourceBitDepth: 20,
@@ -828,6 +833,85 @@ describe('saveDocument', () => {
       expect.objectContaining({ type: 'error', message: 'disk full' })
     );
     expect(useAppStore.getState().documents[0].dirty).toBe(true);
+  });
+});
+
+// `file.save` on a document with nothing to save is not a cheap no-op: it
+// re-encodes every sample and overwrites the source file, and for a 16/24-bit
+// WAV it retags the document as 32-bit float on the way. The incident's first
+// run did exactly that to a CLEAN document, from a gesture the user never
+// aimed at Save. Two gates: the command's `enabled` (menuActions) and this
+// one, for any caller that reaches past the registry.
+describe('saveDocument — a clean document is a no-op (O1-2)', () => {
+  function live(docId: string) {
+    return useAppStore.getState().documents.find((d) => d.id === docId);
+  }
+
+  it('does not encode, write, or prompt for a CLEAN saved document', async () => {
+    const api = installApi();
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: false, name: 'song.wav' });
+
+    await saveDocument(doc.id);
+
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(api.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('leaves a clean 24-bit WAV document tagged as 24-bit', async () => {
+    // The retag is the quiet half of the damage: an in-place Save writes a
+    // 32-bit-float WAV whatever the source depth was, and updates the document
+    // to say so. On a document nobody edited, Properties would start reporting
+    // a different file than the one that was opened.
+    installApi();
+    const doc = seedDoc({
+      filePath: 'D:\\audio\\song.wav',
+      dirty: false,
+      name: 'song.wav',
+      sourceFormat: 'wav',
+      sourceBitDepth: 24,
+    });
+
+    await saveDocument(doc.id);
+
+    expect(live(doc.id)!.sourceBitDepth).toBe(24);
+    expect(live(doc.id)!.sourceFormat).toBe('wav');
+  });
+
+  it('still saves a DIRTY document', async () => {
+    const api = installApi();
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+
+    await saveDocument(doc.id);
+
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\audio\\song.wav', expect.any(ArrayBuffer));
+    expect(live(doc.id)!.dirty).toBe(false);
+  });
+
+  it('still saves a clean NEVER-SAVED document (a computed document has no file yet)', async () => {
+    // Mix Down / Remix N / a recording / a stem: created with no undo entry, so
+    // CLEAN from the moment it exists, and yet the whole thing exists nowhere
+    // on disk. `hasUnsavedWork` covers both, which is why the gate uses it
+    // rather than `dirty`.
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\Remix 1.wav') });
+    const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
+    expect(doc.neverSaved).toBe(true);
+
+    await saveDocument(doc.id);
+
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\Remix 1.wav', expect.any(ArrayBuffer));
+    expect(live(doc.id)!.neverSaved).toBe(false);
+  });
+
+  it('SAVE AS on a clean document still writes — it is an explicit gesture', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\copy.wav') });
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: false, name: 'song.wav' });
+
+    await saveDocument(doc.id, true);
+
+    expect(api.showSaveDialog).toHaveBeenCalledTimes(1);
+    expect(api.writeFile).toHaveBeenCalledWith('D:\\out\\copy.wav', expect.any(ArrayBuffer));
+    expect(live(doc.id)!.filePath).toBe('D:\\out\\copy.wav');
   });
 });
 

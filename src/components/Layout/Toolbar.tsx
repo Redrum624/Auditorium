@@ -6,6 +6,7 @@ import { playbackEngine } from '../../audio/PlaybackEngine';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { hasUnsavedWork } from '../../services/fileService';
 import { runCommand } from '../../services/menuActions';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
 import { canRecord } from '../../services/transportService';
@@ -198,6 +199,11 @@ export default function Toolbar() {
   useSessionStore((s) => s.session.tracks.some((t) => t.armed));
 
   const hasDoc = doc !== null;
+  // The Save pill's own enablement has to state the SAME condition as the
+  // `file.save` command it runs, or the pill lights up for a command
+  // `runCommand` will then refuse — a control that looks live and does
+  // nothing. Dirty-or-never-written, the close guard's predicate.
+  const canSave = doc !== null && hasUnsavedWork(doc);
   const isMultitrack = view === 'multitrack';
   const canTransport = hasDoc || isMultitrack;
   const isPlaying = isMultitrack ? mtPlayState === 'playing' : playback.state === 'playing';
@@ -335,7 +341,7 @@ export default function Toolbar() {
         <PillButton
           label="Save"
           title="Save (Ctrl+S)"
-          disabled={!hasDoc}
+          disabled={!canSave}
           onClick={() => void runCommand('file.save')}
         >
           Save

@@ -153,6 +153,62 @@ describe('getMenuSections', () => {
     expect(saveCmd.enabled(useAppStore.getState())).toBe(false);
   });
 
+  describe('file.save is gated on unsaved work, not on having a document (O1-2)', () => {
+    const fileCmd = (id: string) => {
+      const file = getMenuSections().find((s) => s.title === 'File')!;
+      return file.items.find(
+        (item): item is MenuCommand => item !== 'separator' && item.id === id
+      )!;
+    };
+
+    function openSavedDoc() {
+      const doc = createDocument({
+        name: 'song.wav',
+        sampleRate: 44100,
+        channels: [new Float32Array(1000)],
+        filePath: 'D:\\audio\\song.wav',
+        neverSaved: false,
+      });
+      useAppStore.getState().addDocument(doc);
+      return doc;
+    }
+
+    it('is DISABLED for a document with nothing to save', () => {
+      // Save re-encodes and overwrites the source file. With nothing behind it
+      // that is a destructive no-op, and it was one keystroke (Ctrl+S) or one
+      // stray click away at any moment.
+      openSavedDoc();
+      expect(fileCmd('file.save').enabled(useAppStore.getState())).toBe(false);
+    });
+
+    it('is ENABLED once the document is dirty', () => {
+      const doc = openSavedDoc();
+      useAppStore.getState().updateDocument({ ...doc, dirty: true });
+      expect(fileCmd('file.save').enabled(useAppStore.getState())).toBe(true);
+    });
+
+    it('is ENABLED for a clean document that was never written to disk', () => {
+      // A computed document (Mix Down, Remix N, a recording, a stem) is clean
+      // from birth and exists nowhere on disk. Same predicate the close guard
+      // prompts on.
+      openDoc();
+      expect(fileCmd('file.save').enabled(useAppStore.getState())).toBe(true);
+    });
+
+    it('leaves file.saveAs enabled for a document with nothing to save', () => {
+      // Save As is an explicit "write this to a file I name" gesture; it is
+      // meaningful with no edits behind it, and must not be gated with Save.
+      openSavedDoc();
+      expect(fileCmd('file.saveAs').enabled(useAppStore.getState())).toBe(true);
+    });
+
+    it('leaves file.export and file.close enabled for a document with nothing to save', () => {
+      openSavedDoc();
+      expect(fileCmd('file.export').enabled(useAppStore.getState())).toBe(true);
+      expect(fileCmd('file.close').enabled(useAppStore.getState())).toBe(true);
+    });
+  });
+
   it('Help section exposes an enabled about command', () => {
     const help = getMenuSections().find((s) => s.title === 'Help')!;
     const about = help.items.find(

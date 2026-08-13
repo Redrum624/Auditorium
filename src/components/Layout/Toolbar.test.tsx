@@ -224,6 +224,29 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
     expect(screen.getByRole('button', { name: 'Fit' })).toBeInTheDocument();
   });
 
+  it('greys the Save pill for a document with nothing to save (O1-2)', () => {
+    // The pill has to state the same condition as the `file.save` command it
+    // runs; a lit control that runCommand then refuses is a lie about what a
+    // click will do.
+    const doc = createDocument({
+      name: 'song.wav',
+      sampleRate: 44100,
+      channels: [new Float32Array(1000)],
+      filePath: 'D:\\audio\\song.wav',
+      neverSaved: false,
+    });
+    useAppStore.getState().addDocument(doc);
+
+    const { rerender } = render(<Toolbar />);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    // Export and Close-adjacent controls are untouched by the gate.
+    expect(screen.getByRole('button', { name: 'Export' })).toBeEnabled();
+
+    useAppStore.getState().updateDocument({ ...doc, dirty: true });
+    rerender(<Toolbar />);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
   it('separates Open from Save with a divider', () => {
     // The two pills sat 3 px apart with nothing between them: a click aimed at
     // Open that landed one pill to the right ran Save — a full re-encode and

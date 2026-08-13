@@ -283,6 +283,11 @@ export async function openFilesViaDialog(): Promise<void> {
  * A failed WRITE additionally offers "Save As…" alongside Cancel, and taking it
  * runs the save-as flow — the only action that resolves a refused location.
  *
+ * A plain Save (`as` false) on a document that has a `filePath` and no unsaved
+ * work is a NO-OP: no encode, no write, no dialog. Save As (`as` true) always
+ * runs — it is an explicit "write this to a file I name" gesture, meaningful
+ * whether or not there are edits behind it.
+ *
  * A second call for the same `docId` while one is already mid-encode/write
  * (the OGG branch is async) does not start a second write; it surfaces
  * "Save in progress" and returns (Task H1). If any store-observable edit lands
@@ -312,6 +317,21 @@ export async function saveDocument(docId: string, as = false): Promise<void> {
 async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
   const doc = findDoc(docId);
   if (!doc) return;
+
+  // Nothing to save. An in-place Save is not a cheap no-op when there is no
+  // work behind it: it re-encodes the whole document and overwrites the source
+  // file, and for a 16- or 24-bit WAV it also RETAGS the document as 32-bit
+  // float (see the write below), so a Save nobody asked for silently rewrites
+  // a file and changes what the app reports about it. The command is gated on
+  // the same predicate (menuActions `file.save`); this is the second gate, for
+  // any programmatic caller that reaches past the command registry.
+  //
+  // `as` is excluded deliberately: Save As is an explicit export-like gesture —
+  // "write this document to a file I am about to name" — and is meaningful on a
+  // document with no unsaved work at all. `hasUnsavedWork` covers `neverSaved`
+  // too, so a computed document (Mix Down, Remix N, a recording, a stem) that
+  // has never been written still saves on its first Save.
+  if (!as && doc.filePath && !hasUnsavedWork(doc)) return;
 
   // In-place: re-encode into the source container. Only wav/mp3/flac/ogg sources
   // ever carry a filePath (other/exotic sources are opened with filePath = null).

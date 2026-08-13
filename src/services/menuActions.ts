@@ -15,7 +15,7 @@ import {
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { canRedoSession, canUndoSession, redoSession, undoSession } from '../multitrack/sessionUndo';
 import { getClipboard } from './clipboard';
-import { closeDocumentFlow, openFilesViaDialog, saveDocument } from './fileService';
+import { closeDocumentFlow, hasUnsavedWork, openFilesViaDialog, saveDocument } from './fileService';
 import { openSessionViaDialog, saveSessionViaDialog } from '../multitrack/sessionFile';
 import {
   openConvertDialog,
@@ -459,6 +459,10 @@ function registerEditCommands(): void {
  * rest drive the fileService flows. run() is async so awaits propagate. */
 function registerFileCommands(): void {
   const hasDoc = (s: AppState) => activeDoc(s) !== null;
+  const hasUnsavedActiveDoc = (s: AppState) => {
+    const doc = activeDoc(s);
+    return doc !== null && hasUnsavedWork(doc);
+  };
   const activeId = () => useAppStore.getState().activeDocumentId;
   registerCommands([
     {
@@ -481,7 +485,14 @@ function registerFileCommands(): void {
       id: 'file.save',
       label: 'Save',
       shortcut: 'Ctrl+S',
-      enabled: hasDoc,
+      // Not `hasDoc`: Save re-encodes the whole document and overwrites its
+      // source file, so on a document with nothing to save it is a destructive
+      // no-op — and it was reachable by a stray click on a pill 3 px from
+      // Open, and by Ctrl+S at any moment. Gated on the SAME predicate the
+      // close guard prompts on (`hasUnsavedWork` = dirty or never written), so
+      // "the app would warn me about losing this" and "Save does something"
+      // are one condition rather than two that can disagree.
+      enabled: hasUnsavedActiveDoc,
       run: async () => {
         const id = activeId();
         if (id) await saveDocument(id);
