@@ -88,17 +88,70 @@ describe('dialog:message opts validation', () => {
     expect(forwarded(dialog.showMessageBox).type).toBe('info');
   });
 
-  test('unknown keys are dropped -- only the four expected keys ever reach the OS dialog', async () => {
+  test('unknown keys are dropped -- only the five expected keys ever reach the OS dialog', async () => {
+    // `defaultId` joined the contract with the failed-write "Save As..." offer
+    // (O1-3/M3), so the accepted set is five, not four. `detail`,
+    // `checkboxLabel`, `icon` and `cancelId` are still refused.
     await handlers['dialog:message']({}, {
       message: 'x',
       detail: 'spoofed detail text',
       checkboxLabel: 'evil checkbox',
       icon: 'C:\\anything.png',
-      defaultId: 1,
       cancelId: 0,
     });
     const opts = forwarded(dialog.showMessageBox);
-    expect(Object.keys(opts).sort()).toEqual(['buttons', 'message', 'title', 'type']);
+    expect(Object.keys(opts).sort()).toEqual(['buttons', 'defaultId', 'message', 'title', 'type']);
+  });
+
+  describe('defaultId (which button Enter activates)', () => {
+    test('an in-range index passes through', async () => {
+      await handlers['dialog:message']({}, {
+        message: 'Write denied (protected directory)',
+        buttons: ['Save As…', 'Cancel'],
+        defaultId: 1,
+      });
+      expect(forwarded(dialog.showMessageBox).defaultId).toBe(1);
+    });
+
+    test('an index past the end of the button list is dropped', async () => {
+      // Sanitized against the buttons that SURVIVED cleanButtons, so it can
+      // never name a button that is not there.
+      await handlers['dialog:message']({}, {
+        message: 'x',
+        buttons: ['Save As…', 'Cancel'],
+        defaultId: 7,
+      });
+      expect(forwarded(dialog.showMessageBox).defaultId).toBeUndefined();
+    });
+
+    test('an index that only survives because a non-string button was dropped is refused', async () => {
+      // cleanButtons removes the object, leaving one button; index 1 no longer
+      // exists and must not be forwarded.
+      await handlers['dialog:message']({}, {
+        message: 'x',
+        buttons: ['Only', { evil: true }],
+        defaultId: 1,
+      });
+      const opts = forwarded(dialog.showMessageBox);
+      expect(opts.buttons).toEqual(['Only']);
+      expect(opts.defaultId).toBeUndefined();
+    });
+
+    test('a negative, fractional, or non-numeric index is dropped', async () => {
+      for (const defaultId of [-1, 0.5, '1', null, { valueOf: () => 1 }, NaN, Infinity]) {
+        await handlers['dialog:message']({}, {
+          message: 'x',
+          buttons: ['Save As…', 'Cancel'],
+          defaultId,
+        });
+        expect(forwarded(dialog.showMessageBox).defaultId).toBeUndefined();
+      }
+    });
+
+    test('an index with no buttons at all is dropped', async () => {
+      await handlers['dialog:message']({}, { message: 'x', defaultId: 0 });
+      expect(forwarded(dialog.showMessageBox).defaultId).toBeUndefined();
+    });
   });
 
   test('an overlong message is truncated, not rejected', async () => {

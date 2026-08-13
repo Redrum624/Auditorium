@@ -156,6 +156,17 @@ function cleanButtons(buttons) {
     .map((b) => b.slice(0, DIALOG_MAX_TEXT));
 }
 
+/** Which button Enter activates. Sanitized against the buttons that SURVIVED
+ * cleanButtons rather than against what the renderer sent, so an index can
+ * never point past the end of the real button list; anything that is not an
+ * in-range integer is dropped and the platform default applies. */
+function cleanDefaultId(defaultId, buttons) {
+  if (!Number.isInteger(defaultId)) return undefined;
+  if (!Array.isArray(buttons) || buttons.length === 0) return undefined;
+  if (defaultId < 0 || defaultId >= buttons.length) return undefined;
+  return defaultId;
+}
+
 /**
  * Registers every IPC handler used by the renderer's window.electronAPI.
  * `getWin` is a getter (not the window itself) so handlers always operate on
@@ -236,13 +247,18 @@ function registerIpc(getWin) {
   ipcMain.handle('dialog:message', async (_event, rawOpts = {}) => {
     const opts = asObject(rawOpts);
     const win = getWin();
+    const buttons = cleanButtons(opts.buttons);
     const result = await dialog.showMessageBox(win, {
       type: typeof opts.type === 'string' && DIALOG_MESSAGE_TYPES.has(opts.type) ? opts.type : 'info',
       title: cleanText(opts.title, DIALOG_MAX_TEXT),
       // message is the one REQUIRED field: a non-string becomes '' (an empty
       // dialog) rather than letting arbitrary renderer values reach the OS.
       message: cleanText(opts.message, DIALOG_MAX_TEXT) ?? '',
-      buttons: cleanButtons(opts.buttons)
+      buttons,
+      // Which button Enter activates. Forwarded so a dialog whose first button
+      // DOES something (the failed-write "Save As..." offer) can put the
+      // keyboard default on the harmless one instead.
+      defaultId: cleanDefaultId(opts.defaultId, buttons)
     });
     return result.response;
   });
