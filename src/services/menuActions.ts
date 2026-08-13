@@ -34,7 +34,9 @@ import {
   openVocalChainDialog,
   openCoverChainDialog,
   focusSpatialPanel,
+  focusTranscriptPanel,
 } from './dialogBus';
+import { getTranscript } from './transcribeService';
 import { getVisibleEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
 import { toggleSpectralScale } from './spectralScale';
@@ -1034,7 +1036,28 @@ function registerStemCommands(): void {
   ]);
 }
 
-/** F4b — Transcribe. F11-7: it OPENS the Pipeline menu's Analysis group, with
+/** F4b — Transcribe. F11-8: it is now the door to BOTH halves of the feature.
+ * The user ruled that "Spatial and Transcript are single tools, they should not
+ * be a module", so the module strip stopped carrying a Transcript icon and this
+ * command absorbed what that icon did: with a transcript already in the store
+ * for the active document it SHOWS that transcript, and only with none does it
+ * open the run dialog.
+ *
+ * Which way round matters. Re-running is minutes of inference that would
+ * produce the thing already sitting in the store, so making that the default
+ * would charge the user for a look; whereas showing a transcript costs nothing
+ * and the run is still one click away, on the panel's own 'Transcribe again…'
+ * button (F11-8 added it — the stale banner has been telling users to
+ * transcribe again since F4b with no control to do it with). The branch is on
+ * EXISTENCE, not on staleness: a stale transcript is still the one the user
+ * made, the panel says so in amber at the top, and that is a better answer to
+ * "show me the transcript" than silently starting a second run.
+ *
+ * The `enabled` predicate is unchanged and deliberately still document-and-
+ * audio gated: the reveal arm is the exception this command makes, not a new
+ * always-available surface.
+ *
+ * F11-7: it OPENS the Pipeline menu's Analysis group, with
  * Separate into Stems after it. Both are long analyses over the whole document
  * that the Effects menu's pure, synchronous `EffectDefinition.process`
  * structurally cannot express — the reason neither is an `effect.<id>` — and
@@ -1051,7 +1074,14 @@ function registerTranscribeCommands(): void {
         const d = activeDoc(s);
         return d !== null && docLength(d) > 0;
       },
-      run: async () => openTranscribeDialog(),
+      run: async () => {
+        const id = useAppStore.getState().activeDocumentId;
+        if (id !== null && getTranscript(id) !== null) {
+          focusTranscriptPanel();
+          return;
+        }
+        openTranscribeDialog();
+      },
     },
   ]);
 }

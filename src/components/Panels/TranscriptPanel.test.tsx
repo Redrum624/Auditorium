@@ -105,6 +105,20 @@ describe('TranscriptPanel — the transcript', () => {
     });
   });
 
+  // F11-8. The Transcript stopped being a module-strip entry (the user ruled
+  // it a single tool, not a module) and the Transcribe tool now shows this
+  // panel rather than the dialog once a transcript exists. That makes this
+  // button load-bearing rather than decorative: it is the ONLY way back to the
+  // dialog from here, and the stale banner has been telling the user to
+  // "Transcribe again" with no control to do it with since F4b.
+  it('offers Transcribe again, the one way back to the dialog once a transcript exists', () => {
+    render(<TranscriptPanel />);
+    const again = screen.getByTestId('transcript-retranscribe');
+    expect(again).toHaveTextContent('Transcribe again…');
+    fireEvent.click(again);
+    expect(openTranscribe).toHaveBeenCalledTimes(1);
+  });
+
   it('lists one row per segment with its text', () => {
     render(<TranscriptPanel />);
     const rows = screen.getAllByTestId('transcript-item');

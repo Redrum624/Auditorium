@@ -163,6 +163,21 @@ export default function TranscriptPanel() {
             <Download size={13} className="mr-1 inline-block align-[-2px]" aria-hidden="true" />
             WebVTT
           </GlassButton>
+          {/* F11-8: the way back to the run. Two things made this necessary at
+              once — the stale banner above has been telling the user to
+              "Transcribe again" since F4b with no control to do it with, and
+              `edit.transcribe` now SHOWS this panel when a transcript exists
+              rather than opening the dialog, so without a button here the
+              dialog would be unreachable for an already-transcribed document.
+              Ellipsis, because it opens one. */}
+          <GlassButton
+            data-testid="transcript-retranscribe"
+            title="Run the transcription again — replaces this transcript."
+            onClick={() => openTranscribeDialog()}
+          >
+            <Captions size={13} className="mr-1 inline-block align-[-2px]" aria-hidden="true" />
+            Transcribe again…
+          </GlassButton>
         </div>
       </div>
 

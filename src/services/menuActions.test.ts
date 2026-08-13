@@ -19,6 +19,8 @@ import { registerDialogSetters } from './dialogBus';
 import { SHORTCUT_TABLE } from './shortcuts';
 import { setClipboard } from './clipboard';
 import { createClip } from '../multitrack/session';
+import { _resetTranscriptsForTest, getTranscript } from './transcribeService';
+import { installTranscribeBackend, seedTranscript, voiceVector } from '../__mocks__/transcribeBackend';
 
 jest.mock('../multitrack/sessionFile');
 jest.mock('./tempoAnalysis', () => ({
@@ -1554,7 +1556,7 @@ describe('edit.transcribe (Task F4b)', () => {
     )!;
   }
 
-  function installSetters(openTranscribe: jest.Mock) {
+  function installSetters(openTranscribe: jest.Mock, focusTranscript: jest.Mock = jest.fn()) {
     registerDialogSetters({
       openExportDialog: () => {},
       openNewFileDialog: () => {},
@@ -1571,10 +1573,25 @@ describe('edit.transcribe (Task F4b)', () => {
       openCoverChainDialog: () => {},
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
-      focusTranscriptPanel: () => {},
+      focusTranscriptPanel: focusTranscript,
       focusSpatialPanel: () => {},
     });
   }
+
+  /** A real transcript for `docId`, through the real service and the shared
+   * component-test backend — never a hand-written stand-in, so what the command
+   * reads below is the shape the service actually stores. */
+  async function seedRealTranscript(docId: string): Promise<void> {
+    const backend = installTranscribeBackend();
+    await seedTranscript(backend, docId, [
+      { index: 0, startSample: 0, endSample: 8000, text: 'hello', vector: voiceVector(8, 0, 1) },
+    ]);
+  }
+
+  afterEach(() => {
+    _resetTranscriptsForTest();
+    delete (window as unknown as { electronAPI?: unknown }).electronAPI;
+  });
 
   // F11-7 rewrote this. F4b and F3 shared one Edit group of long-inference
   // jobs; the Pipeline grouping splits that group by subject — Transcribe opens
@@ -1619,14 +1636,16 @@ describe('edit.transcribe (Task F4b)', () => {
     expect(findEditCmd('edit.transcribe').enabled(useAppStore.getState())).toBe(true);
   });
 
-  it('runCommand("edit.transcribe") opens the dialog through the bus', async () => {
+  it('runCommand("edit.transcribe") opens the dialog through the bus when there is no transcript yet', async () => {
     openDoc();
     const openTranscribe = jest.fn();
-    installSetters(openTranscribe);
+    const focusTranscript = jest.fn();
+    installSetters(openTranscribe, focusTranscript);
 
     await runCommand('edit.transcribe');
 
     expect(openTranscribe).toHaveBeenCalledTimes(1);
+    expect(focusTranscript).not.toHaveBeenCalled();
   });
 
   it('runCommand("edit.transcribe") with no document never reaches the bus', async () => {
@@ -1636,6 +1655,59 @@ describe('edit.transcribe (Task F4b)', () => {
     await runCommand('edit.transcribe');
 
     expect(openTranscribe).not.toHaveBeenCalled();
+  });
+
+  // F11-8. The Transcript panel was a module-strip entry until the user ruled
+  // it a single tool rather than a module, so Transcribe is now the door to
+  // BOTH halves of the feature: the run that makes a transcript, and the
+  // surface that shows one. With a transcript already made, running the tool
+  // shows THAT rather than re-running minutes of inference to produce the
+  // thing already sitting in the store — and the panel's own 'Transcribe
+  // again…' button is the way back to the dialog, which is what keeps the
+  // branch from being a trap.
+  it('runCommand("edit.transcribe") shows the transcript instead of the dialog once one exists', async () => {
+    const doc = createDocument({
+      name: 'talk.wav',
+      sampleRate: 44100,
+      channels: [new Float32Array(44100)],
+    });
+    useAppStore.getState().addDocument(doc);
+    await seedRealTranscript(doc.id);
+    expect(getTranscript(doc.id)).not.toBeNull();
+
+    const openTranscribe = jest.fn();
+    const focusTranscript = jest.fn();
+    installSetters(openTranscribe, focusTranscript);
+
+    await runCommand('edit.transcribe');
+
+    expect(focusTranscript).toHaveBeenCalledTimes(1);
+    expect(openTranscribe).not.toHaveBeenCalled();
+  });
+
+  // The transcript belongs to ONE document. Switching to a document that has
+  // never been transcribed must put the dialog back in front of the user, or
+  // the second file in a session could never be transcribed at all.
+  it('goes back to the dialog for a different document that has no transcript', async () => {
+    const transcribed = createDocument({
+      name: 'talk.wav',
+      sampleRate: 44100,
+      channels: [new Float32Array(44100)],
+    });
+    useAppStore.getState().addDocument(transcribed);
+    await seedRealTranscript(transcribed.id);
+
+    const fresh = openDoc(); // addDocument activates it
+    expect(useAppStore.getState().activeDocumentId).toBe(fresh.id);
+
+    const openTranscribe = jest.fn();
+    const focusTranscript = jest.fn();
+    installSetters(openTranscribe, focusTranscript);
+
+    await runCommand('edit.transcribe');
+
+    expect(openTranscribe).toHaveBeenCalledTimes(1);
+    expect(focusTranscript).not.toHaveBeenCalled();
   });
 });
 
