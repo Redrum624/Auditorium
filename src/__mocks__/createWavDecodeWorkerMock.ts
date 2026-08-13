@@ -58,15 +58,42 @@ export function _resetWavDecodeWorkerTestState(): void {
 }
 
 /**
+ * Move an ArrayBuffer the way a real `postMessage(msg, [bytes])` does: the
+ * returned buffer holds the contents, and the ORIGINAL is left detached.
+ *
+ * This matters more than it looks. Without it the double is more permissive
+ * than the thing it stands in for: `openFilePath` must read a file's container
+ * metadata BEFORE handing the bytes to the decoder, and with a non-detaching
+ * double, moving any of those reads back below the decode passes every test
+ * here and then throws `TypeError` on the first real FLAC/MP3/OGG open.
+ *
+ * `ArrayBuffer.prototype.transfer` is the primitive that does it (V8 11.x /
+ * Node 21+, present in this project's jest environment — verified before
+ * relying on it). `structuredClone` with a transfer list would do the same job
+ * but is NOT defined in jest's jsdom environment, so it is the fallback rather
+ * than the first choice. If neither exists the double degrades to copying
+ * without detaching — the old, weaker behaviour, and better than failing to
+ * decode at all.
+ */
+function transferBuffer(bytes: ArrayBuffer): ArrayBuffer {
+  const withTransfer = bytes as ArrayBuffer & { transfer?: () => ArrayBuffer };
+  if (typeof withTransfer.transfer === 'function') return withTransfer.transfer();
+  if (typeof structuredClone === 'function') {
+    return structuredClone(bytes, { transfer: [bytes] });
+  }
+  return bytes.slice(0);
+}
+
+/**
  * Test double for the WAV decode worker: runs the SAME `decodeWav` the real
  * wavDecode.worker.ts calls, synchronously behind a microtask, emitting the
  * same message shapes — `done` or `error` — with a `terminated` guard so a
  * terminated instance never emits again.
  *
- * It deliberately does NOT emulate transfer semantics: jsdom's postMessage
- * cannot detach an ArrayBuffer, so `bytes` stays readable here where in the
- * real worker it would be gone. Tests that care about the detach assert it
- * against the real client's contract instead of against this double.
+ * It emulates the real transfer in both directions: the posted `bytes` are
+ * moved out of the caller's reach before decoding (see `transferBuffer`), so a
+ * caller that keeps using them after handing them over fails here exactly as
+ * it would in the app.
  */
 class FakeWavDecodeWorker {
   onmessage: ((e: MessageEvent) => void) | null = null;
@@ -77,6 +104,12 @@ class FakeWavDecodeWorker {
     const msg = message as WavDecodeRequest;
     if (this.terminated || !msg || msg.type !== 'decode') return;
     lastTransfer = transfer;
+
+    // Take ownership the moment the message is posted, exactly as the real
+    // structured-clone transfer does — including on the load-failure path,
+    // where the bytes are just as gone (which is precisely why the client
+    // cannot fall back to an in-place decode after posting).
+    const owned = transfer && transfer.includes(msg.bytes) ? transferBuffer(msg.bytes) : msg.bytes;
 
     if (loadFailureMessage !== null) {
       const failure = loadFailureMessage;
@@ -91,7 +124,7 @@ class FakeWavDecodeWorker {
       if (this.terminated) return;
       try {
         if (injectedError !== null) throw new Error(injectedError);
-        const { channels, sampleRate, bitDepth, markers, channelMask } = decodeWav(msg.bytes);
+        const { channels, sampleRate, bitDepth, markers, channelMask } = decodeWav(owned);
         this.emit({
           type: 'done',
           id: msg.id,

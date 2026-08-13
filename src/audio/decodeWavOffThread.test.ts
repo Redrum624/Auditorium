@@ -53,6 +53,30 @@ describe('decodeWavOffThread', () => {
     expect(_getLastWavDecodeTransfer()).toEqual([bytes]);
   });
 
+  it('leaves the caller’s buffer DETACHED — the bytes really are gone', async () => {
+    // The contract every caller has to respect, and the one the double has to
+    // enforce: after handing the bytes over there is nothing left to read.
+    // `decodeArrayBuffer` documents it, and `openFilePath` is built around it
+    // (all container metadata is lifted out first).
+    const bytes = wavBytes();
+    expect(bytes.byteLength).toBeGreaterThan(0);
+
+    await decodeWavOffThread(bytes);
+
+    expect(bytes.byteLength).toBe(0); // detached
+    expect(() => new DataView(bytes).getUint8(0)).toThrow();
+  });
+
+  it('the in-place fallback does NOT detach — nothing was ever posted', async () => {
+    _setWavDecodeWorkerConstructionFailure('Worker is not defined');
+    const bytes = wavBytes();
+
+    const result = await decodeWavOffThread(bytes);
+
+    expect(result.channels[0].length).toBeGreaterThan(0);
+    expect(bytes.byteLength).toBeGreaterThan(0);
+  });
+
   it('uses one worker per decode and terminates every one of them', async () => {
     await decodeWavOffThread(wavBytes());
     await decodeWavOffThread(wavBytes());
