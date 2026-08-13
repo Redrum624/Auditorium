@@ -69,10 +69,17 @@ panel.)
 
 **While a pass is actually running**, the module strip greys out and the tool's
 **✕** refuses, both saying why: a running pass keeps its progress inside the
-tool, so closing it or switching module would discard the work rather than
-backgrounding it. The rest of the app stays usable throughout — only the two
-actions that would throw the pass away are refused. Wait for the pass to
-finish, or let it finish while you work on the waveform.
+tool, so closing it or switching module would either discard the work or leave
+it committing to a file you have walked away from. Two things are suspended for
+the duration and nothing else — the module switch, and **keyboard shortcuts**
+(`Space`, `Ctrl+Z`, the arrows: a `Ctrl+O` mid-pass would land the result on a
+file you had just replaced). The **mouse** is untouched throughout: keep
+selecting, scrubbing, zooming and switching view while it runs. Everything comes
+back by itself the moment the pass finishes.
+
+Auto-Remix is the one tool that starts something on its own — it analyses the
+beat grid as it opens — and that mount analysis deliberately does **not** grey
+anything: the lock is only ever for a pass you started.
 
 A menu longer than the window scrolls inside itself; it never resizes or
 scrolls the app behind it.

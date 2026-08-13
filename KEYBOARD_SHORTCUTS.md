@@ -9,6 +9,16 @@ Shortcuts are ignored while focus is inside a text input, textarea, select, or
 a `contenteditable` element, so they never hijack normal typing (e.g. renaming
 a track or a marker).
 
+They are also suspended while a **modal dialog** is open (New File, Export,
+Convert, Record, an effect's parameter dialog), and — new in the Pipeline
+module — while a **pipeline pass is actually running** in the module column.
+Both suspensions exist for the same reason: those surfaces resolve the document
+they act on at the moment you confirm, so a `Ctrl+O` behind one would land the
+result on a file you had just replaced. A pipeline tool that is merely OPEN and
+idle suspends nothing — the whole point of hosting it beside the waveform is
+that you can keep working — and the keys come back by themselves when the pass
+finishes. Mouse interaction is never suspended by either.
+
 | Shortcut | Action |
 |---|---|
 | `Space` | Play / Pause |
@@ -28,6 +38,23 @@ a track or a marker).
 | `M` | Add Marker at the cursor |
 | `Ctrl+E` | Export… |
 | `Escape` | Deselect |
+
+## `Escape` and the two kinds of surface
+
+`Escape` means one thing in the table above and another over a **modal dialog**,
+and since the Pipeline module it means nothing at all over a hosted tool:
+
+| Surface | What `Escape` does |
+|---|---|
+| The editor (nothing open) | Deselect, as above |
+| A modal dialog (New File, Export, Convert, Record, an effect's parameters) | Closes the topmost one — unless it is mid-run, when it refuses |
+| A **pipeline tool** in the module column (Match Tempo, Vocal Chain, Cover Chain, Transcribe, …) | Nothing. Close it with the **✕** in its header |
+
+The last row is deliberate. A hosted tool is not modal — the stage behind it
+stays live — so it installs no `Escape` handler of its own; taking the key would
+make it a focus trap wearing a different shape, and would silently steal
+Deselect from the waveform you are still working in. The **✕** is its dismissal,
+and mid-pass that ✕ refuses and says why.
 
 ## Menu-only commands (no bound key)
 

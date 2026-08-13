@@ -1871,6 +1871,94 @@ async function main() {
       record('Module: Properties', 'five facts compared against the live store', 'PASS');
     });
 
+    // U2: the user's headline ask — "add a module 'Pipeline' to choose
+    // pipelines from […] open the module in the extended modules instead of a
+    // modal" — walked through the door it is actually about. The menu and the
+    // Effects card already had legs below; without this one the Pipeline CARD
+    // itself, the whole point of the request, was never opened by the walk.
+    await step(page, 'Module: Pipeline — the card the user asked for, and a tool opened from it', async () => {
+      await openModuleCard(page, 'Pipeline');
+      await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 5000 });
+
+      const card = await page.evaluate(() => ({
+        sections: [...document.querySelectorAll('[data-testid="pipeline-section"]')].map((s) => ({
+          title: s.getAttribute('data-section'),
+          rows: [...s.querySelectorAll('[data-testid="pipeline-item"]')].map((r) => ({
+            id: r.getAttribute('data-command-id'),
+            label: r.querySelector('button').textContent.trim(),
+            disabled: r.querySelector('button').disabled === true,
+            title: r.querySelector('button').getAttribute('title'),
+          })),
+        })),
+        effects: document.querySelectorAll('[data-testid="effects-item"]').length,
+      }));
+      console.log(
+        `  pipeline card: ${card.sections.map((s) => `${s.title}:${s.rows.length}`).join(', ')}`
+      );
+
+      // The groups are the Pipeline MENU's own, derived rather than restated —
+      // so this compares the card against the live menu rather than against a
+      // list typed here, which is the property the card actually has to hold.
+      assert(await openMenu(page, 'Pipeline'), 'the Pipeline menu opens for the comparison');
+      const menuRows = (await readOpenMenu(page)).items;
+      await closeMenu(page);
+      await openModuleCard(page, 'Pipeline');
+      await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 5000 });
+      const cardRows = card.sections.flatMap((s) => s.rows);
+      assert(
+        cardRows.length === menuRows.length,
+        `the card lists exactly the Pipeline menu's rows (card ${cardRows.length}, menu ${menuRows.length})`
+      );
+      assert(
+        JSON.stringify(cardRows.map((r) => r.label)) === JSON.stringify(menuRows.map((r) => r.label)),
+        `…in the menu's order, with the menu's labels\n    card ${JSON.stringify(cardRows.map((r) => r.label))}\n    menu ${JSON.stringify(menuRows.map((r) => r.label))}`
+      );
+      // Real enablement, not decoration: the card's greying is the command's
+      // own predicate, so it must agree with the menu row for row.
+      assert(
+        JSON.stringify(cardRows.map((r) => r.disabled)) ===
+          JSON.stringify(menuRows.map((r) => r.disabled)),
+        `…and greys exactly what the menu greys\n    card ${JSON.stringify(cardRows.map((r) => `${r.label}${r.disabled ? ' [off]' : ''}`))}\n    menu ${JSON.stringify(menuRows.map((r) => `${r.label}${r.disabled ? ' [off]' : ''}`))}`
+      );
+      assert(
+        cardRows.every((r) => typeof r.title === 'string' && r.title.length > 0),
+        'every row carries a tooltip, greyed rows included (an honest reason, not a blank)'
+      );
+      assert(
+        card.effects === 0,
+        `the Pipeline card is the tools ALONE — no effect list to scroll past (${card.effects} effect rows)`
+      );
+
+      // …and a tool really opens from it, hosted, replacing this very card.
+      const row = cardRows.find((r) => !r.disabled && r.label.endsWith('…'));
+      assert(row !== undefined, `at least one tool is runnable from the card with a document open`);
+      await page.click(`[data-testid="pipeline-item"][data-command-id="${row.id}"] button`);
+      await page.waitForSelector('[data-testid="tool-host"]', { timeout: 10000 });
+      const hosted = await openToolInfo(page);
+      assert(
+        hosted.commandId === row.id,
+        `“${row.label}” opened ITS tool in the column (${hosted.commandId} vs ${row.id})`
+      );
+      assert(
+        hosted.overlays === 0,
+        `…with no backdrop over the stage (${hosted.overlays} overlays)`
+      );
+      const cardGone = await page.evaluate(
+        () => document.querySelector('[data-testid="pipeline-panel"]') === null
+      );
+      assert(cardGone, 'the tool REPLACED the Pipeline card rather than stacking over it');
+
+      await closeHostedTool(page);
+      // Closing returns to the list it was launched from.
+      await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 5000 });
+      record(
+        'Module: Pipeline',
+        `${cardRows.length} rows in ${card.sections.length} groups matching the menu; ` +
+          `“${row.label}” hosted from the card and closed back to it`,
+        'PASS'
+      );
+    });
+
     await step(page, 'Module: Effects — run one real effect, and open one tool from every group', async () => {
       await openModuleCard(page, 'Effects');
       await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });

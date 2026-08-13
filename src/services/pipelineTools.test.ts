@@ -46,14 +46,55 @@ describe('pipelineTools', () => {
     }
   });
 
-  // `fallbackCommand` labels an unregistered id with the id itself. A row for
-  // one could never run and would show a raw id as its name — EffectsPanel's
-  // own rule, moved here so both cards obey it.
-  it('drops an id the registry does not know, keeping its group', () => {
-    const groups = getPipelineGroups();
-    for (const group of groups) {
-      for (const cmd of group.commands) expect(cmd.label).not.toBe(cmd.id);
+  /**
+   * `fallbackCommand` labels an unregistered id with the id itself. A row for
+   * one could never run (`runCommand` no-ops) and would show a raw id as its
+   * name — EffectsPanel's own rule, moved here so both cards obey it.
+   *
+   * The first version of this test only walked the live groups asserting
+   * `label !== id`, which every registered command satisfies anyway: deleting
+   * the filter left it green. So the unregistered state has to be produced.
+   * `LAYOUT` is module-private and there is no unregister, but the filter's
+   * input does not care how the shape arose — registering a command whose label
+   * IS its id hands `getPipelineGroups` exactly the object `fallbackCommand`
+   * would have handed it for a missing id, which is the boundary the filter
+   * actually tests.
+   */
+  it('drops an id the registry does not know, keeping its group and its siblings', () => {
+    const victim = getPipelineGroups()[1].commands[0];
+    const groupTitle = getPipelineGroups()[1].title;
+    const siblingsBefore = getPipelineGroups()[1].commands.map((c) => c.id);
+    expect(siblingsBefore.length).toBeGreaterThan(1);
+
+    const original = getMenuSections()
+      .find((s) => s.title === 'Pipeline')!
+      .items.find((i) => i !== 'separator' && i.id === victim.id)!;
+    if (original === 'separator') throw new Error('unreachable');
+
+    try {
+      // Exactly `fallbackCommand(id)`'s shape: label === id, never enabled.
+      registerCommands([{ id: victim.id, label: victim.id, enabled: () => false, run: () => {} }]);
+      const groups = getPipelineGroups();
+
+      // The row is gone…
+      const ids = groups.flatMap((g) => g.commands.map((c) => c.id));
+      expect(ids).not.toContain(victim.id);
+      // …and no row anywhere is labelled with its own id.
+      for (const group of groups) {
+        for (const cmd of group.commands) expect(cmd.label).not.toBe(cmd.id);
+      }
+      // …while its GROUP survives, keeping its name and its other rows, so
+      // dropping one row cannot shift the remaining groups' titles by one.
+      expect(groups).toHaveLength(PIPELINE_GROUP_TITLES.length);
+      expect(groups[1].title).toBe(groupTitle);
+      expect(groups[1].commands.map((c) => c.id)).toEqual(
+        siblingsBefore.filter((id) => id !== victim.id)
+      );
+    } finally {
+      registerCommands([original]);
     }
-    expect(groups).toHaveLength(PIPELINE_GROUP_TITLES.length);
+
+    // Restored: the walk is back to its full roster.
+    expect(getPipelineGroups()[1].commands.map((c) => c.id)).toEqual(siblingsBefore);
   });
 });

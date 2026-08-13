@@ -21,16 +21,24 @@ import { hasOpenDialog } from '../../services/dialogBus';
  */
 function Hosted({
   dismissable = true,
+  moduleLock,
   onClose = () => {},
-  onDismissableChange = () => {},
+  onModuleLockChange = () => {},
 }: {
   dismissable?: boolean;
+  moduleLock?: boolean;
   onClose?: () => void;
-  onDismissableChange?: (v: boolean) => void;
+  onModuleLockChange?: (v: boolean) => void;
 }) {
   return (
-    <DialogHostProvider onDismissableChange={onDismissableChange}>
-      <DialogShell title="Cover Chain" subtitle="take.wav · 3:12" dismissable={dismissable} onClose={onClose}>
+    <DialogHostProvider onModuleLockChange={onModuleLockChange}>
+      <DialogShell
+        title="Cover Chain"
+        subtitle="take.wav · 3:12"
+        dismissable={dismissable}
+        moduleLock={moduleLock}
+        onClose={onClose}
+      >
         <p>chain body</p>
       </DialogShell>
     </DialogHostProvider>
@@ -55,12 +63,19 @@ describe('DialogShell hosted in the module column', () => {
   });
 
   /**
-   * The stage stays LIVE — that is the entire point ("watch the stepper beside
-   * the waveform"). `hasOpenDialog()` is what `shortcuts.ts` bails out of every
-   * global shortcut on, so a hosted tool that registered on the stack would
-   * silently take Space, Ctrl+O and the arrow keys away from the editor.
+   * An OPEN, IDLE hosted tool takes nothing from the editor — that is the point
+   * ("watch the stepper beside the waveform"). `hasOpenDialog()` is what
+   * `shortcuts.ts` bails out of every global shortcut on, so a hosted tool that
+   * registered on the stack would silently take Space, Ctrl+O and the arrows
+   * away for as long as it was open, idle or not.
+   *
+   * Note the scope carefully: this is about the tool being MOUNTED, not about a
+   * pass running. Once one is, App re-asserts the same guard through
+   * `setHostedToolRunning` and the keyboard IS suspended for its duration —
+   * deliberately, and asserted in `App.pipelineHost.test`. Mouse interaction is
+   * never suspended by either.
    */
-  it('does not register on the open-dialog stack, so global shortcuts stay live', () => {
+  it('does not register on the open-dialog stack, so an idle tool takes no keys', () => {
     expect(hasOpenDialog()).toBe(false);
     const { unmount } = render(<Hosted />);
     expect(hasOpenDialog()).toBe(false);
@@ -102,7 +117,7 @@ describe('DialogShell hosted in the module column', () => {
   });
 
   it('publishes every change of that flag to the host', () => {
-    const onDismissableChange = jest.fn();
+    const onModuleLockChange = jest.fn();
     function Toggle() {
       const [dismissable, setDismissable] = useState(true);
       return (
@@ -110,29 +125,67 @@ describe('DialogShell hosted in the module column', () => {
           <button type="button" onClick={() => setDismissable((d) => !d)}>
             toggle
           </button>
-          <Hosted dismissable={dismissable} onDismissableChange={onDismissableChange} />
+          <Hosted dismissable={dismissable} onModuleLockChange={onModuleLockChange} />
         </>
       );
     }
     render(<Toggle />);
-    expect(onDismissableChange).toHaveBeenLastCalledWith(true);
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(false);
 
     fireEvent.click(screen.getByRole('button', { name: 'toggle' }));
-    expect(onDismissableChange).toHaveBeenLastCalledWith(false);
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(true);
 
     fireEvent.click(screen.getByRole('button', { name: 'toggle' }));
-    expect(onDismissableChange).toHaveBeenLastCalledWith(true);
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(false);
   });
 
   // The host must not be left believing a pass is still running after the
   // tool goes — that would lock the module strip permanently.
-  it('reports dismissable again when the hosted tool unmounts mid-run', () => {
-    const onDismissableChange = jest.fn();
+  it('reports the lock released when the hosted tool unmounts mid-run', () => {
+    const onModuleLockChange = jest.fn();
     const { unmount } = render(
-      <Hosted dismissable={false} onDismissableChange={onDismissableChange} />
+      <Hosted dismissable={false} onModuleLockChange={onModuleLockChange} />
     );
-    expect(onDismissableChange).toHaveBeenLastCalledWith(false);
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(true);
     unmount();
-    expect(onDismissableChange).toHaveBeenLastCalledWith(true);
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(false);
+  });
+
+  /**
+   * The exemption `moduleLock` exists for.
+   *
+   * `dismissable={!busy}` answers "may this dialog be discarded right now",
+   * and by default that is also the answer to "must the module column be held".
+   * They come apart in exactly one shipped case: Auto-Remix starts a tempo
+   * ANALYSIS on mount, before the user has asked for anything, so it is born
+   * un-dismissable — and equating the two greyed the whole module strip and
+   * suspended the keyboard the instant the tool opened, for a pass the user had
+   * not started. The lock is for passes the USER starts; the born-busy analysis
+   * keeps its own in-body busy UI and its ✕ veto, and lets the app alone.
+   */
+  it('lets a dialog hold its ✕ without holding the module column', () => {
+    const onClose = jest.fn();
+    const onModuleLockChange = jest.fn();
+    render(
+      <Hosted
+        dismissable={false}
+        moduleLock={false}
+        onClose={onClose}
+        onModuleLockChange={onModuleLockChange}
+      />
+    );
+    // The dialog still refuses to be discarded…
+    const close = screen.getByTestId('hosted-tool-close') as HTMLButtonElement;
+    expect(close.disabled).toBe(true);
+    fireEvent.click(close);
+    expect(onClose).not.toHaveBeenCalled();
+    // …but the app is not held for it.
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('defaults the lock to the dismissable flag when a dialog states nothing', () => {
+    const onModuleLockChange = jest.fn();
+    render(<Hosted dismissable={false} onModuleLockChange={onModuleLockChange} />);
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(true);
   });
 });

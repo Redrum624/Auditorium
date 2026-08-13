@@ -732,7 +732,7 @@ ratio is clamped to 0.88–1.14× — the range this WSOLA is transparent over
 (section 3's quality bands), not the engine's 0.25–4× limits, because the spans
 being stretched are sung vowels. A correction that would need more than that is
 applied as far as the bound allows and the anchor lands short of the grid; the
-dialog names how many moves that will affect before you apply. Adding more
+tool names how many moves that will affect before you apply. Adding more
 markers spreads each move over a longer span and is usually the fix. Strength
 defaults to 25 % for the same reason: at 100 % on the measured take, 41–55 % of
 the inter-syllable spans would need a ratio outside the transparent band, so a

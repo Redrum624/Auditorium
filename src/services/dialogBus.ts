@@ -235,9 +235,23 @@ export function popDialog(token: number): void {
 let hostedToolRunning = false;
 
 /** U2: records whether the hosted pipeline tool is mid-pass. Called by
- * `PipelineToolHost` from the `dismissable` the dialog already publishes. */
+ * `PipelineToolHost` from the module lock the dialog already publishes. */
 export function setHostedToolRunning(running: boolean): void {
   hostedToolRunning = running;
+}
+
+/**
+ * U2: drops the flag, for tests.
+ *
+ * Module state outlives a `render`/`unmount` pair, so a test that leaves a
+ * hosted tool mid-pass (deliberately, or by failing an assertion before its
+ * cleanup) hands the next test in the file a `hasOpenDialog()` that is true
+ * with no dialog on the stack — which reads as an unrelated failure several
+ * tests later. `_resetHostedToolRunning` is the seam that stops that being
+ * detective work, matching the `_reset*` helpers elsewhere in the repo.
+ */
+export function _resetHostedToolRunning(): void {
+  hostedToolRunning = false;
 }
 
 /** True while at least one dialog is open, or a hosted pipeline tool is

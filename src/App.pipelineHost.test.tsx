@@ -3,7 +3,7 @@ import App from './App';
 import DialogShell from './components/Dialogs/DialogShell';
 import { hostedToolIds } from './components/Dialogs/PipelineToolHost';
 import { createDocument } from './audio/AudioDocument';
-import { hasOpenDialog } from './services/dialogBus';
+import { _resetHostedToolRunning, hasOpenDialog } from './services/dialogBus';
 import { runCommand } from './services/menuActions';
 import { makeInitialState, useAppStore } from './stores/appStore';
 
@@ -71,6 +71,9 @@ const showMessageBox = jest.fn(async (_opts: MessageBoxOptions) => ({ response: 
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  // Module state outlives a render: a test that ends mid-pass would otherwise
+  // hand the next one a `hasOpenDialog()` that is true with nothing open.
+  _resetHostedToolRunning();
   showMessageBox.mockClear();
   // `showMessageBox` is the channel the mid-run refusal speaks through (the
   // same one every other refusal in the app uses). The two subscriptions are

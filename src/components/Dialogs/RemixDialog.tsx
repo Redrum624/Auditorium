@@ -370,6 +370,14 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
       width={600}
       onClose={onClose}
       dismissable={!busy}
+      // U2-3: hosted in the module column, hold the app only for the passes the
+      // USER started. `busy` includes `analysing`, which this dialog begins in a
+      // MOUNT effect — so defaulting the lock to `!dismissable` greyed every
+      // module entry and suspended the global shortcuts the instant Auto-Remix
+      // opened, for a tempo analysis nobody asked for and nobody could stop.
+      // The ✕, Escape and the backdrop still follow `dismissable`, so the
+      // analysis keeps its own veto; it just no longer freezes the app.
+      moduleLock={correcting || creating}
     >
       <div className="flex flex-col gap-3" data-testid="remix-dialog">
         {analysing && (
@@ -705,7 +713,15 @@ export default function RemixDialog({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="mt-2 flex justify-end gap-2">
-          <GlassButton onClick={onClose}>Cancel</GlassButton>
+          {/* U2-3: disabled while a pass is in flight, matching the seven other
+              pipeline tools. `dismissable` stops Escape, the backdrop and the
+              module column's ✕ mid-pass, but it cannot govern a button inside
+              this body — so without this, the one control still live was the
+              one that unmounted the dialog and made `cancelledRef` throw the
+              finished remix away. */}
+          <GlassButton data-testid="remix-cancel" onClick={onClose} disabled={busy}>
+            Cancel
+          </GlassButton>
           <GlassButton
             variant="primary"
             onClick={() => void handleCreate()}

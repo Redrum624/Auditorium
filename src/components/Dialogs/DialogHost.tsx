@@ -17,17 +17,26 @@ import { createContext, useContext, useMemo, type ReactNode } from 'react';
  *
  * - Its PRESENCE is the instruction ("you are hosted"). A dialog rendered
  *   outside a provider is the modal it always was, byte for byte.
- * - `onDismissableChange` is the report back up. `dismissable={!busy}` is the
- *   flag every one of the nine already hands the shell to refuse Escape and a
- *   backdrop click mid-run; hosted, the host reads that same flag to refuse its
- *   own ✕ and to lock the module strip. Nothing new had to be published,
- *   because the fact was already crossing this boundary.
+ * - `onModuleLockChange` is the report back up: "a pass is running that leaving
+ *   this module would destroy". By default that is `!dismissable` — the flag
+ *   every one of the nine already hands the shell to refuse Escape and a
+ *   backdrop click mid-run — so nothing new had to be published, because the
+ *   fact was already crossing this boundary.
+ *
+ * Why the report is the LOCK rather than `dismissable` itself. The two coincide
+ * almost everywhere, but they are different questions: "may this dialog be
+ * discarded" versus "must the app be held while it finishes". Auto-Remix starts
+ * a tempo analysis in a mount effect, so it is born un-dismissable — and
+ * equating the two greyed the whole module strip and suspended the keyboard the
+ * instant the tool opened, for a pass the user had not started. A dialog can
+ * now say so with `DialogShell`'s `moduleLock` prop; everything else keeps the
+ * default and never learns this distinction exists.
  */
 export interface DialogHostApi {
-  /** Called by the hosted `DialogShell` whenever the dialog's `dismissable`
-   * changes, and with `true` on unmount — a host left believing a pass is
-   * still running would lock the module strip for the session. */
-  onDismissableChange(dismissable: boolean): void;
+  /** Called by the hosted `DialogShell` whenever the lock changes, and with
+   * `false` on unmount — a host left believing a pass is still running would
+   * grey the module strip and suspend the shortcuts for the session. */
+  onModuleLockChange(locked: boolean): void;
 }
 
 /** `null` means "not hosted", which is the default everywhere. */
@@ -39,15 +48,15 @@ export function useDialogHost(): DialogHostApi | null {
 }
 
 export function DialogHostProvider({
-  onDismissableChange,
+  onModuleLockChange,
   children,
 }: {
-  onDismissableChange(dismissable: boolean): void;
+  onModuleLockChange(locked: boolean): void;
   children: ReactNode;
 }) {
   // Memoised on the callback so the context value is stable across the host's
   // own re-renders: the shell publishes from an effect keyed on this object,
   // and a fresh object per render would re-publish on every paint.
-  const api = useMemo<DialogHostApi>(() => ({ onDismissableChange }), [onDismissableChange]);
+  const api = useMemo<DialogHostApi>(() => ({ onModuleLockChange }), [onModuleLockChange]);
   return <DialogHostContext.Provider value={api}>{children}</DialogHostContext.Provider>;
 }

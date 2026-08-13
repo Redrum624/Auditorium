@@ -65,10 +65,14 @@ export function hostedToolIds(): string[] {
  * table and the remix plan's per-run bars are the two that would break first —
  * and hosting at anything wider would buy nothing but stage.
  *
- * What it costs: the stage keeps `1100 - 668 = 432px` at the app's minimum
- * window width (`electron/main.cjs` minWidth 1100), and 932px at the 1600
- * default. The waveform stays the larger surface in the state this feature
- * exists for, which is the test the number had to pass.
+ * What it costs, counted properly: the lane is inset on BOTH sides (14 left as
+ * well as the column's 14 + width + 14 right), so at the app's minimum window
+ * width (`electron/main.cjs` minWidth 1100) the waveform keeps
+ * `1100 - 14 - 668 = 418px`, and 918px at the 1600 default. At the minimum
+ * window the tool is therefore the WIDER of the two — that is the trade the
+ * user opts into by opening it, and it reverses at any ordinary window size.
+ * The number the width had to pass is a floor, not a comparison: a lane you
+ * can still select and scrub in. See `PipelineToolHost.test`.
  *
  * The card grows LEFTWARD out of the 348px column rather than widening it, via
  * the negative left margin below — the column's width is shared with the strip
@@ -80,21 +84,22 @@ export const TOOL_HOST_WIDTH = 640;
 export default function PipelineToolHost({
   commandId,
   onClose,
-  onDismissableChange,
+  onModuleLockChange,
 }: {
   /** A Pipeline command id; nothing renders for an id this host does not know. */
   commandId: string;
   onClose(): void;
-  /** Raised with the hosted dialog's own `dismissable`. `false` means a pass is
-   * running and the tool refuses to be discarded — see App, which turns that
-   * into a locked module strip and a live `hasOpenDialog()`. */
-  onDismissableChange(dismissable: boolean): void;
+  /** Raised with the hosted tool's module LOCK — `!dismissable` unless the tool
+   * narrowed it (see `DialogShell`'s `moduleLock`). `true` means a user-started
+   * pass is running; App turns that into a greyed module strip and a live
+   * `hasOpenDialog()`. */
+  onModuleLockChange(locked: boolean): void;
 }) {
   const Tool = PIPELINE_TOOL_COMPONENTS[commandId];
   // Stable identity, so the provider's memo does not re-publish per paint.
   const report = useCallback(
-    (dismissable: boolean) => onDismissableChange(dismissable),
-    [onDismissableChange]
+    (locked: boolean) => onModuleLockChange(locked),
+    [onModuleLockChange]
   );
   if (!Tool) return null;
 
@@ -112,7 +117,7 @@ export default function PipelineToolHost({
         marginLeft: MODULE_COLUMN_WIDTH - TOOL_HOST_WIDTH,
       }}
     >
-      <DialogHostProvider onDismissableChange={report}>
+      <DialogHostProvider onModuleLockChange={report}>
         <Tool onClose={onClose} />
       </DialogHostProvider>
     </GlassCard>

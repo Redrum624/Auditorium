@@ -48,6 +48,7 @@ export default function DialogShell({
   onClose,
   children,
   dismissable = true,
+  moduleLock,
 }: {
   title: string;
   /** Muted state subtitle under the title (e.g. "song.wav · 1:04"). */
@@ -59,6 +60,20 @@ export default function DialogShell({
   onClose: () => void;
   children: ReactNode;
   dismissable?: boolean;
+  /**
+   * U2-3, hosted only: whether the module column must be HELD — the strip
+   * greyed and the global shortcuts suspended — because a pass is running that
+   * leaving would destroy. Defaults to `!dismissable`, which is right for eight
+   * of the nine pipeline tools.
+   *
+   * It exists for the ninth. Auto-Remix starts a tempo analysis in a mount
+   * effect, so it is born un-dismissable, and defaulting greyed the whole app
+   * the instant the tool opened for a pass the user had not started. Passing
+   * this narrows the lock to the passes the USER starts, without touching what
+   * `dismissable` means: the ✕, Escape and the backdrop still follow that.
+   * Ignored entirely in the modal presentation.
+   */
+  moduleLock?: boolean;
 }) {
   // U2-3: `null` unless something mounted this inside a DialogHostProvider.
   // Every conditional below branches on it; the hooks themselves are called
@@ -96,14 +111,15 @@ export default function DialogShell({
     return () => document.removeEventListener('keydown', onKeyDown);
   }, [onClose, dismissable, token, hosted]);
 
-  // U2-3: publish the dialog's own `dismissable` to the host, and hand it back
-  // as `true` on unmount so a host cannot be stranded believing a pass is still
-  // running — that would lock the module strip for the rest of the session.
+  // U2-3: publish the module LOCK to the host — `!dismissable` unless the
+  // dialog narrowed it — and release it on unmount so a host cannot be stranded
+  // holding the strip and the shortcuts for the rest of the session.
+  const locked = moduleLock ?? !dismissable;
   useEffect(() => {
     if (!host) return;
-    host.onDismissableChange(dismissable);
-    return () => host.onDismissableChange(true);
-  }, [host, dismissable]);
+    host.onModuleLockChange(locked);
+    return () => host.onModuleLockChange(false);
+  }, [host, locked]);
 
   const dismissViaBackdrop = () => {
     if (dismissable) onClose();

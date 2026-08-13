@@ -160,27 +160,47 @@ export default function App() {
    *
    * The nicer answer would be to let the pass continue headless and have the
    * stepper pick it back up on return. It is not available, and the reason is
-   * in the dialogs rather than in this file: every one of the nine keeps its
-   * pass in component state (`busy`, `progress`, `liveResults`,
-   * `stageProgress`) and pairs it with an unmount-cancel ref — RemixDialog's
-   * `cancelledRef`, SeparateDialog's and TranscribeDialog's `unmountedRef`, and
-   * the copies the two chains name after them. Those refs do not merely silence
-   * a setState after unmount: each run body reads `if (cancelledRef.current)
-   * return;` after its await and DISCARDS the finished result. So unmounting a
-   * running tool does not background it, it throws the pass away — minutes of
-   * inference, silently.
+   * in the dialogs rather than in this file — but it is not one reason, it is
+   * two, and an earlier draft of this comment claimed all nine shared the
+   * first. They do not.
    *
-   * Reattaching would mean lifting that state out of nine dialogs, which is the
-   * one thing this change may not do (their internals are being rewritten
-   * concurrently). Blocking is therefore the honest choice, not the lazy one,
-   * and it is also what the tools already do: `dismissable={!busy}` has always
+   * SEVEN discard the result. They keep the pass in component state (`busy`,
+   * `progress`, `liveResults`, `stageProgress`) paired with an unmount-cancel
+   * ref — RemixDialog's `cancelledRef`, SeparateDialog's and TranscribeDialog's
+   * `unmountedRef`, and the copies the two chains name after them. Those refs
+   * do not merely silence a setState after unmount: each run body reads
+   * `if (cancelledRef.current) return;` after its await and DISCARDS the
+   * finished result. Unmounting one does not background it, it throws the pass
+   * away — minutes of inference, silently.
+   *
+   * TWO do the opposite, and blocking is if anything more necessary for them.
+   * `TempoDialog` guards only a DOM ref, and `AlignTimingDialog` has no
+   * unmount ref at all: their `applyTempoChange` / align calls resolve and
+   * write to the store whichever way the UI went. Unmounting those mid-pass
+   * does not lose the work — it ORPHANS it, committing an edit and an undo
+   * entry to a document the user has walked away from, with no surface left
+   * that says it happened. So the block is what keeps the commit attached to
+   * the tool that asked for it.
+   *
+   * Either way the fix is the same and the fix is not here: reattaching (or
+   * cancelling honestly) would mean lifting run state out of nine dialogs,
+   * which is the one thing this change may not do — their internals are being
+   * rewritten concurrently. Blocking is the honest choice for both shapes, and
+   * it is also what the tools already do: `dismissable={!busy}` has always
    * refused Escape and a backdrop click mid-run. The block is that same signal,
    * applied to the two doors hosting newly opened — the module strip, and
-   * swapping one hosted tool for another.
+   * swapping one hosted tool for another. (Follow-up, recorded rather than
+   * attempted: give Tempo and AlignTiming real cancel refs.)
    *
-   * The APP stays live throughout: the waveform, the transport, the toolbar and
-   * every editor interaction keep working, which is the entire point of hosting.
-   * What is refused is only the thing that would destroy the pass.
+   * What "the app stays live" does and does not mean. MOUSE interaction is
+   * untouched throughout: the waveform, the transport, the toolbar, selection,
+   * the playhead and the view segment all keep working, which is the point of
+   * hosting. The KEYBOARD is not — for the duration of a run only,
+   * `hasOpenDialog()` reports true and `shortcuts.ts` bails out of every global
+   * shortcut, so Space, Ctrl+Z and the arrows are suspended. That is deliberate
+   * and it is the F10 guard kept where it is still earned: these tools resolve
+   * their target document from the live `activeDocumentId`, so a Ctrl+O behind
+   * a running pass would land it on a document the user had just replaced.
    */
   const toolRunningRef = useRef(false);
   const hostedToolRef = useRef<string | null>(null);
@@ -197,8 +217,9 @@ export default function App() {
       message:
         `${label} is still running.\n\n` +
         'Its progress lives in the tool, so leaving now would discard the pass. ' +
-        'Wait for it to finish — the waveform, the transport and the editor all ' +
-        'stay usable while it runs.',
+        'Wait for it to finish — the waveform, the transport and the editor stay ' +
+        'usable with the mouse while it runs (keyboard shortcuts resume when it ' +
+        'is done).',
     });
   }, []);
 
@@ -271,16 +292,16 @@ export default function App() {
   }, []);
 
   /**
-   * U2-3: the hosted dialog's `dismissable`, arriving through the shell. It is
-   * mirrored into three places because three surfaces need the same fact and
-   * none of them may re-derive it: React state (the strip's lock and the ✕),
-   * a ref (the bus callbacks are registered once and would otherwise close over
-   * a stale value), and `dialogBus` (so `hasOpenDialog()` keeps the global
-   * shortcuts off a running pass's document, the F10 guard hosting would
-   * otherwise have quietly removed).
+   * U2-3: the hosted tool's module LOCK, arriving through the shell — normally
+   * `!dismissable`, narrower for a tool that starts something on mount (see
+   * `DialogShell`'s `moduleLock`). It is mirrored into three places because
+   * three surfaces need the same fact and none of them may re-derive it: React
+   * state (the strip's greying), a ref (the bus callbacks are registered once
+   * and would otherwise close over a stale value), and `dialogBus` (so
+   * `hasOpenDialog()` keeps the global shortcuts off a running pass's document,
+   * the F10 guard hosting would otherwise have quietly removed).
    */
-  const handleToolDismissable = useCallback((dismissable: boolean) => {
-    const running = !dismissable;
+  const handleToolModuleLock = useCallback((running: boolean) => {
     toolRunningRef.current = running;
     setToolRunning(running);
     setHostedToolRunning(running);
@@ -512,7 +533,7 @@ export default function App() {
             <PipelineToolHost
               commandId={hostedTool}
               onClose={closeTool}
-              onDismissableChange={handleToolDismissable}
+              onModuleLockChange={handleToolModuleLock}
             />
           ) : (
             activeTab &&

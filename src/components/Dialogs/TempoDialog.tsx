@@ -724,7 +724,14 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="mt-2 flex justify-end gap-2">
-          <GlassButton onClick={onClose}>Cancel</GlassButton>
+          {/* U2-3: disabled while the change is applying, matching the seven
+              other pipeline tools whose in-card cancel already was. `dismissable`
+              stops Escape, the backdrop and the module column's ✕ mid-pass, but
+              it cannot govern a button inside this body — so without this, the
+              one control still live was the one that discarded the run. */}
+          <GlassButton data-testid="tempo-cancel" onClick={onClose} disabled={busy}>
+            Cancel
+          </GlassButton>
           <GlassButton variant="primary" onClick={() => void handleApply()} disabled={!canApply}>
             Apply
           </GlassButton>

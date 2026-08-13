@@ -1,5 +1,8 @@
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import RemixDialog from './RemixDialog';
+// U2-3: the module-column host, so the born-busy exemption can be observed at
+// the seam the host actually reads.
+import { DialogHostProvider } from './DialogHost';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument } from '../../audio/AudioDocument';
 import { registerDialogSetters } from '../../services/dialogBus';
@@ -528,5 +531,99 @@ describe('G5 glass header', () => {
     await renderReady();
     expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
     expect(screen.getByText(/^song\.wav · \d+:\d{2}$/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * U2-3: the in-card Cancel, while a remix is being created.
+ *
+ * The hosted module column blocks the doors that would unmount a running tool,
+ * reading the `dismissable={!busy}` this dialog already publishes. But
+ * `dismissable` governs only Escape, the modal backdrop and the host's own ✕ —
+ * never a button inside the body. This Cancel called `onClose` unconditionally,
+ * so mid-create it walked through the block and unmounted the tool the greyed
+ * strip beside it existed to protect, discarding the run (`cancelledRef` makes
+ * the create return early and drop its result).
+ *
+ * Note what is NOT asserted here: that the mount ANALYSIS disables Cancel. It
+ * deliberately does not — see `U2 — the mount analysis does not lock the app`
+ * below and `moduleLock` in DialogShell. Cancel follows `busy`, matching the
+ * other eight; the strip lock is the thing that follows the narrower flag.
+ */
+/**
+ * U2-3 / I3: Auto-Remix is born busy, and that must not grey the app.
+ *
+ * This dialog starts a tempo analysis in a mount effect — before the user has
+ * touched anything — so `busy` is true from the first paint. While the module
+ * lock was simply `!dismissable`, opening Auto-Remix instantly greyed every
+ * module-strip entry and suspended the global shortcuts for a pass the user had
+ * not started, and could not have stopped. The lock is for passes the USER
+ * starts; the mount analysis keeps its own in-body busy UI and its ✕ veto.
+ */
+describe('U2 — the mount analysis does not lock the app', () => {
+  function Harness({ onModuleLockChange }: { onModuleLockChange: (v: boolean) => void }) {
+    return (
+      <DialogHostProvider onModuleLockChange={onModuleLockChange}>
+        <RemixDialog onClose={() => {}} />
+      </DialogHostProvider>
+    );
+  }
+
+  it('reports no module lock while the mount analysis runs, though it is un-dismissable', async () => {
+    seedDoc();
+    const onModuleLockChange = jest.fn();
+    // Never resolves: the dialog stays in its born-busy mount analysis.
+    mockRunRemixAnalysis.mockImplementation(() => new Promise(() => {}));
+    render(<Harness onModuleLockChange={onModuleLockChange} />);
+    await act(async () => {});
+
+    // Un-dismissable — the ✕ refuses, exactly as before…
+    expect((screen.getByTestId('hosted-tool-close') as HTMLButtonElement).disabled).toBe(true);
+    // …and yet the module column is NOT held.
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('DOES lock once the user starts a create', async () => {
+    seedDoc();
+    const onModuleLockChange = jest.fn();
+    mockCreateRemix.mockImplementation(() => new Promise(() => {}));
+    mockRunRemixAnalysis.mockResolvedValue(makeAnalysis());
+    render(<Harness onModuleLockChange={onModuleLockChange} />);
+    await act(async () => {});
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(false);
+
+    fireEvent.click(screen.getByTestId('remix-tempo-confirmed'));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Create Remix' }));
+    });
+
+    expect(mockCreateRemix).toHaveBeenCalled();
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(true);
+  });
+});
+
+describe('U2 — Cancel refuses while a remix is being created', () => {
+  it('disables Cancel once Create Remix is running, and ignores a click on it', async () => {
+    const doc = seedDoc();
+    const onClose = jest.fn();
+    // Never resolves: `creating` stays true for the assertions.
+    mockCreateRemix.mockImplementation(() => new Promise(() => {}));
+    await renderReady(makeAnalysis(), onClose);
+
+    const cancel = () => screen.getByTestId('remix-cancel') as HTMLButtonElement;
+    expect(cancel().disabled).toBe(false);
+
+    // `canCreate` needs the grid confirmed, exactly as the user must confirm it.
+    fireEvent.click(screen.getByTestId('remix-tempo-confirmed'));
+    expect(screen.getByRole('button', { name: 'Create Remix' })).toBeEnabled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Create Remix' }));
+    });
+
+    expect(mockCreateRemix).toHaveBeenCalled();
+    expect(cancel().disabled).toBe(true);
+    fireEvent.click(cancel());
+    expect(onClose).not.toHaveBeenCalled();
+    expect(doc.id).toBeDefined();
   });
 });

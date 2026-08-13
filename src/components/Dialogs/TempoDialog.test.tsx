@@ -717,3 +717,36 @@ describe('R7 — Correction mode', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * U2-3: the in-card Cancel, while a pass is running.
+ *
+ * The hosted module column blocks the two doors that would unmount a running
+ * tool — the module strip and a tool swap — and it does so from the
+ * `dismissable={!busy}` this dialog already publishes. But `dismissable` only
+ * governs Escape, the modal backdrop and the host's own ✕; it says nothing
+ * about a button INSIDE the body. This Cancel called `onClose` unconditionally,
+ * so mid-pass it walked straight through the block and unmounted the very tool
+ * the greyed-out strip beside it existed to protect. Seven of the nine already
+ * disable their in-card cancel while busy; this is the eighth.
+ */
+describe('U2 — Cancel refuses while a tempo change is applying', () => {
+  it('disables Cancel once Apply is running, and ignores a click on it', () => {
+    const onClose = jest.fn();
+    seedDoc();
+    mockGetTempo.mockReturnValue(makeEntry({ bpm: 120, confidence: 0.9 }));
+    // Never resolves: `busy` stays true for the duration of the assertions,
+    // which is the state the block exists for.
+    mockApplyTempoChange.mockImplementation(() => new Promise(() => {}));
+    render(<TempoDialog onClose={onClose} />);
+
+    expect((screen.getByTestId('tempo-cancel') as HTMLButtonElement).disabled).toBe(false);
+
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '110' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+
+    expect((screen.getByTestId('tempo-cancel') as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByTestId('tempo-cancel'));
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});
