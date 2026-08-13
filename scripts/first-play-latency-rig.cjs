@@ -24,11 +24,34 @@
 // estimate, per-field, in the JSON verdict.
 //
 //   npm run build   (once, so dist/ exists)
-//   node scripts/first-play-latency-rig.cjs [--launches=3] [--probes-per-launch=3] [--out=<path>]
+//   node scripts/first-play-latency-rig.cjs [--launches=3] [--probes-per-launch=3]
+//                                           [--content=tone|songs] [--out=<path>]
 //
 // Verdict JSON: test-output/first-play-latency.json (default). Exit 0 when
 // every probe ran (whatever the numbers say — this is a measurement, not a
 // gate); exit 1 on rig failure.
+//
+// -------------------------------------------------------------------------
+// MT1-3 — the `--content` switch, and why the default was not enough.
+//
+// The rig above measures the AudioContext and the graph build. It cannot see
+// the defect behind "it takes a while to start the play with 2 tracks", and it
+// said so in its own words: its one-track 2-second tone exists "so playCallMs
+// measures graph build, not content size". Content size turned out to be the
+// entire story — `play()` copies and (on a rate mismatch) RESAMPLES every
+// sample of every clip synchronously before it schedules anything.
+//
+//   --content=tone   (default) the original P2-7 session. Unchanged, so the
+//                    historical numbers stay comparable.
+//   --content=songs  the REPORTED session: two ~3-minute stereo 48 kHz clips on
+//                    two tracks of a 44.1 kHz session, i.e. rate-mismatched, so
+//                    the resample branch is live. This is the shape the user's
+//                    P1177605 + Scarlet session had.
+//
+// `songs` also reports the rate triple (session / doc / context) in the verdict,
+// because "which of these three disagree" is the whole diagnosis and reading it
+// off the status bar is what misled the report in the first place.
+// -------------------------------------------------------------------------
 
 const path = require('node:path');
 const fs = require('node:fs');
@@ -37,13 +60,51 @@ const { _electron: electron } = require('playwright');
 
 const ROOT = path.resolve(__dirname, '..');
 const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
+const SONG_A = path.join(ROOT, 'test-assets', 'latency-a.wav');
+const SONG_B = path.join(ROOT, 'test-assets', 'latency-b.wav');
 
 function arg(name, dflt) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? hit.slice(name.length + 3) : dflt;
 }
 
-async function measureOneLaunch(probesPerLaunch) {
+/** Builds the session under test and returns what it is made of. */
+async function buildSession(page, content) {
+  if (content === 'tone') {
+    // One-track session with a 2 s tone clip at 0 — the minimal schedulable
+    // session, so playCallMs measures graph build, not content size.
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    await page.evaluate(() => window.__test.newSession(44100));
+    const inserted = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
+    if (!inserted) throw new Error('insertActiveDocAsClip returned null');
+    return { clips: 1, tracks: 1 };
+  }
+
+  // The reported session. The session is created FIRST and at 44100 so that the
+  // 48 kHz docs land in a mismatched session — creating it after the first
+  // insert would let a rate-adopting session (the MT1-3 fix) quietly match, and
+  // then the "before" and "after" would not be measuring the same session.
+  await page.evaluate(() => window.__test.newSession(44100));
+  for (const [i, file] of [SONG_A, SONG_B].entries()) {
+    await page.evaluate((p) => window.__test.openPath(p), file);
+    const inserted = await page.evaluate((t) => window.__test.insertActiveDocAsClip(t, 0), i);
+    if (!inserted) throw new Error(`insertActiveDocAsClip(${i}) returned null`);
+  }
+  return { clips: 2, tracks: 2 };
+}
+
+/** session / doc / AudioContext sample rates — the three that must agree. */
+async function rateTriple(page) {
+  return page.evaluate(() => {
+    const summary = window.__test.getStateSummary();
+    const probe = new AudioContext();
+    const deviceRate = probe.sampleRate;
+    void probe.close();
+    return { session: summary.sampleRate ?? null, device: deviceRate };
+  });
+}
+
+async function measureOneLaunch(probesPerLaunch, content) {
   const app = await electron.launch({
     args: ['.'],
     cwd: ROOT,
@@ -56,12 +117,8 @@ async function measureOneLaunch(probesPerLaunch) {
       timeout: 15000,
     });
 
-    // One-track session with a 2 s tone clip at 0 — the minimal schedulable
-    // session, so playCallMs measures graph build, not content size.
-    await page.evaluate((p) => window.__test.openPath(p), TONE);
-    await page.evaluate(() => window.__test.newSession(44100));
-    const inserted = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
-    if (!inserted) throw new Error('insertActiveDocAsClip returned null');
+    const made = await buildSession(page, content);
+    const rates = await rateTriple(page);
 
     const probes = [];
     for (let i = 0; i < probesPerLaunch; i++) {
@@ -69,7 +126,7 @@ async function measureOneLaunch(probesPerLaunch) {
       if (!report.ok) throw new Error(`probe ${i + 1} failed: ${report.reason}`);
       probes.push(report);
     }
-    return probes;
+    return { probes, made, rates };
   } finally {
     await app.close();
   }
@@ -90,26 +147,42 @@ function summarize(values) {
 async function main() {
   const launches = Number(arg('launches', '3'));
   const probesPerLaunch = Number(arg('probes-per-launch', '3'));
+  const content = arg('content', 'tone');
   const outPath = path.resolve(ROOT, arg('out', path.join('test-output', 'first-play-latency.json')));
   if (!Number.isInteger(launches) || launches < 1) throw new Error('--launches must be >= 1');
   if (!Number.isInteger(probesPerLaunch) || probesPerLaunch < 1) {
     throw new Error('--probes-per-launch must be >= 1');
   }
+  if (content !== 'tone' && content !== 'songs') {
+    throw new Error(`--content must be tone or songs (got ${content})`);
+  }
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('dist/index.html missing — run `npm run build` first');
   }
-  if (!fs.existsSync(TONE)) {
+  if (content === 'tone' && !fs.existsSync(TONE)) {
     console.log('Generating test tone...');
     execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'make-test-tone.cjs')], {
       stdio: 'inherit',
     });
   }
-
-  const allLaunches = [];
-  for (let l = 0; l < launches; l++) {
-    console.log(`Launch ${l + 1}/${launches} (${probesPerLaunch} probes)...`);
-    allLaunches.push(await measureOneLaunch(probesPerLaunch));
+  if (content === 'songs' && (!fs.existsSync(SONG_A) || !fs.existsSync(SONG_B))) {
+    console.log('Generating 3-minute 48 kHz stereo fixtures (~35 MB each)...');
+    execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'make-test-latency.cjs')], {
+      stdio: 'inherit',
+    });
   }
+
+  const allRuns = [];
+  for (let l = 0; l < launches; l++) {
+    console.log(`Launch ${l + 1}/${launches} (${probesPerLaunch} probes, content=${content})...`);
+    allRuns.push(await measureOneLaunch(probesPerLaunch, content));
+  }
+  const allLaunches = allRuns.map((r) => r.probes);
+  const sessionShape = { content, ...allRuns[0].made, rates: allRuns[0].rates };
+  console.log(
+    `  session: ${sessionShape.tracks} track(s), ${sessionShape.clips} clip(s) at ` +
+      `${sessionShape.rates.session} Hz; device context ${sessionShape.rates.device} Hz`
+  );
 
   // The P2-7 population: each launch's FIRST probe's COLD numbers (first
   // AudioContext of the process + first device open).
@@ -136,6 +209,7 @@ async function main() {
     ok: true,
     launches,
     probesPerLaunch,
+    session: sessionShape,
     processCold: block(processCold),
     freshCtxWarmProcess: block(freshCtxWarmProcess),
     warmReplays: block(warmReplays),
