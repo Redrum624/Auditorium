@@ -412,18 +412,32 @@ function ClipStartInput({
   sampleRate: number;
   onCommit: (startSample: number) => number;
 }) {
-  const [draft, setDraft] = useState(formatTime(valueSample, sampleRate));
+  const committedText = formatTime(valueSample, sampleRate);
+  const [draft, setDraft] = useState(committedText);
   const escapingRef = useRef(false);
 
   const commit = () => {
     if (escapingRef.current) return;
+    // Fix round 1 (I1) — the R3 no-op guard, which `setClipFade` states
+    // explicitly and `moveClip` does NOT have: it rebuilds the tracks array
+    // unconditionally, so any commit mints a 'Move clip' entry. Two ways a
+    // commit can be a no-op, and both must cost nothing:
+    //  - the draft was never edited (a click into the field to READ it). This
+    //    matters more here than for a fade length, because `formatTime`
+    //    rounds to whole milliseconds and `parseTime` re-derives samples from
+    //    that string: a clip off the millisecond grid — i.e. every dragged
+    //    clip — would be silently nudged, with `maintainFacingFades` re-run on
+    //    a move the user never made.
+    //  - the draft is another spelling of where the clip already is ('1' for
+    //    '0:01.000'). Different text, same sample; nothing to write.
+    if (draft === committedText) return;
     const parsed = parseTime(draft, sampleRate);
-    if (parsed !== null) {
-      const stored = onCommit(parsed);
-      setDraft(formatTime(stored, sampleRate)); // reflect the store's clamp
-    } else {
-      setDraft(formatTime(valueSample, sampleRate)); // revert garbage
+    if (parsed === null || parsed === valueSample) {
+      setDraft(committedText); // revert garbage, or normalise the spelling
+      return;
     }
+    const stored = onCommit(parsed);
+    setDraft(formatTime(stored, sampleRate)); // reflect the store's clamp
   };
 
   return (
@@ -438,7 +452,7 @@ function ClipStartInput({
       onKeyDown={(e) => {
         if (e.key === 'Enter') commit();
         if (e.key === 'Escape') {
-          setDraft(formatTime(valueSample, sampleRate));
+          setDraft(committedText);
           escapingRef.current = true;
           e.currentTarget.blur(); // dispatches blur synchronously
           escapingRef.current = false;

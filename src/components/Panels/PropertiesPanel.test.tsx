@@ -401,6 +401,53 @@ describe('PropertiesPanel (multitrack view)', () => {
       expect(clipStart(clip.id)).toBe(44100);
     });
 
+    /**
+     * Fix round 1 (I1). `formatTime` rounds to whole milliseconds and
+     * `parseTime` re-derives samples from that string, so committing a draft
+     * nobody edited would nudge any clip that does not sit on a millisecond
+     * boundary — which is every dragged clip. 44101 at 44.1 kHz formats as
+     * `0:01.000` and parses back as 44100: one sample of silent movement, plus
+     * a `maintainFacingFades` pass and an undo entry, for a click that typed
+     * nothing. Every other fixture in this file is millisecond-exact and
+     * therefore blind to it.
+     */
+    const OFF_GRID = 44101;
+
+    it('does not move the clip when a blur commits a draft nobody edited', () => {
+      const clip = seedStartedClip(OFF_GRID);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i);
+      fireEvent.focus(field);
+      fireEvent.blur(field);
+
+      expect(clipStart(clip.id)).toBe(OFF_GRID);
+      expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+    });
+
+    it('does not move the clip on the blur that follows an Escape', () => {
+      const clip = seedStartedClip(OFF_GRID);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i);
+      fireEvent.change(field, { target: { value: '5' } });
+      fireEvent.keyDown(field, { key: 'Escape' });
+      fireEvent.blur(field);
+
+      expect(clipStart(clip.id)).toBe(OFF_GRID);
+      expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+    });
+
+    it('does not move the clip when the typed text is another spelling of where it is', () => {
+      const clip = seedStartedClip(44100);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      fireEvent.change(field, { target: { value: '1' } }); // 1 s === 0:01.000
+      fireEvent.blur(field);
+
+      expect(clipStart(clip.id)).toBe(44100);
+      expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+      expect(field.value).toBe('0:01.000'); // …and the field says so in its own words
+    });
+
     it('picks up a position that moved from elsewhere while the panel was open', () => {
       const clip = seedStartedClip(0);
       const { rerender } = render(<PropertiesPanel />);
