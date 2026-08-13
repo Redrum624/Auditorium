@@ -26,7 +26,7 @@ import { runCommand } from '../services/menuActions';
 import { _resetClipResampleCache } from './clipResampleCache';
 import { placeDocumentClips } from './laneDrop';
 import { readClipSlice } from './mixdown';
-import { createClip } from './session';
+import { createClip, createTrack } from './session';
 import { adoptSessionRate, useSessionStore } from './sessionStore';
 import { _resetSessionUndo, undoSession } from './sessionUndo';
 import { _resetSessionLaneWidth, FALLBACK_SESSION_LANE_WIDTH } from './sessionViewport';
@@ -112,6 +112,33 @@ describe('an empty session adopts the inserted document rate — all three inser
 
     expect(hooks.getStateSummary().sessionSampleRate).toBe(DOC_RATE);
     expect(hooks.getStateSummary().sampleRate).toBe(DOC_RATE); // the DOC's, which agrees now
+  });
+});
+
+describe('adoption asks the session what it holds, never where it came from', () => {
+  it('a session OPENED from a .audm with no clips adopts on the next insert', () => {
+    // The shape `sessionFile`'s Open Session commits: the whole `Session` from
+    // the file, its zoom fitted, everything else reset. `formatVersion` is
+    // untouched by MT2 — a v3 file written before it loads identically — so
+    // what matters is only that the loaded session is empty, and it is asked
+    // rather than assumed.
+    const loaded = { name: 'From disk', sampleRate: SESSION_RATE, tracks: [createTrack('Track 1')] };
+    useSessionStore.setState({
+      session: loaded,
+      selectedClipId: null,
+      mtCursorSample: 0,
+      mtZoom: defaultSessionZoom(loaded),
+      mtPlayState: 'stopped',
+      mtPlayheadSample: 0,
+      mtEnvelope: null,
+    });
+
+    const doc = addDoc();
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+
+    expect(store().session.name).toBe('From disk');
+    expect(store().session.sampleRate).toBe(DOC_RATE);
+    expect(store().session.tracks[0].clips[0].lengthSample).toBe(DOC_LEN);
   });
 });
 
