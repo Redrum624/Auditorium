@@ -18,10 +18,8 @@
  * overrides only the parameters whose derivation the chain context provably
  * changes. There is no second table of defaults to drift.
  *
- * FIVE effects get an override, and every one of the overridden values is
- * MEASURED from the audio that reaches that stage. Three of them are
- * level-relative quantities that an absolute dBFS default cannot get right when
- * nobody is listening:
+ * SIX effects get an override. Four of them are level-relative quantities that
+ * an absolute dBFS default cannot get right when nobody is listening:
  *
  *   - De-esser threshold (F8 Ruling 1, binding). Measured at the DE-ESSER'S
  *     INPUT, i.e. after the compressor, because an upstream compressor changes
@@ -32,6 +30,7 @@
  *     0.08 dB. A compressor that does nothing is exactly the wrong default to
  *     bury inside a seven-stage pass.
  *   - Remove Silence threshold, derived from the measured noise floor.
+ *   - Noise Gate threshold, derived from the same measurement (CC1).
  *
  * The other two are not levels but they are measurements all the same, and an
  * effect default cannot carry either:
@@ -40,6 +39,13 @@
  *     or 60 Hz is a fact about the recording, not a preference.
  *   - EQ high-pass: `hpEnabled` and `hpFreq`, the corner placed an octave below
  *     the lowest note Pitch Correct measured.
+ *
+ * The Noise Gate's OTHER three parameters — attack, release and hold — are the
+ * one place the chain overrides a default with a constant rather than with a
+ * measurement of this recording, and both constants come from elsewhere in this
+ * app rather than from taste: the attack and release are the silence detector's
+ * own, because the threshold is defined as a peak of THAT envelope, and the
+ * hold is Remove Silence's minimum pause. `deriveGate` argues all three.
  *
  * Noise Reduction is NOT in that count. It hands the stage a noise print
  * measured from the quietest passage, but it changes no parameter: the print
@@ -50,10 +56,30 @@
  *     absolute level, and a "relative ceiling" would not be one.
  *   - Noise Reduction reduction/sensitivity. Already relative: they scale the
  *     learned noise print, so they track the material by construction.
- *   - Noise Gate. Not a chain stage — Noise Reduction handles the floor here,
- *     spectrally and without a threshold that can chatter on a held note.
  *   - Pitch Correct, DeHum, Reverb, EQ band gains. No level-dependent
  *     parameter among them.
+ *
+ * ── The gate this file used to argue against (CC1) ──────────────────────────
+ * Through v1.27.0 the list above ended with "Noise Gate. Not a chain stage —
+ * Noise Reduction handles the floor here, spectrally and without a threshold
+ * that can chatter on a held note." A user running the Cover Chain reported the
+ * consequence: "it didn't remove the noises where nothing is played, in fact if
+ * no word is spoken remove all sound."
+ *
+ * Both halves of that claim were wrong. Noise Reduction does not handle the
+ * floor: its per-bin gain is `max(floor, ...)` with `floor = 10^(-12/20)`, so
+ * it can pull a pause down by 12 dB and no further — measured through this
+ * chain on a take with a -45 dBFS floor, the pauses came back at -54.8 dBFS,
+ * because the compressor's makeup then lifts what is left. Nothing else
+ * enabled by default can silence anything: Remove Silence is off by default and
+ * length-changing, which is exactly what a take synced to a backing track
+ * cannot have. And the chatter the claim feared is a property of a gate's hold,
+ * not of gates: at a 500 ms hold neither a 120 ms stop-consonant closure nor a
+ * 400 ms dip inside a held note moves a single sample.
+ *
+ * So the gate IS a chain stage now, on by default, length-preserving, between
+ * DeHum and the dynamics stages — the position Remove Silence's own note had
+ * already argued for. The same fixture comes back at digital silence.
  *
  * ── Two deviations from the brief's order, and both are the same rule ───────
  * The brief orders ... compressor -> de-esser -> limiter -> EQ -> reverb. The
@@ -131,6 +157,7 @@ export type VocalChainStageId =
   | 'noise'
   | 'hum'
   | 'silence'
+  | 'gate'
   | 'timing'
   | 'pitch'
   | 'compressor'
@@ -156,12 +183,19 @@ export interface VocalChainStage {
    * that ran without being seen. */
   note: string;
   /** Share of the progress bar. These are MEASURED wall times on the 142 s
-   * stereo reference take, as a percentage of the 104.7 s the ten stages take
-   * together, rounded to integers with a floor of 1 so no stage is invisible:
-   * DC 0.1 s, Noise Reduction 27.0 s, DeHum 0.5 s, Remove Silence 2.4 s, Pitch
-   * Correct 57.7 s, Compressor 5.7 s, De-esser 5.8 s, EQ 0.4 s, Reverb 1.4 s,
-   * Limiter 3.6 s. Equal weights would park the bar for the minute Pitch
-   * Correct alone takes and then jump to done. */
+   * stereo reference take, as a percentage of the 108.8 s the eleven stages
+   * take together, rounded to integers with a floor of 1 so no stage is
+   * invisible: DC 0.1 s, Noise Reduction 27.0 s, DeHum 0.5 s, Remove Silence
+   * 2.4 s, Noise Gate 4.1 s, Pitch Correct 57.7 s, Compressor 5.7 s, De-esser
+   * 5.8 s, EQ 0.4 s, Reverb 1.4 s, Limiter 3.6 s. Equal weights would park the
+   * bar for the minute Pitch Correct alone takes and then jump to done.
+   *
+   * The gate's 4.1 s is the one figure not timed on the take itself, which is
+   * not in this repo: it was timed against the LIMITER — the stage whose time
+   * here is recorded — over identical synthetic audio of the take's dimensions
+   * (142 s stereo at 44.1 kHz), where the gate cost 3.81 s to the limiter's
+   * 3.38 s, i.e. 1.13x, so 1.13 x 3.6 s. Both are one O(n) pass with one
+   * envelope follower, which is why the ratio is the trustworthy part. */
   weight: number;
 }
 
@@ -194,7 +228,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     effectId: 'noise-reduction',
     defaultEnabled: true,
     note: `Early, because every later analysis degrades on noisy input — the pitch detector will otherwise lock onto broadband noise and "correct" pitch that is not there. Learns its noise print from the quietest ${NOISE_WINDOW_MS} ms in the selection.`,
-    weight: 26,
+    weight: 25,
   },
   {
     id: 'hum',
@@ -213,6 +247,14 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     weight: 2,
   },
   {
+    id: 'gate',
+    label: 'Noise Gate',
+    effectId: 'noise-gate',
+    defaultEnabled: true,
+    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is the loudest the silence detector reads inside the quietest ${NOISE_WINDOW_MS} ms, the same measurement Remove Silence uses. It holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
+    weight: 4,
+  },
+  {
     id: 'timing',
     label: 'Align Vocal Timing',
     effectId: null,
@@ -226,7 +268,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     effectId: 'pitch-correct',
     defaultEnabled: true,
     note: 'After noise reduction so the detector sees clean harmonics. Chromatic, so it is correct in any key; the 50 ms retune time constant leaves 5–7 Hz vibrato largely intact. This is by far the slowest stage.',
-    weight: 55,
+    weight: 53,
   },
   {
     id: 'compressor',
@@ -242,7 +284,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     effectId: 'de-esser',
     defaultEnabled: true,
     note: 'After the compressor, because compression makes sibilance worse. Its threshold is measured here, at its own input, for that reason.',
-    weight: 6,
+    weight: 5,
   },
   {
     id: 'eq',
@@ -370,6 +412,22 @@ export function deriveDeEsser(channels: Float32Array[]): StageResolution {
  * sum(out^2) is computable from the inputs. Restoring the level it took is what
  * makeup gain means; choosing a delivery loudness is a mastering decision the
  * chain has no measurement for and does not make.
+ *
+ * ── Why this still works on a take the gate has been through (CC1 / N2) ─────
+ * "Sounding" is defined against the noise floor, and the gate that now runs
+ * before this stage silences the pauses the floor was measured in — so the
+ * obvious worry is that there is no floor left here to measure, and that this
+ * derivation would decline or read the boundary off a window containing voice.
+ * It does not, and the reason is an identity rather than luck: the gate holds
+ * its gain at 1 for `GATE_HOLD_MS` after the level drops, and `GATE_HOLD_MS`
+ * IS `NOISE_WINDOW_MS`. Every pause the gate closes on therefore keeps a full
+ * untouched noise window in front of the fade — exactly the window this
+ * measurement needs. Measured over 16 gated takes (8/22.05/44.1/48 kHz x
+ * 0.8/1.5/3/8 s pauses, up to 86 % of the take silenced): `measureNoiseWindow`
+ * never came back null, and the derived threshold moved by at most 0.02 dB
+ * against the same take ungated. `the floor survives the gate` in
+ * vocalChain.test.ts pins it, and it is the reason those two constants may not
+ * drift apart.
  */
 export function deriveCompressor(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('compressor');
@@ -569,6 +627,106 @@ export function deriveRemoveSilence(channels: Float32Array[], sampleRate: number
 }
 
 /**
+ * Noise Gate — the stage the header used to argue against, and the three
+ * settings that make it work on a sung take.
+ *
+ * THRESHOLD starts from `deriveRemoveSilence`'s number — the loudest the
+ * silence detector reads inside the quietest 500 ms — and then clears it by a
+ * measured headroom, which is the one place the two stages must differ.
+ * Remove Silence can sit exactly ON that level because it needs a RUN of
+ * 500 ms below it and a single graze merely splits one run into two. A gate
+ * cannot: its reopen is instant, so one grazing sample re-opens it for a whole
+ * hold. And the level IS grazed, because it is a maximum taken over 500 ms
+ * being asked to bound pauses several times longer — the same floor simply
+ * reaches it again. Measured over 216 constructed takes (8/22.05/44.1/48 kHz,
+ * 1.5/3/6 s pauses, -35/-45/-60 dBFS floors, uniform and Gaussian floors, three
+ * seeds each), the floor's envelope in the settled part of a pause exceeds that
+ * threshold by up to 0.946 dB raw — and by up to 2.270 dB after Noise
+ * Reduction, whose residual is peakier than the floor it replaced and which is
+ * what actually reaches this stage in the chain. `GATE_HEADROOM_DB` is
+ * therefore 3 dB: the smallest whole decibel above the worst measured graze.
+ * It is not a safety cushion over the voice — on the reference take it moves
+ * the threshold from -50.4 to -47.4 dBFS, still some 22 dB below the sounding
+ * median `deriveCompressor` measures on the same take.
+ *
+ * It needs no clean noise print, so unlike Noise Reduction this stage does NOT
+ * decline on a noisy take — which is the whole point, since that is the take
+ * with the loudest gaps (N3).
+ *
+ * ATTACK AND RELEASE are the silence detector's own constants, and that is a
+ * consequence of the threshold rather than a preference. `envelopePeakDb` is
+ * defined as the peak of an `envelopeFollower(..., 1 ms, 20 ms)` envelope; a
+ * gate whose detector uses a different release measures a DIFFERENT envelope
+ * over the same audio and the threshold stops meaning what it was measured to
+ * mean. Measured on the acceptance fixture (a sung take over a -45 dBFS floor):
+ * inside the very window the threshold came from, a 150 ms release sits above
+ * that threshold for 74.1 % of the window and a 400 ms release for 91.8 %,
+ * against 0.0 % at 20 ms. Run end to end at the effect's shipped 150 ms the
+ * gate never closes at all — the pauses came back at -62.5 dBFS instead of
+ * digital silence. So `releaseMs` is 20 ms because `thresholdDb` is
+ * `envelopePeakDb`; changing either without the other breaks the stage.
+ *
+ * The cost is stated: `releaseMs` is also the fade length, so the close is a
+ * 20 ms linear-in-dB ramp to silence. That is 10x `remixRender`'s 2 ms
+ * click floor and twice its ~10 ms "audible as a level change" line — and at a
+ * gate close the level change IS the intent.
+ *
+ * HOLD is 500 ms: `SilenceRemoverEffect`'s `minSilenceMs`, this app's already
+ * derived answer to "how long is a gap before it is unambiguously a pause
+ * rather than articulation" (stop-consonant closures run to ~150 ms; pauses
+ * start reading as pauses around ~250 ms). The gate may only close on what
+ * Remove Silence would have been willing to cut. Measured on a held note with
+ * two internal dips: at the effect's 50 ms hold the gate closes inside a 400 ms
+ * dip — 1342 samples of a phrase faded toward zero — and at 500 ms both the
+ * 120 ms and the 400 ms dip come back bit-identical. The delay this buys is
+ * additive with the detector's own decay, so nothing shorter than 500 ms of
+ * true silence can start the fade.
+ */
+export const GATE_HOLD_MS = NOISE_WINDOW_MS;
+
+/** How far above the measured floor peak the gate's threshold sits, dB. See the
+ * derivation note above: 3 dB is the smallest whole decibel above the worst
+ * graze measured over 216 constructed takes (0.946 dB raw, 2.270 dB after Noise
+ * Reduction). Zero would put the threshold exactly ON the floor's own extreme,
+ * which is where it re-opens. */
+export const GATE_HEADROOM_DB = 3;
+
+export function deriveGate(channels: Float32Array[], sampleRate: number): StageResolution {
+  const params = defaultParamsFor('noise-gate');
+  const noise = measureNoiseWindow(channels, sampleRate);
+  if (!noise) {
+    return {
+      run: false,
+      reason: `no ${NOISE_WINDOW_MS} ms passage above digital silence to measure the noise floor from, so the threshold cannot be derived`,
+    };
+  }
+  const thresholdDb = clampToParam('noise-gate', 'thresholdDb', noise.envelopePeakDb + GATE_HEADROOM_DB);
+  const attackMs = clampToParam('noise-gate', 'attackMs', DETECT_ATTACK_MS);
+  const releaseMs = clampToParam('noise-gate', 'releaseMs', DETECT_RELEASE_MS);
+  const holdMs = clampToParam('noise-gate', 'holdMs', GATE_HOLD_MS);
+  params.thresholdDb = thresholdDb;
+  params.attackMs = attackMs;
+  params.releaseMs = releaseMs;
+  params.holdMs = holdMs;
+  return {
+    run: true,
+    params,
+    derived: [
+      {
+        label: 'Threshold',
+        value: dbfsStr(thresholdDb),
+        from: `${GATE_HEADROOM_DB} dB over the ${dbfsStr(noise.envelopePeakDb)} the silence detector reads inside the quietest ${NOISE_WINDOW_MS} ms — the same floor grazes that level again in a longer pause, and one graze re-opens a gate`,
+      },
+      {
+        label: 'Hold',
+        value: `${holdMs.toFixed(0)} ms`,
+        from: `the shortest gap this app calls a pause rather than articulation (Remove Silence's own minimum), so nothing briefer can close the gate — the ${releaseMs.toFixed(0)} ms release is the detector the threshold was measured with`,
+      },
+    ],
+  };
+}
+
+/**
  * EQ: a high-pass an octave below the lowest note sung, and nothing else.
  *
  * The corner comes from the 1st percentile of the voiced fundamental measured
@@ -694,6 +852,8 @@ function resolveStage(
       return deriveDeHum(channels, sampleRate);
     case 'silence':
       return deriveRemoveSilence(channels, sampleRate);
+    case 'gate':
+      return deriveGate(channels, sampleRate);
     case 'compressor':
       return deriveCompressor(channels, sampleRate);
     case 'deEsser':
@@ -729,6 +889,29 @@ function describeStage(
     const median = Number(report.medianCorrectionCents ?? 0);
     const max = Number(report.maxCorrectionCents ?? 0);
     return `${corrected} of ${total} frames moved, median ${median.toFixed(1)} cents, largest ${max.toFixed(1)} cents`;
+  }
+
+  // The gate's own account: how much of the selection it actually silenced.
+  // Nothing else in the report can say this — the delta's RMS and peak barely
+  // move when a pause goes to zero, and `identicalFraction` counts the samples
+  // it left alone rather than the ones it took. Measured on the output, so a
+  // gate that found nothing to close reports 0.0 s rather than an intention.
+  if (stage.id === 'gate') {
+    const length = output.channels[0]?.length ?? 0;
+    let silent = 0;
+    for (let i = 0; i < length; i++) {
+      let allZero = true;
+      for (const c of output.channels) {
+        if (c[i] !== 0) {
+          allZero = false;
+          break;
+        }
+      }
+      if (allZero) silent++;
+    }
+    const seconds = silent / sampleRate;
+    const pct = length === 0 ? 0 : (silent / length) * 100;
+    return `${seconds.toFixed(1)} s of the selection now sits at digital silence (${pct.toFixed(0)}%)`;
   }
 
   // Ruling 3: a stage that turned out to have nothing to do says so. Measured,

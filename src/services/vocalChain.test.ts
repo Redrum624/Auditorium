@@ -1,6 +1,8 @@
 import {
   DE_ESSER_BIT_EXACT_OFFSET_DB,
   DE_ESSER_RMS_OFFSET_DB,
+  GATE_HEADROOM_DB,
+  GATE_HOLD_MS,
   STAGE_MEASURING_DETAIL,
   STAGE_RENDERING_DETAIL,
   VOCAL_CHAIN_STAGES,
@@ -10,6 +12,7 @@ import {
   deriveDeEsser,
   deriveDeHum,
   deriveEq,
+  deriveGate,
   deriveNoiseReduction,
   deriveRemoveSilence,
   runVocalChain,
@@ -22,11 +25,12 @@ import {
 import { defaultParamsFor, getEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
 import { compressorEffect } from '../effects/dynamics/CompressorEffect';
+import { noiseGateEffect } from '../effects/dynamics/NoiseGateEffect';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
 import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
-import { measureNoiseWindow, programmeRmsDb, toDb } from '../dsp/chainAnalysis';
+import { NOISE_WINDOW_MS, measureNoiseWindow, programmeRmsDb, toDb } from '../dsp/chainAnalysis';
 import * as chainAnalysis from '../dsp/chainAnalysis';
 import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
@@ -109,6 +113,7 @@ describe('VOCAL_CHAIN_STAGES', () => {
       'noise',
       'hum',
       'silence',
+      'gate',
       'timing',
       'pitch',
       'compressor',
@@ -154,6 +159,52 @@ describe('VOCAL_CHAIN_STAGES', () => {
     expect(last.id).toBe('limiter');
     const audible = VOCAL_CHAIN_STAGES.filter((s) => s.effectId !== null);
     expect(audible[audible.length - 1].id).toBe('limiter');
+  });
+
+  // CC1 — the gate's position, argued the same way: against the rules the
+  // stages around it already state.
+  describe("the Noise Gate stage's position", () => {
+    const ids = VOCAL_CHAIN_STAGES.map((s) => s.id);
+
+    it('gates BEFORE the dynamics stages, so their makeup gain multiplies zeros', () => {
+      // Remove Silence's own note gives the rule ("before the dynamics stages
+      // so the compressor does not lift a noise floor in gaps"), and the
+      // compressor applies its makeup uniformly — below threshold there is no
+      // gain reduction and the full makeup, so a gate placed after it would
+      // have its silence partly refilled.
+      for (const dynamics of ['compressor', 'deEsser', 'limiter'] as const) {
+        expect(ids.indexOf('gate')).toBeLessThan(ids.indexOf(dynamics));
+      }
+    });
+
+    it('gates AFTER the two stages that lower the floor it has to find', () => {
+      // Its threshold is measured from the quietest passage of the audio that
+      // reaches it. Noise Reduction and DeHum both change that passage, so
+      // measuring before them would derive a threshold for audio that no
+      // longer exists by the time the gate runs.
+      for (const cleaner of ['noise', 'hum'] as const) {
+        expect(ids.indexOf('gate')).toBeGreaterThan(ids.indexOf(cleaner));
+      }
+    });
+
+    it('gates AFTER Remove Silence, whose own threshold could not survive a gated take', () => {
+      // Both derive from `measureNoiseWindow`, which rejects windows at digital
+      // silence. Run the gate first and every quiet window is gone, so Remove
+      // Silence would measure a window containing voice and cut into it.
+      expect(ids.indexOf('gate')).toBeGreaterThan(ids.indexOf('silence'));
+    });
+
+    it('is on by default — the pauses reaching silence is what the user expects', () => {
+      expect(stageById('gate').defaultEnabled).toBe(true);
+      expect(defaultStageSelection().gate).toBe(true);
+    });
+
+    it('is length-preserving, unlike the other stage that treats pauses', () => {
+      // The whole reason it can be on by default where Remove Silence cannot:
+      // it mutes in place, so the take still lines up with a backing track.
+      expect(stageById('gate').note).toContain('Length-preserving');
+      expect(stageById('silence').defaultEnabled).toBe(false);
+    });
   });
 
   it('names every stage after what it does, never after how good the result is', () => {
@@ -220,7 +271,7 @@ describe('VOCAL_CHAIN_STAGES', () => {
       // one of these derives its settings from a measurement of the audio that
       // reaches it (the noise print, the compressor threshold, the de-esser
       // threshold, the EQ corner, the limiter's ceiling check).
-      for (const measurer of ['noise', 'hum', 'pitch', 'compressor', 'deEsser', 'eq', 'limiter'] as const) {
+      for (const measurer of ['noise', 'hum', 'gate', 'pitch', 'compressor', 'deEsser', 'eq', 'limiter'] as const) {
         expect(ids.indexOf('lyrics')).toBeLessThan(ids.indexOf(measurer));
       }
     });
@@ -534,6 +585,85 @@ describe('deriveRemoveSilence', () => {
   });
 });
 
+// ── deriveGate (CC1) ────────────────────────────────────────────────────────
+
+describe('deriveGate', () => {
+  function withNoisyGap(windows: number, loud: number, quiet: number, quietAt: number): Float32Array {
+    const out = flat(WIN * windows, loud);
+    out.set(noise(WIN, quiet, 101), quietAt * WIN);
+    return out;
+  }
+
+  it('sets the threshold from the measured floor, above the loudest the detector reads there', () => {
+    const signal = withNoisyGap(8, 0.5, 0.006, 4);
+    const floor = measureNoiseWindow([signal], SR)!;
+    const res = deriveGate([signal], SR);
+    if (!res.run) throw new Error('expected run');
+    // Strictly above, not equal: a threshold AT the floor's own peak is grazed
+    // by the same floor a moment later and the gate re-opens for a full hold.
+    expect(Number(res.params.thresholdDb)).toBeGreaterThan(floor.envelopePeakDb);
+    expect(Number(res.params.thresholdDb)).toBe(floor.envelopePeakDb + GATE_HEADROOM_DB);
+  });
+
+  it('tracks the material: a 6 dB quieter floor gives a 6 dB lower threshold', () => {
+    const a = deriveGate([withNoisyGap(8, 0.5, 0.012, 4)], SR);
+    const b = deriveGate([withNoisyGap(8, 0.5, 0.006, 4)], SR);
+    if (!a.run || !b.run) throw new Error('expected both to run');
+    expect(Number(a.params.thresholdDb) - Number(b.params.thresholdDb)).toBeCloseTo(6.0206, 1);
+  });
+
+  it('runs its detector with the constants the threshold was measured with', () => {
+    // Not a preference: `envelopePeakDb` IS the peak of an envelope followed at
+    // these two constants, so a gate detector using any others measures a
+    // different envelope and the threshold stops meaning what it measured.
+    const res = deriveGate([withNoisyGap(8, 0.5, 0.006, 4)], SR);
+    if (!res.run) throw new Error('expected run');
+    expect(Number(res.params.attackMs)).toBe(DETECT_ATTACK_MS);
+    expect(Number(res.params.releaseMs)).toBe(DETECT_RELEASE_MS);
+  });
+
+  it('holds for the shortest gap this app is willing to call a pause', () => {
+    const res = deriveGate([withNoisyGap(8, 0.5, 0.006, 4)], SR);
+    if (!res.run) throw new Error('expected run');
+    // Remove Silence's own minimum, and the same constant the noise window is
+    // measured over: the gate may only close on what Remove Silence would have
+    // been willing to cut.
+    const minSilence = getEffect('remove-silence')!.params.find((p) => p.id === 'minSilenceMs')!.default;
+    expect(GATE_HOLD_MS).toBe(Number(minSilence));
+    expect(GATE_HOLD_MS).toBe(NOISE_WINDOW_MS);
+    expect(Number(res.params.holdMs)).toBe(GATE_HOLD_MS);
+  });
+
+  it('clamps into the param range instead of emitting settings the effect cannot take', () => {
+    const res = deriveGate([withNoisyGap(8, 0.5, 1e-5, 4)], SR);
+    if (!res.run) throw new Error('expected run');
+    const def = getEffect('noise-gate')!;
+    for (const id of ['thresholdDb', 'attackMs', 'releaseMs', 'holdMs']) {
+      const param = def.params.find((p) => p.id === id)!;
+      expect(Number(res.params[id])).toBeGreaterThanOrEqual(param.min!);
+      expect(Number(res.params[id])).toBeLessThanOrEqual(param.max!);
+    }
+  });
+
+  it('declines without a measurable noise floor', () => {
+    expect(deriveGate([new Float32Array(WIN * 4)], SR).run).toBe(false);
+  });
+
+  it('does NOT share Noise Reduction’s decline: gating needs no clean print (N3)', () => {
+    // A take whose quietest passage sits within 12 dB of programme level: NR
+    // refuses, because a print learned there would contain voice. The gate has
+    // no print to learn — it needs only a level — and that take is exactly the
+    // one whose gaps are loudest, so a shared decline would abandon the user
+    // who needs the stage most.
+    const noisy = withNoisyGap(8, 0.5, 0.3, 4);
+    const nr = deriveNoiseReduction([noisy], SR);
+    expect(nr.run).toBe(false);
+    if (nr.run) return;
+    expect(nr.reason).toContain('would contain voice');
+    expect(deriveGate([noisy], SR).run).toBe(true);
+  });
+});
+
 // ── deriveCompressor ────────────────────────────────────────────────────────
 
 describe('deriveCompressor', () => {
@@ -547,6 +677,61 @@ describe('deriveCompressor', () => {
     }
     return out;
   }
+
+  // CC1 / N2 — the ordering constraint the gate imposes, and the invariant that
+  // makes it free. The gate now runs BEFORE this stage so the makeup gain
+  // multiplies zeros rather than lifting a floor; the apparent price is that
+  // "sounding" is defined against a noise floor the gate has just silenced, and
+  // `measureNoiseWindow` rejects digital-silence windows by construction
+  // (chainAnalysis.ts:148). It is not a price, because GATE_HOLD_MS IS
+  // NOISE_WINDOW_MS: the gate holds its gain at 1 for exactly one noise window
+  // after the level drops, so every pause it closes on keeps an untouched one
+  // in front of the fade.
+  //
+  // This is the test that stops those two constants drifting apart. Shorten the
+  // hold below the noise window and the pauses stop carrying a measurable
+  // floor; this is where that shows up.
+  describe('the floor survives the gate', () => {
+    /** Phrases over a real floor with pauses long enough that the gate reaches
+     * hard zero inside them — the precondition asserted below, not assumed. */
+    function gappedProgramme(): Float32Array {
+      const out = noise(WIN * 20, 0.004, 5);
+      for (const w of [4, 5, 10, 11, 16, 17]) {
+        for (let i = 0; i < WIN; i++) out[w * WIN + i] += 0.2 * Math.sin((2 * Math.PI * 220 * i) / SR);
+      }
+      return out;
+    }
+
+    it('leaves a measurable noise window in every pause, and the same threshold with it', () => {
+      const raw = gappedProgramme();
+      const gate = deriveGate([raw], SR);
+      if (!gate.run) throw new Error('expected the gate to run');
+      const gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
+
+      // The gate really did silence a large part of the take: without this the
+      // rest of the test would pass on audio it never touched.
+      const zeros = gated[0].reduce((n: number, v: number) => (v === 0 ? n + 1 : n), 0);
+      expect(zeros / gated[0].length).toBeGreaterThan(0.3);
+
+      // The floor is still there to measure...
+      const after = measureNoiseWindow(gated, SR);
+      expect(after).not.toBeNull();
+      // ...and reads the floor's own level rather than a voice window's. The
+      // tolerance is 1 dB because the surviving window need not be the SAME
+      // 500 ms the ungated search picked (measured here: 0.61 dB apart); the
+      // failure this guards against is tens of dB away, not fractions.
+      const before = measureNoiseWindow([raw], SR)!;
+      expect(Math.abs(after!.envelopePeakDb - before.envelopePeakDb)).toBeLessThan(1);
+
+      // Which is the whole point: the compressor derives the same threshold on
+      // the gated take as it would have on the ungated one, with no knowledge
+      // of the gate and no parameter handed to it.
+      const onRaw = deriveCompressor([raw], SR);
+      const onGated = deriveCompressor(gated, SR);
+      if (!onRaw.run || !onGated.run) throw new Error('expected both to run');
+      expect(Number(onGated.params.thresholdDb)).toBeCloseTo(Number(onRaw.params.thresholdDb), 1);
+    });
+  });
 
   it('derives a threshold inside the programme, well above the shipped absolute default', () => {
     const res = deriveCompressor([programme()], SR);
@@ -1831,4 +2016,186 @@ describe('runVocalChain', () => {
     expect(useAppStore.getState().selection).toEqual({ start: 0, end: WIN * 11 - removed });
     expect(useAppStore.getState().cursorSample).toBe(0);
   });
+});
+
+// ── The gate: the audio between sung phrases (CC1) ──────────────────────────
+// The user's report, verbatim: "it didn't remove the noises where nothing is
+// played, in fact if no word is spoken remove all sound". Through v1.27.0 no
+// enabled stage could: Noise Reduction's per-bin gain floors at -12 dB, and the
+// compressor's makeup then multiplies whatever floor is left by a number above
+// one. These are the acceptance tests for the gate stage that closes it.
+
+describe('the audio between sung phrases', () => {
+  /** Room tone at -45 dBFS RMS. Audible-real, not a token floor: uniform noise
+   * of amplitude A has RMS A/sqrt(3), so the amplitude is solved for the level
+   * rather than picked. A fixture whose "noise" sat at -300 dBFS would let a
+   * gate that does nothing pass, which is the local anti-pattern. */
+  const FLOOR_DBFS = -45;
+  const NOISE_AMPLITUDE = Math.pow(10, FLOOR_DBFS / 20) * Math.sqrt(3);
+
+  /** These fixtures run at a real recording rate rather than the suite's 8 kHz,
+   * and the reason is measured. Noise Reduction's STFT is a FIXED 2048/512
+   * (NoiseReductionEffect.ts:19-20) regardless of the rate, so at 8 kHz one
+   * analysis window spans 256 ms and the stage smears each phrase a quarter of
+   * a second into the pause on either side of it — an artefact of the fixture's
+   * rate, not of the chain. At 44.1 kHz the same window is 46 ms. A gate tuned
+   * against the 8 kHz version would be tuned against that artefact. */
+  const RATE = 44100;
+
+  interface Span {
+    start: number;
+    end: number;
+  }
+
+  /** One sung note: vibrato, and an attack/decay contour so the boundaries are
+   * real onsets and releases rather than steps. */
+  function sing(channel: Float32Array, at: number, n: number, rate: number): void {
+    for (let i = 0; i < n; i++) {
+      const t = i / rate;
+      const contour = Math.min(1, t / 0.04) * Math.min(1, (n / rate - t) / 0.06);
+      const hz = 220 + 4 * Math.sin(2 * Math.PI * 5.5 * t);
+      channel[at + i] += 0.25 * contour * Math.sin(2 * Math.PI * hz * t);
+    }
+  }
+
+  /** A take of sung phrases over that floor: three notes separated by 2 s
+   * pauses carrying room tone and nothing else. The pauses are what the user
+   * is complaining about. */
+  function phrasesOverNoise(): { channel: Float32Array; pauses: Span[] } {
+    const plan: { sung: boolean; sec: number }[] = [
+      { sung: false, sec: 0.8 },
+      { sung: true, sec: 1.2 },
+      { sung: false, sec: 2.0 },
+      { sung: true, sec: 1.0 },
+      { sung: false, sec: 2.0 },
+      { sung: true, sec: 1.2 },
+      { sung: false, sec: 0.8 },
+    ];
+    const total = plan.reduce((sum, p) => sum + Math.round(p.sec * RATE), 0);
+    const channel = noise(total, NOISE_AMPLITUDE, 7);
+    const pauses: Span[] = [];
+    let at = 0;
+    for (const part of plan) {
+      const n = Math.round(part.sec * RATE);
+      if (!part.sung) pauses.push({ start: at, end: at + n });
+      else sing(channel, at, n, RATE);
+      at += n;
+    }
+    return { channel, pauses };
+  }
+
+  /** A 3.4 s held note carrying two internal drops to the bare floor — a
+   * 120 ms stop-consonant closure and a 400 ms dip — then a 2 s pause. Both
+   * dips are shorter than the 500 ms this app calls a pause, so both are
+   * articulation and neither may close the gate; the pause after them is
+   * longer, and must. */
+  function heldNoteWithDips(): { channel: Float32Array; phrase: Span; dips: Span[]; pause: Span } {
+    const lead = Math.round(0.8 * RATE);
+    const phraseLen = Math.round(3.4 * RATE);
+    const pauseLen = Math.round(2.0 * RATE);
+    const channel = noise(lead + phraseLen + pauseLen, NOISE_AMPLITUDE, 31);
+    const phrase = { start: lead, end: lead + phraseLen };
+    const dips = [
+      { start: lead + Math.round(1.2 * RATE), end: lead + Math.round(1.32 * RATE) },
+      { start: lead + Math.round(2.2 * RATE), end: lead + Math.round(2.6 * RATE) },
+    ];
+    // Sung in the three stretches the dips leave, so each dip is genuinely bare
+    // room tone rather than a quieter note.
+    let at = phrase.start;
+    for (const dip of dips) {
+      sing(channel, at, dip.start - at, RATE);
+      at = dip.end;
+    }
+    sing(channel, at, phrase.end - at, RATE);
+    return { channel, phrase, dips, pause: { start: phrase.end, end: phrase.end + pauseLen } };
+  }
+
+  function rmsDbOver(channel: Float32Array, spans: Span[]): number {
+    let sum = 0;
+    let n = 0;
+    for (const span of spans) {
+      for (let i = span.start; i < span.end; i++) sum += channel[i] * channel[i];
+      n += span.end - span.start;
+    }
+    return toDb(Math.sqrt(sum / Math.max(1, n)));
+  }
+
+  /** The LAST second of each 2 s pause between phrases. A gate cannot close at
+   * the instant a phrase ends — it holds, then fades — so the measurement is
+   * taken where the gate claims to be shut, not across the close itself. The
+   * interior pauses only: the leading and trailing ones are not "between"
+   * anything. */
+  function betweenPhrases(pauses: Span[]): Span[] {
+    return pauses.slice(1, -1).map((p) => ({ start: p.end - RATE, end: p.end }));
+  }
+
+  it('reaches digital silence in the pauses, running the chain as it ships', async () => {
+    const { channel, pauses } = phrasesOverNoise();
+    seedDoc([Float32Array.from(channel)], RATE);
+
+    await runVocalChain({ enabled: defaultStageSelection() });
+
+    const gaps = betweenPhrases(pauses);
+    // The fixture's own floor is audible-real, so this test can fail: the
+    // untouched take reads about -45 dBFS between the phrases.
+    expect(rmsDbOver(channel, gaps)).toBeGreaterThan(-50);
+    expect(rmsDbOver(activeDoc().channels[0], gaps)).toBeLessThanOrEqual(-80);
+  }, 120000);
+
+  it('is the ONLY stage that can: every other default leaves the pauses audible', async () => {
+    // The measurement behind the user's report. Same take, same chain, the gate
+    // alone switched off — which is exactly the stage selection that shipped
+    // through v1.27.0.
+    const { channel, pauses } = phrasesOverNoise();
+    seedDoc([Float32Array.from(channel)], RATE);
+
+    await runVocalChain({ enabled: { ...defaultStageSelection(), gate: false } });
+
+    // Noise Reduction's per-bin gain floors at -12 dB and the compressor's
+    // makeup lifts what is left, so the pauses land within a few dB of where
+    // they started — nowhere near silence.
+    const withoutGate = rmsDbOver(activeDoc().channels[0], betweenPhrases(pauses));
+    expect(withoutGate).toBeGreaterThan(-70);
+    expect(withoutGate).toBeLessThan(-45);
+  }, 120000);
+
+  it('never closes inside a phrase: a 120 ms closure and a 400 ms dip come back untouched', async () => {
+    // Chatter is the failure the header used to cite as the reason for having
+    // no gate at all ("a threshold that can chatter on a held note"). The gate
+    // alone is switched on, so bit-identity IS the claim that its gain never
+    // left 1 across the phrase — no other stage can be blamed for a changed
+    // sample, and none can hide a changed one either.
+    const { channel, phrase, dips, pause } = heldNoteWithDips();
+    seedDoc([Float32Array.from(channel)], RATE);
+
+    const report = await runVocalChain({ enabled: only('gate') });
+    expect(report!.stages.find((s) => s.id === 'gate')!.status).toBe('applied');
+    const out = activeDoc().channels[0];
+
+    // Each dip on its own, so a failure says WHICH one closed the gate. This is
+    // the chatter claim exactly: both are shorter than the 500 ms hold, so the
+    // gate may not even begin to fade inside either.
+    for (const dip of dips) {
+      let changed = 0;
+      for (let i = dip.start; i < dip.end; i++) if (out[i] !== channel[i]) changed++;
+      expect(changed).toBe(0);
+    }
+
+    // ...and the note around them, from the point it has actually risen. The
+    // fixture's own attack contour ramps the note in from nothing over its
+    // first ATTACK_SEC, and audio genuinely below the threshold is audio the
+    // gate is right to mute — measured, that is the first 3.1 ms of the note.
+    // Everything after the ramp is the claim.
+    const ATTACK_SEC = 0.04;
+    let changedInPhrase = 0;
+    for (let i = phrase.start + Math.round(ATTACK_SEC * RATE); i < phrase.end; i++) {
+      if (out[i] !== channel[i]) changedInPhrase++;
+    }
+    expect(changedInPhrase).toBe(0);
+
+    // ...and the gate was not simply inert: the pause after the phrase is
+    // silent, which is the only thing that makes the bit-identity above mean
+    // anything.
+    expect(rmsDbOver(out, [{ start: pause.end - RATE, end: pause.end }])).toBeLessThanOrEqual(-80);
+  }, 120000);
 });
