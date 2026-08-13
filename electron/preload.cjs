@@ -5,11 +5,15 @@ const { contextBridge, ipcRenderer } = require('electron');
 const electronAPI = {
   // The bytes arrive as a Uint8Array (Electron structured-clones main's
   // Buffer). Unconditionally slicing it made a SECOND full-size copy of every
-  // file opened -- both alive at once, so a 68 MB WAV cost the renderer 137 MB
-  // before decoding had allocated a single sample. The copy only has a job
-  // when the view is a window into a larger or offset buffer, which is the
-  // case the slice was written for; when the view already owns its whole
-  // buffer (what the clone actually produces), hand that buffer straight on.
+  // file opened, alive at the same time as the first -- 130 MB of this world
+  // for a 65 MiB WAV before decoding had allocated a single sample, and a
+  // third copy follows regardless when the return value crosses
+  // contextBridge, which copies (measured: mutating this world's buffer after
+  // the return does not change what the page sees). The slice only has a job
+  // when the view is a window into a larger or offset buffer; measured on a
+  // real 65 MiB read, the clone delivers byteOffset 0 with byteLength ===
+  // buffer.byteLength, so hand that buffer straight on and keep the copy for
+  // the views that need it.
   readFile: (path) =>
     ipcRenderer.invoke('file:read', path).then((buf) => {
       if (buf.byteOffset === 0 && buf.byteLength === buf.buffer.byteLength) {

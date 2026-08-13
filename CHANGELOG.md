@@ -9,33 +9,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Opening a large file no longer freezes the window, and no longer costs three copies of it.** Cause:
+- **Opening a large file no longer freezes the window, and no longer costs an extra copy of it.** Cause:
   four independent contributors on one path. `preload.cjs` ended every `readFile` with an
-  unconditional `buf.buffer.slice(...)`, which is a full second copy of the file — for a 65 MiB WAV
-  that is ~137 MB live in the renderer before a single sample has been decoded, and the copy is only
-  ever *needed* when the received view is a window into a larger buffer, which the IPC clone does not
-  produce. `openFilePath` then read its container metadata (FLAC stream info, ID3 chapters, Vorbis
-  comment, Opus tags) *after* decoding, so the whole file had to stay readable alongside its own
-  decoded samples. `decodeArrayBuffer` handed `decodeAudioData` a third copy (`buf.slice(0)`) for
-  non-WAV sources. And `decodeWav` — a per-sample loop, ~17 million iterations for that file — ran on
-  the renderer's main thread, so the window could neither paint nor answer input for the whole of it;
-  measured on the incident's own files, the pre-fix open blocked the main thread for **308 ms**. Fix:
-  the preload copies only when the view really is offset or short; `openFilePath` lifts every scrap of
-  metadata out *before* the decode, which lets the decode CONSUME the buffer instead of coexisting
-  with it; and WAV decoding moved to a worker (`src/workers/wavDecode.worker.ts`) with the bytes
-  transferred in and the channels transferred back, so neither direction clones. Peak per open drops
-  from ~205 MB to ~68 MB, and the main-thread block during an open now tracks the cost of merely
-  *reading* the file (**217 ms vs a 187 ms read-only floor**) rather than exceeding it by the length of
-  the decode. Only WAV moved: the other formats decode through `decodeAudioData`, which the Web Audio
-  API does not expose to workers. Affects: `electron/preload.cjs`, `src/services/fileService.ts`,
-  `src/audio/decodeAudio.ts`, `src/audio/decodeWavOffThread.ts`, `src/workers/wavDecode.worker.ts`.
+  unconditional `buf.buffer.slice(...)`, a full second copy of the file alive alongside the first, and
+  it is only ever *needed* when the received view is a window into a larger buffer — measured on a real
+  65 MiB read, the IPC clone delivers `byteOffset 0` with `byteLength === buffer.byteLength`, so the
+  copy bought nothing there. `openFilePath` then read its container metadata (FLAC stream info, ID3
+  chapters, Vorbis comment, Opus tags) *after* decoding, so the whole file had to stay readable
+  alongside its own decoded samples. `decodeArrayBuffer` handed `decodeAudioData` another copy
+  (`buf.slice(0)`) for non-WAV sources. And `decodeWav` — a per-sample loop, ~17 million iterations for
+  that file — ran on the renderer's main thread, so the window could neither paint nor answer input for
+  the whole of it; measured on the incident's own files, the pre-fix open blocked the main thread for
+  **308 ms**. Fix: the preload copies only when the view really is offset or short; `openFilePath` lifts
+  every scrap of metadata out *before* the decode, which lets the decode CONSUME the buffer instead of
+  coexisting with it; and WAV decoding moved to a worker (`src/workers/wavDecode.worker.ts`) with the
+  bytes transferred in and the channels transferred back, so neither direction clones. For a 65.2 MiB
+  file the transient peak drops from ~195 MiB to ~130 MiB, and what coexists with the decoded samples
+  from ~130 MiB to nothing — the document alone. One copy in that count is **not** removable here:
+  `contextBridge` copies return values across the world boundary (measured directly — mutating the
+  preload's buffer after the return leaves the page's copy unchanged), so ~65 MiB exists twice at the
+  hand-off however the preload is written. The main-thread block during an open now tracks the cost of
+  merely *reading* the file (**217 ms vs a 187 ms read-only floor**) rather than exceeding it by the
+  length of the decode. Only WAV moved: the other formats decode through `decodeAudioData`, which the
+  Web Audio API does not expose to workers. Affects: `electron/preload.cjs`,
+  `src/services/fileService.ts`, `src/audio/decodeAudio.ts`, `src/audio/decodeWavOffThread.ts`,
+  `src/workers/wavDecode.worker.ts`.
 - **A failed open now leaves nothing behind instead of wedging the app.** Cause: `openFilePath` added
   the document to the store and *then* seeded its markers, with no rollback anywhere. A failure after
   the add left a document that was selected, undrawable, and read by every panel that follows the
   active document — which is precisely the state the incident ended in. Fix: the whole open is wrapped;
   anything that throws after the add rolls the document back out and releases its history and peak
-  caches, and the error propagates so the caller names the file in one dialog. The documents that were
-  already open are untouched. Affects: `src/services/fileService.ts`.
+  caches, and the error propagates so the caller names the file in one dialog. The rollback also puts
+  the *view* back: `closeDocument` re-activates whichever document is last, which is only coincidentally
+  the one that was active, so with A and B open and A active a failed open of C used to leave B active
+  and A's selection, cursor and zoom gone. All four are captured before the open and restored. Affects:
+  `src/services/fileService.ts`.
 - **The Files panel says which file it is opening.** Why: now that a large decode no longer freezes the
   UI, a long open is *invisible* rather than obvious — and "responsive but showing nothing" is as
   unreadable as a freeze. Files being read and decoded appear in the panel with an `Opening…` row until
@@ -58,16 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every one of those reasons is writing somewhere else. Fix: both write sites offer
   `['Save As…', 'Cancel']` and route the first choice to the save-as flow, which retries by looping
   rather than recursing — the answer to a refused location is another location, so the offer repeats
-  without growing the stack, and it ends when the user cancels either dialog. Affects:
-  `src/services/fileService.ts`.
+  without growing the stack, and it ends when the user cancels either dialog. The keyboard default is
+  **Cancel**: the box appears unbidden on a failure the user did not cause, so a stray Return on it
+  does nothing rather than opening a file dialog (`defaultId` is now forwarded across the dialog IPC,
+  sanitized against the button list that actually survived validation). Affects:
+  `src/services/fileService.ts`, `electron/ipc.cjs`.
 - **Save is no longer Open's immediate neighbour in the toolbar.** Cause: the two pills sat 3 px apart
   with nothing between them, so a click aimed at Open that landed one pill to the right ran a full
   re-encode and overwrite of the file on disk. Fix: the same divider the toolbar's other groups use now
   separates them. Affects: `src/components/Layout/Toolbar.tsx`.
 - **Ctrl+W closes the document, as the File menu has always claimed.** Cause: the `File > Close` row has
   advertised `Ctrl+W` since Task 11, but `SHORTCUT_TABLE` never carried the combo — the label named a
-  key that did nothing. Fix: wired to `file.close`, i.e. `closeDocumentFlow`, so the accelerator
-  inherits the prompt-before-discarding guard. Affects: `src/services/shortcuts.ts`.
+  key that did nothing. Verified in the running app rather than only against the table: Electron's
+  default application menu *is* present and *does* bind `CommandOrControl+W` to `role: 'close'`, but it
+  never fires here (the window is frameless and carries no menu bar), so pressing Ctrl+W before this
+  change did nothing at all — two documents open, two documents still open, window untouched. Fix:
+  wired to `file.close`, i.e. `closeDocumentFlow`, so the accelerator inherits the
+  prompt-before-discarding guard. It closes one document and leaves the window alone. Affects:
+  `src/services/shortcuts.ts`.
 
 ### Added
 
