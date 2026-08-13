@@ -71,6 +71,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   results pushed by the live callback survived a run that could not start. Fix: restored, and pinned
   by a test. Affects: `src/components/Dialogs/CoverChainDialog.tsx`.
 
+<!-- M4: found by combining the three lines -->
+- **The cover journey's session opened at 512 samples/px instead of fitted.** Cause: stage 5 builds
+  its session through the same load-shaped apply `openSessionViaDialog` and `landStems` use, and it
+  was written in parallel with the fix that gave those four paths a resolved zoom — so it shipped a
+  FIFTH copy of the hardcoded `{ samplesPerPixel: 512 }` the other four had just lost. It bites
+  hardest here: a cover session is a whole song plus a take, i.e. exactly the minutes-long material
+  the original report was filed against, and 512 samples/px is ~16 s of timeline whatever is on it.
+  Fix: `defaultSessionZoom(session)`, as the other four do. Affects: `src/services/coverJourney.ts`.
+- **The cover journey's take picker rendered light-gray on white when opened.** Cause: the journey
+  rewrite added a SECOND document picker, and it carried the translucent `rgba(255,255,255,.05)`
+  background that the native-select fix had just removed from every select in the app — the new
+  control never had the fix because it did not exist when the fix was written. Fix: the opaque
+  `--glass-field-bg`, and the existing source-derived guard now covers it.
+  Affects: `src/components/Dialogs/CoverChainDialog.tsx`.
+
 ### Added
 
 <!-- CP1: the alignment DSP -->
@@ -125,6 +140,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/components/Dialogs/PipelineToolHost.tsx`, `src/components/Dialogs/DialogShell.tsx`,
   `src/services/dialogBus.ts`, `src/App.tsx`.
 
+<!-- M4: found by combining the three lines -->
+- **The packaged smoke now exercises the alignment's BELIEVED arm, not just its refusal.** Why: the
+  Cover Chain's fixtures are filtered noise with no syllables, so every packaged run to date proved
+  that a bad alignment is refused and none proved that a good one is believed and lands where it
+  says — the more dangerous half, since a take placed at a confidently wrong offset is harder to
+  notice than one left at zero. How: `make-test-cover.cjs` emits a pair rendering ONE syllable
+  schedule twice, the take's laid down 0.75 s later as a different performance, so the offset is
+  built in rather than measured; the smoke drives it through all six real stages and asserts the
+  recovered offset against that constant within the DSP's proven ±10 ms, with both confidence
+  numbers clearing their shipped floors. It is also the first packaged exercise of the
+  negative-offset arm, which shifts both tracks rather than clamping the take to zero.
+  Affects: `scripts/make-test-cover.cjs`, `scripts/e2e-smoke.cjs`.
+
 ### Changed
 
 <!-- MT1: multitrack polish -->
@@ -169,6 +197,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are blocked. Global keyboard shortcuts are suppressed for the duration of a run only, keeping the
   guard that stops a `Ctrl+O` landing a running pass on a document the user just replaced.
   Affects: `src/App.tsx`, `src/services/dialogBus.ts`, `src/components/Layout/ModuleStrip.tsx`.
+
+<!-- M4: found by combining the three lines -->
+- **The Cover Chain tool asks for 640 px rather than 680, so the hosted card and the stage keep
+  their measured sizes.** Why: `TOOL_HOST_WIDTH` is DERIVED from these nine tools — it is the widest
+  width any of them asks `DialogShell` for — so a tool widening itself widens the host card for
+  every tool and costs the waveform 40 px at every window size. The journey rewrite arrived asking
+  for 680, which would have cut the lane at the minimum window to 378 px, under the 400 px floor.
+  Nothing in the rewrite needed it: the two multi-column tables that made this the widest tool in
+  the first place (the per-band EQ curve and the before/after summary) were REMOVED by that same
+  rewrite, and what remains is a vertical stack of flowing text and full-width bars with no
+  fixed-width content. Affects: `src/components/Dialogs/CoverChainDialog.tsx`.
 
 ### Removed
 
