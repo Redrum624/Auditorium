@@ -226,6 +226,39 @@ describe('G4: icon rail + glass panel cards', () => {
     }
   });
 
+  // U1 (layout E2): the strip's active entry closes its card, and a closed
+  // card is what hands the module column's width back to the waveform. Both
+  // halves are asserted here — the card really unmounts, and the stage's
+  // right inset really collapses — because the second is the whole point of
+  // the first.
+  it('closes the panel card when the active strip entry is clicked, and reopens it', () => {
+    render(<App />);
+    const strip = screen.getByTestId('sidebar-tabs');
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'history');
+
+    fireEvent.click(within(strip).getByRole('button', { name: 'History' }));
+    expect(screen.queryByTestId('sidebar-panel')).not.toBeInTheDocument();
+    expect(within(strip).getByRole('button', { name: 'History' })).toHaveAttribute(
+      'aria-pressed',
+      'false'
+    );
+
+    fireEvent.click(within(strip).getByRole('button', { name: 'History' }));
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'history');
+  });
+
+  it('gives the stage the module column width when no card is open', () => {
+    render(<App />);
+    const stage = screen.getByTestId('editor-stage');
+    // 14 margin + 348 column + 14 air, published as a token every floating
+    // surface centres on.
+    expect(stage.style.getPropertyValue('--stage-inset-right')).toBe('376px');
+    expect(stage.style.getPropertyValue('--stage-inset-left')).toBe('14px');
+
+    fireEvent.click(within(screen.getByTestId('sidebar-tabs')).getByRole('button', { name: 'History' }));
+    expect(stage.style.getPropertyValue('--stage-inset-right')).toBe('14px');
+  });
+
   it('shows exactly one panel card at a time: Files/Effects bodies are hidden until selected', () => {
     render(<App />);
     // Default tab is History; the old always-visible left column is retired,

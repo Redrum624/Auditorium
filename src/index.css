@@ -500,12 +500,22 @@
 /* ------------------------------------------------------------------------- */
 
 /* Clearance that keeps the editor content out from under the floating chrome:
-   top = toolbar band (pill bottom ~54px + gap), right = icon rail (12+60) +
-   348px card column + gaps, bottom = status pill band, left = stage margin.
-   Lives on each editor view's ROOT — never inside a lane, and never on
-   anything that participates in the clientX→sample canvas mapping. */
+   top = toolbar band (pill bottom ~54px + gap), right = the module column,
+   bottom = status pill band, left = stage margin. Lives on each editor view's
+   ROOT — never inside a lane, and never on anything that participates in the
+   clientX→sample canvas mapping.
+
+   U1 (layout E2): the horizontal inset is a TOKEN, not a constant, for two
+   reasons. The vertical icon rail is gone — its 72px of window edge folded
+   into the module column's own width — and the column itself is only there
+   while a panel card is open, so the right inset has two values App.tsx
+   switches between (`--stage-inset-right`). The left margin drops 24 -> 14:
+   the user's rule for this layout is "as wide as possible, not like a photo",
+   and 24px of empty gutter is picture-framing. The fallbacks here are the
+   open-card values, so a view rendered outside the stage (component tests)
+   still lays out against real chrome. */
 .stage-inset {
-  padding: 68px 446px 60px 24px;
+  padding: 68px var(--stage-inset-right, 376px) 60px var(--stage-inset-left, 14px);
 }
 
 /* Floating editor lane (mockup `.lane`): rounded 12, subtle inset ring, deep
