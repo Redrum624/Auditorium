@@ -575,15 +575,56 @@ describe('openFilePath — a failed open leaves nothing behind (O1-1)', () => {
 // handed, the way the worker mock now does — so the ordering is checked rather
 // than assumed.
 describe('openFilePath — container metadata is read BEFORE the decode consumes the bytes (R3)', () => {
+  // M1: every test below is only a test of the ORDERING while the environment
+  // can really detach an ArrayBuffer. `consumingDecodeOnce` tries
+  // `ArrayBuffer.prototype.transfer` and falls back to `structuredClone`; on a
+  // toolchain carrying NEITHER, both branches are skipped, the buffer stays
+  // fully readable, and all five tests below pass while measuring nothing —
+  // metadata reads could migrate back under the decode and this suite would
+  // still be green, which is the exact regression it exists to catch.
+  //
+  // So the detach is recorded and asserted per test. A defanged toolchain now
+  // fails here, loudly and by name, instead of quietly turning this block into
+  // decoration.
+  let detachedByDecode: boolean | null = null;
+
+  beforeEach(() => {
+    detachedByDecode = null;
+  });
+
+  afterEach(() => {
+    expect(detachedByDecode).toBe(true);
+  });
+
   /** Detach `buf` the way a transfer does, then resolve `value`. */
   function consumingDecodeOnce(value: DecodedAudio) {
     mockDecode.mockImplementationOnce(async (buf: ArrayBuffer) => {
       const withTransfer = buf as ArrayBuffer & { transfer?: () => ArrayBuffer };
       if (typeof withTransfer.transfer === 'function') withTransfer.transfer();
       else if (typeof structuredClone === 'function') structuredClone(buf, { transfer: [buf] });
+      // Recorded, not asserted inline: `openFilePath` rolls back and rethrows
+      // whatever the decode throws, so an `expect` raised in here would reach
+      // the test as an open failure rather than as this assertion.
+      detachedByDecode = buf.byteLength === 0;
       return value;
     });
   }
+
+  it('the environment can actually detach a buffer — the premise of this block', () => {
+    // The canary. If this is the only red test in the block, the toolchain lost
+    // its detach primitive and the other four are no longer measuring ordering.
+    const probe = new ArrayBuffer(8);
+    const withTransfer = probe as ArrayBuffer & { transfer?: () => ArrayBuffer };
+    expect(
+      typeof withTransfer.transfer === 'function' || typeof structuredClone === 'function'
+    ).toBe(true);
+
+    if (typeof withTransfer.transfer === 'function') withTransfer.transfer();
+    else structuredClone(probe, { transfer: [probe] });
+
+    expect(probe.byteLength).toBe(0);
+    detachedByDecode = true; // this test detaches its own probe, not a decode
+  });
 
   it('a WAV opens when the decode detaches the bytes', async () => {
     installApi();
