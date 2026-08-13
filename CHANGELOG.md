@@ -5,6 +5,98 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Opening a large file no longer freezes the window, and no longer costs three copies of it.** Cause:
+  four independent contributors on one path. `preload.cjs` ended every `readFile` with an
+  unconditional `buf.buffer.slice(...)`, which is a full second copy of the file — for a 65 MiB WAV
+  that is ~137 MB live in the renderer before a single sample has been decoded, and the copy is only
+  ever *needed* when the received view is a window into a larger buffer, which the IPC clone does not
+  produce. `openFilePath` then read its container metadata (FLAC stream info, ID3 chapters, Vorbis
+  comment, Opus tags) *after* decoding, so the whole file had to stay readable alongside its own
+  decoded samples. `decodeArrayBuffer` handed `decodeAudioData` a third copy (`buf.slice(0)`) for
+  non-WAV sources. And `decodeWav` — a per-sample loop, ~17 million iterations for that file — ran on
+  the renderer's main thread, so the window could neither paint nor answer input for the whole of it;
+  measured on the incident's own files, the pre-fix open blocked the main thread for **308 ms**. Fix:
+  the preload copies only when the view really is offset or short; `openFilePath` lifts every scrap of
+  metadata out *before* the decode, which lets the decode CONSUME the buffer instead of coexisting
+  with it; and WAV decoding moved to a worker (`src/workers/wavDecode.worker.ts`) with the bytes
+  transferred in and the channels transferred back, so neither direction clones. Peak per open drops
+  from ~205 MB to ~68 MB, and the main-thread block during an open now tracks the cost of merely
+  *reading* the file (**217 ms vs a 187 ms read-only floor**) rather than exceeding it by the length of
+  the decode. Only WAV moved: the other formats decode through `decodeAudioData`, which the Web Audio
+  API does not expose to workers. Affects: `electron/preload.cjs`, `src/services/fileService.ts`,
+  `src/audio/decodeAudio.ts`, `src/audio/decodeWavOffThread.ts`, `src/workers/wavDecode.worker.ts`.
+- **A failed open now leaves nothing behind instead of wedging the app.** Cause: `openFilePath` added
+  the document to the store and *then* seeded its markers, with no rollback anywhere. A failure after
+  the add left a document that was selected, undrawable, and read by every panel that follows the
+  active document — which is precisely the state the incident ended in. Fix: the whole open is wrapped;
+  anything that throws after the add rolls the document back out and releases its history and peak
+  caches, and the error propagates so the caller names the file in one dialog. The documents that were
+  already open are untouched. Affects: `src/services/fileService.ts`.
+- **The Files panel says which file it is opening.** Why: now that a large decode no longer freezes the
+  UI, a long open is *invisible* rather than obvious — and "responsive but showing nothing" is as
+  unreadable as a freeze. Files being read and decoded appear in the panel with an `Opening…` row until
+  they land or fail. Affects: `src/services/openProgress.ts`, `src/components/Panels/FilesPanel.tsx`.
+- **Save does nothing on a document with nothing to save.** Cause: `file.save` was gated on merely
+  having an open document, and an in-place Save is not a cheap no-op — it re-encodes every sample and
+  overwrites the source file, and for a 16- or 24-bit WAV it retags the document as 32-bit float on the
+  way, so Properties starts reporting a different file than the one that was opened. A stray click on a
+  pill 3 px from Open, or Ctrl+S at any moment, did all of that to a clean document. Fix: gated twice —
+  the command's `enabled` and the Toolbar pill both require unsaved work, and `saveDocumentLocked`
+  returns early for a clean document with a `filePath`. The predicate is `hasUnsavedWork`, the one the
+  close guard already prompts on, so "the app would warn me about losing this" and "Save does
+  something" cannot disagree; it covers `neverSaved`, so a computed document still saves its first
+  time. Save As is untouched — it is an explicit "write this to a file I name" gesture and is
+  meaningful with no edits behind it. Affects: `src/services/menuActions.ts`,
+  `src/services/fileService.ts`, `src/components/Layout/Toolbar.tsx`.
+- **A denied write offers a way out instead of a dead end.** Cause: a failed write surfaced the write
+  layer's reason ("Write denied (protected directory)", EACCES, a full disk) in a dialog with one
+  button. The text was right; the dialog offered nothing to do about it, while the action that resolves
+  every one of those reasons is writing somewhere else. Fix: both write sites offer
+  `['Save As…', 'Cancel']` and route the first choice to the save-as flow, which retries by looping
+  rather than recursing — the answer to a refused location is another location, so the offer repeats
+  without growing the stack, and it ends when the user cancels either dialog. Affects:
+  `src/services/fileService.ts`.
+- **Save is no longer Open's immediate neighbour in the toolbar.** Cause: the two pills sat 3 px apart
+  with nothing between them, so a click aimed at Open that landed one pill to the right ran a full
+  re-encode and overwrite of the file on disk. Fix: the same divider the toolbar's other groups use now
+  separates them. Affects: `src/components/Layout/Toolbar.tsx`.
+- **Ctrl+W closes the document, as the File menu has always claimed.** Cause: the `File > Close` row has
+  advertised `Ctrl+W` since Task 11, but `SHORTCUT_TABLE` never carried the combo — the label named a
+  key that did nothing. Fix: wired to `file.close`, i.e. `closeDocumentFlow`, so the accelerator
+  inherits the prompt-before-discarding guard. Affects: `src/services/shortcuts.ts`.
+
+### Added
+
+- **DevTools open by themselves on a dev run.** Why: a standing user rule — while developing, the
+  console is open without anyone asking for it. Detached, so it never takes width from the window the
+  layout was built for. Dev runs only: the gate is `VITE_DEV_SERVER`, the same signal `main.cjs`
+  already routes the dev-server load on, and it fails closed on an unknown `isPackaged`, so a packaged
+  build can never be talked into it by an env var. `AUDITORIUM_TEST` suppresses it ahead of everything
+  else, because the packaged smoke pins its window geometry and a second window would race
+  `firstWindow()`. Affects: `electron/devToolsPolicy.cjs`, `electron/main.cjs`.
+- **An acceptance run for large opens.** `node scripts/e2e-open-large.cjs` drives the built app over the
+  smoke's Playwright-Electron rig and opens two large WAVs back to back, asserting both documents, the
+  second's rendered waveform, the in-flight row, and a real click accepted afterwards. Its
+  responsiveness check is self-calibrating: it first measures what delivering the same file over IPC
+  costs the main thread on its own, then requires the full open to block no longer than that. Affects:
+  `scripts/e2e-open-large.cjs`.
+
+### Note
+
+- `--max-old-space-size=16384` is now passed to V8 (`electron/main.cjs`), per an explicit request to
+  raise the memory ceiling. Measured, it does not raise anything on this platform and is not what fixed
+  the open: the switch does reach the renderers (asking for 512 lowers the reported limit to 631 MiB),
+  but 16384 yields **3585.8 MiB — byte for byte what the default already gives**, because V8 clamps to
+  its pointer-compressed heap cage. The audio was never in that heap either: with both incident files
+  open (~123 MB of `Float32Array`) the renderer's `usedJSHeapSize` is 9.5 MiB, and a probe allocated
+  10 GB of `Float32Array` with and without the switch. The line stays because asking for the platform
+  maximum is free and a larger future cage should benefit, but the copy elimination, the off-thread
+  decode and the clean rollback above are what changed the behaviour.
+
 ## [1.24.0] - 2026-08-12
 
 ### Fixed
