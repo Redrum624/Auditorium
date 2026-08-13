@@ -816,7 +816,10 @@ describe('saveDocument', () => {
   });
 
   it('shows an error and keeps dirty when the write fails', async () => {
-    const api = installApi({ writeFile: jest.fn(async () => ({ ok: false, error: 'disk full' })) });
+    const api = installApi({
+      writeFile: jest.fn(async () => ({ ok: false, error: 'disk full' })),
+      showMessageBox: jest.fn(async () => 1), // Cancel the Save As offer
+    });
     const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
 
     await saveDocument(doc.id);
@@ -825,6 +828,134 @@ describe('saveDocument', () => {
       expect.objectContaining({ type: 'error', message: 'disk full' })
     );
     expect(useAppStore.getState().documents[0].dirty).toBe(true);
+  });
+});
+
+// A denied write is the dead end the incident ended in: "Write denied
+// (protected directory)" with one button, on a save the user never asked for.
+// The error text is the right text — it names the real reason — but a modal
+// that states a policy and offers nothing is not a way out. The way out of a
+// refused location is a different location.
+describe('saveDocument — a denied write offers Save As (O1-3)', () => {
+  function live(docId: string) {
+    return useAppStore.getState().documents.find((d) => d.id === docId);
+  }
+
+  it('offers Save As alongside Cancel when the IN-PLACE write is denied', async () => {
+    const api = installApi({
+      writeFile: jest.fn(async () => ({ ok: false, error: 'Write denied (protected directory)' })),
+      showMessageBox: jest.fn(async () => 1),
+    });
+    const doc = seedDoc({ filePath: 'D:\\protected\\song.wav', dirty: true, name: 'song.wav' });
+
+    await saveDocument(doc.id);
+
+    expect(api.showMessageBox).toHaveBeenCalledWith({
+      type: 'error',
+      title: 'Save failed',
+      // The write layer's own reason, unchanged.
+      message: 'Write denied (protected directory)',
+      buttons: ['Save As…', 'Cancel'],
+    });
+  });
+
+  it('IN-PLACE + "Save As…" runs the save-as flow and lands the file elsewhere', async () => {
+    const api = installApi({
+      // The document's own path is refused; anything else succeeds.
+      writeFile: jest.fn(async (p: string) =>
+        p === 'D:\\protected\\song.wav'
+          ? { ok: false, error: 'Write denied (protected directory)' }
+          : { ok: true }
+      ),
+      showSaveDialog: jest.fn(async () => 'D:\\music\\song.wav'),
+      showMessageBox: jest.fn(async () => 0), // Save As…
+    });
+    const doc = seedDoc({ filePath: 'D:\\protected\\song.wav', dirty: true, name: 'song.wav' });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).toHaveBeenCalledTimes(1);
+    expect(api.writeFile).toHaveBeenLastCalledWith('D:\\music\\song.wav', expect.any(ArrayBuffer));
+    const saved = live(doc.id)!;
+    expect(saved.filePath).toBe('D:\\music\\song.wav');
+    expect(saved.dirty).toBe(false);
+  });
+
+  it('IN-PLACE + "Cancel" leaves the document exactly as it was', async () => {
+    const api = installApi({
+      writeFile: jest.fn(async () => ({ ok: false, error: 'Write denied (protected directory)' })),
+      showSaveDialog: jest.fn(async () => 'D:\\music\\song.wav'),
+      showMessageBox: jest.fn(async () => 1), // Cancel
+    });
+    const doc = seedDoc({ filePath: 'D:\\protected\\song.wav', dirty: true, name: 'song.wav' });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    const after = live(doc.id)!;
+    expect(after.filePath).toBe('D:\\protected\\song.wav');
+    expect(after.dirty).toBe(true);
+  });
+
+  it('offers Save As alongside Cancel when the SAVE-AS write is denied', async () => {
+    const api = installApi({
+      showSaveDialog: jest.fn(async () => 'D:\\protected\\Remix 1.wav'),
+      writeFile: jest.fn(async () => ({ ok: false, error: 'EACCES' })),
+      showMessageBox: jest.fn(async () => 1),
+    });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Remix 1' });
+
+    await saveDocument(doc.id);
+
+    expect(api.showMessageBox).toHaveBeenCalledWith({
+      type: 'error',
+      title: 'Save failed',
+      message: 'EACCES',
+      buttons: ['Save As…', 'Cancel'],
+    });
+  });
+
+  it('SAVE-AS + "Save As…" re-prompts, and the second location sticks', async () => {
+    // The second turn of the loop: the user picks a directory that is also
+    // refused, then one that is not. Nothing recursed — the stack is flat
+    // however many locations they try.
+    const api = installApi({
+      showSaveDialog: jest
+        .fn()
+        .mockResolvedValueOnce('D:\\protected\\Remix 1.wav')
+        .mockResolvedValueOnce('D:\\music\\Remix 1.wav'),
+      writeFile: jest.fn(async (p: string) =>
+        p.startsWith('D:\\protected\\') ? { ok: false, error: 'EACCES' } : { ok: true }
+      ),
+      showMessageBox: jest.fn(async () => 0), // Save As…
+    });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Remix 1' });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).toHaveBeenCalledTimes(2);
+    expect(api.showMessageBox).toHaveBeenCalledTimes(1);
+    const saved = live(doc.id)!;
+    expect(saved.filePath).toBe('D:\\music\\Remix 1.wav');
+    expect(saved.dirty).toBe(false);
+    expect(saved.neverSaved).toBe(false);
+  });
+
+  it('SAVE-AS + "Cancel" stops after one attempt', async () => {
+    const api = installApi({
+      showSaveDialog: jest.fn(async () => 'D:\\protected\\Remix 1.wav'),
+      writeFile: jest.fn(async () => ({ ok: false, error: 'EACCES' })),
+      showMessageBox: jest.fn(async () => 1), // Cancel
+    });
+    const doc = seedDoc({ filePath: null, dirty: true, name: 'Remix 1' });
+
+    await saveDocument(doc.id);
+
+    expect(api.showSaveDialog).toHaveBeenCalledTimes(1);
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+    const after = live(doc.id)!;
+    expect(after.filePath).toBeNull();
+    expect(after.dirty).toBe(true);
   });
 });
 
@@ -1717,6 +1848,9 @@ describe('neverSaved provenance across open/save/export (Task S4)', () => {
     installApi({
       showSaveDialog: jest.fn(async () => 'D:\\out\\Remix 1.wav'),
       writeFile: jest.fn(async () => ({ ok: false, error: 'EACCES' })),
+      // Cancel the "Save As…" offer a failed write now makes — this test is
+      // about the state a refused write leaves behind, not about the retry.
+      showMessageBox: jest.fn(async () => 1),
     });
     const doc = seedDoc({ filePath: null, dirty: true, name: 'Remix 1' });
 

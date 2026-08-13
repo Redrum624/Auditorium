@@ -280,6 +280,8 @@ export async function openFilesViaDialog(): Promise<void> {
  * a stale snapshot flag (Task M2 / F9). A cancelled dialog is a no-op; a failed
  * write, or a non-`OggEncoderUnavailableError` encode failure, surfaces an
  * error message box and leaves the doc dirty (and the save point untouched).
+ * A failed WRITE additionally offers "Save As…" alongside Cancel, and taking it
+ * runs the save-as flow — the only action that resolves a refused location.
  *
  * A second call for the same `docId` while one is already mid-encode/write
  * (the OGG branch is async) does not start a second write; it surfaces
@@ -334,7 +336,14 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
     }
     const result = await api().writeFile(targetPath, data);
     if (!result.ok) {
-      await api().showMessageBox({ type: 'error', title: 'Save failed', message: result.error });
+      // A denied write used to end here, in a dialog with one button and no
+      // way forward: the document's own path is refused by the write policy
+      // (a protected directory, a read-only file, a full disk) and nothing in
+      // the app offered the one action that resolves every one of those --
+      // writing somewhere else. Offer it.
+      if (await offerSaveAs(result.error)) {
+        await saveAsWav(docId);
+      }
       return;
     }
     // Only clear dirty (and only write to the store at all) when nothing
@@ -376,66 +385,99 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
 }
 
 /**
+ * Report a write failure and ask whether to save somewhere else. Returns true
+ * when the user chose "Save As…".
+ *
+ * `message` is the write layer's own error text, unchanged — it names the real
+ * reason (a protected directory, EACCES, a full disk), and that is the half of
+ * the dialog the user needs in order to judge whether a different location
+ * will help. What changed is that the dialog now has a second half: an action.
+ * A single-button error box on a save the user did not ask for is how the
+ * incident ended — a modal naming a policy, with nothing to do about it.
+ */
+async function offerSaveAs(message: string): Promise<boolean> {
+  const choice = await api().showMessageBox({
+    type: 'error',
+    title: 'Save failed',
+    message,
+    buttons: ['Save As…', 'Cancel'],
+  });
+  return choice === 0;
+}
+
+/**
  * Prompt a save-as dialog and write a 32-bit-float WAV (the lossless default),
  * carrying the doc's markers and retagging its provenance to WAV so a later
  * Save writes WAV in place. Shared by the first Save of a path-less/exotic
- * source and the Opus-unavailable in-place `.ogg` fallback. Cancelled dialog is
- * a no-op; a failed write surfaces an error message box.
+ * source, the Opus-unavailable in-place `.ogg` fallback, and the "Save As…"
+ * answer to a denied in-place write. Cancelled dialog is a no-op; a failed
+ * write surfaces the error and offers another location.
+ *
+ * The retry is a LOOP, not a recursive call: the answer to a refused location
+ * is a different location, so the offer has to be repeatable, and iterating
+ * cannot grow the stack however long the user keeps trying. It ends when they
+ * cancel either dialog. Nothing can spin it on its own — `dialog:save` and
+ * `dialog:message` are native modals with no auto-answer in any mode,
+ * including AUDITORIUM_TEST (electron/ipc.cjs), so every turn of this loop
+ * costs two deliberate human clicks.
  */
 async function saveAsWav(docId: string): Promise<void> {
-  const doc = findDoc(docId);
-  if (!doc) return;
-  // Replace the source extension rather than appending (F21 — mirrors
-  // exportDocument's defaultName), so `song.mp3` defaults to `song.wav`
-  // instead of `song.mp3.wav`.
-  const baseName = doc.name.replace(/\.[^.]+$/, '');
-  let targetPath = await api().showSaveDialog({
-    defaultPath: `${baseName}.wav`,
-    filters: [{ name: 'Waveform Audio', extensions: ['wav'] }],
-  });
-  if (!targetPath) return; // cancelled
-  // The dialog can return a path with a different (or no) extension if the
-  // user retypes the filename (e.g. `take.flac`); enforce `.wav` on the
-  // actual write target the same way exportDocument enforces its format
-  // extension, so RIFF bytes never land under a non-wav name and mislead a
-  // later in-place Save into overwriting it with more WAV bytes (F21).
-  if (!isWavPath(targetPath)) {
-    targetPath += '.wav';
-  }
-
-  // Re-read the latest doc in case it changed while the dialog was open.
-  const current = findDoc(docId);
-  if (!current) return;
-  const data = encodeWav(current.channels, current.sampleRate, 32, store().markers[current.id]);
-  const result = await api().writeFile(targetPath, data);
-  if (!result.ok) {
-    await api().showMessageBox({ type: 'error', title: 'Save failed', message: result.error });
-    return;
-  }
-  // Same staleness discipline as the in-place path: only retag filePath/name/
-  // provenance and clear dirty if nothing edited the doc during the write
-  // await. If it changed, leave the live (newer) doc untouched and dirty —
-  // the just-written file holds the pre-edit snapshot; a later Save will
-  // re-prompt (or re-encode in place, once a filePath exists) consistently.
-  if (findDoc(docId) === current) {
-    store().updateDocument({
-      ...current,
-      filePath: targetPath,
-      name: api().pathBasename(targetPath),
-      sourceFormat: 'wav',
-      sourceBitDepth: 32,
-      dirty: false,
-      // Task S4: this is the save that gives a computed document (Mix Down,
-      // Remix N, a recording, a stem) its first file. Cleared here and nowhere
-      // else on this path — a cancelled dialog and a failed write both return
-      // before this point, and the stale branch below deliberately skips it.
-      neverSaved: false,
+  for (;;) {
+    const doc = findDoc(docId);
+    if (!doc) return;
+    // Replace the source extension rather than appending (F21 — mirrors
+    // exportDocument's defaultName), so `song.mp3` defaults to `song.wav`
+    // instead of `song.mp3.wav`.
+    const baseName = doc.name.replace(/\.[^.]+$/, '');
+    let targetPath = await api().showSaveDialog({
+      defaultPath: `${baseName}.wav`,
+      filters: [{ name: 'Waveform Audio', extensions: ['wav'] }],
     });
-    markSavePoint(docId);
-  } else {
-    // Same reasoning as the in-place branch: the write already landed, but a
-    // concurrent edit invalidates the save point it would otherwise mark.
-    invalidateSavePoint(docId);
+    if (!targetPath) return; // cancelled
+    // The dialog can return a path with a different (or no) extension if the
+    // user retypes the filename (e.g. `take.flac`); enforce `.wav` on the
+    // actual write target the same way exportDocument enforces its format
+    // extension, so RIFF bytes never land under a non-wav name and mislead a
+    // later in-place Save into overwriting it with more WAV bytes (F21).
+    if (!isWavPath(targetPath)) {
+      targetPath += '.wav';
+    }
+
+    // Re-read the latest doc in case it changed while the dialog was open.
+    const current = findDoc(docId);
+    if (!current) return;
+    const data = encodeWav(current.channels, current.sampleRate, 32, store().markers[current.id]);
+    const result = await api().writeFile(targetPath, data);
+    if (!result.ok) {
+      if (await offerSaveAs(result.error)) continue; // another location
+      return;
+    }
+    // Same staleness discipline as the in-place path: only retag filePath/name/
+    // provenance and clear dirty if nothing edited the doc during the write
+    // await. If it changed, leave the live (newer) doc untouched and dirty —
+    // the just-written file holds the pre-edit snapshot; a later Save will
+    // re-prompt (or re-encode in place, once a filePath exists) consistently.
+    if (findDoc(docId) === current) {
+      store().updateDocument({
+        ...current,
+        filePath: targetPath,
+        name: api().pathBasename(targetPath),
+        sourceFormat: 'wav',
+        sourceBitDepth: 32,
+        dirty: false,
+        // Task S4: this is the save that gives a computed document (Mix Down,
+        // Remix N, a recording, a stem) its first file. Cleared here and nowhere
+        // else on this path — a cancelled dialog and a failed write both return
+        // before this point, and the stale branch below deliberately skips it.
+        neverSaved: false,
+      });
+      markSavePoint(docId);
+    } else {
+      // Same reasoning as the in-place branch: the write already landed, but a
+      // concurrent edit invalidates the save point it would otherwise mark.
+      invalidateSavePoint(docId);
+    }
+    return;
   }
 }
 
