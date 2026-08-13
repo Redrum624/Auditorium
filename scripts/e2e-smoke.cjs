@@ -89,7 +89,9 @@ const SHOT = path.join(OUT_DIR, 'smoke.png');
 // Why pin it at all: a NEW window is fitted to the work area of the display it
 // is born on, floored by the window's minimum size (1100x700). This machine has
 // two displays, and a run that opened on the smaller one got a 1100x700 window
-// — a 624 CSS px waveform canvas instead of 1129. Canvas width is what decides
+// — a 624 CSS px waveform canvas instead of 1129 (U1: 1210 since the E2 layout
+// gave the lane the retired vertical rail's width — 1600 less a 376px module
+// column and a 14px margin, against the old 446 + 24). Canvas width is what decides
 // how much of the document is on screen (zoom is `ceil(length / 1600)` samples
 // per pixel, appStore.defaultZoom), so the tic-ruler count below moved with the
 // display the window happened to land on: 6 groups there, 11 here. The
@@ -293,6 +295,22 @@ async function realClick(page, clientX, clientY, { alt = false } = {}) {
   } finally {
     if (alt) await page.keyboard.up('Alt');
   }
+}
+
+// U1: the module strip's ACTIVE entry now TOGGLES its card closed — that is
+// what lets the waveform take the column's width in the E2 layout. Every step
+// below that clicked a strip entry meant "show me this panel", and a blind
+// click on an already-open one would now close it instead. Asking first keeps
+// each step's intent intact under the new toggle; the click path is still
+// exercised, because the entry is not already active at any of these sites in
+// a normal run.
+async function openModuleCard(page, label) {
+  const already = await page.evaluate(
+    () => document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab'),
+  );
+  if (already === label.toLowerCase()) return false;
+  await page.click(`[data-testid="sidebar-tabs"] button[aria-label="${label}"]`);
+  return true;
 }
 
 /** Pins the app window to `SMOKE_WINDOW` from the MAIN process, through the
@@ -2056,7 +2074,7 @@ async function main() {
     // Re-roll is disabled — correctly — when EVERY edit is pinned, so the pin
     // step needs an arrangement with at least two. Re-activate the source and
     // remix it to a longer target, which splices more.
-    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
+    await openModuleCard(page, 'Files'); // U1: the strip's active entry toggles its card closed
     await page.waitForSelector('[data-testid="files-list"]', { timeout: 5000 });
     await page.click('[data-testid="files-list"] button:has-text("abab120.wav")');
     let multi = null;
@@ -2079,7 +2097,7 @@ async function main() {
       'a remix with at least two edits exists to pin one of (expected joins >= 2 at one of the tried targets)'
     );
 
-    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Remix"]');
+    await openModuleCard(page, 'Remix'); // U1: the strip's active entry toggles its card closed
     await page.waitForSelector('[data-testid="remix-panel"]', { timeout: 5000 });
     const multiJoins = await page.evaluate(() => window.__test.getRemixJoins());
     const rowCount = await page.evaluate(
@@ -2146,7 +2164,7 @@ async function main() {
     );
     // The remix document was rewritten by the re-roll; leave the rail where
     // the following steps expect it.
-    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
+    await openModuleCard(page, 'Files'); // U1: the strip's active entry toggles its card closed
 
     // 12b) OPTIONAL real-song validation — runs only when the user's local
     // real-material fixture exists (it is copyrighted, gitignored, and never
@@ -2219,7 +2237,7 @@ async function main() {
       () => document.querySelectorAll('[data-testid="sidebar-tabs"]').length
     );
     assert(railCount === 1, `exactly one icon rail is mounted (actual ${railCount})`);
-    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
+    await openModuleCard(page, 'Files'); // U1: the strip's active entry toggles its card closed
     const activeTabG4 = await page.evaluate(() =>
       document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab')
     );
@@ -2249,6 +2267,142 @@ async function main() {
       stripBlocks >= 1,
       `the TEMPO card shows the cluster structure strip (expected >= 1 block, actual ${stripBlocks})`
     );
+
+    // 13b) U1 — the E2 layout, measured -------------------------------------
+    // The layout claims are geometric, so they are checked as geometry against
+    // the pinned window rather than as "the element exists". Every number below
+    // is READ, and the expectations are derived from the same constants the
+    // renderer publishes (`--stage-inset-*`), never hardcoded twice.
+    console.log('U1 layout E2: strip, waveform width, bottom band...');
+    // Stated, not assumed: every measurement below is of the single-document
+    // editor, so the view is pinned rather than inherited from step 12.
+    await page.evaluate(() => window.__test.setView('waveform'));
+    const e2 = await page.evaluate(() => {
+      const box = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.x, y: r.y, width: r.width, height: r.height, right: r.right, bottom: r.bottom };
+      };
+      const stage = document.querySelector('[data-testid="editor-stage"]');
+      const cs = stage ? getComputedStyle(stage) : null;
+      return {
+        strip: box('[data-testid="sidebar-tabs"]'),
+        panel: box('[data-testid="sidebar-panel"]'),
+        canvas: box('[data-testid="waveform-canvas"]'),
+        status: box('[data-testid="status-pill"]'),
+        edit: box('[data-testid="edit-pill"]'),
+        toolbar: box('[data-testid="toolbar-pill"]'),
+        stage: box('[data-testid="editor-stage"]'),
+        insetRight: cs ? cs.getPropertyValue('--stage-inset-right').trim() : null,
+        insetLeft: cs ? cs.getPropertyValue('--stage-inset-left').trim() : null,
+        fileChipText: document.querySelector('[data-testid="file-chip"]')?.textContent ?? null,
+        fileChipInStatus:
+          document
+            .querySelector('[data-testid="status-pill"]')
+            ?.contains(document.querySelector('[data-testid="file-chip"]')) ?? false,
+      };
+    });
+    console.log(
+      `  strip ${e2.strip && Math.round(e2.strip.width)}x${e2.strip && Math.round(e2.strip.height)} ` +
+        `at x=${e2.strip && Math.round(e2.strip.x)}; panel width ${e2.panel && Math.round(e2.panel.width)}; ` +
+        `canvas ${e2.canvas && Math.round(e2.canvas.width)} CSS px; insets ${e2.insetLeft}/${e2.insetRight}`
+    );
+    // The rail rotated: the strip is WIDER than it is tall, and exactly as wide
+    // as the card beneath it, which is what makes the two read as one column.
+    assert(
+      e2.strip !== null && e2.strip.width > e2.strip.height,
+      `the module strip is horizontal (${e2.strip && Math.round(e2.strip.width)}x${e2.strip && Math.round(e2.strip.height)})`
+    );
+    assert(
+      e2.panel !== null && Math.abs(e2.strip.width - e2.panel.width) <= 1,
+      `the strip is the panel card's width (strip ${e2.strip.width}, card ${e2.panel && e2.panel.width})`
+    );
+    assert(
+      e2.strip.y + e2.strip.height <= e2.panel.y,
+      `the strip sits ON TOP of the column, not beside it (strip ends ${Math.round(e2.strip.y + e2.strip.height)}, card starts ${Math.round(e2.panel.y)})`
+    );
+    // The waveform took the liberated pixels: the lane spans the stage less its
+    // published insets, which is a tighter margin than the retired rail allowed.
+    const wantCanvas =
+      e2.stage.width - parseFloat(e2.insetLeft) - parseFloat(e2.insetRight);
+    assert(
+      e2.canvas !== null && Math.abs(e2.canvas.width - wantCanvas) <= 2,
+      `the waveform fills the stage less its published insets (expected ${Math.round(wantCanvas)} ` +
+        `+/-2, actual ${Math.round(e2.canvas.width)} CSS px)`
+    );
+    assert(
+      e2.canvas.width > e2.stage.width * 0.7,
+      `the lane is wide, not picture-framed (${Math.round(e2.canvas.width)} of ${Math.round(e2.stage.width)} CSS px)`
+    );
+    // Element 1: the top-left chip is gone and its identity readout is IN the
+    // bottom bar (name · duration · rate · channels).
+    assert(
+      e2.fileChipInStatus === true,
+      `the file identity lives in the status pill now, not in a top-left chip (${e2.fileChipText})`
+    );
+    assert(
+      /abab120\.wav/.test(e2.fileChipText ?? '') && /44\.1k/.test(e2.fileChipText ?? ''),
+      `the bottom bar carries name · duration · rate · channels (actual "${e2.fileChipText}")`
+    );
+    // Element 5: the edit pill floats ABOVE the bottom bar with clear air, on
+    // the same axis, and both are centred on the WAVEFORM rather than the window.
+    const air = e2.status.y - e2.edit.bottom;
+    console.log(
+      `  edit pill ${Math.round(e2.edit.width)}x${Math.round(e2.edit.height)}, ${Math.round(air)} px of air above the status pill`
+    );
+    assert(
+      e2.edit !== null && air >= 12 && air <= 20,
+      `the edit pill floats above the bottom bar with ~16px of clear air (actual ${Math.round(air)})`
+    );
+    const waveAxis = e2.canvas.x + e2.canvas.width / 2;
+    for (const [name, b] of [['status pill', e2.status], ['edit pill', e2.edit]]) {
+      const centre = b.x + b.width / 2;
+      assert(
+        Math.abs(centre - waveAxis) <= 2,
+        `the ${name} is centred on the WAVEFORM's axis (expected ${Math.round(waveAxis)} +/-2, actual ${Math.round(centre)})`
+      );
+    }
+    const editButtons = await page.evaluate(() =>
+      Array.from(document.querySelectorAll('[data-testid="edit-pill"] button')).map((b) => ({
+        label: b.getAttribute('aria-label'),
+        disabled: b.disabled,
+      }))
+    );
+    console.log(`  edit pill buttons: ${JSON.stringify(editButtons)}`);
+    assert(
+      editButtons.map((b) => b.label).join(',') === 'Cut,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
+      `the edit pill carries the eight commands in the mockup's order (actual ${editButtons.map((b) => b.label).join(',')})`
+    );
+    assert(
+      editButtons.filter((b) => ['Cut', 'Copy', 'Delete', 'Trim', 'Silence'].includes(b.label))
+        .every((b) => b.disabled),
+      `with no selection the region verbs are greyed, not hidden (actual ${JSON.stringify(editButtons)})`
+    );
+    // Closing the card really hands its width to the waveform — the claim the
+    // whole strip rearrangement exists for.
+    await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
+    const collapsed = await page.evaluate(() => {
+      const c = document.querySelector('[data-testid="waveform-canvas"]').getBoundingClientRect();
+      return {
+        width: c.width,
+        panel: document.querySelectorAll('[data-testid="sidebar-panel"]').length,
+        strip: document.querySelectorAll('[data-testid="sidebar-tabs"]').length,
+      };
+    });
+    console.log(
+      `  card closed: canvas ${Math.round(collapsed.width)} CSS px (was ${Math.round(e2.canvas.width)}), ` +
+        `panels ${collapsed.panel}, strips ${collapsed.strip}`
+    );
+    assert(
+      collapsed.panel === 0 && collapsed.strip === 1,
+      `clicking the active strip entry closes the card and leaves the strip (panels ${collapsed.panel}, strips ${collapsed.strip})`
+    );
+    assert(
+      collapsed.width > e2.canvas.width + 300,
+      `the closed card's width goes to the waveform (expected > ${Math.round(e2.canvas.width + 300)}, actual ${Math.round(collapsed.width)})`
+    );
+    await openModuleCard(page, 'Files'); // restore the state step 14's screenshot expects
 
     // 14) Screenshot ---------------------------------------------------------
     await page.screenshot({ path: SHOT });
@@ -3788,10 +3942,12 @@ async function main() {
             'to exercise them against the packaged app too.'
         );
       } else {
-        // The Transcript tab is a real rail button with an accessible name.
+        // The Transcript tab is a real strip button with an accessible name.
         const transcriptTab = await page.$('[data-testid="sidebar-tabs"] [aria-label="Transcript"]');
         assert(transcriptTab !== null, 'the sidebar rail carries a Transcript button');
-        await transcriptTab.click();
+        // U1: the strip's active entry toggles its card closed, so ask before
+        // clicking rather than blindly closing the panel this step reads.
+        await openModuleCard(page, 'Transcript');
         await page.waitForFunction(
           () => document.querySelector('[data-testid="transcript-panel"]') !== null,
           null,
