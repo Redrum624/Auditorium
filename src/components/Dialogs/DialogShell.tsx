@@ -1,5 +1,7 @@
 import { useEffect, useState, type ReactNode } from 'react';
+import { X } from 'lucide-react';
 import { isTopDialog, nextDialogToken, popDialog, pushDialog } from '../../services/dialogBus';
+import { useDialogHost } from './DialogHost';
 import { IconTile } from '../UI/glass';
 
 /**
@@ -23,6 +25,20 @@ import { IconTile } from '../UI/glass';
  * + 12.5/600 title + muted subtitle on the darkened header band — replacing
  * the flat uppercase h2. Behaviour above is untouched; `width` lets each
  * dialog pick its stage (mockup: simple confirms stay 360, Auto-Remix is 600).
+ *
+ * U2-3: everything above describes the MODAL presentation, and it is still
+ * exactly what an unwrapped `DialogShell` renders. Wrapped in a
+ * `DialogHostProvider` (see DialogHost.tsx) the same shell renders the same
+ * header and body as an in-flow CARD instead: no fixed overlay, no backdrop, no
+ * entry on the open-dialog stack and no Escape handler, so the stage behind it
+ * stays fully live. Which presentation applies is decided by the caller's
+ * mounting, never by the dialog — that is what let nine pipeline tools move out
+ * of their modals without one of them being edited.
+ *
+ * Note what the header already was: "the module-card header anatomy". The
+ * hosted branch draws the same three elements plus a ✕, because the modal
+ * header had been a copy of the module card's since G5 — the card presentation
+ * did not need inventing, only unwrapping.
  */
 export default function DialogShell({
   title,
@@ -44,16 +60,32 @@ export default function DialogShell({
   children: ReactNode;
   dismissable?: boolean;
 }) {
+  // U2-3: `null` unless something mounted this inside a DialogHostProvider.
+  // Every conditional below branches on it; the hooks themselves are called
+  // unconditionally, so the hook order is identical in both presentations.
+  const host = useDialogHost();
+  const hosted = host !== null;
+
   // Minting the token is a pure counter bump (safe under StrictMode's
   // double-render); registering it on the stack happens only from the effect
   // below, whose mount/cleanup are always paired 1:1 — see dialogBus.ts.
   const [token] = useState(nextDialogToken);
   useEffect(() => {
+    // U2-3: a hosted tool does NOT join the stack. `shortcuts.ts` bails out of
+    // every global shortcut while that stack is non-empty, and the point of
+    // hosting is that the user can still play, scrub and select behind the
+    // tool. The stack's other reader, `isTopDialog`, is about Escape ordering
+    // between stacked modals, which a card is not part of either.
+    if (hosted) return;
     pushDialog(token);
     return () => popDialog(token);
-  }, [token]);
+  }, [token, hosted]);
 
   useEffect(() => {
+    // U2-3: no document-level Escape handler while hosted. Escape belongs to
+    // the stage (it clears the selection there), and a card that swallowed it
+    // would be a focus trap wearing a different shape. The ✕ is the dismissal.
+    if (hosted) return;
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return;
       if (!dismissable || !isTopDialog(token)) return;
@@ -62,11 +94,102 @@ export default function DialogShell({
     };
     document.addEventListener('keydown', onKeyDown);
     return () => document.removeEventListener('keydown', onKeyDown);
-  }, [onClose, dismissable, token]);
+  }, [onClose, dismissable, token, hosted]);
+
+  // U2-3: publish the dialog's own `dismissable` to the host, and hand it back
+  // as `true` on unmount so a host cannot be stranded believing a pass is still
+  // running — that would lock the module strip for the rest of the session.
+  useEffect(() => {
+    if (!host) return;
+    host.onDismissableChange(dismissable);
+    return () => host.onDismissableChange(true);
+  }, [host, dismissable]);
 
   const dismissViaBackdrop = () => {
     if (dismissable) onClose();
   };
+
+  if (host) {
+    return (
+      <section
+        aria-label={title}
+        data-testid="hosted-tool"
+        className="flex min-h-0 flex-1 flex-col"
+      >
+        <div
+          className="flex flex-shrink-0 items-center"
+          style={{
+            padding: '13px 16px',
+            gap: 11,
+            background: 'rgba(0, 0, 0, 0.3)',
+            borderBottom: '1px solid var(--glass-border)',
+          }}
+        >
+          {icon && <IconTile data-testid="dialog-icon">{icon}</IconTile>}
+          <div className="min-w-0 flex-1">
+            <div
+              style={{
+                fontSize: 12.5,
+                fontWeight: 600,
+                color: 'var(--glass-text-title)',
+                lineHeight: 1.25,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+              }}
+            >
+              {title}
+            </div>
+            {subtitle && (
+              <div
+                style={{
+                  fontSize: 10.5,
+                  color: 'var(--glass-text-muted)',
+                  lineHeight: 1.35,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {subtitle}
+              </div>
+            )}
+          </div>
+          {/* The module card's own close control, and the same rule the modal
+              backdrop follows: `dismissable === false` is the dialog refusing
+              to be discarded mid-run, and it refuses here too. Disabled with
+              the reason in the tooltip rather than absent — a control that
+              vanishes teaches nothing. */}
+          <button
+            type="button"
+            data-testid="hosted-tool-close"
+            aria-label={`Close ${title}`}
+            title={
+              dismissable ? 'Close this tool' : 'This pass is running — it cannot be closed yet'
+            }
+            disabled={!dismissable}
+            onClick={onClose}
+            className="glass-rail-btn flex shrink-0 items-center justify-center"
+            style={{
+              width: 22,
+              height: 22,
+              borderRadius: 7,
+              border: '1px solid transparent',
+              background: 'transparent',
+              color: 'var(--glass-text-chrome-idle)',
+              cursor: dismissable ? 'pointer' : 'default',
+              opacity: dismissable ? 1 : 0.5,
+            }}
+          >
+            <X size={13} />
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 overflow-y-auto" style={{ padding: 16 }}>
+          {children}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <div

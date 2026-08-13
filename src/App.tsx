@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from 'react';
 import { X } from 'lucide-react';
 import WaveformView from './components/Editor/WaveformView';
 import SpectrogramView from './components/Editor/SpectrogramView';
@@ -8,15 +8,10 @@ import EffectDialog from './components/Dialogs/EffectDialog';
 import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
 import RecordDialog from './components/Dialogs/RecordDialog';
-import RemixDialog from './components/Dialogs/RemixDialog';
-import SeparateDialog from './components/Dialogs/SeparateDialog';
-import TempoDialog from './components/Dialogs/TempoDialog';
-import TranscribeDialog from './components/Dialogs/TranscribeDialog';
-import VoiceChangerDialog from './components/Dialogs/VoiceChangerDialog';
-import AlignTimingDialog from './components/Dialogs/AlignTimingDialog';
-import AlignLyricsDialog from './components/Dialogs/AlignLyricsDialog';
-import VocalChainDialog from './components/Dialogs/VocalChainDialog';
-import CoverChainDialog from './components/Dialogs/CoverChainDialog';
+// U2: the nine pipeline tools are no longer mounted here as modals — they are
+// mounted by the host card, in the module column, unchanged. See
+// components/Dialogs/PipelineToolHost.tsx for the registry and the width.
+import PipelineToolHost, { TOOL_HOST_WIDTH } from './components/Dialogs/PipelineToolHost';
 import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
@@ -41,7 +36,11 @@ import TitleBar from './components/Layout/TitleBar';
 import Toolbar from './components/Layout/Toolbar';
 import { GlassCard, IconTile } from './components/UI/glass';
 import { registerAllEffects } from './effects/registerAll';
-import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
+import {
+  registerDialogSetters,
+  setHostedToolRunning,
+  type ConvertMode,
+} from './services/dialogBus';
 import { getInFlightSaveCount, hasUnsavedWork } from './services/fileService';
 import { getRemixSession, useRemixVersion } from './services/remixService';
 import { getStemBusyCount } from './services/stemService';
@@ -49,6 +48,8 @@ import { getTranscribeBusyCount } from './services/transcribeService';
 import { getVoiceBusyCount } from './services/voiceService';
 import { getAlignBusyCount } from './services/alignLyricsService';
 import { registerEffectCommands } from './services/menuActions';
+// U2-3: the running tool's own label, for the refusal message.
+import { getPipelineGroups } from './services/pipelineTools';
 import { installShortcuts } from './services/shortcuts';
 import { installTestHooks } from './services/testHooks';
 import { stopAll } from './services/transportService';
@@ -80,6 +81,15 @@ const COLUMN_MARGIN = 14;
 /** Stage clearance while a panel card is open: the column's footprint plus one
  * margin of air between the card and the waveform. */
 const STAGE_INSET_RIGHT_OPEN = COLUMN_MARGIN + MODULE_COLUMN_WIDTH + COLUMN_MARGIN;
+/** U2-3: the same clearance for the wider tool-host card. The host grows
+ * leftward out of the 348px column (see TOOL_HOST_WIDTH), so the stage has to
+ * step back by the difference or the waveform would run under it. */
+const STAGE_INSET_RIGHT_HOSTED = COLUMN_MARGIN + TOOL_HOST_WIDTH + COLUMN_MARGIN;
+
+/** U2-3: the strip's tooltip while a hosted pass is running. Stated once so the
+ * sentence the user reads and the rule the code enforces are the same fact. */
+const MODULE_SWITCH_LOCKED =
+  'A pipeline pass is running — switching module would discard it. The waveform and transport stay usable.';
 
 // Populate the effect registry and its menu commands once at module load — before
 // the first render — so the Effects menu and panel are fully built on first paint.
@@ -97,15 +107,14 @@ export default function App() {
   const [effectDialogId, setEffectDialogId] = useState<string | null>(null);
   const [convertMode, setConvertMode] = useState<ConvertMode | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
-  const [tempoOpen, setTempoOpen] = useState(false);
-  const [remixOpen, setRemixOpen] = useState(false);
-  const [separateOpen, setSeparateOpen] = useState(false);
-  const [transcribeOpen, setTranscribeOpen] = useState(false);
-  const [voiceChangerOpen, setVoiceChangerOpen] = useState(false);
-  const [alignTimingOpen, setAlignTimingOpen] = useState(false);
-  const [vocalChainOpen, setVocalChainOpen] = useState(false);
-  const [coverChainOpen, setCoverChainOpen] = useState(false);
-  const [alignLyricsOpen, setAlignLyricsOpen] = useState(false);
+  // U2-3: the nine `useState` flags that used to mount nine modals became ONE
+  // command id — the pipeline tool the module column is hosting, or null.
+  // One at a time by construction, which is what makes `setHostedToolRunning`
+  // a boolean rather than a counter.
+  const [hostedTool, setHostedTool] = useState<string | null>(null);
+  // The hosted dialog's own `dismissable`, inverted: true while a pass is
+  // running and the tool refuses to be discarded.
+  const [toolRunning, setToolRunning] = useState(false);
   // U1: null = no panel card open. The strip's active entry closes it, which
   // is what lets the stage take the column's width (E2's "the waveform takes
   // every liberated pixel").
@@ -144,6 +153,105 @@ export default function App() {
   useEffect(() => {
     if (sidebarTab === 'remix' && !hasRemix) setSidebarTab(null);
   }, [sidebarTab, hasRemix]);
+
+  /**
+   * U2-3 — what happens when the user tries to leave a RUNNING pass, and why
+   * it is a refusal rather than a background run that reattaches.
+   *
+   * The nicer answer would be to let the pass continue headless and have the
+   * stepper pick it back up on return. It is not available, and the reason is
+   * in the dialogs rather than in this file: every one of the nine keeps its
+   * pass in component state (`busy`, `progress`, `liveResults`,
+   * `stageProgress`) and pairs it with an unmount-cancel ref — RemixDialog's
+   * `cancelledRef`, SeparateDialog's and TranscribeDialog's `unmountedRef`, and
+   * the copies the two chains name after them. Those refs do not merely silence
+   * a setState after unmount: each run body reads `if (cancelledRef.current)
+   * return;` after its await and DISCARDS the finished result. So unmounting a
+   * running tool does not background it, it throws the pass away — minutes of
+   * inference, silently.
+   *
+   * Reattaching would mean lifting that state out of nine dialogs, which is the
+   * one thing this change may not do (their internals are being rewritten
+   * concurrently). Blocking is therefore the honest choice, not the lazy one,
+   * and it is also what the tools already do: `dismissable={!busy}` has always
+   * refused Escape and a backdrop click mid-run. The block is that same signal,
+   * applied to the two doors hosting newly opened — the module strip, and
+   * swapping one hosted tool for another.
+   *
+   * The APP stays live throughout: the waveform, the transport, the toolbar and
+   * every editor interaction keep working, which is the entire point of hosting.
+   * What is refused is only the thing that would destroy the pass.
+   */
+  const toolRunningRef = useRef(false);
+  const hostedToolRef = useRef<string | null>(null);
+  hostedToolRef.current = hostedTool;
+
+  const refuseWhileRunning = useCallback(() => {
+    const label =
+      getPipelineGroups()
+        .flatMap((g) => g.commands)
+        .find((c) => c.id === hostedToolRef.current)?.label ?? 'A pipeline pass';
+    void window.electronAPI?.showMessageBox({
+      type: 'info',
+      title: 'A pass is running',
+      message:
+        `${label} is still running.\n\n` +
+        'Its progress lives in the tool, so leaving now would discard the pass. ' +
+        'Wait for it to finish — the waveform, the transport and the editor all ' +
+        'stay usable while it runs.',
+    });
+  }, []);
+
+  /** U2-3: mount a pipeline tool in the module column, with the strip showing
+   * Pipeline as the active module. */
+  const openTool = useCallback(
+    (commandId: string) => {
+      if (toolRunningRef.current) {
+        refuseWhileRunning();
+        return;
+      }
+      setSidebarTab('pipeline');
+      setHostedTool(commandId);
+    },
+    [refuseWhileRunning]
+  );
+
+  /** U2-3: put a PANEL in the card, dropping any hosted tool. The three
+   * `focus*Panel` bus entries land here. */
+  const showPanel = useCallback(
+    (panel: PanelId) => {
+      if (toolRunningRef.current) {
+        refuseWhileRunning();
+        return;
+      }
+      setHostedTool(null);
+      setSidebarTab(panel);
+    },
+    [refuseWhileRunning]
+  );
+
+  /** U2-3: the strip's own selection — never reached while a pass runs, because
+   * the strip is disabled then (`lockedReason`). */
+  const selectModule = useCallback((tab: PanelId | null) => {
+    setHostedTool(null);
+    setSidebarTab(tab);
+  }, []);
+
+  /**
+   * U2-3: the hosted dialog's `dismissable`, arriving through the shell. It is
+   * mirrored into three places because three surfaces need the same fact and
+   * none of them may re-derive it: React state (the strip's lock and the ✕),
+   * a ref (the bus callbacks are registered once and would otherwise close over
+   * a stale value), and `dialogBus` (so `hasOpenDialog()` keeps the global
+   * shortcuts off a running pass's document, the F10 guard hosting would
+   * otherwise have quietly removed).
+   */
+  const handleToolDismissable = useCallback((dismissable: boolean) => {
+    const running = !dismissable;
+    toolRunningRef.current = running;
+    setToolRunning(running);
+    setHostedToolRunning(running);
+  }, []);
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
@@ -198,6 +306,13 @@ export default function App() {
   }, [view]);
 
   // Let the file.new / file.export commands open these React dialogs (Task 11).
+  //
+  // U2-3: the nine pipeline openers no longer raise a modal flag. They name the
+  // command whose tool the module column should HOST, and every door the user
+  // has — the Pipeline card, the Pipeline menu, the Effects card's tool rows —
+  // arrives here, because all three go through `runCommand` and every one of
+  // those commands' `run()` bodies calls one of these openers. Routing at the
+  // bus is what made "from every door" one change rather than three.
   useEffect(
     () =>
       registerDialogSetters({
@@ -206,23 +321,23 @@ export default function App() {
         openEffectDialog: (effectId) => setEffectDialogId(effectId),
         openConvertDialog: (mode) => setConvertMode(mode),
         openRecordDialog: () => setRecordOpen(true),
-        openTempoDialog: () => setTempoOpen(true),
-        openRemixDialog: () => setRemixOpen(true),
-        openSeparateDialog: () => setSeparateOpen(true),
-        openTranscribeDialog: () => setTranscribeOpen(true),
-        openVoiceChangerDialog: () => setVoiceChangerOpen(true),
-        openAlignTimingDialog: () => setAlignTimingOpen(true),
-        openVocalChainDialog: () => setVocalChainOpen(true),
-        openCoverChainDialog: () => setCoverChainOpen(true),
-        openAlignLyricsDialog: () => setAlignLyricsOpen(true),
-        focusRemixPanel: () => setSidebarTab('remix'),
-        focusTranscriptPanel: () => setSidebarTab('transcript'),
+        openTempoDialog: () => openTool('tempo.match'),
+        openRemixDialog: () => openTool('edit.remix'),
+        openSeparateDialog: () => openTool('edit.separateStems'),
+        openTranscribeDialog: () => openTool('edit.transcribe'),
+        openVoiceChangerDialog: () => openTool('edit.voiceChanger'),
+        openAlignTimingDialog: () => openTool('timing.align'),
+        openVocalChainDialog: () => openTool('effects.vocalChain'),
+        openCoverChainDialog: () => openTool('effects.coverChain'),
+        openAlignLyricsDialog: () => openTool('lyrics.align'),
+        focusRemixPanel: () => showPanel('remix'),
+        focusTranscriptPanel: () => showPanel('transcript'),
         // F11-8: the Pipeline > Mix command's only effect. Spatial is a single
         // tool rather than a module (user ruling), so this is how its panel
         // reaches the card now that the strip draws no icon for it.
-        focusSpatialPanel: () => setSidebarTab('spatial'),
+        focusSpatialPanel: () => showPanel('spatial'),
       }),
-    []
+    [openTool, showPanel]
   );
 
   // Scripted-smoke test hooks — only when the preload flagged test mode.
@@ -296,8 +411,14 @@ export default function App() {
             // toolbar, status and edit pills) rather than holding 362px of
             // width hostage for a 90px card.
             '--stage-inset-left': `${COLUMN_MARGIN}px`,
+            // U2-3: three states now — no card, a module card, and the wider
+            // tool host.
             '--stage-inset-right': `${
-              sidebarTab === null ? COLUMN_MARGIN : STAGE_INSET_RIGHT_OPEN
+              hostedTool !== null
+                ? STAGE_INSET_RIGHT_HOSTED
+                : sidebarTab === null
+                  ? COLUMN_MARGIN
+                  : STAGE_INSET_RIGHT_OPEN
             }px`,
           } as CSSProperties
         }
@@ -348,7 +469,19 @@ export default function App() {
           }}
         >
           <TempoCard />
-          {activeTab && ActiveIcon && (
+          {/* U2-3: the tool host REPLACES the module card while a pipeline tool
+              is open — same anchor, same glass language, wider. No backdrop and
+              no focus trap: the stage behind it stays live, which is the whole
+              point (watch the stepper beside the waveform). */}
+          {hostedTool !== null ? (
+            <PipelineToolHost
+              commandId={hostedTool}
+              onClose={() => setHostedTool(null)}
+              onDismissableChange={handleToolDismissable}
+            />
+          ) : (
+            activeTab &&
+            ActiveIcon && (
             <GlassCard
               data-testid="sidebar-panel"
               data-active-tab={activeTab.id}
@@ -413,13 +546,23 @@ export default function App() {
                 {sidebarTab === 'transcript' && <TranscriptPanel />}
               </div>
             </GlassCard>
+            )
           )}
         </div>
 
         {/* U1: the module strip — the G4 icon rail rotated horizontal, sitting
             in the toolbar band at the column's width and driving the card
-            below it. */}
-        <ModuleStrip activeTab={sidebarTab} hasRemix={hasRemix} onSelect={setSidebarTab} />
+            below it.
+
+            U2-3: `lockedReason` is set only while a hosted pass is RUNNING —
+            switching module then would unmount the tool, and every one of the
+            nine discards its result on unmount (see `refuseWhileRunning`). */}
+        <ModuleStrip
+          activeTab={sidebarTab}
+          hasRemix={hasRemix}
+          lockedReason={toolRunning ? MODULE_SWITCH_LOCKED : null}
+          onSelect={selectModule}
+        />
 
         {/* U1 bottom band (mockup E2): the edit pill floating ABOVE the G2
             status pill, both centred on the WAVEFORM's axis rather than the
@@ -452,15 +595,13 @@ export default function App() {
         <ConvertDialog mode={convertMode} onClose={() => setConvertMode(null)} />
       )}
       {recordOpen && <RecordDialog onClose={() => setRecordOpen(false)} />}
-      {tempoOpen && <TempoDialog onClose={() => setTempoOpen(false)} />}
-      {remixOpen && <RemixDialog onClose={() => setRemixOpen(false)} />}
-      {separateOpen && <SeparateDialog onClose={() => setSeparateOpen(false)} />}
-      {transcribeOpen && <TranscribeDialog onClose={() => setTranscribeOpen(false)} />}
-      {voiceChangerOpen && <VoiceChangerDialog onClose={() => setVoiceChangerOpen(false)} />}
-      {alignTimingOpen && <AlignTimingDialog onClose={() => setAlignTimingOpen(false)} />}
-      {vocalChainOpen && <VocalChainDialog onClose={() => setVocalChainOpen(false)} />}
-      {coverChainOpen && <CoverChainDialog onClose={() => setCoverChainOpen(false)} />}
-      {alignLyricsOpen && <AlignLyricsDialog onClose={() => setAlignLyricsOpen(false)} />}
+      {/* U2-3: the nine pipeline tools used to be mounted here, each behind its
+          own `useState` flag, each raising a full-screen backdrop. They are in
+          the module column now (see the card column above). What stays modal is
+          the set that is a QUESTION rather than a workspace: New File, Export,
+          Convert, Record and the per-effect parameter dialogs each take one
+          answer and close, and none of them has anything to watch on the stage
+          while it is open. */}
     </div>
   );
 }

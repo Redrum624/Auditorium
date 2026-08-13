@@ -214,9 +214,36 @@ export function popDialog(token: number): void {
   if (index !== -1) openDialogStack.splice(index, 1);
 }
 
-/** True while at least one dialog is open. */
+// U2: a hosted pipeline tool (see components/Dialogs/DialogHost.tsx) does NOT
+// join the stack above — the whole point of hosting is that the user keeps the
+// stage while the tool is open, and joining would hand every global shortcut
+// back to the bail-out below.
+//
+// While such a tool is RUNNING, though, the guard that stack exists for applies
+// again word for word: these tools resolve their target document from the LIVE
+// `activeDocumentId`, so a Ctrl+O behind a running Cover Chain would land the
+// pass on a document the user replaced mid-flight. That is exactly the silent
+// wrong-document write `hasOpenDialog` was introduced to stop (F10), and losing
+// it was never part of what the user asked for.
+//
+// So the flag is separate from the stack, not on it: `isTopDialog` decides
+// Escape ORDERING between stacked modals, and a card that installs no Escape
+// handler must not be able to win that ordering from a modal opened over it.
+// One boolean rather than a counter because App hosts at most one tool at a
+// time — `PipelineToolHost.test` pins that the flag is cleared on unmount, which
+// is the only way a stale `true` could strand the shortcuts.
+let hostedToolRunning = false;
+
+/** U2: records whether the hosted pipeline tool is mid-pass. Called by
+ * `PipelineToolHost` from the `dismissable` the dialog already publishes. */
+export function setHostedToolRunning(running: boolean): void {
+  hostedToolRunning = running;
+}
+
+/** True while at least one dialog is open, or a hosted pipeline tool is
+ * mid-pass (U2 — see above). */
 export function hasOpenDialog(): boolean {
-  return openDialogStack.length > 0;
+  return openDialogStack.length > 0 || hostedToolRunning;
 }
 
 /** True when `token` is the most-recently-opened (topmost) dialog. */
