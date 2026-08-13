@@ -639,6 +639,40 @@ async function resetNativeCalls(app) {
 // ---------------------------------------------------------------------------
 
 const coverage = [];
+/**
+ * MT1 — every `<select>` currently on screen must have an OPAQUE background.
+ *
+ * Called from inside the dialog walk, with a dialog open, because that is where
+ * selects live: the Cover Chain Reference picker (the reported repro), the
+ * Spatial track picker, the Properties fade-curve picker. A sweep run before any
+ * of them is mounted checks nothing.
+ *
+ * Chromium paints a select's dropdown popup with the author's background but as
+ * its own widget off the glass surface, so a translucent tint that reads dark on
+ * the stage composites near-white in the popup, under text coloured for
+ * near-black. Opacity is therefore the property under test — not the colour.
+ *
+ * Returns how many selects it saw, so the caller can prove the sweep was not
+ * vacuous over the whole run.
+ */
+async function sweepSelects(page, where) {
+  const found = await page.evaluate(() => {
+    const opaque = (c) => !/rgba\([^)]*,\s*(?:0?\.\d+|0)\s*\)/.test(c) && c !== 'transparent';
+    return [...document.querySelectorAll('select')].map((s) => ({
+      id: s.dataset.testid || s.getAttribute('aria-label') || '(unlabelled)',
+      bg: getComputedStyle(s).backgroundColor,
+      opaque: opaque(getComputedStyle(s).backgroundColor),
+    }));
+  });
+  const translucent = found.filter((s) => !s.opaque);
+  assert(
+    translucent.length === 0,
+    `every select in ${where} is opaque — a translucent one is the reported bug ` +
+      `(${JSON.stringify(translucent)})`
+  );
+  return found.length;
+}
+
 function record(surface, stepName, verdict) {
   coverage.push({ surface, step: stepName, verdict });
 }
@@ -714,14 +748,15 @@ async function main() {
           probeScheme: probeStyle.colorScheme,
           probeBg: probeStyle.backgroundColor,
           probeBgOpaque: opaque(probeStyle.backgroundColor),
+          optionBg: optStyle.backgroundColor,
           optionBgOpaque: opaque(optStyle.backgroundColor),
-          live: [...document.querySelectorAll('select')]
-            .filter((s) => s !== el)
-            .map((s) => ({
-              id: s.dataset.testid || s.getAttribute('aria-label') || '(unlabelled)',
-              bg: getComputedStyle(s).backgroundColor,
-              opaque: opaque(getComputedStyle(s).backgroundColor),
-            })),
+          // The probe's single option is also its SELECTED one, so this reads
+          // the `option:checked` rule — which is the row the user looks at when
+          // the popup opens, and the one that was still translucent after the
+          // first pass (`var(--accent-soft)`).
+          checkedOption: opt.selected,
+          checkedOptionBg: optStyle.backgroundColor,
+          checkedOptionBgOpaque: opaque(optStyle.backgroundColor),
         };
         el.remove();
         return result;
@@ -735,14 +770,20 @@ async function main() {
         probe.probeBgOpaque,
         `an unstyled select gets an OPAQUE background from the stylesheet (${probe.probeBg})`
       );
-      assert(probe.optionBgOpaque, 'its option row gets an opaque background too');
-      const translucent = probe.live.filter((s) => !s.opaque);
-      console.log(`  selects on screen: ${probe.live.length} (${translucent.length} translucent)`);
+      assert(probe.optionBgOpaque, `its option row gets an opaque background too (${probe.optionBg})`);
+      assert(probe.checkedOption, 'the probe option is the SELECTED one, so the next line reads option:checked');
       assert(
-        translucent.length === 0,
-        `every select on screen is opaque — a translucent one is the reported bug ` +
-          `(${JSON.stringify(translucent)})`
+        probe.checkedOptionBgOpaque,
+        `the CHECKED option row is opaque (${probe.checkedOptionBg}) — the row the user is ` +
+          `looking at when the popup opens, and the last translucent one left after the first pass`
       );
+      // The sweep over REAL selects is deliberately NOT here. Nothing has opened
+      // a dialog or a panel yet at this point in the walk, so
+      // `querySelectorAll('select')` returns NOTHING and an "every select on
+      // screen is opaque" claim would pass by having no select to check — which
+      // is what the first version of this step did. It runs per-dialog instead
+      // (`sweepSelects`), where selects actually exist, and the cumulative count
+      // is asserted non-zero once the dialog walk is done.
     });
 
     // =====================================================================
@@ -1219,6 +1260,10 @@ async function main() {
 
     // Every dialog that a FIXED command opens — directly, or through a service
     // relay. The effect dialog is the one exception and gets its own step.
+    // MT1: how many real, mounted selects the per-dialog sweep actually saw. A
+    // sweep that never finds one proves nothing, and the first version of this
+    // check ran where there were none — so the total is asserted below.
+    let selectsSwept = 0;
     for (const d of derivedDialogs.filter((x) => x.commands.length > 0 || x.relays.length > 0)) {
       const commandId = d.commands[0] ?? d.relays[0].command;
       const label = commandLabels.get(commandId);
@@ -1266,6 +1311,10 @@ async function main() {
           info.controls > 0,
           `${d.component} rendered its own body, not an empty shell (${info.controls} controls)`
         );
+        // MT1: with this dialog OPEN, its selects are mounted and their computed
+        // styles are real. CoverChainDialog's Reference picker — the reported
+        // repro — is checked here on the pass that opens it.
+        selectsSwept += await sweepSelects(page, `the open ${d.component}`);
         record(
           `Dialog: ${d.component}`,
           `opened via ${opener.kind}${opener.title ? ` (${opener.title})` : ''} > ${label}`,
@@ -1287,6 +1336,21 @@ async function main() {
         );
       });
     }
+
+    await step(page, 'MT1 — the select sweep actually had selects to sweep', async () => {
+      // Guards the guard. Every per-dialog sweep above passes trivially if no
+      // dialog mounts a select, which is exactly how the first version of this
+      // check managed to assert nothing at all. At least the Cover Chain
+      // Reference picker — the surface the bug was reported against — is
+      // mounted during the walk above.
+      console.log(`  selects swept across the dialog walk: ${selectsSwept}`);
+      assert(
+        selectsSwept > 0,
+        `the per-dialog select sweep saw at least one real select (${selectsSwept}) — a sweep ` +
+          `with nothing to check is not evidence`
+      );
+      record('Native selects', 'dark scheme + opaque backgrounds, swept per dialog', 'PASS');
+    });
 
     // The one dialog with no fixed command: EffectDialog is built per registry
     // entry, so it is walked through an EFFECT row of the Effects menu.

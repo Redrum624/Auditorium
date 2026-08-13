@@ -162,6 +162,22 @@ describe('MT1-4 — native select popups', () => {
     expect(css).toMatch(/option\s*\{[^}]*background-color:\s*var\(--glass-field-bg\)/);
   });
 
+  it('gives the CHECKED option row an opaque background too', () => {
+    // The last translucent one. `option:checked` was written as
+    // `var(--accent-soft)` = rgba(38,198,218,.14), which is the very defect this
+    // block exists to fix, on the row the user is actually looking at when the
+    // popup opens. It is the accent composited over --glass-field-bg once:
+    // .14*(38,198,218) + .86*(26,26,30) = (28,50,56) = #1c3238.
+    const checked = /select option:checked\s*\{([^}]*)\}/.exec(css);
+    expect(checked).not.toBeNull();
+    // Comments stripped first: the rule's own docblock necessarily NAMES the
+    // translucent value it replaced, and a matcher that reads it reports the
+    // explanation as the defect.
+    const body = stripComments(checked![1]);
+    expect(body).toContain('background-color: #1c3238');
+    expect(body).not.toMatch(/rgba\(|--accent-soft/);
+  });
+
   it('finds every select in the app (guards the scanner itself)', () => {
     const regions = selectRegions();
     const files = [...new Set(regions.map((r) => r.file))].sort();
