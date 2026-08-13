@@ -1,7 +1,21 @@
-import { useAppStore, makeInitialState, nextId } from './appStore';
+import {
+  applyEditorZoom,
+  defaultZoom,
+  fitSamplesPerPixel,
+  makeInitialState,
+  MIN_SPP,
+  nextId,
+  publishEditorLaneWidth,
+  resolveZoom,
+  useAppStore,
+} from './appStore';
 import type { Marker } from './appStore';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import type { AudioDocument } from '../audio/AudioDocument';
+import {
+  FALLBACK_EDITOR_LANE_WIDTH,
+  _resetEditorLaneWidth,
+} from '../services/editorViewport';
 
 function makeDoc(samples: number, name = 'test'): AudioDocument {
   return createDocument({
@@ -15,6 +29,10 @@ beforeEach(() => {
   // Partial-merge reset: with replace=true zustand v5 would wipe the actions
   // off the store, so we merge a fresh state over the existing one instead.
   useAppStore.setState(makeInitialState());
+  // F11-3: the lane width is module state in `editorViewport`, so it outlives
+  // a store reset. Forgetting it keeps every zoom expectation below anchored
+  // on the documented fallback.
+  _resetEditorLaneWidth();
 });
 
 describe('makeInitialState', () => {
@@ -73,20 +91,26 @@ describe('addDocument', () => {
     expect(s.activeDocumentId).toBe(doc.id);
   });
 
-  it('sets default zoom to Math.max(1, Math.ceil(docLength/1600)) and scrollSample 0', () => {
+  it('fits the whole document across the editor lane and starts at scroll 0', () => {
     const doc = makeDoc(160000);
     useAppStore.getState().addDocument(doc);
+    // Nothing has measured a lane in this suite, so the fit is taken against
+    // the 1600 px fallback — the nominal viewport `defaultZoom` used
+    // unconditionally before F11-3.
     expect(useAppStore.getState().zoom).toEqual({
-      samplesPerPixel: Math.max(1, Math.ceil(docLength(doc) / 1600)),
+      samplesPerPixel: docLength(doc) / FALLBACK_EDITOR_LANE_WIDTH,
       scrollSample: 0,
     });
     expect(useAppStore.getState().zoom.samplesPerPixel).toBe(100);
   });
 
-  it('clamps default zoom to a minimum of 1 sample per pixel for short docs', () => {
+  // F11-3 replaced an arbitrary floor of 1 spp with the app's real zoom-in
+  // limit. A document this short cannot fill the lane without zooming in
+  // further than the editor goes, so it fits as far as the range allows.
+  it('fits a document shorter than the lane as far as MIN_SPP allows', () => {
     const doc = makeDoc(10);
     useAppStore.getState().addDocument(doc);
-    expect(useAppStore.getState().zoom.samplesPerPixel).toBe(1);
+    expect(useAppStore.getState().zoom.samplesPerPixel).toBe(MIN_SPP);
   });
 
   it('resets selection and cursor', () => {
@@ -396,5 +420,150 @@ describe('markers', () => {
     useAppStore.getState().addMarker(b.id, m('m-b', 10));
     useAppStore.getState().setMarkersForDoc(a.id, [m('m-a', 20)]);
     expect(useAppStore.getState().markers[b.id].map((x) => x.id)).toEqual(['m-b']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11-3 / F11-9 — one clamped zoom resolution, and the fit that shares its
+// limit. The bug these pin: past the fit, `getPeaksForRange` clamps its request
+// to the document and re-spreads it over every column, so the waveform freezes
+// while the beat tics and the ruler — which map through `sampleToPixel` with
+// the raw spp — keep compressing. The invariant that keeps the three layers on
+// the same picture is `scrollSample + laneWidth * spp <= docLength`.
+// ---------------------------------------------------------------------------
+describe('resolveZoom (F11-9)', () => {
+  const LANE = 800;
+
+  it('clamps zoom-out at the fit — the whole document, and not one pixel more', () => {
+    const doc = makeDoc(160_000);
+    const fit = fitSamplesPerPixel(doc, LANE);
+    expect(fit).toBe(200);
+
+    const out = resolveZoom(doc, { samplesPerPixel: fit * 50, scrollSample: 0 }, LANE);
+    expect(out.samplesPerPixel).toBe(fit);
+    expect(out.scrollSample + LANE * out.samplesPerPixel).toBe(docLength(doc));
+  });
+
+  it('never lets the visible window run past the end of the document', () => {
+    const doc = makeDoc(160_000);
+    for (const spp of [0.01, 1, 37, 199, 200, 201, 1000, 1e9]) {
+      for (const scrollSample of [-500, 0, 12_345, 160_000, 1e9]) {
+        const out = resolveZoom(doc, { samplesPerPixel: spp, scrollSample }, LANE);
+        expect(out.scrollSample).toBeGreaterThanOrEqual(0);
+        expect(out.scrollSample + LANE * out.samplesPerPixel).toBeLessThanOrEqual(
+          docLength(doc) + 1e-9
+        );
+      }
+    }
+  });
+
+  it('floors samplesPerPixel at MIN_SPP', () => {
+    const doc = makeDoc(160_000);
+    expect(resolveZoom(doc, { samplesPerPixel: 0, scrollSample: 0 }, LANE).samplesPerPixel).toBe(
+      MIN_SPP
+    );
+  });
+
+  it('hands the RESOLVED samplesPerPixel to a scroll thunk, so an anchor survives the clamp', () => {
+    const doc = makeDoc(160_000);
+    const seen: number[] = [];
+    resolveZoom(
+      doc,
+      {
+        samplesPerPixel: 1e6, // will be clamped to the fit, 200
+        scrollSample: (spp) => {
+          seen.push(spp);
+          return 0;
+        },
+      },
+      LANE
+    );
+    expect(seen).toEqual([200]);
+  });
+
+  it('resolves a non-finite scroll request to the start rather than poisoning the store', () => {
+    const doc = makeDoc(160_000);
+    expect(resolveZoom(doc, { samplesPerPixel: 100, scrollSample: NaN }, LANE).scrollSample).toBe(
+      0
+    );
+  });
+
+  it('defaultZoom IS the zoom-out limit — Fit and the − button cannot disagree', () => {
+    const doc = makeDoc(160_000);
+    expect(defaultZoom(doc)).toEqual({
+      samplesPerPixel: fitSamplesPerPixel(doc),
+      scrollSample: 0,
+    });
+    expect(fitSamplesPerPixel(doc)).toBe(docLength(doc) / FALLBACK_EDITOR_LANE_WIDTH);
+  });
+});
+
+describe('applyEditorZoom (F11-9)', () => {
+  it('writes nothing at all when the request resolves to the zoom already in place', () => {
+    const doc = makeDoc(160_000);
+    useAppStore.getState().addDocument(doc);
+    const before = useAppStore.getState().zoom;
+
+    applyEditorZoom({ samplesPerPixel: before.samplesPerPixel * 4, scrollSample: 0 });
+
+    // Same OBJECT: no new store snapshot, so nothing repaints.
+    expect(useAppStore.getState().zoom).toBe(before);
+  });
+
+  it('commits a zoom-in and keeps the window inside the document', () => {
+    const doc = makeDoc(160_000);
+    useAppStore.getState().addDocument(doc);
+
+    applyEditorZoom({ samplesPerPixel: 25, scrollSample: 1e9 });
+
+    const z = useAppStore.getState().zoom;
+    expect(z.samplesPerPixel).toBe(25);
+    expect(z.scrollSample).toBe(160_000 - FALLBACK_EDITOR_LANE_WIDTH * 25);
+  });
+
+  it('does nothing without an active document', () => {
+    const before = useAppStore.getState().zoom;
+    applyEditorZoom({ samplesPerPixel: 1, scrollSample: 0 });
+    expect(useAppStore.getState().zoom).toBe(before);
+  });
+});
+
+describe('publishEditorLaneWidth (F11-3)', () => {
+  it('re-fits a fitted document to the lane that finally measured itself', () => {
+    const doc = makeDoc(160_000);
+    useAppStore.getState().addDocument(doc); // fitted to the 1600 fallback
+    expect(useAppStore.getState().zoom.samplesPerPixel).toBe(100);
+
+    publishEditorLaneWidth(400);
+
+    const z = useAppStore.getState().zoom;
+    expect(z.samplesPerPixel).toBe(400);
+    expect(z.scrollSample + 400 * z.samplesPerPixel).toBe(docLength(doc));
+  });
+
+  it('leaves a zoomed-in view where the user put it, only re-clamping its scroll', () => {
+    const doc = makeDoc(160_000);
+    useAppStore.getState().addDocument(doc);
+    // Zoomed in near the end of the track, on the 1600 px fallback lane.
+    useAppStore.getState().setZoom({ samplesPerPixel: 10, scrollSample: 143_000 });
+
+    // The lane turns out to be WIDER, so the same zoom now shows more samples
+    // and the old scroll would push the window past the end.
+    publishEditorLaneWidth(2000);
+
+    const z = useAppStore.getState().zoom;
+    expect(z.samplesPerPixel).toBe(10); // not re-fitted — the user chose this zoom
+    expect(z.scrollSample).toBe(160_000 - 2000 * 10); // pulled back to the last full window
+  });
+
+  it('ignores a zero measurement, so a hidden lane never redefines the fit', () => {
+    const doc = makeDoc(160_000);
+    useAppStore.getState().addDocument(doc);
+    const before = useAppStore.getState().zoom;
+
+    publishEditorLaneWidth(0);
+
+    expect(useAppStore.getState().zoom).toBe(before);
+    expect(fitSamplesPerPixel(doc)).toBe(100);
   });
 });

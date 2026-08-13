@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import type { AudioDocument } from '../audio/AudioDocument';
 import { docLength } from '../audio/AudioDocument';
+import { editorLaneWidth, setEditorLaneWidth } from '../services/editorViewport';
 
 // Single per-prefix counter registry shared with createDocument's 'doc' ids,
 // so nextId('doc') can never collide with an id assigned by createDocument.
@@ -55,14 +56,157 @@ export function makeInitialState(): AppState {
   };
 }
 
-/** The zoom applied whenever a document is (re)activated: whole document laid
- * across a nominal 1600px viewport. Exported since G3 — the toolbar's Fit
- * button restores it and the zoom-% readouts define 100% as this level. */
-export function defaultZoom(doc: AudioDocument): {
+// ---------------------------------------------------------------------------
+// F11-3 / F11-9 — ONE clamped zoom resolution
+// ---------------------------------------------------------------------------
+/**
+ * The furthest the editor zooms IN, in samples per pixel. Lived in
+ * `useEditorGestures` until F11-9; it moved here because the clamp did — a
+ * limit that lives in one of the consumers is a limit the other consumers can
+ * disagree with, which is the whole shape of the bug below.
+ */
+export const MIN_SPP = 1 / 32;
+
+export interface Zoom {
   samplesPerPixel: number;
   scrollSample: number;
-} {
-  return { samplesPerPixel: Math.max(1, Math.ceil(docLength(doc) / 1600)), scrollSample: 0 };
+}
+
+/**
+ * **The zoom-out limit AND the fit — deliberately the same number.**
+ *
+ * Before F11-9 they were unrelated: the fit was `docLength / 1600` (a nominal
+ * viewport, not the real one) and the zoom-out ceiling was `docLength / 50`,
+ * i.e. 32x further out than the fit. Everything between those two is a state
+ * the editor cannot draw coherently, because past the fit the layers stop
+ * agreeing about what is on screen:
+ *
+ *  - the waveform comes from `getPeaksForRange`, which CLAMPS its request to
+ *    `[0, docLength]` and spreads what survives over every pixel column, so
+ *    once the window runs past the end of the track the picture is identical
+ *    for every further zoom-out — the waveform is pinned;
+ *  - the beat tics (`drawBeatTics`) and the ruler (`TimelineRuler`) map samples
+ *    through `sampleToPixel` with the raw `samplesPerPixel` and no clamp, so
+ *    they carry on compressing toward the left edge.
+ *
+ * That is exactly the reported symptom: "zooming out still affects the tempo
+ * lines and the timeline even though the track has reached its limit". Making
+ * the ceiling the fit makes the incoherent range unreachable, and gives Fit,
+ * the − button, the wheel, the tics and the ruler a single limit to share.
+ *
+ * Floored at {@link MIN_SPP}: a track shorter than `laneWidth * MIN_SPP` (~50
+ * samples on a 1600 px lane) cannot fill the lane without exceeding the app's
+ * maximum zoom-in, so it fits as far as the zoom range allows and no further.
+ */
+export function fitSamplesPerPixel(doc: AudioDocument, laneWidth = editorLaneWidth()): number {
+  return Math.max(MIN_SPP, docLength(doc) / laneWidth);
+}
+
+export interface ZoomRequest {
+  samplesPerPixel: number;
+  /**
+   * Either an absolute scroll position, or a function of the RESOLVED
+   * samples-per-pixel. The anchored paths (wheel-zoom on the pointer, the −/+
+   * buttons on the cursor) need the CLAMPED spp to keep their anchor under the
+   * same x: computing the scroll from the requested spp and then clamping it
+   * separately is how an anchor drifts at the limit.
+   */
+  scrollSample: number | ((resolvedSamplesPerPixel: number) => number);
+}
+
+function clamp(v: number, lo: number, hi: number): number {
+  return Math.min(Math.max(v, lo), hi);
+}
+
+/**
+ * F11-9 — the ONLY place the editor's zoom is clamped. `samplesPerPixel` into
+ * `[MIN_SPP, fit]`, `scrollSample` into `[0, docLength - laneWidth * spp]`.
+ * Every consumer (wheel gesture, −/+ buttons, Fit, activation, and through the
+ * store's `zoom` the renderer, the tic layer and the ruler) reads what this
+ * returns; none of them clamps again.
+ *
+ * The two clamps are one rule stated twice: together they say the visible
+ * window `[scrollSample, scrollSample + laneWidth * spp)` never runs past the
+ * end of the document.
+ */
+export function resolveZoom(
+  doc: AudioDocument,
+  requested: ZoomRequest,
+  laneWidth = editorLaneWidth()
+): Zoom {
+  const length = docLength(doc);
+  const samplesPerPixel = clamp(
+    requested.samplesPerPixel,
+    MIN_SPP,
+    fitSamplesPerPixel(doc, laneWidth)
+  );
+  const wanted =
+    typeof requested.scrollSample === 'function'
+      ? requested.scrollSample(samplesPerPixel)
+      : requested.scrollSample;
+  const maxScroll = Math.max(0, length - laneWidth * samplesPerPixel);
+  // A NaN request (an anchor computed from a zero-width rect, say) resolves to
+  // the start rather than poisoning the store.
+  const scrollSample = Number.isFinite(wanted) ? clamp(wanted, 0, maxScroll) : 0;
+  return { samplesPerPixel, scrollSample };
+}
+
+/** The zoom applied whenever a document is (re)activated, and what the Fit
+ * button restores: the whole document laid across the measured editor lane
+ * exactly. Exported since G3 — the zoom-% readout defines 100% as this level.
+ * `Infinity` resolves to the ceiling, so "fit" is literally "as far out as the
+ * editor goes" and cannot drift from {@link fitSamplesPerPixel}. */
+export function defaultZoom(doc: AudioDocument): Zoom {
+  return resolveZoom(doc, { samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 });
+}
+
+/**
+ * The ONE writer for every editor zoom gesture: resolve the request against the
+ * active document, then commit it only if it actually differs. The no-op guard
+ * is load-bearing rather than an optimisation — at the limit it is what makes
+ * "nothing moves" observable, since a fresh but equal `zoom` object would still
+ * be a new store snapshot and would repaint the waveform, the tics and the
+ * ruler for no reason.
+ */
+export function applyEditorZoom(requested: ZoomRequest): void {
+  const s = useAppStore.getState();
+  const doc = s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
+  if (!doc) return;
+  const next = resolveZoom(doc, requested);
+  if (
+    next.samplesPerPixel === s.zoom.samplesPerPixel &&
+    next.scrollSample === s.zoom.scrollSample
+  ) {
+    return;
+  }
+  s.setZoom(next);
+}
+
+/**
+ * F11-3 — the editor lane reports how wide it actually is.
+ *
+ * Called from the views' resize effect, which is also the FIRST moment the real
+ * width is knowable: a document opened before any lane existed was fitted to
+ * the 1600 px fallback, so the mount that finally measures the lane has to
+ * re-fit it or the "whole track fits" promise would hold only from the second
+ * document onward. Hence the two arms:
+ *
+ *  - a view that was sitting at the fit stays at the fit (a fitted view stays
+ *    fitted across a window resize — the only reading of Fit that survives the
+ *    user dragging the window edge);
+ *  - anything zoomed in is merely re-resolved, which re-clamps the scroll to
+ *    the new lane without throwing away where the user was looking.
+ */
+export function publishEditorLaneWidth(width: number): void {
+  const previous = editorLaneWidth();
+  if (!setEditorLaneWidth(width)) return; // unchanged, or not a real measurement
+  const s = useAppStore.getState();
+  const doc = s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
+  if (!doc) return;
+  const wasFitted = s.zoom.samplesPerPixel >= fitSamplesPerPixel(doc, previous);
+  applyEditorZoom(
+    wasFitted ? { samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 } : s.zoom
+  );
 }
 
 /** Reset applied whenever the active document changes. */
