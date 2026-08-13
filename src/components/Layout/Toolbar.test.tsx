@@ -408,6 +408,49 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
       );
       expect(screen.getByTestId('zoom-readout')).toHaveTextContent('50%');
     });
+
+    // F11-9: Fit and the − button used to have unrelated ideas of "as far out
+    // as this goes" — Fit restored `docLength / 1600` while − clamped at
+    // `docLength / 50`, 32x further out, in the range where the waveform is
+    // pinned by `getPeaksForRange` and only the tics and the ruler still move.
+    // They share one limit now, so these three properties hold together.
+    it('F11: the − button walks down to exactly the state Fit jumps to, and stops there', () => {
+      const doc = makeDoc();
+      useAppStore.getState().addDocument(doc);
+      render(<Toolbar />);
+      const out = screen.getByRole('button', { name: 'Zoom Out' });
+
+      // Somewhere well inside the track, then all the way back out.
+      act(() => useAppStore.getState().setZoom({ samplesPerPixel: 1, scrollSample: 0 }));
+      for (let i = 0; i < 40; i++) fireEvent.click(out);
+
+      expect(useAppStore.getState().zoom).toEqual(defaultZoom(doc));
+      expect(screen.getByTestId('zoom-readout')).toHaveTextContent('100%');
+    });
+
+    it('F11: pressing − at the limit writes nothing at all', () => {
+      const doc = makeDoc();
+      useAppStore.getState().addDocument(doc); // opens fitted
+      render(<Toolbar />);
+      const before = useAppStore.getState().zoom;
+
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom Out' }));
+
+      // The SAME object — no new snapshot, so the waveform, the beat tics and
+      // the ruler are not even asked to repaint.
+      expect(useAppStore.getState().zoom).toBe(before);
+    });
+
+    it('F11: Fit is idempotent and is the state a freshly opened document is already in', () => {
+      const doc = makeDoc();
+      useAppStore.getState().addDocument(doc);
+      render(<Toolbar />);
+      const onOpen = useAppStore.getState().zoom;
+
+      fireEvent.click(screen.getByRole('button', { name: 'Fit' }));
+
+      expect(useAppStore.getState().zoom).toBe(onOpen);
+    });
   });
 });
 

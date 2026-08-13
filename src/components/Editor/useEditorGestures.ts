@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
-import { useAppStore } from '../../stores/appStore';
+import { applyEditorZoom, useAppStore } from '../../stores/appStore';
 import { snapSample } from '../../services/snap';
 import { isOnCursorHandle, pixelToSample, sampleToPixel } from './waveformRender';
 import { editorSnapTargets } from './editorSnapTargets';
@@ -52,9 +52,11 @@ import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selec
  * hand.
  */
 
-// Exported since G3: the toolbar's zoom −/+ buttons step by the same factor
-// and clamp to the same floor as the wheel gesture, so both paths agree.
-export const MIN_SPP = 1 / 32;
+// Exported since G3: the toolbar's zoom −/+ buttons step by the same factor as
+// the wheel gesture, so both paths agree. The LIMITS moved to the store in
+// F11-9 (`MIN_SPP`, `fitSamplesPerPixel`, `resolveZoom`): a clamp that lived in
+// each consumer is a clamp each consumer could state differently, and this hook
+// and the toolbar did exactly that.
 export const ZOOM_FACTOR = 1.25;
 
 function clamp(v: number, lo: number, hi: number): number {
@@ -95,10 +97,15 @@ export interface EditorGestureHandlers {
   onPointerUp(e: ReactPointerEvent<HTMLCanvasElement>): void;
 }
 
+/**
+ * F11-9 — no `width` parameter any more. The lane width used to be threaded in
+ * purely so the wheel handler could compute its own scroll ceiling; the views
+ * publish it to the store instead (`publishEditorLaneWidth`), and the ceiling
+ * is computed once, in `resolveZoom`.
+ */
 export function useEditorGestures(
   canvasRef: RefObject<HTMLCanvasElement | null>,
-  length: number,
-  width: number
+  length: number
 ): EditorGestureHandlers {
   const zoom = useAppStore((s) => s.zoom);
   const selection = useAppStore((s) => s.selection);
@@ -111,17 +118,17 @@ export function useEditorGestures(
 
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
-      const { zoom: z, setZoom } = useAppStore.getState();
-      const maxSpp = Math.max(1, length / 50);
-      const maxScroll = (spp: number) => Math.max(0, length - width * spp);
+      // F11-9: the gesture states what it WANTS; the store resolves it. There
+      // is no maxSpp and no maxScroll here any more — the wheel used to clamp
+      // to `length / 50`, which let the view zoom 32x past the point where the
+      // waveform stops changing while the tics and the ruler kept moving.
+      const z = useAppStore.getState().zoom;
 
       if (e.shiftKey) {
-        const scrollSample = clamp(
-          z.scrollSample + e.deltaY * z.samplesPerPixel,
-          0,
-          maxScroll(z.samplesPerPixel)
-        );
-        setZoom({ samplesPerPixel: z.samplesPerPixel, scrollSample });
+        applyEditorZoom({
+          samplesPerPixel: z.samplesPerPixel,
+          scrollSample: z.scrollSample + e.deltaY * z.samplesPerPixel,
+        });
         return;
       }
 
@@ -129,14 +136,17 @@ export function useEditorGestures(
       const mouseX = e.clientX - rect.left;
       const anchorSample = pixelToSample(mouseX, z.scrollSample, z.samplesPerPixel);
       const factor = e.deltaY < 0 ? 1 / ZOOM_FACTOR : ZOOM_FACTOR;
-      const spp = clamp(z.samplesPerPixel * factor, MIN_SPP, maxSpp);
-      const scrollSample = clamp(anchorSample - mouseX * spp, 0, maxScroll(spp));
-      setZoom({ samplesPerPixel: spp, scrollSample });
+      applyEditorZoom({
+        samplesPerPixel: z.samplesPerPixel * factor,
+        // Anchored on the RESOLVED spp, so the sample under the pointer stays
+        // under the pointer even when the request was clamped.
+        scrollSample: (spp) => anchorSample - mouseX * spp,
+      });
     };
 
     canvas.addEventListener('wheel', onWheel, { passive: false });
     return () => canvas.removeEventListener('wheel', onWheel);
-  }, [canvasRef, width, length]);
+  }, [canvasRef]);
 
   const dragRef = useRef<DragState | null>(null);
 

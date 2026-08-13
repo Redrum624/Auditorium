@@ -10,8 +10,10 @@ import { hasUnsavedWork } from '../../services/fileService';
 import { runCommand } from '../../services/menuActions';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
 import { canRecord } from '../../services/transportService';
-import { defaultZoom, useAppStore } from '../../stores/appStore';
-import { MIN_SPP, ZOOM_FACTOR } from '../Editor/useEditorGestures';
+// F11-9: the zoom limits are the store's now, so the toolbar imports the one
+// resolver instead of re-stating MIN_SPP and a ceiling of its own.
+import { applyEditorZoom, defaultZoom, useAppStore } from '../../stores/appStore';
+import { ZOOM_FACTOR } from '../Editor/useEditorGestures';
 import { ChromePill } from '../UI/glass';
 
 /**
@@ -109,42 +111,59 @@ function PillButton({ label, onClick, disabled, active, title, icon, children }:
   );
 }
 
-/** '100%' is the activation default (whole doc across ~1600px, appStore's
- * defaultZoom); zooming in grows the number. */
+/**
+ * F11-3 — THE ZOOM-% SEMANTICS, stated once, here.
+ *
+ * 100% is Fit: the whole track exactly fills the editor lane. Zooming in raises
+ * the number — 200% shows half the track — and because Fit is also the furthest
+ * the editor zooms out, the readout never drops below 100%.
+ *
+ * This is a deliberate change of meaning, not drift. Before F11-3, 100% meant
+ * "the whole track across a nominal 1600 px viewport", which was the real lane
+ * only by coincidence and was NOT the zoom-out limit (the wheel went 32x
+ * further out, which is F11-9's bug). Anchoring the readout to the real fit
+ * makes 100% a state the user can see and reach — it is what the Fit button
+ * lands on, and what a freshly opened document starts at — instead of a
+ * hardcoded number nothing on screen corresponds to.
+ */
 function zoomPercent(doc: AudioDocument, samplesPerPixel: number): number {
   return Math.round((defaultZoom(doc).samplesPerPixel / samplesPerPixel) * 100);
 }
 
+// F11-9: still used for the cursor anchor below; the ZOOM clamps are gone.
 function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);
 }
 
 /** Zoom the single-document editor by `factor`, anchored on the cursor (the
  * only viewport-independent anchor available up here — the wheel gesture
- * anchors on the pointer instead). Same MIN_SPP floor and length/50 ceiling
- * as useEditorGestures, so the button path can never leave the wheel range. */
+ * anchors on the pointer instead).
+ *
+ * F11-9: no clamping here any more. This function used to re-state its own
+ * `MIN_SPP` floor and `length / 50` ceiling "so the button path can never leave
+ * the wheel range", which is exactly the kind of duplicate that drifts —
+ * neither limit was the fit, so both buttons and wheel could zoom out into the
+ * range where the waveform freezes and the tics keep moving. It now states a
+ * request and `applyEditorZoom` resolves it against the one shared limit. */
 function zoomEditorBy(factor: number): void {
   const s = useAppStore.getState();
   const doc = s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
   if (!doc) return;
-  const len = docLength(doc);
-  const maxSpp = Math.max(1, len / 50);
-  const spp = clamp(s.zoom.samplesPerPixel * factor, MIN_SPP, maxSpp);
-  if (spp === s.zoom.samplesPerPixel) return;
-  const anchor = clamp(s.cursorSample, 0, len);
+  const anchor = clamp(s.cursorSample, 0, docLength(doc));
   // Keep the anchor at the same on-screen x: x = (anchor - scroll) / sppOld.
   const x = (anchor - s.zoom.scrollSample) / s.zoom.samplesPerPixel;
-  // Over-scroll self-corrects on the next wheel event (see transport.goToEnd's
-  // note in menuActions.ts) — clamping to the document length is enough here.
-  const scrollSample = clamp(anchor - x * spp, 0, len);
-  s.setZoom({ samplesPerPixel: spp, scrollSample });
+  applyEditorZoom({
+    samplesPerPixel: s.zoom.samplesPerPixel * factor,
+    scrollSample: (spp) => anchor - x * spp,
+  });
 }
 
+/** F11-3: Fit means the whole track across the MEASURED lane — and, since
+ * F11-9, that is also the furthest the editor zooms out, so Fit is spelled as
+ * "as far out as this document goes" rather than as a second copy of the fit
+ * formula. */
 function zoomEditorFit(): void {
-  const s = useAppStore.getState();
-  const doc = s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
-  if (!doc) return;
-  s.setZoom(defaultZoom(doc));
+  applyEditorZoom({ samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 });
 }
 
 export default function Toolbar() {
@@ -447,7 +466,11 @@ export default function Toolbar() {
         {/* Zoom cluster (mockup − · % · + · Fit): buttons over the SAME store
             zoom the wheel gesture drives; Fit restores the activation default
             (= 100%). Multitrack keeps its own Ctrl+wheel mtZoom, so the
-            cluster follows the single-document editor only. */}
+            cluster follows the single-document editor only.
+
+            F11-9: − and Fit now converge — Fit IS the furthest zoom-out, so
+            holding − walks down to exactly the state Fit jumps to, and the
+            readout bottoms out at 100%. */}
         <PillButton label="Zoom Out" icon disabled={!hasDoc} onClick={() => zoomEditorBy(ZOOM_FACTOR)}>
           <Minus size={14} />
         </PillButton>

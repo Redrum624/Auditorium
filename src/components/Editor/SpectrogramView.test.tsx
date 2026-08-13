@@ -1,7 +1,8 @@
 import { act, render, screen } from '@testing-library/react';
 import SpectrogramView from './SpectrogramView';
-import { useAppStore, makeInitialState } from '../../stores/appStore';
-import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
+import { useAppStore, makeInitialState, fitSamplesPerPixel } from '../../stores/appStore';
+import { createDocument, docLength, type AudioDocument } from '../../audio/AudioDocument';
+import { _resetEditorLaneWidth } from '../../services/editorViewport';
 // Jest's moduleNameMapper resolves every `createSpectrogramWorker` import to
 // the mock, so importing the mock file directly reaches the SAME module
 // instance the component uses — its fault injection affects the component.
@@ -379,5 +380,33 @@ describe('SpectrogramView beat tics (Task B2)', () => {
       toggleBeatGrid();
     });
     expect(ticSpy.mock.calls[ticSpy.mock.calls.length - 1][1]).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11-3 — the spectral lane is the same stage the waveform lane is, and the two
+// share the store's zoom. If only the waveform published its width, switching
+// to Spectral and resizing would leave the fit measured against a lane that is
+// no longer on screen.
+// ---------------------------------------------------------------------------
+describe('SpectrogramView publishes its lane width (F11-3)', () => {
+  beforeEach(() => {
+    _resetEditorLaneWidth();
+  });
+
+  it('fits the whole document across the spectral lane it actually measured', () => {
+    const doc = seedDoc();
+    render(<SpectrogramView docId={doc.id} />);
+
+    const { samplesPerPixel, scrollSample } = useAppStore.getState().zoom;
+    expect(scrollSample).toBe(0);
+    // 300 is the lane width this suite pins on every element (see beforeAll).
+    expect(scrollSample + 300 * samplesPerPixel).toBeCloseTo(docLength(doc), 6);
+  });
+
+  it('clamps the zoom-out limit to that lane too', () => {
+    const doc = seedDoc();
+    render(<SpectrogramView docId={doc.id} />);
+    expect(fitSamplesPerPixel(doc)).toBe(docLength(doc) / 300);
   });
 });

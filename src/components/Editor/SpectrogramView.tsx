@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { cloneRegion, docLength, mixDown } from '../../audio/AudioDocument';
-import { useAppStore } from '../../stores/appStore';
+import { publishEditorLaneWidth, useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
 import { useSpectralScale } from '../../services/spectralScale';
 import {
@@ -150,7 +150,7 @@ export default function SpectrogramView({ docId }: { docId: string }) {
   const beatGrid = useBeatGridOverlay(docId, doc?.channels ?? NO_CHANNELS);
 
   const length = doc ? docLength(doc) : 0;
-  const gestures = useEditorGestures(canvasRef, length, size.width);
+  const gestures = useEditorGestures(canvasRef, length);
 
   const workerRef = useRef<Worker | null>(null);
   const reqIdRef = useRef(0);
@@ -172,7 +172,15 @@ export default function SpectrogramView({ docId }: { docId: string }) {
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const update = () => setSize({ width: el.clientWidth, height: el.clientHeight });
+    const update = () => {
+      const width = el.clientWidth;
+      setSize({ width, height: el.clientHeight });
+      // F11-3: the spectral lane is the same stage the waveform lane is, and it
+      // shares the store's zoom, so it publishes its width from the identical
+      // effect — switching views must not leave the fit measured against a lane
+      // that is no longer on screen.
+      publishEditorLaneWidth(width);
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);

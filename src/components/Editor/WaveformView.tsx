@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { docLength } from '../../audio/AudioDocument';
-import { useAppStore } from '../../stores/appStore';
+import { publishEditorLaneWidth, useAppStore } from '../../stores/appStore';
 import { getPyramids } from '../../services/peaksCache';
 import { renderWaveform } from './waveformRender';
 import { useBeatGridOverlay } from './useBeatGridOverlay';
@@ -55,13 +55,23 @@ export default function WaveformView({ docId }: { docId: string }) {
   const beatGrid = useBeatGridOverlay(docId, doc?.channels ?? NO_CHANNELS);
 
   const length = doc ? docLength(doc) : 0;
-  const gestures = useEditorGestures(canvasRef, length, size.width);
+  const gestures = useEditorGestures(canvasRef, length);
 
   // Observe the drawing area size (CSS pixels).
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const update = () => setSize({ width: el.clientWidth, height: el.clientHeight });
+    const update = () => {
+      const width = el.clientWidth;
+      setSize({ width, height: el.clientHeight });
+      // F11-3: this lane IS the stage the zoom fits to. Nothing else in the app
+      // knows how wide it is, so it is published here — the store's fit and its
+      // zoom-out limit are both derived from it, and a document that was fitted
+      // to the 1600 px fallback (opened before any lane existed) is re-fitted
+      // the moment this first fires. Recordings, stems, remixes and mixdowns
+      // all arrive through `addDocument`, so they are fitted by the same path.
+      publishEditorLaneWidth(width);
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
