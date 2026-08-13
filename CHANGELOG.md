@@ -277,6 +277,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   rule. Both are ordinary undoable History steps and neither operation changed. Neither menu row
   advertises a shortcut, because neither command has one bound — this release already retired two
   labels that named keys doing nothing. Affects: `src/services/menuActions.ts`.
+<!-- P1: the live stepper -->
+- **The Vocal Chain and the Cover Chain show every step live while the pass runs.** Why: the user
+  asked to "see all the steps from top to bottom and what is happening in the current tool", and
+  both dialogs listed every stage top to bottom already — what they could not say WHILE running was
+  which stage was in flight, how far through *that* stage the pass was, or what it was doing. The
+  whole live surface was one label and one overall bar, for a vocal pass whose slowest stage alone
+  takes a minute and a cover pass where Match EQ carries 56 of the 68 weight and Match Reverb
+  another 32, most of which is one indivisible measurement. How to use it: press Apply and watch
+  the stage list. Each row keeps its place and carries a state — *Waiting*, *Running*, *✓ Ran*,
+  *Did not run*, *Switched off*, *Manual step*. The running row is highlighted, names its phase
+  (*Measuring* the audio reaching it, then *Rendering* with the settings it just measured shown on
+  the line) and carries its own bar at its own fraction; rows still to come are dimmed; rows that
+  have finished settle into their full report there and then, so the compressor's derived threshold
+  is readable while Pitch Correct is still running. The bar at the foot is still the whole pass.
+  The engine side is additive — `runVocalChain`/`runCoverChain` gained optional `onStageProgress`
+  (`{stageId, label, phase, stageFraction, detail}`, the fraction scoped to one stage) and
+  `onStageResult`, which hands over the VERY object that lands in `report.stages` rather than a
+  copy. That identity is what stops the live text and the finished report becoming two sets of
+  strings to keep in step, and it is pinned as such: the live rendering of a stage is asserted
+  byte-identical to the finished one. No chain behaviour changed, and the test hooks and the
+  packaged smoke drive the chains with none of the new callbacks. A run that FAILS shows nothing —
+  the engine rolls the document back, so the stages that had reported are cleared rather than left
+  looking like an outcome. Affects: `src/services/vocalChain.ts`, `src/services/coverChain.ts`,
+  `src/components/Dialogs/VocalChainDialog.tsx`, `src/components/Dialogs/CoverChainDialog.tsx`.
 
 ### Changed
 <!-- F11: the F11 series' Changed entry. -->

@@ -437,6 +437,18 @@ dialog before the chain:
   syllables first. Timing belongs before pitch, because warping changes the
   windows the pitch detector uses.
 
+<!-- P1: the live stepper -->
+**While it runs, the same list is live.** From the moment you press Apply, every
+stage keeps its place in the list and gains a state: *Waiting*, *Running*,
+*✓ Ran*, *Did not run* or *Switched off*. The stage in progress is highlighted
+and says what it is doing — *Measuring* while it works its settings out from the
+audio reaching it, then *Rendering* with the settings it just measured shown on
+the line — with its own bar for how far through **that stage** the pass is. The
+stages still to come are dimmed; the ones already finished settle into their
+full report there and then, so you can read what the compressor decided while
+Pitch Correct is still going. The bar at the foot of the dialog is the whole
+pass, weighted by the measured stage times.
+
 After the run, every stage reports what it did: the settings it derived and what
 it derived them from, the measured RMS and peak before and after, and how much
 of the audio it left bit-identical — plus a before/after table of loudness,
@@ -508,6 +520,17 @@ this app's own reverb and on synthetic decays, never on a real reverberant vocal
 linearity check cannot tell a curved fall from a room — a slow fade with no reverberation
 in it at all scores higher than either validated control. So a decay it reports is
 evidence of a fall, not proof of a room.
+
+<!-- P1: the live stepper -->
+**While it runs, the same list is live.** Every stage keeps its place and gains a state —
+*Waiting*, *Running*, *✓ Ran*, *Did not run* or *Switched off* — and the stage in
+progress is highlighted, says whether it is *Measuring* or *Rendering* along with the
+settings it just worked out, and carries its own bar for how far through **that stage**
+the pass is. It matters more here than in the Vocal Chain: Match EQ alone is over half
+the total work and Match Reverb another third, so the bar at the foot of the dialog can
+sit almost still for a long time while a great deal is happening. Match Reverb in
+particular spends its whole share taking a measurement, and now says so instead of
+looking stuck.
 
 The whole pass is **one undo entry**. Every stage reports what it did or why it did
 nothing, and the before/after table gives loudness, envelope spread, noise floor and the
