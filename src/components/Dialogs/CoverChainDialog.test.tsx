@@ -18,6 +18,11 @@ import {
   type CoverJourneyStageResult,
   type RunCoverJourneyOptions,
 } from '../../services/coverJourney';
+import {
+  APPLY_GUESS_LABEL,
+  APPLY_GUESS_UNDO_LABEL,
+  applyMeasuredOffset,
+} from '../../services/coverPlacement';
 
 // The STAGE TABLE stays real (requireActual): the dialog's whole contract is
 // that it lists what the engine will actually run, in the engine's order, with
@@ -28,7 +33,17 @@ jest.mock('../../services/coverJourney', () => ({
   runCoverJourney: jest.fn(),
 }));
 
+// CC3: same ruling as the stage table above — the refusal COPY stays real
+// (requireActual), because the dialog's contract is that the button it shows
+// is the one the engine's own sentence tells the user to press. Only the store
+// write is mocked; its arithmetic is proven in `coverPlacement.test.ts`.
+jest.mock('../../services/coverPlacement', () => ({
+  ...jest.requireActual('../../services/coverPlacement'),
+  applyMeasuredOffset: jest.fn(),
+}));
+
 const mockRun = runCoverJourney as jest.MockedFunction<typeof runCoverJourney>;
+const mockApply = applyMeasuredOffset as jest.MockedFunction<typeof applyMeasuredOffset>;
 
 const SR = 48000;
 
@@ -90,6 +105,16 @@ beforeEach(() => {
   // `addDocument` activates what it added last, so the take is active — which
   // is what the dialog defaults its take picker to.
   mockRun.mockResolvedValue(report());
+  mockApply.mockReturnValue({
+    applied: true,
+    sessionRate: SR,
+    takeStartSample: 0,
+    instrumentalStartSample: 0,
+    shiftedSamples: 0,
+    fadeInSample: 1200,
+    fadeOutSample: 1200,
+    cursorSample: 0,
+  });
 });
 
 function open(): void {
@@ -744,5 +769,170 @@ describe('CoverChainDialog — restored: the status vocabulary', () => {
     for (const [id, word] of words) {
       expect(screen.getByTestId(`cover-journey-nested-clean-${id}`)).toHaveTextContent(word);
     }
+  });
+});
+
+// ── CC3: the refused guess, one click away ──────────────────────────────────
+
+/**
+ * The refusal arm's affordance. `applyMeasuredOffset` is spied on rather than
+ * run: what belongs to the dialog is WHICH offset it offers, what numbers ride
+ * the offer, and what it says afterwards — the placement arithmetic has its own
+ * suite in `coverPlacement.test.ts`, on the negative case that produced this.
+ */
+describe('CoverChainDialog — applying the refused guess', () => {
+  const measurement = (offsetSeconds: number, extra: Record<string, unknown> = {}) =>
+    ({
+      offsetSeconds,
+      peakCorrelation: 0.423,
+      rivalCorrelation: 0.344,
+      prominence: 0.079,
+      confident: false,
+      coarseOffsetSeconds: offsetSeconds,
+      lagsEvaluated: 900,
+      overlapSeconds: 41.2,
+      refined: true,
+      ...extra,
+    }) as unknown as CoverJourneyReport['alignment'];
+
+  const separation = (): CoverJourneyReport['separation'] => ({
+    reused: false,
+    vocalsDocId: 'doc-vocals',
+    instrumentalDocId: 'doc-instrumental',
+    summedFrom: [],
+    sampleRate: SR,
+    lengthSamples: SR * 4,
+  });
+
+  async function runRefused(over: Partial<CoverJourneyReport> = {}): Promise<void> {
+    mockRun.mockResolvedValue(
+      report({
+        alignmentRefused: true,
+        alignment: measurement(-8.258),
+        separation: separation(),
+        ...over,
+      })
+    );
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(screen.getByTestId('cover-journey-outcome')).toBeInTheDocument());
+  }
+
+  it('offers the measured offset as a button, with its sign', async () => {
+    await runRefused();
+    const button = screen.getByTestId('cover-journey-guess-apply');
+    expect(button).toHaveTextContent(APPLY_GUESS_LABEL);
+    expect(button).toHaveTextContent('−8.258 s');
+  });
+
+  it('puts the measurement\'s own numbers next to the button, so the choice is informed', async () => {
+    await runRefused();
+    const numbers = screen.getByTestId('cover-journey-guess-numbers');
+    expect(numbers).toHaveTextContent('0.423');
+    expect(numbers).toHaveTextContent('0.079');
+    expect(numbers).toHaveTextContent('41.2');
+    // Offered, never applied on the user's behalf — and it says so.
+    expect(numbers).toHaveTextContent('may be wrong');
+  });
+
+  it('places at the measured offset when pressed, through the two documents it named', async () => {
+    await runRefused();
+    fireEvent.click(screen.getByTestId('cover-journey-guess-apply'));
+    expect(mockApply).toHaveBeenCalledWith({
+      offsetSeconds: -8.258,
+      instrumentalDocId: 'doc-instrumental',
+      takeDocId: take.id,
+    });
+  });
+
+  it('says what it placed, and that it is one undo entry', async () => {
+    mockApply.mockReturnValue({
+      applied: true,
+      sessionRate: SR,
+      takeStartSample: 0,
+      instrumentalStartSample: Math.round(8.258 * SR),
+      shiftedSamples: Math.round(8.258 * SR),
+      fadeInSample: 1200,
+      fadeOutSample: 1200,
+      cursorSample: 0,
+    });
+    await runRefused();
+    fireEvent.click(screen.getByTestId('cover-journey-guess-apply'));
+    const applied = screen.getByTestId('cover-journey-guess-applied');
+    expect(applied).toHaveTextContent('8.258 s');
+    expect(applied).toHaveTextContent(APPLY_GUESS_UNDO_LABEL);
+  });
+
+  it('says why nothing happened when the placement refuses', async () => {
+    mockApply.mockReturnValue({ applied: false, reason: 'the take is no longer on this timeline' });
+    await runRefused();
+    fireEvent.click(screen.getByTestId('cover-journey-guess-apply'));
+    expect(screen.getByTestId('cover-journey-guess-applied')).toHaveTextContent(
+      'the take is no longer on this timeline'
+    );
+  });
+
+  it('offers nothing when the alignment was BELIEVED — the take is already there', async () => {
+    mockRun.mockResolvedValue(
+      report({ alignmentRefused: false, alignment: measurement(1.25, { confident: true }) })
+    );
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(screen.getByTestId('cover-journey-outcome')).toBeInTheDocument());
+    expect(screen.queryByTestId('cover-journey-guess-apply')).not.toBeInTheDocument();
+  });
+
+  it('offers nothing when there is no session to re-place clips on', async () => {
+    await runRefused({ completed: false, placement: null });
+    expect(screen.queryByTestId('cover-journey-guess-apply')).not.toBeInTheDocument();
+  });
+
+  // ── The CC2 outcome contract, when it arrives ─────────────────────────────
+
+  it('lists each candidate as its own one-click placement when the match is ambiguous', async () => {
+    await runRefused({
+      alignment: measurement(-8.258, {
+        outcome: 'ambiguous',
+        candidates: [
+          { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+          { offsetSeconds: 12.5, correlation: 0.41, prominence: 0.06 },
+        ],
+      }),
+    });
+    expect(screen.getByTestId('cover-journey-guess-offer')).toHaveTextContent('several places');
+    expect(screen.getByTestId('cover-journey-guess-candidate-0')).toHaveTextContent('−8.258 s');
+    expect(screen.getByTestId('cover-journey-guess-candidate-1')).toHaveTextContent('+12.500 s');
+    // The single arm gives way to the list — one offer per place, not two ways
+    // to apply the same one.
+    expect(screen.queryByTestId('cover-journey-guess-apply')).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByTestId('cover-journey-guess-candidate-1'));
+    expect(mockApply).toHaveBeenCalledWith({
+      offsetSeconds: 12.5,
+      instrumentalDocId: 'doc-instrumental',
+      takeDocId: take.id,
+    });
+  });
+
+  it('words the offer as weak-but-plausible when the measurement says so', async () => {
+    await runRefused({ alignment: measurement(-8.258, { outcome: 'weak' }) });
+    expect(screen.getByTestId('cover-journey-guess-offer')).toHaveTextContent('weak but plausible');
+  });
+
+  it('words the offer as probably-wrong when the measurement found no relation', async () => {
+    await runRefused({ alignment: measurement(-8.258, { outcome: 'unrelated' }) });
+    expect(screen.getByTestId('cover-journey-guess-offer')).toHaveTextContent('probably wrong');
+    // Still offered: the user, not the app, decides the number is useless.
+    expect(screen.getByTestId('cover-journey-guess-apply')).toBeInTheDocument();
+  });
+
+  it('claims nothing about the kind of failure on today\'s measurement shape', async () => {
+    await runRefused();
+    const offer = screen.getByTestId('cover-journey-guess-offer');
+    expect(offer).not.toHaveTextContent('weak but plausible');
+    expect(offer).not.toHaveTextContent('probably wrong');
+    expect(offer).not.toHaveTextContent('several places');
   });
 });

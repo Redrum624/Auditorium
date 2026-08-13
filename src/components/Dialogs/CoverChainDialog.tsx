@@ -18,12 +18,29 @@ import {
   type CoverJourneyStageResult,
   type CoverJourneyStageStatus,
 } from '../../services/coverJourney';
+// CC3: the refused guess's one-click arm and the copy that names it.
+import {
+  APPLY_GUESS_LABEL,
+  APPLY_GUESS_UNDO_LABEL,
+  applyMeasuredOffset,
+  guessCandidates,
+  guessCharacterisation,
+  guessKind,
+  type ApplyMeasuredOffsetResult,
+} from '../../services/coverPlacement';
 import type { DerivedValue, StageStatus } from '../../services/vocalChain';
 import { GlassButton, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
 
 const AMBER = '#e0a458';
 const secs = (samples: number, rate: number): string => `${(samples / rate).toFixed(2)} s`;
+/** CC3: the journey's own signed-seconds format, so the button and the reason
+ * sentence above it print the same number the same way. */
+const signedSecs = (v: number): string => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(3)} s`;
+/** CC3: where a clip LANDED, at the guess's own three decimals rather than the
+ * report's two — "8.26 s" next to an offer of "−8.258 s" reads as a different
+ * number, and the whole point of the line is that it is the same one. */
+const placedSecs = (samples: number, rate: number): string => `${(samples / rate).toFixed(3)} s`;
 
 /** What each journey status SAYS, in words a user can act on. */
 const STATUS_TEXT: Record<CoverJourneyStageStatus, string> = {
@@ -165,6 +182,108 @@ function StageResult({ result }: { result: CoverJourneyStageResult }) {
         </p>
       ))}
       {nested && nested.length > 0 && <NestedStages parentId={result.id} stages={nested} />}
+    </div>
+  );
+}
+
+/**
+ * CC3 — the refused guess, made one click away.
+ *
+ * The journey refuses to BELIEVE an alignment and places the take at zero;
+ * until this component the number it measured reached the user only inside a
+ * sentence, and acting on it meant memorising a signed figure and dragging a
+ * clip to it by eye — with, for a negative guess, the take unable to go where
+ * the sentence pointed at all.
+ *
+ * The refusal itself is unchanged: the take stays at zero and the offer is an
+ * OFFER. The reported case's 0.423 correlation and 0.079 prominence sit inside
+ * the measured unrelated-pair bands, so auto-applying would be the app
+ * pretending to a confidence it just said it did not have. What this adds is
+ * that the user can act on it in one press, with the measurement's own numbers
+ * in front of them, and undo it in one.
+ *
+ * The CC2 outcome fields are read through `coverPlacement`'s feature-detecting
+ * helpers: on today's measurement shape (no `outcome`, no `candidates`) this
+ * renders a single arm and asserts NOTHING about what kind of failure it was.
+ */
+function GuessOffer({
+  report,
+  takeDocId,
+}: {
+  report: CoverJourneyReport;
+  takeDocId: string;
+}) {
+  const [outcome, setOutcome] = useState<ApplyMeasuredOffsetResult | null>(null);
+
+  const alignment = report.alignment;
+  const instrumentalDocId = report.separation?.instrumentalDocId ?? '';
+  // No session means no clips to re-place: a cancelled or failed pass has
+  // nothing for this button to move.
+  if (!alignment || alignment.confident || !report.placement || !instrumentalDocId || !takeDocId) {
+    return null;
+  }
+
+  const kind = guessKind(alignment);
+  const characterisation = guessCharacterisation(kind);
+  const candidates = guessCandidates(alignment);
+
+  const apply = (offsetSeconds: number): void => {
+    setOutcome(applyMeasuredOffset({ offsetSeconds, instrumentalDocId, takeDocId }));
+  };
+
+  return (
+    <div
+      data-testid="cover-journey-guess-offer"
+      className="mt-2 flex flex-col gap-1 rounded-lg"
+      style={{ border: `1px solid ${AMBER}33`, padding: '6px 8px' }}
+    >
+      {characterisation && (
+        <p className="text-xs" style={{ color: AMBER }}>
+          {characterisation}.
+        </p>
+      )}
+      {candidates.length > 0 ? (
+        candidates.map((c, i) => (
+          <GlassButton
+            key={`${c.offsetSeconds}:${i}`}
+            data-testid={`cover-journey-guess-candidate-${i}`}
+            onClick={() => apply(c.offsetSeconds)}
+          >
+            Place at {signedSecs(c.offsetSeconds)} — correlation {c.correlation.toFixed(3)},
+            standing {c.prominence.toFixed(3)} above the next
+          </GlassButton>
+        ))
+      ) : (
+        <GlassButton data-testid="cover-journey-guess-apply" onClick={() => apply(alignment.offsetSeconds)}>
+          {APPLY_GUESS_LABEL} ({signedSecs(alignment.offsetSeconds)})
+        </GlassButton>
+      )}
+      <p
+        data-testid="cover-journey-guess-numbers"
+        className="text-xs"
+        style={{ color: 'var(--glass-text-muted)' }}
+      >
+        Measured over {alignment.overlapSeconds.toFixed(1)} s of overlap: correlation{' '}
+        {alignment.peakCorrelation.toFixed(3)}, standing {alignment.prominence.toFixed(3)} above the
+        next best lag. Both are below the floors this pass believes, so the guess may be wrong —
+        that is why it is offered rather than applied. Applying it moves BOTH clips and leaves one
+        undo entry.
+      </p>
+      {outcome && (
+        <p
+          data-testid="cover-journey-guess-applied"
+          className="text-xs"
+          style={{ color: outcome.applied ? 'var(--accent)' : AMBER }}
+        >
+          {outcome.applied
+            ? `Placed: your take at ${placedSecs(outcome.takeStartSample, outcome.sessionRate)}, the Instrumental at ${placedSecs(outcome.instrumentalStartSample, outcome.sessionRate)}${
+                outcome.shiftedSamples > 0
+                  ? ` — both pushed ${placedSecs(outcome.shiftedSamples, outcome.sessionRate)} later so neither starts before zero, which keeps the interval between them exactly what was measured`
+                  : ''
+              }. One undo entry, “${APPLY_GUESS_UNDO_LABEL}”, undoes it.`
+            : `Nothing was placed: ${outcome.reason}`}
+        </p>
+      )}
     </div>
   );
 }
@@ -489,6 +608,13 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
                   </div>
                 )}
                 {result && <StageResult result={result} />}
+                {/* CC3: the refused guess's one-click arm sits under the row
+                    whose sentence names it, not in a footnote at the end of
+                    the report — the user reads the refusal and the remedy in
+                    the same place. */}
+                {stage.id === 'align' && report && (
+                  <GuessOffer report={report} takeDocId={takeDocId} />
+                )}
               </div>
             );
           })}
