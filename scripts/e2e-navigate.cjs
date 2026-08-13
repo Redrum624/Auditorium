@@ -209,23 +209,70 @@ function dialogOpenPaths() {
   });
 }
 
-/** The module CARD's panel registry and which of them the strip draws an icon
- * for, both read out of `ModuleStrip.tsx`. `PERMANENT_TABS` is expressed there
- * as a filter over `MODULE_PANELS`, so the excluded ids are derived from that
- * filter rather than restated. */
+/**
+ * The module CARD's panel registry and which of them the strip draws an icon
+ * for, both read out of `ModuleStrip.tsx`.
+ *
+ * U2: each entry now carries a `slot`, and the strip's ORDER is that slot's
+ * rank in `STRIP_SLOT_ORDER` rather than the array's order — which is what
+ * makes "Files first" and "History last" survive a new module being appended.
+ * So this reads both, and returns the panels in the order the strip will draw
+ * them, with `hasStripIcon` = "has a slot other than 'none'". (Before U2 the
+ * exclusions were an id list inside `PERMANENT_TABS`; that filter is gone.)
+ */
 function modulePanels() {
   const src = read(SRC.moduleStrip);
   const from = src.indexOf('export const MODULE_PANELS');
   const to = src.indexOf('];', from);
   const block = src.slice(from, to);
-  const panels = [...block.matchAll(/id:\s*'([a-z]+)',\s*label:\s*'([^']+)'/g)].map((m) => ({
+  const panels = [
+    ...block.matchAll(/id:\s*'([a-z]+)',\s*label:\s*'([^']+)',[^}]*slot:\s*'([a-z]+)'/g),
+  ].map((m) => ({
     id: m[1],
     label: m[2],
+    slot: m[3],
+    hasStripIcon: m[3] !== 'none',
+    // Drawn in EVERY state. A contextual entry (Remix) has an icon but only
+    // while its condition holds, so the two questions are not the same one.
+    permanent: m[3] !== 'none' && m[3] !== 'contextual',
   }));
-  const permFrom = src.indexOf('export const PERMANENT_TABS');
-  const permTo = src.indexOf(';', permFrom);
-  const excluded = [...src.slice(permFrom, permTo).matchAll(/p\.id !== '([a-z]+)'/g)].map((m) => m[1]);
-  return panels.map((p) => ({ ...p, hasStripIcon: !excluded.includes(p.id) }));
+  if (panels.length === 0) throw new Error('ModuleStrip.tsx: no MODULE_PANELS entries with a slot');
+
+  const orderMatch = src.match(/STRIP_SLOT_ORDER[^=]*=\s*\[([^\]]+)\]/);
+  if (!orderMatch) throw new Error('ModuleStrip.tsx: STRIP_SLOT_ORDER was not found');
+  const rank = [...orderMatch[1].matchAll(/'([a-z]+)'/g)].map((m) => m[1]);
+
+  // Strip order: slot rank first, declaration order within a rank.
+  return panels
+    .map((p, i) => ({ ...p, at: i }))
+    .sort((a, b) => {
+      const ra = rank.indexOf(a.slot);
+      const rb = rank.indexOf(b.slot);
+      if (ra !== rb) return (ra < 0 ? rank.length : ra) - (rb < 0 ? rank.length : rb);
+      return a.at - b.at;
+    })
+    .map(({ at: _at, ...p }) => p);
+}
+
+/**
+ * U2: the dialog COMPONENTS the module column hosts, read out of
+ * `PipelineToolHost.tsx`'s own import list — the registry that decides it.
+ *
+ * The walk below needs this because the two presentations answer to different
+ * evidence: a modal raises `[data-testid="dialog-overlay"]` and cancels on
+ * Escape, a hosted tool raises `[data-testid="tool-host"]`, raises NO overlay
+ * at all, and closes from its own ✕. Deriving the split means a tenth tool
+ * moved into the host is walked the new way without editing this file.
+ */
+function hostedDialogComponents() {
+  const src = read(path.join(SRC.dialogDir, 'PipelineToolHost.tsx'));
+  const names = new Set(
+    [...src.matchAll(/import\s+(\w+Dialog)\s+from\s+'\.\/\w+';/g)].map((m) => m[1])
+  );
+  if (names.size === 0) {
+    throw new Error('PipelineToolHost.tsx: no hosted dialog components were found');
+  }
+  return names;
 }
 
 /** The editor views the toolbar's segmented control offers, in its own order. */
@@ -387,6 +434,48 @@ async function cancelDialog(page, timeoutMs = 120000) {
   throw new Error(`the dialog refused Escape for ${timeoutMs} ms (${presses} presses)`);
 }
 
+/**
+ * U2: the hosted equivalent — a pipeline tool closes from the ✕ in its own
+ * header, not from Escape.
+ *
+ * That is deliberate rather than an omission: a hosted tool installs no
+ * document-level Escape handler, because Escape belongs to the stage (it clears
+ * the selection there) and a card that swallowed it would be a focus trap
+ * wearing a different shape. The ✕ carries the SAME veto the modal backdrop
+ * had — it is `disabled` while `dismissable` is false — so this loop clicks
+ * until it takes, exactly as `cancelDialog` presses until it takes, and
+ * `presses > 1` is the same observation that the veto was exercised.
+ */
+async function closeHostedTool(page, timeoutMs = 120000) {
+  const started = Date.now();
+  let presses = 0;
+  while (Date.now() - started < timeoutMs) {
+    const clicked = await page.evaluate(() => {
+      const b = document.querySelector('[data-testid="hosted-tool-close"]');
+      if (!b || b.disabled) return false;
+      b.click();
+      return true;
+    });
+    if (clicked) presses += 1;
+    const closed = await page
+      .waitForFunction(() => document.querySelector('[data-testid="tool-host"]') === null, null, {
+        timeout: 1500,
+      })
+      .then(() => true)
+      .catch(() => false);
+    if (closed) return { presses, ms: Date.now() - started };
+  }
+  throw new Error(`the hosted tool refused its ✕ for ${timeoutMs} ms (${presses} clicks)`);
+}
+
+/** U2: closes whichever presentation is open — a modal or a hosted tool. */
+async function dismissOpenTool(page, timeoutMs = 120000) {
+  const hosted = await page.evaluate(
+    () => document.querySelector('[data-testid="tool-host"]') !== null
+  );
+  return hosted ? closeHostedTool(page, timeoutMs) : cancelDialog(page, timeoutMs);
+}
+
 /** The open dialog's accessible identity, or null. `role="dialog"` plus its
  * `aria-label` is what a screen reader would announce, so it is what the walk
  * asserts on rather than a class name. */
@@ -404,6 +493,38 @@ async function openDialogInfo(page) {
       // conditional on the chosen format, so a testid count would fail on two
       // dialogs that are working perfectly.
       controls: panel ? panel.querySelectorAll('button, input, select, textarea').length : 0,
+      testids: [...top.querySelectorAll('[data-testid]')]
+        .map((e) => e.getAttribute('data-testid'))
+        .filter((t) => t !== 'dialog-icon'),
+    };
+  });
+}
+
+/**
+ * U2: the same identity for a HOSTED tool, plus the claim the change is about —
+ * that no backdrop was raised over the stage.
+ *
+ * The accessible identity differs on purpose and the walk asserts the
+ * difference: hosted, the shell is a `region` with the tool's name, not a
+ * `dialog`, because it is not modal and announcing it as one would tell a
+ * screen-reader user the rest of the app had gone away when it has not.
+ */
+async function openToolInfo(page) {
+  return page.evaluate(() => {
+    const hosts = [...document.querySelectorAll('[data-testid="tool-host"]')];
+    if (hosts.length === 0) return null;
+    const top = hosts[hosts.length - 1];
+    const panel = top.querySelector('[data-testid="hosted-tool"]');
+    return {
+      count: hosts.length,
+      commandId: top.getAttribute('data-tool-id'),
+      label: panel ? panel.getAttribute('aria-label') : null,
+      role: panel ? panel.tagName.toLowerCase() : null,
+      controls: panel ? panel.querySelectorAll('button, input, select, textarea').length : 0,
+      // The claim: the stage is not covered.
+      overlays: document.querySelectorAll('[data-testid="dialog-overlay"]').length,
+      modalRoles: top.querySelectorAll('[role="dialog"]').length,
+      width: Math.round(top.getBoundingClientRect().width),
       testids: [...top.querySelectorAll('[data-testid]')]
         .map((e) => e.getAttribute('data-testid'))
         .filter((t) => t !== 'dialog-icon'),
@@ -518,13 +639,18 @@ async function liveness(page, label) {
     throw new Error(`liveness: the store did not answer after "${label}"`);
   }
 
+  // U2: a hosted pipeline tool counts as left-open too. It raises no backdrop,
+  // so the overlay count alone would miss it, and a step that walks away from
+  // one has left the next step a card it did not expect.
   const stray = await page.evaluate(() => ({
     dialogs: document.querySelectorAll('[data-testid="dialog-overlay"]').length,
     menus: document.querySelectorAll('[data-testid="menu-dropdown"]').length,
+    tools: document.querySelectorAll('[data-testid="tool-host"]').length,
   }));
-  if (stray.dialogs !== 0 || stray.menus !== 0) {
+  if (stray.dialogs !== 0 || stray.menus !== 0 || stray.tools !== 0) {
     throw new Error(
-      `liveness: "${label}" left ${stray.dialogs} dialog(s) and ${stray.menus} menu(s) open`
+      `liveness: "${label}" left ${stray.dialogs} dialog(s), ${stray.menus} menu(s) and ` +
+        `${stray.tools} hosted tool(s) open`
     );
   }
 
@@ -691,9 +817,16 @@ async function main() {
   const derivedDialogs = dialogOpenPaths();
   const derivedPanels = modulePanels();
   const derivedViews = editorViews();
+  // U2: which dialog components open HOSTED in the module column rather than as
+  // a modal, read out of PipelineToolHost's import list.
+  const hostedComponents = hostedDialogComponents();
   console.log('Derived from the registries:');
   console.log(`  menu sections : ${derivedMenus.join(', ')}`);
-  console.log(`  dialogs       : ${derivedDialogs.map((d) => d.component).join(', ')}`);
+  console.log(
+    `  dialogs       : ${derivedDialogs
+      .map((d) => `${d.component}${hostedComponents.has(d.component) ? '^' : ''}`)
+      .join(', ')} (^ = hosted in the module column, not a modal)`
+  );
   console.log(`  module panels : ${derivedPanels.map((p) => `${p.label}${p.hasStripIcon ? '' : '*'}`).join(', ')} (* = no strip icon)`);
   console.log(`  editor views  : ${derivedViews.join(', ')}`);
 
@@ -789,6 +922,32 @@ async function main() {
     // =====================================================================
     // PRIORITY ZERO — the three observation debts, walked first
     // =====================================================================
+
+    // U2: the app's FIRST PAINT, asserted before anything opens a card or a
+    // document — the only moment "the app opens with Files" is observable, and
+    // the reason this sits above the priority-zero block rather than beside the
+    // module-strip step far below (by then a dozen steps have opened and closed
+    // cards, and the liveness guard has closed whatever was left).
+    await step(page, 'U2 — the app opens with the Files card, before anything else runs', async () => {
+      const first = await page.evaluate(() => ({
+        tab: document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab') ?? null,
+        icons: [...document.querySelectorAll('[data-testid="sidebar-tabs"] button')].map((b) =>
+          b.getAttribute('aria-label')
+        ),
+      }));
+      const lead = derivedPanels.find((p) => p.slot === 'lead');
+      assert(
+        lead !== undefined && first.tab === lead.id,
+        `the module card opens on the strip registry's LEAD entry ` +
+          `(expected ${lead && lead.id}, actual ${first.tab})`
+      );
+      assert(first.tab === 'files', `and that entry is Files, as the user asked (${first.tab})`);
+      assert(
+        first.icons[0] === 'Files' && first.icons[first.icons.length - 1] === 'History',
+        `the strip opens Files-first and History-last (${JSON.stringify(first.icons)})`
+      );
+      record('U2 first paint', `card '${first.tab}', strip ${first.icons.join(' > ')}`, 'PASS');
+    });
 
     // The empty-app menu snapshot has to be taken before any document exists,
     // and it is the "before" half of the differential the menu step asserts on.
@@ -1294,6 +1453,65 @@ async function main() {
         );
 
         assert(await invokeOpener(page, opener, label), `“${label}” takes a real click on its ${opener.kind}`);
+
+        // U2: the two presentations. A pipeline tool opens as a CARD in the
+        // module column with the stage left live; everything else is still the
+        // centred modal it was. Which one applies is read off
+        // PipelineToolHost's registry, not decided here.
+        if (hostedComponents.has(d.component)) {
+          await page.waitForSelector('[data-testid="tool-host"]', { timeout: 10000 });
+          const info = await openToolInfo(page);
+          console.log(
+            `  “${info.label}” hosted at ${info.width}px — ${info.controls} controls, ` +
+              `${info.testids.length} testid-bearing elements`
+          );
+          assert(
+            info !== null && info.count === 1,
+            `exactly one tool is hosted, not a stack (${info && info.count})`
+          );
+          assert(
+            info.overlays === 0 && info.modalRoles === 0,
+            `“${label}” raised NO backdrop and no role=dialog — the stage stays live ` +
+              `(overlays ${info.overlays}, modal roles ${info.modalRoles})`
+          );
+          assert(
+            info.role === 'section' && typeof info.label === 'string' && info.label.length > 0,
+            `the hosted tool announces itself as a region with a name ` +
+              `(<${info.role}> ${JSON.stringify(info.label)})`
+          );
+          assert(
+            info.controls > 0,
+            `${d.component} rendered its own body, not an empty shell (${info.controls} controls)`
+          );
+          // The strip says where you are: Pipeline is the active module.
+          const pressed = await page.evaluate(() =>
+            [...document.querySelectorAll('[data-testid="sidebar-tabs"] button')]
+              .filter((b) => b.getAttribute('aria-pressed') === 'true')
+              .map((b) => b.getAttribute('aria-label'))
+          );
+          assert(
+            JSON.stringify(pressed) === JSON.stringify(['Pipeline']),
+            `the strip shows Pipeline as the active module while a tool is hosted ` +
+              `(pressed: ${JSON.stringify(pressed)})`
+          );
+          record(
+            `Tool: ${d.component}`,
+            `hosted in the module column via ${opener.kind}${opener.title ? ` (${opener.title})` : ''} > ${label}`,
+            'PASS'
+          );
+          const closed = await closeHostedTool(page);
+          console.log(
+            `  closed after ${closed.presses} ✕ click(s) in ${closed.ms} ms` +
+              (closed.presses > 1 ? ' — the tool vetoed the ✕ while busy (M7/F12)' : '')
+          );
+          const afterHosted = await storeSnapshot(page);
+          assert(
+            afterHosted === before,
+            `closing ${d.component} left the store byte-identical\n    before ${before}\n    after  ${afterHosted}`
+          );
+          return;
+        }
+
         await page.waitForSelector('[data-testid="dialog-overlay"]', { timeout: 10000 });
         const info = await openDialogInfo(page);
         console.log(
@@ -1321,8 +1539,8 @@ async function main() {
           'PASS'
         );
 
-        // Escape is the cancel this walk uses for every dialog: it is
-        // DialogShell's own path, it is the one every dialog shares, and it
+        // Escape is the cancel this walk uses for every MODAL dialog: it is
+        // DialogShell's own path, it is the one every modal shares, and it
         // exercises the F25 top-of-stack rule rather than a per-dialog button.
         const cancel = await cancelDialog(page);
         console.log(
@@ -1387,7 +1605,9 @@ async function main() {
           b.getAttribute('aria-label')
         )
       );
-      const expected = derivedPanels.filter((p) => p.hasStripIcon).map((p) => p.label);
+      // U2: "permanent" is now a SLOT rather than an id exclusion list, and the
+      // registry order is the slot rank — see `modulePanels()`.
+      const expected = derivedPanels.filter((p) => p.permanent).map((p) => p.label);
       assert(
         JSON.stringify(drawn) === JSON.stringify(expected),
         `the strip draws the permanent entries in registry order (expected ${JSON.stringify(expected)}, ` +
@@ -1399,7 +1619,21 @@ async function main() {
         !drawn.includes('Remix'),
         `the contextual Remix entry is ABSENT with no remix document (strip: ${JSON.stringify(drawn)})`
       );
-      record('Module strip', 'roster matches MODULE_PANELS; Remix contextual and absent', 'PASS');
+      // U2: the user's two rules, asserted on the LIVE strip rather than only
+      // on the source the expectation was derived from.
+      assert(
+        drawn[0] === 'Files' && drawn[drawn.length - 1] === 'History',
+        `Files leads the strip and History closes it (${JSON.stringify(drawn)})`
+      );
+      assert(
+        drawn.includes('Pipeline'),
+        `the Pipeline module has an entry (${JSON.stringify(drawn)})`
+      );
+      record(
+        'Module strip',
+        'roster matches MODULE_PANELS; Files first, History last, Remix contextual and absent',
+        'PASS'
+      );
     });
 
     await step(page, 'Module: Files — switch the active document', async () => {
@@ -1717,14 +1951,22 @@ async function main() {
         );
         // "Did something visible" is asked GENERICALLY rather than as a list of
         // per-command outcomes, because the outcomes genuinely differ: Auto-Remix
-        // opens a dialog, Spatial Positioner moves the module card, and Detect
+        // opens a tool, Spatial Positioner moves the module card, and Detect
         // Tempo does neither — it runs an analysis and rewrites the tempo card.
         // A composite signature of the app's chrome covers all three, and a
         // command that fired and changed nothing at all fails here.
+        //
+        // U2: `tool` joined the signature. Nine of these rows now open in the
+        // module column instead of over the stage, and `dialogs` alone would
+        // have read them as "no dialog, no tab change" — a silent pass for a
+        // row that in fact did the whole thing.
         const chromeSignature = () =>
           page.evaluate(() =>
             JSON.stringify({
               dialogs: document.querySelectorAll('[data-testid="dialog-overlay"]').length,
+              tool:
+                document.querySelector('[data-testid="tool-host"]')?.getAttribute('data-tool-id') ??
+                null,
               tab:
                 document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab') ??
                 null,
@@ -1739,6 +1981,10 @@ async function main() {
             (was) =>
               JSON.stringify({
                 dialogs: document.querySelectorAll('[data-testid="dialog-overlay"]').length,
+                tool:
+                  document
+                    .querySelector('[data-testid="tool-host"]')
+                    ?.getAttribute('data-tool-id') ?? null,
                 tab:
                   document
                     .querySelector('[data-testid="sidebar-panel"]')
@@ -1752,22 +1998,33 @@ async function main() {
           .then(() => true)
           .catch(() => false);
         const sigAfter = await chromeSignature();
-        const dialogOpen = await page.evaluate(
-          () => document.querySelector('[data-testid="dialog-overlay"]') !== null
-        );
-        const outcome = dialogOpen
-          ? 'dialog'
-          : JSON.parse(sigAfter).tab !== JSON.parse(sigBefore).tab
-            ? 'panel'
-            : 'chrome update';
+        const open = await page.evaluate(() => ({
+          dialog: document.querySelector('[data-testid="dialog-overlay"]') !== null,
+          tool: document.querySelector('[data-testid="tool-host"]') !== null,
+        }));
+        const outcome = open.tool
+          ? 'hosted tool'
+          : open.dialog
+            ? 'dialog'
+            : JSON.parse(sigAfter).tab !== JSON.parse(sigBefore).tab
+              ? 'panel'
+              : 'chrome update';
         assert(
           changed,
           `the ${section.title} group's “${row.label}” row changed something visible ` +
             `(signature was ${sigBefore})`
         );
+        // U2: the Effects card is one of the three doors the user asked to open
+        // hosted, so a tool row that raised a MODAL from here is a failure and
+        // not merely a different outcome.
+        assert(
+          !open.dialog,
+          `the ${section.title} group's “${row.label}” row raised no backdrop — the Effects card ` +
+            `is a Pipeline door and its tools open in the column`
+        );
         console.log(`    ${section.title} → ${row.label}: ${outcome}`);
-        if (dialogOpen) {
-          await cancelDialog(page);
+        if (open.tool || open.dialog) {
+          await dismissOpenTool(page);
         }
         await openModuleCard(page, 'Effects');
         await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
@@ -1862,9 +2119,18 @@ async function main() {
           b.getAttribute('aria-label')
         )
       );
+      // U2: Remix's slot is unmoved — still contextual, still appended after
+      // the permanent body entries — but it is no longer LAST, because the
+      // user's "'History' always last" rule outranks it. So the assertion is
+      // the adjacency, and History closing the strip in both remix states.
       assert(
-        icons.includes('Remix') && icons[icons.length - 1] === 'Remix',
-        `the Remix entry appeared, and last, once a remix document existed (${JSON.stringify(icons)})`
+        icons.includes('Remix') && icons[icons.length - 1] === 'History',
+        `the Remix entry appeared and History still closes the strip (${JSON.stringify(icons)})`
+      );
+      assert(
+        icons[icons.indexOf('Remix') + 1] === 'History',
+        `Remix sits immediately before History — its contextual slot is unmoved ` +
+          `(${JSON.stringify(icons)})`
       );
       await openModuleCard(page, 'Remix');
       await page.waitForSelector('[data-testid="remix-panel"]', { timeout: 5000 });
