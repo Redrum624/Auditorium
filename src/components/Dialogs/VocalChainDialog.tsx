@@ -8,10 +8,12 @@ import {
   VOCAL_CHAIN_UNDO_LABEL,
   defaultStageSelection,
   runVocalChain,
+  type ChainStagePhase,
   type StageStatus,
   type VocalChainMetrics,
   type VocalChainReport,
   type VocalChainStageId,
+  type VocalChainStageProgress,
   type VocalChainStageResult,
 } from '../../services/vocalChain';
 import { GlassButton, SectionLabel } from '../UI/glass';
@@ -39,6 +41,62 @@ const STATUS_COLOR: Record<StageStatus, string> = {
   declined: '#e0a458',
   off: 'var(--glass-text-muted)',
   manual: 'var(--glass-text-muted)',
+};
+
+/**
+ * The live stepper (P1).
+ *
+ * Every stage is listed top to bottom before, during and after the run — that
+ * part never changed. What the row could not say WHILE the run was going is
+ * which stage is running, how far through it the pass is, and what it is doing;
+ * the dialog had one overall fraction and one stage label for a pass whose
+ * slowest stage alone takes a minute.
+ *
+ * `done` and `declined` are separate states rather than one "finished": a stage
+ * that declined is the outcome easiest to mistake for a successful one, and
+ * that is the same reason the finished report keeps them apart in amber.
+ *
+ * The live badge REPLACES the status word while the run is going, in the same
+ * slot, so a row never carries two verdicts at once. Everything the row says
+ * BELOW the badge is the report's own block, rendered from the very result
+ * object the engine will put in `report.stages` — there is no second set of
+ * strings here, which is why a finished row looks the same before and after the
+ * run lands.
+ */
+type StepState = 'done' | 'declined' | 'running' | 'pending' | 'off' | 'manual';
+
+const STEP_TEXT: Record<StepState, string> = {
+  done: STATUS_TEXT.applied,
+  declined: STATUS_TEXT.declined,
+  running: 'Running',
+  pending: 'Waiting',
+  off: STATUS_TEXT.off,
+  manual: STATUS_TEXT.manual,
+};
+
+const STEP_COLOR: Record<StepState, string> = {
+  done: STATUS_COLOR.applied,
+  declined: STATUS_COLOR.declined,
+  running: 'var(--accent)',
+  pending: 'var(--glass-text-muted)',
+  off: STATUS_COLOR.off,
+  manual: STATUS_COLOR.manual,
+};
+
+/** What the finished statuses become as a live step. A result that has landed
+ * is a step that is over, whatever it decided. */
+const STEP_OF_STATUS: Record<StageStatus, StepState> = {
+  applied: 'done',
+  declined: 'declined',
+  off: 'off',
+  manual: 'manual',
+};
+
+/** What the phase is called on screen. The engine's own two words, capitalised
+ * — the sentence after the em-dash is the engine's detail verbatim. */
+const PHASE_TEXT: Record<ChainStagePhase, string> = {
+  measuring: 'Measuring',
+  rendering: 'Rendering',
 };
 
 const METRIC_ROWS: { key: keyof VocalChainMetrics; label: string; unit: 'dbfs' | 'db' }[] = [
@@ -149,6 +207,14 @@ function StageResult({ result }: { result: VocalChainStageResult }) {
  * on its own. A stage the user cannot see or refuse is a stage that ran without
  * being seen.
  *
+ * During: the same list, live. Every row carries a state — waiting, running,
+ * ran, did not run, switched off — so the whole pass is legible top to bottom
+ * while it happens; the running row is highlighted and says what it is doing
+ * (measuring its settings, or rendering with the settings it just measured) and
+ * how far through ITSELF it is. The bar at the foot is the whole pass, weighted
+ * by the measured stage times, and that is the number it was always right for:
+ * it cannot say which of twelve stages the minute is being spent in.
+ *
  * After: every stage says what it did. The settings it derived and what it
  * derived them FROM, the measured before/after RMS and peak, and how much of the
  * audio it left bit-identical. A stage that declined says so in amber with the
@@ -176,6 +242,11 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
   const [running, setRunning] = useState<string | null>(null);
   const [report, setReport] = useState<VocalChainReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The live half of the stepper. `liveResults` holds the engine's OWN result
+  // objects as they land — the same ones `report.stages` will carry — and
+  // `stageProgress` holds the last thing the running stage said about itself.
+  const [liveResults, setLiveResults] = useState<VocalChainStageResult[]>([]);
+  const [stageProgress, setStageProgress] = useState<VocalChainStageProgress | null>(null);
 
   // RemixDialog's unmount-cancel idiom: the cleanup must read the CURRENT value,
   // so a ref rather than state. Every continuation below checks it before
@@ -198,8 +269,12 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
     ? `Selection — ${secs(regionSamples, rate)}`
     : `Whole file — ${secs(regionSamples, rate)}`;
 
+  // The finished report wins the moment it exists, and a run that FAILED shows
+  // nothing: `runVocalChain` resolves null after rolling the document back, and
+  // the stages that had already reported would otherwise be left on screen
+  // looking like an outcome of a pass that changed nothing.
   const resultById = new Map<VocalChainStageId, VocalChainStageResult>(
-    (report?.stages ?? []).map((r) => [r.id, r] as const)
+    (report ? report.stages : busy ? liveResults : []).map((r) => [r.id, r] as const)
   );
   const anyEnabled = VOCAL_CHAIN_STAGES.some((s) => s.effectId !== null && enabled[s.id]);
   const done = report !== null && report.applied;
@@ -216,6 +291,8 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
     setRunning(null);
     setError(null);
     setReport(null);
+    setLiveResults([]);
+    setStageProgress(null);
     try {
       const result = await runVocalChain({
         enabled,
@@ -224,6 +301,16 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
         },
         onStageStart: (stage) => {
           if (!cancelledRef.current) setRunning(stage.label);
+        },
+        onStageProgress: (p) => {
+          if (!cancelledRef.current) setStageProgress(p);
+        },
+        onStageResult: (r) => {
+          // Appended, never merged by id: the engine reports each stage once,
+          // in registry order, and rebuilding the row from the report's own
+          // object is what keeps the live text and the finished text the same
+          // text.
+          if (!cancelledRef.current) setLiveResults((prev) => [...prev, r]);
         },
       });
       if (cancelledRef.current) return;
@@ -238,6 +325,7 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
       if (!cancelledRef.current) {
         setBusy(false);
         setRunning(null);
+        setStageProgress(null);
       }
     }
   }
@@ -268,15 +356,34 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
             const result = resultById.get(stage.id);
             const manual = stage.effectId === null;
             const status: StageStatus | null = result ? result.status : manual ? 'manual' : null;
+            // The live state of this row. A result that has landed decides it;
+            // otherwise the stage is manual, switched off, the one the engine is
+            // currently reporting on, or still waiting its turn.
+            const step: StepState = result
+              ? STEP_OF_STATUS[result.status]
+              : manual
+                ? 'manual'
+                : !enabled[stage.id]
+                  ? 'off'
+                  : stageProgress?.stageId === stage.id
+                    ? 'running'
+                    : 'pending';
+            const activity = step === 'running' ? stageProgress : null;
             return (
               <div
                 key={stage.id}
                 data-testid={`vocal-chain-stage-${stage.id}`}
                 className="rounded-xl"
                 style={{
-                  border: '1px solid var(--glass-border)',
-                  background: 'rgba(255, 255, 255, 0.02)',
+                  border: `1px solid ${busy && step === 'running' ? 'var(--accent)' : 'var(--glass-border)'}`,
+                  background:
+                    busy && step === 'running' ? 'var(--accent-ring)' : 'rgba(255, 255, 255, 0.02)',
                   padding: '8px 10px',
+                  // Dimmed until it has something to say. Only while the run is
+                  // going: before Apply every stage is a choice the user is
+                  // making, and after it every stage is a result they are
+                  // reading.
+                  opacity: busy && step === 'pending' ? 0.55 : 1,
                 }}
               >
                 <div className="flex items-start gap-2">
@@ -306,15 +413,31 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                           {stage.label}
                         </label>
                       )}
-                      {status && (
+                      {busy ? (
                         <span
-                          data-testid={`vocal-chain-status-${stage.id}`}
+                          data-testid={`vocal-chain-step-${stage.id}`}
+                          data-state={step}
                           className="shrink-0 text-xs"
-                          style={{ color: STATUS_COLOR[status] }}
+                          style={{ color: STEP_COLOR[step] }}
                         >
-                          {STATUS_TEXT[status]}
-                          {result?.elapsedMs !== undefined ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s` : ''}
+                          {step === 'done' ? '✓ ' : ''}
+                          {STEP_TEXT[step]}
+                          {activity ? ` · ${Math.round(activity.stageFraction * 100)}%` : ''}
+                          {result?.elapsedMs !== undefined
+                            ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s`
+                            : ''}
                         </span>
+                      ) : (
+                        status && (
+                          <span
+                            data-testid={`vocal-chain-status-${stage.id}`}
+                            className="shrink-0 text-xs"
+                            style={{ color: STATUS_COLOR[status] }}
+                          >
+                            {STATUS_TEXT[status]}
+                            {result?.elapsedMs !== undefined ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s` : ''}
+                          </span>
+                        )
                       )}
                     </div>
                     <p
@@ -324,6 +447,30 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                     >
                       {stage.note}
                     </p>
+                    {activity && (
+                      <div className="mt-1 flex flex-col gap-1">
+                        <p
+                          data-testid={`vocal-chain-activity-${stage.id}`}
+                          className="text-xs"
+                          style={{ color: 'var(--glass-text-label)' }}
+                        >
+                          {PHASE_TEXT[activity.phase]} — {activity.detail}
+                        </p>
+                        <div
+                          className="h-1 w-full overflow-hidden rounded-full"
+                          style={{ background: 'rgba(255, 255, 255, 0.09)' }}
+                        >
+                          <div
+                            data-testid={`vocal-chain-stage-progress-${stage.id}`}
+                            className="h-full transition-[width]"
+                            style={{
+                              width: `${Math.round(activity.stageFraction * 100)}%`,
+                              background: 'var(--accent)',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
                     {result && <StageResult result={result} />}
                   </div>
                 </div>

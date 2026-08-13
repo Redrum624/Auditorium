@@ -3,9 +3,11 @@ import VocalChainDialog from './VocalChainDialog';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import {
+  STAGE_MEASURING_DETAIL,
   VOCAL_CHAIN_STAGES,
   defaultStageSelection,
   runVocalChain,
+  type RunVocalChainOptions,
   type VocalChainReport,
   type VocalChainStageResult,
 } from '../../services/vocalChain';
@@ -415,6 +417,176 @@ describe('VocalChainDialog — while it runs', () => {
       if (stage.effectId === null) continue;
       expect(screen.getByTestId(`vocal-chain-toggle-${stage.id}`)).toBeDisabled();
     }
+  });
+
+  // ── The live stepper (P1) ─────────────────────────────────────────────────
+  // "When doing a pipeline, I want to see all the steps from top to bottom and
+  // what is happening in the current tool." The rows were already listed top to
+  // bottom; what they had no way to say was WHICH one is running, how far
+  // through it the run is, and what it is doing — the dialog knew only a single
+  // overall fraction and a stage label.
+
+  /** Everything the report block renders for one stage, tagged by test id.
+   * Used to compare the LIVE rendering of a stage against the FINISHED one:
+   * byte-identical is the claim, and it is a claim about the strings on screen
+   * rather than about which helper produced them. */
+  function resultTextOf(id: string): string[] {
+    return [
+      ...screen.queryAllByTestId(`vocal-chain-derived-${id}`),
+      ...screen.queryAllByTestId(`vocal-chain-detail-${id}`),
+      ...screen.queryAllByTestId(`vocal-chain-delta-${id}`),
+      ...screen.queryAllByTestId(`vocal-chain-warning-${id}`),
+      ...screen.queryAllByTestId(`vocal-chain-reason-${id}`),
+    ].map((el) => `${el.getAttribute('data-testid')}=${el.textContent}`);
+  }
+
+  interface Captured {
+    resolve: (value: VocalChainReport | null) => void;
+    onStageProgress?: RunVocalChainOptions['onStageProgress'];
+    onStageResult?: RunVocalChainOptions['onStageResult'];
+  }
+
+  /** Presses Apply against a run that will not resolve until the test says so,
+   * handing back the callbacks the dialog passed in. */
+  async function startRun(): Promise<Captured> {
+    const captured = { resolve: () => {} } as Captured;
+    mockRun.mockImplementation(
+      (opts) =>
+        new Promise<VocalChainReport | null>((resolve) => {
+          captured.resolve = resolve;
+          captured.onStageProgress = opts.onStageProgress;
+          captured.onStageResult = opts.onStageResult;
+        })
+    );
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(captured.onStageProgress).toBeDefined());
+    return captured;
+  }
+
+  it('lists EVERY stage with a live state from the moment Apply is pressed', async () => {
+    seedDoc();
+    await startRun();
+
+    const steps = screen.getAllByTestId(/^vocal-chain-step-/);
+    expect(steps.map((s) => s.getAttribute('data-testid'))).toEqual(
+      VOCAL_CHAIN_STAGES.map((s) => `vocal-chain-step-${s.id}`)
+    );
+    // Before anything has reported: the manual stages say so, the stages the
+    // user switched off say so, and everything else is waiting its turn. None
+    // of them is blank, which is what the row said during a run until now.
+    for (const stage of VOCAL_CHAIN_STAGES) {
+      const step = screen.getByTestId(`vocal-chain-step-${stage.id}`);
+      const expected =
+        stage.effectId === null ? 'manual' : stage.defaultEnabled ? 'pending' : 'off';
+      expect(step).toHaveAttribute('data-state', expected);
+    }
+    // …and the fixture reaches all three, so this cannot pass by listing one.
+    const states = steps.map((s) => s.getAttribute('data-state'));
+    expect(new Set(states)).toEqual(new Set(['manual', 'pending', 'off']));
+  });
+
+  it('highlights the stage that is running, with what it is doing and how far through it is', async () => {
+    seedDoc();
+    const run = await startRun();
+
+    act(() =>
+      run.onStageProgress!({
+        stageId: 'noise',
+        label: 'Noise Reduction',
+        phase: 'measuring',
+        stageFraction: 0,
+        detail: STAGE_MEASURING_DETAIL,
+      })
+    );
+    expect(screen.getByTestId('vocal-chain-step-noise')).toHaveAttribute('data-state', 'running');
+    // Only one row runs at a time — the stage before it in the order has not
+    // reported yet, so it must not also read as running.
+    expect(screen.getByTestId('vocal-chain-step-dc')).toHaveAttribute('data-state', 'pending');
+    expect(screen.getByTestId('vocal-chain-activity-noise')).toHaveTextContent(STAGE_MEASURING_DETAIL);
+
+    act(() =>
+      run.onStageProgress!({
+        stageId: 'noise',
+        label: 'Noise Reduction',
+        phase: 'rendering',
+        stageFraction: 0.42,
+        detail: 'Noise print: 12.3 s, -61.2 dBFS',
+      })
+    );
+    const step = screen.getByTestId('vocal-chain-step-noise');
+    // The FRACTION is on screen, not merely in the props: a per-stage bar that
+    // never moves is the defect the overall bar already had.
+    expect(step).toHaveTextContent('42%');
+    expect(screen.getByTestId('vocal-chain-activity-noise')).toHaveTextContent(
+      'Noise print: 12.3 s, -61.2 dBFS'
+    );
+    expect(screen.getByTestId('vocal-chain-stage-progress-noise')).toHaveStyle({ width: '42%' });
+  });
+
+  it("settles a finished stage to done, showing the REPORT's own strings for it mid-run", async () => {
+    seedDoc();
+    // One report object, used for both halves of the comparison: the object fed
+    // to the live callback is the object the finished report carries, exactly
+    // as the engine hands it over.
+    const report = makeReport({ stages: stagesWith(APPLIED_COMPRESSOR, DECLINED_HUM) });
+    const run = await startRun();
+
+    for (const id of ['compressor', 'hum'] as const) {
+      act(() => run.onStageResult!(report.stages.find((s) => s.id === id)!));
+    }
+    expect(screen.getByTestId('vocal-chain-step-compressor')).toHaveAttribute('data-state', 'done');
+    expect(screen.getByTestId('vocal-chain-step-hum')).toHaveAttribute('data-state', 'declined');
+
+    const liveCompressor = resultTextOf('compressor');
+    const liveHum = resultTextOf('hum');
+    expect(liveCompressor.length).toBeGreaterThan(0);
+    expect(liveHum.length).toBeGreaterThan(0);
+
+    await act(async () => run.resolve(report));
+
+    // BYTE-IDENTICAL to what the finished report renders. Not "contains the
+    // same numbers" — a live line that rounded differently, or dropped the
+    // "from" clause, or invented its own phrasing for the same measurement
+    // would pass a looser assertion and would be a second set of strings to
+    // keep in step with the report.
+    expect(resultTextOf('compressor')).toEqual(liveCompressor);
+    expect(resultTextOf('hum')).toEqual(liveHum);
+    // And the live rows are gone: the finished view is the report, unchanged.
+    expect(screen.queryAllByTestId(/^vocal-chain-step-/)).toHaveLength(0);
+    expect(screen.getByTestId('vocal-chain-status-compressor')).toHaveTextContent('Ran');
+  });
+
+  it('dims what has not run yet and does not dim what is running', async () => {
+    seedDoc();
+    const run = await startRun();
+    act(() =>
+      run.onStageProgress!({
+        stageId: 'dc',
+        label: 'Remove DC Offset',
+        phase: 'rendering',
+        stageFraction: 0.5,
+        detail: 'x',
+      })
+    );
+    expect(screen.getByTestId('vocal-chain-stage-dc')).toHaveStyle({ opacity: '1' });
+    expect(screen.getByTestId('vocal-chain-stage-pitch')).toHaveStyle({ opacity: '0.55' });
+  });
+
+  it('shows NOTHING from a run that failed — a half-reported pass is not a report', async () => {
+    seedDoc();
+    const report = makeReport({ stages: stagesWith(APPLIED_COMPRESSOR) });
+    const run = await startRun();
+    act(() => run.onStageResult!(report.stages.find((s) => s.id === 'compressor')!));
+    expect(resultTextOf('compressor').length).toBeGreaterThan(0);
+
+    // The engine resolves null when a stage fails: it rolls the document back
+    // and nothing was applied. The stages that HAD reported before the failure
+    // must not be left on screen looking like an outcome.
+    await act(async () => run.resolve(null));
+    expect(screen.getByTestId('vocal-chain-error')).toBeInTheDocument();
+    expect(resultTextOf('compressor')).toEqual([]);
+    expect(screen.queryAllByTestId(/^vocal-chain-step-/)).toHaveLength(0);
   });
 
   it('names the stage currently running', async () => {

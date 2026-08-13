@@ -15,11 +15,12 @@ import {
   type CoverChainMetrics,
   type CoverChainReport,
   type CoverChainStageId,
+  type CoverChainStageProgress,
   type CoverChainStageResult,
   type MatchEqDetail,
 } from '../../services/coverChain';
 import type { MatchBandStatus } from '../../dsp/coverMatch';
-import type { StageStatus } from '../../services/vocalChain';
+import type { ChainStagePhase, StageStatus } from '../../services/vocalChain';
 import { GlassButton, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
 
@@ -50,6 +51,55 @@ const STATUS_COLOR: Record<StageStatus, string> = {
 };
 
 const AMBER = '#e0a458';
+
+/**
+ * The live stepper (P1) — the vocal chain's states, over this chain's table.
+ *
+ * It earns its place here more than it does there. The four automatic stages
+ * are weighted 56/32/1/11, so the overall bar can sit inside Match EQ for most
+ * of a run without saying what Match EQ is doing — and Match Reverb, which is
+ * 32 of that weight and DECLINES on most material, spends its whole share in a
+ * measurement (an ISO 3382-1 T20 fit over the reference) with nothing to show
+ * for it until the verdict lands.
+ *
+ * `done` and `declined` stay separate, for the reason the finished report keeps
+ * them apart in amber: a decline is the outcome easiest to mistake for a
+ * successful run, and on this chain it is the most common one there is.
+ */
+type StepState = 'done' | 'declined' | 'running' | 'pending' | 'off' | 'manual';
+
+const STEP_TEXT: Record<StepState, string> = {
+  done: STATUS_TEXT.applied,
+  declined: STATUS_TEXT.declined,
+  running: 'Running',
+  pending: 'Waiting',
+  off: STATUS_TEXT.off,
+  manual: STATUS_TEXT.manual,
+};
+
+const STEP_COLOR: Record<StepState, string> = {
+  done: STATUS_COLOR.applied,
+  declined: STATUS_COLOR.declined,
+  running: 'var(--accent)',
+  pending: 'var(--glass-text-muted)',
+  off: STATUS_COLOR.off,
+  manual: STATUS_COLOR.manual,
+};
+
+/** What the finished statuses become as a live step. A result that has landed
+ * is a step that is over, whatever it decided. */
+const STEP_OF_STATUS: Record<StageStatus, StepState> = {
+  applied: 'done',
+  declined: 'declined',
+  off: 'off',
+  manual: 'manual',
+};
+
+/** The engine's own two phase words, capitalised. */
+const PHASE_TEXT: Record<ChainStagePhase, string> = {
+  measuring: 'Measuring',
+  rendering: 'Rendering',
+};
 
 /**
  * The before/after table's rows.
@@ -227,7 +277,10 @@ function StageResult({ result }: { result: CoverChainStageResult }) {
  * in registry order — which IS the order the four automatic ones run in, and is
  * only the order the five manual ones are listed in, since nothing here runs
  * them — with the note that says why it sits there, individually
- * switchable; afterwards, every stage saying what it did, with the settings it
+ * switchable; DURING the run, that same list live — every row carrying a state,
+ * the running one highlighted and saying what it is doing and how far through
+ * ITSELF it is, which the overall bar cannot when one stage carries 56 of the
+ * 68 weight; afterwards, every stage saying what it did, with the settings it
  * derived and what it derived them from — and, for the match, the curve the EQ
  * MEASURABLY DELIVERED rather than the one it was asked for.
  *
@@ -250,6 +303,11 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
   const [running, setRunning] = useState<string | null>(null);
   const [report, setReport] = useState<CoverChainReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // The live half of the stepper. `liveResults` holds the engine's OWN result
+  // objects as they land — the same ones `report.stages` will carry — and
+  // `stageProgress` holds the last thing the running stage said about itself.
+  const [liveResults, setLiveResults] = useState<CoverChainStageResult[]>([]);
+  const [stageProgress, setStageProgress] = useState<CoverChainStageProgress | null>(null);
 
   // RemixDialog's unmount-cancel idiom: the cleanup must read the CURRENT value,
   // so a ref rather than state. It is not a kill switch — the chain owns its own
@@ -276,8 +334,12 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
   // renamed or re-imported vocal is still a valid reference, and a filter that
   // hid it would be a rule the user cannot see.
   const candidates = documents.filter((d) => d.id !== doc.id);
+  // The finished report wins the moment it exists, and a run that FAILED shows
+  // nothing: `runCoverChain` resolves null after rolling the document back, and
+  // the stages that had already reported would otherwise be left on screen
+  // looking like an outcome.
   const resultById = new Map<CoverChainStageId, CoverChainStageResult>(
-    (report?.stages ?? []).map((r) => [r.id, r] as const)
+    (report ? report.stages : busy ? liveResults : []).map((r) => [r.id, r] as const)
   );
   const anyEnabled = COVER_CHAIN_STAGES.some((s) => s.effectId !== null && enabled[s.id]);
   const done = report !== null && report.applied;
@@ -294,6 +356,8 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
     setRunning(null);
     setError(null);
     setReport(null);
+    setLiveResults([]);
+    setStageProgress(null);
     try {
       const result = await runCoverChain({
         enabled,
@@ -303,6 +367,16 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
         },
         onStageStart: (stage) => {
           if (!cancelledRef.current) setRunning(stage.label);
+        },
+        onStageProgress: (p) => {
+          if (!cancelledRef.current) setStageProgress(p);
+        },
+        onStageResult: (r) => {
+          // Appended, never merged by id: the engine reports each stage once,
+          // in registry order, and rebuilding the row from the report's own
+          // object is what keeps the live text and the finished text the same
+          // text.
+          if (!cancelledRef.current) setLiveResults((prev) => [...prev, r]);
         },
       });
       if (cancelledRef.current) return;
@@ -317,6 +391,7 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
       if (!cancelledRef.current) {
         setBusy(false);
         setRunning(null);
+        setStageProgress(null);
       }
     }
   }
@@ -391,15 +466,33 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
             const result = resultById.get(stage.id);
             const manual = stage.effectId === null;
             const status: StageStatus | null = result ? result.status : manual ? 'manual' : null;
+            // The live state of this row. A result that has landed decides it;
+            // otherwise the stage is manual, switched off, the one the engine is
+            // currently reporting on, or still waiting its turn.
+            const step: StepState = result
+              ? STEP_OF_STATUS[result.status]
+              : manual
+                ? 'manual'
+                : !enabled[stage.id]
+                  ? 'off'
+                  : stageProgress?.stageId === stage.id
+                    ? 'running'
+                    : 'pending';
+            const activity = step === 'running' ? stageProgress : null;
             return (
               <div
                 key={stage.id}
                 data-testid={`cover-chain-stage-${stage.id}`}
                 className="rounded-xl"
                 style={{
-                  border: '1px solid var(--glass-border)',
-                  background: 'rgba(255, 255, 255, 0.02)',
+                  border: `1px solid ${busy && step === 'running' ? 'var(--accent)' : 'var(--glass-border)'}`,
+                  background:
+                    busy && step === 'running' ? 'var(--accent-ring)' : 'rgba(255, 255, 255, 0.02)',
                   padding: '8px 10px',
+                  // Dimmed until it has something to say, and only while the run
+                  // is going: before Apply every stage is a choice, and after it
+                  // every stage is a result.
+                  opacity: busy && step === 'pending' ? 0.55 : 1,
                 }}
               >
                 <div className="flex items-start gap-2">
@@ -429,15 +522,31 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
                           {stage.label}
                         </label>
                       )}
-                      {status && (
+                      {busy ? (
                         <span
-                          data-testid={`cover-chain-status-${stage.id}`}
+                          data-testid={`cover-chain-step-${stage.id}`}
+                          data-state={step}
                           className="shrink-0 text-xs"
-                          style={{ color: STATUS_COLOR[status] }}
+                          style={{ color: STEP_COLOR[step] }}
                         >
-                          {STATUS_TEXT[status]}
-                          {result?.elapsedMs !== undefined ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s` : ''}
+                          {step === 'done' ? '✓ ' : ''}
+                          {STEP_TEXT[step]}
+                          {activity ? ` · ${Math.round(activity.stageFraction * 100)}%` : ''}
+                          {result?.elapsedMs !== undefined
+                            ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s`
+                            : ''}
                         </span>
+                      ) : (
+                        status && (
+                          <span
+                            data-testid={`cover-chain-status-${stage.id}`}
+                            className="shrink-0 text-xs"
+                            style={{ color: STATUS_COLOR[status] }}
+                          >
+                            {STATUS_TEXT[status]}
+                            {result?.elapsedMs !== undefined ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s` : ''}
+                          </span>
+                        )
                       )}
                     </div>
                     <p
@@ -447,6 +556,30 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
                     >
                       {stage.note}
                     </p>
+                    {activity && (
+                      <div className="mt-1 flex flex-col gap-1">
+                        <p
+                          data-testid={`cover-chain-activity-${stage.id}`}
+                          className="text-xs"
+                          style={{ color: 'var(--glass-text-label)' }}
+                        >
+                          {PHASE_TEXT[activity.phase]} — {activity.detail}
+                        </p>
+                        <div
+                          className="h-1 w-full overflow-hidden rounded-full"
+                          style={{ background: 'rgba(255, 255, 255, 0.09)' }}
+                        >
+                          <div
+                            data-testid={`cover-chain-stage-progress-${stage.id}`}
+                            className="h-full transition-[width]"
+                            style={{
+                              width: `${Math.round(activity.stageFraction * 100)}%`,
+                              background: 'var(--accent)',
+                            }}
+                          />
+                        </div>
+                      </div>
+                    )}
                     {result && <StageResult result={result} />}
                   </div>
                 </div>

@@ -14,7 +14,9 @@ import {
   type CoverChainMetrics,
   type CoverChainReport,
   type CoverChainStageResult,
+  type RunCoverChainOptions,
 } from '../../services/coverChain';
+import { STAGE_MEASURING_DETAIL } from '../../services/vocalChain';
 
 // The STAGE TABLE stays real (requireActual): the dialog's whole contract is
 // that it lists what the engine will actually run, in the engine's order, with
@@ -639,6 +641,159 @@ describe('CoverChainDialog — the run and the report', () => {
     await waitFor(() => expect(screen.getByTestId('cover-chain-close')).toBeInTheDocument());
     expect(screen.getByTestId('cover-chain-toggle-matchEq')).toBeDisabled();
     expect(screen.getByTestId('cover-chain-reference')).toBeDisabled();
+  });
+
+  // ── The live stepper (P1) ─────────────────────────────────────────────────
+  // The four automatic stages are weighted 56/32/1/11, so the overall bar can
+  // sit inside Match EQ for most of a run saying nothing about what Match EQ is
+  // doing. Same contract as the vocal chain's, over this chain's stage table.
+
+  /** Everything the report block renders for one stage, tagged by test id — so
+   * the LIVE rendering can be compared with the FINISHED one, byte for byte. */
+  function resultTextOf(id: string): string[] {
+    return [
+      ...screen.queryAllByTestId(`cover-chain-derived-${id}`),
+      ...screen.queryAllByTestId(`cover-chain-detail-${id}`),
+      ...screen.queryAllByTestId(`cover-chain-delta-${id}`),
+      ...screen.queryAllByTestId(`cover-chain-warning-${id}`),
+      ...screen.queryAllByTestId(`cover-chain-reason-${id}`),
+      ...screen.queryAllByTestId('cover-chain-eq-table'),
+    ].map((el) => `${el.getAttribute('data-testid')}=${el.textContent}`);
+  }
+
+  interface Captured {
+    resolve: (value: CoverChainReport | null) => void;
+    onStageProgress?: RunCoverChainOptions['onStageProgress'];
+    onStageResult?: RunCoverChainOptions['onStageResult'];
+  }
+
+  async function startRun(): Promise<Captured> {
+    const captured = { resolve: () => {} } as Captured;
+    mockRun.mockImplementation(
+      (opts) =>
+        new Promise<CoverChainReport | null>((resolve) => {
+          captured.resolve = resolve;
+          captured.onStageProgress = opts.onStageProgress;
+          captured.onStageResult = opts.onStageResult;
+        })
+    );
+    render(<CoverChainDialog onClose={() => {}} />);
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(captured.onStageProgress).toBeDefined());
+    return captured;
+  }
+
+  it('lists EVERY stage with a live state from the moment Apply is pressed', async () => {
+    seedDoc();
+    await startRun();
+
+    const steps = screen.getAllByTestId(/^cover-chain-step-/);
+    expect(steps.map((s) => s.getAttribute('data-testid'))).toEqual(
+      COVER_CHAIN_STAGES.map((s) => `cover-chain-step-${s.id}`)
+    );
+    for (const stage of COVER_CHAIN_STAGES) {
+      const expected =
+        stage.effectId === null ? 'manual' : stage.defaultEnabled ? 'pending' : 'off';
+      expect(screen.getByTestId(`cover-chain-step-${stage.id}`)).toHaveAttribute('data-state', expected);
+    }
+    // Five manual stages, two on by default, one automatic stage off by default
+    // — so all three states are reached and this cannot pass by listing one.
+    expect(new Set(steps.map((s) => s.getAttribute('data-state')))).toEqual(
+      new Set(['manual', 'pending', 'off'])
+    );
+  });
+
+  it('highlights the stage that is running, with what it is doing and how far through it is', async () => {
+    seedDoc();
+    const run = await startRun();
+
+    act(() =>
+      run.onStageProgress!({
+        stageId: 'matchEq',
+        label: 'Match EQ to the Original Vocal',
+        phase: 'measuring',
+        stageFraction: 0,
+        detail: STAGE_MEASURING_DETAIL,
+      })
+    );
+    expect(screen.getByTestId('cover-chain-step-matchEq')).toHaveAttribute('data-state', 'running');
+    expect(screen.getByTestId('cover-chain-step-headroom')).toHaveAttribute('data-state', 'pending');
+    expect(screen.getByTestId('cover-chain-activity-matchEq')).toHaveTextContent(STAGE_MEASURING_DETAIL);
+
+    act(() =>
+      run.onStageProgress!({
+        stageId: 'matchEq',
+        label: 'Match EQ to the Original Vocal',
+        phase: 'rendering',
+        stageFraction: 0.42,
+        detail: 'Curve 5 bands, -1.90 dB to +3.54 dB',
+      })
+    );
+    expect(screen.getByTestId('cover-chain-step-matchEq')).toHaveTextContent('42%');
+    expect(screen.getByTestId('cover-chain-activity-matchEq')).toHaveTextContent(
+      'Curve 5 bands, -1.90 dB to +3.54 dB'
+    );
+    expect(screen.getByTestId('cover-chain-stage-progress-matchEq')).toHaveStyle({ width: '42%' });
+  });
+
+  it("settles a finished stage to done, showing the REPORT's own strings for it mid-run", async () => {
+    seedDoc();
+    // ONE report object: what is fed to the live callback is what the finished
+    // report carries, exactly as the engine hands it over.
+    const report = makeReport({ stages: stagesWith(APPLIED_EQ, DECLINED_REVERB) });
+    const run = await startRun();
+
+    for (const id of ['matchEq', 'matchReverb'] as const) {
+      act(() => run.onStageResult!(report.stages.find((s) => s.id === id)!));
+    }
+    expect(screen.getByTestId('cover-chain-step-matchEq')).toHaveAttribute('data-state', 'done');
+    expect(screen.getByTestId('cover-chain-step-matchReverb')).toHaveAttribute('data-state', 'declined');
+
+    const liveEq = resultTextOf('matchEq');
+    const liveReverb = resultTextOf('matchReverb');
+    expect(liveEq.length).toBeGreaterThan(0);
+    expect(liveReverb.length).toBeGreaterThan(0);
+    // The per-band curve is part of what Match EQ reports, so it has to be live
+    // too — the stage carries 56 of the 68 weight and its table IS its result.
+    expect(screen.getByTestId('cover-chain-eq-table')).toBeInTheDocument();
+
+    await act(async () => run.resolve(report));
+
+    // BYTE-IDENTICAL to what the finished report renders — not merely "the same
+    // numbers somewhere".
+    expect(resultTextOf('matchEq')).toEqual(liveEq);
+    expect(resultTextOf('matchReverb')).toEqual(liveReverb);
+    expect(screen.queryAllByTestId(/^cover-chain-step-/)).toHaveLength(0);
+    expect(screen.getByTestId('cover-chain-status-matchEq')).toHaveTextContent('Ran');
+  });
+
+  it('dims what has not run yet and does not dim what is running', async () => {
+    seedDoc();
+    const run = await startRun();
+    act(() =>
+      run.onStageProgress!({
+        stageId: 'matchEq',
+        label: 'Match EQ to the Original Vocal',
+        phase: 'rendering',
+        stageFraction: 0.5,
+        detail: 'x',
+      })
+    );
+    expect(screen.getByTestId('cover-chain-stage-matchEq')).toHaveStyle({ opacity: '1' });
+    expect(screen.getByTestId('cover-chain-stage-matchLoudness')).toHaveStyle({ opacity: '0.55' });
+  });
+
+  it('shows NOTHING from a run that failed — a half-reported pass is not a report', async () => {
+    seedDoc();
+    const report = makeReport({ stages: stagesWith(APPLIED_EQ) });
+    const run = await startRun();
+    act(() => run.onStageResult!(report.stages.find((s) => s.id === 'matchEq')!));
+    expect(resultTextOf('matchEq').length).toBeGreaterThan(0);
+
+    await act(async () => run.resolve(null));
+    expect(screen.getByTestId('cover-chain-error')).toBeInTheDocument();
+    expect(resultTextOf('matchEq')).toEqual([]);
+    expect(screen.queryAllByTestId(/^cover-chain-step-/)).toHaveLength(0);
   });
 
   it('shows the running stage and the progress the engine reports', async () => {
