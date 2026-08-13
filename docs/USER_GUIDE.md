@@ -316,10 +316,15 @@ is always last, and anything added later goes between them.
   `32-bit float (internal)`. Save writes the document back into its source
   container for `.wav`, `.mp3`, `.flac`, and `.ogg` (see *Format-faithful
   Save* below for the exact depth/bitrate each format writes). In the multitrack
-  view it shows the selected clip's source document, track, start/offset/
-  length, and an editable **Gain (dB)** field (−24..+24, committed on
-  `Enter` or when the field loses focus; `Escape` reverts your typing to the
-  committed value).
+  view it shows the selected clip's source document, track, offset and length,
+  an editable **Start** field, and an editable **Gain (dB)** field (−24..+24).
+  Both commit on `Enter` or when the field loses focus, and `Escape` reverts
+  your typing to the committed value. **Start** is where the clip sits on the
+  timeline, typed as `m:ss.mmm` or as plain seconds — the way to realise a
+  stated offset exactly instead of dragging to it by eye. It goes through the
+  same move a drag does, so it leaves one *Move clip* undo entry and maintains
+  any crossfade the clip is in; a position before zero is refused rather than
+  silently clamped, because no clip can start before zero.
 
 ## Effects
 
@@ -620,7 +625,23 @@ along with the confidence that produced it. Your whole take is then placed at th
 — nothing is stretched and no syllable is moved, so a take that drifts against the record
 still drifts. Two thresholds have to be cleared before the number is believed, and both
 are measured rather than chosen; below either one the stage places your take at the start
-of the original and **tells you the numbers** instead of guessing. Known offsets come back
+of the original and **tells you the numbers** instead of guessing.
+
+**A refused guess is still one click away.** Under the align row, a refusal carries an
+**Apply the measured offset anyway** button with the measurement's own correlation,
+prominence and overlap next to it. Pressing it re-places both clips at the offset — the
+same both-tracks-move arithmetic a believed alignment uses, with the same 25 ms edge fades
+— as a single undo entry, so a guess that turns out wrong costs one Ctrl+Z. It is offered
+and never applied for you: the numbers that produced the refusal sit inside the range
+measured for *unrelated* pairs, so the app will not pretend to a confidence it just said it
+did not have. And the refusal's advice is **sign-aware**, because it has to be: no clip can
+start before zero, so a guess *before* the original's start can only be realised by
+dragging the **Instrumental** later — dragging your take can only make it worse. (The
+refusal no longer suggests Align Vocal Timing. That tool warps document audio to a
+confirmed beat grid; it cannot move a clip on the timeline at all, for either sign. It
+stays recommended where it belongs — under a *believed* alignment, for a take that drifts.)
+Any offset can also simply be typed: the Properties panel's clip **Start** is an editable
+time field. Known offsets come back
 within 10 ms in both signs, at equal rates and across 44.1/48 kHz — but that figure assumes
 a normal take level. It is level-dependent and it degrades without warning: 8.4 ms at unity,
 10.9 ms at −40 dB, 21.6 ms at −70 dB, and the take is BELIEVED at all three, so a very quiet
