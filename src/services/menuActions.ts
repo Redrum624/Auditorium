@@ -57,8 +57,8 @@ export interface MenuSection {
    *
    * Plan Ruling 5 said NOT to widen it "for a handful of analysis/transform
    * commands", and every command that wanted a home since has been argued into
-   * Effects or Edit against that ruling. The user has overruled it: ten of
-   * those commands now live in a top-level Pipeline menu. The ruling is kept on
+   * Effects or Edit against that ruling. The user has overruled it: those
+   * commands live in a top-level Pipeline menu now. The ruling is kept on
    * the record here rather than deleted — it was a real constraint, the
    * decisions it produced are all over this file's comments, and it stopped
    * applying by request rather than by being wrong. */
@@ -157,13 +157,16 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
   },
   { title: 'Effects', itemIds: ['effects.none'] },
   {
-    // F11-7. Ten advanced tools, MOVED here — seven out of the Effects menu's
-    // head and two out of the Edit menu's long-inference group (plus
-    // `lyrics.align`, also from the Effects head). Nothing about the commands
-    // themselves changed: same ids, same predicates, same run bodies, same
-    // (absent) shortcuts. Only where the user finds them.
+    // F11-7. Ten advanced tools, MOVED here — six out of the Effects menu's
+    // head (Detect Tempo, Match Tempo, Align Vocal Timing, Align Lyrics, Vocal
+    // Chain, Cover Chain) and four out of the Edit menu's long-inference group
+    // (Auto-Remix, Separate into Stems, Transcribe, Voice Changer). Nothing
+    // about the commands themselves changed: same ids, same predicates, same
+    // run bodies, same (absent) shortcuts. Only where the user finds them.
+    // F11-8 then ADDED an eleventh that was moved from nowhere — the Spatial
+    // Positioner is a new command — so count the list below, not this sentence.
     //
-    // The three groups are by SUBJECT, which is a deliberate change of basis.
+    // The groups are by SUBJECT, which is a deliberate change of basis.
     // The Effects head listed Align Vocal Timing → Align Lyrics → Vocal Chain
     // in RUN order, and each of those stages' notes argued its own position;
     // grouping by subject puts Align Lyrics at the end of Voice instead, so the

@@ -37,7 +37,7 @@ Six menus: **File**, **Edit**, **Effects**, **Pipeline**, **View** and
 
 - **Effects** holds **Capture Noise Print** and then every effect, grouped by
   category — the things that transform the audio you have selected.
-- **Pipeline** holds the ten long-running tools, grouped by subject:
+- **Pipeline** holds the eleven long-running tools, grouped by subject:
   **Detect Tempo · Match Tempo… · Align Vocal Timing… · Auto-Remix…**, then
   **Voice Changer… · Vocal Chain… · Cover Chain… · Align Lyrics…**, then
   **Transcribe… · Separate into Stems…**, then **Spatial Positioner**. These

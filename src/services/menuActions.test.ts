@@ -289,9 +289,9 @@ describe('the region verbs are disabled in the Multitrack view (F1)', () => {
 });
 
 describe('getMenuSections', () => {
-  // F11-7: six, not five. Pipeline sits after Effects, carrying the ten
-  // advanced tools that had been wedged into the Effects head and the Edit
-  // menu's long-inference group.
+  // F11-7: six, not five. Pipeline sits after Effects, carrying the advanced
+  // tools that had been wedged into the Effects head and the Edit menu's
+  // long-inference group.
   it('returns exactly 6 sections in the documented order', () => {
     const sections = getMenuSections();
     expect(sections.map((s) => s.title)).toEqual([
@@ -907,7 +907,7 @@ describe('the Pipeline section (F11-7)', () => {
     );
   });
 
-  it('carries no keyboard shortcut on any row — every one of the ten is a long pass', () => {
+  it('carries no keyboard shortcut on any row — every one of the eleven is a long pass', () => {
     const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
     for (const item of pipeline.items) {
       if (item === 'separator') continue;

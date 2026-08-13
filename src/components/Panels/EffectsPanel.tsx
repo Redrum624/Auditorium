@@ -57,7 +57,7 @@ const TOOL_SECTIONS: { title: string; commandIds: string[] }[] = [
 /**
  * Every registered command's label, keyed by id, read out of the menu the user
  * already sees. `menuActions` exports no single-command getter, and this panel
- * may not grow its own copy of ten strings: a hardcoded 'Match Tempo…' here
+ * may not grow its own copy of those strings: a hardcoded 'Match Tempo…' here
  * would silently disagree with the menu the first time one is reworded, and
  * the ellipsis convention (a label ending in '…' opens a dialog) would become
  * two facts instead of one. `getMenuSections()` resolves ids against the live
@@ -111,7 +111,7 @@ const ROW_BUTTON_CLASS =
 export default function EffectsPanel() {
   // Subscribe to the whole store so every command predicate is recomputed on
   // any state change — MenuBar's and EditToolbar's own subscription, for the
-  // same reason: the ten tools are gated on more than the active document id
+  // same reason: the advanced tools are gated on more than the active doc id
   // (Auto-Remix, Transcribe, Separate and Align Lyrics also need audio in it).
   useAppStore((s) => s);
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);

@@ -3051,7 +3051,7 @@ async function main() {
       `the dropdown is clamped to the window (bottom ${menuOpen.bottom.toFixed(0)} <= ${menuOpen.viewportH})`
     );
 
-    // The Pipeline menu: the ten tools, in three separator-delimited groups.
+    // The Pipeline menu: the eleven tools, in four separator-delimited groups.
     await page.keyboard.press('Escape');
     assert(await openMenu('Pipeline'), 'the Pipeline menu opens on a real click');
     const pipeline = await page.evaluate(() => {
@@ -3086,7 +3086,7 @@ async function main() {
       `four groups means three separators (actual ${pipeline.separators})`
     );
 
-    // MOVED, not copied: none of the ten may still be reachable from Edit.
+    // MOVED, not copied: none of the moved tools may still be reachable from Edit.
     await page.keyboard.press('Escape');
     assert(await openMenu('Edit'), 'the Edit menu opens on a real click');
     const editLabels = await page.evaluate(() =>
