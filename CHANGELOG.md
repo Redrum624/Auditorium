@@ -148,9 +148,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   notice than one left at zero. How: `make-test-cover.cjs` emits a pair rendering ONE syllable
   schedule twice, the take's laid down 0.75 s later as a different performance, so the offset is
   built in rather than measured; the smoke drives it through all six real stages and asserts the
-  recovered offset against that constant within the DSP's proven ±10 ms, with both confidence
-  numbers clearing their shipped floors. It is also the first packaged exercise of the
-  negative-offset arm, which shifts both tracks rather than clamping the take to zero.
+  recovered offset against that constant within the DSP's proven ±10 ms — measured at **1.39 ms**,
+  correlation 0.946 and prominence 0.668 against floors of 0.607 and 0.186. It is also the first
+  packaged exercise of the negative-offset arm, which shifts both tracks rather than clamping the
+  take to zero. The song ships WITH ITS STEMS, so stage 1 takes its reuse path, and that is a
+  finding rather than a convenience: driving the real separation model with a synthetic mix routes
+  essentially all of it to Other (source RMS −17.99 dBFS; the Vocals stem came back −59.28, i.e. 41
+  dB down and empty), so the alignment was handed a silent reference and correctly refused. A fresh
+  model pass on this arm would need a real vocal recording, which the repo cannot carry; the
+  fresh-separation path stays covered by the noise pass beside it.
   Affects: `scripts/make-test-cover.cjs`, `scripts/e2e-smoke.cjs`.
 
 ### Changed

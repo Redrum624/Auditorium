@@ -204,11 +204,33 @@ function addTransients(signal) {
 // its own noise — so what is recovered is the shared rhythm rather than a
 // trivial autocorrelation of one signal against a copy of itself.
 //
-// The song also carries a quiet bed under its vocal, because stage 1 of the
-// journey SEPARATES it: with no non-vocal content the four stems that get summed
-// into the instrumental would be silence, and the session's first track would be
-// nothing. The bed sits well below the vocal so the Vocals stem keeps the onsets
-// the alignment then keys on.
+// The song carries a bed under its vocal, and ships WITH ITS STEMS ALREADY
+// SEPARATED — five extra, extensionless files named exactly as the journey's
+// reuse rule expects (`<song doc> — <label>`, and a document is named after the
+// whole file basename, so these carry no extension). That is not a shortcut
+// around stage 1; it is the only way this arm can be reached at all, and the
+// reason is MEASURED:
+//
+//   Driving the real separation model with the mix routes essentially all of it
+//   to OTHER. Measured on this fixture — source RMS -17.99 dBFS, and the stems
+//   came back Drums -54.71, Bass -73.04, VOCALS -59.28, Other -17.99, Residual
+//   -77.96. The model does not hear a synthetic three-harmonic tone as a voice,
+//   so the Vocals stem is 41 dB below the source: empty. The journey then aligns
+//   the take against a silent reference and correctly refuses (prominence 0.003
+//   against its 0.186 floor). Nothing is wrong with the alignment there; the
+//   reference simply has no onsets in it.
+//
+// Exercising the believed arm through a fresh model pass would need a song a
+// trained separation model recognises as singing — i.e. a real vocal recording,
+// which this repo cannot carry. So this pair takes the journey's REUSE path
+// instead: stage 1 finds these five already open and says so. Reuse is a
+// shipped, documented behaviour and the fresh-separation path stays covered by
+// the noise pass beside this one, so between them the step covers both arms of
+// stage 1 as well as both arms of stage 3.
+//
+// The five stems sum EXACTLY to the mix (vocals + bed, with three silent), which
+// is separation's own hard guarantee — so the instrumental the journey builds by
+// summing the four non-vocal stems is the bed, to the last bit.
 const SYNC_OFFSET_SECONDS = 0.75;
 /** The schedule BOTH files share — the ground truth itself. */
 const SYNC_SCHEDULE_SEED = 0x51d3a7;
@@ -219,29 +241,26 @@ const SYNC_TAKE_VARIANCE_SEED = 0x4d5e6f;
 const SYNC_TAKE_HZ_SCALE = 1.06;
 const SYNC_TAKE_AMPLITUDE_JITTER = 0.25;
 /**
- * The bed's level is bounded by what this pair is FOR, and the two pull against
- * each other. The bed exists so stage 1 has non-vocal content to separate; but
- * the bed is continuous, so it puts energy into the onset envelope everywhere
- * and blurs the very correlation this pair exists to exercise. Measured on the
- * RAW pair (offset error against the built-in -0.75 s, and the two confidence
- * numbers against their 0.607 / 0.186 floors):
+ * The bed, which the alignment never sees.
+ *
+ * MEASURED, and the measurement changed the design. The alignment's reference
+ * is the separated VOCAL, not the mix — so what matters is that the Vocals stem
+ * carries the schedule, and the bed is free to be a realistic instrumental. It
+ * was not always free: while this fixture drove the real separation model, the
+ * bed sat in the reference and traded directly against accuracy (offset error
+ * against the built-in -0.75 s, on the raw mix):
  *
  *   bed      error     peak corr   prominence
  *   -32 dB   13.0 ms     0.638       0.357     <- outside the proven +/-10 ms
  *   -40 dB   10.4 ms     0.775       0.477     <- still outside
- *   -45 dB    8.88 ms    0.829       0.523
- *   -48 dB    7.94 ms    0.849       0.541     <- shipped
+ *   -48 dB    7.94 ms    0.849       0.541
  *   none      0.07 ms    0.956       0.684
  *
- * -48 dB is chosen for the WORST CASE rather than the expected one. In the
- * journey the alignment runs against the SEPARATED vocal, so the bed should be
- * gone by then and the real figure should sit nearer the bottom row — but that
- * assumes the model routes a synthetic three-harmonic tone to Vocals, which is
- * not something this fixture gets to assume. At -48 dB the pair is believed and
- * accurate even if separation contributes nothing at all, so the packaged
- * assertion cannot fail on how the model happened to route made-up audio.
+ * That trade is gone now that the stems are shipped alongside the mix (below),
+ * because the reference is the pure Vocals stem — the bottom row. So the bed
+ * goes back to a level that makes the instrumental worth listening to.
  */
-const SYNC_BED_RMS_DBFS = -48;
+const SYNC_BED_RMS_DBFS = -32;
 const SYNC_VOCAL_RMS_DBFS = -18;
 
 /** Bursts of 0.12-0.37 s separated by gaps of 0.04-0.39 s, which is roughly how
@@ -364,6 +383,36 @@ writeWav(roomFile, room[0], room[1]);
 writeWav(syncSongFile, syncSong, syncSong);
 writeWav(syncTakeFile, syncTake, syncTake);
 
+// The pre-separated stems. Named for the journey's reuse rule — a document is
+// named after the WHOLE file basename, so `<song>.wav — Vocals` must be the
+// entire filename and carries no extension of its own. The four non-vocal stems
+// sum to the bed and all five sum to the mix, exactly.
+const silence = new Float64Array(numFrames);
+const syncStems = {
+  Drums: silence,
+  Bass: silence,
+  Vocals: syncSongVocal,
+  Other: syncBed,
+  Residual: silence,
+};
+const syncStemFiles = [];
+for (const [label, signal] of Object.entries(syncStems)) {
+  const file = path.join(dir, `cover-song-sync.wav — ${label}`);
+  writeWav(file, signal, signal);
+  syncStemFiles.push([label, file, signal]);
+}
+// The exact-sum guarantee, checked here rather than asserted: if these five stop
+// summing to the mix, the instrumental the journey builds stops being the bed.
+let worstSumError = 0;
+for (let i = 0; i < numFrames; i++) {
+  let s = 0;
+  for (const [, , signal] of syncStemFiles) s += signal[i];
+  worstSumError = Math.max(worstSumError, Math.abs(s - syncSong[i]));
+}
+if (worstSumError > 1e-12) {
+  throw new Error(`the sync stems do not sum to the mix (worst |err| ${worstSumError})`);
+}
+
 const peakDb = (channels) => {
   let peak = 0;
   for (const c of channels) for (let i = 0; i < c.length; i++) peak = Math.max(peak, Math.abs(c[i]));
@@ -402,4 +451,9 @@ console.log(
     `the SAME ${syncSchedule.length}-syllable schedule laid down ${SYNC_OFFSET_SECONDS}s later at ×${SYNC_TAKE_HZ_SCALE} pitch — ` +
     `the take's own sample 0 therefore sits ${SYNC_OFFSET_SECONDS}s BEFORE the song's, so the believed arm must ` +
     `recover ${(-SYNC_OFFSET_SECONDS).toFixed(2)}s: offset is the take's zero on the song's timeline)`
+);
+console.log(
+  `Wrote ${syncStemFiles.length} pre-separated stems beside it (${syncStemFiles.map(([l]) => l).join(', ')}), ` +
+    `summing to the mix exactly (worst |err| ${worstSumError}) — so the journey's stage 1 REUSES them and ` +
+    `the alignment gets a real vocal reference instead of the empty Vocals stem the model produces from synthetic audio`
 );

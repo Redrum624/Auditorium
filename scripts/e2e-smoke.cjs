@@ -52,6 +52,12 @@ const COVER_REFERENCE_ROOM = path.join(ROOT, 'test-assets', 'cover-reference-roo
 // 0.75 s later.
 const COVER_SONG_SYNC = path.join(ROOT, 'test-assets', 'cover-song-sync.wav');
 const COVER_TAKE_SYNC = path.join(ROOT, 'test-assets', 'cover-take-sync.wav');
+/** The song's stems, shipped pre-separated so stage 1 takes its REUSE path.
+ * Extensionless by necessity: a document is named after the whole file
+ * basename, and the reuse rule matches `<song doc name> — <label>` exactly. */
+const COVER_SONG_SYNC_STEMS = ['Drums', 'Bass', 'Vocals', 'Other', 'Residual'].map((label) =>
+  path.join(ROOT, 'test-assets', `cover-song-sync.wav — ${label}`)
+);
 /**
  * The ground truth, built into the fixtures rather than measured off them.
  * NEGATIVE by the convention `coverAlign` documents and its unit suite pins:
@@ -224,6 +230,9 @@ async function main() {
     [COVER_REFERENCE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_TAKE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_REFERENCE_ROOM, 'make-test-cover.cjs', 'Cover Chain reverberant reference'],
+    [COVER_SONG_SYNC, 'make-test-cover.cjs', 'shared-onset cover pair'],
+    [COVER_TAKE_SYNC, 'make-test-cover.cjs', 'shared-onset cover pair'],
+    ...COVER_SONG_SYNC_STEMS.map((f) => [f, 'make-test-cover.cjs', 'shared-onset song stems']),
   ]);
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const f of [
@@ -3481,6 +3490,17 @@ async function main() {
       // left at zero. This pass drives the shared-onset pair, whose offset is
       // built in rather than measured, through the same six real stages.
       console.log('Cover journey (M4): the shared-onset pair → the BELIEVED arm...');
+      // The song's stems are opened first, so stage 1 finds them and REUSES
+      // them. That is not a shortcut around separation — it is the only way this
+      // arm is reachable, and the reason is measured: driving the real model with
+      // this synthetic mix routes it almost entirely to Other (source RMS -17.99
+      // dBFS; Vocals came back -59.28, i.e. 41 dB down and empty), so the
+      // alignment is handed a silent reference and correctly refuses. A model
+      // that recognised it would need a real vocal recording, which this repo
+      // cannot carry. The fresh-model path stays covered by the pass above.
+      for (const stem of COVER_SONG_SYNC_STEMS) {
+        await page.evaluate((p) => window.__test.openPath(p), stem);
+      }
       await page.evaluate((p) => window.__test.openPath(p), COVER_SONG_SYNC);
       const syncSong = await page.evaluate(() => window.__test.getStateSummary());
       await page.evaluate((p) => window.__test.openPath(p), COVER_TAKE_SYNC);
@@ -3544,11 +3564,17 @@ async function main() {
         Math.abs(sync.takeStartSample - sync.instrumentalStartSample - syncRaw) <= 1,
         `the measured interval survives the shift (raw ${syncRaw}, actual ${sync.takeStartSample - sync.instrumentalStartSample})`
       );
-      // This pass separated a DIFFERENT song, so it must not have reused the
-      // first pass's stems — otherwise it aligned against the wrong vocal.
+      // Stage 1 must have found THIS song's stems. If it ever runs the model
+      // here instead, the reference becomes the empty Vocals stem the model
+      // produces from synthetic audio and the assertions above stop meaning what
+      // they say — so the reuse is pinned rather than assumed.
       assert(
-        sync.separationReused === false,
-        `the shared-onset song was separated fresh, not matched to the other song's stems (actual ${sync.separationReused})`
+        sync.separationReused === true,
+        `stage 1 reused the stems shipped beside the song (actual ${sync.separationReused})`
+      );
+      assert(
+        sync.stages.filter((st) => st.id === 'separate')[0].status === 'reused',
+        'the reuse is reported as its own status, not disguised as a fresh run'
       );
     }
 
