@@ -9,7 +9,7 @@ import type { Clip } from '../../multitrack/session';
 import { CROSSFADE_RHO, resolveClipFadeSpecs } from '../../multitrack/mixdown';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
-import { snapSample, snapSpan } from '../../services/snap';
+import { snapSample } from '../../services/snap';
 import { formatTime } from '../../utils/timeFormat';
 import { drawBeatTics, sampleToPixel } from '../Editor/waveformRender';
 import {
@@ -20,6 +20,7 @@ import {
   useClipBeatTics,
   useViewportWidth,
 } from './clipBeatTics';
+import { snapClipStart } from './clipDropPosition';
 import { getClipWaveformCanvas, zoomBucket } from './clipWaveformCache';
 import { sessionSnapTargets } from './sessionSnapTargets';
 
@@ -411,16 +412,21 @@ export default function ClipView({
   // session store's `mtZoom`, never the editor's app-store zoom (trap 26).
 
   /** The clip start this drag is asking for, snapped unless suspended. Shared
-   * by the preview and the commit so the two cannot disagree (trap 23). The
-   * clamp mirrors `moveClip`'s own `Math.max(0, …)`. */
-  const moveStartFor = (drag: DragState, clientX: number, alt: boolean): number => {
-    const raw = drag.origStart + (clientX - drag.startClientX) * zoom.samplesPerPixel;
-    if (alt || drag.targets.length === 0) return Math.max(0, Math.round(raw));
-    // Either edge of the clip may catch a target — aligning a clip's tail to a
-    // beat is as ordinary as aligning its head.
-    const s = snapSpan(raw, clip.lengthSample, drag.targets, zoom.samplesPerPixel);
-    return Math.max(0, Math.round(s.sample));
-  };
+   * by the preview and the commit so the two cannot disagree (trap 23).
+   *
+   * F11-4: only the RAW position — a delta from the pointerdown x — is this
+   * component's own. The magnet, the clamp and the rounding moved into
+   * `clipDropPosition.snapClipStart`, because a Files-panel/Explorer drop
+   * (`TrackLane`) asks the same question from an absolute lane x and must get
+   * the same answer. */
+  const moveStartFor = (drag: DragState, clientX: number, alt: boolean): number =>
+    snapClipStart(
+      drag.origStart + (clientX - drag.startClientX) * zoom.samplesPerPixel,
+      clip.lengthSample,
+      drag.targets,
+      zoom.samplesPerPixel,
+      alt
+    );
 
   /** A single trim boundary, snapped unless suspended. */
   const snapBoundary = (raw: number, drag: DragState, alt: boolean): number => {
