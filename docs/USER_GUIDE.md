@@ -570,6 +570,19 @@ stages behind one bar. The bar at the foot of the dialog is labelled *Whole jour
 is deliberately a different number from the highlighted row's: separation is roughly nine
 tenths of the work, so that bar can sit almost still while a great deal is happening.
 
+<!-- CP1: what the journey dialog deliberately does not show -->
+**What the journey report does not show, and where to find it.** The old Cover Chain dialog
+printed two tables: the match curve band by band (what the EQ was asked for, what it realised,
+what gain it was handed) and a before/after table of loudness, envelope spread, noise floor and
+spectral distance. Neither is in the journey report, and that is a decision rather than an
+oversight — the journey nests two whole chains inside six stages, and reproducing both chains'
+tables would put four tables and about ninety numbers on one screen, which is a report nobody
+reads. What the journey shows instead is every stage's own status, reason and derived settings,
+including each nested stage's. **The tables still exist**: run `Pipeline → Cover Chain…`'s
+matching stages on their own — or open the take and run the Vocal Chain — and each chain's own
+dialog reports itself in full, exactly as before. Nothing was removed from the engines; the
+numbers are one dialog away rather than in front of you.
+
 **The level check is a measurement, not a fix.** Stage 6 mixes the finished session down
 once and reports the peak the two tracks summed to **before** the master bus's ±1 clamp —
 the clamped render peaks at 0 dBFS by construction and could never tell you this. If that

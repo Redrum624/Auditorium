@@ -995,6 +995,27 @@ and that is disagreement between two performances about where a syllable starts 
 error in the measurement. The fine pass may only refine the coarse answer inside ±0.2 s; it can
 never find a different verse.
 
+**That accuracy is measured at one GAIN, and a quiet take degrades it.** The onset envelope is
+spectral flux, and flux falls with level while the analysis floor does not, so a take recorded
+far below full scale carries a weaker envelope for the same performance. Measured on the same
+ground-truth pair, scaling the take only:
+
+| take gain | offset error | prominence |
+|---|---|---|
+| 1.0 (unity) | 8.4 ms | 0.474 |
+| −40 dB | 10.9 ms | — |
+| −70 dB | 21.6 ms | 0.379 |
+
+At −40 dB the error has already passed the 10 ms the rest of this feature claims, and at −70 dB
+it is more than double it. **The alignment is still believed at all three** — the confidence
+floors are cleared throughout, so nothing warns you — which is exactly why it is written down
+here: a very quiet take gets a placement that is silently a frame or two out, not a refusal. The
+−40 dB case is pinned by a test so the boundary is a known property rather than something a user
+discovers. If your take is that quiet, normalise or amplify it before running the journey (the
+Vocal Chain at stage 2 does raise the level, but the alignment at stage 3 measures what stage 2
+left, so a take that started at −70 dB has already been through the chain by then and the residue
+is what it is).
+
 ## The cover journey leaves two undo entries, not one
 
 <!-- CP1 -->

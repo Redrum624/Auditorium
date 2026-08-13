@@ -3229,6 +3229,10 @@ async function main() {
       console.log('Cover journey (CP1): song + take → session, in the packaged app...');
       await page.evaluate(() => window.__test.setView('waveform'));
       await page.evaluate((p) => window.__test.openPath(p), COVER_REFERENCE);
+      // The SONG's own rate, read while it is the active document — the session
+      // runs at this one, and reading it from the take (opened next) would only
+      // work while both fixtures happen to share a rate.
+      const journeySong = await page.evaluate(() => window.__test.getStateSummary());
       await page.evaluate((p) => window.__test.openPath(p), COVER_TAKE);
       const journeyBefore = await page.evaluate(() => window.__test.getStateSummary());
       const journey = await page.evaluate(() =>
@@ -3328,25 +3332,62 @@ async function main() {
         journeyMt.views === 1 && journeyMt.tracks === 2 && journeyMt.clips === 2,
         `the cover session is on screen (${journeyMt.views} views / ${journeyMt.tracks} tracks / ${journeyMt.clips} clips)`
       );
-      // The alignment arithmetic, whichever arm it took. A refused alignment is
-      // a legitimate outcome on this material and must place at zero rather
-      // than at a guess; a believed one must have moved the clip by what it
-      // measured. Both arms are asserted so neither can silently become the
-      // other.
+      // CP1: the placement arithmetic, at the SESSION's own rate.
+      //
+      // Two corrections from the review, both of which made this block unable to
+      // pass. It hard-coded 44100 while these fixtures are 48 kHz and the session
+      // runs at the INSTRUMENTAL's rate — so the expected sample count was out by
+      // 8.8 % on every run. And it added `shiftedSamples` to a start that had
+      // already been floored at zero, which is the negative-offset case counted
+      // twice: the engine's rule is `take = raw + shift` with
+      // `shift = max(0, -raw)`, i.e. exactly `max(0, raw)` and
+      // `instrumental = max(0, -raw)`, and that is what is asserted here.
+      //
+      // ONLY ONE ARM RUNS PER PASS — this material either clears the confidence
+      // floors or it does not. The earlier claim that "both arms are asserted"
+      // was false; what is asserted is that whichever arm ran, its own
+      // arithmetic holds and the other arm's outcome is impossible.
+      assert(
+        journey.sessionRate === journeySong.sampleRate,
+        `the session runs at the SONG's rate (session ${journey.sessionRate}, song ${journeySong.sampleRate}, take ${journeyBefore.sampleRate})`
+      );
       assert(
         journey.takeStartSample !== null && journey.takeStartSample >= 0,
         `the take was placed at a real, non-negative session sample (actual ${journey.takeStartSample})`
       );
       if (journey.alignmentRefused) {
         assert(
-          journey.takeStartSample === 0,
-          `a refused alignment places at zero rather than guessing (actual ${journey.takeStartSample})`
+          journey.takeStartSample === 0 && journey.shiftedSamples === 0,
+          `a refused alignment places at zero rather than guessing (take ${journey.takeStartSample}, shift ${journey.shiftedSamples})`
         );
-      } else if (journey.alignmentOffsetSeconds !== null) {
-        const expectedStart = Math.max(0, Math.round(journey.alignmentOffsetSeconds * 44100));
+        console.log(
+          '  alignment arm: REFUSED — placed at zero and the numbers were stated (the believed arm did not run this pass)'
+        );
+      } else {
         assert(
-          Math.abs(journey.takeStartSample - expectedStart - (journey.shiftedSamples || 0)) <= 1,
-          `the clip landed at the measured offset (offset ${journey.alignmentOffsetSeconds}s, expected ~${expectedStart}, actual ${journey.takeStartSample})`
+          journey.alignmentOffsetSeconds !== null && journey.alignmentConfident === true,
+          `a non-refused alignment reports a believed offset (offset ${journey.alignmentOffsetSeconds}, confident ${journey.alignmentConfident})`
+        );
+        const raw = Math.round(journey.alignmentOffsetSeconds * journey.sessionRate);
+        const expectedTake = Math.max(0, raw);
+        const expectedShift = Math.max(0, -raw);
+        assert(
+          Math.abs(journey.takeStartSample - expectedTake) <= 1,
+          `the clip landed at the measured offset (offset ${journey.alignmentOffsetSeconds}s at ${journey.sessionRate} Hz, expected ${expectedTake}, actual ${journey.takeStartSample})`
+        );
+        assert(
+          Math.abs(journey.shiftedSamples - expectedShift) <= 1 &&
+            Math.abs(journey.instrumentalStartSample - expectedShift) <= 1,
+          `a negative offset shifts BOTH tracks rather than clamping the take (expected shift ${expectedShift}, actual shift ${journey.shiftedSamples}, instrumental at ${journey.instrumentalStartSample})`
+        );
+        // Whatever the signs, the INTERVAL between the two clips is exactly the
+        // offset that was measured — that is the property the shift exists for.
+        assert(
+          Math.abs(journey.takeStartSample - journey.instrumentalStartSample - raw) <= 1,
+          `the measured interval survives the shift (raw ${raw}, actual ${journey.takeStartSample - journey.instrumentalStartSample})`
+        );
+        console.log(
+          `  alignment arm: BELIEVED — raw ${raw}, take@${journey.takeStartSample}, instrumental@${journey.instrumentalStartSample} (the refused arm did not run this pass)`
         );
       }
       // Smoothing: both edges faded, and the summed peak measured rather than

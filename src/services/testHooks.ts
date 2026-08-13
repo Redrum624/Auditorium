@@ -427,6 +427,11 @@ export interface TestApi {
     /** Where the two clips actually landed, in SESSION samples. */
     sessionName: string | null;
     sessionTrackCount: number;
+    /** The session's own rate — the INSTRUMENTAL's, which is the song's and not
+     * necessarily the take's. A caller converting the reported offset into
+     * samples must use this one; assuming 44.1 kHz is how the first version of
+     * the packaged step came to compute a placement the app never made. */
+    sessionRate: number | null;
     takeStartSample: number | null;
     instrumentalStartSample: number | null;
     shiftedSamples: number | null;
@@ -2574,6 +2579,7 @@ export function installTestHooks(): void {
         alignmentRefused: false,
         sessionName: null,
         sessionTrackCount: 0,
+        sessionRate: null,
         takeStartSample: null,
         instrumentalStartSample: null,
         shiftedSamples: null,
@@ -2609,6 +2615,7 @@ export function installTestHooks(): void {
         alignmentRefused: report.alignmentRefused,
         sessionName: report.placement ? report.placement.sessionName : null,
         sessionTrackCount: useSessionStore.getState().session.tracks.length,
+        sessionRate: report.placement ? report.placement.sessionRate : null,
         takeStartSample: report.placement ? report.placement.takeStartSample : null,
         instrumentalStartSample: report.placement ? report.placement.instrumentalStartSample : null,
         shiftedSamples: report.placement ? report.placement.shiftedSamples : null,

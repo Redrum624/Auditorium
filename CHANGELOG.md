@@ -53,6 +53,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `components/UI/glass.tsx`, `components/Dialogs/CoverChainDialog.tsx`,
   `components/Panels/SpatialPanel.tsx`.
 
+<!-- CP1: fix round -->
+- **A cover journey cancelled at the last stage no longer claims there is no session.** Cause: the
+  cancel copy branched on `place || smooth` and said "there is no session" for both, but stage 5
+  has already built the session by the time stage 6 can be cancelled — so the one sentence a user
+  could check against their own screen was false. Fix: the message is per-boundary and now names
+  what stage 6 did *not* do (the take is placed, its edges are not faded, the level is unchecked).
+  Affects: `src/services/coverJourney.ts`.
+- **A sub-service that throws mid-journey now produces a report instead of a rejected promise.**
+  Cause: `runCoverJourney` had no `catch`, and the dialog has a `finally` but no `catch` either, so
+  an exception left no report set while the rows from the part of the run that *had* happened
+  stayed on screen looking like an outcome. Fix: the running stage is recorded as `failed` with the
+  error's own message, everything after it as `pending`, and the report returns `completed: false`.
+  Affects: `src/services/coverJourney.ts`.
+- **The Cover Chain dialog no longer shows half-run stage rows beside a start-up error.** Cause: the
+  journey rewrite dropped the `busy` arm from the row lookup that the previous dialog had, so
+  results pushed by the live callback survived a run that could not start. Fix: restored, and pinned
+  by a test. Affects: `src/components/Dialogs/CoverChainDialog.tsx`.
+
 ### Added
 
 <!-- CP1: the alignment DSP -->
