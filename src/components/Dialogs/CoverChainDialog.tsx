@@ -285,7 +285,19 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
       title="Cover Chain"
       subtitle={song && take ? `${take.name} over ${song.name}` : 'the whole journey'}
       icon={<Mic2 size={15} />}
-      width={680}
+      // M4 (the train's width ruling): 640, not the 680 the journey rewrite
+      // arrived with. 640 is not this dialog's taste — it is the widest width
+      // any of the nine hosted tools asks for, and U2's PipelineToolHost reads
+      // these nine sources to derive TOOL_HOST_WIDTH from them, so raising it
+      // here widens the host card for every tool and costs the stage 40 px at
+      // every window size. The rewrite had no content asking for the extra 40:
+      // the two multi-column tables that made this the widest dialog in the
+      // first place (the per-band EQ curve and the before/after summary) were
+      // REMOVED by that same rewrite, and everything left is a vertical stack
+      // of flowing text, flex rows and full-width bars with no fixed-width
+      // content in it. The 680 was incidental — nothing in the commit that
+      // introduced it, or in its call site, ever justified it.
+      width={640}
       onClose={onClose}
       dismissable={!busy}
     >

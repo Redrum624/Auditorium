@@ -176,7 +176,14 @@ describe('PipelineToolHost — the card’s width is measured, not chosen', () =
    */
   it('is exactly the widest width any hosted dialog asks DialogShell for', () => {
     const widths = hostedToolSources().map(({ id, file, source }) => {
-      const m = source.match(/width=\{(\d+)\}/);
+      // Comments stripped FIRST, for the reason the `dismissable` gate strips
+      // them (U2's C1): this is a first-match technique, so a `width={…}`
+      // written in prose above the attribute is read INSTEAD of the attribute.
+      // Proven by a decoy — a commented `width={9999}` over an untouched
+      // `width={440}` made this test demand 9999. M4's width ruling put a
+      // paragraph discussing two widths directly above one of these nine
+      // attributes, which is exactly the shape that trips it.
+      const m = stripComments(source).match(/width=\{(\d+)\}/);
       if (!m) throw new Error(`${file}.tsx passes DialogShell no explicit width (${id})`);
       return { id, width: Number(m[1]) };
     });
@@ -213,7 +220,9 @@ describe('PipelineToolHost — the card’s width is measured, not chosen', () =
    * roughly a third of the minimum window, and enough for a visible selection
    * and playhead. The card being wider than the lane at the minimum window is
    * the trade the user opts into by opening the tool, and it reverses at any
-   * ordinary window size (932 px of lane at the 1600 default).
+   * ordinary window size (918 px of lane at the 1600 default — the same
+   * both-sides inset that made 432 into 418, missed here when the assertion
+   * below was corrected).
    */
   it('leaves at least a workable lane at the app’s minimum window width', () => {
     const MIN_WINDOW = 1100; // electron/main.cjs
