@@ -1143,6 +1143,27 @@ overlays, and the same zoom/scroll gestures.
 **View → Multitrack** opens the session editor — it works even with no
 document open. A session has a name, a sample rate, and any number of tracks.
 
+<!-- MT2: session rate adoption -->
+### The session's sample rate
+
+**An empty session takes the sample rate of the first file you put on it.** A
+new session starts at 44 100 Hz, but that is a placeholder rather than a
+choice — until a clip is on the timeline there is nothing measured in that rate
+— so inserting or dropping a 48 kHz file re-states the session at 48 kHz and
+places the clip at its own length. Nothing is converted, and playback starts
+immediately.
+
+Once the session holds a clip its rate is fixed. A later file at a different
+rate is **converted** to the session's rate as it is placed, which is the only
+answer that keeps two files at two rates in the same timeline. That conversion
+now happens once, in the background, when the file is placed — not every time
+you press Play.
+
+A session loaded from a `.audm` keeps whatever rate it was saved at, and one
+built for you — by **Separate Stems**' "place in a session" or by the **Cover
+Chain** — takes it from the audio it is built out of. Those all adopt on their
+next insert too, but only while they are still empty of clips.
+
 <!-- MT1: session zoom/Fit semantics -->
 ### Zoom and Fit in the multitrack
 

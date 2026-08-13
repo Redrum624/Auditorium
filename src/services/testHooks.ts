@@ -112,6 +112,18 @@ export interface TestStateSummary {
    * written to a file (a recording, a Mix Down, `Remix N`, a stem). Gates the
    * close prompt and the quit guard's count alongside `dirty`. */
   neverSaved: boolean | null;
+  /**
+   * MT2 — the MULTITRACK SESSION's rate, which is not `sampleRate` above (that
+   * one is the active DOCUMENT's).
+   *
+   * Added because the latency rig had to infer it: it compared the rate it had
+   * passed to `newSession` against the active document's and called the two
+   * "mismatched", which stopped being true the moment an empty session began
+   * adopting the first document's rate — the verdict would have gone on
+   * reporting a live resample branch over a session that has none. A rig that
+   * infers the state it is measuring reports the inference, not the state.
+   */
+  sessionSampleRate: number;
 }
 
 /** F10's four before/after numbers, as plain JSON scalars. `null` is a real
@@ -1077,6 +1089,7 @@ export function installTestHooks(): void {
         filePath: doc?.filePath ?? null,
         dirty: doc?.dirty ?? null,
         neverSaved: doc?.neverSaved ?? null,
+        sessionSampleRate: useSessionStore.getState().session.sampleRate,
       };
     },
 

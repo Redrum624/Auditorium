@@ -98,6 +98,21 @@ describe('an empty session adopts the inserted document rate — all three inser
     expect(result?.lengthSample).toBe(DOC_LEN);
     expect(store().session.tracks[0].clips[0].lengthSample).toBe(DOC_LEN);
   });
+
+  it('reports the SESSION rate to the latency rig, not the rate it was created with', () => {
+    // The rig used to compare the rate it passed to `newSession` against the
+    // active DOCUMENT's and call the pair "mismatched — resample branch live".
+    // After adoption that inference is simply false, so the session's own rate
+    // is reported and the rig reads it instead of deducing it.
+    addDoc();
+    const hooks = api();
+    expect(hooks.getStateSummary().sessionSampleRate).toBe(SESSION_RATE);
+
+    hooks.insertActiveDocAsClip(0, 0);
+
+    expect(hooks.getStateSummary().sessionSampleRate).toBe(DOC_RATE);
+    expect(hooks.getStateSummary().sampleRate).toBe(DOC_RATE); // the DOC's, which agrees now
+  });
 });
 
 describe('a session that already holds a clip never changes rate', () => {

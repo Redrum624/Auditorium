@@ -5,6 +5,82 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+<!-- MT2: session rate adoption -->
+- **Play no longer stalls for twenty seconds on a session made of two songs.** This was the
+  reported bug — "it takes a while to start the play with 2 tracks" — and 1.26.0 shipped it
+  measured but unfixed. Cause: **the session's sample rate was decided once and never revisited.**
+  `makeSession(44100)` set it at store init, `newSession` repeated the number, and the three insert
+  paths (Insert Active File, a lane drop, the `insertActiveDocAsClip` test hook) all converted the
+  *clip* to the session instead of the other way round — two of them with their own inlined copy of
+  the conversion arithmetic `documentClipLength` already owned. So two 48 kHz files put on a
+  session nobody had chosen a rate for were rate-mismatched by construction, and
+  `MultitrackPlayer.play()` ran the 64-tap sinc over every sample of every clip, synchronously,
+  before scheduling a single note.
+
+  Three fixes, in order of how much each was worth:
+
+  1. **An empty session adopts the rate of the first document put on it.** A session with no clips
+     denominates nothing the user placed — 44 100 was a default, not a decision — so the first file
+     names the rate, the clip lands at ratio 1, and there is nothing to resample. Adoption carries
+     every session-sample number that exists at that moment (the cursor, the playhead, the zoom —
+     re-resolved through `resolveSessionZoom`, never a raw `samplesPerPixel`) and is recorded inside
+     the insert's own gesture, so one Ctrl+Z lifts the clip and the rate together. A session that
+     already holds a clip never changes rate: two documents at two rates cannot both be native, and
+     converting one of them is the honest answer.
+  2. **A clip read that stays inside its file stops copying it.** With the rates matched, `play()`
+     still took 222.8 ms, all of it `readClipSlice` building each slice with a per-sample
+     JavaScript loop — ~34.6 M iterations and ~138 MB allocated — to produce arrays that
+     `AudioBuffer.copyToChannel` copied again one line later. A fully in-range read at the session's
+     own rate is now a `subarray` window onto the document and `copyToChannel` makes the single copy
+     the graph needs; the zero-fill survives for reads that run off an edge, as one `set()` instead
+     of a per-sample conditional. (1.26.0's entry blamed this residual on `readClipSlice`'s copy
+     *plus* `buildClipBuffer`'s scale loop. The scale loop was already skipped at unity gain with no
+     fade — the copy was the whole of it.)
+  3. **The sinc left the play path for the sessions that still need it.**
+     `multitrack/clipResampleCache.ts` holds each conversion per (document audio, session rate, clip
+     window), warmed at *insert* time on `requestIdleCallback`, and shared by the realtime player
+     and the offline mixdown through the same `readClipSlice`. The key is the **channel arrays**,
+     not the document id: `AudioDocument` carries no revision counter and its id survives every
+     edit, but `applyEdit`'s helpers allocate fresh channel arrays, so their identity *is* the
+     revision counter — a `WeakMap` on them collects with the document, and a per-entry identity
+     check catches a channel swapped underneath it. Bounded by construction: one document's worth of
+     samples per document, LRU past that.
+
+  Measured on the packaged app, same fixtures and same machine as 1.26.0's numbers — two 180 s
+  stereo 48 kHz clips, `play()` medians, verdicts committed under `docs/bench/`:
+
+  | session | `play()` process-cold | fresh ctx, warm process | re-play, running ctx |
+  |---|---|---|---|
+  | 1.26.0, 44 100 Hz (mismatched) | 22 039 ms | 21 237 ms | 42 718 ms |
+  | 1.26.0, 48 000 Hz (matched) | 223 ms | 182 ms | 275 ms |
+  | **now, reported flow (adopts 48 000)** | **30.9 ms** | **25.8 ms** | **25.4 ms** |
+  | **now, genuinely mixed-rate, warm cache** | **25.6 ms** | **25.2 ms** | **24.7 ms** |
+
+  The audible estimate the rig also reports (~50 ms) is measured AFTER `play()` returns and must be
+  added to it, not read instead of it. Reproduce: `npm run build`, then
+  `node scripts/first-play-latency-rig.cjs --launches=1 --probes-per-launch=2 --content=songs` and
+  `--content=mixed`. The rig now READS the session's rate back from the app
+  (`getStateSummary().sessionSampleRate`) instead of assuming it is the number it passed to
+  `newSession` — an inference that adoption made false, and that would have had the verdict
+  reporting a live resample branch over a session with none.
+  Affects: `multitrack/sessionStore.ts`, `multitrack/sessionInsert.ts` (new),
+  `multitrack/clipResampleCache.ts` (new), `multitrack/mixdown.ts`, `multitrack/laneDrop.ts`,
+  `services/menuActions.ts`, `services/testHooks.ts`, `scripts/first-play-latency-rig.cjs`.
+
+### Added
+
+- **Clip waveform drawing is now covered by tests that read what it draws**, not only where it
+  lands. Three mutations survived the suite until now: flipping the sign of the waveform's
+  `center − v·amp` mapping, dropping `clip.offsetSample` from the drawn window's origin, and
+  dropping or inverting the `docRate/sessionRate` ratio the window advances by. Each is a picture
+  silently of the wrong audio. `ClipView.waveform.test.tsx` kills all three, with asymmetric
+  fixtures (a symmetric one cannot tell a sign flip from the truth) and an explicitly-constructed
+  mixed-rate session so the adoption above cannot make the third test vacuous.
+
 ## [1.26.0] - 2026-08-13
 
 ### Fixed
@@ -260,28 +336,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `removedClipIds` bookkeeping, which existed only to feed it. Its 170-line suite passed by calling
   the dead producer directly to manufacture the entries it then certified were purged. Deleted
   rather than left as a trap for the next reader to wire something into.
-
-### Known issues
-
-<!-- MT1: multitrack polish -->
-- **Play with two 3-minute tracks still stalls when the session rate does not match the files.**
-  MEASURED, not fixed. `MultitrackPlayer.play()` calls `readClipSlice` for every clip
-  synchronously, which resamples the whole clip when `doc.sampleRate !== session.sampleRate`.
-  Measured on the packaged app with two 180 s stereo 48 kHz clips on two tracks, medians:
-
-  | session rate | `play()` process-cold | `play()` fresh ctx, warm process | re-play, running ctx |
-  |---|---|---|---|
-  | 44 100 Hz (mismatched) | **22 039 ms** | **21 237 ms** | 42 718 ms |
-  | 48 000 Hz (matched) | **223 ms** | **182 ms** | 275 ms |
-
-  Same build, same fixtures, same machine — only the resample branch differs, so **~99% of the
-  stall is the synchronous 64-tap sinc resample**; the ~200 ms residual is `readClipSlice`'s copy
-  plus `buildClipBuffer`'s scale loop (~34.6 M samples, ~138 MB allocated per play). The audible
-  estimate the rig also reports (~50 ms) is measured AFTER `play()` returns and must be added to
-  it, not read instead of it. The status bar reading "44.1 kHz" over two 48 kHz files is the
-  visible corner of the same mismatch. Verdicts committed under `docs/bench/`. Reproduce:
-  `npm run build` then
-  `node scripts/first-play-latency-rig.cjs --content=songs [--session-rate=48000]`.
 
 ## [1.25.0] - 2026-08-13
 

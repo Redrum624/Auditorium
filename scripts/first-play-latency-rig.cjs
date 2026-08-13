@@ -25,7 +25,7 @@
 //
 //   npm run build   (once, so dist/ exists)
 //   node scripts/first-play-latency-rig.cjs [--launches=3] [--probes-per-launch=3]
-//                                           [--content=tone|songs] [--out=<path>]
+//                                           [--content=tone|songs|mixed] [--out=<path>]
 //
 // Verdict JSON: test-output/first-play-latency.json (default). Exit 0 when
 // every probe ran (whatever the numbers say — this is a measurement, not a
@@ -43,14 +43,36 @@
 //
 //   --content=tone   (default) the original P2-7 session. Unchanged, so the
 //                    historical numbers stay comparable.
-//   --content=songs  the REPORTED session: two ~3-minute stereo 48 kHz clips on
-//                    two tracks of a 44.1 kHz session, i.e. rate-mismatched, so
-//                    the resample branch is live. This is the shape the user's
-//                    P1177605 + Scarlet session had.
+//   --content=songs  the REPORTED flow: a session created at 44 100 and then
+//                    given two ~3-minute stereo 48 kHz files, one per track.
+//                    This is the shape the user's P1177605 + Scarlet session
+//                    had.
+//   --content=mixed  a GENUINELY rate-mismatched session — the 44.1 kHz tone
+//                    lands first, so the session is no longer empty when the
+//                    two 48 kHz songs arrive and cannot adopt their rate. See
+//                    MT2 below for why `songs` no longer produces this state.
 //
-// `songs` also reports the rate triple (session / doc / context) in the verdict,
+// Every mode reports the rate triple (session / doc / context) in the verdict,
 // because "which of these three disagree" is the whole diagnosis and reading it
 // off the status bar is what misled the report in the first place.
+//
+// -------------------------------------------------------------------------
+// MT2 — what `songs` measures NOW.
+//
+// It measured the resample. It no longer can, and that is the fix rather than a
+// gap in the rig: an EMPTY session adopts the rate of the first document put on
+// it (`sessionStore.adoptSessionRate`), so the reported flow — new session,
+// insert two 48 kHz files — ends at 48 000 Hz with both clips at ratio 1 and
+// nothing to convert. The verdict says so in its own words from MT2 onward —
+// `rates.session` is READ BACK from the app rather than assumed, `rates.adopted`
+// is true, and `rates.mismatch` is false — and that IS the result; the number to
+// compare against `docs/bench/mt1-play-latency-44100.json` is `playCallMs`.
+//
+// `--content=mixed` keeps the resample branch reachable, so the cache that
+// moved it off the play path (`clipResampleCache`) has something to be measured
+// on. Its clips are warmed at INSERT time on `requestIdleCallback`, so the rig
+// waits for the renderer to go idle before probing — otherwise it would time
+// the warm-up instead of the play.
 // -------------------------------------------------------------------------
 
 const path = require('node:path');
@@ -94,40 +116,85 @@ async function buildSession(page, content) {
     return { clips: 1, tracks: 1 };
   }
 
-  // The reported session. The session is created FIRST and at 44100 so that the
-  // 48 kHz docs land in a mismatched session — creating it after the first
-  // insert would let a rate-adopting session (the MT1-3 fix) quietly match, and
-  // then the "before" and "after" would not be measuring the same session.
+  // The REPORTED flow, driven exactly as a user drives it: a session created at
+  // `--session-rate` (44 100 by default — what File > New Session gave), then
+  // two 48 kHz files inserted into it. Before MT2 that produced a mismatched
+  // session and a 22-second `play()`; from MT2 the empty session adopts 48 000
+  // at the first insert and the clips land at ratio 1. The flow is the same
+  // keystrokes either way, which is what makes the two verdicts comparable.
+  //
+  // `mixed` differs by ONE insert: the 44.1 kHz tone goes on first, so the
+  // session is not empty when the songs arrive and the mismatch is genuine.
+  const preface = content === 'mixed' ? [TONE] : [];
   await page.evaluate((r) => window.__test.newSession(r), SESSION_RATE);
-  for (const [i, file] of [SONG_A, SONG_B].entries()) {
+  let track = 0;
+  for (const file of [...preface, SONG_A, SONG_B]) {
     await page.evaluate((p) => window.__test.openPath(p), file);
-    const inserted = await page.evaluate((t) => window.__test.insertActiveDocAsClip(t, 0), i);
-    if (!inserted) throw new Error(`insertActiveDocAsClip(${i}) returned null`);
+    const inserted = await page.evaluate((t) => window.__test.insertActiveDocAsClip(t, 0), track);
+    if (!inserted) throw new Error(`insertActiveDocAsClip(${track}) returned null`);
+    track++;
   }
-  return { clips: 2, tracks: 2 };
+  // MT2: the mismatched clips' conversions are warmed on `requestIdleCallback`
+  // at insert time. Waiting for the renderer to go idle is waiting for that
+  // work to finish — idle callbacks run in the order they were queued, so this
+  // one cannot resolve before the warm-ups it was queued behind.
+  if (content === 'mixed') await waitForIdle(page);
+  return { clips: track, tracks: track };
+}
+
+/** Resolves once the renderer has been idle — i.e. once every idle callback
+ * already queued (the MT2 resample warm-ups) has run to completion. */
+async function waitForIdle(page) {
+  await page.evaluate(
+    () =>
+      new Promise((resolve) => {
+        const step = (n) => {
+          if (n === 0) {
+            resolve(null);
+            return;
+          }
+          window.requestIdleCallback(() => step(n - 1), { timeout: 120_000 });
+        };
+        step(3);
+      })
+  );
 }
 
 /**
  * The sample rates that must agree, and where each is observed.
  *
- * `session` is not read back — it is what this rig passed to `newSession`, and
- * there is no test hook that reports a session's rate. `doc` comes from
- * `getStateSummary()`, whose `sampleRate` is the ACTIVE DOCUMENT's (testHooks
- * reads `doc?.sampleRate`), which is the number that matters here: it proves the
- * fixtures really are 48 kHz rather than something the WAV writer got wrong.
- * `device` is a throwaway AudioContext's rate, i.e. what the OS hands out.
+ * MT2: `session` is now READ BACK (`getStateSummary().sessionSampleRate`) rather
+ * than assumed to be whatever this rig passed to `newSession`. It stopped being
+ * the same number the moment an empty session began adopting the first
+ * document's rate, and a verdict that had gone on printing "MISMATCHED —
+ * resample branch live" over a session with no mismatch would have been the
+ * rig lying about the thing it exists to measure. `requested` keeps what was
+ * asked for, so an adoption is visible as the two disagreeing.
+ *
+ * `doc` is the ACTIVE DOCUMENT's rate, which proves the fixtures really are
+ * 48 kHz rather than something the WAV writer got wrong. `device` is a
+ * throwaway AudioContext's rate, i.e. what the OS hands out.
  *
  * A `doc` that differs from `session` is the resample condition.
  */
-async function rateTriple(page, sessionRate) {
+async function rateTriple(page, requestedRate) {
   const observed = await page.evaluate(() => {
     const summary = window.__test.getStateSummary();
     const probe = new AudioContext();
     const deviceRate = probe.sampleRate;
     void probe.close();
-    return { doc: summary.sampleRate ?? null, device: deviceRate };
+    return {
+      session: summary.sessionSampleRate,
+      doc: summary.sampleRate ?? null,
+      device: deviceRate,
+    };
   });
-  return { session: sessionRate, ...observed, mismatch: observed.doc !== sessionRate };
+  return {
+    requested: requestedRate,
+    ...observed,
+    adopted: observed.session !== requestedRate,
+    mismatch: observed.doc !== observed.session,
+  };
 }
 
 async function measureOneLaunch(probesPerLaunch, content) {
@@ -179,19 +246,19 @@ async function main() {
   if (!Number.isInteger(probesPerLaunch) || probesPerLaunch < 1) {
     throw new Error('--probes-per-launch must be >= 1');
   }
-  if (content !== 'tone' && content !== 'songs') {
-    throw new Error(`--content must be tone or songs (got ${content})`);
+  if (content !== 'tone' && content !== 'songs' && content !== 'mixed') {
+    throw new Error(`--content must be tone, songs or mixed (got ${content})`);
   }
   if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
     throw new Error('dist/index.html missing — run `npm run build` first');
   }
-  if (content === 'tone' && !fs.existsSync(TONE)) {
+  if ((content === 'tone' || content === 'mixed') && !fs.existsSync(TONE)) {
     console.log('Generating test tone...');
     execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'make-test-tone.cjs')], {
       stdio: 'inherit',
     });
   }
-  if (content === 'songs' && (!fs.existsSync(SONG_A) || !fs.existsSync(SONG_B))) {
+  if (content !== 'tone' && (!fs.existsSync(SONG_A) || !fs.existsSync(SONG_B))) {
     console.log('Generating 3-minute 48 kHz stereo fixtures (~35 MB each)...');
     execFileSync(process.execPath, [path.join(ROOT, 'scripts', 'make-test-latency.cjs')], {
       stdio: 'inherit',
@@ -207,7 +274,9 @@ async function main() {
   const sessionShape = { content, ...allRuns[0].made, rates: allRuns[0].rates };
   console.log(
     `  session: ${sessionShape.tracks} track(s), ${sessionShape.clips} clip(s) at ` +
-      `${sessionShape.rates.session} Hz from ${sessionShape.rates.doc} Hz sources ` +
+      `${sessionShape.rates.session} Hz` +
+      `${sessionShape.rates.adopted ? ` (ADOPTED — asked for ${sessionShape.rates.requested})` : ''}` +
+      ` from ${sessionShape.rates.doc} Hz sources ` +
       `(${sessionShape.rates.mismatch ? 'MISMATCHED — resample branch live' : 'matched'}); ` +
       `device context ${sessionShape.rates.device} Hz`
   );
