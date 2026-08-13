@@ -12,10 +12,10 @@ import type { EditorView, Marker } from '../stores/appStore';
 import { nextId, useAppStore } from '../stores/appStore';
 import {
   clampFadePair,
-  createClip,
   crossfadableOverlap,
   DEFAULT_FADE_CURVE,
 } from '../multitrack/session';
+import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { withSessionGesture } from '../multitrack/sessionUndo';
 import type { AutomationLane, AutomationParam } from '../multitrack/automation';
@@ -1266,22 +1266,18 @@ export function installTestHooks(): void {
     },
 
     // Inserts the active document as a clip on tracks[trackIndex] at startSample
-    // (session samples), converting length when the doc rate differs.
+    // (session samples), through the SHARED placement path — so this hook sees
+    // the same conversion, and the same empty-session rate adoption (MT2), that
+    // Insert Active File and a lane drop see. `startSample` and `lengthSample`
+    // come back in the session's rate AFTER any adoption, which is why they are
+    // reported rather than echoed.
     insertActiveDocAsClip: (trackIndex, startSample) => {
       const doc = activeDoc();
       if (!doc) return null;
-      const store = useSessionStore.getState();
-      const { session } = store;
-      const track = session.tracks[trackIndex];
+      const track = useSessionStore.getState().session.tracks[trackIndex];
       if (!track) return null;
-      const srcLen = docLength(doc);
-      const lengthSample =
-        doc.sampleRate === session.sampleRate
-          ? srcLen
-          : Math.round((srcLen * session.sampleRate) / doc.sampleRate);
-      const clip = createClip({ documentId: doc.id, startSample, offsetSample: 0, lengthSample });
-      store.addClip(track.id, clip);
-      return { clipId: clip.id, lengthSample, startSample };
+      const [placed] = placeDocumentsOnTrack([doc], track.id, startSample, { select: false });
+      return placed ?? null;
     },
 
     // Renders the session offline, adds the resulting stereo doc, switches to

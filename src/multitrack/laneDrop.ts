@@ -1,9 +1,9 @@
 import { type AudioDocument } from '../audio/AudioDocument';
 import { AUDIO_EXTENSIONS, openFilePath } from '../services/fileService';
 import { useAppStore } from '../stores/appStore';
-import { createClip, documentClipLength } from './session';
+import { documentClipLength } from './session';
+import { placeDocumentsOnTrack } from './sessionInsert';
 import { useSessionStore } from './sessionStore';
-import { withSessionGesture } from './sessionUndo';
 
 /**
  * Task F11-4 — dropping audio onto a track lane, from either of the two places
@@ -114,27 +114,15 @@ export function placeDocumentClips(
   trackId: string,
   startSample: number
 ): string[] {
-  const session = useSessionStore.getState().session;
-  if (!session.tracks.some((t) => t.id === trackId)) return [];
-
-  const placed: { clipId: string; trackId: string; clip: ReturnType<typeof createClip> }[] = [];
-  let next = Math.max(0, Math.round(startSample));
-  for (const docId of docIds) {
-    const doc = findDocument(docId);
-    if (!doc) continue; // closed between dragstart and drop — nothing to place
-    const lengthSample = documentClipLength(doc, session.sampleRate);
-    const clip = createClip({ documentId: doc.id, startSample: next, offsetSample: 0, lengthSample });
-    placed.push({ clipId: clip.id, trackId, clip });
-    next += lengthSample;
-  }
-  if (placed.length === 0) return [];
-
-  const store = useSessionStore.getState();
-  withSessionGesture(placed.length === 1 ? 'Add clip' : 'Add clips', () => {
-    for (const p of placed) store.addClip(p.trackId, p.clip);
-    store.setSelectedClip(placed[placed.length - 1].clipId);
-  });
-  return placed.map((p) => p.clipId);
+  // A document closed between dragstart and drop is simply not there to place;
+  // the rest of the drop continues without it.
+  const docs = docIds
+    .map(findDocument)
+    .filter((d): d is AudioDocument => d !== undefined);
+  // MT2: the placement itself — conversion, empty-session rate adoption, the
+  // one-entry gesture and the selection — lives in `sessionInsert`, shared with
+  // Insert Active File and the `insertActiveDocAsClip` test hook.
+  return placeDocumentsOnTrack(docs, trackId, startSample).map((p) => p.clipId);
 }
 
 /** The one document a Files-panel drop carries, placed at the drop position. */

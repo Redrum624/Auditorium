@@ -2,7 +2,7 @@ import { createDocument, docLength, nextId } from '../audio/AudioDocument';
 import type { AppState, Marker } from '../stores/appStore';
 import { applyEditorZoom, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
-import { createClip } from '../multitrack/session';
+import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { mixdownSession } from '../multitrack/mixdown';
 import { canRecord, transportPlayPause, transportRecord, transportStop } from './transportService';
 import {
@@ -803,14 +803,15 @@ function sessionHasClips(): boolean {
 }
 
 /** Inserts the entire active document as a clip at the multitrack cursor. The
- * target track is the one holding the selected clip, else the first track.
- * Clip length is expressed in session samples (converted when the document rate
- * differs from the session rate). No-op without an active doc or any track. */
+ * target track is the one holding the selected clip, else the first track. The
+ * placement itself — the doc-rate/session-rate conversion, an empty session
+ * adopting the document's rate (MT2), the undo entry and the selection — is
+ * `sessionInsert.placeDocumentsOnTrack`, shared with the lane drop and the
+ * `insertActiveDocAsClip` test hook. No-op without an active doc or any track. */
 function insertActiveDocAsClip(): void {
   const doc = activeDoc(useAppStore.getState());
   if (!doc) return;
-  const store = useSessionStore.getState();
-  const { session, selectedClipId, mtCursorSample } = store;
+  const { session, selectedClipId, mtCursorSample } = useSessionStore.getState();
   if (session.tracks.length === 0) return;
 
   const owningTrack = selectedClipId
@@ -818,20 +819,7 @@ function insertActiveDocAsClip(): void {
     : undefined;
   const targetTrack = owningTrack ?? session.tracks[0];
 
-  const srcLen = docLength(doc);
-  const lengthSample =
-    doc.sampleRate === session.sampleRate
-      ? srcLen
-      : Math.round((srcLen * session.sampleRate) / doc.sampleRate);
-
-  const clip = createClip({
-    documentId: doc.id,
-    startSample: mtCursorSample,
-    offsetSample: 0,
-    lengthSample,
-  });
-  store.addClip(targetTrack.id, clip);
-  store.setSelectedClip(clip.id);
+  placeDocumentsOnTrack([doc], targetTrack.id, mtCursorSample);
 }
 
 /** Renders the session offline to a stereo document, adds it to the Files

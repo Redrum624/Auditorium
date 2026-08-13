@@ -984,6 +984,67 @@ export function applySessionZoom(requested: SessionZoomRequest): void {
 }
 
 /**
+ * MT2 — an EMPTY session takes the sample rate of the first document inserted
+ * into it, and reports the ratio it moved by.
+ *
+ * THE REPORTED BUG. The session's rate was decided once, by
+ * `makeSession(44100)` at store init, and nothing ever revisited it: two 48 kHz
+ * files inserted into a session nobody had chosen a rate for were converted
+ * — every sample, through the 64-tap sinc in `readClipSlice` — synchronously
+ * inside `MultitrackPlayer.play()`. Measured on the packaged app with two 180 s
+ * stereo clips: 22 039 ms to return from `play()` against 223 ms for the same
+ * build and the same files with the session at 48 000 Hz.
+ *
+ * WHY "EMPTY" IS THE WHOLE CONDITION. A session's rate is the denominator of
+ * every clip position, length and fade on its timeline, so changing it under
+ * existing clips would mean rewriting all of them — and the second document is
+ * a genuine mismatch anyway: two rates cannot both be native, and converting
+ * one of them is the honest answer. But a session with NO clips denominates
+ * nothing the user placed. 44 100 was a default, not a decision, so the first
+ * document may as well name the rate — and then it lands at ratio 1 and the
+ * resample never happens.
+ *
+ * WHAT ADOPTION MUST CARRY. Every session-sample number that exists at this
+ * moment, because its next reader has no way to know it was left in the old
+ * rate: the multitrack cursor, the live playhead, and the zoom — the last one
+ * re-resolved through `resolveSessionZoom` (the ONE clamp) rather than written
+ * raw, so the visible DURATION survives and the ceiling is re-applied against
+ * the re-denominated timeline. There is no multitrack selection or loop range
+ * to carry (only the cursor exists), and the snap targets are derived per
+ * render from the session and the cursor (`sessionSnapTargets`), so they follow
+ * for free.
+ *
+ * Returns `newRate / oldRate` — the factor a caller must apply to any session
+ * sample it computed BEFORE calling (a drop position resolved against the lane's
+ * old pixel mapping, say) — or 1 when nothing changed.
+ *
+ * Recorded, per the sessionUndo recording invariant. The insert paths call this
+ * inside their own `withSessionGesture`, so the rate change and the clip it was
+ * made for fold into ONE history entry and one Ctrl+Z lifts both.
+ */
+export function adoptSessionRate(docRate: number): number {
+  const s = useSessionStore.getState();
+  const from = s.session.sampleRate;
+  if (!Number.isFinite(docRate) || docRate <= 0 || docRate === from) return 1;
+  if (hasAnyClip(s.session)) return 1;
+
+  const ratio = docRate / from;
+  recordSessionMutation('Set session rate', () => {
+    const session = { ...s.session, sampleRate: docRate };
+    useSessionStore.setState({
+      session,
+      mtCursorSample: Math.round(s.mtCursorSample * ratio),
+      mtPlayheadSample: Math.round(s.mtPlayheadSample * ratio),
+      mtZoom: resolveSessionZoom(session, {
+        samplesPerPixel: s.mtZoom.samplesPerPixel * ratio,
+        scrollSample: Math.round(s.mtZoom.scrollSample * ratio),
+      }),
+    });
+  });
+  return ratio;
+}
+
+/**
  * MT1-1 — the multitrack lane reports how wide it actually is.
  *
  * Called from `MultitrackView`'s resize effect with the SCROLLER's width, which
