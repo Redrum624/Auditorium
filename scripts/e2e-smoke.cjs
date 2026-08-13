@@ -3074,12 +3074,13 @@ async function main() {
           'Align Lyrics…',
           'Transcribe…',
           'Separate into Stems…',
+          'Spatial Positioner',
         ]),
-      `the Pipeline menu holds the ten tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
+      `the Pipeline menu holds the eleven tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
     );
     assert(
-      pipeline.separators === 2,
-      `three groups means two separators (actual ${pipeline.separators})`
+      pipeline.separators === 3,
+      `four groups means three separators (actual ${pipeline.separators})`
     );
 
     // MOVED, not copied: none of the ten may still be reachable from Edit.
@@ -3102,6 +3103,57 @@ async function main() {
       () => document.querySelector('[data-testid="menu-dropdown"]') === null,
       null,
       { timeout: 5000 }
+    );
+
+    // F11: 16c-bis) the Effects module card carries the same tools ----------
+    // The card is the surface this user works from, and the smoke had never
+    // opened it — no `effects-list`, no `effects-item`, nothing. The tools
+    // shipped menu-only for ten releases partly because nothing here would
+    // have noticed.
+    console.log('Effects card: the eleven tools, and no layout growth (F11)...');
+    await openModuleCard(page, 'Effects');
+    await page.waitForSelector('[data-testid="effects-tool-section"]', { timeout: 5000 });
+    const cardBefore = await page.evaluate(() => {
+      const el = document.querySelector('[data-testid="sidebar-panel"]');
+      const r = el.getBoundingClientRect();
+      return { width: r.width, bodyOverflow: document.body.scrollWidth - document.body.clientWidth };
+    });
+    const tools = await page.evaluate(() => ({
+      sections: [...document.querySelectorAll('[data-testid="effects-tool-section"]')].map(
+        (n) => n.dataset.section
+      ),
+      ids: [...document.querySelectorAll('[data-testid="effects-tool-item"]')].map(
+        (n) => n.dataset.commandId
+      ),
+      greyed: [...document.querySelectorAll('[data-testid="effects-tool-item"] button')].filter(
+        (b) => b.disabled
+      ).length,
+      effects: document.querySelectorAll('[data-testid="effects-item"]').length,
+    }));
+    console.log(
+      `  Effects card: sections ${JSON.stringify(tools.sections)}, ${tools.ids.length} tool rows ` +
+        `(${tools.greyed} greyed), ${tools.effects} effect rows; card ${cardBefore.width.toFixed(0)}px`
+    );
+    assert(
+      JSON.stringify(tools.sections) ===
+        JSON.stringify(['Tempo & Timing', 'Voice', 'Analysis', 'Mix']),
+      `the card groups its tools the way the Pipeline menu does (actual ${JSON.stringify(tools.sections)})`
+    );
+    assert(
+      tools.ids.length === 11,
+      `every Pipeline tool has a row in the card (expected 11, actual ${tools.ids.length})`
+    );
+    assert(
+      tools.effects > 0,
+      `the effect list is still there, above the tools (actual ${tools.effects} rows)`
+    );
+    assert(
+      cardBefore.bodyOverflow <= 0,
+      `the tool sections widen nothing (body overflow ${cardBefore.bodyOverflow}px)`
+    );
+    assert(
+      Math.abs(cardBefore.width - 348) <= 2,
+      `the card is still the module column's width (expected 348 +/-2, actual ${cardBefore.width.toFixed(1)})`
     );
 
     // F11: 16d) drag a document from the Files panel onto a track lane -------
@@ -4485,12 +4537,34 @@ async function main() {
             'to exercise them against the packaged app too.'
         );
       } else {
-        // The Transcript tab is a real strip button with an accessible name.
-        const transcriptTab = await page.$('[data-testid="sidebar-tabs"] [aria-label="Transcript"]');
-        assert(transcriptTab !== null, 'the sidebar rail carries a Transcript button');
-        // U1: the strip's active entry toggles its card closed, so ask before
-        // clicking rather than blindly closing the panel this step reads.
-        await openModuleCard(page, 'Transcript');
+        // F11-8: Transcript is no longer a strip icon — it is not a module,
+        // it is what the Transcribe TOOL produces. So the transcript surface is
+        // now reached the way a user reaches it: run Transcribe on a document
+        // that already has one, and it reveals the panel instead of re-running
+        // the model. This drives the real Pipeline menu row, which also proves
+        // the reveal-vs-rerun branch in `edit.transcribe`.
+        const stripHasTranscript = await page.$(
+          '[data-testid="sidebar-tabs"] [aria-label="Transcript"]'
+        );
+        assert(
+          stripHasTranscript === null,
+          'Transcript is not a module-strip entry any more — it is a tool result'
+        );
+        assert(await openMenu('Pipeline'), 'the Pipeline menu opens for Transcribe…');
+        await page.evaluate(() => {
+          const row = [
+            ...document.querySelectorAll('[data-testid="menu-dropdown"] button'),
+          ].find((b) => b.querySelector('span').textContent.trim() === 'Transcribe…');
+          row.click();
+        });
+        await page.waitForFunction(
+          () =>
+            document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute(
+              'data-active-tab'
+            ) === 'transcript',
+          null,
+          { timeout: 5000 }
+        );
         await page.waitForFunction(
           () => document.querySelector('[data-testid="transcript-panel"]') !== null,
           null,
