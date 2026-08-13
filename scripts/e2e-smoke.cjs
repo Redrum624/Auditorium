@@ -3226,6 +3226,22 @@ async function main() {
       // The fixtures are the Cover Chain's own: `cover-reference.wav` stands in
       // for the original song and `cover-take.wav` for the new take. They are
       // 6 s each, so the separation here is seconds rather than minutes.
+      //
+      // WHICH ALIGNMENT ARM THIS MATERIAL TAKES, and why it is not a defect.
+      // `make-test-cover.cjs` builds both files from filtered NOISE — the same
+      // noise through two first-order FIRs, plus transients in the take — because
+      // they were made to give Match EQ a monotone tilt and Match Loudness an
+      // unambiguous move. Continuous noise has no syllables, so the two share no
+      // ONSET structure whatever, and the alignment correctly refuses: measured
+      // here, correlation 0.210 against its 0.607 floor and prominence 0.031
+      // against 0.186. It places at zero and states both numbers, which is the
+      // refusal arm doing exactly its job on real audio in the packaged app.
+      //
+      // So this step exercises the REFUSED arm end to end and the BELIEVED arm
+      // not at all. Exercising the believed arm needs a fixture pair that shares
+      // an onset schedule at a known offset, which `make-test-cover.cjs` does not
+      // yet emit — recorded in the CP1 report as outstanding rather than papered
+      // over by relaxing an assertion here.
       console.log('Cover journey (CP1): song + take → session, in the packaged app...');
       await page.evaluate(() => window.__test.setView('waveform'));
       await page.evaluate((p) => window.__test.openPath(p), COVER_REFERENCE);
