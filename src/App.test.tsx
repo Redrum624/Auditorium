@@ -216,8 +216,8 @@ describe('right sidebar tabs (Task 23)', () => {
   });
 });
 
-describe('G4: icon rail + glass panel cards', () => {
-  it('mounts the rail exactly once, carrying all six panel entries', () => {
+describe('G4 module column, U1 module strip (the rail rotated horizontal)', () => {
+  it('mounts the strip exactly once, carrying all six panel entries', () => {
     render(<App />);
     const rails = screen.getAllByTestId('sidebar-tabs');
     expect(rails).toHaveLength(1);
@@ -290,7 +290,7 @@ describe('G4: icon rail + glass panel cards', () => {
     }
   });
 
-  it('marks the active rail entry with the accent tile class', () => {
+  it('marks the active strip entry with the accent tile class', () => {
     render(<App />);
     const rail = screen.getByTestId('sidebar-tabs');
     expect(within(rail).getByRole('button', { name: 'History' })).toHaveClass('is-active');

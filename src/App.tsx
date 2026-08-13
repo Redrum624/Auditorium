@@ -49,7 +49,7 @@ import { stopAll } from './services/transportService';
 import { useAppStore } from './stores/appStore';
 
 // G4: the two flat sidebars (left Files/Effects column + right tab strip)
-// became ONE right-edge icon rail driving a single glass panel card, with
+// became ONE icon rail driving a single glass panel card, with
 // Files and Effects as additive entries now that the always-visible left
 // column is retired (user-approved via the 2026-07-28 mockup). 'remix' is
 // also reachable through `focusRemixPanel()` (dialogBus) the moment a remix
