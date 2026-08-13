@@ -17,6 +17,8 @@ import { useSessionStore } from '../multitrack/sessionStore';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { registerDialogSetters } from './dialogBus';
 import { SHORTCUT_TABLE } from './shortcuts';
+import { setClipboard } from './clipboard';
+import { createClip } from '../multitrack/session';
 
 jest.mock('../multitrack/sessionFile');
 jest.mock('./tempoAnalysis', () => ({
@@ -181,6 +183,106 @@ describe('edit.trim / edit.silence (U1)', () => {
     useAppStore.getState().setSelection({ start: 100, end: 400 });
     expect(row('edit.trim').enabled(useAppStore.getState())).toBe(true);
     expect(row('edit.silence').enabled(useAppStore.getState())).toBe(true);
+  });
+});
+
+// F1 (M1 fix round): the five region verbs act on a REGION of the active
+// document. `setView` never clears the selection, so in the multitrack view
+// each of them addressed a document the user cannot see, with no feedback in
+// the session view — and the Undo sitting next to them routes to the SESSION's
+// history, which cannot undo a document edit. The toolbar greyed three of them
+// and left Trim/Silence lit; the keyboard left all five live. The gate belongs
+// on the COMMAND, so every surface inherits it at once.
+describe('the region verbs are disabled in the Multitrack view (F1)', () => {
+  const REGION_VERBS = ['edit.cut', 'edit.copy', 'edit.paste', 'edit.trim', 'edit.silence'];
+
+  /** The exact trap: a live document selection AND a full clipboard, carried
+   * into the multitrack view the way switching views really does.
+   *
+   * The samples are deliberately NON-ZERO. `openDoc`'s are all zero, which
+   * would make "Silence did not run" unfalsifiable — a silenced region and an
+   * untouched one are the same bytes. */
+  function armedInMultitrack() {
+    const doc = createDocument({
+      name: 'hidden.wav',
+      sampleRate: 44100,
+      channels: [Float32Array.from({ length: 1000 }, (_, i) => 0.5 - (i % 7) / 10)],
+    });
+    useAppStore.getState().addDocument(doc);
+    useAppStore.getState().setSelection({ start: 100, end: 400 });
+    setClipboard({ channels: [new Float32Array(50)], sampleRate: 44100 });
+    useAppStore.getState().setView('multitrack');
+    return doc;
+  }
+
+  it('reports all five disabled in Multitrack even with a selection and a full clipboard', () => {
+    armedInMultitrack();
+    for (const id of REGION_VERBS) expect(isCommandEnabled(id)).toBe(false);
+  });
+
+  it('and all five live again in the waveform and spectral views', () => {
+    armedInMultitrack();
+    for (const view of ['waveform', 'spectral'] as const) {
+      useAppStore.getState().setView(view);
+      for (const id of REGION_VERBS) expect(isCommandEnabled(id)).toBe(true);
+    }
+  });
+
+  it('greys all five rows in the Edit MENU there too — one predicate, every surface', () => {
+    armedInMultitrack();
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    for (const id of REGION_VERBS) {
+      const row = edit.items.find((i): i is MenuCommand => i !== 'separator' && i.id === id)!;
+      expect(row.enabled(useAppStore.getState())).toBe(false);
+    }
+  });
+
+  // installShortcuts dispatches through runCommand, which re-checks `enabled`
+  // before running — so this is the keyboard's behaviour too, and Ctrl+X in
+  // Multitrack no longer edits the hidden document.
+  // Each verb is dispatched ALONE, against a freshly armed document. Running
+  // all five in sequence against one document hides the bug it is meant to
+  // catch: pre-fix, `edit.cut` really did delete 300 samples (1000 -> 700) and
+  // `edit.paste` then re-inserted the very samples cut had put on the
+  // clipboard (700 -> 1000), so a length assertion after the loop saw 1000 and
+  // passed while two destructive edits had landed on the hidden document.
+  it.each(REGION_VERBS)('leaves the hidden document byte-identical when %s is dispatched anyway', async (id) => {
+    const doc = armedInMultitrack();
+    const before = useAppStore.getState().documents.find((d) => d.id === doc.id)!;
+    const beforeLength = docLength(before);
+    const beforeSamples = Array.from(before.channels[0]);
+    // The premise: this region is non-zero, so "Silence did not run" is a real
+    // claim rather than a comparison of zeros with zeros.
+    expect(beforeSamples.slice(100, 400).some((v) => v !== 0)).toBe(true);
+
+    await runCommand(id);
+
+    const after = useAppStore.getState().documents.find((d) => d.id === doc.id)!;
+    expect(docLength(after)).toBe(beforeLength);
+    expect(Array.from(after.channels[0])).toEqual(beforeSamples);
+    // And the selection survives, so returning to Waveform finds the edit
+    // still armed rather than silently consumed by a refused command.
+    expect(useAppStore.getState().selection).toEqual({ start: 100, end: 400 });
+  });
+
+  it('does NOT gate edit.delete, which is view-aware by design', () => {
+    armedInMultitrack();
+    // No clip selected yet, so it is disabled for the RIGHT reason...
+    expect(isCommandEnabled('edit.delete')).toBe(false);
+
+    useSessionStore.getState().addTrack();
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    const clip = createClip({
+      documentId: 'x',
+      startSample: 0,
+      offsetSample: 0,
+      lengthSample: 100,
+    });
+    useSessionStore.getState().addClip(trackId, clip);
+    useSessionStore.getState().setSelectedClip(clip.id);
+
+    // ...and live again once there is a CLIP to remove, which is its own rule.
+    expect(isCommandEnabled('edit.delete')).toBe(true);
   });
 });
 

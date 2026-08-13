@@ -118,10 +118,13 @@ you already have: nothing here does anything the menu and the keyboard do not.
   clipboard, Paste is greyed; Undo and Redo follow whichever history is
   active — the **document's** in Waveform and Spectral, the **session's** in
   Multitrack.
-- In the **Multitrack** view, Cut / Copy / Paste are always greyed: the
-  clipboard works on a region of a document, and clip-level cut/copy/paste
-  does not exist in Auditorium yet. Hover one for the reason. **Delete** does
-  work there — it removes the selected clip.
+- In the **Multitrack** view, Cut / Copy / Paste / Trim / Silence are always
+  greyed, and their keyboard shortcuts do nothing there either. All five edit a
+  region of the **active document**, which that view does not show — and since
+  switching views keeps your selection, they would otherwise change a file you
+  cannot see, with the Undo button beside them pointing at the session's
+  history instead. Hover one for the reason; switch to Waveform or Spectral to
+  use it. **Delete** does work there — it removes the selected clip.
 
 ### Markers
 

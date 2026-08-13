@@ -397,6 +397,29 @@ function registerSelectionAndTransportCommands(): void {
  * gated on the active document's history stacks. */
 function registerEditCommands(): void {
   const hasSelection = (s: AppState) => activeDoc(s) !== null && s.selection !== null;
+
+  /**
+   * F1: the five REGION verbs — cut, copy, paste, trim, silence — act on a
+   * region of the ACTIVE DOCUMENT, which the multitrack view does not show.
+   * `setView` does not clear the selection (deliberately: coming back to
+   * Waveform should find your work where you left it), so in that view each of
+   * them addressed a document the user cannot see, with no feedback anywhere in
+   * the session, while the Undo beside them routes to the SESSION's history and
+   * cannot undo a document edit.
+   *
+   * Gated here rather than per surface, so the toolbar, the Edit menu and the
+   * keyboard inherit one rule — `runCommand` re-checks `enabled` before running,
+   * which is what makes the accelerators inert too.
+   *
+   * This CHANGES pre-existing behaviour: Ctrl+X/C/V in the multitrack view used
+   * to edit the hidden document silently. That was the same trap with no button
+   * on it, not a feature worth preserving.
+   *
+   * `edit.delete` is deliberately NOT in this set — it already routes to clip
+   * removal in the multitrack view, so it is view-aware by design.
+   */
+  const isDocumentEditView = (s: AppState) => s.view !== 'multitrack';
+  const canEditRegion = (s: AppState) => isDocumentEditView(s) && hasSelection(s);
   registerCommands([
     {
       // R3 view routing (ruling 1), same shape as edit.delete below: in the
@@ -441,21 +464,21 @@ function registerEditCommands(): void {
       id: 'edit.cut',
       label: 'Cut',
       shortcut: 'Ctrl+X',
-      enabled: hasSelection,
+      enabled: canEditRegion,
       run: async () => cutSelection(),
     },
     {
       id: 'edit.copy',
       label: 'Copy',
       shortcut: 'Ctrl+C',
-      enabled: hasSelection,
+      enabled: canEditRegion,
       run: async () => copySelection(),
     },
     {
       id: 'edit.paste',
       label: 'Paste',
       shortcut: 'Ctrl+V',
-      enabled: (s) => activeDoc(s) !== null && getClipboard() !== null,
+      enabled: (s) => isDocumentEditView(s) && activeDoc(s) !== null && getClipboard() !== null,
       run: async () => pasteAtCursor(),
     },
     {
@@ -491,13 +514,13 @@ function registerEditCommands(): void {
     {
       id: 'edit.trim',
       label: 'Trim to Selection',
-      enabled: hasSelection,
+      enabled: canEditRegion,
       run: async () => trimToSelection(),
     },
     {
       id: 'edit.silence',
       label: 'Silence Selection',
-      enabled: hasSelection,
+      enabled: canEditRegion,
       run: async () => silenceSelection(),
     },
   ]);

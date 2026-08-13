@@ -109,9 +109,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that command's OWN predicate read through a new `isCommandEnabled`, so the bar cannot drift from
   the menu. Buttons grey individually rather than disappearing — no selection greys
   Cut/Copy/Delete/Trim/Silence, an empty clipboard greys Paste, and Undo/Redo follow whichever
-  history is active (the session's in Multitrack, the document's elsewhere). In Multitrack the three
-  clipboard verbs are greyed with a tooltip saying why: the clipboard acts on a region of a
-  document, and clip-level cut/copy/paste does not exist in the app. Affects:
+  history is active (the session's in Multitrack, the document's elsewhere). In Multitrack all five
+  region verbs are greyed with a tooltip saying why — see the behaviour change below. Affects:
   `src/components/Layout/EditToolbar.tsx`, `src/services/menuActions.ts`, `src/App.tsx`.
 - **Trim to Selection and Silence Selection are reachable at last.** Why: `trimToSelection` and
   `silenceSelection` have been in `editOps` since Task 22 with no command in front of them — the only
@@ -123,6 +122,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **BEHAVIOUR CHANGE — Cut, Copy, Paste, Trim and Silence no longer do anything in the Multitrack
+  view, including from the keyboard.** Why: all five act on a region of the *active document*, and
+  the multitrack view does not show that document. Switching views deliberately keeps your selection
+  (so coming back to Waveform finds your work where you left it), which meant that in Multitrack
+  those verbs silently edited a file you could not see, with no feedback anywhere in the session —
+  and the Undo beside them routes to the *session's* history in that view, so it could not reverse
+  what they had just done. The edit toolbar greyed three of them and left **Trim and Silence lit**,
+  where one click destroyed everything outside the selection in the hidden document. What changed for
+  you: **`Ctrl+X` / `Ctrl+C` / `Ctrl+V` in the Multitrack view now do nothing** instead of editing the
+  hidden document — previously they "worked", which was the same trap with no button on it. The gate
+  is on the commands themselves, so the toolbar, the Edit menu and the keyboard cannot disagree, and
+  each greyed button says which view to switch to. `Delete` is unaffected: it already removes the
+  selected *clip* there, by design. Affects: `src/services/menuActions.ts`,
+  `src/components/Layout/EditToolbar.tsx`.
 - **The window is laid out around the waveform now, not around the window.** Why: the user's rule for
   this pass was "we want the waveform as wide as possible, not like a photo", settled through five
   mockup iterations (`docs/ui-feedback/2026-08-12/edit-toolbar-mockup.html`, option E2). How it

@@ -161,7 +161,13 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
     expect(btn('Redo')).toBeEnabled();
   });
 
-  it('greys the clipboard verbs in Multitrack even with a document selection, and says why', () => {
+  // F1 (M1 fix round): this used to cover Cut/Copy/Paste ONLY, and Trim and
+  // Silence stayed lit in exactly this state — a click destroyed everything
+  // outside the selection in a document the multitrack view does not show,
+  // while the Undo button one divider away routed to the session's history and
+  // could not undo it. All five region verbs are now gated on the COMMAND, so
+  // this pill inherits the rule instead of restating a subset of it.
+  it('greys ALL five region verbs in Multitrack even with a document selection, and says why', () => {
     lastDocId = addDoc().id;
     act(() => {
       useAppStore.getState().setSelection({ start: 0, end: 1000 });
@@ -170,9 +176,29 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
     setClipboard({ channels: [new Float32Array(100)], sampleRate: 44100 });
     render(<EditToolbar />);
 
-    for (const label of ['Cut', 'Copy', 'Paste']) {
+    for (const label of ['Cut', 'Copy', 'Paste', 'Trim', 'Silence']) {
       expect(btn(label)).toBeDisabled();
-      expect(btn(label).title.toLowerCase()).toContain('multitrack');
+      const title = btn(label).title.toLowerCase();
+      expect(title).toContain('multitrack');
+      // Honest about the remedy, not just the refusal.
+      expect(title).toContain('waveform or spectral');
+    }
+  });
+
+  it('lights the same five again on the way back to Waveform, so the gate is the VIEW', () => {
+    lastDocId = addDoc().id;
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 1000 });
+      useAppStore.getState().setView('multitrack');
+    });
+    setClipboard({ channels: [new Float32Array(100)], sampleRate: 44100 });
+    render(<EditToolbar />);
+    expect(btn('Trim')).toBeDisabled();
+
+    act(() => useAppStore.getState().setView('waveform'));
+
+    for (const label of ['Cut', 'Copy', 'Paste', 'Trim', 'Silence']) {
+      expect(btn(label)).toBeEnabled();
     }
   });
 

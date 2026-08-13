@@ -34,11 +34,15 @@ import { ChromePill } from '../UI/glass';
  * to the SESSION's history in the multitrack view and the document's
  * elsewhere, which is exactly the rule wanted here).
  *
- * The one thing the predicates cannot express is Multitrack's clipboard: the
- * app has no clip-level cut/copy/paste, and `edit.cut`/`edit.copy`/
- * `edit.paste` would silently address the ACTIVE DOCUMENT from a view showing
- * a session. Those three are greyed in that view with a tooltip that says so,
- * rather than hidden — a missing button teaches nothing.
+ * F1: the five REGION verbs — Cut, Copy, Paste, Trim, Silence — are greyed in
+ * the Multitrack view because their COMMANDS are disabled there, not because
+ * this pill says so. Each edits a region of the active document, which that
+ * view does not show; Trim and Silence used to stay lit and would destroy the
+ * hidden document with the neighbouring Undo unable to reverse it (that Undo
+ * routes to the SESSION's history there). The gate lives in the registry so
+ * the menu and the keyboard obey it too — this component only chooses the
+ * tooltip that explains the greying, because a missing button teaches nothing.
+ * Delete is excluded: it already routes to clip removal in that view.
  */
 
 export interface EditToolbarItem {
@@ -47,8 +51,9 @@ export interface EditToolbarItem {
   Icon: LucideIcon;
   /** Starts a new group in the pill (renders a divider before it). */
   startsGroup?: boolean;
-  /** Addresses the in-app audio clipboard — see the Multitrack note above. */
-  clipboard?: boolean;
+  /** Acts on a REGION of the active document — see the Multitrack note above.
+   * Drives the explanatory tooltip ONLY; enablement comes from the command. */
+  regionVerb?: boolean;
   title: string;
 }
 
@@ -56,13 +61,13 @@ export interface EditToolbarItem {
  * three groups, in its order, on lucide line icons (the app's rule: never
  * emoji). Exported so the tests name the same eight the pill draws. */
 export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
-  { label: 'Cut', commandId: 'edit.cut', Icon: Scissors, clipboard: true, title: 'Cut (Ctrl+X)' },
-  { label: 'Copy', commandId: 'edit.copy', Icon: Copy, clipboard: true, title: 'Copy (Ctrl+C)' },
+  { label: 'Cut', commandId: 'edit.cut', Icon: Scissors, regionVerb: true, title: 'Cut (Ctrl+X)' },
+  { label: 'Copy', commandId: 'edit.copy', Icon: Copy, regionVerb: true, title: 'Copy (Ctrl+C)' },
   {
     label: 'Paste',
     commandId: 'edit.paste',
     Icon: ClipboardPaste,
-    clipboard: true,
+    regionVerb: true,
     title: 'Paste (Ctrl+V)',
   },
   { label: 'Delete', commandId: 'edit.delete', Icon: Trash2, title: 'Delete (Del)' },
@@ -71,20 +76,22 @@ export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
     commandId: 'edit.trim',
     Icon: Crop,
     startsGroup: true,
+    regionVerb: true,
     title: 'Trim to Selection — keeps the selected region, drops the rest',
   },
   {
     label: 'Silence',
     commandId: 'edit.silence',
     Icon: VolumeX,
+    regionVerb: true,
     title: 'Silence Selection — zeroes the selected region in place',
   },
   { label: 'Undo', commandId: 'edit.undo', Icon: Undo2, startsGroup: true, title: 'Undo (Ctrl+Z)' },
   { label: 'Redo', commandId: 'edit.redo', Icon: Redo2, title: 'Redo (Ctrl+Y)' },
 ];
 
-const MULTITRACK_CLIPBOARD_TITLE =
-  'Not available in the Multitrack view — the clipboard acts on a document region, and clip-level cut/copy/paste does not exist in the app yet.';
+const MULTITRACK_REGION_TITLE =
+  'Not available in the Multitrack view — it edits a region of the active document, which this view does not show. Switch to Waveform or Spectral to edit the document.';
 
 // Toolbar.tsx `pillIconBtn`, verbatim: the interactive hover/press/disabled
 // states come from .glass-pill-btn in index.css, which inline styles cannot
@@ -142,16 +149,20 @@ export default function EditToolbar() {
       className="pointer-events-auto flex items-center"
       style={{ borderRadius: 14, padding: '6px 8px', gap: 3 }}
     >
-      {EDIT_TOOLBAR_ITEMS.map(({ label, commandId, Icon, startsGroup, clipboard, title }) => {
-        const blockedByView = isMultitrack && clipboard === true;
-        const disabled = blockedByView || !isCommandEnabled(commandId);
+      {EDIT_TOOLBAR_ITEMS.map(({ label, commandId, Icon, startsGroup, regionVerb, title }) => {
+        // F1: enablement is the COMMAND's, with nothing added here — the view
+        // gate lives in the registry so this pill, the Edit menu and the
+        // keyboard cannot disagree. `blockedByView` only chooses the tooltip
+        // that explains a greying the predicate has already decided.
+        const disabled = !isCommandEnabled(commandId);
+        const blockedByView = isMultitrack && regionVerb === true;
         return (
           <span key={commandId} className="flex items-center">
             {startsGroup && <span aria-hidden="true" style={divider} />}
             <button
               type="button"
               aria-label={label}
-              title={blockedByView ? `${label} — ${MULTITRACK_CLIPBOARD_TITLE}` : title}
+              title={blockedByView ? `${label} — ${MULTITRACK_REGION_TITLE}` : title}
               disabled={disabled}
               onClick={() => void run(commandId)}
               className="glass-pill-btn"
