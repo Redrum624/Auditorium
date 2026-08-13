@@ -1,6 +1,6 @@
 'use strict';
 
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const electronAPI = {
   // The bytes arrive as a Uint8Array (Electron structured-clones main's
@@ -150,7 +150,22 @@ const electronAPI = {
 
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
-  pathBasename: (p) => p.split(/[\\/]/).pop()
+  pathBasename: (p) => p.split(/[\\/]/).pop(),
+
+  // F11-4: where a file dragged in from Explorer actually lives. Electron 32
+  // removed `File.path`, and `webUtils.getPathForFile` replaced it — it must
+  // be called HERE, with the File object handed across the bridge, because the
+  // mapping lives in the renderer process, not in main (there is no IPC form
+  // of this call). Returns null for anything that is not a real dropped file,
+  // so the renderer refuses politely instead of opening a path it invented.
+  pathForFile: (file) => {
+    try {
+      const p = webUtils.getPathForFile(file);
+      return typeof p === 'string' && p.length > 0 ? p : null;
+    } catch {
+      return null;
+    }
+  }
 };
 
 Object.freeze(electronAPI);

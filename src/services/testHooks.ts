@@ -997,7 +997,12 @@ export function installTestHooks(): void {
   if (typeof window === 'undefined') return;
 
   const testApi: TestApi = {
-    openPath: (path) => openFilePath(path),
+    // F11-4: openFilePath now answers with the id of the document it added
+    // (the lane drop places THAT document). The harness only awaits the open,
+    // so the id is dropped here rather than widening the test API.
+    openPath: async (path) => {
+      await openFilePath(path);
+    },
 
     getStateSummary: () => {
       const s = useAppStore.getState();

@@ -1,4 +1,5 @@
 import { type AudioDocument } from '../audio/AudioDocument';
+import { AUDIO_EXTENSIONS, openFilePath } from '../services/fileService';
 import { useAppStore } from '../stores/appStore';
 import { createClip, documentClipLength } from './session';
 import { useSessionStore } from './sessionStore';
@@ -8,6 +9,8 @@ import { withSessionGesture } from './sessionUndo';
  * Task F11-4 — dropping audio onto a track lane, from either of the two places
  * a user can drag audio FROM.
  *
+ * ---------------------------------------------------------------------------
+ * ONE PLACEMENT, TWO SOURCES
  * ---------------------------------------------------------------------------
  * A row in the Files panel is a document the app already holds; a file dragged
  * out of Explorer is one it does not. The difference is entirely in HOW the
@@ -50,7 +53,7 @@ import { withSessionGesture } from './sessionUndo';
 export const DOC_DRAG_MIME = 'application/x-auditorium-document-id';
 
 /** What a lane is willing to accept. */
-export type DropKind = 'document';
+export type DropKind = 'document' | 'files';
 
 /** The Files-panel drag currently in flight — see the module header. */
 let panelDragDocId: string | null = null;
@@ -76,10 +79,12 @@ export function draggedDocumentId(): string | null {
  */
 export function dropPayloadKind(types: ArrayLike<string> | undefined): DropKind | null {
   if (!types) return null;
+  let hasFiles = false;
   for (let i = 0; i < types.length; i++) {
     if (types[i] === DOC_DRAG_MIME) return 'document';
+    if (types[i] === 'Files') hasFiles = true;
   }
-  return null;
+  return hasFiles ? 'files' : null;
 }
 
 /** How long the clip a drop would land is, in session samples — 0 when the
@@ -135,4 +140,63 @@ export function placeDocumentClips(
 /** The one document a Files-panel drop carries, placed at the drop position. */
 export function dropDocumentOnTrack(docId: string, trackId: string, startSample: number): string[] {
   return placeDocumentClips([docId], trackId, startSample);
+}
+
+function extensionOf(path: string): string {
+  const base = path.split(/[\\/]/).pop() ?? path;
+  const dot = base.lastIndexOf('.');
+  return dot === -1 ? '' : base.slice(dot + 1).toLowerCase();
+}
+
+/** The open path's own failure handling: one dialog naming the file, and
+ * nothing left behind. Awaited so a multi-file drop reports its refusals in
+ * order rather than stacking dialogs. */
+async function refuse(what: string, why: string): Promise<void> {
+  await window.electronAPI?.showMessageBox({
+    type: 'error',
+    title: 'Open failed',
+    message: `Could not open ${what}:\n${why}`,
+  });
+}
+
+/**
+ * The Explorer half: resolve each dropped file to a path, open it through the
+ * REAL open pipeline, then place what opened exactly as a panel drop would.
+ *
+ * A non-audio file is refused BEFORE it is read — the drop's analogue of the
+ * Open dialog's extension filter, which the OS does not apply to a drag. A
+ * file that has the right extension but fails to decode is refused by
+ * `openFilePath` itself, which rolls its half-open document back before it
+ * throws; either way nothing is added and no clip is placed for that file.
+ * The rest of the drop continues, exactly as `openFilesViaDialog` continues
+ * past one bad file.
+ */
+export async function dropFilesOnTrack(
+  files: readonly File[],
+  trackId: string,
+  startSample: number
+): Promise<string[]> {
+  const opened: string[] = [];
+  for (const file of files) {
+    // Electron 32 removed `File.path`; `webUtils.getPathForFile` (bridged as
+    // `pathForFile`) is the supported way to learn where a dropped file lives.
+    const path = window.electronAPI?.pathForFile?.(file) ?? null;
+    if (!path) {
+      await refuse(file.name, 'The file path is not available in this window.');
+      continue;
+    }
+    if (!AUDIO_EXTENSIONS.includes(extensionOf(path))) {
+      await refuse(
+        path,
+        `Not an audio file. Auditorium opens ${AUDIO_EXTENSIONS.join(', ')} files.`
+      );
+      continue;
+    }
+    try {
+      opened.push(await openFilePath(path));
+    } catch (err) {
+      await refuse(path, err instanceof Error ? err.message : String(err));
+    }
+  }
+  return placeDocumentClips(opened, trackId, startSample);
 }

@@ -46,5 +46,6 @@ export interface ElectronAPI {
   voiceProfilesSave(req: { profiles: unknown[] }): Promise<{ ok: true } | { ok: false; error: string }>;
 
   pathBasename(p: string): string;      // implemented in preload (string ops only, no IPC)
+  pathForFile(file: File): string | null; // preload-only (webUtils.getPathForFile); null when the File has no disk path
 }
 declare global { interface Window { electronAPI: ElectronAPI } }

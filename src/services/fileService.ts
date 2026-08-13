@@ -68,8 +68,10 @@ function formatForPath(path: string): SourceFormat {
   return 'other';
 }
 
-/** File extensions offered in the Open dialog's Audio filter. */
-const AUDIO_EXTENSIONS = ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'webm'];
+/** File extensions offered in the Open dialog's Audio filter — and (F11-4) the
+ * same list a lane drop checks a dropped file against, since the OS applies no
+ * filter to a drag. Exported so that check cannot drift from this one. */
+export const AUDIO_EXTENSIONS = ['wav', 'mp3', 'ogg', 'flac', 'm4a', 'aac', 'webm'];
 
 function api() {
   const a = window.electronAPI;
@@ -238,8 +240,13 @@ function rollbackOpen(docId: string, before: ViewStateSnapshot): void {
  * a decode that dies mid-open cannot leave a blank row selected and the app
  * with a document it can neither draw nor close. The error propagates for the
  * caller to name the file in one dialog.
+ *
+ * Returns the id of the document it added. F11-4: a lane drop opens a file and
+ * must then place THAT document as a clip; making the open say what it made is
+ * the alternative to a caller diffing the store around it, which would guess
+ * wrong the moment two opens are in flight.
  */
-export async function openFilePath(path: string): Promise<void> {
+export async function openFilePath(path: string): Promise<string> {
   const name = api().pathBasename(path);
   const sourceFormat = formatForPath(path);
   const keepsPath =
@@ -334,6 +341,8 @@ export async function openFilePath(path: string): Promise<void> {
         store().setMarkersForDoc(doc.id, markers);
       }
     }
+
+    return doc.id;
   } catch (err) {
     // A half-added document is worse than no document: it is selected, it
     // cannot be drawn, and every panel that reads the active document reads

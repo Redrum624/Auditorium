@@ -6,6 +6,7 @@ import {
   draggedClipLength,
   draggedDocumentId,
   dropDocumentOnTrack,
+  dropFilesOnTrack,
   dropPayloadKind,
   type DropKind,
 } from '../../multitrack/laneDrop';
@@ -130,16 +131,22 @@ export default function TrackLane({
   };
 
   const onDrop = (e: ReactDragEvent<HTMLDivElement>) => {
-    if (!kindOf(e)) return; // not ours — and no preventDefault, so nothing happened
+    const kind = kindOf(e);
+    if (!kind) return; // not ours — and no preventDefault, so nothing happened
     e.preventDefault();
     const startSample = dropStartSample(e);
     const dt = e.dataTransfer;
     endDrag();
 
-    // The payload is authoritative now that the drop released it; the drag
-    // record is the fallback for a dataTransfer that carried only the type.
-    const docId = dt?.getData(DOC_DRAG_MIME) || draggedDocumentId();
-    if (docId) dropDocumentOnTrack(docId, track.id, startSample);
+    if (kind === 'document') {
+      // The payload is authoritative now that the drop released it; the drag
+      // record is the fallback for a dataTransfer that carried only the type.
+      const docId = dt?.getData(DOC_DRAG_MIME) || draggedDocumentId();
+      if (docId) dropDocumentOnTrack(docId, track.id, startSample);
+      return;
+    }
+    const files = dt?.files ? Array.from(dt.files) : [];
+    if (files.length > 0) void dropFilesOnTrack(files, track.id, startSample);
   };
 
   return (
