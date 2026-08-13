@@ -177,25 +177,45 @@ function clamp1(v: number): number {
  *
  * Exported so the realtime MultitrackPlayer builds its AudioBuffers from the
  * exact same slice/resample logic the offline mixdown uses.
+ *
+ * MT2-3 — THE RETURNED ARRAYS ARE READ-ONLY, AND MAY ALIAS THE DOCUMENT.
+ * A read that lies entirely inside its document at the session's own rate is
+ * returned as a `subarray` WINDOW onto `doc.channels[c]`: no allocation, no
+ * copy. That is the whole of the matched-rate fix — the old per-sample copy ran
+ * ~34.6 M iterations and allocated ~138 MB for two 3-minute stereo clips,
+ * inside `play()`, to build arrays that `AudioBuffer.copyToChannel` copied
+ * again one line later. Both consumers (this file's mixdown loop and the
+ * player's `buildClipBuffer`) only ever READ the slice or write into their own
+ * freshly allocated `scaled` array, and that is now a contract: writing into a
+ * returned slice would edit the user's document.
+ *
+ * The zero-fill survives for reads that run off an edge (a clip trimmed past
+ * its source, a negative offset), where it is a `set()` of whatever part
+ * overlaps rather than a per-sample conditional — same samples, same length,
+ * one memcpy.
  */
 export function readClipSlice(doc: AudioDocument, clip: Clip, sessionRate: number): Float32Array[] {
-  const docSliceLen =
-    doc.sampleRate === sessionRate
-      ? clip.lengthSample
-      : Math.round((clip.lengthSample * doc.sampleRate) / sessionRate);
+  const matched = doc.sampleRate === sessionRate;
+  const docSliceLen = matched
+    ? clip.lengthSample
+    : Math.round((clip.lengthSample * doc.sampleRate) / sessionRate);
   if (docSliceLen <= 0 || doc.channels.length === 0) return [];
 
   const srcLen = docLength(doc);
+  const from = clip.offsetSample;
+  // The part of [from, from + docSliceLen) that actually exists in the document.
+  const lo = Math.min(Math.max(from, 0), srcLen);
+  const hi = Math.min(Math.max(from + docSliceLen, 0), srcLen);
+  const inRange = lo === from && hi === from + docSliceLen;
+
   const slices = doc.channels.map((ch) => {
+    if (inRange) return ch.subarray(from, from + docSliceLen);
     const out = new Float32Array(docSliceLen);
-    for (let i = 0; i < docSliceLen; i++) {
-      const idx = clip.offsetSample + i;
-      out[i] = idx >= 0 && idx < srcLen ? ch[idx] : 0;
-    }
+    if (hi > lo) out.set(ch.subarray(lo, hi), lo - from);
     return out;
   });
 
-  if (doc.sampleRate === sessionRate) return slices;
+  if (matched) return slices;
   return slices.map((ch) => resampleChannel(ch, doc.sampleRate, sessionRate));
 }
 
