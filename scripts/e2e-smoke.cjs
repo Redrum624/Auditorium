@@ -89,9 +89,13 @@ const SHOT = path.join(OUT_DIR, 'smoke.png');
 // Why pin it at all: a NEW window is fitted to the work area of the display it
 // is born on, floored by the window's minimum size (1100x700). This machine has
 // two displays, and a run that opened on the smaller one got a 1100x700 window
-// — a 624 CSS px waveform canvas instead of 1129 (U1: 1210 since the E2 layout
-// gave the lane the retired vertical rail's width — 1600 less a 376px module
-// column and a 14px margin, against the old 446 + 24). Canvas width is what decides
+// — a 624 CSS px waveform canvas instead of 1129 (U1: 1209 since the E2 layout
+// gave the lane the retired vertical rail's width — the stage less a 376px
+// module column and a 14px margin, against the old 446 + 24). M1 measured that
+// 1209 on the first packaged run of this step; U1 predicted 1210 by subtracting
+// from 1600, but the stage measures 1599 CSS px for the reason the next comment
+// gives, and the old 1129 was a measurement obeying the same rule (1599 - 446 -
+// 24), not 1130. Canvas width is what decides
 // how much of the document is on screen (zoom is `ceil(length / 1600)` samples
 // per pixel, appStore.defaultZoom), so the tic-ruler count below moved with the
 // display the window happened to land on: 6 groups there, 11 here. The

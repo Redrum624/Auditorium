@@ -133,7 +133,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   which the lane, the toolbar band and the bottom band all lay out against, so the toolbar and status
   pills are centred on the WAVEFORM rather than on the window and re-centre in the same layout pass
   whenever the column opens or closes. At the pinned 1600 px smoke window the lane goes from 1129 to
-  **1210** CSS px with a card open, and to **1572** with none. Affects: `src/App.tsx`,
+  **1209** CSS px with a card open, and to **1571** with none — both measured on the packaged run,
+  against a stage that realises as 1599 CSS px rather than 1600. Affects: `src/App.tsx`,
   `src/index.css`, `src/components/Layout/ModuleStrip.tsx`, `src/components/Layout/Toolbar.tsx`,
   `src/components/Layout/StatusBar.tsx`.
 - **Clicking the open module entry closes its card.** Why: "the waveform runs nearly the full window
