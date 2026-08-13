@@ -414,8 +414,29 @@ async function invokeOpener(page, opener, label) {
  * design. Pressing until it takes measures the real behaviour instead of
  * assuming an idle dialog; `presses > 1` is the observation that the veto was
  * exercised, and it is logged rather than swallowed.
+ *
+ * M4: it checks the dialog is THERE first. Without that the loop's very first
+ * `waitForFunction` resolves against an overlay that never existed, so the
+ * helper returned `{ presses: 1 }` after 14 ms having closed nothing — measured,
+ * not reasoned. That is how the Transcript step came to "cancel" a hosted tool
+ * that has no overlay at all and walk away leaving it open, and it is the same
+ * defect `closeHostedTool` was hardened against one function below. A caller
+ * that reaches here with nothing open has a bug wherever it thinks it opened
+ * something, so this throws rather than passing quietly.
  */
 async function cancelDialog(page, timeoutMs = 120000) {
+  const present = await page.evaluate(
+    () => document.querySelector('[data-testid="dialog-overlay"]') !== null
+  );
+  if (!present) {
+    const hosted = await page.evaluate(
+      () => document.querySelector('[data-testid="tool-host"]') !== null
+    );
+    throw new Error(
+      'cancelDialog: no dialog-overlay is open, so Escape would report success having closed ' +
+        `nothing${hosted ? ' — a hosted tool IS open; use dismissOpenTool, which closes both presentations' : ''}`
+    );
+  }
   const started = Date.now();
   let presses = 0;
   while (Date.now() - started < timeoutMs) {
@@ -765,13 +786,22 @@ async function resetNativeCalls(app) {
 // ---------------------------------------------------------------------------
 
 const coverage = [];
+/** M4: how many real selects the PANEL sweeps saw, kept module-wide because the
+ * dialog walk's own counter is scoped to that step. Asserted non-zero once both
+ * panels have been walked, so the panel half cannot go vacuous either. */
+let panelSelectsSwept = 0;
 /**
  * MT1 — every `<select>` currently on screen must have an OPAQUE background.
  *
- * Called from inside the dialog walk, with a dialog open, because that is where
- * selects live: the Cover Chain Reference picker (the reported repro), the
- * Spatial track picker, the Properties fade-curve picker. A sweep run before any
- * of them is mounted checks nothing.
+ * Called with something MOUNTED, because a sweep run over an empty screen checks
+ * nothing. That means three places, not one: the dialog walk (the Cover Chain
+ * pickers — the reported repro), the Properties card (its fade-curve picker) and
+ * the Spatial card (its track picker).
+ *
+ * M4 added the latter two. This docblock already NAMED them while the only call
+ * site was inside the dialog walk, where neither panel is mounted — so the two
+ * selects it claimed to cover were swept by nothing, and the claim read as
+ * coverage that did not exist.
  *
  * Chromium paints a select's dropdown popup with the author's background but as
  * its own widget off the glass surface, so a translucent tint that reads dark on
@@ -1833,6 +1863,20 @@ async function main() {
     await step(page, 'Module: Properties — every fact matches the store', async () => {
       await openModuleCard(page, 'Properties');
       await page.waitForSelector('[data-testid="properties-document"]', { timeout: 5000 });
+      // M4: with the card MOUNTED, its own selects are real. The dialog walk
+      // never opens this panel, so until now nothing swept it.
+      //
+      // MEASURED: this currently sweeps ZERO selects, and that is reported
+      // rather than papered over. The panel's only select is `FadeCurveSelect`,
+      // which renders in the CLIP properties view; this step opens the card on a
+      // DOCUMENT (`properties-document`), so the picker is not mounted. The
+      // sweep is left here because it is the right place for it the moment a
+      // clip is selected, and because a silent zero is exactly what the count
+      // below exists to expose. The Spatial card is what makes the panel half
+      // non-vacuous today.
+      const propsSelects = await sweepSelects(page, 'the Properties card');
+      panelSelectsSwept += propsSelects;
+      console.log(`  selects mounted in the Properties card: ${propsSelects}`);
       const facts = await page.evaluate(() => {
         const root = document.querySelector('[data-testid="properties-document"]');
         const out = {};
@@ -2141,6 +2185,18 @@ async function main() {
       assert(
         hasStage,
         'the positioner shows its stage (the session seeded in P0-2 still has tracks)'
+      );
+      // M4: the Spatial track picker — the second select the sweep's own
+      // docblock claimed to cover while nothing swept this card.
+      const spatialSelects = await sweepSelects(page, 'the Spatial card');
+      panelSelectsSwept += spatialSelects;
+      console.log(`  selects mounted in the Spatial card: ${spatialSelects}`);
+      console.log(`  selects swept across the two panel cards: ${panelSelectsSwept}`);
+      assert(
+        panelSelectsSwept > 0,
+        `the panel sweeps saw at least one real select (${panelSelectsSwept}) — a sweep over a ` +
+          `card with no select mounted would pass by having nothing to check, which is the ` +
+          `failure mode this half was added to close`
       );
       const dotBefore = await page.evaluate(() => {
         const c = document.querySelector('[data-testid="spatial-source"]');

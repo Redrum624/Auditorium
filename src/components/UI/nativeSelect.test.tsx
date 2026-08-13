@@ -130,8 +130,9 @@ function selectRegions(): { file: string; text: string }[] {
 }
 
 /**
- * A translucent BACKGROUND specifically — `background`/`background-color` set to
- * an `rgba()` with alpha < 1, or a Tailwind `bg-…/NN` opacity modifier.
+ * A translucent BACKGROUND specifically — `background`, `background-color` or
+ * React's `backgroundColor` set to an `rgba()` with alpha < 1, or a Tailwind
+ * `bg-…/NN` opacity modifier.
  *
  * Deliberately not "any translucent colour in the region": a translucent BORDER
  * (`--glass-border` is `rgba(255,255,255,.08)`, and `GlassSelect` writes
@@ -139,9 +140,18 @@ function selectRegions(): { file: string; text: string }[] {
  * background reaches the popup, so only the background is constrained. The first
  * draft of this matcher was the loose one and reported the border as an
  * offender, which would have driven the fix into the wrong property.
+ *
+ * M4: `backgroundColor` was missing, which is the spelling every select in this
+ * app would actually use — they are all styled through JSX `style` objects, and
+ * the CoverChainDialog select that this law caught during the train was written
+ * as `background:` only by chance. Between the property and its colour the
+ * matcher now allows anything up to a property separator (`,` `;` or a newline),
+ * so a ternary — how three of the app's four camelCase translucent backgrounds
+ * are written — is covered, while a following `border:` on the same line still
+ * cannot be mistaken for the background's own value.
  */
 const TRANSLUCENT_BG =
-  /background(?:-color)?:\s*'?"?rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*(?:0?\.\d+|0)\s*\)|\bbg-[^\s"'`]*\/\d{1,3}\b/;
+  /background(?:-color|Color)?:[^;,\n]*rgba\(\s*[\d.]+\s*,\s*[\d.]+\s*,\s*[\d.]+\s*,\s*(?:0?\.\d+|0)\s*\)|\bbg-[^\s"'`]*\/\d{1,3}\b/;
 
 describe('MT1-4 — native select popups', () => {
   const css = fs.readFileSync(path.join(SRC, 'index.css'), 'utf8');
@@ -203,6 +213,31 @@ describe('MT1-4 — native select popups', () => {
     expect(TRANSLUCENT_BG.test("border: '1px solid rgba(255,255,255,.1)'")).toBe(false);
     expect(TRANSLUCENT_BG.test("background: 'var(--glass-field-bg)'")).toBe(false);
     expect(TRANSLUCENT_BG.test('className="bg-[#1a1a1e]"')).toBe(false);
+
+    // React's OWN spelling, which this matcher missed entirely until M4's fix
+    // round. Every select in this app is styled through a JSX `style` object, so
+    // `backgroundColor` is the form a new one is most likely to arrive in — and
+    // the app already writes exactly this shape in four places
+    // (`SpatialPanel`, `TrackHeader` twice, `VoiceChangerDialog`). The law read
+    // only the CSS spellings, so a camelCase translucent background on a select
+    // would have been invisible to it, and this self-test never exercised the
+    // case so the hole could not be seen from here either.
+    expect(TRANSLUCENT_BG.test("backgroundColor: 'rgba(255, 255, 255, 0.05)'")).toBe(true);
+    expect(TRANSLUCENT_BG.test("backgroundColor: 'rgba(255,255,255,.04)'")).toBe(true);
+    // …including behind a ternary, which is how three of those four are written.
+    expect(
+      TRANSLUCENT_BG.test("backgroundColor: open ? 'var(--accent)' : 'rgba(255,255,255,0.05)'")
+    ).toBe(true);
+    expect(TRANSLUCENT_BG.test("backgroundColor: 'var(--glass-field-bg)'")).toBe(false);
+    // The border must STILL not trip it, including when it follows an opaque
+    // background on the same line — the match stops at the property separator
+    // rather than running on into the next property's value.
+    expect(
+      TRANSLUCENT_BG.test("background: 'var(--glass-field-bg)', border: '1px solid rgba(255,255,255,.1)'")
+    ).toBe(false);
+    expect(
+      TRANSLUCENT_BG.test("backgroundColor: '#1a1a1e', border: '1px solid rgba(255,255,255,.1)'")
+    ).toBe(false);
   });
 
   it('slices each select down to its own opening tag', () => {
