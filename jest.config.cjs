@@ -55,19 +55,38 @@ module.exports = {
       },
       setupFilesAfterEnv: ['<rootDir>/src/setupTests.ts']
     },
+    // MT1 fix round: `roots` + a ROOT-RELATIVE `testMatch`, which is what
+    // `renderer` above already does and what these two must do for the same
+    // reason the ignore pattern needed rewriting.
+    //
+    // `<rootDir>` is substituted as a LITERAL into a glob, and from a worktree
+    // that literal is `D:\Dev\...\.claude\worktrees\<id>\electron\**\*.test.cjs`.
+    // `jest-util`'s path normaliser converts `\` to `/` EXCEPT before a
+    // glob-special character, so the backslash in `\.claude` survives and
+    // escapes the dot — the pattern then matches nothing and the project
+    // discovers ZERO tests while still exiting 0. Exactly the defect class the
+    // M2 docblock above records for the regex, in the glob this time: `main`
+    // and `scripts` silently ran nothing from every agent worktree, so a
+    // worktree's "full suite green" was only ever the renderer project.
+    //
+    // `roots` is not a glob — it is a path Jest resolves and crawls — so it
+    // carries no escaping hazard, and a `**/*.test.cjs` pattern with no
+    // absolute prefix has nothing to escape.
     {
       displayName: 'main',
       testEnvironment: 'node',
       modulePathIgnorePatterns: IGNORE_AGENT_WORKTREES,
       testPathIgnorePatterns: TEST_PATH_IGNORE,
-      testMatch: ['<rootDir>/electron/**/*.test.cjs']
+      roots: ['<rootDir>/electron'],
+      testMatch: ['**/*.test.cjs']
     },
     {
       displayName: 'scripts',
       testEnvironment: 'node',
       modulePathIgnorePatterns: IGNORE_AGENT_WORKTREES,
       testPathIgnorePatterns: TEST_PATH_IGNORE,
-      testMatch: ['<rootDir>/scripts/**/*.test.cjs']
+      roots: ['<rootDir>/scripts'],
+      testMatch: ['**/*.test.cjs']
     }
   ]
 };
