@@ -15,11 +15,11 @@ and everything is anchored on the **waveform**, not on the window:
 - **Top, centred on the waveform** — the toolbar pill: `Open · Save · Export`,
   the transport (`⏮ ⏹ ▶ ⏺ ⟳`), the magnet, the view segment
   (Waveform / Spectral / Multitrack) and the zoom cluster (`− · % · + · Fit`).
-- **Top right** — the **module strip**: one icon per panel (Files, Effects,
-  Markers, History, Properties, Remix, Spatial, Transcript), sitting on top of
-  the module column. Click an icon to open its card below the strip; click the
-  **open** icon again to close the card, and the waveform takes the whole
-  column's width.
+- **Top right** — the **module strip**: one icon per module — **Files,
+  Effects, Markers, History, Properties** — plus **Remix**, which appears only
+  once a remix document exists. It sits on top of the module column. Click an
+  icon to open its card below the strip; click the **open** icon again to close
+  the card, and the waveform takes the whole column's width.
 - **Bottom, centred on the waveform** — the status pill: the active file's
   `name · duration · rate · channels`, the big time readout, the cursor and
   selection times, the `♩ BPM` readout, the zoom in samples-per-pixel, and the
@@ -40,7 +40,8 @@ Six menus: **File**, **Edit**, **Effects**, **Pipeline**, **View** and
 - **Pipeline** holds the ten long-running tools, grouped by subject:
   **Detect Tempo · Match Tempo… · Align Vocal Timing… · Auto-Remix…**, then
   **Voice Changer… · Vocal Chain… · Cover Chain… · Align Lyrics…**, then
-  **Transcribe… · Separate into Stems…**. These used to be scattered between
+  **Transcribe… · Separate into Stems…**, then **Spatial Positioner**. These
+  used to be scattered between
   the Effects and Edit menus; they are in one place now, and each one is in
   exactly one place.
 
@@ -242,8 +243,8 @@ History-panel step.
 
 The horizontal **module strip** at the top right opens one floating glass
 panel card at a time, directly beneath it — **Files**, **Effects**,
-**Markers**, **History**, **Properties**, **Remix**, **Spatial** and
-**Transcript**; **History** is the default. Clicking the **already-open**
+**Markers**, **History** and **Properties**, plus **Remix** once a remix
+document exists; **History** is the default. Clicking the **already-open**
 entry closes the card, and the waveform stretches across the column's width;
 clicking any entry reopens one. When the active document has a tempo analysis,
 a persistent **TEMPO** card (BPM readout, structure strip, and ×2 / ÷2 /
@@ -256,8 +257,15 @@ Re-detect) appears between the strip and the panel card.
   the multitrack view, the **active document's** elsewhere (see *Cut / Copy /
   Paste / Delete* above and *Undo in the multitrack* below).
 - **Markers** — the active document's marker list (see *Markers* above).
-- **Transcript** — the active document's transcript, once you have run one
-  (see *Transcribing speech* below).
+- **Remix** appears in the strip only while a remix document is open, and
+  vanishes again when the last one is closed — it has nothing to show
+  otherwise.
+- **Spatial** and **Transcript** are not modules. They are what a tool
+  produces, so they have no permanent icon: **Pipeline → Spatial Positioner**
+  opens the positioner, and **Pipeline → Transcribe…** shows the transcript of
+  a document that already has one (and offers to make one when it does not).
+  Both still open as the same full card in the same column — nothing about
+  either surface was trimmed.
 - **Properties** — read-only facts about what you're working on. In the
   waveform/spectral views it shows the active document's name, path (`—` for
   never-saved documents), sample rate, channels (Mono/Stereo), bit depth,
@@ -887,6 +895,13 @@ To turn speech into timestamped text with a speaker label per segment:
    there. The same segments appear as coloured bars in a thin strip between
    the time ruler and the waveform — click one to jump to it.
 
+**To come back to a transcript later**, run **Pipeline → Transcribe…** again on
+the same document: when a transcript already exists the tool shows it rather
+than re-running the model, so it costs nothing to reach. The panel itself has
+the button to run a fresh one when you actually want that. (There is no
+Transcript icon in the module strip: a transcript is what the Transcribe tool
+produces, not a module of its own.)
+
 **Read this before you trust the speaker labels.** Speaker separation was
 measured on clean recordings with one voice at a time. It told **two**
 speakers apart with every segment correct, and recognised a single speaker as
@@ -1195,7 +1210,8 @@ v1.9.2 — the lanes are simply not shown there and survive a re-save.
 
 ### Spatial placement (the Spatial panel)
 
-The **Spatial** entry on the module strip opens a positioner that
+**Pipeline → Spatial Positioner** (or the **Mix** row in the Effects card)
+opens a positioner that
 places a track's sound around the listener: a top-down stage (front is up)
 where you drag the source, an elevation slider, and readouts for the three
 position parameters — **azimuth** (direction, −180°..180°, positive to the

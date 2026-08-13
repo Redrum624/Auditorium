@@ -230,6 +230,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/multitrack/{laneDrop,session}.ts`, `src/components/Panels/FilesPanel.tsx`,
   `electron/preload.cjs`.
 
+
 - **DevTools open by themselves on a dev run.** Why: a standing user rule — while developing, the
   console is open without anyone asking for it. Detached, so it never takes width from the window the
   layout was built for. Dev runs only: the gate is `VITE_DEV_SERVER`, the same signal `main.cjs`
@@ -264,6 +265,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   labels that named keys doing nothing. Affects: `src/services/menuActions.ts`.
 
 ### Changed
+<!-- F11: the F11 series' Changed entry. -->
+- **The module strip carries five permanent modules, and Remix only when there is a remix.** Why: the
+  user's ruling — "Spatial and Transcript are single tools, they should not be a module. Remix should
+  only appear when a remix is created." A module is something you keep open beside the audio; Spatial
+  and Transcript are what a tool *produces*, and Remix has nothing to show until a remix exists. The
+  strip now draws **Files, Effects, Markers, History, Properties**, plus **Remix** while any remix
+  document is open — asked with `remixService`'s own existing question, not a new flag. Spatial is
+  reached by **Pipeline → Spatial Positioner** (a fourth **Mix** group, and the matching row in the
+  Effects card); the transcript by **Pipeline → Transcribe…**, which now REVEALS an existing
+  transcript instead of re-running the model, with the re-run button moved into the panel where it
+  belongs. **Neither surface was trimmed**: both still open as the same full card in the same column,
+  because the card registry (what can be rendered) and the strip roster (what draws an icon) are now
+  two different lists instead of one. Affects: `src/components/Layout/ModuleStrip.tsx`, `src/App.tsx`,
+  `src/services/{menuActions,dialogBus}.ts`, `src/components/Panels/{TranscriptPanel,EffectsPanel}.tsx`.
 
 - **BEHAVIOUR CHANGE — Cut, Copy, Paste, Trim and Silence no longer do anything in the Multitrack
   view, including from the keyboard.** Why: all five act on a region of the *active document*, and
