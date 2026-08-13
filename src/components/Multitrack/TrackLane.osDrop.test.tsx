@@ -3,6 +3,7 @@ import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { decodeArrayBuffer } from '../../audio/decodeAudio';
 import { dropFilesOnTrack } from '../../multitrack/laneDrop';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { setSessionLaneWidth } from '../../multitrack/sessionViewport';
 import {
   SESSION_UNDO_KEY,
   _resetSessionUndo,
@@ -45,6 +46,11 @@ import MultitrackView from './MultitrackView';
 jest.mock('../../audio/decodeAudio', () => ({ decodeArrayBuffer: jest.fn() }));
 const mockDecode = decodeArrayBuffer as jest.MockedFunction<typeof decodeArrayBuffer>;
 
+// MT1-1: 512 was the session store's hardcoded default mtZoom; it is now the
+// scale this file PINS via the lane measurement in beforeEach (an EMPTY session
+// fits the 60 s placeholder timeline, so the lane width that makes that fit
+// exactly 512 samples/px is 60 * rate / 512). Every pixel number below is
+// therefore unchanged.
 const SPP = 512;
 const SESSION_RATE = 44_100;
 /** 4 samples per decoded file (see `decoded()`), at the session rate. */
@@ -139,6 +145,7 @@ function openExisting(): AudioDocument {
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  setSessionLaneWidth((60 * SESSION_RATE) / SPP);
   useSessionStore.getState().newSession(SESSION_RATE);
   _resetPendingOpens();
   _resetSnapPreference();

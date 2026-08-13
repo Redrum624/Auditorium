@@ -1,5 +1,6 @@
 import { createClip } from './session';
 import { useSessionStore } from './sessionStore';
+import { sessionLaneWidth } from './sessionViewport';
 import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 
 function findClip(clipId: string) {
@@ -34,7 +35,15 @@ describe('newSession', () => {
 
     expect(state.selectedClipId).toBeNull();
     expect(state.mtCursorSample).toBe(0);
-    expect(state.mtZoom).toEqual({ samplesPerPixel: 512, scrollSample: 0 });
+    // MT1-1: was `{ samplesPerPixel: 512, scrollSample: 0 }`. 512 was a constant
+    // with no relationship to anything on screen — 16 s of timeline whatever the
+    // session held, which is why a 2:58 session opened showing 18 s of itself. A
+    // fresh session is EMPTY, so there is no longest track to fit and the zoom
+    // falls to the empty-timeline convention (60 s, per sessionZoom); asserting
+    // that relationship rather than the resulting number keeps this test honest
+    // if the fallback lane width ever changes.
+    expect(state.mtZoom.scrollSample).toBe(0);
+    expect(state.mtZoom.samplesPerPixel * sessionLaneWidth()).toBeCloseTo(60 * 48000, 6);
     expect(state.mtPlayState).toBe('stopped');
   });
 

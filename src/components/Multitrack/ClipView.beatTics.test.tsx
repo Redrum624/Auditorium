@@ -180,8 +180,25 @@ function overlayOf(container: HTMLElement): HTMLCanvasElement | null {
   return container.querySelector('[data-testid="clip-beat-tics"]');
 }
 
+/**
+ * The waveform's zero-amplitude axis rule, drawn once per channel lane.
+ *
+ * MT1-2 gave the clip the editor's own two-layer draw, and the editor rules an
+ * axis across each lane at `rgba(255,255,255,0.12)`. That is a stroke on the
+ * waveform canvas, so "no tics reached the waveform" can no longer be spelled
+ * "no strokes reached the waveform" — the axis would satisfy the old spelling
+ * and so would a beat tic that happened to be axis-coloured. Naming the axis is
+ * what keeps {@link beatTicsOn} a claim about TICS.
+ */
+const AXIS_STYLE = 'rgba(255,255,255,0.12)';
+
 function ticsOn(canvas: HTMLCanvasElement): Stroke[] {
   return recorders.get(canvas)?.strokes ?? [];
+}
+
+/** Strokes on `canvas` that are not the waveform's own axis rule. */
+function beatTicsOn(canvas: HTMLCanvasElement): Stroke[] {
+  return ticsOn(canvas).filter((s) => s.style !== AXIS_STYLE);
 }
 
 // ---------------------------------------------------------------------------
@@ -199,37 +216,56 @@ describe('ClipView beat tics — where they are drawn', () => {
     const waveform = canvases.find((c) => c !== overlay)!;
 
     expect(ticsOn(overlay).length).toBeGreaterThan(0);
-    expect(ticsOn(waveform)).toHaveLength(0);
-    // ...and the waveform canvas is still the one that gets the blit.
-    expect(recorders.get(waveform)!.drawImage).toHaveBeenCalled();
+    expect(beatTicsOn(waveform)).toHaveLength(0);
+    // ...and the waveform canvas is the one carrying the envelope. MT1-2: this
+    // used to assert `drawImage` was called, because the waveform arrived as a
+    // BLIT of a full-clip offscreen raster. There is no blit any more — the
+    // visible band is drawn straight into this canvas — so the same claim ("the
+    // waveform is on THIS canvas") is now made about its fills.
+    expect(recorders.get(waveform)!.fillRects).toBeGreaterThan(0);
+    expect(recorders.get(waveform)!.drawImage).not.toHaveBeenCalled();
   });
 
-  it('never draws into the CACHED offscreen bitmap, whose key has no grid identity', () => {
+  it('uses exactly two canvases — no third offscreen raster behind them', () => {
     mockGetBeatGrid.mockReturnValue(grid());
     const { container } = renderClip(seedDoc(44100), makeClip(), 441);
 
     const overlay = overlayOf(container)!;
     const waveform = Array.from(container.querySelectorAll('canvas')).find((c) => c !== overlay)!;
-    const cached = recorders.get(waveform)!.drawImage.mock.calls[0][0] as HTMLCanvasElement;
 
-    expect(cached).not.toBe(overlay);
-    expect(ticsOn(cached)).toHaveLength(0);
-    expect(recorders.get(cached)!.fillRects).toBeGreaterThan(0); // it holds the envelope
+    // MT1-2: this test used to reach THROUGH `drawImage` to the cached offscreen
+    // bitmap the waveform was blitted from, and assert the tics never reached
+    // it. That bitmap no longer exists — the band is drawn straight into the
+    // on-screen canvas — so the strongest remaining form of the same claim is
+    // that nothing is blitted from anywhere and only the two visible canvases
+    // were ever given a context. Retiring the raster is the POINT of MT1-2
+    // (a capped full-clip raster stretched over the clip's width was the coarse
+    // blob in the report), so this asserts its absence rather than mourning it.
+    expect(recorders.get(waveform)!.drawImage).not.toHaveBeenCalled();
+    expect(recorders.get(overlay)!.drawImage).not.toHaveBeenCalled();
+    expect(recorders.size).toBe(2);
+    expect(beatTicsOn(waveform)).toHaveLength(0);
+    expect(recorders.get(waveform)!.fillRects).toBeGreaterThan(0); // it holds the envelope
   });
 
-  it('leaves the cached waveform bitmap untouched across a beat-grid toggle', () => {
+  it('does not repaint the waveform across a beat-grid toggle', () => {
     mockGetBeatGrid.mockReturnValue(grid());
     const { container } = renderClip(seedDoc(44100), makeClip(), 441);
     const waveform = Array.from(container.querySelectorAll('canvas')).find(
       (c) => c !== overlayOf(container)
     )!;
-    const before = recorders.get(waveform)!.drawImage.mock.calls[0][0];
+    const before = recorders.get(waveform)!.fillRects;
+    expect(before).toBeGreaterThan(0);
 
     act(() => setBeatGridVisible(false));
     act(() => setBeatGridVisible(true));
 
-    const calls = recorders.get(waveform)!.drawImage.mock.calls;
-    expect(calls[calls.length - 1][0]).toBe(before); // same bitmap, not rebuilt
+    // MT1-2: the old form of this test compared the blitted bitmap IDENTITY
+    // across the toggle ("same bitmap, not rebuilt"). With the raster gone, the
+    // invariant it was protecting — the beat grid is not part of the waveform's
+    // identity, so toggling it must not cost a waveform repaint — is measured
+    // directly, as fills added to the waveform canvas.
+    expect(recorders.get(waveform)!.fillRects).toBe(before);
   });
 
   it('sizes the overlay backing store 1:1 with its CSS width — the raster is NOT stretched', () => {

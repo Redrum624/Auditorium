@@ -68,13 +68,27 @@ function arg(name, dflt) {
   return hit ? hit.slice(name.length + 3) : dflt;
 }
 
+/**
+ * The rate every session in this rig is created at. 44100 by default, which is
+ * what `sessionStore`'s own `newSession` default was when MT1-3 was filed, and
+ * the "44.1 kHz" the status bar showed over two 48 kHz files.
+ *
+ * `--session-rate=48000` makes it MATCH the fixtures, which is the controlled
+ * experiment that separates the two costs inside `play()`: `readClipSlice`
+ * always copies the clip sample by sample, and additionally resamples it when
+ * the rates differ. Running both rates against the SAME build attributes the
+ * measured time between them without changing a line of app code — so the fix
+ * is chosen from evidence rather than from which suspect was named first.
+ */
+const SESSION_RATE = Number(arg('session-rate', '44100'));
+
 /** Builds the session under test and returns what it is made of. */
 async function buildSession(page, content) {
   if (content === 'tone') {
     // One-track session with a 2 s tone clip at 0 — the minimal schedulable
     // session, so playCallMs measures graph build, not content size.
     await page.evaluate((p) => window.__test.openPath(p), TONE);
-    await page.evaluate(() => window.__test.newSession(44100));
+    await page.evaluate((r) => window.__test.newSession(r), SESSION_RATE);
     const inserted = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
     if (!inserted) throw new Error('insertActiveDocAsClip returned null');
     return { clips: 1, tracks: 1 };
@@ -84,7 +98,7 @@ async function buildSession(page, content) {
   // 48 kHz docs land in a mismatched session — creating it after the first
   // insert would let a rate-adopting session (the MT1-3 fix) quietly match, and
   // then the "before" and "after" would not be measuring the same session.
-  await page.evaluate(() => window.__test.newSession(44100));
+  await page.evaluate((r) => window.__test.newSession(r), SESSION_RATE);
   for (const [i, file] of [SONG_A, SONG_B].entries()) {
     await page.evaluate((p) => window.__test.openPath(p), file);
     const inserted = await page.evaluate((t) => window.__test.insertActiveDocAsClip(t, 0), i);
@@ -93,15 +107,27 @@ async function buildSession(page, content) {
   return { clips: 2, tracks: 2 };
 }
 
-/** session / doc / AudioContext sample rates — the three that must agree. */
-async function rateTriple(page) {
-  return page.evaluate(() => {
+/**
+ * The sample rates that must agree, and where each is observed.
+ *
+ * `session` is not read back — it is what this rig passed to `newSession`, and
+ * there is no test hook that reports a session's rate. `doc` comes from
+ * `getStateSummary()`, whose `sampleRate` is the ACTIVE DOCUMENT's (testHooks
+ * reads `doc?.sampleRate`), which is the number that matters here: it proves the
+ * fixtures really are 48 kHz rather than something the WAV writer got wrong.
+ * `device` is a throwaway AudioContext's rate, i.e. what the OS hands out.
+ *
+ * A `doc` that differs from `session` is the resample condition.
+ */
+async function rateTriple(page, sessionRate) {
+  const observed = await page.evaluate(() => {
     const summary = window.__test.getStateSummary();
     const probe = new AudioContext();
     const deviceRate = probe.sampleRate;
     void probe.close();
-    return { session: summary.sampleRate ?? null, device: deviceRate };
+    return { doc: summary.sampleRate ?? null, device: deviceRate };
   });
+  return { session: sessionRate, ...observed, mismatch: observed.doc !== sessionRate };
 }
 
 async function measureOneLaunch(probesPerLaunch, content) {
@@ -118,7 +144,7 @@ async function measureOneLaunch(probesPerLaunch, content) {
     });
 
     const made = await buildSession(page, content);
-    const rates = await rateTriple(page);
+    const rates = await rateTriple(page, SESSION_RATE);
 
     const probes = [];
     for (let i = 0; i < probesPerLaunch; i++) {
@@ -181,7 +207,9 @@ async function main() {
   const sessionShape = { content, ...allRuns[0].made, rates: allRuns[0].rates };
   console.log(
     `  session: ${sessionShape.tracks} track(s), ${sessionShape.clips} clip(s) at ` +
-      `${sessionShape.rates.session} Hz; device context ${sessionShape.rates.device} Hz`
+      `${sessionShape.rates.session} Hz from ${sessionShape.rates.doc} Hz sources ` +
+      `(${sessionShape.rates.mismatch ? 'MISMATCHED — resample branch live' : 'matched'}); ` +
+      `device context ${sessionShape.rates.device} Hz`
   );
 
   // The P2-7 population: each launch's FIRST probe's COLD numbers (first

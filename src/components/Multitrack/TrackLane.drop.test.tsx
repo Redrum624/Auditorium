@@ -7,6 +7,7 @@ import {
   placeDocumentClips,
 } from '../../multitrack/laneDrop';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { setSessionLaneWidth } from '../../multitrack/sessionViewport';
 import {
   SESSION_UNDO_KEY,
   _resetSessionUndo,
@@ -46,7 +47,13 @@ import MultitrackView from './MultitrackView';
  * edge is x = 0 here and `clientX` IS the lane-local x.
  */
 
-const SPP = 512; // the session store's default mtZoom (see defaultMtZoom)
+// MT1-1: 512 was the session store's hardcoded default mtZoom. It is now the
+// scale this file PINS (see the lane measurement in beforeEach) rather than one
+// it inherits, so every pixel expectation below is unchanged.
+const SPP = 512;
+/** Where the seeded session ends: the seed clip's start + its length. The lane
+ * is measured so that fitting THIS length gives exactly {@link SPP}. */
+const SEEDED_SESSION_END = 200_000;
 const SESSION_RATE = 44_100;
 
 interface StubDataTransfer {
@@ -153,6 +160,17 @@ function startPanelDrag(): StubDataTransfer {
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  // MT1-1: the session zoom is no longer the constant 512 this file's pixel
+  // arithmetic was written against — it is the fit of the longest track across
+  // the MEASURED lane, and because `fit` is also the zoom-out ceiling a coarser
+  // zoom can no longer simply be asserted into the store. Rather than rewrite
+  // every number below, the lane is measured at the width that makes the fit
+  // exactly SPP for the session seeded at the end of this hook
+  // (SEEDED_SESSION_END / SPP px), so the seed's re-fit lands on SPP and every
+  // pixel expectation in this file means what it always meant. jsdom reports a
+  // zero-width lane and `setSessionLaneWidth` rejects non-positive widths, so
+  // mounting MultitrackView below cannot overwrite this.
+  setSessionLaneWidth(SEEDED_SESSION_END / SPP);
   useSessionStore.getState().newSession(SESSION_RATE);
   _resetSnapPreference();
   endDocumentDrag();
