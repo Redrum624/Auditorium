@@ -13,6 +13,18 @@ import {
   clearClipWaveformCache,
 } from '../components/Multitrack/clipWaveformCache';
 import { bindSessionUndo, recordSessionMutation } from './sessionUndo';
+// MT1-1: the session's zoom limits live in one module now, so this store states
+// requests and `resolveSessionZoom` answers them — the shape `appStore` took in
+// F11-9. The store-touching writers (`applySessionZoom`,
+// `publishSessionLaneWidth`) are at the bottom of this file, next to
+// `setMtZoom`, exactly as the editor's live next to `setZoom`.
+import {
+  defaultSessionZoom,
+  fitSessionSamplesPerPixel,
+  resolveSessionZoom,
+  type SessionZoomRequest,
+} from './sessionZoom';
+import { laneWidthFromScrollerWidth, sessionLaneWidth, setSessionLaneWidth } from './sessionViewport';
 
 export interface SessionState {
   session: Session;
@@ -165,8 +177,21 @@ export interface SessionActions {
   setMtPlayheadSample(s: number): void;
 }
 
-function defaultMtZoom(): SessionState['mtZoom'] {
-  return { samplesPerPixel: 512, scrollSample: 0 };
+/** MT1-1 — the state a fresh session starts in, session and zoom together.
+ * They cannot be written independently: the zoom IS a function of the session
+ * (fit the longest track across the measured lane), and the constant
+ * `{ samplesPerPixel: 512 }` that used to stand here was the reported bug —
+ * 512 samples/px is 16 seconds of timeline whatever is on it, so a 2:58
+ * session opened showing 18 seconds of itself. */
+function freshSessionState(sampleRate: number): Pick<SessionState, 'session' | 'mtZoom'> {
+  const session = makeSession(sampleRate);
+  return { session, mtZoom: defaultSessionZoom(session) };
+}
+
+/** True when any track carries a clip — the predicate `addClip`'s re-fit arm
+ * reads, and the one `menuActions`/`MultitrackView` state for their own gates. */
+function hasAnyClip(session: Session): boolean {
+  return session.tracks.some((t) => t.clips.length > 0);
 }
 
 /**
@@ -511,10 +536,9 @@ function trackParamCoalesceKey(
 }
 
 export const useSessionStore = create<SessionState & SessionActions>()((set) => ({
-  session: makeSession(44100),
+  ...freshSessionState(44100),
   selectedClipId: null,
   mtCursorSample: 0,
-  mtZoom: defaultMtZoom(),
   mtPlayState: 'stopped',
   mtPlayheadSample: 0,
   mtEnvelope: null,
@@ -525,10 +549,9 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
     // replacements (Open Session, stem landing) which CLEAR the history.
     recordSessionMutation('New session', () => {
       set({
-        session: makeSession(sampleRate),
+        ...freshSessionState(sampleRate),
         selectedClipId: null,
         mtCursorSample: 0,
-        mtZoom: defaultMtZoom(),
         mtPlayState: 'stopped',
         mtPlayheadSample: 0,
         mtEnvelope: null,
@@ -613,9 +636,39 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   addClip(trackId, clip) {
+    // MT1-1 — the ONE place the "did this insert change what Fit means?"
+    // decision lives, so all three insert paths (Insert Active File in
+    // `menuActions`, a Files-panel/OS drop in `laneDrop`, a punch-in take in
+    // `multitrackRecord`) get it without stating it. Captured inside the set()
+    // updater — the `removeTrack` pattern — because the answer is about the
+    // state BEFORE the insert and there is no second lookup that can see it.
+    //
+    // WHY NOT ON EVERY INSERT. A user who has zoomed in to place a clip against
+    // a beat must not have the timeline yanked back out from under them by the
+    // next insert; a zoom the user chose outlives every later edit. Hence two
+    // arms, and only two:
+    //
+    //  - `wasEmpty` — the session had no clips at all, so it had no length, so
+    //    the zoom it is sitting at was fitted to the 60 s placeholder
+    //    (`MT_EMPTY_TIMELINE_SEC`) rather than to anything the user can see.
+    //    There is nothing to preserve. This is the reported case: open a file,
+    //    Insert Active File, and the 2:58 track should be on screen whole.
+    //  - `wasFitted` — the view is sitting exactly AT the fit, which is a state
+    //    the user reaches only by never having zoomed or by pressing Fit; in
+    //    both readings "keep everything visible" is what they asked for. It is
+    //    the same arm `publishEditorLaneWidth` uses on a window resize, and it
+    //    is what makes a MULTI-file drop work: `laneDrop` calls this once per
+    //    file inside one gesture, so without it a 3-file drop would fit the
+    //    first clip and leave the other two off the right edge.
+    //
+    // Anything else — the user zoomed, therefore chose — is left alone.
+    let refit = false;
     recordSessionMutation('Add clip', () => {
       set((s) => {
         if (!s.session.tracks.some((t) => t.id === trackId)) return s; // R3 no-op guard
+        refit =
+          !hasAnyClip(s.session) ||
+          s.mtZoom.samplesPerPixel >= fitSessionSamplesPerPixel(s.session);
         return {
           session: {
             ...s.session,
@@ -626,6 +679,11 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         };
       });
     });
+    // Outside the recording bracket on purpose. mtZoom is deliberately absent
+    // from `SessionSnapshot` (sessionUndo.ts, ruling 3) — undo restores what the
+    // session WAS, not where the user was looking — and running the re-fit here
+    // keeps that true by construction rather than by the snapshot's omission.
+    if (refit) applySessionZoom({ samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 });
   },
 
   moveClip(clipId, toTrackId, newStartSample, opts) {
@@ -915,6 +973,61 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
     set({ mtPlayheadSample: sample });
   },
 }));
+
+// ---------------------------------------------------------------------------
+// MT1-1 — the session zoom's store-touching writers
+// ---------------------------------------------------------------------------
+/**
+ * The ONE writer for every multitrack zoom gesture: resolve the request against
+ * the live session, then commit it only if it actually differs. `setMtZoom`
+ * stays the raw setter it always was (the `setZoom` split), so this is a
+ * discipline about CALLERS, not a lock — grep `setMtZoom` before trusting it.
+ *
+ * The no-op guard is load-bearing rather than an optimisation: at the limit it
+ * is what makes "nothing moves" observable, since a fresh but equal `mtZoom`
+ * object would still be a new store snapshot and would repaint every lane, the
+ * ruler, and the clip bitmaps for no reason.
+ */
+export function applySessionZoom(requested: SessionZoomRequest): void {
+  const s = useSessionStore.getState();
+  const next = resolveSessionZoom(s.session, requested);
+  if (
+    next.samplesPerPixel === s.mtZoom.samplesPerPixel &&
+    next.scrollSample === s.mtZoom.scrollSample
+  ) {
+    return;
+  }
+  s.setMtZoom(next);
+}
+
+/**
+ * MT1-1 — the multitrack lane reports how wide it actually is.
+ *
+ * Called from `MultitrackView`'s resize effect with the SCROLLER's width, which
+ * is not the lane's: the 224 px track-header column lives inside every row, so
+ * the subtraction happens here (`laneWidthFromScrollerWidth`) rather than in
+ * the view, where it would be a number nothing tests.
+ *
+ * This is also the FIRST moment the real width is knowable, so like the
+ * editor's twin it has two arms:
+ *
+ *  - a session that was sitting at the fit stays at the fit — a fitted view
+ *    stays fitted across a window resize, the only reading of Fit that survives
+ *    the user dragging the window edge, and the arm that re-fits a session
+ *    opened (from `.audm`, from stem landing) before any lane existed;
+ *  - anything zoomed in is merely re-resolved, which re-clamps the scroll to
+ *    the new lane without throwing away where the user was looking.
+ */
+export function publishSessionLaneWidth(scrollerWidth: number): void {
+  const previous = sessionLaneWidth();
+  const laneWidth = laneWidthFromScrollerWidth(scrollerWidth);
+  if (!setSessionLaneWidth(laneWidth)) return; // unchanged, or not a real measurement
+  const s = useSessionStore.getState();
+  const wasFitted = s.mtZoom.samplesPerPixel >= fitSessionSamplesPerPixel(s.session, previous);
+  applySessionZoom(
+    wasFitted ? { samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 } : s.mtZoom
+  );
+}
 
 // R3 — binds the session undo plumbing to this store (one-way dependency:
 // this module imports sessionUndo, never the reverse). The snapshot is
