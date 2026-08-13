@@ -653,7 +653,13 @@ export const PEAK_BLOCK_SAMPLES = 1 << 16;
  *
  * A rate-mismatched clip is still resampled whole (through the same bounded
  * cache the render uses), so the saving is the master buffers, which is where
- * the session-length cost was.
+ * the session-length cost was. Each block re-requests the SAME cache key, and a
+ * hit re-inserts at the back of the LRU, so a clip is converted once and hit
+ * thereafter — the one shape that could convert per block is many mismatched
+ * clips of ONE document whose slices together exceed that document's own cache
+ * budget. The cover journey's session is two clips of two documents, and
+ * v1.27's session-rate adoption makes a mismatch the exception rather than the
+ * rule; a caller with that shape should use {@link mixdownSession}.
  */
 export function mixdownSessionPeak(
   session: Session,
