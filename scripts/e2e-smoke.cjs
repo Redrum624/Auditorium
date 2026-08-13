@@ -2967,6 +2967,143 @@ async function main() {
         `actual ${f11AfterRelease.cursorSample})`
     );
 
+    // F11: 16c) the menu bar — the FIRST time the packaged app has ever had a
+    // menu opened by this smoke. Until now every command was driven through
+    // `window.__test`, so the bar itself, its dropdowns and their overflow
+    // behaviour had no packaged coverage at all: the "Effects menu adds empty
+    // space at the bottom of the app" bug could not have been caught here.
+    console.log('Menu bar: six sections, a Pipeline menu, and a long menu that scrolls (F11)...');
+
+    // A REAL click on a bar button — the same discipline as step 16.
+    const openMenu = async (title) => {
+      const box = await page.evaluate((t) => {
+        const btn = [...document.querySelectorAll('.chrome-menu-btn')].find(
+          (b) => b.textContent.trim() === t
+        );
+        if (!btn) return null;
+        const r = btn.getBoundingClientRect();
+        return { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+      }, title);
+      if (!box) return false;
+      await realClick(page, box.x, box.y);
+      await page.waitForSelector(`[data-testid="menu-dropdown"][data-menu-title="${title}"]`, {
+        timeout: 5000,
+      });
+      return true;
+    };
+
+    const barTitles = await page.evaluate(() =>
+      [...document.querySelectorAll('.chrome-menu-btn')].map((b) => b.textContent.trim())
+    );
+    assert(
+      JSON.stringify(barTitles) ===
+        JSON.stringify(['File', 'Edit', 'Effects', 'Pipeline', 'View', 'Help']),
+      `the bar carries six sections in order (actual ${JSON.stringify(barTitles)})`
+    );
+
+    // The scroll region BEFORE any menu is open, so the comparison below is a
+    // difference rather than an absolute — the bug was a document that became
+    // scrollable, not a document of a particular height.
+    const scrollBefore = await page.evaluate(() => ({
+      doc: document.documentElement.scrollHeight - document.documentElement.clientHeight,
+      body: document.body.scrollHeight - document.body.clientHeight,
+    }));
+
+    // Effects is the longest menu — ~33 rows, the one that reproduced the bug.
+    assert(await openMenu('Effects'), 'the Effects menu opens on a real click');
+    const menuOpen = await page.evaluate(() => {
+      const d = document.querySelector('[data-testid="menu-dropdown"]');
+      const r = d.getBoundingClientRect();
+      const cs = getComputedStyle(d);
+      return {
+        scroll: {
+          doc: document.documentElement.scrollHeight - document.documentElement.clientHeight,
+          body: document.body.scrollHeight - document.body.clientHeight,
+        },
+        position: cs.position,
+        overflowY: cs.overflowY,
+        bottom: r.bottom,
+        viewportH: window.innerHeight,
+        overflows: d.scrollHeight > d.clientHeight + 1,
+        rows: d.querySelectorAll('button').length,
+      };
+    });
+    console.log(
+      `  Effects dropdown: ${menuOpen.rows} rows, ${menuOpen.position}/${menuOpen.overflowY}, ` +
+        `bottom ${menuOpen.bottom.toFixed(0)} of ${menuOpen.viewportH}, ` +
+        `scrollable=${menuOpen.overflows}; document overflow ` +
+        `${scrollBefore.doc}->${menuOpen.scroll.doc}, body ${scrollBefore.body}->${menuOpen.scroll.body}`
+    );
+    assert(
+      menuOpen.scroll.doc <= scrollBefore.doc && menuOpen.scroll.body <= scrollBefore.body,
+      `opening the longest menu adds NO scrollable space to the app (document ` +
+        `${scrollBefore.doc}->${menuOpen.scroll.doc}, body ${scrollBefore.body}->${menuOpen.scroll.body})`
+    );
+    assert(
+      menuOpen.position === 'fixed' && menuOpen.overflowY === 'auto',
+      `the dropdown is a fixed, self-scrolling overlay (actual ${menuOpen.position}/${menuOpen.overflowY})`
+    );
+    assert(
+      menuOpen.bottom <= menuOpen.viewportH + 1,
+      `the dropdown is clamped to the window (bottom ${menuOpen.bottom.toFixed(0)} <= ${menuOpen.viewportH})`
+    );
+
+    // The Pipeline menu: the ten tools, in three separator-delimited groups.
+    await page.keyboard.press('Escape');
+    assert(await openMenu('Pipeline'), 'the Pipeline menu opens on a real click');
+    const pipeline = await page.evaluate(() => {
+      const d = document.querySelector('[data-testid="menu-dropdown"]');
+      return {
+        labels: [...d.querySelectorAll('button')].map((b) =>
+          b.querySelector('span').textContent.trim()
+        ),
+        separators: d.querySelectorAll('div.h-px').length,
+      };
+    });
+    console.log(`  Pipeline: ${JSON.stringify(pipeline.labels)} (${pipeline.separators} separators)`);
+    assert(
+      JSON.stringify(pipeline.labels) ===
+        JSON.stringify([
+          'Detect Tempo',
+          'Match Tempo…',
+          'Align Vocal Timing…',
+          'Auto-Remix…',
+          'Voice Changer…',
+          'Vocal Chain…',
+          'Cover Chain…',
+          'Align Lyrics…',
+          'Transcribe…',
+          'Separate into Stems…',
+        ]),
+      `the Pipeline menu holds the ten tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
+    );
+    assert(
+      pipeline.separators === 2,
+      `three groups means two separators (actual ${pipeline.separators})`
+    );
+
+    // MOVED, not copied: none of the ten may still be reachable from Edit.
+    await page.keyboard.press('Escape');
+    assert(await openMenu('Edit'), 'the Edit menu opens on a real click');
+    const editLabels = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="menu-dropdown"] button')].map((b) =>
+        b.querySelector('span').textContent.trim()
+      )
+    );
+    const strays = editLabels.filter((l) =>
+      ['Auto-Remix…', 'Separate into Stems…', 'Transcribe…', 'Voice Changer…'].includes(l)
+    );
+    assert(
+      strays.length === 0,
+      `the four tools that left Edit are gone from it, not duplicated (strays ${JSON.stringify(strays)})`
+    );
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="menu-dropdown"]') === null,
+      null,
+      { timeout: 5000 }
+    );
+
     // 17) v1.7 stem separation (Task S7) — LAST, because it leaves the app in
     // the multitrack view with five new documents and must not perturb any
     // step above (including the screenshot).
