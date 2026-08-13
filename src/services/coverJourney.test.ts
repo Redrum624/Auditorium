@@ -597,9 +597,35 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
     alignTakeToReference.mockReturnValue(null);
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
     expect(report!.alignment).toBeNull();
-    expect(report!.stages.find((s) => s.id === 'align')!.status).toBe('declined');
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    expect(stage.status).toBe('declined');
+    // The measurement claim belongs ONLY to a genuine null measurement.
+    expect(stage.reason).toMatch(/no attack anywhere/);
     expect(report!.placement!.takeStartSample).toBe(0);
     expect(report!.completed).toBe(true);
+  });
+
+  // CC4 (CJ-5): the same null branch fired when a DOCUMENT went missing, and
+  // claimed a measurement that never ran. Stage 5 has accurate wording for
+  // exactly this case; stage 3 now shares it instead of guessing.
+  it('says the document was closed, not that nothing had an attack, when one disappears', async () => {
+    runVocalChain.mockImplementation(async () => {
+      // The vocals stem is closed while the (minutes-long) clean stage runs.
+      useAppStore.setState({
+        documents: useAppStore.getState().documents.filter((d) => d.name !== 'song — Vocals'),
+      });
+      return okVocalReport();
+    });
+
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    expect(stage.status).toBe('declined');
+    expect(stage.reason).toMatch(/closed while the pass was running/);
+    expect(stage.reason).not.toMatch(/no attack anywhere/);
+    // Nothing was measured, so nothing may be reported as measured.
+    expect(alignTakeToReference).not.toHaveBeenCalled();
+    expect(report!.alignment).toBeNull();
   });
 
   // ── CC3: what the refusal TELLS the user to do ────────────────────────────

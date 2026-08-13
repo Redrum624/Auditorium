@@ -787,7 +787,23 @@ export async function runCoverJourney(
           )
         : null;
 
-    if (!alignment) {
+    if (!vocals || !cleaned) {
+      // CC4 (CJ-5): a documents-lookup failure, not a measurement. This branch
+      // used to share the no-attack wording below and so asserted a measurement
+      // that never ran — over a window (the Vocal Chain's) that is minutes long
+      // and during which the files panel stays live, so closing one is
+      // reachable. Stage 5 already words this case accurately; the two now
+      // agree rather than describing the same event two different ways.
+      record({
+        id: stage.id,
+        label: stage.label,
+        status: 'declined',
+        reason: `the ${vocals ? 'take' : 'separated original vocal'} was closed while the pass was running, so there was nothing left to align against — nothing was measured, and the take is placed at the start of the original`,
+        derived: [],
+        undoEntries: [],
+        elapsedMs: Date.now() - at,
+      });
+    } else if (!alignment) {
       // A refusal to MEASURE, which is not the same as a refusal to BELIEVE.
       // CC3: and the Place row has to say which of the two it was.
       placedAtZeroBecause =
