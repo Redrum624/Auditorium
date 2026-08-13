@@ -65,6 +65,13 @@ open document is listed with its name (a trailing `*` means unsaved
 changes), duration, and sample rate. Click a row to make it active; hover and
 click the ✕ to close it (you'll be prompted to save if it's dirty).
 
+**Where unsaved state is visible:** that trailing `*` is the only place the app
+shows it, and since the module card can now be closed (click the active strip
+entry), it can be off screen. Nothing is lost if it is — closing a dirty
+document still prompts, and quitting with unsaved work still counts your dirty
+documents and asks — but if you want unsaved state in view while you work,
+leave the Files card open.
+
 Closing the **app window** with unsaved changes is guarded natively: the app
 counts your dirty documents and shows a confirmation ("N file(s) have unsaved
 changes.") with **Quit** (discard everything and exit) and **Cancel** (keep
