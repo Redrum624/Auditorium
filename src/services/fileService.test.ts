@@ -461,6 +461,71 @@ describe('openFilePath — a failed open leaves nothing behind (O1-1)', () => {
     expect(state.documents[0].channels[0].length).toBeGreaterThan(0);
   });
 
+  it('restores the document that WAS active, not whichever one is last (R1)', async () => {
+    // `closeDocument` re-activates `documents[min(index, len-1)]` — the last
+    // survivor, which is only coincidentally the one that was active. Three
+    // documents with the FIRST one active is the arrangement where the two
+    // answers differ; a single prior document cannot tell them apart.
+    installApi();
+    await openFilePath('D:\\audio\\a.wav');
+    await openFilePath('D:\\audio\\b.wav');
+    await openFilePath('D:\\audio\\c.wav');
+    const [a, b, c] = useAppStore.getState().documents;
+    useAppStore.getState().setActiveDocument(a.id);
+    expect(useAppStore.getState().activeDocumentId).toBe(a.id);
+
+    // The failure has to land AFTER `addDocument` — that is the only path that
+    // reaches the rollback at all.
+    mockDecode.mockResolvedValueOnce(decodedWithFailingMarkers('marker seeding exploded'));
+    await expect(openFilePath('D:\\audio\\d.wav')).rejects.toThrow('marker seeding exploded');
+
+    const state = useAppStore.getState();
+    expect(state.documents.map((d) => d.id)).toEqual([a.id, b.id, c.id]);
+    expect(state.activeDocumentId).toBe(a.id);
+  });
+
+  it('restores the selection, cursor and zoom the failed open reset (R1)', async () => {
+    // `addDocument` clears all three on its way in, so "the documents already
+    // open are untouched" is only true if they come back.
+    installApi();
+    await openFilePath('D:\\audio\\a.wav');
+    await openFilePath('D:\\audio\\b.wav');
+    const [a] = useAppStore.getState().documents;
+    useAppStore.getState().setActiveDocument(a.id);
+    useAppStore.getState().setSelection({ start: 10, end: 40 });
+    useAppStore.getState().setCursor(25);
+    useAppStore.getState().setZoom({ samplesPerPixel: 64, scrollSample: 8 });
+
+    mockDecode.mockResolvedValueOnce(decodedWithFailingMarkers('marker seeding exploded'));
+    await expect(openFilePath('D:\\audio\\c.wav')).rejects.toThrow();
+
+    const state = useAppStore.getState();
+    expect(state.activeDocumentId).toBe(a.id);
+    expect(state.selection).toEqual({ start: 10, end: 40 });
+    expect(state.cursorSample).toBe(25);
+    expect(state.zoom).toEqual({ samplesPerPixel: 64, scrollSample: 8 });
+  });
+
+  it('leaves the store alone when the previously-active document is gone', async () => {
+    // Nothing in the app closes a document mid-open today, but the restore
+    // must not resurrect an id that no longer exists or strand a selection on
+    // nothing.
+    installApi();
+    await openFilePath('D:\\audio\\a.wav');
+    const [a] = useAppStore.getState().documents;
+
+    mockDecode.mockImplementationOnce(async () => {
+      // Closed after the snapshot was taken, before the rollback needs it.
+      useAppStore.getState().closeDocument(a.id);
+      return decodedWithFailingMarkers('marker seeding exploded');
+    });
+    await expect(openFilePath('D:\\audio\\b.wav')).rejects.toThrow();
+
+    const state = useAppStore.getState();
+    expect(state.documents).toEqual([]);
+    expect(state.activeDocumentId).toBeNull();
+  });
+
   it('releases the history and peak caches of the rolled-back document', async () => {
     installApi();
     const clearHistorySpy = jest.spyOn(undoHistory, 'clearHistory');
@@ -496,6 +561,107 @@ describe('openFilePath — a failed open leaves nothing behind (O1-1)', () => {
     const state = useAppStore.getState();
     expect(state.documents).toHaveLength(1);
     expect(state.documents[0].name).toBe('good.wav');
+  });
+});
+
+// `decodeArrayBuffer` CONSUMES the bytes it is given — transferred into the
+// decode worker, or detached by `decodeAudioData` — so every container-metadata
+// read in openFilePath has to happen BEFORE it. That ordering is load-bearing
+// and invisible: a decode double that merely resolves leaves the buffer
+// readable, so moving any of those reads back below the decode passes the whole
+// suite and then throws TypeError on the first real FLAC/MP3/OGG open.
+//
+// These tests give the decode mock the real contract — it detaches what it is
+// handed, the way the worker mock now does — so the ordering is checked rather
+// than assumed.
+describe('openFilePath — container metadata is read BEFORE the decode consumes the bytes (R3)', () => {
+  /** Detach `buf` the way a transfer does, then resolve `value`. */
+  function consumingDecodeOnce(value: DecodedAudio) {
+    mockDecode.mockImplementationOnce(async (buf: ArrayBuffer) => {
+      const withTransfer = buf as ArrayBuffer & { transfer?: () => ArrayBuffer };
+      if (typeof withTransfer.transfer === 'function') withTransfer.transfer();
+      else if (typeof structuredClone === 'function') structuredClone(buf, { transfer: [buf] });
+      return value;
+    });
+  }
+
+  it('a WAV opens when the decode detaches the bytes', async () => {
+    installApi();
+    consumingDecodeOnce(decoded());
+
+    await openFilePath('D:\\audio\\song.wav');
+
+    expect(useAppStore.getState().documents).toHaveLength(1);
+  });
+
+  /** The shared FLAC fixture carries an all-zero STREAMINFO, which
+   * `readFlacStreamInfo` correctly rejects (a zero sample rate is not a rate).
+   * Fill in the four bytes it actually reads — file offsets 18-21, i.e.
+   * STREAMINFO's packed 20-bit rate / 3-bit channel count / 5-bit
+   * bits-per-sample-minus-one — so a REAL depth comes back and the assertion
+   * below can only pass if the read happened while the bytes were still there.
+   */
+  function flacWithStreamInfo(sampleRate: number, channels: number, bitDepth: number): ArrayBuffer {
+    const buf = buildFakeFlacWithMarkers([], sampleRate);
+    const b = new Uint8Array(buf);
+    const bps = bitDepth - 1;
+    b[18] = sampleRate >> 12;
+    b[19] = (sampleRate >> 4) & 0xff;
+    b[20] = ((sampleRate & 0x0f) << 4) | ((channels - 1) << 1) | (bps >> 4);
+    b[21] = (bps & 0x0f) << 4;
+    return buf;
+  }
+
+  it('a FLAC still gets its source bit depth (readFlacStreamInfo)', async () => {
+    // Read from the file's STREAMINFO block, which only exists while the bytes
+    // do.
+    const fileBytes = flacWithStreamInfo(44100, 2, 24);
+    installApi({ readFile: jest.fn(async () => fileBytes) });
+    consumingDecodeOnce(decoded());
+
+    await openFilePath('D:\\audio\\track.flac');
+
+    const doc = useAppStore.getState().documents[0];
+    expect(doc.sourceFormat).toBe('flac');
+    expect(doc.sourceBitDepth).toBe(24);
+  });
+
+  it('a FLAC still gets its chapter markers (readFlacVorbisComment)', async () => {
+    const fileBytes = buildFakeFlacWithMarkers(
+      [{ positionSample: 10, name: 'Intro' }, { positionSample: 500, name: 'Verse' }],
+      44100
+    );
+    installApi({ readFile: jest.fn(async () => fileBytes) });
+    consumingDecodeOnce(decoded(44100, 2, 10000));
+
+    await openFilePath('D:\\audio\\track.flac');
+
+    const docId = useAppStore.getState().documents[0].id;
+    expect(useAppStore.getState().markers[docId].map((m) => m.name)).toEqual(['Intro', 'Verse']);
+  });
+
+  it('an MP3 still gets its ID3 chapters (parseId3Chapters)', async () => {
+    const tag = buildId3Chapters([{ positionSample: 4410, name: 'Hook' }], 44100);
+    const fileBytes = new Uint8Array(tag.length);
+    fileBytes.set(tag, 0);
+    installApi({ readFile: jest.fn(async () => fileBytes.buffer) });
+    consumingDecodeOnce(decoded(44100, 2, 44100));
+
+    await openFilePath('D:\\audio\\clip.mp3');
+
+    const docId = useAppStore.getState().documents[0].id;
+    expect(useAppStore.getState().markers[docId].map((m) => m.name)).toEqual(['Hook']);
+  });
+
+  it('an OGG still gets its Opus tag chapters (readOpusTags)', async () => {
+    const fileBytes = buildFakeOggWithMarkers([{ positionSample: 48, name: 'Drop' }], 48000);
+    installApi({ readFile: jest.fn(async () => fileBytes) });
+    consumingDecodeOnce(decoded(48000, 2, 48000));
+
+    await openFilePath('D:\\audio\\voice.ogg');
+
+    const docId = useAppStore.getState().documents[0].id;
+    expect(useAppStore.getState().markers[docId].map((m) => m.name)).toEqual(['Drop']);
   });
 });
 
@@ -1113,6 +1279,8 @@ describe('saveDocument — a denied write offers Save As (O1-3)', () => {
       // The write layer's own reason, unchanged.
       message: 'Write denied (protected directory)',
       buttons: ['Save As…', 'Cancel'],
+      // Enter must not start a save-as flow on a box the user did not ask for.
+      defaultId: 1,
     });
   });
 
@@ -1169,6 +1337,8 @@ describe('saveDocument — a denied write offers Save As (O1-3)', () => {
       title: 'Save failed',
       message: 'EACCES',
       buttons: ['Save As…', 'Cancel'],
+      // Enter must not start a save-as flow on a box the user did not ask for.
+      defaultId: 1,
     });
   });
 

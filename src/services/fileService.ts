@@ -10,7 +10,12 @@ import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncod
 import { readOpusTags } from '../audio/oggPage';
 import { encodeWav, type WavBitDepth } from '../audio/wavCodec';
 import { playbackEngine } from '../audio/PlaybackEngine';
-import { useAppStore, type Marker } from '../stores/appStore';
+import {
+  useAppStore,
+  type AppState,
+  type Marker,
+  type SelectionRange,
+} from '../stores/appStore';
 import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { beginOpen, endOpen } from './openProgress';
 import { invalidatePeaks } from './peaksCache';
@@ -146,17 +151,64 @@ async function encodeInPlace(doc: AudioDocument): Promise<ArrayBuffer> {
   }
 }
 
-/** Undo a half-completed open. The document was added to the store moments
- * ago and nothing else has had a chance to reference it — no analysis, no
- * remix session, no stem run, no noise profile can exist for an id the app has
- * not returned to the event loop with — so unlike `closeDocumentFlow` this
- * needs only the three teardowns that `addDocument` itself makes necessary.
- * `closeDocument` drops the document and its markers and re-activates a
- * neighbour; the other two release the caches keyed on the id. */
-function rollbackOpen(docId: string): void {
+/** Everything `addDocument` overwrites, captured before the open touches it so
+ * a rollback can put it back. `addDocument` sets the new document active and
+ * resets selection/cursor/zoom (appStore.ts), and `closeDocument` then picks a
+ * SURVIVOR by index rather than restoring what was active — so without this a
+ * failed open silently moved the user to a different document. */
+interface ViewStateSnapshot {
+  activeDocumentId: string | null;
+  selection: SelectionRange | null;
+  cursorSample: number;
+  zoom: AppState['zoom'];
+}
+
+function captureViewState(): ViewStateSnapshot {
+  const s = store();
+  return {
+    activeDocumentId: s.activeDocumentId,
+    selection: s.selection,
+    cursorSample: s.cursorSample,
+    zoom: s.zoom,
+  };
+}
+
+/**
+ * Undo a half-completed open.
+ *
+ * The document was added to the store moments ago and nothing else has had a
+ * chance to reference it — no analysis, no remix session, no stem run, no noise
+ * profile can exist for an id the app has not returned to the event loop with —
+ * so unlike `closeDocumentFlow` this needs only the three teardowns that
+ * `addDocument` itself makes necessary: `closeDocument` drops the document and
+ * its markers, and the other two release the caches keyed on the id.
+ *
+ * Then it restores the view. `closeDocument` re-activates `documents[min(index,
+ * len-1)]` — the LAST survivor, which is only coincidentally the document that
+ * was active before. With A, B open and A active, a failed open of C left B
+ * active with A's selection, cursor and zoom gone. A failed open must be
+ * invisible, so the document that was active is made active again and its
+ * selection/cursor/zoom are put back. Playback is deliberately NOT restored:
+ * `addDocument` stopped it, the engine really is stopped, and re-asserting a
+ * 'playing' flag over a stopped engine would be a lie about the transport.
+ */
+function rollbackOpen(docId: string, before: ViewStateSnapshot): void {
   store().closeDocument(docId);
   clearHistory(docId);
   invalidatePeaks(docId);
+
+  const { activeDocumentId } = before;
+  if (activeDocumentId === null) return;
+  // A no-op if that document is gone (closed while this open was in flight);
+  // `setActiveDocument` ignores an unknown id, and then the selection/cursor/
+  // zoom below would belong to nothing, so bail on the same condition.
+  if (!findDoc(activeDocumentId)) return;
+  store().setActiveDocument(activeDocumentId);
+  // setActiveDocument applies its own activation reset, so these three go
+  // after it, not before.
+  store().setSelection(before.selection);
+  store().setCursor(before.cursorSample);
+  store().setZoom(before.zoom);
 }
 
 /**
@@ -199,6 +251,9 @@ export async function openFilePath(path: string): Promise<void> {
   // The Files panel shows this while the read and decode run. Cleared in the
   // `finally` on every path — success, failure, or an exception from the store.
   const openToken = beginOpen(path, name);
+  // Captured before anything can change it — a failed open has to be able to
+  // put the view back exactly as it found it.
+  const viewBefore = captureViewState();
   let addedDocId: string | null = null;
 
   try {
@@ -284,7 +339,7 @@ export async function openFilePath(path: string): Promise<void> {
     // cannot be drawn, and every panel that reads the active document reads
     // one whose audio never arrived. Take it back out and let the caller
     // report the failure once, naming the file.
-    if (addedDocId !== null) rollbackOpen(addedDocId);
+    if (addedDocId !== null) rollbackOpen(addedDocId, viewBefore);
     throw err;
   } finally {
     endOpen(openToken);
@@ -463,11 +518,17 @@ async function saveDocumentLocked(docId: string, as: boolean): Promise<void> {
  * incident ended — a modal naming a policy, with nothing to do about it.
  */
 async function offerSaveAs(message: string): Promise<boolean> {
+  const buttons = ['Save As…', 'Cancel'];
   const choice = await api().showMessageBox({
     type: 'error',
     title: 'Save failed',
     message,
-    buttons: ['Save As…', 'Cancel'],
+    buttons,
+    // Enter lands on Cancel, not on the button that opens a file dialog. This
+    // box appears unbidden, on a failure the user did not cause, and a stray
+    // Return on it should do nothing rather than start a save-as flow — the
+    // same reasoning that put a divider between Open and Save.
+    defaultId: buttons.indexOf('Cancel'),
   });
   return choice === 0;
 }
