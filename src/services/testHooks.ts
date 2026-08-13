@@ -68,6 +68,7 @@ import {
   runCoverChain,
   type CoverChainStageId,
 } from './coverChain';
+import { COVER_JOURNEY_STAGES, runCoverJourney } from './coverJourney';
 import { createRemixDocument, getRemixSession } from './remixService';
 import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
 import {
@@ -394,6 +395,61 @@ export interface TestApi {
      * moment a stage is added, and it has, twice. */
     registryStageIds: string[];
     registryManualIds: string[];
+  }>;
+  // --- CP1 -----------------------------------------------------------------
+  /**
+   * Runs the WHOLE Cover journey — separate, clean, align, match, place, smooth
+   * — over two open documents, through the same service the dialog calls.
+   *
+   * What only the packaged app can prove, and the reason this hook exists at
+   * all: the unit suite spies on the six sub-services, so it can show they are
+   * called in order but not that they COMPOSE. This drives the real separation
+   * (or its reuse), two real chains over real DSP workers, the real alignment
+   * over real audio, and a real session build — and reports what came out the
+   * far end. Scalars and flat records only, per the `getBeatGridState`
+   * precedent.
+   */
+  runCoverJourney(
+    songName: string,
+    takeName: string
+  ): Promise<{
+    ok: boolean;
+    completed: boolean;
+    cancelledAt: string | null;
+    /** True when an existing separation of the song was reused. */
+    separationReused: boolean | null;
+    /** The alignment's own numbers, or nulls when it could not measure. */
+    alignmentOffsetSeconds: number | null;
+    alignmentConfident: boolean | null;
+    alignmentPeakCorrelation: number | null;
+    alignmentProminence: number | null;
+    alignmentRefused: boolean;
+    /** Where the two clips actually landed, in SESSION samples. */
+    sessionName: string | null;
+    sessionTrackCount: number;
+    takeStartSample: number | null;
+    instrumentalStartSample: number | null;
+    shiftedSamples: number | null;
+    fadeInSample: number | null;
+    fadeOutSample: number | null;
+    /** The summed peak measured BEFORE the master bus's clamp. */
+    summedPeakDb: number | null;
+    overCeiling: boolean | null;
+    /** Every undo entry the pass left, in order. */
+    undoEntries: string[];
+    stages: {
+      id: string;
+      status: string;
+      reason: string | null;
+      warning: string | null;
+      derived: { label: string; value: string }[];
+      /** How many stages the NESTED chain reported, when this stage is one —
+       * the structural proof that the nesting is real rather than flattened. */
+      nestedStageCount: number | null;
+    }[];
+    /** The registry's own ids, so a caller compares against the stage LIST
+     * rather than a hardcoded count. */
+    registryStageIds: string[];
   }>;
   runVocalChain(overrides?: Record<string, boolean>): Promise<{
     ok: boolean;
@@ -2498,6 +2554,82 @@ export function installTestHooks(): void {
           eqWorstErrorDb: stage.eq ? stage.eq.worstErrorDb : null,
         })),
         ...registry,
+      };
+    },
+
+    // CP1. Drives the whole journey, bypassing CoverChainDialog.
+    runCoverJourney: async (songName, takeName) => {
+      const docs = useAppStore.getState().documents;
+      const song = docs.find((d) => d.name === songName) ?? null;
+      const take = docs.find((d) => d.name === takeName) ?? null;
+      const empty = {
+        ok: false,
+        completed: false,
+        cancelledAt: null,
+        separationReused: null,
+        alignmentOffsetSeconds: null,
+        alignmentConfident: null,
+        alignmentPeakCorrelation: null,
+        alignmentProminence: null,
+        alignmentRefused: false,
+        sessionName: null,
+        sessionTrackCount: 0,
+        takeStartSample: null,
+        instrumentalStartSample: null,
+        shiftedSamples: null,
+        fadeInSample: null,
+        fadeOutSample: null,
+        summedPeakDb: null,
+        overCeiling: null,
+        undoEntries: [] as string[],
+        stages: [] as {
+          id: string;
+          status: string;
+          reason: string | null;
+          warning: string | null;
+          derived: { label: string; value: string }[];
+          nestedStageCount: number | null;
+        }[],
+        registryStageIds: COVER_JOURNEY_STAGES.map((s) => s.id),
+      };
+      if (!song || !take) return empty;
+
+      const report = await runCoverJourney({ songDocId: song.id, takeDocId: take.id });
+      if (!report) return empty;
+
+      return {
+        ok: true,
+        completed: report.completed,
+        cancelledAt: report.cancelledAt,
+        separationReused: report.separation ? report.separation.reused : null,
+        alignmentOffsetSeconds: report.alignment ? report.alignment.offsetSeconds : null,
+        alignmentConfident: report.alignment ? report.alignment.confident : null,
+        alignmentPeakCorrelation: report.alignment ? report.alignment.peakCorrelation : null,
+        alignmentProminence: report.alignment ? report.alignment.prominence : null,
+        alignmentRefused: report.alignmentRefused,
+        sessionName: report.placement ? report.placement.sessionName : null,
+        sessionTrackCount: useSessionStore.getState().session.tracks.length,
+        takeStartSample: report.placement ? report.placement.takeStartSample : null,
+        instrumentalStartSample: report.placement ? report.placement.instrumentalStartSample : null,
+        shiftedSamples: report.placement ? report.placement.shiftedSamples : null,
+        fadeInSample: report.smoothing ? report.smoothing.fadeInSample : null,
+        fadeOutSample: report.smoothing ? report.smoothing.fadeOutSample : null,
+        summedPeakDb: report.smoothing ? report.smoothing.summedPeakDb : null,
+        overCeiling: report.smoothing ? report.smoothing.overCeiling : null,
+        undoEntries: report.undoEntries,
+        stages: report.stages.map((stage) => ({
+          id: stage.id,
+          status: stage.status,
+          reason: stage.reason ?? null,
+          warning: stage.warning ?? null,
+          derived: stage.derived.map((d) => ({ label: d.label, value: d.value })),
+          nestedStageCount: stage.vocalChain
+            ? stage.vocalChain.stages.length
+            : stage.coverChain
+              ? stage.coverChain.stages.length
+              : null,
+        })),
+        registryStageIds: COVER_JOURNEY_STAGES.map((s) => s.id),
       };
     },
 

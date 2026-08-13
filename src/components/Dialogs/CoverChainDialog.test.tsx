@@ -1,4 +1,4 @@
-import { render, screen, fireEvent, act, waitFor, within } from '@testing-library/react';
+import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import CoverChainDialog from './CoverChainDialog';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
@@ -8,818 +8,389 @@ import {
   COVER_CHAIN_RESIDUAL_SENTENCE,
   COVER_CHAIN_SHAPING_SENTENCE,
   COVER_CHAIN_SPREAD_SENTENCE,
-  COVER_CHAIN_STAGES,
-  SPREAD_GATE_SWEEP,
-  runCoverChain,
-  type CoverChainMetrics,
-  type CoverChainReport,
-  type CoverChainStageResult,
-  type RunCoverChainOptions,
 } from '../../services/coverChain';
-import { STAGE_MEASURING_DETAIL } from '../../services/vocalChain';
+import {
+  COVER_JOURNEY_STAGES,
+  runCoverJourney,
+  type CoverJourneyReport,
+  type CoverJourneyStageId,
+  type CoverJourneyStageResult,
+  type RunCoverJourneyOptions,
+} from '../../services/coverJourney';
 
 // The STAGE TABLE stays real (requireActual): the dialog's whole contract is
 // that it lists what the engine will actually run, in the engine's order, with
 // the engine's own notes — a mocked stage list would let the two drift and the
 // tests would still pass. Only the run itself is mocked.
-jest.mock('../../services/coverChain', () => ({
-  ...jest.requireActual('../../services/coverChain'),
-  runCoverChain: jest.fn(),
+jest.mock('../../services/coverJourney', () => ({
+  ...jest.requireActual('../../services/coverJourney'),
+  runCoverJourney: jest.fn(),
 }));
 
-const mockRun = runCoverChain as jest.MockedFunction<typeof runCoverChain>;
+const mockRun = runCoverJourney as jest.MockedFunction<typeof runCoverJourney>;
 
 const SR = 48000;
 
-function seedDoc(name = 'take.wav', samples = SR * 4): AudioDocument {
+function seedDoc(name: string, samples = SR * 4): AudioDocument {
   const doc = createDocument({ name, sampleRate: SR, channels: [new Float32Array(samples)] });
   useAppStore.getState().addDocument(doc);
   return doc;
 }
 
-function metrics(over: Partial<CoverChainMetrics> = {}): CoverChainMetrics {
-  return {
-    gatedLevelDb: -25.96,
-    peakDb: -9.68,
-    spreadDb: 13.62,
-    noiseFloorDb: -50.4,
-    matchDistanceDb: 2.1,
-    ...over,
-  };
-}
-
-/** A full stage list with `results` substituted in by id — so a fixture can
- * describe one stage's outcome without hand-writing the other eight. */
-function stagesWith(...results: CoverChainStageResult[]): CoverChainStageResult[] {
-  const byId = new Map(results.map((r) => [r.id, r]));
-  return COVER_CHAIN_STAGES.map(
+/** Every stage as `pending`, with `overrides` substituted in by id — so a
+ * fixture can describe one stage's outcome without hand-writing the other five. */
+function stagesWith(...overrides: CoverJourneyStageResult[]): CoverJourneyStageResult[] {
+  const byId = new Map(overrides.map((r) => [r.id, r]));
+  return COVER_JOURNEY_STAGES.map(
     (s) =>
       byId.get(s.id) ?? {
         id: s.id,
         label: s.label,
-        status: s.effectId === null ? 'manual' : 'off',
+        status: 'done' as const,
         derived: [],
+        undoEntries: [],
       }
   );
 }
 
-function makeReport(overrides: Partial<CoverChainReport> = {}): CoverChainReport {
+function report(over: Partial<CoverJourneyReport> = {}): CoverJourneyReport {
   return {
-    before: metrics(),
-    after: metrics({ gatedLevelDb: -16.35, peakDb: -0.3, matchDistanceDb: 0.4 }),
-    reference: metrics({ gatedLevelDb: -16.35, peakDb: -1.2, matchDistanceDb: null }),
-    referenceName: 'Scarlet Paintings — Vocals',
+    songName: 'song.wav',
+    takeName: 'take.wav',
     stages: stagesWith(),
-    sampleRate: SR,
-    regionSamples: SR * 4,
-    outputSamples: SR * 4,
-    elapsedMs: 21400,
-    applied: true,
-    ...overrides,
+    separation: null,
+    alignment: null,
+    alignmentRefused: false,
+    placement: {
+      sessionName: 'song.wav — Cover',
+      sessionRate: SR,
+      instrumentalStartSample: 0,
+      takeStartSample: 4800,
+      shiftedSamples: 0,
+      takeLengthSample: SR * 4,
+    },
+    smoothing: null,
+    cancelledAt: null,
+    undoEntries: ['Vocal Chain', 'Cover Chain'],
+    elapsedMs: 12345,
+    completed: true,
+    ...over,
   };
 }
 
-const APPLIED_EQ: CoverChainStageResult = {
-  id: 'matchEq',
-  label: 'Match EQ to the Original Vocal',
-  status: 'applied',
-  derived: [
-    // The engine's OWN strings, verbatim. Invented `from` text is how the
-    // dialog's tests missed that both realised-curve sentences pointed the user
-    // 'above' at a table this component renders BELOW them.
-    { label: 'Curve', value: '5 bands, -1.90 dB to +3.54 dB', from: 'the octave-band energy of the reference' },
-    { label: 'Level removed', value: '+10.19 dB', from: 'the broadband difference' },
-    {
-      label: 'Realised',
-      value: 'within 0.004 dB of the target',
-      from: "the cascade's measured effect on THIS take's octave-band energy after 3 pre-compensation passes — the Realised column in the table below is what the audio receives, not what was requested",
-    },
-  ],
-  delta: {
-    rmsBeforeDb: -27.8,
-    rmsAfterDb: -27.5,
-    peakBeforeDb: -9.7,
-    peakAfterDb: -9.4,
-    identicalFraction: 0,
-    differenceRmsDb: -34.2,
-  },
-  eq: {
-    bands: [
-      { centreHz: 250, status: 'below-range', targetDb: 0, realisedDb: 0.21, bandGainDb: 0, bounded: false },
-      { centreHz: 500, status: 'matched', targetDb: 0.54, realisedDb: 0.54, bandGainDb: 0.31, bounded: false },
-      { centreHz: 1000, status: 'matched', targetDb: -1.15, realisedDb: -1.15, bandGainDb: -1.02, bounded: false },
-      // The fourth status. `coverMatch` produces it for a spectrum whose gate
-      // found nothing sounding, and nothing rendered it until this row existed:
-      // the label map could be emptied for it and the suite stayed green.
-      { centreHz: 2000, status: 'no-signal', targetDb: 0, realisedDb: 0.02, bandGainDb: 0, bounded: false },
-      { centreHz: 8000, status: 'matched', targetDb: 3.54, realisedDb: 3.54, bandGainDb: 3.29, bounded: true },
-      { centreHz: 16000, status: 'above-nyquist', targetDb: 0, realisedDb: 0, bandGainDb: 0, bounded: false },
-    ],
-    levelDb: 10.19,
-    worstErrorDb: 0.004,
-    iterations: 3,
-    clamped: false,
-    matchedCount: 3,
-  },
-  elapsedMs: 8100,
-};
-
-const DECLINED_REVERB: CoverChainStageResult = {
-  id: 'matchReverb',
-  label: 'Match Reverb',
-  status: 'declined',
-  reason:
-    'estimated decay 0.40 s (180 decays, quartiles 0.33–0.50 s); the shortest this reverb can produce is 0.71 s, so matching it would add more space than the original has',
-  derived: [],
-};
-
-const WARNED_LOUDNESS: CoverChainStageResult = {
-  id: 'matchLoudness',
-  label: 'Match Loudness',
-  status: 'applied',
-  derived: [{ label: 'Gain', value: '+9.61 dB', from: "the reference's sounding level" }],
-  warning:
-    'this puts the peak at +0.93 dBFS, above full scale, and the Limiter stage that would catch it is switched off — the file will clip when it is written or played',
-  delta: {
-    rmsBeforeDb: -27.8,
-    rmsAfterDb: -18.2,
-    peakBeforeDb: -9.7,
-    peakAfterDb: 0.93,
-    identicalFraction: 0,
-    differenceRmsDb: -18.0,
-  },
-  elapsedMs: 300,
-};
+let song: AudioDocument;
+let take: AudioDocument;
 
 beforeEach(() => {
+  jest.clearAllMocks();
   useAppStore.setState(makeInitialState());
-  mockRun.mockReset();
-  mockRun.mockResolvedValue(makeReport());
+  song = seedDoc('song.wav');
+  take = seedDoc('take.wav');
+  // `addDocument` activates what it added last, so the take is active — which
+  // is what the dialog defaults its take picker to.
+  mockRun.mockResolvedValue(report());
 });
 
-describe('CoverChainDialog — before the run', () => {
-  it('renders nothing without an active document', () => {
-    const { container } = render(<CoverChainDialog onClose={() => {}} />);
-    expect(container).toBeEmptyDOMElement();
-  });
+function open(): void {
+  render(<CoverChainDialog onClose={() => {}} />);
+}
 
-  it('lists every stage the engine will run, in the engine\'s order, with its own note', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    const ids = COVER_CHAIN_STAGES.map((s) => s.id);
-    for (const stage of COVER_CHAIN_STAGES) {
-      expect(screen.getByTestId(`cover-chain-stage-${stage.id}`)).toBeInTheDocument();
-      expect(screen.getByTestId(`cover-chain-note-${stage.id}`)).toHaveTextContent(
-        stage.note.slice(0, 40)
-      );
-    }
-    // ORDER, not just membership: the stage cards appear in registry order.
-    const rendered = Array.from(document.querySelectorAll('[data-testid^="cover-chain-stage-"]')).map(
-      (el) => el.getAttribute('data-testid')!.replace('cover-chain-stage-', '')
-    );
-    expect(rendered).toEqual(ids);
-  });
-
-  it('offers a checkbox for every automatic stage and none for a manual one', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    let toggles = 0;
-    for (const stage of COVER_CHAIN_STAGES) {
-      const toggle = screen.queryByTestId(`cover-chain-toggle-${stage.id}`);
-      if (stage.effectId === null) {
-        expect(toggle).toBeNull();
-        expect(screen.getByTestId(`cover-chain-status-${stage.id}`)).toHaveTextContent('Manual step');
-      } else {
-        expect(toggle).not.toBeNull();
-        toggles++;
-      }
-    }
-    expect(toggles).toBe(4);
-  });
-
-  it('opens with the engine\'s own defaults ticked', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    for (const stage of COVER_CHAIN_STAGES) {
-      if (stage.effectId === null) continue;
-      const toggle = screen.getByTestId(`cover-chain-toggle-${stage.id}`) as HTMLInputElement;
-      expect(`${stage.id}=${toggle.checked}`).toBe(`${stage.id}=${stage.defaultEnabled}`);
-    }
-  });
-
-  it('says the region it will run over', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    expect(screen.getByTestId('cover-chain-scope')).toHaveTextContent('Whole file — 4.00 s');
-    act(() => {
-      useAppStore.setState({ selection: { start: 0, end: SR } });
-    });
-    render(<CoverChainDialog onClose={() => {}} />);
-    expect(screen.getAllByTestId('cover-chain-scope')[1]).toHaveTextContent('Selection — 1.00 s');
-  });
-});
-
-describe('CoverChainDialog — the reference picker', () => {
-  it('offers every OTHER open document and starts with none chosen', () => {
-    const take = seedDoc('take.wav');
-    const vocals = seedDoc('Scarlet Paintings — Vocals');
-    const bed = seedDoc('Scarlet Paintings — Other');
-    useAppStore.setState({ activeDocumentId: take.id });
-    render(<CoverChainDialog onClose={() => {}} />);
-
-    const select = screen.getByTestId('cover-chain-reference') as HTMLSelectElement;
-    expect(select.value).toBe('');
-    const values = Array.from(select.options).map((o) => o.value);
-    expect(values).toEqual(['', vocals.id, bed.id]);
-    // The take itself is never a candidate — matching a recording to itself is
-    // a no-op the user would have to diagnose.
-    expect(values).not.toContain(take.id);
-  });
-
-  it('warns while nothing is chosen, and stops warning once it is', () => {
-    const take = seedDoc('take.wav');
-    const vocals = seedDoc('Scarlet Paintings — Vocals');
-    useAppStore.setState({ activeDocumentId: take.id });
-    render(<CoverChainDialog onClose={() => {}} />);
-
-    expect(screen.getByTestId('cover-chain-no-reference')).toHaveTextContent('Separate into Stems…');
-    fireEvent.change(screen.getByTestId('cover-chain-reference'), { target: { value: vocals.id } });
-    expect(screen.queryByTestId('cover-chain-no-reference')).toBeNull();
-  });
-
-  it('passes the chosen reference to the engine, and null when none is chosen', async () => {
-    const take = seedDoc('take.wav');
-    const vocals = seedDoc('Scarlet Paintings — Vocals');
-    useAppStore.setState({ activeDocumentId: take.id });
-    // `applied: false` keeps the dialog open for the second run — a landed pass
-    // locks the picker on purpose, which its own test pins.
-    mockRun.mockResolvedValue(makeReport({ applied: false }));
-    render(<CoverChainDialog onClose={() => {}} />);
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    expect(mockRun.mock.calls[0][0].referenceDocId).toBeNull();
-
-    mockRun.mockClear();
-    fireEvent.change(screen.getByTestId('cover-chain-reference'), { target: { value: vocals.id } });
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    expect(mockRun.mock.calls[0][0].referenceDocId).toBe(vocals.id);
-  });
-});
-
-describe('CoverChainDialog — the honesty block (Rulings A, D, E)', () => {
-  /**
-   * A TOTAL, EXCLUSIVE classifier over every text in the dialog that states one
-   * of the four measured caveats. v1.21.0's review named the failure this
-   * guards: a phrase-shaped probe cannot catch a sentence containing two
-   * phrases, and a substring sweep passes when a caveat is stated twice or not
-   * at all. Every classified text must match EXACTLY ONE kind — zero or two is
-   * a failure.
-   */
-  const KINDS = {
-    residual: COVER_CHAIN_RESIDUAL_SENTENCE,
-    shaping: COVER_CHAIN_SHAPING_SENTENCE,
-    goodTake: COVER_CHAIN_GOOD_TAKE_SENTENCE,
-    confirm: COVER_CHAIN_CONFIRM_SENTENCE,
-  } as const;
-  type Kind = keyof typeof KINDS;
-  const ALL_KINDS: Kind[] = ['residual', 'shaping', 'goodTake', 'confirm'];
-
-  function classify(text: string): Kind[] {
-    return ALL_KINDS.filter((kind) => text.includes(KINDS[kind]));
+function choose(songName: string | null = 'song.wav'): void {
+  if (songName) {
+    fireEvent.change(screen.getByTestId('cover-journey-song'), { target: { value: song.id } });
   }
+}
 
-  it('enumerates four kinds, each a distinct sentence', () => {
-    expect(ALL_KINDS).toHaveLength(4);
-    expect(new Set(Object.values(KINDS)).size).toBe(4);
-  });
+// ── The honesty block ───────────────────────────────────────────────────────
 
-  it('states each caveat exactly once in the block above the button', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    const block: [string, Kind][] = [
-      ['cover-chain-limitation', 'residual'],
-      ['cover-chain-shaping', 'shaping'],
-      ['cover-chain-good-take', 'goodTake'],
-    ];
-    for (const [testid, expected] of block) {
-      const matches = classify(screen.getByTestId(testid).textContent ?? '');
-      // EXACTLY one — a text matching none or two fails here.
-      expect(`${testid}:${matches.join('+')}`).toBe(`${testid}:${expected}`);
-    }
-  });
-
-  it('classifies every stage note that carries a caveat, and each carries one kind', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    const carriers: Record<string, Kind> = {};
-    for (const stage of COVER_CHAIN_STAGES) {
-      const matches = classify(screen.getByTestId(`cover-chain-note-${stage.id}`).textContent ?? '');
-      // A note carrying two caveats has had one pasted into it — the exact
-      // defect the classifier exists to catch.
-      expect(`${stage.id}:${matches.length}`).not.toBe(`${stage.id}:2`);
-      if (matches.length === 1) carriers[stage.id] = matches[0];
-    }
-    expect(carriers).toEqual({
-      separate: 'residual',
-      lyrics: 'goodTake',
-      timing: 'confirm',
-      place: 'residual',
-    });
-  });
-
-  it('puts the residual limitation above the Apply button, not below it', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    const dialog = screen.getByTestId('cover-chain-dialog');
-    const order = Array.from(dialog.querySelectorAll('[data-testid]')).map((el) =>
-      el.getAttribute('data-testid')
+describe('CoverChainDialog — what it says before it runs', () => {
+  it('states every limitation ABOVE the button, not in a footnote', () => {
+    open();
+    expect(screen.getByTestId('cover-chain-limitation')).toHaveTextContent(
+      COVER_CHAIN_RESIDUAL_SENTENCE
     );
-    expect(order.indexOf('cover-chain-limitation')).toBeGreaterThanOrEqual(0);
-    expect(order.indexOf('cover-chain-limitation')).toBeLessThan(order.indexOf('cover-chain-apply'));
+    expect(screen.getByTestId('cover-chain-shaping')).toHaveTextContent(COVER_CHAIN_SHAPING_SENTENCE);
+    expect(screen.getByTestId('cover-chain-good-take')).toHaveTextContent(
+      COVER_CHAIN_GOOD_TAKE_SENTENCE
+    );
+  });
+
+  it('says the alignment is a placement rather than a warp, and names the manual tools', () => {
+    open();
+    const note = screen.getByTestId('cover-journey-placement-note');
+    expect(note).toHaveTextContent('PLACEMENT, not a warp');
+    expect(note).toHaveTextContent(COVER_CHAIN_CONFIRM_SENTENCE);
+    expect(note).toHaveTextContent('Align Lyrics');
+  });
+
+  it('says what a cancelled run leaves behind BEFORE the run, not after', () => {
+    open();
+    expect(screen.getByTestId('cover-journey-cancel-note')).toHaveTextContent(
+      /session is\s+built only at stage 5|session is built only at stage 5/
+    );
+    expect(screen.getByTestId('cover-journey-cancel-note')).toHaveTextContent('no session');
   });
 });
 
-describe('CoverChainDialog — the run and the report', () => {
-  it('sends the tick state to the engine, every stage of it', async () => {
-    // Renamed: this test never asserted anything about Apply being disabled —
-    // that is the NEXT test's property, and crediting it here meant a reader
-    // auditing coverage by name would have found the guard pinned twice and
-    // removable once.
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    fireEvent.click(screen.getByTestId('cover-chain-toggle-matchReverb'));
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    const sent = mockRun.mock.calls[0][0].enabled;
-    // Every stage the registry declares, not the two that were on the mind of
-    // whoever wrote it: a stage added to the engine and forgotten in the
-    // dialog's state would be `undefined` here.
-    for (const stage of COVER_CHAIN_STAGES) {
-      expect(typeof sent[stage.id]).toBe('boolean');
-    }
-    expect(sent.matchEq).toBe(true);
-    expect(sent.matchReverb).toBe(true);
-    expect(sent.separate).toBe(false);
-  });
+// ── Inputs ──────────────────────────────────────────────────────────────────
 
-  it('disables Apply once every automatic stage is off', () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    for (const stage of COVER_CHAIN_STAGES) {
-      if (stage.effectId === null || !stage.defaultEnabled) continue;
-      fireEvent.click(screen.getByTestId(`cover-chain-toggle-${stage.id}`));
-    }
+describe('CoverChainDialog — the two inputs', () => {
+  it('defaults the take to the active document and asks for the song', () => {
+    open();
+    expect(screen.getByTestId('cover-journey-take')).toHaveValue(take.id);
+    expect(screen.getByTestId('cover-journey-song')).toHaveValue('');
+    expect(screen.getByTestId('cover-journey-not-ready')).toBeInTheDocument();
     expect(screen.getByTestId('cover-chain-apply')).toBeDisabled();
   });
 
-  it('shows the realised curve alongside the requested one, per band (Ruling B)', async () => {
-    seedDoc();
-    mockRun.mockResolvedValue(makeReport({ stages: stagesWith(APPLIED_EQ) }));
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-eq-table')).toBeInTheDocument());
-
-    // Three columns, three quantities, and the gain is NOT the response —
-    // which is the whole of Ruling B. On a pre-compensated band the wanted and
-    // realised figures agree (that is what the solve is for) and BOTH differ
-    // from the gain the EQ was handed.
-    const row500 = within(screen.getByTestId('cover-chain-eq-row-500'));
-    expect(row500.getAllByText('+0.54 dB')).toHaveLength(2); // wanted AND realised
-    expect(row500.getAllByText('+0.31 dB')).toHaveLength(1); // the gain the EQ got
-    expect(screen.getByTestId('cover-chain-eq-row-500').textContent).toBe(
-      '500 Hz+0.54 dB+0.54 dB+0.31 dB'
-    );
-
-    // A band the match may not touch shows its LEAK rather than a blank: it
-    // received no gain, and the audio still moved there.
-    const row250 = screen.getByTestId('cover-chain-eq-row-250');
-    expect(row250.textContent).toContain('below the measured range');
-    expect(row250.textContent).toContain('+0.21 dB');
-    expect(row250.textContent).toContain('+0.00 dB');
-
-    // Every one of the four statuses renders its OWN words. 'no-signal' had no
-    // row anywhere: its entry could be emptied and the table read "2 kHz — "
-    // with a dangling em-dash, with the suite green.
-    expect(screen.getByTestId('cover-chain-eq-row-16000').textContent).toContain('above Nyquist');
-    expect(screen.getByTestId('cover-chain-eq-row-2000').textContent).toContain('— no signal');
-    expect(screen.getByTestId('cover-chain-eq-row-8000').textContent).toContain('bounded');
-    // A matched band gets NO status text — the entry for it was dead code.
-    expect(screen.getByTestId('cover-chain-eq-row-500').textContent).not.toContain('—');
-
-    // The kHz/Hz boundary is `>= 1000`, and it was probed only from below: the
-    // 1 kHz, 8 kHz and 16 kHz rows were checked for substrings that exclude the
-    // band label, so changing `>=` to `>` rendered "1000 Hz" among "8 kHz" rows
-    // with nothing failing. Below / ON / above, full text.
-    expect(screen.getByTestId('cover-chain-eq-row-500').textContent).toContain('500 Hz');
-    expect(screen.getByTestId('cover-chain-eq-row-1000').textContent).toContain('1 kHz');
-    expect(screen.getByTestId('cover-chain-eq-row-1000').textContent).not.toContain('1000 Hz');
-    expect(screen.getByTestId('cover-chain-eq-row-8000').textContent).toContain('8 kHz');
-    expect(screen.getByTestId('cover-chain-eq-row-500').textContent).not.toContain('bounded');
+  it('enables the run once two different documents are chosen', () => {
+    open();
+    choose();
+    expect(screen.queryByTestId('cover-journey-not-ready')).not.toBeInTheDocument();
+    expect(screen.getByTestId('cover-chain-apply')).not.toBeDisabled();
   });
 
-  it('renders a declined stage\'s measured reason, and never as if it had run', async () => {
-    seedDoc();
-    mockRun.mockResolvedValue(makeReport({ stages: stagesWith(DECLINED_REVERB) }));
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-reason-matchReverb')).toBeInTheDocument());
-    expect(screen.getByTestId('cover-chain-status-matchReverb')).toHaveTextContent('Did not run');
-    expect(screen.getByTestId('cover-chain-reason-matchReverb')).toHaveTextContent('0.40 s');
-    expect(screen.getByTestId('cover-chain-reason-matchReverb')).toHaveTextContent('0.71 s');
-    expect(screen.queryByTestId('cover-chain-delta-matchReverb')).toBeNull();
-    expect(screen.queryByTestId('cover-chain-derived-matchReverb')).toBeNull();
+  it('never offers the same document as both song and take', () => {
+    open();
+    choose();
+    const takeOptions = Array.from(
+      screen.getByTestId('cover-journey-take').querySelectorAll('option')
+    ).map((o) => (o as HTMLOptionElement).value);
+    expect(takeOptions).not.toContain(song.id);
   });
 
-  it('gives each of the four statuses its own words, so a switched-off stage never reads as one that ran', async () => {
-    // 'Switched off' was asserted nowhere in this suite: `off: 'Switched off'`
-    // could be changed to 'Ran' and all 25 tests stayed green, which is a stage
-    // the user deliberately left off claiming to have processed the take. The
-    // badge is the only thing on the card that says what happened, so all four
-    // words are pinned here, each on a stage that actually carries that status.
-    seedDoc();
-    const stages = stagesWith(APPLIED_EQ, DECLINED_REVERB);
-    mockRun.mockResolvedValue(makeReport({ stages }));
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-status-matchEq')).toHaveTextContent('Ran'));
+  it('says the whole take runs, not a selection', () => {
+    open();
+    choose();
+    expect(screen.getByTestId('cover-journey-scope')).toHaveTextContent('The whole take runs, not a selection');
+  });
+});
 
-    const words = {
-      applied: 'Ran',
-      declined: 'Did not run',
-      off: 'Switched off',
-      manual: 'Manual step',
-    } as const;
-    // The fixture exercises every one of them — otherwise this loop could go on
-    // passing while a status it never reaches loses its words.
-    expect(new Set(stages.map((s) => s.status))).toEqual(
-      new Set<CoverChainStageResult['status']>(['applied', 'declined', 'off', 'manual'])
-    );
-    for (const s of stages) {
-      expect(screen.getByTestId(`cover-chain-status-${s.id}`).textContent).toContain(words[s.status]);
+// ── The stage table ─────────────────────────────────────────────────────────
+
+describe('CoverChainDialog — the journey it lists', () => {
+  it('lists the engine\'s six stages, in the engine\'s order, with the engine\'s notes', () => {
+    open();
+    for (const stage of COVER_JOURNEY_STAGES) {
+      expect(screen.getByTestId(`cover-journey-stage-${stage.id}`)).toBeInTheDocument();
+      expect(screen.getByTestId(`cover-journey-note-${stage.id}`)).toHaveTextContent(stage.note);
     }
   });
+});
 
-  it('renders a warning on a stage that DID run (Ruling C), distinct from a refusal', async () => {
-    seedDoc();
-    mockRun.mockResolvedValue(makeReport({ stages: stagesWith(WARNED_LOUDNESS) }));
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-warning-matchLoudness')).toBeInTheDocument());
-    expect(screen.getByTestId('cover-chain-status-matchLoudness')).toHaveTextContent('Ran');
-    expect(screen.getByTestId('cover-chain-warning-matchLoudness')).toHaveTextContent('+0.93 dBFS');
-    // It ran, so its measurements are there too — a warning is not a refusal.
-    expect(screen.getByTestId('cover-chain-delta-matchLoudness')).toBeInTheDocument();
-    expect(screen.queryByTestId('cover-chain-reason-matchLoudness')).toBeNull();
+// ── Running ─────────────────────────────────────────────────────────────────
+
+describe('CoverChainDialog — while it runs', () => {
+  it('passes the two chosen documents to the engine', async () => {
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(mockRun).toHaveBeenCalled());
+    const opts = mockRun.mock.calls[0][0];
+    expect(opts.songDocId).toBe(song.id);
+    expect(opts.takeDocId).toBe(take.id);
   });
 
-  it('reports loudness, spread, floor and distance for the take AND the target', async () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-summary')).toBeInTheDocument());
-
-    // BY POSITION. `toHaveTextContent` on the row is position-blind: every
-    // number stayed present when the Before and After cells were swapped, so the
-    // table could show the take getting QUIETER where it got louder and this
-    // suite read it as correct. Which column a figure lands in is the whole
-    // content of a before/after table.
-    const cellsOf = (key: string): HTMLElement[] =>
-      within(screen.getByTestId(`cover-chain-summary-${key}`)).getAllByRole('cell');
-
-    const loudness = cellsOf('gatedLevelDb');
-    expect(loudness).toHaveLength(4); // measure · before · after · the original
-    expect(loudness[0]).toHaveTextContent('Loudness (sounding parts)');
-    expect(loudness[1]).toHaveTextContent('-26.0 dBFS');
-    expect(loudness[2]).toHaveTextContent('-16.4 dBFS');
-    expect(loudness[3]).toHaveTextContent('-16.4 dBFS');
-
-    const peak = cellsOf('peakDb');
-    expect(peak[1]).toHaveTextContent('-9.7 dBFS');
-    expect(peak[2]).toHaveTextContent('-0.3 dBFS');
-    expect(peak[3]).toHaveTextContent('-1.2 dBFS');
-
-    expect(cellsOf('spreadDb')[1]).toHaveTextContent('13.6 dB');
-    expect(cellsOf('noiseFloorDb')[1]).toHaveTextContent('-50.4 dBFS');
-
-    const distance = cellsOf('matchDistanceDb');
-    expect(distance[1]).toHaveTextContent('2.1 dB');
-    expect(distance[2]).toHaveTextContent('0.4 dB');
-    // A quantity that has no meaning for the reference reads 'n/a', not 0 — and
-    // it reads it in the REFERENCE column, not somewhere in the row.
-    expect(distance[3]).toHaveTextContent('n/a');
-    expect(screen.getByTestId('cover-chain-summary')).toHaveTextContent('Scarlet Paintings — Vocals');
-  });
-
-  it('says the spread is reported and never corrected, with the WHOLE sweep that decided it', async () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-spread-note')).toBeInTheDocument());
-    const note = screen.getByTestId('cover-chain-spread-note');
-
-    // BOTH halves of this test's name, because neither was observed before: the
-    // sentence that discharges the "dynamics matching does not ship" ruling
-    // could be deleted, or reworded into a claim that the spread IS matched,
-    // and the suite stayed green.
-    expect(note).toHaveTextContent('reported and NEVER corrected');
-    expect(note).toHaveTextContent('changes sign');
-
-    // And the WHOLE sweep — five points, not four. The dropped one (−6.71 at
-    // K = 40) is the point that breaks monotonicity, which is the strongest
-    // evidence that the quantity belongs to the gate rather than to the singer;
-    // without it the four numbers read as one clean downward trend, a weaker and
-    // different claim than the measurement made.
-    expect(SPREAD_GATE_SWEEP).toHaveLength(5);
-    for (const point of SPREAD_GATE_SWEEP) {
-      expect(note).toHaveTextContent(`${point.gateDb} dB`);
-      expect(note).toHaveTextContent(
-        `${point.moveDb >= 0 ? '+' : '−'}${Math.abs(point.moveDb).toFixed(2)} dB`
-      );
-    }
-    // Rendered from the engine's constant rather than typed here, so the dialog
-    // and the module cannot state the same sweep differently — they already had.
-    expect(note).toHaveTextContent(COVER_CHAIN_SPREAD_SENTENCE);
-  });
-
-  it('calls the reference column what it is, and marks only the rows a stage aims at', async () => {
-    // Heading the column "Target" told the user the chain had under-delivered by
-    // the difference on three of the five rows: the limiter's peak target is its
-    // own ceiling, the envelope spread is never corrected, and nothing matches a
-    // noise floor.
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-summary')).toBeInTheDocument());
-    const summary = screen.getByTestId('cover-chain-summary');
-    expect(summary).toHaveTextContent('The original vocal — Scarlet Paintings — Vocals');
-    expect(summary).not.toHaveTextContent('Target');
-
-    for (const key of ['gatedLevelDb', 'matchDistanceDb']) {
-      expect(screen.getByTestId(`cover-chain-summary-${key}`)).toHaveTextContent('matched to it');
-    }
-    for (const key of ['peakDb', 'spreadDb', 'noiseFloorDb']) {
-      expect(screen.getByTestId(`cover-chain-summary-${key}`)).not.toHaveTextContent('matched to it');
-    }
-    // And the note says which target the Peak row actually has.
-    expect(screen.getByTestId('cover-chain-target-note')).toHaveTextContent('−0.3 dBFS ceiling');
-  });
-
-  it('names the single undo entry, and the new length when a stage grew the region', async () => {
-    seedDoc();
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-outcome')).toBeInTheDocument());
-    expect(screen.getByTestId('cover-chain-outcome')).toHaveTextContent('one undo entry (“Cover Chain”)');
-    expect(screen.getByTestId('cover-chain-outcome')).not.toHaveTextContent('Region length');
-
-    mockRun.mockResolvedValue(makeReport({ outputSamples: SR * 7 }));
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getAllByTestId('cover-chain-apply')[0]);
-    });
-    await waitFor(() =>
-      expect(screen.getAllByTestId('cover-chain-outcome')[1]).toHaveTextContent(
-        'Region length 4.00 s → 7.00 s'
-      )
-    );
-  });
-
-  it('says nothing was changed when no stage ran, and keeps Apply available', async () => {
-    seedDoc();
-    mockRun.mockResolvedValue(makeReport({ applied: false }));
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-outcome')).toBeInTheDocument());
-    expect(screen.getByTestId('cover-chain-outcome')).toHaveTextContent('the document was not changed');
-    expect(screen.getByTestId('cover-chain-apply')).toBeInTheDocument();
-    expect(screen.queryByTestId('cover-chain-close')).toBeNull();
-  });
-
-  it('surfaces a failed run without claiming anything about the document', async () => {
-    seedDoc();
-    mockRun.mockResolvedValue(null);
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-error')).toBeInTheDocument());
-    expect(screen.getByTestId('cover-chain-error')).toHaveTextContent('Nothing in the document was changed');
-    expect(screen.queryByTestId('cover-chain-summary')).toBeNull();
-  });
-
-  it('locks the ticks and the picker once the pass has landed', async () => {
-    const take = seedDoc('take.wav');
-    seedDoc('Scarlet Paintings — Vocals');
-    useAppStore.setState({ activeDocumentId: take.id });
-    render(<CoverChainDialog onClose={() => {}} />);
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    });
-    await waitFor(() => expect(screen.getByTestId('cover-chain-close')).toBeInTheDocument());
-    expect(screen.getByTestId('cover-chain-toggle-matchEq')).toBeDisabled();
-    expect(screen.getByTestId('cover-chain-reference')).toBeDisabled();
-  });
-
-  // ── The live stepper (P1) ─────────────────────────────────────────────────
-  // The four automatic stages are weighted 56/32/1/11, so the overall bar can
-  // sit inside Match EQ for most of a run saying nothing about what Match EQ is
-  // doing. Same contract as the vocal chain's, over this chain's stage table.
-
-  /** Everything the report block renders for one stage, tagged by test id — so
-   * the LIVE rendering can be compared with the FINISHED one, byte for byte. */
-  function resultTextOf(id: string): string[] {
-    return [
-      ...screen.queryAllByTestId(`cover-chain-derived-${id}`),
-      ...screen.queryAllByTestId(`cover-chain-detail-${id}`),
-      ...screen.queryAllByTestId(`cover-chain-delta-${id}`),
-      ...screen.queryAllByTestId(`cover-chain-warning-${id}`),
-      ...screen.queryAllByTestId(`cover-chain-reason-${id}`),
-      ...screen.queryAllByTestId('cover-chain-eq-table'),
-    ].map((el) => `${el.getAttribute('data-testid')}=${el.textContent}`);
-  }
-
-  interface Captured {
-    resolve: (value: CoverChainReport | null) => void;
-    onStageProgress?: RunCoverChainOptions['onStageProgress'];
-    onStageResult?: RunCoverChainOptions['onStageResult'];
-  }
-
-  async function startRun(): Promise<Captured> {
-    const captured = { resolve: () => {} } as Captured;
+  it('shows the running stage, its own bar, and the NESTED chain\'s own row', async () => {
+    // The run is held OPEN deliberately: everything asserted here only exists
+    // while `busy` is true, and a mock that resolves on its own timer races the
+    // assertions into an empty dialog.
+    let emit: RunCoverJourneyOptions['onStageProgress'];
+    let settle: (r: CoverJourneyReport) => void = () => {};
     mockRun.mockImplementation(
       (opts) =>
-        new Promise<CoverChainReport | null>((resolve) => {
-          captured.resolve = resolve;
-          captured.onStageProgress = opts.onStageProgress;
-          captured.onStageResult = opts.onStageResult;
+        new Promise((resolve) => {
+          emit = opts.onStageProgress;
+          settle = resolve;
         })
     );
-    render(<CoverChainDialog onClose={() => {}} />);
+    open();
+    choose();
     fireEvent.click(screen.getByTestId('cover-chain-apply'));
-    await waitFor(() => expect(captured.onStageProgress).toBeDefined());
-    return captured;
-  }
+    await waitFor(() => expect(emit).toBeDefined());
 
-  it('lists EVERY stage with a live state from the moment Apply is pressed', async () => {
-    seedDoc();
-    await startRun();
-
-    const steps = screen.getAllByTestId(/^cover-chain-step-/);
-    expect(steps.map((s) => s.getAttribute('data-testid'))).toEqual(
-      COVER_CHAIN_STAGES.map((s) => `cover-chain-step-${s.id}`)
-    );
-    for (const stage of COVER_CHAIN_STAGES) {
-      const expected =
-        stage.effectId === null ? 'manual' : stage.defaultEnabled ? 'pending' : 'off';
-      expect(screen.getByTestId(`cover-chain-step-${stage.id}`)).toHaveAttribute('data-state', expected);
-    }
-    // Five manual stages, two on by default, one automatic stage off by default
-    // — so all three states are reached and this cannot pass by listing one.
-    expect(new Set(steps.map((s) => s.getAttribute('data-state')))).toEqual(
-      new Set(['manual', 'pending', 'off'])
-    );
-  });
-
-  it('highlights the stage that is running, with what it is doing and how far through it is', async () => {
-    seedDoc();
-    const run = await startRun();
-
-    act(() =>
-      run.onStageProgress!({
-        stageId: 'matchEq',
-        label: 'Match EQ to the Original Vocal',
-        phase: 'measuring',
-        stageFraction: 0,
-        detail: STAGE_MEASURING_DETAIL,
-      })
-    );
-    expect(screen.getByTestId('cover-chain-step-matchEq')).toHaveAttribute('data-state', 'running');
-    expect(screen.getByTestId('cover-chain-step-headroom')).toHaveAttribute('data-state', 'pending');
-    expect(screen.getByTestId('cover-chain-activity-matchEq')).toHaveTextContent(STAGE_MEASURING_DETAIL);
-
-    act(() =>
-      run.onStageProgress!({
-        stageId: 'matchEq',
-        label: 'Match EQ to the Original Vocal',
+    act(() => {
+      emit!({
+        stageId: 'clean',
+        label: 'Clean the Take (Vocal Chain)',
         phase: 'rendering',
-        stageFraction: 0.42,
-        detail: 'Curve 5 bands, -1.90 dB to +3.54 dB',
-      })
-    );
-    expect(screen.getByTestId('cover-chain-step-matchEq')).toHaveTextContent('42%');
-    expect(screen.getByTestId('cover-chain-activity-matchEq')).toHaveTextContent(
-      'Curve 5 bands, -1.90 dB to +3.54 dB'
-    );
-    expect(screen.getByTestId('cover-chain-stage-progress-matchEq')).toHaveStyle({ width: '42%' });
-  });
-
-  it("settles a finished stage to done, showing the REPORT's own strings for it mid-run", async () => {
-    seedDoc();
-    // ONE report object: what is fed to the live callback is what the finished
-    // report carries, exactly as the engine hands it over.
-    const report = makeReport({ stages: stagesWith(APPLIED_EQ, DECLINED_REVERB) });
-    const run = await startRun();
-
-    for (const id of ['matchEq', 'matchReverb'] as const) {
-      act(() => run.onStageResult!(report.stages.find((s) => s.id === id)!));
-    }
-    expect(screen.getByTestId('cover-chain-step-matchEq')).toHaveAttribute('data-state', 'done');
-    expect(screen.getByTestId('cover-chain-step-matchReverb')).toHaveAttribute('data-state', 'declined');
-
-    const liveEq = resultTextOf('matchEq');
-    const liveReverb = resultTextOf('matchReverb');
-    expect(liveEq.length).toBeGreaterThan(0);
-    expect(liveReverb.length).toBeGreaterThan(0);
-    // The per-band curve is part of what Match EQ reports, so it has to be live
-    // too — the stage carries 56 of the 68 weight and its table IS its result.
-    expect(screen.getByTestId('cover-chain-eq-table')).toBeInTheDocument();
-
-    await act(async () => run.resolve(report));
-
-    // BYTE-IDENTICAL to what the finished report renders — not merely "the same
-    // numbers somewhere".
-    expect(resultTextOf('matchEq')).toEqual(liveEq);
-    expect(resultTextOf('matchReverb')).toEqual(liveReverb);
-    expect(screen.queryAllByTestId(/^cover-chain-step-/)).toHaveLength(0);
-    expect(screen.getByTestId('cover-chain-status-matchEq')).toHaveTextContent('Ran');
-  });
-
-  it('dims what has not run yet and does not dim what is running', async () => {
-    seedDoc();
-    const run = await startRun();
-    act(() =>
-      run.onStageProgress!({
-        stageId: 'matchEq',
-        label: 'Match EQ to the Original Vocal',
-        phase: 'rendering',
-        stageFraction: 0.5,
-        detail: 'x',
-      })
-    );
-    expect(screen.getByTestId('cover-chain-stage-matchEq')).toHaveStyle({ opacity: '1' });
-    expect(screen.getByTestId('cover-chain-stage-matchLoudness')).toHaveStyle({ opacity: '0.55' });
-  });
-
-  it('shows NOTHING from a run that failed — a half-reported pass is not a report', async () => {
-    seedDoc();
-    const report = makeReport({ stages: stagesWith(APPLIED_EQ) });
-    const run = await startRun();
-    act(() => run.onStageResult!(report.stages.find((s) => s.id === 'matchEq')!));
-    expect(resultTextOf('matchEq').length).toBeGreaterThan(0);
-
-    await act(async () => run.resolve(null));
-    expect(screen.getByTestId('cover-chain-error')).toBeInTheDocument();
-    expect(resultTextOf('matchEq')).toEqual([]);
-    expect(screen.queryAllByTestId(/^cover-chain-step-/)).toHaveLength(0);
-  });
-
-  it('shows the running stage and the progress the engine reports', async () => {
-    seedDoc();
-    let resolveRun: (r: CoverChainReport) => void = () => {};
-    mockRun.mockImplementation((opts) => {
-      opts.onStageStart?.(COVER_CHAIN_STAGES.find((s) => s.id === 'matchEq')!);
-      opts.onProgress?.(0.42);
-      return new Promise<CoverChainReport>((resolve) => {
-        resolveRun = resolve;
+        stageFraction: 0.4,
+        detail: 'Vocal Chain — De-Hum',
+        sub: {
+          stageId: 'hum',
+          label: 'De-Hum',
+          phase: 'measuring',
+          stageFraction: 0.25,
+          detail: 'measuring the audio that reaches this stage',
+        },
       });
     });
-    render(<CoverChainDialog onClose={() => {}} />);
+
+    expect(screen.getByTestId('cover-journey-status-clean')).toHaveTextContent('Running · 40%');
+    expect(screen.getByTestId('cover-journey-activity-clean')).toHaveTextContent('Vocal Chain — De-Hum');
+    // The nested row keeps the sub-chain's own words rather than collapsing ten
+    // stages behind one bar.
+    const sub = screen.getByTestId('cover-journey-sub-clean');
+    expect(sub).toHaveTextContent('De-Hum');
+    expect(sub).toHaveTextContent('measuring the audio that reaches this stage');
+    expect(sub).toHaveTextContent('25%');
+
     await act(async () => {
-      fireEvent.click(screen.getByTestId('cover-chain-apply'));
+      settle(report());
     });
-    // Named as the WHOLE PASS, and that naming is load-bearing rather than
-    // decorative: Match EQ carries 56 of the 68 weight, so its own row bar
-    // reads 50 % while this one reads 41 %. With both captions reading
-    // "Running <stage>…" that difference reads as a bug in one of them.
-    expect(screen.getByTestId('cover-chain-running')).toHaveTextContent(
-      'Whole pass — running Match EQ to the Original Vocal'
+  });
+
+  it('offers Cancel while running, and tells the engine when it is pressed', async () => {
+    let opts: RunCoverJourneyOptions | null = null;
+    let settle: (r: CoverJourneyReport) => void = () => {};
+    mockRun.mockImplementation(
+      (o) =>
+        new Promise((resolve) => {
+          opts = o;
+          settle = resolve;
+        })
     );
-    expect(screen.getByTestId('cover-chain-progress')).toHaveStyle({ width: '42%' });
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(opts).not.toBeNull());
+
+    // The engine POLLS this rather than being interrupted — the flag is what
+    // the button sets, and the run settles on its own terms afterwards.
+    expect(opts!.shouldCancel!()).toBe(false);
+    fireEvent.click(screen.getByTestId('cover-journey-stop'));
+    expect(opts!.shouldCancel!()).toBe(true);
+    expect(screen.getByTestId('cover-journey-running')).toHaveTextContent('Stopping after this stage');
+    expect(screen.getByTestId('cover-journey-stop')).toBeDisabled();
+
     await act(async () => {
-      resolveRun(makeReport());
+      settle(report({ completed: false, cancelledAt: 'align' }));
     });
+    expect(screen.getByTestId('cover-journey-outcome')).toHaveTextContent('Cancelled at');
+  });
+});
+
+// ── Results ─────────────────────────────────────────────────────────────────
+
+describe('CoverChainDialog — what it says afterwards', () => {
+  async function run(over: Partial<CoverJourneyReport> = {}): Promise<void> {
+    mockRun.mockResolvedValue(report(over));
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(screen.getByTestId('cover-journey-outcome')).toBeInTheDocument());
+  }
+
+  it('names the session it built and how long the pass took', async () => {
+    await run();
+    const outcome = screen.getByTestId('cover-journey-outcome');
+    expect(outcome).toHaveTextContent('song.wav — Cover');
+    expect(outcome).toHaveTextContent('12.3 s');
+  });
+
+  it('lists the undo entries and says why there is no single one', async () => {
+    await run();
+    const undo = screen.getByTestId('cover-journey-undo');
+    expect(undo).toHaveTextContent('“Vocal Chain”, “Cover Chain”');
+    expect(undo).toHaveTextContent('no single entry that undoes the whole journey');
+  });
+
+  it('says so when nothing changed the take', async () => {
+    await run({ undoEntries: [] });
+    expect(screen.getByTestId('cover-journey-undo')).toHaveTextContent('nothing to undo');
+  });
+
+  it('shows a declined stage\'s reason in amber, with its numbers', async () => {
+    await run({
+      alignmentRefused: true,
+      stages: stagesWith({
+        id: 'align',
+        label: 'Align with the Original',
+        status: 'declined',
+        reason: 'correlation 0.310 against a floor of 0.607',
+        derived: [],
+        undoEntries: [],
+      }),
+    });
+    const reason = screen.getByTestId('cover-journey-reason-align');
+    expect(reason).toHaveTextContent('Did not run — correlation 0.310 against a floor of 0.607');
+    expect(reason).toHaveStyle({ color: '#e0a458' });
+  });
+
+  it('shows a stage warning even when the stage ran', async () => {
+    await run({
+      stages: stagesWith({
+        id: 'smooth',
+        label: 'Smooth and Check the Level',
+        status: 'done',
+        warning: 'the two tracks sum to +1.20 dBFS, above full scale',
+        derived: [],
+        undoEntries: [],
+      }),
+    });
+    expect(screen.getByTestId('cover-journey-warning-smooth')).toHaveTextContent('above full scale');
+  });
+
+  it('renders a stage\'s derived values with what they were derived from', async () => {
+    await run({
+      stages: stagesWith({
+        id: 'align',
+        label: 'Align with the Original',
+        status: 'done',
+        derived: [{ label: 'Offset', value: '+1.250 s', from: 'the best lag of the two onset envelopes' }],
+        undoEntries: [],
+      }),
+    });
+    const derived = screen.getByTestId('cover-journey-derived-align');
+    expect(derived).toHaveTextContent('Offset: +1.250 s');
+    expect(derived).toHaveTextContent('from the best lag of the two onset envelopes');
+  });
+
+  it('nests the vocal chain\'s own stages under its row rather than hiding them', async () => {
+    await run({
+      stages: stagesWith({
+        id: 'clean',
+        label: 'Clean the Take (Vocal Chain)',
+        status: 'done',
+        derived: [],
+        undoEntries: ['Vocal Chain'],
+        vocalChain: {
+          stages: [
+            { id: 'hum', label: 'De-Hum', status: 'declined', reason: 'no mains hum found', derived: [] },
+            { id: 'limiter', label: 'Limiter', status: 'applied', derived: [], detail: 'caught 0.42 dB of peak' },
+          ],
+        },
+      } as unknown as CoverJourneyStageResult),
+    });
+    const nested = screen.getByTestId('cover-journey-nested-clean');
+    expect(nested).toHaveTextContent('De-Hum');
+    expect(nested).toHaveTextContent('no mains hum found');
+    expect(nested).toHaveTextContent('Limiter');
+    expect(nested).toHaveTextContent('caught 0.42 dB of peak');
+  });
+
+  it('names the stage the run was cancelled at', async () => {
+    await run({
+      completed: false,
+      cancelledAt: 'match' as CoverJourneyStageId,
+      placement: null,
+    });
+    expect(screen.getByTestId('cover-journey-outcome')).toHaveTextContent(
+      'Cancelled at “Match to the Original Vocal”'
+    );
+  });
+
+  it('keeps the spread ruling on screen after the run', async () => {
+    await run();
+    expect(screen.getByTestId('cover-chain-spread-note')).toHaveTextContent(COVER_CHAIN_SPREAD_SENTENCE);
+  });
+
+  it('reports a pass that could not start rather than pretending it ran', async () => {
+    mockRun.mockResolvedValue(null);
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(screen.getByTestId('cover-journey-error')).toBeInTheDocument());
+    expect(screen.getByTestId('cover-journey-error')).toHaveTextContent('could not start');
   });
 });

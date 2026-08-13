@@ -7,10 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-<!-- MT1: multitrack polish -->
-
 ### Fixed
 
+<!-- MT1: multitrack polish -->
 - **The multitrack now opens Fit on the longest track.** A 2:58 session opened showing about 18
   seconds of itself, at "100%". Cause: the session had no zoom RULE, only four copies of the
   constant `{ samplesPerPixel: 512 }` (`newSession`, Open Session, stem landing, the test hooks), a
@@ -54,8 +53,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `components/UI/glass.tsx`, `components/Dialogs/CoverChainDialog.tsx`,
   `components/Panels/SpatialPanel.tsx`.
 
+### Added
+
+<!-- CP1: the alignment DSP -->
+- **Automatic global alignment of a cover take to the original vocal.** Why: placement was the one step
+  of the journey the app could not do at all, and doing it wrong is worse than not doing it — a take
+  placed at a confidently wrong offset is harder to notice than one left at zero. How it works: it
+  cross-correlates the app's own onset envelope (`tempoCore.onsetEnvelope`) of the two recordings, in two
+  passes — a coarse pass with both signals brought to a fixed 22.05 kHz analysis rate, which decides
+  *where* and *whether to believe it*, and a fine pass at each file's own rate refining that inside
+  ±0.2 s. Onset flux rather than a level envelope is what makes the refusal arm work at all: two
+  unrelated recordings of singing have similar amounts of silence and similar loud sections, so their
+  level envelopes correlate on the shape of "someone is singing"; their attacks do not line up. Two
+  single-pass designs were built and measured and lost first — a full-rate-only pass left the two
+  populations OVERLAPPING (worst cover 0.152 prominence against best unrelated 0.155), and a coarse pass
+  over `decimateMono`'s ~11 kHz was worse still (0.2035 against 0.2045). Both confidence thresholds are
+  points inside a measured gap, and the test that derives them prints both populations every run and
+  fails if the gap ever stops containing the shipped constants. Below either threshold the stage places
+  the take at the start of the original and states the numbers rather than guessing. It is a
+  **placement, not a warp**: Align Vocal Timing and Align Lyrics stay manual, each because it needs a
+  decision only the user can make. Affects: `src/dsp/coverAlign.ts` (new),
+  `src/dsp/__fixtures__/coverAlignFixtures.ts` (new).
+
+<!-- CP1: the pre-clamp peak -->
+- **`mixdownSession` now reports the peak the bus reached before the master clamp.** Why: the clamped
+  output cannot answer "did this session sum over full scale?" — its own peak is at most 1.0 by
+  construction, so a render that flat-topped for thirty seconds and one that never came near the ceiling
+  read identically. The cover journey's final level check needs the number the clamp removed. How: it is
+  measured inside the clamp pass itself, the one place the pre-clamp value is still in scope, rather than
+  by a second summation that would have to re-derive every gain, pan and fade. Affects:
+  `src/multitrack/mixdown.ts`.
+
+### Changed
+
+<!-- MT1: multitrack polish -->
+- **The first-play latency rig can build the session that was reported** (`--content=songs`,
+  `--session-rate=`): two 3-minute stereo 48 kHz clips on two tracks. Its previous one-track
+  2-second tone existed so `playCallMs` measured graph build "and not content size" — content size
+  is the whole defect. Affects: `scripts/first-play-latency-rig.cjs`,
+  `scripts/make-test-latency.cjs`.
+
+<!-- CP1: the Cover Chain becomes the whole journey -->
+- **The Cover Chain now does the whole journey instead of listing five things for you to do.** Why: the
+  shipped chain matched a take's tone and level and then documented five manual steps either side of it
+  — separate the original, run the Vocal Chain, repair words, align timing, build the session. Every one
+  of those was a defensible decision on its own and their sum was not the product the name promises. The
+  user, after running it: *"you are supposed to input the original song AND the vocals, clean the vocals,
+  align with original, remove the vocals from original, add cleaned vocals to music of original, smooth."*
+  How to use: open the original song and your vocal take, `Pipeline → Cover Chain…`, pick both in the two
+  boxes at the top, press **Run the journey**. Six stages run unattended — separate (reusing this song's
+  stems when they are already open, and saying which it did), clean with the full Vocal Chain, align,
+  match with the four existing matching stages, build a two-track session, smooth and check the level —
+  each reporting what it measured, and the two stages that are themselves chains nesting their own
+  chains' stages rather than collapsing them behind one bar. Cancel works between stages; the session is
+  built only at stage 5, so cancelling earlier leaves documents and no session, and the dialog says so
+  *before* the run. Undo stays per-sub-pass ("Vocal Chain" and "Cover Chain"), and the report says why
+  there is deliberately no single entry across all of it: an undo entry belongs to one document, and this
+  pass touches two documents and a session. Affects: `src/services/coverJourney.ts` (new),
+  `src/components/Dialogs/CoverChainDialog.tsx`, `src/services/testHooks.ts`, `scripts/e2e-smoke.cjs`.
+
 ### Removed
 
+<!-- MT1: multitrack polish -->
 - **`clipWaveformCache` and its eight call sites.** Once clip waveforms started drawing straight to
   the on-screen canvas, nothing produced a cache entry any more: `getClipWaveformCanvas` had zero
   production callers, so the eight `purgeClip`/`clearClipWaveformCache` calls scattered across the
@@ -65,16 +124,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the dead producer directly to manufacture the entries it then certified were purged. Deleted
   rather than left as a trap for the next reader to wire something into.
 
-### Changed
-
-- **The first-play latency rig can build the session that was reported** (`--content=songs`,
-  `--session-rate=`): two 3-minute stereo 48 kHz clips on two tracks. Its previous one-track
-  2-second tone existed so `playCallMs` measured graph build "and not content size" — content size
-  is the whole defect. Affects: `scripts/first-play-latency-rig.cjs`,
-  `scripts/make-test-latency.cjs`.
-
 ### Known issues
 
+<!-- MT1: multitrack polish -->
 - **Play with two 3-minute tracks still stalls when the session rate does not match the files.**
   MEASURED, not fixed. `MultitrackPlayer.play()` calls `readClipSlice` for every clip
   synchronously, which resamples the whole clip when `doc.sampleRate !== session.sampleRate`.

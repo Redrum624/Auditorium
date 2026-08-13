@@ -13,6 +13,7 @@
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
+import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import * as coverAlign from '../dsp/coverAlign';
 import * as stemService from './stemService';
 import * as stemLanding from './stemLanding';
@@ -76,9 +77,9 @@ let takeId = '';
 
 /** The song, the take, and (when `withStems`) the five documents a completed
  * separation of that song leaves behind. */
-function seed(withStems: boolean, takeRate = SR): void {
+function seed(withStems: boolean, takeRate = SR, songSamples = SONG_SAMPLES): void {
   useAppStore.setState(makeInitialState());
-  const song = createDocument({ name: 'song', sampleRate: SR, channels: [tone(SONG_SAMPLES, 220, SR)] });
+  const song = createDocument({ name: 'song', sampleRate: SR, channels: [tone(songSamples, 220, SR)] });
   const take = createDocument({
     name: 'take',
     sampleRate: takeRate,
@@ -90,8 +91,11 @@ function seed(withStems: boolean, takeRate = SR): void {
       docs.push(
         createDocument({
           name: `song — ${label}`,
+          // The reuse path matches stems by the song's rate AND length, so a
+          // longer song needs longer stems or it silently takes the fresh-run
+          // arm instead.
           sampleRate: SR,
-          channels: [tone(SONG_SAMPLES, 440, SR, 0.1)],
+          channels: [tone(songSamples, 440, SR, 0.1)],
         })
       );
     }
@@ -374,6 +378,39 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
     const session = useSessionStore.getState().session;
     expect(session.tracks).toHaveLength(2);
     expect(session.tracks[1].clips[0].startSample).toBe(Math.round(1.25 * SR));
+  });
+
+  // M4 (train): the journey's stage 5 is a FIFTH load-shaped session apply, and
+  // it was written while MT1 was fixing the other four in parallel — so it
+  // shipped the hardcoded `{ samplesPerPixel: 512 }` those four had just lost.
+  // A cover session is a whole song plus a take, i.e. exactly the minutes-long
+  // material the reported bug was filed against: 512 samples/px is ~16 s of
+  // timeline whatever is on it. The rule is the one MT1 established — every
+  // load-shaped apply commits the session's RESOLVED zoom.
+  it('opens the placed session fitted, not at the hardcoded 512', async () => {
+    // A LONG song, and that length is the whole point of the fixture. 512
+    // samples/px is only wrong when it is a REACHABLE zoom — i.e. when the
+    // session's fit ceiling is coarser than 512. The rest of this suite runs an
+    // 8 s song, whose fit is ~46 samples/px, so a hardcoded 512 exceeds the
+    // zoom-out ceiling and `resolveSessionZoom` clamps it back to the fit: the
+    // bug is invisible there, and a test written on that fixture passes against
+    // the broken code. At 120 s the fit is ~698 samples/px, 512 sits inside the
+    // range and stands — which is the reported case (a 2:58 session fitting at
+    // 5704.8 opened at 512, i.e. 16 s visible at ~1114%). A cover session is a
+    // whole song plus a take, so it is ALWAYS this end of the scale.
+    seed(true, SR, SR * 120);
+    // Start from NO session — the state a user actually runs the journey from.
+    // MT1's subscription re-resolves only when the timeline gets SHORTER, so a
+    // session grown from empty is exactly the case nothing downstream rescues.
+    useSessionStore.setState({ session: { name: 'none', sampleRate: SR, tracks: [] } });
+    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
+    await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const session = useSessionStore.getState().session;
+    const fit = defaultSessionZoom(session);
+    // The fixture must actually be able to express the bug, or this test is
+    // green against broken code.
+    expect(fit.samplesPerPixel).toBeGreaterThan(512);
+    expect(useSessionStore.getState().mtZoom).toEqual(fit);
   });
 
   it('shifts BOTH tracks rather than clamping a negative offset to zero', async () => {

@@ -461,38 +461,73 @@ that made it decline.
 Pitch Correct dominates the running time (roughly 0.4× real time on its own; the
 whole chain took about 105 seconds on a 142-second stereo take).
 
-### Cover Chain (matching your take to the record's vocal)
+### Cover Chain (the whole journey, from the song and your take to a session)
 
-`Pipeline → Cover Chain…` takes the vocal you recorded and the *separated original vocal*
-of the song you are covering, and matches your take's tone and level to it.
+<!-- CP1: the chain became the journey -->
+`Pipeline → Cover Chain…` takes **two documents** — the original song, and the vocal you
+recorded — and does the whole thing: separates the original, cleans your take, works out
+where your take belongs against it, matches your take's tone and level to the original
+singer's, builds a session with the original's music and your take on it, and smooths
+the edges. Open both files, pick them in the two boxes at the top, press **Run the
+journey**.
 
-**Do this first, in this order.** The chain lists all of it, and refuses to do any of
-it for you, because each step needs a decision only you can make:
+Six stages run, top to bottom, each reporting what it measured:
 
-1. Open the original song and run `Pipeline → Separate into Stems…`. That gives you a
-   five-track session and, among the new documents, `<song> — Vocals`: the original
-   vocal *as a signal*, carrying whatever was done to it in the mix. That document is
-   what everything below matches against.
-2. If a word came out wrong, `Pipeline → Align Lyrics…`. This is **before** the vocal
-   chain and not after it: the replacement has to be in the file before any stage
-   measures a level or learns a noise print from it, or the new word sits in a
-   de-noised, level-matched take with none of that applied to it. Nothing in the app
-   judges which word is wrong; you pick it.
-3. If your take drifts against the record, `Pipeline → Align Vocal Timing…`. Also before
-   the vocal chain, for the same reason. It needs you to confirm the beat grid — see the
-   note in that section about why nothing picks it for you.
-4. Open your take and run `Pipeline → Vocal Chain…` on it, last of the four. The match is
-   a correction to a **clean** take — match the timbre of a noisy one and you match the
-   noise too.
+1. **Separate the Original** — runs the separation model over the song and lays down its
+   five stems, then sums the four non-vocal ones into a `— Instrumental` document. That
+   sum is exact rather than approximate: separation's one hard guarantee is that its five
+   outputs add back up to the mix to the last bit, so "the original with its vocal
+   removed" is arithmetic here, not an estimate. **If this song's stems are already open**
+   — five documents named `<song> — Drums`, `— Bass`, `— Vocals`, `— Other`, `— Residual`,
+   each at the song's rate and length — the stage reuses them and says so, because a model
+   pass is minutes and there is no reason to pay for it twice. What it cannot see is an
+   edit to the song that left its length unchanged; separate again if you have edited it.
+2. **Clean the Take (Vocal Chain)** — the whole Vocal Chain on your take. Its ten stages
+   appear nested under this row, each with its own status and reason, rather than hidden
+   behind one bar. The match below is a correction to a **clean** take: match the timbre
+   of a noisy one and you match the noise too.
+3. **Align with the Original** — see below.
+4. **Match to the Original Vocal** — the four matching stages, described below, against
+   the separated original vocal. Nested under this row the same way.
+5. **Build the Session** — a two-track session: the instrumental on one track, your
+   matched take on the other, at the offset stage 3 found.
+6. **Smooth and Check the Level** — 25 ms edge fades on your take so neither end starts
+   or stops mid-waveform, and one mixdown of the finished session to measure what the two
+   tracks actually sum to.
 
-(The Cover Chain dialog lists these four in registry order, which is the order they are
-*listed* rather than the order to *do* them: they are manual stages, so nothing runs them
-and the registry's order carries no promise about them. The order to do them is the one
-above, and each stage's own note repeats it.)
+**The alignment is a placement, not a warp.** Stage 3 cross-correlates the onset envelope
+of your cleaned take with the separated original vocal's and reports the offset it found
+along with the confidence that produced it. Your whole take is then placed at that offset
+— nothing is stretched and no syllable is moved, so a take that drifts against the record
+still drifts. Two thresholds have to be cleared before the number is believed, and both
+are measured rather than chosen; below either one the stage places your take at the start
+of the original and **tells you the numbers** instead of guessing. If the take belonged
+*before* the original's own start, both tracks are pushed later by the same amount rather
+than your take being clamped to zero — clamping would have silently thrown away the offset
+that was just measured.
 
-**Then run the chain.** With your take active, open `Pipeline → Cover Chain…`, choose the
-`— Vocals` document in the **Reference** picker, and press Apply. Three automatic stages
-are on by default:
+**Two tools stay manual, deliberately, and are worth running afterwards.**
+`Pipeline → Align Lyrics…` replaces one word you pick with a fresh take of that word;
+nothing in the app judges which word is wrong, and a per-phone quality scorer was built,
+measured at 0.642 AUC against a 0.500 chance baseline, and cut. `Pipeline → Align Vocal
+Timing…` warps timing but needs you to confirm the beat grid first — see the note in that
+section about why nothing picks it for you. If you use Align Lyrics, run the journey
+again afterwards, so the replaced word is in the file before any stage measures a level or
+learns a noise print from it.
+
+**Cancel works between stages.** The run takes minutes and the separation is most of it.
+The session is built only at stage 5, so cancelling before then leaves you with the
+documents the pass produced — the stems, and your take with whatever passes had already
+finished — and no session. Nothing is left half-built.
+
+**Undo stays per-pass.** The Vocal Chain leaves one entry named "Vocal Chain" on your take
+and the matching stages leave one named "Cover Chain"; the report lists them. There is
+deliberately no single entry that undoes the whole journey: an undo entry belongs to one
+document, and this pass touches two documents and a session.
+
+#### The four matching stages
+
+Three are on by default:
 
 - **Match EQ to the Original Vocal** — compares the long-term octave-band energy of the
   two recordings and realises the difference on the Graphic EQ. It works from 500 Hz up
@@ -524,25 +559,22 @@ linearity check cannot tell a curved fall from a room — a slow fade with no re
 in it at all scores higher than either validated control. So a decay it reports is
 evidence of a fall, not proof of a room.
 
-<!-- P1: the live stepper -->
+<!-- P1: the live stepper — CP1: now over the journey's six stages, with the two chains nested -->
 **While it runs, the same list is live.** Every stage keeps its place and gains a state —
-*Waiting*, *Running*, *✓ Ran*, *Did not run*, *Switched off*, or *Manual step* for the
-five this chain never runs itself — and the stage in progress is highlighted, says
-whether it is *Measuring* or *Rendering* along with the settings it just worked out, and
-carries its own bar for how far through **that stage** the pass is. It matters more here
-than in the Vocal Chain: Match EQ alone is over half the total work, and most of that is
-a single measurement of your take's long-term spectrum — so the bar at the foot of the
-dialog, which is labelled *Whole pass* and is deliberately a different number from the
-highlighted row's, can sit almost still for a long time while a great deal is happening.
-That measurement now says it is happening instead of looking stuck.
+*Waiting*, *Running*, *✓ Done*, *✓ Reused*, *Did not run*, *Cancelled* or *Failed* — and
+the stage in progress is highlighted, says what it is doing, and carries its own bar for
+how far through **that stage** the pass is. Stages 2 and 4 are themselves multi-stage
+chains, and their rows carry the nested chain's *own* live line underneath — the stage it
+is on, what that stage is doing, and how far through it is — rather than collapsing ten
+stages behind one bar. The bar at the foot of the dialog is labelled *Whole journey* and
+is deliberately a different number from the highlighted row's: separation is roughly nine
+tenths of the work, so that bar can sit almost still while a great deal is happening.
 
-The whole pass is **one undo entry**. Every stage reports what it did or why it did
-nothing, and the before/after table gives loudness, envelope spread, noise floor and the
-spectral distance from the original vocal, with the original vocal's own reading of each
-beside them. Only two of those five rows are **targets** — the loudness and the spectral
-distance. The Peak row's target is the Limiter's own −0.3 dBFS ceiling, not the original
-vocal's peak; the envelope spread is reported and never corrected; and nothing here
-matches a noise floor. The table marks the two rows that are matched.
+**The level check is a measurement, not a fix.** Stage 6 mixes the finished session down
+once and reports the peak the two tracks summed to **before** the master bus's ±1 clamp —
+the clamped render peaks at 0 dBFS by construction and could never tell you this. If that
+sum passes full scale you get the number and the amount to come down by; nothing is
+normalised, limited or mastered on your behalf.
 
 **The envelope spread is reported and never corrected.** A "matched compressor" was
 built and cut: the move it asks for changes sign depending on how the measurement is
@@ -550,12 +582,14 @@ gated, which makes it a property of the analysis rather than of the singer.
 
 **Two things to expect.** The instrumental you lay the cover over is **not clean** — it
 still contains the original singer, about 18 dB below the music and only 10 dB below it
-in the band your own voice occupies. And the match is a *shaping*: on the song it was
-built against it moved about ±1.2 dB across 500 Hz–4 kHz with +3.5 dB of air at 8 kHz. It
-is a real, measured correction. It will not turn a poor take into a good one.
+in the band your own voice occupies. Exact summation is a statement about arithmetic, not
+about whether the original singer is audible in the bed; she is, most audibly in sparse
+passages. And the match is a *shaping*: on the song it was built against it moved about
+±1.2 dB across 500 Hz–4 kHz with +3.5 dB of air at 8 kHz. It is a real, measured
+correction. It will not turn a poor take into a good one.
 
-**Finally, place it.** Open the `— Stems` session the separation created, mute its
-**Vocals** track, and drag your corrected take in as a new track.
+**When it finishes** the `<song> — Cover` session is open in the multitrack view, ready to
+play and to **Mix Down**.
 
 ## Tempo, remix, stems, transcription and the voice changer
 

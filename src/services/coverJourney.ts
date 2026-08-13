@@ -58,7 +58,6 @@
  */
 
 import { createDocument, docLength, type AudioDocument } from '../audio/AudioDocument';
-import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { toDb } from '../dsp/chainAnalysis';
 import {
   ALIGN_MIN_CORRELATION,
@@ -77,6 +76,7 @@ import {
   type Track,
 } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
+import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import { clearSessionHistory } from '../multitrack/sessionUndo';
 import { useAppStore } from '../stores/appStore';
 import { linkDerivedDocument } from './beatGrid';
@@ -854,11 +854,20 @@ export async function runCoverJourney(
       session,
       selectedClipId: null,
       mtCursorSample: 0,
-      mtZoom: { samplesPerPixel: 512, scrollSample: 0 },
+      // MT1 (C1): fitted, not the hardcoded 512 — the same ruling as
+      // `sessionFile`, `stemLanding` and the `openSessionFrom` test hook. This
+      // is the FIFTH load-shaped apply and it was written in parallel with that
+      // fix, so it inherited the constant those four had just lost. It matters
+      // most here: a cover session is a whole song plus a take, and 512
+      // samples/px is ~16 s of timeline whatever is on it.
+      mtZoom: defaultSessionZoom(session),
       mtPlayState: 'stopped',
       mtPlayheadSample: 0,
     });
-    clearClipWaveformCache();
+    // MT1 (I7) deleted `clipWaveformCache` and its eight call sites: clips now
+    // draw straight to the on-screen canvas, so nothing produces an entry and
+    // there is no per-clip bitmap left to strand here. This was the ninth call
+    // site, written in parallel with that deletion.
     clearSessionHistory();
     useAppStore.getState().setView('multitrack');
 

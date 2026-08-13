@@ -3215,6 +3215,181 @@ async function main() {
         Number.isFinite(stems.sanitisedEstimateSamples),
         `the non-finite-estimate count is reported (actual ${stems.sanitisedEstimateSamples})`
       );
+
+      // CP1: the WHOLE cover journey, in the packaged app -------------------
+      // The unit suite spies on the six sub-services, so it proves they are
+      // called in order and cannot prove they COMPOSE. This is the only place
+      // a real separation, two real chains over real DSP workers, a real
+      // cross-correlation over real audio and a real session build meet each
+      // other. It lives inside the model guard because stage 1 is a model run.
+      //
+      // The fixtures are the Cover Chain's own: `cover-reference.wav` stands in
+      // for the original song and `cover-take.wav` for the new take. They are
+      // 6 s each, so the separation here is seconds rather than minutes.
+      console.log('Cover journey (CP1): song + take → session, in the packaged app...');
+      await page.evaluate(() => window.__test.setView('waveform'));
+      await page.evaluate((p) => window.__test.openPath(p), COVER_REFERENCE);
+      await page.evaluate((p) => window.__test.openPath(p), COVER_TAKE);
+      const journeyBefore = await page.evaluate(() => window.__test.getStateSummary());
+      const journey = await page.evaluate(() =>
+        window.__test.runCoverJourney('cover-reference.wav', 'cover-take.wav')
+      );
+      console.log(
+        `  runCoverJourney: ok=${journey.ok} completed=${journey.completed} ` +
+          `cancelledAt=${JSON.stringify(journey.cancelledAt)} reused=${journey.separationReused}`
+      );
+      for (const stage of journey.stages) {
+        const derived = stage.derived.map((d) => `${d.label}=${d.value}`).join(', ');
+        console.log(
+          `    ${stage.id}: ${stage.status}` +
+            (derived ? ` [${derived}]` : '') +
+            (stage.nestedStageCount !== null ? ` (${stage.nestedStageCount} nested stages)` : '') +
+            (stage.warning ? ` — WARNING ${stage.warning}` : '') +
+            (stage.reason ? ` — ${stage.reason}` : '')
+        );
+      }
+      console.log(
+        `  alignment: offset=${journey.alignmentOffsetSeconds}s confident=${journey.alignmentConfident} ` +
+          `peak=${journey.alignmentPeakCorrelation} prominence=${journey.alignmentProminence}`
+      );
+      console.log(
+        `  placement: take@${journey.takeStartSample} instrumental@${journey.instrumentalStartSample} ` +
+          `shifted=${journey.shiftedSamples} fades=${journey.fadeInSample}/${journey.fadeOutSample} ` +
+          `summedPeak=${journey.summedPeakDb} dBFS overCeiling=${journey.overCeiling}`
+      );
+
+      assert(journey.ok === true, 'the journey started with two open documents');
+      assert(
+        journey.completed === true,
+        `all six stages completed (cancelledAt ${JSON.stringify(journey.cancelledAt)})`
+      );
+      // Against the app's OWN registry, never a hardcoded count.
+      const journeyReported = journey.stages.map((st) => st.id);
+      assert(
+        JSON.stringify(journeyReported) === JSON.stringify(journey.registryStageIds),
+        `every stage is reported, in registry order (registry ${JSON.stringify(journey.registryStageIds)}, reported ${JSON.stringify(journeyReported)})`
+      );
+      for (const stage of journey.stages) {
+        assert(
+          ['done', 'declined', 'reused', 'cancelled', 'failed', 'pending'].indexOf(stage.status) !== -1,
+          `stage ${stage.id} reports a known status (actual ${JSON.stringify(stage.status)})`
+        );
+        // The honesty rule, executable: a stage that did not do its job says why.
+        if (stage.status === 'declined' || stage.status === 'failed') {
+          assert(
+            typeof stage.reason === 'string' && stage.reason.length > 0,
+            `stage ${stage.id} did not run and SAID why — a silent skip is the failure mode this rules out`
+          );
+        }
+      }
+      // The nesting is structural, not cosmetic: both chain stages carry their
+      // own chains' whole stage lists rather than one opaque line.
+      const journeyClean = journey.stages.filter((st) => st.id === 'clean')[0];
+      const journeyMatch = journey.stages.filter((st) => st.id === 'match')[0];
+      assert(
+        journeyClean.nestedStageCount !== null && journeyClean.nestedStageCount > 1,
+        `the Vocal Chain's own stages are nested, not flattened (actual ${journeyClean.nestedStageCount})`
+      );
+      assert(
+        journeyMatch.nestedStageCount !== null && journeyMatch.nestedStageCount > 1,
+        `the Cover Chain's own stages are nested, not flattened (actual ${journeyMatch.nestedStageCount})`
+      );
+      // Separation ran for real here — the reference had never been separated.
+      assert(
+        journey.separationReused === false,
+        `the first pass separated rather than reusing (actual ${journey.separationReused})`
+      );
+      // The five stems plus the instrumental this pass sums for itself.
+      const journeyAfter = await page.evaluate(() => window.__test.getStateSummary());
+      assert(
+        journeyAfter.docCount === journeyBefore.docCount + 6,
+        `five stems and one instrumental were added (expected ${journeyBefore.docCount + 6}, actual ${journeyAfter.docCount})`
+      );
+      // Undo stays per-sub-pass, and the report says exactly which entries.
+      assert(
+        JSON.stringify(journey.undoEntries) === JSON.stringify(['Vocal Chain', 'Cover Chain']),
+        `each pass kept its own undo entry (actual ${JSON.stringify(journey.undoEntries)})`
+      );
+      // The session that is the whole point: two tracks, both clips placed.
+      assert(
+        journey.sessionName === 'cover-reference.wav — Cover',
+        `the session is named after the song (actual ${JSON.stringify(journey.sessionName)})`
+      );
+      assert(
+        journey.sessionTrackCount === 2,
+        `the session has the instrumental and the take on it (actual ${journey.sessionTrackCount})`
+      );
+      const journeyMt = await page.evaluate(() => ({
+        views: document.querySelectorAll('[data-testid="multitrack-view"]').length,
+        tracks: document.querySelectorAll('[data-testid="track-header"]').length,
+        clips: document.querySelectorAll('[data-testid="clip"]').length,
+      }));
+      assert(
+        journeyMt.views === 1 && journeyMt.tracks === 2 && journeyMt.clips === 2,
+        `the cover session is on screen (${journeyMt.views} views / ${journeyMt.tracks} tracks / ${journeyMt.clips} clips)`
+      );
+      // The alignment arithmetic, whichever arm it took. A refused alignment is
+      // a legitimate outcome on this material and must place at zero rather
+      // than at a guess; a believed one must have moved the clip by what it
+      // measured. Both arms are asserted so neither can silently become the
+      // other.
+      assert(
+        journey.takeStartSample !== null && journey.takeStartSample >= 0,
+        `the take was placed at a real, non-negative session sample (actual ${journey.takeStartSample})`
+      );
+      if (journey.alignmentRefused) {
+        assert(
+          journey.takeStartSample === 0,
+          `a refused alignment places at zero rather than guessing (actual ${journey.takeStartSample})`
+        );
+      } else if (journey.alignmentOffsetSeconds !== null) {
+        const expectedStart = Math.max(0, Math.round(journey.alignmentOffsetSeconds * 44100));
+        assert(
+          Math.abs(journey.takeStartSample - expectedStart - (journey.shiftedSamples || 0)) <= 1,
+          `the clip landed at the measured offset (offset ${journey.alignmentOffsetSeconds}s, expected ~${expectedStart}, actual ${journey.takeStartSample})`
+        );
+      }
+      // Smoothing: both edges faded, and the summed peak measured rather than
+      // assumed. `summedPeakDb` comes from BEFORE the master bus's clamp — the
+      // clamped render peaks at 0 dBFS by construction and could not show this.
+      assert(
+        journey.fadeInSample !== null && journey.fadeInSample > 0 && journey.fadeOutSample > 0,
+        `both edges of the placed take were faded (actual ${journey.fadeInSample}/${journey.fadeOutSample})`
+      );
+      assert(
+        Number.isFinite(journey.summedPeakDb),
+        `the summed peak was measured (actual ${journey.summedPeakDb})`
+      );
+      assert(
+        journey.overCeiling === journey.summedPeakDb > 0,
+        `the over-ceiling verdict follows the measured peak (peak ${journey.summedPeakDb}, verdict ${journey.overCeiling})`
+      );
+      const journeySmooth = journey.stages.filter((st) => st.id === 'smooth')[0];
+      assert(
+        journey.overCeiling
+          ? typeof journeySmooth.warning === 'string' && journeySmooth.warning.length > 0
+          : journeySmooth.warning === null,
+        `a summed peak over full scale is WARNED about and one under it is not (peak ${journey.summedPeakDb}, warning ${JSON.stringify(journeySmooth.warning)})`
+      );
+
+      // CP1: and the REUSE arm, which is the difference between a four-minute
+      // second pass and a four-second one. Running the journey again on the
+      // same song must find the stems it just made rather than re-running the
+      // model — and must SAY that it did.
+      const journeyAgain = await page.evaluate(() =>
+        window.__test.runCoverJourney('cover-reference.wav', 'cover-take.wav')
+      );
+      console.log(
+        `  second pass: ok=${journeyAgain.ok} completed=${journeyAgain.completed} reused=${journeyAgain.separationReused}`
+      );
+      assert(
+        journeyAgain.separationReused === true,
+        `a second pass REUSED the separation instead of re-running the model (actual ${journeyAgain.separationReused})`
+      );
+      assert(
+        journeyAgain.stages.filter((st) => st.id === 'separate')[0].status === 'reused',
+        'the reuse is reported as its own status, not disguised as a fresh run'
+      );
     }
 
     // 18) v1.9 — clip fades and crossfades, end to end ---------------------

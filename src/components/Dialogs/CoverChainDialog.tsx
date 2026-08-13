@@ -1,245 +1,160 @@
 import { useEffect, useRef, useState } from 'react';
 import { Mic2 } from 'lucide-react';
 import { docLength } from '../../audio/AudioDocument';
-import type { StageDelta } from '../../dsp/chainAnalysis';
 import { useAppStore } from '../../stores/appStore';
 import {
+  COVER_CHAIN_CONFIRM_SENTENCE,
   COVER_CHAIN_GOOD_TAKE_SENTENCE,
   COVER_CHAIN_RESIDUAL_SENTENCE,
   COVER_CHAIN_SHAPING_SENTENCE,
   COVER_CHAIN_SPREAD_SENTENCE,
-  COVER_CHAIN_STAGES,
-  COVER_CHAIN_UNDO_LABEL,
-  defaultCoverStageSelection,
-  runCoverChain,
-  type CoverChainMetrics,
-  type CoverChainReport,
-  type CoverChainStageId,
-  type CoverChainStageProgress,
-  type CoverChainStageResult,
-  type MatchEqDetail,
 } from '../../services/coverChain';
-import type { MatchBandStatus } from '../../dsp/coverMatch';
-import type { ChainStagePhase, StageStatus } from '../../services/vocalChain';
+import {
+  COVER_JOURNEY_STAGES,
+  runCoverJourney,
+  type CoverJourneyReport,
+  type CoverJourneyStageId,
+  type CoverJourneyStageProgress,
+  type CoverJourneyStageResult,
+  type CoverJourneyStageStatus,
+} from '../../services/coverJourney';
+import type { DerivedValue, StageStatus } from '../../services/vocalChain';
 import { GlassButton, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
 
-const dbfs = (v: number): string => (Number.isFinite(v) ? `${v.toFixed(1)} dBFS` : '—');
-const db = (v: number): string => (Number.isFinite(v) ? `${v.toFixed(1)} dB` : '—');
-const signedDb = (v: number): string =>
-  Number.isFinite(v) ? `${v >= 0 ? '+' : ''}${v.toFixed(2)} dB` : '—';
-const pct = (v: number): string => `${(v * 100).toFixed(1)}%`;
+const AMBER = '#e0a458';
 const secs = (samples: number, rate: number): string => `${(samples / rate).toFixed(2)} s`;
 
-/** What each status SAYS, in the words a user can act on. `applied` claims only
- * that the stage ran — how well it ran is what the measured delta below it is
- * for. */
-const STATUS_TEXT: Record<StageStatus, string> = {
+/** What each journey status SAYS, in words a user can act on. */
+const STATUS_TEXT: Record<CoverJourneyStageStatus, string> = {
+  done: '✓ Done',
+  declined: 'Did not run',
+  reused: '✓ Reused',
+  cancelled: 'Cancelled',
+  failed: 'Failed',
+  pending: 'Waiting',
+};
+
+const STATUS_COLOR: Record<CoverJourneyStageStatus, string> = {
+  done: 'var(--accent)',
+  // Amber, the colour every other dialog uses for "read this": a declined stage
+  // is the one outcome that is easy to mistake for a successful one.
+  declined: AMBER,
+  reused: 'var(--accent)',
+  cancelled: AMBER,
+  failed: '#ef5350',
+  pending: 'var(--glass-text-muted)',
+};
+
+/** The nested chains' four statuses, in the same words the chain dialogs use. */
+const SUB_STATUS_TEXT: Record<StageStatus, string> = {
   applied: 'Ran',
   declined: 'Did not run',
   off: 'Switched off',
   manual: 'Manual step',
 };
 
-const STATUS_COLOR: Record<StageStatus, string> = {
+const SUB_STATUS_COLOR: Record<StageStatus, string> = {
   applied: 'var(--accent)',
-  // Amber, the colour every other dialog uses for "read this": a declined stage
-  // is the one outcome that is easy to mistake for a successful one.
-  declined: '#e0a458',
+  declined: AMBER,
   off: 'var(--glass-text-muted)',
   manual: 'var(--glass-text-muted)',
 };
 
-const AMBER = '#e0a458';
-
 /**
- * The live stepper (P1) — the vocal chain's states, over this chain's table.
+ * One row of a NESTED chain — the Vocal Chain's ten stages, or the Cover
+ * Chain's nine.
  *
- * It earns its place here more than it does there. The four automatic stages
- * are weighted 56/32/1/11, so the overall bar can sit inside Match EQ for most
- * of a run without saying what Match EQ is doing — and that stage spends 1.75 s
- * of its 2.28 s inside ONE measurement, `deriveMatchEq`'s long-term spectrum of
- * the take, which is why the engine paints the "Measuring" line before taking
- * it rather than merely emitting it first.
- *
- * (Match Reverb looks like the culprit and is not: its ISO 3382-1 decay fit is
- * hoisted out of the loop into `measureReference`, so its in-loop resolve is
- * cheap and its decline costs nothing. Its row was frozen by Match EQ's
- * measurement, not by its own.)
- *
- * `done` and `declined` stay separate, for the reason the finished report keeps
- * them apart in amber: a decline is the outcome easiest to mistake for a
- * successful run, and on this chain it is the most common one there is.
+ * Typed on the structural subset both `VocalChainStageResult` and
+ * `CoverChainStageResult` share rather than on either of them, because the two
+ * are the same shape for everything shown here and a second renderer could only
+ * describe the same fields in different words. What is deliberately NOT shown
+ * is each chain's own before/after table and the Cover Chain's per-band curve:
+ * those live in the chains' own dialogs, and a journey report that reproduced
+ * them would be four tables deep.
  */
-type StepState = 'done' | 'declined' | 'running' | 'pending' | 'off' | 'manual';
-
-const STEP_TEXT: Record<StepState, string> = {
-  done: STATUS_TEXT.applied,
-  declined: STATUS_TEXT.declined,
-  running: 'Running',
-  pending: 'Waiting',
-  off: STATUS_TEXT.off,
-  manual: STATUS_TEXT.manual,
-};
-
-const STEP_COLOR: Record<StepState, string> = {
-  done: STATUS_COLOR.applied,
-  declined: STATUS_COLOR.declined,
-  running: 'var(--accent)',
-  pending: 'var(--glass-text-muted)',
-  off: STATUS_COLOR.off,
-  manual: STATUS_COLOR.manual,
-};
-
-/** What the finished statuses become as a live step. A result that has landed
- * is a step that is over, whatever it decided. */
-const STEP_OF_STATUS: Record<StageStatus, StepState> = {
-  applied: 'done',
-  declined: 'declined',
-  off: 'off',
-  manual: 'manual',
-};
-
-/** The engine's own two phase words, capitalised. */
-const PHASE_TEXT: Record<ChainStagePhase, string> = {
-  measuring: 'Measuring',
-  rendering: 'Rendering',
-};
-
-/**
- * The before/after table's rows.
- *
- * `aimedAt` is load-bearing rather than decoration. The last column holds the
- * REFERENCE's own reading of each measure, and for three of the five rows that
- * reading is not a target and nothing in the chain moves towards it: the
- * limiter's peak target is its own −0.3 dBFS ceiling, the envelope spread is
- * explicitly never corrected (the dynamics match was measured and cut), and no
- * stage matches a noise floor. Heading that column "Target" told the user the
- * chain had under-delivered by the difference — on a successful run the Peak row
- * read "After −0.30 dBFS / Target −1.20 dBFS", which is a 0.9 dB miss against a
- * number nothing aimed at, and the spread row implied exactly the dynamics match
- * the measurements refused to ship.
- */
-const METRIC_ROWS: {
-  key: keyof CoverChainMetrics;
+interface NestedStage {
+  id: string;
   label: string;
-  unit: 'dbfs' | 'db';
-  /** True when a stage actually moves this measure towards the reference's. */
-  aimedAt: boolean;
-}[] = [
-  { key: 'gatedLevelDb', label: 'Loudness (sounding parts)', unit: 'dbfs', aimedAt: true },
-  { key: 'peakDb', label: 'Peak', unit: 'dbfs', aimedAt: false },
-  { key: 'spreadDb', label: 'Envelope spread', unit: 'db', aimedAt: false },
-  { key: 'noiseFloorDb', label: 'Noise floor', unit: 'dbfs', aimedAt: false },
-  { key: 'matchDistanceDb', label: 'Distance from the original vocal', unit: 'db', aimedAt: true },
-];
-
-/** `null` is a real answer here — nothing was sounding, or there was no
- * reference to measure a distance against — and it is rendered as one rather
- * than as a zero. */
-function metricText(value: number | null, unit: 'dbfs' | 'db'): string {
-  if (value === null) return 'n/a';
-  return unit === 'dbfs' ? dbfs(value) : db(value);
+  status: StageStatus;
+  reason?: string;
+  warning?: string;
+  derived: DerivedValue[];
+  detail?: string;
 }
 
-/** The four numbers every applied stage reports, in one line. */
-function deltaText(delta: StageDelta): string {
-  const parts = [
-    `RMS ${dbfs(delta.rmsBeforeDb)} → ${dbfs(delta.rmsAfterDb)}`,
-    `peak ${dbfs(delta.peakBeforeDb)} → ${dbfs(delta.peakAfterDb)}`,
-  ];
-  if (delta.identicalFraction !== null) parts.push(`${pct(delta.identicalFraction)} of samples unchanged`);
-  if (delta.differenceRmsDb !== null) parts.push(`difference ${dbfs(delta.differenceRmsDb)}`);
-  return parts.join(' · ');
-}
-
-/**
- * What a band's non-matched status means, in words — a band with no correction
- * says WHY it has none.
- *
- * Keyed by `Exclude<MatchBandStatus, 'matched'>` rather than by `string`, so the
- * comment's claim to be exhaustive is one the COMPILER makes: a fifth member of
- * the union is a compile error here rather than a dangling em-dash followed by
- * "undefined" in the table. The `matched` entry is excluded because it is never
- * read — the render guard below is `status !== 'matched'` — and an entry that
- * cannot be reached is one nobody can tell is wrong.
- */
-const BAND_STATUS_TEXT: Record<Exclude<MatchBandStatus, 'matched'>, string> = {
-  'below-range': 'below the measured range',
-  'above-nyquist': 'above Nyquist',
-  'no-signal': 'no signal',
-};
-
-/**
- * The match curve, per band, TARGET against REALISED (Ruling B).
- *
- * Both columns are shown because they are different numbers and the difference
- * is the point: the Graphic EQ is a cascade of overlapping peaking filters, so
- * the gain a band is given is not the response it produces. The realised column
- * is what the audio received.
- */
-function MatchEqTable({ eq }: { eq: MatchEqDetail }) {
+function NestedStages({ parentId, stages }: { parentId: string; stages: readonly NestedStage[] }) {
   return (
-    <table data-testid="cover-chain-eq-table" className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
-      <thead>
-        <tr style={{ color: 'var(--glass-text-muted)' }}>
-          <th className="text-left font-normal" style={{ padding: '2px 0' }}>
-            Band
-          </th>
-          <th className="text-right font-normal">Wanted</th>
-          <th className="text-right font-normal">Realised</th>
-          <th className="text-right font-normal">EQ gain</th>
-        </tr>
-      </thead>
-      <tbody>
-        {eq.bands.map((band) => (
-          <tr key={band.centreHz} data-testid={`cover-chain-eq-row-${band.centreHz}`}>
-            <td style={{ color: 'var(--glass-text-label)', padding: '2px 0' }}>
-              {band.centreHz >= 1000 ? `${band.centreHz / 1000} kHz` : `${band.centreHz} Hz`}
-              {band.status !== 'matched' && (
-                <span style={{ color: 'var(--glass-text-muted)' }}> — {BAND_STATUS_TEXT[band.status]}</span>
-              )}
-              {band.bounded && <span style={{ color: AMBER }}> — bounded</span>}
-            </td>
-            <td className="text-right font-mono" style={{ color: 'var(--glass-text-secondary)' }}>
-              {band.status === 'matched' ? signedDb(band.targetDb) : '—'}
-            </td>
-            <td className="text-right font-mono" style={{ color: 'var(--glass-text-title)' }}>
-              {signedDb(band.realisedDb)}
-            </td>
-            <td className="text-right font-mono" style={{ color: 'var(--glass-text-secondary)' }}>
-              {signedDb(band.bandGainDb)}
-            </td>
-          </tr>
-        ))}
-      </tbody>
-    </table>
+    <div
+      data-testid={`cover-journey-nested-${parentId}`}
+      className="mt-2 flex flex-col gap-1"
+      style={{ borderLeft: '2px solid var(--glass-border)', paddingLeft: 8 }}
+    >
+      {stages.map((s) => (
+        <div key={s.id} data-testid={`cover-journey-nested-${parentId}-${s.id}`}>
+          <div className="flex items-baseline justify-between gap-2">
+            <span className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
+              {s.label}
+            </span>
+            <span className="shrink-0 text-xs" style={{ color: SUB_STATUS_COLOR[s.status] }}>
+              {SUB_STATUS_TEXT[s.status]}
+            </span>
+          </div>
+          {s.status === 'declined' && s.reason && (
+            <p className="text-xs" style={{ color: AMBER }}>
+              {s.reason}
+            </p>
+          )}
+          {s.warning && (
+            <p className="text-xs" style={{ color: AMBER }}>
+              Warning — {s.warning}
+            </p>
+          )}
+          {s.derived.map((d) => (
+            <p key={d.label} className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              <span className="font-mono">
+                {d.label}: {d.value}
+              </span>
+            </p>
+          ))}
+          {s.detail && (
+            <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              {s.detail}
+            </p>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 
-/** What one stage did, under that stage's own row. A declined stage renders its
- * reason INSTEAD, in amber; a stage that ran but needs a caveat renders the
- * caveat as well, in the same amber, because both are "read this". */
-function StageResult({ result }: { result: CoverChainStageResult }) {
-  if (result.status === 'declined') {
-    return (
-      <p data-testid={`cover-chain-reason-${result.id}`} className="mt-1 text-xs" style={{ color: STATUS_COLOR.declined }}>
-        Did not run — {result.reason}
-      </p>
-    );
-  }
-  if (result.status !== 'applied') return null;
+/** What one journey stage decided, under that stage's own row. */
+function StageResult({ result }: { result: CoverJourneyStageResult }) {
+  const nested: NestedStage[] | null = result.vocalChain
+    ? result.vocalChain.stages
+    : result.coverChain
+      ? result.coverChain.stages
+      : null;
   return (
     <div className="mt-1 flex flex-col gap-0.5">
+      {result.reason && (
+        <p
+          data-testid={`cover-journey-reason-${result.id}`}
+          className="text-xs"
+          style={{ color: result.status === 'failed' ? '#ef5350' : AMBER }}
+        >
+          {STATUS_TEXT[result.status]} — {result.reason}
+        </p>
+      )}
       {result.warning && (
-        <p data-testid={`cover-chain-warning-${result.id}`} className="text-xs" style={{ color: AMBER }}>
+        <p data-testid={`cover-journey-warning-${result.id}`} className="text-xs" style={{ color: AMBER }}>
           Warning — {result.warning}
         </p>
       )}
       {result.derived.map((d) => (
         <p
           key={d.label}
-          data-testid={`cover-chain-derived-${result.id}`}
+          data-testid={`cover-journey-derived-${result.id}`}
           className="text-xs"
           style={{ color: 'var(--glass-text-label)' }}
         >
@@ -249,113 +164,73 @@ function StageResult({ result }: { result: CoverChainStageResult }) {
           <span style={{ color: 'var(--glass-text-muted)' }}> — from {d.from}</span>
         </p>
       ))}
-      {result.eq && (
-        <div className="mt-1">
-          <MatchEqTable eq={result.eq} />
-        </div>
-      )}
-      {result.detail && (
-        <p data-testid={`cover-chain-detail-${result.id}`} className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
-          {result.detail}
-        </p>
-      )}
-      {result.delta && (
-        <p
-          data-testid={`cover-chain-delta-${result.id}`}
-          className="font-mono text-xs"
-          style={{ color: 'var(--glass-text-secondary)' }}
-        >
-          {deltaText(result.delta)}
-        </p>
-      )}
+      {nested && nested.length > 0 && <NestedStages parentId={result.id} stages={nested} />}
     </div>
   );
 }
 
 /**
- * F10 — the Cover Chain.
+ * CP1 — the Cover Chain, as the whole journey.
  *
- * The engine (`services/coverChain.ts`) owns the order, the derivations and the
- * single undo entry. This dialog owns two jobs.
+ * Two inputs at the top (the original song, and the take), six automatic stages
+ * as the body, and nothing left for the user to wire up in between. What was
+ * five documented manual steps is now two automated passes, one automated
+ * placement, an automated session and an automated smoothing — with Align
+ * Lyrics the one genuinely manual pre-step that remains, listed with its reason.
  *
- * The first is the vocal chain's: make the pass ACCOUNTABLE. Every stage listed
- * in registry order — which IS the order the four automatic ones run in, and is
- * only the order the five manual ones are listed in, since nothing here runs
- * them — with the note that says why it sits there, individually
- * switchable; DURING the run, that same list live — every row carrying a state,
- * the running one highlighted and saying what it is doing and how far through
- * ITSELF it is, which the overall bar cannot when one stage carries 56 of the
- * 68 weight; afterwards, every stage saying what it did, with the settings it
- * derived and what it derived them from — and, for the match, the curve the EQ
- * MEASURABLY DELIVERED rather than the one it was asked for.
- *
- * The second is specific to this feature, and it is why the honesty block sits
- * ABOVE the Apply button rather than in a footnote. The instrumental a cover is
- * laid over still contains the original singer, measured; the match is a gentle
- * shaping and not a transformation; and a single take still has to be a good
- * take. A user who reads those three sentences after pressing Apply has been
- * told too late.
+ * The honesty block still sits ABOVE the button rather than in a footnote, and
+ * for the same reason it did before: the instrumental a cover is laid over still
+ * contains the original singer, the match is a gentle shaping rather than a
+ * transformation, and a single take still has to be a good take. A user who
+ * reads those after pressing Run has been told too late. Two sentences are new,
+ * and both describe things the run itself does: the alignment is a PLACEMENT
+ * rather than a warp, and cancelling before the session is built leaves
+ * documents and no session.
  */
 export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
-  const doc = useAppStore((s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null);
   const documents = useAppStore((s) => s.documents);
-  const selection = useAppStore((s) => s.selection);
+  const activeId = useAppStore((s) => s.activeDocumentId);
 
-  const [enabled, setEnabled] = useState<Record<CoverChainStageId, boolean>>(defaultCoverStageSelection);
-  const [referenceDocId, setReferenceDocId] = useState<string>('');
+  // The take defaults to whatever is in front of the user; the song does not
+  // default at all, because picking the wrong one costs a separation.
+  const [takeDocId, setTakeDocId] = useState<string>(activeId ?? '');
+  const [songDocId, setSongDocId] = useState<string>('');
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [running, setRunning] = useState<string | null>(null);
-  const [report, setReport] = useState<CoverChainReport | null>(null);
+  const [report, setReport] = useState<CoverJourneyReport | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // The live half of the stepper. `liveResults` holds the engine's OWN result
-  // objects as they land — the same ones `report.stages` will carry — and
-  // `stageProgress` holds the last thing the running stage said about itself.
-  const [liveResults, setLiveResults] = useState<CoverChainStageResult[]>([]);
-  const [stageProgress, setStageProgress] = useState<CoverChainStageProgress | null>(null);
+  const [liveResults, setLiveResults] = useState<CoverJourneyStageResult[]>([]);
+  const [stageProgress, setStageProgress] = useState<CoverJourneyStageProgress | null>(null);
 
-  // RemixDialog's unmount-cancel idiom: the cleanup must read the CURRENT value,
-  // so a ref rather than state. It is not a kill switch — the chain owns its own
-  // worker leg and its own undo entry, and a run that has started must be
-  // allowed to land or roll back as one.
+  // Two separate flags. `cancelledRef` is the UNMOUNT guard (RemixDialog's
+  // idiom — the cleanup must read the current value, so a ref rather than
+  // state); `cancelRequestedRef` is the user pressing Cancel, which the engine
+  // polls between stages. They are not the same event and conflating them would
+  // make closing the dialog silently abort a run that was still wanted.
   const cancelledRef = useRef(false);
+  const cancelRequestedRef = useRef(false);
+  const [cancelRequested, setCancelRequested] = useState(false);
   useEffect(() => {
     cancelledRef.current = false;
     return () => {
       cancelledRef.current = true;
+      cancelRequestedRef.current = true;
     };
   }, []);
 
-  if (!doc) return null;
-
-  const rate = doc.sampleRate;
-  const regionSamples = selection ? selection.end - selection.start : docLength(doc);
-  const scopeText = selection
-    ? `Selection — ${secs(regionSamples, rate)}`
-    : `Whole file — ${secs(regionSamples, rate)}`;
-
-  // Anything open except the take itself. The one you want is the "— Vocals"
-  // document Separate into Stems produced, but the list is not filtered by name: a
-  // renamed or re-imported vocal is still a valid reference, and a filter that
-  // hid it would be a rule the user cannot see.
-  const candidates = documents.filter((d) => d.id !== doc.id);
-  // The finished report wins the moment it exists, and a run that FAILED shows
-  // nothing: `runCoverChain` resolves null after rolling the document back, and
-  // the stages that had already reported would otherwise be left on screen
-  // looking like an outcome.
-  const resultById = new Map<CoverChainStageId, CoverChainStageResult>(
-    (report ? report.stages : busy ? liveResults : []).map((r) => [r.id, r] as const)
-  );
-  const anyEnabled = COVER_CHAIN_STAGES.some((s) => s.effectId !== null && enabled[s.id]);
-  const done = report !== null && report.applied;
+  const take = documents.find((d) => d.id === takeDocId) ?? null;
+  const song = documents.find((d) => d.id === songDocId) ?? null;
+  const ready = take !== null && song !== null && song.id !== take.id;
+  const done = report !== null;
   const locked = busy || done;
 
-  function toggle(id: CoverChainStageId, next: boolean): void {
-    setEnabled((prev) => ({ ...prev, [id]: next }));
-  }
+  const resultById = new Map<CoverJourneyStageId, CoverJourneyStageResult>(
+    (report ? report.stages : liveResults).map((r) => [r.id, r] as const)
+  );
 
-  async function handleApply(): Promise<void> {
-    if (busy || done || !anyEnabled) return;
+  async function handleRun(): Promise<void> {
+    if (!ready || busy || done) return;
     setBusy(true);
     setProgress(0);
     setRunning(null);
@@ -363,12 +238,15 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
     setReport(null);
     setLiveResults([]);
     setStageProgress(null);
+    cancelRequestedRef.current = false;
+    setCancelRequested(false);
     try {
-      const result = await runCoverChain({
-        enabled,
-        referenceDocId: referenceDocId === '' ? null : referenceDocId,
-        onProgress: (fraction) => {
-          if (!cancelledRef.current) setProgress(fraction);
+      const result = await runCoverJourney({
+        songDocId,
+        takeDocId,
+        shouldCancel: () => cancelRequestedRef.current,
+        onProgress: (f) => {
+          if (!cancelledRef.current) setProgress(f);
         },
         onStageStart: (stage) => {
           if (!cancelledRef.current) setRunning(stage.label);
@@ -377,18 +255,14 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
           if (!cancelledRef.current) setStageProgress(p);
         },
         onStageResult: (r) => {
-          // Appended, never merged by id: the engine reports each stage once,
-          // in registry order, and rebuilding the row from the report's own
-          // object is what keeps the live text and the finished text the same
-          // text.
           if (!cancelledRef.current) setLiveResults((prev) => [...prev, r]);
         },
       });
       if (cancelledRef.current) return;
       if (!result) {
-        // The engine reports its own failure through the shared error dialog and
-        // leaves the document untouched; this line is what stays on screen here.
-        setError('The chain did not run. Nothing in the document was changed.');
+        setError(
+          'The pass could not start. Choose an original song and a vocal take — two different documents, both with audio in them.'
+        );
       } else {
         setReport(result);
       }
@@ -404,16 +278,19 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogShell
       title="Cover Chain"
-      subtitle={doc.name}
+      subtitle={song && take ? `${take.name} over ${song.name}` : 'the whole journey'}
       icon={<Mic2 size={15} />}
-      width={640}
+      width={680}
       onClose={onClose}
       dismissable={!busy}
     >
       <div className="flex flex-col gap-3" data-testid="cover-chain-dialog">
-        <div data-testid="cover-chain-scope" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-          {scopeText}
-        </div>
+        <p data-testid="cover-journey-intro" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
+          Give it the original song and your vocal take. It separates the original, cleans your take with the
+          Vocal Chain, finds where your take belongs against the original vocal, matches its tone and level to
+          that vocal, builds a session with the original&rsquo;s music and your take on it, and smooths the
+          edges. Every stage reports what it measured; nothing runs that you cannot read afterwards.
+        </p>
 
         <SectionLabel>Before you run this</SectionLabel>
 
@@ -426,13 +303,24 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
         <p data-testid="cover-chain-good-take" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
           {COVER_CHAIN_GOOD_TAKE_SENTENCE}
         </p>
+        <p data-testid="cover-journey-placement-note" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
+          The alignment is a PLACEMENT, not a warp: your whole take is moved by one offset, and a take that
+          drifts against the original still drifts. {COVER_CHAIN_CONFIRM_SENTENCE} Align Vocal Timing and Align
+          Lyrics stay manual for that reason, and are worth running afterwards — Align Lyrics before a second
+          pass, so the replaced word is in the file before any stage measures a level from it.
+        </p>
+        <p data-testid="cover-journey-cancel-note" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+          The run takes minutes and the separation is most of it. Cancel works between stages. The session is
+          built only at stage 5, so cancelling before then leaves you with the documents this pass produced —
+          the stems, and your take with whatever passes had already finished — and no session.
+        </p>
 
-        <SectionLabel>The original vocal to match</SectionLabel>
+        <SectionLabel>What to run it on</SectionLabel>
 
         <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
-          <span className="shrink-0">Reference</span>
+          <span className="w-28 shrink-0">Original song</span>
           <select
-            data-testid="cover-chain-reference"
+            data-testid="cover-journey-song"
             className="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs"
             style={{
               // MT1-4: opaque, not the 5%-white tint. This picker is the
@@ -443,155 +331,147 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
               border: '1px solid var(--glass-border)',
               color: 'var(--glass-text-title)',
             }}
-            value={referenceDocId}
+            value={songDocId}
             disabled={locked}
-            onChange={(e) => setReferenceDocId(e.target.value)}
+            onChange={(e) => setSongDocId(e.target.value)}
           >
-            <option value="">— none chosen —</option>
-            {candidates.map((d) => (
-              <option key={d.id} value={d.id}>
-                {d.name}
-              </option>
-            ))}
+            <option value="">— choose the full mix —</option>
+            {documents
+              .filter((d) => d.id !== takeDocId)
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
           </select>
         </label>
 
-        {referenceDocId === '' && (
-          <p data-testid="cover-chain-no-reference" className="text-xs" style={{ color: AMBER }}>
-            Nothing to match against yet. Run Pipeline → Separate into Stems… on the original song, then choose its
-            “— Vocals” document here. Without it every matching stage below will decline.
+        <label className="flex items-center gap-2 text-xs" style={{ color: 'var(--glass-text-label)' }}>
+          <span className="w-28 shrink-0">Your vocal take</span>
+          <select
+            data-testid="cover-journey-take"
+            className="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs"
+            style={{
+              // MT1-4: opaque, for the same reason as the picker above. This
+              // one is new in the journey rewrite, so it never carried the
+              // original fix — a tint here composites to near-white in the
+              // native popup under light-gray option text.
+              background: 'var(--glass-field-bg)',
+              border: '1px solid var(--glass-border)',
+              color: 'var(--glass-text-title)',
+            }}
+            value={takeDocId}
+            disabled={locked}
+            onChange={(e) => setTakeDocId(e.target.value)}
+          >
+            <option value="">— choose your take —</option>
+            {documents
+              .filter((d) => d.id !== songDocId)
+              .map((d) => (
+                <option key={d.id} value={d.id}>
+                  {d.name}
+                </option>
+              ))}
+          </select>
+        </label>
+
+        {take && (
+          <p data-testid="cover-journey-scope" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+            The whole take runs, not a selection — {secs(docLength(take), take.sampleRate)}
+            {song ? ` against ${secs(docLength(song), song.sampleRate)} of song` : ''}.
           </p>
         )}
 
-        <SectionLabel>Stages</SectionLabel>
+        {!ready && !busy && (
+          <p data-testid="cover-journey-not-ready" className="text-xs" style={{ color: AMBER }}>
+            Choose two different documents: the original song (the full mix — this pass separates it for you)
+            and your vocal take.
+          </p>
+        )}
 
-        <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-          The stages run top to bottom over the region above, each on settings worked out from the audio that
-          reaches it. The whole pass lands as a single undo entry.
-        </p>
+        <SectionLabel>The journey</SectionLabel>
 
         <div className="flex flex-col gap-2">
-          {COVER_CHAIN_STAGES.map((stage) => {
+          {COVER_JOURNEY_STAGES.map((stage) => {
             const result = resultById.get(stage.id);
-            const manual = stage.effectId === null;
-            const status: StageStatus | null = result ? result.status : manual ? 'manual' : null;
-            // The live state of this row. A result that has landed decides it;
-            // otherwise the stage is manual, switched off, the one the engine is
-            // currently reporting on, or still waiting its turn.
-            const step: StepState = result
-              ? STEP_OF_STATUS[result.status]
-              : manual
-                ? 'manual'
-                : !enabled[stage.id]
-                  ? 'off'
-                  : stageProgress?.stageId === stage.id
-                    ? 'running'
-                    : 'pending';
-            const activity = step === 'running' ? stageProgress : null;
+            const isRunning = busy && !result && stageProgress?.stageId === stage.id;
+            const status: CoverJourneyStageStatus | null = result ? result.status : null;
+            const activity = isRunning ? stageProgress : null;
             return (
               <div
                 key={stage.id}
-                data-testid={`cover-chain-stage-${stage.id}`}
+                data-testid={`cover-journey-stage-${stage.id}`}
+                data-state={result ? result.status : isRunning ? 'running' : 'idle'}
                 className="rounded-xl"
                 style={{
-                  border: `1px solid ${busy && step === 'running' ? 'var(--accent)' : 'var(--glass-border)'}`,
-                  background:
-                    busy && step === 'running' ? 'var(--accent-ring)' : 'rgba(255, 255, 255, 0.02)',
+                  border: `1px solid ${isRunning ? 'var(--accent)' : 'var(--glass-border)'}`,
+                  background: isRunning ? 'var(--accent-ring)' : 'rgba(255, 255, 255, 0.02)',
                   padding: '8px 10px',
-                  // Dimmed until it has something to say, and only while the run
-                  // is going: before Apply every stage is a choice, and after it
-                  // every stage is a result.
-                  opacity: busy && step === 'pending' ? 0.55 : 1,
+                  opacity: busy && !result && !isRunning ? 0.55 : 1,
                 }}
               >
-                <div className="flex items-start gap-2">
-                  {!manual && (
-                    <input
-                      type="checkbox"
-                      id={`cover-chain-toggle-${stage.id}`}
-                      data-testid={`cover-chain-toggle-${stage.id}`}
-                      checked={enabled[stage.id]}
-                      disabled={locked}
-                      onChange={(e) => toggle(stage.id, e.target.checked)}
-                      className="mt-0.5 accent-[#26c6da]"
-                    />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-baseline justify-between gap-2">
-                      {manual ? (
-                        <span className="text-xs font-semibold" style={{ color: 'var(--glass-text-title)' }}>
-                          {stage.label}
-                        </span>
-                      ) : (
-                        <label
-                          htmlFor={`cover-chain-toggle-${stage.id}`}
-                          className="text-xs font-semibold"
-                          style={{ color: 'var(--glass-text-title)' }}
-                        >
-                          {stage.label}
-                        </label>
-                      )}
-                      {busy ? (
-                        <span
-                          data-testid={`cover-chain-step-${stage.id}`}
-                          data-state={step}
-                          className="shrink-0 text-xs"
-                          style={{ color: STEP_COLOR[step] }}
-                        >
-                          {step === 'done' ? '✓ ' : ''}
-                          {STEP_TEXT[step]}
-                          {activity ? ` · ${Math.round(activity.stageFraction * 100)}%` : ''}
-                          {result?.elapsedMs !== undefined
-                            ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s`
-                            : ''}
-                        </span>
-                      ) : (
-                        status && (
-                          <span
-                            data-testid={`cover-chain-status-${stage.id}`}
-                            className="shrink-0 text-xs"
-                            style={{ color: STATUS_COLOR[status] }}
-                          >
-                            {STATUS_TEXT[status]}
-                            {result?.elapsedMs !== undefined ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s` : ''}
-                          </span>
-                        )
-                      )}
-                    </div>
-                    <p
-                      data-testid={`cover-chain-note-${stage.id}`}
-                      className="mt-1 text-xs"
-                      style={{ color: 'var(--glass-text-muted)' }}
-                    >
-                      {stage.note}
-                    </p>
-                    {activity && (
-                      <div className="mt-1 flex flex-col gap-1">
-                        <p
-                          data-testid={`cover-chain-activity-${stage.id}`}
-                          className="text-xs"
-                          style={{ color: 'var(--glass-text-label)' }}
-                        >
-                          {PHASE_TEXT[activity.phase]} — {activity.detail}
-                        </p>
-                        <div
-                          className="h-1 w-full overflow-hidden rounded-full"
-                          style={{ background: 'rgba(255, 255, 255, 0.09)' }}
-                        >
-                          <div
-                            data-testid={`cover-chain-stage-progress-${stage.id}`}
-                            className="h-full transition-[width]"
-                            style={{
-                              width: `${Math.round(activity.stageFraction * 100)}%`,
-                              background: 'var(--accent)',
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                    {result && <StageResult result={result} />}
-                  </div>
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="text-xs font-semibold" style={{ color: 'var(--glass-text-title)' }}>
+                    {stage.label}
+                  </span>
+                  <span
+                    data-testid={`cover-journey-status-${stage.id}`}
+                    className="shrink-0 text-xs"
+                    style={{ color: status ? STATUS_COLOR[status] : 'var(--accent)' }}
+                  >
+                    {status
+                      ? STATUS_TEXT[status]
+                      : isRunning
+                        ? `Running · ${Math.round((activity?.stageFraction ?? 0) * 100)}%`
+                        : ''}
+                    {result?.elapsedMs !== undefined ? ` · ${(result.elapsedMs / 1000).toFixed(1)} s` : ''}
+                  </span>
                 </div>
+                <p
+                  data-testid={`cover-journey-note-${stage.id}`}
+                  className="mt-1 text-xs"
+                  style={{ color: 'var(--glass-text-muted)' }}
+                >
+                  {stage.note}
+                </p>
+                {activity && (
+                  <div className="mt-1 flex flex-col gap-1">
+                    <p
+                      data-testid={`cover-journey-activity-${stage.id}`}
+                      className="text-xs"
+                      style={{ color: 'var(--glass-text-label)' }}
+                    >
+                      {activity.detail}
+                    </p>
+                    {/* The nested chain's OWN row, never flattened into the line
+                        above: ten vocal-chain stages behind one bar is exactly
+                        what the live view exists to stop. */}
+                    {activity.sub && (
+                      <p
+                        data-testid={`cover-journey-sub-${stage.id}`}
+                        className="text-xs"
+                        style={{ color: 'var(--glass-text-muted)' }}
+                      >
+                        {activity.sub.label} — {activity.sub.detail} ·{' '}
+                        {Math.round(activity.sub.stageFraction * 100)}%
+                      </p>
+                    )}
+                    <div
+                      className="h-1 w-full overflow-hidden rounded-full"
+                      style={{ background: 'rgba(255, 255, 255, 0.09)' }}
+                    >
+                      <div
+                        data-testid={`cover-journey-stage-progress-${stage.id}`}
+                        className="h-full transition-[width]"
+                        style={{
+                          width: `${Math.round((activity.stageFraction ?? 0) * 100)}%`,
+                          background: 'var(--accent)',
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+                {result && <StageResult result={result} />}
               </div>
             );
           })}
@@ -599,86 +479,39 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
 
         {report && (
           <>
-            <SectionLabel>Before and after</SectionLabel>
-
-            <table data-testid="cover-chain-summary" className="w-full text-xs" style={{ borderCollapse: 'collapse' }}>
-              <thead>
-                <tr style={{ color: 'var(--glass-text-muted)' }}>
-                  <th className="text-left font-normal" style={{ padding: '2px 0' }}>
-                    Measure
-                  </th>
-                  <th className="text-right font-normal">Before</th>
-                  <th className="text-right font-normal">After</th>
-                  <th className="text-right font-normal">
-                    {report.referenceName ? `The original vocal — ${report.referenceName}` : 'The original vocal'}
-                  </th>
-                </tr>
-              </thead>
-              <tbody>
-                {METRIC_ROWS.map((row) => (
-                  <tr key={row.key} data-testid={`cover-chain-summary-${row.key}`}>
-                    <td style={{ color: 'var(--glass-text-label)', padding: '2px 0' }}>
-                      {row.label}
-                      {row.aimedAt && (
-                        <span style={{ color: 'var(--accent)' }}> — matched to it</span>
-                      )}
-                    </td>
-                    <td className="text-right font-mono" style={{ color: 'var(--glass-text-secondary)' }}>
-                      {metricText(report.before[row.key], row.unit)}
-                    </td>
-                    <td className="text-right font-mono" style={{ color: 'var(--glass-text-title)' }}>
-                      {metricText(report.after[row.key], row.unit)}
-                    </td>
-                    <td className="text-right font-mono" style={{ color: 'var(--glass-text-secondary)' }}>
-                      {report.reference ? metricText(report.reference[row.key], row.unit) : 'n/a'}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-
-            <p data-testid="cover-chain-target-note" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-              The last column is the original vocal&rsquo;s own reading of each measure. Only the two rows marked
-              &ldquo;matched to it&rdquo; are targets: the Peak row&rsquo;s target is the Limiter&rsquo;s own
-              &minus;0.3&nbsp;dBFS ceiling, and nothing here matches an envelope spread or a noise floor.
+            <SectionLabel>What you have now</SectionLabel>
+            <p data-testid="cover-journey-outcome" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
+              {report.completed
+                ? `“${report.placement?.sessionName}” is open in the multitrack view: the original’s music on one track, your take on the other. Press play, or Mix Down to render it. The whole pass took ${(report.elapsedMs / 1000).toFixed(1)} s.`
+                : report.cancelledAt
+                  ? `Cancelled at “${COVER_JOURNEY_STAGES.find((s) => s.id === report.cancelledAt)?.label}”. Every stage above says what it did before it stopped.`
+                  : 'The pass stopped early. The stage that failed says why above.'}
             </p>
-
+            <p data-testid="cover-journey-undo" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              {report.undoEntries.length > 0
+                ? `Undo entries left on your take, newest last: ${report.undoEntries.map((e) => `“${e}”`).join(', ')}. Each pass keeps its own entry — there is deliberately no single entry that undoes the whole journey, because an undo entry belongs to one document and this pass touched two documents and a session.`
+                : 'No pass changed your take, so there is nothing to undo.'}
+            </p>
             <p data-testid="cover-chain-spread-note" className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
               {COVER_CHAIN_SPREAD_SENTENCE}
-            </p>
-
-            <p data-testid="cover-chain-outcome" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
-              {report.applied
-                ? `Applied in ${(report.elapsedMs / 1000).toFixed(1)} s as one undo entry (“${COVER_CHAIN_UNDO_LABEL}”).${
-                    report.outputSamples !== report.regionSamples
-                      ? ` Region length ${secs(report.regionSamples, report.sampleRate)} → ${secs(
-                          report.outputSamples,
-                          report.sampleRate
-                        )}.`
-                      : ''
-                  }`
-                : 'No stage ran, so the document was not changed.'}
             </p>
           </>
         )}
 
         {error && (
-          <p data-testid="cover-chain-error" className="text-xs text-[#ef5350]">
+          <p data-testid="cover-journey-error" className="text-xs text-[#ef5350]">
             {error}
           </p>
         )}
 
         {busy && (
           <div>
-            {/* Named as the WHOLE PASS, because the highlighted row above shows
-                its own bar at its own number and the two legitimately disagree —
-                more sharply here than in the vocal chain: Match EQ carries 56 of
-                the 68 weight, so half way through ITSELF the row reads 50 % while
-                this one reads 41 %, and Match Loudness carries 1, so half way
-                through itself the row reads 50 % while this one reads 83 %.
-                Unlabelled, that reads as a bug in one of them. */}
-            <p data-testid="cover-chain-running" className="mb-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-              {running ? `Whole pass — running ${running}…` : 'Whole pass — starting…'}
+            <p data-testid="cover-journey-running" className="mb-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+              {cancelRequested
+                ? 'Stopping after this stage…'
+                : running
+                  ? `Whole journey — running ${running}…`
+                  : 'Whole journey — starting…'}
             </p>
             <div
               className="h-1.5 w-full overflow-hidden rounded-full"
@@ -688,7 +521,7 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
               }}
             >
               <div
-                data-testid="cover-chain-progress"
+                data-testid="cover-journey-progress"
                 className="h-full transition-[width]"
                 style={{
                   width: `${Math.round(progress * 100)}%`,
@@ -705,18 +538,29 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
             <GlassButton variant="primary" data-testid="cover-chain-close" onClick={onClose}>
               Close
             </GlassButton>
+          ) : busy ? (
+            <GlassButton
+              data-testid="cover-journey-stop"
+              disabled={cancelRequested}
+              onClick={() => {
+                cancelRequestedRef.current = true;
+                setCancelRequested(true);
+              }}
+            >
+              {cancelRequested ? 'Stopping…' : 'Cancel the run'}
+            </GlassButton>
           ) : (
             <>
-              <GlassButton data-testid="cover-chain-cancel" onClick={onClose} disabled={busy}>
-                Cancel
+              <GlassButton data-testid="cover-chain-cancel" onClick={onClose}>
+                Close
               </GlassButton>
               <GlassButton
                 variant="primary"
                 data-testid="cover-chain-apply"
-                onClick={() => void handleApply()}
-                disabled={busy || !anyEnabled}
+                onClick={() => void handleRun()}
+                disabled={!ready}
               >
-                Apply
+                Run the journey
               </GlassButton>
             </>
           )}
