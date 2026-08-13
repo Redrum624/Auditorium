@@ -84,6 +84,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   wired to `file.close`, i.e. `closeDocumentFlow`, so the accelerator inherits the
   prompt-before-discarding guard. It closes one document and leaves the window alone. Affects:
   `src/services/shortcuts.ts`.
+- **The toolbar pill really is on the waveform's axis now, with the module card closed as well as
+  open.** Cause: the band clamped its right padding to `max(inset, 362px)` to keep the pill from
+  sliding under the module strip once the closed card let the stage run on beneath it. Measured in
+  the built app, the clamp was guarding against something that cannot happen and cost the claim it
+  was protecting: the pill is 860.5 px wide, so centred on the closed-card axis (799.7) it ends at
+  1230 while the strip starts at 1237.4 — it clears by 7.4 px. The clamp instead pinned it at 625.7,
+  **174 px off** the axis the status and edit pills sat on, in a state this release newly made
+  reachable, while the guide, the README and this file all said the three pills shared one axis. Fix:
+  the padding mirrors the stage's insets on both sides, so all three centre together in both states.
+  The clearance is thin and depends on the zoom readout's width, so the packaged smoke now asserts
+  the toolbar pill's centre in BOTH card states — it had been collecting that rectangle and never
+  checking it — and asserts that the pill clears the strip at the default zoom and at the deepest
+  zoom the fixture allows. Affects: `src/components/Layout/Toolbar.tsx`, `scripts/e2e-smoke.cjs`.
 
 ### Added
 

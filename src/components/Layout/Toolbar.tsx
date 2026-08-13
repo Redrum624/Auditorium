@@ -282,15 +282,29 @@ export default function Toolbar() {
         // or closing the module card re-centres the pill in the same layout
         // pass, with nothing measured and no resize listener.
         //
-        // The right side is clamped to the module STRIP's footprint (14 margin
-        // + 348 column). With a card open that clamp is inert — the stage's
-        // right inset is the strip's footprint plus air, so the pill lands
-        // exactly on the stage's centre. With the card closed the stage runs
-        // on under the strip, but the pill shares the strip's row and cannot:
-        // following the stage there would slide the zoom cluster beneath the
-        // module icons.
+        // F2: the right side used to carry `max(..., 362px)`, a clamp meant to
+        // stop the pill sliding under the module strip when the card is closed
+        // and the stage runs on beneath it. Measured in the built app, that
+        // clamp was not protecting anything and cost the whole claim: the pill
+        // is 860.5 px wide, the axis with the card closed is 799.7, so an
+        // axis-centred pill ends at 1230 while the strip starts at 1237.4 — it
+        // CLEARS by 7.4 px. The clamp meanwhile pushed the pill to 625.7, i.e.
+        // 174 px off the axis the status and edit pills sit on, in the state
+        // this layout newly made reachable. Dropped, so all three pills share
+        // one axis in both card states, which is what the guide, the README and
+        // the changelog have been claiming all along.
+        //
+        // The clearance is thin and content-dependent, so the smoke pins it
+        // rather than trusting it: the only part of this pill that changes
+        // width is the zoom readout, which grows once the percentage passes its
+        // 46px min-width (measured: 860.5 px at "100%", 864.4 at "10842%",
+        // ~3.9 px per further digit). Overlap needs the pill past 875.4 px —
+        // about a nine-digit percentage, which takes a ~19-minute file at the
+        // 1/32 samples-per-pixel maximum. Step 13b asserts the clearance at
+        // both the default zoom and the deepest zoom the fixture allows, so
+        // widening this pill fails loudly instead of quietly touching the strip.
         paddingLeft: 'var(--stage-inset-left, 14px)',
-        paddingRight: 'max(var(--stage-inset-right, 376px), 362px)',
+        paddingRight: 'var(--stage-inset-right, 376px)',
       }}
     >
       <ChromePill

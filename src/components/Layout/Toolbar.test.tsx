@@ -441,14 +441,22 @@ describe('Toolbar — the file chip is retired (U1)', () => {
     expect(screen.getByTestId('zoom-readout')).toHaveTextContent('25%');
   });
 
-  it('centres the band on the WAVEFORM, clamped clear of the module strip', () => {
+  // F2: this used to pin `max(var(--stage-inset-right, 376px), 362px)`. That
+  // clamp put the pill 174 px off the axis whenever the module card was closed
+  // — measured in the built app — while the status and edit pills stayed on it,
+  // and while four doc sentences claimed all three shared one axis. It was
+  // guarding against an overlap that cannot happen at the pill's realised
+  // width (860.5 px clears the strip by 7.4 px with the card closed), so the
+  // padding is now the stage's own inset on BOTH sides: one axis, both states.
+  it('centres the band on the WAVEFORM in both card states — no clamp to knock it off axis', () => {
     const { container } = render(<Toolbar />);
     const band = container.firstElementChild as HTMLElement;
     expect(band.className).toContain('justify-center');
     expect(band.style.paddingLeft).toBe('var(--stage-inset-left, 14px)');
-    // The clamp: with a card open this is the stage's own right inset; with it
-    // closed the stage runs on under the strip and the pill must not.
-    expect(band.style.paddingRight).toBe('max(var(--stage-inset-right, 376px), 362px)');
+    expect(band.style.paddingRight).toBe('var(--stage-inset-right, 376px)');
+    // Named explicitly so re-introducing a clamp has to argue with this test
+    // rather than slip past it: the padding mirrors the insets, nothing more.
+    expect(band.style.paddingRight).not.toContain('max(');
   });
 });
 

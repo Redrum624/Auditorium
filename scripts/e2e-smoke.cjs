@@ -305,9 +305,15 @@ async function realClick(page, clientX, clientY, { alt = false } = {}) {
 // what lets the waveform take the column's width in the E2 layout. Every step
 // below that clicked a strip entry meant "show me this panel", and a blind
 // click on an already-open one would now close it instead. Asking first keeps
-// each step's intent intact under the new toggle; the click path is still
-// exercised, because the entry is not already active at any of these sites in
-// a normal run.
+// each step's intent intact under the new toggle.
+//
+// F3: this comment used to claim the entry "is not already active at any of
+// these sites in a normal run". That was false — step 13's Files card is still
+// open from step 12 — so the guard returned early and the step's own "the
+// Files entry drives the panel card" assertion passed on inherited state,
+// never once exercising a click. Step 13 now switches to another card first,
+// so its click is real; the return value says whether one happened, and any
+// site that depends on the click can assert it.
 async function openModuleCard(page, label) {
   const already = await page.evaluate(
     () => document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab'),
@@ -2241,7 +2247,15 @@ async function main() {
       () => document.querySelectorAll('[data-testid="sidebar-tabs"]').length
     );
     assert(railCount === 1, `exactly one icon rail is mounted (actual ${railCount})`);
-    await openModuleCard(page, 'Files'); // U1: the strip's active entry toggles its card closed
+    // F3: step 12 leaves Files open, so asking for it again used to be a no-op
+    // and the assertion below measured inherited state. Switch away first, so
+    // the Files entry is genuinely clicked and genuinely drives the card.
+    await openModuleCard(page, 'History');
+    const clickedFiles = await openModuleCard(page, 'Files');
+    assert(
+      clickedFiles === true,
+      'the Files strip entry was really clicked, not found already open (F3)'
+    );
     const activeTabG4 = await page.evaluate(() =>
       document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab')
     );
@@ -2359,8 +2373,29 @@ async function main() {
       e2.edit !== null && air >= 12 && air <= 20,
       `the edit pill floats above the bottom bar with ~16px of clear air (actual ${Math.round(air)})`
     );
+    // F4: the canvas width is checked against the PUBLISHED insets above, which
+    // a wrong inset would satisfy by moving both sides of the comparison. Tie
+    // the right inset to the module column it is supposed to clear, so the
+    // token has to agree with the thing it describes and not merely with the
+    // canvas it produced. `14 + 348 + 14` is App.tsx's
+    // COLUMN_MARGIN + MODULE_COLUMN_WIDTH + COLUMN_MARGIN.
+    assert(
+      Math.abs(parseFloat(e2.insetRight) - (e2.strip.width + 28)) <= 1,
+      `the right inset is the module column's own width plus its margins ` +
+        `(strip ${Math.round(e2.strip.width)} + 28 = ${Math.round(e2.strip.width + 28)}, inset ${e2.insetRight})`
+    );
+    // F2: the toolbar pill joins the two it was documented to share an axis
+    // with. It was collected here from the start and never asserted, which is
+    // how it stayed 174 px off that axis with the card closed.
     const waveAxis = e2.canvas.x + e2.canvas.width / 2;
-    for (const [name, b] of [['status pill', e2.status], ['edit pill', e2.edit]]) {
+    console.log(
+      `  toolbar pill ${Math.round(e2.toolbar.width)} wide, centre ${Math.round(e2.toolbar.x + e2.toolbar.width / 2)}; wave axis ${Math.round(waveAxis)}`
+    );
+    for (const [name, b] of [
+      ['status pill', e2.status],
+      ['edit pill', e2.edit],
+      ['toolbar pill', e2.toolbar],
+    ]) {
       const centre = b.x + b.width / 2;
       assert(
         Math.abs(centre - waveAxis) <= 2,
@@ -2387,11 +2422,22 @@ async function main() {
     // whole strip rearrangement exists for.
     await page.click('[data-testid="sidebar-tabs"] button[aria-label="Files"]');
     const collapsed = await page.evaluate(() => {
+      const box = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { x: r.x, width: r.width, right: r.right };
+      };
       const c = document.querySelector('[data-testid="waveform-canvas"]').getBoundingClientRect();
       return {
         width: c.width,
+        x: c.x,
         panel: document.querySelectorAll('[data-testid="sidebar-panel"]').length,
         strip: document.querySelectorAll('[data-testid="sidebar-tabs"]').length,
+        toolbar: box('[data-testid="toolbar-pill"]'),
+        status: box('[data-testid="status-pill"]'),
+        edit: box('[data-testid="edit-pill"]'),
+        stripBox: box('[data-testid="sidebar-tabs"]'),
       };
     });
     console.log(
@@ -2406,6 +2452,63 @@ async function main() {
       collapsed.width > e2.canvas.width + 300,
       `the closed card's width goes to the waveform (expected > ${Math.round(e2.canvas.width + 300)}, actual ${Math.round(collapsed.width)})`
     );
+    // F2: the card-CLOSED state is the one the retired clamp existed for, and
+    // the one nothing measured — the toolbar pill sat 174 px off the axis here
+    // while the guide, the README and the changelog all said otherwise. The
+    // axis MOVED when the card closed (the lane grew), so this is a genuinely
+    // different assertion from the one above, not a repeat.
+    const closedAxis = collapsed.x + collapsed.width / 2;
+    console.log(
+      `  card closed: wave axis ${Math.round(closedAxis)}; toolbar centre ${Math.round(collapsed.toolbar.x + collapsed.toolbar.width / 2)}, ` +
+        `status ${Math.round(collapsed.status.x + collapsed.status.width / 2)}, edit ${Math.round(collapsed.edit.x + collapsed.edit.width / 2)}`
+    );
+    for (const [name, b] of [
+      ['status pill', collapsed.status],
+      ['edit pill', collapsed.edit],
+      ['toolbar pill', collapsed.toolbar],
+    ]) {
+      const centre = b.x + b.width / 2;
+      assert(
+        Math.abs(centre - closedAxis) <= 2,
+        `with the card CLOSED the ${name} is still on the WAVEFORM's axis ` +
+          `(expected ${Math.round(closedAxis)} +/-2, actual ${Math.round(centre)})`
+      );
+    }
+    // The invariant that let the clamp go: an axis-centred toolbar pill clears
+    // the module strip. Thin (7.4 px measured) and content-dependent — the zoom
+    // readout is the only part of the pill that changes width — so it is pinned
+    // rather than assumed, at the default zoom AND at the deepest zoom this
+    // fixture allows, which is where the readout is widest.
+    assert(
+      collapsed.toolbar.right < collapsed.stripBox.x,
+      `the axis-centred toolbar pill clears the module strip with the card closed ` +
+        `(pill ends ${Math.round(collapsed.toolbar.right)}, strip starts ${Math.round(collapsed.stripBox.x)})`
+    );
+    const deepZoom = await page.evaluate(async () => {
+      const btn = document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Zoom In"]');
+      for (let i = 0; i < 30; i++) btn.click();
+      await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+      const pill = document.querySelector('[data-testid="toolbar-pill"]').getBoundingClientRect();
+      const strip = document.querySelector('[data-testid="sidebar-tabs"]').getBoundingClientRect();
+      return {
+        readout: document.querySelector('[data-testid="zoom-readout"]')?.textContent ?? null,
+        width: pill.width,
+        right: pill.right,
+        stripX: strip.x,
+      };
+    });
+    console.log(
+      `  deepest zoom: readout ${deepZoom.readout}, pill ${Math.round(deepZoom.width)} wide, ` +
+        `ends ${Math.round(deepZoom.right)}, strip starts ${Math.round(deepZoom.stripX)}`
+    );
+    assert(
+      deepZoom.right < deepZoom.stripX,
+      `and still clears it at the widest the zoom readout gets (${deepZoom.readout}: pill ends ` +
+        `${Math.round(deepZoom.right)}, strip starts ${Math.round(deepZoom.stripX)})`
+    );
+    await page.evaluate(() => {
+      document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Fit"]').click();
+    });
     await openModuleCard(page, 'Files'); // restore the state step 14's screenshot expects
 
     // 14) Screenshot ---------------------------------------------------------
