@@ -11,6 +11,7 @@ import { readOpusTags } from '../audio/oggPage';
 import { encodeWav, type WavBitDepth } from '../audio/wavCodec';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import {
+  applyEditorZoom,
   useAppStore,
   type AppState,
   type Marker,
@@ -210,7 +211,17 @@ function rollbackOpen(docId: string, before: ViewStateSnapshot): void {
   // after it, not before.
   store().setSelection(before.selection);
   store().setCursor(before.cursorSample);
-  store().setZoom(before.zoom);
+  // M3: through the ONE clamping writer, not `setZoom` — this was the sixth
+  // surface writing the store's zoom raw. A snapshot is only known-good for the
+  // lane it was taken against, and an open is exactly the window in which that
+  // can change: a decode runs for hundreds of milliseconds, and a panel card
+  // opening or the window being dragged wider both re-measure the lane. A WIDER
+  // lane shows more of the document, so `maxScroll` shrinks, and restoring the
+  // snapshot's scroll verbatim puts the viewport past an end the waveform
+  // cannot follow — the F11-9 symptom, through one more door. `resolveZoom`
+  // carries an unchanged request through untouched, so the ordinary rollback
+  // (nothing resized) restores the snapshot exactly.
+  applyEditorZoom(before.zoom);
 }
 
 /**

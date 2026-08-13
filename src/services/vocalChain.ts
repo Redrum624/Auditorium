@@ -881,9 +881,18 @@ function yieldToPaint(): Promise<void> {
  *
  * The whole thing is gated on the callback being present. A frame per stage is
  * real work, and `testHooks` and the packaged smoke drive both chains with no
- * callbacks whatsoever: they must keep bit-for-bit today's timing, so the gate
- * is part of the additive contract rather than an optimisation. Shared by both
- * chains so neither can quietly stop yielding.
+ * callbacks whatsoever, so the gate is part of the additive contract rather
+ * than an optimisation. Shared by both chains so neither can quietly stop
+ * yielding.
+ *
+ * What the gate costs when it fires, stated exactly. This is an `async`
+ * function, so `await announceMeasuring(...)` still suspends the caller for one
+ * microtask tick before `resolveStage` runs, where pre-P1 the call was plainly
+ * synchronous. That tick is the whole difference: no `requestAnimationFrame`,
+ * no task boundary, no timer, and nothing on the audio path — the samples, the
+ * stage order and every derived number are identical. "Unchanged" here means
+ * unchanged in result and in scheduling CLASS, not a claim that the callback-
+ * free run is instruction-for-instruction what it was.
  */
 export async function announceMeasuring<Id extends string>(
   onStageProgress: ((progress: ChainStageProgress<Id>) => void) | undefined,

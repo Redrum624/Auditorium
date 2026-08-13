@@ -131,9 +131,14 @@ function clamp(v: number, lo: number, hi: number): number {
  * guessed for "a ~800 px viewport" (Markers, Remix and Transcript "go to", plus
  * both transport jumps). Since fit-on-open they were all writing past the end
  * of a document that starts entirely on screen. They route through
- * {@link centreEditorOn} / {@link applyEditorZoom} now, which is what makes the
- * sentence above true rather than aspirational. If you add a sixth, route it
- * here too — a comment claiming single-sourcing does not enforce it.
+ * {@link centreEditorOn} / {@link applyEditorZoom} now.
+ *
+ * The sixth was found by review, not by symptom: `fileService.rollbackOpen`
+ * restored its view-state snapshot with a raw `setZoom`, and a snapshot is only
+ * known-good for the lane it was taken against — a decode is exactly the window
+ * in which the lane can be re-measured (M3). It routes here too. That is the
+ * lesson rather than the count: a comment claiming single-sourcing does not
+ * enforce it, so grep `setZoom` before believing this paragraph.
  *
  * The two clamps are one rule stated twice: together they say the visible
  * window `[scrollSample, scrollSample + laneWidth * spp)` never runs past the

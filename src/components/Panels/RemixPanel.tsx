@@ -241,7 +241,6 @@ export default function RemixPanel() {
   const zoom = useAppStore((s) => s.zoom);
   const view = useAppStore((s) => s.view);
   const setCursor = useAppStore((s) => s.setCursor);
-  const setZoom = useAppStore((s) => s.setZoom);
   const setView = useAppStore((s) => s.setView);
 
   const [busy, setBusy] = useState(false);
@@ -292,9 +291,10 @@ export default function RemixPanel() {
     }
   };
 
-  // `MarkersPanel.tsx:72-85` verbatim: leave multitrack first (the cursor/zoom
-  // jump is invisible there), then move the cursor and approximate centring
-  // for a ~800 px viewport, which is the only width this panel can assume.
+  // MarkersPanel's rule, and TranscriptPanel's: leave multitrack first (the
+  // cursor/zoom jump is invisible there), then move the cursor and centre. The
+  // "~800 px viewport" this used to approximate is gone — `centreEditorOn`
+  // reads the lane's MEASURED width, so no panel guesses it any more.
   const goTo = (positionSample: number): void => {
     if (view === 'multitrack') setView('waveform');
     setCursor(positionSample);

@@ -32,7 +32,6 @@ export default function MarkersPanel() {
   const zoom = useAppStore((s) => s.zoom);
   const view = useAppStore((s) => s.view);
   const setCursor = useAppStore((s) => s.setCursor);
-  const setZoom = useAppStore((s) => s.setZoom);
   const setView = useAppStore((s) => s.setView);
   const renameMarker = useAppStore((s) => s.renameMarker);
   const removeMarker = useAppStore((s) => s.removeMarker);

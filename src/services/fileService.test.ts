@@ -18,6 +18,7 @@ import { buildId3Chapters } from '../audio/id3Chapters';
 import { buildChapterComments, buildVorbisCommentPayload } from '../audio/chapterTags';
 import { muxOpusStream } from '../audio/oggPage';
 import * as undoHistory from './undoHistory';
+import { setEditorLaneWidth, _resetEditorLaneWidth } from './editorViewport';
 import { _resetPendingOpens, getPendingOpens } from './openProgress';
 import { pushMarkerUndo, deleteSelection } from './editOps';
 import * as peaksCache from './peaksCache';
@@ -133,10 +134,18 @@ function buildFakeOggWithMarkers(markers: { positionSample: number; name: string
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   jest.clearAllMocks();
+  // Module-level state: a test that resizes the lane must not leave it resized
+  // for the next one, whose zoom expectations are written for the 1600 px
+  // fallback.
+  _resetEditorLaneWidth();
   mockDecode.mockResolvedValue(decoded());
   mockEncodeMp3.mockReturnValue(new ArrayBuffer(2048));
   mockEncodeFlac.mockReturnValue(new ArrayBuffer(4096));
   mockEncodeOgg.mockResolvedValue(new Uint8Array([0x4f, 0x67, 0x67, 0x53]));
+});
+
+afterAll(() => {
+  _resetEditorLaneWidth();
 });
 
 describe('openFilePath', () => {
@@ -486,15 +495,19 @@ describe('openFilePath — a failed open leaves nothing behind (O1-1)', () => {
 
   it('restores the selection, cursor and zoom the failed open reset (R1)', async () => {
     // `addDocument` clears all three on its way in, so "the documents already
-    // open are untouched" is only true if they come back.
+    // open are untouched" is only true if they come back. The zoom seeded here
+    // is LEGAL for `a` at the fallback 1600 px lane (10 000 samples at 4 spp
+    // shows 6 400, so scroll may run to 3 600), which is what makes this a test
+    // of the restore rather than of the clamp — the clamp has its own below.
     installApi();
+    mockDecode.mockResolvedValueOnce(decoded(44100, 2, 10_000));
     await openFilePath('D:\\audio\\a.wav');
     await openFilePath('D:\\audio\\b.wav');
     const [a] = useAppStore.getState().documents;
     useAppStore.getState().setActiveDocument(a.id);
     useAppStore.getState().setSelection({ start: 10, end: 40 });
     useAppStore.getState().setCursor(25);
-    useAppStore.getState().setZoom({ samplesPerPixel: 64, scrollSample: 8 });
+    useAppStore.getState().setZoom({ samplesPerPixel: 4, scrollSample: 8 });
 
     mockDecode.mockResolvedValueOnce(decodedWithFailingMarkers('marker seeding exploded'));
     await expect(openFilePath('D:\\audio\\c.wav')).rejects.toThrow();
@@ -503,7 +516,43 @@ describe('openFilePath — a failed open leaves nothing behind (O1-1)', () => {
     expect(state.activeDocumentId).toBe(a.id);
     expect(state.selection).toEqual({ start: 10, end: 40 });
     expect(state.cursorSample).toBe(25);
-    expect(state.zoom).toEqual({ samplesPerPixel: 64, scrollSample: 8 });
+    expect(state.zoom).toEqual({ samplesPerPixel: 4, scrollSample: 8 });
+  });
+
+  it('CLAMPS the restored zoom against the lane the user is looking at now (M3)', async () => {
+    // The seventh door onto the F11-9 symptom. `rollbackOpen` restored the
+    // snapshot with a raw `setZoom`, which is the one writer that skips
+    // `resolveZoom` — so a scroll that was legal when the snapshot was taken
+    // came back unchecked however the world had moved underneath it.
+    //
+    // The move that does it is a lane RESIZE during the decode, which is a
+    // realistic several-hundred-millisecond window: a panel card opening or the
+    // window being dragged wider both change `editorLaneWidth`. A WIDER lane
+    // shows more of the document, so `maxScroll` SHRINKS — the snapshot's
+    // scroll is now past an end the waveform cannot follow, and the beat tics
+    // and the ruler slide off it.
+    //
+    // Kills the mutation `applyEditorZoom(before.zoom)` -> `setZoom(before.zoom)`.
+    installApi();
+    mockDecode.mockResolvedValueOnce(decoded(44100, 2, 10_000));
+    await openFilePath('D:\\audio\\a.wav');
+    const [a] = useAppStore.getState().documents;
+    useAppStore.getState().setActiveDocument(a.id);
+    // Legal at 1600 px: maxScroll = 10 000 - 1600*4 = 3 600, exactly the end.
+    useAppStore.getState().setZoom({ samplesPerPixel: 4, scrollSample: 3_600 });
+
+    mockDecode.mockImplementationOnce(async () => {
+      // The editor lane gets wider while the decode is in flight. At 2400 px
+      // the same 4 spp shows 9 600 samples, so maxScroll drops to 400.
+      setEditorLaneWidth(2_400);
+      return decodedWithFailingMarkers('marker seeding exploded');
+    });
+    await expect(openFilePath('D:\\audio\\b.wav')).rejects.toThrow();
+
+    const state = useAppStore.getState();
+    expect(state.activeDocumentId).toBe(a.id);
+    expect(state.zoom.samplesPerPixel).toBe(4); // the zoom LEVEL is carried through
+    expect(state.zoom.scrollSample).toBe(400); // not the snapshot's 3 600
   });
 
   it('leaves the store alone when the previously-active document is gone', async () => {

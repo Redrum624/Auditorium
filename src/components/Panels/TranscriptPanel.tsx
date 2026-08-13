@@ -58,7 +58,6 @@ export default function TranscriptPanel() {
   const zoom = useAppStore((s) => s.zoom);
   const view = useAppStore((s) => s.view);
   const setCursor = useAppStore((s) => s.setCursor);
-  const setZoom = useAppStore((s) => s.setZoom);
   const setView = useAppStore((s) => s.setView);
 
   if (!doc || !activeDocumentId) {
