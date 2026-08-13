@@ -4449,6 +4449,36 @@ async function main() {
       `Ctrl+Y re-applied the exact committed position (${undoAfterY.clips[0].startSample} === ${movedStart})`
     );
 
+    // M4: Fit before grabbing the right edge, because the edge is no longer on
+    // screen without it. A session now opens FITTED (MT1), so this clip fills
+    // the lane exactly — 88200 samples across 985 px — and the +150 px move
+    // above therefore pushes its right edge 150 px PAST the visible lane. The
+    // layout rect still reports it, so `x + width - 2` looks like a valid
+    // coordinate while `elementFromPoint` there returns the multitrack view
+    // rather than the clip's resize handle, and the drag silently trims
+    // nothing. That is not a regression in the app — a session that grew does
+    // not re-fit itself, deliberately (only shrinking re-resolves) — it is this
+    // step's own assumption, written when a session opened at 512 samples/px
+    // and a 2 s clip was 172 px wide with room to spare. Fit is the control the
+    // user has for exactly this, and clicking it here also gives the
+    // multitrack's Fit button its first packaged exercise.
+    await page.evaluate(() => {
+      const fit = document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Fit"]');
+      if (!fit) throw new Error('the toolbar has no Fit button');
+      fit.click();
+    });
+    await page.waitForFunction(
+      () => {
+        const c = document.querySelector('[data-testid="clip"]');
+        if (!c) return false;
+        const r = c.getBoundingClientRect();
+        const el = document.elementFromPoint(r.x + r.width - 2, r.y + r.height / 2);
+        return Boolean(el && c.contains(el));
+      },
+      null,
+      { timeout: 10000 }
+    );
+
     // (b) A real trim drag: grab the clip's right edge (the outer 6 CSS px),
     // drag left in several separated moves so the store is written multiple
     // times, and PROVE it mid-drag with a state read taken while the button

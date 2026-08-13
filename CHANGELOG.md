@@ -72,6 +72,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a test. Affects: `src/components/Dialogs/CoverChainDialog.tsx`.
 
 <!-- M4: found by combining the three lines -->
+- **Two packaged-walk steps were silently testing nothing, each broken by a change the other line
+  made.** Neither line could have seen it: the multitrack work never ran the smoke, and the Pipeline
+  work never ran the walker. (1) The session-undo step's trim drag grabbed a clip's right edge at
+  its layout rect, but a session now opens FITTED, so a 2 s clip fills the lane exactly and the
+  step's own +150 px move pushed that edge outside the visible lane — the coordinate still looked
+  valid and `elementFromPoint` returned the view rather than the resize handle, so the drag trimmed
+  nothing. It clicks Fit first now, which also gives the multitrack's Fit button its first packaged
+  exercise. (2) The Transcript step closed Transcribe with `cancelDialog`, which presses Escape and
+  waits for the modal backdrop to vanish; Transcribe is one of the nine that now open HOSTED, draws
+  no backdrop and installs no Escape handler, so the helper reported success having closed nothing
+  and the walk's liveness guard caught the tool still open. It uses the hosted-aware
+  `dismissOpenTool` now. Affects: `scripts/e2e-smoke.cjs`, `scripts/e2e-navigate.cjs`.
+<!-- M4: found by combining the three lines -->
 - **The cover journey's session opened at 512 samples/px instead of fitted.** Cause: stage 5 builds
   its session through the same load-shaped apply `openSessionViaDialog` and `landStems` use, and it
   was written in parallel with the fix that gave those four paths a resolved zoom — so it shipped a

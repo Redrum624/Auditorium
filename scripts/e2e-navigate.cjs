@@ -2245,7 +2245,14 @@ async function main() {
       assert(await clickMenuItem(page, 'Transcribe…'), 'Transcribe… takes a real click');
       await page.waitForSelector('[data-testid="transcribe-dialog"]', { timeout: 10000 });
       record('Module: Transcript', 'Transcribe… offered the dialog (no transcript to reveal)', 'PASS');
-      await cancelDialog(page);
+      // M4: `dismissOpenTool`, not `cancelDialog`. Transcribe is one of the nine
+      // that now open HOSTED in the module column, and a hosted tool installs no
+      // Escape handler and draws no backdrop — so `cancelDialog` pressed Escape
+      // once, found no `dialog-overlay` (there never is one), and reported
+      // success having closed nothing. The tool stayed open and the step's own
+      // liveness guard caught it. This is the case U2's report predicted:
+      // "anything else that assumed Escape will need the same."
+      await dismissOpenTool(page);
     });
 
     // =====================================================================
