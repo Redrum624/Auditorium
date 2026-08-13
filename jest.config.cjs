@@ -11,8 +11,16 @@
  * on Windows that literal is `D:\Dev\...` — backslashes the regex engine reads
  * as escapes. Matching the path SEGMENT instead works on both platforms, and
  * `.claude` is unambiguous here: it is gitignored and appears nowhere else.
+ *
+ * MT1: the pattern matches on ABSOLUTE paths, so when jest is run FROM inside an
+ * agent worktree every test path contains `.claude` and the suite silently
+ * collapses to zero tests — `jest --listTests` printed nothing and exited 0.
+ * A worktree ignoring itself is never the intent: the rule exists to stop the
+ * MAIN checkout crawling its siblings. So it only arms when this config is NOT
+ * itself inside a worktree, which is exactly the case it was written for.
  */
-const IGNORE_AGENT_WORKTREES = ['[/\\\\]\\.claude[/\\\\]'];
+const INSIDE_AGENT_WORKTREE = /[/\\]\.claude[/\\]worktrees[/\\]/.test(__dirname);
+const IGNORE_AGENT_WORKTREES = INSIDE_AGENT_WORKTREE ? [] : ['[/\\\\]\\.claude[/\\\\]'];
 
 /** Jest's `testPathIgnorePatterns` DEFAULT is `['/node_modules/']`; setting the
  * key replaces it rather than extending it, so the default is restated here. */
