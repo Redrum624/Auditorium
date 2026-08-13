@@ -4,6 +4,8 @@ import { createDocument, docLength, type AudioDocument } from '../../audio/Audio
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { useAppStore, makeInitialState, defaultZoom } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { setSessionLaneWidth } from '../../multitrack/sessionViewport';
+import { defaultSessionZoom } from '../../multitrack/sessionZoom';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { registerDialogSetters } from '../../services/dialogBus';
 import { _resetSnapPreference, isSnapEnabled, setSnapEnabled } from '../../services/snapPreference';
@@ -558,5 +560,88 @@ describe('Toolbar — the snap magnet (Task B4)', () => {
       'title',
       'Snap to Grid: off'
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MT1-1 — the zoom cluster follows the ACTIVE VIEW
+// ---------------------------------------------------------------------------
+/*
+ * The reported bug was "the tracks should appear Fit on the longest one", and
+ * half of it lived here: the cluster drove `applyEditorZoom` unconditionally,
+ * so in the multitrack view Fit fitted a DOCUMENT — one the user was not
+ * looking at, or none at all, in which case the whole cluster was dead. There
+ * was no control anywhere in the app that could fit the session.
+ */
+describe('MT1-1: the zoom cluster in the multitrack view', () => {
+  const CLIP_LEN = 44100 * 178; // 2:58, the reported length
+  const LANE = 1000;
+
+  function seedSession(): void {
+    setSessionLaneWidth(LANE);
+    useSessionStore.getState().newSession(44100);
+    const trackIds = useSessionStore.getState().session.tracks.map((t) => t.id);
+    useSessionStore.getState().addClip(trackIds[0], {
+      id: 'mt1-clip',
+      documentId: 'doc-1',
+      startSample: 0,
+      offsetSample: 0,
+      lengthSample: CLIP_LEN,
+      gainDb: 0,
+    });
+    useAppStore.getState().setView('multitrack');
+  }
+
+  it('is live with NO document open, because the session is what it zooms', () => {
+    seedSession();
+    render(<Toolbar />);
+    expect(useAppStore.getState().documents).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Fit' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Zoom In' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Zoom Out' })).toBeEnabled();
+  });
+
+  it('Fit fits the SESSION — the longest track across the measured lane', () => {
+    seedSession();
+    act(() => useSessionStore.getState().setMtZoom({ samplesPerPixel: 8, scrollSample: 900 }));
+    render(<Toolbar />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Fit' }));
+
+    const { session, mtZoom } = useSessionStore.getState();
+    expect(mtZoom).toEqual(defaultSessionZoom(session));
+    expect(mtZoom.samplesPerPixel).toBeCloseTo(CLIP_LEN / LANE, 6);
+    expect(mtZoom.scrollSample).toBe(0);
+    expect(screen.getByTestId('zoom-readout')).toHaveTextContent('100%');
+  });
+
+  it('leaves the EDITOR zoom alone while the multitrack view is active', () => {
+    const doc = makeDoc();
+    act(() => useAppStore.getState().addDocument(doc));
+    const before = useAppStore.getState().zoom;
+    seedSession();
+    render(<Toolbar />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Fit' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+
+    expect(useAppStore.getState().zoom).toEqual(before);
+  });
+
+  it('the % readout reads the session, and 100% is its fit', () => {
+    seedSession();
+    render(<Toolbar />);
+    expect(screen.getByTestId('zoom-readout')).toHaveTextContent('100%');
+
+    // Twice as far IN as the fit reads 200% — the same law the editor's readout
+    // states, so switching view never changes what a percentage means.
+    act(() => {
+      const { session } = useSessionStore.getState();
+      useSessionStore.getState().setMtZoom({
+        samplesPerPixel: defaultSessionZoom(session).samplesPerPixel / 2,
+        scrollSample: 0,
+      });
+    });
+    expect(screen.getByTestId('zoom-readout')).toHaveTextContent('200%');
   });
 });

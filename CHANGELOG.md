@@ -5,6 +5,66 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+<!-- MT1: multitrack polish -->
+
+### Fixed
+
+- **The multitrack now opens Fit on the longest track.** A 2:58 session opened showing about 18
+  seconds of itself, at "100%". Cause: the session had no zoom RULE, only four copies of the
+  constant `{ samplesPerPixel: 512 }` (`newSession`, Open Session, stem landing, the test hooks), a
+  fifth clamp written inline in the wheel handler, and no knowledge anywhere of how wide the lane
+  is — 512 samples/px is 16 seconds of timeline whatever is on it. The toolbar's `− · % · + · Fit`
+  cluster made it unreachable from the other side: it drove the EDITOR unconditionally, so in the
+  multitrack view Fit fitted a document the user was not looking at, or was dead with none open.
+  Fix: `sessionZoom.ts` resolves every session zoom through one clamp (fit == the zoom-out ceiling,
+  100% == fit, the editor's F11-3/F11-9 ruling restated for a session) against a lane width
+  `MultitrackView` measures and publishes; the cluster follows the active view; the first clip into
+  an empty session re-fits, later inserts do not. Affects: `multitrack/sessionZoom.ts`,
+  `multitrack/sessionViewport.ts`, `multitrack/sessionStore.ts`, `components/Multitrack/`,
+  `components/Layout/Toolbar.tsx`.
+
+- **Clip waveforms in the multitrack are drawn to the same standard as the editor's.** Clips
+  rendered as a coarse solid blob or a thin sparse line. Cause: a clip's envelope was rasterised
+  across its FULL timeline width, capped at 4096 device px, then blit-STRETCHED over that width —
+  so a 3-minute clip drew its visible portion from a small fraction of those columns and magnified
+  it. Fix: the visible band is drawn at 1:1×dpr through the editor's own bucket/sample draw, now
+  exported so the two surfaces cannot drift; the full-clip raster and its cap are retired, which is
+  strictly less memory than the capped raster it replaces. Affects:
+  `components/Multitrack/ClipView.tsx`, `components/Editor/waveformRender.ts`.
+
+- **Native `<select>` popups no longer render light-gray text on white.** Reported against Cover
+  Chain's Reference picker. Cause: NOT the missing `color-scheme` the report assumed — that has
+  been declared on `:root` since G1. Chromium paints a select's dropdown listbox with the author's
+  background, as its own widget rather than on the glass surface, and three selects set a
+  translucent white (`rgba(255,255,255,.04/.05/.06)`) that composites dark on the stage and
+  near-white in the popup, under text coloured for near-black. An author background outranks the
+  UA's dark base. Fix: an opaque `--glass-field-bg` token plus `select`/`option` element rules, and
+  the three inline backgrounds switched over. Affects: `index.css`, `components/UI/glass.tsx`,
+  `components/Dialogs/CoverChainDialog.tsx`, `components/Panels/SpatialPanel.tsx`.
+
+### Changed
+
+- **The first-play latency rig can build the session that was reported** (`--content=songs`,
+  `--session-rate=`): two 3-minute stereo 48 kHz clips on two tracks. Its previous one-track
+  2-second tone existed so `playCallMs` measured graph build "and not content size" — content size
+  is the whole defect. Affects: `scripts/first-play-latency-rig.cjs`,
+  `scripts/make-test-latency.cjs`.
+
+### Known issues
+
+- **Play with two 3-minute tracks still stalls when the session rate does not match the files.**
+  MEASURED, not fixed. `MultitrackPlayer.play()` calls `readClipSlice` for every clip
+  synchronously, which resamples the whole clip when `doc.sampleRate !== session.sampleRate`. On
+  the packaged app with two 180 s stereo 48 kHz clips in a 44.1 kHz session, `play()` blocks for
+  **14 547 ms** (process-cold median 15 476 ms). The identical build with the session at 48 kHz —
+  same fixtures, same machine, only the resample branch removed — blocks for **156.5 ms**, so
+  ~99% of the stall is the synchronous 64-tap sinc resample and the remainder is the copy/scale
+  loop. The status bar reading "44.1 kHz" over two 48 kHz files is the visible corner of the same
+  mismatch. Reproduce:
+  `node scripts/first-play-latency-rig.cjs --content=songs [--session-rate=48000]`.
+
 ## [1.25.0] - 2026-08-13
 
 ### Fixed

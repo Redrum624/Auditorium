@@ -5,7 +5,9 @@ import type { AudioDocument } from '../../audio/AudioDocument';
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
-import { useSessionStore } from '../../multitrack/sessionStore';
+import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore';
+import type { Session } from '../../multitrack/session';
+import { defaultSessionZoom, sessionTimelineLength } from '../../multitrack/sessionZoom';
 import { hasUnsavedWork } from '../../services/fileService';
 import { runCommand } from '../../services/menuActions';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
@@ -166,6 +168,44 @@ function zoomEditorFit(): void {
   applyEditorZoom({ samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 });
 }
 
+// ---------------------------------------------------------------------------
+// MT1-1 — the same three gestures, for the session
+// ---------------------------------------------------------------------------
+/*
+ * The cluster used to be editor-only, and said so: "Multitrack keeps its own
+ * Ctrl+wheel mtZoom, so the cluster follows the single-document editor only."
+ * That was the reported bug's other half. In the multitrack view the buttons
+ * were live but drove the ZOOM OF A DOCUMENT THE USER WAS NOT LOOKING AT (or
+ * were dead, with no document open), so "the tracks should appear Fit on the
+ * longest one" had no control that could make it so — Fit fitted the editor.
+ *
+ * Each of the three below is the exact session twin of the editor function
+ * above it, differing only in which store it resolves against. The percentage
+ * means the same thing on both surfaces (100% == fit == the zoom-out limit), so
+ * the readout does not change meaning when the user switches view.
+ */
+function sessionZoomPercent(session: Session, samplesPerPixel: number): number {
+  return Math.round((defaultSessionZoom(session).samplesPerPixel / samplesPerPixel) * 100);
+}
+
+/** Zoom the session by `factor`, anchored on the multitrack cursor — the same
+ * viewport-independent anchor `zoomEditorBy` uses, for the same reason. */
+function zoomSessionBy(factor: number): void {
+  const s = useSessionStore.getState();
+  const anchor = clamp(s.mtCursorSample, 0, sessionTimelineLength(s.session));
+  const x = (anchor - s.mtZoom.scrollSample) / s.mtZoom.samplesPerPixel;
+  applySessionZoom({
+    samplesPerPixel: s.mtZoom.samplesPerPixel * factor,
+    scrollSample: (spp) => anchor - x * spp,
+  });
+}
+
+/** Fit the SESSION: the longest track laid across the measured lane. Spelled as
+ * "as far out as this session goes" so it cannot drift from the fit. */
+function zoomSessionFit(): void {
+  applySessionZoom({ samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 });
+}
+
 export default function Toolbar() {
   const doc = useAppStore((s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null);
   const playback = useAppStore((s) => s.playback);
@@ -178,6 +218,9 @@ export default function Toolbar() {
   const snapEnabled = useSnapEnabled();
 
   const mtPlayState = useSessionStore((s) => s.mtPlayState);
+  // MT1-1: the readout re-renders with the session's zoom and length.
+  const session = useSessionStore((s) => s.session);
+  const mtZoom = useSessionStore((s) => s.mtZoom);
   // Subscribe to the armed set (value unused directly) so canRecord() below is
   // re-evaluated whenever a track is armed/disarmed.
   useSessionStore((s) => s.session.tracks.some((t) => t.armed));
@@ -189,6 +232,11 @@ export default function Toolbar() {
   // nothing. Dirty-or-never-written, the close guard's predicate.
   const canSave = doc !== null && hasUnsavedWork(doc);
   const isMultitrack = view === 'multitrack';
+  // MT1-1: the zoom cluster is live whenever the ACTIVE surface has something to
+  // zoom. In multitrack that is the session itself, which always has a timeline
+  // (an empty one shows the 60 s placeholder), so the cluster no longer goes
+  // dead just because no document happens to be open behind it.
+  const canZoom = isMultitrack || hasDoc;
   const canTransport = hasDoc || isMultitrack;
   const isPlaying = isMultitrack ? mtPlayState === 'playing' : playback.state === 'playing';
 
@@ -465,13 +513,22 @@ export default function Toolbar() {
 
         {/* Zoom cluster (mockup − · % · + · Fit): buttons over the SAME store
             zoom the wheel gesture drives; Fit restores the activation default
-            (= 100%). Multitrack keeps its own Ctrl+wheel mtZoom, so the
-            cluster follows the single-document editor only.
+            (= 100%).
 
             F11-9: − and Fit now converge — Fit IS the furthest zoom-out, so
             holding − walks down to exactly the state Fit jumps to, and the
-            readout bottoms out at 100%. */}
-        <PillButton label="Zoom Out" icon disabled={!hasDoc} onClick={() => zoomEditorBy(ZOOM_FACTOR)}>
+            readout bottoms out at 100%.
+
+            MT1-1: and the cluster now follows the ACTIVE VIEW. It used to drive
+            the editor unconditionally, which in the multitrack view meant Fit
+            fitted a document the user was not looking at. Both surfaces define
+            100% as their own fit, so only the target changes. */}
+        <PillButton
+          label="Zoom Out"
+          icon
+          disabled={!canZoom}
+          onClick={() => (isMultitrack ? zoomSessionBy(ZOOM_FACTOR) : zoomEditorBy(ZOOM_FACTOR))}
+        >
           <Minus size={14} />
         </PillButton>
         <span
@@ -486,12 +543,25 @@ export default function Toolbar() {
             color: 'var(--glass-text-chrome-idle)',
           }}
         >
-          {doc ? `${zoomPercent(doc, zoom.samplesPerPixel)}%` : '—'}
+          {isMultitrack
+            ? `${sessionZoomPercent(session, mtZoom.samplesPerPixel)}%`
+            : doc
+              ? `${zoomPercent(doc, zoom.samplesPerPixel)}%`
+              : '—'}
         </span>
-        <PillButton label="Zoom In" icon disabled={!hasDoc} onClick={() => zoomEditorBy(1 / ZOOM_FACTOR)}>
+        <PillButton
+          label="Zoom In"
+          icon
+          disabled={!canZoom}
+          onClick={() => (isMultitrack ? zoomSessionBy(1 / ZOOM_FACTOR) : zoomEditorBy(1 / ZOOM_FACTOR))}
+        >
           <Plus size={14} />
         </PillButton>
-        <PillButton label="Fit" disabled={!hasDoc} onClick={zoomEditorFit}>
+        <PillButton
+          label="Fit"
+          disabled={!canZoom}
+          onClick={isMultitrack ? zoomSessionFit : zoomEditorFit}
+        >
           Fit
         </PillButton>
       </ChromePill>

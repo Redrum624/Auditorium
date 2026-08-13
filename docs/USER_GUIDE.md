@@ -1040,6 +1040,29 @@ overlays, and the same zoom/scroll gestures.
 **View → Multitrack** opens the session editor — it works even with no
 document open. A session has a name, a sample rate, and any number of tracks.
 
+<!-- MT1: session zoom/Fit semantics -->
+### Zoom and Fit in the multitrack
+
+The toolbar's `− · % · + · Fit` cluster follows whichever view is open, and in
+the multitrack it drives the **session**, not the document behind it. It stays
+live even with no document open, because the session is what it zooms.
+
+**100% is Fit: the LONGEST track exactly fills the lane.** A session opens
+fitted, so a 2:58 track is on screen whole rather than showing its first few
+seconds. Fit is also the furthest the session zooms out, so the readout never
+drops below 100% and pressing `−` at 100% does nothing.
+
+Dropping or inserting the **first** clip into an empty session re-fits it —
+there was nothing on the timeline to have chosen a zoom for. After that your
+zoom is yours: later inserts leave it alone, so placing a clip against a beat
+at high zoom does not yank the timeline back out. The one exception is a
+session already sitting exactly at Fit, which stays fitted (this is also what
+makes dropping several files at once show all of them rather than just the
+first). Resizing the window keeps a fitted session fitted.
+
+`Ctrl`+wheel zooms on the pointer and `Shift`+wheel scrolls, both bounded by the
+same limits as the buttons.
+
 - **Tracks**: each has a name (double-click to rename), Mute/Solo/Arm toggles,
   a volume slider (−60..+12 dB) and a pan slider (−1..1). **Add Track** adds
   an empty track. Arm (R) marks a track as a recording target — see **Recording

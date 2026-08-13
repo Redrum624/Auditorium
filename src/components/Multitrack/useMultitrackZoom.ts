@@ -1,8 +1,7 @@
 import { useEffect } from 'react';
 import type { RefObject } from 'react';
 import { pixelToSample } from '../Editor/waveformRender';
-import { useSessionStore } from '../../multitrack/sessionStore';
-import type { Session } from '../../multitrack/session';
+import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore';
 
 /**
  * Wheel zoom/scroll for the multitrack lanes, driven by the session store's
@@ -17,25 +16,18 @@ import type { Session } from '../../multitrack/session';
  *   - Shift + wheel → horizontal scroll
  *   - plain wheel   → native vertical scroll (not intercepted)
  *
- * Clamps (per the Task 22 spec): samplesPerPixel ∈ [1/32, max(1, end/50)] where
- * `end` is the last clip end (or 60 s worth of samples for an empty session);
- * scrollSample ∈ [0, max(0, end + 60 s)].
+ * MT1-1 — THE CLAMPS ARE NOT HERE ANY MORE. This hook used to carry its own
+ * `MIN_SPP`, its own `maxSpp = max(1, end/50)` ceiling, its own scroll bound and
+ * its own private copy of `sessionEndSample`, none of which knew how wide the
+ * lane was and all of which disagreed with the four places that wrote a flat
+ * `{ samplesPerPixel: 512 }`. A limit that lives in one consumer is a limit the
+ * other consumers can disagree with — the F11-9 lesson, and the reason "the
+ * tracks should appear Fit on the longest one" could be true of the Fit button
+ * and false of everything else. The gesture now states a REQUEST and
+ * `applySessionZoom` answers it; `sessionZoom.ts` owns every bound.
  */
 
-const MIN_SPP = 1 / 32;
 const ZOOM_FACTOR = 1.25;
-
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(Math.max(v, lo), hi);
-}
-
-function sessionEndSample(session: Session): number {
-  let end = 0;
-  for (const t of session.tracks) {
-    for (const c of t.clips) end = Math.max(end, c.startSample + c.lengthSample);
-  }
-  return end;
-}
 
 export function useMultitrackZoom(laneRef: RefObject<HTMLElement | null>): void {
   useEffect(() => {
@@ -47,31 +39,29 @@ export function useMultitrackZoom(laneRef: RefObject<HTMLElement | null>): void 
       if (!e.ctrlKey && !e.shiftKey) return;
       e.preventDefault();
 
-      const { session, mtZoom, setMtZoom } = useSessionStore.getState();
-      const sr = session.sampleRate;
-      const end = sessionEndSample(session);
-      const effectiveEnd = end > 0 ? end : 60 * sr;
-      const maxSpp = Math.max(1, effectiveEnd / 50);
-      const maxScroll = Math.max(0, effectiveEnd + 60 * sr);
+      const { mtZoom } = useSessionStore.getState();
 
       if (e.shiftKey && !e.ctrlKey) {
-        const scrollSample = clamp(
-          mtZoom.scrollSample + e.deltaY * mtZoom.samplesPerPixel,
-          0,
-          maxScroll
-        );
-        setMtZoom({ samplesPerPixel: mtZoom.samplesPerPixel, scrollSample });
+        applySessionZoom({
+          samplesPerPixel: mtZoom.samplesPerPixel,
+          scrollSample: mtZoom.scrollSample + e.deltaY * mtZoom.samplesPerPixel,
+        });
         return;
       }
 
-      // Ctrl+wheel → zoom centered on the pointer.
+      // Ctrl+wheel → zoom centered on the pointer. The scroll is a FUNCTION of
+      // the resolved samples-per-pixel, not of the requested one: at the
+      // zoom-out limit the two differ, and computing the anchor from a request
+      // that was then clamped is exactly how the sample under the cursor drifts
+      // out from under it.
       const rect = el.getBoundingClientRect();
       const mouseX = e.clientX - rect.left;
       const anchorSample = pixelToSample(mouseX, mtZoom.scrollSample, mtZoom.samplesPerPixel);
       const factor = e.deltaY < 0 ? 1 / ZOOM_FACTOR : ZOOM_FACTOR;
-      const spp = clamp(mtZoom.samplesPerPixel * factor, MIN_SPP, maxSpp);
-      const scrollSample = clamp(anchorSample - mouseX * spp, 0, maxScroll);
-      setMtZoom({ samplesPerPixel: spp, scrollSample });
+      applySessionZoom({
+        samplesPerPixel: mtZoom.samplesPerPixel * factor,
+        scrollSample: (spp) => anchorSample - mouseX * spp,
+      });
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });

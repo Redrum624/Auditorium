@@ -1,9 +1,9 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { FileDown, FilePlus2, Plus } from 'lucide-react';
 import { GlassButton } from '../UI/glass';
 import { runCommand } from '../../services/menuActions';
 import { useAppStore } from '../../stores/appStore';
-import { useSessionStore } from '../../multitrack/sessionStore';
+import { publishSessionLaneWidth, useSessionStore } from '../../multitrack/sessionStore';
 import TimelineRuler from '../Editor/TimelineRuler';
 import { sampleToPixel } from '../Editor/waveformRender';
 import { sessionSnapTargets } from './sessionSnapTargets';
@@ -44,6 +44,24 @@ export default function MultitrackView() {
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   useMultitrackZoom(scrollRef);
+
+  // MT1-1: this scroller IS the stage the session zoom fits to, and nothing else
+  // in the app knows how wide it is — the same fact `WaveformView` publishes for
+  // the editor, published here for the session. `publishSessionLaneWidth` takes
+  // the SCROLLER's width and subtracts the header column itself, so the 224 px
+  // constant stays a layout fact of this file and a zoom fact of exactly one
+  // module. A session opened (from `.audm`, from stem landing, from a first
+  // insert) before any lane existed was fitted to the fallback width; this is
+  // the moment that becomes wrong and the moment it is re-fitted.
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const update = () => publishSessionLaneWidth(el.clientWidth);
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const [dragTargetTrackId, setDragTargetTrackId] = useState<string | null>(null);
 
