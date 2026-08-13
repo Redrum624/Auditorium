@@ -691,7 +691,11 @@ export async function runCoverJourney(
             docLength(d) === docLength(song)
         ) ?? null;
     const instrumental: AudioDocument = previous
-      ? { ...previous, channels: instrumentalChannels }
+      ? // `dirty: true` because the samples now differ from whatever is on disk —
+        // the same stamp every channel-replacing helper in `AudioDocument` makes.
+        // A user who had SAVED an earlier pass's instrumental would otherwise be
+        // holding a document that reads clean and is not.
+        { ...previous, channels: instrumentalChannels, dirty: true }
       : createDocument({
           name: instrumentalName,
           sampleRate: song.sampleRate,
