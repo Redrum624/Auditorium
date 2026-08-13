@@ -699,7 +699,7 @@ export async function runCoverJourney(
         });
     if (previous) useAppStore.getState().updateDocument(instrumental);
     else useAppStore.getState().addDocument(instrumental);
-    // Same identity-copy precondition `landStems` records for the stems: the
+    // Same identity-copy precondition `createStemDocuments` records for the stems: the
     // instrumental is a time-aligned combination of the song at the same rate
     // and length, so the song's beat grid IS its grid. `linkDerivedDocument`
     // re-verifies that and simply declines if it ever stops holding.
@@ -754,7 +754,7 @@ export async function runCoverJourney(
     const at = Date.now();
 
     // `runVocalChain` runs on the ACTIVE document over the ACTIVE selection.
-    // Both are set here rather than assumed: `landStems` activates a stem, and a
+    // Both are set here rather than assumed: the stem landing activates a stem, and a
     // selection left over from before the dialog opened would silently make the
     // chain a partial-region pass.
     const app = useAppStore.getState();
