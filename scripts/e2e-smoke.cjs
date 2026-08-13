@@ -10,10 +10,29 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
-const { execFileSync } = require('node:child_process');
-const { _electron: electron } = require('playwright');
-
-const ROOT = path.resolve(__dirname, '..');
+// PW1: the launch/pin/assert/pointer plumbing this file grew now lives in
+// scripts/e2e-lib.cjs, so the navigation walker (scripts/e2e-navigate.cjs)
+// drives the app on the SAME rig instead of a copy of it. Nothing below
+// changed behaviour — the helpers moved verbatim, `assert` still prints the
+// same `ok:` line, and this script's own measurements (the beat-tic hue
+// arithmetic, the 20 ms RMS envelope) stayed here because they are the smoke's
+// analysis rather than anyone's rig.
+const {
+  ROOT,
+  SMOKE_WINDOW,
+  SMOKE_WINDOW_TOLERANCE_PX,
+  assert,
+  closeApp,
+  ensureFixtures,
+  launchApp,
+  openModuleCard,
+  pinWindowGeometry,
+  readWav,
+  realClick,
+  realDrag,
+  spectroHash,
+  waitNonUniform,
+} = require('./e2e-lib.cjs');
 const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
 const BEAT = path.join(ROOT, 'test-assets', 'beat120.wav');
 // F10 Cover Chain fixtures. Two files by design: the chain matches ONE document
@@ -81,84 +100,6 @@ const OUT_TRUNCATED_MP3 = path.join(OUT_DIR, 'truncated.mp3');
 const OUT_TAKE_MP3 = path.join(OUT_DIR, 'take.mp3');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
-// The window geometry every pixel assertion in this file is measured against.
-// It is the app's own design size (electron/main.cjs creates the window at
-// 1600x1000), so the smoke drives the layout the app was built for rather than
-// a shape only the harness ever sees.
-//
-// Why pin it at all: a NEW window is fitted to the work area of the display it
-// is born on, floored by the window's minimum size (1100x700). This machine has
-// two displays, and a run that opened on the smaller one got a 1100x700 window
-// — a 624 CSS px waveform canvas instead of 1129 (U1: 1209 since the E2 layout
-// gave the lane the retired vertical rail's width — the stage less a 376px
-// module column and a 14px margin, against the old 446 + 24). M1 measured that
-// 1209 on the first packaged run of this step; U1 predicted 1210 by subtracting
-// from 1600, but the stage measures 1599 CSS px for the reason the next comment
-// gives, and the old 1129 was a measurement obeying the same rule (1599 - 446 -
-// 24), not 1130. Canvas width is what decides
-// how much of the document is on screen — and doubly so since F11-3, because a
-// document now opens FITTED: the zoom is `docLength / laneWidth`, resolved by
-// appStore.resolveZoom against the width the lane actually measured, not the
-// nominal `ceil(length / 1600)` this comment used to name. So the tic-ruler
-// count below moved with the
-// display the window happened to land on: 6 groups there, 11 here. The
-// assertion was honest; the geometry was not deterministic. Pinning the content
-// size makes every canvas readback in this file reproducible.
-const SMOKE_WINDOW = { width: 1600, height: 1000 };
-// Content size is set in DIP but realised in whole device pixels, so at a
-// fractional display scale (1.75 here) the readback can land a pixel off the
-// request. Only a real refusal to resize should fail the check.
-const SMOKE_WINDOW_TOLERANCE_PX = 4;
-
-function assert(cond, msg) {
-  if (!cond) throw new Error(`ASSERT FAILED: ${msg}`);
-  console.log(`  ok: ${msg}`);
-}
-
-// Minimal RIFF/WAVE reader used by step 23 to re-measure what the packaged app
-// wrote WITHOUT calling back into the app for the numbers. It walks the chunk
-// table rather than assuming a 44-byte header, because `saveActiveAs` writes
-// 32-bit float and may carry a cue chunk.
-function readWav(file) {
-  const b = fs.readFileSync(file);
-  if (b.toString('ascii', 0, 4) !== 'RIFF' || b.toString('ascii', 8, 12) !== 'WAVE') {
-    throw new Error(`${file} is not a RIFF/WAVE file`);
-  }
-  let fmt = null;
-  let data = null;
-  let p = 12;
-  while (p + 8 <= b.length) {
-    const id = b.toString('ascii', p, p + 4);
-    const size = b.readUInt32LE(p + 4);
-    const body = p + 8;
-    if (id === 'fmt ') {
-      fmt = {
-        format: b.readUInt16LE(body),
-        channelCount: b.readUInt16LE(body + 2),
-        sampleRate: b.readUInt32LE(body + 4),
-        bits: b.readUInt16LE(body + 14),
-      };
-    } else if (id === 'data') {
-      data = { offset: body, size };
-    }
-    p = body + size + (size % 2);
-  }
-  if (!fmt || !data) throw new Error(`${file} has no fmt/data chunk`);
-  const bytesPerSample = fmt.bits / 8;
-  const frames = Math.floor(data.size / (bytesPerSample * fmt.channelCount));
-  const channels = [];
-  for (let c = 0; c < fmt.channelCount; c++) channels.push(new Float32Array(frames));
-  for (let i = 0; i < frames; i++) {
-    for (let c = 0; c < fmt.channelCount; c++) {
-      const at = data.offset + (i * fmt.channelCount + c) * bytesPerSample;
-      if (fmt.bits === 32 && fmt.format === 3) channels[c][i] = b.readFloatLE(at);
-      else if (fmt.bits === 16) channels[c][i] = b.readInt16LE(at) / 32768;
-      else throw new Error(`unsupported WAV sample format ${fmt.format}/${fmt.bits}-bit`);
-    }
-  }
-  return { ...fmt, frames, channels };
-}
-
 /** 20 ms RMS frames of a mono buffer — the smoke's own envelope arithmetic. */
 function rmsFrames20ms(x, sampleRate) {
   const size = Math.round(0.02 * sampleRate);
@@ -170,48 +111,6 @@ function rmsFrames20ms(x, sampleRate) {
     out[f] = Math.sqrt(s / size);
   }
   return { frames: out, size };
-}
-
-// Waits until the given canvas has drawn at least two differing pixels (i.e. it
-// is not a blank/uniform fill). Shared by the waveform and spectrogram checks.
-async function waitNonUniform(page, testid, timeout = 15000) {
-  await page.waitForFunction(
-    (id) => {
-      const c = document.querySelector(`[data-testid="${id}"]`);
-      if (!(c instanceof HTMLCanvasElement)) return false;
-      const ctx = c.getContext('2d');
-      if (!ctx || c.width === 0 || c.height === 0) return false;
-      const data = ctx.getImageData(0, 0, c.width, c.height).data;
-      let first = null;
-      for (let i = 0; i < data.length; i += 4 * 97) {
-        const px = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
-        if (first === null) first = px;
-        else if (px !== first) return true;
-      }
-      return false;
-    },
-    testid,
-    { timeout }
-  );
-}
-
-// FNV-1a hash of the spectrogram canvas raster, so a repaint after a scale
-// toggle (Task F4) can be detected by a changed hash.
-async function spectroHash(page) {
-  return page.evaluate(() => {
-    const c = document.querySelector('[data-testid="spectrogram-canvas"]');
-    if (!(c instanceof HTMLCanvasElement)) return -1;
-    const ctx = c.getContext('2d');
-    if (!ctx || !c.width || !c.height) return -1;
-    const data = ctx.getImageData(0, 0, c.width, c.height).data;
-    let h = 2166136261 >>> 0;
-    for (let i = 0; i < data.length; i += 4 * 53) {
-      h = Math.imul(h ^ data[i], 16777619) >>> 0;
-      h = Math.imul(h ^ data[i + 1], 16777619) >>> 0;
-      h = Math.imul(h ^ data[i + 2], 16777619) >>> 0;
-    }
-    return h >>> 0;
-  });
 }
 
 /**
@@ -288,116 +187,12 @@ async function beatTicBand(page, testid, bandCssPx) {
   );
 }
 
-/** One REAL pointer click at a viewport position — `page.mouse`, so it goes
- * through the browser's own input path and the renderer's gesture layer, not
- * through a test hook (plan trap 28: a hook-driven assertion can pass without
- * the magnet ever running). Clicks are separated in time by the caller so
- * Chromium never coalesces two of them into a double-click. */
-async function realClick(page, clientX, clientY, { alt = false } = {}) {
-  if (alt) await page.keyboard.down('Alt');
-  try {
-    await page.mouse.move(clientX, clientY);
-    await page.mouse.down();
-    await page.mouse.up();
-  } finally {
-    if (alt) await page.keyboard.up('Alt');
-  }
-}
-
-// F11: one REAL pointer DRAG — press at `from`, travel through intermediate
-// positions, release at `to`. Same discipline as `realClick`: it goes through
-// the browser's input path and the renderer's gesture layer, never a hook, so
-// a drag assertion cannot pass without the gesture actually running. The
-// intermediate moves are load-bearing rather than cosmetic — a press followed
-// by a single jump to the end would not exercise the "follows live" half of
-// either the playhead handle or the ruler scrub. `hold` leaves the button DOWN
-// so a caller can assert mid-drag and release itself.
-async function realDrag(page, from, to, { alt = false, steps = 4, hold = false } = {}) {
-  if (alt) await page.keyboard.down('Alt');
-  try {
-    await page.mouse.move(from.x, from.y);
-    await page.mouse.down();
-    for (let i = 1; i <= steps; i++) {
-      await page.mouse.move(
-        from.x + ((to.x - from.x) * i) / steps,
-        from.y + ((to.y - from.y) * i) / steps
-      );
-    }
-    if (!hold) await page.mouse.up();
-  } finally {
-    if (alt && !hold) await page.keyboard.up('Alt');
-  }
-}
-
-// U1: the module strip's ACTIVE entry now TOGGLES its card closed — that is
-// what lets the waveform take the column's width in the E2 layout. Every step
-// below that clicked a strip entry meant "show me this panel", and a blind
-// click on an already-open one would now close it instead. Asking first keeps
-// each step's intent intact under the new toggle.
-//
-// F3: this comment used to claim the entry "is not already active at any of
-// these sites in a normal run". That was false — step 13's Files card is still
-// open from step 12 — so the guard returned early and the step's own "the
-// Files entry drives the panel card" assertion passed on inherited state,
-// never once exercising a click. Step 13 now switches to another card first,
-// so its click is real; the return value says whether one happened, and any
-// site that depends on the click can assert it.
-async function openModuleCard(page, label) {
-  const already = await page.evaluate(
-    () => document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab'),
-  );
-  if (already === label.toLowerCase()) return false;
-  await page.click(`[data-testid="sidebar-tabs"] button[aria-label="${label}"]`);
-  return true;
-}
-
-/** Pins the app window to `SMOKE_WINDOW` from the MAIN process, through the
- * real BrowserWindow — the only place a window's size can be set, since the
- * renderer cannot resize its own frameless shell.
- *
- * The window is first moved to the roomiest display: Windows fits a window to
- * the work area it is created on, so a window born on a small screen is created
- * at its minimum size, and that is the shape the resize has to undo. Any
- * maximized/fullscreen/minimized state is cleared for the same reason — a
- * restored window would silently take its own size back.
- *
- * Returns the geometry actually realised, so the caller can assert the pin took
- * rather than discovering it later as a mysterious pixel count. */
-async function pinWindowGeometry(app, want) {
-  return app.evaluate(({ BrowserWindow, screen }, size) => {
-    const win = BrowserWindow.getAllWindows()[0];
-    if (!win) return null;
-    if (win.isMinimized()) win.restore();
-    if (win.isFullScreen()) win.setFullScreen(false);
-    if (win.isMaximized()) win.unmaximize();
-    const displays = screen.getAllDisplays();
-    const roomiest = displays.reduce(
-      (best, d) =>
-        d.workArea.width * d.workArea.height > best.workArea.width * best.workArea.height ? d : best,
-      displays[0]
-    );
-    win.setPosition(roomiest.workArea.x + 8, roomiest.workArea.y + 8);
-    win.setContentSize(size.width, size.height);
-    const [contentWidth, contentHeight] = win.getContentSize();
-    return {
-      contentWidth,
-      contentHeight,
-      displayCount: displays.length,
-      scaleFactor: roomiest.scaleFactor,
-      workArea: roomiest.workArea,
-    };
-  }, want);
-}
-
 async function main() {
   // Preconditions ----------------------------------------------------------
-  if (!fs.existsSync(path.join(ROOT, 'dist', 'index.html'))) {
-    throw new Error('dist/index.html missing — run `npm run build` before the smoke test');
-  }
   // test-assets/ is gitignored, so every fixture is generated on demand from
   // its own plain-Node generator (deterministic PRNG => byte-identical output
   // on every machine).
-  for (const [file, script, label] of [
+  ensureFixtures([
     [TONE, 'make-test-tone.cjs', 'test tone'],
     [BEAT, 'make-test-beat.cjs', '120 BPM click train'],
     [ABAB, 'make-test-abab.cjs', 'ABAB structure fixture'],
@@ -406,12 +201,7 @@ async function main() {
     [COVER_REFERENCE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_TAKE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_REFERENCE_ROOM, 'make-test-cover.cjs', 'Cover Chain reverberant reference'],
-  ]) {
-    if (!fs.existsSync(file)) {
-      console.log(`Generating ${label}...`);
-      execFileSync(process.execPath, [path.join(ROOT, 'scripts', script)], { stdio: 'inherit' });
-    }
-  }
+  ]);
   fs.mkdirSync(OUT_DIR, { recursive: true });
   for (const f of [
     OUT_MP3,
@@ -437,25 +227,12 @@ async function main() {
   }
 
   console.log('Launching built app under Playwright Electron...');
-  const app = await electron.launch({
-    // The two fake-media switches make Chromium synthesize a mic (a periodic
-    // tone) and auto-accept the capture prompt, so the recording step below runs
-    // headless-safe with no real hardware.
-    args: [
-      '.',
-      '--use-fake-device-for-media-stream',
-      '--use-fake-ui-for-media-stream',
-    ],
-    cwd: ROOT,
-    env: { ...process.env, AUDITORIUM_TEST: '1' },
-  });
+  // `launchApp` checks dist/index.html exists, passes the two fake-media
+  // switches (so the recording step below runs headless-safe with no real
+  // hardware), sets AUDITORIUM_TEST=1 and waits for window.__test.
+  const { app, page } = await launchApp();
 
   try {
-    const page = await app.firstWindow();
-    await page.waitForLoadState('domcontentloaded');
-
-    // Wait for the renderer to install its test hooks.
-    await page.waitForFunction(() => Boolean(window.__test), null, { timeout: 20000 });
     console.log('window.__test is available.');
 
     // 0) Pin the window geometry -------------------------------------------
@@ -6016,20 +5793,8 @@ async function main() {
     console.log('\nSMOKE PASSED');
   } finally {
     // The run must NEVER leave an Electron window for a human to close by
-    // hand. Graceful close first (the close guard auto-confirms in test
-    // mode), but if anything still wedges it — a crashed renderer, a native
-    // dialog from a path the guard doesn't own — force-kill after 10 s.
-    // close() may itself reject once the process dies; that must not mask
-    // the real error from the try block.
-    const proc = app.process();
-    await Promise.race([
-      app.close().catch(() => {}),
-      new Promise((resolve) => setTimeout(resolve, 10000)),
-    ]);
-    if (proc && proc.exitCode === null && !proc.killed) {
-      console.error('teardown: graceful close timed out after 10 s; force-killing Electron');
-      proc.kill();
-    }
+    // hand — see `closeApp` for the graceful-then-force sequence.
+    await closeApp(app);
   }
 }
 
