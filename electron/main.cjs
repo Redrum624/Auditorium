@@ -14,24 +14,35 @@ const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs')
 
 app.setName('audition_app');
 
-// V8 heap ceiling, raised from the default before anything can allocate.
+// Ask V8 for the largest old-generation heap it will give us, before anything
+// can allocate. USER REQUEST, verbatim: "put the memory allocation higher! it
+// makes no sense that 2 songs can't fit on 64Gb RAM".
 //
-// USER REQUEST, verbatim: "put the memory allocation higher! it makes no sense
-// that 2 songs can't fit on 64Gb RAM". Two large WAVs exhausted the renderer
-// mid-open on a 64 GB machine and wedged the app -- the default old-space
-// ceiling is a fixed fraction of what a browser tab is expected to need, not a
-// fraction of this machine, and an audio editor holds whole decoded songs as
-// live JS objects.
+// What this actually does, measured on the machine that hit the incident
+// rather than assumed (see .superpowers/sdd/task-O1-report.md):
 //
-// This is the LAST of three independent measures, not the fix on its own: the
-// open path no longer keeps redundant copies of the bytes (preload.cjs,
-// fileService.openFilePath) and decodes off the main thread (decodeAudio.ts),
-// which is what keeps the UI alive. The ceiling is what stops a file that is
-// merely large from being fatal.
+//   * The switch DOES reach the renderers, not just the main process. Asking
+//     for 512 lowers the renderer's reported jsHeapSizeLimit to 631 MiB, which
+//     is how we know the value is honoured where the audio lives.
+//   * 16384 does NOT produce a 16 GiB heap. The renderer reports 3585.8 MiB
+//     with this switch and 3585.8 MiB without it: V8 clamps to the ceiling its
+//     pointer-compressed heap cage allows, and the default is already at that
+//     ceiling. So this line asks for the maximum and gets the maximum; it does
+//     not RAISE anything on this platform.
+//   * It could not have been the fix on its own anyway, because the audio is
+//     not in that heap. Typed-array backing stores are external to it: with
+//     both incident files open (~123 MB of Float32Array) the renderer's
+//     usedJSHeapSize stayed at 9.5 MiB, and a probe allocated 10 GB of
+//     Float32Array without failing, with and without this switch.
 //
-// `js-flags` is a Chromium switch, so it reaches the renderer processes too --
-// which is where the audio actually lives. Set before `app.whenReady()`
-// because V8 reads its heap configuration at isolate creation.
+// It stays because asking for the platform maximum is free and correct, and
+// because a future Electron with a larger cage should get the benefit without
+// anyone having to remember. The measures that actually fixed the open are the
+// copy elimination (preload.cjs, fileService.openFilePath), the off-thread
+// decode (decodeAudio.ts) and the clean rollback.
+//
+// Set before `app.whenReady()` because V8 reads its heap configuration at
+// isolate creation.
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=16384');
 
 let mainWindow = null;
