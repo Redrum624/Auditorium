@@ -11,6 +11,7 @@ import {
   RESIDUAL_BELOW_VOCAL_DB,
   RESIDUAL_IN_BAND_BEST_DB,
   RESIDUAL_IN_BAND_WORST_DB,
+  REFERENCE_BELOW_MIX_FLOOR_DB,
   RESIDUAL_WORST_SECOND_DB,
   coverStageById,
   defaultCoverStageSelection,
@@ -34,6 +35,7 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
 import { peakDb } from '../dsp/chainAnalysis';
 import {
+  ACTIVE_GATE_DB,
   LTAS_FFT_SIZE,
   MATCH_BAND_CENTRES_HZ,
   MATCH_BOUND_DB,
@@ -131,6 +133,10 @@ function reference(over: Partial<ReferenceMeasurements> = {}): ReferenceMeasurem
     decay: null,
     sampleRate: SR,
     name: 'Song — Vocals',
+    // CC4 (CJ-3): no mix by default — the standalone chain's shape, where the
+    // plausibility floor is inert and every existing expectation here holds.
+    mixGatedLevelDb: null,
+    mixName: null,
     ...over,
   };
 }
@@ -764,6 +770,110 @@ describe('deriveMatchLoudness', () => {
     const guarded = probe(0.3, true);
     if (!guarded.run) throw new Error('unreachable');
     expect(guarded.warning).toBeUndefined();
+  });
+});
+
+// ── CC4 (CJ-3): the plausibility floor on the separated vocal ───────────────
+
+/**
+ * A Vocals stem the separator failed on is not silent — it carries leakage, and
+ * `gatedLevelDb` gates relative to the signal's OWN p95, so it still reports a
+ * finite "sounding level". Match Loudness then committed `reference − take` to
+ * the take (bounded only by Amplify's ±60 dB) and Match EQ shaped it toward the
+ * leakage spectrum, both reporting success. This repo has MEASURED that
+ * pathology on its own material: driving the real model with the smoke's
+ * synthetic mix returns a Vocals stem 41 dB below the source
+ * (`scripts/e2e-smoke.cjs`, source RMS −17.99 dBFS, Vocals −59.28).
+ *
+ * The floor is only checkable when the caller can say what the reference was
+ * separated FROM, which is why it lives on the reference's own measurements and
+ * is inert (`mixGatedLevelDb: null`) for the standalone chain, where the user
+ * picks any document they like as the reference.
+ */
+describe('CC4 (CJ-3): a reference implausibly far below its own mix', () => {
+  const take = [tone(N, 1000, 0.5)];
+
+  /** The measured pathology: a Vocals stem 41 dB below the song. */
+  const leakage = (): ReferenceMeasurements =>
+    reference({
+      gatedLevelDb: -59.28,
+      mixGatedLevelDb: -17.99,
+      mixName: 'song.wav',
+      ltas: longTermAverageSpectrum([tone(N, 1000, 0.0011)], SR),
+    });
+
+  it('is derived from the app\'s own gate span, not chosen', () => {
+    // A signal more than one full gate span below another would not clear that
+    // other signal's own activity gate — the app's existing definition of "not
+    // sounding". That is the derivation, and it is the same constant.
+    expect(REFERENCE_BELOW_MIX_FLOOR_DB).toBe(ACTIVE_GATE_DB);
+    // …and it separates the measured pathology from the measured leakage the
+    // separator leaves in the BED, which is vocal content that IS there.
+    expect(REFERENCE_BELOW_MIX_FLOOR_DB).toBeGreaterThan(RESIDUAL_BELOW_BED_DB);
+    expect(REFERENCE_BELOW_MIX_FLOOR_DB).toBeLessThan(41.29);
+  });
+
+  it('declines Match Loudness with the measured numbers instead of crushing the take', () => {
+    const resolution = deriveMatchLoudness(leakage(), take, SR, true);
+    expect(resolution.run).toBe(false);
+    if (resolution.run) throw new Error('unreachable');
+    expect(resolution.reason).toContain('-59.28 dBFS');
+    expect(resolution.reason).toContain('-17.99 dBFS');
+    expect(resolution.reason).toContain('41.29');
+    expect(resolution.reason).toContain(String(REFERENCE_BELOW_MIX_FLOOR_DB));
+  });
+
+  it('declines Match EQ too — the leakage spectrum is not the singer\'s', () => {
+    const resolution = deriveMatchEq(leakage(), take, SR);
+    expect(resolution.run).toBe(false);
+    if (resolution.run) throw new Error('unreachable');
+    expect(resolution.reason).toContain('41.29');
+  });
+
+  it('runs normally at the floor and declines past it — a boundary, not a mood', () => {
+    const at = (belowDb: number) =>
+      deriveMatchLoudness(
+        reference({ gatedLevelDb: -20 - belowDb, mixGatedLevelDb: -20, mixName: 'song.wav' }),
+        take,
+        SR,
+        true
+      );
+    expect(at(REFERENCE_BELOW_MIX_FLOOR_DB - 0.01).run).toBe(true);
+    expect(at(REFERENCE_BELOW_MIX_FLOOR_DB).run).toBe(true); // `>`, so exactly at it still runs
+    expect(at(REFERENCE_BELOW_MIX_FLOOR_DB + 0.01).run).toBe(false);
+  });
+
+  it('is inert for the standalone chain, which has no mix to compare against', () => {
+    const resolution = deriveMatchLoudness(
+      reference({ gatedLevelDb: -59.28, mixGatedLevelDb: null }),
+      take,
+      SR,
+      true
+    );
+    // Unchanged shipped behaviour: the user picked this reference themselves.
+    expect(resolution.run).toBe(true);
+  });
+
+  it('measures the mix when the caller supplies one, and reports null when it does not', () => {
+    const channels = [tone(N, 440, 0.5)];
+    const mix = [tone(N, 440, 0.5)];
+    const without = measureReference(channels, SR, 'ref', {
+      ltas: false,
+      level: true,
+      decay: false,
+    });
+    expect(without.mixGatedLevelDb).toBeNull();
+    expect(without.mixName).toBeNull();
+
+    const with_ = measureReference(
+      channels,
+      SR,
+      'ref',
+      { ltas: false, level: true, decay: false },
+      { channels: mix, sampleRate: SR, name: 'song.wav' }
+    );
+    expect(with_.mixGatedLevelDb).toBeCloseTo(gatedLevelDb(mix, SR)!, 10);
+    expect(with_.mixName).toBe('song.wav');
   });
 });
 

@@ -50,6 +50,7 @@ import { GRAPHIC_EQ_BANDS } from '../effects/eq/GraphicEqEffect';
 import type { EffectParamValue } from '../effects/types';
 import { peakDb } from '../dsp/chainAnalysis';
 import {
+  ACTIVE_GATE_DB,
   MATCH_BAND_CENTRES_HZ,
   MATCH_BOUND_DB,
   MATCH_MIN_CENTRE_HZ,
@@ -372,6 +373,79 @@ export interface ReferenceMeasurements {
   decay: DecayEstimate | null;
   sampleRate: number;
   name: string;
+  /**
+   * CC4 (CJ-3): the sounding level of the MIX this reference was separated
+   * from, when the caller knows what that mix is — the cover journey always
+   * does, the standalone chain never does (there the user picks any document
+   * they like as the reference, and this module has no business second-guessing
+   * that choice). `null` switches the plausibility floor below off entirely.
+   */
+  mixGatedLevelDb: number | null;
+  /** The mix's name, for the floor's decline reason. `null` with the level. */
+  mixName: string | null;
+}
+
+/**
+ * CC4 (CJ-3) — how far below its own mix a separated vocal may sit before this
+ * chain stops believing it is a vocal at all.
+ *
+ * DERIVED, not chosen, and from a constant this app already ships:
+ * `ACTIVE_GATE_DB` (20 dB) is the span below a signal's own p95 at which
+ * `coverMatch` already declares material NOT SOUNDING. A Vocals stem whose own
+ * sounding level sits more than that below the song's own would not clear the
+ * song's activity gate — by the app's existing definition it is not the lead
+ * vocal, it is what the separator swept there.
+ *
+ * The two measurements this repo owns bracket it, which is why one number can
+ * serve both ends:
+ *
+ *  - `RESIDUAL_BELOW_BED_DB` = 17.95 dB is where vocal content the separator
+ *    FAILED to extract sits relative to the music. Vocal content that is really
+ *    present therefore reads no lower than that against the mix even in the
+ *    separator's worst case, so the floor must sit ABOVE 17.95 dB or it would
+ *    decline on real vocals.
+ *  - The measured pathology is 41.29 dB down (a real model run over the smoke's
+ *    synthetic mix: source −17.99 dBFS, Vocals −59.28 dBFS,
+ *    `scripts/e2e-smoke.cjs`), so the floor must sit well below 41.29.
+ *
+ * 20 dB is the app's own gate span sitting inside that bracket with 2 dB of
+ * margin on one side and 21 dB on the other. It is a floor on PLAUSIBILITY, not
+ * an opinion about mixing: a lead vocal 20 dB under the full mix is not audible
+ * in the song it came from.
+ */
+export const REFERENCE_BELOW_MIX_FLOOR_DB = ACTIVE_GATE_DB;
+
+/**
+ * CC4 (CJ-3) — how far the reference sits below its mix, or `null` when the
+ * comparison cannot be made (no mix supplied, or either side not sounding).
+ */
+export function referenceBelowMixDb(reference: ReferenceMeasurements | null): number | null {
+  if (!reference) return null;
+  if (reference.gatedLevelDb === null || reference.mixGatedLevelDb === null) return null;
+  return reference.mixGatedLevelDb - reference.gatedLevelDb;
+}
+
+/**
+ * CC4 (CJ-3) — the decline reason when the reference is implausibly quiet
+ * against its own mix, or `null` when it is not. ONE sentence, shared by every
+ * stage that would otherwise match against it, so the two stages cannot end up
+ * describing the same measurement two different ways.
+ */
+export function implausibleReferenceReason(
+  reference: ReferenceMeasurements | null
+): string | null {
+  const belowDb = referenceBelowMixDb(reference);
+  if (belowDb === null || belowDb <= REFERENCE_BELOW_MIX_FLOOR_DB) return null;
+  const ref = reference as ReferenceMeasurements;
+  return (
+    `${ref.name} sounds at ${dbfsStr(ref.gatedLevelDb as number)} against ` +
+    `${ref.mixName}'s own ${dbfsStr(ref.mixGatedLevelDb as number)} — ${belowDb.toFixed(2)} dB below the ` +
+    `song it came out of, past the ${REFERENCE_BELOW_MIX_FLOOR_DB} dB this chain will believe. A lead ` +
+    `vocal is not that far under its own mix, so this is a separation that left the singing ` +
+    `somewhere else and returned leakage; matching to it would shape and level your take against ` +
+    `the wrong signal. Nothing was changed. Check the “— Vocals” document: if it is not the ` +
+    `original singer, separate the song again or pick a different reference.`
+  );
 }
 
 /**
@@ -400,6 +474,11 @@ export function deriveMatchEq(
       reason: `nothing in ${reference.name} rises above its own gate, so there is no spectrum to match to`,
     };
   }
+  // CC4 (CJ-3): a leakage-only stem HAS frames — that is the whole problem —
+  // so the emptiness guards above cannot catch it. Shaping toward a leakage
+  // spectrum is a real, bounded, wrong correction.
+  const implausible = implausibleReferenceReason(reference);
+  if (implausible) return { run: false, reason: implausible };
   const takeLtas = longTermAverageSpectrum(take, sampleRate);
   if (takeLtas.frames === 0) {
     return {
@@ -549,6 +628,14 @@ export function deriveMatchLoudness(
         : 'no original vocal chosen to match against — separate the original mix and pick its Vocals document above',
     };
   }
+  // CC4 (CJ-3): before the arithmetic, the plausibility of the number it is
+  // about to trust. `gatedLevelDb` gates each signal against its own p95, so a
+  // near-empty Vocals stem reports a perfectly finite level and this stage
+  // would commit `reference − take` — measured at −41 dB on this repo's own
+  // material — bounded only by Amplify's ±60 dB range.
+  const implausible = implausibleReferenceReason(reference);
+  if (implausible) return { run: false, reason: implausible };
+
   const takeLevel = gatedLevelDb(take, sampleRate);
   if (takeLevel === null) {
     return {
@@ -701,6 +788,13 @@ export interface CoverChainReport {
    * when no reference was chosen. */
   reference: CoverChainMetrics | null;
   referenceName: string | null;
+  /**
+   * CC4 (CJ-3): how far the reference sat below its own mix when that was
+   * FURTHER than {@link REFERENCE_BELOW_MIX_FLOOR_DB} — i.e. the number that
+   * made the match stages decline. `null` whenever the floor did not fire,
+   * including every run with no mix supplied.
+   */
+  referenceImplausibleBelowDb: number | null;
   stages: CoverChainStageResult[];
   sampleRate: number;
   regionSamples: number;
@@ -784,7 +878,16 @@ export function measureReference(
   channels: Float32Array[],
   sampleRate: number,
   name: string,
-  need: { ltas: boolean; level: boolean; decay: boolean }
+  need: { ltas: boolean; level: boolean; decay: boolean },
+  /**
+   * CC4 (CJ-3): the MIX the reference was separated from, when the caller knows
+   * it. One extra gated-level scan of the song — the same measurement the
+   * reference already pays for, over material the caller is already holding —
+   * and it is what makes {@link REFERENCE_BELOW_MIX_FLOOR_DB} checkable at all.
+   * Omitted by the standalone chain, whose reference is whatever document the
+   * user picked.
+   */
+  mix?: { channels: Float32Array[]; sampleRate: number; name: string } | null
 ): ReferenceMeasurements {
   return {
     ltas: need.ltas ? longTermAverageSpectrum(channels, sampleRate) : null,
@@ -792,6 +895,8 @@ export function measureReference(
     decay: need.decay ? estimateDecay(channels, sampleRate) : null,
     sampleRate,
     name,
+    mixGatedLevelDb: mix ? gatedLevelDb(mix.channels, mix.sampleRate) : null,
+    mixName: mix ? mix.name : null,
   };
 }
 
@@ -905,6 +1010,14 @@ export interface RunCoverChainOptions {
    * every stage that needs it declines saying so, rather than the chain
    * refusing to start. */
   referenceDocId: string | null;
+  /**
+   * CC4 (CJ-3): the document the reference was SEPARATED FROM, when the caller
+   * knows it. Supplying it switches on the plausibility floor
+   * ({@link REFERENCE_BELOW_MIX_FLOOR_DB}); omitting it leaves this chain's
+   * behaviour exactly as shipped, which is what the standalone dialog wants —
+   * there the reference is whatever document the user chose.
+   */
+  mixDocId?: string | null;
   onProgress?: (fraction: number) => void;
   onStageStart?: (stage: CoverChainStage) => void;
   /** Fires repeatedly while a stage is in flight, scoped to that stage. */
@@ -931,7 +1044,8 @@ export interface RunCoverChainOptions {
  * stage gave, and Match Reverb's decline is the most common outcome there is.
  */
 export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverChainReport | null> {
-  const { enabled, referenceDocId, onProgress, onStageStart, onStageProgress, onStageResult } = opts;
+  const { enabled, referenceDocId, mixDocId, onProgress, onStageStart, onStageProgress, onStageResult } =
+    opts;
   const state = useAppStore.getState();
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
   if (!doc) return null;
@@ -969,14 +1083,37 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
     : null;
   const needsReference =
     enabled.matchEq === true || enabled.matchLoudness === true || enabled.matchReverb === true;
+  // CC4 (CJ-3): the mix the reference came out of, when the caller named one and
+  // it is still open. The gated LEVEL of the reference is measured whenever a
+  // mix is supplied, whether or not Match Loudness is on: it is the floor's own
+  // input, and Match EQ declines on it too.
+  const mixDoc = mixDocId
+    ? (state.documents.find((d) => d.id === mixDocId && d.id !== refDoc?.id) ?? null)
+    : null;
+  const mix =
+    mixDoc && docLength(mixDoc) > 0
+      ? { channels: mixDoc.channels, sampleRate: mixDoc.sampleRate, name: mixDoc.name }
+      : null;
   let reference: ReferenceMeasurements | null = null;
   if (refDoc && needsReference && docLength(refDoc) > 0) {
-    reference = measureReference(refDoc.channels, refDoc.sampleRate, refDoc.name, {
-      ltas: enabled.matchEq === true,
-      level: enabled.matchLoudness === true,
-      decay: enabled.matchReverb === true,
-    });
+    reference = measureReference(
+      refDoc.channels,
+      refDoc.sampleRate,
+      refDoc.name,
+      {
+        ltas: enabled.matchEq === true,
+        level: enabled.matchLoudness === true || mix !== null,
+        decay: enabled.matchReverb === true,
+      },
+      mix
+    );
   }
+  // CC4 (CJ-3): the floor's verdict as a typed field rather than a string the
+  // caller would have to recognise — the cover journey warns on its own row with
+  // this number, and the nested stage rows carry the full sentence.
+  const referenceBelowMix = referenceBelowMixDb(reference);
+  const referenceImplausibleBelowDb =
+    implausibleReferenceReason(reference) === null ? null : (referenceBelowMix as number);
 
   // The before/after spectral distance needs the reference's spectrum whether or
   // not Match EQ is on — a run with only the loudness stage still reports how
@@ -1117,6 +1254,7 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
     after,
     reference: referenceMetrics,
     referenceName: refDoc ? refDoc.name : null,
+    referenceImplausibleBelowDb, // CC4 (CJ-3)
     stages: results,
     sampleRate,
     regionSamples,
