@@ -43,8 +43,19 @@ const EXPECTED_SECTIONS: [string, string[]][] = [
   ['Tempo & Timing', ['tempo.detect', 'tempo.match', 'timing.align', 'edit.remix']],
   ['Voice', ['edit.voiceChanger', 'effects.vocalChain', 'effects.coverChain', 'lyrics.align']],
   ['Analysis', ['edit.transcribe', 'edit.separateStems']],
+  // F11-8: the fourth section the F11-6 header said it was leaving room for.
+  // The room was structural, not automatic — an unregistered id is DROPPED by
+  // `toolRows`, so the section stayed empty (and therefore unrendered) until a
+  // spatial command existed. It exists now, because 'Spatial' left the module
+  // strip: the user ruled it a single tool rather than a module.
+  ['Mix', ['spatial.position']],
 ];
 const ALL_TOOL_IDS = EXPECTED_SECTIONS.flatMap(([, ids]) => ids);
+
+/** Every tool whose command is gated on the active document. The positioner is
+ * not one: it addresses the multitrack session's tracks, which exist with no
+ * document open, so the document laws below are stated over these. */
+const DOC_GATED_TOOL_IDS = ALL_TOOL_IDS.filter((id) => id !== 'spatial.position');
 
 /** Length-gated tools: `enabled` is an active document AND `docLength > 0`. */
 const NEEDS_AUDIO = ['edit.remix', 'edit.voiceChanger', 'lyrics.align', 'edit.transcribe', 'edit.separateStems'];
@@ -125,7 +136,7 @@ describe('EffectsPanel — the effect list stays first and untouched', () => {
 });
 
 describe('EffectsPanel — the tool sections', () => {
-  it('ships exactly three sections, in order, each holding its entries in order', () => {
+  it('ships exactly four sections, in order, each holding its entries in order', () => {
     render(<EffectsPanel />);
     expect(sections().map((s) => s.getAttribute('data-section'))).toEqual(
       EXPECTED_SECTIONS.map(([title]) => title)
@@ -163,9 +174,20 @@ describe('EffectsPanel — the tool sections', () => {
 });
 
 describe('EffectsPanel — greying is the command own predicate', () => {
-  it('greys every tool with no document open', () => {
+  it('greys every document-gated tool with no document open', () => {
     render(<EffectsPanel />);
-    for (const id of ALL_TOOL_IDS) expect(toolButton(id)).toBeDisabled();
+    for (const id of DOC_GATED_TOOL_IDS) expect(toolButton(id)).toBeDisabled();
+    expectRowsMirrorTheRegistry();
+  });
+
+  // F11-8: the Mix row is the exception, and it has to be. Its command is the
+  // only door the Spatial positioner has left now that the strip carries no
+  // icon for it, and the positioner acts on the multitrack session — greying
+  // it with no document open would replace a panel that explains an empty
+  // session with a grey row that explains nothing.
+  it('leaves the Mix row live with no document open, because the positioner is session-scoped', () => {
+    render(<EffectsPanel />);
+    expect(toolButton('spatial.position')).toBeEnabled();
     expectRowsMirrorTheRegistry();
   });
 

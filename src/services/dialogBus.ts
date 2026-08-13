@@ -25,6 +25,7 @@ let openCoverChain: OpenSetter | null = null;
 let openAlignLyrics: OpenSetter | null = null;
 let focusRemix: OpenSetter | null = null;
 let focusTranscript: OpenSetter | null = null;
+let focusSpatial: OpenSetter | null = null;
 
 export function registerDialogSetters(setters: {
   openExportDialog: OpenSetter;
@@ -53,6 +54,12 @@ export function registerDialogSetters(setters: {
   /** Not a dialog either: switches the sidebar to the Transcript tab once a
    * transcript exists (F4b), for the same reason as `focusRemixPanel`. */
   focusTranscriptPanel: OpenSetter;
+  /** F11-8. Not a dialog either — and unlike the two above it is not a
+   * follow-up to a job that just finished, it is the positioner's ONLY door:
+   * the user ruled Spatial a single tool rather than a module, so the module
+   * strip carries no icon for it and `spatial.position` (Pipeline > Mix) calls
+   * this to put the panel in the card. */
+  focusSpatialPanel: OpenSetter;
 }): () => void {
   openExport = setters.openExportDialog;
   openNewFile = setters.openNewFileDialog;
@@ -70,6 +77,7 @@ export function registerDialogSetters(setters: {
   openAlignLyrics = setters.openAlignLyricsDialog;
   focusRemix = setters.focusRemixPanel;
   focusTranscript = setters.focusTranscriptPanel;
+  focusSpatial = setters.focusSpatialPanel;
   return () => {
     openExport = null;
     openNewFile = null;
@@ -87,6 +95,7 @@ export function registerDialogSetters(setters: {
     openAlignLyrics = null;
     focusRemix = null;
     focusTranscript = null;
+    focusSpatial = null;
   };
 }
 
@@ -152,6 +161,10 @@ export function focusRemixPanel(): void {
 
 export function focusTranscriptPanel(): void {
   focusTranscript?.();
+}
+
+export function focusSpatialPanel(): void {
+  focusSpatial?.();
 }
 
 // --- Open-dialog stack (Task M7: F10/F25) ---------------------------------

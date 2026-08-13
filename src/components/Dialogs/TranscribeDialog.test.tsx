@@ -60,6 +60,7 @@ beforeEach(() => {
     openAlignLyricsDialog: () => {},
     focusRemixPanel: () => {},
     focusTranscriptPanel: focusTranscript,
+    focusSpatialPanel: () => {},
   });
 });
 

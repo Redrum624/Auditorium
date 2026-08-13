@@ -161,6 +161,7 @@ function installBus(): void {
     openAlignLyricsDialog: () => {},
     focusRemixPanel,
     focusTranscriptPanel: () => {},
+    focusSpatialPanel: () => {},
   });
 }
 

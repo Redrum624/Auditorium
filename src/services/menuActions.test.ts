@@ -820,9 +820,21 @@ describe('the Pipeline section (F11-7)', () => {
     'separator',
     'edit.transcribe',
     'edit.separateStems',
+    // F11-8: a fourth group, Mix. 'Spatial' was a module-strip entry until the
+    // user ruled that it is a single tool rather than a module; this is where
+    // it landed, and the strip icon is gone.
+    'separator',
+    'spatial.position',
   ];
 
   const MOVED = PIPELINE_ITEMS.filter((id): id is string => id !== 'separator');
+
+  /** F11-8: every Pipeline row EXCEPT the positioner is gated on the active
+   * document. `spatial.position` is not — it addresses the multitrack
+   * SESSION's tracks, which exist with no document open at all — so the
+   * document law below is stated over the rows it actually governs, and the
+   * positioner's own enablement is pinned in its own describe. */
+  const DOC_GATED = MOVED.filter((id) => id !== 'spatial.position');
 
   function itemKeys(title: string): (string | 'separator')[] {
     const section = getMenuSections().find((s) => s.title === title)!;
@@ -834,7 +846,7 @@ describe('the Pipeline section (F11-7)', () => {
     expect(titles.indexOf('Pipeline')).toBe(titles.indexOf('Effects') + 1);
   });
 
-  it('holds the ten tools in three separated groups, in order', () => {
+  it('holds the eleven tools in four separated groups, in order', () => {
     expect(itemKeys('Pipeline')).toEqual(PIPELINE_ITEMS);
   });
 
@@ -846,7 +858,7 @@ describe('the Pipeline section (F11-7)', () => {
 
   // The whole point of the request was to MOVE them. A duplicate would leave
   // two rows running one command, and the old rows greying independently.
-  it('MOVED them: each of the ten appears exactly once across the whole menu bar', () => {
+  it('MOVED them: each of the eleven appears exactly once across the whole menu bar', () => {
     registerAllEffects();
     registerEffectCommands();
     const everywhere = getMenuSections().flatMap((s) => commandIds(s.items));
@@ -903,17 +915,89 @@ describe('the Pipeline section (F11-7)', () => {
 
   // Placement moved; the commands did not. Enablement is the observable half of
   // that, and it is the half a careless "move" breaks by re-registering a stub.
-  it('every row is disabled with no document and enabled with one', () => {
+  it('every document-gated row is disabled with no document and enabled with one', () => {
     const findRow = (id: string) => {
       const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
       return pipeline.items.find(
         (item): item is MenuCommand => item !== 'separator' && item.id === id
       )!;
     };
-    for (const id of MOVED) expect(findRow(id).enabled(useAppStore.getState())).toBe(false);
+    for (const id of DOC_GATED) expect(findRow(id).enabled(useAppStore.getState())).toBe(false);
 
     openDoc();
-    for (const id of MOVED) expect(findRow(id).enabled(useAppStore.getState())).toBe(true);
+    for (const id of DOC_GATED) expect(findRow(id).enabled(useAppStore.getState())).toBe(true);
+  });
+});
+
+// F11-8. The user's ruling: "Spatial and Transcript are single tools, they
+// should not be a module." Spatial's panel is untouched — it keeps its stage,
+// its track selector and its lane buttons — but the module strip no longer
+// carries an icon for it, so the command below is the door it is reached
+// through, and the Pipeline menu grew a fourth group to hold it.
+describe('spatial.position — the Mix group (F11-8)', () => {
+  function pipelineItems(): (string | 'separator')[] {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.map((item) => (item === 'separator' ? 'separator' : item.id));
+  }
+
+  function pipelineCmd(id: string): MenuCommand | undefined {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  }
+
+  it('closes the Pipeline menu as a group of its own, after Analysis', () => {
+    const ids = pipelineItems();
+    expect(ids[ids.length - 1]).toBe('spatial.position');
+    expect(ids[ids.length - 2]).toBe('separator');
+    expect(ids[ids.length - 3]).toBe('edit.separateStems');
+  });
+
+  it('resolves to a registered command named for what it opens, with no ellipsis (it opens no dialog)', () => {
+    const cmd = pipelineCmd('spatial.position')!;
+    expect(cmd).toBeDefined();
+    expect(cmd.label).toBe('Spatial Positioner');
+    expect(cmd.label).not.toMatch(/…$/);
+  });
+
+  // The one Pipeline row that is not document-gated, and deliberately so: the
+  // positioner writes automation onto a multitrack TRACK, which exists with no
+  // document open, and the panel states an empty session in its own words
+  // rather than being replaced by a grey row that explains nothing. The strip
+  // icon it replaces was clickable in every state too, so gating here would
+  // remove a surface the user has today.
+  it('is enabled with no document open, and stays enabled with one', () => {
+    expect(pipelineCmd('spatial.position')!.enabled(useAppStore.getState())).toBe(true);
+    openDoc();
+    expect(pipelineCmd('spatial.position')!.enabled(useAppStore.getState())).toBe(true);
+  });
+
+  it('runCommand("spatial.position") shows the positioner through the bus, opening no dialog', async () => {
+    const focusSpatial = jest.fn();
+    const openEffect = jest.fn();
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: openEffect,
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      openSeparateDialog: () => {},
+      openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
+      openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
+      focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
+      focusSpatialPanel: focusSpatial,
+    });
+
+    await runCommand('spatial.position');
+
+    expect(focusSpatial).toHaveBeenCalledTimes(1);
+    expect(openEffect).not.toHaveBeenCalled();
   });
 });
 
@@ -1047,6 +1131,7 @@ describe('tempo.match (Task T8)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
 
     await runCommand('tempo.match');
@@ -1105,6 +1190,7 @@ describe('timing.align (Task F9)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
 
     await runCommand('timing.align');
@@ -1180,6 +1266,7 @@ describe('effects.vocalChain (Task F7)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
 
     await runCommand('effects.vocalChain');
@@ -1250,6 +1337,7 @@ describe('effects.coverChain (Task F10)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
 
     await runCommand('effects.coverChain');
@@ -1326,6 +1414,7 @@ describe('edit.remix (Task T14)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
 
     await runCommand('edit.remix');
@@ -1352,6 +1441,7 @@ describe('edit.remix (Task T14)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
 
     await runCommand('edit.remix');
@@ -1389,6 +1479,7 @@ describe('edit.separateStems (Task S6)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
   }
 
@@ -1408,8 +1499,12 @@ describe('edit.separateStems (Task S6)', () => {
     expect(separate !== 'separator' && separate.id).toBe('edit.separateStems');
     expect(separate !== 'separator' && separate.label).toBe('Separate into Stems…');
     expect(separate !== 'separator' && separate.shortcut).toBeUndefined();
-    // Last row of the menu: nothing dangles after the group.
-    expect(pipeline.items).toHaveLength(transcribeIndex + 2);
+    // Closes the GROUP, which is what this test is named for: the next thing
+    // after it is the separator that opens the next group, never another
+    // Analysis row. It stopped being the last row of the menu in F11-8, when
+    // 'Mix' was added after it, so pinning `items.length` here would be pinning
+    // the menu's total size under the name of an adjacency.
+    expect(pipeline.items[transcribeIndex + 2]).toBe('separator');
 
     expect(commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items)).not.toContain(
       'edit.separateStems'
@@ -1477,6 +1572,7 @@ describe('edit.transcribe (Task F4b)', () => {
       openAlignLyricsDialog: () => {},
       focusRemixPanel: () => {},
       focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
     });
   }
 

@@ -28,11 +28,18 @@ function groupByCategory(effects: EffectDefinition[]): [string, EffectDefinition
  * here, and none can be: a row that looks live but is stale still cannot fire,
  * because `runCommand` re-checks enablement before running.
  *
- * The sections are the three questions the tools answer, in the order a cover
- * is actually made. A fourth 'Mix' section belongs after 'Analysis' once a
- * spatial command exists to put in it — there is no such command today, and a
- * row pointing at an unregistered id would render as a permanently grey
- * mystery, so the space is left rather than filled.
+ * The sections are the questions the tools answer, in the order a cover is
+ * actually made.
+ *
+ * F11-8 fills the fourth, 'Mix', which F11-6 left empty for want of a spatial
+ * command: `spatial.position` exists now, because the user ruled the Spatial
+ * positioner a single tool rather than a module and the module strip stopped
+ * drawing an icon for it. Note what was and was NOT automatic about that. The
+ * ROW is automatic — `toolRows` drops an unregistered id and lights a
+ * registered one off `isCommandEnabled`, so nothing here had to learn the new
+ * command's label or predicate. The SECTION is not: this list is written, so
+ * the 'Mix' line below is the change, and until it existed the section would
+ * have rendered as nothing at all (`rows.length === 0` returns null).
  */
 const TOOL_SECTIONS: { title: string; commandIds: string[] }[] = [
   {
@@ -44,6 +51,7 @@ const TOOL_SECTIONS: { title: string; commandIds: string[] }[] = [
     commandIds: ['edit.voiceChanger', 'effects.vocalChain', 'effects.coverChain', 'lyrics.align'],
   },
   { title: 'Analysis', commandIds: ['edit.transcribe', 'edit.separateStems'] },
+  { title: 'Mix', commandIds: ['spatial.position'] },
 ];
 
 /**

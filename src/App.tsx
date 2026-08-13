@@ -135,6 +135,10 @@ export default function App() {
         openAlignLyricsDialog: () => setAlignLyricsOpen(true),
         focusRemixPanel: () => setSidebarTab('remix'),
         focusTranscriptPanel: () => setSidebarTab('transcript'),
+        // F11-8: the Pipeline > Mix command's only effect. Spatial is a single
+        // tool rather than a module (user ruling), so this is how its panel
+        // reaches the card now that the strip draws no icon for it.
+        focusSpatialPanel: () => setSidebarTab('spatial'),
       }),
     []
   );

@@ -50,6 +50,7 @@ function registerSetters(overrides: Partial<Parameters<typeof registerDialogSett
     openAlignLyricsDialog: () => {},
     focusRemixPanel: () => {},
     focusTranscriptPanel: () => {},
+    focusSpatialPanel: () => {},
     ...overrides,
   });
 }

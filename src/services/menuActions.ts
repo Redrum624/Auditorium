@@ -33,6 +33,7 @@ import {
   openAlignTimingDialog,
   openVocalChainDialog,
   openCoverChainDialog,
+  focusSpatialPanel,
 } from './dialogBus';
 import { getVisibleEffects } from '../effects/EffectRegistry';
 import { captureNoiseProfile } from './noiseProfile';
@@ -184,6 +185,12 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       // Analysis — whole-file model runs that produce new material.
       'edit.transcribe',
       'edit.separateStems',
+      'separator',
+      // F11-8: Mix — where a source SITS rather than what it says or when it
+      // plays. One entry, and a fourth group rather than a fifth row in
+      // Analysis: the positioner neither analyses nor transforms the active
+      // document, it writes automation onto a multitrack track.
+      'spatial.position',
     ],
   },
   {
@@ -1145,6 +1152,33 @@ function registerAlignLyricsCommands(): void {
   ]);
 }
 
+/** F11-8 — the Spatial positioner, closing the Pipeline menu as its own 'Mix'
+ * group. The user ruled that "Spatial and Transcript are single tools, they
+ * should not be a module", so the module strip no longer carries an icon for
+ * the positioner and this command is the ONLY door it has: it opens no dialog
+ * (hence no ellipsis in the label, the same convention `tempo.detect` follows)
+ * — it puts the existing panel, untouched, into the module card through the
+ * bus, exactly as `focusRemixPanel`/`focusTranscriptPanel` do.
+ *
+ * ALWAYS enabled, and it is the only Pipeline row that is. Every other row acts
+ * on the active document; the positioner writes automation onto a multitrack
+ * TRACK, which exists with no document open at all — the multitrack view works
+ * in an empty app. Gating it on `activeDoc(s) !== null` would grey it in the
+ * one state the multitrack user is most likely to be in, and gating it on the
+ * session having tracks would replace a panel that says "No tracks in the
+ * session." with a grey row that says nothing. The strip icon it replaces was
+ * clickable in every state; this keeps that true. */
+function registerSpatialCommands(): void {
+  registerCommands([
+    {
+      id: 'spatial.position',
+      label: 'Spatial Positioner',
+      enabled: () => true,
+      run: async () => focusSpatialPanel(),
+    },
+  ]);
+}
+
 registerDefaultCommands();
 registerSelectionAndTransportCommands();
 registerEditCommands();
@@ -1162,3 +1196,4 @@ registerVoiceCommands();
 registerVocalChainCommands();
 registerCoverChainCommands();
 registerAlignLyricsCommands();
+registerSpatialCommands();

@@ -5,6 +5,7 @@ import { createDocument } from './audio/AudioDocument';
 import { playbackEngine } from './audio/PlaybackEngine';
 import { multitrackPlayer } from './multitrack/MultitrackPlayer';
 import { getInFlightSaveCount } from './services/fileService';
+import { runCommand } from './services/menuActions';
 
 // Real fileService, except getInFlightSaveCount is swapped for a controllable
 // mock so the close-guard reply tests below (Task M4/F7) can force it to a
@@ -298,6 +299,18 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
     fireEvent.click(within(rail).getByRole('button', { name: 'Markers' }));
     expect(within(rail).getByRole('button', { name: 'Markers' })).toHaveClass('is-active');
     expect(within(rail).getByRole('button', { name: 'History' })).not.toHaveClass('is-active');
+  });
+
+  // F11-8: 'Spatial' is a single tool, not a module (user ruling), so the
+  // Pipeline > Mix command is the door it is reached through. The card it lands
+  // in is the SAME card the strip drives — one card, two kinds of door.
+  it('shows the Spatial positioner in the module card when the Mix tool runs', async () => {
+    render(<App />);
+    await act(async () => {
+      await runCommand('spatial.position');
+    });
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'spatial');
+    expect(screen.getByTestId('spatial-panel')).toBeInTheDocument();
   });
 
   it('does not render the tempo card when no analysis exists (and never starts one)', () => {
