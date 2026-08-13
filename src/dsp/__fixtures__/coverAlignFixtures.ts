@@ -1,0 +1,138 @@
+/**
+ * Task CP1 — constructed ground truth for the cover-journey alignment.
+ *
+ * The alignment stage has to answer two questions, and neither can be checked
+ * against real audio: "where does this take sit against the original?" needs an
+ * offset nobody knows for a recording made in a room, and "is this take even
+ * the same song?" needs a NEGATIVE case that real fixtures cannot supply
+ * (`cover-take.wav` and `cover-reference.wav` are related by construction).
+ *
+ * So the ground truth is BUILT. A schedule of syllables — start, duration,
+ * pitch, amplitude — is drawn from a seeded PRNG, and two signals are rendered
+ * from it:
+ *
+ *   - the SAME seed with different `leadSeconds` gives two recordings of one
+ *     performance at a known offset (`leadSeconds` of the reference minus
+ *     `leadSeconds` of the take, which is exactly the quantity the aligner
+ *     reports);
+ *   - the same seed with `hzScale`/`amplitudeJitter`/`noiseAmplitude` gives a
+ *     DIFFERENT performance of the same phrasing — a cover, which is the case
+ *     that actually ships;
+ *   - a DIFFERENT seed gives audio with no relation at all, which is the case
+ *     the confidence threshold exists to refuse.
+ *
+ * Everything here is deterministic: same options, same samples, on any machine.
+ */
+
+/** Mulberry32 — 32-bit, deterministic, and already the repo's idiom for a
+ * seeded stream in a fixture (see `remixGoldenCases`). */
+export function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export interface Syllable {
+  /** Seconds from the first syllable's nominal zero, BEFORE `leadSeconds`. */
+  startSeconds: number;
+  durationSeconds: number;
+  hz: number;
+  amplitude: number;
+}
+
+/**
+ * A syllable schedule: bursts of 0.12–0.37 s separated by gaps of 0.04–0.39 s,
+ * which is roughly how sung phrasing sits on an onset envelope. The SCHEDULE is
+ * what alignment keys on — two renderings of one schedule line up, two
+ * schedules from different seeds do not.
+ */
+export function syllableSchedule(seed: number, seconds: number): Syllable[] {
+  const rng = mulberry32(seed);
+  const out: Syllable[] = [];
+  let t = 0.2 + rng() * 0.3;
+  while (t < seconds - 0.5) {
+    const durationSeconds = 0.12 + rng() * 0.25;
+    out.push({
+      startSeconds: t,
+      durationSeconds,
+      hz: 140 + rng() * 180,
+      amplitude: 0.3 + rng() * 0.6,
+    });
+    t += durationSeconds + 0.04 + rng() * 0.35;
+  }
+  return out;
+}
+
+export interface VocalLikeOptions {
+  seed: number;
+  sampleRate: number;
+  /** Length of the SCHEDULE, before `leadSeconds` is added in front of it. */
+  seconds: number;
+  /** Silence before the first syllable. The difference between the reference's
+   * and the take's is the ground-truth offset. */
+  leadSeconds?: number;
+  /** 1 = the same notes. A cover sings the same words at other pitches. */
+  hzScale?: number;
+  /** 0 = the same dynamics. A cover does not hit the same levels. */
+  amplitudeJitter?: number;
+  /** Broadband noise, as a peak amplitude. */
+  noiseAmplitude?: number;
+  /** Stream for the jitter/noise, so a "different performance" can be varied
+   * without disturbing the schedule the two share. */
+  varianceSeed?: number;
+  channels?: number;
+}
+
+/**
+ * Renders a schedule as vocal-like audio: each syllable is a raised-cosine
+ * amplitude envelope over a three-harmonic tone. Nothing here is a claim about
+ * how singing sounds — it is a claim about where the ATTACKS are, which is the
+ * only thing an onset envelope carries.
+ */
+export function makeVocalLike(opts: VocalLikeOptions): Float32Array[] {
+  const {
+    seed,
+    sampleRate,
+    seconds,
+    leadSeconds = 0,
+    hzScale = 1,
+    amplitudeJitter = 0,
+    noiseAmplitude = 0,
+    varianceSeed = seed + 1,
+    channels = 1,
+  } = opts;
+
+  const schedule = syllableSchedule(seed, seconds);
+  const total = Math.round((seconds + leadSeconds) * sampleRate);
+  const mono = new Float32Array(total);
+  const rng = mulberry32(varianceSeed);
+
+  for (const syl of schedule) {
+    const gain = syl.amplitude * (1 + amplitudeJitter * (rng() * 2 - 1));
+    const hz = syl.hz * hzScale;
+    const start = Math.round((leadSeconds + syl.startSeconds) * sampleRate);
+    const len = Math.round(syl.durationSeconds * sampleRate);
+    for (let i = 0; i < len; i++) {
+      const idx = start + i;
+      if (idx < 0 || idx >= total) continue;
+      // Raised cosine: silence at both edges, so every syllable is an attack
+      // followed by a decay rather than a click.
+      const env = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / len);
+      const t = i / sampleRate;
+      const w = 2 * Math.PI * hz * t;
+      mono[idx] += gain * env * (Math.sin(w) + 0.5 * Math.sin(2 * w) + 0.25 * Math.sin(3 * w)) * 0.55;
+    }
+  }
+
+  if (noiseAmplitude > 0) {
+    for (let i = 0; i < total; i++) mono[i] += noiseAmplitude * (rng() * 2 - 1);
+  }
+
+  const out: Float32Array[] = [mono];
+  for (let c = 1; c < channels; c++) out.push(Float32Array.from(mono));
+  return out;
+}
