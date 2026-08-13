@@ -1002,6 +1002,18 @@ document open. A session has a name, a sample rate, and any number of tracks.
   a volume slider (−60..+12 dB) and a pan slider (−1..1). **Add Track** adds
   an empty track. Arm (R) marks a track as a recording target — see **Recording
   into the multitrack** below.
+- **Dragging a file onto a track**: drop a row from the **Files** panel onto a
+  track lane and that document becomes a clip where you dropped it. You can
+  also drag an audio file straight from Explorer onto a lane — it is opened
+  through the normal open path (so it appears in the Files panel too) and then
+  placed. While you drag, the lane under the pointer highlights and a ghost
+  line shows exactly where the clip will start; **no highlight means no
+  action**, so dropping anywhere that is not a lane does nothing. The drop
+  position snaps like a clip drag does, and `Alt` suspends that. The whole drop
+  is a single undo step (`Add clip`, or `Add clips` when you drop several files
+  at once), so one `Ctrl+Z` lifts all of it. Dropping something that is not an
+  audio file is refused the same way **File → Open** refuses it, and leaves
+  nothing half-created.
 - **Clips**: **Edit → Insert Active File at Cursor** places the whole active
   document as a clip on the selected (or first) track at the multitrack
   cursor. Drag a clip to move it and drag its edges to trim; both snap to the

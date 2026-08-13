@@ -212,6 +212,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   called or when it is available. Tool rows are a **single** click, against the effect rows'
   double-click: an effect row opens a parameter dialog, a tool row runs a verb the menu already runs
   on one click. Affects: `src/components/Panels/EffectsPanel.tsx`.
+- **A file can be dragged onto a multitrack track — from the Files panel or from Explorer.** Why: the
+  user's words were "we can't drag a file on a track in multitrack, it's a real issue". They were
+  exactly right: HTML5 drag-and-drop did not exist anywhere in this app — no `draggable`, no
+  `dataTransfer`, no `onDrop`, and no bridge that could learn a dropped file's path at all. The only
+  way to get audio into a session was *Insert Active File at Cursor*, which places the ACTIVE document
+  at the CURSOR — never the file you meant, at the place you pointed. Dragging a Files-panel row onto a
+  lane now places that document where you dropped it; dragging an audio file from Explorer opens it
+  through the REAL open path — the same decode, the same rollback, the same failure dialog — and then
+  places it identically. The drop position goes through the clip drag's own magnet, which was
+  extracted to `clipDropPosition.ts` and is now called by BOTH the drag and the drop rather than
+  copied (the three lines it replaced were deleted from `ClipView`, not duplicated). The lane
+  highlights and a ghost line shows the snapped start while dragging, so "no highlight, no action" is
+  readable before you let go. One drop is one session-history entry (`Add clip` / `Add clips`),
+  following the `Record clip`/`Record clips` precedent, so a single undo lifts a whole multi-file
+  drop. Affects: `src/components/Multitrack/{clipDropPosition,TrackLane,ClipView}.tsx`,
+  `src/multitrack/{laneDrop,session}.ts`, `src/components/Panels/FilesPanel.tsx`,
+  `electron/preload.cjs`.
 
 - **DevTools open by themselves on a dev run.** Why: a standing user rule — while developing, the
   console is open without anyone asking for it. Detached, so it never takes width from the window the
