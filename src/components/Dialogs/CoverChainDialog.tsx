@@ -62,7 +62,7 @@ const SUB_STATUS_COLOR: Record<StageStatus, string> = {
 };
 
 /**
- * One row of a NESTED chain — the Vocal Chain's ten stages, or the Cover
+ * One row of a NESTED chain — the Vocal Chain's eleven stages, or the Cover
  * Chain's nine.
  *
  * Typed on the structural subset both `VocalChainStageResult` and

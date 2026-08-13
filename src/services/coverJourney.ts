@@ -134,7 +134,10 @@ export const COVER_JOURNEY_STAGES: readonly CoverJourneyStage[] = [
   {
     id: 'clean',
     label: 'Clean the Take (Vocal Chain)',
-    note: "The whole Vocal Chain on your take, with its own ten stages reported live below this row rather than hidden behind one bar. It removes noise, hum and DC, corrects pitch, and sets a compressor, de-esser and high-pass from the take's own levels. The match that follows is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.",
+    // CC1: eleven, not ten — the Vocal Chain gained a Noise Gate stage, and the
+    // silence it brings the pauses to is the visible half of what this stage
+    // does for a cover, so the sentence names it.
+    note: "The whole Vocal Chain on your take, with its own eleven stages reported live below this row rather than hidden behind one bar. It removes noise, hum and DC, gates the pauses between your phrases down to actual silence, corrects pitch, and sets a compressor, de-esser and high-pass from the take's own levels. The match that follows is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.",
     weight: 4,
   },
   {

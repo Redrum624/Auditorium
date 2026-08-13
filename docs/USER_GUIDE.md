@@ -400,13 +400,14 @@ The stages, in the order they run:
 | 3 | Noise Reduction | yes |
 | 4 | DeHum | yes (runs only if hum is measured) |
 | 5 | Remove Silence | **no** |
-| 6 | Align Vocal Timing | **manual — run it before the chain** |
-| 7 | Pitch Correct | yes |
-| 8 | Compressor | yes |
-| 9 | De-esser | yes |
-| 10 | EQ (high-pass) | yes |
-| 11 | Reverb | **no** |
-| 12 | Limiter | yes |
+| 6 | Noise Gate | yes |
+| 7 | Align Vocal Timing | **manual — run it before the chain** |
+| 8 | Pitch Correct | yes |
+| 9 | Compressor | yes |
+| 10 | De-esser | yes |
+| 11 | EQ (high-pass) | yes |
+| 12 | Reverb | **no** |
+| 13 | Limiter | yes |
 
 The order is not stylistic. Noise reduction comes early because the pitch
 detector will otherwise lock onto broadband noise and "correct" pitch that is
@@ -442,7 +443,34 @@ and the chain overrides only what the recording decides:
   the compression took away;
 - the **noise print** is learned from the quietest 500 ms in the selection;
 - the **silence threshold** is the loudest that quiet passage ever reads;
+- the **gate threshold** is that same reading plus 3 dB;
 - the **high-pass** sits an octave below the lowest note actually sung.
+
+**The pauses between your phrases go to actual silence.** The **Noise Gate**
+stage mutes them, and it is on by default because it is what most people mean by
+"clean up this take" — Noise Reduction can only pull a floor down by 12 dB, and
+the compressor's makeup gain then lifts what is left, so before this stage a
+pause was quieter but never quiet. It **mutes in place rather than cutting**,
+which is why it can be on by default where Remove Silence cannot: nothing moves,
+so a take stays lined up with its backing track.
+
+It will not chew up your phrasing. The threshold is measured from your own
+recording — the loudest the silence detector reads in its quietest 500 ms, plus
+3 dB, because the same room tone reaches that level again in a longer pause and
+one graze would re-open the gate for half a second. And it **holds open for
+500 ms** after the level drops, which is the shortest gap this app is willing to
+call a pause at all (the same minimum Remove Silence uses): a stop-consonant
+closure, a breath, or a dip inside a held note is far shorter than that, so the
+gate does not so much as begin to close on one. The gate's row in the report
+says how much of the selection it actually silenced, in seconds and per cent.
+
+**And it declines rather than muting a recording that has no pause in it.** The
+threshold comes from the quietest 500 ms in the selection, and on a recording
+that never stops — a held tone, a stretch of room tone with no voice, or clicks
+spaced closer together than half a second — that quietest passage is the
+material itself, so the threshold would sit above everything and the whole take
+would go silent. When nothing at all is above the level it would gate at, the
+stage says so with the number it measured and leaves your audio alone.
 
 **One stage depends on another.** The high-pass corner comes from the lowest note
 the pitch detector measured, so **switching Pitch Correct off also switches the EQ
@@ -526,10 +554,12 @@ Six stages run, top to bottom, each reporting what it measured:
    each at the song's rate and length — the stage reuses them and says so, because a model
    pass is minutes and there is no reason to pay for it twice. What it cannot see is an
    edit to the song that left its length unchanged; separate again if you have edited it.
-2. **Clean the Take (Vocal Chain)** — the whole Vocal Chain on your take. Its ten stages
+2. **Clean the Take (Vocal Chain)** — the whole Vocal Chain on your take. Its eleven stages
    appear nested under this row, each with its own status and reason, rather than hidden
-   behind one bar. The match below is a correction to a **clean** take: match the timbre
-   of a noisy one and you match the noise too.
+   behind one bar. This is also where the pauses between your phrases go to silence: the
+   Vocal Chain's Noise Gate stage is on by default and mutes in place, so nothing shifts
+   out of sync with the instrumental. The match below is a correction to a **clean** take:
+   match the timbre of a noisy one and you match the noise too.
 3. **Align with the Original** — see below.
 4. **Match to the Original Vocal** — the four matching stages, described below, against
    the separated original vocal. Nested under this row the same way.

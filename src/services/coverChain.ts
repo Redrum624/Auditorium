@@ -241,7 +241,7 @@ export const COVER_CHAIN_STAGES: readonly CoverChainStage[] = [
     label: 'Vocal Chain on the Take',
     effectId: null,
     defaultEnabled: false,
-    note: 'Not an automatic stage — it is its own multi-stage pass with its own single undo entry, and running it inside this one would hide ten stages behind one line. Run Pipeline → Vocal Chain… on the take FIRST. It removes noise, hum and DC, corrects pitch, and sets a compressor, de-esser and high-pass from the take\'s own levels. It ends on a limiter, but that one derives nothing: a ceiling is an absolute level, so it runs at the effect\'s own −0.3 dBFS. The match below is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.',
+    note: 'Not an automatic stage — it is its own multi-stage pass with its own single undo entry, and running it inside this one would hide eleven stages behind one line. Run Pipeline → Vocal Chain… on the take FIRST. It removes noise, hum and DC, gates the pauses between phrases down to silence, corrects pitch, and sets a compressor, de-esser and high-pass from the take\'s own levels. It ends on a limiter, but that one derives nothing: a ceiling is an absolute level, so it runs at the effect\'s own −0.3 dBFS. The match below is a correction to a CLEAN take: matching the timbre of a noisy one matches the noise too.',
     weight: 0,
   },
   {

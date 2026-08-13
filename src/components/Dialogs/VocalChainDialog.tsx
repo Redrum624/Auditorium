@@ -213,7 +213,7 @@ function StageResult({ result }: { result: VocalChainStageResult }) {
  * (measuring its settings, or rendering with the settings it just measured) and
  * how far through ITSELF it is. The bar at the foot is the whole pass, weighted
  * by the measured stage times, and that is the number it was always right for:
- * it cannot say which of twelve stages the minute is being spent in.
+ * it cannot say which of thirteen stages the minute is being spent in.
  *
  * After: every stage says what it did. The settings it derived and what it
  * derived them FROM, the measured before/after RMS and peak, and how much of the
@@ -224,10 +224,11 @@ function StageResult({ result }: { result: VocalChainStageResult }) {
  * scale and is hard-clipped by both writers — carries its warning in the same
  * amber, above its measurements rather than instead of them.
  *
- * The one stage with `effectId === null` (Align Vocal Timing) is listed without
- * a checkbox: it needs a confirmed beat grid and confirmed syllable anchors, so
- * it is a separate dialog run BEFORE this one, and offering a tick here would
- * promise something the chain cannot do.
+ * The two stages with `effectId === null` (Align Lyrics and Align Vocal Timing)
+ * are listed without a checkbox: each needs the user to say WHICH thing to
+ * change — which word, which syllables — so each is a separate dialog run
+ * BEFORE this one, and offering a tick here would promise something the chain
+ * cannot do.
  *
  * Nothing here grades the result. The numbers are stated; whether they are the
  * ones the user wanted is the user's call.
