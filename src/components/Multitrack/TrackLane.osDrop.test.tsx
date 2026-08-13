@@ -107,7 +107,12 @@ function installApi(): void {
   api = {
     readFile: jest.fn(async () => new ArrayBuffer(8)),
     showMessageBox: jest.fn(async () => 0),
-    pathForFile: jest.fn((f: File) => paths.get(f) ?? null),
+    // F11 fix round (C1): ASYNC, because the real one is — the preload now
+    // registers the dropped path as read-approved in main and only then
+    // resolves. A synchronous stub would let a drop that never awaits the
+    // approval pass this suite while every real drop is refused by the
+    // `file:read` gate, which is exactly the bug that shipped.
+    pathForFile: jest.fn(async (f: File) => paths.get(f) ?? null),
     pathBasename: (p: string) => p.split(/[\\/]/).pop() ?? p,
   };
   (window as unknown as { electronAPI: MockApi }).electronAPI = api;

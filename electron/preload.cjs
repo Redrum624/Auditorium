@@ -158,13 +158,36 @@ const electronAPI = {
   // mapping lives in the renderer process, not in main (there is no IPC form
   // of this call). Returns null for anything that is not a real dropped file,
   // so the renderer refuses politely instead of opening a path it invented.
-  pathForFile: (file) => {
+  // F11 (C1): ...and, in the same breath, tells main that THIS path is one the
+  // user approved by dropping it. `file:read` refuses any path the user has not
+  // approved, and a dropped path passes through neither the open nor the save
+  // dialog, so without this every real Explorer drop was refused — invisibly to
+  // the smoke, which is the one environment where that gate is disabled.
+  //
+  // The approval is minted HERE rather than in the renderer because this is the
+  // only place that can tell a real drop from a forged one: `getPathForFile`
+  // returns "" for any `File` web content built itself, so a non-empty return
+  // is proof of a genuine user drop. The renderer never sees the channel —
+  // `ipcRenderer` is not exposed, and this object is frozen.
+  //
+  // Async because the approval must be registered in main BEFORE the renderer
+  // asks to read the file; the caller awaits it.
+  pathForFile: async (file) => {
+    let p;
     try {
-      const p = webUtils.getPathForFile(file);
-      return typeof p === 'string' && p.length > 0 ? p : null;
+      p = webUtils.getPathForFile(file);
     } catch {
       return null;
     }
+    if (typeof p !== 'string' || p.length === 0) return null;
+    try {
+      await ipcRenderer.invoke('file:approveDropped', p);
+    } catch {
+      // Main refused to approve it (bad shape). Report "no path" rather than
+      // hand back one that is guaranteed to be refused a moment later.
+      return null;
+    }
+    return p;
   }
 };
 

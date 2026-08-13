@@ -180,7 +180,10 @@ export async function dropFilesOnTrack(
   for (const file of files) {
     // Electron 32 removed `File.path`; `webUtils.getPathForFile` (bridged as
     // `pathForFile`) is the supported way to learn where a dropped file lives.
-    const path = window.electronAPI?.pathForFile?.(file) ?? null;
+    // F11 fix round: awaited — the preload registers this path as
+    // read-approved in main before it resolves, and `openFilePath` below would
+    // otherwise race that approval and be refused by the `file:read` gate.
+    const path = (await window.electronAPI?.pathForFile?.(file)) ?? null;
     if (!path) {
       await refuse(file.name, 'The file path is not available in this window.');
       continue;

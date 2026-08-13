@@ -46,6 +46,10 @@ export interface ElectronAPI {
   voiceProfilesSave(req: { profiles: unknown[] }): Promise<{ ok: true } | { ok: false; error: string }>;
 
   pathBasename(p: string): string;      // implemented in preload (string ops only, no IPC)
-  pathForFile(file: File): string | null; // preload-only (webUtils.getPathForFile); null when the File has no disk path
+  // F11: async since the fix round — the preload also registers the dropped
+  // path as read-approved in main before handing it back, and the caller must
+  // not start reading before that lands. `null` when the File has no disk path
+  // (web content built it) or main refused to approve its shape.
+  pathForFile(file: File): Promise<string | null>; // preload-only (webUtils.getPathForFile)
 }
 declare global { interface Window { electronAPI: ElectronAPI } }

@@ -180,6 +180,43 @@ function registerIpc(getWin) {
     return fs.promises.readFile(path.resolve(filePath));
   });
 
+  /**
+   * F11 (C1): read-approval for a file the USER DROPPED onto the window.
+   *
+   * Until this existed, approval was minted in exactly two places — after the
+   * open dialog and after the save dialog (below). A path that arrives by drag
+   * and drop passes through neither, so every real Explorer drop onto a track
+   * lane died on the gate above. It shipped because the one environment where
+   * `isTestMode()` disables that gate is precisely the smoke harness: the
+   * feature worked where it was tested and nowhere else.
+   *
+   * WHY THIS IS NOT A HOLE IN THE GATE. This channel is never exposed to the
+   * renderer. `contextIsolation` is on and the preload exposes only the frozen
+   * `electronAPI` object, which carries no general-purpose approver — the only
+   * caller is the preload's own drop-path resolution, immediately after
+   * `webUtils.getPathForFile(file)` returned a NON-EMPTY string. That return is
+   * the unforgeable part: Electron hands back "" for any `File` web content
+   * constructed itself, so a non-empty path can only have come from a real
+   * user drop. The preload therefore approves exactly the path the user
+   * dropped, at the moment they dropped it.
+   *
+   * It approves for READING only — a dropped file is something to open, never
+   * something we may overwrite — and it validates shape rather than existence:
+   * a non-empty ABSOLUTE string. Existence is `file:read`'s problem, and
+   * `openFilePath` already has the rollback for a path that turns out not to
+   * be readable. A relative path is refused outright, because resolving one
+   * would silently approve "whatever the working directory happens to be".
+   */
+  ipcMain.handle('file:approveDropped', async (_event, filePath) => {
+    if (typeof filePath !== 'string' || filePath.length === 0) {
+      throw new Error('Drop approval needs a non-empty path');
+    }
+    if (!path.isAbsolute(filePath)) {
+      throw new Error('Drop approval needs an absolute path');
+    }
+    approvePath(filePath);
+  });
+
   ipcMain.handle('file:write', async (_event, filePath, arrayBuffer) => {
     try {
       const resolved = path.resolve(filePath);
