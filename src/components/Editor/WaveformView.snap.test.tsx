@@ -80,7 +80,7 @@ let gridSpy: jest.SpyInstance;
 let doc: AudioDocument;
 
 function mount(): HTMLElement {
-  render(<WaveformView doc={doc} />);
+  render(<WaveformView docId={doc.id} />);
   return screen.getByTestId('waveform-canvas');
 }
 

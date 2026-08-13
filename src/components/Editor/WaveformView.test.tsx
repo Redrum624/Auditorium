@@ -40,6 +40,17 @@ function firePointer(
   });
 }
 
+// F11-0: the view takes a docId and resolves the document from the store, so
+// every render site has to put it there first. Inserted DIRECTLY rather than
+// through `addDocument`, which would also reset the zoom to `defaultZoom(doc)`
+// and silently move every `clientX -> sample` expectation below.
+function renderView(doc: AudioDocument) {
+  useAppStore.setState((s) =>
+    s.documents.some((d) => d.id === doc.id) ? s : { documents: [...s.documents, doc] }
+  );
+  return render(<WaveformView docId={doc.id} />);
+}
+
 describe('WaveformView', () => {
   beforeEach(() => {
     useAppStore.setState(makeInitialState());
@@ -48,7 +59,7 @@ describe('WaveformView', () => {
 
   it('mounts with a document and renders the waveform canvas and ruler', () => {
     const doc = makeDoc();
-    render(<WaveformView doc={doc} />);
+    renderView(doc);
     expect(screen.getByTestId('waveform-view')).toBeInTheDocument();
     expect(screen.getByTestId('waveform-canvas')).toBeInTheDocument();
     expect(screen.getByTestId('timeline-ruler')).toBeInTheDocument();
@@ -56,7 +67,7 @@ describe('WaveformView', () => {
 
   it('floats the canvas in a glass lane on the stage-inset root (G6), canvas filling the lane edge-to-edge', () => {
     const doc = makeDoc();
-    render(<WaveformView doc={doc} />);
+    renderView(doc);
     const canvas = screen.getByTestId('waveform-canvas');
     // The rounded clip container WRAPS the canvas; the canvas itself keeps its
     // full-bleed classes so the clientX→sample mapping geometry is untouched.
@@ -71,7 +82,7 @@ describe('WaveformView', () => {
     it('pointerdown sets the cursor to the clicked sample and clears any existing selection', () => {
       const doc = makeDoc();
       useAppStore.setState({ selection: { start: 10, end: 20 } });
-      render(<WaveformView doc={doc} />);
+      renderView(doc);
       const canvas = screen.getByTestId('waveform-canvas');
       const spp = useAppStore.getState().zoom.samplesPerPixel;
 
@@ -84,7 +95,7 @@ describe('WaveformView', () => {
 
     it('dragging past the 3px threshold creates a live selection', () => {
       const doc = makeDoc();
-      render(<WaveformView doc={doc} />);
+      renderView(doc);
       const canvas = screen.getByTestId('waveform-canvas');
 
       firePointer(canvas, 'pointerdown', { clientX: 0, pointerId: 1 });
@@ -104,7 +115,7 @@ describe('WaveformView', () => {
 
     it('double-click selects the entire document', () => {
       const doc = makeDoc();
-      render(<WaveformView doc={doc} />);
+      renderView(doc);
       const canvas = screen.getByTestId('waveform-canvas');
 
       firePointer(canvas, 'pointerdown', { clientX: 5, pointerId: 1, detail: 2 });
@@ -115,7 +126,7 @@ describe('WaveformView', () => {
     it('shift+click extends the selection from the cursor when there is none yet', () => {
       const doc = makeDoc();
       useAppStore.setState({ cursorSample: 100 });
-      render(<WaveformView doc={doc} />);
+      renderView(doc);
       const canvas = screen.getByTestId('waveform-canvas');
       const spp = useAppStore.getState().zoom.samplesPerPixel;
 
@@ -210,20 +221,20 @@ describe('WaveformView beat tics (Task B2)', () => {
   it('hands the cached grid to renderWaveform', () => {
     const g = grid();
     gridSpy.mockReturnValue(g);
-    render(<WaveformView doc={makeDoc()} />);
+    renderView(makeDoc());
     expect(lastOpts().beatGrid!.beats).toBe(g.beatSamples);
     expect(lastOpts().beatGrid!.endSample).toBe(44100);
   });
 
   it('passes null when the document has no cached grid — and never triggers an analysis', () => {
     gridSpy.mockReturnValue(null);
-    render(<WaveformView doc={makeDoc()} />);
+    renderView(makeDoc());
     expect(lastOpts().beatGrid).toBeNull();
   });
 
   it('the View toggle hides the tics: renderWaveform is re-run with no grid', () => {
     gridSpy.mockImplementation(() => grid());
-    render(<WaveformView doc={makeDoc()} />);
+    renderView(makeDoc());
     expect(lastOpts().beatGrid).not.toBeNull();
 
     act(() => {
@@ -235,5 +246,110 @@ describe('WaveformView beat tics (Task B2)', () => {
       toggleBeatGrid();
     });
     expect(lastOpts().beatGrid).not.toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11-0 — the view resolves its document from the store, and its prop is a
+// string. Not cosmetic: the whole `AudioDocument` as a prop put a
+// `Float32Array[]` into React's props object, which React 19's DEV profiler
+// serialises into `performance.measure`, and which wedged the renderer
+// permanently on the second large-document change. See
+// src/dev/userTimingGuard.ts for the full mechanism.
+// ---------------------------------------------------------------------------
+describe('WaveformView takes a docId, not a document (F11-0)', () => {
+  let getContextSpy: jest.SpyInstance;
+  let renderSpy: jest.SpyInstance;
+
+  const fakeCtx = {
+    setTransform() {},
+    clearRect() {},
+    beginPath() {},
+    moveTo() {},
+    lineTo() {},
+    stroke() {},
+    fillRect() {},
+    fillText() {},
+    setLineDash() {},
+    closePath() {},
+    fill() {},
+    strokeStyle: '',
+    fillStyle: '',
+    lineWidth: 1,
+    font: '',
+    textBaseline: '',
+    shadowColor: '',
+    shadowBlur: 0,
+  };
+
+  function drawnOpts(): RenderOpts {
+    return renderSpy.mock.calls[renderSpy.mock.calls.length - 1][1] as RenderOpts;
+  }
+
+  beforeEach(() => {
+    useAppStore.setState(makeInitialState());
+    clearAllPeaks();
+    for (const prop of ['clientWidth', 'clientHeight'] as const) {
+      Object.defineProperty(HTMLElement.prototype, prop, {
+        configurable: true,
+        value: prop === 'clientWidth' ? 300 : 150,
+      });
+    }
+    getContextSpy = jest
+      .spyOn(HTMLCanvasElement.prototype, 'getContext')
+      .mockImplementation(() => fakeCtx as unknown as CanvasRenderingContext2D);
+    renderSpy = jest.spyOn(waveformRender, 'renderWaveform').mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    getContextSpy.mockRestore();
+    renderSpy.mockRestore();
+    for (const prop of ['clientWidth', 'clientHeight'] as const) {
+      delete (HTMLElement.prototype as unknown as Record<string, unknown>)[prop];
+    }
+  });
+
+  it('draws the channels of the document the id names, having been handed no document', () => {
+    const doc = makeDoc();
+    useAppStore.getState().addDocument(doc);
+
+    render(<WaveformView docId={doc.id} />);
+
+    expect(drawnOpts().channels).toBe(doc.channels);
+  });
+
+  it('repaints from the STORE when the document is replaced under the same id (an edit)', () => {
+    const doc = makeDoc();
+    useAppStore.getState().addDocument(doc);
+    render(<WaveformView docId={doc.id} />);
+    expect(drawnOpts().channels).toBe(doc.channels);
+
+    // What every effect run produces: a new document object under the same id.
+    const edited = { ...doc, channels: [doc.channels[0].slice()] };
+    act(() => {
+      useAppStore.getState().updateDocument(edited);
+    });
+
+    expect(drawnOpts().channels).toBe(edited.channels);
+  });
+
+  it('follows a switch of the id to another open document', () => {
+    const a = makeDoc();
+    const b = makeDoc();
+    useAppStore.getState().addDocument(a);
+    useAppStore.getState().addDocument(b);
+
+    const { rerender } = render(<WaveformView docId={a.id} />);
+    expect(drawnOpts().channels).toBe(a.channels);
+
+    rerender(<WaveformView docId={b.id} />);
+    expect(drawnOpts().channels).toBe(b.channels);
+  });
+
+  it('renders nothing, rather than throwing, for an id no document answers to', () => {
+    render(<WaveformView docId="doc-that-was-closed" />);
+
+    expect(screen.queryByTestId('waveform-view')).toBeNull();
+    expect(renderSpy).not.toHaveBeenCalled();
   });
 });

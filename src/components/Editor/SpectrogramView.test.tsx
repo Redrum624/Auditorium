@@ -57,7 +57,7 @@ afterEach(() => {
 describe('SpectrogramView error branch (Task F8)', () => {
   it('shows no failure overlay on a successful compute', async () => {
     const doc = seedDoc();
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
     expect(screen.queryByText('Spectrogram failed')).not.toBeInTheDocument();
   });
@@ -67,7 +67,7 @@ describe('SpectrogramView error branch (Task F8)', () => {
     _setSpectrogramWorkerError('fft exploded');
     const doc = seedDoc();
 
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
 
     expect(screen.getByText('Spectrogram failed')).toBeInTheDocument();
@@ -80,7 +80,7 @@ describe('SpectrogramView error branch (Task F8)', () => {
     _setSpectrogramWorkerError('boom');
     const doc = seedDoc();
 
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
     expect(screen.getByText('Spectrogram failed')).toBeInTheDocument();
 
@@ -98,7 +98,7 @@ describe('SpectrogramView error branch (Task F8)', () => {
 describe('SpectrogramView G6 floating lane', () => {
   it('floats the canvas in a glass lane on the stage-inset root, canvas filling the lane edge-to-edge', async () => {
     const doc = seedDoc();
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     const canvas = screen.getByTestId('spectrogram-canvas');
     expect(canvas.parentElement).toHaveClass('glass-lane');
     expect(canvas).toHaveClass('block', 'h-full', 'w-full');
@@ -118,7 +118,7 @@ describe('SpectrogramView viewport slicing (Task M9 / F17)', () => {
       useAppStore.getState().setZoom({ samplesPerPixel: 4, scrollSample: 5000 });
     });
 
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
 
     const msg = _getLastComputeMessage();
@@ -139,7 +139,7 @@ describe('SpectrogramView viewport slicing (Task M9 / F17)', () => {
       useAppStore.getState().setZoom({ samplesPerPixel: 4, scrollSample: 50_000 });
     });
 
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
 
     const msg = _getLastComputeMessage();
@@ -204,7 +204,7 @@ describe('SpectrogramView raster caching during playback (v1.5.2)', () => {
 
   it('does not re-rasterise (no createImageData) on playhead-only paints; the cached raster is blitted instead', async () => {
     const doc = seedDoc();
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
 
     expect(counts.createImageData).toBeGreaterThanOrEqual(1); // initial rasterisation happened
@@ -230,7 +230,7 @@ describe('SpectrogramView raster caching during playback (v1.5.2)', () => {
 
   it('does re-rasterise when new magnitudes arrive (a zoom-triggered recompute)', async () => {
     const doc = seedDoc();
-    render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
     const rasterisations = counts.createImageData;
 
@@ -246,14 +246,18 @@ describe('SpectrogramView raster caching during playback (v1.5.2)', () => {
 describe('SpectrogramView compute-effect narrowing (Task M9 fix round 1 / MINOR 7)', () => {
   it('does not recompute on a metadata-only doc replacement (dirty/name/...), same id/channels/sampleRate', async () => {
     const doc = seedDoc();
-    const { rerender } = render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
     _resetSpectrogramWorkerCapture();
 
     // Exactly what every marker add/rename/delete produces via appStore's
     // markDirty (Task M1): a new doc object, same id/channels/sampleRate.
+    // F11-0: pushed through the STORE now that the view resolves the document
+    // itself — which is the real path this narrowing has to survive.
     const metadataOnly = { ...doc, dirty: true, name: 'renamed.wav' };
-    rerender(<SpectrogramView doc={metadataOnly} />);
+    await act(async () => {
+      useAppStore.getState().updateDocument(metadataOnly);
+    });
     await flushCompute();
 
     expect(_getLastComputeMessage()).toBeNull(); // no new compute request posted
@@ -261,12 +265,14 @@ describe('SpectrogramView compute-effect narrowing (Task M9 fix round 1 / MINOR 
 
   it('does recompute when the channels array reference changes (a real audio edit)', async () => {
     const doc = seedDoc();
-    const { rerender } = render(<SpectrogramView doc={doc} />);
+    render(<SpectrogramView docId={doc.id} />);
     await flushCompute();
     _resetSpectrogramWorkerCapture();
 
     const edited = { ...doc, channels: [doc.channels[0].slice()] };
-    rerender(<SpectrogramView doc={edited} />);
+    await act(async () => {
+      useAppStore.getState().updateDocument(edited);
+    });
     await flushCompute();
 
     expect(_getLastComputeMessage()).not.toBeNull();
@@ -353,7 +359,7 @@ describe('SpectrogramView beat tics (Task B2)', () => {
 
   it('draws the tics on the live canvas AFTER the raster blit, never inside it', async () => {
     gridSpy.mockImplementation(() => grid());
-    render(<SpectrogramView doc={seedDoc()} />);
+    render(<SpectrogramView docId={seedDoc().id} />);
     await flushCompute();
 
     expect(order).toContain('blit');
@@ -364,7 +370,7 @@ describe('SpectrogramView beat tics (Task B2)', () => {
   it('passes the same grid the waveform view gets, and null when the toggle is off', async () => {
     const g = grid();
     gridSpy.mockReturnValue(g);
-    render(<SpectrogramView doc={seedDoc()} />);
+    render(<SpectrogramView docId={seedDoc().id} />);
     await flushCompute();
     expect(ticSpy.mock.calls[ticSpy.mock.calls.length - 1][1].beats).toBe(g.beatSamples);
 

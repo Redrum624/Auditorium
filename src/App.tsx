@@ -219,9 +219,12 @@ export default function App() {
         {view === 'multitrack' ? (
           <MultitrackView />
         ) : doc && view === 'spectral' ? (
-          <SpectrogramView doc={doc} />
+          // F11-0: the ID, never the document — a 65 MiB object graph in a
+          // prop wedged React 19's dev profiler permanently (see
+          // src/dev/userTimingGuard.ts).
+          <SpectrogramView docId={doc.id} />
         ) : doc ? (
-          <WaveformView doc={doc} />
+          <WaveformView docId={doc.id} />
         ) : (
           <div
             className="flex flex-1 items-center justify-center text-center"

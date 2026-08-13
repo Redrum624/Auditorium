@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState } from 'react';
-import type { AudioDocument } from '../../audio/AudioDocument';
 import { cloneRegion, docLength, mixDown } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
@@ -13,6 +12,8 @@ import type { Marker } from '../../stores/appStore';
 // Stable empty-array reference — see WaveformView.tsx for why this must not
 // be a fresh `[]` literal in the selector (infinite render loop otherwise).
 const NO_MARKERS: Marker[] = [];
+/** Stable empty channel list — see WaveformView.tsx. */
+const NO_CHANNELS: Float32Array[] = [];
 
 const FFT_SIZE = 2048;
 const DB_MIN = -90;
@@ -123,23 +124,26 @@ function drawSpectrogram(ctx: CanvasRenderingContext2D, m: MagsData, width: numb
  * selection, marker, cursor, and playhead overlays on top, drawn in CSS-pixel
  * space under a `ctx.setTransform(dpr, ...)` scale (mirrors WaveformView).
  */
-export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
+// F11-0 — takes the document's **id**, not the document, for exactly the
+// reasons documented on `WaveformView` and in `src/dev/userTimingGuard.ts`.
+export default function SpectrogramView({ docId }: { docId: string }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [size, setSize] = useState({ width: 0, height: 0 });
   const [magsData, setMagsData] = useState<MagsData | null>(null);
   const [computeFailed, setComputeFailed] = useState(false);
 
+  const doc = useAppStore((s) => s.documents.find((d) => d.id === docId) ?? null);
   const zoom = useAppStore((s) => s.zoom);
   const selection = useAppStore((s) => s.selection);
   const cursorSample = useAppStore((s) => s.cursorSample);
   const playback = useAppStore((s) => s.playback);
-  const markers = useAppStore((s) => s.markers[doc.id] ?? NO_MARKERS);
+  const markers = useAppStore((s) => s.markers[docId] ?? NO_MARKERS);
   const scale = useSpectralScale();
   // Task B2: the same beat tics as the waveform view, from the same adapter.
-  const beatGrid = useBeatGridOverlay(doc.id, doc.channels);
+  const beatGrid = useBeatGridOverlay(docId, doc?.channels ?? NO_CHANNELS);
 
-  const length = docLength(doc);
+  const length = doc ? docLength(doc) : 0;
   const gestures = useEditorGestures(canvasRef, length, size.width);
 
   const workerRef = useRef<Worker | null>(null);
@@ -200,6 +204,7 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
   // since `zoom.samplesPerPixel` is defined in CSS-pixel terms (matches the
   // gesture math in useEditorGestures).
   useEffect(() => {
+    if (!doc) return;
     const cssWidth = Math.round(size.width);
     const cssHeight = Math.round(size.height);
     if (cssWidth <= 0 || cssHeight <= 0) return;
@@ -259,7 +264,7 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     // render's `doc`, so this can only fire the effect LESS often, never with
     // stale data.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [doc.id, doc.channels, doc.sampleRate, length, zoom, size, scale]);
+  }, [docId, doc?.channels, doc?.sampleRate, length, zoom, size, scale]);
 
   // Paint the latest magnitudes plus selection/cursor/playhead overlays.
   useEffect(() => {
@@ -379,6 +384,10 @@ export default function SpectrogramView({ doc }: { doc: AudioDocument }) {
     markers,
     beatGrid,
   ]);
+
+  // Every hook above runs unconditionally — see WaveformView for why this
+  // bail-out is safe and what frame it covers.
+  if (!doc) return null;
 
   // G6: stage insets on the root, canvas floating in a glass lane — same
   // no-padding rule as WaveformView so the gesture math is untouched.
