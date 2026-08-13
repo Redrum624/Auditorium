@@ -45,6 +45,29 @@ const COVER_TAKE = path.join(ROOT, 'test-assets', 'cover-take.wav');
 // engaged, and the chain's LAST stage is never the one that can lift the output
 // back over the ceiling. That ordering shipped broken once.
 const COVER_REFERENCE_ROOM = path.join(ROOT, 'test-assets', 'cover-reference-room.wav');
+// M4: the shared-onset pair, for the alignment arm the three files above cannot
+// reach. They are filtered noise with no syllables, so the journey's alignment
+// correctly REFUSES on them and the believed arm has never run in the packaged
+// app. These two render one syllable schedule twice, the take's laid down
+// 0.75 s later.
+const COVER_SONG_SYNC = path.join(ROOT, 'test-assets', 'cover-song-sync.wav');
+const COVER_TAKE_SYNC = path.join(ROOT, 'test-assets', 'cover-take-sync.wav');
+/**
+ * The ground truth, built into the fixtures rather than measured off them.
+ * NEGATIVE by the convention `coverAlign` documents and its unit suite pins:
+ * the offset is the take's sample 0 on the song's timeline, and a take carrying
+ * 0.75 s of leading silence has to start 0.75 s EARLIER for its syllables to
+ * land on the song's. See scripts/make-test-cover.cjs.
+ */
+const COVER_SYNC_OFFSET_SECONDS = -0.75;
+/** The DSP's proven accuracy — the tolerance `coverAlign.test.ts` holds its own
+ * ground-truth cases to. Measured on this pair through the raw files (the
+ * harshest path, with separation contributing nothing): 7.94 ms. */
+const COVER_SYNC_TOLERANCE_SECONDS = 0.01;
+/** `coverAlign`'s shipped floors, quoted so this step fails if a pass is
+ * believed on numbers that do not actually clear them. */
+const ALIGN_MIN_CORRELATION = 0.607;
+const ALIGN_MIN_PROMINENCE = 0.186;
 // Optional real-material fixture: a full commercial track the user placed
 // locally. Copyrighted, so it is NEVER committed (test-assets/ is gitignored)
 // and NEVER required — the real-song step skips cleanly when it is absent.
@@ -3237,11 +3260,11 @@ async function main() {
       // against 0.186. It places at zero and states both numbers, which is the
       // refusal arm doing exactly its job on real audio in the packaged app.
       //
-      // So this step exercises the REFUSED arm end to end and the BELIEVED arm
-      // not at all. Exercising the believed arm needs a fixture pair that shares
-      // an onset schedule at a known offset, which `make-test-cover.cjs` does not
-      // yet emit — recorded in the CP1 report as outstanding rather than papered
-      // over by relaxing an assertion here.
+      // So THIS pass exercises the REFUSED arm end to end and the believed arm
+      // not at all. M4 closed that gap rather than relaxing an assertion here:
+      // `make-test-cover.cjs` now also emits a pair sharing one onset schedule at
+      // a built-in offset, and the sibling pass at the end of this block drives
+      // the believed arm through the same six stages.
       console.log('Cover journey (CP1): song + take → session, in the packaged app...');
       await page.evaluate(() => window.__test.setView('waveform'));
       await page.evaluate((p) => window.__test.openPath(p), COVER_REFERENCE);
@@ -3446,6 +3469,86 @@ async function main() {
       assert(
         journeyAgain.stages.filter((st) => st.id === 'separate')[0].status === 'reused',
         'the reuse is reported as its own status, not disguised as a fresh run'
+      );
+
+      // M4: the BELIEVED arm, which until now ran nowhere in the packaged app.
+      //
+      // The pass above takes the refusal arm, correctly — its fixtures are
+      // filtered noise and share no onset structure. So every packaged run to
+      // date proved that a bad alignment is refused, and none proved that a good
+      // one is BELIEVED and lands where it says. That is the more dangerous half:
+      // a take placed at a confidently wrong offset is harder to notice than one
+      // left at zero. This pass drives the shared-onset pair, whose offset is
+      // built in rather than measured, through the same six real stages.
+      console.log('Cover journey (M4): the shared-onset pair → the BELIEVED arm...');
+      await page.evaluate((p) => window.__test.openPath(p), COVER_SONG_SYNC);
+      const syncSong = await page.evaluate(() => window.__test.getStateSummary());
+      await page.evaluate((p) => window.__test.openPath(p), COVER_TAKE_SYNC);
+      const sync = await page.evaluate(() =>
+        window.__test.runCoverJourney('cover-song-sync.wav', 'cover-take-sync.wav')
+      );
+      console.log(
+        `  runCoverJourney(sync): ok=${sync.ok} completed=${sync.completed} reused=${sync.separationReused}`
+      );
+      console.log(
+        `  alignment: offset=${sync.alignmentOffsetSeconds}s confident=${sync.alignmentConfident} ` +
+          `peak=${sync.alignmentPeakCorrelation} prominence=${sync.alignmentProminence}`
+      );
+      console.log(
+        `  placement: take@${sync.takeStartSample} instrumental@${sync.instrumentalStartSample} ` +
+          `shifted=${sync.shiftedSamples}`
+      );
+      assert(sync.ok === true && sync.completed === true, 'the shared-onset journey completed');
+      // The point of the whole fixture pair: this arm, in the packaged app.
+      assert(
+        sync.alignmentRefused === false && sync.alignmentConfident === true,
+        `the alignment BELIEVED the shared-onset pair (refused ${sync.alignmentRefused}, confident ${sync.alignmentConfident}) — ` +
+          `if this refuses, the pair has stopped sharing onset structure, NOT the floors being too high`
+      );
+      // Believed on numbers that genuinely clear the shipped floors, not on a
+      // `confident` flag that drifted away from them.
+      assert(
+        sync.alignmentPeakCorrelation >= ALIGN_MIN_CORRELATION &&
+          sync.alignmentProminence >= ALIGN_MIN_PROMINENCE,
+        `both confidence numbers clear their floors (correlation ${sync.alignmentPeakCorrelation} >= ${ALIGN_MIN_CORRELATION}, ` +
+          `prominence ${sync.alignmentProminence} >= ${ALIGN_MIN_PROMINENCE})`
+      );
+      // And it landed where the fixture was BUILT to put it.
+      const syncError = Math.abs(sync.alignmentOffsetSeconds - COVER_SYNC_OFFSET_SECONDS);
+      assert(
+        syncError <= COVER_SYNC_TOLERANCE_SECONDS,
+        `the recovered offset matches the built-in one within the DSP's proven ±10 ms ` +
+          `(built ${COVER_SYNC_OFFSET_SECONDS}s, recovered ${sync.alignmentOffsetSeconds}s, error ${(syncError * 1000).toFixed(2)} ms)`
+      );
+      console.log(
+        `  ground truth: built ${COVER_SYNC_OFFSET_SECONDS}s, recovered ${sync.alignmentOffsetSeconds}s ` +
+          `(error ${(syncError * 1000).toFixed(2)} ms)`
+      );
+      // The offset is negative, so this is also the first packaged exercise of
+      // the shift-BOTH-tracks arm: the take cannot start before zero, so the
+      // instrumental moves later by the same amount and the interval survives.
+      const syncRaw = Math.round(sync.alignmentOffsetSeconds * sync.sessionRate);
+      assert(
+        sync.sessionRate === syncSong.sampleRate,
+        `the session runs at the SONG's rate (session ${sync.sessionRate}, song ${syncSong.sampleRate})`
+      );
+      assert(syncRaw < 0, `the built-in offset is negative, as the fixture intends (raw ${syncRaw})`);
+      assert(
+        sync.takeStartSample === 0 &&
+          Math.abs(sync.shiftedSamples - -syncRaw) <= 1 &&
+          Math.abs(sync.instrumentalStartSample - -syncRaw) <= 1,
+        `a negative believed offset shifts BOTH tracks rather than clamping the take ` +
+          `(take ${sync.takeStartSample}, shift ${sync.shiftedSamples}, instrumental ${sync.instrumentalStartSample}, expected shift ${-syncRaw})`
+      );
+      assert(
+        Math.abs(sync.takeStartSample - sync.instrumentalStartSample - syncRaw) <= 1,
+        `the measured interval survives the shift (raw ${syncRaw}, actual ${sync.takeStartSample - sync.instrumentalStartSample})`
+      );
+      // This pass separated a DIFFERENT song, so it must not have reused the
+      // first pass's stems — otherwise it aligned against the wrong vocal.
+      assert(
+        sync.separationReused === false,
+        `the shared-onset song was separated fresh, not matched to the other song's stems (actual ${sync.separationReused})`
       );
     }
 

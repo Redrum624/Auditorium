@@ -181,6 +181,109 @@ function addTransients(signal) {
   return signal;
 }
 
+// ── The shared-onset pair, for the alignment's CONFIDENT arm ────────────────
+//
+// M4. The three files above are filtered NOISE, built to give Match EQ a tilt
+// and Match Loudness a move. Continuous noise has no syllables, so the pair
+// shares no ONSET structure and `coverAlign` correctly REFUSES on it — measured
+// in the packaged run at correlation 0.210 against its 0.607 floor and
+// prominence 0.031 against 0.186. That refusal is the right answer for that
+// material, and it means the packaged app has never once exercised the arm that
+// BELIEVES an offset. These two files exist for exactly that arm.
+//
+// The ground truth is BUILT rather than measured: both files render the SAME
+// syllable schedule, and the take's is laid down `SYNC_OFFSET_SECONDS` later.
+// The recovered number is therefore MINUS that constant, not plus it:
+// `coverAlign` reports "the take's sample 0 on the reference's timeline", and a
+// take carrying 0.75 s of leading silence has to start 0.75 s EARLIER for its
+// syllables to land on the song's. The journey then places it at zero and
+// shifts BOTH tracks, which is the negative-offset arm doing its job.
+// The schedule is what an onset envelope carries, so two renderings of one
+// schedule line up and the recovered offset must come back as that constant.
+// The take is a DIFFERENT PERFORMANCE of it — other pitches, other dynamics,
+// its own noise — so what is recovered is the shared rhythm rather than a
+// trivial autocorrelation of one signal against a copy of itself.
+//
+// The song also carries a quiet bed under its vocal, because stage 1 of the
+// journey SEPARATES it: with no non-vocal content the four stems that get summed
+// into the instrumental would be silence, and the session's first track would be
+// nothing. The bed sits well below the vocal so the Vocals stem keeps the onsets
+// the alignment then keys on.
+const SYNC_OFFSET_SECONDS = 0.75;
+/** The schedule BOTH files share — the ground truth itself. */
+const SYNC_SCHEDULE_SEED = 0x51d3a7;
+const SYNC_SONG_VARIANCE_SEED = 0x1a2b3c;
+const SYNC_TAKE_VARIANCE_SEED = 0x4d5e6f;
+/** A cover sings the same words at other pitches, and does not hit the same
+ * levels — so the two renderings differ in everything EXCEPT the schedule. */
+const SYNC_TAKE_HZ_SCALE = 1.06;
+const SYNC_TAKE_AMPLITUDE_JITTER = 0.25;
+/**
+ * The bed's level is bounded by what this pair is FOR, and the two pull against
+ * each other. The bed exists so stage 1 has non-vocal content to separate; but
+ * the bed is continuous, so it puts energy into the onset envelope everywhere
+ * and blurs the very correlation this pair exists to exercise. Measured on the
+ * RAW pair (offset error against the built-in -0.75 s, and the two confidence
+ * numbers against their 0.607 / 0.186 floors):
+ *
+ *   bed      error     peak corr   prominence
+ *   -32 dB   13.0 ms     0.638       0.357     <- outside the proven +/-10 ms
+ *   -40 dB   10.4 ms     0.775       0.477     <- still outside
+ *   -45 dB    8.88 ms    0.829       0.523
+ *   -48 dB    7.94 ms    0.849       0.541     <- shipped
+ *   none      0.07 ms    0.956       0.684
+ *
+ * -48 dB is chosen for the WORST CASE rather than the expected one. In the
+ * journey the alignment runs against the SEPARATED vocal, so the bed should be
+ * gone by then and the real figure should sit nearer the bottom row — but that
+ * assumes the model routes a synthetic three-harmonic tone to Vocals, which is
+ * not something this fixture gets to assume. At -48 dB the pair is believed and
+ * accurate even if separation contributes nothing at all, so the packaged
+ * assertion cannot fail on how the model happened to route made-up audio.
+ */
+const SYNC_BED_RMS_DBFS = -48;
+const SYNC_VOCAL_RMS_DBFS = -18;
+
+/** Bursts of 0.12-0.37 s separated by gaps of 0.04-0.39 s, which is roughly how
+ * sung phrasing sits on an onset envelope. Ported from the unit fixtures
+ * (`src/dsp/__fixtures__/coverAlignFixtures.ts`) rather than re-invented — this
+ * script may not import app code, so the two copies are deliberate. */
+function syllableSchedule(seedValue, seconds) {
+  const rand = prng(seedValue);
+  const out = [];
+  let t = 0.2 + rand() * 0.3;
+  while (t < seconds - 0.5) {
+    const durationSeconds = 0.12 + rand() * 0.25;
+    out.push({ startSeconds: t, durationSeconds, hz: 140 + rand() * 180, amplitude: 0.3 + rand() * 0.6 });
+    t += durationSeconds + 0.04 + rand() * 0.35;
+  }
+  return out;
+}
+
+/** Renders a schedule as vocal-like audio into a fixed `numFrames` buffer: each
+ * syllable is a raised-cosine envelope over three harmonics. Nothing here is a
+ * claim about how singing SOUNDS — it is a claim about where the ATTACKS are,
+ * which is the only thing an onset envelope carries. Syllables past the end are
+ * dropped, so the take's later lead simply costs it its last one. */
+function renderVocal(schedule, { leadSeconds = 0, hzScale = 1, amplitudeJitter = 0, varianceSeed }) {
+  const out = new Float64Array(numFrames);
+  const rand = prng(varianceSeed);
+  for (const syl of schedule) {
+    const gain = syl.amplitude * (1 + amplitudeJitter * (rand() * 2 - 1));
+    const hz = syl.hz * hzScale;
+    const start = Math.round((leadSeconds + syl.startSeconds) * SAMPLE_RATE);
+    const len = Math.round(syl.durationSeconds * SAMPLE_RATE);
+    for (let i = 0; i < len; i++) {
+      const idx = start + i;
+      if (idx < 0 || idx >= numFrames) continue;
+      const env = 0.5 - 0.5 * Math.cos((2 * Math.PI * i) / len);
+      const w = (2 * Math.PI * hz * i) / SAMPLE_RATE;
+      out[idx] += gain * env * (Math.sin(w) + 0.5 * Math.sin(2 * w) + 0.25 * Math.sin(3 * w)) * 0.55;
+    }
+  }
+  return out;
+}
+
 function writeWav(file, left, right) {
   const bytesPerSample = BITS / 8;
   const blockAlign = CHANNELS * bytesPerSample;
@@ -230,12 +333,36 @@ const take = sources.map((s) => addTransients(normaliseToRms(tilt(s, 0.5), TAKE_
 
 const room = makeRoom(reference);
 
+// The shared-onset pair. ONE schedule, rendered twice — the take's laid down
+// SYNC_OFFSET_SECONDS later, with its own pitches, dynamics and noise.
+const syncSchedule = syllableSchedule(SYNC_SCHEDULE_SEED, SECONDS);
+const syncSongVocal = normaliseToRms(
+  renderVocal(syncSchedule, { varianceSeed: SYNC_SONG_VARIANCE_SEED }),
+  SYNC_VOCAL_RMS_DBFS
+);
+const syncBed = normaliseToRms(tilt(sourceNoise(0x7c4e11), 0.7), SYNC_BED_RMS_DBFS);
+const syncSong = new Float64Array(numFrames);
+for (let i = 0; i < numFrames; i++) syncSong[i] = syncSongVocal[i] + syncBed[i];
+const syncTake = normaliseToRms(
+  renderVocal(syncSchedule, {
+    leadSeconds: SYNC_OFFSET_SECONDS,
+    hzScale: SYNC_TAKE_HZ_SCALE,
+    amplitudeJitter: SYNC_TAKE_AMPLITUDE_JITTER,
+    varianceSeed: SYNC_TAKE_VARIANCE_SEED,
+  }),
+  SYNC_VOCAL_RMS_DBFS
+);
+
 const refFile = path.join(dir, 'cover-reference.wav');
 const takeFile = path.join(dir, 'cover-take.wav');
 const roomFile = path.join(dir, 'cover-reference-room.wav');
+const syncSongFile = path.join(dir, 'cover-song-sync.wav');
+const syncTakeFile = path.join(dir, 'cover-take-sync.wav');
 writeWav(refFile, reference[0], reference[1]);
 writeWav(takeFile, take[0], take[1]);
 writeWav(roomFile, room[0], room[1]);
+writeWav(syncSongFile, syncSong, syncSong);
+writeWav(syncTakeFile, syncTake, syncTake);
 
 const peakDb = (channels) => {
   let peak = 0;
@@ -265,4 +392,14 @@ console.log(
   `Wrote ${roomFile} (${SECONDS}s ${SAMPLE_RATE}Hz stereo, RMS ${rmsDb(room).toFixed(2)} dBFS, peak ${peakDb(room).toFixed(2)} dBFS, ` +
     `clipped to ${ROOM_CLIP_FRACTION} of its peak then a ${ROOM_FALL_DB_PER_SECOND} dB/s fall every ${ROOM_CYCLE_SECONDS}s ` +
     `= RT60 ${(60 / ROOM_FALL_DB_PER_SECOND).toFixed(2)}s, so Match Reverb engages)`
+);
+console.log(
+  `Wrote ${syncSongFile} (${SECONDS}s ${SAMPLE_RATE}Hz stereo, RMS ${rmsDb([syncSong]).toFixed(2)} dBFS, peak ${peakDb([syncSong]).toFixed(2)} dBFS; ` +
+    `${syncSchedule.length} syllables over a ${SYNC_BED_RMS_DBFS} dBFS bed, so separation has both a vocal and an instrumental to find)`
+);
+console.log(
+  `Wrote ${syncTakeFile} (${SECONDS}s ${SAMPLE_RATE}Hz stereo, RMS ${rmsDb([syncTake]).toFixed(2)} dBFS, peak ${peakDb([syncTake]).toFixed(2)} dBFS; ` +
+    `the SAME ${syncSchedule.length}-syllable schedule laid down ${SYNC_OFFSET_SECONDS}s later at ×${SYNC_TAKE_HZ_SCALE} pitch — ` +
+    `the take's own sample 0 therefore sits ${SYNC_OFFSET_SECONDS}s BEFORE the song's, so the believed arm must ` +
+    `recover ${(-SYNC_OFFSET_SECONDS).toFixed(2)}s: offset is the take's zero on the song's timeline)`
 );
