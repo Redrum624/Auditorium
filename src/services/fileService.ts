@@ -12,6 +12,7 @@ import { encodeWav, type WavBitDepth } from '../audio/wavCodec';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { useAppStore, type Marker } from '../stores/appStore';
 import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
+import { beginOpen, endOpen } from './openProgress';
 import { invalidatePeaks } from './peaksCache';
 import { clearHistory, markSavePoint, invalidateSavePoint } from './undoHistory';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
@@ -145,6 +146,19 @@ async function encodeInPlace(doc: AudioDocument): Promise<ArrayBuffer> {
   }
 }
 
+/** Undo a half-completed open. The document was added to the store moments
+ * ago and nothing else has had a chance to reference it — no analysis, no
+ * remix session, no stem run, no noise profile can exist for an id the app has
+ * not returned to the event loop with — so unlike `closeDocumentFlow` this
+ * needs only the three teardowns that `addDocument` itself makes necessary.
+ * `closeDocument` drops the document and its markers and re-activates a
+ * neighbour; the other two release the caches keyed on the id. */
+function rollbackOpen(docId: string): void {
+  store().closeDocument(docId);
+  clearHistory(docId);
+  invalidatePeaks(docId);
+}
+
 /**
  * Read, decode, and add a single file as a new document.
  *
@@ -155,10 +169,25 @@ async function encodeInPlace(doc: AudioDocument): Promise<ArrayBuffer> {
  * save-as `.wav` dialog. The source format and (for WAV/FLAC) the original bit
  * depth are recorded on the document for the Properties panel and Save.
  * Throws on read/decode failure; callers that batch-open catch per file.
+ *
+ * Two orderings here are load-bearing, both about memory:
+ *
+ *  1. **Every scrap of container metadata is read before the decode.** The
+ *     decode CONSUMES the bytes (transferred into the decode worker, or
+ *     detached by `decodeAudioData`), so a FLAC's stream info, an MP3's ID3
+ *     chapters, a FLAC's Vorbis comment and an Ogg's Opus tags are all lifted
+ *     out while the buffer is still readable. This used to happen after, which
+ *     forced the whole file to stay resident alongside its own decoded samples.
+ *  2. **Nothing else holds the bytes across the decode.** The only reference
+ *     is the argument handed to `decodeArrayBuffer`, so from the moment it is
+ *     posted the file exists in one place, not two.
+ *
+ * On failure at ANY point the document is rolled back if it had been added, so
+ * a decode that dies mid-open cannot leave a blank row selected and the app
+ * with a document it can neither draw nor close. The error propagates for the
+ * caller to name the file in one dialog.
  */
 export async function openFilePath(path: string): Promise<void> {
-  const buf = await api().readFile(path);
-  const decoded = await decodeArrayBuffer(buf, path);
   const name = api().pathBasename(path);
   const sourceFormat = formatForPath(path);
   const keepsPath =
@@ -166,39 +195,54 @@ export async function openFilePath(path: string): Promise<void> {
     sourceFormat === 'mp3' ||
     sourceFormat === 'flac' ||
     sourceFormat === 'ogg';
-  let sourceBitDepth: number | undefined;
-  if (sourceFormat === 'wav') {
-    sourceBitDepth = decoded.sourceBitDepth;
-  } else if (sourceFormat === 'flac') {
-    sourceBitDepth = readFlacStreamInfo(buf)?.bitDepth;
-  }
-  const doc = createDocument({
-    name,
-    sampleRate: decoded.sampleRate,
-    channels: decoded.channels,
-    filePath: keepsPath ? path : null,
-    sourceFormat,
-    sourceBitDepth,
-    channelMask: decoded.channelMask,
-    // Task S4: this audio came OFF disk, so closing it loses nothing — even
-    // for an exotic source, which keeps no filePath (its first Save prompts a
-    // save-as WAV) but whose original file is still sitting there.
-    neverSaved: false,
-  });
-  store().addDocument(doc);
-  if (decoded.markers && decoded.markers.length > 0) {
-    const length = docLength(doc);
-    const markers: Marker[] = decoded.markers.map((m) => ({
-      id: nextId('marker'),
-      name: m.name,
-      positionSample: Math.max(0, Math.min(length, m.positionSample)),
-    }));
-    store().setMarkersForDoc(doc.id, markers);
-  } else if (sourceFormat === 'mp3') {
-    const chapters = parseId3Chapters(buf);
-    if (chapters && chapters.length > 0) {
+
+  // The Files panel shows this while the read and decode run. Cleared in the
+  // `finally` on every path — success, failure, or an exception from the store.
+  const openToken = beginOpen(path, name);
+  let addedDocId: string | null = null;
+
+  try {
+    const buf = await api().readFile(path);
+
+    // --- container metadata, while the bytes are still ours (see 1. above) ---
+    const flacBitDepth = sourceFormat === 'flac' ? readFlacStreamInfo(buf)?.bitDepth : undefined;
+    const id3Chapters = sourceFormat === 'mp3' ? parseId3Chapters(buf) : null;
+    const vorbisComment = sourceFormat === 'flac' ? readFlacVorbisComment(buf) : null;
+    const opusTags = sourceFormat === 'ogg' ? readOpusTags(buf) : null;
+
+    // --- the decode consumes `buf`; it is detached from here on ---
+    const decoded = await decodeArrayBuffer(buf, path);
+
+    const sourceBitDepth =
+      sourceFormat === 'wav' ? decoded.sourceBitDepth : sourceFormat === 'flac' ? flacBitDepth : undefined;
+
+    const doc = createDocument({
+      name,
+      sampleRate: decoded.sampleRate,
+      channels: decoded.channels,
+      filePath: keepsPath ? path : null,
+      sourceFormat,
+      sourceBitDepth,
+      channelMask: decoded.channelMask,
+      // Task S4: this audio came OFF disk, so closing it loses nothing — even
+      // for an exotic source, which keeps no filePath (its first Save prompts a
+      // save-as WAV) but whose original file is still sitting there.
+      neverSaved: false,
+    });
+    store().addDocument(doc);
+    addedDocId = doc.id;
+
+    if (decoded.markers && decoded.markers.length > 0) {
       const length = docLength(doc);
-      const markers: Marker[] = chapters.map((c) => {
+      const markers: Marker[] = decoded.markers.map((m) => ({
+        id: nextId('marker'),
+        name: m.name,
+        positionSample: Math.max(0, Math.min(length, m.positionSample)),
+      }));
+      store().setMarkersForDoc(doc.id, markers);
+    } else if (id3Chapters && id3Chapters.length > 0) {
+      const length = docLength(doc);
+      const markers: Marker[] = id3Chapters.map((c) => {
         const rawSample = c.exactSample ?? Math.round((c.positionMs / 1000) * doc.sampleRate);
         return {
           id: nextId('marker'),
@@ -207,10 +251,7 @@ export async function openFilePath(path: string): Promise<void> {
         };
       });
       store().setMarkersForDoc(doc.id, markers);
-    }
-  } else if (sourceFormat === 'flac') {
-    const vorbisComment = readFlacVorbisComment(buf);
-    if (vorbisComment) {
+    } else if (vorbisComment) {
       // FLAC's file rate equals the doc's decoded rate (no resample), so
       // AUDITORIUM_MARKERS positions pass through unscaled.
       const chapters = parseChapterComments(vorbisComment.comments, doc.sampleRate);
@@ -223,10 +264,7 @@ export async function openFilePath(path: string): Promise<void> {
         }));
         store().setMarkersForDoc(doc.id, markers);
       }
-    }
-  } else if (sourceFormat === 'ogg') {
-    const opusTags = readOpusTags(buf);
-    if (opusTags) {
+    } else if (opusTags) {
       // Ogg Opus always decodes at 48 kHz, and AUDITORIUM_MARKERS positions
       // are written at the file's own (48 kHz) rate, so doc.sampleRate maps
       // 1:1 — same reasoning as the FLAC branch above (Task K5).
@@ -241,6 +279,15 @@ export async function openFilePath(path: string): Promise<void> {
         store().setMarkersForDoc(doc.id, markers);
       }
     }
+  } catch (err) {
+    // A half-added document is worse than no document: it is selected, it
+    // cannot be drawn, and every panel that reads the active document reads
+    // one whose audio never arrived. Take it back out and let the caller
+    // report the failure once, naming the file.
+    if (addedDocId !== null) rollbackOpen(addedDocId);
+    throw err;
+  } finally {
+    endOpen(openToken);
   }
 }
 

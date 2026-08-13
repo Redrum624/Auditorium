@@ -1,5 +1,6 @@
 import { bs775Applicable, downmixBs775, type DownmixLaw } from '../dsp/downmix';
-import { decodeWav, type WavMarker } from './wavCodec';
+import { type WavMarker } from './wavCodec';
+import { decodeWavOffThread } from './decodeWavOffThread';
 import { sniffSampleRate } from './sniffSampleRate';
 
 export interface DecodedAudio {
@@ -84,9 +85,20 @@ export function downmixToStereoWithLaw(
 /**
  * Decode an encoded audio file's bytes into per-channel Float32 sample data.
  *
+ * **`buf` is CONSUMED.** Whichever branch runs, the buffer is handed to a
+ * decoder that detaches it — transferred into the decode worker for WAV, given
+ * to `decodeAudioData` for everything else — so it is unreadable when this
+ * resolves and no caller may keep using it. That is deliberate: the bytes and
+ * the decoded samples must never both be resident, which on a 68 MB file is
+ * the difference between 137 MB and 68 MB of live renderer memory. Read
+ * whatever container metadata you need (bit depth, chapters, tags) BEFORE
+ * calling, as `fileService.openFilePath` does.
+ *
  * WAV files (detected by the `.wav` extension of `hintedName`, case-insensitive)
  * go through our own `decodeWav`, preserving the exact samples and original
- * sample rate. Everything else is decoded via the Web Audio API's
+ * sample rate — but on a WORKER (`decodeWavOffThread`), because that decode is
+ * a multi-million-iteration loop that used to freeze the UI for the whole of a
+ * large open. Everything else is decoded via the Web Audio API's
  * `decodeAudioData`, which resamples output to the OfflineAudioContext's rate.
  * To keep non-WAV imports at their NATIVE rate we first sniff the container
  * header (`sniffSampleRate`) and build the context at that rate; only genuinely
@@ -94,11 +106,12 @@ export function downmixToStereoWithLaw(
  * are down-mixed to stereo via `downmixToStereo` (see its −3 dB fold law).
  *
  * jsdom has no OfflineAudioContext, so non-WAV decoding throws there; tests mock
- * this module, supply WAV bytes, or stub OfflineAudioContext.
+ * this module, supply WAV bytes, or stub OfflineAudioContext. jsdom has no
+ * Worker either, and the WAV branch falls back to decoding in place there.
  */
 export async function decodeArrayBuffer(buf: ArrayBuffer, hintedName: string): Promise<DecodedAudio> {
   if (/\.wav$/i.test(hintedName)) {
-    const { channels, sampleRate, bitDepth, markers, channelMask } = decodeWav(buf);
+    const { channels, sampleRate, bitDepth, markers, channelMask } = await decodeWavOffThread(buf);
     return { channels, sampleRate, sourceBitDepth: bitDepth, markers, channelMask };
   }
 
@@ -106,6 +119,8 @@ export async function decodeArrayBuffer(buf: ArrayBuffer, hintedName: string): P
     throw new Error('Audio decoding for non-WAV files is not available in this environment');
   }
 
+  // Sniffed BEFORE the decode hands the buffer over — `decodeAudioData`
+  // detaches it.
   const rate = sniffSampleRate(buf, hintedName) ?? 48000;
   // A corrupt header can sniff to a rate the browser rejects (OfflineAudioContext
   // throws NotSupportedError outside roughly [3000, 768000] Hz). Rather than
@@ -117,9 +132,12 @@ export async function decodeArrayBuffer(buf: ArrayBuffer, hintedName: string): P
   } catch {
     ctx = new OfflineAudioContext(1, 1, 48000);
   }
-  // decodeAudioData detaches the buffer it is given; pass a copy so the caller's
-  // ArrayBuffer stays usable.
-  const audioBuffer = await ctx.decodeAudioData(buf.slice(0));
+  // decodeAudioData detaches the buffer it is given. It used to be handed a
+  // `buf.slice(0)` copy so the caller's ArrayBuffer stayed usable; nothing
+  // needs it afterwards any more (metadata is read before the call, and the
+  // WAV branch above detaches too), so the copy is gone and the original is
+  // handed straight over.
+  const audioBuffer = await ctx.decodeAudioData(buf);
 
   const all: Float32Array[] = [];
   for (let c = 0; c < audioBuffer.numberOfChannels; c++) {

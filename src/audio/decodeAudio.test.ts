@@ -2,6 +2,11 @@ import { decodeArrayBuffer, downmixToStereo, downmixToStereoWithLaw } from './de
 import { downmixBs775 } from '../dsp/downmix';
 import { buildExtensibleWav } from './__fixtures__/extensibleWav';
 import { encodeWav } from './wavCodec';
+import {
+  _getWavDecodeWorkerCounts,
+  _resetWavDecodeWorkerTestState,
+  _setWavDecodeWorkerError,
+} from '../__mocks__/createWavDecodeWorkerMock';
 
 class FakeAudioBuffer {
   constructor(
@@ -97,6 +102,29 @@ describe('decodeArrayBuffer markers passthrough (WAV only)', () => {
     const buf = encodeWav(mono, 44100, 16);
     const result = await decodeArrayBuffer(buf, 'song.wav');
     expect(result.markers).toEqual([]);
+  });
+});
+
+describe('decodeArrayBuffer routes WAV off the main thread (O1-1)', () => {
+  beforeEach(_resetWavDecodeWorkerTestState);
+  afterEach(_resetWavDecodeWorkerTestState);
+
+  it('decodes a WAV through the worker, not in place', async () => {
+    // The in-place decode is a per-sample loop over the whole file — ~17
+    // million iterations for a 68 MB WAV — and it ran on the thread that
+    // paints and answers input.
+    const buf = encodeWav([new Float32Array(64)], 44100, 16);
+
+    await decodeArrayBuffer(buf, 'song.wav');
+
+    expect(_getWavDecodeWorkerCounts().constructed).toBe(1);
+  });
+
+  it('surfaces a worker decode failure as a rejection naming the reason', async () => {
+    _setWavDecodeWorkerError('Not a WAV file');
+    const buf = encodeWav([new Float32Array(8)], 44100, 16);
+
+    await expect(decodeArrayBuffer(buf, 'song.wav')).rejects.toThrow('Not a WAV file');
   });
 });
 

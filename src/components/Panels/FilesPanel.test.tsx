@@ -1,6 +1,7 @@
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import FilesPanel from './FilesPanel';
 import { closeDocumentFlow } from '../../services/fileService';
+import { _resetPendingOpens, beginOpen, endOpen } from '../../services/openProgress';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 
@@ -107,5 +108,55 @@ describe('FilesPanel', () => {
     render(<FilesPanel />);
     fireEvent.click(screen.getByLabelText('Close a.wav'));
     expect(mockClose).toHaveBeenCalledWith(doc.id);
+  });
+
+  // A big decode now runs on a worker, so the app stays responsive for the
+  // seconds it takes — and a responsive app showing nothing is exactly as
+  // unreadable as a frozen one. The panel says which.
+  describe('opens in flight (O1-1)', () => {
+    afterEach(() => {
+      _resetPendingOpens();
+    });
+
+    it('shows a row for a file being opened, before any document exists', () => {
+      beginOpen('D:\\audio\\Scarlet Paintings 48000 1.wav', 'Scarlet Paintings 48000 1.wav');
+      render(<FilesPanel />);
+
+      const rows = screen.getAllByTestId('files-opening');
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toHaveTextContent('Scarlet Paintings 48000 1.wav');
+      expect(rows[0]).toHaveTextContent('Opening…');
+      // Not "No files open." — something IS happening.
+      expect(screen.queryByText('No files open.')).not.toBeInTheDocument();
+    });
+
+    it('shows the in-flight row alongside the documents already open', () => {
+      addDoc({ name: 'first.wav' });
+      beginOpen('D:\\audio\\second.wav', 'second.wav');
+      render(<FilesPanel />);
+
+      expect(screen.getAllByTestId('files-item')).toHaveLength(1);
+      expect(screen.getAllByTestId('files-opening')).toHaveLength(1);
+    });
+
+    it('drops the row when the open ends', () => {
+      const token = beginOpen('D:\\audio\\second.wav', 'second.wav');
+      const { rerender } = render(<FilesPanel />);
+      expect(screen.getAllByTestId('files-opening')).toHaveLength(1);
+
+      act(() => {
+        endOpen(token);
+      });
+      rerender(<FilesPanel />);
+
+      expect(screen.queryAllByTestId('files-opening')).toHaveLength(0);
+      expect(screen.getByText('No files open.')).toBeInTheDocument();
+    });
+
+    it('gives an in-flight row no close button — there is no document behind it', () => {
+      beginOpen('D:\\audio\\second.wav', 'second.wav');
+      render(<FilesPanel />);
+      expect(screen.queryByLabelText('Close second.wav')).not.toBeInTheDocument();
+    });
   });
 });

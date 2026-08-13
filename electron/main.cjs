@@ -14,6 +14,26 @@ const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs')
 
 app.setName('audition_app');
 
+// V8 heap ceiling, raised from the default before anything can allocate.
+//
+// USER REQUEST, verbatim: "put the memory allocation higher! it makes no sense
+// that 2 songs can't fit on 64Gb RAM". Two large WAVs exhausted the renderer
+// mid-open on a 64 GB machine and wedged the app -- the default old-space
+// ceiling is a fixed fraction of what a browser tab is expected to need, not a
+// fraction of this machine, and an audio editor holds whole decoded songs as
+// live JS objects.
+//
+// This is the LAST of three independent measures, not the fix on its own: the
+// open path no longer keeps redundant copies of the bytes (preload.cjs,
+// fileService.openFilePath) and decodes off the main thread (decodeAudio.ts),
+// which is what keeps the UI alive. The ceiling is what stops a file that is
+// merely large from being fatal.
+//
+// `js-flags` is a Chromium switch, so it reaches the renderer processes too --
+// which is where the audio actually lives. Set before `app.whenReady()`
+// because V8 reads its heap configuration at isolate creation.
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=16384');
+
 let mainWindow = null;
 
 // Native close guard (Task F8): the window's 'close' event is intercepted, the

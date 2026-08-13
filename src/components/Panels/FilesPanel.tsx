@@ -1,6 +1,7 @@
 import { X } from 'lucide-react';
 import { docDuration } from '../../audio/AudioDocument';
 import { closeDocumentFlow } from '../../services/fileService';
+import { usePendingOpens } from '../../services/openProgress';
 import { useAppStore } from '../../stores/appStore';
 
 /** Format a duration in seconds as `m:ss`. */
@@ -21,8 +22,13 @@ export default function FilesPanel() {
   const documents = useAppStore((s) => s.documents);
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
   const setActiveDocument = useAppStore((s) => s.setActiveDocument);
+  // Files being read and decoded right now. A large decode runs on a worker,
+  // so the app stays live for the seconds it takes — and without a row saying
+  // so, "live but nothing happening" is indistinguishable from a hang. That
+  // ambiguity is exactly what the incident's frozen window offered.
+  const pendingOpens = usePendingOpens();
 
-  if (documents.length === 0) {
+  if (documents.length === 0 && pendingOpens.length === 0) {
     return <div className="p-2 text-sm text-[#8b8b92]">No files open.</div>;
   }
 
@@ -82,6 +88,23 @@ export default function FilesPanel() {
           </li>
         );
       })}
+
+      {/* Opens in flight, below the documents that already exist. Not
+          selectable and not closable: there is no document behind one yet. */}
+      {pendingOpens.map((p) => (
+        <li key={`opening-${p.token}`} data-testid="files-opening">
+          <div className="mx-1 flex items-center gap-2 rounded-lg px-2 py-1">
+            <span
+              aria-hidden="true"
+              className="h-2 w-2 shrink-0 animate-pulse rounded-full bg-[#26c6da]"
+            />
+            <div className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-[#8b8b92]">{p.name}</span>
+              <span className="text-xs text-[#8b8b92]">Opening…</span>
+            </div>
+          </div>
+        </li>
+      ))}
     </ul>
   );
 }

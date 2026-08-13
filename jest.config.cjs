@@ -20,7 +20,8 @@ module.exports = {
         '^.+/createDspWorker$': '<rootDir>/src/__mocks__/createDspWorkerMock.ts',
         '^.+/createSpectrogramWorker$': '<rootDir>/src/__mocks__/createSpectrogramWorkerMock.ts',
         '^.+/createTempoWorker$': '<rootDir>/src/__mocks__/createTempoWorkerMock.ts',
-        '^.+/createRemixPlanWorker$': '<rootDir>/src/__mocks__/createRemixPlanWorkerMock.ts'
+        '^.+/createRemixPlanWorker$': '<rootDir>/src/__mocks__/createRemixPlanWorkerMock.ts',
+        '^.+/createWavDecodeWorker$': '<rootDir>/src/__mocks__/createWavDecodeWorkerMock.ts'
       },
       setupFilesAfterEnv: ['<rootDir>/src/setupTests.ts']
     },

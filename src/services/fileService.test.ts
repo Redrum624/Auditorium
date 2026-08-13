@@ -9,7 +9,7 @@ import {
 } from './fileService';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { docLength, createDocument } from '../audio/AudioDocument';
-import { decodeArrayBuffer } from '../audio/decodeAudio';
+import { decodeArrayBuffer, type DecodedAudio } from '../audio/decodeAudio';
 import { encodeMp3 } from '../audio/mp3Encoder';
 import { encodeFlac } from '../audio/flacEncoder';
 import { encodeOggOpus, OggEncoderUnavailableError } from '../audio/oggOpusEncoder';
@@ -18,6 +18,7 @@ import { buildId3Chapters } from '../audio/id3Chapters';
 import { buildChapterComments, buildVorbisCommentPayload } from '../audio/chapterTags';
 import { muxOpusStream } from '../audio/oggPage';
 import * as undoHistory from './undoHistory';
+import { _resetPendingOpens, getPendingOpens } from './openProgress';
 import { pushMarkerUndo, deleteSelection } from './editOps';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
@@ -385,6 +386,178 @@ describe('openFilePath', () => {
     const markers = useAppStore.getState().markers[docId];
     expect(markers).toHaveLength(1);
     expect(markers[0].positionSample).toBe(100); // clamped to docLength
+  });
+});
+
+// The incident: a decode died part-way through opening the second of two large
+// files, and the app was left with a document that was added, selected, and
+// undrawable, and a window that answered nothing. An open that cannot finish
+// has to leave the app exactly as it found it.
+describe('openFilePath — a failed open leaves nothing behind (O1-1)', () => {
+  afterEach(() => {
+    _resetPendingOpens();
+  });
+
+  it('adds no document when the DECODE throws', async () => {
+    installApi();
+    mockDecode.mockRejectedValueOnce(new Error('out of memory'));
+
+    await expect(openFilePath('D:\\audio\\huge.wav')).rejects.toThrow('out of memory');
+
+    expect(useAppStore.getState().documents).toEqual([]);
+    expect(useAppStore.getState().activeDocumentId).toBeNull();
+  });
+
+  it('adds no document when the READ throws', async () => {
+    installApi({ readFile: jest.fn(async () => { throw new Error('EACCES'); }) });
+
+    await expect(openFilePath('D:\\audio\\locked.wav')).rejects.toThrow('EACCES');
+
+    expect(useAppStore.getState().documents).toEqual([]);
+  });
+
+  /** A decoded result whose marker seeding throws — the marker pass runs AFTER
+   * `addDocument`, so this is the shape that can leave a half-added document.
+   * The throw is planted on the marker list itself rather than on a store
+   * action: zustand copies state objects field by field, so a spy installed on
+   * a store action survives `mockRestore` into every later state object and
+   * poisons the rest of the file. */
+  function decodedWithFailingMarkers(message: string) {
+    return {
+      ...decoded(),
+      markers: {
+        length: 1,
+        map() {
+          throw new Error(message);
+        },
+      } as unknown as NonNullable<DecodedAudio['markers']>,
+    };
+  }
+
+  it('rolls the document back out when a failure lands AFTER it was added', async () => {
+    installApi();
+    mockDecode.mockResolvedValueOnce(decodedWithFailingMarkers('marker seeding exploded'));
+
+    await expect(openFilePath('D:\\audio\\song.wav')).rejects.toThrow('marker seeding exploded');
+
+    expect(useAppStore.getState().documents).toEqual([]);
+    expect(useAppStore.getState().activeDocumentId).toBeNull();
+  });
+
+  it('leaves an ALREADY-OPEN document untouched and active when the next open fails', async () => {
+    // The real shape of the incident: one file open and fine, the second one
+    // dies. The survivor must still be there, still active, still drawable.
+    installApi();
+    await openFilePath('D:\\audio\\first.wav');
+    const firstId = useAppStore.getState().documents[0].id;
+
+    mockDecode.mockRejectedValueOnce(new Error('out of memory'));
+    await expect(openFilePath('D:\\audio\\second.wav')).rejects.toThrow('out of memory');
+
+    const state = useAppStore.getState();
+    expect(state.documents).toHaveLength(1);
+    expect(state.documents[0].id).toBe(firstId);
+    expect(state.activeDocumentId).toBe(firstId);
+    expect(state.documents[0].channels[0].length).toBeGreaterThan(0);
+  });
+
+  it('releases the history and peak caches of the rolled-back document', async () => {
+    installApi();
+    const clearHistorySpy = jest.spyOn(undoHistory, 'clearHistory');
+    const invalidatePeaksSpy = jest.spyOn(peaksCache, 'invalidatePeaks');
+    mockDecode.mockResolvedValueOnce(decodedWithFailingMarkers('marker seeding exploded'));
+
+    await expect(openFilePath('D:\\audio\\song.wav')).rejects.toThrow();
+
+    expect(clearHistorySpy).toHaveBeenCalled();
+    expect(invalidatePeaksSpy).toHaveBeenCalled();
+    clearHistorySpy.mockRestore();
+    invalidatePeaksSpy.mockRestore();
+  });
+
+  it('reports the failing file by name, once, and keeps opening the rest', async () => {
+    // openFilesViaDialog's per-file catch is what turns the throw above into
+    // the one dialog the user sees.
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\audio\\bad.wav', 'D:\\audio\\good.wav']),
+    });
+    mockDecode.mockRejectedValueOnce(new Error('out of memory'));
+
+    await openFilesViaDialog();
+
+    expect(api.showMessageBox).toHaveBeenCalledTimes(1);
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        title: 'Open failed',
+        message: expect.stringContaining('D:\\audio\\bad.wav'),
+      })
+    );
+    const state = useAppStore.getState();
+    expect(state.documents).toHaveLength(1);
+    expect(state.documents[0].name).toBe('good.wav');
+  });
+});
+
+describe('openFilePath — the Files panel is told an open is in flight (O1-1)', () => {
+  afterEach(() => {
+    _resetPendingOpens();
+  });
+
+  it('lists the file while it decodes and drops it when the document lands', async () => {
+    let releaseDecode!: () => void;
+    installApi();
+    mockDecode.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          releaseDecode = () => resolve(decoded());
+        })
+    );
+
+    const opening = openFilePath('D:\\audio\\song.wav');
+    await Promise.resolve(); // let the read settle and the decode start
+
+    expect(getPendingOpens().map((p) => p.name)).toEqual(['song.wav']);
+    expect(getPendingOpens()[0].path).toBe('D:\\audio\\song.wav');
+    // Still no document — the row is the ONLY thing telling the user anything
+    // is happening.
+    expect(useAppStore.getState().documents).toEqual([]);
+
+    releaseDecode();
+    await opening;
+
+    expect(getPendingOpens()).toEqual([]);
+    expect(useAppStore.getState().documents).toHaveLength(1);
+  });
+
+  it('drops the entry when the open FAILS, so no row is left spinning forever', async () => {
+    installApi();
+    mockDecode.mockRejectedValueOnce(new Error('out of memory'));
+
+    await expect(openFilePath('D:\\audio\\huge.wav')).rejects.toThrow();
+
+    expect(getPendingOpens()).toEqual([]);
+  });
+
+  it('tracks two concurrent opens independently', async () => {
+    installApi();
+    let releaseFirst!: () => void;
+    mockDecode.mockImplementationOnce(
+      () => new Promise((resolve) => { releaseFirst = () => resolve(decoded()); })
+    );
+    const first = openFilePath('D:\\audio\\one.wav');
+    await Promise.resolve();
+    const second = openFilePath('D:\\audio\\two.wav');
+    await Promise.resolve();
+
+    expect(getPendingOpens().map((p) => p.name).sort()).toEqual(['one.wav', 'two.wav']);
+
+    await second;
+    expect(getPendingOpens().map((p) => p.name)).toEqual(['one.wav']);
+
+    releaseFirst();
+    await first;
+    expect(getPendingOpens()).toEqual([]);
   });
 });
 
