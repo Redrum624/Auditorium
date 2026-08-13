@@ -35,7 +35,8 @@ import {
   type CoverJourneyStageResult,
 } from './coverJourney';
 import { MONO_PAN_COMPENSATION_DB, STEM_TRACK_LABELS } from './stemLanding';
-import { clearHistory, pushUndo } from './undoHistory';
+import { clearHistory, getHistory, pushUndo, undo } from './undoHistory';
+import { applyEdit } from './editOps';
 import { VOCAL_CHAIN_UNDO_LABEL } from './vocalChain';
 import { COVER_CHAIN_UNDO_LABEL } from './coverChain';
 
@@ -348,6 +349,59 @@ describe('runCoverJourney — a second pass on the same song', () => {
       peak = Math.max(peak, Math.abs(instrumental.channels[0][i]));
     }
     expect(peak).toBeGreaterThan(0.8);
+  });
+
+  /**
+   * CC4 fix-round 1 (I1). Adoption rewrites a document's channels in place, and
+   * a length-preserving edit — EQ, amplify, noise reduction, a same-length paste
+   * — leaves the name/rate/length precondition true. So the pass could silently
+   * destroy work the user had done on the instrumental between two runs, with no
+   * undo path back to it, while the document's own surviving undo entries would
+   * then restore pre-rewrite audio over the fresh sum.
+   *
+   * The rule: this pass adopts only artifacts it made and the user has not
+   * touched. A document carrying ANY editing history is theirs, and the pass
+   * falls back to the create-beside arm that was always safe.
+   */
+  it('leaves an instrumental the user has edited alone, and creates its own beside it', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const theirs = first!.separation!.instrumentalDocId;
+
+    // A length-preserving edit through the app's own write path, so it carries a
+    // real undo entry exactly as any effect would.
+    applyEdit('Amplify', theirs, (doc) => ({
+      ...doc,
+      channels: doc.channels.map((ch) => ch.map((v) => v * 0.5) as Float32Array),
+    }));
+    const mine = useAppStore.getState().documents.find((d) => d.id === theirs)!;
+    const sample = mine.channels[0][1000];
+
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    // Their document is not this pass's instrumental, and not one sample of it
+    // was touched.
+    expect(second!.separation!.instrumentalDocId).not.toBe(theirs);
+    const after = useAppStore.getState().documents.find((d) => d.id === theirs)!;
+    expect(after.channels[0][1000]).toBe(sample);
+    // …and their undo entry still means what it meant.
+    expect(getHistory(theirs).done).toEqual(['Amplify']);
+    // The row says which of the two happened rather than leaving it to be found
+    // in the files panel.
+    expect(second!.stages[0].derived[1].from).toMatch(/your own edits|left alone/i);
+  });
+
+  it('does not adopt one whose edit was merely UNDONE — redo would restore stale audio', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const theirs = first!.separation!.instrumentalDocId;
+    applyEdit('Amplify', theirs, (doc) => ({
+      ...doc,
+      channels: doc.channels.map((ch) => ch.map((v) => v * 0.5) as Float32Array),
+    }));
+    undo(theirs);
+    expect(getHistory(theirs).undone).toEqual(['Amplify']);
+
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(second!.separation!.instrumentalDocId).not.toBe(theirs);
   });
 
   it('creates a fresh one when the old copy no longer describes the song', async () => {

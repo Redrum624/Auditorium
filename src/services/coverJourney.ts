@@ -394,6 +394,21 @@ export function priorJourneyPasses(docId: string): string[] {
 }
 
 /**
+ * CC4 fix-round 1 (I1) — whether this document has been EDITED, in either
+ * direction.
+ *
+ * Undo entries exist only where an edit was committed, so a non-empty stack is
+ * the app's own record that someone changed this document. BOTH stacks count: an
+ * edit the user undid is still their work — it is one keystroke from being back
+ * — and rewriting the channels underneath it would leave their redo restoring
+ * audio from before a rewrite it knows nothing about.
+ */
+function hasEditHistory(docId: string): boolean {
+  const history = getHistory(docId);
+  return history.done.length > 0 || history.undone.length > 0;
+}
+
+/**
  * The instrumental: the four non-vocal stems summed.
  *
  * Not a new separation and not an approximation — separation's one hard
@@ -678,9 +693,29 @@ export async function runCoverJourney(
     // length. That is the same test a stem must pass to inherit the song's beat
     // grid, and it is what makes adoption safe — a copy that no longer matches
     // is left alone and a fresh one is created beside it, exactly as before.
+    //
+    // CC4 fix-round 1 (I1): and ONE more condition, which the precondition above
+    // cannot express — the candidate must be an artifact this pass made and the
+    // user has NOT touched. Adoption rewrites channels in place, and every edit
+    // that keeps the length (amplify, EQ, noise reduction, a same-length paste)
+    // leaves name/rate/length true, so without this a user who cleaned up the
+    // instrumental between two runs lost that work with no undo path back to it
+    // — and the document's surviving entries would then restore pre-rewrite
+    // audio over the fresh sum. Any editing history at all means the document is
+    // theirs: this pass leaves it exactly where it is and creates its own beside
+    // it, which is the arm that shipped before adoption existed and has never
+    // destroyed anything.
+    //
+    // Recording the rewrite as an undo entry instead was the other candidate and
+    // is rejected: it makes the destruction undoable rather than avoided, leaves
+    // the user to NOTICE the loss and to think of reaching for undo on a
+    // document they ran nothing on, and charges the undo budget a full-length
+    // document per pass for a generated artifact. The take is a different case
+    // and keeps its entries — it is the document the user asked this pass to
+    // process; the instrumental is one the pass made for itself.
     const instrumentalName = `${song.name} ${INSTRUMENTAL_SUFFIX}`;
     const instrumentalChannels = sumInstrumental(stems);
-    const previous =
+    const candidate =
       useAppStore
         .getState()
         .documents.find(
@@ -690,6 +725,10 @@ export async function runCoverJourney(
             d.sampleRate === song.sampleRate &&
             docLength(d) === docLength(song)
         ) ?? null;
+    // Both stacks, not just `done`: an edit the user UNDID is still theirs, and
+    // rewriting under it would leave their redo restoring stale audio.
+    const candidateEdited = candidate !== null && hasEditHistory(candidate.id);
+    const previous = candidateEdited ? null : candidate;
     const instrumental: AudioDocument = previous
       ? // `dirty: true` because the samples now differ from whatever is on disk —
         // the same stamp every channel-replacing helper in `AudioDocument` makes.
@@ -735,13 +774,15 @@ export async function runCoverJourney(
         {
           label: 'Instrumental',
           value: instrumental.name,
-          // CC4 (CJ-4): which of the two happened, said rather than left to be
+          // CC4 (CJ-4): which of the three happened, said rather than left to be
           // counted in the files panel.
           from:
             `${nonVocalNames.join(' + ')} summed — separation's guarantee is that its stems sum back to the mix exactly, so this is the original with its vocal removed to the last bit` +
             (previous
               ? '. The document of this name that an earlier pass left open was reused, its samples rewritten with this pass\'s own sum — it still carries the song\'s rate and exact length, so it is this song\'s'
-              : ''),
+              : candidateEdited
+                ? '. A document of this name from an earlier pass is also open, and it carries your own edits — so it was left alone, exactly as you made it, and this is a new one beside it'
+                : ''),
         },
       ],
       warning: COVER_CHAIN_RESIDUAL_SENTENCE,
