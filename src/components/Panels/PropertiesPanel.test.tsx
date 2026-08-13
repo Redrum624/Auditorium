@@ -4,6 +4,9 @@ import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { createClip } from '../../multitrack/session';
+import { clearSessionHistory, SESSION_UNDO_KEY } from '../../multitrack/sessionUndo';
+import { getHistory } from '../../services/undoHistory';
+import { formatTime } from '../../utils/timeFormat';
 import {
   getTempo,
   isTempoRunning,
@@ -184,7 +187,9 @@ describe('PropertiesPanel (multitrack view)', () => {
     render(<PropertiesPanel />);
 
     expect(screen.getByText('clip.wav')).toBeInTheDocument();
-    expect(screen.getByText('0:00.100')).toBeInTheDocument(); // start
+    // CC3: Start is a field now, not a readout — its value carries the same
+    // number the row used to print.
+    expect((screen.getByLabelText(/clip start/i) as HTMLInputElement).value).toBe('0:00.100');
     expect(screen.getByText('0:00.200')).toBeInTheDocument(); // offset
     expect(screen.getByText('0:01.000')).toBeInTheDocument(); // length
 
@@ -287,6 +292,124 @@ describe('PropertiesPanel (multitrack view)', () => {
 
     expect(clipGain(clip.id)).toBe(24); // store clamps to +24
     expect(gainInput.value).toBe('24'); // draft reflects the clamp
+  });
+
+  // ── CC3: a clip start you can TYPE ────────────────────────────────────────
+
+  /**
+   * Drag was the only way to place a clip, which made every stated offset —
+   * the Cover Chain's refused guess above all — an eyeball exercise with no
+   * snap target at the position it names. The field commits through the
+   * store's own `moveClip`, so its clamp and its one undo entry are the
+   * store's, not a second implementation of either.
+   */
+  describe('the clip Start field', () => {
+    function seedStartedClip(startSample: number) {
+      const doc = addDoc();
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      const clip = createClip({
+        documentId: doc.id,
+        startSample,
+        offsetSample: 0,
+        lengthSample: 44100,
+      });
+      useSessionStore.getState().addClip(trackId, clip);
+      useSessionStore.getState().setSelectedClip(clip.id);
+      clearSessionHistory();
+      return clip;
+    }
+
+    const clipStart = (clipId: string): number =>
+      useSessionStore
+        .getState()
+        .session.tracks.flatMap((t) => t.clips)
+        .find((c) => c.id === clipId)!.startSample;
+
+    it('commits a typed position on blur, as one undo entry', () => {
+      const clip = seedStartedClip(0);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i);
+      fireEvent.change(field, { target: { value: '0:08.258' } });
+      fireEvent.blur(field);
+
+      expect(clipStart(clip.id)).toBe(Math.round(8.258 * 44100));
+      expect(getHistory(SESSION_UNDO_KEY).done).toEqual(['Move clip']);
+    });
+
+    it('commits on Enter, and accepts plain seconds as well as m:ss.mmm', () => {
+      const clip = seedStartedClip(0);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i);
+      fireEvent.change(field, { target: { value: '8.258' } });
+      fireEvent.keyDown(field, { key: 'Enter' });
+
+      expect(clipStart(clip.id)).toBe(Math.round(8.258 * 44100));
+    });
+
+    it('echoes the position the STORE kept, not the text that was typed', () => {
+      const clip = seedStartedClip(0);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      fireEvent.change(field, { target: { value: '2.5' } });
+      fireEvent.blur(field);
+
+      // Re-queried, not held: a committed move re-keys the field, so what the
+      // user is looking at afterwards is the field the store's own position
+      // rendered — never the string they typed.
+      const after = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      expect(after.value).toBe(formatTime(clipStart(clip.id), 44100));
+      expect(after.value).toBe('0:02.500');
+    });
+
+    it('refuses a position before zero rather than pretending to place one there', () => {
+      const clip = seedStartedClip(44100);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      fireEvent.change(field, { target: { value: '-3' } });
+      fireEvent.blur(field);
+
+      // No clip can start before zero (the store clamps), so the field reverts
+      // rather than silently committing a 0 the user did not ask for.
+      expect(clipStart(clip.id)).toBe(44100);
+      expect(field.value).toBe('0:01.000');
+      expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+    });
+
+    it('reverts garbage to the committed position and leaves the clip alone', () => {
+      const clip = seedStartedClip(44100);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      fireEvent.change(field, { target: { value: 'somewhere' } });
+      fireEvent.blur(field);
+
+      expect(clipStart(clip.id)).toBe(44100);
+      expect(field.value).toBe('0:01.000');
+    });
+
+    it('abandons the draft on Escape without committing it', () => {
+      const clip = seedStartedClip(44100);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      fireEvent.change(field, { target: { value: '5' } });
+      fireEvent.keyDown(field, { key: 'Escape' });
+
+      expect(clipStart(clip.id)).toBe(44100);
+      expect(field.value).toBe('0:01.000');
+      expect(document.activeElement).not.toBe(field);
+      // A later blur must not resurrect the abandoned draft as a commit.
+      fireEvent.blur(field);
+      expect(clipStart(clip.id)).toBe(44100);
+    });
+
+    it('picks up a position that moved from elsewhere while the panel was open', () => {
+      const clip = seedStartedClip(0);
+      const { rerender } = render(<PropertiesPanel />);
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      useSessionStore.getState().moveClip(clip.id, trackId, 44100);
+      rerender(<PropertiesPanel />);
+
+      expect((screen.getByLabelText(/clip start/i) as HTMLInputElement).value).toBe('0:01.000');
+    });
   });
 });
 

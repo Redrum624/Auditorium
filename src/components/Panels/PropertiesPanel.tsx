@@ -389,6 +389,66 @@ function FadeLengthInput({
   );
 }
 
+/**
+ * CC3 — clip start editor.
+ *
+ * Until this field, drag was the app's ONLY placement affordance: a stated
+ * offset (the Cover Chain's refused guess above all) had to be realised by eye,
+ * with no snap target at the position it named. The panel now takes the number.
+ *
+ * Structurally identical to `FadeLengthInput` (T36's local-draft pattern, C4's
+ * echo-the-store rule) and deliberately so — two time fields in one panel that
+ * behaved differently would be a defect. `parseTime` already refuses negatives,
+ * which is the honest answer here rather than a silent clamp to zero: no clip
+ * can start before zero, and committing a 0 the user did not type would look
+ * like the field had accepted the position.
+ */
+function ClipStartInput({
+  valueSample,
+  sampleRate,
+  onCommit,
+}: {
+  valueSample: number;
+  sampleRate: number;
+  onCommit: (startSample: number) => number;
+}) {
+  const [draft, setDraft] = useState(formatTime(valueSample, sampleRate));
+  const escapingRef = useRef(false);
+
+  const commit = () => {
+    if (escapingRef.current) return;
+    const parsed = parseTime(draft, sampleRate);
+    if (parsed !== null) {
+      const stored = onCommit(parsed);
+      setDraft(formatTime(stored, sampleRate)); // reflect the store's clamp
+    } else {
+      setDraft(formatTime(valueSample, sampleRate)); // revert garbage
+    }
+  };
+
+  return (
+    <input
+      type="text"
+      inputMode="decimal"
+      value={draft}
+      aria-label="Clip start"
+      title="Where this clip starts on the timeline — m:ss.mmm or plain seconds. A clip cannot start before zero."
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter') commit();
+        if (e.key === 'Escape') {
+          setDraft(formatTime(valueSample, sampleRate));
+          escapingRef.current = true;
+          e.currentTarget.blur(); // dispatches blur synchronously
+          escapingRef.current = false;
+        }
+      }}
+      className="w-20 rounded border border-[#3a3a42] bg-[#1a1a1e] px-1 py-0.5 text-right text-[#d4d4d8] outline-none focus:border-[#26c6da]"
+    />
+  );
+}
+
 /** X4 — fade curve picker. Options come straight from FADE_CURVES in its
  * documented picker order; labels are the ruling-2 behaviour names and the
  * title carries the one-line description of the selected curve. Styled on the
@@ -433,6 +493,7 @@ function ClipProperties() {
   const selectedClipId = useSessionStore((s) => s.selectedClipId);
   const setClipGain = useSessionStore((s) => s.setClipGain);
   const setClipFade = useSessionStore((s) => s.setClipFade);
+  const moveClip = useSessionStore((s) => s.moveClip); // CC3
 
   let clip: Clip | null = null;
   let trackName = '';
@@ -461,6 +522,28 @@ function ClipProperties() {
    * (C4) — and returns what the store actually kept (read synchronously from
    * the store, zustand's set is synchronous), so the input can echo the clamp
    * without re-implementing it. */
+  /** CC3 — commits a typed clip start through the store's own `moveClip`, and
+   * returns the position the store actually kept. `moveClip` owns the >= 0
+   * clamp, the facing-fade maintenance and the single 'Move clip' undo entry;
+   * this panel re-implements none of the three. The clip stays on its own
+   * track — this field places, it does not re-route. */
+  const commitClipStart = (startSample: number): number => {
+    let trackId = '';
+    for (const t of session.tracks) {
+      if (t.clips.some((c) => c.id === clip!.id)) {
+        trackId = t.id;
+        break;
+      }
+    }
+    if (!trackId) return clip!.startSample;
+    moveClip(clip!.id, trackId, startSample);
+    for (const t of useSessionStore.getState().session.tracks) {
+      const c = t.clips.find((x) => x.id === clip!.id);
+      if (c) return c.startSample;
+    }
+    return clip!.startSample;
+  };
+
   const commitFadeLength = (edge: 'in' | 'out', lengthSample: number): number => {
     setClipFade(clip!.id, edge, { lengthSample });
     for (const t of useSessionStore.getState().session.tracks) {
@@ -536,7 +619,19 @@ function ClipProperties() {
     <div className="flex flex-col py-1" data-testid="properties-clip">
       <Row label="Source" value={srcDoc?.name ?? '—'} />
       <Row label="Track" value={trackName} />
-      <Row label="Start" value={formatTime(clip.startSample, session.sampleRate)} />
+      {/* CC3: the one clip fact that was a readout and had to be a field —
+          every other placement affordance in the app is a drag. */}
+      <label className="flex items-center justify-between gap-2 px-2 py-1 text-xs">
+        <span className="shrink-0 text-[#8b8b92]">Start</span>
+        <ClipStartInput
+          // Re-key on the committed position too, so a drag with the panel
+          // open resets a stale draft (the FadeLengthInput ruling).
+          key={`${clip.id}:${clip.startSample}`}
+          valueSample={clip.startSample}
+          sampleRate={session.sampleRate}
+          onCommit={commitClipStart}
+        />
+      </label>
       <Row label="Offset" value={formatTime(clip.offsetSample, session.sampleRate)} />
       <Row label="Length" value={formatTime(clip.lengthSample, session.sampleRate)} />
 
