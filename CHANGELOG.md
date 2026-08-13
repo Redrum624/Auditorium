@@ -122,6 +122,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   react-dom has no `logComponentRender` at all. Affects: `src/App.tsx`,
   `src/components/Editor/WaveformView.tsx`, `src/components/Editor/SpectrogramView.tsx`,
   `src/dev/userTimingGuard.ts`, `src/dev/installUserTimingGuard.ts`, `src/main.tsx`.
+- **A long menu scrolls instead of adding empty space at the bottom of the app.** Cause: not what it
+  looked like. The dropdown is `position: absolute`, so it never changed an ancestor's layout box —
+  but `index.css` gives `html, body, #root` `height: 100%` and **nothing** in that chain sets
+  `overflow: hidden`, and an absolutely-positioned box still contributes to the DOCUMENT's scrollable
+  overflow region. A panel taller than the window therefore made the whole document scrollable, and
+  because `body` is a flex column, scrolling it read exactly as "a new space at the bottom pushing
+  everything else up". The Effects menu was about 33 rows (~900 px), so any window under ~940 px hit
+  it. Fix: the panel is rendered through a portal into `document.body` with `position: fixed`, its
+  top/left measured from the section wrapper, `max-height` set to the space actually below it (floor
+  96 px) and `overflow-y: auto`. The portal is load-bearing rather than stylistic — `TitleBar` carries
+  `backdrop-filter`, which would make it the containing block for a fixed descendant and reinstate the
+  bug. Z-order is unchanged (50, above the glass cards' 20 and below dialogs' 40). Affects:
+  `src/components/Layout/MenuBar.tsx`.
+- **Zooming out past the end of the track stopped moving the tics and the timeline.** Cause: the
+  waveform and its overlays disagree about where the track ends. `getPeaksForRange` clamps its request
+  to the channel's real length and then spreads the survivors over all buckets, so once the visible
+  window runs past the end the painted waveform is byte-identical for every further zoom-out — while
+  the beat tics and the ruler map through `sampleToPixel` with the raw `samplesPerPixel` and no clamp,
+  and keep compressing. The two clamp paths were also 32× apart: the wheel gesture allowed
+  `length / 50` while the fit was `length / 1600`, so that whole incoherent range was reachable. Fix:
+  one clamped resolution in the store (`resolveZoom`), which is now the only place either clamp
+  exists; the wheel, the −/+ buttons, Fit, document activation and the lane re-measure all funnel
+  through it, and the renderer, the tic layer and the ruler read the one resolved pair. The zoom-out
+  limit and the fit are now the same number by construction, so they cannot disagree. Affects:
+  `src/stores/appStore.ts`, `src/components/Editor/useEditorGestures.ts`,
+  `src/components/Layout/Toolbar.tsx`, `src/services/editorViewport.ts`.
 
 ### Added
 <!-- F11: the F11 series' Added entries start here. -->
@@ -147,6 +173,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   moving the position line has never re-seeked a running engine. Affects:
   `src/components/Editor/TimelineRuler.tsx`, `src/components/Editor/WaveformView.tsx`,
   `src/components/Editor/SpectrogramView.tsx`, `src/components/Multitrack/MultitrackView.tsx`.
+- **A newly opened track is shown whole, fitted to the lane.** Why: opening a file laid it out at a
+  nominal 1600-pixel viewport (`docLength / 1600`), which is not the editor's actual width and was
+  never fit-to-canvas — and the **Fit** button restored exactly that same not-quite-fit, so the gap
+  existed twice. The editor lane now publishes the width it actually measures, and both the open and
+  the Fit button use it: the whole track exactly fills the lane. This applies to everything that
+  arrives through `addDocument` — opens, imports, recordings, stems, remixes and mixdowns — so a
+  computed document shows itself whole on first sight too. **Zoom-% semantics, stated deliberately
+  rather than drifted into: 100% is Fit — the whole track exactly fills the editor lane. Zooming in
+  raises the number (200% shows half the track), and because Fit is also the furthest the editor zooms
+  out, the readout never drops below 100%.** Affects: `src/stores/appStore.ts`,
+  `src/services/editorViewport.ts`, `src/components/Layout/Toolbar.tsx`,
+  `src/components/Editor/WaveformView.tsx`, `src/components/Editor/SpectrogramView.tsx`.
+- **A Pipeline menu, holding the ten advanced tools in one place.** Why: Detect Tempo, Match Tempo,
+  Align Vocal Timing, Auto-Remix, Voice Changer, Vocal Chain, Cover Chain, Align Lyrics, Transcribe
+  and Separate into Stems had accumulated across the head and tail of the Effects menu and the middle
+  of the Edit menu, over ten releases, with no rule saying which went where. They are **moved, not
+  copied**, into a sixth top-level menu grouped by subject: Tempo & Timing, Voice, Analysis. Ids,
+  enablement predicates, labels, shortcuts and run bodies are untouched — only placement moved.
+  `Capture Noise Print` deliberately stayed at the top of Effects: it is an instant profile of the
+  selection rather than a long pass, and the only thing it primes is the Noise Reduction effect a few
+  rows below it. `MenuSection['title']` was a closed five-value union guarded by a code comment citing
+  "Plan Ruling 5"; the user overruled that ruling, and the comment now records the reversal rather
+  than the rule. One thing is genuinely given up: the Effects head used to list Align Vocal Timing,
+  Align Lyrics and Vocal Chain adjacently *because that is the order they must be run in*, and
+  grouping by subject drops that hint — the stage notes in `vocalChain.ts` and `coverChain.ts` are now
+  the only surface that states run order, and their tests still pin it. Every in-app string naming an
+  old path was swept in the same series. Affects: `src/services/menuActions.ts`,
+  `src/components/Dialogs/{AlignTimingDialog,CoverChainDialog}.tsx`,
+  `src/effects/time/{AlignTimingEffect,MatchTempoVariableEffect}.ts`,
+  `src/services/{coverChain,vocalChain}.ts`.
+- **The Effects module card carries the ten Pipeline tools, one click each.** Why: the tools shipped
+  menu-only across ten releases while the card still listed nothing but the effect registry — and the
+  card is the surface this user actually works from. The effect list is unchanged and still first;
+  below it the same three groups as the Pipeline menu, each row firing the same `runCommand` the menu
+  fires. Labels and enablement are read from the command registry itself (`getMenuSections`,
+  `isCommandEnabled`), never copied, so the panel and the menu cannot disagree about what a command is
+  called or when it is available. Tool rows are a **single** click, against the effect rows'
+  double-click: an effect row opens a parameter dialog, a tool row runs a verb the menu already runs
+  on one click. Affects: `src/components/Panels/EffectsPanel.tsx`.
 
 - **DevTools open by themselves on a dev run.** Why: a standing user rule — while developing, the
   console is open without anyone asking for it. Detached, so it never takes width from the window the

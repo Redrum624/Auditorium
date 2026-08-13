@@ -30,6 +30,48 @@ and everything is anchored on the **waveform**, not on the window:
 There is no separate file chip: the file's identity lives in the status pill,
 and the zoom percentage lives in the toolbar's own `%` readout.
 
+### The menus
+
+Six menus: **File**, **Edit**, **Effects**, **Pipeline**, **View** and
+**Help**.
+
+- **Effects** holds **Capture Noise Print** and then every effect, grouped by
+  category — the things that transform the audio you have selected.
+- **Pipeline** holds the ten long-running tools, grouped by subject:
+  **Detect Tempo · Match Tempo… · Align Vocal Timing… · Auto-Remix…**, then
+  **Voice Changer… · Vocal Chain… · Cover Chain… · Align Lyrics…**, then
+  **Transcribe… · Separate into Stems…**. These used to be scattered between
+  the Effects and Edit menus; they are in one place now, and each one is in
+  exactly one place.
+
+The grouping is by subject, not by run order. Where several of these tools have
+to be run in a particular sequence — the vocal and cover chains especially —
+the order is stated in the dialog's own stage notes, not implied by the menu.
+
+Every one of these tools is also a single click in the **Effects** module card
+(see *The panel cards* below), which is usually the faster route.
+
+A menu longer than the window scrolls inside itself; it never resizes or
+scrolls the app behind it.
+
+### Zoom and Fit
+
+The toolbar's zoom cluster is `− · % · + · Fit`.
+
+**100% is Fit: the whole track exactly fills the editor lane.** Zooming in
+raises the number — 200% shows half the track — and because Fit is also the
+furthest the editor zooms out, the readout never drops below 100%.
+
+A newly opened, imported, recorded or computed document (a stem, a remix, a
+mixdown) starts fitted, so you see the whole track the moment it appears. The
+**Fit** button returns to exactly that state at any time. Because Fit is the
+zoom-out limit, pressing `−` or scrolling out at 100% does nothing at all —
+previously it kept going, and the beat tics and the timeline kept compressing
+against a waveform that had already stopped changing.
+
+The status pill also shows the zoom in samples-per-pixel, which is the exact
+figure the `%` is derived from.
+
 ### Opening a file
 
 **File → Open…** (`Ctrl+O`) opens a native file picker. Supported formats:
@@ -240,6 +282,15 @@ open) to open its parameter dialog, adjust settings, and apply. Every effect
 processes the current selection, or the whole document when there's no
 selection.
 
+**Below the effects, the same card lists the Pipeline tools** — grouped as
+**Tempo & Timing**, **Voice** and **Analysis** — so the whole capability
+surface is in one panel. A tool takes a **single** click (it is a verb the menu
+already runs on one click; a second door slower than the first is not a door),
+while effect rows keep their double-click, because an effect row opens a
+parameter dialog rather than doing something. A greyed tool row means that
+command is unavailable right now, for exactly the reason the menu gives — the
+panel asks the command itself rather than keeping its own copy of the rule.
+
 - **Amplitude** — Amplify (gain in dB), Fade (in/out; Linear, Ducked, Cosine
   or Equal power curve; ramp length as a % of the selection — 100 % shapes the
   whole selection exactly as before), Normalize (peak or RMS target level)
@@ -283,7 +334,7 @@ Reduction dialog notices a capture or clear immediately, even while open.
 
 ### Vocal Chain (fixing a rough vocal in one pass)
 
-**Effects → Vocal Chain…** runs the corrections a vocal usually needs, in one
+**Pipeline → Vocal Chain…** runs the corrections a vocal usually needs, in one
 pass that lands as a single undo entry. It contains no new processing — every
 stage is an effect you can also run on its own. What the chain adds is the
 order, settings worked out from your actual recording, and a report.
@@ -389,25 +440,25 @@ whole chain took about 105 seconds on a 142-second stereo take).
 
 ### Cover Chain (matching your take to the record's vocal)
 
-`Effects → Cover Chain…` takes the vocal you recorded and the *separated original vocal*
+`Pipeline → Cover Chain…` takes the vocal you recorded and the *separated original vocal*
 of the song you are covering, and matches your take's tone and level to it.
 
 **Do this first, in this order.** The chain lists all of it, and refuses to do any of
 it for you, because each step needs a decision only you can make:
 
-1. Open the original song and run `Edit → Separate into Stems…`. That gives you a
+1. Open the original song and run `Pipeline → Separate into Stems…`. That gives you a
    five-track session and, among the new documents, `<song> — Vocals`: the original
    vocal *as a signal*, carrying whatever was done to it in the mix. That document is
    what everything below matches against.
-2. If a word came out wrong, `Effects → Align Lyrics…`. This is **before** the vocal
+2. If a word came out wrong, `Pipeline → Align Lyrics…`. This is **before** the vocal
    chain and not after it: the replacement has to be in the file before any stage
    measures a level or learns a noise print from it, or the new word sits in a
    de-noised, level-matched take with none of that applied to it. Nothing in the app
    judges which word is wrong; you pick it.
-3. If your take drifts against the record, `Effects → Align Vocal Timing…`. Also before
+3. If your take drifts against the record, `Pipeline → Align Vocal Timing…`. Also before
    the vocal chain, for the same reason. It needs you to confirm the beat grid — see the
    note in that section about why nothing picks it for you.
-4. Open your take and run `Effects → Vocal Chain…` on it, last of the four. The match is
+4. Open your take and run `Pipeline → Vocal Chain…` on it, last of the four. The match is
    a correction to a **clean** take — match the timbre of a noisy one and you match the
    noise too.
 
@@ -416,7 +467,7 @@ it for you, because each step needs a decision only you can make:
 and the registry's order carries no promise about them. The order to do them is the one
 above, and each stage's own note repeats it.)
 
-**Then run the chain.** With your take active, open `Effects → Cover Chain…`, choose the
+**Then run the chain.** With your take active, open `Pipeline → Cover Chain…`, choose the
 `— Vocals` document in the **Reference** picker, and press Apply. Three automatic stages
 are on by default:
 
@@ -478,7 +529,7 @@ file never pays for an analysis you didn't want.
 
 ### Detecting the tempo
 
-To find a track's tempo: open it and run **Effects → Detect Tempo**. The
+To find a track's tempo: open it and run **Pipeline → Detect Tempo**. The
 analysis runs off the main thread; when it finishes, the BPM appears in three
 places — the `♩ 124.0` readout in the bottom status pill, the **TEMPO** card
 above the panel cards, and the **Tempo** row in the **Properties** panel.
@@ -574,7 +625,7 @@ To make a 128 BPM loop sit in a 124 BPM track:
 
 1. Select the region to retarget (or select nothing, to retarget the whole
    document).
-2. **Effects → Match Tempo…**. The dialog prefills the source BPM from the
+2. **Pipeline → Match Tempo…**. The dialog prefills the source BPM from the
    detection; **Re-detect from selection** re-runs it against the region the
    ratio will be applied to. A selection of 30 seconds or less is analysed in
    full; a longer one is measured over a **centred 30-second excerpt** of it
@@ -635,7 +686,7 @@ the *singer* moves against a tempo that does not.
 
 It works from *anchors you confirm*, never from a detector's guess:
 
-1. Detect the tempo first (**Effects → Detect Tempo**) — the alignment needs a
+1. Detect the tempo first (**Pipeline → Detect Tempo**) — the alignment needs a
    beat grid and will never start an analysis on its own.
 2. Drop a marker on each syllable you want moved (`M`). Or open the dialog and
    press **Suggest syllable markers**, which runs an onset detector and writes
@@ -643,7 +694,7 @@ It works from *anchors you confirm*, never from a detector's guess:
    solo vocal roughly one proposal in eight is not a syllable (it is a breath, a
    note ending, or a slide), and about a third of the syllables are missed, so
    this step is a starting point, not an answer.
-3. **Effects → Align Vocal Timing…**.
+3. **Pipeline → Align Vocal Timing…**.
 4. Check the grid. The dialog shows the BPM the tracked beats imply and the
    detector's confidence, with ×2 / ÷2 to re-track if the octave is wrong.
 5. Choose the subdivision. Each option is labelled with the median move it would
@@ -665,13 +716,13 @@ so the result can still go through Pitch Correct.
 ### Fixing one word without singing the whole take again
 
 You know which word came out wrong — you can hear it. What you want is to sing
-that one word again and drop it in, not to re-record the line. **Effects → Align
+that one word again and drop it in, not to re-record the line. **Pipeline → Align
 Lyrics…** is that.
 
 It works from lyrics *you already have*. The model is never asked what was sung;
 it is given the words and asked only where each one is.
 
-1. **Effects → Align Lyrics…**. The first run downloads a 378 MB acoustic model
+1. **Pipeline → Align Lyrics…**. The first run downloads a 378 MB acoustic model
    (once, kept with the app's settings).
 2. Paste the lyrics, or press **Load from file…** for a `.txt` / `.lrc`. One line
    per line of the song — the words are laid out the way you wrote them.
@@ -741,7 +792,7 @@ a file" button; the take is recorded here, in your own voice.
 
 To make a song fit a 2-minute video without time-stretching it:
 
-1. Open the track and run **Edit → Auto-Remix…**.
+1. Open the track and run **Pipeline → Auto-Remix…**.
 2. Confirm the tempo and the downbeat the dialog reports (use ×2 / ÷2 if the
    octave is wrong — the arrangement is built on this grid).
 3. Set the target length, and adjust phrase length, crossfade, strictness or
@@ -782,7 +833,7 @@ longer describes the source.
 
 To split a song into drums, bass, vocals and everything else:
 
-1. Open the file and run **Edit → Separate into Stems…**.
+1. Open the file and run **Pipeline → Separate into Stems…**.
 2. The first time only, the dialog offers the **one-time 166 MB model
    download** with byte progress. It is fetched once and kept, so later
    separations start immediately.
@@ -821,7 +872,7 @@ written to disk, so closing one — or quitting — prompts you to save it.
 
 To turn speech into timestamped text with a speaker label per segment:
 
-1. Open the recording and run **Edit → Transcribe…**.
+1. Open the recording and run **Pipeline → Transcribe…**.
 2. The first time only, the dialog offers the **one-time ~323 MB model
    download** with byte progress (Whisper base, plus a speaker-embedding
    model). They are fetched once and kept.
@@ -870,7 +921,7 @@ shows.
 
 ### Changing a voice
 
-`Edit → Voice Changer…` makes a recording sound like a different speaker while
+`Pipeline → Voice Changer…` makes a recording sound like a different speaker while
 keeping the words and the delivery. Everything runs on your own CPU — no
 account, no upload.
 
