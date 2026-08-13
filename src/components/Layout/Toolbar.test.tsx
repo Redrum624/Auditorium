@@ -17,6 +17,20 @@ function makeDoc(): AudioDocument {
   });
 }
 
+/** A document that came off disk and has no unsaved work — the shape that
+ * separates "there is an active document" from "there is something to save".
+ * `makeDoc()` conflates the two: with no filePath it is never-saved, so it
+ * always has unsaved work. */
+function makeSavedDoc(): AudioDocument {
+  return createDocument({
+    name: 'clip.wav',
+    sampleRate: 44100,
+    channels: [new Float32Array(4096), new Float32Array(4096)],
+    filePath: 'D:\\audio\\clip.wav',
+    neverSaved: false,
+  });
+}
+
 /** The full setter set — individual tests overwrite the spy they care about. */
 function registerSetters(overrides: Partial<Parameters<typeof registerDialogSetters>[0]> = {}) {
   registerDialogSetters({
@@ -266,21 +280,27 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
     expect(dividerBetween).toBe(true);
   });
 
-  it('Open is always enabled; Save/Export/zoom need an active document', () => {
+  it('Open is always enabled; Export/zoom need an active document', () => {
+    // Seeded with a SAVED, clean document on purpose. `makeDoc()` has no
+    // filePath, so it is never-saved and therefore always has unsaved work —
+    // which since O1-2 is what enables Save. Using it here would let this test
+    // pass while measuring "the document has unsaved work" instead of "there
+    // is an active document", and the two stopped being the same condition.
     render(<Toolbar />);
     expect(screen.getByRole('button', { name: 'Open' })).toBeEnabled();
-    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Zoom In' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Zoom Out' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Fit' })).toBeDisabled();
 
-    act(() => useAppStore.getState().addDocument(makeDoc()));
-    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+    act(() => useAppStore.getState().addDocument(makeSavedDoc()));
     expect(screen.getByRole('button', { name: 'Export' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Zoom In' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Zoom Out' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Fit' })).toBeEnabled();
+    // Save deliberately does NOT follow document presence — its own gate is
+    // measured by "greys the Save pill for a document with nothing to save".
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
   });
 
   it('Export routes through the file.export command to the export dialog', () => {
