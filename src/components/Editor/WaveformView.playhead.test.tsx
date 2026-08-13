@@ -175,6 +175,59 @@ describe('dragging the playhead handle (F11-1)', () => {
     expect(useAppStore.getState().cursorSample).toBe(224 * SPP);
   });
 
+  // PW1. Found by the packaged navigation walker, which dragged the handle with
+  // Alt held on a document opened FITTED — and a fitted zoom is
+  // `docLength / laneWidth`, which is almost never a whole number of samples per
+  // pixel. The cursor came to rest at 121308.03126517865.
+  //
+  // Why that is a defect rather than a rounding curiosity: `marker.add` writes
+  // `positionSample: cursorSample` verbatim, so the fraction becomes marker
+  // DATA and travels into the cue chunk of every export written from it. And
+  // the ruler — the other surface that writes this exact field — has always
+  // rounded its own seek, so the two disagreed about whether `cursorSample` is
+  // an integer at all.
+  //
+  // The zoom here is deliberately fractional for the same reason a fitted
+  // document's is: at the integer SPP the rest of this file uses, every
+  // arithmetic path lands on a whole sample by luck and the bug is invisible.
+  it('lands on a WHOLE sample even at a fractional zoom, with the magnet suspended', () => {
+    useAppStore.getState().setZoom({ samplesPerPixel: 182.3821339950372, scrollSample: 0 });
+    useAppStore.getState().setCursor(0);
+    const canvas = mount();
+
+    firePointer(canvas, 'pointerdown', { clientX: 0, clientY: 3 });
+    firePointer(canvas, 'pointermove', { clientX: 224, clientY: 3, altKey: true });
+
+    const cursor = useAppStore.getState().cursorSample;
+    expect(cursor).toBe(Math.round(224 * 182.3821339950372));
+    expect(Number.isInteger(cursor)).toBe(true);
+  });
+
+  it('rounds a dragged SELECTION to whole samples too — same resolver, same field kind', () => {
+    // `snapped()` feeds `dragToSelection` as well as `setCursor`, so a
+    // fractional zoom used to produce a selection whose bounds sat between two
+    // samples. The press is below the handle band, which is what makes this
+    // gesture a selection drag rather than a playhead drag.
+    useAppStore.getState().setZoom({ samplesPerPixel: 182.3821339950372, scrollSample: 0 });
+    const canvas = mount();
+
+    firePointer(canvas, 'pointerdown', {
+      clientX: 10,
+      clientY: CURSOR_HANDLE_HIT_H + 1,
+      altKey: true,
+    });
+    firePointer(canvas, 'pointermove', {
+      clientX: 300,
+      clientY: CURSOR_HANDLE_HIT_H + 1,
+      altKey: true,
+    });
+
+    const sel = useAppStore.getState().selection;
+    expect(sel).not.toBeNull();
+    expect(Number.isInteger(sel!.start)).toBe(true);
+    expect(Number.isInteger(sel!.end)).toBe(true);
+  });
+
   it('does not select-all on a double press, the way the lane body does', () => {
     useAppStore.getState().setCursor(0);
     const canvas = mount();

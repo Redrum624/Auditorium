@@ -191,13 +191,29 @@ export function useEditorGestures(
   }
 
   /** The position a gesture should COMMIT for a raw sample: the nearest target
-   * within tolerance, or the raw value untouched. The clamp is re-applied
-   * because a document truncated after its analysis can leave a target past the
-   * current end; with an intact document every target is already in range and
-   * the clamp is a no-op. */
+   * within tolerance, or the raw value. The clamp is re-applied because a
+   * document truncated after its analysis can leave a target past the current
+   * end; with an intact document every target is already in range and the clamp
+   * is a no-op.
+   *
+   * PW1: ROUNDED, on both arms. `raw` comes from `pixelToSample`, so it is a
+   * fraction of a sample whenever the magnet is suspended (Alt) or the document
+   * has no snap targets at all — and this function's result is committed
+   * straight to `setCursor` and to `dragToSelection`, so both the cursor and a
+   * dragged selection could sit BETWEEN two samples. That is not a display nit:
+   * `marker.add` (menuActions.ts) writes `positionSample: cursorSample`
+   * verbatim, so the fraction reaches marker data and the cue chunk of every
+   * export written from it.
+   *
+   * `TimelineRuler` has always rounded its own seek (`Math.round(snapped)`) for
+   * exactly this reason — so the two surfaces that write `cursorSample` were
+   * disagreeing about whether the field is an integer. Rounding here settles it
+   * where the value is produced. The snapping arm is unaffected in practice:
+   * snap targets are integer sample positions already, so the round is a no-op
+   * on that path and only the raw path moves, by less than one sample. */
   function snapped(raw: number, targets: number[], e: { altKey: boolean }): number {
-    if (snapSuspended(e) || targets.length === 0) return raw;
-    return clamp(snapSample(raw, targets, zoom.samplesPerPixel).sample, 0, length);
+    if (snapSuspended(e) || targets.length === 0) return Math.round(raw);
+    return Math.round(clamp(snapSample(raw, targets, zoom.samplesPerPixel).sample, 0, length));
   }
 
   const onPointerDown = (e: ReactPointerEvent<HTMLCanvasElement>) => {
