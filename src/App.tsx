@@ -136,6 +136,35 @@ export default function App() {
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
 
+  // F11: the window-level drop guard.
+  //
+  // Chromium's default action for a file dropped on a page is to NAVIGATE to
+  // it. In a browser that loses a tab; in this renderer it replaces the whole
+  // app with a file viewer — every open document, every unsaved edit and the
+  // whole session, gone, with no prompt and no undo. F11-4 gave the track
+  // lanes a real drop target, which makes a *near miss* an everyday gesture:
+  // aim at a lane, land on the toolbar, lose your work.
+  //
+  // So the default is refused for the whole window. This is not a competing
+  // drop handler — it neither reads the payload nor imports anything. The lane
+  // handlers are React listeners on the root container, which is INSIDE
+  // `window`, so they have already run by the time this fires; all it removes
+  // is the navigation that would otherwise follow. A drop anywhere else
+  // therefore does nothing at all, which is exactly the "no highlight, no
+  // action" rule F11-4 states, enforced at the one level that can guarantee it.
+  //
+  // `dragover` needs the same treatment: without it Chromium shows a "no drop"
+  // cursor over most of the window, so the affordance would contradict itself.
+  useEffect(() => {
+    const refuse = (e: DragEvent) => e.preventDefault();
+    window.addEventListener('dragover', refuse);
+    window.addEventListener('drop', refuse);
+    return () => {
+      window.removeEventListener('dragover', refuse);
+      window.removeEventListener('drop', refuse);
+    };
+  }, []);
+
   // Switching views mid-playback otherwise orphans whichever engine was
   // playing (transportStop() only routes to the CURRENT view's engine) — stop
   // BOTH engines whenever the view changes. Skips the initial mount (there is

@@ -4053,9 +4053,17 @@ async function main() {
     // pan (2 keys) lanes; tracks 2-4 carry no automation field.
     console.log('Spatial placement (F5): positioner gesture, seam-crossing render parity, round trip...');
 
-    // (a) Open the Spatial tab and aim the positioner at track 2 (lane-free,
-    // so the gesture's effect is unambiguous).
-    await page.click('[aria-label="Spatial"]');
+    // (a) Open the positioner and aim it at track 2 (lane-free, so the
+    // gesture's effect is unambiguous).
+    // F11-8: Spatial is a TOOL now, not a module — there is no strip icon to
+    // click. Reached through its own command row in the Effects card, which is
+    // the surface the user reaches it from; the Pipeline menu's "Spatial
+    // Positioner" row is the identical command. The row is never greyed, so
+    // this works from the multitrack view this step runs in.
+    await openModuleCard(page, 'Effects');
+    await page.click(
+      '[data-testid="effects-tool-item"][data-command-id="spatial.position"] button'
+    );
     await page.waitForSelector('[data-testid="spatial-panel"]', { timeout: 5000 });
     const track2Id = await page.evaluate(
       () => document.querySelector('[data-testid="spatial-track-select"]').options[1].value

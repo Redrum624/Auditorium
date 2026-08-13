@@ -553,3 +553,39 @@ describe('view-change stops both playback engines (Task 23 / Task 22 review find
     mtStop.mockRestore();
   });
 });
+
+// F11: a file dropped anywhere but a track lane must do NOTHING. Chromium's
+// default is to navigate to it, which in this renderer means replacing the
+// whole app — every open document and unsaved edit — with a file viewer. F11-4
+// made near-misses an everyday gesture by giving the lanes a real drop target.
+describe('the window refuses a stray file drop (F11)', () => {
+  function dispatch(type: 'dragover' | 'drop'): Event {
+    // jsdom has no DragEvent; the guard reads nothing off the event but
+    // `preventDefault`, so a cancelable Event of the right type is a faithful
+    // stand-in — and `defaultPrevented` is exactly what Chromium consults.
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    act(() => {
+      window.dispatchEvent(event);
+    });
+    return event;
+  }
+
+  it('refuses the default for a drop anywhere on the window', () => {
+    render(<App />);
+    expect(dispatch('drop').defaultPrevented).toBe(true);
+  });
+
+  it('refuses it for dragover too, so the cursor does not contradict the rule', () => {
+    render(<App />);
+    expect(dispatch('dragover').defaultPrevented).toBe(true);
+  });
+
+  it('stops refusing once the app unmounts — the listeners are cleaned up', () => {
+    const { unmount } = render(<App />);
+    expect(dispatch('drop').defaultPrevented).toBe(true);
+
+    unmount();
+
+    expect(dispatch('drop').defaultPrevented).toBe(false);
+  });
+});
