@@ -1197,7 +1197,14 @@ describe('runCoverChain', () => {
     expect(raf.mock.calls.length).toBeGreaterThanOrEqual(STEPPER_IDS.length);
 
     raf.mockRestore();
-  });
+    // PW1: an explicit budget, because this is the only test in the file that
+    // runs TWO whole cover chains back to back, and jest's 5 s default is not a
+    // budget anyone chose for that. In isolation the entire 76-test file takes
+    // ~21 s; under a full `--maxWorkers=14` run it takes ~91 s, and at that
+    // contention these two passes alone overran the default and failed the gate
+    // at random. Nothing about what the test ASSERTS changes — a wall-clock
+    // budget is not an assertion, and a genuine hang still fails here.
+  }, 60_000);
 
   it('measures before it renders, on every stage, and says so', async () => {
     const { refId } = seedPair(takeAudio(), refAudio());

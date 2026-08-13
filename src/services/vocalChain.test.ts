@@ -1409,7 +1409,9 @@ describe('runVocalChain', () => {
     expect(raf.mock.calls.length).toBeGreaterThanOrEqual(STEPPER_IDS.length);
 
     raf.mockRestore();
-  });
+    // PW1: the same explicit budget as its cover-chain twin — two whole chains
+    // in one test, and jest's 5 s default is not a budget anyone chose for that.
+  }, 60_000);
 
   it('measures before it renders, on every stage, and says so', async () => {
     seedDoc([stepperFixture()]);
