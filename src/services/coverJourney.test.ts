@@ -14,6 +14,7 @@ import { createDocument, docLength } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
+import { mixdownSession } from '../multitrack/mixdown';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import * as coverAlign from '../dsp/coverAlign';
 import * as stemService from './stemService';
@@ -32,7 +33,7 @@ import {
   type CoverJourneyStageProgress,
   type CoverJourneyStageResult,
 } from './coverJourney';
-import { STEM_TRACK_LABELS } from './stemLanding';
+import { MONO_PAN_COMPENSATION_DB, STEM_TRACK_LABELS } from './stemLanding';
 
 jest.mock('./stemService', () => ({
   ...jest.requireActual('./stemService'),
@@ -147,7 +148,15 @@ function separationOutput(songSamples = SONG_SAMPLES): stemService.StemSeparatio
 const okVocalReport = (): vocalChain.VocalChainReport =>
   ({ applied: true, stages: [], elapsedMs: 1 }) as unknown as vocalChain.VocalChainReport;
 const okCoverReport = (): coverChain.CoverChainReport =>
-  ({ applied: true, stages: [], elapsedMs: 1 }) as unknown as coverChain.CoverChainReport;
+  ({
+    applied: true,
+    stages: [],
+    elapsedMs: 1,
+    // CC4 (CJ-3): the floor's verdict is part of every real report, so it is
+    // part of this one. A stub that omits it would leave the journey reading
+    // `undefined` where the contract says `number | null`.
+    referenceImplausibleBelowDb: null,
+  }) as unknown as coverChain.CoverChainReport;
 
 const confidentAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurement => ({
   offsetSeconds,
@@ -768,6 +777,114 @@ describe('runCoverJourney — what the Place row says it placed at', () => {
     alignTakeToReference.mockReturnValue(confidentAlignment(0));
     const row = takeAtRow(await runCoverJourney({ songDocId: songId, takeDocId: takeId }));
     expect(row.from).toContain('the measured offset +0.000 s');
+  });
+});
+
+// ── The reference the match trusts ──────────────────────────────────────────
+
+/**
+ * CC4 (CJ-3). The match stages' floor is checkable only against the song the
+ * reference was separated FROM, and this pass is the one caller that always
+ * knows it. What is asserted here is the WIRING and the row the user reads; the
+ * floor's own arithmetic is derived and pinned in `coverChain.test.ts`.
+ */
+describe('runCoverJourney — the separated vocal has to be plausible', () => {
+  it('tells the Cover Chain which mix the reference came out of', async () => {
+    await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(runCoverChain.mock.calls[0][0].mixDocId).toBe(songId);
+  });
+
+  it('warns on the match row, with the number, when the floor refused the reference', async () => {
+    runCoverChain.mockResolvedValue({
+      ...okCoverReport(),
+      referenceImplausibleBelowDb: 41.29,
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    const match = report!.stages.find((s) => s.id === 'match')!;
+    expect(match.warning).toContain('41.29');
+    expect(match.warning).toMatch(/separat/i);
+    // The run still finishes and still places the take — the take was left
+    // unmatched, not destroyed, which is the entire point of declining.
+    expect(report!.completed).toBe(true);
+    expect(report!.placement).not.toBeNull();
+  });
+
+  it('says nothing when the reference was believable', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.stages.find((s) => s.id === 'match')!.warning).toBeUndefined();
+  });
+});
+
+// ── The placed take's level ─────────────────────────────────────────────────
+
+/**
+ * CC4 (CJ-2). Match Loudness calibrates the take in DOCUMENT space, against the
+ * separated original vocal. The session then renders it — and `mixdownSession`
+ * picks its pan law from the clip source's channel count, so a MONO take (the
+ * normal case for a mic recording) took the constant-power law at 0.7071/side
+ * while the always-stereo instrumental took the unity balance law. The take
+ * sounded 3.01 dB under the level that had just been calibrated for it, and
+ * nothing said so.
+ *
+ * These assertions are made on the RENDER, never on a gain field: a test that
+ * echoed the compensation back would pass against a compensation applied to the
+ * wrong object entirely.
+ */
+describe('runCoverJourney — the placed take renders at its calibrated level', () => {
+  /** The take track alone, rendered through the real mixdown. */
+  function renderTakeTrack(): { peak: number; docPeak: number } {
+    const session = useSessionStore.getState().session;
+    const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const));
+    const takeTrack = session.tracks.find((t) => t.name === 'Cover Vocal')!;
+    const mixed = mixdownSession({ ...session, tracks: [takeTrack] }, docs);
+    let peak = 0;
+    for (const ch of mixed.channels) {
+      for (let i = 0; i < ch.length; i++) peak = Math.max(peak, Math.abs(ch[i]));
+    }
+    const doc = docs.get(takeId)!;
+    let docPeak = 0;
+    for (const ch of doc.channels) {
+      for (let i = 0; i < ch.length; i++) docPeak = Math.max(docPeak, Math.abs(ch[i]));
+    }
+    return { peak, docPeak };
+  }
+
+  it('renders a MONO take at the level Match Loudness set, not 3.01 dB under it', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(useAppStore.getState().documents.find((d) => d.id === takeId)!.channels).toHaveLength(1);
+
+    const { peak, docPeak } = renderTakeTrack();
+    // The number that matters, in the unit the defect was stated in.
+    expect(20 * Math.log10(peak / docPeak)).toBeCloseTo(0, 3);
+    // …and the fixture can actually express the bug: without compensation the
+    // very same render would have peaked at 0.7071 × the document.
+    expect(docPeak * Math.SQRT1_2).toBeLessThan(peak * 0.99);
+    expect(report!.placement!.takeGainDb).toBeCloseTo(MONO_PAN_COMPENSATION_DB, 12);
+  });
+
+  it('leaves a STEREO take at unity — the balance law needs no help', async () => {
+    useAppStore.setState({
+      documents: useAppStore.getState().documents.map((d) =>
+        d.id === takeId
+          ? { ...d, channels: [tone(TAKE_SAMPLES, 330, SR), tone(TAKE_SAMPLES, 330, SR)] }
+          : d
+      ),
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    const { peak, docPeak } = renderTakeTrack();
+    expect(20 * Math.log10(peak / docPeak)).toBeCloseTo(0, 3);
+    expect(report!.placement!.takeGainDb).toBe(0);
+    expect(useSessionStore.getState().session.tracks[1].clips[0].gainDb).toBe(0);
+  });
+
+  it('says what it did rather than moving the level silently', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const place = report!.stages.find((s) => s.id === 'place')!;
+    const row = place.derived.find((d) => d.label === 'Take routing')!;
+    expect(row.value).toContain('+3.01 dB');
+    expect(row.from).toMatch(/mono/i);
   });
 });
 

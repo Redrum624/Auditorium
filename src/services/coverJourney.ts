@@ -106,7 +106,11 @@ import {
   placementFor,
 } from './coverPlacement';
 import { cancelStemSeparation, separateStems, STEM_LABELS } from './stemService';
-import { createStemDocuments, STEM_TRACK_LABELS } from './stemLanding';
+import {
+  createStemDocuments,
+  MONO_PAN_COMPENSATION_DB,
+  STEM_TRACK_LABELS,
+} from './stemLanding';
 import {
   VOCAL_CHAIN_UNDO_LABEL,
   defaultStageSelection,
@@ -265,6 +269,8 @@ export interface CoverJourneyPlacement {
    */
   shiftedSamples: number;
   takeLengthSample: number;
+  /** CC4 (CJ-2): the clip gain the take was placed with. */
+  takeGainDb: number;
 }
 
 export interface CoverJourneySmoothing {
@@ -403,6 +409,8 @@ export function sumInstrumental(stems: readonly AudioDocument[]): Float32Array[]
 
 const secondsStr = (v: number): string => `${v >= 0 ? '+' : '−'}${Math.abs(v).toFixed(3)} s`;
 const dbfsStr = (v: number): string => `${v.toFixed(2)} dBFS`;
+/** CC4 (CJ-2): a signed gain, the cover chain's own idiom for the same thing. */
+const dbStr = (v: number): string => `${v >= 0 ? '+' : ''}${v.toFixed(2)} dB`;
 
 /** The cancellation sentinel, so every stage's early return is one shape. */
 const CANCELLED = Symbol('cancelled');
@@ -888,6 +896,13 @@ export async function runCoverJourney(
     const report = await runCoverChain({
       enabled: defaultCoverStageSelection(),
       referenceDocId: separation!.vocalsDocId,
+      // CC4 (CJ-3): the song the reference was separated FROM. Nothing else in
+      // the app can supply this — the standalone chain's reference is whatever
+      // document the user picked — and without it the match stages have no way
+      // to tell a separated vocal from the leakage a failed separation returns.
+      // The measured pathology is 41 dB down, and it is reachable with this
+      // repo's own model on its own fixtures.
+      mixDocId: song.id,
       onStageProgress: (p) => emit(stage, `Cover Chain — ${p.label}`, p.stageFraction, p),
       onProgress: (f) => emit(stage, 'Cover Chain', f),
     });
@@ -915,6 +930,14 @@ export async function runCoverJourney(
       reason: report.applied
         ? undefined
         : 'every matching stage was off or declined, so the take was not changed — each stage says why in its own row below',
+      // CC4 (CJ-3): the floor's verdict, on the row the user is looking at. The
+      // full sentence is in the declined stages' own rows underneath; without
+      // this the headline could still read "done" (the limiter always applies)
+      // while the two stages the pass exists for had refused.
+      warning:
+        report.referenceImplausibleBelowDb === null
+          ? undefined
+          : `the matching stages DECLINED: the separated vocal sounds ${report.referenceImplausibleBelowDb.toFixed(2)} dB below the song it came out of, so it is leakage rather than the singer, and matching your take to it would have shaped and levelled it against the wrong signal. Your take was not matched — read the rows below, check the “— Vocals” document, and separate the song again if it is not the original singer.`,
       derived: [],
       undoEntries: report.applied ? [COVER_CHAIN_UNDO_LABEL] : [],
       coverChain: report,
@@ -972,12 +995,38 @@ export async function runCoverJourney(
         lengthSample: documentClipLength(instrumental, sessionRate),
       }),
     ];
+    // CC4 (CJ-2): a MONO take is placed with the compensation that makes it
+    // render at the level Match Loudness just calibrated for it.
+    //
+    // `mixdownSession` (and the realtime player, which shares its math) picks
+    // its pan law from the CLIP SOURCE's channel count: a mono clip takes the
+    // constant-power law, 0.7071 per side at centre, while the instrumental —
+    // always stereo, because `landStems` dual-mono-routes a mono source and
+    // `sumInstrumental` takes the max channel count — takes the unity balance
+    // law. Match Loudness works in DOCUMENT space, so without this a mono take
+    // (the normal case for a mic recording) sounded 3.01 dB under the level the
+    // stage above measured for it, with every report self-consistent.
+    //
+    // `MONO_PAN_COMPENSATION_DB` is stemLanding's own constant — the same hazard,
+    // the same number, defined once. stemLanding REJECTS this route for stems and
+    // lays them down as dual-mono documents instead, and its measurement table
+    // says why: the fader leaves a 5.96e-8 (−144.5 dBFS) residue that flips one
+    // float32 ULP on 2.5 % of samples, and ruling 1 demands the stems reconstruct
+    // the source "not to a tolerance". NOTHING is reconstructed here — the take
+    // has already been through amplify, EQ and a limiter — so the requirement is
+    // only that the rendered level match the calibrated one, which this meets to
+    // ~8 orders below float32 granularity. The exact route stemLanding took is
+    // not available to this stage anyway: it would mean placing a dual-mono COPY
+    // of the take, doubling a four-minute take's memory and severing the clip
+    // from the document the user goes on editing.
+    const takeGainDb = matched.channels.length === 1 ? MONO_PAN_COMPENSATION_DB : 0;
     const takeTrack: Track = createTrack('Cover Vocal');
     const takeClip = createClip({
       documentId: matched.id,
       startSample: takeStartSample,
       offsetSample: 0,
       lengthSample: takeLengthSample,
+      gainDb: takeGainDb,
     });
     takeClipId = takeClip.id;
     takeTrack.clips = [takeClip];
@@ -1020,6 +1069,7 @@ export async function runCoverJourney(
       takeStartSample,
       shiftedSamples,
       takeLengthSample,
+      takeGainDb,
     };
 
     record({
@@ -1048,6 +1098,18 @@ export async function runCoverJourney(
           value: `${session.name} — 2 tracks`,
           from: 'the instrumental on one track and your matched take on the other, ready to play and to Mix Down',
         },
+        // CC4 (CJ-2): stated rather than applied quietly. A clip gain the user
+        // did not set is exactly the kind of thing they are entitled to find in
+        // the report when they notice it in the properties panel.
+        ...(takeGainDb > 0
+          ? [
+              {
+                label: 'Take routing',
+                value: `${dbStr(takeGainDb)} on the take clip`,
+                from: 'your take is MONO, and a mono clip feeds both master sides through the constant-power pan law at 0.707 each — 3.01 dB under the stereo instrumental, which takes the unity balance law. Match Loudness calibrated the take as a file, so without this the placed take would play 3.01 dB below the level it was just matched to. It is the exact inverse of that law, and it is the only thing on this clip that is not a default',
+              },
+            ]
+          : []),
       ],
       undoEntries: [],
       elapsedMs: Date.now() - at,
