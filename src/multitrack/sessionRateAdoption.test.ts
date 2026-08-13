@@ -27,10 +27,15 @@ import { _resetClipResampleCache } from './clipResampleCache';
 import { placeDocumentClips } from './laneDrop';
 import { readClipSlice } from './mixdown';
 import { createClip, createTrack } from './session';
-import { adoptSessionRate, useSessionStore } from './sessionStore';
-import { _resetSessionUndo, undoSession } from './sessionUndo';
+import { adoptSessionRate, applySessionZoom, useSessionStore } from './sessionStore';
+import { _resetSessionUndo, redoSession, undoSession } from './sessionUndo';
 import { _resetSessionLaneWidth, FALLBACK_SESSION_LANE_WIDTH } from './sessionViewport';
-import { defaultSessionZoom, fitSessionSamplesPerPixel, MT_EMPTY_TIMELINE_SEC } from './sessionZoom';
+import {
+  defaultSessionZoom,
+  fitSessionSamplesPerPixel,
+  MT_EMPTY_TIMELINE_SEC,
+  resolveSessionZoom,
+} from './sessionZoom';
 
 const DOC_RATE = 48_000;
 const SESSION_RATE = 44_100;
@@ -301,5 +306,172 @@ describe('adoption is part of the insert, not a second undo step', () => {
 
     expect(store().session.sampleRate).toBe(SESSION_RATE);
     expect(store().session.tracks.flatMap((t) => t.clips)).toHaveLength(0);
+  });
+});
+
+/**
+ * MT2 fix round 1 — undoing an adoption must put the DENOMINATOR back too.
+ *
+ * Adoption is the one mutation in this store that changes what a session sample
+ * MEANS, and the undo entry carried only `{session, selectedClipId}` (ruling 3's
+ * view-state pin). So the rate reverted while the cursor, the playhead and the
+ * zoom stayed in the adopted denomination: a cursor the user placed at 2.000 s
+ * in a 44.1 kHz session read 4.35 s after Ctrl+Z of a 96 kHz insert, and the
+ * stored `samplesPerPixel` sat above the reverted session's Fit ceiling — the
+ * resolve-once/clamp defect family, in the store rather than in a writer.
+ *
+ * This is NOT ruling 3 being repealed. Ruling 3 says an undo must not restore
+ * REMEMBERED view state, because yanking the viewport back buys no
+ * comprehension. Keeping the cursor at the same INSTANT across a change of unit
+ * is the same intent, not its opposite: it is what "never touched the cursor"
+ * MEANS when the ruler underneath it is re-scaled. Same-rate undo — every other
+ * entry in the app — still touches none of the three (pinned in
+ * `sessionStore.undo.test.ts:241`, and again below).
+ */
+const HI_RATE = 96_000;
+/** 60 s at 96 kHz. Long enough that the fit of the session-with-clip is far
+ * COARSER than the empty 44.1 kHz session's fit (4186 vs 1923 samples/px), so a
+ * zoom left unconverted is genuinely out of clamp after the undo rather than
+ * accidentally legal. */
+const HI_LEN = 60 * HI_RATE;
+
+describe('undoing an adopting insert restores the denominator, not just the rate', () => {
+  /** Where the cursor is, in SECONDS — the quantity the user chose and the only
+   * one that has to survive a change of unit. */
+  const cursorSeconds = () => store().mtCursorSample / store().session.sampleRate;
+
+  /** The stored zoom is a FIXED POINT of the one resolver against the live
+   * session: re-resolving it changes nothing. That is the precise spelling of
+   * "legal, and arrived at through `resolveSessionZoom` rather than written
+   * raw" — an out-of-clamp `samplesPerPixel` moves when re-resolved. */
+  function expectZoomResolved(): void {
+    expect(store().mtZoom).toEqual(resolveSessionZoom(store().session, store().mtZoom));
+    expect(store().mtZoom.samplesPerPixel).toBeLessThanOrEqual(
+      fitSessionSamplesPerPixel(store().session, FALLBACK_SESSION_LANE_WIDTH)
+    );
+  }
+
+  it('puts the cursor back at the instant the user chose, in the reverted rate', () => {
+    store().setMtCursor(2 * SESSION_RATE); // 88 200 — 2.000 s
+    const doc = addDoc(HI_RATE, HI_LEN);
+
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+    expect(store().session.sampleRate).toBe(HI_RATE);
+    expect(store().mtCursorSample).toBe(2 * HI_RATE); // still 2.000 s, in 96 kHz
+    expect(cursorSeconds()).toBeCloseTo(2, 9);
+
+    undoSession();
+
+    expect(store().session.sampleRate).toBe(SESSION_RATE);
+    // The bug: 192 000 left standing under a 44 100 session reads 4.354 s.
+    expect(store().mtCursorSample).toBe(2 * SESSION_RATE);
+    expect(cursorSeconds()).toBeCloseTo(2, 9);
+  });
+
+  it('keeps the visible DURATION the user was looking at', () => {
+    const doc = addDoc(HI_RATE, HI_LEN);
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+    // Zoom in to a quarter of the fit AFTER the insert — the insert's own re-fit
+    // would otherwise own the zoom and make this vacuous. A quarter of a 60 s
+    // session is 15 s across the lane.
+    applySessionZoom({ samplesPerPixel: store().mtZoom.samplesPerPixel / 4, scrollSample: 0 });
+    const visibleSeconds = () =>
+      (store().mtZoom.samplesPerPixel * FALLBACK_SESSION_LANE_WIDTH) / store().session.sampleRate;
+    expect(visibleSeconds()).toBeCloseTo(15, 6);
+
+    undoSession();
+
+    // The stale samples/px is LEGAL for the reverted session (it is below its
+    // Fit ceiling), so the I2 shrink-subscription below has nothing to clamp and
+    // the window silently widened from 15 s to 32.7 s. Legality was never the
+    // property that mattered here — the denominator was.
+    expect(visibleSeconds()).toBeCloseTo(15, 6);
+    expectZoomResolved();
+  });
+
+  it('leaves a zoom the reverted session can legally hold', () => {
+    // The other half of the review finding — and, measured rather than assumed,
+    // the half that was ALREADY defended. MT1's I2 subscription re-resolves the
+    // zoom whenever the timeline SHRINKS, and an out-of-clamp zoom after a rate
+    // revert implies exactly that: the stored samples/px is at most the
+    // post-insert fit (== length / laneWidth), so it can only exceed the
+    // reverted fit when the reverted length is smaller. There are therefore two
+    // independent clamps on this now, and the mutation evidence says so —
+    // disabling I2 alone leaves this green, replacing `viewStateAtRate`'s
+    // `resolveSessionZoom` with a raw write alone leaves this green, and
+    // removing BOTH turns it red. It is kept as the pin on that pair: whichever
+    // defence a later change retires, the other has to still be there.
+    const doc = addDoc(HI_RATE, HI_LEN);
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+    // Fitted to a 60 s clip at 96 kHz — far coarser than anything the empty
+    // 44.1 kHz session it is about to revert to may hold.
+    expect(store().mtZoom.samplesPerPixel).toBeGreaterThan(
+      fitSessionSamplesPerPixel(
+        { ...store().session, sampleRate: SESSION_RATE, tracks: [] },
+        FALLBACK_SESSION_LANE_WIDTH
+      )
+    );
+
+    undoSession();
+
+    expectZoomResolved();
+  });
+
+  it('carries the live playhead with the cursor', () => {
+    useSessionStore.setState({ mtPlayheadSample: SESSION_RATE }); // 1.000 s
+    const doc = addDoc(HI_RATE, HI_LEN);
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+    expect(store().mtPlayheadSample).toBe(HI_RATE);
+
+    undoSession();
+
+    expect(store().mtPlayheadSample).toBe(SESSION_RATE);
+  });
+
+  it('redo lands back in the adopted denomination, coherently', () => {
+    store().setMtCursor(2 * SESSION_RATE);
+    const doc = addDoc(HI_RATE, HI_LEN);
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+
+    undoSession();
+    redoSession();
+
+    expect(store().session.sampleRate).toBe(HI_RATE);
+    expect(store().session.tracks[0].clips).toHaveLength(1);
+    expect(store().mtCursorSample).toBe(2 * HI_RATE);
+    expect(cursorSeconds()).toBeCloseTo(2, 9);
+    expectZoomResolved();
+  });
+
+  it('survives the round trip — undo/redo/undo returns the same instant, not a drift', () => {
+    store().setMtCursor(2 * SESSION_RATE);
+    const doc = addDoc(HI_RATE, HI_LEN);
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+
+    undoSession();
+    redoSession();
+    undoSession();
+
+    expect(store().mtCursorSample).toBe(2 * SESSION_RATE);
+    expectZoomResolved();
+  });
+
+  it('a SAME-RATE undo still touches none of the three (ruling 3 stands)', () => {
+    // The exception is scoped to a change of denominator, and this is the arm
+    // that says so: an ordinary edit's undo leaves the viewport exactly where
+    // the user left it, cursor and zoom and playhead alike.
+    const doc = addDoc(SESSION_RATE, SESSION_RATE);
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+    expect(store().session.sampleRate).toBe(SESSION_RATE); // nothing adopted
+
+    store().setMtCursor(7777);
+    store().setMtZoom({ samplesPerPixel: 64, scrollSample: 42 });
+    store().setMtPlayheadSample(1234);
+
+    undoSession();
+
+    expect(store().mtCursorSample).toBe(7777);
+    expect(store().mtZoom).toEqual({ samplesPerPixel: 64, scrollSample: 42 });
+    expect(store().mtPlayheadSample).toBe(1234);
   });
 });

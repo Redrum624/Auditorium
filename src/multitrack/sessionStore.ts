@@ -1031,17 +1031,41 @@ export function adoptSessionRate(docRate: number): number {
   const ratio = docRate / from;
   recordSessionMutation('Set session rate', () => {
     const session = { ...s.session, sampleRate: docRate };
-    useSessionStore.setState({
-      session,
-      mtCursorSample: Math.round(s.mtCursorSample * ratio),
-      mtPlayheadSample: Math.round(s.mtPlayheadSample * ratio),
-      mtZoom: resolveSessionZoom(session, {
-        samplesPerPixel: s.mtZoom.samplesPerPixel * ratio,
-        scrollSample: Math.round(s.mtZoom.scrollSample * ratio),
-      }),
-    });
+    useSessionStore.setState({ session, ...viewStateAtRate(s, session, ratio) });
   });
   return ratio;
+}
+
+/**
+ * MT2 (fix round 1) — THE re-denomination: the rate-denominated view state,
+ * re-expressed for a session whose rate is about to become `session`'s.
+ *
+ * Extracted because it has TWO callers and they must not drift. Adoption moves
+ * the denominator forward; a snapshot restore (undo, and redo) moves it back —
+ * and the restore is where it was missing, which is the whole of the fix. Both
+ * are the same act: the instant a number NAMES has to survive the change of the
+ * unit it is counted in, because nothing downstream can tell which unit a bare
+ * sample count was written in.
+ *
+ * The zoom goes through `resolveSessionZoom` rather than being written raw, so
+ * the re-denominated `samplesPerPixel` is re-clamped against the session it is
+ * about to describe — the one clamp, applied where the ceiling moved.
+ *
+ * `ratio` is `toRate / fromRate`, and `s` must be the state BEFORE the write.
+ */
+function viewStateAtRate(
+  s: SessionState,
+  session: Session,
+  ratio: number
+): Pick<SessionState, 'mtCursorSample' | 'mtPlayheadSample' | 'mtZoom'> {
+  return {
+    mtCursorSample: Math.round(s.mtCursorSample * ratio),
+    mtPlayheadSample: Math.round(s.mtPlayheadSample * ratio),
+    mtZoom: resolveSessionZoom(session, {
+      samplesPerPixel: s.mtZoom.samplesPerPixel * ratio,
+      scrollSample: Math.round(s.mtZoom.scrollSample * ratio),
+    }),
+  };
 }
 
 /**
@@ -1133,15 +1157,45 @@ useSessionStore.subscribe((s) => {
 // mutation that would otherwise have purged. That whole discipline went with
 // `clipWaveformCache` — there is no per-clip bitmap to strand any more, since
 // `ClipView` draws the visible band straight to its on-screen canvas.
+//
+// MT2 (fix round 1): the ONE entry in this app that changes what a session
+// sample MEANS is an insert that made an empty session adopt the document's
+// rate. Restoring its snapshot put the rate back and left the cursor, the
+// playhead and the zoom counted in the ADOPTED rate — a cursor placed at
+// 2.000 s in a 44.1 kHz session read 4.35 s after Ctrl+Z of a 96 kHz insert,
+// and a 15-second window silently became a 32.7-second one.
+//
+// This is NOT ruling 3 being repealed, and the distinction is the reason the
+// conversion lives HERE rather than in `SessionSnapshot`. Ruling 3 forbids
+// restoring REMEMBERED view state: an undo must not yank the viewport back to
+// where it was, because that buys no comprehension. Nothing is remembered here
+// — the snapshot still carries only `{session, selectedClipId}`. The live
+// cursor is kept exactly where the user left it and merely re-counted, which is
+// what "the undo did not touch the cursor" MEANS once the ruler underneath it
+// has been re-scaled. Same-rate restores — every other entry in the app — take
+// the `ratio === 1` arm and write nothing but the session and the selection,
+// so `sessionStore.undo.test.ts`'s ruling-3 pin holds unchanged.
+//
+// The I2 shrink-subscription below is NOT this: it re-resolves a zoom whose
+// CEILING moved, which after a rate revert happens to catch the illegal cases
+// but never the merely mis-denominated ones (a stale samples/px under the new
+// fit is legal and still shows the wrong number of seconds).
 bindSessionUndo({
   capture: () => {
     const s = useSessionStore.getState();
     return { session: s.session, selectedClipId: s.selectedClipId };
   },
   apply: (snapshot) => {
+    const s = useSessionStore.getState();
+    const ratio = snapshot.session.sampleRate / s.session.sampleRate;
+    const redenominate =
+      Number.isFinite(ratio) && ratio > 0 && ratio !== 1
+        ? viewStateAtRate(s, snapshot.session, ratio)
+        : null;
     useSessionStore.setState({
       session: snapshot.session,
       selectedClipId: snapshot.selectedClipId,
+      ...redenominate,
     });
   },
 });
