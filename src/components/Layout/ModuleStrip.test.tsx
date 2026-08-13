@@ -1,5 +1,6 @@
 import { render, screen, fireEvent, within } from '@testing-library/react';
 import ModuleStrip, {
+  DEFAULT_PANEL,
   MODULE_COLUMN_WIDTH,
   MODULE_PANELS,
   PERMANENT_TABS,
@@ -21,10 +22,12 @@ import ModuleStrip, {
  * reached through their commands instead.
  */
 describe('ModuleStrip', () => {
-  const PERMANENT = ['Files', 'Effects', 'Markers', 'History', 'Properties'];
+  // U2: six permanents now — Pipeline joined after Effects, mirroring the menu
+  // bar — and the order obeys the user's two rules: Files FIRST, History LAST.
+  const PERMANENT = ['Files', 'Effects', 'Pipeline', 'Markers', 'Properties', 'History'];
 
   // F11: five, where this used to say "every module entry" over a list of eight.
-  it('carries the five permanent entries, in order, by accessible name', () => {
+  it('carries the six permanent entries, in order, by accessible name', () => {
     render(<ModuleStrip activeTab="history" hasRemix={false} onSelect={() => {}} />);
     const strip = screen.getByTestId('sidebar-tabs');
     const buttons = within(strip).getAllByRole('button');
@@ -49,7 +52,10 @@ describe('ModuleStrip', () => {
   });
 
   // F11: the user's rule — "Remix should only appear when a remix is created".
-  it('shows Remix only once a remix exists, and last in the roster', () => {
+  // U2: its SLOT is unmoved — still contextual, still appended after the body
+  // entries — but it is no longer last, because History's always-last rule
+  // outranks it. So the assertion is an adjacency, not an index.
+  it('shows Remix only once a remix exists, still contextual, just before History', () => {
     const { rerender } = render(
       <ModuleStrip activeTab="history" hasRemix={false} onSelect={() => {}} />
     );
@@ -60,36 +66,69 @@ describe('ModuleStrip', () => {
     const labels = within(screen.getByTestId('sidebar-tabs'))
       .getAllByRole('button')
       .map((b) => b.getAttribute('aria-label'));
-    expect(labels).toEqual([...PERMANENT, 'Remix']);
+    expect(labels).toEqual([...PERMANENT.slice(0, -1), 'Remix', 'History']);
+  });
+
+  /**
+   * U2: the two rules the user stated — "make 'Files' default at opening" and
+   * "'History' always last" — are pinned as PROPERTIES of the roster, over
+   * BOTH remix states, rather than as one hardcoded sequence.
+   *
+   * The difference matters for the next module. A frozen array says "today's
+   * strip is this"; a property says "whatever the strip becomes, Files leads it
+   * and History closes it". A future entry appended to `MODULE_PANELS` cannot
+   * silently violate either rule without turning one of these red, and the
+   * `slot` invariants below are what make that structural instead of hopeful.
+   */
+  it('opens with Files and closes with History, in either remix state', () => {
+    for (const hasRemix of [false, true]) {
+      const ids = stripTabs(hasRemix).map((t) => t.id);
+      expect(ids[0]).toBe('files');
+      expect(ids[ids.length - 1]).toBe('history');
+    }
+  });
+
+  it('names the app-start card as that same first entry, not a second constant', () => {
+    expect(DEFAULT_PANEL).toBe(stripTabs(false)[0].id);
+    expect(DEFAULT_PANEL).toBe(stripTabs(true)[0].id);
+  });
+
+  it('carries exactly one lead and one trail slot, so neither rule can be doubled', () => {
+    expect(MODULE_PANELS.filter((p) => p.slot === 'lead').map((p) => p.id)).toEqual(['files']);
+    expect(MODULE_PANELS.filter((p) => p.slot === 'trail').map((p) => p.id)).toEqual(['history']);
   });
 
   // F11: one roster function, so App and the strip cannot disagree about it.
+  // U2: Pipeline joined it, after Effects — the menu bar's own adjacency.
   it('states that roster once, as `stripTabs`, so the strip and App cannot disagree', () => {
     expect(stripTabs(false).map((t) => t.id)).toEqual([
       'files',
       'effects',
+      'pipeline',
       'markers',
-      'history',
       'properties',
+      'history',
     ]);
     expect(stripTabs(true).map((t) => t.id)).toEqual([
       'files',
       'effects',
+      'pipeline',
       'markers',
-      'history',
       'properties',
       'remix',
+      'history',
     ]);
   });
 
   // F11: the card's registry is the WIDER list — a panel with no icon is still
   // a panel the card renders, which is the whole point of the split.
   it('keeps every panel in MODULE_PANELS, icons or not', () => {
-    expect(MODULE_PANELS.map((p) => p.id)).toEqual([
-      'files',
+    expect(MODULE_PANELS.map((p) => p.id).sort()).toEqual([
       'effects',
-      'markers',
+      'files',
       'history',
+      'markers',
+      'pipeline',
       'properties',
       'remix',
       'spatial',
@@ -99,6 +138,13 @@ describe('ModuleStrip', () => {
       expect(typeof panel.label).toBe('string');
       expect(panel.label.length).toBeGreaterThan(0);
     }
+  });
+
+  // U2: the strip's roster is exactly "every panel whose slot is not 'none'",
+  // so adding a panel to the card registry does not accidentally add an icon.
+  it('draws an icon for every panel with a slot, and only those', () => {
+    const withSlot = MODULE_PANELS.filter((p) => p.slot !== 'none').map((p) => p.id);
+    expect(stripTabs(true).map((t) => t.id).sort()).toEqual([...withSlot].sort());
   });
 
   it('is a horizontal chrome pill at the module column width, in the toolbar band', () => {

@@ -21,12 +21,16 @@ import EffectsPanel from './components/Panels/EffectsPanel';
 import FilesPanel from './components/Panels/FilesPanel';
 import HistoryPanel from './components/Panels/HistoryPanel';
 import MarkersPanel from './components/Panels/MarkersPanel';
+// U2: the Pipeline module's card — the Pipeline menu's tools, same registry.
+import PipelinePanel from './components/Panels/PipelinePanel';
 import PropertiesPanel from './components/Panels/PropertiesPanel';
 import RemixPanel from './components/Panels/RemixPanel';
 import SpatialPanel from './components/Panels/SpatialPanel';
 import TranscriptPanel from './components/Panels/TranscriptPanel';
 import EditToolbar from './components/Layout/EditToolbar';
 import ModuleStrip, {
+  // U2: the app-start card, derived from the strip registry's lead entry.
+  DEFAULT_PANEL,
   MODULE_COLUMN_WIDTH,
   MODULE_PANELS,
   type PanelId,
@@ -109,7 +113,15 @@ export default function App() {
   // F11-8: the card is resolved against MODULE_PANELS — every panel — while the
   // strip draws icons for a subset, so `sidebarTab` can legitimately name a
   // panel with no icon (Spatial, Transcript) that a command opened.
-  const [sidebarTab, setSidebarTab] = useState<PanelId | null>('history');
+  //
+  // U2: the app opens on FILES (the user: "make 'Files' default at opening";
+  // it was History). `DEFAULT_PANEL` rather than the literal, because Files
+  // leading the strip and Files opening the app are ONE fact — see
+  // ModuleStrip's `slot`. Nothing persists this: `sidebarTab` is plain
+  // component state with no storage behind it (the session restores documents
+  // and the view, never the panel), so the rule is simply "first paint opens
+  // Files" and there is no restored state to fight.
+  const [sidebarTab, setSidebarTab] = useState<PanelId | null>(DEFAULT_PANEL);
   const activeTab = MODULE_PANELS.find((t) => t.id === sidebarTab) ?? null;
   const ActiveIcon = activeTab?.Icon ?? null;
 
@@ -391,6 +403,8 @@ export default function App() {
               <div className="min-h-0 overflow-auto">
                 {sidebarTab === 'files' && <FilesPanel />}
                 {sidebarTab === 'effects' && <EffectsPanel />}
+                {/* U2: the new module. */}
+                {sidebarTab === 'pipeline' && <PipelinePanel />}
                 {sidebarTab === 'history' && <HistoryPanel />}
                 {sidebarTab === 'markers' && <MarkersPanel />}
                 {sidebarTab === 'properties' && <PropertiesPanel />}

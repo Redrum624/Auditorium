@@ -1,7 +1,10 @@
 import { getVisibleEffects } from '../../effects/EffectRegistry';
 import type { EffectDefinition } from '../../effects/types';
 import { openEffectDialog } from '../../services/dialogBus';
-import { getMenuSections, isCommandEnabled, runCommand } from '../../services/menuActions';
+import { isCommandEnabled, runCommand } from '../../services/menuActions';
+// U2: the Pipeline menu's rows and groups, derived once and shared with the
+// Pipeline module's card.
+import { getPipelineGroups } from '../../services/pipelineTools';
 import { useAppStore } from '../../stores/appStore';
 import { SectionLabel } from '../UI/glass';
 
@@ -21,75 +24,28 @@ function groupByCategory(effects: EffectDefinition[]): [string, EffectDefinition
  *
  * Ten tools shipped menu-only across ten releases while this card kept listing
  * the plain effect registry alone — so the surface the user reaches for first
- * was the one surface that never learned about them. Each entry below is a
- * SECOND DOOR to a command that already exists: the id is handed to
- * `runCommand`, the label is read off the registry, and the greying is
- * `isCommandEnabled` — the command's own predicate. No behaviour is added
- * here, and none can be: a row that looks live but is stale still cannot fire,
- * because `runCommand` re-checks enablement before running.
+ * was the one surface that never learned about them. Each row is a SECOND DOOR
+ * to a command that already exists: the id is handed to `runCommand`, the label
+ * is read off the registry, and the greying is `isCommandEnabled` — the
+ * command's own predicate. No behaviour is added here, and none can be: a row
+ * that looks live but is stale still cannot fire, because `runCommand`
+ * re-checks enablement before running.
  *
  * The sections are the questions the tools answer, in the order a cover is
- * actually made.
+ * actually made. F11-8 filled the fourth, 'Mix', once `spatial.position`
+ * existed.
  *
- * F11-8 fills the fourth, 'Mix', which F11-6 left empty for want of a spatial
- * command: `spatial.position` exists now, because the user ruled the Spatial
- * positioner a single tool rather than a module and the module strip stopped
- * drawing an icon for it. Note what was and was NOT automatic about that. The
- * ROW is automatic — `toolRows` drops an unregistered id and lights a
- * registered one off `isCommandEnabled`, so nothing here had to learn the new
- * command's label or predicate. The SECTION is not: this list is written, so
- * the 'Mix' line below is the change, and until it existed the section would
- * have rendered as nothing at all (`rows.length === 0` returns null).
+ * U2: the roster and its four groups MOVED to `services/pipelineTools.ts`,
+ * where they are derived from the Pipeline menu's own separator-delimited
+ * section instead of being restated. F11-6 wrote the id list here because this
+ * was the only card that showed the tools; U2 adds a second (the Pipeline
+ * module), and two hand-maintained copies of the same eleven ids would have
+ * disagreed with the menu — and with each other — the first time a tool moved
+ * group. Nothing about what this card DRAWS changed: `getPipelineGroups()`
+ * returns exactly the four sections in exactly the order F11-6/F11-8 wrote,
+ * because it reads the section they were copied from. What changed is that
+ * they can no longer drift apart.
  */
-const TOOL_SECTIONS: { title: string; commandIds: string[] }[] = [
-  {
-    title: 'Tempo & Timing',
-    commandIds: ['tempo.detect', 'tempo.match', 'timing.align', 'edit.remix'],
-  },
-  {
-    title: 'Voice',
-    commandIds: ['edit.voiceChanger', 'effects.vocalChain', 'effects.coverChain', 'lyrics.align'],
-  },
-  { title: 'Analysis', commandIds: ['edit.transcribe', 'edit.separateStems'] },
-  { title: 'Mix', commandIds: ['spatial.position'] },
-];
-
-/**
- * Every registered command's label, keyed by id, read out of the menu the user
- * already sees. `menuActions` exports no single-command getter, and this panel
- * may not grow its own copy of those strings: a hardcoded 'Match Tempo…' here
- * would silently disagree with the menu the first time one is reworded, and
- * the ellipsis convention (a label ending in '…' opens a dialog) would become
- * two facts instead of one. `getMenuSections()` resolves ids against the live
- * registry on every call, so this is always current; it is rebuilt per render
- * for the same reason MenuBar rebuilds it per store change, and costs one pass
- * over the layout plus the effect list.
- *
- * An id that is in the layout but NOT registered comes back from
- * `fallbackCommand` labelled with the id itself — that is the one case where
- * this map reports a label it should not draw, and `toolRows` drops it.
- */
-function registryLabels(): Map<string, string> {
-  const labels = new Map<string, string>();
-  for (const section of getMenuSections()) {
-    for (const item of section.items) {
-      if (item !== 'separator') labels.set(item.id, item.label);
-    }
-  }
-  return labels;
-}
-
-/** The rows to draw for a section: registered commands only, in listed order. */
-function toolRows(commandIds: string[], labels: Map<string, string>): { id: string; label: string }[] {
-  const rows: { id: string; label: string }[] = [];
-  for (const id of commandIds) {
-    const label = labels.get(id);
-    // `label === id` is `fallbackCommand`'s placeholder for an unregistered id:
-    // a row for one could never run and would show a raw id as its name.
-    if (label !== undefined && label !== id) rows.push({ id, label });
-  }
-  return rows;
-}
 
 // Shared by the effect rows and the tool rows: `truncate` plus the fixed
 // content width is what keeps a long label from widening the card.
@@ -116,7 +72,6 @@ export default function EffectsPanel() {
   useAppStore((s) => s);
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
   const groups = groupByCategory(getVisibleEffects());
-  const labels = registryLabels();
   const hasDoc = activeDocumentId !== null;
 
   return (
@@ -150,14 +105,17 @@ export default function EffectsPanel() {
         </div>
       )}
 
-      {TOOL_SECTIONS.map(({ title, commandIds }) => {
-        const rows = toolRows(commandIds, labels);
-        if (rows.length === 0) return null;
+      {getPipelineGroups().map(({ title, commands }, i) => {
+        if (commands.length === 0) return null;
         return (
-          <div key={title} data-testid="effects-tool-section" data-section={title}>
-            <SectionLabel className="px-2 pb-1 pt-2">{title}</SectionLabel>
+          <div
+            key={title ?? `group-${i}`}
+            data-testid="effects-tool-section"
+            data-section={title ?? ''}
+          >
+            {title !== null && <SectionLabel className="px-2 pb-1 pt-2">{title}</SectionLabel>}
             <ul>
-              {rows.map(({ id, label }) => {
+              {commands.map(({ id, label }) => {
                 const enabled = isCommandEnabled(id);
                 return (
                   <li key={id} data-testid="effects-tool-item" data-command-id={id}>

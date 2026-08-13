@@ -8,6 +8,9 @@ import { getInFlightSaveCount } from './services/fileService';
 import { runCommand } from './services/menuActions';
 import { getRemixSession } from './services/remixService';
 import { focusTranscriptPanel } from './services/dialogBus';
+// U2: the strip registry's own answers, so these tests assert the RULE (Files
+// leads, History trails) rather than a second copy of today's roster.
+import { DEFAULT_PANEL, stripTabs } from './components/Layout/ModuleStrip';
 
 // Real fileService, except getInFlightSaveCount is swapped for a controllable
 // mock so the close-guard reply tests below (Task M4/F7) can force it to a
@@ -234,9 +237,33 @@ function addRemixDocument() {
 }
 
 describe('right sidebar tabs (Task 23)', () => {
-  it('defaults to the History tab', () => {
+  // U2: "make 'Files' default at opening" — and the assertion reads
+  // `DEFAULT_PANEL` rather than the string, so App and the strip cannot come
+  // to disagree about which card the app opens with. `ModuleStrip.test` is
+  // where DEFAULT_PANEL is pinned to the strip's own first entry.
+  it('defaults to the Files card, the strip registry’s lead entry', () => {
     render(<App />);
-    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'history');
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute(
+      'data-active-tab',
+      DEFAULT_PANEL
+    );
+    expect(DEFAULT_PANEL).toBe('files');
+  });
+
+  // U2: nothing in the app persists panel state — `sidebarTab` is plain
+  // component state with no storage read behind it, and the store's
+  // `documents`/`view` are the only things restored across a session — so the
+  // rule is simply "first paint opens Files", with nothing to fight. This
+  // pins that: a remount is a first paint, and it opens Files again even
+  // after another card was deliberately opened in the previous mount.
+  it('opens Files on every first paint — no panel state is persisted', () => {
+    const first = render(<App />);
+    fireEvent.click(screen.getByRole('button', { name: 'Markers' }));
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'markers');
+    first.unmount();
+
+    render(<App />);
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'files');
   });
 
   it('switches to Markers and Properties on tab click', () => {
@@ -319,15 +346,21 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
   // tests above), and Spatial and Transcript left the strip altogether — the
   // user ruled them single tools rather than modules, so they are reached by
   // command and the strip never draws an icon for either.
-  it('mounts the strip exactly once, carrying the five permanent entries and nothing else', () => {
+  // U2: six permanents (Pipeline joined), and the expectation is the registry's
+  // own roster rather than a restated array — App draws what `stripTabs` says,
+  // so a test that restates the list only pins that someone typed it twice.
+  it('mounts the strip exactly once, carrying the permanent entries and nothing else', () => {
     render(<App />);
     const rails = screen.getAllByTestId('sidebar-tabs');
     expect(rails).toHaveLength(1);
-    expect(
-      within(rails[0])
-        .getAllByRole('button')
-        .map((b) => b.getAttribute('aria-label'))
-    ).toEqual(['Files', 'Effects', 'Markers', 'History', 'Properties']);
+    const drawn = within(rails[0])
+      .getAllByRole('button')
+      .map((b) => b.getAttribute('aria-label'));
+    expect(drawn).toEqual(stripTabs(false).map((t) => t.label));
+    // …and the two rules the user stated, at the surface they are about.
+    expect(drawn[0]).toBe('Files');
+    expect(drawn[drawn.length - 1]).toBe('History');
+    expect(drawn).toContain('Pipeline');
   });
 
   it('never draws a Spatial or Transcript entry, even with a remix in play', () => {
@@ -378,17 +411,19 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
   it('closes the panel card when the active strip entry is clicked, and reopens it', () => {
     render(<App />);
     const strip = screen.getByTestId('sidebar-tabs');
-    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'history');
+    // U2: the app opens on Files now, so Files is the ACTIVE entry this
+    // exercises. The behaviour under test is unchanged.
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'files');
 
-    fireEvent.click(within(strip).getByRole('button', { name: 'History' }));
+    fireEvent.click(within(strip).getByRole('button', { name: 'Files' }));
     expect(screen.queryByTestId('sidebar-panel')).not.toBeInTheDocument();
-    expect(within(strip).getByRole('button', { name: 'History' })).toHaveAttribute(
+    expect(within(strip).getByRole('button', { name: 'Files' })).toHaveAttribute(
       'aria-pressed',
       'false'
     );
 
-    fireEvent.click(within(strip).getByRole('button', { name: 'History' }));
-    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'history');
+    fireEvent.click(within(strip).getByRole('button', { name: 'Files' }));
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'files');
   });
 
   it('gives the stage the module column width when no card is open', () => {
@@ -399,26 +434,29 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
     expect(stage.style.getPropertyValue('--stage-inset-right')).toBe('376px');
     expect(stage.style.getPropertyValue('--stage-inset-left')).toBe('14px');
 
-    fireEvent.click(within(screen.getByTestId('sidebar-tabs')).getByRole('button', { name: 'History' }));
+    // U2: Files is the open card at first paint, so Files is what closes it.
+    fireEvent.click(within(screen.getByTestId('sidebar-tabs')).getByRole('button', { name: 'Files' }));
     expect(stage.style.getPropertyValue('--stage-inset-right')).toBe('14px');
   });
 
-  it('shows exactly one panel card at a time: Files/Effects bodies are hidden until selected', () => {
+  it('shows exactly one panel card at a time: only the selected body is mounted', () => {
     render(<App />);
-    // Default tab is History; the old always-visible left column is retired,
-    // so neither the Files body nor the Effects browser is mounted yet.
-    expect(screen.queryByText(/no files open/i)).not.toBeInTheDocument();
+    // U2: the app opens on Files, so the Files body IS mounted at first paint
+    // and the Effects browser is NOT — the one-card rule read from the other
+    // end. (Before U2 the default was History and neither was mounted.)
+    expect(screen.getByText(/no files open/i)).toBeInTheDocument();
     expect(screen.queryByTestId('effects-list')).not.toBeInTheDocument();
 
     const rail = screen.getByTestId('sidebar-tabs');
-    fireEvent.click(within(rail).getByRole('button', { name: 'Files' }));
-    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'files');
-    expect(screen.getByText(/no files open/i)).toBeInTheDocument();
-
     fireEvent.click(within(rail).getByRole('button', { name: 'Effects' }));
     expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'effects');
     expect(screen.getByTestId('effects-list')).toBeInTheDocument();
     expect(screen.queryByText(/no files open/i)).not.toBeInTheDocument();
+
+    fireEvent.click(within(rail).getByRole('button', { name: 'Files' }));
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'files');
+    expect(screen.getByText(/no files open/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('effects-list')).not.toBeInTheDocument();
   });
 
   it('double-clicking an effect in the Effects card still routes through the dialog bus (disabled without a doc)', () => {
@@ -437,11 +475,12 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
   it('marks the active strip entry with the accent tile class', () => {
     render(<App />);
     const rail = screen.getByTestId('sidebar-tabs');
-    expect(within(rail).getByRole('button', { name: 'History' })).toHaveClass('is-active');
+    // U2: Files is the card the app opens with, so Files carries the tile.
+    expect(within(rail).getByRole('button', { name: 'Files' })).toHaveClass('is-active');
 
     fireEvent.click(within(rail).getByRole('button', { name: 'Markers' }));
     expect(within(rail).getByRole('button', { name: 'Markers' })).toHaveClass('is-active');
-    expect(within(rail).getByRole('button', { name: 'History' })).not.toHaveClass('is-active');
+    expect(within(rail).getByRole('button', { name: 'Files' })).not.toHaveClass('is-active');
   });
 
   // F11-8: 'Spatial' is a single tool, not a module (user ruling), so the

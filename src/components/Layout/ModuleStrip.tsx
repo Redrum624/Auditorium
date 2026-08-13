@@ -1,5 +1,15 @@
 import type { CSSProperties } from 'react';
-import { Captions, Flag, Folder, History as HistoryIcon, Info, Orbit, Shuffle, Sparkles } from 'lucide-react';
+import {
+  Captions,
+  Flag,
+  Folder,
+  History as HistoryIcon,
+  Info,
+  Orbit,
+  Shuffle,
+  Sparkles,
+  Workflow,
+} from 'lucide-react';
 import type { LucideIcon } from 'lucide-react';
 import { ChromePill } from '../UI/glass';
 
@@ -37,6 +47,7 @@ import { ChromePill } from '../UI/glass';
 export type PanelId =
   | 'files'
   | 'effects'
+  | 'pipeline'
   | 'markers'
   | 'history'
   | 'properties'
@@ -44,23 +55,63 @@ export type PanelId =
   | 'spatial'
   | 'transcript';
 
+/**
+ * U2: where an entry sits in the strip, as a PROPERTY of the entry rather than
+ * as its index in an array.
+ *
+ * The user gave two rules — "make 'Files' default at opening" and "'History'
+ * always last" — and a hardcoded sequence can only satisfy them for today's
+ * roster. The next module appended to `MODULE_PANELS` would land after History
+ * and break the second rule silently, exactly as Pipeline would have. Slots
+ * make both rules structural: `stripTabs` orders by slot rank, so a new entry
+ * declares `'body'` and lands between the two ends no matter where in the array
+ * it is written. `ModuleStrip.test` pins that there is exactly one `lead` and
+ * exactly one `trail`, so neither rule can be doubled or quietly moved either.
+ *
+ * - `lead` — first, always. Also the card the app opens with (`DEFAULT_PANEL`).
+ * - `body` — the middle, in declaration order.
+ * - `contextual` — drawn only while its condition holds (Remix: a remix
+ *   document exists). After the body, before the trail — F11-8 put it after
+ *   the permanents and U2 does not move it; History overtakes it.
+ * - `trail` — last, always.
+ * - `none` — no strip icon at all. The card still renders the panel; a command
+ *   is its only door (F11-8's ruling for Spatial and Transcript).
+ */
+export type StripSlot = 'lead' | 'body' | 'contextual' | 'trail' | 'none';
+
+/** U2: slot rank — the strip's order, stated once. `e2e-navigate.cjs` reads
+ * this array out of this file to derive the roster it asserts against, so the
+ * packaged run cannot drift from it either. */
+export const STRIP_SLOT_ORDER: readonly StripSlot[] = ['lead', 'body', 'contextual', 'trail'];
+
 export interface PanelEntry {
   id: PanelId;
   label: string;
   Icon: LucideIcon;
+  /** U2: see `StripSlot`. */
+  slot: StripSlot;
 }
 
 // F11: the CARD's registry — every panel it can render, icons or not.
+// U2: written in strip order for readability, but `stripTabs` orders by SLOT —
+// the array's order only decides the `body` run.
 export const MODULE_PANELS: PanelEntry[] = [
-  { id: 'files', label: 'Files', Icon: Folder },
-  { id: 'effects', label: 'Effects', Icon: Sparkles },
-  { id: 'markers', label: 'Markers', Icon: Flag },
-  { id: 'history', label: 'History', Icon: HistoryIcon },
-  { id: 'properties', label: 'Properties', Icon: Info },
+  { id: 'files', label: 'Files', Icon: Folder, slot: 'lead' },
+  { id: 'effects', label: 'Effects', Icon: Sparkles, slot: 'body' },
+  // U2: the Pipeline module — the card lists the Pipeline MENU's tools from the
+  // same registry (see PipelinePanel), so it sits directly after Effects here
+  // for the same reason it sits after Effects in the menu bar: the two are the
+  // same shelf at two depths, plain effects then the multi-stage passes.
+  { id: 'pipeline', label: 'Pipeline', Icon: Workflow, slot: 'body' },
+  { id: 'markers', label: 'Markers', Icon: Flag, slot: 'body' },
+  { id: 'properties', label: 'Properties', Icon: Info, slot: 'body' },
   // F11: contextual — an icon only while a remix document exists (see
   // `stripTabs`). Also reached the moment one is created, through
   // `focusRemixPanel()`.
-  { id: 'remix', label: 'Remix', Icon: Shuffle },
+  { id: 'remix', label: 'Remix', Icon: Shuffle, slot: 'contextual' },
+  // U2: History moved from the middle of the permanents to the trail slot, on
+  // the user's rule. Nothing about the panel changed.
+  { id: 'history', label: 'History', Icon: HistoryIcon, slot: 'trail' },
   // F5 — the spatial positioner (stereo projection; lucide line icon, never
   // emoji). F11: no strip icon any more — it is reached by the
   // `spatial.position` command (Pipeline > Mix, and the Effects card's Mix
@@ -68,22 +119,39 @@ export const MODULE_PANELS: PanelEntry[] = [
   // track-header popover for F5's own reason: the positioner is
   // playhead-scoped, not row-scoped, and the 348px card gives the stage room
   // the 96px track row never could.
-  { id: 'spatial', label: 'Spatial', Icon: Orbit },
+  { id: 'spatial', label: 'Spatial', Icon: Orbit, slot: 'none' },
   // F4b — the transcript (lucide line icon, never emoji). F11: no strip icon
   // any more — the Transcribe tool shows it (`edit.transcribe` reveals an
   // existing transcript instead of re-running the model). Still a card rather
   // than a dialog for F4b's own reason: a transcript is read ALONGSIDE the
   // audio, one row scrubbed at a time over minutes, and a modal would have to
   // be dismissed to do the one thing it is for.
-  { id: 'transcript', label: 'Transcript', Icon: Captions },
+  { id: 'transcript', label: 'Transcript', Icon: Captions, slot: 'none' },
 ];
 
-/** F11: the five entries the strip ALWAYS draws, in order. */
-export const PERMANENT_TABS: PanelEntry[] = MODULE_PANELS.filter(
-  (p) => p.id !== 'remix' && p.id !== 'spatial' && p.id !== 'transcript'
+/** U2: the entries carrying `slot`, ordered by it — the strip's roster with
+ * every contextual entry present. Stable within a rank, so the `body` run keeps
+ * its declaration order. */
+function bySlot(slots: readonly StripSlot[]): PanelEntry[] {
+  return slots.flatMap((slot) => MODULE_PANELS.filter((p) => p.slot === slot));
+}
+
+/** F11: the entries the strip ALWAYS draws, in order. U2: six now (Pipeline
+ * joined), and derived from the slots rather than from an id exclusion list —
+ * "permanent" means "has a slot and is not contextual", which is a property a
+ * new entry declares rather than a list someone has to remember to update. */
+export const PERMANENT_TABS: PanelEntry[] = bySlot(
+  STRIP_SLOT_ORDER.filter((s) => s !== 'contextual')
 );
 
-const REMIX_TAB = MODULE_PANELS.find((p) => p.id === 'remix')!;
+/**
+ * U2: the card the app opens with, derived from the SAME fact that puts Files
+ * first — the user asked for one thing ("make 'Files' default at opening"), so
+ * the app stores one thing. A separate `const DEFAULT = 'files'` would be a
+ * second place for the answer to live, free to disagree with the strip the
+ * first time the lead entry changes.
+ */
+export const DEFAULT_PANEL: PanelId = MODULE_PANELS.find((p) => p.slot === 'lead')!.id;
 
 /**
  * F11: what the strip draws, stated ONCE so the strip and App cannot disagree
@@ -93,9 +161,14 @@ const REMIX_TAB = MODULE_PANELS.find((p) => p.id === 'remix')!;
  * `remixService.getRemixSession(docId) !== null` — the same question
  * `RemixPanel` asks to decide it has something to show. App reads it over the
  * open documents; nothing here invents a second flag to track.
+ *
+ * U2: ordered by slot, which is what makes "Files first, History last" hold for
+ * the contextual roster too — Remix is appended where F11-8 put it (after the
+ * permanents) and History still closes the strip.
  */
 export function stripTabs(hasRemix: boolean): PanelEntry[] {
-  return hasRemix ? [...PERMANENT_TABS, REMIX_TAB] : PERMANENT_TABS;
+  const roster = bySlot(STRIP_SLOT_ORDER);
+  return hasRemix ? roster : roster.filter((p) => p.slot !== 'contextual');
 }
 
 /** The module column's width — the strip is exactly as wide as the card it
