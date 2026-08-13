@@ -14,13 +14,94 @@ import {
   alignTakeToReference,
 } from './coverAlign';
 import { BANDS, computeBandTable } from './tempoCore';
-import { makeVocalLike } from './__fixtures__/coverAlignFixtures';
+import {
+  makeVocalLike,
+  perturbSchedule,
+  syllableSchedule,
+} from './__fixtures__/coverAlignFixtures';
 
 const RATE = 44100;
 const SECONDS = 10;
 
 /** The acceptance the brief states: a known offset recovered to within 10 ms. */
 const TOLERANCE_SECONDS = 0.01;
+
+/**
+ * CC2. The calibration population's timing was SAMPLE-IDENTICAL — same seed,
+ * same schedule, same onsets to the sample — so nothing in the shipped floors
+ * ever saw a human being early on one word and late on the next. These are the
+ * knobs that make a constructed take a PERFORMANCE rather than a copy, and they
+ * are pinned here because every threshold below is derived from populations
+ * they generate: a knob that quietly did nothing would silently turn the whole
+ * derivation back into the sample-identical sweep it exists to replace.
+ */
+describe('the fixture\'s timing knobs', () => {
+  const base = syllableSchedule(1234, 20);
+
+  it('moves every syllable by at most the stated jitter, and really moves them', () => {
+    const jitter = 0.04;
+    const jittered = perturbSchedule(base, { timingJitterSeconds: jitter, timingSeed: 5 });
+    expect(jittered).toHaveLength(base.length);
+    const moves = jittered.map((s, i) => s.startSeconds - base[i].startSeconds);
+    // Bounded by the knob…
+    expect(Math.max(...moves.map(Math.abs))).toBeLessThanOrEqual(jitter + 1e-9);
+    // …and a uniform ±40 ms draw has SD 40/√3 = 23.1 ms. Asserting the SPREAD
+    // rather than "something moved" is what catches a knob wired to a stream
+    // that always returns the same number.
+    const sd = Math.sqrt(moves.reduce((a, m) => a + m * m, 0) / moves.length);
+    expect(sd).toBeGreaterThan((jitter / Math.sqrt(3)) * 0.6);
+    expect(sd).toBeLessThan(jitter);
+    // Deterministic: same seed, same schedule.
+    expect(perturbSchedule(base, { timingJitterSeconds: jitter, timingSeed: 5 })).toEqual(jittered);
+  });
+
+  it('scales start times by the tempo knob, so the error grows with time', () => {
+    const drifted = perturbSchedule(base, { tempoScale: 1.005 });
+    for (const [i, s] of drifted.entries()) {
+      expect(s.startSeconds).toBeCloseTo(base[i].startSeconds * 1.005, 9);
+      // Durations are NOT scaled: a singer drifting against a click changes
+      // WHEN a syllable starts, and the onset envelope keys on starts.
+      expect(s.durationSeconds).toBe(base[i].durationSeconds);
+    }
+    const last = drifted[drifted.length - 1].startSeconds - base[base.length - 1].startSeconds;
+    const first = drifted[0].startSeconds - base[0].startSeconds;
+    expect(last).toBeGreaterThan(first);
+  });
+
+  it('tiles one period when asked for a repeated section', () => {
+    const period = 8;
+    const repeated = syllableSchedule(77, period * 3, 0, period);
+    const inFirst = repeated.filter((s) => s.startSeconds < period);
+    expect(inFirst.length).toBeGreaterThan(3);
+    // Every syllable of period 1 has a twin exactly one period later — the
+    // self-similarity a chorus gives a correlation surface.
+    for (const s of inFirst) {
+      const twin = repeated.find((t) => Math.abs(t.startSeconds - (s.startSeconds + period)) < 1e-9);
+      expect(twin).toBeDefined();
+      expect(twin!.hz).toBeCloseTo(s.hz, 9);
+    }
+    expect(repeated.length).toBe(inFirst.length * 3);
+  });
+
+  it('renders the knobs into the audio, not just into the schedule', () => {
+    const plain = makeVocalLike({ seed: 9, sampleRate: RATE, seconds: 6 });
+    const jittered = makeVocalLike({
+      seed: 9,
+      sampleRate: RATE,
+      seconds: 6,
+      timingJitterSeconds: 0.04,
+      timingSeed: 3,
+    });
+    expect(jittered[0].length).toBe(plain[0].length);
+    let diff = 0;
+    for (let i = 0; i < plain[0].length; i++) diff += Math.abs(plain[0][i] - jittered[0][i]);
+    expect(diff).toBeGreaterThan(0);
+    // …and with the knobs at their defaults the fixture is bit-identical to
+    // what the shipped calibration measured, so this commit moves no floor.
+    const same = makeVocalLike({ seed: 9, sampleRate: RATE, seconds: 6 });
+    expect(Array.from(same[0])).toEqual(Array.from(plain[0]));
+  });
+});
 
 describe('alignmentOdf', () => {
   it('lands both envelopes on their common frame grids whatever the source rate', () => {

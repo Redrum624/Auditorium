@@ -50,7 +50,30 @@ export interface Syllable {
  * what alignment keys on — two renderings of one schedule line up, two
  * schedules from different seeds do not.
  */
-export function syllableSchedule(seed: number, seconds: number, minSyllables = 0): Syllable[] {
+export function syllableSchedule(
+  seed: number,
+  seconds: number,
+  minSyllables = 0,
+  /**
+   * CC2. When set, ONE period of this length is drawn and then tiled to fill
+   * `seconds` — a song with a repeated chorus. The calibration population is
+   * aperiodic by construction, so the regime where a rival lag one section away
+   * is a GENUINE partial match had never been measured; it is the regime that
+   * collapses prominence to ~0.01 while the peak stays at 0.8.
+   */
+  repeatPeriodSeconds = 0
+): Syllable[] {
+  if (repeatPeriodSeconds > 0) {
+    const period = syllableSchedule(seed, repeatPeriodSeconds, minSyllables);
+    const repeats = Math.max(1, Math.round(seconds / repeatPeriodSeconds));
+    const tiled: Syllable[] = [];
+    for (let r = 0; r < repeats; r++) {
+      for (const syl of period) {
+        tiled.push({ ...syl, startSeconds: syl.startSeconds + r * repeatPeriodSeconds });
+      }
+    }
+    return tiled;
+  }
   const rng = mulberry32(seed);
   const out: Syllable[] = [];
   let t = 0.2 + rng() * 0.3;
@@ -84,7 +107,49 @@ export function syllableSchedule(seed: number, seconds: number, minSyllables = 0
   return out;
 }
 
-export interface VocalLikeOptions {
+export interface SchedulePerturbation {
+  /**
+   * CC2. 1 = the take keeps the reference's tempo. Anything else scales every
+   * START time, so the error a rigid global lag makes GROWS with time — which is
+   * exactly what a singer drifting against a click does, and exactly what a
+   * single-lag model cannot express. Durations are deliberately left alone: the
+   * onset envelope keys on where a syllable STARTS.
+   */
+  tempoScale?: number;
+  /**
+   * CC2. Per-syllable start-time jitter, in seconds: each start is moved by an
+   * independent uniform draw in ±this. The shipped floors were calibrated with
+   * this at zero — the take shared the reference's onsets TO THE SAMPLE — and a
+   * real cover does not. ±40 ms (SD 23 ms) is the measured band where the
+   * un-smoothed evidence collapses while the recovered offset stays correct.
+   */
+  timingJitterSeconds?: number;
+  /** Stream for the timing jitter, separate from `varianceSeed` so timing and
+   * dynamics can be varied independently — and so that leaving the timing knobs
+   * alone renders bit-identically to the pre-CC2 fixture. */
+  timingSeed?: number;
+}
+
+/**
+ * CC2. Applies the timing knobs to a drawn schedule: tempo first (a drift the
+ * whole performance carries), then per-syllable jitter (the variance one
+ * performance has against another). Pure — the input schedule is not mutated.
+ */
+export function perturbSchedule(
+  schedule: Syllable[],
+  opts: SchedulePerturbation
+): Syllable[] {
+  const { tempoScale = 1, timingJitterSeconds = 0, timingSeed = 104729 } = opts;
+  if (tempoScale === 1 && timingJitterSeconds === 0) return schedule.map((s) => ({ ...s }));
+  const rng = mulberry32(timingSeed);
+  return schedule.map((syl) => {
+    const drifted = syl.startSeconds * tempoScale;
+    const jitter = timingJitterSeconds === 0 ? 0 : timingJitterSeconds * (rng() * 2 - 1);
+    return { ...syl, startSeconds: Math.max(0, drifted + jitter) };
+  });
+}
+
+export interface VocalLikeOptions extends SchedulePerturbation {
   seed: number;
   sampleRate: number;
   /** Length of the SCHEDULE, before `leadSeconds` is added in front of it. */
@@ -105,6 +170,9 @@ export interface VocalLikeOptions {
   /** Forces at least this many syllables into a window too short to draw them
    * naturally — see `syllableSchedule`. */
   minSyllables?: number;
+  /** CC2. Draw one period of this length and tile it — a repeated chorus. See
+   * `syllableSchedule`. */
+  repeatPeriodSeconds?: number;
 }
 
 /**
@@ -125,9 +193,16 @@ export function makeVocalLike(opts: VocalLikeOptions): Float32Array[] {
     varianceSeed = seed + 1,
     channels = 1,
     minSyllables = 0,
+    repeatPeriodSeconds = 0,
+    tempoScale = 1,
+    timingJitterSeconds = 0,
+    timingSeed = varianceSeed + 104729,
   } = opts;
 
-  const schedule = syllableSchedule(seed, seconds, minSyllables);
+  const schedule = perturbSchedule(
+    syllableSchedule(seed, seconds, minSyllables, repeatPeriodSeconds),
+    { tempoScale, timingJitterSeconds, timingSeed }
+  );
   const total = Math.round((seconds + leadSeconds) * sampleRate);
   const mono = new Float32Array(total);
   const rng = mulberry32(varianceSeed);
