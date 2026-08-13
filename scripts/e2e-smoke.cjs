@@ -301,6 +301,31 @@ async function realClick(page, clientX, clientY, { alt = false } = {}) {
   }
 }
 
+// F11: one REAL pointer DRAG — press at `from`, travel through intermediate
+// positions, release at `to`. Same discipline as `realClick`: it goes through
+// the browser's input path and the renderer's gesture layer, never a hook, so
+// a drag assertion cannot pass without the gesture actually running. The
+// intermediate moves are load-bearing rather than cosmetic — a press followed
+// by a single jump to the end would not exercise the "follows live" half of
+// either the playhead handle or the ruler scrub. `hold` leaves the button DOWN
+// so a caller can assert mid-drag and release itself.
+async function realDrag(page, from, to, { alt = false, steps = 4, hold = false } = {}) {
+  if (alt) await page.keyboard.down('Alt');
+  try {
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down();
+    for (let i = 1; i <= steps; i++) {
+      await page.mouse.move(
+        from.x + ((to.x - from.x) * i) / steps,
+        from.y + ((to.y - from.y) * i) / steps
+      );
+    }
+    if (!hold) await page.mouse.up();
+  } finally {
+    if (alt && !hold) await page.keyboard.up('Alt');
+  }
+}
+
 // U1: the module strip's ACTIVE entry now TOGGLES its card closed — that is
 // what lets the waveform take the column's width in the E2 layout. Every step
 // below that clicked a strip entry meant "show me this panel", and a blind
@@ -2811,6 +2836,136 @@ async function main() {
         `turning the magnet back on restores the snap (expected ${targetBeat}, actual ${backOn.cursorSample})`
       );
     }
+
+    // F11: 16b) the playhead grab handle and the ruler seek/scrub -----------
+    // Both are POINTER gestures, so both are driven with `page.mouse` for the
+    // same reason step 16 is: the test hooks write the cursor directly and
+    // would prove nothing about the handlers. Every expectation is DERIVED
+    // from the live view state (`samplesPerPixel`, `scrollSample`) rather than
+    // hardcoded, so it survives F11-3's fit-on-open changing the realised zoom.
+    //
+    // Alt is held throughout: it suspends the magnet, which makes the aimed
+    // pixel the committed sample exactly. The magnet's own behaviour is step
+    // 16's subject, not this one's — mixing them would make a failure here
+    // ambiguous between "the drag is broken" and "the snap moved it".
+    console.log('Playhead handle drag and ruler seek/scrub (F11)...');
+    const f11Canvas = await page.locator('[data-testid="waveform-canvas"]').boundingBox();
+    const f11Ruler = await page.locator('[data-testid="timeline-ruler"]').boundingBox();
+    assert(
+      f11Canvas !== null && f11Ruler !== null,
+      'the waveform canvas and the timeline ruler are both on screen'
+    );
+
+    // Park the position line at a known x with a real click in the lane BODY
+    // (well below the handle's 15px grab strip, so this is an ordinary cursor
+    // placement and not already a grab).
+    const parkX = Math.round(f11Canvas.width * 0.25);
+    await realClick(page, f11Canvas.x + parkX, f11Canvas.y + f11Canvas.height / 2, { alt: true });
+    const f11Parked = await page.evaluate(() => window.__test.getEditorViewState());
+    const f11Spp = f11Parked.samplesPerPixel;
+    console.log(
+      `  parked at x=${parkX} -> cursorSample ${f11Parked.cursorSample} ` +
+        `(${f11Spp} samples/px, scroll ${f11Parked.scrollSample})`
+    );
+    assert(
+      Math.abs(f11Parked.cursorSample - (f11Parked.scrollSample + parkX * f11Spp)) <= f11Spp,
+      `a body click placed the line where it was aimed (expected ~${Math.round(
+        f11Parked.scrollSample + parkX * f11Spp
+      )}, actual ${f11Parked.cursorSample})`
+    );
+
+    // 1. GRABBING the handle does not move it. The press is 8px to the RIGHT
+    //    of the line and 4px down — inside the handle, outside the line. A
+    //    body click there would have moved the cursor by 8px worth of samples,
+    //    so this cannot pass vacuously.
+    await page.keyboard.down('Alt');
+    await page.mouse.move(f11Canvas.x + parkX + 8, f11Canvas.y + 4);
+    await page.mouse.down();
+    const f11Grabbed = await page.evaluate(() => window.__test.getEditorViewState());
+    assert(
+      f11Grabbed.cursorSample === f11Parked.cursorSample,
+      `grabbing the handle does not itself move the line (expected ${f11Parked.cursorSample}, ` +
+        `actual ${f11Grabbed.cursorSample}; a body click there would have moved it by ${Math.round(8 * f11Spp)})`
+    );
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+
+    // 2. DRAGGING it moves the line live, and releases cleanly. `hold` keeps
+    //    the button down so the MID-drag read below is a genuine mid-drag.
+    const dragToX = Math.round(f11Canvas.width * 0.6);
+    await realDrag(
+      page,
+      { x: f11Canvas.x + parkX + 8, y: f11Canvas.y + 4 },
+      { x: f11Canvas.x + dragToX, y: f11Canvas.y + 4 },
+      { alt: true, hold: true }
+    );
+    const f11MidDrag = await page.evaluate(() => window.__test.getEditorViewState());
+    await page.mouse.up();
+    await page.keyboard.up('Alt');
+    const f11Dragged = await page.evaluate(() => window.__test.getEditorViewState());
+    const f11DragExpect = f11Parked.scrollSample + dragToX * f11Spp;
+    console.log(
+      `  handle dragged to x=${dragToX} -> cursorSample ${f11Dragged.cursorSample} ` +
+        `(expected ~${Math.round(f11DragExpect)})`
+    );
+    assert(
+      f11MidDrag.cursorSample === f11Dragged.cursorSample,
+      `the line follows the handle DURING the drag, not only on release ` +
+        `(mid ${f11MidDrag.cursorSample}, released ${f11Dragged.cursorSample})`
+    );
+    assert(
+      Math.abs(f11Dragged.cursorSample - f11DragExpect) <= 2 * f11Spp,
+      `dragging the handle put the line where the pointer left it (expected ~${Math.round(
+        f11DragExpect
+      )} +/-${Math.round(2 * f11Spp)}, actual ${f11Dragged.cursorSample})`
+    );
+
+    // 3. The RULER seeks on the PRESS — asserted before any release, which is
+    //    the whole difference from the `click` handler this replaced.
+    const rulerPressX = Math.round(f11Ruler.width * 0.35);
+    await page.keyboard.down('Alt');
+    await page.mouse.move(f11Ruler.x + rulerPressX, f11Ruler.y + f11Ruler.height / 2);
+    await page.mouse.down();
+    const f11RulerPressed = await page.evaluate(() => window.__test.getEditorViewState());
+    const f11PressExpect = f11Parked.scrollSample + rulerPressX * f11Spp;
+    assert(
+      Math.abs(f11RulerPressed.cursorSample - f11PressExpect) <= 2 * f11Spp,
+      `the ruler seeks on the PRESS, before any release (expected ~${Math.round(
+        f11PressExpect
+      )}, actual ${f11RulerPressed.cursorSample})`
+    );
+
+    // 4. ...and SCRUBS while held.
+    const rulerScrubX = Math.round(f11Ruler.width * 0.75);
+    for (let i = 1; i <= 4; i++) {
+      await page.mouse.move(
+        f11Ruler.x + rulerPressX + ((rulerScrubX - rulerPressX) * i) / 4,
+        f11Ruler.y + f11Ruler.height / 2
+      );
+    }
+    const f11Scrubbed = await page.evaluate(() => window.__test.getEditorViewState());
+    await page.mouse.up();
+    const f11ScrubExpect = f11Parked.scrollSample + rulerScrubX * f11Spp;
+    console.log(
+      `  ruler pressed at x=${rulerPressX} -> ${f11RulerPressed.cursorSample}, ` +
+        `scrubbed to x=${rulerScrubX} -> ${f11Scrubbed.cursorSample}`
+    );
+    assert(
+      Math.abs(f11Scrubbed.cursorSample - f11ScrubExpect) <= 2 * f11Spp,
+      `holding the button and moving scrubs the line along the ruler (expected ~${Math.round(
+        f11ScrubExpect
+      )} +/-${Math.round(2 * f11Spp)}, actual ${f11Scrubbed.cursorSample})`
+    );
+
+    // 5. The scrub STOPS on release: a bare hover over the ruler is not a seek.
+    await page.mouse.move(f11Ruler.x + f11Ruler.width * 0.15, f11Ruler.y + f11Ruler.height / 2);
+    await page.keyboard.up('Alt');
+    const f11AfterRelease = await page.evaluate(() => window.__test.getEditorViewState());
+    assert(
+      f11AfterRelease.cursorSample === f11Scrubbed.cursorSample,
+      `moving over the ruler with the button UP does not seek (expected ${f11Scrubbed.cursorSample}, ` +
+        `actual ${f11AfterRelease.cursorSample})`
+    );
 
     // 17) v1.7 stem separation (Task S7) — LAST, because it leaves the app in
     // the multitrack view with five new documents and must not perturb any
