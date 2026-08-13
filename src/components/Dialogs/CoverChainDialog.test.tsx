@@ -810,8 +810,12 @@ describe('CoverChainDialog — the run and the report', () => {
     await act(async () => {
       fireEvent.click(screen.getByTestId('cover-chain-apply'));
     });
+    // Named as the WHOLE PASS, and that naming is load-bearing rather than
+    // decorative: Match EQ carries 56 of the 68 weight, so its own row bar
+    // reads 50 % while this one reads 41 %. With both captions reading
+    // "Running <stage>…" that difference reads as a bug in one of them.
     expect(screen.getByTestId('cover-chain-running')).toHaveTextContent(
-      'Running Match EQ to the Original Vocal'
+      'Whole pass — running Match EQ to the Original Vocal'
     );
     expect(screen.getByTestId('cover-chain-progress')).toHaveStyle({ width: '42%' });
     await act(async () => {

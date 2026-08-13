@@ -57,10 +57,15 @@ const AMBER = '#e0a458';
  *
  * It earns its place here more than it does there. The four automatic stages
  * are weighted 56/32/1/11, so the overall bar can sit inside Match EQ for most
- * of a run without saying what Match EQ is doing — and Match Reverb, which is
- * 32 of that weight and DECLINES on most material, spends its whole share in a
- * measurement (an ISO 3382-1 T20 fit over the reference) with nothing to show
- * for it until the verdict lands.
+ * of a run without saying what Match EQ is doing — and that stage spends 1.75 s
+ * of its 2.28 s inside ONE measurement, `deriveMatchEq`'s long-term spectrum of
+ * the take, which is why the engine paints the "Measuring" line before taking
+ * it rather than merely emitting it first.
+ *
+ * (Match Reverb looks like the culprit and is not: its ISO 3382-1 decay fit is
+ * hoisted out of the loop into `measureReference`, so its in-loop resolve is
+ * cheap and its decline costs nothing. Its row was frozen by Match EQ's
+ * measurement, not by its own.)
  *
  * `done` and `declined` stay separate, for the reason the finished report keeps
  * them apart in amber: a decline is the outcome easiest to mistake for a
@@ -661,8 +666,15 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
 
         {busy && (
           <div>
+            {/* Named as the WHOLE PASS, because the highlighted row above shows
+                its own bar at its own number and the two legitimately disagree —
+                more sharply here than in the vocal chain: Match EQ carries 56 of
+                the 68 weight, so half way through ITSELF the row reads 50 % while
+                this one reads 41 %, and Match Loudness carries 1, so half way
+                through itself the row reads 50 % while this one reads 83 %.
+                Unlabelled, that reads as a bug in one of them. */}
             <p data-testid="cover-chain-running" className="mb-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-              {running ? `Running ${running}…` : 'Starting…'}
+              {running ? `Whole pass — running ${running}…` : 'Whole pass — starting…'}
             </p>
             <div
               className="h-1.5 w-full overflow-hidden rounded-full"

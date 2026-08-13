@@ -531,8 +531,13 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
 
         {busy && (
           <div>
+            {/* Named as the WHOLE PASS, because the highlighted row above shows
+                its own bar at its own number and the two legitimately disagree:
+                mid-way through a stage that carries most of the weight the row
+                reads 50 % while this one reads 41 %. Unlabelled, that difference
+                reads as a bug in one of them. */}
             <p data-testid="vocal-chain-running" className="mb-1 text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-              {running ? `Running ${running}…` : 'Starting…'}
+              {running ? `Whole pass — running ${running}…` : 'Whole pass — starting…'}
             </p>
             <div
               className="h-1.5 w-full overflow-hidden rounded-full"

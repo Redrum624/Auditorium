@@ -290,16 +290,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (*Measuring* the audio reaching it, then *Rendering* with the settings it just measured shown on
   the line) and carries its own bar at its own fraction; rows still to come are dimmed; rows that
   have finished settle into their full report there and then, so the compressor's derived threshold
-  is readable while Pitch Correct is still running. The bar at the foot is still the whole pass.
-  The engine side is additive — `runVocalChain`/`runCoverChain` gained optional `onStageProgress`
-  (`{stageId, label, phase, stageFraction, detail}`, the fraction scoped to one stage) and
-  `onStageResult`, which hands over the VERY object that lands in `report.stages` rather than a
-  copy. That identity is what stops the live text and the finished report becoming two sets of
-  strings to keep in step, and it is pinned as such: the live rendering of a stage is asserted
-  byte-identical to the finished one. No chain behaviour changed, and the test hooks and the
-  packaged smoke drive the chains with none of the new callbacks. A run that FAILS shows nothing —
-  the engine rolls the document back, so the stages that had reported are cleared rather than left
-  looking like an outcome. Affects: `src/services/vocalChain.ts`, `src/services/coverChain.ts`,
+  is readable while Pitch Correct is still running. The bar at the foot is the whole pass and now
+  says so — it and the highlighted row's bar are different quantities that legitimately disagree
+  (mid-Match-EQ the row reads 50 % while the pass reads 41 %), and unlabelled that reads as a bug.
+  The *Measuring* line is **painted** before the measurement runs, not merely emitted before it:
+  `resolveStage` is synchronous, so without a yield to the next frame both announcements collapsed
+  into one React flush and the word never reached a screen — worst on the Cover Chain, where
+  `deriveMatchEq`'s long-term spectrum of the take is 1.75 s of frozen main thread with the previous
+  stage's row still showing. The engine side is additive — `runVocalChain`/`runCoverChain` gained
+  optional `onStageProgress` (`{stageId, label, phase, stageFraction, detail}`, the fraction scoped
+  to one stage) and `onStageResult`, which hands over the VERY object that lands in `report.stages`
+  rather than a copy. That identity is what stops the live text and the finished report becoming two
+  sets of strings to keep in step, and it is pinned as such: a stage's live **report block** is
+  asserted byte-identical to the finished one (the state badge deliberately differs — `✓ Ran · 1.2 s`
+  live against `Ran · 1.2 s` after). No chain behaviour changed; the yield is gated on the callback
+  being present, so the test hooks and the packaged smoke — which pass none of the new callbacks —
+  keep bit-for-bit their previous timing. A run that FAILS shows nothing — the engine rolls the
+  document back, so the stages that had reported are cleared rather than left looking like an
+  outcome. Affects: `src/services/vocalChain.ts`, `src/services/coverChain.ts`,
   `src/components/Dialogs/VocalChainDialog.tsx`, `src/components/Dialogs/CoverChainDialog.tsx`.
 
 ### Changed

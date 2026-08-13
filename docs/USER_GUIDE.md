@@ -440,14 +440,17 @@ dialog before the chain:
 <!-- P1: the live stepper -->
 **While it runs, the same list is live.** From the moment you press Apply, every
 stage keeps its place in the list and gains a state: *Waiting*, *Running*,
-*✓ Ran*, *Did not run* or *Switched off*. The stage in progress is highlighted
+*✓ Ran*, *Did not run*, *Switched off*, or *Manual step* for the two that this
+chain never runs itself. The stage in progress is highlighted
 and says what it is doing — *Measuring* while it works its settings out from the
 audio reaching it, then *Rendering* with the settings it just measured shown on
 the line — with its own bar for how far through **that stage** the pass is. The
 stages still to come are dimmed; the ones already finished settle into their
 full report there and then, so you can read what the compressor decided while
-Pitch Correct is still going. The bar at the foot of the dialog is the whole
-pass, weighted by the measured stage times.
+Pitch Correct is still going. The bar at the foot of the dialog is labelled
+*Whole pass* and is weighted by the measured stage times — it is deliberately a
+different number from the highlighted row's own bar, which measures only how far
+through **that one stage** the pass is.
 
 After the run, every stage reports what it did: the settings it derived and what
 it derived them from, the measured RMS and peak before and after, and how much
@@ -523,14 +526,15 @@ evidence of a fall, not proof of a room.
 
 <!-- P1: the live stepper -->
 **While it runs, the same list is live.** Every stage keeps its place and gains a state —
-*Waiting*, *Running*, *✓ Ran*, *Did not run* or *Switched off* — and the stage in
-progress is highlighted, says whether it is *Measuring* or *Rendering* along with the
-settings it just worked out, and carries its own bar for how far through **that stage**
-the pass is. It matters more here than in the Vocal Chain: Match EQ alone is over half
-the total work and Match Reverb another third, so the bar at the foot of the dialog can
-sit almost still for a long time while a great deal is happening. Match Reverb in
-particular spends its whole share taking a measurement, and now says so instead of
-looking stuck.
+*Waiting*, *Running*, *✓ Ran*, *Did not run*, *Switched off*, or *Manual step* for the
+five this chain never runs itself — and the stage in progress is highlighted, says
+whether it is *Measuring* or *Rendering* along with the settings it just worked out, and
+carries its own bar for how far through **that stage** the pass is. It matters more here
+than in the Vocal Chain: Match EQ alone is over half the total work, and most of that is
+a single measurement of your take's long-term spectrum — so the bar at the foot of the
+dialog, which is labelled *Whole pass* and is deliberately a different number from the
+highlighted row's, can sit almost still for a long time while a great deal is happening.
+That measurement now says it is happening instead of looking stuck.
 
 The whole pass is **one undo entry**. Every stage reports what it did or why it did
 nothing, and the before/after table gives loudness, envelope spread, noise floor and the

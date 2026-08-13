@@ -602,11 +602,21 @@ describe('VocalChainDialog — while it runs', () => {
     fireEvent.click(screen.getByTestId('vocal-chain-apply'));
     await waitFor(() => expect(started).toBeDefined());
 
+    // Before any stage has started, the foot caption already says what its bar
+    // measures — the row bars do not exist yet, and neither does a stage name.
+    expect(screen.getByTestId('vocal-chain-running')).toHaveTextContent('Whole pass');
+
     act(() => {
       started!(VOCAL_CHAIN_STAGES[0]);
     });
+    // The foot bar is named as the WHOLE PASS, and that naming is load-bearing
+    // rather than decorative: the highlighted row carries its own bar at its
+    // own fraction, and the two legitimately disagree — a stage half way
+    // through ITSELF while the pass is 41 % through the chain. With both
+    // captions reading "Running <stage>…" the difference reads as a bug in one
+    // of them.
     expect(screen.getByTestId('vocal-chain-running')).toHaveTextContent(
-      `Running ${VOCAL_CHAIN_STAGES[0].label}`
+      `Whole pass — running ${VOCAL_CHAIN_STAGES[0].label}`
     );
   });
 });
