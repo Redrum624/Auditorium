@@ -312,10 +312,12 @@ describe('a drop that is not ours does nothing, visibly', () => {
     const lane = lanes()[0];
 
     const over = fireDrag(lane, 'dragover', dt, { clientX: 100 });
-    // The lane withheld its preventDefault; the view root then refuses the
-    // whole drag outright (dropEffect 'none'), so no drop can follow.
-    expect(dt.dropEffect).toBe('none');
-    expect(over.defaultPrevented).toBe(true); // refused by the root, not accepted
+    // The lane withheld its preventDefault, and so does the view root: a text
+    // drag carries no `Files`, so nothing here has an opinion about it. It is
+    // left un-prevented all the way up to the window, which is what lets a
+    // drag of text land in a text control (the track-rename input is one).
+    expect(over.defaultPrevented).toBe(false);
+    expect(dt.dropEffect).toBe('none'); // untouched — nobody claimed the drag
     expect(ghost()).toBeNull();
     expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
 
@@ -329,6 +331,58 @@ describe('a drop that is not ours does nothing, visibly', () => {
     expect(droppedClips()).toHaveLength(0);
     expect(doneLabels()).toEqual([]);
     expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// M3 — the view root's FILE guard is about Files, and only Files.
+//
+// The same regression `0ddcb68` fixed at the window level had a second copy
+// here: this root preventDefaulted EVERY unclaimed dragover and drop, with no
+// `types` check. The default action it was suppressing for a text drag is the
+// one that inserts the text into a text control — and this view owns one, the
+// track-rename input in `TrackHeader`. Refusing its dragover means the OS draws
+// the no-drop cursor over the field and the drop never arrives.
+//
+// Dispatched on the ROOT rather than the window, because that is the element
+// whose handlers are under test; the window guard has its own suite in
+// `App.test.tsx` and `App` is not rendered here at all.
+// ---------------------------------------------------------------------------
+describe('the view root refuses files, and nothing else (M3)', () => {
+  const root = () => screen.getByTestId('multitrack-view');
+
+  it('LEAVES A TEXT DRAG ALONE — the track-rename input can still receive one', () => {
+    render(<MultitrackView />);
+    const dt = stubDataTransfer({ types: ['text/plain'] });
+
+    expect(fireDrag(root(), 'dragover', dt).defaultPrevented).toBe(false);
+    expect(fireDrag(root(), 'drop', dt).defaultPrevented).toBe(false);
+    expect(dt.dropEffect).toBe('none'); // never set to 'none' BY the guard
+  });
+
+  it('refuses a FILE dragover and drop that no lane claimed', () => {
+    render(<MultitrackView />);
+    const dt = stubDataTransfer({ types: ['Files'] });
+
+    const over = fireDrag(root(), 'dragover', dt);
+    expect(over.defaultPrevented).toBe(true);
+    expect(dt.dropEffect).toBe('none'); // the OS "no" cursor
+    expect(fireDrag(root(), 'drop', dt).defaultPrevented).toBe(true);
+  });
+
+  it('leaves a drag carrying nothing recognisable alone, our own clip payload included', () => {
+    render(<MultitrackView />);
+    expect(fireDrag(root(), 'drop', stubDataTransfer()).defaultPrevented).toBe(false);
+    expect(
+      fireDrag(root(), 'drop', stubDataTransfer({ types: ['application/x-auditorium-document-id'] }))
+        .defaultPrevented
+    ).toBe(false);
+  });
+
+  it('does not throw when an event carries no dataTransfer at all', () => {
+    render(<MultitrackView />);
+    expect(() => fireDrag(root(), 'drop', null)).not.toThrow();
+    expect(() => fireDrag(root(), 'dragover', null)).not.toThrow();
   });
 });
 

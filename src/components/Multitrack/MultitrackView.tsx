@@ -72,20 +72,39 @@ export default function MultitrackView() {
     <div
       className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
       data-testid="multitrack-view"
-      // F11-4 — outside a lane, a drop does NOTHING, visibly. A lane that
+      // F11-4 — outside a lane, a FILE drop does nothing, visibly. A lane that
       // accepts a drag has already called preventDefault by the time the event
-      // bubbles here, so this only speaks for the parts of the surface that
-      // are not a lane: it refuses the drop (dropEffect 'none' is the OS's
-      // "no" cursor) and swallows it. Swallowing matters — a file dropped on a
-      // page Chromium has not been told to refuse is NAVIGATED to, which in a
-      // packaged app means the window walks away from the application.
+      // bubbles here, so this only speaks for the parts of the surface that are
+      // not a lane: it refuses the drop (dropEffect 'none' is the OS's "no"
+      // cursor) and swallows it.
+      //
+      // Honestly, about the swallowing (M3, matching `App.tsx`'s window guard).
+      // `navigateOnDragDrop` — the webPreferences flag that would make Chromium
+      // navigate to a dropped file, replacing the app with a file viewer — has
+      // defaulted to FALSE since Electron 3, and `electron/main.cjs` never sets
+      // it, so the catastrophe this once cited is not currently reachable. The
+      // refusal stays as config-drift insurance: it costs one condition and the
+      // failure it covers is total.
+      //
+      // The `Files` gate is not optional. Without it this refused EVERY
+      // unclaimed drag, and the default action being suppressed for a text drag
+      // is the one that inserts the text into a text control — which this view
+      // owns: the track-rename input in `TrackHeader`. That is the exact
+      // regression `0ddcb68` fixed at the window level, which had a second copy
+      // here. A text drag carries `text/plain`, a clip drag carries our own
+      // MIME, and neither carries `Files`.
+      //
+      // `dragover` gets the same condition as `drop`, because a `drop` whose
+      // `dragover` was not prevented never fires at all.
       onDragOver={(e) => {
         if (e.defaultPrevented) return; // a lane took it
+        if (!e.dataTransfer?.types.includes('Files')) return;
         e.preventDefault();
-        if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+        e.dataTransfer.dropEffect = 'none';
       }}
       onDrop={(e) => {
         if (e.defaultPrevented) return;
+        if (!e.dataTransfer?.types.includes('Files')) return;
         e.preventDefault();
       }}
     >
