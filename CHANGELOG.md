@@ -199,13 +199,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Align Lyrics and Vocal Chain adjacently *because that is the order they must be run in*, and
   grouping by subject drops that hint — the stage notes in `vocalChain.ts` and `coverChain.ts` are now
   the only surface that states run order, and their tests still pin it. Every string naming an old path
-  was swept — in the app, and (after a review found 23 survivors the first pass had missed) in the
-  README, the known-limitations log, three code comments and two smoke step headers that contradicted
-  their own bodies. Affects: `src/services/menuActions.ts`,
+  was swept — in the app, and (a second review found 23 survivors the first pass had missed, a third
+  four more) in the README, the known-limitations log, five code comments, two smoke step headers that
+  contradicted their own bodies, and the two Electron integration tests whose skip message told the
+  user to download models from a menu that no longer offers them. The claim is now a sweep of the
+  whole repo rather than of the app alone, and it is checkable: no `Effects →`/`Edit →` (or `>`, or
+  `->`) string outside `docs/superpowers/` — which is a historical record, deliberately left alone —
+  names a command that moved. Affects: `src/services/menuActions.ts`,
   `src/components/Dialogs/{AlignTimingDialog,CoverChainDialog}.tsx`,
   `src/effects/time/{AlignTimingEffect,MatchTempoVariableEffect}.ts`,
   `src/services/{coverChain,vocalChain,beatGrid,beatGridDisplay}.ts`, `README.md`,
-  `docs/KNOWN_LIMITATIONS.md`, `scripts/e2e-smoke.cjs`.
+  `docs/KNOWN_LIMITATIONS.md`, `scripts/e2e-smoke.cjs`,
+  `electron/{transcribeIntegration,voiceIntegration}.test.cjs`.
 - **The Effects module card carries the Pipeline tools, one click each.** Why: the tools shipped
   menu-only across ten releases while the card still listed nothing but the effect registry — and the
   card is the surface this user actually works from. The effect list is unchanged and still first;

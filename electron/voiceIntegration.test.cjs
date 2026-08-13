@@ -135,7 +135,7 @@ function requireModels() {
   if (!modelsOnDisk) {
     throw new Error(
       `the pinned voice model set is not in ${MODEL_DIR} — download it in-app ` +
-        `(Edit -> Voice Changer... -> Download Models) and copy it there, or unset ` +
+        `(Pipeline -> Voice Changer... -> Download Models) and copy it there, or unset ` +
         `VOICE_INTEGRATION to let this test skip`
     );
   }

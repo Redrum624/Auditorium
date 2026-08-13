@@ -1148,7 +1148,7 @@ async function main() {
 
     // 10) v1.5 step A — tempo detection (Task T4/T5 acceptance): open a 120 BPM
     // click train and run the REAL shared analysis (worker + cache) over it via
-    // the detectTempo hook, which bypasses the Effects > Detect Tempo menu
+    // the detectTempo hook, which bypasses the Pipeline > Detect Tempo menu
     // command. Detection is a pure read of the audio — it must NOT dirty the
     // document, which the dirty assertion below pins. The waveform canvas is
     // re-checked here because the click train is a completely different signal
@@ -2021,7 +2021,7 @@ async function main() {
     // 12) v1.5 step C — Auto-Remix (Task T13 acceptance): open the 64 s ABAB
     // fixture and ask for a 32 s arrangement through the real
     // createRemixDocument (analyse -> plan -> render -> new document),
-    // bypassing the Edit > Auto-Remix dialog. The duration is BAR-QUANTISED, so
+    // bypassing the Pipeline > Auto-Remix dialog. The duration is BAR-QUANTISED, so
     // the honest bound is half a phrase (Phi=8 bars at 120 BPM 4/4 is 16 s),
     // not a sample-exact match.
     //
