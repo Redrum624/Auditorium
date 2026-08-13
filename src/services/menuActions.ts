@@ -50,7 +50,16 @@ export interface MenuCommand {
 }
 
 export interface MenuSection {
-  title: 'File' | 'Edit' | 'Effects' | 'View' | 'Help';
+  /** F11-7: 'Pipeline' widens what had been a five-title closed union.
+   *
+   * Plan Ruling 5 said NOT to widen it "for a handful of analysis/transform
+   * commands", and every command that wanted a home since has been argued into
+   * Effects or Edit against that ruling. The user has overruled it: ten of
+   * those commands now live in a top-level Pipeline menu. The ruling is kept on
+   * the record here rather than deleted — it was a real constraint, the
+   * decisions it produced are all over this file's comments, and it stopped
+   * applying by request rather than by being wrong. */
+  title: 'File' | 'Edit' | 'Effects' | 'Pipeline' | 'View' | 'Help';
   items: (MenuCommand | 'separator')[];
 }
 
@@ -130,11 +139,10 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'separator',
       'edit.convertSampleRate',
       'edit.convertChannels',
-      'separator',
-      'edit.remix',
-      'edit.separateStems',
-      'edit.transcribe',
-      'edit.voiceChanger',
+      // F11-7: the long-inference group that sat here — Auto-Remix, Separate
+      // into Stems, Transcribe, Voice Changer — moved to the Pipeline section
+      // below, taking its separator with it so this list keeps one separator
+      // between each surviving group.
       'separator',
       'multitrack.insertDoc',
       'multitrack.addTrack',
@@ -145,6 +153,39 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
     ],
   },
   { title: 'Effects', itemIds: ['effects.none'] },
+  {
+    // F11-7. Ten advanced tools, MOVED here — seven out of the Effects menu's
+    // head and two out of the Edit menu's long-inference group (plus
+    // `lyrics.align`, also from the Effects head). Nothing about the commands
+    // themselves changed: same ids, same predicates, same run bodies, same
+    // (absent) shortcuts. Only where the user finds them.
+    //
+    // The three groups are by SUBJECT, which is a deliberate change of basis.
+    // The Effects head listed Align Vocal Timing → Align Lyrics → Vocal Chain
+    // in RUN order, and each of those stages' notes argued its own position;
+    // grouping by subject puts Align Lyrics at the end of Voice instead, so the
+    // menu no longer encodes sequence. The stage notes in `vocalChain.ts` and
+    // `coverChain.ts` remain the surface that does, and each one names the
+    // menu path to run it from — those strings moved with this section.
+    title: 'Pipeline',
+    itemIds: [
+      // Tempo & Timing — everything that answers "this is not in time".
+      'tempo.detect',
+      'tempo.match',
+      'timing.align',
+      'edit.remix',
+      'separator',
+      // Voice — everything that reshapes a vocal take.
+      'edit.voiceChanger',
+      'effects.vocalChain',
+      'effects.coverChain',
+      'lyrics.align',
+      'separator',
+      // Analysis — whole-file model runs that produce new material.
+      'edit.transcribe',
+      'edit.separateStems',
+    ],
+  },
   {
     title: 'View',
     itemIds: [
@@ -172,41 +213,22 @@ function fallbackCommand(id: string): MenuCommand {
 function effectsSectionItemIds(): (string | 'separator')[] {
   const effects = getVisibleEffects();
   if (effects.length === 0) {
-    return [
-      'noise.capture',
-      'tempo.detect',
-      'tempo.match',
-      'timing.align',
-      'lyrics.align',
-      'effects.vocalChain',
-      'effects.coverChain',
-      'separator',
-      'effects.none',
-    ];
+    return ['noise.capture', 'separator', 'effects.none'];
   }
-  // 'Capture Noise Print' sits at the very top of the Effects menu (it feeds the
-  // Noise Reduction effect), above the category-grouped effect list. 'Detect
-  // Tempo' (Task T5), 'Match Tempo…' (Task T8), 'Align Vocal Timing…' (F9),
-  // 'Align Lyrics…' (F6), 'Vocal Chain…' (F7) and 'Cover Chain…' (F10) join it
-  // there rather than widening the closed MenuSection['title'] union for a
-  // handful of analysis/transform commands (Plan Ruling 5). Vocal Chain sits
-  // after BOTH manual stages — Align Vocal Timing and then Align Lyrics —
-  // because that is the order the three are used in: the chain's timing and
-  // lyrics stages are manual by design and must be run BEFORE the chain (see
-  // `vocalChain.ts`'s stage notes). Cover Chain sits last of the six for the
-  // same reason — the Vocal
-  // Chain is a manual stage of it, and its own note says to run it first.
-  // The same list appears in the empty-registry branch above; both are here.
-  const ids: (string | 'separator')[] = [
-    'noise.capture',
-    'tempo.detect',
-    'tempo.match',
-    'timing.align',
-    'lyrics.align',
-    'effects.vocalChain',
-    'effects.coverChain',
-    'separator',
-  ];
+  // F11-7: the six analysis/transform commands that used to head this list
+  // (Detect Tempo, Match Tempo…, Align Vocal Timing…, Align Lyrics…, Vocal
+  // Chain…, Cover Chain…) were here only because Plan Ruling 5 forbade a menu
+  // of their own. They are in the Pipeline section now and the menu is plain
+  // registry effects again.
+  //
+  // 'Capture Noise Print' is the one that stayed, and it is a ruling rather
+  // than an oversight. It is not one of the ten the user moved; it is an
+  // instant profile of the current selection rather than a multi-stage pass;
+  // and its only consumer is the Noise Reduction EFFECT a few rows below it —
+  // its own confirmation dialog sends the user straight there. Moving it would
+  // file a one-step primer under a menu of long jobs and separate it from the
+  // only thing it primes.
+  const ids: (string | 'separator')[] = ['noise.capture', 'separator'];
   let lastCategory: string | null = null;
   for (const e of effects) {
     if (e.category !== lastCategory) {
@@ -917,8 +939,9 @@ function registerMarkerCommands(): void {
 }
 
 /** Registers the Task T5/T8 tempo commands: `tempo.detect` and `tempo.match`
- * join `noise.capture` in the Effects menu (Plan Ruling 5) rather than
- * widening the closed `MenuSection['title']` union for a couple of items.
+ * open the Pipeline menu's Tempo & Timing group (F11-7). They used to head the
+ * Effects menu beside `noise.capture`, which Plan Ruling 5 required by
+ * forbidding a sixth `MenuSection['title']`; the user overruled that ruling.
  * `tempo.detect` fires `runTempoAnalysis`, which itself never throws/rejects
  * and surfaces its own failure dialog — no try/catch needed here, matching
  * `effect.<id>`'s run() above. `tempo.match` just opens the dialog through
@@ -956,13 +979,16 @@ function registerTempoCommands(): void {
   ]);
 }
 
-/** Registers the Task T14 Auto-Remix command. It sits in the EDIT menu beside
- * the other whole-document, dialog-driven transforms — NOT in Effects, which
- * is built live from `getAllEffects()` and only holds `EffectDefinition`s (a
- * remix is a multi-second analysis producing a NEW document, which
+/** Registers the Task T14 Auto-Remix command. F11-7: it closes the PIPELINE
+ * menu's Tempo & Timing group, beside the two tempo tools whose analysis it
+ * shares. T14's original argument — not in Effects, which is built live from
+ * `getAllEffects()` and only holds `EffectDefinition`s (a remix is a
+ * multi-second analysis producing a NEW document, which
  * `EffectDefinition.process` — pure, synchronous, returning channels for the
- * SAME document — structurally cannot express). `enabled` stays O(1) and
- * pure: MenuBar re-evaluates every item on every store change. No shortcut. */
+ * SAME document — structurally cannot express) — still rules out Effects; it
+ * only ever put the command in Edit for want of anywhere better. `enabled`
+ * stays O(1) and pure: MenuBar re-evaluates every item on every store change.
+ * No shortcut. */
 function registerRemixCommands(): void {
   registerCommands([
     {
@@ -977,13 +1003,16 @@ function registerRemixCommands(): void {
   ]);
 }
 
-/** Registers the Task S6 stem-separation command. It sits BESIDE Auto-Remix in
- * the same Edit-menu group (plan ruling 8) for the same reason Auto-Remix is
- * there: a separation is a long analysis producing NEW documents, which the
- * Effects menu's `EffectDefinition.process` — pure, synchronous, returning
- * channels for the SAME document — structurally cannot express. Identical
- * `enabled` rule (an active document with audio in it), and no shortcut: this
- * is a multi-minute job that should never be one keystroke away. */
+/** Registers the Task S6 stem-separation command. F11-7: it closes the PIPELINE
+ * menu's Analysis group, beside Transcribe — the other whole-file model run.
+ * S6's plan ruling 8 had put it beside Auto-Remix instead, on the shared
+ * property that both produce NEW documents (which the Effects menu's
+ * `EffectDefinition.process` — pure, synchronous, returning channels for the
+ * SAME document — structurally cannot express). That property still rules out
+ * Effects; the Pipeline groups by subject, so the two are no longer neighbours.
+ * Identical `enabled` rule (an active document with audio in it), and no
+ * shortcut: this is a multi-minute job that should never be one keystroke
+ * away. */
 function registerStemCommands(): void {
   registerCommands([
     {
@@ -998,12 +1027,14 @@ function registerStemCommands(): void {
   ]);
 }
 
-/** F4b — Transcribe. Sits with Auto-Remix and Separate into Stems in the same
- * Edit-menu group and for the same reason: a long analysis over the whole
- * document that the Effects menu's pure, synchronous `EffectDefinition.process`
- * structurally cannot express. Identical `enabled` rule (an active document
- * with audio in it), and no shortcut — a multi-minute job should never be one
- * keystroke away. */
+/** F4b — Transcribe. F11-7: it OPENS the Pipeline menu's Analysis group, with
+ * Separate into Stems after it. Both are long analyses over the whole document
+ * that the Effects menu's pure, synchronous `EffectDefinition.process`
+ * structurally cannot express — the reason neither is an `effect.<id>` — and
+ * both read the file rather than reshaping a take, which is why they share a
+ * group rather than sitting in Voice. Identical `enabled` rule (an active
+ * document with audio in it), and no shortcut — a multi-minute job should never
+ * be one keystroke away. */
 function registerTranscribeCommands(): void {
   registerCommands([
     {
@@ -1018,12 +1049,14 @@ function registerTranscribeCommands(): void {
   ]);
 }
 
-/** F3 — Voice Changer. Sits with Auto-Remix, Separate into Stems and
- * Transcribe in the same Edit-menu group, for the same structural reason: a
- * long CPU-inference job producing a NEW document, which the Effects menu's
- * pure, synchronous `EffectDefinition.process` (same-document channels in,
- * channels out) cannot express. Identical `enabled` rule, and no shortcut —
- * a minutes-long job should never be one keystroke away. */
+/** F3 — Voice Changer. F11-7: it OPENS the Pipeline menu's Voice group, ahead
+ * of the two chains — it is the one tool there that replaces the voice rather
+ * than cleaning it, so everything after it operates on whatever it produced.
+ * It is not an `effect.<id>` for the structural reason F3 gave: a long
+ * CPU-inference job producing a NEW document, which the Effects menu's pure,
+ * synchronous `EffectDefinition.process` (same-document channels in, channels
+ * out) cannot express. Identical `enabled` rule, and no shortcut — a
+ * minutes-long job should never be one keystroke away. */
 function registerVoiceCommands(): void {
   registerCommands([
     {
@@ -1038,10 +1071,13 @@ function registerVoiceCommands(): void {
   ]);
 }
 
-/** F7 — the Vocal Chain. It sits in the EFFECTS menu, immediately after 'Align
- * Vocal Timing…', because it is a same-document, in-place transform of the
- * selection — unlike Auto-Remix / Separate / Transcribe, which produce NEW
- * documents and therefore live in Edit. It is a command rather than an
+/** F7 — the Vocal Chain. F11-7: it sits in the PIPELINE menu's Voice group,
+ * after Voice Changer and before Cover Chain. F7 had placed it in the Effects
+ * menu after 'Align Vocal Timing…' because it is a same-document, in-place
+ * transform of the selection (unlike Auto-Remix / Separate / Transcribe, which
+ * produce NEW documents and so lived in Edit) — that distinction no longer
+ * decides anything now that all of them are in one menu grouped by subject.
+ * It is a command rather than an
  * `effect.<id>` entry because it is not one `EffectDefinition`: it composes
  * several of them, deriving each one's settings from the audio that reaches it,
  * which scalar params in an EffectDialog cannot express. Same `enabled` rule as
@@ -1058,10 +1094,11 @@ function registerVocalChainCommands(): void {
   ]);
 }
 
-/** F10 — the Cover Chain. It sits in the EFFECTS menu immediately AFTER 'Vocal
- * Chain…', because that is the order the two are used in and the cover chain
- * says so in its own `clean` stage note: the match is a correction to a CLEAN
- * take, so the vocal chain runs first. Like the vocal chain it is a command
+/** F10 — the Cover Chain. F11-7: it sits in the PIPELINE menu's Voice group,
+ * still immediately AFTER 'Vocal Chain…' — the one run-order adjacency the
+ * regrouping preserved, and the cover chain's own `clean` stage note is why it
+ * has to be: the match is a correction to a CLEAN take, so the vocal chain runs
+ * first. Like the vocal chain it is a command
  * rather than an `effect.<id>` entry, because it is not one `EffectDefinition`:
  * it composes four of them and derives each one's settings from a SECOND
  * document — the separated original vocal — which scalar params in an
@@ -1078,11 +1115,14 @@ function registerCoverChainCommands(): void {
   ]);
 }
 
-/** F6 — Align Lyrics. It sits in the EFFECTS menu immediately BEFORE 'Vocal
- * Chain…' and after 'Align Vocal Timing…', because that is the order the three
- * are used in: both manual steps run before the chain, and replacing a word
- * must happen before any length-changing stage moves the spans it was measured
- * against (see `vocalChain.ts`'s `lyrics` stage note). It is a command rather
+/** F6 — Align Lyrics. F11-7: it CLOSES the Pipeline menu's Voice group. F6 had
+ * placed it in the Effects menu between 'Align Vocal Timing…' and 'Vocal
+ * Chain…' because that is the order the three are RUN in — both manual steps
+ * before the chain, and a word replaced before any length-changing stage moves
+ * the spans it was measured against. The Pipeline groups by subject instead, so
+ * the menu no longer says that anywhere; `vocalChain.ts`'s `lyrics` stage note
+ * is now the only place it is stated, and that note names this menu path.
+ * It is a command rather
  * than an `effect.<id>` entry for the same structural reason as the chain: it
  * is not one pure `EffectDefinition.process`, it is a model run plus a
  * per-word splice the user drives. Its `enabled` rule is `timing.align`'s PLUS

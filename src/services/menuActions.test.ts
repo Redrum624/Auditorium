@@ -287,9 +287,19 @@ describe('the region verbs are disabled in the Multitrack view (F1)', () => {
 });
 
 describe('getMenuSections', () => {
-  it('returns exactly 5 sections in the documented order', () => {
+  // F11-7: six, not five. Pipeline sits after Effects, carrying the ten
+  // advanced tools that had been wedged into the Effects head and the Edit
+  // menu's long-inference group.
+  it('returns exactly 6 sections in the documented order', () => {
     const sections = getMenuSections();
-    expect(sections.map((s) => s.title)).toEqual(['File', 'Edit', 'Effects', 'View', 'Help']);
+    expect(sections.map((s) => s.title)).toEqual([
+      'File',
+      'Edit',
+      'Effects',
+      'Pipeline',
+      'View',
+      'Help',
+    ]);
   });
 
   it('File section contains the documented command ids in order', () => {
@@ -319,6 +329,12 @@ describe('getMenuSections', () => {
     expect(findCmd('session.save').enabled(useAppStore.getState())).toBe(true);
   });
 
+  // F11-7 rewrote this list. The M1 round pinned it with the four
+  // long-inference commands in it (`edit.remix`, `edit.separateStems`,
+  // `edit.transcribe`, `edit.voiceChanger`); those MOVED to the Pipeline
+  // section, so the expectation legitimately changes rather than being wrong.
+  // What it still pins is the same thing it always did: the whole Edit list,
+  // exactly, in order — so an accidental re-add shows up here.
   it('Edit section contains the documented command ids in order', () => {
     const edit = getMenuSections().find((s) => s.title === 'Edit')!;
     expect(commandIds(edit.items)).toEqual([
@@ -333,16 +349,24 @@ describe('getMenuSections', () => {
       'edit.selectAll',
       'edit.convertSampleRate',
       'edit.convertChannels',
-      'edit.remix',
-      'edit.separateStems',
-      'edit.transcribe',
-      'edit.voiceChanger',
       'multitrack.insertDoc',
       'multitrack.addTrack',
       'marker.add',
       'marker.next',
       'marker.prev',
     ]);
+  });
+
+  // The separator run has to survive the removal too: dropping four items out
+  // of the middle of a group leaves two adjacent separators if the group's own
+  // separator is not dropped with them.
+  it('Edit section has no doubled or leading/trailing separator after the move', () => {
+    const items = getMenuSections().find((s) => s.title === 'Edit')!.items;
+    expect(items[0]).not.toBe('separator');
+    expect(items[items.length - 1]).not.toBe('separator');
+    for (let i = 1; i < items.length; i++) {
+      expect(items[i] === 'separator' && items[i - 1] === 'separator').toBe(false);
+    }
   });
 
   it('File commands needing an active document report disabled when none is open', () => {
@@ -450,6 +474,8 @@ describe('getMenuSections', () => {
 });
 
 describe('marker commands (Task 23)', () => {
+  // The marker commands did NOT move in F11-7 — they are per-document edits,
+  // not pipeline passes — so this helper still reads the Edit section.
   function findEditCmd(id: string): MenuCommand {
     const edit = getMenuSections().find((s) => s.title === 'Edit')!;
     return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
@@ -768,23 +794,145 @@ describe('session.save / session.open error surfacing (F3 defense-in-depth)', ()
   });
 });
 
-describe('tempo.detect (Task T5)', () => {
-  it('Effects section contains tempo.detect immediately after noise.capture', () => {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    const ids = commandIds(effects.items);
-    expect(ids.indexOf('tempo.detect')).toBe(ids.indexOf('noise.capture') + 1);
+// F11-7. Ten advanced tools had accreted in two places neither of them belongs:
+// seven in the head of the Effects menu (above its category-grouped effect
+// list) and four in an Edit-menu group of long-inference jobs. The user asked
+// for one top-level Pipeline menu holding all ten. Plan Ruling 5, which said
+// the closed `MenuSection['title']` union must not be widened "for a handful of
+// analysis/transform commands", is overruled by that request — see the comment
+// on the union itself, which records the reversal rather than hiding it.
+describe('the Pipeline section (F11-7)', () => {
+  // Three groups, separator-delimited, in the order the user specified. Note
+  // that this is NOT run order: `lyrics.align` closes the Voice group even
+  // though the vocal chain's own `lyrics` stage note says to run it BEFORE the
+  // chain. The menu groups by subject; the stage notes remain the only surface
+  // that states sequence, and `vocalChain.test.ts` still pins them.
+  const PIPELINE_ITEMS: (string | 'separator')[] = [
+    'tempo.detect',
+    'tempo.match',
+    'timing.align',
+    'edit.remix',
+    'separator',
+    'edit.voiceChanger',
+    'effects.vocalChain',
+    'effects.coverChain',
+    'lyrics.align',
+    'separator',
+    'edit.transcribe',
+    'edit.separateStems',
+  ];
+
+  const MOVED = PIPELINE_ITEMS.filter((id): id is string => id !== 'separator');
+
+  function itemKeys(title: string): (string | 'separator')[] {
+    const section = getMenuSections().find((s) => s.title === title)!;
+    return section.items.map((item) => (item === 'separator' ? 'separator' : item.id));
+  }
+
+  it('sits immediately after Effects in the bar', () => {
+    const titles = getMenuSections().map((s) => s.title);
+    expect(titles.indexOf('Pipeline')).toBe(titles.indexOf('Effects') + 1);
   });
 
-  function findEffectsCmd(id: string): MenuCommand {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  it('holds the ten tools in three separated groups, in order', () => {
+    expect(itemKeys('Pipeline')).toEqual(PIPELINE_ITEMS);
+  });
+
+  it('keeps that layout once the effect registry has populated the menu', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    expect(itemKeys('Pipeline')).toEqual(PIPELINE_ITEMS);
+  });
+
+  // The whole point of the request was to MOVE them. A duplicate would leave
+  // two rows running one command, and the old rows greying independently.
+  it('MOVED them: each of the ten appears exactly once across the whole menu bar', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const everywhere = getMenuSections().flatMap((s) => commandIds(s.items));
+    for (const id of MOVED) {
+      expect(everywhere.filter((seen) => seen === id)).toEqual([id]);
+    }
+  });
+
+  it('every row resolves to a real registered command, not an id fallback', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    for (const item of pipeline.items) {
+      if (item === 'separator') continue;
+      expect(item.label).not.toBe(item.id);
+    }
+  });
+
+  it('leaves the Effects menu to Capture Noise Print plus the registry effects', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const ids = commandIds(getMenuSections().find((s) => s.title === 'Effects')!.items);
+    for (const id of MOVED) expect(ids).not.toContain(id);
+    // Everything after the noise print is a category label or an effect.
+    expect(ids[0]).toBe('noise.capture');
+    for (const id of ids.slice(1)) {
+      expect(id.startsWith('effects.cat.') || id.startsWith('effect.')).toBe(true);
+    }
+  });
+
+  // Argued, not inherited: `noise.capture` is the one head item that did NOT
+  // move. It is not one of the ten the user listed, it is an instant profile of
+  // the selection rather than a multi-stage pass, and its only consumer is the
+  // Noise Reduction EFFECT sitting a few rows below it — its own confirmation
+  // dialog tells the user to go run exactly that. Moving it would put a
+  // one-step primer in a menu of long jobs and separate it from the only thing
+  // it primes.
+  it('leaves Capture Noise Print at the top of Effects, with the effect it primes', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const ids = commandIds(getMenuSections().find((s) => s.title === 'Effects')!.items);
+    expect(ids[0]).toBe('noise.capture');
+    expect(ids).toContain('effect.noise-reduction');
+    expect(commandIds(getMenuSections().find((s) => s.title === 'Pipeline')!.items)).not.toContain(
+      'noise.capture'
+    );
+  });
+
+  it('carries no keyboard shortcut on any row — every one of the ten is a long pass', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    for (const item of pipeline.items) {
+      if (item === 'separator') continue;
+      expect(item.shortcut).toBeUndefined();
+    }
+  });
+
+  // Placement moved; the commands did not. Enablement is the observable half of
+  // that, and it is the half a careless "move" breaks by re-registering a stub.
+  it('every row is disabled with no document and enabled with one', () => {
+    const findRow = (id: string) => {
+      const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+      return pipeline.items.find(
+        (item): item is MenuCommand => item !== 'separator' && item.id === id
+      )!;
+    };
+    for (const id of MOVED) expect(findRow(id).enabled(useAppStore.getState())).toBe(false);
+
+    openDoc();
+    for (const id of MOVED) expect(findRow(id).enabled(useAppStore.getState())).toBe(true);
+  });
+});
+
+describe('tempo.detect (Task T5)', () => {
+  it('Pipeline section opens with tempo.detect', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    expect(commandIds(pipeline.items)[0]).toBe('tempo.detect');
+  });
+
+  function findPipelineCmd(id: string): MenuCommand {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
   }
 
   it('is disabled with no active document and enabled with one', () => {
-    expect(findEffectsCmd('tempo.detect').enabled(useAppStore.getState())).toBe(false);
+    expect(findPipelineCmd('tempo.detect').enabled(useAppStore.getState())).toBe(false);
 
     openDoc();
-    expect(findEffectsCmd('tempo.detect').enabled(useAppStore.getState())).toBe(true);
+    expect(findPipelineCmd('tempo.detect').enabled(useAppStore.getState())).toBe(true);
   });
 
   it('runCommand("tempo.detect") with no document is a no-op: runTempoAnalysis is never called', async () => {
@@ -800,22 +948,22 @@ describe('tempo.detect (Task T5)', () => {
 });
 
 describe('tempo.match (Task T8)', () => {
-  it('Effects section contains tempo.match immediately after tempo.detect', () => {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    const ids = commandIds(effects.items);
+  it('Pipeline section contains tempo.match immediately after tempo.detect', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    const ids = commandIds(pipeline.items);
     expect(ids.indexOf('tempo.match')).toBe(ids.indexOf('tempo.detect') + 1);
   });
 
-  function findEffectsCmd(id: string): MenuCommand {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  function findPipelineCmd(id: string): MenuCommand {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
   }
 
   it('is disabled with no active document and enabled with one', () => {
-    expect(findEffectsCmd('tempo.match').enabled(useAppStore.getState())).toBe(false);
+    expect(findPipelineCmd('tempo.match').enabled(useAppStore.getState())).toBe(false);
 
     openDoc();
-    expect(findEffectsCmd('tempo.match').enabled(useAppStore.getState())).toBe(true);
+    expect(findPipelineCmd('tempo.match').enabled(useAppStore.getState())).toBe(true);
   });
 
   it('runCommand("tempo.match") opens the dialog through the bus (registered spy setter)', async () => {
@@ -847,14 +995,14 @@ describe('tempo.match (Task T8)', () => {
 });
 
 describe('timing.align (Task F9)', () => {
-  function findEffectsCmd(id: string): MenuCommand | undefined {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  function findPipelineCmd(id: string): MenuCommand | undefined {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
   }
 
-  it('Effects section contains timing.align immediately after tempo.match', () => {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    const ids = commandIds(effects.items);
+  it('Pipeline section contains timing.align immediately after tempo.match', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    const ids = commandIds(pipeline.items);
     expect(ids.indexOf('timing.align')).toBe(ids.indexOf('tempo.match') + 1);
   });
 
@@ -871,9 +1019,9 @@ describe('timing.align (Task F9)', () => {
   });
 
   it('is disabled with no active document and enabled with one', () => {
-    expect(findEffectsCmd('timing.align')!.enabled(useAppStore.getState())).toBe(false);
+    expect(findPipelineCmd('timing.align')!.enabled(useAppStore.getState())).toBe(false);
     openDoc();
-    expect(findEffectsCmd('timing.align')!.enabled(useAppStore.getState())).toBe(true);
+    expect(findPipelineCmd('timing.align')!.enabled(useAppStore.getState())).toBe(true);
   });
 
   it('runCommand("timing.align") opens the dialog through the bus', async () => {
@@ -905,48 +1053,50 @@ describe('timing.align (Task F9)', () => {
 });
 
 describe('effects.vocalChain (Task F7)', () => {
-  function findEffectsCmd(id: string): MenuCommand | undefined {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  function findPipelineCmd(id: string): MenuCommand | undefined {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
   }
 
-  // The three run in this order and the menu says so: both manual steps come
-  // before the chain (F9's timing note and F6's `lyrics` stage note each argue
-  // their own position), so the menu must not present them in some other one.
-  const MANUAL_THEN_CHAIN = ['timing.align', 'lyrics.align', 'effects.vocalChain'];
+  // F11-7 rewrote this pair, and the rewrite gives something up. Until now the
+  // Effects head listed timing.align → lyrics.align → effects.vocalChain back
+  // to back BECAUSE that is the order the three are run in, and these two tests
+  // pinned exactly that. The user's Pipeline grouping puts Align Vocal Timing in
+  // the Tempo & Timing group and Align Lyrics at the END of the Voice group, so
+  // the menu no longer encodes sequence at all — it groups by subject. That is
+  // recorded here rather than quietly deleted: the only surface still stating
+  // the order is each manual stage's own note, and `vocalChain.test.ts` pins
+  // those. What is still worth pinning HERE is that all three landed in the one
+  // menu, so neither manual step is stranded somewhere the chain's note cannot
+  // point the user at.
+  const MANUAL_AND_CHAIN = ['timing.align', 'lyrics.align', 'effects.vocalChain'];
 
-  it('Effects section runs Align Vocal Timing, Align Lyrics and Vocal Chain back to back, in that order', () => {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    const ids = commandIds(effects.items);
-    for (const id of MANUAL_THEN_CHAIN) expect(ids).toContain(id);
-    expect(ids.indexOf('lyrics.align')).toBe(ids.indexOf('timing.align') + 1);
-    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('lyrics.align') + 1);
-  });
-
-  it('keeps that run of three once the effect registry has populated the section', () => {
-    registerAllEffects();
-    registerEffectCommands();
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    const ids = commandIds(effects.items);
-    expect(ids.indexOf('lyrics.align')).toBe(ids.indexOf('timing.align') + 1);
-    expect(ids.indexOf('effects.vocalChain')).toBe(ids.indexOf('lyrics.align') + 1);
+  it('Pipeline holds both manual stages and the chain whose notes point at them', () => {
+    for (const populate of [false, true]) {
+      if (populate) {
+        registerAllEffects();
+        registerEffectCommands();
+      }
+      const ids = commandIds(getMenuSections().find((s) => s.title === 'Pipeline')!.items);
+      for (const id of MANUAL_AND_CHAIN) expect(ids).toContain(id);
+    }
   });
 
   it('registers Align Lyrics with a real label, gated on a document with audio in it', () => {
-    expect(findEffectsCmd('lyrics.align')!.label).toBe('Align Lyrics…');
-    expect(findEffectsCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(false);
+    expect(findPipelineCmd('lyrics.align')!.label).toBe('Align Lyrics…');
+    expect(findPipelineCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(false);
     openDoc();
-    expect(findEffectsCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(true);
+    expect(findPipelineCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(true);
   });
 
   it('is registered with a real label rather than falling back to its id', () => {
-    expect(findEffectsCmd('effects.vocalChain')!.label).toBe('Vocal Chain…');
+    expect(findPipelineCmd('effects.vocalChain')!.label).toBe('Vocal Chain…');
   });
 
   it('is disabled with no active document and enabled with one', () => {
-    expect(findEffectsCmd('effects.vocalChain')!.enabled(useAppStore.getState())).toBe(false);
+    expect(findPipelineCmd('effects.vocalChain')!.enabled(useAppStore.getState())).toBe(false);
     openDoc();
-    expect(findEffectsCmd('effects.vocalChain')!.enabled(useAppStore.getState())).toBe(true);
+    expect(findPipelineCmd('effects.vocalChain')!.enabled(useAppStore.getState())).toBe(true);
   });
 
   it('runCommand("effects.vocalChain") opens the dialog through the bus', async () => {
@@ -978,9 +1128,9 @@ describe('effects.vocalChain (Task F7)', () => {
 });
 
 describe('effects.coverChain (Task F10)', () => {
-  function findEffectsCmd(id: string): MenuCommand | undefined {
-    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  function findPipelineCmd(id: string): MenuCommand | undefined {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
   }
 
   // The FOUR run in this order and the menu says so. The cover chain's own
@@ -994,25 +1144,28 @@ describe('effects.coverChain (Task F10)', () => {
         registerAllEffects();
         registerEffectCommands();
       }
-      const effects = getMenuSections().find((s) => s.title === 'Effects')!;
-      const ids = commandIds(effects.items);
+      // F11-7: the section is Pipeline now. This adjacency is the one the move
+      // preserved — the Voice group keeps Vocal Chain → Cover Chain back to
+      // back, which is the pairing the cover chain's own `clean` note argues.
+      const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+      const ids = commandIds(pipeline.items);
       for (const id of IN_ORDER) expect(ids).toContain(id);
       expect(ids.indexOf('effects.coverChain')).toBe(ids.indexOf('effects.vocalChain') + 1);
     }
   });
 
   it('is registered with a real label rather than falling back to its id', () => {
-    expect(findEffectsCmd('effects.coverChain')!.label).toBe('Cover Chain…');
+    expect(findPipelineCmd('effects.coverChain')!.label).toBe('Cover Chain…');
   });
 
   it('is disabled with no active document and enabled with one', () => {
-    expect(findEffectsCmd('effects.coverChain')!.enabled(useAppStore.getState())).toBe(false);
+    expect(findPipelineCmd('effects.coverChain')!.enabled(useAppStore.getState())).toBe(false);
     openDoc();
-    expect(findEffectsCmd('effects.coverChain')!.enabled(useAppStore.getState())).toBe(true);
+    expect(findPipelineCmd('effects.coverChain')!.enabled(useAppStore.getState())).toBe(true);
   });
 
   it('has no keyboard shortcut — a nine-stage pass is never one keystroke away', () => {
-    expect(findEffectsCmd('effects.coverChain')!.shortcut).toBeUndefined();
+    expect(findPipelineCmd('effects.coverChain')!.shortcut).toBeUndefined();
   });
 
   it('runCommand("effects.coverChain") opens the dialog through the bus', async () => {
@@ -1047,22 +1200,37 @@ describe('effects.coverChain (Task F10)', () => {
 });
 
 describe('edit.remix (Task T14)', () => {
+  // F11-7: this command left the Edit menu for Pipeline. Only its PLACEMENT
+  // moved — the id, the predicate, the label and the run body are untouched,
+  // which is what the enablement/dispatch tests below still measure.
   function findEditCmd(id: string): MenuCommand {
-    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
-    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find(
+      (item): item is MenuCommand => item !== 'separator' && item.id === id
+    )!;
   }
 
-  it('sits in the Edit section immediately after edit.convertChannels, preceded by a separator', () => {
-    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
-    const convertIndex = edit.items.findIndex(
-      (item) => item !== 'separator' && item.id === 'edit.convertChannels'
+  // F11-7 rewrote this. T14 argued Auto-Remix into the Edit menu because it
+  // produces a NEW document and so cannot be an `EffectDefinition`. That
+  // argument only ever ruled out the Effects menu; with a Pipeline menu it
+  // closes the Tempo & Timing group instead, next to the two tempo tools whose
+  // analysis it shares. It is out of Edit entirely, which the Edit-layout test
+  // above pins from the other side.
+  it('closes the Pipeline Tempo & Timing group, immediately after timing.align', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    const alignIndex = pipeline.items.findIndex(
+      (item) => item !== 'separator' && item.id === 'timing.align'
     );
 
-    expect(edit.items[convertIndex + 1]).toBe('separator');
-    const remix = edit.items[convertIndex + 2];
+    const remix = pipeline.items[alignIndex + 1];
     expect(remix !== 'separator' && remix.id).toBe('edit.remix');
     expect(remix !== 'separator' && remix.label).toBe('Auto-Remix…');
     expect(remix !== 'separator' && remix.shortcut).toBeUndefined();
+    expect(pipeline.items[alignIndex + 2]).toBe('separator');
+
+    expect(commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items)).not.toContain(
+      'edit.remix'
+    );
   });
 
   it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {
@@ -1132,9 +1300,14 @@ describe('edit.remix (Task T14)', () => {
 });
 
 describe('edit.separateStems (Task S6)', () => {
+  // F11-7: this command left the Edit menu for Pipeline. Only its PLACEMENT
+  // moved — the id, the predicate, the label and the run body are untouched,
+  // which is what the enablement/dispatch tests below still measure.
   function findEditCmd(id: string): MenuCommand {
-    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
-    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find(
+      (item): item is MenuCommand => item !== 'separator' && item.id === id
+    )!;
   }
 
   function installSetters(openSeparate: jest.Mock) {
@@ -1158,15 +1331,28 @@ describe('edit.separateStems (Task S6)', () => {
     });
   }
 
-  it('sits in the Edit section immediately BESIDE Auto-Remix, in the same separator group', () => {
-    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
-    const remixIndex = edit.items.findIndex((item) => item !== 'separator' && item.id === 'edit.remix');
+  // F11-7 rewrote this. S6 put Separate into Stems beside Auto-Remix because
+  // both produce new documents; the Pipeline grouping is by SUBJECT, not by
+  // that structural property, so the two are no longer neighbours — separation
+  // closes the Analysis group with Transcribe, the other whole-file model run.
+  // The adjacency S6 pinned is genuinely gone, so this pins the new one and the
+  // absence from Edit rather than pretending the old one survived.
+  it('closes the Pipeline Analysis group, immediately after edit.transcribe', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    const transcribeIndex = pipeline.items.findIndex(
+      (item) => item !== 'separator' && item.id === 'edit.transcribe'
+    );
 
-    const separate = edit.items[remixIndex + 1];
+    const separate = pipeline.items[transcribeIndex + 1];
     expect(separate !== 'separator' && separate.id).toBe('edit.separateStems');
     expect(separate !== 'separator' && separate.label).toBe('Separate into Stems…');
     expect(separate !== 'separator' && separate.shortcut).toBeUndefined();
-    expect(edit.items[remixIndex + 2]).not.toBe('separator');
+    // Last row of the menu: nothing dangles after the group.
+    expect(pipeline.items).toHaveLength(transcribeIndex + 2);
+
+    expect(commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items)).not.toContain(
+      'edit.separateStems'
+    );
   });
 
   it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {
@@ -1202,9 +1388,14 @@ describe('edit.separateStems (Task S6)', () => {
 });
 
 describe('edit.transcribe (Task F4b)', () => {
+  // F11-7: this command left the Edit menu for Pipeline. Only its PLACEMENT
+  // moved — the id, the predicate, the label and the run body are untouched,
+  // which is what the enablement/dispatch tests below still measure.
   function findEditCmd(id: string): MenuCommand {
-    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
-    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find(
+      (item): item is MenuCommand => item !== 'separator' && item.id === id
+    )!;
   }
 
   function installSetters(openTranscribe: jest.Mock) {
@@ -1228,23 +1419,35 @@ describe('edit.transcribe (Task F4b)', () => {
     });
   }
 
-  it('sits with Auto-Remix and Separate into Stems, closing that separator group', () => {
-    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
-    const separateIndex = edit.items.findIndex(
-      (item) => item !== 'separator' && item.id === 'edit.separateStems'
-    );
+  // F11-7 rewrote this. F4b and F3 shared one Edit group of long-inference
+  // jobs; the Pipeline grouping splits that group by subject — Transcribe opens
+  // Analysis, Voice Changer opens Voice — so the three-in-a-row this used to
+  // pin no longer exists. Both labels, both missing shortcuts and both group
+  // positions are still pinned, from the new places.
+  it('opens the Pipeline Analysis group, with Voice Changer opening the Voice group', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    const items = pipeline.items;
 
-    const transcribe = edit.items[separateIndex + 1];
-    expect(transcribe !== 'separator' && transcribe.id).toBe('edit.transcribe');
+    const transcribeIndex = items.findIndex(
+      (item) => item !== 'separator' && item.id === 'edit.transcribe'
+    );
+    expect(items[transcribeIndex - 1]).toBe('separator');
+    const transcribe = items[transcribeIndex];
     expect(transcribe !== 'separator' && transcribe.label).toBe('Transcribe…');
     // No shortcut: a multi-minute job must never be one keystroke away.
     expect(transcribe !== 'separator' && transcribe.shortcut).toBeUndefined();
-    // F3 joined the same long-inference group: Voice Changer closes it.
-    const voice = edit.items[separateIndex + 2];
-    expect(voice !== 'separator' && voice.id).toBe('edit.voiceChanger');
+
+    const voiceIndex = items.findIndex(
+      (item) => item !== 'separator' && item.id === 'edit.voiceChanger'
+    );
+    expect(items[voiceIndex - 1]).toBe('separator');
+    const voice = items[voiceIndex];
     expect(voice !== 'separator' && voice.label).toBe('Voice Changer…');
     expect(voice !== 'separator' && voice.shortcut).toBeUndefined();
-    expect(edit.items[separateIndex + 3]).toBe('separator');
+
+    const editIds = commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items);
+    expect(editIds).not.toContain('edit.transcribe');
+    expect(editIds).not.toContain('edit.voiceChanger');
   });
 
   it('is disabled with no document, disabled for a zero-length document, enabled otherwise', () => {
