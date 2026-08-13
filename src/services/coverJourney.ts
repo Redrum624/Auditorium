@@ -432,6 +432,11 @@ export async function runCoverJourney(
     }
   };
 
+  /** The stage `begin` last admitted, so a throw can name what was running. A
+   * holder rather than a bare `let`: TypeScript's control-flow analysis cannot
+   * see an assignment made inside `begin`'s closure and would narrow the bare
+   * binding to `null` in the catch block below. */
+  const running: { stage: CoverJourneyStage | null } = { stage: null };
   let separation: CoverJourneySeparation | null = null;
   let alignment: AlignmentMeasurement | null = null;
   let alignmentRefused = false;
@@ -454,6 +459,28 @@ export async function runCoverJourney(
     completed,
   });
 
+  /**
+   * What a cancel at THIS stage actually leaves behind.
+   *
+   * CP1 fix-round (I1): this used to tell the user "there is no session"
+   * whenever the cancel landed at `place` OR `smooth` — and at `smooth` the
+   * session has already been built and is on screen. The copy has to describe
+   * the artifacts that exist at each boundary, or the coherent-artifact story
+   * the whole cancellation design rests on is just a sentence.
+   */
+  const cancelReason = (id: CoverJourneyStageId): string => {
+    if (id === 'smooth') {
+      return (
+        'cancelled after the session was built — “' +
+        (placement ? placement.sessionName : coverSessionName(song.name)) +
+        '” is open and your take is placed at the offset that was measured, but its edges are ' +
+        'NOT faded and the summed level has not been checked. Fade the clip edges yourself, and ' +
+        'watch the level when you mix down'
+      );
+    }
+    return 'cancelled before the session was built — the documents this pass produced are open and unchanged, and there is no session';
+  };
+
   /** Starts a stage, or returns CANCELLED when the user asked to stop first. */
   const begin = (stage: CoverJourneyStage): typeof CANCELLED | null => {
     if (cancelled()) {
@@ -462,16 +489,14 @@ export async function runCoverJourney(
         id: stage.id,
         label: stage.label,
         status: 'cancelled',
-        reason:
-          stage.id === 'place' || stage.id === 'smooth'
-            ? 'cancelled before the session was built — the documents this pass produced are open and unchanged, and there is no session'
-            : 'cancelled before this stage started',
+        reason: cancelReason(stage.id),
         derived: [],
         undoEntries: [],
       });
       fillPending(stage.id);
       return CANCELLED;
     }
+    running.stage = stage;
     onStageStart?.(stage);
     return null;
   };
@@ -500,6 +525,20 @@ export async function runCoverJourney(
     }
   };
 
+  /**
+   * CP1 fix-round (I2). Every stage below calls into a service that can throw —
+   * a worker that dies, a document closed mid-flight, an out-of-memory decode.
+   * Without this the exception escaped `runCoverJourney` entirely: the dialog's
+   * `try/finally` has no `catch`, so the promise rejected, no report was ever
+   * set, and the stage rows from the part of the run that DID happen stayed on
+   * screen looking like an outcome.
+   *
+   * A throw is now an outcome like any other: the stage that was running is
+   * recorded as `failed` WITH the error's own message, everything after it is
+   * `pending`, and the report comes back with `completed: false`. The caller
+   * gets an account of exactly how far the pass got.
+   */
+  try {
   // ── 1. Separate ───────────────────────────────────────────────────────────
   const separateStage = journeyStageById('separate');
   {
@@ -984,6 +1023,28 @@ export async function runCoverJourney(
       elapsedMs: Date.now() - at,
     });
     advance(stage);
+  }
+
+  } catch (err) {
+    const stage = running.stage;
+    const message = err instanceof Error ? err.message : String(err);
+    if (stage) {
+      // The stage was admitted by `begin` but never recorded a result, so this
+      // is its one and only row — no stale remnant, and no second row for a
+      // stage that already reported.
+      if (!results.some((r) => r.id === stage.id)) {
+        record({
+          id: stage.id,
+          label: stage.label,
+          status: 'failed',
+          reason: `this stage threw and the pass stopped: ${message}`,
+          derived: [],
+          undoEntries: [],
+        });
+      }
+      fillPending(stage.id);
+    }
+    return finish(false);
   }
 
   onProgress?.(1);

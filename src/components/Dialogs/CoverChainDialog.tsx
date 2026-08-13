@@ -225,8 +225,13 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
   const done = report !== null;
   const locked = busy || done;
 
+  // CP1 fix-round: the finished report wins the moment it exists, and a run that
+  // could not START shows NOTHING. Without the `busy` arm the rows `onStageResult`
+  // had already pushed stayed on screen next to the error, looking like an
+  // outcome — the exact defect the old dialog's "shows nothing from a run that
+  // failed" pin existed to prevent, dropped in the rewrite.
   const resultById = new Map<CoverJourneyStageId, CoverJourneyStageResult>(
-    (report ? report.stages : liveResults).map((r) => [r.id, r] as const)
+    (report ? report.stages : busy ? liveResults : []).map((r) => [r.id, r] as const)
   );
 
   async function handleRun(): Promise<void> {

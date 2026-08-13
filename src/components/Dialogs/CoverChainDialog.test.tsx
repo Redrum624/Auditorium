@@ -11,6 +11,7 @@ import {
 } from '../../services/coverChain';
 import {
   COVER_JOURNEY_STAGES,
+  journeyStageById,
   runCoverJourney,
   type CoverJourneyReport,
   type CoverJourneyStageId,
@@ -392,5 +393,356 @@ describe('CoverChainDialog — what it says afterwards', () => {
     fireEvent.click(screen.getByTestId('cover-chain-apply'));
     await waitFor(() => expect(screen.getByTestId('cover-journey-error')).toBeInTheDocument());
     expect(screen.getByTestId('cover-journey-error')).toHaveTextContent('could not start');
+  });
+});
+
+// ── CP1 fix-round: pins restored from the 825-line suite this file replaced ──
+//
+// The rewrite dropped 31 review-hardened assertions and wrote 21 new ones. The
+// audit against `git show d414196:src/components/Dialogs/CoverChainDialog.test.tsx`
+// found 10 properties already covered, 8 genuinely gone with the UI that carried
+// them (per-stage toggles, the Reference picker, the EQ table, the before/after
+// summary table), and 13 that still hold in the new dialog but had nothing
+// asserting them. Those 13 are below, each naming the old pin it restores.
+
+/** Every `data-testid` inside the dialog, in DOM order. The old suite's order
+ * pins were built on exactly this, and "above the button" is a claim about
+ * ORDER that a substring probe cannot make. */
+function testIdOrder(): string[] {
+  const root = screen.getByTestId('cover-chain-dialog');
+  return [...root.querySelectorAll('[data-testid]')].map(
+    (el) => el.getAttribute('data-testid') as string
+  );
+}
+
+describe('CoverChainDialog — restored: four distinct caveats, each stated once', () => {
+  /** The old suite's classifier: which caveat KIND a piece of text states. A
+   * block that states two kinds, or none, is the defect this catches. */
+  const KINDS: { kind: string; text: string }[] = [
+    { kind: 'residual', text: COVER_CHAIN_RESIDUAL_SENTENCE },
+    { kind: 'shaping', text: COVER_CHAIN_SHAPING_SENTENCE },
+    { kind: 'goodTake', text: COVER_CHAIN_GOOD_TAKE_SENTENCE },
+    { kind: 'confirm', text: COVER_CHAIN_CONFIRM_SENTENCE },
+  ];
+  const classify = (text: string): string[] =>
+    KINDS.filter((k) => text.includes(k.text)).map((k) => k.kind);
+
+  // OLD #9
+  it('enumerates four kinds, each a distinct sentence', () => {
+    expect(new Set(KINDS.map((k) => k.text)).size).toBe(4);
+  });
+
+  // OLD #10 — the EXCLUSIVE classifier, not a substring probe
+  it('states each caveat exactly once in the block above the button', () => {
+    open();
+    const carriers: Record<string, string> = {
+      'cover-chain-limitation': 'residual',
+      'cover-chain-shaping': 'shaping',
+      'cover-chain-good-take': 'goodTake',
+      'cover-journey-placement-note': 'confirm',
+    };
+    const seen: string[] = [];
+    for (const [testid, expected] of Object.entries(carriers)) {
+      expect(classify(screen.getByTestId(testid).textContent ?? '')).toEqual([expected]);
+      seen.push(expected);
+    }
+    expect(seen.slice().sort()).toEqual(KINDS.map((k) => k.kind).sort());
+  });
+
+  // OLD #11 — a stage note may repeat ONE caveat, never two, and which stages
+  // carry which is pinned, so a note that starts or stops stating one shows up
+  it('classifies every stage note that carries a caveat', () => {
+    open();
+    const carried: Record<string, string[]> = {};
+    for (const stage of COVER_JOURNEY_STAGES) {
+      const kinds = classify(screen.getByTestId(`cover-journey-note-${stage.id}`).textContent ?? '');
+      expect(kinds.length).toBeLessThanOrEqual(1);
+      if (kinds.length) carried[stage.id] = kinds;
+    }
+    expect(carried).toEqual({ separate: ['residual'] });
+  });
+
+  // OLD #12 — DOM ORDER. The existing test is NAMED "above the button"; this is
+  // what actually checks it.
+  it('puts every caveat above the run button, not below it', () => {
+    open();
+    const order = testIdOrder();
+    const apply = order.indexOf('cover-chain-apply');
+    expect(apply).toBeGreaterThan(0);
+    for (const id of [
+      'cover-chain-limitation',
+      'cover-chain-shaping',
+      'cover-chain-good-take',
+      'cover-journey-placement-note',
+    ]) {
+      expect(order.indexOf(id)).toBeGreaterThanOrEqual(0);
+      expect(apply).toBeGreaterThan(order.indexOf(id));
+    }
+  });
+});
+
+describe('CoverChainDialog — restored: order, scope and locking', () => {
+  // OLD #2 — membership AND order; the existing stage-list test checks neither
+  it("renders the stage cards in the engine's registry ORDER", () => {
+    open();
+    const rendered = testIdOrder()
+      .filter((id) => /^cover-journey-stage-[a-z]+$/.test(id))
+      .map((id) => id.replace('cover-journey-stage-', ''));
+    expect(rendered).toEqual(COVER_JOURNEY_STAGES.map((s) => s.id));
+  });
+
+  // OLD #5 — the scope line's DURATIONS, both rendered and both unasserted
+  it('says the duration of the take and of the song it will run against', () => {
+    open();
+    choose();
+    const scope = screen.getByTestId('cover-journey-scope');
+    expect(scope).toHaveTextContent('4.00 s');
+    expect(scope).toHaveTextContent('against 4.00 s of song');
+  });
+
+  // OLD #25 — the pickers lock while the pass runs AND once it has landed
+  it('locks both pickers while the pass runs and after it lands', async () => {
+    let settle: (r: CoverJourneyReport) => void = () => {};
+    mockRun.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settle = resolve;
+        })
+    );
+    open();
+    choose();
+    expect(screen.getByTestId('cover-journey-song')).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(mockRun).toHaveBeenCalled());
+    expect(screen.getByTestId('cover-journey-song')).toBeDisabled();
+    expect(screen.getByTestId('cover-journey-take')).toBeDisabled();
+    await act(async () => {
+      settle(report());
+    });
+    expect(screen.getByTestId('cover-journey-song')).toBeDisabled();
+    expect(screen.getByTestId('cover-journey-take')).toBeDisabled();
+  });
+});
+
+describe('CoverChainDialog — restored: the live view', () => {
+  /** Runs up to the point the engine has been called, and leaves it open. */
+  async function startRun(): Promise<{
+    opts: RunCoverJourneyOptions;
+    settle: (r: CoverJourneyReport | null) => void;
+  }> {
+    let captured: RunCoverJourneyOptions | null = null;
+    let settle: (r: CoverJourneyReport | null) => void = () => {};
+    mockRun.mockImplementation(
+      (o) =>
+        new Promise((resolve) => {
+          captured = o;
+          settle = resolve;
+        })
+    );
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(captured).not.toBeNull());
+    return { opts: captured as unknown as RunCoverJourneyOptions, settle };
+  }
+
+  // OLD #26 — every stage carries a live state from the moment the run starts
+  it('gives every stage a live state from the moment the run starts', async () => {
+    const { opts, settle } = await startRun();
+    for (const stage of COVER_JOURNEY_STAGES) {
+      expect(screen.getByTestId(`cover-journey-stage-${stage.id}`)).toHaveAttribute(
+        'data-state',
+        'idle'
+      );
+    }
+    act(() => {
+      opts.onStageProgress?.({
+        stageId: 'align',
+        label: 'Align with the Original',
+        phase: 'measuring',
+        stageFraction: 0,
+        detail: 'cross-correlating',
+      });
+    });
+    // Exactly ONE stage is running — a stepper that highlights two is a stepper
+    // that is describing a run nobody is having.
+    const running = COVER_JOURNEY_STAGES.filter(
+      (s) =>
+        screen.getByTestId(`cover-journey-stage-${s.id}`).getAttribute('data-state') === 'running'
+    );
+    expect(running.map((s) => s.id)).toEqual(['align']);
+    await act(async () => {
+      settle(report());
+    });
+  });
+
+  // OLD #29 — dimming: what has not run is dimmed, what IS running is not
+  it('dims what has not run yet and does not dim what is running', async () => {
+    const { opts, settle } = await startRun();
+    act(() => {
+      opts.onStageProgress?.({
+        stageId: 'clean',
+        label: 'Clean the Take (Vocal Chain)',
+        phase: 'rendering',
+        stageFraction: 0.5,
+        detail: 'Vocal Chain',
+      });
+    });
+    expect(screen.getByTestId('cover-journey-stage-clean')).toHaveStyle({ opacity: '1' });
+    expect(screen.getByTestId('cover-journey-stage-smooth')).toHaveStyle({ opacity: '0.55' });
+    await act(async () => {
+      settle(report());
+    });
+  });
+
+  // OLD #31 — the whole-pass caption and the overall bar; `onStageStart` and
+  // `onProgress` were never fired by the rewrite at all
+  it('names the running stage and shows the progress the engine reported', async () => {
+    const { opts, settle } = await startRun();
+    expect(screen.getByTestId('cover-journey-running')).toHaveTextContent(
+      'Whole journey — starting…'
+    );
+    act(() => {
+      opts.onStageStart?.(journeyStageById('match'));
+      opts.onProgress?.(0.42);
+    });
+    expect(screen.getByTestId('cover-journey-running')).toHaveTextContent(
+      'Whole journey — running Match to the Original Vocal…'
+    );
+    expect(screen.getByTestId('cover-journey-progress')).toHaveStyle({ width: '42%' });
+    await act(async () => {
+      settle(report());
+    });
+  });
+
+  // OLD #28 — the live rows and the finished rows are THE SAME OBJECTS, so the
+  // two cannot describe one stage in two ways. `onStageResult` was dead in the
+  // rewrite: nothing called it, so nothing checked the contract at all.
+  it("settles a finished stage to the REPORT's own words, live and after", async () => {
+    const landed = report({
+      stages: stagesWith({
+        id: 'align',
+        label: 'Align with the Original',
+        status: 'done',
+        derived: [{ label: 'Offset', value: '+1.250 s', from: 'the best lag of the two envelopes' }],
+        warning: 'a placement, not a warp',
+        undoEntries: [],
+      }),
+    });
+    const { opts, settle } = await startRun();
+
+    act(() => {
+      for (const r of landed.stages) opts.onStageResult?.(r);
+    });
+    const liveDerived = screen.getByTestId('cover-journey-derived-align').textContent;
+    const liveWarning = screen.getByTestId('cover-journey-warning-align').textContent;
+    expect(liveDerived).toContain('+1.250 s');
+
+    await act(async () => {
+      settle(landed);
+    });
+    // Identical text, because they are the same objects — not a second phrasing.
+    expect(screen.getByTestId('cover-journey-derived-align').textContent).toBe(liveDerived);
+    expect(screen.getByTestId('cover-journey-warning-align').textContent).toBe(liveWarning);
+  });
+
+  // OLD #30 — a run that could not start shows NOTHING. This was a live
+  // REGRESSION, not merely an untested property: the rewrite dropped the `busy`
+  // arm, so half-run rows stayed on screen beside the error looking like an
+  // outcome.
+  it('shows NOTHING from a run that failed to start', async () => {
+    const { opts, settle } = await startRun();
+    act(() => {
+      opts.onStageResult?.({
+        id: 'separate',
+        label: 'Separate the Original',
+        status: 'done',
+        derived: [{ label: 'Separated', value: 'song into 5', from: 'a model pass' }],
+        undoEntries: [],
+      });
+    });
+    expect(screen.getByTestId('cover-journey-derived-separate')).toBeInTheDocument();
+
+    await act(async () => {
+      settle(null);
+    });
+    expect(screen.getByTestId('cover-journey-error')).toBeInTheDocument();
+    expect(screen.queryByTestId('cover-journey-derived-separate')).not.toBeInTheDocument();
+    expect(screen.getByTestId('cover-journey-status-separate')).toHaveTextContent('');
+  });
+});
+
+describe('CoverChainDialog — restored: the status vocabulary', () => {
+  // OLD #17 — every status word, so a new status cannot ship unworded and an
+  // existing one cannot silently change what it says.
+  const JOURNEY_WORDS: [CoverJourneyStageResult['status'], string][] = [
+    ['done', '✓ Done'],
+    ['declined', 'Did not run'],
+    ['reused', '✓ Reused'],
+    ['cancelled', 'Cancelled'],
+    ['failed', 'Failed'],
+    ['pending', 'Waiting'],
+  ];
+
+  async function runWith(stages: CoverJourneyStageResult[]): Promise<void> {
+    mockRun.mockResolvedValue(report({ completed: false, stages }));
+    open();
+    choose();
+    fireEvent.click(screen.getByTestId('cover-chain-apply'));
+    await waitFor(() => expect(screen.getByTestId('cover-journey-outcome')).toBeInTheDocument());
+  }
+
+  it('gives each journey status its own words', async () => {
+    // Six stages, six statuses — the union is covered exhaustively.
+    expect(JOURNEY_WORDS.length).toBe(COVER_JOURNEY_STAGES.length);
+    await runWith(
+      COVER_JOURNEY_STAGES.map((s, i) => ({
+        id: s.id,
+        label: s.label,
+        status: JOURNEY_WORDS[i][0],
+        derived: [],
+        undoEntries: [],
+      }))
+    );
+    COVER_JOURNEY_STAGES.forEach((s, i) => {
+      expect(screen.getByTestId(`cover-journey-status-${s.id}`)).toHaveTextContent(
+        JOURNEY_WORDS[i][1]
+      );
+    });
+  });
+
+  it('gives each NESTED chain status its own words', async () => {
+    await runWith(
+      stagesWith({
+        id: 'clean',
+        label: 'Clean the Take (Vocal Chain)',
+        status: 'done',
+        derived: [],
+        undoEntries: [],
+        vocalChain: {
+          stages: [
+            { id: 'a', label: 'Applied one', status: 'applied', derived: [] },
+            {
+              id: 'b',
+              label: 'Declined one',
+              status: 'declined',
+              reason: 'nothing found',
+              derived: [],
+            },
+            { id: 'c', label: 'Off one', status: 'off', derived: [] },
+            { id: 'd', label: 'Manual one', status: 'manual', derived: [] },
+          ],
+        },
+      } as unknown as CoverJourneyStageResult)
+    );
+    const words: [string, string][] = [
+      ['a', 'Ran'],
+      ['b', 'Did not run'],
+      ['c', 'Switched off'],
+      ['d', 'Manual step'],
+    ];
+    for (const [id, word] of words) {
+      expect(screen.getByTestId(`cover-journey-nested-clean-${id}`)).toHaveTextContent(word);
+    }
   });
 });

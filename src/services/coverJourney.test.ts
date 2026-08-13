@@ -100,7 +100,14 @@ function seed(withStems: boolean, takeRate = SR, songSamples = SONG_SAMPLES): vo
       );
     }
   }
-  useAppStore.setState({ documents: docs, activeDocumentId: song.id, selection: null });
+  // CP1 fix-round (I5): a NON-NULL selection and the SONG active, so the
+  // assertions that the orchestrator sets the active document and clears the
+  // selection are testing something. Seeded null, both were vacuous.
+  useAppStore.setState({
+    documents: docs,
+    activeDocumentId: song.id,
+    selection: { start: 100, end: 200 },
+  });
   songId = song.id;
   takeId = take.id;
 }
@@ -119,6 +126,7 @@ const confidentAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurem
   coarseOffsetSeconds: offsetSeconds,
   lagsEvaluated: 900,
   overlapSeconds: 5,
+  refined: true,
 });
 
 beforeEach(() => {
@@ -169,6 +177,7 @@ describe('runCoverJourney — sequencing', () => {
     // Both chains run on the TAKE, over the WHOLE take — the orchestrator sets
     // the active document and clears any selection, because both chains read
     // those from the store rather than taking them as arguments.
+    expect(useAppStore.getState().activeDocumentId).toBe(takeId);
     expect(useAppStore.getState().selection).toBeNull();
 
     // Every stage reported exactly once, in registry order.
@@ -338,6 +347,29 @@ describe('runCoverJourney — cancellation', () => {
     expect(report!.placement).toBeNull();
     // …and the row SAYS that, rather than leaving the user to discover it.
     expect(report!.stages.find((s) => s.id === 'place')!.reason).toMatch(/no session/);
+  });
+
+  it('tells the truth about the session when cancelled at the LAST stage', async () => {
+    // CP1 fix-round (I1). Stage 5 has already run by the time stage 6 is
+    // cancelled, so the session IS on screen. The copy used to say "there is no
+    // session" — the one sentence a user could check against their own screen
+    // and find false.
+    let calls = 0;
+    const report = await runCoverJourney({
+      songDocId: songId,
+      takeDocId: takeId,
+      shouldCancel: () => ++calls > 5, // at the head of 'smooth'
+    });
+    expect(report!.cancelledAt).toBe('smooth');
+    expect(report!.placement).not.toBeNull();
+    expect(useSessionStore.getState().session.tracks).toHaveLength(2);
+
+    const reason = report!.stages.find((s) => s.id === 'smooth')!.reason!;
+    expect(reason).toContain('after the session was built');
+    expect(reason).toContain(report!.placement!.sessionName);
+    expect(reason).toMatch(/NOT faded/);
+    expect(reason).not.toMatch(/there is no session/);
+    expect(report!.smoothing).toBeNull();
   });
 
   it('forwards the cancel to the separation model rather than waiting it out', async () => {
@@ -561,6 +593,38 @@ describe('runCoverJourney — failure', () => {
     expect(stage.status).toBe('failed');
     expect(stage.reason).toMatch(/nothing was placed/);
     expect(report!.placement).toBeNull();
+  });
+
+  it('turns a mid-journey THROW into a report rather than a rejected promise', async () => {
+    // CP1 fix-round (I2). Before this the exception escaped `runCoverJourney`
+    // entirely — the dialog has a `finally` but no `catch`, so the promise
+    // rejected, no report was set, and the rows from the part of the run that
+    // DID happen stayed on screen looking like an outcome.
+    runVocalChain.mockRejectedValue(new Error('the worker died'));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(report).not.toBeNull();
+    expect(report!.completed).toBe(false);
+    const clean = report!.stages.find((s) => s.id === 'clean')!;
+    expect(clean.status).toBe('failed');
+    expect(clean.reason).toContain('the worker died');
+    expect(report!.stages[0].status).toBe('reused');
+    for (const later of ['align', 'match', 'place', 'smooth']) {
+      expect(report!.stages.find((s) => s.id === later)!.status).toBe('pending');
+    }
+    // Exactly one row per stage — no stale remnant, no duplicate.
+    expect(report!.stages.map((s) => s.id)).toEqual(COVER_JOURNEY_STAGES.map((s) => s.id));
+    expect(report!.placement).toBeNull();
+  });
+
+  it('names the throwing stage even when it is the first one', async () => {
+    seed(false);
+    separateStems.mockRejectedValue(new Error('model file is corrupt'));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.completed).toBe(false);
+    expect(report!.stages[0].status).toBe('failed');
+    expect(report!.stages[0].reason).toContain('model file is corrupt');
+    expect(runVocalChain).not.toHaveBeenCalled();
   });
 
   it('stops when the separation model fails, naming its own message', async () => {
