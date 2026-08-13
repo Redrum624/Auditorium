@@ -1023,7 +1023,7 @@ relabelling the number, so the drawn tics move with it.
 **2. Bar lines require a remix-level analysis; an ordinary Detect Tempo has
 none.** `barBoundary`, `downbeatPhase` and `beatsPerBar` live only on a
 `level:'remix'` analysis, which only the Auto-Remix dialog produces. Every other
-path — the Properties panel, `Effects → Detect Tempo`, the test hook — produces a
+path — the Properties panel, `Pipeline → Detect Tempo`, the test hook — produces a
 tempo-level result carrying `beatSamples` and nothing else, so the grid it draws
 is an unbroken row of equal tics with no visible bar 1. This is deliberate: the
 alternative was deriving bar data from stubbed features and publishing it into
@@ -1242,7 +1242,7 @@ reached by release. The panel displays exactly what will be committed.
 `src/services/transcribeService.ts`,
 `src/components/Panels/TranscriptPanel.tsx`).
 
-**Behavior a user will notice:** `Edit → Transcribe…` labels every segment
+**Behavior a user will notice:** `Pipeline → Transcribe…` labels every segment
 with a speaker, and on two-voice material it is right. With three or more
 voices it is not, and it will still hand you a confident-looking answer with
 the wrong number of speakers in it. It also has no idea when two people talk
@@ -1325,7 +1325,7 @@ probability), so those windows are skipped and **nothing** is emitted. Measured
 A/B on the same 60 s file: with the no-speech signal broken it produced **7
 fabricated segments** ("One hundred and his name is A. I.", …); with it
 repaired, **0**. Separating the vocal stem first
-(`Edit → Separate into Stems…`) is still what moves that material from
+(`Pipeline → Separate into Stems…`) is still what moves that material from
 *discarded* to *usable* — but nothing rescues clean singing.
 
 *(An earlier revision of this entry reported `noSpeechProb` as 0.000 on every
@@ -1367,7 +1367,7 @@ tools read. Re-importing it is not supported.
 `electron/voiceManager.cjs`, `src/services/voiceService.ts`,
 `src/components/Dialogs/VoiceChangerDialog.tsx`).
 
-**Behavior a user will notice:** `Edit → Voice Changer…` produces audio that
+**Behavior a user will notice:** `Pipeline → Voice Changer…` produces audio that
 sounds like a different person, but usually not *specifically and
 unmistakably* the person in the reference clip. And when the reference already
 sounds like the source, the output can be almost indistinguishable from the

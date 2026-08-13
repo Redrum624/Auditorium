@@ -46,13 +46,15 @@ export function registerDialogSetters(setters: {
   openCoverChainDialog: OpenSetter;
   /** F6's Align Lyrics dialog. */
   openAlignLyricsDialog: OpenSetter;
-  /** Not a dialog: switches the sidebar to the Remix tab once a remix
-   * document exists (Task T14). It rides this bus for the same reason the
-   * dialog openers do — the caller must not import React or reach into
-   * App's component state. */
+  /** Not a dialog: opens the Remix panel card once a remix document exists
+   * (Task T14). It rides this bus for the same reason the dialog openers do —
+   * the caller must not import React or reach into App's component state.
+   * ("tab" until F11-8; the strip entry is contextual now, and this is what
+   * opens the card whether or not the user has spotted the icon.) */
   focusRemixPanel: OpenSetter;
-  /** Not a dialog either: switches the sidebar to the Transcript tab once a
-   * transcript exists (F4b), for the same reason as `focusRemixPanel`. */
+  /** Not a dialog either: opens the Transcript panel card once a transcript
+   * exists (F4b), for the same reason as `focusRemixPanel`. Since F11-8 there
+   * is no Transcript strip entry at all, so this is its only door. */
   focusTranscriptPanel: OpenSetter;
   /** F11-8. Not a dialog either — and unlike the two above it is not a
    * follow-up to a job that just finished, it is the positioner's ONLY door:

@@ -10,9 +10,9 @@
  * drive it. This one cannot be: its essential input is a LIST OF CONFIRMED
  * ANCHORS, which only `AlignTimingDialog` can produce — the user has to see the
  * beat grid, choose the subdivision and confirm the moves first (RULING 1, and
- * `timingWarp.ts`'s measured onset reliability). Listing it in the Effects menu
+ * `timingWarp.ts`'s measured onset reliability). Listing it among the EFFECTS
  * would offer a control that opens a params-only dialog and then refuses,
- * because there would be no anchors. `Effects -> Align Vocal Timing…` is
+ * because there would be no anchors. `Pipeline -> Align Vocal Timing…` is
  * registered separately as a command that opens the real dialog.
  *
  * Anchors arrive REGION-RELATIVE through the `__effectExtra` side channel (the

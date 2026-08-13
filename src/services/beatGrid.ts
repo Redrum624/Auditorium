@@ -35,7 +35,7 @@
  * BEATS ALWAYS, DOWNBEATS ONLY WHEN GENUINELY ANALYSED (AMENDED RULING 1)
  * ---------------------------------------------------------------------------
  * `beatSamples` exists on every analysed document — it is what `level:'tempo'`
- * produces, which is what the Properties panel, `Effects -> Detect Tempo` and
+ * produces, which is what the Properties panel, `Pipeline -> Detect Tempo` and
  * the test hook all run. `barBoundary`/`downbeatPhase`/`beatsPerBar` exist
  * ONLY on a `level:'remix'` row (`remixFeatures.ts:453-503`), which today only
  * the Auto-Remix dialog produces. So:

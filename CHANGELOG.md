@@ -198,12 +198,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   than the rule. One thing is genuinely given up: the Effects head used to list Align Vocal Timing,
   Align Lyrics and Vocal Chain adjacently *because that is the order they must be run in*, and
   grouping by subject drops that hint — the stage notes in `vocalChain.ts` and `coverChain.ts` are now
-  the only surface that states run order, and their tests still pin it. Every in-app string naming an
-  old path was swept in the same series. Affects: `src/services/menuActions.ts`,
+  the only surface that states run order, and their tests still pin it. Every string naming an old path
+  was swept — in the app, and (after a review found 23 survivors the first pass had missed) in the
+  README, the known-limitations log, three code comments and two smoke step headers that contradicted
+  their own bodies. Affects: `src/services/menuActions.ts`,
   `src/components/Dialogs/{AlignTimingDialog,CoverChainDialog}.tsx`,
   `src/effects/time/{AlignTimingEffect,MatchTempoVariableEffect}.ts`,
-  `src/services/{coverChain,vocalChain}.ts`.
-- **The Effects module card carries the ten Pipeline tools, one click each.** Why: the tools shipped
+  `src/services/{coverChain,vocalChain,beatGrid,beatGridDisplay}.ts`, `README.md`,
+  `docs/KNOWN_LIMITATIONS.md`, `scripts/e2e-smoke.cjs`.
+- **The Effects module card carries the Pipeline tools, one click each.** Why: the tools shipped
   menu-only across ten releases while the card still listed nothing but the effect registry — and the
   card is the surface this user actually works from. The effect list is unchanged and still first;
   below it the same three groups as the Pipeline menu, each row firing the same `runCommand` the menu

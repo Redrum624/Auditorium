@@ -10,7 +10,7 @@
  *
  * **Default: ON.** The user's request was *"when known, I want tics to be
  * printed"*, and a grid only exists after someone explicitly asked for an
- * analysis (Properties panel, `Effects -> Detect Tempo`, Auto-Remix), so
+ * analysis (Properties panel, `Pipeline -> Detect Tempo`, Auto-Remix), so
  * defaulting to visible cannot surprise anyone who has not asked for one:
  * with no cached analysis there is nothing to draw either way.
  */

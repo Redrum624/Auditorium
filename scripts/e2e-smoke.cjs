@@ -96,8 +96,11 @@ const SHOT = path.join(OUT_DIR, 'smoke.png');
 // from 1600, but the stage measures 1599 CSS px for the reason the next comment
 // gives, and the old 1129 was a measurement obeying the same rule (1599 - 446 -
 // 24), not 1130. Canvas width is what decides
-// how much of the document is on screen (zoom is `ceil(length / 1600)` samples
-// per pixel, appStore.defaultZoom), so the tic-ruler count below moved with the
+// how much of the document is on screen — and doubly so since F11-3, because a
+// document now opens FITTED: the zoom is `docLength / laneWidth`, resolved by
+// appStore.resolveZoom against the width the lane actually measured, not the
+// nominal `ceil(length / 1600)` this comment used to name. So the tic-ruler
+// count below moved with the
 // display the window happened to land on: 6 groups there, 11 here. The
 // assertion was honest; the geometry was not deterministic. Pinning the content
 // size makes every canvas readback in this file reproducible.
@@ -3342,7 +3345,7 @@ async function main() {
         `Stem separation: SKIPPED (REPORTED) — the ${expectedModelMb} MB separation model ` +
           `is not on this machine and no valid repo-local copy exists at ` +
           `test-assets/models/htdemucs_fp16weights.onnx. Download it in-app ` +
-          `(Edit → Separate into Stems… → Download Model) to make this step run.`
+          `(Pipeline → Separate into Stems… → Download Model) to make this step run.`
       );
     } else {
       await page.evaluate(() => window.__test.setView('waveform'));
@@ -4034,8 +4037,9 @@ async function main() {
     // 20) F5 (v1.11) — spatial placement, end to end ------------------------
     // Discharges the packaged-app obligations the F5 unit/parity tests
     // cannot:
-    //   (a) a REAL positioner gesture on the built app: open the Spatial
-    //       sidebar tab, pick track 2, drag the stage — ONE commit writing
+    //   (a) a REAL positioner gesture on the built app: open the positioner
+    //       from its Effects-card tool row (F11-8 retired the Spatial strip
+    //       tab), pick track 2, drag the stage — ONE commit writing
     //       azimuth AND distance keys together — and ruling 4 visible in the
     //       real DOM (the pan fader disables with the SPATIAL explanation);
     //   (b) REAL Web Audio render over MOVING spatial lanes that cross the
@@ -4370,8 +4374,9 @@ async function main() {
     //       because a cancel that left the child alive or the manager's slot
     //       reserved would show up as a busy refusal or a hang, not as a
     //       failed cancel;
-    //   (c) the renderer surface in the packaged app: the Transcript tab, a
-    //       row per segment, the region ribbon over the waveform, a click
+    //   (c) the renderer surface in the packaged app: the transcript reached
+    //       through Pipeline > Transcribe… (F11-8 retired the Transcript strip
+    //       tab), a row per segment, the region ribbon over the waveform, a click
     //       moving the real playhead, the speaker-count control re-grouping
     //       with no second inference run, and an SRT written to disk whose
     //       timestamps are re-derived here with independent arithmetic.
@@ -4417,7 +4422,7 @@ async function main() {
         `Transcription: SKIPPED (REPORTED) — the ${transcribeMb} MB transcription model set ` +
           `is not on this machine and no valid repo-local copy exists at ` +
           `test-assets/models/transcription/. Download it in-app ` +
-          `(Edit → Transcribe… → Download Models) to make this step run.`
+          `(Pipeline → Transcribe… → Download Models) to make this step run.`
       );
     } else {
       // --- (a) real spawn + multi-slice transport -------------------------
@@ -4751,7 +4756,7 @@ async function main() {
       console.log(
         `Voice Changer: SKIPPED (REPORTED) — the ${voiceMb} MB voice model set is not on this ` +
           `machine and no valid repo-local copy exists at test-assets/models/voice/. Download it ` +
-          `in-app (Edit → Voice Changer… → Download Models) to make this step run.`
+          `in-app (Pipeline → Voice Changer… → Download Models) to make this step run.`
       );
     } else {
       // The model's fixed rate and the chunk-plan law, restated here with
@@ -5031,7 +5036,7 @@ async function main() {
       console.log(
         `Align Lyrics: SKIPPED (REPORTED) - the ${alignMb} MB alignment model is not on this ` +
           `machine and no valid repo-local copy exists at test-assets/models/align/. Download it ` +
-          `in-app (Effects -> Align Lyrics... -> Download Model) to make this step run.`
+          `in-app (Pipeline -> Align Lyrics... -> Download Model) to make this step run.`
       );
     } else {
       // The real sung take and its verbatim lyrics when the machine has them;
