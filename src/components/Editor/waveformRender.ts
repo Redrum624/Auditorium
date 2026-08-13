@@ -230,28 +230,17 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
   if (width <= 0 || height <= 0 || channels.length === 0) return;
 
   const laneH = height / channels.length;
-  const startSample = scrollSample;
-  const endSample = scrollSample + width * samplesPerPixel;
 
   for (let ch = 0; ch < channels.length; ch++) {
-    const channel = channels[ch];
-    const laneTop = ch * laneH;
-    const center = laneTop + laneH / 2;
-    const amp = (laneH / 2) * VSCALE;
-
-    // Zero-axis reference line.
-    ctx.strokeStyle = AXIS;
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(0, center);
-    ctx.lineTo(width, center);
-    ctx.stroke();
-
-    if (samplesPerPixel >= 1) {
-      drawBuckets(ctx, channel, pyramids[ch], width, startSample, endSample, center, amp);
-    } else {
-      drawSamples(ctx, channel, width, scrollSample, samplesPerPixel, center, amp);
-    }
+    drawWaveformLane(ctx, {
+      channel: channels[ch],
+      pyramid: pyramids[ch],
+      width,
+      laneTop: ch * laneH,
+      laneH,
+      scrollSample,
+      samplesPerPixel,
+    });
   }
 
   // Beat tics sit in the BACKGROUND layer, immediately after the audio itself
@@ -284,6 +273,76 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
       ctx.shadowBlur = 0;
       ctx.shadowColor = 'transparent';
     }
+  }
+}
+
+/** The geometry ONE waveform lane is drawn with. All primitives, no editor
+ * zoom/scroll object and no channel index — see {@link drawWaveformLane}. */
+export interface WaveformLaneOpts {
+  /** The samples this lane draws. */
+  channel: Float32Array;
+  /** `channel`'s peak pyramid (from `peaksCache.getPyramids`). Only read in
+   * bucket mode; per-sample mode reads the raw samples. */
+  pyramid: PeakPyramid;
+  /** Drawable width in CSS px. */
+  width: number;
+  /** y of the lane's top edge in CSS px. */
+  laneTop: number;
+  /** Lane height in CSS px. The zero axis sits at its middle and a full-scale
+   * sample reaches {@link VSCALE} of a half-lane. */
+  laneH: number;
+  /** Absolute sample index at x = 0, in `channel`'s OWN time base. */
+  scrollSample: number;
+  /** Samples per CSS pixel, in `channel`'s OWN time base. Also the mode
+   * switch: >= 1 draws buckets, below 1 draws individual samples. */
+  samplesPerPixel: number;
+}
+
+/**
+ * One waveform lane: the zero axis, then either the bucketed min/max envelope
+ * plus its centre trace (>= 1 sample per pixel) or the per-sample polyline
+ * (below that).
+ *
+ * MT1-2 — extracted from {@link renderWaveform}'s per-channel loop, whose body
+ * this now IS, and exported so the multitrack clips draw their waveform with
+ * the very same code instead of a copy of it.
+ *
+ * *Why exported rather than copied.* Before MT1-2 `ClipView` had its own
+ * single-pass fill loop: no centre trace, no axis, a hardcoded `rgba(...)`
+ * instead of the `--accent` token, and no per-sample mode at all. Every one of
+ * those was a silent divergence from the editor that nothing could catch,
+ * because there was nothing shared to break. With one function there is one
+ * answer to "what does a waveform look like in this app", and a change to the
+ * envelope, the trace, the axis or the vertical scale lands on both surfaces or
+ * on neither.
+ *
+ * Takes `laneTop`/`laneH` rather than a ready-made `center`/`amp` on purpose:
+ * {@link VSCALE} is part of "what a waveform looks like" too, so a caller that
+ * computed its own amplitude could drift on the vertical scale while agreeing
+ * on everything else — the hardest kind of difference to notice.
+ *
+ * All coordinates are CSS px; the caller owns the dpr transform. Leaves
+ * `strokeStyle`/`fillStyle` set, exactly as every other pass in this module
+ * does (the recording stubs the render tests drive have no `save`/`restore`).
+ */
+export function drawWaveformLane(ctx: CanvasRenderingContext2D, opts: WaveformLaneOpts): void {
+  const { channel, pyramid, width, laneTop, laneH, scrollSample, samplesPerPixel } = opts;
+  const center = laneTop + laneH / 2;
+  const amp = (laneH / 2) * VSCALE;
+
+  // Zero-axis reference line.
+  ctx.strokeStyle = AXIS;
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(0, center);
+  ctx.lineTo(width, center);
+  ctx.stroke();
+
+  if (samplesPerPixel >= 1) {
+    const endSample = scrollSample + width * samplesPerPixel;
+    drawBuckets(ctx, channel, pyramid, width, scrollSample, endSample, center, amp);
+  } else {
+    drawSamples(ctx, channel, width, scrollSample, samplesPerPixel, center, amp);
   }
 }
 

@@ -2,25 +2,62 @@ import { render } from '@testing-library/react';
 import ClipView from './ClipView';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { _resetClipWaveformCache } from './clipWaveformCache';
+import { TIC_WINDOW_QUANTUM_PX } from './clipBeatTics';
 import type { Clip } from '../../multitrack/session';
 
 // jsdom has no 2d backend (getContext returns null, which makes ClipView's
 // draw effect bail before sizing the canvas), so install a minimal recording
-// stub. ONE shared object serves both the on-screen canvas and the cache's
-// offscreen canvas -- fine here, since the assertions only need the blit call
-// and the canvas elements' width/height attributes.
+// stub. ONE shared object serves every canvas in the tree -- fine here, since
+// the assertions below are about the on-screen waveform canvas's geometry and
+// the drawing calls that land on it.
+//
+// MT1-2: the stub grew `beginPath`/`moveTo`/`lineTo`/`stroke` + `strokeStyle`/
+// `lineWidth`, because the clip now draws through the editor's own
+// `drawWaveformLane`, which puts a zero-axis line under the envelope. A stub
+// missing any method the draw path uses THROWS (see waveformRender.ts's note),
+// so this list has to track that function's needs, not the clip's old
+// fill-only loop.
+interface RecordedFill {
+  args: number[];
+  fillStyle: string;
+}
+interface RecordedStroke {
+  from: [number, number];
+  to: [number, number];
+  strokeStyle: string;
+}
 let drawImage: jest.Mock;
+let fills: RecordedFill[];
+let strokes: RecordedStroke[];
 let getContextSpy: jest.SpyInstance;
 
 beforeEach(() => {
   _resetClipWaveformCache();
   drawImage = jest.fn();
+  fills = [];
+  strokes = [];
+  let pending: [number, number] = [0, 0];
+  let end: [number, number] = [0, 0];
   const fakeCtx = {
     setTransform: jest.fn(),
     clearRect: jest.fn(),
-    fillRect: jest.fn(),
+    fillRect: (...args: number[]) => {
+      fills.push({ args, fillStyle: String(fakeCtx.fillStyle) });
+    },
     drawImage,
+    beginPath: () => {},
+    moveTo: (x: number, y: number) => {
+      pending = [x, y];
+    },
+    lineTo: (x: number, y: number) => {
+      end = [x, y];
+    },
+    stroke: () => {
+      strokes.push({ from: pending, to: end, strokeStyle: String(fakeCtx.strokeStyle) });
+    },
     fillStyle: '',
+    strokeStyle: '',
+    lineWidth: 1,
   };
   getContextSpy = jest
     .spyOn(HTMLCanvasElement.prototype, 'getContext')
@@ -41,13 +78,18 @@ function makeClip(lengthSample: number): Clip {
   return { id: 'clip-1', documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample, gainDb: 0 };
 }
 
-function renderClip(doc: AudioDocument, clip: Clip, samplesPerPixel: number) {
+function renderClip(
+  doc: AudioDocument,
+  clip: Clip,
+  samplesPerPixel: number,
+  scrollSample = 0
+) {
   return render(
     <ClipView
       clip={clip}
       doc={doc}
       trackId="track-1"
-      zoom={{ samplesPerPixel, scrollSample: 0 }}
+      zoom={{ samplesPerPixel, scrollSample }}
       sessionRate={44100}
       laneHeight={64}
       selected={false}
@@ -57,40 +99,116 @@ function renderClip(doc: AudioDocument, clip: Clip, samplesPerPixel: number) {
   );
 }
 
-describe('ClipView waveform raster width cap (v1.5.2)', () => {
-  // Both the on-screen canvas and the cached offscreen bitmap used to be
-  // sized to the clip's FULL timeline pixel width (~7.6 MB per clip at
-  // default zoom, ~30 MB at 4x, LRU-retained 200 deep). The raster is now
-  // capped at 4096 device pixels and blit-scaled across the clip's CSS width.
-  it('caps the drawn canvases at 4096 device pixels for a clip far wider than any viewport', () => {
+function waveformOf(container: HTMLElement): HTMLCanvasElement {
+  return container.querySelector('[data-testid="clip-waveform"]') as HTMLCanvasElement;
+}
+
+/** The editor's own two bucket-mode passes (waveformRender.ts): a translucent
+ * body at --accent @ 70 %, then a 1 px centre trace at --accent itself. In
+ * jsdom no stylesheet defines the token, so `cssToken` returns its fallback. */
+const BODY = 'rgba(38,198,218,0.7)';
+const CENTER = '#26c6da';
+const AXIS = 'rgba(255,255,255,0.12)';
+
+describe('ClipView waveform is rasterised at VISIBLE resolution (MT1-2)', () => {
+  // Until MT1-2 the clip rasterised its whole timeline width, capped that
+  // raster at 4096 device px, and blit-STRETCHED it across the clip's CSS
+  // width. On a clip far wider than the screen the visible slice was therefore
+  // drawn from a small fraction of those 4096 columns and magnified -- the
+  // "coarse blob" the user reported. The raster now covers only the on-screen
+  // band, at one column per CSS pixel, which is both sharper AND less memory
+  // than the cap it replaces (so the cap is gone, not merely raised).
+  it('sizes the raster to the on-screen band, 1:1, for a clip far wider than any viewport', () => {
     const doc = seedDoc(20000);
     // samplesPerPixel=1 -> the clip spans 20 000 timeline pixels.
     const { container } = renderClip(doc, makeClip(20000), 1);
 
-    const canvas = container.querySelector('canvas') as HTMLCanvasElement;
-    expect(canvas.width).toBeLessThanOrEqual(4096); // on-screen backing store
+    const canvas = waveformOf(container);
+    const band = window.innerWidth; // jsdom: 1024, an exact multiple of the quantum
+    expect(canvas.style.width).toBe(`${band}px`);
+    expect(canvas.width).toBe(band); // dpr 1 -> one backing-store column per CSS px
     expect(canvas.height).toBe(42); // laneHeight - 22, dpr 1 -- unchanged
+    expect(canvas.style.height).toBe('42px'); // ...and 1:1 vertically too
 
-    // The cached offscreen bitmap (drawImage's source) is capped too, and the
-    // blit maps its FULL extent onto the FULL backing store -- the whole clip
-    // range stretched across the whole clip element, so alignment survives.
-    expect(drawImage).toHaveBeenCalled();
-    const args = drawImage.mock.calls[drawImage.mock.calls.length - 1];
-    const off = args[0] as HTMLCanvasElement;
-    expect(off.width).toBeLessThanOrEqual(4096);
-    expect(args.slice(1)).toEqual([0, 0, off.width, off.height, 0, 0, canvas.width, canvas.height]);
+    // Nothing is blit-scaled any more: there is no offscreen bitmap at all.
+    expect(drawImage).not.toHaveBeenCalled();
   });
 
-  it('leaves clips narrower than the cap at their exact pixel width', () => {
+  it('bounds the raster by the VIEWPORT, not by the clip, however wide the clip is', () => {
+    const doc = seedDoc(20000);
+    const { container } = renderClip(doc, makeClip(20000), 0.5); // 40 000 px wide
+    const canvas = waveformOf(container);
+    const bound = window.innerWidth + 2 * TIC_WINDOW_QUANTUM_PX;
+    expect(parseFloat(canvas.style.width)).toBeLessThanOrEqual(bound);
+    expect(canvas.width).toBeLessThanOrEqual(Math.round(bound * (window.devicePixelRatio || 1)));
+  });
+
+  it('draws the editor\'s two passes -- one envelope column per CSS px, plus the centre trace', () => {
+    const doc = seedDoc(20000);
+    const { container } = renderClip(doc, makeClip(20000), 1);
+    const cols = waveformOf(container).width;
+
+    const body = fills.filter((f) => f.fillStyle === BODY);
+    const center = fills.filter((f) => f.fillStyle === CENTER);
+    expect(body).toHaveLength(cols);
+    expect(center).toHaveLength(cols);
+    // The centre trace is the editor's 1 px midpoint bar, not a second envelope.
+    for (const c of center) expect(c.args[3]).toBe(1);
+    // Every column is one CSS pixel wide and inside the band.
+    for (const b of body) {
+      expect(b.args[2]).toBe(1);
+      expect(b.args[0]).toBeGreaterThanOrEqual(0);
+      expect(b.args[0]).toBeLessThan(cols);
+    }
+  });
+
+  it('draws the same zero-axis line the editor does, at the lane centre', () => {
+    const doc = seedDoc(20000);
+    const { container } = renderClip(doc, makeClip(20000), 1);
+    const canvas = waveformOf(container);
+
+    const axis = strokes.filter((s) => s.strokeStyle === AXIS);
+    expect(axis).toHaveLength(1);
+    expect(axis[0].from).toEqual([0, 21]); // canvasH / 2
+    expect(axis[0].to).toEqual([parseFloat(canvas.style.width), 21]);
+  });
+
+  it('follows the scroll: the band tracks the visible slice of the clip', () => {
+    const doc = seedDoc(20000);
+    // Scrolled 5 000 px into a 20 000 px clip. The window is snapped OUT to the
+    // 256 px quantum, so the band starts at 4864 and is 1280 px wide.
+    const { container } = renderClip(doc, makeClip(20000), 1, 5000);
+
+    const canvas = waveformOf(container);
+    expect(canvas.style.left).toBe('4864px');
+    expect(canvas.width).toBe(1280);
+    // Positioned inside the clip element, so it rides the move-drag transform.
+    expect(canvas.style.bottom).toBe('0px');
+  });
+
+  it('leaves clips narrower than the viewport at their exact pixel width', () => {
     const doc = seedDoc(4410);
     // samplesPerPixel=44.1 -> 100 timeline pixels.
     const { container } = renderClip(doc, makeClip(4410), 44.1);
 
-    const canvas = container.querySelector('canvas') as HTMLCanvasElement;
+    const canvas = waveformOf(container);
     expect(canvas.width).toBe(100);
+    expect(canvas.style.left).toBe('0px');
+    expect(drawImage).not.toHaveBeenCalled();
+  });
 
-    const args = drawImage.mock.calls[drawImage.mock.calls.length - 1];
-    expect((args[0] as HTMLCanvasElement).width).toBe(100);
+  it('switches to the editor\'s per-sample polyline when a pixel spans < 1 sample', () => {
+    const doc = seedDoc(4410);
+    // 0.5 samples/px: 8820 px wide, and every column is a drawn SAMPLE, not a
+    // bucket -- exactly the mode switch renderWaveform makes at the same point.
+    const { container } = renderClip(doc, makeClip(4410), 0.5);
+    expect(waveformOf(container)).toBeTruthy();
+
+    expect(fills.filter((f) => f.fillStyle === BODY)).toHaveLength(0);
+    const poly = strokes.filter((s) => s.strokeStyle === CENTER);
+    expect(poly).toHaveLength(1); // one polyline stroke
+    // ...and the 3x3 dots, drawn below 1/8 sample per px, are NOT drawn here.
+    expect(fills.filter((f) => f.args[2] === 3)).toHaveLength(0);
   });
 });
 

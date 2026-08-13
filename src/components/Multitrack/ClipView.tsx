@@ -2,7 +2,6 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { PointerEvent as ReactPointerEvent } from 'react';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import { docLength } from '../../audio/AudioDocument';
-import { getPeaksForRange } from '../../audio/peaks';
 import { getPyramids } from '../../services/peaksCache';
 import { crossfadeGains, fadeInShape, fadeOutShape } from '../../dsp/fades';
 import type { Clip } from '../../multitrack/session';
@@ -11,7 +10,7 @@ import { useSessionStore } from '../../multitrack/sessionStore';
 import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
 import { snapSample } from '../../services/snap';
 import { formatTime } from '../../utils/timeFormat';
-import { drawBeatTics, sampleToPixel } from '../Editor/waveformRender';
+import { drawBeatTics, drawWaveformLane, sampleToPixel } from '../Editor/waveformRender';
 import {
   CLIP_BEAT_TIC_PX,
   CLIP_DOWNBEAT_TIC_PX,
@@ -21,7 +20,6 @@ import {
   useViewportWidth,
 } from './clipBeatTics';
 import { snapClipStart } from './clipDropPosition';
-import { getClipWaveformCanvas, zoomBucket } from './clipWaveformCache';
 import { sessionSnapTargets } from './sessionSnapTargets';
 
 const HANDLE_PX = 6;
@@ -75,16 +73,36 @@ function gainLinePath(x0: number, x1: number, height: number, gainAt: (u: number
   return parts.join(' ');
 }
 
-/** Cap (in DEVICE pixels) on the width of a clip's waveform raster — both the
- * on-screen canvas backing store and the cached offscreen bitmap (v1.5.2).
- * Uncapped, both were sized to the clip's FULL timeline pixel width (~7.6 MB
- * per clip at default zoom, ~30 MB at 4x — LRU-retained 200 deep by
- * clipWaveformCache). The peak envelope still spans the clip's whole sample
- * range; it is simply rasterised at at most this many columns and blit-scaled
- * across the clip's CSS width, so alignment is exact at every zoom/scroll and
- * only sub-column detail (invisible beyond the widest real viewport anyway)
- * is lost. */
-const MAX_CLIP_WAVEFORM_DEVICE_PX = 4096;
+/**
+ * MT1-2 — WHERE THE 4096-PX RASTER CAP WENT.
+ *
+ * v1.5.2 added `MAX_CLIP_WAVEFORM_DEVICE_PX = 4096`: the waveform raster (both
+ * the on-screen backing store and the cached offscreen bitmap) had been sized
+ * to the clip's FULL timeline pixel width — ~7.6 MB per clip at default zoom,
+ * ~30 MB at 4x, LRU-retained 200 deep — so it was capped at 4096 device px and
+ * blit-STRETCHED across the clip's CSS width.
+ *
+ * That fixed the memory and broke the picture. A three-minute clip is tens of
+ * thousands of CSS px wide at any working zoom, so the ~1–2 kpx actually on
+ * screen were being magnified out of a few hundred of those 4096 columns: a
+ * coarse solid blob where the editor showed detail, and a thin sparse line
+ * wherever the magnified columns happened to fall between transients. That is
+ * the visual-quality complaint MT1-2 exists to answer.
+ *
+ * The cap is DELETED rather than raised, and deliberately not replaced by a
+ * bigger one, because the fix removes the thing it was protecting against: the
+ * raster now covers only the on-screen band (`ticWindow`, at most viewport +
+ * two 256-px quanta ≈ 2.5 kpx), so it is STRICTLY SMALLER than the 4096-px cap
+ * it replaces at every zoom and on every clip. A cap on top of a
+ * viewport-bounded raster would be a second bound on an already-bounded number,
+ * i.e. dead code that reads like a live safeguard.
+ *
+ * The one thing that must never come back is the full-clip-width canvas: clips
+ * are never viewport-culled, so a clip-width raster is unbounded by
+ * construction (and past the browser's maximum canvas dimension on a long clip,
+ * where it silently goes blank). Both bands here are viewport-derived, which is
+ * the invariant `ClipView.test.tsx` and `ClipView.beatTics.test.tsx` pin.
+ */
 
 interface Zoom {
   samplesPerPixel: number;
@@ -123,11 +141,6 @@ interface DragState {
   lastClientX: number;
 }
 
-/** Number of source-document samples spanned by `lengthSample` session samples. */
-function docSpan(lengthSample: number, docRate: number, sessionRate: number): number {
-  return docRate === sessionRate ? lengthSample : Math.round((lengthSample * docRate) / sessionRate);
-}
-
 /** True while the escape-hatch modifier is held on THIS event (Task B4). Alt,
  * verified free against the BUILT app — see `useEditorGestures`'s header. */
 function snapSuspended(e: { altKey: boolean }): boolean {
@@ -135,8 +148,9 @@ function snapSuspended(e: { altKey: boolean }): boolean {
 }
 
 /**
- * One clip on a track lane: a rounded rect (cyan) with the source name and a
- * cached mini waveform. Pointer interactions:
+ * One clip on a track lane: a rounded rect (cyan) with the source name and,
+ * over the slice of it that is on screen, the editor's own waveform drawn at
+ * the current zoom (MT1-2). Pointer interactions:
  *   - click               → select
  *   - drag body (>4px)     → move horizontally (live transform) and across
  *                            tracks (target lane highlighted), committed on
@@ -196,8 +210,22 @@ export default function ClipView({
   // drag translation is included so the band still covers the lane while a clip
   // is being dragged, and the window is quantised so that costs a canvas resize
   // once per 256 px of movement rather than once per pointer event.
-  const ticBand = ticWindow(-(left + moveDx), widthPx, viewportPx);
-  const showTics = beatTics !== null && ticBand.width > 0;
+  //
+  // MT1-2 — ONE band, shared by the waveform and the tics. B3 computed this for
+  // the tic overlay alone because the waveform was a stretched full-clip raster;
+  // now that both are position-accurate 1:1 rasters they want the identical
+  // window, and sharing it means they cannot disagree about which part of the
+  // clip is on screen (a half-pixel disagreement would show as tics sliding
+  // against the audio they describe). It also means the quantum buys BOTH
+  // canvases their "resize once per 256 px of travel" instead of one.
+  const band = ticWindow(-(left + moveDx), widthPx, viewportPx);
+  const showTics = beatTics !== null && band.width > 0;
+  // Hoisted so the waveform effect can depend on the document's channel-array
+  // identity and rate, not merely on the document object: an audio EDIT
+  // replaces `doc.channels` (that identity is what `peaksCache` rebuilds on),
+  // and the raster must follow it. Same reasoning as `useClipBeatTics`'s deps.
+  const docChannels = doc?.channels;
+  const docRate = doc?.sampleRate;
 
   // --- X4, the fade UI -----------------------------------------------------
   //
@@ -282,69 +310,93 @@ export default function ClipView({
     );
   })();
 
-  // Mini waveform (Task F8): the peak envelope is drawn ONCE into an offscreen
-  // canvas cached by (clipId, lengthSample, zoom bucket, channels identity,
-  // height) — see clipWaveformCache.ts — and merely BLITTED here on every
-  // render. Within a zoom bucket (a 2x samplesPerPixel range) the cached bitmap
-  // is blit-scaled to the current width; an edit to the source document
-  // replaces doc.channels (identity change), which invalidates the entry.
+  // --- MT1-2, the waveform ------------------------------------------------
+  //
+  // The clip's waveform is the EDITOR's waveform: same envelope, same centre
+  // trace, same axis, same vertical scale, same accent token, same bucket ↔
+  // per-sample mode switch — because it is literally `drawWaveformLane`, the
+  // body of `renderWaveform`'s per-channel loop, called here. Nothing about
+  // "what a waveform looks like" lives in this file any more, so the two
+  // surfaces cannot drift (they had already: one flat fill pass, no trace, no
+  // axis, a hardcoded `rgba(38,198,218,0.85)` instead of `--accent`).
+  //
+  // WHAT MAKES IT SHARP. The raster covers only `band` — the on-screen slice —
+  // at one column per CSS pixel times dpr, and is drawn at the CURRENT zoom.
+  // The old path rasterised the clip's WHOLE timeline width into at most 4096
+  // columns and blit-stretched that over the clip's CSS width, so the visible
+  // part came from a few hundred magnified columns (see the note where the cap
+  // used to live). Stretching is what cost the detail; not stretching is the
+  // whole fix. This is also less memory than the cap it replaces, not more.
+  //
+  // WHY THERE IS NO OFFSCREEN CACHE ANY MORE. `clipWaveformCache` bucketed zoom
+  // by `floor(log2(spp))` precisely so one bitmap could be blit-scaled across a
+  // 2x zoom range — the trick that produced the blur. A resolution-correct
+  // raster cannot be reused across zooms by definition, and it does not need to
+  // be reused across scrolls either: the deps below are the QUANTISED band, so
+  // React already skips the repaint until the band actually moves (once per
+  // 256 px of travel), and the genuinely expensive part — building the peak
+  // pyramid — is still cached, by `peaksCache`, per document. Measured on a
+  // 3-minute source: `buildPeaks` 22 ms (cached, untouched here) versus 1.2 ms
+  // for a 2432-column band from that pyramid — cheaper than the 1.95 ms
+  // full-clip 4096-column raster the cache existed to avoid recomputing. A
+  // cache keyed on something that changes on every zoom step, holding entries
+  // that are cheaper to rebuild than to look up, is a memory leak wearing a
+  // performance costume.
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return; // jsdom / no backend
 
-    const w = Math.max(1, Math.round(widthPx));
     const dpr = window.devicePixelRatio || 1;
-    // v1.5.2: rasterise at most MAX_CLIP_WAVEFORM_DEVICE_PX device pixels (see
-    // the constant's comment). The canvas element's CSS size is unchanged
-    // (`h-full w-full` stretches the backing store across the whole clip), so
-    // the capped raster maps 1:1 onto the clip's full extent.
-    const drawW = Math.min(w, Math.max(1, Math.floor(MAX_CLIP_WAVEFORM_DEVICE_PX / dpr)));
-    canvas.width = Math.round(drawW * dpr);
-    canvas.height = Math.round(canvasH * dpr);
-    ctx.setTransform(1, 0, 0, 1, 0, 0);
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!doc || doc.channels.length === 0) return;
+    const w = band.width;
+    canvas.width = Math.max(1, Math.round(w * dpr));
+    canvas.height = Math.max(1, Math.round(canvasH * dpr));
+    // dpr-scaled, NOT identity: everything below is in CSS px, exactly as the
+    // editor's canvas and the tic band are. The old identity transform was a
+    // symptom of this canvas only ever receiving a blit.
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, canvasH);
+    if (w <= 0) return; // the clip is scrolled entirely off the lane
+    if (!doc || docRate === undefined || docChannels === undefined) return;
+    if (docChannels.length === 0) return;
 
-    const off = getClipWaveformCanvas(
-      {
-        clipId: clip.id,
-        lengthSample: clip.lengthSample,
-        bucket: zoomBucket(zoom.samplesPerPixel),
-        height: canvasH,
-        offsetSample: clip.offsetSample,
-        channels: doc.channels,
-      },
-      drawW,
-      (offCanvas) => {
-        const octx = offCanvas.getContext('2d');
-        if (!octx) return; // jsdom / no backend
-        const ow = offCanvas.width;
-        const oh = offCanvas.height;
-        const channel = doc.channels[0];
-        const pyramid = getPyramids(doc)[0];
-        const docStart = clip.offsetSample;
-        const docEnd = docStart + docSpan(clip.lengthSample, doc.sampleRate, sessionRate);
-        const { min, max } = getPeaksForRange(pyramid, channel, docStart, docEnd, ow);
+    // Clip-local CSS px → SOURCE-document samples. The clip's two sample fields
+    // live in different time bases (see clipBeatTics.ts's header): `startSample`
+    // /`lengthSample` are session-rate timeline positions, `offsetSample`
+    // indexes the source document at ITS rate. So a pixel spans
+    // `samplesPerPixel · docRate/sessionRate` source samples, and the band's
+    // left edge is that many per pixel into the clip from `offsetSample`.
+    // Deliberately NOT via the old `docSpan` rounding helper: rounding the band
+    // origin to a whole source sample would displace the picture by up to half
+    // a sample, which is invisible at spp ≥ 1 and several pixels wide in the
+    // per-sample mode below. The band never runs past the clip's own source
+    // window because `ticWindow` clamps it to the clip's pixel width.
+    const docSpp = zoom.samplesPerPixel * (docRate === sessionRate ? 1 : docRate / sessionRate);
 
-        octx.fillStyle = 'rgba(38,198,218,0.85)';
-        const mid = oh / 2;
-        const amp = (oh / 2) * 0.9;
-        for (let x = 0; x < ow; x++) {
-          const yTop = mid - max[x] * amp;
-          const yBot = mid - min[x] * amp;
-          octx.fillRect(x, yTop, 1, Math.max(1, yBot - yTop));
-        }
-      }
-    );
-    ctx.drawImage(off, 0, 0, off.width, off.height, 0, 0, canvas.width, canvas.height);
+    // Channel 0 only, where the editor draws one lane per channel: a clip lane
+    // is ~40 px tall, so two 20 px lanes would show LESS of the audio, not
+    // more. The clip surface is for arrangement; the editor is where a
+    // waveform is inspected. Everything else about the drawing is identical.
+    drawWaveformLane(ctx, {
+      channel: docChannels[0],
+      pyramid: getPyramids(doc)[0],
+      width: w,
+      laneTop: 0,
+      laneH: canvasH,
+      scrollSample: clip.offsetSample + band.start * docSpp,
+      samplesPerPixel: docSpp,
+    });
+    // `moveDx` and `clip.lengthSample` are deliberately absent: both reach this
+    // effect through `band`, quantised, so a drag or a trim re-rasters when the
+    // visible band actually moves and not once per pointer event.
   }, [
     doc,
-    clip.id,
+    docChannels,
+    docRate,
     clip.offsetSample,
-    clip.lengthSample,
-    widthPx,
+    band.start,
+    band.width,
     canvasH,
     sessionRate,
     zoom.samplesPerPixel,
@@ -352,40 +404,46 @@ export default function ClipView({
 
   // Task B3 — the beat tics, on their OWN canvas.
   //
-  // Deliberately not the waveform canvas above: that raster is capped at 4096
-  // device px and blit-STRETCHED across the clip's whole CSS width, which is
-  // right for a min/max envelope and wrong for a position — one raster column
-  // can span many CSS px, so every tic would be displaced and fattened. This
-  // canvas is sized in CSS px at 1:1 (times dpr) over the visible slice, so a
-  // tic lands on the pixel the mapping computed. It is also not the CACHED
-  // offscreen bitmap: that cache's key carries no beat-grid or toggle identity,
-  // so tics baked into it would persist or vanish stale across a toggle, an
-  // analysis completing, or a x2 / /2 correction.
+  // B3's original reason was that the waveform raster was capped at 4096 device
+  // px and blit-STRETCHED across the clip's whole CSS width — right for a
+  // min/max envelope, fatal for a POSITION, since one raster column spanned
+  // many CSS px and every tic would have been displaced and fattened. MT1-2
+  // removed the stretch, so that reason is gone; two things keep the canvases
+  // separate anyway, and they are the reasons to cite from here on:
+  //
+  //  - **Repaint identity.** This overlay depends on the beat grid: a toggle,
+  //    an analysis completing, a x2 / /2 correction. The waveform depends on
+  //    none of those (see its deps above), and must not be re-rasterised by
+  //    them — `ClipView.beatTics.test.tsx` pins exactly that. One canvas would
+  //    mean one effect and every grid event repainting the audio.
+  //  - **Extent.** The tic band is the bottom 14 px of the CLIP element; the
+  //    waveform lane is `laneHeight - 22` px of it. Merging them would force
+  //    one of the two out of its documented geometry (trap 16).
   useEffect(() => {
     const canvas = ticCanvasRef.current;
-    if (!canvas || !beatTics || ticBand.width <= 0) return;
+    if (!canvas || !beatTics || band.width <= 0) return;
     const ctx = canvas.getContext('2d');
     if (!ctx) return; // jsdom / no backend
 
     const dpr = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.round(ticBand.width * dpr));
+    canvas.width = Math.max(1, Math.round(band.width * dpr));
     canvas.height = Math.max(1, Math.round(CLIP_TIC_BAND_PX * dpr));
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, ticBand.width, CLIP_TIC_BAND_PX);
+    ctx.clearRect(0, 0, band.width, CLIP_TIC_BAND_PX);
 
     drawBeatTics(ctx, {
       ...beatTics,
-      // The overlay's left edge is `ticBand.start` CSS px into the clip, and
+      // The overlay's left edge is `band.start` CSS px into the clip, and
       // clip-local x 0 is exactly `clip.startSample` on the session timeline.
-      scrollSample: clip.startSample + ticBand.start * zoom.samplesPerPixel,
+      scrollSample: clip.startSample + band.start * zoom.samplesPerPixel,
       samplesPerPixel: zoom.samplesPerPixel,
-      width: ticBand.width,
+      width: band.width,
       baseline: CLIP_TIC_BAND_PX,
       beatHeight: CLIP_BEAT_TIC_PX,
       downbeatHeight: CLIP_DOWNBEAT_TIC_PX,
     });
-    // `moveDx` is deliberately absent: ticBand already carries it, quantised.
-  }, [beatTics, ticBand.start, ticBand.width, zoom.samplesPerPixel, clip.startSample]);
+    // `moveDx` is deliberately absent: `band` already carries it, quantised.
+  }, [beatTics, band.start, band.width, zoom.samplesPerPixel, clip.startSample]);
 
   const maxTrimEnd = (): number => {
     if (!doc) return Number.POSITIVE_INFINITY;
@@ -660,7 +718,7 @@ export default function ClipView({
         // G6 clip chrome, token-routed (mockup accent-soft / accent-ring):
         // idle = soft accent wash inside a ring-alpha border; selected = full
         // accent border with a ring halo + lift shadow. Geometry (left/width/
-        // height, the 6px trim handles, the 4096px raster cap) untouched.
+        // height, the 6px trim handles) untouched.
         backgroundColor: 'var(--accent-soft)',
         borderWidth: 1,
         borderStyle: 'solid',
@@ -678,15 +736,31 @@ export default function ClipView({
       >
         {doc?.name ?? clip.documentId}
       </div>
-      <canvas ref={canvasRef} className="pointer-events-none block h-full w-full" />
+      {/* MT1-2 — the waveform band, positioned exactly like the tic band below
+          and for the same reason: it covers the on-screen slice of the clip,
+          so it needs the slice's own left edge, not the clip's.
+
+          This also fixes a second, older defect. As `h-full w-full` the canvas
+          sat BELOW the name label in flow while claiming 100 % of the clip's
+          height, so it hung ~16 px past the clip's bottom edge into the
+          overflow-hidden box: the lower third of every waveform was cut off,
+          and the backing store (laneHeight - 22) was being stretched over a
+          taller CSS box on top of that. Anchored to the clip's bottom edge at
+          its true height, the whole envelope is on screen and 1:1 vertically. */}
+      <canvas
+        ref={canvasRef}
+        data-testid="clip-waveform"
+        className="pointer-events-none absolute"
+        style={{ left: band.start, bottom: 0, width: band.width, height: canvasH }}
+      />
       {/* X4 — fades, crossfades and overlap regions, on an SVG overlay.
           Deliberately NOT a third canvas (two shipped tests pin the canvas
-          count, T29), NOT the waveform canvas (capped + blit-stretched — a
-          ramp's breakpoint is a position and would be displaced like a tic,
-          T31), and NOT the cached offscreen bitmap (its key carries no fade
-          identity, and joining it would cost a re-raster per drag frame,
-          T30/C8). A child of the clip element, so it rides the move-drag
-          translateX for free — no moveDx compensation (T34). */}
+          count, T29) and NOT the waveform canvas: a ramp spans the clip's WHOLE
+          width while that canvas covers only the on-screen band, and a fade
+          drag would cost a re-raster per pointer event (T30/T31/C8). SVG also
+          keeps the ramp resolution-free. A child of the clip element, so it
+          rides the move-drag translateX for free — no moveDx compensation
+          (T34). */}
       {(spec !== undefined || overlapSegs.length > 0) && (
         <svg
           data-testid="fade-overlay"
@@ -770,21 +844,22 @@ export default function ClipView({
             })()}
         </svg>
       )}
-      {/* Beat tics (B3). Pinned to the clip element's BOTTOM edge, not the
-          waveform canvas's: that canvas is `h-full` below the name label inside
-          an overflow-hidden box, so its own bottom strip is clipped away and
-          anything drawn there would be invisible. Being a child of the clip, the
-          band also rides the move-drag transform, so the tics travel with the
-          audio they describe instead of lagging on the lane until the drop. */}
+      {/* Beat tics (B3). Pinned to the clip element's BOTTOM edge — where the
+          waveform band now also ends, so the tics sit over the bottom 14 px of
+          the audio they describe rather than below a canvas whose own bottom
+          strip was clipped away (trap 16, fixed at the source by MT1-2). Being
+          a child of the clip, the band rides the move-drag transform, so the
+          tics travel with the audio instead of lagging on the lane until the
+          drop. */}
       {showTics && (
         <canvas
           ref={ticCanvasRef}
           data-testid="clip-beat-tics"
           className="pointer-events-none absolute"
           style={{
-            left: ticBand.start,
+            left: band.start,
             bottom: 0,
-            width: ticBand.width,
+            width: band.width,
             height: CLIP_TIC_BAND_PX,
           }}
         />
