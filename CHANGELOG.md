@@ -100,6 +100,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   responsiveness check is self-calibrating: it first measures what delivering the same file over IPC
   costs the main thread on its own, then requires the full open to block no longer than that. Affects:
   `scripts/e2e-open-large.cjs`.
+- **An icon-only edit toolbar, floating above the bottom bar.** Why: cut/copy/paste/delete and
+  undo/redo had no pointer surface at all — they lived in the Edit menu and on the keyboard only.
+  How to use it: eight lucide glyphs in three groups — `Cut · Copy · Paste · Delete` │
+  `Trim · Silence` │ `Undo · Redo` — on the waveform's axis, 16 px above the status pill, present in
+  Waveform, Spectral AND Multitrack whenever at least one file is open and absent only in the empty
+  app. It adds no edit logic: every button hands an id to `runCommand`, and every enabled state is
+  that command's OWN predicate read through a new `isCommandEnabled`, so the bar cannot drift from
+  the menu. Buttons grey individually rather than disappearing — no selection greys
+  Cut/Copy/Delete/Trim/Silence, an empty clipboard greys Paste, and Undo/Redo follow whichever
+  history is active (the session's in Multitrack, the document's elsewhere). In Multitrack the three
+  clipboard verbs are greyed with a tooltip saying why: the clipboard acts on a region of a
+  document, and clip-level cut/copy/paste does not exist in the app. Affects:
+  `src/components/Layout/EditToolbar.tsx`, `src/services/menuActions.ts`, `src/App.tsx`.
+- **Trim to Selection and Silence Selection are reachable at last.** Why: `trimToSelection` and
+  `silenceSelection` have been in `editOps` since Task 22 with no command in front of them — the only
+  caller was the test hooks. How to use them: the edit toolbar's middle group. Both take Cut's own
+  `hasSelection` predicate and are ordinary undoable History steps; neither operation changed, and
+  neither is added to the Edit menu's layout. Affects: `src/services/menuActions.ts`.
+
+### Changed
+
+- **The window is laid out around the waveform now, not around the window.** Why: the user's rule for
+  this pass was "we want the waveform as wide as possible, not like a photo", settled through five
+  mockup iterations (`docs/ui-feedback/2026-08-12/edit-toolbar-mockup.html`, option E2). How it
+  works: the vertical icon rail at the right edge is gone — the same eight module icons are now a
+  horizontal **module strip** sitting on top of the module column at the card's own width, so the two
+  surfaces cost one width instead of two, and the column moved out to the window's 14 px margin. The
+  editor lane's clearance stopped being a constant: the stage publishes `--stage-inset-left/right`,
+  which the lane, the toolbar band and the bottom band all lay out against, so the toolbar and status
+  pills are centred on the WAVEFORM rather than on the window and re-centre in the same layout pass
+  whenever the column opens or closes. At the pinned 1600 px smoke window the lane goes from 1129 to
+  **1210** CSS px with a card open, and to **1572** with none. Affects: `src/App.tsx`,
+  `src/index.css`, `src/components/Layout/ModuleStrip.tsx`, `src/components/Layout/Toolbar.tsx`,
+  `src/components/Layout/StatusBar.tsx`.
+- **Clicking the open module entry closes its card.** Why: "the waveform runs nearly the full window
+  width with no card open" is unreachable while the card cannot be closed, and the strip's own entry
+  is the only affordance that can close what it opened without inventing a second control.
+  `aria-pressed` already carried the state; the title spells the toggle out. Affects:
+  `src/components/Layout/ModuleStrip.tsx`, `src/App.tsx`, `scripts/e2e-smoke.cjs`.
+- **The top-left file chip is retired; its identity readout moved into the bottom bar.** Why: the chip
+  spent a whole floating surface on `name · duration · rate · channels` plus a zoom percentage the
+  toolbar's own `− % +` group already showed live. How to read it: the status pill now opens with
+  `name │ duration · rate · channels`, compactly (`2:35.4 · 44.1k · stereo`), replacing its old
+  `44100 Hz · 2ch · N smp` segment — which stated rate and channels a second time and spent the rest
+  on a raw sample count the Properties panel owns. The chip's `file-chip` testid moved with the
+  readout. Affects: `src/components/Layout/Toolbar.tsx`, `src/components/Layout/StatusBar.tsx`,
+  `docs/USER_GUIDE.md`, `README.md`.
 
 ### Note
 

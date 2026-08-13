@@ -7,6 +7,29 @@ differs from Adobe Audition, see [`KNOWN_LIMITATIONS.md`](KNOWN_LIMITATIONS.md).
 
 ## Getting Started
 
+### The window
+
+Everything except the audio itself floats over the waveform as a glass pill,
+and everything is anchored on the **waveform**, not on the window:
+
+- **Top, centred on the waveform** — the toolbar pill: `Open · Save · Export`,
+  the transport (`⏮ ⏹ ▶ ⏺ ⟳`), the magnet, the view segment
+  (Waveform / Spectral / Multitrack) and the zoom cluster (`− · % · + · Fit`).
+- **Top right** — the **module strip**: one icon per panel (Files, Effects,
+  Markers, History, Properties, Remix, Spatial, Transcript), sitting on top of
+  the module column. Click an icon to open its card below the strip; click the
+  **open** icon again to close the card, and the waveform takes the whole
+  column's width.
+- **Bottom, centred on the waveform** — the status pill: the active file's
+  `name · duration · rate · channels`, the big time readout, the cursor and
+  selection times, the `♩ BPM` readout, the zoom in samples-per-pixel, and the
+  L/R level meters.
+- **Just above the status pill** — the **edit toolbar** (see *The edit
+  toolbar* below), present whenever at least one file is open.
+
+There is no separate file chip: the file's identity lives in the status pill,
+and the zoom percentage lives in the toolbar's own `%` readout.
+
 ### Opening a file
 
 **File → Open…** (`Ctrl+O`) opens a native file picker. Supported formats:
@@ -37,7 +60,7 @@ the multitrack** below.
 
 ### The Files panel
 
-Open the Files card from the right-edge icon rail (the folder icon). Every
+Open the Files card from the module strip (the folder icon). Every
 open document is listed with its name (a trailing `*` means unsaved
 changes), duration, and sample rate. Click a row to make it active; hover and
 click the ✕ to close it (you'll be prompted to save if it's dirty).
@@ -68,7 +91,7 @@ Standard editing acts on the current selection: `Ctrl+X` cut, `Ctrl+C` copy,
 within an 800 MB per-document memory budget — whichever limit is hit first
 evicts the oldest step (a large document's effective depth can be well under
 50) — and is tracked per document — the **History** panel (opened from the
-icon rail) lists every applied edit; click any entry to jump the document's state to
+module strip) lists every applied edit; click any entry to jump the document's state to
 that point. Marker add/rename/delete are undoable too (labelled `Add Marker`
 / `Rename Marker` / `Delete Marker` in the History panel), and destructive
 edits that change the timeline (delete, paste, trim, replace, sample-rate
@@ -76,10 +99,32 @@ conversion, and length-changing effects like Time Stretch/Pitch Shift) remap
 or drop affected markers in the same undo step, so undo restores their exact
 pre-edit positions.
 
+### The edit toolbar
+
+A pill of eight icon buttons floats just above the status pill, on the
+waveform's axis, whenever **at least one file is open** — in the Waveform,
+Spectral and Multitrack views alike. It is only ever a shortcut to commands
+you already have: nothing here does anything the menu and the keyboard do not.
+
+`Cut · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
+
+- **Trim** keeps the selected region and drops everything else;
+  **Silence** zeroes the selected region in place, leaving the length alone.
+  Both are undoable History steps like any other edit.
+- Buttons grey out individually rather than disappearing. With no selection,
+  Cut / Copy / Delete / Trim / Silence are greyed; with nothing on the
+  clipboard, Paste is greyed; Undo and Redo follow whichever history is
+  active — the **document's** in Waveform and Spectral, the **session's** in
+  Multitrack.
+- In the **Multitrack** view, Cut / Copy / Paste are always greyed: the
+  clipboard works on a region of a document, and clip-level cut/copy/paste
+  does not exist in Auditorium yet. Hover one for the reason. **Delete** does
+  work there — it removes the selected clip.
+
 ### Markers
 
 Press `M` (or **Edit → Add Marker**) to drop a marker named `Marker N` at the
-current cursor position. The **Markers** panel (opened from the icon rail) lists every
+current cursor position. The **Markers** panel (opened from the module strip) lists every
 marker on the active document: click a marker's **time** to move the cursor
 there and re-center the view around it; double-click a marker's name to
 rename it inline (`Enter` or clicking away commits, `Escape` cancels); the ✕
@@ -113,13 +158,16 @@ channel). Both dialogs open pre-selected to the active document's current
 rate/channel count, apply to the whole document, and are undoable as a single
 History-panel step.
 
-### The panel cards (icon rail)
+### The panel cards (module strip)
 
-The vertical icon rail at the right edge opens one floating glass panel card
-at a time — **Files**, **Effects**, **Markers**, **History**, **Properties**,
-**Remix**, **Spatial** and **Transcript**; **History** is the default. When the active document has a
-tempo analysis, a persistent **TEMPO** card (BPM readout, structure strip, and
-×2 / ÷2 / Re-detect) appears above the panel card.
+The horizontal **module strip** at the top right opens one floating glass
+panel card at a time, directly beneath it — **Files**, **Effects**,
+**Markers**, **History**, **Properties**, **Remix**, **Spatial** and
+**Transcript**; **History** is the default. Clicking the **already-open**
+entry closes the card, and the waveform stretches across the column's width;
+clicking any entry reopens one. When the active document has a tempo analysis,
+a persistent **TEMPO** card (BPM readout, structure strip, and ×2 / ÷2 /
+Re-detect) appears between the strip and the panel card.
 
 - **Files** / **Effects** — see their own sections in this guide.
 - **Remix** — a remix document's per-splice adjustment rows (quality dot,
@@ -148,7 +196,7 @@ tempo analysis, a persistent **TEMPO** card (BPM readout, structure strip, and
 
 ## Effects
 
-Effects live in the **Effects** panel (opened from the icon rail), grouped by category, and
+Effects live in the **Effects** panel (opened from the module strip), grouped by category, and
 mirrored in the **Effects** menu. Double-click an effect (with a document
 open) to open its parameter dialog, adjust settings, and apply. Every effect
 processes the current selection, or the whole document when there's no
@@ -1046,7 +1094,7 @@ v1.9.2 — the lanes are simply not shown there and survive a re-save.
 
 ### Spatial placement (the Spatial panel)
 
-The **Spatial** entry on the right-edge icon rail opens a positioner that
+The **Spatial** entry on the module strip opens a positioner that
 places a track's sound around the listener: a top-down stage (front is up)
 where you drag the source, an elevation slider, and readouts for the three
 position parameters — **azimuth** (direction, −180°..180°, positive to the
