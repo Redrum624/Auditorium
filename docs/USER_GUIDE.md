@@ -16,10 +16,11 @@ and everything is anchored on the **waveform**, not on the window:
   the transport (`⏮ ⏹ ▶ ⏺ ⟳`), the magnet, the view segment
   (Waveform / Spectral / Multitrack) and the zoom cluster (`− · % · + · Fit`).
 - **Top right** — the **module strip**: one icon per module — **Files,
-  Effects, Markers, History, Properties** — plus **Remix**, which appears only
-  once a remix document exists. It sits on top of the module column. Click an
-  icon to open its card below the strip; click the **open** icon again to close
-  the card, and the waveform takes the whole column's width.
+  Effects, Pipeline, Markers, Properties** — plus **Remix**, which appears only
+  once a remix document exists, and then **History**, which is always last. It
+  sits on top of the module column. Click an icon to open its card below the
+  strip; click the **open** icon again to close the card, and the waveform takes
+  the whole column's width. **Files** is the card the app opens with.
 - **Bottom, centred on the waveform** — the status pill: the active file's
   `name · duration · rate · channels`, the big time readout, the cursor and
   selection times, the `♩ BPM` readout, the zoom in samples-per-pixel, and the
@@ -47,10 +48,31 @@ Six menus: **File**, **Edit**, **Effects**, **Pipeline**, **View** and
 
 The grouping is by subject, not by run order. Where several of these tools have
 to be run in a particular sequence — the vocal and cover chains especially —
-the order is stated in the dialog's own stage notes, not implied by the menu.
+the order is stated in the tool's own stage notes, not implied by the menu.
 
-Every one of these tools is also a single click in the **Effects** module card
-(see *The panel cards* below), which is usually the faster route.
+Every one of these tools is also a single click in the **Pipeline** module card
+— the same eleven rows in the same four groups — and in the **Effects** module
+card below the effect list (see *The panel cards* below). All three doors run
+the same command.
+
+**These tools do not open a centred dialog.** Selecting one of the nine that
+have a UI — Match Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal
+Chain, Cover Chain, Align Lyrics, Transcribe, Separate into Stems — opens it as
+a **wider card in the module column**, in place of whatever card was open, with
+the strip showing **Pipeline** as the active module. Nothing is dimmed and
+nothing is blocked: while the tool is open you can still select audio, move the
+playhead, zoom, switch view and use the transport, so a multi-stage pass can be
+watched stepping through beside the waveform it is working on. Close the tool
+with the **✕** in its header. (Detect Tempo and Spatial Positioner have no UI
+of their own — the first rewrites the TEMPO card, the second opens the Spatial
+panel.)
+
+**While a pass is actually running**, the module strip greys out and the tool's
+**✕** refuses, both saying why: a running pass keeps its progress inside the
+tool, so closing it or switching module would discard the work rather than
+backgrounding it. The rest of the app stays usable throughout — only the two
+actions that would throw the pass away are refused. Wait for the pass to
+finish, or let it finish while you work on the waveform.
 
 A menu longer than the window scrolls inside itself; it never resizes or
 scrolls the app behind it.
@@ -243,14 +265,24 @@ History-panel step.
 
 The horizontal **module strip** at the top right opens one floating glass
 panel card at a time, directly beneath it — **Files**, **Effects**,
-**Markers**, **History** and **Properties**, plus **Remix** once a remix
-document exists; **History** is the default. Clicking the **already-open**
-entry closes the card, and the waveform stretches across the column's width;
-clicking any entry reopens one. When the active document has a tempo analysis,
-a persistent **TEMPO** card (BPM readout, structure strip, and ×2 / ÷2 /
-Re-detect) appears between the strip and the panel card.
+**Pipeline**, **Markers** and **Properties**, plus **Remix** once a remix
+document exists, and **History** last. **Files** is the default: it is the card
+the app opens with, and nothing about the panel is remembered between runs.
+Clicking the **already-open** entry closes the card, and the waveform stretches
+across the column's width; clicking any entry reopens one. When the active
+document has a tempo analysis, a persistent **TEMPO** card (BPM readout,
+structure strip, and ×2 / ÷2 / Re-detect) appears between the strip and the
+panel card.
+
+The order is a rule rather than a list: **Files** is always first, **History**
+is always last, and anything added later goes between them.
 
 - **Files** / **Effects** — see their own sections in this guide.
+- **Pipeline** — the eleven Pipeline-menu tools, in the same four groups
+  (**Tempo & Timing**, **Voice**, **Analysis**, **Mix**), each a single click.
+  Choosing one replaces this card with the tool itself (see *The menus* above);
+  closing the tool brings this list back. Greyed rows are unavailable right now
+  for exactly the reason the menu gives.
 - **Remix** — a remix document's per-splice adjustment rows (quality dot,
   Go To, Reject, Pin, Nudge, Re-roll, Revert to auto).
 - **History** — the undo history of whatever is active: the **session's** in
@@ -261,7 +293,7 @@ Re-detect) appears between the strip and the panel card.
   vanishes again when the last one is closed — it has nothing to show
   otherwise.
 - **Spatial** and **Transcript** are not modules. They are what a tool
-  produces, so they have no permanent icon: **Pipeline → Spatial Positioner**
+  produces, so they have no icon at all: **Pipeline → Spatial Positioner**
   opens the positioner, and **Pipeline → Transcribe…** shows the transcript of
   a document that already has one (and offers to make one when it does not).
   Both still open as the same full card in the same column — nothing about
@@ -291,13 +323,18 @@ processes the current selection, or the whole document when there's no
 selection.
 
 **Below the effects, the same card lists the Pipeline tools** — grouped as
-**Tempo & Timing**, **Voice** and **Analysis** — so the whole capability
-surface is in one panel. A tool takes a **single** click (it is a verb the menu
-already runs on one click; a second door slower than the first is not a door),
-while effect rows keep their double-click, because an effect row opens a
-parameter dialog rather than doing something. A greyed tool row means that
-command is unavailable right now, for exactly the reason the menu gives — the
-panel asks the command itself rather than keeping its own copy of the rule.
+**Tempo & Timing**, **Voice**, **Analysis** and **Mix** — so the whole
+capability surface is in one panel. (The **Pipeline** module card lists exactly
+the same rows on their own, without scrolling past the effects.) A tool takes a
+**single** click (it is a verb the menu already runs on one click; a second door
+slower than the first is not a door), while effect rows keep their double-click,
+because an effect row opens a parameter dialog rather than doing something. A
+greyed tool row means that command is unavailable right now, for exactly the
+reason the menu gives — the panel asks the command itself rather than keeping
+its own copy of the rule.
+
+Clicking a tool row here replaces this card with the tool, exactly as the
+Pipeline card and the Pipeline menu do.
 
 - **Amplitude** — Amplify (gain in dB), Fade (in/out; Linear, Ducked, Cosine
   or Equal power curve; ramp length as a % of the selection — 100 % shapes the
@@ -419,7 +456,7 @@ tail no measurement of a recording can ask for.
 
 **Two more are listed but never run automatically**, because each needs you to
 say *what* to change rather than *whether* to change it. Run each from its own
-dialog before the chain:
+tool before the chain:
 
 - **Align Lyrics** (stage 2) replaces one word you pick with a fresh take of it.
   It sits second, right after DC offset, and the position is a consequence
@@ -447,7 +484,7 @@ audio reaching it, then *Rendering* with the settings it just measured shown on
 the line — with its own bar for how far through **that stage** the pass is. The
 stages still to come are dimmed; the ones already finished settle into their
 full report there and then, so you can read what the compressor decided while
-Pitch Correct is still going. The bar at the foot of the dialog is labelled
+Pitch Correct is still going. The bar at the foot of the tool is labelled
 *Whole pass* and is weighted by the measured stage times — it is deliberately a
 different number from the highlighted row's own bar, which measures only how far
 through **that one stage** the pass is.
@@ -566,7 +603,7 @@ the stage in progress is highlighted, says what it is doing, and carries its own
 how far through **that stage** the pass is. Stages 2 and 4 are themselves multi-stage
 chains, and their rows carry the nested chain's *own* live line underneath — the stage it
 is on, what that stage is doing, and how far through it is — rather than collapsing ten
-stages behind one bar. The bar at the foot of the dialog is labelled *Whole journey* and
+stages behind one bar. The bar at the foot of the tool is labelled *Whole journey* and
 is deliberately a different number from the highlighted row's: separation is roughly nine
 tenths of the work, so that bar can sit almost still while a great deal is happening.
 
@@ -580,8 +617,8 @@ tables would put four tables and about ninety numbers on one screen, which is a 
 reads. What the journey shows instead is every stage's own status, reason and derived settings,
 including each nested stage's. **The tables still exist**: run `Pipeline → Cover Chain…`'s
 matching stages on their own — or open the take and run the Vocal Chain — and each chain's own
-dialog reports itself in full, exactly as before. Nothing was removed from the engines; the
-numbers are one dialog away rather than in front of you.
+tool reports itself in full, exactly as before. Nothing was removed from the engines; the
+numbers are one tool away rather than in front of you.
 
 **The level check is a measurement, not a fix.** Stage 6 mixes the finished session down
 once and reports the peak the two tracks summed to **before** the master bus's ±1 clamp —
@@ -625,11 +662,11 @@ The beats are *tracked*, not extrapolated from a rigid grid, so the result
 follows a take that drifts. What the detector cannot judge is the **octave**: a
 60 BPM loop can be reported as 120 with high confidence. That is what the
 octave-correction buttons on the TEMPO card — and in the Properties panel's
-Tempo row, and in the Match Tempo, Align Vocal Timing and Auto-Remix dialogs —
+Tempo row, and in the Match Tempo, Align Vocal Timing and Auto-Remix tools —
 are for: they re-track the beats at the corrected period rather than just
 relabelling the number, so everything built on the grid moves with it. The
-labels vary by surface: the **TEMPO card** and the **Align Vocal Timing** dialog
-render them as **×2** and **÷2**; the **Match Tempo** and **Auto-Remix** dialogs
+labels vary by surface: the **TEMPO card** and the **Align Vocal Timing** tool
+render them as **×2** and **÷2**; the **Match Tempo** and **Auto-Remix** tools
 and the **Properties** Tempo row use plain `x2` and `/2` (the Properties row
 lists `/2` first). Same operation everywhere, whatever the glyph.
 
@@ -657,7 +694,7 @@ What the tics mean:
   **Auto-Remix** analysis. An ordinary Detect Tempo measures beats and nothing
   else; the app will not invent a downbeat it never measured, so a plain
   detection gives you an unbroken row of equal tics. If the bar lines it does
-  draw are on the wrong beat, the ◂ ▸ downbeat shift in the Auto-Remix dialog is
+  draw are on the wrong beat, the ◂ ▸ downbeat shift in the Auto-Remix tool is
   the correction.
 - **Dimmed, dashed tics mean the grid is provisional** — the same two conditions
   that put `*` (the audio was edited since the analysis) or `?` (low confidence)
@@ -707,13 +744,13 @@ To make a 128 BPM loop sit in a 124 BPM track:
 
 1. Select the region to retarget (or select nothing, to retarget the whole
    document).
-2. **Pipeline → Match Tempo…**. The dialog prefills the source BPM from the
+2. **Pipeline → Match Tempo…**. The tool prefills the source BPM from the
    detection; **Re-detect from selection** re-runs it against the region the
    ratio will be applied to. A selection of 30 seconds or less is analysed in
    full; a longer one is measured over a **centred 30-second excerpt** of it
    rather than end to end, because detection wants a representative stretch, not
    a complete one.
-3. Enter the target BPM — or switch to a plain ratio. The dialog shows which
+3. Enter the target BPM — or switch to a plain ratio. The tool shows which
    quality band the resulting stretch falls in (transparent / good / extreme).
 4. Optionally tick the beat-marker grid, which lays down markers at the *new*
    tempo as a separate, separately-undoable step.
@@ -770,21 +807,21 @@ It works from *anchors you confirm*, never from a detector's guess:
 
 1. Detect the tempo first (**Pipeline → Detect Tempo**) — the alignment needs a
    beat grid and will never start an analysis on its own.
-2. Drop a marker on each syllable you want moved (`M`). Or open the dialog and
+2. Drop a marker on each syllable you want moved (`M`). Or open the tool and
    press **Suggest syllable markers**, which runs an onset detector and writes
    its proposals in as ordinary markers — then delete the wrong ones. On a real
    solo vocal roughly one proposal in eight is not a syllable (it is a breath, a
    note ending, or a slide), and about a third of the syllables are missed, so
    this step is a starting point, not an answer.
 3. **Pipeline → Align Vocal Timing…**.
-4. Check the grid. The dialog shows the BPM the tracked beats imply and the
+4. Check the grid. The tool shows the BPM the tracked beats imply and the
    detector's confidence, with ×2 / ÷2 to re-track if the octave is wrong.
 5. Choose the subdivision. Each option is labelled with the median move it would
    make — that number is the fastest way to tell which grid the performance is
    actually on. A median of 120 ms on **Beat** and 25 ms on **¼ beat** means the
    line is sitting on sixteenths, and snapping it to beats would wreck it.
 6. Tick **Grid and subdivision are correct**. Apply stays disabled until you do.
-7. Set **Strength**. It defaults to 25 %, and the dialog reports how much of the
+7. Set **Strength**. It defaults to 25 %, and the tool reports how much of the
    median move is left in place. Fully quantised vocals sound machine-made; the
    musical answer is usually partial.
 8. **Apply**.
@@ -792,7 +829,7 @@ It works from *anchors you confirm*, never from a detector's guess:
 The region keeps its exact length — syllables move *within* it, so nothing after
 it slides. Local stretch is clamped to 0.88–1.14× (the range where this stretch
 is transparent); a move the clamp holds back lands short of the grid, and the
-dialog says how many will before you apply rather than after. Pitch is preserved,
+tool says how many will before you apply rather than after. Pitch is preserved,
 so the result can still go through Pitch Correct.
 
 ### Fixing one word without singing the whole take again
@@ -841,7 +878,7 @@ What the splice does for you, none of which you have to set:
 - The two crossfades sit **outside** the word, not across its edges. The whole of
   the old word is replaced; none of it is left mixed under the new one.
 
-The dialog reports what it matched — the level correction in dB, the pitch shift
+The tool reports what it matched — the level correction in dB, the pitch shift
 in semitones, the fit ratio and the two seam lengths — and the whole thing is one
 `Ctrl+Z`.
 
@@ -857,7 +894,7 @@ per-phone pronunciation scorer was built against this same model and measured on
 this same material: it separated the known problem words from the rest at AUC
 0.642 against a chance baseline of 0.500, and it flagged 46 of 51 words. A tool
 that flags nine words in ten while being barely better than a coin toss is worse
-than no tool, so it was cut. Every word in the dialog looks identical until you
+than no tool, so it was cut. Every word in the tool looks identical until you
 select it.
 
 **If the lyrics don't match, it says so — and still shows you.** Forced alignment
@@ -875,7 +912,7 @@ a file" button; the take is recorded here, in your own voice.
 To make a song fit a 2-minute video without time-stretching it:
 
 1. Open the track and run **Pipeline → Auto-Remix…**.
-2. Confirm the tempo and the downbeat the dialog reports (use ×2 / ÷2 if the
+2. Confirm the tempo and the downbeat the tool reports (use ×2 / ÷2 if the
    octave is wrong — the arrangement is built on this grid).
 3. Set the target length, and adjust phrase length, crossfade, strictness or
    repeat limits if you want to.
@@ -916,7 +953,7 @@ longer describes the source.
 To split a song into drums, bass, vocals and everything else:
 
 1. Open the file and run **Pipeline → Separate into Stems…**.
-2. The first time only, the dialog offers the **one-time 166 MB model
+2. The first time only, the tool offers the **one-time 166 MB model
    download** with byte progress. It is fetched once and kept, so later
    separations start immediately.
 3. Press **Separate** and watch the per-segment progress and its time estimate.
@@ -945,7 +982,7 @@ of promise:
 Practical notes: separation is limited to **15 minutes** of audio per run;
 mixing the session down only reproduces the original exactly if the original
 itself stays within ±1 (a document you have amplified past full scale is
-detected and the dialog says the exact sum will not hold); a **mono** source's
+detected and the tool says the exact sum will not hold); a **mono** source's
 stems arrive as stereo documents with identical channels (use **Edit → Convert
 Channels…** if you want them mono); and the five stem documents have never been
 written to disk, so closing one — or quitting — prompts you to save it.
@@ -955,7 +992,7 @@ written to disk, so closing one — or quitting — prompts you to save it.
 To turn speech into timestamped text with a speaker label per segment:
 
 1. Open the recording and run **Pipeline → Transcribe…**.
-2. The first time only, the dialog offers the **one-time ~323 MB model
+2. The first time only, the tool offers the **one-time ~323 MB model
    download** with byte progress (Whisper base, plus a speaker-embedding
    model). They are fetched once and kept.
 3. Choose the **number of speakers**, or leave it on *Detect automatically*.
@@ -1014,7 +1051,7 @@ shows.
 keeping the words and the delivery. Everything runs on your own CPU — no
 account, no upload.
 
-**Setting up a voice.** The dialog holds a list of **voice profiles**: saved
+**Setting up a voice.** The tool holds a list of **voice profiles**: saved
 reference voices you can reuse. Add one with **New voice from file…** (any audio
 file) or **New voice from selection** (whatever is selected in the open document,
 which is the quickest way to try a voice you already have on the timeline; it

@@ -102,6 +102,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a second summation that would have to re-derive every gain, pan and fade. Affects:
   `src/multitrack/mixdown.ts`.
 
+<!-- U2: the module-bar reorder and the Pipeline module. -->
+- **A Pipeline module.** Why: the user asked to "add a module 'Pipeline' to choose pipelines from".
+  The eleven long-running tools had two doors — the Pipeline menu, and the bottom of the Effects
+  card, reachable only by scrolling past every registered effect. How to use: click **Pipeline** in
+  the module strip; the card lists the same eleven rows in the same four groups (Tempo & Timing,
+  Voice, Analysis, Mix), one click each, greyed by the command's own predicate.
+  Affects: `src/components/Panels/PipelinePanel.tsx`, `src/services/pipelineTools.ts`,
+  `src/components/Panels/EffectsPanel.tsx`.
+- **Pipeline tools open IN the module column instead of as a modal.** Why: the user asked that
+  selecting a pipeline "open the module in the extended modules instead of a modal" — a multi-stage
+  pass is something you watch, and a centred modal covered the waveform it was working on. How to
+  use: pick a tool from the Pipeline card, the Pipeline menu or the Effects card's tool rows; it
+  mounts as a wide card in the module column with the strip showing Pipeline as the active module,
+  no backdrop and nothing dimmed, so you can keep selecting audio, moving the playhead, zooming and
+  switching view while the stepper runs beside the waveform. Close it with the ✕ in its header.
+  Nine tools moved (Match Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal Chain, Cover
+  Chain, Align Lyrics, Transcribe, Separate into Stems); Detect Tempo and Spatial Positioner have no
+  UI of their own, and New File / Export / Convert / Record / the per-effect parameter dialogs stay
+  modal — each is one question rather than a workspace.
+  Affects: `src/components/Dialogs/DialogHost.tsx`,
+  `src/components/Dialogs/PipelineToolHost.tsx`, `src/components/Dialogs/DialogShell.tsx`,
+  `src/services/dialogBus.ts`, `src/App.tsx`.
+
 ### Changed
 
 <!-- MT1: multitrack polish -->
@@ -129,6 +152,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   there is deliberately no single entry across all of it: an undo entry belongs to one document, and this
   pass touches two documents and a session. Affects: `src/services/coverJourney.ts` (new),
   `src/components/Dialogs/CoverChainDialog.tsx`, `src/services/testHooks.ts`, `scripts/e2e-smoke.cjs`.
+
+<!-- U2: the module-bar reorder and the Pipeline module. -->
+- **The module strip's order, and the card the app opens with.** Why: the user asked to "reorder the
+  module in the module bar, make 'Files' default at opening, 'History' always last". How to use:
+  nothing to do — the strip now reads Files, Effects, Pipeline, Markers, Properties, [Remix], History,
+  and the app opens on the **Files** card instead of History. Remix's contextual slot is unmoved; it
+  is History that overtakes it. The order is stored as a SLOT per module rather than as a fixed
+  sequence, so a module added later declares where it belongs and cannot silently land after History.
+  Affects: `src/components/Layout/ModuleStrip.tsx`, `src/App.tsx`.
+- **Switching module is refused while a pipeline pass is running, and says why.** Cause: every one of
+  the nine tools keeps its pass in component state and cancels it on unmount, so unmounting a running
+  tool discards the pass rather than backgrounding it. Fix: while a pass runs the module strip greys
+  out and the tool's ✕ refuses, both carrying the reason; the rest of the app — waveform, transport,
+  toolbar, editing — stays live throughout, and only the two actions that would throw the pass away
+  are blocked. Global keyboard shortcuts are suppressed for the duration of a run only, keeping the
+  guard that stops a `Ctrl+O` landing a running pass on a document the user just replaced.
+  Affects: `src/App.tsx`, `src/services/dialogBus.ts`, `src/components/Layout/ModuleStrip.tsx`.
 
 ### Removed
 

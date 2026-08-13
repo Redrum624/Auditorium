@@ -573,7 +573,7 @@ octave choice (the structure really is there at 2×). The
 165–200 BPM band on uniform content is additionally phase-unstable by design.
 The remedy is therefore the **×2 / ÷2 control**, which re-tracks the grid at the
 corrected period rather than relabelling the displayed number, plus the manual
-BPM field and the Auto-Remix dialog's explicit tempo confirmation. No feature
+BPM field and the Auto-Remix tool's explicit tempo confirmation. No feature
 presents a detected BPM as authoritative.
 
 **2. Downbeat phase can be wrong** independently of the tempo. The detector
@@ -582,7 +582,7 @@ pop and anacrusic intros land 1–3 beats off, which puts every splice off the
 bar line even at a correct tempo. `downbeatConfidence` is reported as a soft
 hint and is explicitly **not** a gate — its log compression flattens a genuine
 2× accent, so any threshold would reject correct detections on most real music.
-The Auto-Remix dialog's structure strip is where a wrong grid becomes visible
+The Auto-Remix tool's structure strip is where a wrong grid becomes visible
 before anything is committed, and the ◂ ▸ shift is the correction.
 
 **3. Varying material: TWO different limits, with different causes and
@@ -628,7 +628,7 @@ not the route taken.
 **What it still cannot do, and says so:** the local ratio is bounded by the same
 `0.25x–4x` limit the constant path enforces, per beat interval rather than once
 for the region. A beat the bound holds back is moved as far as it allows and
-**counted in the dialog** rather than silently under-delivered. And the map is
+**counted in the tool** rather than silently under-delivered. And the map is
 only ever built from a beat grid the user has **confirmed** — the tick is
 cleared by every ×2 / ÷2 re-track and every re-detect — because a wrong single
 ratio is uniformly wrong and audible at once, while a wrong tempo map is wrong
@@ -672,7 +672,7 @@ at all.
 
 **Why it is not fixed yet, stated rather than hidden:** the app has **no meter
 detector at all** — `beatsPerBar` is a single time signature the user picks in
-the Auto-Remix dialog — so variable meter needs a new surface for the user to
+the Auto-Remix tool — so variable meter needs a new surface for the user to
 say where the meter changes, and it may not be driven from an unconfirmed
 detection (see the octave-error entry above for why detector confidence cannot
 gate this class of error). Beyond that, the per-bar descriptor matrix the
@@ -723,7 +723,7 @@ just as much: the same 23 attacks sit a median of 120 ms from the nearest
 quarter note, 63 ms from the nearest eighth and 25 ms from the nearest
 sixteenth. That take is on sixteenths with ~31 ms rms of human micro-timing;
 snapping it to quarters would move syllables by up to 260 ms and destroy it.
-Apply is therefore gated on an explicit confirmation, and the dialog labels each
+Apply is therefore gated on an explicit confirmation, and the tool labels each
 subdivision with the median move it implies so the choice is made from the
 measurement rather than from the label.
 
@@ -746,7 +746,7 @@ must be at least Φ = 8 bars long and every join must be phrase-congruent, so a
 source of `M` bars can only reach a sparse ladder of lengths — on a 31-bar
 source at 120 BPM 4/4 the shortest arrangement carrying a join renders at 24
 bars (48 s), and anything shorter is refused as `too-short` rather than
-approximated. This is why the Auto-Remix dialog clamps its length control to
+approximated. This is why the Auto-Remix tool clamps its length control to
 the planner's reported `[minOutputSample, maxOutputSample]` window instead of
 letting a request fail: an unreachable target is reported with the reachable
 minimum, never silently mis-served. Loose phrase mode (`minRunBars = 4`,
@@ -779,7 +779,7 @@ discovered as a bug.
 
 **v1.7 behavior:** The two halves of "isolate every instrument without losing
 any sound" are different kinds of promise, and Auditorium keeps them
-differently. Both are stated in the dialog itself, in every state, before you
+differently. Both are stated in the tool itself, in every state, before you
 commit to the 166 MB download.
 
 **What is guaranteed, by construction:** the five tracks add back up to the
@@ -809,7 +809,7 @@ exceed full scale (reachable after an Amplify or an EQ boost) therefore
 reconstructs with large error even though the raw sum is still exact — measured
 0.600 at |mix| = 1.6, against a raw sum error of 3.5e-15. **The clamp is
 detected, not defeated:** the landing measures the source peak and reports
-`exactSumHolds`, and the dialog stays open on an amber note naming the peak
+`exactSumHolds`, and the tool stays open on an amber note naming the peak
 ("This document peaks above full scale (2.40) … reduce the source level and
 separate again if you need the exact sum") instead of closing on a promise it
 cannot keep. When the source document has already been closed, the result is
@@ -858,7 +858,7 @@ model/UI change rather than a fix to this pipeline.
 and the `RESIDUAL_*` constants), Separate into Stems
 (`src/services/stemService.ts`), `src/components/Dialogs/CoverChainDialog.tsx`
 
-**This is the headline limitation of the Cover Chain, and it is stated in the dialog before
+**This is the headline limitation of the Cover Chain, and it is stated in the tool before
 you run it rather than here alone.**
 
 v1.7's separation guarantee is **exact sum** — the five stems add back to the mix sample for
@@ -1107,7 +1107,7 @@ relabelling the number, so the drawn tics move with it.
 
 **2. Bar lines require a remix-level analysis; an ordinary Detect Tempo has
 none.** `barBoundary`, `downbeatPhase` and `beatsPerBar` live only on a
-`level:'remix'` analysis, which only the Auto-Remix dialog produces. Every other
+`level:'remix'` analysis, which only the Auto-Remix tool produces. Every other
 path — the Properties panel, `Pipeline → Detect Tempo`, the test hook — produces a
 tempo-level result carrying `beatSamples` and nothing else, so the grid it draws
 is an unbroken row of equal tics with no visible bar 1. This is deliberate: the
@@ -1610,7 +1610,7 @@ unchunked path on the 70 s input) at a cost of 5.3 % extra inference.
 `src/dsp/ctcAlign.ts`, `src/dsp/wordSplice.ts`, `src/services/alignLyricsService.ts`,
 `src/components/Dialogs/AlignLyricsDialog.tsx`).
 
-**Behavior a user will notice:** the dialog gives every word a position and lets
+**Behavior a user will notice:** the tool gives every word a position and lets
 you hear and replace any one of them, but it never says which word is wrong. If
 you came looking for a pronunciation coach, this is not one, and the name says
 so.
@@ -1788,7 +1788,7 @@ splice costs one undo, a wrong refusal costs a re-recording.
 
 **Area:** F6 replace-a-word (`src/services/alignLyricsService.ts`).
 
-**Behavior a user will notice:** the Align Lyrics dialog records the replacement
+**Behavior a user will notice:** the Align Lyrics tool records the replacement
 from the microphone and offers no way to bring one in from a file. (The "Load
 from file…" button beside the lyrics box reads *words*; it never touches audio.)
 
