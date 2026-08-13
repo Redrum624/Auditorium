@@ -1,3 +1,4 @@
+import { FALLBACK_EDITOR_LANE_WIDTH } from '../../services/editorViewport';
 import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import RemixPanel from './RemixPanel';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
@@ -131,15 +132,29 @@ function makeSession(
   };
 }
 
-function addRemixDoc(name = 'Remix 1'): AudioDocument {
+/**
+ * `samples` defaults to a token 1000 — most tests here never look at the audio,
+ * and a real buffer per test would cost seconds for nothing.
+ *
+ * F11 fix round: the two Go-To tests pass a REAL length. `centreEditorOn`
+ * clamps the scroll to what the document can actually show, so against a
+ * 1000-sample document there is nothing to scroll to and "re-centres the
+ * viewport" would assert 0 === 0 forever. The old inline centring never looked
+ * at the document at all, which is exactly why it could scroll a 1000-sample
+ * document to sample 425 000.
+ */
+function addRemixDoc(name = 'Remix 1', samples = 1000): AudioDocument {
   const doc = createDocument({
     name,
     sampleRate: SR,
-    channels: [new Float32Array(1000)],
+    channels: [new Float32Array(samples)],
   });
   useAppStore.getState().addDocument(doc);
   return doc;
 }
+
+/** Long enough to contain every join the SIX_JOINS fixture advertises. */
+const GOTO_DOC_SAMPLES = 30 * SR;
 
 /** The six joins used by most tests: `#1` is `16>24`. */
 const SIX_JOINS = [
@@ -301,7 +316,8 @@ describe('RemixPanel — quality dot (acceptance 3 and 4)', () => {
 
 describe('RemixPanel — Go To (acceptance 5)', () => {
   it('sets the cursor to the join sample and re-centres the viewport', () => {
-    const doc = addRemixDoc();
+    // A document long enough to hold the joins — see addRemixDoc.
+    const doc = addRemixDoc('Remix 1', GOTO_DOC_SAMPLES);
     mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS));
     useAppStore.setState({ zoom: { samplesPerPixel: 20, scrollSample: 0 } });
 
@@ -310,7 +326,10 @@ describe('RemixPanel — Go To (acceptance 5)', () => {
 
     const state = useAppStore.getState();
     expect(state.cursorSample).toBe(10 * SR);
-    expect(state.zoom.scrollSample).toBe(10 * SR - 20 * 400);
+    // F11 fix round: centred on the lane's MEASURED width (the documented
+    // fallback here) and clamped by the store's one resolver, not the old
+    // inline "~800px viewport" guess that bypassed the clamp.
+    expect(state.zoom.scrollSample).toBe(10 * SR - (FALLBACK_EDITOR_LANE_WIDTH * 20) / 2);
     expect(state.zoom.samplesPerPixel).toBe(20);
   });
 
@@ -1001,7 +1020,7 @@ describe('RemixPanel — staleness (acceptance 10)', () => {
   });
 
   it('KEEPS Go To enabled while stale — the session degrades to read-only, not inert', () => {
-    const doc = addRemixDoc();
+    const doc = addRemixDoc('Remix 1', GOTO_DOC_SAMPLES);
     mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS, { stale: true }));
     useAppStore.setState({ zoom: { samplesPerPixel: 20, scrollSample: 0 } });
 
@@ -1016,7 +1035,9 @@ describe('RemixPanel — staleness (acceptance 10)', () => {
 
     fireEvent.click(goTos[0]);
     expect(useAppStore.getState().cursorSample).toBe(10 * SR);
-    expect(useAppStore.getState().zoom.scrollSample).toBe(10 * SR - 20 * 400);
+    expect(useAppStore.getState().zoom.scrollSample).toBe(
+      10 * SR - (FALLBACK_EDITOR_LANE_WIDTH * 20) / 2
+    );
   });
 
   it('still applies the multitrack guard on the stale path', () => {

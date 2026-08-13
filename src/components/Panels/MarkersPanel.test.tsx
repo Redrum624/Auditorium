@@ -1,3 +1,4 @@
+import { FALLBACK_EDITOR_LANE_WIDTH } from '../../services/editorViewport';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import MarkersPanel from './MarkersPanel';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
@@ -68,9 +69,41 @@ describe('MarkersPanel', () => {
 
     const state = useAppStore.getState();
     expect(state.cursorSample).toBe(50000);
-    // scrollSample = max(0, position - samplesPerPixel*400) = max(0, 50000 - 8000) = 42000
-    expect(state.zoom.scrollSample).toBe(42000);
+    // F11 fix round: centred on the lane's MEASURED width, clamped by the
+    // store's one resolver. Nothing has published a width in this suite, so
+    // the documented fallback applies. The old expectation (42000) came from
+    // an inline "~800px viewport" guess that also bypassed the clamp — at fit,
+    // where every freshly opened document now sits, that guess scrolled past
+    // an end the waveform could not follow.
+    const half = (FALLBACK_EDITOR_LANE_WIDTH * 20) / 2;
+    expect(state.zoom.scrollSample).toBe(50000 - half);
     expect(state.zoom.samplesPerPixel).toBe(20); // samplesPerPixel is preserved
+  });
+
+  // F11 fix round (I2): the regression that shipped. Every freshly opened
+  // document now sits at FIT, where the whole track is already on screen and
+  // `maxScroll` is 0 — so one click on a marker used to write a positive
+  // `scrollSample`, and the beat tics and the timeline ruler slid off the end
+  // of a waveform that could not follow them. The F11-9 symptom, through a
+  // door F11-9 never closed.
+  it('does not scroll at all when the document already fits — the default state now', () => {
+    const doc = addDoc(); // addDocument fits it
+    useAppStore.getState().addMarker(doc.id, {
+      id: 'marker-1',
+      name: 'Outro',
+      positionSample: 99_000,
+    });
+    const atFit = useAppStore.getState().zoom;
+    expect(atFit.scrollSample).toBe(0);
+
+    render(<MarkersPanel />);
+    fireEvent.click(screen.getByRole('button', { name: /go to outro/i }));
+
+    expect(useAppStore.getState().cursorSample).toBe(99_000);
+    expect(useAppStore.getState().zoom.scrollSample).toBe(0);
+    // Same object: nothing repaints either, which is what makes "nothing
+    // moved" observable rather than merely equal.
+    expect(useAppStore.getState().zoom).toBe(atFit);
   });
 
   it('clicking the go-to button near the start clamps scrollSample to 0 instead of going negative', () => {

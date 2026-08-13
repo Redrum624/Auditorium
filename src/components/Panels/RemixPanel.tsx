@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { ChevronLeft, ChevronRight, Pin, X } from 'lucide-react';
-import { useAppStore } from '../../stores/appStore';
+import { useAppStore, centreEditorOn } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
 import {
   MAX_REQUIRED_JOINS,
@@ -298,8 +298,11 @@ export default function RemixPanel() {
   const goTo = (positionSample: number): void => {
     if (view === 'multitrack') setView('waveform');
     setCursor(positionSample);
-    const halfViewportSamples = zoom.samplesPerPixel * 400;
-    setZoom({ ...zoom, scrollSample: Math.max(0, positionSample - halfViewportSamples) });
+    // F11 fix round: one shared writer, which centres on the lane's MEASURED
+    // width and clamps. The old inline version assumed a ~800px viewport and
+    // wrote `setZoom` directly, so at fit — where every freshly opened document
+    // now sits — it scrolled past an end the waveform could not follow.
+    centreEditorOn(positionSample);
   };
 
   const onToggleLock = (key: string): void => {

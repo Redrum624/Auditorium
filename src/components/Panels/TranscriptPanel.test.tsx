@@ -1,3 +1,4 @@
+import { FALLBACK_EDITOR_LANE_WIDTH } from '../../services/editorViewport';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import TranscriptPanel from './TranscriptPanel';
 import {
@@ -176,8 +177,13 @@ describe('TranscriptPanel — the transcript', () => {
     });
     render(<TranscriptPanel />);
     fireEvent.click(screen.getAllByTestId('transcript-goto')[3]);
-    // 72000 - 10*400 = 68000.
-    expect(useAppStore.getState().zoom.scrollSample).toBe(68000);
+    // F11 fix round: centred on the lane's MEASURED width (the documented
+    // fallback here — nothing has published one in this suite) and clamped by
+    // the store, instead of the old inline "~800px viewport" guess that
+    // bypassed the clamp: 72000 - (1600 * 10) / 2.
+    expect(useAppStore.getState().zoom.scrollSample).toBe(
+      72000 - (FALLBACK_EDITOR_LANE_WIDTH * 10) / 2
+    );
   });
 
   it('states the measured three-speaker accuracy rather than implying confidence', () => {

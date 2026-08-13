@@ -1,6 +1,6 @@
 import { createDocument, docLength, nextId } from '../audio/AudioDocument';
 import type { AppState, Marker } from '../stores/appStore';
-import { useAppStore } from '../stores/appStore';
+import { applyEditorZoom, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip } from '../multitrack/session';
 import { mixdownSession } from '../multitrack/mixdown';
@@ -354,9 +354,12 @@ function registerSelectionAndTransportCommands(): void {
       shortcut: 'Home',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => {
-        const { zoom, setCursor, setZoom } = useAppStore.getState();
-        setCursor(0);
-        setZoom({ samplesPerPixel: zoom.samplesPerPixel, scrollSample: 0 });
+        // F11 fix round (I2): through the one clamped writer. `scrollSample: 0`
+        // is already legal at every zoom, so this is about routing rather than
+        // about the value — a second `setZoom` caller is how the clamp stopped
+        // being single-sourced the first time.
+        useAppStore.getState().setCursor(0);
+        applyEditorZoom({ samplesPerPixel: useAppStore.getState().zoom.samplesPerPixel, scrollSample: 0 });
       },
     },
     {
@@ -365,19 +368,20 @@ function registerSelectionAndTransportCommands(): void {
       shortcut: 'End',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => {
-        const { documents, activeDocumentId, zoom, setCursor, setZoom } = useAppStore.getState();
+        const { documents, activeDocumentId, zoom, setCursor } = useAppStore.getState();
         const doc = documents.find((d) => d.id === activeDocumentId);
         if (!doc) return;
         const len = docLength(doc);
         setCursor(len);
-        // The service layer doesn't know the viewport width (only the
-        // WaveformView component does), so it can't compute the exact
-        // scrollSample that puts the cursor at the right edge. Simplify by
-        // scrolling to the document length; any subsequent wheel zoom/scroll
-        // in WaveformView clamps scrollSample back into its valid range
-        // (see the onWheel handler's maxScroll), so this over-scroll is
-        // self-correcting rather than a permanent stuck state.
-        setZoom({ samplesPerPixel: zoom.samplesPerPixel, scrollSample: len });
+        // F11 fix round (I2): asking for `len` and letting the store clamp it
+        // to `maxScroll` puts the END of the document at the right edge, which
+        // is what "Go to End" means. The previous version wrote the unclamped
+        // `len` straight into the store and called the resulting over-scroll
+        // "self-correcting", on the grounds that the next wheel gesture would
+        // fix it — which left the tics and the ruler drawn past the end of the
+        // audio until the user happened to scroll. It also cited an onWheel
+        // clamp that no longer exists; `resolveZoom` owns both clamps now.
+        applyEditorZoom({ samplesPerPixel: zoom.samplesPerPixel, scrollSample: len });
       },
     },
 

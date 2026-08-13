@@ -1,5 +1,5 @@
 import { Captions, Download, Users } from 'lucide-react';
-import { useAppStore } from '../../stores/appStore';
+import { useAppStore, centreEditorOn } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
 import { openTranscribeDialog } from '../../services/dialogBus';
 import {
@@ -88,10 +88,11 @@ export default function TranscriptPanel() {
     // switch back first or "go to" is a silent no-op.
     if (view === 'multitrack') setView('waveform');
     setCursor(positionSample);
-    // The panel does not know the viewport's pixel width (only the editor
-    // views do), so centring is approximated for a ~800px viewport.
-    const halfViewportSamples = zoom.samplesPerPixel * 400;
-    setZoom({ ...zoom, scrollSample: Math.max(0, positionSample - halfViewportSamples) });
+    // F11 fix round: one shared writer, which centres on the lane's MEASURED
+    // width and clamps. The old inline version assumed a ~800px viewport and
+    // wrote `setZoom` directly, so at fit — where every freshly opened document
+    // now sits — it scrolled past an end the waveform could not follow.
+    centreEditorOn(positionSample);
   };
 
   const speakerValue =

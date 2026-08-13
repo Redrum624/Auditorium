@@ -121,9 +121,19 @@ function clamp(v: number, lo: number, hi: number): number {
 /**
  * F11-9 — the ONLY place the editor's zoom is clamped. `samplesPerPixel` into
  * `[MIN_SPP, fit]`, `scrollSample` into `[0, docLength - laneWidth * spp]`.
- * Every consumer (wheel gesture, −/+ buttons, Fit, activation, and through the
- * store's `zoom` the renderer, the tic layer and the ruler) reads what this
- * returns; none of them clamps again.
+ * Every consumer (wheel gesture, −/+ buttons, Fit, activation, the three
+ * panels' "go to", Go to Start / Go to End, and through the store's `zoom` the
+ * renderer, the tic layer and the ruler) reads what this returns; none of them
+ * clamps again.
+ *
+ * "ONLY" is a claim about `setZoom` callers, and it was FALSE when first
+ * written: five surfaces still wrote the store directly with a scroll they had
+ * guessed for "a ~800 px viewport" (Markers, Remix and Transcript "go to", plus
+ * both transport jumps). Since fit-on-open they were all writing past the end
+ * of a document that starts entirely on screen. They route through
+ * {@link centreEditorOn} / {@link applyEditorZoom} now, which is what makes the
+ * sentence above true rather than aspirational. If you add a sixth, route it
+ * here too — a comment claiming single-sourcing does not enforce it.
  *
  * The two clamps are one rule stated twice: together they say the visible
  * window `[scrollSample, scrollSample + laneWidth * spp)` never runs past the
@@ -180,6 +190,37 @@ export function applyEditorZoom(requested: ZoomRequest): void {
     return;
   }
   s.setZoom(next);
+}
+
+/**
+ * F11 fix round (I2) — scroll the editor so `sample` is in the middle, at the
+ * current zoom.
+ *
+ * Every "go to this position" surface wants exactly this: the Markers panel's
+ * time button, the Remix panel's Go To, the Transcript panel's row jump, and
+ * Go to Start / Go to End. All five used to write `setZoom` directly with a
+ * scroll approximated for "a ~800 px viewport" — a number none of them could
+ * know — which meant all five bypassed {@link resolveZoom}.
+ *
+ * That was survivable while a fresh document opened part-way zoomed in. Since
+ * F11-3 a fresh document opens FITTED, which is the zoom-out limit, where
+ * `maxScroll` is 0: one click on a marker wrote a positive `scrollSample`, and
+ * the beat tics and the ruler slid off the end of a waveform that could not
+ * follow them. The F11-9 symptom, through a different door, on the surfaces
+ * F11-8 had just made more prominent.
+ *
+ * Routing through {@link applyEditorZoom} fixes the clamp AND the guess: the
+ * lane's real measured width is available now, so "centred" means centred on
+ * the lane the user is looking at. The zoom level is carried through untouched
+ * — this is a scroll, never a zoom.
+ */
+export function centreEditorOn(sample: number): void {
+  applyEditorZoom({
+    samplesPerPixel: useAppStore.getState().zoom.samplesPerPixel,
+    // A function of the RESOLVED spp, so the centring uses the zoom actually
+    // committed rather than the one requested.
+    scrollSample: (spp) => sample - (editorLaneWidth() * spp) / 2,
+  });
 }
 
 /**

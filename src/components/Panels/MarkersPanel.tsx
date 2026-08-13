@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Flag, X } from 'lucide-react';
-import { useAppStore } from '../../stores/appStore';
+import { useAppStore, centreEditorOn } from '../../stores/appStore';
 import type { Marker } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
 import { pushMarkerUndo } from '../../services/editOps';
@@ -77,11 +77,11 @@ export default function MarkersPanel() {
     // markers for activeDocumentId), so no document switch is needed.
     if (view === 'multitrack') setView('waveform');
     setCursor(positionSample);
-    // The panel doesn't know the viewport's pixel width (only WaveformView /
-    // SpectrogramView do), so centering is approximated for a ~800px-wide
-    // viewport: half of that, in samples, is samplesPerPixel * 400.
-    const halfViewportSamples = zoom.samplesPerPixel * 400;
-    setZoom({ ...zoom, scrollSample: Math.max(0, positionSample - halfViewportSamples) });
+    // F11 fix round: one shared writer, which centres on the lane's MEASURED
+    // width and clamps. The old inline version assumed a ~800px viewport and
+    // wrote `setZoom` directly, so at fit — where every freshly opened document
+    // now sits — it scrolled past an end the waveform could not follow.
+    centreEditorOn(positionSample);
   };
 
   return (

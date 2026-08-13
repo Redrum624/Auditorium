@@ -1,5 +1,6 @@
 import {
   applyEditorZoom,
+  centreEditorOn,
   defaultZoom,
   fitSamplesPerPixel,
   makeInitialState,
@@ -565,5 +566,89 @@ describe('publishEditorLaneWidth (F11-3)', () => {
 
     expect(useAppStore.getState().zoom).toBe(before);
     expect(fitSamplesPerPixel(doc)).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11 fix round (I2) — `centreEditorOn`, the writer every "go to this sample"
+// surface uses.
+//
+// Five of them (Markers, Remix, Transcript, Go to Start, Go to End) wrote
+// `setZoom` directly with a scroll approximated for "a ~800 px viewport",
+// bypassing the clamp entirely. Since fit-on-open, EVERY freshly opened
+// document sits at the zoom-out limit, where `maxScroll` is 0 — so one click on
+// a marker wrote a positive `scrollSample`, and the tics and the ruler slid off
+// the end of a waveform that could not follow. That is the F11-9 symptom
+// arriving through a different door, on the surfaces F11-8 had just
+// emphasised.
+// ---------------------------------------------------------------------------
+describe('centreEditorOn (F11 fix round)', () => {
+  beforeEach(() => {
+    useAppStore.setState(makeInitialState());
+    _resetEditorLaneWidth();
+  });
+
+  afterEach(() => {
+    _resetEditorLaneWidth();
+  });
+
+  it('does not scroll at all when the whole track already fits — the F11-9 symptom', () => {
+    const doc = makeDoc(160_000);
+    publishEditorLaneWidth(800);
+    useAppStore.getState().addDocument(doc); // opens fitted
+    const atFit = useAppStore.getState().zoom;
+    expect(atFit.scrollSample).toBe(0);
+
+    centreEditorOn(docLength(doc) - 1);
+
+    // Nothing to scroll to: the document is already entirely on screen.
+    expect(useAppStore.getState().zoom.scrollSample).toBe(0);
+    // ...and the object identity is unchanged, so nothing repaints either.
+    expect(useAppStore.getState().zoom).toBe(atFit);
+  });
+
+  it('centres the sample on the MEASURED lane, not on an assumed 800px one', () => {
+    const doc = makeDoc(1_000_000);
+    publishEditorLaneWidth(1000);
+    useAppStore.getState().addDocument(doc);
+    // Zoom in so there is room to scroll: 100 samples/px over 1000 px shows
+    // 100 000 samples of a 1 000 000-sample document.
+    applyEditorZoom({ samplesPerPixel: 100, scrollSample: 0 });
+
+    centreEditorOn(500_000);
+
+    // Half a lane back from the target: 500 000 - (1000 * 100) / 2.
+    expect(useAppStore.getState().zoom.scrollSample).toBe(450_000);
+  });
+
+  it('clamps at both ends rather than over-scrolling', () => {
+    const doc = makeDoc(1_000_000);
+    publishEditorLaneWidth(1000);
+    useAppStore.getState().addDocument(doc);
+    applyEditorZoom({ samplesPerPixel: 100, scrollSample: 0 });
+
+    centreEditorOn(0);
+    expect(useAppStore.getState().zoom.scrollSample).toBe(0);
+
+    centreEditorOn(1_000_000);
+    // maxScroll = 1 000 000 - 1000 * 100.
+    expect(useAppStore.getState().zoom.scrollSample).toBe(900_000);
+  });
+
+  it('never changes the zoom level — centring is a scroll, not a zoom', () => {
+    const doc = makeDoc(1_000_000);
+    publishEditorLaneWidth(1000);
+    useAppStore.getState().addDocument(doc);
+    applyEditorZoom({ samplesPerPixel: 100, scrollSample: 0 });
+
+    centreEditorOn(500_000);
+
+    expect(useAppStore.getState().zoom.samplesPerPixel).toBe(100);
+  });
+
+  it('is a no-op with no active document', () => {
+    const before = useAppStore.getState().zoom;
+    centreEditorOn(1234);
+    expect(useAppStore.getState().zoom).toBe(before);
   });
 });
