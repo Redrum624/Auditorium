@@ -775,11 +775,90 @@ function stageWarning(
   return `this stage summed a tail on top of the audio and the output now peaks at +${delta.peakAfterDb.toFixed(1)} dBFS, above full scale. The Limiter — the only stage that runs after this one, and the one that would have caught it — is switched off, and both the WAV writer and the MP3 encoder hard-clip anything over full scale. Switch the Limiter on, or bring the level down before you export.`;
 }
 
+// ── The live view (P1) ──────────────────────────────────────────────────────
+// `onProgress` is ONE number over the whole pass, weighted by the measured
+// stage times above. It is the right number for a bar and the wrong one for a
+// stepper: it cannot say WHICH stage is running, how far through THAT stage the
+// run is, or what the stage is doing while it takes its minute. The loop below
+// knows all three, so it says them. Everything here is ADDITIVE — every
+// callback is optional, no chain behaviour depends on one being passed, and the
+// test hooks and the packaged smoke drive the chain with none of them.
+//
+// Shared with the cover chain, which runs the same two-phase loop over its own
+// stage table. One vocabulary, so the two live views cannot describe the same
+// thing in different words.
+
+/**
+ * The two phases every automatic stage passes through, in this order.
+ *
+ * `measuring` is `resolveStage` working the settings out from the audio that
+ * actually reaches the stage — it is not a formality, and on the stages that
+ * scan the whole region for a noise window or an envelope median it can be the
+ * longer of the two. `rendering` is the effect itself running in the worker.
+ *
+ * They are reported separately because the fraction only means something in the
+ * second: a measurement is one indivisible pass with no progress to report, so
+ * it is announced rather than counted.
+ */
+export type ChainStagePhase = 'measuring' | 'rendering';
+
+/** The `measuring` phase's line. One sentence, because there is nothing to
+ * report but what is happening. */
+export const STAGE_MEASURING_DETAIL = 'measuring the audio that reaches this stage';
+
+/** The `rendering` line for a stage that derived nothing — the limiter and the
+ * effects whose defaults are already right in their own task. Saying so beats a
+ * blank: "no setting was derived here" is information. */
+export const STAGE_RENDERING_DETAIL =
+  "running on the effect's own declared defaults — this stage derives nothing";
+
+/**
+ * The `rendering` line for a stage that DID derive something: the settings it
+ * just worked out, in the report's own words.
+ *
+ * Built from the `DerivedValue`s the stage resolution produced, which are the
+ * same objects the finished report renders. There is deliberately no second
+ * table of phrasings here — a live line and a report line that disagree about
+ * what a stage measured is worse than either alone.
+ */
+export function stageRenderingDetail(derived: DerivedValue[]): string {
+  if (derived.length === 0) return STAGE_RENDERING_DETAIL;
+  return derived.map((d) => `${d.label} ${d.value}`).join(' · ');
+}
+
+/** What the stage that is running right now is doing. Emitted per stage; the
+ * `stageId` is what tells a stepper which row to highlight. */
+export interface ChainStageProgress<Id extends string> {
+  stageId: Id;
+  /** The stage's own label, so a consumer never has to look the table up. */
+  label: string;
+  phase: ChainStagePhase;
+  /** How far through THIS stage, in [0, 1] — not the overall fraction, which
+   * `onProgress` already carries and which cannot return to 0 at a boundary. */
+  stageFraction: number;
+  /** One line of what the stage is doing, or the measurement it just took. */
+  detail: string;
+}
+
+export type VocalChainStageProgress = ChainStageProgress<VocalChainStageId>;
+
 export interface RunVocalChainOptions {
   enabled: Partial<Record<VocalChainStageId, boolean>>;
   onProgress?: (fraction: number) => void;
   /** Fires as each stage starts, so the UI can name what is running. */
   onStageStart?: (stage: VocalChainStage) => void;
+  /** Fires repeatedly while a stage is in flight, scoped to that stage. */
+  onStageProgress?: (progress: VocalChainStageProgress) => void;
+  /**
+   * Fires as each stage's result is decided — with the VERY object that lands in
+   * `report.stages`, not a copy of it. That identity is the point: a live view
+   * built on this shows the finished report's own strings by construction, so
+   * there is no second set of phrasings to drift.
+   *
+   * Fires for EVERY stage, run or not, in registry order — an `off` or `manual`
+   * stage owes the user its status just as much as an applied one does.
+   */
+  onStageResult?: (result: VocalChainStageResult) => void;
 }
 
 /**
@@ -798,7 +877,7 @@ export interface RunVocalChainOptions {
  * what: a chain that did nothing still owes the user the reason each stage gave.
  */
 export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalChainReport | null> {
-  const { enabled, onProgress, onStageStart } = opts;
+  const { enabled, onProgress, onStageStart, onStageProgress, onStageResult } = opts;
   const state = useAppStore.getState();
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
   if (!doc) return null;
@@ -840,20 +919,34 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
   let doneWeight = 0;
   let anyApplied = false;
 
+  // ONE place a stage result is recorded, so the live callback cannot be given a
+  // different object — or a different set of stages — from the report's.
+  const record = (result: VocalChainStageResult): void => {
+    results.push(result);
+    onStageResult?.(result);
+  };
+
   for (const stage of VOCAL_CHAIN_STAGES) {
     if (stage.effectId === null) {
-      results.push({ id: stage.id, label: stage.label, status: 'manual', derived: [] });
+      record({ id: stage.id, label: stage.label, status: 'manual', derived: [] });
       continue;
     }
     if (enabled[stage.id] !== true) {
-      results.push({ id: stage.id, label: stage.label, status: 'off', derived: [] });
+      record({ id: stage.id, label: stage.label, status: 'off', derived: [] });
       continue;
     }
 
     onStageStart?.(stage);
+    onStageProgress?.({
+      stageId: stage.id,
+      label: stage.label,
+      phase: 'measuring',
+      stageFraction: 0,
+      detail: STAGE_MEASURING_DETAIL,
+    });
     const resolution = resolveStage(stage, channels, sampleRate, f0P1Hz);
     if (!resolution.run) {
-      results.push({
+      record({
         id: stage.id,
         label: stage.label,
         status: 'declined',
@@ -865,6 +958,18 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
       continue;
     }
 
+    // The measurement it just took, phrased once — the same string for every
+    // rendering event of this stage, so the line does not flicker between the
+    // settings and a generic verb while the worker runs.
+    const renderingDetail = stageRenderingDetail(resolution.derived);
+    onStageProgress?.({
+      stageId: stage.id,
+      label: stage.label,
+      phase: 'rendering',
+      stageFraction: 0,
+      detail: renderingDetail,
+    });
+
     // Kept alive only until the delta is measured: the worker DETACHES the
     // buffers it is handed, so a before/after comparison needs its own copy.
     // One region-sized copy, released as soon as the stage is reported.
@@ -874,7 +979,16 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
     try {
       output = await runEffectOnChannels(stage.effectId, channels, sampleRate, resolution.params, {
         extra: resolution.extra,
-        onProgress: (f) => onProgress?.(totalWeight === 0 ? 1 : (doneWeight + stage.weight * f) / totalWeight),
+        onProgress: (f) => {
+          onProgress?.(totalWeight === 0 ? 1 : (doneWeight + stage.weight * f) / totalWeight);
+          onStageProgress?.({
+            stageId: stage.id,
+            label: stage.label,
+            phase: 'rendering',
+            stageFraction: f,
+            detail: renderingDetail,
+          });
+        },
       });
     } catch (err) {
       reportEffectFailure(err);
@@ -894,7 +1008,7 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
       f0P1Hz = output.report.f0P1Hz;
     }
 
-    results.push({
+    record({
       id: stage.id,
       label: stage.label,
       status: 'applied',

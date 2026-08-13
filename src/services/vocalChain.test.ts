@@ -1,6 +1,8 @@
 import {
   DE_ESSER_BIT_EXACT_OFFSET_DB,
   DE_ESSER_RMS_OFFSET_DB,
+  STAGE_MEASURING_DETAIL,
+  STAGE_RENDERING_DETAIL,
   VOCAL_CHAIN_STAGES,
   VOCAL_CHAIN_UNDO_LABEL,
   defaultStageSelection,
@@ -12,7 +14,10 @@ import {
   deriveRemoveSilence,
   runVocalChain,
   stageById,
+  stageRenderingDetail,
   type VocalChainStageId,
+  type VocalChainStageProgress,
+  type VocalChainStageResult,
 } from './vocalChain';
 import { defaultParamsFor, getEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
@@ -1225,6 +1230,171 @@ describe('runVocalChain', () => {
     for (let i = 1; i < seen.length; i++) expect(seen[i]).toBeGreaterThanOrEqual(seen[i - 1]);
     expect(seen[seen.length - 1]).toBe(1);
     expect(seen.filter((f) => f === 1)).toHaveLength(1);
+  });
+
+  // ── The live view (P1) ────────────────────────────────────────────────────
+  // `onProgress` is ONE number over the whole pass. It cannot say which stage is
+  // running, how far through THAT stage the run is, or what the stage is doing —
+  // and a stepper that highlights the current stage needs all three. These pin
+  // the additive contract; nothing about the chain's behaviour changes with the
+  // callbacks absent, which is what every other test in this file runs without.
+  //
+  // THE FIXTURE IS PART OF THE PIN. On uniform noise the quietest 500 ms is as
+  // loud as the rest, so `deriveCompressor` finds nothing above its own floor
+  // and DECLINES — a stage that declines never reaches the rendering phase at
+  // all, and a first draft of these tests was measuring an empty one without
+  // saying so. Eight loud windows with one genuinely quiet one give the gate a
+  // floor to measure and a programme to sit above, and `runsEverything` below
+  // fails if that ever stops being true.
+  const stepperFixture = (): Float32Array => withQuietWindow(8, 0.3, 0.003, 3);
+  const STEPPER_IDS = ['dc', 'compressor', 'limiter'] as const;
+
+  it('runs every stage the live-view tests assume runs — the fixture, guarded', async () => {
+    seedDoc([stepperFixture()]);
+    const report = await runVocalChain({ enabled: only(...STEPPER_IDS) });
+    for (const id of STEPPER_IDS) {
+      expect(report!.stages.find((s) => s.id === id)!.status).toBe('applied');
+    }
+  });
+
+  it('reports stage-scoped progress against the stage that is actually running, in chain order', async () => {
+    seedDoc([stepperFixture()]);
+    const seen: VocalChainStageProgress[] = [];
+    await runVocalChain({
+      enabled: only(...STEPPER_IDS),
+      onStageProgress: (p) => seen.push(p),
+    });
+    // GROUPED, not merely present. A `new Set(...)` comparison is satisfied by
+    // an implementation that interleaves every stage's events, which would tell
+    // a stepper nothing about which row to highlight — so the run-length
+    // encoding is what is asserted, and a stage may appear in it only once.
+    const runs: VocalChainStageId[] = [];
+    for (const e of seen) if (runs[runs.length - 1] !== e.stageId) runs.push(e.stageId);
+    expect(runs).toEqual(['dc', 'compressor', 'limiter']);
+    // Each event names the stage's own label, so the UI never has to look it up.
+    for (const e of seen) expect(e.label).toBe(stageById(e.stageId).label);
+  });
+
+  it('scopes every fraction to the ONE stage it describes, inside [0, 1]', async () => {
+    seedDoc([stepperFixture()]);
+    // The two callbacks are captured TOGETHER, in arrival order, because the
+    // claim under test is a relation between them: `stageFraction` must not be
+    // the overall fraction under a new name. Asserting the range alone does not
+    // reach that — the overall fraction is in [0, 1] too, and an implementation
+    // that simply forwarded it passed a range-only version of this test.
+    const seen: (VocalChainStageProgress & { overall: number })[] = [];
+    let overall = 0;
+    await runVocalChain({
+      enabled: only(...STEPPER_IDS),
+      onProgress: (f) => {
+        overall = f;
+      },
+      onStageProgress: (p) => seen.push({ ...p, overall }),
+    });
+
+    for (const e of seen) {
+      expect(e.stageFraction).toBeGreaterThanOrEqual(0);
+      expect(e.stageFraction).toBeLessThanOrEqual(1);
+    }
+    // It restarts at 0 for every stage. The overall fraction never returns to 0
+    // once the first stage has moved, so this alone kills a forwarded overall at
+    // the two announcement sites.
+    expect(seen.filter((e) => e.stageFraction === 0)).toHaveLength(6); // measuring + rendering-0, × 3 stages
+    expect(seen.some((e) => e.stageFraction > 0 && e.stageFraction < 1)).toBe(true);
+    // And it is genuinely a different quantity from the overall one: an early
+    // stage is FURTHER through itself than the pass is through the chain, and a
+    // late stage is LESS far. Both directions are asserted, so a constant offset
+    // or a monotone rescaling of the overall fraction cannot satisfy them.
+    const inFlight = seen.filter((e) => e.stageFraction > 0 && e.stageFraction < 1);
+    expect(inFlight.some((e) => e.stageFraction > e.overall)).toBe(true);
+    expect(inFlight.some((e) => e.stageFraction < e.overall)).toBe(true);
+    // Monotone WITHIN a stage: the fraction may only go backwards at a boundary.
+    for (let i = 1; i < seen.length; i++) {
+      if (seen[i].stageId !== seen[i - 1].stageId) continue;
+      expect(seen[i].stageFraction).toBeGreaterThanOrEqual(seen[i - 1].stageFraction);
+    }
+  });
+
+  it('measures before it renders, on every stage, and says so', async () => {
+    seedDoc([stepperFixture()]);
+    const seen: VocalChainStageProgress[] = [];
+    await runVocalChain({
+      enabled: only(...STEPPER_IDS),
+      onStageProgress: (p) => seen.push(p),
+    });
+    for (const id of STEPPER_IDS) {
+      const phases = seen.filter((e) => e.stageId === id).map((e) => e.phase);
+      expect(phases[0]).toBe('measuring');
+      // Once it renders it never goes back to measuring: the two phases are an
+      // order, not a pair of labels that can alternate.
+      expect(phases.indexOf('rendering')).toBeGreaterThan(-1);
+      expect(phases.lastIndexOf('measuring')).toBeLessThan(phases.indexOf('rendering'));
+    }
+    for (const e of seen.filter((p) => p.phase === 'measuring')) {
+      expect(e.detail).toBe(STAGE_MEASURING_DETAIL);
+    }
+  });
+
+  it("makes the rendering line the stage's OWN derived settings, not a second copy of them", async () => {
+    seedDoc([stepperFixture()]);
+    const seen: VocalChainStageProgress[] = [];
+    const report = await runVocalChain({
+      enabled: only(...STEPPER_IDS),
+      onStageProgress: (p) => seen.push(p),
+    });
+
+    // The compressor derives two values; the expectation is read out of the
+    // REPORT rather than written here, so a drift between what the live line
+    // says and what the finished report says is a failure rather than a
+    // difference nobody notices.
+    const compressor = report!.stages.find((s) => s.id === 'compressor')!;
+    expect(compressor.derived.length).toBeGreaterThan(0);
+    const rendering = seen.filter((e) => e.stageId === 'compressor' && e.phase === 'rendering');
+    expect(rendering.length).toBeGreaterThan(0);
+    for (const e of rendering) {
+      expect(e.detail).toBe(stageRenderingDetail(compressor.derived));
+      for (const d of compressor.derived) expect(e.detail).toContain(d.value);
+    }
+
+    // The limiter derives NOTHING — a ceiling is an absolute level — and says
+    // that instead of showing an empty line.
+    const limiter = report!.stages.find((s) => s.id === 'limiter')!;
+    expect(limiter.derived).toEqual([]);
+    for (const e of seen.filter((p) => p.stageId === 'limiter' && p.phase === 'rendering')) {
+      expect(e.detail).toBe(STAGE_RENDERING_DETAIL);
+    }
+  });
+
+  it('hands out each stage result the moment it lands — the very objects the report carries', async () => {
+    seedDoc([stepperFixture()]);
+    const seen: VocalChainStageResult[] = [];
+    const report = await runVocalChain({
+      enabled: only(...STEPPER_IDS),
+      onStageResult: (r) => seen.push(r),
+    });
+
+    // Every stage, run or not, in registry order — the same list the smoke
+    // compares against `registryStageIds`, so a live view built on this cannot
+    // show a different set of rows from the finished report.
+    expect(seen.map((r) => r.id)).toEqual(VOCAL_CHAIN_STAGES.map((s) => s.id));
+    // IDENTITY, not equality. This is what makes "the live row shows the
+    // report's own strings" structural rather than a promise: there is only one
+    // object, so there is nothing to keep in sync.
+    expect(seen).toHaveLength(report!.stages.length);
+    for (let i = 0; i < seen.length; i++) expect(seen[i]).toBe(report!.stages[i]);
+  });
+
+  it('fires the result callback for a stage that DECLINES too, with its reason', async () => {
+    // Too short for the hum probe, so DeHum declines — the live view must be
+    // able to say so while the rest of the pass is still running, which it
+    // cannot do if only applied stages report.
+    seedDoc([noise(Math.round(SR * 0.75), 0.3, 46)]);
+    const seen: VocalChainStageResult[] = [];
+    const report = await runVocalChain({ enabled: only('hum', 'limiter'), onStageResult: (r) => seen.push(r) });
+    const hum = seen.find((r) => r.id === 'hum')!;
+    expect(hum.status).toBe('declined');
+    expect(hum.reason).toEqual(expect.any(String));
+    expect(hum).toBe(report!.stages.find((s) => s.id === 'hum'));
   });
 
   it('records before/after metrics over the region it processed', async () => {
