@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react';
+import { X } from 'lucide-react';
 import WaveformView from './components/Editor/WaveformView';
 import SpectrogramView from './components/Editor/SpectrogramView';
 import MultitrackView from './components/Multitrack/MultitrackView';
@@ -27,8 +28,8 @@ import TranscriptPanel from './components/Panels/TranscriptPanel';
 import EditToolbar from './components/Layout/EditToolbar';
 import ModuleStrip, {
   MODULE_COLUMN_WIDTH,
-  SIDEBAR_TABS,
-  type SidebarTab,
+  MODULE_PANELS,
+  type PanelId,
 } from './components/Layout/ModuleStrip';
 import StatusBar from './components/Layout/StatusBar';
 import TempoCard from './components/Layout/TempoCard';
@@ -38,6 +39,7 @@ import { GlassCard, IconTile } from './components/UI/glass';
 import { registerAllEffects } from './effects/registerAll';
 import { registerDialogSetters, type ConvertMode } from './services/dialogBus';
 import { getInFlightSaveCount, hasUnsavedWork } from './services/fileService';
+import { getRemixSession, useRemixVersion } from './services/remixService';
 import { getStemBusyCount } from './services/stemService';
 import { getTranscribeBusyCount } from './services/transcribeService';
 import { getVoiceBusyCount } from './services/voiceService';
@@ -54,6 +56,13 @@ import { useAppStore } from './stores/appStore';
 // column is retired (user-approved via the 2026-07-28 mockup). 'remix' is
 // also reachable through `focusRemixPanel()` (dialogBus) the moment a remix
 // document is created, without the user finding the rail entry first.
+//
+// F11-8: that "also" is the whole rule now for three of the panels. The strip
+// draws five permanent icons; Remix appears only while a remix document exists,
+// and Spatial and Transcript have no icon at all — they are single tools, so
+// their commands (`spatial.position`, `edit.transcribe`) put their panels in
+// this same card through the bus. The card renders from MODULE_PANELS, which is
+// the wider list.
 //
 // U1: the rail rotated horizontal and moved into components/Layout/
 // ModuleStrip.tsx (layout E2) — same ids, same order, same `sidebar-tabs`
@@ -96,9 +105,33 @@ export default function App() {
   // U1: null = no panel card open. The strip's active entry closes it, which
   // is what lets the stage take the column's width (E2's "the waveform takes
   // every liberated pixel").
-  const [sidebarTab, setSidebarTab] = useState<SidebarTab | null>('history');
-  const activeTab = SIDEBAR_TABS.find((t) => t.id === sidebarTab) ?? null;
+  //
+  // F11-8: the card is resolved against MODULE_PANELS — every panel — while the
+  // strip draws icons for a subset, so `sidebarTab` can legitimately name a
+  // panel with no icon (Spatial, Transcript) that a command opened.
+  const [sidebarTab, setSidebarTab] = useState<PanelId | null>('history');
+  const activeTab = MODULE_PANELS.find((t) => t.id === sidebarTab) ?? null;
   const ActiveIcon = activeTab?.Icon ?? null;
+
+  // F11-8: "Remix should only appear when a remix is created" — so the entry's
+  // condition is the app's own notion of a remix document existing, read from
+  // remixService's session map (`getRemixSession`, the same question RemixPanel
+  // asks to decide it has something to show) over the OPEN documents. No new
+  // flag: a session is created by `createRemix` and dropped by
+  // `invalidateRemixSession`, which `closeDocumentFlow` already calls for the
+  // remix and its source. `useRemixVersion()` is the subscription that makes it
+  // reactive — that map is module state behind `useSyncExternalStore`, not
+  // zustand, exactly as RemixPanel documents.
+  useRemixVersion();
+  const hasRemix = documents.some((d) => getRemixSession(d.id) !== null);
+
+  // The one state the contextual entry can strand: the card is showing Remix
+  // when the last remix document goes. It closes — leaving it open would strand
+  // a card whose strip entry has just been taken away, and E2's rule is that a
+  // closed card hands the column's width back to the waveform.
+  useEffect(() => {
+    if (sidebarTab === 'remix' && !hasRemix) setSidebarTab(null);
+  }, [sidebarTab, hasRemix]);
 
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
@@ -285,9 +318,38 @@ export default function App() {
                 <IconTile>
                   <ActiveIcon size={15} />
                 </IconTile>
-                <span style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--glass-text-title)' }}>
+                <span
+                  className="min-w-0 flex-1 truncate"
+                  style={{ fontSize: 12.5, fontWeight: 600, color: 'var(--glass-text-title)' }}
+                >
                   {activeTab.label}
                 </span>
+                {/* F11-8: the card closes from its own header. Until now the
+                    strip's active entry was the ONLY way to close it — which
+                    stops being true the moment a card can show a panel the
+                    strip draws no icon for (Spatial, Transcript, and Remix
+                    after its last remix document goes). One rule for every
+                    panel rather than a conditional control: a card you opened
+                    is a card you can close, wherever you opened it from. */}
+                <button
+                  type="button"
+                  data-testid="sidebar-panel-close"
+                  aria-label={`Close the ${activeTab.label} panel`}
+                  title="Close this panel"
+                  onClick={() => setSidebarTab(null)}
+                  className="glass-rail-btn flex shrink-0 items-center justify-center"
+                  style={{
+                    width: 22,
+                    height: 22,
+                    borderRadius: 7,
+                    border: '1px solid transparent',
+                    background: 'transparent',
+                    color: 'var(--glass-text-chrome-idle)',
+                    cursor: 'pointer',
+                  }}
+                >
+                  <X size={13} />
+                </button>
               </div>
               <div className="min-h-0 overflow-auto">
                 {sidebarTab === 'files' && <FilesPanel />}
@@ -306,7 +368,7 @@ export default function App() {
         {/* U1: the module strip — the G4 icon rail rotated horizontal, sitting
             in the toolbar band at the column's width and driving the card
             below it. */}
-        <ModuleStrip activeTab={sidebarTab} onSelect={setSidebarTab} />
+        <ModuleStrip activeTab={sidebarTab} hasRemix={hasRemix} onSelect={setSidebarTab} />
 
         {/* U1 bottom band (mockup E2): the edit pill floating ABOVE the G2
             status pill, both centred on the WAVEFORM's axis rather than the

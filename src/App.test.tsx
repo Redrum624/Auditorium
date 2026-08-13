@@ -6,6 +6,8 @@ import { playbackEngine } from './audio/PlaybackEngine';
 import { multitrackPlayer } from './multitrack/MultitrackPlayer';
 import { getInFlightSaveCount } from './services/fileService';
 import { runCommand } from './services/menuActions';
+import { getRemixSession } from './services/remixService';
+import { focusTranscriptPanel } from './services/dialogBus';
 
 // Real fileService, except getInFlightSaveCount is swapped for a controllable
 // mock so the close-guard reply tests below (Task M4/F7) can force it to a
@@ -18,10 +20,32 @@ const mockGetInFlightSaveCount = getInFlightSaveCount as jest.MockedFunction<
   typeof getInFlightSaveCount
 >;
 
+// F11-8: the strip's Remix entry appears exactly while a remix DOCUMENT exists,
+// which the app answers with `getRemixSession(docId) !== null` — remixService's
+// own session map, the same question RemixPanel asks. Making a real session
+// here would mean running the planner over real audio for a test about an icon,
+// so the map's reader is the seam: everything else (which documents are open,
+// when the entry appears and disappears) stays real.
+jest.mock('./services/remixService', () => ({
+  ...jest.requireActual('./services/remixService'),
+  getRemixSession: jest.fn(() => null),
+}));
+const mockGetRemixSession = getRemixSession as jest.MockedFunction<typeof getRemixSession>;
+
+/** Marks `docId` as carrying a remix session, as remixService would. */
+function haveRemixSessionFor(docIds: string[]) {
+  const ids = new Set(docIds);
+  mockGetRemixSession.mockImplementation((id) =>
+    ids.has(id) ? ({ remixDocId: id } as never) : null
+  );
+}
+
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   delete (window as { electronAPI?: unknown }).electronAPI;
   mockGetInFlightSaveCount.mockReturnValue(0);
+  mockGetRemixSession.mockReset();
+  mockGetRemixSession.mockReturnValue(null);
 });
 
 describe('App', () => {
@@ -186,6 +210,29 @@ describe('native close guard renderer side (Task F8)', () => {
   });
 });
 
+/** A source document plus the computed 'Remix 1' made from it, with the SOURCE
+ * left active. Two documents rather than one because the remix document is the
+ * one carrying the (mocked) session: leaving it active would hand RemixPanel a
+ * session object this test has no business building, and sitting on the source
+ * with a remix open elsewhere is the ordinary case anyway. */
+function addRemixDocument() {
+  const source = createDocument({
+    name: 'source.wav',
+    sampleRate: 44100,
+    channels: [new Float32Array(1024)],
+  });
+  const remix = createDocument({
+    name: 'Remix 1',
+    sampleRate: 44100,
+    channels: [new Float32Array(1024)],
+  });
+  useAppStore.getState().addDocument(source);
+  useAppStore.getState().addDocument(remix);
+  useAppStore.getState().setActiveDocument(source.id);
+  haveRemixSessionFor([remix.id]);
+  return { source, remix };
+}
+
 describe('right sidebar tabs (Task 23)', () => {
   it('defaults to the History tab', () => {
     render(<App />);
@@ -204,27 +251,123 @@ describe('right sidebar tabs (Task 23)', () => {
     expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'history');
   });
 
-  it('offers the Remix tab (Task T15) and switches to it on click', () => {
+  // F11-8 rewrote this pair. T15's Remix tab was permanent; the user ruled that
+  // "Remix should only appear when a remix is created", so the entry is
+  // contextual now. What T15 pinned — the entry switches the card to a mounted
+  // RemixPanel — is unchanged and still pinned, from the state that offers it.
+  it('offers NO Remix entry until a remix document exists', () => {
     render(<App />);
+    expect(
+      within(screen.getByTestId('sidebar-tabs')).queryByRole('button', { name: 'Remix' })
+    ).toBeNull();
+  });
+
+  it('offers the Remix entry once a remix document exists, and switches to it on click (Task T15)', () => {
+    render(<App />);
+    act(() => {
+      addRemixDocument();
+    });
 
     const tabs = screen.getByTestId('sidebar-tabs');
-    expect(within(tabs).getByRole('button', { name: 'Remix' })).toBeInTheDocument();
-
     fireEvent.click(within(tabs).getByRole('button', { name: 'Remix' }));
     expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'remix');
     // The panel body is mounted, not just the tab state.
     expect(screen.getByText(/no remix for this document/i)).toBeInTheDocument();
   });
+
+  it('takes the Remix entry away again when the last remix document closes', () => {
+    render(<App />);
+    let remixId = '';
+    act(() => {
+      remixId = addRemixDocument().remix.id;
+    });
+    const tabs = screen.getByTestId('sidebar-tabs');
+    expect(within(tabs).getByRole('button', { name: 'Remix' })).toBeInTheDocument();
+
+    act(() => useAppStore.getState().closeDocument(remixId));
+    expect(within(tabs).queryByRole('button', { name: 'Remix' })).toBeNull();
+  });
+
+  // The awkward state the contextual entry creates, decided rather than left to
+  // chance: the card is showing Remix when the last remix document closes. It
+  // CLOSES. Leaving it open would strand a card whose only close affordance —
+  // its own strip entry — has just been taken away, and a closed card hands the
+  // module column's width back to the waveform, which is E2's own rule for what
+  // an empty column is worth.
+  it('closes the card when the open Remix card outlives its last remix document', () => {
+    render(<App />);
+    let remixId = '';
+    act(() => {
+      remixId = addRemixDocument().remix.id;
+    });
+    fireEvent.click(
+      within(screen.getByTestId('sidebar-tabs')).getByRole('button', { name: 'Remix' })
+    );
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'remix');
+
+    act(() => useAppStore.getState().closeDocument(remixId));
+
+    expect(screen.queryByTestId('sidebar-panel')).not.toBeInTheDocument();
+    expect(screen.getByTestId('editor-stage').style.getPropertyValue('--stage-inset-right')).toBe(
+      '14px'
+    );
+  });
 });
 
 describe('G4 module column, U1 module strip (the rail rotated horizontal)', () => {
-  it('mounts the strip exactly once, carrying all six panel entries', () => {
+  // F11-8: five permanent entries, not eight. Remix is contextual (its own
+  // tests above), and Spatial and Transcript left the strip altogether — the
+  // user ruled them single tools rather than modules, so they are reached by
+  // command and the strip never draws an icon for either.
+  it('mounts the strip exactly once, carrying the five permanent entries and nothing else', () => {
     render(<App />);
     const rails = screen.getAllByTestId('sidebar-tabs');
     expect(rails).toHaveLength(1);
-    for (const name of ['Files', 'Effects', 'Markers', 'History', 'Properties', 'Remix']) {
-      expect(within(rails[0]).getByRole('button', { name })).toBeInTheDocument();
-    }
+    expect(
+      within(rails[0])
+        .getAllByRole('button')
+        .map((b) => b.getAttribute('aria-label'))
+    ).toEqual(['Files', 'Effects', 'Markers', 'History', 'Properties']);
+  });
+
+  it('never draws a Spatial or Transcript entry, even with a remix in play', () => {
+    render(<App />);
+    act(() => {
+      addRemixDocument();
+    });
+    const strip = screen.getByTestId('sidebar-tabs');
+    expect(within(strip).queryByRole('button', { name: 'Spatial' })).toBeNull();
+    expect(within(strip).queryByRole('button', { name: 'Transcript' })).toBeNull();
+  });
+
+  // The two single tools still reach the SAME card, and the card still names
+  // them: the panel registry is wider than the strip's roster, which is the
+  // whole point of the split.
+  it('shows the Transcript surface in the card when the Transcribe tool asks for it', () => {
+    render(<App />);
+    act(() => focusTranscriptPanel());
+    const panel = screen.getByTestId('sidebar-panel');
+    expect(panel).toHaveAttribute('data-active-tab', 'transcript');
+    expect(within(panel).getByText('Transcript')).toBeInTheDocument();
+    expect(screen.getByText('No document open.')).toBeInTheDocument();
+  });
+
+  // With no strip icon, a Spatial or Transcript card had no way to close: the
+  // strip's own entry was the only affordance, and these panels have none. The
+  // card header carries one now, for every panel — one rule, no branch.
+  it('closes the card from its own header, including a panel the strip has no icon for', async () => {
+    render(<App />);
+    await act(async () => {
+      await runCommand('spatial.position');
+    });
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'spatial');
+
+    fireEvent.click(screen.getByRole('button', { name: /close the spatial panel/i }));
+
+    expect(screen.queryByTestId('sidebar-panel')).not.toBeInTheDocument();
+    expect(screen.getByTestId('editor-stage').style.getPropertyValue('--stage-inset-right')).toBe(
+      '14px'
+    );
   });
 
   // U1 (layout E2): the strip's active entry closes its card, and a closed
