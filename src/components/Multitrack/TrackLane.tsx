@@ -127,7 +127,15 @@ export default function TrackLane({
     // the pointer passed over a clip.
     const to = e.relatedTarget;
     if (to instanceof Node && e.currentTarget.contains(to)) return;
-    endDrag();
+    // This lane's own transient state always goes.
+    dropTargetsRef.current = null;
+    setGhostPx(null);
+    // F11: but the SHARED highlight is only relinquished if this lane still
+    // holds it. Crossing into a neighbouring lane fires that lane's `dragenter`
+    // BEFORE this lane's `dragleave`, so clearing unconditionally would blank
+    // the highlight the new lane had just claimed — one frame of no target at
+    // every lane boundary.
+    if (isDragTarget) onDragOverTrack(null);
   };
 
   const onDrop = (e: ReactDragEvent<HTMLDivElement>) => {

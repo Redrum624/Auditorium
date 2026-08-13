@@ -72,6 +72,14 @@ function channelLabel(count: number): string {
  * App owns one bottom band carrying the edit pill above this one, both centred
  * on the waveform's axis. This component is the pill and nothing else now, so
  * the two can share a gap the flex column guarantees. */
+/** F11: the samples-per-pixel readout. See its JSX for why it needs formatting
+ * at all. Exported for the test that pins the rounding. */
+export function formatSpp(samplesPerPixel: number): string {
+  if (!Number.isFinite(samplesPerPixel)) return String(samplesPerPixel);
+  if (samplesPerPixel >= 100) return String(Math.round(samplesPerPixel));
+  return String(Number.parseFloat(samplesPerPixel.toFixed(2)));
+}
+
 export default function StatusBar() {
   useTempoVersion();
   const documents = useAppStore((s) => s.documents);
@@ -175,8 +183,16 @@ export default function StatusBar() {
           {tempo.text}
         </span>
         <Divider />
+        {/* F11: formatted. Samples-per-pixel used to be an integer on every
+            path (`ceil(length / 1600)`); since fit-on-open it is
+            `docLength / laneWidth`, which almost never divides evenly — the
+            readout was printing `7812.222320637732` on a freshly opened file.
+            Two decimals below 100, none above: the fractional part only means
+            anything when zoomed in far enough for one pixel to be a handful of
+            samples. `Number.parseFloat(toFixed())` drops a trailing `.00`, so a
+            genuinely round value still reads as one. */}
         <span style={{ ...monoStyle, color: 'var(--glass-text-muted)' }}>
-          spp: {zoom.samplesPerPixel}
+          spp: {formatSpp(zoom.samplesPerPixel)}
         </span>
         <Divider />
         <LevelMeter channels={doc?.channels.length ?? 2} />

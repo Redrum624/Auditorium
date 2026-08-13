@@ -471,3 +471,35 @@ describe('laneDrop degrades the way its header says it does (I4)', () => {
     expect(doneLabels()).toEqual([]);
   });
 });
+
+// F11 fix round (minor): crossing from one lane to the next fires the NEW
+// lane's `dragenter` before the OLD lane's `dragleave`, so a `dragleave` that
+// cleared the shared target unconditionally blanked the highlight the new lane
+// had just claimed — one frame of nothing highlighted at every boundary.
+describe('the highlight does not blink when the drag crosses lanes (I4 minor)', () => {
+  it('hands the highlight straight over, with no frame in between', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[1], 'dragenter', dt);
+    fireDrag(lanes()[1], 'dragover', dt, { clientX: 100 });
+    expect(isHighlighted(lanes()[1])).toBe(true);
+
+    // The real event order for a lane-to-lane crossing.
+    fireDrag(lanes()[2], 'dragenter', dt);
+    fireDrag(lanes()[1], 'dragleave', dt, { relatedTarget: lanes()[2] });
+
+    const lit = lanes().filter((l) => isHighlighted(l));
+    expect(lit).toHaveLength(1);
+    expect(lit[0]).toBe(lanes()[2]);
+  });
+
+  it('still clears everything when the drag leaves the lanes entirely', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[1], 'dragenter', dt);
+    fireDrag(lanes()[1], 'dragover', dt, { clientX: 100 });
+
+    fireDrag(lanes()[1], 'dragleave', dt, { relatedTarget: document.body });
+
+    expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
+    expect(ghost()).toBeNull();
+  });
+});

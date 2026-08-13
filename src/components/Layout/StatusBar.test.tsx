@@ -1,5 +1,5 @@
 import { render, screen, act } from '@testing-library/react';
-import StatusBar from './StatusBar';
+import StatusBar, { formatSpp } from './StatusBar';
 import LevelMeter from './LevelMeter';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
@@ -262,5 +262,29 @@ describe('LevelMeter', () => {
   it('renders a single bar for mono', () => {
     const { container } = render(<LevelMeter channels={1} />);
     expect(container.querySelectorAll('.h-2')).toHaveLength(1);
+  });
+});
+
+// F11 fix round (minor): the readout used to print raw `samplesPerPixel`, which
+// was always an integer while the zoom was `ceil(length / 1600)`. Fit-on-open
+// made it `docLength / laneWidth`, so a freshly opened file showed
+// `spp: 7812.222320637732`.
+describe('formatSpp (F11)', () => {
+  it('drops the noise on a fractional zoom, which is now the ordinary case', () => {
+    expect(formatSpp(7812.222320637732)).toBe('7812');
+  });
+
+  it('keeps two decimals when zoomed in far enough for them to mean something', () => {
+    expect(formatSpp(0.03125)).toBe('0.03');
+    expect(formatSpp(12.5)).toBe('12.5');
+  });
+
+  it('does not add a trailing .00 to a value that really is round', () => {
+    expect(formatSpp(4)).toBe('4');
+    expect(formatSpp(512)).toBe('512');
+  });
+
+  it('passes a non-finite value through rather than printing NaN arithmetic', () => {
+    expect(formatSpp(Number.POSITIVE_INFINITY)).toBe('Infinity');
   });
 });
