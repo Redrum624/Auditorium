@@ -36,9 +36,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   across its FULL timeline width, capped at 4096 device px, then blit-STRETCHED over that width —
   so a 3-minute clip drew its visible portion from a small fraction of those columns and magnified
   it. Fix: the visible band is drawn at 1:1×dpr through the editor's own bucket/sample draw, now
-  exported so the two surfaces cannot drift; the full-clip raster and its cap are retired, which is
-  strictly less memory than the capped raster it replaces. Affects:
-  `components/Multitrack/ClipView.tsx`, `components/Editor/waveformRender.ts`.
+  exported so the two surfaces cannot drift; the full-clip raster and its cap are retired. That is
+  NOT "strictly less memory than the capped raster" — an earlier draft of this entry said so and it
+  is false, because it compared a CSS-pixel band against a device-pixel cap: the band's backing
+  store is ~4864 device px at dpr 2, which is LARGER than the 4096-px cap it replaces. The real win
+  is that the raster no longer scales with clip LENGTH (a 3-minute clip cost ~7.6 MB at default
+  zoom and ~30 MB at 4×) and that the LRU-200 cache retaining up to two hundred of them is gone
+  entirely — peak memory falls by orders of magnitude, while the per-clip raster merely becomes
+  bounded instead of unbounded. Affects: `components/Multitrack/ClipView.tsx`,
+  `components/Editor/waveformRender.ts`.
 
 - **Native `<select>` popups no longer render light-gray text on white.** Reported against Cover
   Chain's Reference picker. Cause: NOT the missing `color-scheme` the report assumed — that has
@@ -72,6 +78,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   by a test. Affects: `src/components/Dialogs/CoverChainDialog.tsx`.
 
 <!-- M4: found by combining the three lines -->
+- **Three guards were passing on nothing, and one of them was guarding the release's headline fix.**
+  (1) `stemLanding.test.ts`'s fitted-session guard used a 12 000-sample fixture whose fit is 8.72
+  samples/px, so a hardcoded 512 is coarser than the zoom-out ceiling and gets CLAMPED back to the
+  fit before any assertion sees it — reverting `stemLanding.ts` to the original bug left the suite
+  green. It now uses a 20 s fixture (local to that test: raising the shared constant took the suite
+  from 31 s to over 600 s, measured) and asserts `fit > 512` first, so the fixture cannot silently
+  stop being able to express the bug. (2) `nativeSelect.test.tsx`'s source law matched `background:`
+  and `background-color:` but not React's `backgroundColor:` — the spelling every select in this app
+  would actually use, and one already present in four places — and its own self-test never exercised
+  camelCase, so the hole was invisible from inside the test. The matcher now covers it, including
+  behind a ternary, while a following `border:` still cannot be mistaken for the background. (3) The
+  walker's select sweep named the Spatial and Properties pickers in its docblock while running only
+  inside the dialog walk, where neither panel is mounted; it now sweeps both cards, and reports how
+  many selects each contributed so a zero cannot hide. Affects: `src/services/stemLanding.test.ts`,
+  `src/components/UI/nativeSelect.test.tsx`, `scripts/e2e-navigate.cjs`.
 - **Two packaged-walk steps were silently testing nothing, each broken by a change the other line
   made.** Neither line could have seen it: the multitrack work never ran the smoke, and the Pipeline
   work never ran the walker. (1) The session-undo step's trim drag grabbed a clip's right edge at

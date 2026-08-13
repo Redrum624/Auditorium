@@ -545,10 +545,22 @@ along with the confidence that produced it. Your whole take is then placed at th
 — nothing is stretched and no syllable is moved, so a take that drifts against the record
 still drifts. Two thresholds have to be cleared before the number is believed, and both
 are measured rather than chosen; below either one the stage places your take at the start
-of the original and **tells you the numbers** instead of guessing. If the take belonged
+of the original and **tells you the numbers** instead of guessing. Known offsets come back
+within 10 ms in both signs, at equal rates and across 44.1/48 kHz — but that figure assumes
+a normal take level. It is level-dependent and it degrades without warning: 8.4 ms at unity,
+10.9 ms at −40 dB, 21.6 ms at −70 dB, and the take is BELIEVED at all three, so a very quiet
+take is placed a frame or two out rather than refused. Normalise a quiet take before running
+the journey; `docs/KNOWN_LIMITATIONS.md` carries the measured table. If the take belonged
 *before* the original's own start, both tracks are pushed later by the same amount rather
 than your take being clamped to zero — clamping would have silently thrown away the offset
 that was just measured.
+
+**Key and tempo are not decided for you.** This is the fourth of the four sentences the
+tool states above its own button, and it was missing here. Pitch and timing each need you
+to confirm the target first: on the song this was measured on, the drums read ~160 BPM
+while everything else read ~109, every confidence below the app's own threshold — an
+automatic pick would have been a coin flip. That is why the journey aligns but does not
+transpose or re-time, and why the two tools below stay yours to run.
 
 **Two tools stay manual, deliberately, and are worth running afterwards.**
 `Pipeline → Align Lyrics…` replaces one word you pick with a fresh take of that word;
@@ -614,7 +626,7 @@ stages behind one bar. The bar at the foot of the tool is labelled *Whole journe
 is deliberately a different number from the highlighted row's: separation is roughly nine
 tenths of the work, so that bar can sit almost still while a great deal is happening.
 
-<!-- CP1: what the journey dialog deliberately does not show -->
+<!-- CP1: what the journey tool deliberately does not show -->
 **What the journey report does not show, and where to find it.** The old Cover Chain dialog
 printed two tables: the match curve band by band (what the EQ was asked for, what it realised,
 what gain it was handed) and a before/after table of loudness, envelope spread, noise floor and

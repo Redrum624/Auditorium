@@ -61,9 +61,22 @@ export function hostedToolIds(): string[] {
  * It is measured, not chosen: 640 is the widest `width` any of the nine hands
  * `DialogShell` (`CoverChainDialog`), with Auto-Remix and Vocal Chain at 600
  * and Align Lyrics at 560 behind it. Hosting at anything narrower would reflow
- * content that was laid out against those numbers — the cover chain's stage
- * table and the remix plan's per-run bars are the two that would break first —
- * and hosting at anything wider would buy nothing but stage.
+ * content laid out against those numbers, and anything wider would buy nothing
+ * but stage.
+ *
+ * M4: this paragraph used to name "the cover chain's stage table" as the content
+ * that would break first. That table no longer exists — the journey rewrite
+ * removed both of the Cover Chain's multi-column tables — so the example was
+ * describing a dialog that had not looked like that for a release. The remix
+ * plan's per-run bars are now the widest laid-out content among the nine and are
+ * what a narrower host would break.
+ *
+ * Which leaves 640 held by the REQUEST rather than by that request's content:
+ * `CoverChainDialog` still asks for 640 and `DialogShell` still renders it at
+ * 640, so the host must match or crop it — but its own widest row measures about
+ * 310 px inside a 578 px content box, i.e. it has headroom to spare. If it is
+ * ever re-fitted to what it now draws, this constant follows it down and the
+ * stage gets the difference back; the test below derives it either way.
  *
  * What it costs, counted properly: the lane is inset on BOTH sides (14 left as
  * well as the column's 14 + width + 14 right), so at the app's minimum window
