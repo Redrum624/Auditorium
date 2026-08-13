@@ -3104,6 +3104,150 @@ async function main() {
       { timeout: 5000 }
     );
 
+    // F11: 16d) drag a document from the Files panel onto a track lane -------
+    // The user's report was "we can't drag a file on a track in multitrack,
+    // it's a real issue". HTML5 drag-and-drop did not exist anywhere in this
+    // app before F11-4, so this is the first packaged coverage of it.
+    //
+    // The four events MUST share ONE `DataTransfer` — that object is the whole
+    // channel between the source and the target, and a fresh one per event
+    // makes the drop arrive carrying nothing. It is parked on `window` between
+    // evaluates rather than dispatched in a single blocking one, so React
+    // flushes its state between `dragover` and the mid-drag read below;
+    // reading in the same synchronous run would race the render.
+    console.log('Multitrack: dragging a Files-panel document onto a lane (F11)...');
+    await page.evaluate(() => window.__test.setView('multitrack'));
+    await openModuleCard(page, 'Files');
+    await page.waitForSelector('[data-testid="files-item"]', { timeout: 5000 });
+    await page.waitForSelector('[data-testid="track-lane"]', { timeout: 5000 });
+
+    const laneBox = await page.evaluate(() => {
+      const lane = document.querySelector('[data-testid="track-lane"]');
+      const r = lane.getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+    const f11DropX = Math.round(laneBox.x + laneBox.width * 0.45);
+    const f11DropY = Math.round(laneBox.y + laneBox.height / 2);
+    const clipsBefore = await page.evaluate(
+      () => document.querySelectorAll('[data-testid="track-lane"]')[0].querySelectorAll('[data-testid="clip"]').length
+    );
+
+    await page.evaluate(() => {
+      const row = document.querySelector('[data-testid="files-item"]');
+      const dt = new DataTransfer();
+      window.__f11dt = dt;
+      row.dispatchEvent(
+        new DragEvent('dragstart', { bubbles: true, cancelable: true, dataTransfer: dt })
+      );
+    });
+    await page.evaluate(
+      ({ x, y }) => {
+        const lane = document.querySelectorAll('[data-testid="track-lane"]')[0];
+        for (const type of ['dragenter', 'dragover']) {
+          lane.dispatchEvent(
+            new DragEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              clientX: x,
+              clientY: y,
+              dataTransfer: window.__f11dt,
+            })
+          );
+        }
+      },
+      { x: f11DropX, y: f11DropY }
+    );
+
+    // DURING the drag: the lane must say it is the target, and the ghost must
+    // show where the clip would land. "No highlight = no action" is the rule
+    // the user has to be able to read off the screen.
+    const midDrag = await page.evaluate(() => {
+      const lane = document.querySelectorAll('[data-testid="track-lane"]')[0];
+      return {
+        background: lane.style.backgroundColor,
+        ghost: document.querySelectorAll('[data-testid="clip-drop-ghost"]').length,
+        payload: [...window.__f11dt.types],
+      };
+    });
+    console.log(
+      `  mid-drag: lane background "${midDrag.background}", ${midDrag.ghost} ghost, ` +
+        `payload ${JSON.stringify(midDrag.payload)}`
+    );
+    assert(
+      midDrag.background !== '' && midDrag.background !== 'transparent',
+      `the lane under the pointer highlights itself (actual "${midDrag.background}")`
+    );
+    assert(midDrag.ghost === 1, `a ghost line shows the snapped drop point (actual ${midDrag.ghost})`);
+    assert(
+      midDrag.payload.includes('application/x-auditorium-document-id'),
+      `the Files row published a document id to drag (actual ${JSON.stringify(midDrag.payload)})`
+    );
+
+    await page.evaluate(
+      ({ x, y }) => {
+        const lane = document.querySelectorAll('[data-testid="track-lane"]')[0];
+        lane.dispatchEvent(
+          new DragEvent('drop', {
+            bubbles: true,
+            cancelable: true,
+            clientX: x,
+            clientY: y,
+            dataTransfer: window.__f11dt,
+          })
+        );
+        delete window.__f11dt;
+      },
+      { x: f11DropX, y: f11DropY }
+    );
+    await page.waitForFunction(
+      (before) =>
+        document.querySelectorAll('[data-testid="track-lane"]')[0].querySelectorAll(
+          '[data-testid="clip"]'
+        ).length > before,
+      clipsBefore,
+      { timeout: 5000 }
+    );
+    const afterDrop = await page.evaluate(() => ({
+      clips: document.querySelectorAll('[data-testid="track-lane"]')[0].querySelectorAll(
+        '[data-testid="clip"]'
+      ).length,
+      ghost: document.querySelectorAll('[data-testid="clip-drop-ghost"]').length,
+      background: document.querySelectorAll('[data-testid="track-lane"]')[0].style.backgroundColor,
+    }));
+    assert(
+      afterDrop.clips === clipsBefore + 1,
+      `the drop placed exactly one clip on that lane (${clipsBefore} -> ${afterDrop.clips})`
+    );
+    assert(
+      afterDrop.ghost === 0 &&
+        (afterDrop.background === '' || afterDrop.background === 'transparent'),
+      `the highlight and the ghost are cleaned up after the drop (ghost ${afterDrop.ghost}, ` +
+        `background "${afterDrop.background}")`
+    );
+
+    // The drop is ONE labelled undo step. Read off the History card rather
+    // than a hook: there is no session-history test hook, and the panel IS the
+    // surface the user reads, so asserting on it also proves the drop reached
+    // the session history the multitrack Undo routes to.
+    await openModuleCard(page, 'History');
+    await page.waitForSelector('[data-testid="history-item"]', { timeout: 5000 });
+    const dropHistory = await page.evaluate(() =>
+      [...document.querySelectorAll('[data-testid="history-item"]')].map((li) =>
+        li.textContent.trim()
+      )
+    );
+    const dropTop = dropHistory[dropHistory.length - 1];
+    console.log(`  session history: ${JSON.stringify(dropHistory)}`);
+    assert(
+      typeof dropTop === 'string' && /Add clips?/.test(dropTop),
+      `the drop landed in the SESSION history under a clip-add label (actual ` +
+        `${JSON.stringify(dropTop)}) — that it FOLDS into a single entry is pinned by ` +
+        `the unit tests, which can count the entries a gesture adds; this step can only ` +
+        `see the label on top`
+    );
+
+    await page.evaluate(() => window.__test.setView('waveform'));
+
     // 17) v1.7 stem separation (Task S7) — LAST, because it leaves the app in
     // the multitrack view with five new documents and must not perturb any
     // step above (including the screenshot).
