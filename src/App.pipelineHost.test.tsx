@@ -30,11 +30,33 @@ jest.mock('./components/Dialogs/TempoDialog', () => {
         title: 'Match Tempo',
         dismissable: !busy,
         onClose,
-        children: React.createElement(
-          'button',
-          { type: 'button', onClick: () => setBusy((b) => !b) },
-          busy ? 'finish pass' : 'start pass'
-        ),
+        children: [
+          React.createElement(
+            'button',
+            { key: 'toggle', type: 'button', onClick: () => setBusy((b) => !b) },
+            busy ? 'finish pass' : 'start pass'
+          ),
+          // The hand-off shape RemixDialog and TranscribeDialog really have:
+          // the pass ends and the panel is opened in the SAME synchronous
+          // block, so React has not re-rendered and `busy` is still true at
+          // the moment the panel is asked for. Reproduced exactly, because it
+          // is the case a naive "refuse while running" guard breaks.
+          React.createElement(
+            'button',
+            {
+              key: 'handover',
+              type: 'button',
+              onClick: () => {
+                setBusy(false);
+                jest
+                  .requireActual<typeof import('./services/dialogBus')>('./services/dialogBus')
+                  .focusTranscriptPanel();
+                onClose();
+              },
+            },
+            'finish and hand over'
+          ),
+        ],
       });
     },
   };
@@ -258,6 +280,43 @@ describe('while a hosted pass is running', () => {
 
     fireEvent.click(stripButton('Markers'));
     expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'markers');
+  });
+
+  /**
+   * The hand-off, and why it is NOT refused.
+   *
+   * RemixDialog ends with `onClose(); focusRemixPanel();` and TranscribeDialog
+   * with `focusTranscriptPanel(); onClose();` — in both, the pass finishes and
+   * the panel is asked for in one synchronous block, so React has not
+   * re-rendered and "a pass is running" still reads true at that instant. A
+   * guard that refused every panel request while running would therefore fire
+   * on the completion path of the two tools that have one, every single time,
+   * and strand the user in a tool with nothing left to say.
+   */
+  it('lets a finishing tool hand over to its result panel', async () => {
+    await startPass();
+    fireEvent.click(screen.getByRole('button', { name: 'finish and hand over' }));
+
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('tool-host')).toBeNull();
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'transcript');
+    expect(hasOpenDialog()).toBe(false);
+    for (const button of within(strip()).getAllByRole('button')) {
+      expect(button).not.toBeDisabled();
+    }
+  });
+
+  /**
+   * The other side of that line: `focusSpatialPanel` is not a hand-off. Its
+   * only caller is the `spatial.position` command — a menu row the user picks —
+   * and taking it mid-pass would unmount the running tool and discard the pass
+   * exactly as switching module would. So that one IS guarded.
+   */
+  it('still refuses the Spatial Positioner command, which is a user’s choice to leave', async () => {
+    await startPass();
+    await openTool('spatial.position');
+    expect(screen.getByTestId('tool-host')).toHaveAttribute('data-tool-id', 'tempo.match');
+    expect(showMessageBox).toHaveBeenCalledTimes(1);
   });
 
   // A stale `true` here would leave every global shortcut suppressed for the

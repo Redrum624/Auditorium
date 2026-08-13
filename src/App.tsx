@@ -216,19 +216,52 @@ export default function App() {
     [refuseWhileRunning]
   );
 
-  /** U2-3: put a PANEL in the card, dropping any hosted tool. The three
-   * `focus*Panel` bus entries land here. */
+  /**
+   * U2-3: put a PANEL in the card, dropping any hosted tool. The three
+   * `focus*Panel` bus entries land here — and they do NOT all get the same
+   * treatment, because they are not the same kind of request.
+   *
+   * `focusRemixPanel` and `focusTranscriptPanel` are a FINISHING TOOL handing
+   * over its own result: RemixDialog calls one straight after `onClose()`,
+   * TranscribeDialog calls the other straight before it, both from inside the
+   * handler that has just completed the pass. Refusing those would strand the
+   * user in a tool with nothing left to say — and it would happen every time,
+   * because a dialog's `busy` flag and its follow-up call are the same
+   * synchronous block: React has not re-rendered yet, so "is a pass running"
+   * still reads true at the instant the tool says it is done. That is not a
+   * race to fix here; it is the wrong question being asked of the wrong caller.
+   *
+   * `focusSpatialPanel` is different in kind: its only caller is the
+   * `spatial.position` COMMAND, i.e. the user picking a menu row, which mid-run
+   * would unmount a running tool and discard the pass exactly as switching
+   * module would. So that one is guarded, and the two hand-offs are not.
+   */
   const showPanel = useCallback(
-    (panel: PanelId) => {
-      if (toolRunningRef.current) {
+    (panel: PanelId, guard: 'guard-while-running' | 'tool-handover' = 'tool-handover') => {
+      if (guard === 'guard-while-running' && toolRunningRef.current) {
         refuseWhileRunning();
         return;
       }
+      // The tool is going; nothing it reports after this can be trusted, and a
+      // stale `true` would lock the strip for the session.
+      toolRunningRef.current = false;
+      setToolRunning(false);
+      setHostedToolRunning(false);
       setHostedTool(null);
       setSidebarTab(panel);
     },
     [refuseWhileRunning]
   );
+
+  /** U2-3: the host's own dismissal. Clearing the flag here is what makes
+   * RemixDialog's `onClose(); focusRemixPanel();` work — by the time it closes
+   * itself the pass is over, whatever its not-yet-committed state still says. */
+  const closeTool = useCallback(() => {
+    toolRunningRef.current = false;
+    setToolRunning(false);
+    setHostedToolRunning(false);
+    setHostedTool(null);
+  }, []);
 
   /** U2-3: the strip's own selection — never reached while a pass runs, because
    * the strip is disabled then (`lockedReason`). */
@@ -330,12 +363,14 @@ export default function App() {
         openVocalChainDialog: () => openTool('effects.vocalChain'),
         openCoverChainDialog: () => openTool('effects.coverChain'),
         openAlignLyricsDialog: () => openTool('lyrics.align'),
+        // U2-3: hand-offs from a tool that has just finished — never refused.
         focusRemixPanel: () => showPanel('remix'),
         focusTranscriptPanel: () => showPanel('transcript'),
         // F11-8: the Pipeline > Mix command's only effect. Spatial is a single
         // tool rather than a module (user ruling), so this is how its panel
         // reaches the card now that the strip draws no icon for it.
-        focusSpatialPanel: () => showPanel('spatial'),
+        // U2-3: a user COMMAND rather than a hand-off, so it is guarded.
+        focusSpatialPanel: () => showPanel('spatial', 'guard-while-running'),
       }),
     [openTool, showPanel]
   );
@@ -476,7 +511,7 @@ export default function App() {
           {hostedTool !== null ? (
             <PipelineToolHost
               commandId={hostedTool}
-              onClose={() => setHostedTool(null)}
+              onClose={closeTool}
               onDismissableChange={handleToolDismissable}
             />
           ) : (
