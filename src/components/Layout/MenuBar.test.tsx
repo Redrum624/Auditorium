@@ -4,13 +4,19 @@ import { registerAllEffects } from '../../effects/registerAll';
 import { getMenuSections, registerEffectCommands } from '../../services/menuActions';
 
 describe('MenuBar', () => {
-  it('renders a button for each of the 5 sections', () => {
+  // F11-7 made this six: Pipeline joined the bar, after Effects.
+  it('renders a button for each of the 6 sections, in the menu’s own order', () => {
     render(<MenuBar />);
-    expect(screen.getByRole('button', { name: 'File' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Edit' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Effects' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'View' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Help' })).toBeInTheDocument();
+    for (const title of ['File', 'Edit', 'Effects', 'Pipeline', 'View', 'Help']) {
+      expect(screen.getByRole('button', { name: title })).toBeInTheDocument();
+    }
+    // The bar renders the sections the service publishes, in that order — not a
+    // second list that can drift from it.
+    const bar = screen.getByRole('button', { name: 'File' }).closest('div')!.parentElement!;
+    const rendered = Array.from(bar.querySelectorAll('button.chrome-menu-btn')).map(
+      (b) => b.textContent
+    );
+    expect(rendered).toEqual(getMenuSections().map((s) => s.title));
   });
 
   it('opens the File dropdown on click and lists Open…', () => {
