@@ -21,9 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Fix: `sessionZoom.ts` resolves every session zoom through one clamp (fit == the zoom-out ceiling,
   100% == fit, the editor's F11-3/F11-9 ruling restated for a session) against a lane width
   `MultitrackView` measures and publishes; the cluster follows the active view; the first clip into
-  an empty session re-fits, later inserts do not. Affects: `multitrack/sessionZoom.ts`,
-  `multitrack/sessionViewport.ts`, `multitrack/sessionStore.ts`, `components/Multitrack/`,
-  `components/Layout/Toolbar.tsx`.
+  an empty session re-fits, later inserts do not. **All FOUR session-load paths** commit a fitted
+  zoom — `newSession`, Open Session, stem landing and the `openSessionFrom` test hook. The last
+  three were missed on the first pass and are the reason the bug outlived it: opening the reported
+  2:58 `.audm` still gave 512 samples/px against a fit of 5704.8, i.e. 15.97 s visible at ~1114%,
+  and nothing downstream rescued it (`publishSessionLaneWidth` only re-fits a view already AT its
+  fit). A session that gets SHORTER — delete a clip, trim one, undo — re-resolves too, so the zoom
+  can never sit past a ceiling that moved under it and read as "fitted" to the next insert.
+  Affects: `multitrack/sessionZoom.ts`, `multitrack/sessionViewport.ts`,
+  `multitrack/sessionStore.ts`, `multitrack/sessionFile.ts`, `services/stemLanding.ts`,
+  `services/testHooks.ts`, `components/Multitrack/`, `components/Layout/Toolbar.tsx`.
 
 - **Clip waveforms in the multitrack are drawn to the same standard as the editor's.** Clips
   rendered as a coarse solid blob or a thin sparse line. Cause: a clip's envelope was rasterised
@@ -41,8 +48,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   translucent white (`rgba(255,255,255,.04/.05/.06)`) that composites dark on the stage and
   near-white in the popup, under text coloured for near-black. An author background outranks the
   UA's dark base. Fix: an opaque `--glass-field-bg` token plus `select`/`option` element rules, and
-  the three inline backgrounds switched over. Affects: `index.css`, `components/UI/glass.tsx`,
-  `components/Dialogs/CoverChainDialog.tsx`, `components/Panels/SpatialPanel.tsx`.
+  the three inline backgrounds switched over. The SELECTED row — the one under the cursor when the
+  popup opens — needed the same treatment: it was `var(--accent-soft)`, itself translucent, and is
+  now that accent composited over the field background once (`#1c3238`). Affects: `index.css`,
+  `components/UI/glass.tsx`, `components/Dialogs/CoverChainDialog.tsx`,
+  `components/Panels/SpatialPanel.tsx`.
 
 ### Changed
 
@@ -56,13 +66,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Play with two 3-minute tracks still stalls when the session rate does not match the files.**
   MEASURED, not fixed. `MultitrackPlayer.play()` calls `readClipSlice` for every clip
-  synchronously, which resamples the whole clip when `doc.sampleRate !== session.sampleRate`. On
-  the packaged app with two 180 s stereo 48 kHz clips in a 44.1 kHz session, `play()` blocks for
-  **14 547 ms** (process-cold median 15 476 ms). The identical build with the session at 48 kHz —
-  same fixtures, same machine, only the resample branch removed — blocks for **156.5 ms**, so
-  ~99% of the stall is the synchronous 64-tap sinc resample and the remainder is the copy/scale
-  loop. The status bar reading "44.1 kHz" over two 48 kHz files is the visible corner of the same
-  mismatch. Reproduce:
+  synchronously, which resamples the whole clip when `doc.sampleRate !== session.sampleRate`.
+  Measured on the packaged app with two 180 s stereo 48 kHz clips on two tracks, medians:
+
+  | session rate | `play()` process-cold | `play()` fresh ctx, warm process | re-play, running ctx |
+  |---|---|---|---|
+  | 44 100 Hz (mismatched) | **22 039 ms** | **21 237 ms** | 42 718 ms |
+  | 48 000 Hz (matched) | **223 ms** | **182 ms** | 275 ms |
+
+  Same build, same fixtures, same machine — only the resample branch differs, so **~99% of the
+  stall is the synchronous 64-tap sinc resample**; the ~200 ms residual is `readClipSlice`'s copy
+  plus `buildClipBuffer`'s scale loop (~34.6 M samples, ~138 MB allocated per play). The audible
+  estimate the rig also reports (~50 ms) is measured AFTER `play()` returns and must be added to
+  it, not read instead of it. The status bar reading "44.1 kHz" over two 48 kHz files is the
+  visible corner of the same mismatch. Verdicts committed under `docs/bench/`. Reproduce:
+  `npm run build` then
   `node scripts/first-play-latency-rig.cjs --content=songs [--session-rate=48000]`.
 
 ## [1.25.0] - 2026-08-13

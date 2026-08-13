@@ -104,6 +104,53 @@ describe('resolveSessionZoom — the ONE clamp', () => {
       .samplesPerPixel).toBe(25);
   });
 
+  it('pins MT_MIN_SPP to its literal, not to whatever the code says', () => {
+    // A constant asserted only against itself moves for free. 1/32 is the
+    // editor's MIN_SPP, and the two surfaces agreeing is a deliberate choice
+    // (see the module docblock) rather than an import — so the number is
+    // written down here, where a change has to be argued for.
+    expect(MT_MIN_SPP).toBe(1 / 32);
+  });
+
+  it('resolves the scroll against the RESOLVED spp, never the requested one', () => {
+    // The anchored gestures (wheel-zoom on the pointer, the -/+ buttons on the
+    // cursor) pass a scroll FUNCTION so the anchor stays under the same x. At a
+    // limit the requested and resolved spp differ, and feeding the request to
+    // that function is exactly how an anchor drifts at the edge of the range.
+    // Requesting an absurd zoom-out resolves to `fit`, so the function must be
+    // handed `fit` and not 1e9.
+    const fit = fitSessionSamplesPerPixel(session, 1000);
+    const seen: number[] = [];
+    resolveSessionZoom(
+      session,
+      {
+        samplesPerPixel: 1e9,
+        scrollSample: (spp) => {
+          seen.push(spp);
+          return 0;
+        },
+      },
+      1000
+    );
+    expect(seen).toEqual([fit]);
+    expect(seen[0]).not.toBe(1e9);
+
+    // ...and the same at the zoom-IN limit, where the clamp moves the other way.
+    const seenIn: number[] = [];
+    resolveSessionZoom(
+      session,
+      {
+        samplesPerPixel: 0,
+        scrollSample: (spp) => {
+          seenIn.push(spp);
+          return 0;
+        },
+      },
+      1000
+    );
+    expect(seenIn).toEqual([MT_MIN_SPP]);
+  });
+
   it('keeps the visible window inside the timeline PLUS its open-ended tail', () => {
     // The one place this deliberately diverges from the editor: a document has
     // a hard end, a session timeline does not — a clip has to be droppable

@@ -91,11 +91,22 @@ function gainLinePath(x0: number, x1: number, height: number, gainAt: (u: number
  *
  * The cap is DELETED rather than raised, and deliberately not replaced by a
  * bigger one, because the fix removes the thing it was protecting against: the
- * raster now covers only the on-screen band (`ticWindow`, at most viewport +
- * two 256-px quanta ≈ 2.5 kpx), so it is STRICTLY SMALLER than the 4096-px cap
- * it replaces at every zoom and on every clip. A cap on top of a
- * viewport-bounded raster would be a second bound on an already-bounded number,
- * i.e. dead code that reads like a live safeguard.
+ * raster now covers only the on-screen band (`ticWindow`, at most the viewport
+ * plus two 256-px quanta) instead of the whole clip, so it is bounded by the
+ * WINDOW rather than by the content. A cap on top of a viewport-bounded raster
+ * would be a second bound on an already-bounded number, i.e. dead code that
+ * reads like a live safeguard.
+ *
+ * Stated in the right units, because an earlier draft of this paragraph claimed
+ * "strictly smaller than the 4096-px cap at every zoom" and that is FALSE: it
+ * compared a CSS-pixel band against a DEVICE-pixel cap. The band is ~2.5 k CSS
+ * px on a 2 k-wide window, and the backing store is `(band) · dpr` — 4864 device
+ * px at dpr 2, which is LARGER than 4096. The real win is not a smaller single
+ * raster; it is that the raster no longer scales with clip length (a 3-minute
+ * clip cost ~7.6 MB at default zoom and ~30 MB at 4x) and that the LRU-200
+ * cache retaining up to two hundred of them is gone entirely. Peak memory falls
+ * by orders of magnitude; the per-clip raster is merely bounded instead of
+ * unbounded.
  *
  * The one thing that must never come back is the full-clip-width canvas: clips
  * are never viewport-culled, so a clip-width raster is unbounded by

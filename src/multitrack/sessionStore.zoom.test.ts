@@ -186,3 +186,106 @@ describe('publishSessionLaneWidth', () => {
     expect(zoom()).toBe(settled);
   });
 });
+
+// ---------------------------------------------------------------------------
+// MT1 fix round (I2) — a session that gets SHORTER re-resolves
+// ---------------------------------------------------------------------------
+/*
+ * `fit` is the zoom-out ceiling, and `fit` is a function of the session's
+ * length — so any mutation that SHORTENS the session moves the ceiling down and
+ * can leave the committed zoom above it, in the state the whole single-clamp
+ * design exists to make unreachable.
+ *
+ * Two visible consequences, both reachable by deleting one clip:
+ *   - the readout drops below 100% (34% was the measured case), which the user
+ *     guide says cannot happen;
+ *   - `addClip`'s "was it fitted?" arm is `spp >= fit`, so an out-of-range zoom
+ *     reads as FITTED and the next insert silently re-fits — throwing away a
+ *     zoom the user chose, which is the one thing that arm promises not to do.
+ *
+ * Re-resolving is done in ONE place, on the store's own subscription, because
+ * the mutations that can shorten a session are five (`removeClip`,
+ * `removeTrack`, `trimClip`, `moveClip`) plus undo/redo restore, and undo does
+ * not go through any of the four.
+ */
+describe('the empty-session arm of the first-clip re-fit', () => {
+  // Mutation kill: deleting `!hasAnyClip(s.session)` from addClip's `refit`
+  // left every other fixture in the suite passing, because they all insert into
+  // a session sitting at its fit — where the SECOND arm (`spp >= fit`) already
+  // says yes. The empty case is the one the arms disagree about, and it is the
+  // reported bug: an empty session is fitted to the 60 s placeholder, so a real
+  // clip arriving is far coarser than the placeholder's fit and `spp >= fit` is
+  // FALSE. Without the empty arm the first insert leaves the session at the
+  // placeholder zoom.
+  it('re-fits the first clip even though the placeholder zoom is NOT at the new fit', () => {
+    publishSessionLaneWidth(1000 + MT_HEADER_W);
+    const placeholder = zoom().samplesPerPixel;
+    const trackId = store().session.tracks[0].id;
+    store().addClip(trackId, clipOf(0, 178 * SR));
+
+    const fitNow = fitSessionSamplesPerPixel(store().session);
+    // The precondition that makes this a real test: the second arm cannot fire.
+    expect(placeholder).toBeLessThan(fitNow);
+    expect(zoom().samplesPerPixel).toBe(fitNow);
+    expect(zoom().samplesPerPixel).not.toBe(placeholder);
+  });
+});
+
+describe('a session that gets shorter re-resolves its zoom', () => {
+  /** A long clip and a short one; fitted to the long one. */
+  function seedLongAndShort(): { trackId: string; longId: string } {
+    const trackId = store().session.tracks[0].id;
+    const long = clipOf(0, 178 * SR);
+    const short = clipOf(0, 4 * SR);
+    store().addClip(trackId, long);
+    store().addClip(store().session.tracks[1].id, short);
+    publishSessionLaneWidth(1000 + MT_HEADER_W);
+    return { trackId, longId: long.id };
+  }
+
+  it('re-clamps when the longest clip is deleted', () => {
+    const { longId } = seedLongAndShort();
+    expect(zoom().samplesPerPixel).toBe(fitSessionSamplesPerPixel(store().session));
+
+    store().removeClip(longId);
+
+    const fitNow = fitSessionSamplesPerPixel(store().session);
+    expect(sessionEndSample(store().session)).toBe(4 * SR);
+    expect(zoom().samplesPerPixel).toBeLessThanOrEqual(fitNow);
+    // Still exactly AT the fit, which is what "100%" means on this surface.
+    expect(zoom().samplesPerPixel).toBe(fitNow);
+  });
+
+  it('does not let a shortened session smuggle a re-fit past the user-chose rule', () => {
+    const { trackId, longId } = seedLongAndShort();
+    // The user zooms IN — a deliberate choice that later inserts must respect.
+    const chosen = fitSessionSamplesPerPixel(store().session) / 4;
+    applySessionZoom({ samplesPerPixel: chosen, scrollSample: 0 });
+    expect(zoom().samplesPerPixel).toBe(chosen);
+
+    store().removeClip(longId);
+    // Deleting the long clip leaves `chosen` ABOVE the new fit, so it is
+    // re-clamped down to it — the zoom cannot survive as an unreachable state.
+    const fitNow = fitSessionSamplesPerPixel(store().session);
+    expect(zoom().samplesPerPixel).toBe(fitNow);
+
+    // ...and the next insert, arriving at a genuinely fitted view, re-fits. The
+    // regression this guards is the opposite: before I2 the stale zoom sat
+    // ABOVE the fit, `spp >= fit` read TRUE, and the insert re-fitted a view the
+    // user had chosen while believing it had not.
+    store().addClip(trackId, clipOf(0, 90 * SR));
+    expect(zoom().samplesPerPixel).toBe(fitSessionSamplesPerPixel(store().session));
+  });
+
+  it('leaves a zoom that is still in range exactly where the user put it', () => {
+    const { trackId, longId } = seedLongAndShort();
+    void trackId;
+    // Zoomed in far enough that the SHORT clip's fit is still coarser than this.
+    const chosen = 1;
+    applySessionZoom({ samplesPerPixel: chosen, scrollSample: 0 });
+
+    store().removeClip(longId);
+
+    expect(zoom().samplesPerPixel).toBe(chosen);
+  });
+});

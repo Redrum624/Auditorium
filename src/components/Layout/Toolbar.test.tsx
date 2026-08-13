@@ -628,6 +628,31 @@ describe('MT1-1: the zoom cluster in the multitrack view', () => {
     expect(useAppStore.getState().zoom).toEqual(before);
   });
 
+  it('the − and + buttons move the session zoom by the factor, in the right direction', () => {
+    // Mutation kill: the earlier cases only asserted that the editor zoom was
+    // untouched and that Fit landed on the fit, so swapping `*` and `/` inside
+    // `zoomSessionBy` — or dropping the factor entirely — survived. The OUTPUT
+    // is asserted here: out is coarser, in is finer, and the pair round-trips.
+    seedSession();
+    act(() =>
+      useSessionStore.getState().setMtZoom({ samplesPerPixel: CLIP_LEN / LANE / 4, scrollSample: 0 })
+    );
+    render(<Toolbar />);
+    const spp0 = useSessionStore.getState().mtZoom.samplesPerPixel;
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom Out' }));
+    const out = useSessionStore.getState().mtZoom.samplesPerPixel;
+    expect(out).toBeGreaterThan(spp0);
+    expect(out).toBeCloseTo(spp0 * 1.25, 6);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+    const back = useSessionStore.getState().mtZoom.samplesPerPixel;
+    expect(back).toBeCloseTo(spp0, 6);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+    expect(useSessionStore.getState().mtZoom.samplesPerPixel).toBeCloseTo(spp0 / 1.25, 6);
+  });
+
   it('the % readout reads the session, and 100% is its fit', () => {
     seedSession();
     render(<Toolbar />);

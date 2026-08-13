@@ -50,9 +50,11 @@ export default function MultitrackView() {
   // the editor, published here for the session. `publishSessionLaneWidth` takes
   // the SCROLLER's width and subtracts the header column itself, so the 224 px
   // constant stays a layout fact of this file and a zoom fact of exactly one
-  // module. A session opened (from `.audm`, from stem landing, from a first
-  // insert) before any lane existed was fitted to the fallback width; this is
-  // the moment that becomes wrong and the moment it is re-fitted.
+  // module. A session opened before any lane existed was fitted to the FALLBACK
+  // width, so the first real measurement re-fits it — but only because those
+  // load paths now commit a fitted zoom (C1). While they wrote a hardcoded 512
+  // this effect rescued nothing: `publishSessionLaneWidth` only re-fits a view
+  // already AT its fit, and 512 is far zoomed in of it for any real session.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;

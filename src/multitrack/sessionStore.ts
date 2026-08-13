@@ -22,6 +22,7 @@ import {
   defaultSessionZoom,
   fitSessionSamplesPerPixel,
   resolveSessionZoom,
+  sessionTimelineLength,
   type SessionZoomRequest,
 } from './sessionZoom';
 import { laneWidthFromScrollerWidth, sessionLaneWidth, setSessionLaneWidth } from './sessionViewport';
@@ -1013,10 +1014,21 @@ export function applySessionZoom(requested: SessionZoomRequest): void {
  *
  *  - a session that was sitting at the fit stays at the fit — a fitted view
  *    stays fitted across a window resize, the only reading of Fit that survives
- *    the user dragging the window edge, and the arm that re-fits a session
- *    opened (from `.audm`, from stem landing) before any lane existed;
+ *    the user dragging the window edge;
  *  - anything zoomed in is merely re-resolved, which re-clamps the scroll to
  *    the new lane without throwing away where the user was looking.
+ *
+ * WHAT THIS IS NOT (MT1 fix round, I1). An earlier draft of this docblock also
+ * called the first arm "the arm that re-fits a session opened from `.audm` or
+ * from stem landing before any lane existed". It never did, and could not: those
+ * paths committed a hardcoded 512 samples/px, which for anything longer than
+ * about sixteen seconds is far zoomed IN of the fit, so `wasFitted` was false
+ * and the arm was not taken. `measured` is module-global besides, so a SECOND
+ * session opened in the same run finds the width unchanged and returns at the
+ * guard without touching the zoom at all. Believing that sentence is what let
+ * the reported bug survive the first pass: the load paths were left writing 512
+ * because a rescue was assumed downstream. They now fit at the source (C1), and
+ * this function is only what its two arms say.
  */
 export function publishSessionLaneWidth(scrollerWidth: number): void {
   const previous = sessionLaneWidth();
@@ -1028,6 +1040,45 @@ export function publishSessionLaneWidth(scrollerWidth: number): void {
     wasFitted ? { samplesPerPixel: Number.POSITIVE_INFINITY, scrollSample: 0 } : s.mtZoom
   );
 }
+
+/**
+ * MT1 (I2) — a session that gets SHORTER re-resolves its zoom.
+ *
+ * `fit` is the zoom-out ceiling AND a function of the session's length, so any
+ * mutation that shortens the timeline moves the ceiling down underneath a zoom
+ * that was legal when it was committed. The result is precisely the state the
+ * single-clamp design exists to make unreachable: measured at 44x past the fit
+ * after deleting one long clip, with the readout at 34% on a surface whose user
+ * guide says it never drops below 100%.
+ *
+ * Worse than cosmetic, because `addClip`'s "was this view fitted?" arm is
+ * `spp >= fit`: a stale over-the-ceiling zoom reads as FITTED, so the next
+ * insert re-fits and throws away a zoom the user deliberately chose — the one
+ * thing that arm promises not to do.
+ *
+ * ONE subscription rather than a call at the end of each mutation, because the
+ * shortening paths are `removeClip`, `removeTrack`, `trimClip` and `moveClip`
+ * PLUS undo/redo restore — and undo restores a snapshot without running any of
+ * the four, so a per-action call would have missed it. Watching the length is
+ * also the honest statement of the rule: it is the length that moves the
+ * ceiling, whatever moved the length.
+ *
+ * Only SHRINKING re-resolves. Growth is `addClip`'s business and it has its own
+ * deliberate policy (fit on the first clip, respect a chosen zoom after that);
+ * re-resolving on growth here would be a second, competing opinion. And
+ * re-resolving is not re-fitting: `applySessionZoom` re-clamps only what is now
+ * out of range, so a zoom that still fits is left exactly where the user put it.
+ */
+let lastTimelineLength = sessionTimelineLength(useSessionStore.getState().session);
+useSessionStore.subscribe((s) => {
+  const length = sessionTimelineLength(s.session);
+  if (length === lastTimelineLength) return;
+  const shrank = length < lastTimelineLength;
+  lastTimelineLength = length;
+  // The re-resolve below writes mtZoom, which re-enters this subscriber; the
+  // length is unchanged by then, so it returns at the guard above.
+  if (shrank) applySessionZoom(s.mtZoom);
+});
 
 // R3 — binds the session undo plumbing to this store (one-way dependency:
 // this module imports sessionUndo, never the reverse). The snapshot is
