@@ -5,6 +5,7 @@ const { createCloseGuard } = require('./closeGuard.cjs');
 const { setAppPaths } = require('./writePathPolicy.cjs');
 const { isMediaAllowed } = require('./permissionPolicy.cjs');
 const { isPackagedGateOpen } = require('./prodGate.cjs');
+const { shouldAutoOpenDevTools } = require('./devToolsPolicy.cjs');
 const { createStemManager, registerStemIpc } = require('./stemManager.cjs');
 const { createTranscribeManager, registerTranscribeIpc } = require('./transcribeManager.cjs');
 const { createVoiceManager, registerVoiceIpc } = require('./voiceManager.cjs');
@@ -60,6 +61,19 @@ function createWindow() {
 
   win.once('ready-to-show', () => {
     win.show();
+    // USER RULE: while developing, the console is open without being asked
+    // for. Dev runs only -- see devToolsPolicy.cjs for why a packaged build
+    // and the smoke harness are both excluded. Detached so it never takes
+    // width from the window the app laid itself out for.
+    if (
+      shouldAutoOpenDevTools({
+        isPackaged: app.isPackaged,
+        viteDevServer: process.env.VITE_DEV_SERVER,
+        auditoriumTest: process.env.AUDITORIUM_TEST,
+      })
+    ) {
+      win.webContents.openDevTools({ mode: 'detach' });
+    }
   });
 
   // F23: also gated on !app.isPackaged, so a packaged build always loads the
