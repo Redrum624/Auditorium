@@ -14,7 +14,7 @@ import { createDocument, docLength } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
-import { mixdownSession } from '../multitrack/mixdown';
+import { PEAK_BLOCK_SAMPLES, mixdownSession } from '../multitrack/mixdown';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import * as coverAlign from '../dsp/coverAlign';
 import * as stemService from './stemService';
@@ -1020,6 +1020,49 @@ describe('runCoverJourney — smoothing and the level check', () => {
     expect(stage.warning).toContain('above full scale');
     // Nothing was normalised on the user's behalf — the fix is named, not done.
     expect(stage.warning).toMatch(/fader/);
+  });
+
+  // CC4 (CJ-6): the stage needs ONE number and was allocating two session-length
+  // Float32Arrays to read it — ~346 MB for the 15-minute session the separation
+  // cap admits, on the renderer thread, at the run's peak-memory moment.
+  it('reads the summed peak without allocating the render it throws away', async () => {
+    // Long enough that the session exceeds one peak block, or the block-sized
+    // buffer and the session-length one are the same size and this passes
+    // against the old code.
+    seed(true, SR, SR * 20);
+    expect(SR * 20).toBeGreaterThan(PEAK_BLOCK_SAMPLES);
+
+    const Real = globalThis.Float32Array;
+    let counting = false;
+    let largest = 0;
+    class Counting extends Real {
+      constructor(arg?: unknown) {
+        super(arg as number);
+        if (counting && typeof arg === 'number' && arg > largest) largest = arg;
+      }
+    }
+    (globalThis as { Float32Array: unknown }).Float32Array = Counting;
+    let report: Awaited<ReturnType<typeof runCoverJourney>>;
+    try {
+      report = await runCoverJourney({
+        songDocId: songId,
+        takeDocId: takeId,
+        // Stage 6 is last, so this scopes the count to it and to nothing else —
+        // stage 1's instrumental sum is a song-length allocation and is not
+        // what this measures.
+        onStageStart: (s) => {
+          counting = s.id === 'smooth';
+        },
+      });
+    } finally {
+      (globalThis as { Float32Array: unknown }).Float32Array = Real;
+    }
+
+    expect(report!.completed).toBe(true);
+    expect(largest).toBeGreaterThan(0); // it really did sum something
+    expect(largest).toBeLessThanOrEqual(PEAK_BLOCK_SAMPLES);
+    // …and the number it reports is still the pre-clamp peak, unchanged.
+    expect(Number.isFinite(report!.smoothing!.summedPeakDb)).toBe(true);
   });
 
   it('says nothing about the level when there is nothing to say', async () => {

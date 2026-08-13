@@ -15,12 +15,12 @@
  * and it contains no DSP: every stage below is an existing, reviewed, shipped
  * service called with the right inputs in the right order.
  *
- *   1. Separate      → `stemService.separateStems` + `stemLanding.landStems`
+ *   1. Separate      → `stemService.separateStems` + `stemLanding.createStemDocuments`
  *   2. Clean         → `vocalChain.runVocalChain`
  *   3. Align         → `dsp/coverAlign.alignTakeToReference`
  *   4. Match         → `coverChain.runCoverChain`, the four stages unchanged
  *   5. Place         → `multitrack/session` + the load-shaped session apply
- *   6. Smooth        → the v1.9 clip fades + `mixdown.mixdownSession`'s peak
+ *   6. Smooth        → the v1.9 clip fades + `mixdown.mixdownSessionPeak`
  *
  * The one genuinely new thing is the alignment, and it lives in `dsp/coverAlign`
  * with its own ground-truth tests and a threshold it measured.
@@ -73,7 +73,7 @@ import {
   alignTakeToReference,
   type AlignmentMeasurement,
 } from '../dsp/coverAlign';
-import { mixdownSession } from '../multitrack/mixdown';
+import { mixdownSessionPeak } from '../multitrack/mixdown';
 import {
   createClip,
   createTrack,
@@ -1207,15 +1207,25 @@ export async function runCoverJourney(
       },
     }));
 
-    // ONE mixdown of the finished session, for its pre-clamp peak. The clamped
+    // ONE summation of the finished session, for its pre-clamp peak. The clamped
     // output cannot answer the question — its peak is 1.0 by construction — so
-    // `mixdownSession` reports what the bus reached before the clamp.
+    // the mixdown reports what the bus reached before the clamp.
+    //
+    // CC4 (CJ-6): the PEAK-ONLY mode, which sums block by block and keeps only
+    // the running maximum. This stage reads one number and discarded the render,
+    // and `mixdownSession` allocated two session-length Float32Arrays to produce
+    // it — ~346 MB for the 15-minute session the separation cap admits,
+    // synchronously on the renderer thread, at the moment the app is already
+    // holding the song, five stems, the instrumental and the take. An OOM here
+    // lands in this module's catch as a failed final stage after everything else
+    // succeeded. The number is identical (mixdown's suite asserts that with
+    // `toBe` over every fixture shape), so nothing about the report changes.
     const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const));
-    const mixed = mixdownSession(useSessionStore.getState().session, docs, (f) =>
+    const peakBeforeClamp = mixdownSessionPeak(useSessionStore.getState().session, docs, (f) =>
       emit(stage, 'summing the session to measure what it peaks at', f)
     );
-    const summedPeakDb = toDb(mixed.peakBeforeClamp);
-    const overCeiling = mixed.peakBeforeClamp > 1;
+    const summedPeakDb = toDb(peakBeforeClamp);
+    const overCeiling = peakBeforeClamp > 1;
 
     smoothing = {
       fadeInSample: fadeIn,

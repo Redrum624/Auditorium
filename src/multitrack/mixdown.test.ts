@@ -1,6 +1,34 @@
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import type { Clip, Session, Track } from './session';
-import { mixdownSession } from './mixdown';
+import { PEAK_BLOCK_SAMPLES, mixdownSession, mixdownSessionPeak } from './mixdown';
+
+/**
+ * CC4 (CJ-6): the largest `new Float32Array(n)` made while `fn` runs.
+ *
+ * A subclass rather than a wrapper function: `new` on it still produces a real
+ * Float32Array (every typed-array method and `instanceof` keeps working), and
+ * arrays created BEFORE the swap — the fixture documents' own channels — are
+ * untouched, so only the code under test is measured. `subarray` returns the
+ * species of the receiver, so slices of a plain document channel are not
+ * counted, which is exactly right: they are windows, not allocations.
+ */
+function trackLargestAllocation(fn: () => unknown): number {
+  const Real = globalThis.Float32Array;
+  let largest = 0;
+  class Counting extends Real {
+    constructor(arg?: unknown) {
+      super(arg as number);
+      if (typeof arg === 'number' && arg > largest) largest = arg;
+    }
+  }
+  (globalThis as { Float32Array: unknown }).Float32Array = Counting;
+  try {
+    fn();
+  } finally {
+    (globalThis as { Float32Array: unknown }).Float32Array = Real;
+  }
+  return largest;
+}
 
 // ---------------------------------------------------------------------------
 // Test builders. Sessions are constructed as plain objects (mixdownSession is
@@ -246,6 +274,156 @@ describe('mixdownSession', () => {
     ]);
     const seen: number[] = [];
     mixdownSession(s, docsMap(doc), (f) => seen.push(f));
+    expect(seen.length).toBeGreaterThan(0);
+    expect(seen[seen.length - 1]).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CC4 (CJ-6) — the peak-only render
+// ---------------------------------------------------------------------------
+
+/**
+ * The cover journey's smoothing stage mixes the whole session down to read ONE
+ * number and throws the render away: two session-length Float32Arrays, ~346 MB
+ * for the 15-minute session the separation cap admits, allocated at the run's
+ * peak-memory moment with the renderer already holding the song, five stems, the
+ * instrumental and the take.
+ *
+ * The requirement is EQUALITY, not approximation — this is the same renderer
+ * summing the same clips in the same order, block by block, so every case in the
+ * suite above must produce the identical number. Anything less would make the
+ * reported peak depend on which of the two functions the caller happened to use.
+ */
+describe('mixdownSessionPeak', () => {
+  const ramp = Array.from({ length: 1000 }, (_, i) => (i % 100) / 100);
+
+  /** Every fixture shape the suite above exercises, in one list. */
+  function cases(): { label: string; s: Session; docs: Map<string, AudioDocument> }[] {
+    const mono = monoDoc('doc-1', ramp);
+    const stereo = stereoDoc(
+      'doc-2',
+      ramp.map((v) => v * 0.5),
+      ramp.map((v) => -v)
+    );
+    const slow = monoDoc('doc-3', new Float32Array(500).fill(0.5), 22050);
+    const hot = monoDoc('doc-4', new Float32Array(300).fill(1));
+    return [
+      {
+        label: 'overlapping mono clips, centre pan',
+        s: session([
+          track({ clips: [clip({ documentId: 'doc-1', lengthSample: 1000 })] }),
+          track({ clips: [clip({ documentId: 'doc-1', startSample: 500, lengthSample: 1000 })] }),
+        ]),
+        docs: docsMap(mono),
+      },
+      {
+        label: 'stereo balance law, gains and a hard pan',
+        s: session([
+          track({ pan: -1, volumeDb: -6, clips: [clip({ documentId: 'doc-2', lengthSample: 1000, gainDb: -3 })] }),
+          track({ pan: 0.5, clips: [clip({ documentId: 'doc-2', startSample: 250, lengthSample: 1000 })] }),
+        ]),
+        docs: docsMap(stereo),
+      },
+      {
+        label: 'solo, mute and an offset clip',
+        s: session([
+          track({ solo: true, clips: [clip({ documentId: 'doc-1', lengthSample: 400, offsetSample: 200 })] }),
+          track({ muted: true, clips: [clip({ documentId: 'doc-4', lengthSample: 300 })] }),
+          track({ clips: [clip({ documentId: 'doc-4', lengthSample: 300 })] }),
+        ]),
+        docs: docsMap(mono, hot),
+      },
+      {
+        label: 'edge fades, the journey\'s own shape',
+        s: session([
+          track({
+            clips: [
+              clip({
+                documentId: 'doc-2',
+                lengthSample: 1000,
+                fadeInSample: 100,
+                fadeOutSample: 100,
+                fadeInCurve: 'equal-power',
+                fadeOutCurve: 'equal-power',
+              }),
+            ],
+          }),
+        ]),
+        docs: docsMap(stereo),
+      },
+      {
+        label: 'a crossfaded pair',
+        s: session([
+          track({
+            clips: [
+              clip({ documentId: 'doc-1', startSample: 0, lengthSample: 600, fadeOutSample: 100 }),
+              clip({ documentId: 'doc-1', startSample: 500, lengthSample: 500, fadeInSample: 100 }),
+            ],
+          }),
+        ]),
+        docs: docsMap(mono),
+      },
+      {
+        label: 'a rate-mismatched clip',
+        s: session([track({ clips: [clip({ documentId: 'doc-3', lengthSample: 1000 })] })], 44100),
+        docs: docsMap(slow),
+      },
+      {
+        label: 'summing past full scale, where the clamp hides the answer',
+        s: session([
+          track({ pan: -1, clips: [clip({ documentId: 'doc-4', lengthSample: 300 })] }),
+          track({ pan: -1, clips: [clip({ documentId: 'doc-4', lengthSample: 300 })] }),
+        ]),
+        docs: docsMap(hot),
+      },
+      { label: 'an empty session', s: session([track(), track()], 48000), docs: docsMap() },
+    ];
+  }
+
+  it.each(cases().map((c) => [c.label, c] as const))(
+    'reports EXACTLY the full render\'s pre-clamp peak — %s',
+    (_label, c) => {
+      const full = mixdownSession(c.s, c.docs);
+      expect(mixdownSessionPeak(c.s, c.docs)).toBe(full.peakBeforeClamp);
+    }
+  );
+
+  it('agrees across a session many blocks long, not just one', () => {
+    // Longer than the block the peak pass works in, and deliberately not a
+    // multiple of it — a block loop that dropped the tail would still pass on a
+    // round length.
+    const n = PEAK_BLOCK_SAMPLES * 3 + 517;
+    const data = new Float32Array(n);
+    for (let i = 0; i < n; i++) data[i] = Math.sin(i / 97) * 0.3;
+    // The one and only sample that carries the peak sits in the LAST partial
+    // block, where a dropped tail would lose it.
+    data[n - 13] = 0.91;
+    const doc = monoDoc('doc-long', data);
+    const s = session([track({ clips: [clip({ documentId: 'doc-long', lengthSample: n })] })]);
+
+    const full = mixdownSession(s, docsMap(doc));
+    expect(mixdownSessionPeak(s, docsMap(doc))).toBe(full.peakBeforeClamp);
+    expect(full.peakBeforeClamp).toBeCloseTo(0.91 * CP, 6);
+  });
+
+  it('never allocates a session-length buffer — the whole point of it', () => {
+    const n = PEAK_BLOCK_SAMPLES * 4;
+    const doc = monoDoc('doc-big', new Float32Array(n).fill(0.5));
+    const s = session([track({ clips: [clip({ documentId: 'doc-big', lengthSample: n })] })]);
+
+    const largest = trackLargestAllocation(() => mixdownSessionPeak(s, docsMap(doc)));
+    expect(largest).toBeLessThanOrEqual(PEAK_BLOCK_SAMPLES);
+    // The fixture must be able to express the failure: the full render DOES
+    // allocate the session length, twice.
+    expect(trackLargestAllocation(() => mixdownSession(s, docsMap(doc)))).toBe(n);
+  });
+
+  it('reports progress ending at 1', () => {
+    const doc = monoDoc('doc-1', ramp);
+    const s = session([track({ clips: [clip({ documentId: 'doc-1', lengthSample: 1000 })] })]);
+    const seen: number[] = [];
+    mixdownSessionPeak(s, docsMap(doc), (f) => seen.push(f));
     expect(seen.length).toBeGreaterThan(0);
     expect(seen[seen.length - 1]).toBe(1);
   });

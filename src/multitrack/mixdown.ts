@@ -444,36 +444,47 @@ export function clipFadeGainAt(spec: ClipFadeSpec, i: number): number {
   return g;
 }
 
-export function mixdownSession(
-  session: Session,
-  docs: Map<string, AudioDocument>,
-  onProgress?: (fraction: number) => void
-): MixdownResult {
-  const sr = session.sampleRate;
-  const anySolo = session.tracks.some((t) => t.solo);
-  const audible = session.tracks.filter((t) => isAudible(t, anySolo));
-
+/** Timeline length of a session: the furthest clip end over audible tracks. */
+function sessionLength(audible: readonly Track[]): number {
   let length = 0;
   for (const t of audible) {
     for (const c of t.clips) {
       length = Math.max(length, c.startSample + c.lengthSample);
     }
   }
+  return length;
+}
 
-  if (length === 0) {
-    onProgress?.(1);
-    return {
-      channels: [new Float32Array(0), new Float32Array(0)],
-      sampleRate: sr,
-      peakBeforeClamp: 0,
-    };
-  }
-
-  const L = new Float32Array(length);
-  const R = new Float32Array(length);
-
-  const total = audible.length;
-  let done = 0;
+/**
+ * CC4 (CJ-6) — accumulates every audible clip into `L`/`R` over the timeline
+ * WINDOW `[windowStart, windowEnd)`, with `L[0]` standing for timeline sample
+ * `windowStart`.
+ *
+ * THE loop, factored out of {@link mixdownSession} unchanged so that the
+ * peak-only pass below is the same renderer rather than a second one that has to
+ * agree with it. The full render calls it once over the whole timeline
+ * (`windowStart = 0`, `windowEnd = length`), where every index below reduces to
+ * exactly what it was before. Per-sample results cannot depend on the windowing:
+ * a sample's value is the sum of the contributions landing on it, tracks and
+ * clips are visited in the same order in either mode, and each `+=` still rounds
+ * through the same float32 store — which is what lets the peak pass claim
+ * EQUALITY with the full render rather than approximation.
+ *
+ * `length` is the whole timeline length, not the window's: it bounds the clip
+ * reads exactly as before, so a clip running past the end is truncated at the
+ * same sample either way.
+ */
+function accumulateWindow(
+  audible: readonly Track[],
+  docs: Map<string, AudioDocument>,
+  sr: number,
+  length: number,
+  L: Float32Array,
+  R: Float32Array,
+  windowStart: number,
+  windowEnd: number,
+  onTrackDone?: () => void
+): void {
   for (const t of audible) {
     const trackGain = dbToLinear(t.volumeDb);
     // F0 — the track's active automation, from the SAME resolver the player
@@ -500,6 +511,14 @@ export function mixdownSession(
 
       const base = c.startSample;
       const n = Math.min(slice[0].length, length - base);
+      // CC4 (CJ-6): the part of this clip that lands inside the window. `i0`/`i1`
+      // are CLIP-LOCAL, so every gain, fade and automation lookup below indexes
+      // exactly what it did when the window was the whole timeline (`i0 = 0`,
+      // `i1 = n`) — the window only decides which samples are visited and where
+      // they are stored.
+      const i0 = Math.max(0, windowStart - base);
+      const i1 = Math.min(n, windowEnd - base);
+      if (i1 <= i0) continue;
       const spec = fadeSpecs.get(c.id);
       if (auto) {
         // F0 — AUTOMATED track: the hoisted static factors above are dead for
@@ -527,7 +546,7 @@ export function mixdownSession(
         // lives in the player's bake (`buildClipBuffer`), so the two engines
         // cannot disagree about which law governs.
         const clipGain = dbToLinear(c.gainDb);
-        for (let i = 0; i < n; i++) {
+        for (let i = i0; i < i1; i++) {
           const s = base + i;
           const e = spec ? clipFadeGainAt(spec, i) : 1;
           const v = auto.volume ? autoVolumeGainAt(auto.volume, s) : trackGain;
@@ -538,29 +557,58 @@ export function mixdownSession(
               : null;
           const pgL = p ? p.gL : gL;
           const pgR = p ? p.gR : gR;
-          L[s] += chL[i] * clipGain * v * pgL * e;
-          R[s] += chR[i] * clipGain * v * pgR * e;
+          L[s - windowStart] += chL[i] * clipGain * v * pgL * e;
+          R[s - windowStart] += chR[i] * clipGain * v * pgR * e;
         }
       } else if (spec) {
         // Envelope applied PER CLIP, before the `+=` accumulation -- never to
         // the summed bus, and never after the clamp pass below (T22): two
         // crossfading clips must each be shaped before they meet, and the
         // clamp must see the already-shaped (lower) peaks.
-        for (let i = 0; i < n; i++) {
+        for (let i = i0; i < i1; i++) {
           const e = clipFadeGainAt(spec, i);
-          L[base + i] += chL[i] * g * gL * e;
-          R[base + i] += chR[i] * g * gR * e;
+          L[base + i - windowStart] += chL[i] * g * gL * e;
+          R[base + i - windowStart] += chR[i] * g * gR * e;
         }
       } else {
-        for (let i = 0; i < n; i++) {
-          L[base + i] += chL[i] * g * gL;
-          R[base + i] += chR[i] * g * gR;
+        for (let i = i0; i < i1; i++) {
+          L[base + i - windowStart] += chL[i] * g * gL;
+          R[base + i - windowStart] += chR[i] * g * gR;
         }
       }
     }
+    onTrackDone?.();
+  }
+}
+
+export function mixdownSession(
+  session: Session,
+  docs: Map<string, AudioDocument>,
+  onProgress?: (fraction: number) => void
+): MixdownResult {
+  const sr = session.sampleRate;
+  const anySolo = session.tracks.some((t) => t.solo);
+  const audible = session.tracks.filter((t) => isAudible(t, anySolo));
+  const length = sessionLength(audible);
+
+  if (length === 0) {
+    onProgress?.(1);
+    return {
+      channels: [new Float32Array(0), new Float32Array(0)],
+      sampleRate: sr,
+      peakBeforeClamp: 0,
+    };
+  }
+
+  const L = new Float32Array(length);
+  const R = new Float32Array(length);
+
+  const total = audible.length;
+  let done = 0;
+  accumulateWindow(audible, docs, sr, length, L, R, 0, length, () => {
     done++;
     onProgress?.(done / total);
-  }
+  });
 
   let peakBeforeClamp = 0;
   for (let i = 0; i < length; i++) {
@@ -574,4 +622,71 @@ export function mixdownSession(
 
   onProgress?.(1);
   return { channels: [L, R], sampleRate: sr, peakBeforeClamp };
+}
+
+/**
+ * CC4 (CJ-6) — how many timeline samples the peak pass sums at a time.
+ *
+ * 1 << 16 is ~1.4 s at 48 kHz and costs two 256 kB buffers whatever the session
+ * length: the 15-minute cover session that allocated ~346 MB for a render it
+ * threw away now allocates 512 kB. It is large enough that the per-block
+ * overhead (one clip-window intersection per clip) is negligible against the
+ * per-sample work, and it changes NO arithmetic — see {@link accumulateWindow}.
+ */
+export const PEAK_BLOCK_SAMPLES = 1 << 16;
+
+/**
+ * CC4 (CJ-6) — {@link mixdownSession}'s peak-only mode: the pre-clamp peak of
+ * the summed session, WITHOUT ever holding the render.
+ *
+ * The cover journey's smoothing stage needs one number — did the two tracks sum
+ * over full scale? — and was allocating two session-length Float32Arrays to read
+ * it, on the renderer thread, at the moment the app is already holding the song,
+ * five stems, the instrumental and the take. This sums the same clips through
+ * the same accumulator a block at a time and keeps only the running maximum.
+ *
+ * It returns EXACTLY what `mixdownSession(...).peakBeforeClamp` returns, and the
+ * suite asserts that with `toBe` across every fixture shape: same tracks in the
+ * same order, same per-sample float32 accumulation, same |value| scan. What it
+ * does NOT do is clamp — there is no output to clamp, and the peak is the
+ * pre-clamp figure by definition.
+ *
+ * A rate-mismatched clip is still resampled whole (through the same bounded
+ * cache the render uses), so the saving is the master buffers, which is where
+ * the session-length cost was.
+ */
+export function mixdownSessionPeak(
+  session: Session,
+  docs: Map<string, AudioDocument>,
+  onProgress?: (fraction: number) => void
+): number {
+  const sr = session.sampleRate;
+  const anySolo = session.tracks.some((t) => t.solo);
+  const audible = session.tracks.filter((t) => isAudible(t, anySolo));
+  const length = sessionLength(audible);
+
+  if (length === 0) {
+    onProgress?.(1);
+    return 0;
+  }
+
+  const block = Math.min(PEAK_BLOCK_SAMPLES, length);
+  const L = new Float32Array(block);
+  const R = new Float32Array(block);
+
+  let peak = 0;
+  for (let start = 0; start < length; start += block) {
+    const end = Math.min(start + block, length);
+    L.fill(0);
+    R.fill(0);
+    accumulateWindow(audible, docs, sr, length, L, R, start, end);
+    for (let i = 0; i < end - start; i++) {
+      const l = L[i] < 0 ? -L[i] : L[i];
+      if (l > peak) peak = l;
+      const r = R[i] < 0 ? -R[i] : R[i];
+      if (r > peak) peak = r;
+    }
+    onProgress?.(end / length);
+  }
+  return peak;
 }
