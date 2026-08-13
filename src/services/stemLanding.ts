@@ -119,6 +119,49 @@ export function stemSessionName(sourceName: string): string {
   return `${sourceName} — Stems`;
 }
 
+/**
+ * CC4 (CJ-1) — the DOCUMENTS half of a landing, on its own.
+ *
+ * Landing stems is two independent acts: creating five documents (additive —
+ * nothing that was open changes) and REPLACING the session with one built from
+ * them (destructive — the previous session and its undo history go). The
+ * standalone Separate dialog wants both and says so. The cover journey wants
+ * only the first: its own contract is that no session exists until its stage 5,
+ * and calling the whole landing at stage 1 made that contract false for every
+ * user who cancelled in between. Splitting the act is what makes the sentence
+ * true, rather than rewording the sentence to match the code.
+ */
+export interface StemDocumentsResult {
+  /** The five created document ids, in track order (Residual last). */
+  documentIds: string[];
+  /**
+   * True when the source was MONO and its stems were laid down as dual-mono
+   * stereo documents (see the module header). False for a stereo source, whose
+   * stems are the delivered arrays themselves.
+   */
+  monoRoutedAsDualMono: boolean;
+  /**
+   * Peak |sample| of the SOURCE document, or `null` when the source document is
+   * no longer open and the check could not be made (the stems still land — they
+   * are valid audio regardless; only the verdict below is unknown).
+   */
+  sourcePeak: number | null;
+  /**
+   * Whether mixing the untouched session down reproduces the source exactly.
+   * `false` when `sourcePeak > 1`: the master bus's ±1 clamp flat-tops the sum
+   * (see the module header). `null` when it could not be determined.
+   */
+  exactSumHolds: boolean | null;
+}
+
+/** CC4 (CJ-1) — what the SESSION half adds to {@link StemDocumentsResult}. */
+export interface StemSessionResult {
+  /** The five created track ids, in document order. */
+  trackIds: string[];
+  /** `<source> — Stems`, also the default filename for Save Session. */
+  sessionName: string;
+}
+
 export interface StemLandingResult {
   /** The five created document ids, in track order (Residual last). */
   documentIds: string[];
@@ -170,9 +213,10 @@ function documentChannels(stem: Float32Array[]): Float32Array[] {
 }
 
 /**
- * Lands a completed separation: five documents + a five-track session + the
- * multitrack view. Synchronous and self-contained — the caller (S6's dialog)
- * needs nothing else to finish the flow.
+ * CC4 (CJ-1) — the ADDITIVE half of a landing: five documents, the first of
+ * them active, each carrying the source's beat-grid provenance. Nothing that
+ * was already open changes, and in particular NO SESSION IS TOUCHED — which is
+ * the whole reason this half exists on its own (see {@link StemDocumentsResult}).
  *
  * Documents are created with the `mixdownToNewFile` pattern (`createDocument`
  * then `addDocument`, no undo entry — creating a document is not an edit to any
@@ -181,7 +225,7 @@ function documentChannels(stem: Float32Array[]): Float32Array[] {
  * prompts; this module deliberately does NOT pass the flag, so the protection
  * keeps coming from the one place that owns it.
  */
-export function landStems(output: StemSeparationOutput): StemLandingResult {
+export function createStemDocuments(output: StemSeparationOutput): StemDocumentsResult {
   const app = useAppStore.getState();
 
   const stemChannelSets: Float32Array[][] = [
@@ -214,11 +258,36 @@ export function landStems(output: StemSeparationOutput): StemLandingResult {
   // precondition and simply declines if it ever stops holding.
   for (const doc of docs) linkDerivedDocument(doc.id, output.sourceDocId);
 
-  const tracks: Track[] = docs.map((doc, i) => {
+  const source = useAppStore.getState().documents.find((d) => d.id === output.sourceDocId);
+  const sourcePeak = source && docLength(source) > 0 ? peakAmplitude(source.channels) : null;
+
+  return {
+    documentIds: docs.map((d) => d.id),
+    monoRoutedAsDualMono: output.channelCount === 1,
+    sourcePeak,
+    exactSumHolds: sourcePeak === null ? null : sourcePeak <= 1,
+  };
+}
+
+/**
+ * CC4 (CJ-1) — the DESTRUCTIVE half: a five-track session over the documents
+ * {@link createStemDocuments} just created, installed in place of whatever
+ * session was open, and the multitrack view. Every caller of THIS half is
+ * replacing the user's session, which is why it is a separate call: a caller
+ * that only wanted documents cannot reach it by accident.
+ *
+ * `documentIds` must be in {@link STEM_TRACK_LABELS} order — Residual LAST,
+ * which the module header explains is load-bearing for the exact-sum identity.
+ */
+export function buildStemSession(
+  output: StemSeparationOutput,
+  documentIds: readonly string[]
+): StemSessionResult {
+  const tracks: Track[] = documentIds.map((documentId, i) => {
     const track = createTrack(STEM_TRACK_LABELS[i]);
     track.clips = [
       createClip({
-        documentId: doc.id,
+        documentId,
         startSample: 0,
         offsetSample: 0,
         // Session rate == document rate == output.sampleRate, so session
@@ -257,17 +326,23 @@ export function landStems(output: StemSeparationOutput): StemLandingResult {
   // whole-state snapshots, so undoing a pre-landing entry would silently
   // revert the landing itself (the recording invariant in sessionUndo.ts).
   clearSessionHistory();
-  app.setView('multitrack');
+  useAppStore.getState().setView('multitrack');
 
-  const source = useAppStore.getState().documents.find((d) => d.id === output.sourceDocId);
-  const sourcePeak = source && docLength(source) > 0 ? peakAmplitude(source.channels) : null;
+  return { trackIds: tracks.map((t) => t.id), sessionName: session.name };
+}
 
-  return {
-    documentIds: docs.map((d) => d.id),
-    trackIds: tracks.map((t) => t.id),
-    sessionName: session.name,
-    monoRoutedAsDualMono: output.channelCount === 1,
-    sourcePeak,
-    exactSumHolds: sourcePeak === null ? null : sourcePeak <= 1,
-  };
+/**
+ * Lands a completed separation: five documents + a five-track session + the
+ * multitrack view. Synchronous and self-contained — the caller (S6's dialog)
+ * needs nothing else to finish the flow.
+ *
+ * CC4 (CJ-1): now literally the two halves above, in order, and nothing else.
+ * Its behaviour is unchanged and is still pinned by this module's whole suite —
+ * the standalone Separate dialog documents that it replaces the session, so it
+ * is the caller that WANTS both halves.
+ */
+export function landStems(output: StemSeparationOutput): StemLandingResult {
+  const documents = createStemDocuments(output);
+  const session = buildStemSession(output, documents.documentIds);
+  return { ...documents, ...session };
 }

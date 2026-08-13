@@ -23,6 +23,8 @@ import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from '../multitra
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { STEM_LABELS, type StemSeparationOutput } from './stemService';
 import {
+  buildStemSession,
+  createStemDocuments,
   landStems,
   stemSessionName,
   MONO_PAN_COMPENSATION_DB,
@@ -552,6 +554,55 @@ describe('the stem session', () => {
     const names = useSessionStore.getState().session.tracks.map((t) => t.name);
     expect(names).not.toContain('Track 1');
     expect(names).toHaveLength(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CC4 (CJ-1) — the two halves, separately
+// ---------------------------------------------------------------------------
+
+describe('CC4 (CJ-1): the documents half lands documents and NOTHING else', () => {
+  it('creates the five documents without touching the session or its history', () => {
+    useSessionStore.getState().newSession(44100);
+    useSessionStore.getState().addTrack();
+    const before = useSessionStore.getState().session;
+    useSessionStore.setState({ selectedClipId: 'clip-mine', mtCursorSample: 999 });
+    useAppStore.setState({ view: 'waveform' });
+
+    const source = addSourceDocument(2, 44100);
+    const result = createStemDocuments(makeOutput(source));
+
+    // Everything the ADDITIVE half promises.
+    expect(result.documentIds).toHaveLength(5);
+    const docs = useAppStore.getState().documents;
+    expect(result.documentIds.map((id) => docs.find((d) => d.id === id)!.name)).toEqual(
+      STEM_TRACK_LABELS.map((l) => `${source.name} — ${l}`)
+    );
+    expect(useAppStore.getState().activeDocumentId).toBe(result.documentIds[0]);
+
+    // …and everything it must NOT do. The session object is the SAME object,
+    // not an equal one: a replacement that happened to rebuild the same shape
+    // would still have dropped the user's session undo history.
+    const after = useSessionStore.getState();
+    expect(after.session).toBe(before);
+    expect(after.selectedClipId).toBe('clip-mine');
+    expect(after.mtCursorSample).toBe(999);
+    // Nor does it drag the user into the multitrack view.
+    expect(useAppStore.getState().view).toBe('waveform');
+  });
+
+  it('is exactly what landStems does, plus the session half', () => {
+    const source = addSourceDocument(2, 44100);
+    const output = makeOutput(source);
+    const documents = createStemDocuments(output);
+    const session = buildStemSession(output, documents.documentIds);
+
+    expect(useSessionStore.getState().session.tracks.map((t) => t.clips[0].documentId)).toEqual(
+      documents.documentIds
+    );
+    expect(session.sessionName).toBe(stemSessionName(source.name));
+    expect(session.trackIds).toEqual(useSessionStore.getState().session.tracks.map((t) => t.id));
+    expect(useAppStore.getState().view).toBe('multitrack');
   });
 });
 

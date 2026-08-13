@@ -43,6 +43,14 @@
  * session at all. Nothing is half-built, because nothing before stage 5 builds
  * anything jointly.
  *
+ * CC4 (CJ-1): that sentence used to be false in the fresh-separation arm, which
+ * called `stemLanding.landStems` — documents AND a `<song> — Stems` session that
+ * replaced the user's, with its undo history cleared — at stage 1. Stage 1 now
+ * calls `createStemDocuments`, the documents half only, so the contract above is
+ * something the code does rather than something this comment claims. The
+ * standalone Separate dialog still calls the whole `landStems`, because
+ * replacing the session is what that dialog is for and it says so.
+ *
  * ── Undo ────────────────────────────────────────────────────────────────────
  * Each sub-pass keeps its OWN undo entry, the chains' own precedent: "Vocal
  * Chain" and "Cover Chain" are two entries on the take, the stem documents are
@@ -98,7 +106,7 @@ import {
   placementFor,
 } from './coverPlacement';
 import { cancelStemSeparation, separateStems, STEM_LABELS } from './stemService';
-import { landStems, STEM_TRACK_LABELS } from './stemLanding';
+import { createStemDocuments, STEM_TRACK_LABELS } from './stemLanding';
 import {
   VOCAL_CHAIN_UNDO_LABEL,
   defaultStageSelection,
@@ -491,7 +499,12 @@ export async function runCoverJourney(
         'watch the level when you mix down'
       );
     }
-    return 'cancelled before the session was built — the documents this pass produced are open and unchanged, and there is no session';
+    // CC4 (CJ-1): "there is no session" was a claim about the SCREEN, and it
+    // was false for anyone who had a session open — which, in the fresh arm,
+    // this pass had already replaced by stage 1. The stems now land as
+    // documents only, so the accurate claim is about THIS PASS: it built no
+    // session, and whatever was open is still exactly what it was.
+    return 'cancelled before the session was built — the documents this pass produced are open and unchanged, this pass built no session, and whatever session you had open before you ran it is still there, untouched';
   };
 
   /** Starts a stage, or returns CANCELLED when the user asked to stop first. */
@@ -590,7 +603,16 @@ export async function runCoverJourney(
         fillPending(stage.id);
         return finish(false);
       }
-      landStems(result.output);
+      // CC4 (CJ-1): the DOCUMENTS half of the landing, never the session half.
+      // `landStems` also installs a `<song> — Stems` session and clears the
+      // session undo history — at stage 1, four stages before this module's
+      // header, `cancelReason` below, and the dialog all promise any session is
+      // touched. A user who cancelled at stage 2 lost the arrangement they had
+      // open, and the row they were shown said "there is no session". The stems
+      // are still landed as documents (everything downstream finds them by
+      // name); the session this pass builds is still stage 5's, and it is the
+      // only one.
+      createStemDocuments(result.output);
       stems = findExistingSeparation(useAppStore.getState().documents, song);
       if (!stems) {
         record({

@@ -13,10 +13,10 @@
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
+import { createClip, createTrack, type Session } from '../multitrack/session';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import * as coverAlign from '../dsp/coverAlign';
 import * as stemService from './stemService';
-import * as stemLanding from './stemLanding';
 import * as vocalChain from './vocalChain';
 import * as coverChain from './coverChain';
 import * as coverPlacement from './coverPlacement';
@@ -39,10 +39,13 @@ jest.mock('./stemService', () => ({
   separateStems: jest.fn(),
   cancelStemSeparation: jest.fn(async () => true),
 }));
-jest.mock('./stemLanding', () => ({
-  ...jest.requireActual('./stemLanding'),
-  landStems: jest.fn(),
-}));
+// CC4 (CJ-1): `stemLanding` is NOT mocked. It used to be — `landStems: jest.fn()`
+// — and that mock is precisely what hid the defect this suite now pins: the real
+// landing installs a session and clears the session history, and the journey's
+// fresh arm called it at stage 1 while the header, the cancel copy and the dialog
+// all promised no session existed before stage 5. A stub that lands nothing
+// cannot disagree with a contract. The real split (`createStemDocuments` /
+// `buildStemSession`) runs here, on real (tiny) separation output.
 jest.mock('./vocalChain', () => ({
   ...jest.requireActual('./vocalChain'),
   runVocalChain: jest.fn(),
@@ -67,7 +70,6 @@ jest.mock('./coverPlacement', () => {
 
 const separateStems = stemService.separateStems as jest.Mock;
 const cancelStemSeparation = stemService.cancelStemSeparation as jest.Mock;
-const landStems = stemLanding.landStems as jest.Mock;
 const runVocalChain = vocalChain.runVocalChain as jest.Mock;
 const runCoverChain = coverChain.runCoverChain as jest.Mock;
 const alignTakeToReference = coverAlign.alignTakeToReference as jest.Mock;
@@ -121,6 +123,25 @@ function seed(withStems: boolean, takeRate = SR, songSamples = SONG_SAMPLES): vo
   });
   songId = song.id;
   takeId = take.id;
+}
+
+/**
+ * CC4 (CJ-1): a REAL `StemSeparationOutput` for the seeded song, so the real
+ * landing runs against it. Five tiny stems at the song's rate and exact length —
+ * the shape `findExistingSeparation` re-checks after the landing.
+ */
+function separationOutput(songSamples = SONG_SAMPLES): stemService.StemSeparationOutput {
+  const stemChannels = (): Float32Array[] => [tone(songSamples, 440, SR, 0.1)];
+  return {
+    sourceDocId: songId,
+    sourceName: 'song',
+    sampleRate: SR,
+    channelCount: 1,
+    lengthSamples: songSamples,
+    stems: stemService.STEM_LABELS.map((label) => ({ label, channels: stemChannels() })),
+    residual: stemChannels(),
+    sanitisedEstimateSamples: 0,
+  };
 }
 
 const okVocalReport = (): vocalChain.VocalChainReport =>
@@ -182,7 +203,6 @@ describe('runCoverJourney — sequencing', () => {
     expect(report!.completed).toBe(true);
     // The separation was REUSED, so the model was never asked to run.
     expect(separateStems).not.toHaveBeenCalled();
-    expect(landStems).not.toHaveBeenCalled();
     expect(order).toEqual(['vocal', 'align', 'cover']);
     expect(runVocalChain).toHaveBeenCalledTimes(1);
     expect(runCoverChain).toHaveBeenCalledTimes(1);
@@ -238,30 +258,19 @@ describe('runCoverJourney — sequencing', () => {
     expect(takeChannels[0].length).toBe(TAKE_SAMPLES);
   });
 
-  it('runs the separation when no existing one is open, and lands it', async () => {
+  it('runs the separation when no existing one is open, and lands its documents', async () => {
     seed(false);
-    separateStems.mockImplementation(async () => {
-      // `landStems` is what creates the five documents; the stub does the same.
-      const state = useAppStore.getState();
-      const song = state.documents.find((d) => d.id === songId)!;
-      const stems = STEM_TRACK_LABELS.map((label) =>
-        createDocument({
-          name: `${song.name} — ${label}`,
-          sampleRate: SR,
-          channels: [tone(SONG_SAMPLES, 440, SR, 0.1)],
-        })
-      );
-      useAppStore.setState({ documents: [...state.documents, ...stems] });
-      return { ok: true, output: { sourceDocId: songId, sourceName: 'song' } };
-    });
+    separateStems.mockImplementation(async () => ({ ok: true, output: separationOutput() }));
 
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
 
     expect(separateStems).toHaveBeenCalledTimes(1);
     expect(separateStems.mock.calls[0][0].sourceDocId).toBe(songId);
-    expect(landStems).toHaveBeenCalledTimes(1);
     expect(report!.separation!.reused).toBe(false);
     expect(report!.stages[0].status).toBe('done');
+    // The real landing put five documents on screen, by name.
+    const names = useAppStore.getState().documents.map((d) => d.name);
+    for (const label of STEM_TRACK_LABELS) expect(names).toContain(`song — ${label}`);
   });
 
   it('says so when it reuses a separation rather than re-running the model', async () => {
@@ -380,6 +389,63 @@ describe('runCoverJourney — cancellation', () => {
     expect(report!.placement).toBeNull();
     // …and the row SAYS that, rather than leaving the user to discover it.
     expect(report!.stages.find((s) => s.id === 'place')!.reason).toMatch(/no session/);
+  });
+
+  /**
+   * CC4 (CJ-1) — THE acceptance test for the contract the whole cancellation
+   * design rests on.
+   *
+   * The fresh-separation arm used to call `landStems`, which REPLACES the
+   * session and clears its undo history, at stage 1 — four stages before the
+   * header, the cancel copy and the dialog all say any session is touched. A
+   * user with unsaved arrangement work who cancelled at stage 2 lost it, and
+   * the report's own row told them "there is no session".
+   *
+   * The fixture is therefore a session the user built themselves, with a track
+   * arrangement that is checkable sample by sample after the cancel.
+   */
+  it('leaves the user\'s own session untouched when the FRESH arm is cancelled mid-run', async () => {
+    seed(false);
+    separateStems.mockImplementation(async () => ({ ok: true, output: separationOutput() }));
+
+    const mine: Session = {
+      name: 'my arrangement',
+      sampleRate: SR,
+      tracks: [
+        {
+          ...createTrack('Vox'),
+          clips: [
+            createClip({ documentId: takeId, startSample: 4321, offsetSample: 0, lengthSample: 999 }),
+          ],
+        },
+      ],
+    };
+    useSessionStore.setState({ session: mine, mtCursorSample: 777 });
+
+    let calls = 0;
+    const report = await runCoverJourney({
+      songDocId: songId,
+      takeDocId: takeId,
+      shouldCancel: () => ++calls > 1, // at the head of 'clean' — the separation ran
+    });
+
+    expect(report!.cancelledAt).toBe('clean');
+    // The separation DID happen: its five documents are on screen.
+    const names = useAppStore.getState().documents.map((d) => d.name);
+    for (const label of STEM_TRACK_LABELS) expect(names).toContain(`song — ${label}`);
+
+    // …and the user's session is exactly the one they had, arrangement intact.
+    const after = useSessionStore.getState();
+    expect(after.session.name).toBe('my arrangement');
+    expect(after.session.tracks).toHaveLength(1);
+    expect(after.session.tracks[0].name).toBe('Vox');
+    expect(after.session.tracks[0].clips[0].startSample).toBe(4321);
+    expect(after.session.tracks[0].clips[0].lengthSample).toBe(999);
+    expect(after.mtCursorSample).toBe(777);
+    // The row that says so is now true rather than aspirational.
+    const reason = report!.stages.find((s) => s.id === 'clean')!.reason!;
+    expect(reason).toMatch(/no session/);
+    expect(reason).toMatch(/untouched/);
   });
 
   it('tells the truth about the session when cancelled at the LAST stage', async () => {
