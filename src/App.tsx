@@ -300,8 +300,22 @@ export default function App() {
             below it. */}
         <ModuleStrip activeTab={sidebarTab} onSelect={setSidebarTab} />
 
-        {/* G2 status pill, floating bottom-centre (mockup `.status`). */}
-        <StatusBar />
+        {/* U1 bottom band (mockup E2): the G2 status pill, centred on the
+            WAVEFORM's axis rather than the window's — the stage-inset tokens
+            do the centring as padding, so opening or closing the module card
+            re-centres it in the same layout pass. A flex COLUMN because the
+            edit pill joins it above the status pill with a gap this container
+            guarantees, whatever either pill's content does to its height. */}
+        <div
+          className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex flex-col items-center"
+          style={{
+            gap: 16,
+            paddingLeft: 'var(--stage-inset-left)',
+            paddingRight: 'var(--stage-inset-right)',
+          }}
+        >
+          <StatusBar />
+        </div>
       </div>
 
       {newFileOpen && <NewFileDialog onClose={() => setNewFileOpen(false)} />}

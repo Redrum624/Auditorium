@@ -11,19 +11,25 @@ import { runCommand } from '../../services/menuActions';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
 import { canRecord } from '../../services/transportService';
 import { defaultZoom, useAppStore } from '../../stores/appStore';
-import { formatTime } from '../../utils/timeFormat';
 import { MIN_SPP, ZOOM_FACTOR } from '../Editor/useEditorGestures';
 import { ChromePill } from '../UI/glass';
 
 /**
  * v1.6 G3: the retired bottom TransportBar reborn as Vitrine's floating top
- * chrome pill (photo_app Layout/Toolbar.tsx anatomy) plus the top-left file
- * chip. Since G6 the band truly FLOATS over the radial stage (mockup
- * `.toolbar` / `.filechip` absolute placement — the sidebars it used to
- * avoid are floating overlays themselves now): an absolute z-20 band whose
- * empty stretches ignore pointer events so the stage beneath stays live.
+ * chrome pill (photo_app Layout/Toolbar.tsx anatomy). Since G6 the band truly
+ * FLOATS over the radial stage (mockup `.toolbar` absolute placement — the
+ * sidebars it used to avoid are floating overlays themselves now): an absolute
+ * z-20 band whose empty stretches ignore pointer events so the stage beneath
+ * stays live.
  *
- *   [file chip]        [Open Save Export | ⏮ ⏹ ▶ ⏺ ⟳ | views | − % + Fit]
+ *   [Open Save Export | ⏮ ⏹ ▶ ⏺ ⟳ | views | − % + Fit]        [module strip]
+ *
+ * U1 (layout E2): the top-left file chip is GONE. Its identity readout —
+ * name · duration · rate · channels — folded into the bottom bar, where the
+ * eye already goes for time and levels, and its zoom % died with it: the same
+ * number is live two controls away in this pill's own − % + group, so the
+ * chip was spending a whole floating surface on a duplicate. The band now
+ * centres the pill on the waveform instead of the window (see the wrapper).
  *
  * Every control keeps its command id, aria-label, enabled-state and testid
  * from the bottom bar (plan ruling 4). This component also inherits, verbatim,
@@ -104,7 +110,7 @@ function PillButton({ label, onClick, disabled, active, title, icon, children }:
 }
 
 /** '100%' is the activation default (whole doc across ~1600px, appStore's
- * defaultZoom); zooming in grows the number. Shared by the chip and the pill. */
+ * defaultZoom); zooming in grows the number. */
 function zoomPercent(doc: AudioDocument, samplesPerPixel: number): number {
   return Math.round((defaultZoom(doc).samplesPerPixel / samplesPerPixel) * 100);
 }
@@ -139,47 +145,6 @@ function zoomEditorFit(): void {
   const doc = s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
   if (!doc) return;
   s.setZoom(defaultZoom(doc));
-}
-
-/** Top-left file chip: name · duration · rate · channels · zoom %, live from
- * the store (mockup `.filechip`). */
-function FileChip() {
-  const doc = useAppStore((s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null);
-  const zoom = useAppStore((s) => s.zoom);
-
-  return (
-    <ChromePill
-      data-testid="file-chip"
-      className="pointer-events-auto flex items-center"
-      style={{
-        justifySelf: 'start',
-        maxWidth: '100%',
-        minWidth: 0,
-        padding: '8px 14px',
-        fontSize: '12px',
-        color: 'var(--glass-text-secondary)',
-        whiteSpace: 'nowrap',
-      }}
-    >
-      {doc ? (
-        <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-          {doc.name} · {formatTime(docLength(doc), doc.sampleRate)} ·{' '}
-          {(doc.sampleRate / 1000).toFixed(1)} kHz ·{' '}
-          {doc.channels.length === 1
-            ? 'mono'
-            : doc.channels.length === 2
-              ? 'stereo'
-              : `${doc.channels.length}ch`}{' '}
-          ·{' '}
-          <span style={{ color: 'var(--glass-text-title)' }}>
-            {zoomPercent(doc, zoom.samplesPerPixel)}%
-          </span>
-        </span>
-      ) : (
-        <span style={{ color: 'var(--glass-text-muted)' }}>no document</span>
-      )}
-    </ChromePill>
-  );
 }
 
 export default function Toolbar() {
@@ -310,11 +275,24 @@ export default function Toolbar() {
 
   return (
     <div
-      className="pointer-events-none absolute inset-x-0 top-2.5 z-20 grid items-center gap-3 px-4"
-      style={{ gridTemplateColumns: '1fr auto 1fr' }}
+      className="pointer-events-none absolute inset-x-0 top-2.5 z-20 flex items-center justify-center"
+      style={{
+        // U1 (layout E2, element 2): the pill is centred on the WAVEFORM, not
+        // on the window — the stage's own insets do it as padding, so opening
+        // or closing the module card re-centres the pill in the same layout
+        // pass, with nothing measured and no resize listener.
+        //
+        // The right side is clamped to the module STRIP's footprint (14 margin
+        // + 348 column). With a card open that clamp is inert — the stage's
+        // right inset is the strip's footprint plus air, so the pill lands
+        // exactly on the stage's centre. With the card closed the stage runs
+        // on under the strip, but the pill shares the strip's row and cannot:
+        // following the stage there would slide the zoom cluster beneath the
+        // module icons.
+        paddingLeft: 'var(--stage-inset-left, 14px)',
+        paddingRight: 'max(var(--stage-inset-right, 376px), 362px)',
+      }}
     >
-      <FileChip />
-
       <ChromePill
         data-testid="toolbar-pill"
         className="pointer-events-auto flex items-center"
@@ -480,9 +458,6 @@ export default function Toolbar() {
           Fit
         </PillButton>
       </ChromePill>
-
-      {/* Right cell of the band grid — keeps the pill window-centered. */}
-      <div />
     </div>
   );
 }

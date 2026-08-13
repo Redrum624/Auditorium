@@ -411,46 +411,44 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
   });
 });
 
-describe('Toolbar — G3 file chip (top-left)', () => {
+// U1 (layout E2, element 1): the G3 top-left file chip is retired — its
+// identity readout moved into the status pill (StatusBar.test.tsx owns those
+// assertions now) and its zoom % died with it, being a duplicate of this
+// pill's own readout. What survives here is the CONTRACT that the toolbar no
+// longer renders a second copy of either.
+describe('Toolbar — the file chip is retired (U1)', () => {
   beforeEach(() => {
     useAppStore.setState(makeInitialState());
   });
 
-  it('shows "no document" when nothing is open', () => {
+  it('renders no file chip, with or without a document', () => {
     render(<Toolbar />);
-    expect(screen.getByTestId('file-chip')).toHaveTextContent('no document');
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
+
+    act(() => useAppStore.getState().addDocument(makeDoc()));
+    expect(screen.queryByTestId('file-chip')).not.toBeInTheDocument();
   });
 
-  it('shows name · duration · rate · channels · zoom % live from the store', () => {
+  it('keeps the zoom % in the pill, the one place it is now shown', () => {
     const doc = makeDoc();
     useAppStore.getState().addDocument(doc);
     render(<Toolbar />);
-    const chip = screen.getByTestId('file-chip');
-    expect(chip).toHaveTextContent('clip.wav');
-    expect(chip).toHaveTextContent(formatTime(docLength(doc), doc.sampleRate));
-    expect(chip).toHaveTextContent('44.1 kHz');
-    expect(chip).toHaveTextContent('stereo');
-    expect(chip).toHaveTextContent('100%');
-  });
+    expect(screen.getAllByText(/^\d+%$/)).toHaveLength(1);
+    expect(screen.getByTestId('zoom-readout')).toHaveTextContent('100%');
 
-  it('the chip zoom % follows setZoom', () => {
-    const doc = makeDoc();
-    useAppStore.getState().addDocument(doc);
-    render(<Toolbar />);
     const base = defaultZoom(doc).samplesPerPixel;
     act(() => useAppStore.getState().setZoom({ samplesPerPixel: base * 4, scrollSample: 0 }));
-    expect(screen.getByTestId('file-chip')).toHaveTextContent('25%');
+    expect(screen.getByTestId('zoom-readout')).toHaveTextContent('25%');
   });
 
-  it('labels mono documents "mono"', () => {
-    useAppStore
-      .getState()
-      .addDocument(
-        createDocument({ name: 'm.wav', sampleRate: 48000, channels: [new Float32Array(1024)] })
-      );
-    render(<Toolbar />);
-    expect(screen.getByTestId('file-chip')).toHaveTextContent('mono');
-    expect(screen.getByTestId('file-chip')).toHaveTextContent('48.0 kHz');
+  it('centres the band on the WAVEFORM, clamped clear of the module strip', () => {
+    const { container } = render(<Toolbar />);
+    const band = container.firstElementChild as HTMLElement;
+    expect(band.className).toContain('justify-center');
+    expect(band.style.paddingLeft).toBe('var(--stage-inset-left, 14px)');
+    // The clamp: with a card open this is the stage's own right inset; with it
+    // closed the stage runs on under the strip and the pill must not.
+    expect(band.style.paddingRight).toBe('max(var(--stage-inset-right, 376px), 362px)');
   });
 });
 

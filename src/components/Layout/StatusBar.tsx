@@ -46,6 +46,13 @@ function Divider() {
   );
 }
 
+/** U1: the retired file chip's channel wording, verbatim — 'mono' / 'stereo' /
+ * 'Nch'. The mockup abbreviates it to 'St'; the app's own vocabulary is a word
+ * the reader does not have to decode, and it costs four characters. */
+function channelLabel(count: number): string {
+  return count === 1 ? 'mono' : count === 2 ? 'stereo' : `${count}ch`;
+}
+
 /** G2: the status bar is now the mockup's floating bottom chrome pill —
  * file info · cursor/selection · ♩ BPM · doc stats. Same five readouts (and
  * exact text shapes — the tempo `*`/`?` markers are tested contracts) as the
@@ -58,7 +65,13 @@ function Divider() {
  * the level meter.
  *
  * G6: the band truly floats now — an absolute bottom-centre z-20 overlay on
- * the radial stage (mockup `.status`), pointer-transparent outside the pill. */
+ * the radial stage (mockup `.status`), pointer-transparent outside the pill.
+ *
+ * U1 (layout E2, element 3): the retired file chip's identity readout folds in
+ * at the head of the pill, and the band itself moved OUT of this component —
+ * App owns one bottom band carrying the edit pill above this one, both centred
+ * on the waveform's axis. This component is the pill and nothing else now, so
+ * the two can share a gap the flex column guarantees. */
 export default function StatusBar() {
   useTempoVersion();
   const documents = useAppStore((s) => s.documents);
@@ -90,12 +103,52 @@ export default function StatusBar() {
       : cursorSample;
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-3 z-20 flex justify-center px-3">
-      <ChromePill
-        data-testid="status-pill"
-        className="pointer-events-auto flex items-center text-xs"
-        style={{ gap: 18, padding: '7px 16px', color: 'var(--glass-text-secondary)' }}
-      >
+    <ChromePill
+      data-testid="status-pill"
+      className="pointer-events-auto flex items-center text-xs"
+      style={{
+        gap: 18,
+        padding: '7px 16px',
+        color: 'var(--glass-text-secondary)',
+        maxWidth: '100%',
+        minWidth: 0,
+      }}
+    >
+      {/* U1: the file identity the top-left chip used to carry, folded in
+            here — name first, then the compact `duration · rate · channels`
+            the mockup abbreviates. It keeps the chip's `file-chip` testid:
+            the surface moved, the contract did not. The old
+            `44100 Hz · 2ch · N smp` segment is what it replaces — rate and
+            channels were already in it, and a raw sample count is the one
+            number the properties panel is for. */}
+        <span
+          data-testid="file-chip"
+          className="flex min-w-0 items-center"
+          style={{ gap: 8, whiteSpace: 'nowrap' }}
+        >
+          {doc ? (
+            <>
+              <span
+                title={doc.name}
+                style={{
+                  color: 'var(--glass-text-title)',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {doc.name}
+              </span>
+              <Divider />
+              <span>
+                {formatTime(docLength(doc), doc.sampleRate)} ·{' '}
+                {(doc.sampleRate / 1000).toFixed(1)}k · {channelLabel(doc.channels.length)}
+              </span>
+            </>
+          ) : (
+            <span style={{ color: 'var(--glass-text-muted)' }}>no document</span>
+          )}
+        </span>
+        <Divider />
         <span
           data-testid="transport-time"
           style={{
@@ -106,12 +159,6 @@ export default function StatusBar() {
           }}
         >
           {formatTime(readoutSample, readoutRate)}
-        </span>
-        <Divider />
-        <span>
-          {doc
-            ? `${doc.sampleRate} Hz · ${doc.channels.length}ch · ${docLength(doc)} smp`
-            : 'no document'}
         </span>
         <Divider />
         <span style={monoStyle}>cursor {doc ? formatTime(cursorSample, doc.sampleRate) : '—'}</span>
@@ -133,7 +180,6 @@ export default function StatusBar() {
         </span>
         <Divider />
         <LevelMeter channels={doc?.channels.length ?? 2} />
-      </ChromePill>
-    </div>
+    </ChromePill>
   );
 }

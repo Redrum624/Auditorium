@@ -98,14 +98,70 @@ describe('StatusBar — tempo readout (Task T5)', () => {
       expect(pill.className).toContain('glass-chrome');
     });
 
-    it('keeps the cursor / selection / doc-info / spp readouts', () => {
+    it('keeps the cursor / selection / spp readouts', () => {
       addDoc();
       render(<StatusBar />);
 
       expect(screen.getByText(/^cursor /)).toBeInTheDocument();
       expect(screen.getByText('sel —')).toBeInTheDocument();
-      expect(screen.getByText('44100 Hz · 1ch · 44100 smp')).toBeInTheDocument();
       expect(screen.getByText(/^spp: /)).toBeInTheDocument();
+    });
+  });
+
+  // U1 (layout E2, element 1 + 3): the retired top-left chip's identity
+  // readout lives here now, carrying the chip's own `file-chip` testid — the
+  // surface moved, the contract did not. It REPLACES the old
+  // `44100 Hz · 2ch · N smp` segment, which said rate and channels twice over
+  // and spent the rest on a raw sample count.
+  describe('U1 — the file identity folded in from the retired chip', () => {
+    it('shows name · duration · rate · channels, compactly', () => {
+      addDoc();
+      render(<StatusBar />);
+
+      const chip = screen.getByTestId('file-chip');
+      expect(chip).toHaveTextContent('a.wav');
+      expect(chip).toHaveTextContent('0:01.000');
+      expect(chip).toHaveTextContent('44.1k');
+      expect(chip).toHaveTextContent('mono');
+    });
+
+    it('labels a stereo document "stereo" and a 6-channel one "6ch"', () => {
+      useAppStore.getState().addDocument(
+        createDocument({
+          name: 's.wav',
+          sampleRate: 48000,
+          channels: [new Float32Array(48000), new Float32Array(48000)],
+        })
+      );
+      const { unmount } = render(<StatusBar />);
+      expect(screen.getByTestId('file-chip')).toHaveTextContent('48.0k · stereo');
+      unmount();
+
+      useAppStore.setState(makeInitialState());
+      useAppStore.getState().addDocument(
+        createDocument({
+          name: 'six.wav',
+          sampleRate: 44100,
+          channels: Array.from({ length: 6 }, () => new Float32Array(44100)),
+        })
+      );
+      render(<StatusBar />);
+      expect(screen.getByTestId('file-chip')).toHaveTextContent('6ch');
+    });
+
+    it('says "no document" in the empty app, and drops the retired sample-count segment', () => {
+      render(<StatusBar />);
+      expect(screen.getByTestId('file-chip')).toHaveTextContent('no document');
+      expect(screen.queryByText(/smp$/)).not.toBeInTheDocument();
+    });
+
+    it('is the pill itself — App owns the band, so the edit pill can share its axis', () => {
+      addDoc();
+      render(<StatusBar />);
+      const pill = screen.getByTestId('status-pill');
+      // No positioning wrapper of its own: the pill is the component's root.
+      expect(pill.parentElement?.tagName).toBe('DIV');
+      expect(pill.parentElement?.className).not.toContain('absolute');
     });
   });
 
