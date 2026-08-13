@@ -952,6 +952,70 @@ minimum r² of 0.910, *higher* than either validated reverb control (0.883 and 0
 check removes is **ragged** fits, not curved ones. A decay this estimator reports is evidence of
 a fall, not proof of a room.
 
+## The cover journey's alignment is a placement, not a warp — and its confidence was measured on constructed audio
+
+<!-- CP1 -->
+**Area:** the alignment (`src/dsp/coverAlign.ts`), its ground truth
+(`src/dsp/__fixtures__/coverAlignFixtures.ts`), the stage that consumes it
+(`src/services/coverJourney.ts`)
+
+**One offset moves the whole take.** The stage cross-correlates the two onset envelopes and
+places the take at the single lag that best matches. Nothing is stretched and no syllable is
+moved, so a take that **drifts** against the record — starts together and ends a beat late —
+is placed at whatever offset best fits it *on average* and still drifts. That is not a defect
+to be fixed here: warping needs a confirmed beat grid (Align Vocal Timing) or a chosen word
+(Align Lyrics), and both refuse to guess for the reason each states. The journey lists them as
+refinements to run afterwards.
+
+**The thresholds are measured, and what they were measured ON is constructed audio.** The
+sweep in `coverAlign.test.ts` builds sixteen cover pairs — one syllable schedule rendered
+twice, the second at pitches scaled 1.26× with ±50 % dynamics jitter and noise, 44.1 kHz
+against 48 kHz — and sixteen pairs from unrelated schedules:
+
+| | prominence | peak correlation |
+|---|---|---|
+| covers | 0.2092 – 0.5093 | 0.7674 – 0.8325 |
+| unrelated | 0.0002 – 0.1635 | 0.2937 – 0.4476 |
+| **shipped floor** | **0.186** | **0.607** |
+
+Both floors are points inside a measured gap and the test fails if a gap ever stops containing
+its floor. What no ground truth is available for is a **real** cover against a **real**
+separated vocal: nobody knows the true offset of a recording made in a room, and the negative
+case — a take that is not the same song — cannot be constructed from a fixture pair that is
+related by construction. So the numbers above describe how the measure behaves on audio built
+to exercise it, not a false-accept rate on real material. The refusal arm is what that
+uncertainty is spent on: below either floor the take goes to the start of the original and the
+two numbers are stated, because a take placed at a confidently wrong offset is harder to notice
+than one left at zero.
+
+**Accuracy, and where it stops.** Known offsets are recovered to within **10 ms** in both
+signs, at equal sample rates and across 44.1/48 kHz, mono and stereo. On the harsher sweep —
+where the two recordings are genuinely different performances — the residual is **6.6–10.4 ms**,
+and that is disagreement between two performances about where a syllable starts rather than
+error in the measurement. The fine pass may only refine the coarse answer inside ±0.2 s; it can
+never find a different verse.
+
+## The cover journey leaves two undo entries, not one
+
+<!-- CP1 -->
+**Area:** `src/services/coverJourney.ts`, `src/services/editOps.ts`,
+`src/multitrack/sessionUndo.ts`
+
+A journey run leaves **"Vocal Chain"** and **"Cover Chain"** on the take, in that order, and
+the report lists them. It does not leave one entry that undoes the whole pass, and that is a
+decision rather than an oversight.
+
+An undo entry in this app belongs to **one document**. A single journey entry would have to span
+two documents (the take, plus the five stem documents and the instrumental the pass created) and
+a session replacement whose own history is deliberately cleared, load-shaped, exactly as Open
+Session and stem landing clear theirs. Making that one entry is a change to the undo data model
+in both `editOps` and `sessionUndo` — a joint scope neither has — and it is not a change worth
+making behind a cover feature. It is recorded here as future work.
+
+What this means in practice: undoing twice returns your take to what it was before the journey
+touched it. It does not remove the stem documents, the instrumental, or the session — those are
+creations rather than edits, and closing them is how they go away.
+
 ## The match curve is realised in band energy, and the Graphic EQ cannot always reach it
 
 **Area:** the cascade solve (`src/dsp/graphicEqCascade.ts` — `realisedBandEnergyDb`,
