@@ -588,6 +588,12 @@ describe('deriveRemoveSilence', () => {
 // ── deriveGate (CC1) ────────────────────────────────────────────────────────
 
 describe('deriveGate', () => {
+  const peakDbOf = (c: Float32Array): number => {
+    let peak = 0;
+    for (const v of c) peak = Math.max(peak, Math.abs(v));
+    return toDb(peak);
+  };
+
   function withNoisyGap(windows: number, loud: number, quiet: number, quietAt: number): Float32Array {
     const out = flat(WIN * windows, loud);
     out.set(noise(WIN, quiet, 101), quietAt * WIN);
@@ -635,8 +641,16 @@ describe('deriveGate', () => {
   });
 
   it('clamps into the param range instead of emitting settings the effect cannot take', () => {
-    const res = deriveGate([withNoisyGap(8, 0.5, 1e-5, 4)], SR);
+    // A floor quiet enough that peak + headroom lands under the effect's -80 dB
+    // minimum, but still ABOVE digital silence so `measureNoiseWindow` accepts
+    // the window at all — the two constraints leave a narrow band, and a floor
+    // below it makes the quietest MEASURABLE window the programme instead.
+    const res = deriveGate([withNoisyGap(8, 0.5, 6.6e-5, 4)], SR);
     if (!res.run) throw new Error('expected run');
+    const floor = measureNoiseWindow([withNoisyGap(8, 0.5, 6.6e-5, 4)], SR)!;
+    expect(floor.envelopePeakDb + GATE_HEADROOM_DB).toBeLessThan(-80);
+    expect(Number(res.params.thresholdDb)).toBe(-80);
+
     const def = getEffect('noise-gate')!;
     for (const id of ['thresholdDb', 'attackMs', 'releaseMs', 'holdMs']) {
       const param = def.params.find((p) => p.id === id)!;
@@ -647,6 +661,60 @@ describe('deriveGate', () => {
 
   it('declines without a measurable noise floor', () => {
     expect(deriveGate([new Float32Array(WIN * 4)], SR).run).toBe(false);
+  });
+
+  // The failure mode a gate on by default can least afford: `measureNoiseWindow`
+  // always returns the quietest 500 ms there IS, so on a recording containing no
+  // pause it returns 500 ms of the recording, the threshold lands over the
+  // material and every sample is muted. Each of these silenced 100 % of itself
+  // before the guard, and a stage that deletes the take is worse than the noise
+  // it was asked to remove.
+  describe('a selection with no pause in it at all', () => {
+    it('declines on a continuous tone rather than muting the whole recording', () => {
+      const t = tone(SR * 3, 440, 0.25);
+      const res = deriveGate([t], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('rather than a pause');
+      // The guard is what stops it: the threshold really would have covered the
+      // tone, so this is not a fixture that was never going to be gated.
+      const floor = measureNoiseWindow([t], SR)!;
+      expect(floor.envelopePeakDb + GATE_HEADROOM_DB).toBeGreaterThan(peakDbOf(t) - 6);
+    });
+
+    it('declines on steady room tone with no voice in it', () => {
+      expect(deriveGate([noise(SR * 3, 0.01, 9)], SR).run).toBe(false);
+    });
+
+    it('declines when every window holds a click, so the quietest one is not a pause', () => {
+      // Clicks 500 ms apart: each gap is real silence but none is a whole noise
+      // window long, so every 500 ms window contains a click and the quietest
+      // window reads the CLICK. Measured before the guard: 100 % silenced.
+      const clicks = new Float32Array(SR * 4);
+      for (let k = 0; k * 0.5 * SR < clicks.length; k++) {
+        const at = Math.round(k * 0.5 * SR);
+        for (let i = 0; i < Math.round(0.01 * SR) && at + i < clicks.length; i++) {
+          clicks[at + i] = 0.8 * Math.exp(-i / 20);
+        }
+      }
+      const res = deriveGate([clicks], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('gating would mute all of it');
+    });
+
+    it('still runs on the take those three are the boundary of — pauses a window long', () => {
+      // Same clicks, one noise window apart instead of half of one, over a real
+      // floor. The guard must not have swallowed the case the stage is for.
+      const signal = noise(SR * 4, 0.004, 13);
+      for (let k = 0; k * WIN * 2 < signal.length; k++) {
+        const at = k * WIN * 2;
+        for (let i = 0; i < Math.round(0.2 * SR) && at + i < signal.length; i++) {
+          signal[at + i] += 0.4 * Math.sin((2 * Math.PI * 220 * i) / SR);
+        }
+      }
+      expect(deriveGate([signal], SR).run).toBe(true);
+    });
   });
 
   it('does NOT share Noise Reduction’s decline: gating needs no clean print (N3)', () => {

@@ -704,6 +704,35 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
   const attackMs = clampToParam('noise-gate', 'attackMs', DETECT_ATTACK_MS);
   const releaseMs = clampToParam('noise-gate', 'releaseMs', DETECT_RELEASE_MS);
   const holdMs = clampToParam('noise-gate', 'holdMs', GATE_HOLD_MS);
+
+  // Is that quietest window actually a PAUSE, or is it the programme?
+  //
+  // `measureNoiseWindow` returns the quietest 500 ms there is, which on a
+  // recording containing no pause at all is simply 500 ms of the recording. The
+  // threshold then lands above the material itself and the gate mutes the whole
+  // take. Three measured examples, all of which did exactly that before this
+  // guard: a continuous 440 Hz tone (100 % silenced), a stretch of room tone
+  // with no voice in it (100 %), and a click train whose clicks are 500 ms
+  // apart, so that EVERY window contains one and the quietest window still
+  // reads -5.6 dBFS (100 %).
+  //
+  // The test needs no threshold of its own, because the failure is total: on
+  // those three nothing whatsoever sits above the derived level, while a real
+  // take with pauses has 42 % of its samples above it and a very noisy take —
+  // the one Noise Reduction refuses, and the one this stage exists for — has
+  // 85 %. So the question is simply whether anything is left, asked with the
+  // effect's own comparison so the answer predicts what the effect would do.
+  const env = envelopeFollower(maxAcrossChannels(channels), sampleRate, attackMs, releaseMs);
+  const gateLin = Math.pow(10, thresholdDb / 20);
+  let soundingSamples = 0;
+  for (let i = 0; i < env.length; i++) if (env[i] > gateLin) soundingSamples++;
+  if (soundingSamples === 0) {
+    return {
+      run: false,
+      reason: `nothing in the selection rises above the ${dbfsStr(thresholdDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`,
+    };
+  }
+
   params.thresholdDb = thresholdDb;
   params.attackMs = attackMs;
   params.releaseMs = releaseMs;
@@ -716,6 +745,11 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
         label: 'Threshold',
         value: dbfsStr(thresholdDb),
         from: `${GATE_HEADROOM_DB} dB over the ${dbfsStr(noise.envelopePeakDb)} the silence detector reads inside the quietest ${NOISE_WINDOW_MS} ms — the same floor grazes that level again in a longer pause, and one graze re-opens a gate`,
+      },
+      {
+        label: 'Gated',
+        value: `${((env.length - soundingSamples) / sampleRate).toFixed(1)} s`,
+        from: `the part of the selection sitting under that threshold — the rest stays at full level`,
       },
       {
         label: 'Hold',
