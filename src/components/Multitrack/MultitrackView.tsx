@@ -6,12 +6,20 @@ import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import TimelineRuler from '../Editor/TimelineRuler';
 import { sampleToPixel } from '../Editor/waveformRender';
+import { sessionSnapTargets } from './sessionSnapTargets';
 import TrackHeader from './TrackHeader';
 import TrackLane from './TrackLane';
 import { useMultitrackZoom } from './useMultitrackZoom';
 
 const HEADER_W = 224; // Tailwind w-56 (14rem)
 const LANE_H = 96; // Tailwind h-24
+
+/** F11-2: the ruler's magnet targets for THIS surface — every clip edge, bar
+ * and beat in the session. Nothing is excluded: a ruler seek is not a clip
+ * drag, so there is no clip whose own edges must be left out. */
+function mtSnapTargets(): number[] {
+  return sessionSnapTargets(null);
+}
 
 /**
  * The multitrack editor. Left column of TrackHeaders aligned with a right lane
@@ -92,7 +100,14 @@ export default function MultitrackView() {
       <div className="flex shrink-0">
         <div className="w-56 shrink-0" />
         <div className="min-w-0 flex-1">
-          <TimelineRuler sampleRate={session.sampleRate} zoom={mtZoom} onSeek={setMtCursor} />
+          {/* F11-2: the session's own snap targets, at the session's own zoom —
+              the editor's would quantise this surface at the wrong scale. */}
+          <TimelineRuler
+            sampleRate={session.sampleRate}
+            zoom={mtZoom}
+            onSeek={setMtCursor}
+            snapTargets={mtSnapTargets}
+          />
         </div>
       </div>
 

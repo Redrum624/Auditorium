@@ -406,7 +406,8 @@ export default function SpectrogramView({ docId }: { docId: string }) {
       className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
       data-testid="spectrogram-view"
     >
-      <TimelineRuler sampleRate={doc.sampleRate} />
+      {/* F11-2: same seek/scrub as the waveform view, same length clamp. */}
+      <TimelineRuler sampleRate={doc.sampleRate} length={length} />
       <div ref={containerRef} className="glass-lane relative min-h-0 min-w-0 flex-1">
         <canvas
           ref={canvasRef}

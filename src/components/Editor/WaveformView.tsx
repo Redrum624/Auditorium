@@ -130,7 +130,8 @@ export default function WaveformView({ docId }: { docId: string }) {
       className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
       data-testid="waveform-view"
     >
-      <TimelineRuler sampleRate={doc.sampleRate} />
+      {/* F11-2: the ruler seeks and scrubs against THIS document's length. */}
+      <TimelineRuler sampleRate={doc.sampleRate} length={length} />
       <TranscriptRibbon />
       <div ref={containerRef} className="glass-lane relative min-h-0 min-w-0 flex-1">
         <canvas
