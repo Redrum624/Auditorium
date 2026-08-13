@@ -22,7 +22,7 @@ import { ChromePill } from '../UI/glass';
  * z-20 band whose empty stretches ignore pointer events so the stage beneath
  * stays live.
  *
- *   [Open Save Export | ⏮ ⏹ ▶ ⏺ ⟳ | views | − % + Fit]        [module strip]
+ *   [Open | Save Export | ⏮ ⏹ ▶ ⏺ ⟳ | views | − % + Fit]        [module strip]
  *
  * U1 (layout E2): the top-left file chip is GONE. Its identity readout —
  * name · duration · rate · channels — folded into the bottom bar, where the
