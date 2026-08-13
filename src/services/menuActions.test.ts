@@ -16,6 +16,7 @@ import * as sessionFileModule from '../multitrack/sessionFile';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { registerDialogSetters } from './dialogBus';
+import { SHORTCUT_TABLE } from './shortcuts';
 
 jest.mock('../multitrack/sessionFile');
 jest.mock('./tempoAnalysis', () => ({
@@ -137,10 +138,49 @@ describe('edit.trim / edit.silence (U1)', () => {
     expect(docLength(trimmed!)).toBe(300);
   });
 
-  it('stays out of the Edit menu — the toolbar is their only surface', () => {
+  // M1 (controller ruling, inverting U1's own test): U1 registered both
+  // commands but deliberately left the Edit menu alone, so the floating
+  // toolbar was their ONLY surface — a verb reachable by mouse and by nothing
+  // else, invisible to anyone who looks for it where every other edit verb
+  // lives. They now sit with the selection verbs they belong to.
+  it('appears in the Edit menu directly after Delete, with the other selection verbs', () => {
     const editIds = commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items);
-    expect(editIds).not.toContain('edit.trim');
-    expect(editIds).not.toContain('edit.silence');
+    expect(editIds).toContain('edit.trim');
+    expect(editIds).toContain('edit.silence');
+    expect(editIds.slice(editIds.indexOf('edit.delete'), editIds.indexOf('edit.delete') + 3)).toEqual(
+      ['edit.delete', 'edit.trim', 'edit.silence']
+    );
+  });
+
+  // The repo has just paid for two labels naming keys that did nothing
+  // (File > Close's Ctrl+W, and the Save pill's). Neither command has a combo
+  // in SHORTCUT_TABLE, so neither row may advertise one.
+  it('advertises no shortcut, because neither command has one bound', () => {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    const rows = edit.items.filter(
+      (item): item is MenuCommand =>
+        item !== 'separator' && (item.id === 'edit.trim' || item.id === 'edit.silence')
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.map((r) => r.label)).toEqual(['Trim to Selection', 'Silence Selection']);
+    for (const row of rows) expect(row.shortcut).toBeUndefined();
+    const bound = SHORTCUT_TABLE.map((s) => s.commandId);
+    expect(bound).not.toContain('edit.trim');
+    expect(bound).not.toContain('edit.silence');
+  });
+
+  it('greys both rows in the menu until there is a selection', () => {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    const row = (id: string) =>
+      edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+
+    openDoc();
+    expect(row('edit.trim').enabled(useAppStore.getState())).toBe(false);
+    expect(row('edit.silence').enabled(useAppStore.getState())).toBe(false);
+
+    useAppStore.getState().setSelection({ start: 100, end: 400 });
+    expect(row('edit.trim').enabled(useAppStore.getState())).toBe(true);
+    expect(row('edit.silence').enabled(useAppStore.getState())).toBe(true);
   });
 });
 
@@ -186,6 +226,8 @@ describe('getMenuSections', () => {
       'edit.copy',
       'edit.paste',
       'edit.delete',
+      'edit.trim',
+      'edit.silence',
       'edit.selectAll',
       'edit.convertSampleRate',
       'edit.convertChannels',

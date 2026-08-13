@@ -115,9 +115,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `src/components/Layout/EditToolbar.tsx`, `src/services/menuActions.ts`, `src/App.tsx`.
 - **Trim to Selection and Silence Selection are reachable at last.** Why: `trimToSelection` and
   `silenceSelection` have been in `editOps` since Task 22 with no command in front of them — the only
-  caller was the test hooks. How to use them: the edit toolbar's middle group. Both take Cut's own
-  `hasSelection` predicate and are ordinary undoable History steps; neither operation changed, and
-  neither is added to the Edit menu's layout. Affects: `src/services/menuActions.ts`.
+  caller was the test hooks. How to use them: the edit toolbar's middle group, or **Edit → Trim to
+  Selection / Silence Selection**, directly under Delete and sharing that group's `hasSelection`
+  rule. Both are ordinary undoable History steps and neither operation changed. Neither menu row
+  advertises a shortcut, because neither command has one bound — this release already retired two
+  labels that named keys doing nothing. Affects: `src/services/menuActions.ts`.
 
 ### Changed
 

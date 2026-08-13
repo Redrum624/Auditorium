@@ -115,6 +115,16 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.copy',
       'edit.paste',
       'edit.delete',
+      // M1: Trim and Silence act on the same `[start, end)` selection as the
+      // four above and share Cut's predicate, so they belong in that group
+      // rather than behind a separator of their own. Until now the floating
+      // edit toolbar was their only surface — mouse-reachable and nowhere
+      // else, so anyone who looked for them where every other edit verb lives
+      // found nothing. Neither carries a shortcut label: neither has a combo
+      // in SHORTCUT_TABLE, and this repo has just paid for two labels that
+      // named keys doing nothing.
+      'edit.trim',
+      'edit.silence',
       'separator',
       'edit.selectAll',
       'separator',
@@ -472,10 +482,12 @@ function registerEditCommands(): void {
     // listed them, so the only way to reach either was the test hooks. The E2
     // edit toolbar puts a button on each, and the app's rule is that a button
     // calls a COMMAND: the registry is what re-checks enablement at run time,
-    // so a surface can never outrun it. Neither entry is added to the Edit
-    // menu's LAYOUT — that would be a menu change this task did not ask for —
-    // and neither op is touched. Same `hasSelection` predicate as Cut/Copy,
-    // which is what both functions already require and return early without.
+    // so a surface can never outrun it. Neither op is touched. Same
+    // `hasSelection` predicate as Cut/Copy, which is what both functions
+    // already require and return early without.
+    // M1: both are in the Edit menu's LAYOUT too now, next to Delete — U1 left
+    // the menu alone as out of its scope, which left the toolbar their only
+    // surface. Neither gets a `shortcut`, because neither has a real one.
     {
       id: 'edit.trim',
       label: 'Trim to Selection',

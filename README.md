@@ -96,7 +96,7 @@ use `npm run dev`.
 
 **Editing & workflow:**
 
-- Cut, copy, paste, and delete on sample-accurate `[start, end)` selections, from the menu, the keyboard, or the floating edit toolbar (which adds Trim to Selection and Silence Selection, and greys each verb by the same rule the menu uses).
+- Cut, copy, paste, and delete on sample-accurate `[start, end)` selections, from the menu, the keyboard, or the floating edit toolbar — which also carries Trim to Selection and Silence Selection (both in the Edit menu under Delete, neither on the keyboard), and greys each verb by the same rule the menu uses.
 - **Waveform-anchored chrome**: the toolbar, status and edit pills centre on the waveform rather than the window, and closing the open module card hands the column's full width to the lane.
 - Per-document undo/redo history, up to 50 steps within an 800 MB per-document memory budget (oldest step evicted once either limit is hit), browsable in the History panel; marker add/rename/delete are undoable too (`Add Marker`/`Rename Marker`/`Delete Marker`).
 - Session undo/redo for the multitrack: every clip, fade, automation and track edit is undoable, one step per gesture (a whole trim drag, a recorded take, an armed crossfade each revert with one `Ctrl+Z`); `Ctrl+Z` in the multitrack view addresses the session's own 50-step history, in the editor views the active document's — view changes, selection and scrolling are never undo steps.

@@ -110,7 +110,9 @@ you already have: nothing here does anything the menu and the keyboard do not.
 
 - **Trim** keeps the selected region and drops everything else;
   **Silence** zeroes the selected region in place, leaving the length alone.
-  Both are undoable History steps like any other edit.
+  Both are undoable History steps like any other edit, and both are also in
+  **Edit → Trim to Selection / Silence Selection**, directly under Delete.
+  Neither has a keyboard shortcut, so neither menu row advertises one.
 - Buttons grey out individually rather than disappearing. With no selection,
   Cut / Copy / Delete / Trim / Silence are greyed; with nothing on the
   clipboard, Paste is greyed; Undo and Redo follow whichever history is
