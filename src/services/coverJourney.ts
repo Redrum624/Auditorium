@@ -105,6 +105,7 @@ import {
   guessRemedy,
   placementFor,
 } from './coverPlacement';
+import { getHistory } from './undoHistory';
 import { cancelStemSeparation, separateStems, STEM_LABELS } from './stemService';
 import {
   createStemDocuments,
@@ -372,6 +373,24 @@ export function findExistingSeparation(
     found.push(doc);
   }
   return found;
+}
+
+/**
+ * CC4 (CJ-4) — the journey passes this take has already been through, oldest
+ * first, read from its own undo history.
+ *
+ * The two labels are the ones the nested chains commit under, so this is a fact
+ * about the document rather than a flag this module would have to store and keep
+ * in sync. A take carrying them has already been noise-reduced, pitch-corrected,
+ * matched and limited; running the journey again learns a noise print from
+ * already-gated audio and corrects pitch a second time, which is a real audible
+ * cost and is not what a user pressing Run a second time is usually after (they
+ * are usually after the placement). Undone entries are deliberately NOT counted:
+ * an undone pass is not in the audio.
+ */
+export function priorJourneyPasses(docId: string): string[] {
+  const known: string[] = [VOCAL_CHAIN_UNDO_LABEL, COVER_CHAIN_UNDO_LABEL];
+  return getHistory(docId).done.filter((label) => known.includes(label));
 }
 
 /**
@@ -643,16 +662,43 @@ export async function runCoverJourney(
       .filter((_, i) => STEM_TRACK_LABELS[i] !== 'Vocals')
       .map((d) => d.name);
 
-    // The instrumental document. Created rather than reused even on a reused
-    // separation: it is this pass's own artifact, it is cheap (a sum of four
-    // arrays already in memory), and a stale one from an earlier run would be
-    // the one thing here that could silently describe a different song.
-    const instrumental = createDocument({
-      name: `${song.name} ${INSTRUMENTAL_SUFFIX}`,
-      sampleRate: song.sampleRate,
-      channels: sumInstrumental(stems),
-    });
-    useAppStore.getState().addDocument(instrumental);
+    // The instrumental document, RE-SUMMED every run and re-used in place when
+    // this pass's own earlier copy is still open and still describes the song.
+    //
+    // CC4 (CJ-4): it used to be created outright every run. The reasoning — a
+    // stale copy could silently describe a different song — is right and is kept:
+    // the samples below are always the fresh sum, never last run's. What it did
+    // not do was close or reuse the previous copy, so a second pass (the fast
+    // path the reuse arm exists FOR, exercised by the product's own smoke) left
+    // two full-length documents with the SAME name open, a third after a third
+    // pass, at ~85 MB apiece for a four-minute stereo song.
+    //
+    // The adoption precondition is `findExistingSeparation`'s, verbatim: the
+    // name this pass gives it, the song's sample rate, and the song's exact
+    // length. That is the same test a stem must pass to inherit the song's beat
+    // grid, and it is what makes adoption safe — a copy that no longer matches
+    // is left alone and a fresh one is created beside it, exactly as before.
+    const instrumentalName = `${song.name} ${INSTRUMENTAL_SUFFIX}`;
+    const instrumentalChannels = sumInstrumental(stems);
+    const previous =
+      useAppStore
+        .getState()
+        .documents.find(
+          (d) =>
+            d.id !== song.id &&
+            d.name === instrumentalName &&
+            d.sampleRate === song.sampleRate &&
+            docLength(d) === docLength(song)
+        ) ?? null;
+    const instrumental: AudioDocument = previous
+      ? { ...previous, channels: instrumentalChannels }
+      : createDocument({
+          name: instrumentalName,
+          sampleRate: song.sampleRate,
+          channels: instrumentalChannels,
+        });
+    if (previous) useAppStore.getState().updateDocument(instrumental);
+    else useAppStore.getState().addDocument(instrumental);
     // Same identity-copy precondition `landStems` records for the stems: the
     // instrumental is a time-aligned combination of the song at the same rate
     // and length, so the song's beat grid IS its grid. `linkDerivedDocument`
@@ -685,7 +731,13 @@ export async function runCoverJourney(
         {
           label: 'Instrumental',
           value: instrumental.name,
-          from: `${nonVocalNames.join(' + ')} summed — separation's guarantee is that its stems sum back to the mix exactly, so this is the original with its vocal removed to the last bit`,
+          // CC4 (CJ-4): which of the two happened, said rather than left to be
+          // counted in the files panel.
+          from:
+            `${nonVocalNames.join(' + ')} summed — separation's guarantee is that its stems sum back to the mix exactly, so this is the original with its vocal removed to the last bit` +
+            (previous
+              ? '. The document of this name that an earlier pass left open was reused, its samples rewritten with this pass\'s own sum — it still carries the song\'s rate and exact length, so it is this song\'s'
+              : ''),
         },
       ],
       warning: COVER_CHAIN_RESIDUAL_SENTENCE,

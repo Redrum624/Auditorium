@@ -27,6 +27,7 @@ import {
   coverSessionName,
   findExistingSeparation,
   journeyStageById,
+  priorJourneyPasses,
   runCoverJourney,
   sumInstrumental,
   type CoverJourneyStageId,
@@ -34,6 +35,9 @@ import {
   type CoverJourneyStageResult,
 } from './coverJourney';
 import { MONO_PAN_COMPENSATION_DB, STEM_TRACK_LABELS } from './stemLanding';
+import { clearHistory, pushUndo } from './undoHistory';
+import { VOCAL_CHAIN_UNDO_LABEL } from './vocalChain';
+import { COVER_CHAIN_UNDO_LABEL } from './coverChain';
 
 jest.mock('./stemService', () => ({
   ...jest.requireActual('./stemService'),
@@ -186,6 +190,9 @@ beforeEach(() => {
   alignTakeToReference.mockReturnValue(confidentAlignment(0));
   separateStems.mockResolvedValue({ ok: false, status: 'failed', message: 'not stubbed' });
   seed(true);
+  // CC4 (CJ-4): undo history is module-global and outlives the store reset, so
+  // the take starts each test with the history the user's would have.
+  clearHistory(takeId);
 });
 
 // ── Sequencing ──────────────────────────────────────────────────────────────
@@ -293,6 +300,85 @@ describe('runCoverJourney — sequencing', () => {
     expect(await runCoverJourney({ songDocId: 'nope', takeDocId: takeId })).toBeNull();
     expect(await runCoverJourney({ songDocId: songId, takeDocId: 'nope' })).toBeNull();
     expect(await runCoverJourney({ songDocId: songId, takeDocId: songId })).toBeNull();
+  });
+});
+
+// ── Running it twice ────────────────────────────────────────────────────────
+
+/**
+ * CC4 (CJ-4). The reuse arm exists so a second pass is seconds rather than
+ * minutes, and the product's own smoke exercises it — so a second pass is a
+ * SUPPORTED flow, not an edge case. It left a second full-length
+ * `<song> — Instrumental` open beside the first on every run (~85 MB apiece for
+ * a four-minute stereo song), with an identical name, and re-ran both chains
+ * over the already-processed take with nothing said about either.
+ */
+describe('runCoverJourney — a second pass on the same song', () => {
+  it('reuses the instrumental it made last time instead of stacking another', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const afterFirst = useAppStore.getState().documents.length;
+
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(useAppStore.getState().documents.length).toBe(afterFirst);
+    expect(
+      useAppStore.getState().documents.filter((d) => d.name === 'song — Instrumental')
+    ).toHaveLength(1);
+    expect(second!.separation!.instrumentalDocId).toBe(first!.separation!.instrumentalDocId);
+    expect(second!.stages[0].derived[1].from).toMatch(/rewritten|reused/i);
+  });
+
+  it('rewrites the reused instrumental rather than trusting last run\'s samples', async () => {
+    await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    // A stem changes between the passes — same name, same rate, same length, so
+    // the separation is still reused, but the instrumental it sums to is not the
+    // one on disk from last time.
+    useAppStore.setState({
+      documents: useAppStore.getState().documents.map((d) =>
+        d.name === 'song — Drums' ? { ...d, channels: [tone(SONG_SAMPLES, 440, SR, 0.9)] } : d
+      ),
+    });
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    const instrumental = useAppStore
+      .getState()
+      .documents.find((d) => d.id === second!.separation!.instrumentalDocId)!;
+    let peak = 0;
+    for (let i = 0; i < instrumental.channels[0].length; i++) {
+      peak = Math.max(peak, Math.abs(instrumental.channels[0][i]));
+    }
+    expect(peak).toBeGreaterThan(0.8);
+  });
+
+  it('creates a fresh one when the old copy no longer describes the song', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    // The stale copy the created-not-reused comment was written against: same
+    // name, wrong length. It must not be adopted.
+    useAppStore.setState({
+      documents: useAppStore.getState().documents.map((d) =>
+        d.id === first!.separation!.instrumentalDocId
+          ? { ...d, channels: [tone(64, 100, SR)] }
+          : d
+      ),
+    });
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(second!.separation!.instrumentalDocId).not.toBe(first!.separation!.instrumentalDocId);
+  });
+});
+
+describe('priorJourneyPasses', () => {
+  it('names the passes this take has already been through, oldest first', () => {
+    pushUndo({ label: 'Amplify', docId: takeId, undo() {}, redo() {} });
+    pushUndo({ label: VOCAL_CHAIN_UNDO_LABEL, docId: takeId, undo() {}, redo() {} });
+    pushUndo({ label: COVER_CHAIN_UNDO_LABEL, docId: takeId, undo() {}, redo() {} });
+    expect(priorJourneyPasses(takeId)).toEqual([VOCAL_CHAIN_UNDO_LABEL, COVER_CHAIN_UNDO_LABEL]);
+  });
+
+  it('is empty for a take nothing has run on, and for a document that is not there', () => {
+    expect(priorJourneyPasses(takeId)).toEqual([]);
+    expect(priorJourneyPasses('nope')).toEqual([]);
+    pushUndo({ label: 'Normalize', docId: takeId, undo() {}, redo() {} });
+    expect(priorJourneyPasses(takeId)).toEqual([]);
   });
 });
 

@@ -11,6 +11,7 @@ import {
 } from '../../services/coverChain';
 import {
   COVER_JOURNEY_STAGES,
+  priorJourneyPasses,
   runCoverJourney,
   type CoverJourneyReport,
   type CoverJourneyStageId,
@@ -28,6 +29,7 @@ import {
   guessKind,
   type ApplyMeasuredOffsetResult,
 } from '../../services/coverPlacement';
+import { useHistoryVersion } from '../../services/undoHistory';
 import type { DerivedValue, StageStatus } from '../../services/vocalChain';
 import { GlassButton, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
@@ -344,6 +346,14 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
   const done = report !== null;
   const locked = busy || done;
 
+  // CC4 (CJ-4): the passes this take already carries. `useHistoryVersion` is the
+  // subscription the History panel uses — the stacks live outside zustand, so
+  // without it this line would be read once and never again, and undoing the
+  // previous run's entries (which is exactly what the warning tells the user to
+  // do) would leave the warning standing.
+  useHistoryVersion();
+  const priorPasses = take ? priorJourneyPasses(take.id) : [];
+
   // CP1 fix-round: the finished report wins the moment it exists, and a run that
   // could not START shows NOTHING. Without the `busy` arm the rows `onStageResult`
   // had already pushed stayed on screen next to the error, looking like an
@@ -522,6 +532,24 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
           <p data-testid="cover-journey-not-ready" className="text-xs" style={{ color: AMBER }}>
             Choose two different documents: the original song (the full mix — this pass separates it for you)
             and your vocal take.
+          </p>
+        )}
+
+        {/* CC4 (CJ-4): the second pass, before the button rather than after the
+            damage. The take's own undo history is the source — these are the
+            labels the two nested chains commit under — so this cannot drift out
+            of sync with what actually ran. A warning with the choice to proceed,
+            not a block: re-running is a legitimate thing to want (usually for
+            the placement), it just must not be silent. */}
+        {priorPasses.length > 0 && !busy && !done && (
+          <p data-testid="cover-journey-rerun" className="text-xs" style={{ color: AMBER }}>
+            {take ? `“${take.name}”` : 'This take'} has already been through{' '}
+            {priorPasses.map((p) => `“${p}”`).join(' and ')}. Running the journey again processes it a
+            SECOND time on top of that: the Vocal Chain would learn its noise print from audio it has
+            already cleaned and correct the pitch of pitch-corrected singing, and the matching stages would
+            measure a take they have already moved. If what you want is a different placement or a fresh
+            instrumental, undo those entries on the take first (Edit → Undo, or the History panel) and run
+            this again — or run it on a fresh copy of the take.
           </p>
         )}
 

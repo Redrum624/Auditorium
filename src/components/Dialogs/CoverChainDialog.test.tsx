@@ -23,6 +23,7 @@ import {
   APPLY_GUESS_UNDO_LABEL,
   applyMeasuredOffset,
 } from '../../services/coverPlacement';
+import { clearHistory, pushUndo } from '../../services/undoHistory';
 
 // The STAGE TABLE stays real (requireActual): the dialog's whole contract is
 // that it lists what the engine will actually run, in the engine's order, with
@@ -84,6 +85,7 @@ function report(over: Partial<CoverJourneyReport> = {}): CoverJourneyReport {
       takeStartSample: 4800,
       shiftedSamples: 0,
       takeLengthSample: SR * 4,
+      takeGainDb: 0,
     },
     smoothing: null,
     cancelledAt: null,
@@ -102,6 +104,9 @@ beforeEach(() => {
   useAppStore.setState(makeInitialState());
   song = seedDoc('song.wav');
   take = seedDoc('take.wav');
+  // CC4 (CJ-4): undo history is module-global and outlives the store reset.
+  clearHistory(song.id);
+  clearHistory(take.id);
   // `addDocument` activates what it added last, so the take is active — which
   // is what the dialog defaults its take picker to.
   mockRun.mockResolvedValue(report());
@@ -155,6 +160,50 @@ describe('CoverChainDialog — what it says before it runs', () => {
       /session is\s+built only at stage 5|session is built only at stage 5/
     );
     expect(screen.getByTestId('cover-journey-cancel-note')).toHaveTextContent('no session');
+  });
+});
+
+// ── CC4 (CJ-4): the second pass ─────────────────────────────────────────────
+
+/**
+ * Running the journey again on a take it has already processed re-runs the
+ * whole Vocal Chain over already-cleaned audio — a noise print learned from
+ * gated audio, a second pitch correction — with nothing said before the button.
+ * The take's own undo history knows, so the dialog asks it.
+ */
+describe('CoverChainDialog — a take that has already been through a pass', () => {
+  it('says nothing for a fresh take', () => {
+    open();
+    choose();
+    expect(screen.queryByTestId('cover-journey-rerun')).toBeNull();
+  });
+
+  it('warns before Run, naming the passes, and still lets the user proceed', () => {
+    pushUndo({ label: 'Vocal Chain', docId: take.id, undo() {}, redo() {} });
+    pushUndo({ label: 'Cover Chain', docId: take.id, undo() {}, redo() {} });
+    open();
+    choose();
+
+    const warning = screen.getByTestId('cover-journey-rerun');
+    expect(warning).toHaveTextContent('Vocal Chain');
+    expect(warning).toHaveTextContent('Cover Chain');
+    expect(warning).toHaveTextContent(/again/i);
+    // A warning, not a block: the user is told and then decides.
+    expect(screen.getByTestId('cover-chain-apply')).not.toBeDisabled();
+  });
+
+  it('follows the take picker rather than the document that happened to be active', () => {
+    const other = seedDoc('other-take.wav');
+    // `addDocument` activates what it added, and the picker defaults to the
+    // active document — so the fixture puts the CLEAN take back in front.
+    useAppStore.getState().setActiveDocument(take.id);
+    pushUndo({ label: 'Vocal Chain', docId: other.id, undo() {}, redo() {} });
+    open();
+    choose();
+    expect(screen.queryByTestId('cover-journey-rerun')).toBeNull();
+
+    fireEvent.change(screen.getByTestId('cover-journey-take'), { target: { value: other.id } });
+    expect(screen.getByTestId('cover-journey-rerun')).toHaveTextContent('Vocal Chain');
   });
 });
 
