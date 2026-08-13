@@ -2,6 +2,7 @@ import type { AudioDocument } from '../audio/AudioDocument';
 import { docLength } from '../audio/AudioDocument';
 import { crossfadeGains, fadeInGainAt, fadeOutGainAt, type FadeCurve } from '../dsp/fades';
 import { resampleChannel } from '../dsp/resample';
+import { resampledClipSlice, scheduleIdle } from './clipResampleCache';
 import { SPATIAL_NEUTRAL, spatialDistanceGain, spatialPanPosition } from '../dsp/spatial';
 import {
   automationValueAt,
@@ -216,7 +217,35 @@ export function readClipSlice(doc: AudioDocument, clip: Clip, sessionRate: numbe
   });
 
   if (matched) return slices;
-  return slices.map((ch) => resampleChannel(ch, doc.sampleRate, sessionRate));
+  return resampledClipSlice(doc, clip, sessionRate, () =>
+    slices.map((ch) => resampleChannel(ch, doc.sampleRate, sessionRate))
+  );
+}
+
+/**
+ * MT2-2 — computes this clip's conversion off the play path, when the renderer
+ * is next idle, so `play()` finds it already done.
+ *
+ * Called at INSERT time (`sessionInsert.placeDocumentsOnTrack`), which is the
+ * moment the (document, session rate, window) triple comes into existence and
+ * the moment the user is least surprised by the app being busy. A no-op when
+ * the rates already agree — after MT2-1's adoption that is the reported flow,
+ * which therefore never reaches this code at all.
+ *
+ * There is no in-flight state to share: the conversion is synchronous, so a
+ * `play()` that arrives before the idle callback simply computes it itself
+ * through the same cache and the warm-up then finds it done.
+ */
+export function warmClipResample(doc: AudioDocument, clip: Clip, sessionRate: number): void {
+  if (doc.sampleRate === sessionRate) return;
+  scheduleIdle(() => {
+    try {
+      readClipSlice(doc, clip, sessionRate);
+    } catch {
+      // A warm-up is an optimisation; it may never be the reason anything fails.
+      // The real read on the play path will surface any genuine problem.
+    }
+  });
 }
 
 /**

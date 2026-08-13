@@ -1,5 +1,6 @@
 import { type AudioDocument } from '../audio/AudioDocument';
-import { createClip, documentClipLength } from './session';
+import { warmClipResample } from './mixdown';
+import { createClip, documentClipLength, type Clip } from './session';
 import { adoptSessionRate, useSessionStore } from './sessionStore';
 import { withSessionGesture } from './sessionUndo';
 
@@ -51,7 +52,8 @@ export function placeDocumentsOnTrack(
   if (docs.length === 0) return [];
   if (!useSessionStore.getState().session.tracks.some((t) => t.id === trackId)) return [];
 
-  const placed: PlacedClip[] = [];
+  const built: { doc: AudioDocument; clip: Clip }[] = [];
+  let sessionRate = useSessionStore.getState().session.sampleRate;
   withSessionGesture(docs.length === 1 ? 'Add clip' : 'Add clips', () => {
     // Before the first clip is built, so the clip is built against the rate the
     // session ENDS at. A multi-document drop adopts from the first of them; the
@@ -59,7 +61,7 @@ export function placeDocumentsOnTrack(
     // other non-empty session's rate.
     const ratio = adoptSessionRate(docs[0].sampleRate);
     const store = useSessionStore.getState();
-    const sessionRate = store.session.sampleRate;
+    sessionRate = store.session.sampleRate;
 
     let next = Math.max(0, Math.round(startSample * ratio));
     for (const doc of docs) {
@@ -71,11 +73,23 @@ export function placeDocumentsOnTrack(
         lengthSample,
       });
       store.addClip(trackId, clip);
-      placed.push({ clipId: clip.id, lengthSample, startSample: next });
+      built.push({ doc, clip });
       next += lengthSample;
     }
 
-    if (opts?.select !== false) store.setSelectedClip(placed[placed.length - 1].clipId);
+    if (opts?.select !== false) store.setSelectedClip(built[built.length - 1].clip.id);
   });
-  return placed;
+
+  // MT2-2 — a clip that WILL need converting gets converted now, off the play
+  // path, when the renderer is next idle. A no-op when the rates agree, which
+  // after the adoption above is the whole of the reported flow; it exists for
+  // the genuinely mixed-rate session, so `play()` finds the samples ready
+  // instead of running the sinc over all of them while the user waits.
+  for (const { doc, clip } of built) warmClipResample(doc, clip, sessionRate);
+
+  return built.map(({ clip }) => ({
+    clipId: clip.id,
+    lengthSample: clip.lengthSample,
+    startSample: clip.startSample,
+  }));
 }

@@ -20,9 +20,12 @@
  */
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
+import * as resample from '../dsp/resample';
 import { installTestHooks, type TestApi } from '../services/testHooks';
 import { runCommand } from '../services/menuActions';
+import { _resetClipResampleCache } from './clipResampleCache';
 import { placeDocumentClips } from './laneDrop';
+import { readClipSlice } from './mixdown';
 import { createClip } from './session';
 import { adoptSessionRate, useSessionStore } from './sessionStore';
 import { _resetSessionUndo, undoSession } from './sessionUndo';
@@ -211,6 +214,38 @@ describe('adoptSessionRate — the conversion itself', () => {
     const before = store().session;
     expect(adoptSessionRate(SESSION_RATE)).toBe(1);
     expect(store().session).toBe(before);
+  });
+});
+
+describe('an insert that CANNOT adopt warms its conversion off the play path', () => {
+  it('leaves nothing for play() to resample once the renderer has been idle', () => {
+    _resetClipResampleCache();
+    jest.useFakeTimers();
+    try {
+      // A non-empty session at 48 kHz, so the 44.1 kHz document below is a
+      // genuine mismatch and adoption correctly refuses. This is the shape MT2-2
+      // exists for; the reported flow never reaches it.
+      store().newSession(DOC_RATE);
+      const standing = addDoc(DOC_RATE, 2000);
+      placeDocumentClips([standing.id], store().session.tracks[0].id, 0);
+
+      const odd = addDoc(SESSION_RATE, 2000);
+      const spy = jest.spyOn(resample, 'resampleChannel');
+      const [placed] = placeDocumentClips([odd.id], store().session.tracks[1].id, 0);
+      expect(placed).toBeDefined();
+      expect(spy).not.toHaveBeenCalled(); // deferred, never on the insert's tick
+
+      jest.runOnlyPendingTimers();
+      expect(spy).toHaveBeenCalled();
+
+      // What play() does, on the exact clip that was placed.
+      spy.mockClear();
+      const clip = store().session.tracks[1].clips[0];
+      readClipSlice(odd, clip, store().session.sampleRate);
+      expect(spy).not.toHaveBeenCalled();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 
