@@ -1,4 +1,4 @@
-import { nextId } from '../audio/AudioDocument';
+import { docLength, nextId, type AudioDocument } from '../audio/AudioDocument';
 import type { FadeCurve } from '../dsp/fades';
 import type { AutomationLane } from './automation';
 
@@ -140,6 +140,22 @@ export function createTrack(name: string): Track {
     armed: false,
     clips: [],
   };
+}
+
+/**
+ * How many SESSION samples a whole document occupies when placed as a clip.
+ *
+ * The conversion every placement needs — Insert Active File, and (F11-4) a
+ * drop from the Files panel or from Explorer. It lives here, once, because a
+ * clip's `lengthSample` is stated in session samples while a document's length
+ * is stated in its own, and two placements disagreeing about that would put
+ * the same file on the timeline at two different lengths.
+ */
+export function documentClipLength(doc: AudioDocument, sessionRate: number): number {
+  const srcLen = docLength(doc);
+  return doc.sampleRate === sessionRate
+    ? srcLen
+    : Math.round((srcLen * sessionRate) / doc.sampleRate);
 }
 
 /** Creates a clip referencing a region of a source AudioDocument, with a

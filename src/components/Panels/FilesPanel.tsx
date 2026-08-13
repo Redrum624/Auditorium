@@ -1,5 +1,6 @@
 import { X } from 'lucide-react';
 import { docDuration } from '../../audio/AudioDocument';
+import { DOC_DRAG_MIME, beginDocumentDrag, endDocumentDrag } from '../../multitrack/laneDrop';
 import { closeDocumentFlow } from '../../services/fileService';
 import { usePendingOpens } from '../../services/openProgress';
 import { useAppStore } from '../../stores/appStore';
@@ -37,7 +38,26 @@ export default function FilesPanel() {
       {documents.map((doc) => {
         const isActive = doc.id === activeDocumentId;
         return (
-          <li key={doc.id} data-testid="files-item" className="group">
+          <li
+            key={doc.id}
+            data-testid="files-item"
+            className="group"
+            // F11-4 — a row IS the document, so the row is the drag source
+            // (dragging the name button alone would make the ✕ and the
+            // padding dead zones). The payload is the document id under a
+            // private MIME: a lane can then recognise the drag from its TYPE,
+            // which is all a dragover is allowed to see. `beginDocumentDrag`
+            // additionally records the drag in module state so the lane's
+            // ghost can snap the clip's TAIL edge too — the length is not
+            // readable out of a dataTransfer until the drop.
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData(DOC_DRAG_MIME, doc.id);
+              e.dataTransfer.effectAllowed = 'copy';
+              beginDocumentDrag(doc.id);
+            }}
+            onDragEnd={() => endDocumentDrag()}
+          >
             {/* G4 glass restyle (styling only): white-alpha hover/active over
                 the translucent card instead of the old opaque grays. */}
             <div

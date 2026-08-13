@@ -1,0 +1,328 @@
+import { act, render, screen } from '@testing-library/react';
+import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
+import { endDocumentDrag } from '../../multitrack/laneDrop';
+import { useSessionStore } from '../../multitrack/sessionStore';
+import {
+  SESSION_UNDO_KEY,
+  _resetSessionUndo,
+  undoSession,
+} from '../../multitrack/sessionUndo';
+import * as beatGridService from '../../services/beatGrid';
+import type { BeatGrid } from '../../services/beatGrid';
+import { _resetSnapPreference } from '../../services/snapPreference';
+import { getHistory } from '../../services/undoHistory';
+import { makeInitialState, useAppStore } from '../../stores/appStore';
+import FilesPanel from '../Panels/FilesPanel';
+import MultitrackView from './MultitrackView';
+
+/**
+ * Task F11-4 — dragging a Files-panel row onto a track lane, driven through
+ * the REAL components: the FilesPanel row is the drag source, MultitrackView
+ * owns the highlight, TrackLane owns the drop.
+ *
+ * ---------------------------------------------------------------------------
+ * WHY THE EVENTS ARE HAND-BUILT
+ * ---------------------------------------------------------------------------
+ * jsdom implements neither `DragEvent` nor `DataTransfer` (both are
+ * `undefined` — measured, not assumed), so there is nothing to construct a
+ * real drag with. What jsdom DOES have is `MouseEvent`, and React's event
+ * system dispatches by event TYPE, not by constructor identity: a `MouseEvent`
+ * of type 'dragover' with a `dataTransfer` property defined on it reaches
+ * `onDragOver` with that object on `e.dataTransfer`. That is the same
+ * technique the editor's pointer tests use for `pointerId`
+ * (`WaveformView.playhead.test.tsx`), applied one layer up.
+ *
+ * The stub below is a real-DataTransfer-shaped object, and deliberately not
+ * more: ONE stub is shared across dragstart -> dragover -> drop, exactly as a
+ * browser hands one DataTransfer to a whole drag, so a test cannot accidentally
+ * prove that the payload survives when in the real app it would not.
+ *
+ * jsdom also reports a zero-origin `getBoundingClientRect`, so a lane's left
+ * edge is x = 0 here and `clientX` IS the lane-local x.
+ */
+
+const SPP = 512; // the session store's default mtZoom (see defaultMtZoom)
+const SESSION_RATE = 44_100;
+
+interface StubDataTransfer {
+  readonly types: string[];
+  files: File[];
+  dropEffect: string;
+  effectAllowed: string;
+  setData(type: string, value: string): void;
+  getData(type: string): string;
+}
+
+function stubDataTransfer(initial?: { files?: File[]; types?: string[] }): StubDataTransfer {
+  const data = new Map<string, string>();
+  const extra = initial?.types ?? [];
+  return {
+    get types() {
+      return [...data.keys(), ...extra];
+    },
+    files: initial?.files ?? [],
+    dropEffect: 'none',
+    effectAllowed: 'all',
+    setData(type, value) {
+      data.set(type, value);
+    },
+    getData(type) {
+      return data.get(type) ?? '';
+    },
+  };
+}
+
+type DragType = 'dragstart' | 'dragenter' | 'dragover' | 'dragleave' | 'drop' | 'dragend';
+
+function fireDrag(
+  element: Element,
+  type: DragType,
+  dt: StubDataTransfer | null,
+  init: { clientX?: number; altKey?: boolean; relatedTarget?: EventTarget | null } = {}
+): MouseEvent {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX: init.clientX ?? 0,
+    clientY: 0,
+    altKey: init.altKey ?? false,
+    relatedTarget: (init.relatedTarget ?? null) as EventTarget | null,
+  });
+  Object.defineProperty(event, 'dataTransfer', { value: dt });
+  act(() => {
+    element.dispatchEvent(event);
+  });
+  return event;
+}
+
+function makeGrid(): BeatGrid {
+  return {
+    // 120 BPM at 44.1 kHz: a beat every 22 050 samples.
+    beatSamples: Int32Array.from([0, 22_050, 44_100, 66_150, 88_200, 110_250]),
+    sampleRate: SESSION_RATE,
+    beatsPerBar: null,
+    downbeatPhase: null,
+    barCount: 0,
+    confidence: 0.9,
+    stale: false,
+    analyzedEndSample: 1_000_000,
+    truncated: false,
+    origin: 'own',
+    originDocId: 'doc-1',
+    originOpen: true,
+  };
+}
+
+let doc: AudioDocument;
+let gridSpy: jest.SpyInstance;
+
+/** Track 3 carries one clip through every test below, because it is the ONLY
+ * reason there is anything to snap to: `sessionSnapTargets` builds its set out
+ * of the OTHER clips' mapped beat grids, their source markers and the
+ * multitrack cursor — an empty session offers a drop no magnet at all, by that
+ * module's design (see its header). This clip starts at 100 000, so its mapped
+ * beats are 100 000, 122 050, 144 100, … */
+const SNAP_CLIP_START = 100_000;
+const SEEDED_CLIPS = 1;
+
+const lanes = () => screen.getAllByTestId('track-lane');
+const clips = () => useSessionStore.getState().session.tracks.flatMap((t) => t.clips);
+const droppedClips = () => clips().filter((c) => c.id !== 'seed-clip');
+const doneLabels = () => getHistory(SESSION_UNDO_KEY).done;
+const ghost = () => document.querySelector('[data-testid="clip-drop-ghost"]') as HTMLElement | null;
+const isHighlighted = (lane: HTMLElement) => lane.style.backgroundColor !== 'transparent';
+
+/** Renders the two surfaces of the gesture and starts a drag from the row of
+ * the open document, returning the drag's DataTransfer. */
+function startPanelDrag(): StubDataTransfer {
+  render(
+    <>
+      <FilesPanel />
+      <MultitrackView />
+    </>
+  );
+  const dt = stubDataTransfer();
+  fireDrag(screen.getByTestId('files-item'), 'dragstart', dt);
+  return dt;
+}
+
+beforeEach(() => {
+  useAppStore.setState(makeInitialState());
+  useSessionStore.getState().newSession(SESSION_RATE);
+  _resetSnapPreference();
+  endDocumentDrag();
+  // 200 000 samples long, so the clip is far longer than any drop offset used
+  // below and its TAIL never lands on a beat by accident.
+  doc = createDocument({
+    name: 'beat.wav',
+    sampleRate: SESSION_RATE,
+    channels: [new Float32Array(200_000)],
+  });
+  useAppStore.getState().addDocument(doc);
+  // Park the multitrack cursor far away so it never competes as a target.
+  useSessionStore.getState().setMtCursor(9_000_000);
+  gridSpy = jest.spyOn(beatGridService, 'getBeatGrid').mockReturnValue(makeGrid());
+  const trackIds = useSessionStore.getState().session.tracks.map((t) => t.id);
+  useSessionStore.getState().addClip(trackIds[3], {
+    id: 'seed-clip',
+    documentId: doc.id,
+    startSample: SNAP_CLIP_START,
+    offsetSample: 0,
+    lengthSample: 100_000,
+    gainDb: 0,
+  });
+  _resetSessionUndo(); // the seeding above must not count as user history
+});
+
+afterEach(() => {
+  gridSpy.mockRestore();
+  _resetSnapPreference();
+  endDocumentDrag();
+});
+
+describe('dragging a Files-panel row over a lane', () => {
+  it('publishes the document id on the drag', () => {
+    const dt = startPanelDrag();
+    expect(dt.getData('application/x-auditorium-document-id')).toBe(doc.id);
+    expect(dt.effectAllowed).toBe('copy');
+  });
+
+  it('highlights the lane under the pointer, and only that one', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[2], 'dragenter', dt);
+    fireDrag(lanes()[2], 'dragover', dt, { clientX: 100 });
+
+    expect(isHighlighted(lanes()[2])).toBe(true);
+    expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(1);
+    expect(dt.dropEffect).toBe('copy');
+  });
+
+  it('shows a ghost line at the SNAPPED drop position, not the raw pointer x', () => {
+    const dt = startPanelDrag();
+    // x = 200 is raw sample 102 400 — 2 400 samples past the seeded clip's
+    // first mapped beat at 100 000, and so inside the 8 px (4 096 sample)
+    // magnet radius at this zoom.
+    fireDrag(lanes()[0], 'dragenter', dt);
+    fireDrag(lanes()[0], 'dragover', dt, { clientX: 200 });
+
+    const line = ghost();
+    expect(line).not.toBeNull();
+    expect(parseFloat(line!.style.left)).toBeCloseTo(SNAP_CLIP_START / SPP, 5);
+  });
+
+  it('the ghost follows the raw pointer while Alt suspends the magnet', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[0], 'dragenter', dt);
+    fireDrag(lanes()[0], 'dragover', dt, { clientX: 200, altKey: true });
+    expect(parseFloat(ghost()!.style.left)).toBeCloseTo(200, 5);
+  });
+
+  it('clears the highlight and the ghost when the drag leaves the lane', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[1], 'dragenter', dt);
+    fireDrag(lanes()[1], 'dragover', dt, { clientX: 100 });
+    expect(ghost()).not.toBeNull();
+
+    fireDrag(lanes()[1], 'dragleave', dt, { relatedTarget: document.body });
+    expect(ghost()).toBeNull();
+    expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
+  });
+
+  it('keeps the highlight while the pointer crosses a child of the lane', () => {
+    const dt = startPanelDrag();
+    const lane = lanes()[1];
+    fireDrag(lane, 'dragenter', dt);
+    fireDrag(lane, 'dragover', dt, { clientX: 100 });
+    // A dragleave whose relatedTarget is INSIDE the lane (a clip, the envelope
+    // overlay) is the pointer moving within the lane, not out of it.
+    const child = document.createElement('div');
+    lane.appendChild(child);
+    fireDrag(lane, 'dragleave', dt, { relatedTarget: child });
+    expect(isHighlighted(lanes()[1])).toBe(true);
+  });
+});
+
+describe('dropping a Files-panel row on a lane', () => {
+  it('places a clip of that document at the snapped position, on that track', () => {
+    const dt = startPanelDrag();
+    const lane = lanes()[2];
+    fireDrag(lane, 'dragenter', dt);
+    fireDrag(lane, 'dragover', dt, { clientX: 200 });
+    fireDrag(lane, 'drop', dt, { clientX: 200 });
+
+    const tracks = useSessionStore.getState().session.tracks;
+    expect(tracks.map((t) => t.clips.length)).toEqual([0, 0, 1, 1]);
+    const clip = tracks[2].clips[0];
+    expect(clip.documentId).toBe(doc.id);
+    expect(clip.startSample).toBe(SNAP_CLIP_START); // snapped to the mapped beat
+    expect(clip.offsetSample).toBe(0);
+    expect(clip.lengthSample).toBe(200_000); // the whole document
+    expect(useSessionStore.getState().selectedClipId).toBe(clip.id);
+  });
+
+  it('drops where the pointer is when Alt suspends the magnet', () => {
+    const dt = startPanelDrag();
+    const lane = lanes()[0];
+    fireDrag(lane, 'dragenter', dt);
+    fireDrag(lane, 'drop', dt, { clientX: 200, altKey: true });
+    expect(droppedClips()[0].startSample).toBe(200 * SPP);
+  });
+
+  it('is ONE undoable session edit labelled "Add clip"', () => {
+    const dt = startPanelDrag();
+    const pre = useSessionStore.getState().session;
+    const lane = lanes()[1];
+    fireDrag(lane, 'dragenter', dt);
+    fireDrag(lane, 'drop', dt, { clientX: 200 });
+
+    expect(doneLabels()).toEqual(['Add clip']);
+    act(() => undoSession());
+    expect(useSessionStore.getState().session).toBe(pre);
+    expect(clips()).toHaveLength(SEEDED_CLIPS);
+  });
+
+  it('clears the highlight and the ghost on drop', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[0], 'dragenter', dt);
+    fireDrag(lanes()[0], 'dragover', dt, { clientX: 200 });
+    fireDrag(lanes()[0], 'drop', dt, { clientX: 200 });
+    expect(ghost()).toBeNull();
+    expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
+  });
+
+  it('places nothing when the document was closed mid-drag', () => {
+    const dt = startPanelDrag();
+    act(() => useAppStore.getState().closeDocument(doc.id));
+    fireDrag(lanes()[0], 'dragenter', dt);
+    fireDrag(lanes()[0], 'drop', dt, { clientX: 200 });
+    expect(droppedClips()).toHaveLength(0);
+    expect(doneLabels()).toEqual([]);
+  });
+});
+
+describe('a drop that is not ours does nothing, visibly', () => {
+  it('a drag of some other payload gets no acceptance, no highlight, no ghost', () => {
+    render(<MultitrackView />);
+    const dt = stubDataTransfer({ types: ['text/plain'] });
+    const lane = lanes()[0];
+
+    const over = fireDrag(lane, 'dragover', dt, { clientX: 100 });
+    // The lane withheld its preventDefault; the view root then refuses the
+    // whole drag outright (dropEffect 'none'), so no drop can follow.
+    expect(dt.dropEffect).toBe('none');
+    expect(over.defaultPrevented).toBe(true); // refused by the root, not accepted
+    expect(ghost()).toBeNull();
+    expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
+
+    fireDrag(lane, 'drop', dt, { clientX: 100 });
+    expect(droppedClips()).toHaveLength(0);
+  });
+
+  it('a document dropped outside every lane places nothing', () => {
+    const dt = startPanelDrag();
+    fireDrag(screen.getByTestId('multitrack-view'), 'drop', dt, { clientX: 300 });
+    expect(droppedClips()).toHaveLength(0);
+    expect(doneLabels()).toEqual([]);
+    expect(lanes().filter((l) => isHighlighted(l))).toHaveLength(0);
+  });
+});

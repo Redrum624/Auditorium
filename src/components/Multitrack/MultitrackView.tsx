@@ -72,6 +72,22 @@ export default function MultitrackView() {
     <div
       className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
       data-testid="multitrack-view"
+      // F11-4 — outside a lane, a drop does NOTHING, visibly. A lane that
+      // accepts a drag has already called preventDefault by the time the event
+      // bubbles here, so this only speaks for the parts of the surface that
+      // are not a lane: it refuses the drop (dropEffect 'none' is the OS's
+      // "no" cursor) and swallows it. Swallowing matters — a file dropped on a
+      // page Chromium has not been told to refuse is NAVIGATED to, which in a
+      // packaged app means the window walks away from the application.
+      onDragOver={(e) => {
+        if (e.defaultPrevented) return; // a lane took it
+        e.preventDefault();
+        if (e.dataTransfer) e.dataTransfer.dropEffect = 'none';
+      }}
+      onDrop={(e) => {
+        if (e.defaultPrevented) return;
+        e.preventDefault();
+      }}
     >
       {/* Session strip: glass buttons on the bare stage (no band chrome). */}
       <div className="flex shrink-0 items-center gap-2 pb-2">
