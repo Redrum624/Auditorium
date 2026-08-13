@@ -11,6 +11,8 @@ import {
   serializeSessionV3,
 } from './sessionFile';
 import { useSessionStore } from './sessionStore';
+import { defaultSessionZoom } from './sessionZoom';
+import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from './sessionViewport';
 import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 
 interface MockApi {
@@ -1127,6 +1129,42 @@ describe('saveSessionViaDialog', () => {
 });
 
 describe('openSessionViaDialog', () => {
+  // MT1 fix round (C1) — the reported bug, through the door the report came in.
+  //
+  // "The tracks should appear Fit on the longest one" was filed after opening a
+  // 2:58 session. The first MT1-1 pass fixed `newSession` and the first-clip
+  // insert and CLAIMED all four load paths, but this one still wrote
+  // `{ samplesPerPixel: 512 }` by hand through `setState`, which bypasses
+  // `applySessionZoom` entirely. Nothing downstream rescues it: the lane-width
+  // republish only re-fits a session that is ALREADY at its fit, and 512 is far
+  // zoomed IN of the fit for anything longer than about sixteen seconds, so the
+  // re-fit arm is never taken. File → Open Session on the user's own file
+  // reproduced the exact symptom the ticket describes.
+  it('C1: opens a long session FITTED, not at the hardcoded 512 samples/px', async () => {
+    _resetSessionLaneWidth();
+    // 2:58 at 44.1 kHz — the reported session's length.
+    const LEN = Math.round(178 * 44100);
+    const doc = createDocument({ name: 'song.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('Long Track');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: LEN })];
+    const session: Session = { name: 'Long Session', sampleRate: 44100, tracks: [track] };
+    const { json } = serializeSession(session, [doc]);
+    const bytes = new TextEncoder().encode(json);
+    installApi({
+      showOpenDialog: jest.fn(async () => ['D:\in\long.audm']),
+      readFile: jest.fn(async () => bytes.buffer),
+    });
+
+    await openSessionViaDialog();
+
+    const loaded = useSessionStore.getState();
+    expect(loaded.mtZoom).toEqual(defaultSessionZoom(loaded.session));
+    expect(loaded.mtZoom.samplesPerPixel).toBe(LEN / FALLBACK_SESSION_LANE_WIDTH);
+    expect(loaded.mtZoom.scrollSample).toBe(0);
+    // The whole session is on screen: what is visible covers its full length.
+    expect(loaded.mtZoom.samplesPerPixel * FALLBACK_SESSION_LANE_WIDTH).toBeGreaterThanOrEqual(LEN);
+  });
+
   it('recreates docs, remaps clip documentIds, replaces the session, and switches to multitrack view (legacy v1/v2 fixture)', async () => {
     const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     const track = createTrack('Loaded Track');

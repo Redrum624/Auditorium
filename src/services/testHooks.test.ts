@@ -24,6 +24,14 @@ import { isBeatGridVisible, setBeatGridVisible } from './beatGridDisplay';
 import { SNAP_TOLERANCE_PX } from './snap';
 import { _resetSnapPreference, isSnapEnabled } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
+import { useSessionStore } from '../multitrack/sessionStore';
+import { createClip, createTrack, type Session } from '../multitrack/session';
+import { serializeSession } from '../multitrack/sessionFile';
+import { defaultSessionZoom } from '../multitrack/sessionZoom';
+import {
+  FALLBACK_SESSION_LANE_WIDTH,
+  _resetSessionLaneWidth,
+} from '../multitrack/sessionViewport';
 
 function api(): TestApi {
   installTestHooks();
@@ -532,5 +540,49 @@ describe('getEditorViewState (Task B5)', () => {
     expect(after.cursorSample).toBe(before.cursorSample);
     expect(after.selection).toBe(before.selection);
     expect(after.zoom).toBe(before.zoom);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// MT1 fix round (C1) — the harness's own session-open path opens FITTED
+// ---------------------------------------------------------------------------
+/*
+ * `openSessionFrom` is the fourth of the four session-load paths the MT1-1
+ * changelog claimed routed through the resolved zoom, and the third that did
+ * not: it wrote `{ samplesPerPixel: 512 }` by hand through `setState`,
+ * bypassing `applySessionZoom`.
+ *
+ * This one matters beyond tidiness. It is the hook the Playwright smoke and the
+ * navigation walker use to open a session, so every rig assertion ever made
+ * about what the multitrack looks like was made against a zoom no user would
+ * ever see. A rig that cannot reproduce the user's view cannot catch the user's
+ * bug — and did not.
+ */
+describe('MT1 C1: openSessionFrom opens the session fitted', () => {
+  it('lays the longest track across the lane instead of the hardcoded 512', async () => {
+    _resetSessionLaneWidth();
+    const LEN = Math.round(178 * 44100); // 2:58, the reported session's length
+    const doc = createDocument({
+      name: 'song.wav',
+      sampleRate: 44100,
+      channels: [new Float32Array(64)],
+    });
+    const track = createTrack('Long Track');
+    track.clips = [
+      createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: LEN }),
+    ];
+    const session: Session = { name: 'Long Session', sampleRate: 44100, tracks: [track] };
+    const { json } = serializeSession(session, [doc]);
+    const bytes = new TextEncoder().encode(json);
+    (window as unknown as { electronAPI: unknown }).electronAPI = {
+      readFile: async () => bytes.buffer,
+    };
+
+    await api().openSessionFrom('session.audm');
+
+    const loaded = useSessionStore.getState();
+    expect(loaded.mtZoom).toEqual(defaultSessionZoom(loaded.session));
+    expect(loaded.mtZoom.samplesPerPixel).toBe(LEN / FALLBACK_SESSION_LANE_WIDTH);
+    expect(loaded.mtZoom.scrollSample).toBe(0);
   });
 });

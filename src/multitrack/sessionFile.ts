@@ -8,6 +8,7 @@ import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import { useSessionStore } from './sessionStore';
 import { clearSessionHistory } from './sessionUndo';
 import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
+import { defaultSessionZoom } from './sessionZoom';
 
 /** .audm format version. v1: no markers. v2: adds an optional `markers` map,
  * audio embedded as base64 WAV inside the JSON text. v3 (current, write
@@ -745,7 +746,15 @@ export async function openSessionViaDialog(): Promise<void> {
     session: result.session,
     selectedClipId: null,
     mtCursorSample: 0,
-    mtZoom: { samplesPerPixel: 512, scrollSample: 0 },
+    // MT1 (C1): the session and its zoom are written together, because the zoom
+    // IS a function of the session — the longest track across the measured lane.
+    // This wrote `{ samplesPerPixel: 512 }` by hand, which is 16 s of timeline
+    // whatever the file holds: opening the reported 2:58 session showed 15.97 s
+    // of it at ~1114%, which is the filed bug arriving through File → Open
+    // Session. Nothing downstream rescued it — `publishSessionLaneWidth` only
+    // re-fits a session ALREADY at its fit, and 512 is far zoomed IN of the fit
+    // for anything longer than about sixteen seconds.
+    mtZoom: defaultSessionZoom(result.session),
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
     mtEnvelope: null, // F0: a stale open-envelope target must not outlive its session

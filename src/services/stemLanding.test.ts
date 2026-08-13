@@ -18,6 +18,8 @@ import { partitionStems } from '../dsp/stemPartition';
 import { mixdownSession } from '../multitrack/mixdown';
 import { createClip, createTrack } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
+import { defaultSessionZoom, sessionEndSample } from '../multitrack/sessionZoom';
+import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from '../multitrack/sessionViewport';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { STEM_LABELS, type StemSeparationOutput } from './stemService';
 import {
@@ -178,6 +180,34 @@ beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(44100);
   clearBeatGridLinks();
+});
+
+// ---------------------------------------------------------------------------
+// MT1 fix round (C1) — landed stems open FITTED
+// ---------------------------------------------------------------------------
+/*
+ * Stem landing is one of the four session-load paths the MT1-1 changelog
+ * claimed routed through the resolved zoom. It did not: it wrote
+ * `{ samplesPerPixel: 512 }` by hand through `setState`, bypassing
+ * `applySessionZoom`. Landing stems from a real song therefore opened a
+ * five-track session showing about sixteen seconds of it — the reported
+ * symptom, on a surface the report never mentioned because separating a song
+ * is how you MOST often arrive at a long multitrack session.
+ */
+describe('MT1 C1: a landed stem session opens fitted', () => {
+  it('lays the longest stem across the lane instead of the hardcoded 512', () => {
+    _resetSessionLaneWidth();
+    const source = addSourceDocument(2, 44100);
+    landStems(makeOutput(source));
+
+    const landed = useSessionStore.getState();
+    expect(landed.mtZoom).toEqual(defaultSessionZoom(landed.session));
+    expect(landed.mtZoom.scrollSample).toBe(0);
+    // Every stem spans the whole source, so the fit is the source's length.
+    expect(landed.mtZoom.samplesPerPixel).toBe(
+      sessionEndSample(landed.session) / FALLBACK_SESSION_LANE_WIDTH
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------

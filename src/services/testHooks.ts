@@ -98,6 +98,7 @@ import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/fi
 import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import type { FadeCurve } from '../dsp/fades';
+import { defaultSessionZoom } from '../multitrack/sessionZoom';
 
 export interface TestStateSummary {
   docCount: number;
@@ -1491,7 +1492,11 @@ export function installTestHooks(): void {
         session: result.session,
         selectedClipId: null,
         mtCursorSample: 0,
-        mtZoom: { samplesPerPixel: 512, scrollSample: 0 },
+        // MT1 (C1): fitted, not the hardcoded 512 — see sessionFile's twin. This
+        // hook is how the smoke and the walker open a session, so while it wrote
+        // 512 every rig assertion about the multitrack was made against a zoom
+        // no user would ever see.
+        mtZoom: defaultSessionZoom(result.session),
         mtPlayState: 'stopped',
         mtPlayheadSample: 0,
       });

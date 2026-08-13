@@ -97,6 +97,7 @@ import { clearSessionHistory } from '../multitrack/sessionUndo';
 import { useAppStore } from '../stores/appStore';
 import { linkDerivedDocument } from './beatGrid';
 import { STEM_LABELS, type StemSeparationOutput } from './stemService';
+import { defaultSessionZoom } from '../multitrack/sessionZoom';
 
 /**
  * The five track/document labels in the order ruling 6 pins them, Residual
@@ -242,7 +243,11 @@ export function landStems(output: StemSeparationOutput): StemLandingResult {
     session,
     selectedClipId: null,
     mtCursorSample: 0,
-    mtZoom: { samplesPerPixel: 512, scrollSample: 0 },
+    // MT1 (C1): fitted, not the hardcoded 512 — see sessionFile's twin. Landing
+    // stems is how a user MOST often arrives at a long multitrack session, so
+    // this path showed the reported symptom more often than the one it was
+    // filed against.
+    mtZoom: defaultSessionZoom(session),
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
   });
