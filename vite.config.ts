@@ -29,6 +29,16 @@ export default defineConfig({
   },
   server: {
     port: 3005,
-    strictPort: true
+    strictPort: true,
+    watch: {
+      // M2: agent worktrees live under `.claude/worktrees/<id>/`, each a FULL
+      // checkout of this repo with a `node_modules` symlink back to this one.
+      // The dev server's watcher walks the project root, so a file written in
+      // a worktree — a rebase touching `tsconfig.json`, a subagent saving a
+      // component — read as a change to THIS project and force-reloaded the
+      // user's live app mid-session. The worktrees are gitignored and are
+      // never inputs to this build; the watcher has no business in them.
+      ignored: ['**/.claude/**']
+    }
   }
 });

@@ -1,8 +1,30 @@
+/**
+ * M2: agent worktrees live under `.claude/worktrees/<id>/`, each a FULL checkout
+ * of this repo with a `node_modules` symlink back to this one. The `main` and
+ * `scripts` projects set no `roots`, so their haste map crawls from `<rootDir>`
+ * and swallowed those copies whole — every `package.json` and every `__mocks__`
+ * directory twice or three times over, which is the naming-collision warning
+ * this project has been printing all evening, plus the crawl cost of N repos.
+ *
+ * Written separator-agnostically and WITHOUT `<rootDir>`: Jest substitutes
+ * `<rootDir>` as a literal into a string that is then compiled as a regex, and
+ * on Windows that literal is `D:\Dev\...` — backslashes the regex engine reads
+ * as escapes. Matching the path SEGMENT instead works on both platforms, and
+ * `.claude` is unambiguous here: it is gitignored and appears nowhere else.
+ */
+const IGNORE_AGENT_WORKTREES = ['[/\\\\]\\.claude[/\\\\]'];
+
+/** Jest's `testPathIgnorePatterns` DEFAULT is `['/node_modules/']`; setting the
+ * key replaces it rather than extending it, so the default is restated here. */
+const TEST_PATH_IGNORE = ['/node_modules/', ...IGNORE_AGENT_WORKTREES];
+
 /** @type {import('jest').Config} */
 module.exports = {
   projects: [
     {
       displayName: 'renderer',
+      modulePathIgnorePatterns: IGNORE_AGENT_WORKTREES,
+      testPathIgnorePatterns: TEST_PATH_IGNORE,
       testEnvironment: 'jsdom',
       roots: ['<rootDir>/src'],
       transform: {
@@ -28,11 +50,15 @@ module.exports = {
     {
       displayName: 'main',
       testEnvironment: 'node',
+      modulePathIgnorePatterns: IGNORE_AGENT_WORKTREES,
+      testPathIgnorePatterns: TEST_PATH_IGNORE,
       testMatch: ['<rootDir>/electron/**/*.test.cjs']
     },
     {
       displayName: 'scripts',
       testEnvironment: 'node',
+      modulePathIgnorePatterns: IGNORE_AGENT_WORKTREES,
+      testPathIgnorePatterns: TEST_PATH_IGNORE,
       testMatch: ['<rootDir>/scripts/**/*.test.cjs']
     }
   ]
