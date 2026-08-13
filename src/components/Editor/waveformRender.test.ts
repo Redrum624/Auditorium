@@ -3,7 +3,11 @@ import {
   pixelToSample,
   sampleToPixel,
   drawBeatTics,
+  drawCursorHandle,
   drawEditorBeatTics,
+  drawMarkers,
+  CURSOR_HANDLE_H,
+  CURSOR_HANDLE_HALF_W,
   type BeatTicOpts,
   type RenderOpts,
 } from './waveformRender';
@@ -662,5 +666,105 @@ describe('drawEditorBeatTics + renderWaveform integration (Task B2)', () => {
     for (const c of ticStarts(stub)) expect(c.args[1]).toBe(120 - 9);
     expect(drawEditorBeatTics(ctx, null, 120, 0, 10, 100)).toBe(0);
     expect(drawEditorBeatTics(ctx, undefined, 120, 0, 10, 100)).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// F11-1 — the playhead grab handle. The point of these assertions is the
+// DIFFERENCE from a marker flag: the two shapes share the top few pixels of the
+// same canvas, and a user must never grab one thinking it is the other.
+// ---------------------------------------------------------------------------
+describe('the playhead grab handle (F11-1)', () => {
+  function opts(over: Partial<RenderOpts>): RenderOpts {
+    const ch = constantChannel(8000, 0);
+    return {
+      width: 800,
+      height: 100,
+      channels: [ch],
+      pyramids: [buildPeaks(ch)],
+      scrollSample: 0,
+      samplesPerPixel: 1,
+      selection: null,
+      cursorSample: 0,
+      playheadSample: null,
+      ...over,
+    };
+  }
+
+  /** The moveTo/lineTo path the handle draws, in order. */
+  function handlePath(stub: StubCtx): Call[] {
+    const start = stub.calls.findIndex(
+      (c) => (c.method === 'moveTo' || c.method === 'lineTo') && c.fillStyle === '#e5484d'
+    );
+    if (start === -1) return [];
+    return stub.calls
+      .slice(start)
+      .filter((c) => c.method === 'moveTo' || c.method === 'lineTo')
+      .slice(0, 3);
+  }
+
+  it('is a red triangle CENTRED on the line and pointing down into it', () => {
+    const { ctx, stub } = makeCtx();
+    drawCursorHandle(ctx, 300, 800);
+
+    const path = handlePath(stub);
+    expect(path.map((c) => c.args)).toEqual([
+      [300 - CURSOR_HANDLE_HALF_W, 0],
+      [300 + CURSOR_HANDLE_HALF_W, 0],
+      [300, CURSOR_HANDLE_H],
+    ]);
+    // Symmetric about the line: the two top corners are equidistant from it.
+    expect(300 - path[0].args[0]).toBe(path[1].args[0] - 300);
+  });
+
+  it('is a different colour and a different shape from a marker flag', () => {
+    const { ctx: handleCtx, stub: handleStub } = makeCtx();
+    drawCursorHandle(handleCtx, 300, 800);
+    const { ctx: markerCtx, stub: markerStub } = makeCtx();
+    drawMarkers(markerCtx, [{ positionSample: 300 }], 100, 0, 1, 800);
+
+    const handle = handlePath(handleStub);
+    // The FLAG pass, not the dashed-line pass that precedes it (that one sets
+    // only strokeStyle, so its recorded fillStyle is still empty).
+    const flagFill = markerStub.calls.find(
+      (c) => c.method === 'moveTo' && c.fillStyle !== ''
+    )!.fillStyle;
+
+    expect(handle[0].fillStyle).toBe('#e5484d'); // red
+    expect(flagFill).toBe('#ff8a65'); // orange
+    expect(handle[0].fillStyle).not.toBe(flagFill);
+
+    // The flag hangs to ONE side of its line (all its x are >= the line);
+    // the handle straddles its own.
+    const flagXs = markerStub.calls
+      .filter((c) => c.method === 'moveTo' || c.method === 'lineTo')
+      .map((c) => c.args[0]);
+    expect(Math.min(...flagXs)).toBe(300);
+    expect(Math.min(...handle.map((c) => c.args[0]))).toBeLessThan(300);
+  });
+
+  it('is culled once it is fully past either edge, and drawn while it straddles one', () => {
+    const { ctx: outCtx, stub: outStub } = makeCtx();
+    drawCursorHandle(outCtx, -CURSOR_HANDLE_HALF_W - 1, 800);
+    drawCursorHandle(outCtx, 800 + CURSOR_HANDLE_HALF_W + 1, 800);
+    expect(handlePath(outStub)).toEqual([]);
+
+    const { ctx: edgeCtx, stub: edgeStub } = makeCtx();
+    drawCursorHandle(edgeCtx, 0, 800);
+    expect(handlePath(edgeStub)).toHaveLength(3);
+  });
+
+  it('renderWaveform draws it on the cursor, after the cursor line', () => {
+    const { ctx, stub } = makeCtx();
+    renderWaveform(ctx, opts({ cursorSample: 300 }));
+
+    const cursorLine = stub.calls.findIndex(
+      (c) => c.method === 'moveTo' && c.strokeStyle === '#ffffff' && c.args[0] === 300
+    );
+    const handle = stub.calls.findIndex(
+      (c) => c.method === 'moveTo' && c.fillStyle === '#e5484d'
+    );
+    expect(cursorLine).toBeGreaterThanOrEqual(0);
+    expect(handle).toBeGreaterThan(cursorLine);
   });
 });

@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import { useAppStore } from '../../stores/appStore';
 import { snapSample } from '../../services/snap';
-import { pixelToSample } from './waveformRender';
+import { isOnCursorHandle, pixelToSample, sampleToPixel } from './waveformRender';
 import { editorSnapTargets } from './editorSnapTargets';
 import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selectionGestures';
 
@@ -61,15 +61,27 @@ function clamp(v: number, lo: number, hi: number): number {
   return Math.min(Math.max(v, lo), hi);
 }
 
-interface DragState {
-  anchorSample: number;
-  anchorX: number;
-  exceeded: boolean;
-  /** The snap targets as they stood when the drag began (B4). Empty whenever
-   * the magnet is off or there is nothing to snap to, which makes the whole
-   * feature a single `snapSample` call that provably returns its input. */
-  targets: number[];
-}
+/** The snap targets as they stood when the drag began (B4). Empty whenever
+ * the magnet is off or there is nothing to snap to, which makes the whole
+ * feature a single `snapSample` call that provably returns its input. */
+type SnapTargets = number[];
+
+/**
+ * F11-1 made this a union. `select` is the gesture that has always been here —
+ * press places the cursor, 3 px of travel turns it into a selection. `playhead`
+ * is the new one: the press landed on the cursor's grab handle, so the whole
+ * gesture is "move the cursor", the selection is never touched, and there is no
+ * drag threshold (the user grabbed a handle; they already committed).
+ */
+type DragState =
+  | {
+      kind: 'select';
+      anchorSample: number;
+      anchorX: number;
+      exceeded: boolean;
+      targets: SnapTargets;
+    }
+  | { kind: 'playhead'; targets: SnapTargets };
 
 /** True while the escape-hatch modifier is held on THIS event. Alt, verified
  * free against the built app — see the hook's header. */
@@ -140,6 +152,34 @@ export function useEditorGestures(
     return { x, sample };
   }
 
+  /** F11-1: lane-local y for a client y. The lane's content box IS the canvas
+   * rect (`.glass-lane` has no padding or border — see WaveformView's note), so
+   * this needs no correction beyond the rect's own top. */
+  function yAtClientY(clientY: number): number {
+    const canvas = canvasRef.current;
+    const rect = canvas ? canvas.getBoundingClientRect() : { top: 0 };
+    return clientY - rect.top;
+  }
+
+  /** F11-1: is this pointer on the cursor's grab handle? The hit rule lives in
+   * `waveformRender` beside the drawing it has to agree with. */
+  function onHandle(x: number, y: number): boolean {
+    return isOnCursorHandle(
+      x,
+      y,
+      sampleToPixel(cursorSample, zoom.scrollSample, zoom.samplesPerPixel)
+    );
+  }
+
+  /** F11-1: cursor feedback, written straight to the element rather than held
+   * in React state — this runs on every pointermove over the lane, and a state
+   * update per move would re-render (and repaint) the whole waveform to change
+   * a CSS property. Cleared to '' so the element falls back to its class. */
+  function setLaneCursor(value: '' | 'grab' | 'grabbing'): void {
+    const canvas = canvasRef.current;
+    if (canvas) canvas.style.cursor = value;
+  }
+
   /** The position a gesture should COMMIT for a raw sample: the nearest target
    * within tolerance, or the raw value untouched. The clamp is re-applied
    * because a document truncated after its analysis can leave a target past the
@@ -158,6 +198,21 @@ export function useEditorGestures(
 
     // Captured once per gesture — see the hook header.
     const targets = editorSnapTargets(activeDocumentId);
+
+    // F11-1: the handle wins the press. Checked BEFORE the cursor is moved and
+    // before the double-click branch: the user aimed at a grab handle, so the
+    // gesture is a drag of the thing they grabbed and nothing else — no
+    // selection change, no select-all on a double press, and no jump of the
+    // cursor to the press position (grabbing a handle must not itself move it).
+    if (onHandle(x, yAtClientY(e.clientY))) {
+      if (typeof canvas.setPointerCapture === 'function') {
+        canvas.setPointerCapture(e.pointerId);
+      }
+      dragRef.current = { kind: 'playhead', targets };
+      setLaneCursor('grabbing');
+      return;
+    }
+
     const sample = snapped(raw, targets, e);
 
     setCursor(sample);
@@ -176,17 +231,32 @@ export function useEditorGestures(
       // The anchor is an EXISTING edge or the existing cursor: it is not being
       // dragged, so it is used exactly as it stands.
       const anchor = shiftClickAnchor(sample, selection, cursorSample);
-      dragRef.current = { anchorSample: anchor, anchorX: x, exceeded: true, targets };
+      dragRef.current = { kind: 'select', anchorSample: anchor, anchorX: x, exceeded: true, targets };
       setSelection(dragToSelection(anchor, sample));
     } else {
-      dragRef.current = { anchorSample: sample, anchorX: x, exceeded: false, targets };
+      dragRef.current = { kind: 'select', anchorSample: sample, anchorX: x, exceeded: false, targets };
     }
   };
 
   const onPointerMove = (e: ReactPointerEvent<HTMLCanvasElement>) => {
     const drag = dragRef.current;
-    if (!drag) return;
     const { x, sample: raw } = sampleAtClientX(e.clientX);
+
+    if (!drag) {
+      // F11-1: idle hover — the only thing to do is tell the user the handle is
+      // grabbable. No store read/write, no render.
+      setLaneCursor(onHandle(x, yAtClientY(e.clientY)) ? 'grab' : '');
+      return;
+    }
+
+    if (drag.kind === 'playhead') {
+      // The same snap the cursor has always been placed with — targets frozen
+      // at pointerdown, Alt re-read on THIS event (see the hook header). The
+      // selection is deliberately untouched: dragging the playhead through a
+      // selected region must not redefine it.
+      useAppStore.getState().setCursor(snapped(raw, drag.targets, e));
+      return;
+    }
 
     if (!drag.exceeded) {
       // The threshold is measured on the RAW pointer travel: a snap can move
@@ -212,6 +282,13 @@ export function useEditorGestures(
     }
     const drag = dragRef.current;
     dragRef.current = null;
+    // F11-1: the grip is released; the pointer may still be over the handle, so
+    // fall back to the hover state rather than clearing outright.
+    if (drag?.kind === 'playhead') {
+      const { x } = sampleAtClientX(e.clientX);
+      setLaneCursor(onHandle(x, yAtClientY(e.clientY)) ? 'grab' : '');
+      return;
+    }
     if (drag && !drag.exceeded) {
       useAppStore.getState().setSelection(null);
     }

@@ -43,7 +43,9 @@ function firePointer(
     bubbles: true,
     cancelable: true,
     clientX: init.clientX,
-    clientY: init.clientY ?? 0,
+    // F11-1: default into the lane BODY — see WaveformView.test.tsx's helper
+    // for why y=0 is now a different gesture (the playhead grab handle).
+    clientY: init.clientY ?? 40,
     shiftKey: init.shiftKey ?? false,
     altKey: init.altKey ?? false,
     detail: init.detail ?? 1,

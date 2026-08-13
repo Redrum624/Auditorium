@@ -30,7 +30,13 @@ function firePointer(
     bubbles: true,
     cancelable: true,
     clientX: init.clientX,
-    clientY: init.clientY ?? 0,
+    // F11-1: the DEFAULT press lands in the lane BODY, not at y=0. The top
+    // 15 px of the lane is the playhead handle's grab strip now, and jsdom
+    // reports a zero-origin rect, so an unspecified clientY used to mean
+    // "on the handle" — which is a different gesture. Every test below is
+    // about placing the cursor / dragging a selection in the waveform itself,
+    // which is what pressing in the body has always meant.
+    clientY: init.clientY ?? 40,
     shiftKey: init.shiftKey ?? false,
     detail: init.detail ?? 1,
   });

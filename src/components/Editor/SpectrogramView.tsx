@@ -3,7 +3,13 @@ import { cloneRegion, docLength, mixDown } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { createSpectrogramWorker } from '../../workers/createSpectrogramWorker';
 import { useSpectralScale } from '../../services/spectralScale';
-import { cssToken, drawEditorBeatTics, drawMarkers, sampleToPixel } from './waveformRender';
+import {
+  cssToken,
+  drawCursorHandle,
+  drawEditorBeatTics,
+  drawMarkers,
+  sampleToPixel,
+} from './waveformRender';
 import { useBeatGridOverlay } from './useBeatGridOverlay';
 import { useEditorGestures } from './useEditorGestures';
 import TimelineRuler from './TimelineRuler';
@@ -361,6 +367,10 @@ export default function SpectrogramView({ docId }: { docId: string }) {
       ctx.strokeStyle = '#ffffff';
       verticalLine(ctx, cx, height);
     }
+    // F11-1: the same grab handle as the waveform view, from the same code —
+    // the `drawMarkers` precedent. Two surfaces drawing their own triangle
+    // would drift the moment either was touched.
+    drawCursorHandle(ctx, cx, width);
     if (playback.state === 'playing') {
       const px = sampleToPixel(playback.positionSample, scrollSample, spp);
       if (px >= 0 && px <= width) {

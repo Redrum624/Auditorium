@@ -116,6 +116,44 @@ const PLAYHEAD_FALLBACK = '#26c6da'; // --accent (was yellow pre-G6)
 const PLAYHEAD_GLOW_FALLBACK = 'rgba(38,198,218,0.35)'; // --accent-ring
 const MARKER = '#ff8a65';
 
+// --- F11-1: the playhead grab handle ---------------------------------------
+/**
+ * The cursor line has always been drawable but not grabbable. F11-1 puts a
+ * handle on it, and the handle's entire job is to be UNMISTAKABLE next to a
+ * marker flag, because both live in the top few pixels of the same canvas:
+ *
+ * | | marker flag (Task 23)                | playhead handle (F11-1)      |
+ * |-|--------------------------------------|------------------------------|
+ * | colour | `#ff8a65` orange              | `#e5484d` red                |
+ * | shape  | right-angled, hangs down-RIGHT | isoceles, points straight DOWN |
+ * | anchor | BESIDE the line               | CENTRED ON the line          |
+ * | line   | dashed `[4,3]`                | solid, unchanged             |
+ *
+ * The red is the app's existing danger/record red family (`#e5484d`-class), so
+ * nothing new enters the palette; the cyan playhead, amber beat tics and white
+ * cursor line are all untouched.
+ *
+ * The line below it stays WHITE and solid exactly as before — the handle is an
+ * affordance added on top, not a restyle, which is also why every existing
+ * cursor-line assertion still reads the same.
+ */
+const CURSOR_HANDLE = '#e5484d';
+/** Half-width of the triangle, CSS px: it spans 12 px and is 9 px deep. */
+export const CURSOR_HANDLE_HALF_W = 6;
+export const CURSOR_HANDLE_H = 9;
+/**
+ * Grab tolerance around the handle, CSS px. Horizontally ±12 (double the
+ * triangle's own half-width, so the pointer does not have to be accurate);
+ * vertically the triangle's depth plus 6, i.e. the top 15 px of the lane.
+ *
+ * The vertical band is deliberately shallow. Anywhere below it, a press is
+ * still an ordinary cursor placement / selection drag, so the handle costs the
+ * existing gesture nothing outside a thin strip; and markers are not draggable
+ * today, so the strip competes with nothing.
+ */
+export const CURSOR_HANDLE_HIT_PX = 12;
+export const CURSOR_HANDLE_HIT_H = CURSOR_HANDLE_H + 6;
+
 // --- Beat grid (Task B2) ---------------------------------------------------
 // Amber: the four colours already on this canvas are cyan (waveform, playhead,
 // selection), orange (markers), white (cursor) and the faint white axis. Amber
@@ -231,6 +269,11 @@ export function renderWaveform(ctx: CanvasRenderingContext2D, opts: RenderOpts):
     ctx.strokeStyle = CURSOR;
     verticalLine(ctx, cx, height);
   }
+  // F11-1: the grab handle, drawn LAST of the cursor's own parts so nothing
+  // paints over it, and outside the `cx >= 0` guard's block only in the sense
+  // that it has its own (wider) cull — the triangle is 12 px across, so it is
+  // still half-visible when the line itself has just left the view.
+  drawCursorHandle(ctx, cx, width);
   if (playheadSample != null) {
     const px = sampleToPixel(playheadSample, scrollSample, samplesPerPixel);
     if (px >= 0 && px <= width) {
@@ -335,6 +378,42 @@ function drawSelection(
   ctx.lineWidth = 1;
   if (x0 >= 0 && x0 <= width) verticalLine(ctx, x0, height);
   if (x1 >= 0 && x1 <= width) verticalLine(ctx, x1, height);
+}
+
+/**
+ * F11-1 — the playhead's grab handle: a red isoceles triangle CENTRED on the
+ * cursor line and pointing down into it, at the very top of the lane.
+ *
+ * Exported and primitive-taking for the same reason {@link drawMarkers} is:
+ * `SpectrogramView` paints its own overlays rather than going through
+ * {@link renderWaveform}, and the two surfaces must be the same handle drawn by
+ * the same code or they will drift.
+ *
+ * Leaves `fillStyle` set, exactly as `drawMarkers` does — every pass in this
+ * module sets the fill it needs before using it, and the recording stub the
+ * render tests drive has no `save`/`restore`.
+ */
+export function drawCursorHandle(ctx: CanvasRenderingContext2D, x: number, width: number): void {
+  if (x < -CURSOR_HANDLE_HALF_W || x > width + CURSOR_HANDLE_HALF_W) return;
+  ctx.fillStyle = CURSOR_HANDLE;
+  ctx.beginPath();
+  ctx.moveTo(x - CURSOR_HANDLE_HALF_W, 0);
+  ctx.lineTo(x + CURSOR_HANDLE_HALF_W, 0);
+  ctx.lineTo(x, CURSOR_HANDLE_H);
+  ctx.closePath();
+  ctx.fill();
+}
+
+/**
+ * Whether a pointer at CSS-pixel `(x, y)` within the lane is grabbing the
+ * handle of a cursor drawn at `cursorX`.
+ *
+ * Pure and exported so the gesture hook and the tests agree on one rule — the
+ * hit box is NOT re-derived from the drawing constants at the call site, which
+ * is how a hit box and its target drift apart.
+ */
+export function isOnCursorHandle(x: number, y: number, cursorX: number): boolean {
+  return y >= 0 && y <= CURSOR_HANDLE_HIT_H && Math.abs(x - cursorX) <= CURSOR_HANDLE_HIT_PX;
 }
 
 /** Triangle flag half-size in px (Task 23): the flag spans FLAG_SIZE px wide
