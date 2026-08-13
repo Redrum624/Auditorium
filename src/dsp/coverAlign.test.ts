@@ -4,12 +4,16 @@ import {
   ALIGN_FRAME_RATE_HZ,
   ALIGN_GUARD_SECONDS,
   ALIGN_MIN_CORRELATION,
+  ALIGN_MIN_OVERLAP_FRACTION,
   ALIGN_MIN_OVERLAP_SECONDS,
   ALIGN_MIN_PROMINENCE,
+  ALIGN_CORRELATION_MARGIN,
+  ALIGN_PROMINENCE_MARGIN,
   ALIGN_REFINE_SECONDS,
   alignmentOdf,
   alignTakeToReference,
 } from './coverAlign';
+import { BANDS, computeBandTable } from './tempoCore';
 import { makeVocalLike } from './__fixtures__/coverAlignFixtures';
 
 const RATE = 44100;
@@ -105,15 +109,62 @@ describe('alignTakeToReference — ground truth', () => {
     expect(result!.confident).toBe(true);
   });
 
-  it('recovers a stereo take against a stereo reference', () => {
-    const reference = makeVocalLike({
-      seed: 41, sampleRate: RATE, seconds: SECONDS, leadSeconds: 0.9, channels: 2,
-    });
-    const take = makeVocalLike({
-      seed: 41, sampleRate: RATE, seconds: SECONDS, leadSeconds: 0.4, channels: 2,
-    });
+  it('recovers a genuinely stereo take against a genuinely stereo reference', () => {
+    // CP1 fix-round: `channels: 2` alone is DUAL-MONO, which `monoMix` collapses
+    // back to exactly the mono case — so it proved nothing about stereo. These
+    // two differ per channel (a second, decorrelated performance in the right),
+    // which is what a real stereo recording hands the downmix.
+    const stereo = (seed: number, leadSeconds: number): Float32Array[] => {
+      const left = makeVocalLike({ seed, sampleRate: RATE, seconds: SECONDS, leadSeconds });
+      const right = makeVocalLike({
+        seed,
+        sampleRate: RATE,
+        seconds: SECONDS,
+        leadSeconds,
+        hzScale: 1.19,
+        amplitudeJitter: 0.3,
+        varianceSeed: seed * 3 + 11,
+      });
+      return [left[0], right[0]];
+    };
+    const reference = stereo(41, 0.9);
+    const take = stereo(41, 0.4);
     const result = alignTakeToReference(reference, RATE, take, RATE);
+    expect(result).not.toBeNull();
     expect(Math.abs(result!.offsetSeconds - 0.5)).toBeLessThan(TOLERANCE_SECONDS);
+    expect(result!.confident).toBe(true);
+  });
+
+  /**
+   * CP1 fix-round (I10). The ±10 ms above is measured at ONE gain, and the
+   * measurement that says so: at unity the error is 8.4 ms, at −40 dB it is
+   * 10.9 ms — past the tolerance the rest of this suite asserts — and at −70 dB
+   * it is 21.6 ms, with prominence eroding 0.474 → 0.379 across the same range.
+   *
+   * −40 dB is the level pinned here because it is the one where the claim
+   * BREAKS: pinning unity would assert only that the good case is good, and
+   * pinning −70 dB would pin a level no usable take sits at. The assertion is
+   * therefore the honest one — the offset is still recovered to within 15 ms and
+   * the alignment is still BELIEVED — rather than the ±10 ms the louder cases
+   * meet. A quiet take degrades this measurement; it does not break it, and the
+   * boundary is here rather than in a user's session.
+   */
+  it('degrades but still recovers and still believes a very quiet take', () => {
+    const scale = (chs: Float32Array[], g: number): Float32Array[] =>
+      chs.map((c) => Float32Array.from(c, (v) => v * g));
+    const reference = makeVocalLike({ seed: 7, sampleRate: RATE, seconds: SECONDS, leadSeconds: 1.4 });
+    const take = makeVocalLike({ seed: 7, sampleRate: RATE, seconds: SECONDS, leadSeconds: 0.2 });
+    const quiet = scale(take, Math.pow(10, -40 / 20));
+
+    const loud = alignTakeToReference(reference, RATE, take, RATE)!;
+    const result = alignTakeToReference(reference, RATE, quiet, RATE);
+    expect(result).not.toBeNull();
+    expect(Math.abs(result!.offsetSeconds - 1.2)).toBeLessThan(0.015);
+    expect(result!.confident).toBe(true);
+    // The direction of the degradation is part of the claim: quieter is worse,
+    // never better, so a future change that "improves" the quiet case is a
+    // change to investigate rather than to celebrate.
+    expect(result!.prominence).toBeLessThanOrEqual(loud.prominence + 1e-9);
   });
 });
 
@@ -128,6 +179,41 @@ describe('alignTakeToReference — refusal', () => {
     // quotes them, and a bare boolean cannot be argued with.
     expect(Number.isFinite(result!.peakCorrelation)).toBe(true);
     expect(Number.isFinite(result!.prominence)).toBe(true);
+    // CP1 fix-round: the two fields nothing pinned. `rivalCorrelation` is what
+    // makes `prominence` a comparison rather than a bare score, and
+    // `overlapSeconds` is how much audio the verdict was formed over — a caller
+    // quoting either would have been quoting an unchecked number.
+    expect(result!.prominence).toBeCloseTo(result!.peakCorrelation - result!.rivalCorrelation, 12);
+    expect(result!.overlapSeconds).toBeGreaterThan(ALIGN_MIN_OVERLAP_SECONDS);
+    expect(result!.overlapSeconds).toBeLessThanOrEqual(SECONDS + 1);
+  });
+
+  /**
+   * CP1 fix-round: the `rival === -1 -> 0` no-op. When the guard swallows the
+   * whole evaluable surface there is no rival to compare against, so prominence
+   * degenerates to the peak itself and the CORRELATION floor is the only thing
+   * carrying the decision. `lagsEvaluated` is what tells a caller the surface
+   * was that small, and nothing asserted it.
+   */
+  it('reports how small the surface was when the guard leaves no rival', () => {
+    const reference = makeVocalLike({ seed: 5, sampleRate: RATE, seconds: SECONDS });
+    const result = alignTakeToReference(reference, RATE, reference, RATE)!;
+    expect(result.lagsEvaluated).toBeGreaterThan(0);
+    // A signal against ITSELF: peak is 1 at lag 0 by construction.
+    expect(result.peakCorrelation).toBeCloseTo(1, 6);
+    expect(Math.abs(result.offsetSeconds)).toBeLessThan(TOLERANCE_SECONDS);
+    // Every evaluated lag is a real lag of the surface, never more than exist.
+    expect(result.lagsEvaluated).toBeLessThanOrEqual(
+      Math.round((SECONDS * 2 + 2) * ALIGN_FRAME_RATE_HZ)
+    );
+  });
+
+  /** CP1 fix-round: the fine pass either ran or it did not, and the accuracy the
+   * caller may quote depends on which. It was silent before. */
+  it('says whether the answer was refined by the fine pass', () => {
+    const reference = makeVocalLike({ seed: 7, sampleRate: RATE, seconds: SECONDS, leadSeconds: 1.4 });
+    const take = makeVocalLike({ seed: 7, sampleRate: RATE, seconds: SECONDS, leadSeconds: 0.2 });
+    expect(alignTakeToReference(reference, RATE, take, RATE)!.refined).toBe(true);
   });
 
   it('returns null when either side has no onset at all', () => {
@@ -136,10 +222,66 @@ describe('alignTakeToReference — refusal', () => {
     expect(alignTakeToReference([new Float32Array(RATE * 5)], RATE, reference, RATE)).toBeNull();
   });
 
+  /**
+   * CP1 fix-round (I11). This test used to hand in a 0.8 s fixture, which the
+   * schedule generator fills with ZERO syllables — so it was digital silence
+   * and returned null through the no-onset path, never reaching the overlap
+   * gate at all. The gate was covered by nothing.
+   *
+   * The fixture below is short but genuinely SOUNDING: syllables are forced into
+   * it, so `alignmentOdf` returns a real envelope for both sides and the null
+   * can only come from the gate.
+   */
   it('returns null when the two are too short to overlap by the stated minimum', () => {
     const reference = makeVocalLike({ seed: 5, sampleRate: RATE, seconds: SECONDS });
-    const stub = makeVocalLike({ seed: 5, sampleRate: RATE, seconds: ALIGN_MIN_OVERLAP_SECONDS * 0.4 });
+    const shortSeconds = ALIGN_MIN_OVERLAP_SECONDS * 0.4;
+    const stub = makeVocalLike({ seed: 5, sampleRate: RATE, seconds: shortSeconds, minSyllables: 3 });
+
+    // The precondition that makes this a test of the GATE: both sides have an
+    // onset envelope, so the no-onset arm is not what returns null.
+    expect(alignmentOdf(stub, RATE)).not.toBeNull();
+    expect(alignmentOdf(reference, RATE)).not.toBeNull();
+    // …and the stub really is shorter than the gate demands.
+    expect(shortSeconds).toBeLessThan(ALIGN_MIN_OVERLAP_SECONDS);
+
     expect(alignTakeToReference(reference, RATE, stub, RATE)).toBeNull();
+    // Symmetric: the gate is on the SHORTER of the two, whichever side it is.
+    expect(alignTakeToReference(stub, RATE, reference, RATE)).toBeNull();
+  });
+
+  /**
+   * CP1 fix-round: the FRACTION half of the gate, which the floor never reaches.
+   *
+   * Two 20 s recordings give 4000 frames each, so the fraction (20 % = 800
+   * frames = 4 s) is four times the 2 s floor and is what actually excludes the
+   * far lags. Here the ONLY thing the two share is 3 s of audio — the take
+   * carries a copy of the reference's opening in its last 3 s, so the true
+   * offset is −17 s and its overlap is 600 frames, below the gate.
+   *
+   * The honest outcome is a refusal, and pinning it is pinning a real limit:
+   * this gate REFUSES a genuine alignment when the two barely overlap, because a
+   * Pearson denominator over a few hundred frames returns ±1 for any two signals
+   * at all and a confident wrong answer is worse than none.
+   */
+  it('refuses a genuine alignment whose overlap is below the FRACTION gate', () => {
+    const seconds = 20;
+    const shared = 3;
+    const reference = makeVocalLike({ seed: 61, sampleRate: RATE, seconds });
+    const take = new Float32Array(seconds * RATE);
+    take.set(reference[0].subarray(0, shared * RATE), (seconds - shared) * RATE);
+
+    // The premise: both sides have onsets, so this is the gate rather than the
+    // no-onset path.
+    expect(alignmentOdf([take], RATE)).not.toBeNull();
+    // …and the overlap at the true lag really is under the fraction.
+    const overlapFrames = shared * ALIGN_FRAME_RATE_HZ;
+    const gateFrames = seconds * ALIGN_FRAME_RATE_HZ * ALIGN_MIN_OVERLAP_FRACTION;
+    expect(overlapFrames).toBeLessThan(gateFrames);
+
+    const result = alignTakeToReference(reference, RATE, [take], RATE);
+    const foundTheTruth =
+      result !== null && result.confident && Math.abs(result.offsetSeconds + 17) < 0.05;
+    expect(foundTheTruth).toBe(false);
   });
 });
 
@@ -234,15 +376,32 @@ describe('alignTakeToReference — the measured separation', () => {
     // The gaps themselves, so a regression reads as a number rather than as a
     // boolean that flipped.
     expect(bestUnrelatedProminence).toBeLessThan(worstRelatedProminence);
-    expect(ALIGN_MIN_PROMINENCE).toBeGreaterThan(bestUnrelatedProminence);
-    expect(ALIGN_MIN_PROMINENCE).toBeLessThan(worstRelatedProminence);
     expect(bestUnrelatedPeak).toBeLessThan(worstRelatedPeak);
-    expect(ALIGN_MIN_CORRELATION).toBeGreaterThan(bestUnrelatedPeak);
-    expect(ALIGN_MIN_CORRELATION).toBeLessThan(worstRelatedPeak);
 
-    // The fine pass is a REFINEMENT, not a second opinion: it may never leave
-    // the window the coarse pass handed it.
+    // CP1 fix-round (M4): MARGIN, not mere membership. Bare `<`/`>` said only
+    // that the floor was somewhere in the gap, so a change that left it 0.0001
+    // above the unrelated population would pass while accepting coincidences.
+    // Each floor must clear BOTH edges by a stated amount.
+    expect(ALIGN_MIN_PROMINENCE - bestUnrelatedProminence).toBeGreaterThanOrEqual(
+      ALIGN_PROMINENCE_MARGIN
+    );
+    expect(worstRelatedProminence - ALIGN_MIN_PROMINENCE).toBeGreaterThanOrEqual(
+      ALIGN_PROMINENCE_MARGIN
+    );
+    expect(ALIGN_MIN_CORRELATION - bestUnrelatedPeak).toBeGreaterThanOrEqual(
+      ALIGN_CORRELATION_MARGIN
+    );
+    expect(worstRelatedPeak - ALIGN_MIN_CORRELATION).toBeGreaterThanOrEqual(
+      ALIGN_CORRELATION_MARGIN
+    );
+
+    // The fine pass is a REFINEMENT, not a second opinion. The clamp is
+    // structural (the window is what `lagSurface` is given), so asserting it
+    // alone could never fail — measured, the refinement moves 3.2-6.4 ms against
+    // a 200 ms clamp, 31x of slack. Both are asserted: the structural bound for
+    // what it guarantees, and the MEASURED bound so the assertion has teeth.
     expect(Math.max(...relatedRefinement)).toBeLessThanOrEqual(ALIGN_REFINE_SECONDS);
+    expect(Math.max(...relatedRefinement)).toBeLessThan(0.01);
 
     // The ±10 ms requirement is pinned by the ground-truth cases above, where
     // the take IS the reference at a known offset and the answer is not a
@@ -259,6 +418,25 @@ describe('alignTakeToReference — the measured separation', () => {
       expect(related(1000 + s)!.confident).toBe(true);
       expect(unrelated(2000 + s)!.confident).toBe(false);
     }
+  });
+});
+
+/**
+ * CP1 fix-round: the header claims a band count for the shipped analysis rate
+ * and for the rates it was chosen over. That claim is `onsetEnvelope`'s, not
+ * this module's, so it is READ from `computeBandTable` rather than asserted
+ * from memory — a superlative no test can reach is exactly how "every band
+ * resolved" came to be written about a table that drops one.
+ */
+describe('the analysis rate\'s band table', () => {
+  it('resolves more bands than the rates it was chosen over', () => {
+    const shipped = computeBandTable(ALIGN_ANALYSIS_RATE_HZ).lo.length;
+    const fullRate = computeBandTable(44100).lo.length;
+    const decimated = computeBandTable(11025).lo.length;
+    // eslint-disable-next-line no-console
+    console.log(`bands: 11025=${decimated} 22050=${shipped} 44100=${fullRate} (BANDS=${BANDS})`);
+    expect(shipped).toBeGreaterThan(fullRate);
+    expect(shipped).toBeLessThanOrEqual(BANDS);
   });
 });
 

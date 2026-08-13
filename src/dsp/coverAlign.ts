@@ -10,11 +10,15 @@
  * pretend to replace them.
  *
  * ── It composes; it does not re-implement ───────────────────────────────────
- * The feature this correlates is the app's OWN onset-strength envelope —
+ * The feature this correlates is the app's OWN onset-strength envelope:
  * `tempoCore.onsetEnvelope`, the log-band spectral flux the tempo tracker and
- * the beat grid already run on, over `tempoCore.decimateMono` — reduced to mono
- * by `chainAnalysis.monoMix` and transformed by `fft`/`ifft`. Nothing about
- * attack detection is invented here.
+ * the beat grid already run on. The signal reaching it is reduced to mono by
+ * `chainAnalysis.monoMix` and — for the coarse pass — brought to
+ * {@link ALIGN_ANALYSIS_RATE_HZ} by `resample.resampleChannel`. The correlation
+ * itself is `fft`/`ifft`. Nothing about attack detection is invented here.
+ *
+ * (`tempoCore.decimateMono` is NOT used. It appears below only as one of the two
+ * REJECTED designs, and it is named there as rejected.)
  *
  * Correlating the ONSET envelope rather than a level envelope is the decision
  * that makes the refusal arm work at all. Two unrelated recordings of singing
@@ -38,7 +42,10 @@
  * on their own are not the answer either.
  *
  * What ships is the rate the sweep actually separated on,
- * {@link ALIGN_ANALYSIS_RATE_HZ}: bins 21.5 Hz wide, every band resolved, and
+ * {@link ALIGN_ANALYSIS_RATE_HZ}: bins 21.5 Hz wide, and 23 of
+ * `onsetEnvelope`'s 24 bands surviving its own same-bin dedup against 21 at
+ * 44.1 kHz (measured — see "the analysis rate's band table"). All 24 survive at
+ * 11 kHz, which is precisely why band count alone was not the answer, and
  * still enough bandwidth that a vocal's 80 Hz–3.5 kHz is entirely inside it. The
  * two questions are then asked separately, of the pass that can answer each:
  *
@@ -170,6 +177,22 @@ export const ALIGN_MIN_PROMINENCE = 0.186;
  */
 export const ALIGN_MIN_CORRELATION = 0.607;
 
+/**
+ * CP1 fix-round. How far each floor must sit from BOTH population edges.
+ *
+ * The gap being non-empty is not enough, and asserting membership with bare
+ * `<`/`>` said only that: with the prominence gap 0.0457 wide, a floor could
+ * drift to within 0.0001 of the unrelated population and every test would still
+ * pass while an unrelated pair at 0.187 was accepted. These are the margins the
+ * shipped floors ACTUALLY clear today — measured 0.0225 below and 0.0232 above
+ * for prominence, 0.1594 and 0.1604 for correlation — each rounded DOWN to a
+ * blunt figure, so the assertion has real teeth now and any erosion of the gap
+ * trips it rather than silently eating the slack.
+ */
+export const ALIGN_PROMINENCE_MARGIN = 0.02;
+/** …and the same for the (much wider) correlation gap. */
+export const ALIGN_CORRELATION_MARGIN = 0.15;
+
 export interface AlignmentMeasurement {
   /**
    * Where the take's sample 0 belongs on the reference's timeline, in seconds.
@@ -194,6 +217,17 @@ export interface AlignmentMeasurement {
   lagsEvaluated: number;
   /** The overlap, in seconds, at the winning coarse lag. */
   overlapSeconds: number;
+  /**
+   * CP1 fix-round. True when the FINE pass produced a surface and `offsetSeconds`
+   * is its refined answer; false when it could not (too little overlap at the
+   * fine grid's own gate) and `offsetSeconds` fell back to the coarse lag.
+   *
+   * Reported rather than silent because the two carry different accuracy: the
+   * ±10 ms this module claims is the refined figure, and a coarse-only answer is
+   * one 11.6 ms frame plus interpolation. A caller that quotes an accuracy has to
+   * be able to tell which it is holding.
+   */
+  refined: boolean;
 }
 
 /**
@@ -264,8 +298,17 @@ export function alignmentOdf(
       : resampleChannel(mono, sampleRate, ALIGN_ANALYSIS_RATE_HZ);
   if (analysis.length < 1024) return null;
 
-  // No grid conversion on the coarse ODF: `analysis` is at the same rate for
-  // every caller, so the two ODFs being compared are already on one grid.
+  // The coarse ODF arrives at ALIGN_ANALYSIS_RATE_HZ / ONSET_HOP = 86.1 fps for
+  // EVERY caller, because `analysis` above is at one fixed rate — so the two
+  // envelopes being compared already share a grid, and this conversion is not
+  // there to reconcile two rates.
+  //
+  // It is there because 86.1 fps is the wrong grid to SEARCH on. Leaving the
+  // coarse ODF at its native rate was measured and lost (worst cover 0.1476
+  // against best unrelated 0.1829): a rival search that samples the correlation
+  // surface coarsely finds a lower runner-up than the surface really has, which
+  // inflates the prominence of a coincidence more than that of an alignment.
+  // See ALIGN_COARSE_FRAME_RATE_HZ.
   const coarse = odfOrNull(analysis, ALIGN_ANALYSIS_RATE_HZ, ALIGN_COARSE_FRAME_RATE_HZ);
   if (!coarse) return null;
   const fine = odfOrNull(mono, sampleRate, ALIGN_FRAME_RATE_HZ);
@@ -472,5 +515,6 @@ export function alignTakeToReference(
     coarseOffsetSeconds,
     lagsEvaluated: coarse.evaluated,
     overlapSeconds: coarse.overlap[coarse.bestIdx] / ALIGN_COARSE_FRAME_RATE_HZ,
+    refined: fine !== null,
   };
 }

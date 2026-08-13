@@ -50,7 +50,7 @@ export interface Syllable {
  * what alignment keys on — two renderings of one schedule line up, two
  * schedules from different seeds do not.
  */
-export function syllableSchedule(seed: number, seconds: number): Syllable[] {
+export function syllableSchedule(seed: number, seconds: number, minSyllables = 0): Syllable[] {
   const rng = mulberry32(seed);
   const out: Syllable[] = [];
   let t = 0.2 + rng() * 0.3;
@@ -63,6 +63,23 @@ export function syllableSchedule(seed: number, seconds: number): Syllable[] {
       amplitude: 0.3 + rng() * 0.6,
     });
     t += durationSeconds + 0.04 + rng() * 0.35;
+  }
+  // CP1 fix-round: a short window draws ZERO syllables from the loop above, and
+  // a fixture that is silent by accident tests the silence path rather than the
+  // one it was written for — which is exactly how the min-overlap gate came to
+  // be covered by nothing. `minSyllables` packs a short window densely instead,
+  // so "short" and "silent" stop being the same fixture.
+  if (out.length < minSyllables) {
+    out.length = 0;
+    const slot = seconds / minSyllables;
+    for (let i = 0; i < minSyllables; i++) {
+      out.push({
+        startSeconds: i * slot,
+        durationSeconds: Math.min(0.12, slot * 0.6),
+        hz: 140 + rng() * 180,
+        amplitude: 0.3 + rng() * 0.6,
+      });
+    }
   }
   return out;
 }
@@ -85,6 +102,9 @@ export interface VocalLikeOptions {
    * without disturbing the schedule the two share. */
   varianceSeed?: number;
   channels?: number;
+  /** Forces at least this many syllables into a window too short to draw them
+   * naturally — see `syllableSchedule`. */
+  minSyllables?: number;
 }
 
 /**
@@ -104,9 +124,10 @@ export function makeVocalLike(opts: VocalLikeOptions): Float32Array[] {
     noiseAmplitude = 0,
     varianceSeed = seed + 1,
     channels = 1,
+    minSyllables = 0,
   } = opts;
 
-  const schedule = syllableSchedule(seed, seconds);
+  const schedule = syllableSchedule(seed, seconds, minSyllables);
   const total = Math.round((seconds + leadSeconds) * sampleRate);
   const mono = new Float32Array(total);
   const rng = mulberry32(varianceSeed);
