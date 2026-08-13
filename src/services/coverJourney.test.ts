@@ -1,0 +1,614 @@
+/**
+ * CP1 — the orchestrator's own tests.
+ *
+ * Deliberately SPY-LEVEL over the six sub-services. Every one of them
+ * (separation, the vocal chain, the cover chain, the alignment DSP) has its own
+ * suite proving what it does to audio; what has never been tested is that they
+ * are called ONCE EACH, IN ORDER, WITH THE RIGHT INPUTS, that Cancel is honoured
+ * between every pair of them, and that the arithmetic between them — the
+ * placement offset above all — is right. Re-running their DSP here would be a
+ * slower way of testing them again and no way at all of testing this.
+ */
+
+import { createDocument, docLength } from '../audio/AudioDocument';
+import { makeInitialState, useAppStore } from '../stores/appStore';
+import { useSessionStore } from '../multitrack/sessionStore';
+import * as coverAlign from '../dsp/coverAlign';
+import * as stemService from './stemService';
+import * as stemLanding from './stemLanding';
+import * as vocalChain from './vocalChain';
+import * as coverChain from './coverChain';
+import {
+  COVER_JOURNEY_STAGES,
+  JOURNEY_FADE_MS,
+  coverSessionName,
+  findExistingSeparation,
+  journeyStageById,
+  runCoverJourney,
+  sumInstrumental,
+  type CoverJourneyStageId,
+  type CoverJourneyStageProgress,
+  type CoverJourneyStageResult,
+} from './coverJourney';
+import { STEM_TRACK_LABELS } from './stemLanding';
+
+jest.mock('./stemService', () => ({
+  ...jest.requireActual('./stemService'),
+  separateStems: jest.fn(),
+  cancelStemSeparation: jest.fn(async () => true),
+}));
+jest.mock('./stemLanding', () => ({
+  ...jest.requireActual('./stemLanding'),
+  landStems: jest.fn(),
+}));
+jest.mock('./vocalChain', () => ({
+  ...jest.requireActual('./vocalChain'),
+  runVocalChain: jest.fn(),
+}));
+jest.mock('./coverChain', () => ({
+  ...jest.requireActual('./coverChain'),
+  runCoverChain: jest.fn(),
+}));
+jest.mock('../dsp/coverAlign', () => ({
+  ...jest.requireActual('../dsp/coverAlign'),
+  alignTakeToReference: jest.fn(),
+}));
+
+const separateStems = stemService.separateStems as jest.Mock;
+const cancelStemSeparation = stemService.cancelStemSeparation as jest.Mock;
+const landStems = stemLanding.landStems as jest.Mock;
+const runVocalChain = vocalChain.runVocalChain as jest.Mock;
+const runCoverChain = coverChain.runCoverChain as jest.Mock;
+const alignTakeToReference = coverAlign.alignTakeToReference as jest.Mock;
+
+const SR = 8000;
+const SONG_SAMPLES = SR * 8;
+const TAKE_SAMPLES = SR * 6;
+
+function tone(n: number, hz: number, rate: number, amp = 0.4): Float32Array {
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) out[i] = amp * Math.sin((2 * Math.PI * hz * i) / rate);
+  return out;
+}
+
+let songId = '';
+let takeId = '';
+
+/** The song, the take, and (when `withStems`) the five documents a completed
+ * separation of that song leaves behind. */
+function seed(withStems: boolean, takeRate = SR): void {
+  useAppStore.setState(makeInitialState());
+  const song = createDocument({ name: 'song', sampleRate: SR, channels: [tone(SONG_SAMPLES, 220, SR)] });
+  const take = createDocument({
+    name: 'take',
+    sampleRate: takeRate,
+    channels: [tone(Math.round((TAKE_SAMPLES * takeRate) / SR), 330, takeRate)],
+  });
+  const docs = [song, take];
+  if (withStems) {
+    for (const label of STEM_TRACK_LABELS) {
+      docs.push(
+        createDocument({
+          name: `song — ${label}`,
+          sampleRate: SR,
+          channels: [tone(SONG_SAMPLES, 440, SR, 0.1)],
+        })
+      );
+    }
+  }
+  useAppStore.setState({ documents: docs, activeDocumentId: song.id, selection: null });
+  songId = song.id;
+  takeId = take.id;
+}
+
+const okVocalReport = (): vocalChain.VocalChainReport =>
+  ({ applied: true, stages: [], elapsedMs: 1 }) as unknown as vocalChain.VocalChainReport;
+const okCoverReport = (): coverChain.CoverChainReport =>
+  ({ applied: true, stages: [], elapsedMs: 1 }) as unknown as coverChain.CoverChainReport;
+
+const confidentAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurement => ({
+  offsetSeconds,
+  peakCorrelation: 0.81,
+  rivalCorrelation: 0.3,
+  prominence: 0.51,
+  confident: true,
+  coarseOffsetSeconds: offsetSeconds,
+  lagsEvaluated: 900,
+  overlapSeconds: 5,
+});
+
+beforeEach(() => {
+  jest.clearAllMocks();
+  runVocalChain.mockResolvedValue(okVocalReport());
+  runCoverChain.mockResolvedValue(okCoverReport());
+  alignTakeToReference.mockReturnValue(confidentAlignment(0));
+  separateStems.mockResolvedValue({ ok: false, status: 'failed', message: 'not stubbed' });
+  seed(true);
+});
+
+// ── Sequencing ──────────────────────────────────────────────────────────────
+
+describe('runCoverJourney — sequencing', () => {
+  it('calls every sub-service once, in order, with the right inputs', async () => {
+    const order: string[] = [];
+    runVocalChain.mockImplementation(async () => {
+      order.push('vocal');
+      return okVocalReport();
+    });
+    alignTakeToReference.mockImplementation(() => {
+      order.push('align');
+      return confidentAlignment(0.5);
+    });
+    runCoverChain.mockImplementation(async () => {
+      order.push('cover');
+      return okCoverReport();
+    });
+
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(report).not.toBeNull();
+    expect(report!.completed).toBe(true);
+    // The separation was REUSED, so the model was never asked to run.
+    expect(separateStems).not.toHaveBeenCalled();
+    expect(landStems).not.toHaveBeenCalled();
+    expect(order).toEqual(['vocal', 'align', 'cover']);
+    expect(runVocalChain).toHaveBeenCalledTimes(1);
+    expect(runCoverChain).toHaveBeenCalledTimes(1);
+    expect(alignTakeToReference).toHaveBeenCalledTimes(1);
+
+    // The cover chain matches against the SEPARATED VOCAL, never the song.
+    const vocalsDoc = useAppStore
+      .getState()
+      .documents.find((d) => d.name === 'song — Vocals')!;
+    expect(runCoverChain.mock.calls[0][0].referenceDocId).toBe(vocalsDoc.id);
+
+    // Both chains run on the TAKE, over the WHOLE take — the orchestrator sets
+    // the active document and clears any selection, because both chains read
+    // those from the store rather than taking them as arguments.
+    expect(useAppStore.getState().selection).toBeNull();
+
+    // Every stage reported exactly once, in registry order.
+    expect(report!.stages.map((s) => s.id)).toEqual(COVER_JOURNEY_STAGES.map((s) => s.id));
+  });
+
+  it('aligns the CLEANED take against the separated vocal, not the raw one', async () => {
+    // The vocal chain replaces the take's samples; alignment must see what it
+    // left behind, which is only true if it runs after and re-reads the store.
+    runVocalChain.mockImplementation(async () => {
+      const state = useAppStore.getState();
+      useAppStore.setState({
+        documents: state.documents.map((d) =>
+          d.id === takeId ? { ...d, channels: [tone(TAKE_SAMPLES, 111, SR, 0.9)] } : d
+        ),
+      });
+      return okVocalReport();
+    });
+    await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    const [refChannels, refRate, takeChannels] = alignTakeToReference.mock.calls[0];
+    expect(refRate).toBe(SR);
+    expect(refChannels[0].length).toBe(SONG_SAMPLES);
+    // 0.9 amplitude is the cleaned take's, not the seeded 0.4.
+    expect(Math.max(...Array.from(takeChannels[0] as Float32Array))).toBeGreaterThan(0.8);
+  });
+
+  it('runs the separation when no existing one is open, and lands it', async () => {
+    seed(false);
+    separateStems.mockImplementation(async () => {
+      // `landStems` is what creates the five documents; the stub does the same.
+      const state = useAppStore.getState();
+      const song = state.documents.find((d) => d.id === songId)!;
+      const stems = STEM_TRACK_LABELS.map((label) =>
+        createDocument({
+          name: `${song.name} — ${label}`,
+          sampleRate: SR,
+          channels: [tone(SONG_SAMPLES, 440, SR, 0.1)],
+        })
+      );
+      useAppStore.setState({ documents: [...state.documents, ...stems] });
+      return { ok: true, output: { sourceDocId: songId, sourceName: 'song' } };
+    });
+
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(separateStems).toHaveBeenCalledTimes(1);
+    expect(separateStems.mock.calls[0][0].sourceDocId).toBe(songId);
+    expect(landStems).toHaveBeenCalledTimes(1);
+    expect(report!.separation!.reused).toBe(false);
+    expect(report!.stages[0].status).toBe('done');
+  });
+
+  it('says so when it reuses a separation rather than re-running the model', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.separation!.reused).toBe(true);
+    expect(report!.stages[0].status).toBe('reused');
+    expect(report!.stages[0].derived[0].value).toMatch(/already open/);
+  });
+
+  it('refuses to start without both documents, or with one document twice', async () => {
+    expect(await runCoverJourney({ songDocId: 'nope', takeDocId: takeId })).toBeNull();
+    expect(await runCoverJourney({ songDocId: songId, takeDocId: 'nope' })).toBeNull();
+    expect(await runCoverJourney({ songDocId: songId, takeDocId: songId })).toBeNull();
+  });
+});
+
+// ── The stepper ─────────────────────────────────────────────────────────────
+
+describe('runCoverJourney — the live view', () => {
+  it('walks every stage through start, progress and result', async () => {
+    const started: CoverJourneyStageId[] = [];
+    const results: CoverJourneyStageResult[] = [];
+    const progress: number[] = [];
+    const seen: CoverJourneyStageProgress[] = [];
+
+    await runCoverJourney({
+      songDocId: songId,
+      takeDocId: takeId,
+      onStageStart: (s) => started.push(s.id),
+      onStageResult: (r) => results.push(r),
+      onProgress: (f) => progress.push(f),
+      onStageProgress: (p) => seen.push(p),
+    });
+
+    expect(started).toEqual(COVER_JOURNEY_STAGES.map((s) => s.id));
+    // The result objects handed to the live callback ARE the report's own.
+    expect(results.map((r) => r.id)).toEqual(COVER_JOURNEY_STAGES.map((s) => s.id));
+    expect(progress[progress.length - 1]).toBeCloseTo(1, 5);
+    expect(progress.every((f) => f >= 0 && f <= 1)).toBe(true);
+    expect(seen.length).toBeGreaterThan(0);
+  });
+
+  it('nests the vocal chain\'s own stages rather than flattening them', async () => {
+    runVocalChain.mockImplementation(async (opts: vocalChain.RunVocalChainOptions) => {
+      opts.onStageProgress?.({
+        stageId: 'hum',
+        label: 'De-Hum',
+        phase: 'measuring',
+        stageFraction: 0,
+        detail: 'measuring the audio that reaches this stage',
+      });
+      return okVocalReport();
+    });
+
+    const nested: CoverJourneyStageProgress[] = [];
+    await runCoverJourney({
+      songDocId: songId,
+      takeDocId: takeId,
+      onStageProgress: (p) => {
+        if (p.sub) nested.push(p);
+      },
+    });
+
+    const clean = nested.find((p) => p.stageId === 'clean');
+    expect(clean).toBeDefined();
+    // The nested row keeps the sub-chain's OWN label and detail — the words the
+    // Vocal Chain dialog would have shown — instead of one opaque bar.
+    expect(clean!.sub!.label).toBe('De-Hum');
+    expect(clean!.sub!.stageId).toBe('hum');
+    expect(clean!.detail).toContain('De-Hum');
+  });
+
+  it('carries each nested chain\'s whole report on its stage', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.stages.find((s) => s.id === 'clean')!.vocalChain).toBeDefined();
+    expect(report!.stages.find((s) => s.id === 'match')!.coverChain).toBeDefined();
+  });
+});
+
+// ── Cancellation ────────────────────────────────────────────────────────────
+
+describe('runCoverJourney — cancellation', () => {
+  it.each(COVER_JOURNEY_STAGES.map((s, i) => [s.id, i] as const))(
+    'stops cleanly when cancelled before %s',
+    async (id, index) => {
+      let calls = 0;
+      const report = await runCoverJourney({
+        songDocId: songId,
+        takeDocId: takeId,
+        // Fires on the (index+1)-th poll — i.e. at the head of stage `index`.
+        shouldCancel: () => ++calls > index,
+      });
+
+      expect(report).not.toBeNull();
+      expect(report!.completed).toBe(false);
+      expect(report!.cancelledAt).toBe(id);
+      // Every stage still owes the user a row, cancelled or not reached.
+      expect(report!.stages.map((s) => s.id)).toEqual(COVER_JOURNEY_STAGES.map((s) => s.id));
+      expect(report!.stages[index].status).toBe('cancelled');
+      for (let i = index + 1; i < COVER_JOURNEY_STAGES.length; i++) {
+        expect(report!.stages[i].status).toBe('pending');
+      }
+    }
+  );
+
+  it('leaves NO session behind when cancelled before the session is built', async () => {
+    useSessionStore.setState({ session: { name: 'untouched', sampleRate: SR, tracks: [] } });
+    let calls = 0;
+    const report = await runCoverJourney({
+      songDocId: songId,
+      takeDocId: takeId,
+      shouldCancel: () => ++calls > 4, // at the head of 'place'
+    });
+    expect(report!.cancelledAt).toBe('place');
+    expect(useSessionStore.getState().session.name).toBe('untouched');
+    expect(report!.placement).toBeNull();
+    // …and the row SAYS that, rather than leaving the user to discover it.
+    expect(report!.stages.find((s) => s.id === 'place')!.reason).toMatch(/no session/);
+  });
+
+  it('forwards the cancel to the separation model rather than waiting it out', async () => {
+    seed(false);
+    separateStems.mockImplementation(
+      async (req: { onProgress?: (p: stemService.StemSeparationProgress) => void }) => {
+        req.onProgress?.({
+          phase: 'inference',
+          segment: 1,
+          totalSegments: 10,
+          fraction: 0.1,
+          elapsedMs: 10,
+          estimatedRemainingMs: 90,
+        });
+        return { ok: false, status: 'cancelled', message: 'cancelled' };
+      }
+    );
+    const report = await runCoverJourney({
+      songDocId: songId,
+      takeDocId: takeId,
+      shouldCancel: () => separateStems.mock.calls.length > 0,
+    });
+    expect(cancelStemSeparation).toHaveBeenCalled();
+    expect(report!.cancelledAt).toBe('separate');
+  });
+});
+
+// ── Alignment and placement ─────────────────────────────────────────────────
+
+describe('runCoverJourney — alignment and placement arithmetic', () => {
+  it('places the take at the measured offset', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.placement!.takeStartSample).toBe(Math.round(1.25 * SR));
+    expect(report!.placement!.instrumentalStartSample).toBe(0);
+    expect(report!.placement!.shiftedSamples).toBe(0);
+
+    const session = useSessionStore.getState().session;
+    expect(session.tracks).toHaveLength(2);
+    expect(session.tracks[1].clips[0].startSample).toBe(Math.round(1.25 * SR));
+  });
+
+  it('shifts BOTH tracks rather than clamping a negative offset to zero', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(-0.75));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const shift = Math.round(0.75 * SR);
+    expect(report!.placement!.shiftedSamples).toBe(shift);
+    expect(report!.placement!.takeStartSample).toBe(0);
+    expect(report!.placement!.instrumentalStartSample).toBe(shift);
+    // The measured interval between the two survives the shift exactly.
+    expect(
+      report!.placement!.takeStartSample - report!.placement!.instrumentalStartSample
+    ).toBe(-shift);
+  });
+
+  it('converts the offset into SESSION samples when the take has another rate', async () => {
+    seed(true, 16000);
+    alignTakeToReference.mockReturnValue(confidentAlignment(0.5));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    // The session runs at the instrumental's rate, not the take's.
+    expect(report!.placement!.sessionRate).toBe(SR);
+    expect(report!.placement!.takeStartSample).toBe(Math.round(0.5 * SR));
+    // …and the clip's LENGTH is converted too, or the take would play at the
+    // wrong length on the timeline.
+    const take = useAppStore.getState().documents.find((d) => d.id === takeId)!;
+    expect(report!.placement!.takeLengthSample).toBe(
+      Math.round((docLength(take) * SR) / 16000)
+    );
+  });
+
+  it('places at zero and states the numbers when the alignment is not believed', async () => {
+    alignTakeToReference.mockReturnValue({
+      ...confidentAlignment(3.5),
+      peakCorrelation: 0.31,
+      prominence: 0.02,
+      confident: false,
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(report!.alignmentRefused).toBe(true);
+    expect(report!.placement!.takeStartSample).toBe(0);
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    expect(stage.status).toBe('declined');
+    // The refusal quotes what it measured AND what it was measured against.
+    expect(stage.reason).toContain('0.310');
+    expect(stage.reason).toContain(String(coverAlign.ALIGN_MIN_CORRELATION));
+    expect(stage.reason).toContain(String(coverAlign.ALIGN_MIN_PROMINENCE));
+    // …and the run goes on. A refusal is not a failure.
+    expect(report!.completed).toBe(true);
+  });
+
+  it('declines without a placement guess when there is nothing to measure', async () => {
+    alignTakeToReference.mockReturnValue(null);
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.alignment).toBeNull();
+    expect(report!.stages.find((s) => s.id === 'align')!.status).toBe('declined');
+    expect(report!.placement!.takeStartSample).toBe(0);
+    expect(report!.completed).toBe(true);
+  });
+});
+
+// ── Smoothing ───────────────────────────────────────────────────────────────
+
+describe('runCoverJourney — smoothing and the level check', () => {
+  it('fades both edges of the placed take with the v1.9 curve', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const expected = Math.round((JOURNEY_FADE_MS / 1000) * SR);
+    expect(report!.smoothing!.fadeInSample).toBe(expected);
+    expect(report!.smoothing!.fadeOutSample).toBe(expected);
+    expect(report!.smoothing!.curve).toBe('equal-power');
+
+    const clip = useSessionStore.getState().session.tracks[1].clips[0];
+    expect(clip.fadeInSample).toBe(expected);
+    expect(clip.fadeOutSample).toBe(expected);
+    expect(clip.fadeInCurve).toBe('equal-power');
+  });
+
+  it('shortens the pair rather than letting the two fades cross on a short take', async () => {
+    useAppStore.setState({
+      documents: useAppStore.getState().documents.map((d) =>
+        d.id === takeId ? { ...d, channels: [tone(120, 300, SR)] } : d
+      ),
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const s = report!.smoothing!;
+    expect(s.fadeInSample + s.fadeOutSample).toBeLessThanOrEqual(
+      report!.placement!.takeLengthSample
+    );
+  });
+
+  it('measures the summed peak before the clamp and warns when it passes full scale', async () => {
+    // Two full-scale tracks sum well over 0 dBFS; the clamped mixdown could
+    // never show that, which is the whole reason the pre-clamp peak exists.
+    useAppStore.setState({
+      documents: useAppStore.getState().documents.map((d) =>
+        d.name === 'song — Drums' || d.id === takeId
+          ? { ...d, channels: [tone(docLength(d), 300, d.sampleRate, 1)] }
+          : d
+      ),
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.smoothing!.overCeiling).toBe(true);
+    expect(report!.smoothing!.summedPeakDb).toBeGreaterThan(0);
+    const stage = report!.stages.find((s) => s.id === 'smooth')!;
+    expect(stage.warning).toContain('above full scale');
+    // Nothing was normalised on the user's behalf — the fix is named, not done.
+    expect(stage.warning).toMatch(/fader/);
+  });
+
+  it('says nothing about the level when there is nothing to say', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.smoothing!.overCeiling).toBe(false);
+    expect(report!.stages.find((s) => s.id === 'smooth')!.warning).toBeUndefined();
+  });
+});
+
+// ── Undo ────────────────────────────────────────────────────────────────────
+
+describe('runCoverJourney — undo', () => {
+  it('lists the per-pass undo entries the chains left, and claims no more', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.undoEntries).toEqual(['Vocal Chain', 'Cover Chain']);
+    expect(report!.stages.find((s) => s.id === 'clean')!.undoEntries).toEqual(['Vocal Chain']);
+    expect(report!.stages.find((s) => s.id === 'match')!.undoEntries).toEqual(['Cover Chain']);
+    // Creating documents and replacing the session are not edits to a document,
+    // so those stages claim nothing.
+    expect(report!.stages.find((s) => s.id === 'separate')!.undoEntries).toEqual([]);
+    expect(report!.stages.find((s) => s.id === 'place')!.undoEntries).toEqual([]);
+  });
+
+  it('claims no undo entry for a chain that did not change anything', async () => {
+    runVocalChain.mockResolvedValue({ applied: false, stages: [], elapsedMs: 1 });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.undoEntries).toEqual(['Cover Chain']);
+    expect(report!.stages.find((s) => s.id === 'clean')!.status).toBe('declined');
+    expect(report!.completed).toBe(true);
+  });
+});
+
+// ── Failure ─────────────────────────────────────────────────────────────────
+
+describe('runCoverJourney — failure', () => {
+  it('stops and says which stage failed when a chain refuses to run', async () => {
+    runCoverChain.mockResolvedValue(null);
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.completed).toBe(false);
+    const stage = report!.stages.find((s) => s.id === 'match')!;
+    expect(stage.status).toBe('failed');
+    expect(stage.reason).toMatch(/nothing was placed/);
+    expect(report!.placement).toBeNull();
+  });
+
+  it('stops when the separation model fails, naming its own message', async () => {
+    seed(false);
+    separateStems.mockResolvedValue({ ok: false, status: 'model-missing', message: 'no model' });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.stages[0].status).toBe('failed');
+    expect(report!.stages[0].reason).toBe('no model');
+    expect(runVocalChain).not.toHaveBeenCalled();
+  });
+});
+
+// ── The pieces, on their own ────────────────────────────────────────────────
+
+describe('findExistingSeparation', () => {
+  it('finds a complete set of five', () => {
+    const state = useAppStore.getState();
+    const song = state.documents.find((d) => d.id === songId)!;
+    const found = findExistingSeparation(state.documents, song);
+    expect(found).not.toBeNull();
+    expect(found!.map((d) => d.name)).toEqual(STEM_TRACK_LABELS.map((l) => `song — ${l}`));
+  });
+
+  it('refuses an incomplete set rather than reusing part of one', () => {
+    const state = useAppStore.getState();
+    const song = state.documents.find((d) => d.id === songId)!;
+    const without = state.documents.filter((d) => d.name !== 'song — Residual');
+    expect(findExistingSeparation(without, song)).toBeNull();
+  });
+
+  it('refuses a stem whose rate or length no longer matches the song', () => {
+    const state = useAppStore.getState();
+    const song = state.documents.find((d) => d.id === songId)!;
+    const shortened = state.documents.map((d) =>
+      d.name === 'song — Bass' ? { ...d, channels: [tone(10, 200, SR)] } : d
+    );
+    expect(findExistingSeparation(shortened, song)).toBeNull();
+    const rerated = state.documents.map((d) =>
+      d.name === 'song — Bass' ? { ...d, sampleRate: SR * 2 } : d
+    );
+    expect(findExistingSeparation(rerated, song)).toBeNull();
+  });
+});
+
+describe('sumInstrumental', () => {
+  it('sums the four non-vocal stems and leaves the vocal out', () => {
+    const docs = STEM_TRACK_LABELS.map((label) =>
+      createDocument({
+        name: label,
+        sampleRate: SR,
+        // Vocals is the loud one: if it leaked in, the sum would show it.
+        channels: [new Float32Array(4).fill(label === 'Vocals' ? 1 : 0.25)],
+      })
+    );
+    const summed = sumInstrumental(docs);
+    expect(summed).toHaveLength(1);
+    expect(Array.from(summed[0])).toEqual([1, 1, 1, 1]);
+  });
+});
+
+describe('the stage table', () => {
+  it('names every stage of the journey the user was promised', () => {
+    expect(COVER_JOURNEY_STAGES.map((s) => s.id)).toEqual([
+      'separate',
+      'clean',
+      'align',
+      'match',
+      'place',
+      'smooth',
+    ]);
+  });
+
+  it('gives every stage a note and a positive weight', () => {
+    for (const stage of COVER_JOURNEY_STAGES) {
+      expect(stage.note.length).toBeGreaterThan(40);
+      expect(stage.weight).toBeGreaterThan(0);
+      expect(journeyStageById(stage.id)).toBe(stage);
+    }
+  });
+
+  it('throws on an id that is not a stage', () => {
+    expect(() => journeyStageById('nope' as CoverJourneyStageId)).toThrow();
+  });
+
+  it('names the session after the song', () => {
+    expect(coverSessionName('My Song')).toBe('My Song — Cover');
+  });
+});

@@ -43,6 +43,19 @@ import { DEFAULT_FADE_CURVE, crossfadableOverlap } from './session';
 export interface MixdownResult {
   channels: [Float32Array, Float32Array];
   sampleRate: number;
+  /**
+   * CP1 — the largest |sample| the bus reached BEFORE the ±1 clamp below, over
+   * both channels. 0 for an empty render.
+   *
+   * The clamped output cannot answer "did this session sum over full scale?":
+   * by construction its own peak is at most 1.0, so a render that flat-topped
+   * for thirty seconds and one that never came near the ceiling read the same.
+   * The cover journey's final level check needs the number the clamp REMOVED,
+   * so it is measured in the clamp pass itself — the one place the pre-clamp
+   * value is still in scope — rather than by a second summation that would have
+   * to re-derive every gain, pan and fade this function already applied.
+   */
+  peakBeforeClamp: number;
 }
 
 function dbToLinear(db: number): number {
@@ -400,7 +413,11 @@ export function mixdownSession(
 
   if (length === 0) {
     onProgress?.(1);
-    return { channels: [new Float32Array(0), new Float32Array(0)], sampleRate: sr };
+    return {
+      channels: [new Float32Array(0), new Float32Array(0)],
+      sampleRate: sr,
+      peakBeforeClamp: 0,
+    };
   }
 
   const L = new Float32Array(length);
@@ -496,11 +513,16 @@ export function mixdownSession(
     onProgress?.(done / total);
   }
 
+  let peakBeforeClamp = 0;
   for (let i = 0; i < length; i++) {
+    const l = L[i] < 0 ? -L[i] : L[i];
+    if (l > peakBeforeClamp) peakBeforeClamp = l;
+    const r = R[i] < 0 ? -R[i] : R[i];
+    if (r > peakBeforeClamp) peakBeforeClamp = r;
     L[i] = clamp1(L[i]);
     R[i] = clamp1(R[i]);
   }
 
   onProgress?.(1);
-  return { channels: [L, R], sampleRate: sr };
+  return { channels: [L, R], sampleRate: sr, peakBeforeClamp };
 }
