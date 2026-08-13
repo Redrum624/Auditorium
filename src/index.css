@@ -63,6 +63,15 @@
   --glass-blur-chrome: 24px;
   --glass-shadow: 0 32px 90px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.06);
   --glass-shadow-chrome: 0 16px 48px rgba(0, 0, 0, 0.5);
+  /* MT1-4: the OPAQUE field background, for controls that spawn a native popup
+     (`<select>`). Every other glass field tints the surface behind it with a few
+     percent of white, which is correct on the stage and wrong the moment the
+     widget is drawn somewhere else — see the `select` rule near the bottom of
+     this file. The value is not a new colour: it is `PropertiesPanel`'s
+     fade-curve select, the one control that was already opaque and the one
+     nobody reported, and it is within a shade of what `rgba(255,255,255,.04)`
+     over `--glass-bg` composites to, so the closed control does not move. */
+  --glass-field-bg: #1a1a1e;
   --canvas-bg: radial-gradient(1400px 800px at 42% 45%, #121216, #08080a);
 
   /* Glass text scale: title / control label / secondary / muted-subtitle,
@@ -492,6 +501,47 @@
 }
 .glass-rail-btn:active {
   transform: scale(0.98);
+}
+
+/* ------------------------------------------------------------------------- */
+/* MT1-4 native select popups: the one widget the glass tint cannot follow.   */
+/* ------------------------------------------------------------------------- */
+/*
+   Reported as "light gray text on white" on Cover Chain's Reference picker.
+   The `color-scheme: dark` at the top of this file is NOT the missing piece —
+   it has been there since G1. Chromium draws a select's dropdown listbox with
+   the AUTHOR's background whenever the author sets one, and it draws it as a
+   widget of its own rather than on the stage. So `rgba(255,255,255,.04)` —
+   which composites to a dark field over `--glass-bg`, and looks right on the
+   closed control — composites to near-WHITE in the popup, and the light-gray
+   `--glass-text-*` chosen to sit on near-black lands on it unreadable. An
+   author background beats the UA's dark base, so the root declaration only
+   ever governed the popups nobody had styled.
+
+   Both halves are needed. The element rules below catch any select added later
+   that leaves its background to the UA; the three inline `background` values
+   (GlassSelect, CoverChainDialog, SpatialPanel) had to become opaque in their
+   own files, because an inline style outranks anything written here.
+
+   `option` is styled explicitly rather than left to inherit: on Windows the
+   option rows are painted by the popup widget, which reads the option's own
+   computed colours and does not inherit the select's. Honest limit: how far a
+   platform honours option styling varies, and neither jsdom nor Playwright can
+   open a native popup to check — `src/components/UI/nativeSelect.test.tsx`
+   enforces the opacity law over the source and says so at length.
+*/
+select {
+  color-scheme: dark;
+  background-color: var(--glass-field-bg);
+  color: var(--glass-text-label);
+}
+select option {
+  background-color: var(--glass-field-bg);
+  color: var(--glass-text-title);
+}
+select option:checked {
+  background-color: var(--accent-soft);
+  color: var(--glass-text-title);
 }
 
 /* ------------------------------------------------------------------------- */

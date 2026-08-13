@@ -195,8 +195,14 @@ describe('GlassSelect (G5)', () => {
     const select = screen.getByLabelText('Format') as HTMLSelectElement;
     expect(ref.current).toBe(select);
     expect(select.value).toBe('wav');
-    // Same field anatomy as GlassField (Vitrine glassFormStyles: select === input).
-    expect(select.style.background).toBe('rgba(255, 255, 255, 0.04)');
+    // Same field anatomy as GlassField (Vitrine glassFormStyles: select === input)
+    // in every respect BUT the background, which MT1-4 made opaque: the select's
+    // native popup is painted with it off the glass surface, where the shared
+    // `rgba(255,255,255,.04)` tint composites to near-white under light-gray
+    // option text. The token's value is what that tint composited to on the
+    // stage, so the closed control is unchanged — which is what this line, and
+    // the identical radius/colour/padding below it, still pin.
+    expect(select.style.background).toBe('var(--glass-field-bg)');
     expect(select.style.color).toBe('var(--glass-text-label)');
     expect(select.style.borderRadius).toBe('8px');
     fireEvent.change(select, { target: { value: 'mp3' } });

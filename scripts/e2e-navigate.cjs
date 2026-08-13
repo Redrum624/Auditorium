@@ -677,6 +677,74 @@ async function main() {
     );
     await stubNativeDialogs(app);
 
+    // MT1: native `<select>` popups, asserted as far as a rig honestly can.
+    //
+    // The report was "light gray text on white" on Cover Chain's Reference
+    // picker. The cause was three selects carrying a translucent white
+    // background (`rgba(255,255,255,.04/.05/.06)`): Chromium paints the dropdown
+    // listbox with the author's background but NOT on the glass surface, so a
+    // tint that composites dark on the stage composites near-white in the popup,
+    // under text coloured for near-black. The root's `color-scheme: dark` — the
+    // thing the report was originally filed against — was already present and
+    // never governed a select that styles its own background.
+    //
+    // WHAT THIS CANNOT DO, stated plainly: the popup is an OS-level widget with
+    // no DOM, so Playwright cannot open it, query it or screenshot it. There is
+    // no assertion available anywhere in this repo that observes the reported
+    // pixel. What IS observable is the input to the rule — real Chromium's
+    // computed styles for the root, for every select on screen, and for a probe
+    // select that exercises the stylesheet's element rule — and that is what
+    // runs below. jsdom cannot even do that much: `index.css` is mapped to
+    // `identity-obj-proxy` under jest, so the unit-side law
+    // (`src/components/UI/nativeSelect.test.tsx`) is a source scan instead.
+    await step(page, 'MT1 — selects declare a dark scheme and an opaque background', async () => {
+      const probe = await page.evaluate(() => {
+        const opaque = (c) => !/rgba\([^)]*,\s*(?:0?\.\d+|0)\s*\)/.test(c) && c !== 'transparent';
+        // A bare select, styled only by the stylesheet: this is what a select
+        // added later — one that never styles itself — will look like.
+        const el = document.createElement('select');
+        const opt = document.createElement('option');
+        opt.textContent = 'probe';
+        el.appendChild(opt);
+        document.body.appendChild(el);
+        const probeStyle = getComputedStyle(el);
+        const optStyle = getComputedStyle(opt);
+        const result = {
+          rootScheme: getComputedStyle(document.documentElement).colorScheme,
+          probeScheme: probeStyle.colorScheme,
+          probeBg: probeStyle.backgroundColor,
+          probeBgOpaque: opaque(probeStyle.backgroundColor),
+          optionBgOpaque: opaque(optStyle.backgroundColor),
+          live: [...document.querySelectorAll('select')]
+            .filter((s) => s !== el)
+            .map((s) => ({
+              id: s.dataset.testid || s.getAttribute('aria-label') || '(unlabelled)',
+              bg: getComputedStyle(s).backgroundColor,
+              opaque: opaque(getComputedStyle(s).backgroundColor),
+            })),
+        };
+        el.remove();
+        return result;
+      });
+      assert(probe.rootScheme === 'dark', `the root declares color-scheme: dark (${probe.rootScheme})`);
+      assert(
+        probe.probeScheme === 'dark',
+        `an unstyled select inherits the dark scheme (${probe.probeScheme})`
+      );
+      assert(
+        probe.probeBgOpaque,
+        `an unstyled select gets an OPAQUE background from the stylesheet (${probe.probeBg})`
+      );
+      assert(probe.optionBgOpaque, 'its option row gets an opaque background too');
+      const translucent = probe.live.filter((s) => !s.opaque);
+      console.log(`  selects on screen: ${probe.live.length} (${translucent.length} translucent)`);
+      assert(
+        translucent.length === 0,
+        `every select on screen is opaque — a translucent one is the reported bug ` +
+          `(${JSON.stringify(translucent)})`
+      );
+    });
+
     // =====================================================================
     // PRIORITY ZERO — the three observation debts, walked first
     // =====================================================================

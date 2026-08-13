@@ -253,7 +253,9 @@ export default function SpatialPanel() {
           className="w-full rounded border px-1.5 py-1 text-xs outline-none"
           style={{
             borderColor: 'var(--glass-border)',
-            background: 'rgba(255,255,255,0.06)',
+            // MT1-4: opaque — a select's native popup is painted with this
+            // background off the glass surface (see src/index.css).
+            background: 'var(--glass-field-bg)',
             color: 'var(--glass-text-label)',
           }}
         >

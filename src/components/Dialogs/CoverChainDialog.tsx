@@ -435,7 +435,11 @@ export default function CoverChainDialog({ onClose }: { onClose: () => void }) {
             data-testid="cover-chain-reference"
             className="min-w-0 flex-1 rounded-lg px-2 py-1 text-xs"
             style={{
-              background: 'rgba(255, 255, 255, 0.05)',
+              // MT1-4: opaque, not the 5%-white tint. This picker is the
+              // reported repro — its native popup is painted with this
+              // background off the glass surface, where a tint composites to
+              // near-white under light-gray option text.
+              background: 'var(--glass-field-bg)',
               border: '1px solid var(--glass-border)',
               color: 'var(--glass-text-title)',
             }}

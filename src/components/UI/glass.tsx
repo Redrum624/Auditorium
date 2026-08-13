@@ -169,6 +169,16 @@ export function GlassField({ className = '', style, ...rest }: ComponentPropsWit
  * Token-styled select (G5): Vitrine's `glassFormStyles.selectStyle`, which is
  * defined as an ALIAS of `inputStyle` — selects and inputs share the exact
  * same field anatomy, so this mirrors GlassField on a `<select>`.
+ *
+ * MT1-4 — with ONE deliberate divergence from `GlassField`, which is why the
+ * alias is no longer literal: the background is the OPAQUE `--glass-field-bg`
+ * rather than the shared `rgba(255,255,255,.04)` tint. A select spawns a native
+ * dropdown popup that Chromium paints with this background but NOT on the glass
+ * surface, so a 4%-white tint that reads dark on the stage reads near-white in
+ * the popup and buries the light-gray option text. `GlassField` keeps the tint
+ * because an `<input>` has no popup to get it wrong. The token's value is the
+ * composite the tint already produced, so this control looks unchanged closed.
+ * See the `select` block in `src/index.css` and `nativeSelect.test.tsx`.
  */
 export function GlassSelect({ className = '', style, ...rest }: ComponentPropsWithRef<'select'>) {
   return (
@@ -180,7 +190,7 @@ export function GlassSelect({ className = '', style, ...rest }: ComponentPropsWi
         padding: '6px 8px',
         borderRadius: 8,
         border: '1px solid rgba(255,255,255,.1)',
-        background: 'rgba(255,255,255,.04)',
+        background: 'var(--glass-field-bg)',
         color: 'var(--glass-text-label)',
         ...style,
       }}
