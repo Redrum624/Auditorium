@@ -87,6 +87,9 @@ import {
   runCoverChain,
   type CoverChainReport,
 } from './coverChain';
+// CC3: the fade constant the refusal arm shares with the apply-the-guess
+// action. One direction only — `coverPlacement` never imports this module.
+import { JOURNEY_FADE_MS } from './coverPlacement';
 import { cancelStemSeparation, separateStems, STEM_LABELS } from './stemService';
 import { landStems, STEM_TRACK_LABELS } from './stemLanding';
 import {
@@ -172,16 +175,12 @@ export function journeyStageById(id: CoverJourneyStageId): CoverJourneyStage {
   return stage;
 }
 
-/**
- * The edge fade the smoothing stage applies, in milliseconds.
- *
- * 25 ms is not a new number: it is the Remix pass's own default crossfade
- * (`RemixDialog`'s `crossfadeMs` initial state), which is this app's existing
- * answer to the same question — how long a fade has to be to remove a splice
- * edge without being heard as a fade. Reusing it means the two features cannot
- * drift into two different opinions about the same 25 ms.
- */
-export const JOURNEY_FADE_MS = 25;
+// CC3: the edge-fade constant's DECLARATION moved to `coverPlacement`, which
+// has to lay down the same fades when the refused guess is applied late; a
+// module importing this one to learn its fade length would close an import
+// cycle. Re-exported here so every existing import path still resolves and the
+// smoothing stage below reads the same 25 ms it always did.
+export { JOURNEY_FADE_MS };
 
 /** Suffix for the summed non-vocal document the journey creates. */
 export const INSTRUMENTAL_SUFFIX = '— Instrumental';

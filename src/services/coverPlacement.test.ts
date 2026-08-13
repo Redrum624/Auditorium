@@ -1,0 +1,319 @@
+/**
+ * CC3 — the refused guess, made actionable.
+ *
+ * What this file exists to prove, in the order the user meets it:
+ *  - the refusal's remedy names the clip that CAN move (a clip cannot start
+ *    before zero, so a negative guess is only reachable by moving the
+ *    INSTRUMENTAL) and never names Align Vocal Timing, which cannot move a
+ *    clip at all;
+ *  - the measured guess is one call away from being realised, through the
+ *    SAME both-track-shift arithmetic the confident arm uses, as ONE undo
+ *    entry, with the journey's own edge fades and a cursor the user can press
+ *    play at;
+ *  - the CC2 outcome fields are read DEFENSIVELY: absent on today's shape,
+ *    honoured when present, and never invented.
+ */
+
+import { createDocument, type AudioDocument } from '../audio/AudioDocument';
+import { createClip, createTrack, DEFAULT_FADE_CURVE, type Session } from '../multitrack/session';
+import { useSessionStore } from '../multitrack/sessionStore';
+import { clearSessionHistory, undoSession } from '../multitrack/sessionUndo';
+import { getHistory } from './undoHistory';
+import { SESSION_UNDO_KEY } from '../multitrack/sessionUndo';
+import { useAppStore, makeInitialState } from '../stores/appStore';
+import { JOURNEY_FADE_MS } from './coverJourney';
+import {
+  APPLY_GUESS_LABEL,
+  APPLY_GUESS_UNDO_LABEL,
+  applyMeasuredOffset,
+  guessCandidates,
+  guessCharacterisation,
+  guessKind,
+  guessRemedy,
+} from './coverPlacement';
+
+const SR = 8000;
+const TAKE_SAMPLES = SR * 6;
+const SONG_SAMPLES = SR * 8;
+
+let instrumental: AudioDocument;
+let take: AudioDocument;
+let instrumentalClipId = '';
+let takeClipId = '';
+
+function seedCoverSession(): void {
+  useAppStore.setState(makeInitialState());
+  instrumental = createDocument({
+    name: 'song.wav — Instrumental',
+    sampleRate: SR,
+    channels: [new Float32Array(SONG_SAMPLES), new Float32Array(SONG_SAMPLES)],
+  });
+  take = createDocument({
+    name: 'take.wav',
+    sampleRate: SR,
+    channels: [new Float32Array(TAKE_SAMPLES)],
+  });
+  useAppStore.getState().addDocument(instrumental);
+  useAppStore.getState().addDocument(take);
+
+  const instrumentalTrack = createTrack('Instrumental');
+  const instrumentalClip = createClip({
+    documentId: instrumental.id,
+    startSample: 0,
+    offsetSample: 0,
+    lengthSample: SONG_SAMPLES,
+  });
+  instrumentalTrack.clips = [instrumentalClip];
+  instrumentalClipId = instrumentalClip.id;
+
+  const takeTrack = createTrack('Cover Vocal');
+  const takeClip = createClip({
+    documentId: take.id,
+    startSample: 0,
+    offsetSample: 0,
+    lengthSample: TAKE_SAMPLES,
+  });
+  takeTrack.clips = [takeClip];
+  takeClipId = takeClip.id;
+
+  const session: Session = {
+    name: 'song.wav — Cover',
+    sampleRate: SR,
+    tracks: [instrumentalTrack, takeTrack],
+  };
+  useSessionStore.setState({ session, selectedClipId: null, mtCursorSample: 0, mtPlayheadSample: 0 });
+  clearSessionHistory();
+}
+
+function clipById(id: string) {
+  for (const t of useSessionStore.getState().session.tracks) {
+    const c = t.clips.find((x) => x.id === id);
+    if (c) return c;
+  }
+  return null;
+}
+
+beforeEach(() => {
+  seedCoverSession();
+});
+
+// ── The remedy sentence ─────────────────────────────────────────────────────
+
+describe('guessRemedy — the sentence a refused guess ends with', () => {
+  it('sends a NEGATIVE guess to the instrumental, with the amount and the reason', () => {
+    const remedy = guessRemedy(-8.258);
+    expect(remedy).toContain('Instrumental');
+    expect(remedy).toContain('8.258 s');
+    expect(remedy).toContain('later');
+    // The WHY, because the instruction is counter-intuitive: the take is the
+    // clip the user thinks of moving, and it is the one that cannot.
+    expect(remedy).toContain('cannot start before zero');
+    // The take must not be offered as the thing to drag for this sign.
+    expect(remedy).not.toMatch(/drag (your|the) take/i);
+  });
+
+  it('sends a POSITIVE guess to the take, with the amount', () => {
+    const remedy = guessRemedy(8.258);
+    expect(remedy).toContain('take');
+    expect(remedy).toContain('8.258 s');
+    expect(remedy).not.toContain('Instrumental');
+  });
+
+  it('never recommends Align Vocal Timing, which cannot move a clip at all', () => {
+    for (const offset of [-8.258, 8.258, 0]) {
+      expect(guessRemedy(offset)).not.toContain('Align Vocal Timing');
+    }
+  });
+
+  it('names the one-click control by the label the button actually carries', () => {
+    expect(guessRemedy(-8.258)).toContain(APPLY_GUESS_LABEL);
+    expect(guessRemedy(8.258)).toContain(APPLY_GUESS_LABEL);
+  });
+
+  it('says there is nothing to move when the guess is already zero', () => {
+    const remedy = guessRemedy(0);
+    expect(remedy).toContain('already');
+    expect(remedy).not.toContain(APPLY_GUESS_LABEL);
+  });
+});
+
+// ── The CC2 outcome contract, feature-detected ──────────────────────────────
+
+describe('guessKind / guessCandidates — read defensively, never invented', () => {
+  it('reports `unclassified` for a non-confident measurement with no outcome field', () => {
+    expect(guessKind({ confident: false })).toBe('unclassified');
+    expect(guessKind({ confident: true })).toBe('confident');
+  });
+
+  it('honours the outcome field when the measurement carries one', () => {
+    expect(guessKind({ confident: false, outcome: 'ambiguous' })).toBe('ambiguous');
+    expect(guessKind({ confident: false, outcome: 'weak' })).toBe('weak');
+    expect(guessKind({ confident: false, outcome: 'unrelated' })).toBe('unrelated');
+    expect(guessKind({ confident: true, outcome: 'confident' })).toBe('confident');
+  });
+
+  it('ignores an outcome value it does not recognise rather than trusting it', () => {
+    expect(guessKind({ confident: false, outcome: 'sideways' })).toBe('unclassified');
+  });
+
+  it('returns no candidates when the field is absent, and the listed ones when it is', () => {
+    expect(guessCandidates({ confident: false })).toEqual([]);
+    expect(
+      guessCandidates({
+        confident: false,
+        candidates: [
+          { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+          { offsetSeconds: 12.5, correlation: 0.41, prominence: 0.06 },
+        ],
+      })
+    ).toEqual([
+      { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+      { offsetSeconds: 12.5, correlation: 0.41, prominence: 0.06 },
+    ]);
+  });
+
+  it('drops a candidate whose numbers are not all finite rather than showing a hole', () => {
+    expect(
+      guessCandidates({
+        confident: false,
+        candidates: [
+          { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+          { offsetSeconds: Number.NaN, correlation: 0.4, prominence: 0.1 },
+          { offsetSeconds: 3, correlation: 0.4 },
+          'nonsense',
+        ],
+      })
+    ).toEqual([{ offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 }]);
+  });
+
+  it('characterises each known outcome and stays silent about the unclassified one', () => {
+    expect(guessCharacterisation('ambiguous')).toContain('several places');
+    expect(guessCharacterisation('weak')).toContain('weak but plausible');
+    expect(guessCharacterisation('unrelated')).toContain('probably wrong');
+    expect(guessCharacterisation('unclassified')).toBeNull();
+    expect(guessCharacterisation('confident')).toBeNull();
+  });
+});
+
+// ── Applying the guess ──────────────────────────────────────────────────────
+
+describe('applyMeasuredOffset — the user\'s own −8.258 s case', () => {
+  it('shifts BOTH tracks for a negative guess rather than clamping the take to zero', () => {
+    const result = applyMeasuredOffset({
+      offsetSeconds: -8.258,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    expect(result.applied).toBe(true);
+    if (!result.applied) return;
+
+    const shift = Math.round(8.258 * SR);
+    expect(result.shiftedSamples).toBe(shift);
+    expect(result.takeStartSample).toBe(0);
+    expect(result.instrumentalStartSample).toBe(shift);
+
+    // The store agrees with the report — this is the placement, not a summary.
+    expect(clipById(takeClipId)!.startSample).toBe(0);
+    expect(clipById(instrumentalClipId)!.startSample).toBe(shift);
+    // …and the INTERVAL between the two is exactly what was measured.
+    expect(clipById(takeClipId)!.startSample - clipById(instrumentalClipId)!.startSample).toBe(
+      -shift
+    );
+  });
+
+  it('leaves the instrumental at zero and moves only the take for a positive guess', () => {
+    const result = applyMeasuredOffset({
+      offsetSeconds: 1.25,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    expect(result.applied).toBe(true);
+    if (!result.applied) return;
+    expect(result.shiftedSamples).toBe(0);
+    expect(result.takeStartSample).toBe(Math.round(1.25 * SR));
+    expect(clipById(instrumentalClipId)!.startSample).toBe(0);
+    expect(clipById(takeClipId)!.startSample).toBe(Math.round(1.25 * SR));
+  });
+
+  it('fades the take\'s edges with the journey\'s own fade, on the negative case', () => {
+    const result = applyMeasuredOffset({
+      offsetSeconds: -8.258,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    expect(result.applied).toBe(true);
+    if (!result.applied) return;
+    const nominal = Math.round((JOURNEY_FADE_MS / 1000) * SR);
+    expect(result.fadeInSample).toBe(nominal);
+    expect(result.fadeOutSample).toBe(nominal);
+    const clip = clipById(takeClipId)!;
+    expect(clip.fadeInSample).toBe(nominal);
+    expect(clip.fadeOutSample).toBe(nominal);
+    expect(clip.fadeInCurve).toBe(DEFAULT_FADE_CURVE);
+    expect(clip.fadeOutCurve).toBe(DEFAULT_FADE_CURVE);
+  });
+
+  it('parks the cursor and playhead where the take now enters, on the negative case', () => {
+    applyMeasuredOffset({
+      offsetSeconds: -8.258,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    const s = useSessionStore.getState();
+    // The take starts at 0 for a negative guess, and that IS where it enters.
+    expect(s.mtCursorSample).toBe(0);
+    expect(s.mtPlayheadSample).toBe(0);
+  });
+
+  it('parks the cursor at the take\'s entry for a positive guess too', () => {
+    applyMeasuredOffset({
+      offsetSeconds: 1.25,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    const s = useSessionStore.getState();
+    expect(s.mtCursorSample).toBe(Math.round(1.25 * SR));
+    expect(s.mtPlayheadSample).toBe(Math.round(1.25 * SR));
+  });
+
+  it('leaves ONE undo entry for the whole gesture, and undoing it restores both clips', () => {
+    applyMeasuredOffset({
+      offsetSeconds: -8.258,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    expect(getHistory(SESSION_UNDO_KEY).done).toEqual([APPLY_GUESS_UNDO_LABEL]);
+
+    undoSession();
+    expect(clipById(instrumentalClipId)!.startSample).toBe(0);
+    expect(clipById(takeClipId)!.startSample).toBe(0);
+    expect(clipById(takeClipId)!.fadeInSample).toBeUndefined();
+  });
+
+  it('refuses, with a reason, when one of the two clips is no longer in the session', () => {
+    useSessionStore.setState((prev) => ({
+      session: { ...prev.session, tracks: [prev.session.tracks[0]] },
+    }));
+    const result = applyMeasuredOffset({
+      offsetSeconds: -8.258,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    expect(result.applied).toBe(false);
+    if (result.applied) return;
+    expect(result.reason).toContain('take');
+    // Nothing moved.
+    expect(clipById(instrumentalClipId)!.startSample).toBe(0);
+    expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+  });
+
+  it('refuses a guess that is not a finite number rather than placing at NaN', () => {
+    const result = applyMeasuredOffset({
+      offsetSeconds: Number.NaN,
+      instrumentalDocId: instrumental.id,
+      takeDocId: take.id,
+    });
+    expect(result.applied).toBe(false);
+    expect(clipById(takeClipId)!.startSample).toBe(0);
+  });
+});
