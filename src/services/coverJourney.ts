@@ -443,6 +443,10 @@ export async function runCoverJourney(
   let separation: CoverJourneySeparation | null = null;
   let alignment: AlignmentMeasurement | null = null;
   let alignmentRefused = false;
+  /** CC2 (ALIGN-5): the take's channels as the singer recorded them, taken at
+   * stage 2 before the Vocal Chain rewrites them, because stage 3 measures onset
+   * envelopes and the chain moves onsets. Set in stage 2, read in stage 3. */
+  let preCleanTakeChannels: Float32Array[] | null = null;
   let placement: CoverJourneyPlacement | null = null;
   let smoothing: CoverJourneySmoothing | null = null;
   let cancelledAt: CoverJourneyStageId | null = null;
@@ -669,6 +673,22 @@ export async function runCoverJourney(
     app.setActiveDocument(take.id);
     app.setSelection(null);
 
+    // CC2 (ALIGN-5): the channels stage 3 will align on, snapshotted BEFORE the
+    // chain touches them. The aligner correlates ONSET envelopes — pure spectral
+    // flux — so every amplitude discontinuity the chain introduces IS an onset
+    // to it, and every one it removes is an onset taken away. A gate that cuts
+    // between phrases writes an attack at each open and close and deletes real
+    // breath and consonant onsets; the pitch corrector moves them. Measuring the
+    // take the singer actually recorded is the only version of this measurement
+    // that is about the singer.
+    //
+    // This holds a reference to the pre-chain Float32Arrays rather than a copy.
+    // That is sound for the same reason undo is: `applyEdit` keeps the pre-edit
+    // document and restores it wholesale (editOps.ts:166-235), so an effect that
+    // mutated channels in place would already have broken undo. The cost is one
+    // take's worth of memory held until stage 3, and nothing else.
+    preCleanTakeChannels = app.documents.find((d) => d.id === take.id)?.channels ?? null;
+
     const report = await runVocalChain({
       enabled: defaultStageSelection(),
       onStageProgress: (p) => emit(stage, `Vocal Chain — ${p.label}`, p.stageFraction, p),
@@ -718,12 +738,19 @@ export async function runCoverJourney(
     const vocals = state.documents.find((d) => d.id === separation!.vocalsDocId) ?? null;
     const cleaned = state.documents.find((d) => d.id === take.id) ?? null;
 
+    // CC2 (ALIGN-5): the PRE-clean channels when stage 2 captured them, falling
+    // back to the document's current ones when it did not (the take was closed
+    // and reopened, or a future caller reaches this stage another way). The
+    // document is still the right source for the RATE and for existence — only
+    // the samples come from before the chain.
+    const takeChannels = preCleanTakeChannels ?? cleaned?.channels ?? null;
+
     alignment =
-      vocals && cleaned
+      vocals && cleaned && takeChannels
         ? alignTakeToReference(
             vocals.channels,
             vocals.sampleRate,
-            cleaned.channels,
+            takeChannels,
             cleaned.sampleRate
           )
         : null;

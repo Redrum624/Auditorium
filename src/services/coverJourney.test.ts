@@ -193,9 +193,19 @@ describe('runCoverJourney — sequencing', () => {
     expect(report!.stages.map((s) => s.id)).toEqual(COVER_JOURNEY_STAGES.map((s) => s.id));
   });
 
-  it('aligns the CLEANED take against the separated vocal, not the raw one', async () => {
-    // The vocal chain replaces the take's samples; alignment must see what it
-    // left behind, which is only true if it runs after and re-reads the store.
+  /**
+   * CC2 (ALIGN-5). This test previously asserted the OPPOSITE — that alignment
+   * sees what the Vocal Chain left behind — and that was the defect.
+   *
+   * The aligner correlates ONSET envelopes, pure spectral flux, so every
+   * amplitude discontinuity the chain introduces IS an onset to it and every one
+   * it removes is an onset taken away: a gate writes an attack at each open and
+   * close, and deletes real breath and consonant onsets. Measuring the take the
+   * singer actually recorded is the only version of the measurement that is
+   * about the singer. The document is still where the RATE comes from — only the
+   * samples come from before the chain.
+   */
+  it('aligns the PRE-CLEAN take against the separated vocal, not what the chain left', async () => {
     runVocalChain.mockImplementation(async () => {
       const state = useAppStore.getState();
       useAppStore.setState({
@@ -207,11 +217,14 @@ describe('runCoverJourney — sequencing', () => {
     });
     await runCoverJourney({ songDocId: songId, takeDocId: takeId });
 
-    const [refChannels, refRate, takeChannels] = alignTakeToReference.mock.calls[0];
+    const [refChannels, refRate, takeChannels, takeRate] = alignTakeToReference.mock.calls[0];
     expect(refRate).toBe(SR);
     expect(refChannels[0].length).toBe(SONG_SAMPLES);
-    // 0.9 amplitude is the cleaned take's, not the seeded 0.4.
-    expect(Math.max(...Array.from(takeChannels[0] as Float32Array))).toBeGreaterThan(0.8);
+    expect(takeRate).toBe(SR);
+    // 0.4 is the amplitude the take was SEEDED with; 0.9 is what the chain
+    // replaced it by. The aligner must be holding the first of those.
+    expect(Math.max(...Array.from(takeChannels[0] as Float32Array))).toBeLessThan(0.5);
+    expect(takeChannels[0].length).toBe(TAKE_SAMPLES);
   });
 
   it('runs the separation when no existing one is open, and lands it', async () => {
