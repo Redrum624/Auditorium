@@ -19,6 +19,7 @@ import * as stemService from './stemService';
 import * as stemLanding from './stemLanding';
 import * as vocalChain from './vocalChain';
 import * as coverChain from './coverChain';
+import * as coverPlacement from './coverPlacement';
 import {
   COVER_JOURNEY_STAGES,
   JOURNEY_FADE_MS,
@@ -54,6 +55,15 @@ jest.mock('../dsp/coverAlign', () => ({
   ...jest.requireActual('../dsp/coverAlign'),
   alignTakeToReference: jest.fn(),
 }));
+// CC3 fix round 1 (I2): the shift arithmetic is SHARED with the apply-the-guess
+// arm, not copied into both. Spied (delegating to the real one by default) so a
+// test can prove the session is built from what the shared function returned —
+// which is what stops a future edit to this stage from forking the rule while
+// the offered guess keeps the old one.
+jest.mock('./coverPlacement', () => {
+  const actual = jest.requireActual('./coverPlacement');
+  return { ...actual, placementFor: jest.fn(actual.placementFor) };
+});
 
 const separateStems = stemService.separateStems as jest.Mock;
 const cancelStemSeparation = stemService.cancelStemSeparation as jest.Mock;
@@ -61,6 +71,7 @@ const landStems = stemLanding.landStems as jest.Mock;
 const runVocalChain = vocalChain.runVocalChain as jest.Mock;
 const runCoverChain = coverChain.runCoverChain as jest.Mock;
 const alignTakeToReference = coverAlign.alignTakeToReference as jest.Mock;
+const placementFor = coverPlacement.placementFor as jest.Mock;
 
 const SR = 8000;
 const SONG_SAMPLES = SR * 8;
@@ -588,6 +599,44 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
     expect(await alignReason(refusedAlignment(-8.258, { outcome: 'ambiguous' }))).toContain(
       'several places'
     );
+  });
+});
+
+// ── CC3 fix round 1: one shift arithmetic, shared with the apply arm ────────
+
+describe('runCoverJourney — where the two clip starts come from', () => {
+  it('builds the session from the SHARED placement function, not its own copy', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(-0.75));
+    // Values no arithmetic would produce from -0.75 s: if this stage ever
+    // computes the shift itself again, the session stops matching what the
+    // shared function said and this fails.
+    placementFor.mockReturnValueOnce({
+      rawTakeStartSample: -7,
+      shiftedSamples: 3,
+      takeStartSample: 10,
+      instrumentalStartSample: 3,
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(placementFor).toHaveBeenCalledWith(-0.75, SR);
+    expect(report!.placement!.takeStartSample).toBe(10);
+    expect(report!.placement!.instrumentalStartSample).toBe(3);
+    expect(report!.placement!.shiftedSamples).toBe(3);
+    // …and the CLIPS carry it, not only the report.
+    const tracks = useSessionStore.getState().session.tracks;
+    expect(tracks[0].clips[0].startSample).toBe(3);
+    expect(tracks[1].clips[0].startSample).toBe(10);
+  });
+
+  it('agrees with the apply-the-guess arm for every sign, by construction', async () => {
+    for (const offset of [-8.258, -0.75, 0, 1.25]) {
+      alignTakeToReference.mockReturnValue(confidentAlignment(offset));
+      const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+      const shared = jest.requireActual('./coverPlacement').placementFor(offset, SR);
+      expect(report!.placement!.takeStartSample).toBe(shared.takeStartSample);
+      expect(report!.placement!.instrumentalStartSample).toBe(shared.instrumentalStartSample);
+      expect(report!.placement!.shiftedSamples).toBe(shared.shiftedSamples);
+    }
   });
 });
 

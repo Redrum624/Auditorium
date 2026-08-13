@@ -95,6 +95,7 @@ import {
   guessCharacterisation,
   guessKind,
   guessRemedy,
+  placementFor,
 } from './coverPlacement';
 import { cancelStemSeparation, separateStems, STEM_LABELS } from './stemService';
 import { landStems, STEM_TRACK_LABELS } from './stemLanding';
@@ -911,13 +912,17 @@ export async function runCoverJourney(
     }
 
     const sessionRate = instrumental.sampleRate;
-    const rawTakeStart = Math.round(takeStartSeconds * sessionRate);
-    // A negative start is not clamped to zero — that would silently discard the
-    // alignment this pass just measured. BOTH tracks move instead, which keeps
-    // the interval between them exactly what was measured.
-    const shiftedSamples = rawTakeStart < 0 ? -rawTakeStart : 0;
-    const takeStartSample = rawTakeStart + shiftedSamples;
-    const instrumentalStartSample = shiftedSamples;
+    // CC3: the shift arithmetic lives in `coverPlacement.placementFor` and is
+    // SHARED with the apply-the-guess arm rather than written out twice — an
+    // offered guess has to land exactly where a believed one would, and two
+    // copies of the rule cannot guarantee that. The rule is unchanged: a
+    // negative start is not clamped to zero (that would silently discard the
+    // alignment this pass just measured), BOTH tracks move instead, and the
+    // interval between them stays exactly what was measured.
+    const { shiftedSamples, takeStartSample, instrumentalStartSample } = placementFor(
+      takeStartSeconds,
+      sessionRate
+    );
     const takeLengthSample = documentClipLength(matched, sessionRate);
 
     const instrumentalTrack: Track = createTrack('Instrumental');

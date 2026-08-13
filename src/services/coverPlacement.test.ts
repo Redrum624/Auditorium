@@ -30,6 +30,7 @@ import {
   guessCharacterisation,
   guessKind,
   guessRemedy,
+  placementFor,
 } from './coverPlacement';
 
 const SR = 8000;
@@ -192,6 +193,51 @@ describe('guessKind / guessCandidates — read defensively, never invented', () 
     expect(guessCharacterisation('unrelated')).toContain('probably wrong');
     expect(guessCharacterisation('unclassified')).toBeNull();
     expect(guessCharacterisation('confident')).toBeNull();
+  });
+});
+
+// ── The shift arithmetic, in ONE place ──────────────────────────────────────
+
+/**
+ * Fix round 1 (I2). Both the believed arm's session build and the apply-the-
+ * guess arm have to turn a signed offset into two clip starts, and until this
+ * function they each did it themselves with a comment pointing at the other.
+ * Nothing bound them, and the Place stage is a concurrent task's surface — so
+ * a change there would have left the offered guess landing somewhere a
+ * believed alignment would not have put it.
+ */
+describe('placementFor — the one place a signed offset becomes two clip starts', () => {
+  it('moves only the take for a positive offset', () => {
+    expect(placementFor(1.25, SR)).toEqual({
+      rawTakeStartSample: Math.round(1.25 * SR),
+      shiftedSamples: 0,
+      takeStartSample: Math.round(1.25 * SR),
+      instrumentalStartSample: 0,
+    });
+  });
+
+  it('pushes BOTH clips later for a negative offset rather than clamping the take', () => {
+    const shift = Math.round(8.258 * SR);
+    expect(placementFor(-8.258, SR)).toEqual({
+      rawTakeStartSample: -shift,
+      shiftedSamples: shift,
+      takeStartSample: 0,
+      instrumentalStartSample: shift,
+    });
+  });
+
+  it('keeps the measured interval whatever the sign, which is what the shift is for', () => {
+    for (const offset of [-8.258, -0.75, 0, 0.5, 12.5]) {
+      const p = placementFor(offset, SR);
+      expect(p.takeStartSample - p.instrumentalStartSample).toBe(Math.round(offset * SR));
+      expect(p.takeStartSample).toBeGreaterThanOrEqual(0);
+      expect(p.instrumentalStartSample).toBeGreaterThanOrEqual(0);
+    }
+  });
+
+  it('rounds to the SESSION rate it was handed, not the take\'s', () => {
+    expect(placementFor(0.5, 16000).takeStartSample).toBe(8000);
+    expect(placementFor(0.5, SR).takeStartSample).toBe(4000);
   });
 });
 

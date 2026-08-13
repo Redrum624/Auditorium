@@ -186,6 +186,47 @@ export function guessRemedy(offsetSeconds: number): string {
   );
 }
 
+// ── The shift arithmetic ────────────────────────────────────────────────────
+
+/** Where the two clips of a cover session go for one signed offset. */
+export interface ClipPlacement {
+  /** The take's start BEFORE the shift — negative when the take belongs before
+   * the reference's own zero. Reported because it is the measured quantity;
+   * the two starts below are what a timeline can actually hold. */
+  rawTakeStartSample: number;
+  /** Samples BOTH clips were pushed later so neither starts before zero. */
+  shiftedSamples: number;
+  takeStartSample: number;
+  instrumentalStartSample: number;
+}
+
+/**
+ * One signed offset → two clip starts. THE one implementation.
+ *
+ * Fix round 1 (I2): the believed arm's session build and the apply-the-guess
+ * arm both need this, and each used to compute it itself with a comment
+ * pointing at the other. Nothing bound the two, and the Place stage is a
+ * concurrent task's surface — so a change to the rule there (rate source,
+ * rounding, clamp) would have left the OFFERED guess landing somewhere a
+ * BELIEVED alignment would not have put it, which is precisely the failure the
+ * offer exists to prevent.
+ *
+ * The rule itself is unchanged: a negative start is not clamped to zero —
+ * that would silently discard the alignment that was just measured — so BOTH
+ * clips move instead, which keeps the interval between them exactly what was
+ * measured. `sampleRate` is the SESSION's rate, never the take's.
+ */
+export function placementFor(offsetSeconds: number, sampleRate: number): ClipPlacement {
+  const rawTakeStartSample = Math.round(offsetSeconds * sampleRate);
+  const shiftedSamples = rawTakeStartSample < 0 ? -rawTakeStartSample : 0;
+  return {
+    rawTakeStartSample,
+    shiftedSamples,
+    takeStartSample: rawTakeStartSample + shiftedSamples,
+    instrumentalStartSample: shiftedSamples,
+  };
+}
+
 // ── Applying the guess ──────────────────────────────────────────────────────
 
 export interface ApplyMeasuredOffsetOptions {
@@ -258,13 +299,12 @@ export function applyMeasuredOffset({
   }
 
   const sessionRate = session.sampleRate;
-  const rawTakeStart = Math.round(offsetSeconds * sessionRate);
-  // The confident arm's rule, verbatim (coverJourney's Place stage): a negative
-  // start is not clamped to zero — that would silently discard the very offset
-  // being applied. BOTH clips move instead.
-  const shiftedSamples = rawTakeStart < 0 ? -rawTakeStart : 0;
-  const takeStartSample = rawTakeStart + shiftedSamples;
-  const instrumentalStartSample = shiftedSamples;
+  // Not the confident arm's rule copied — the confident arm's rule ITSELF: the
+  // journey's Place stage calls this same function.
+  const { shiftedSamples, takeStartSample, instrumentalStartSample } = placementFor(
+    offsetSeconds,
+    sessionRate
+  );
 
   // The journey's smoothing stage, on the clip it is being applied to. Computed
   // as ONE pair (rather than two sequential edge writes) so a take too short to
