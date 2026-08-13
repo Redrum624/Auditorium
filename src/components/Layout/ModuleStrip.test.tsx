@@ -23,6 +23,7 @@ import ModuleStrip, {
 describe('ModuleStrip', () => {
   const PERMANENT = ['Files', 'Effects', 'Markers', 'History', 'Properties'];
 
+  // F11: five, where this used to say "every module entry" over a list of eight.
   it('carries the five permanent entries, in order, by accessible name', () => {
     render(<ModuleStrip activeTab="history" hasRemix={false} onSelect={() => {}} />);
     const strip = screen.getByTestId('sidebar-tabs');
@@ -31,9 +32,10 @@ describe('ModuleStrip', () => {
     expect(PERMANENT_TABS.map((t) => t.label)).toEqual(PERMANENT);
   });
 
-  // The user's ruling, at the surface it is about: neither is a module, so
-  // neither has an icon here. Their panels are untouched and are reached by
-  // command (Pipeline > Mix for the positioner, Transcribe for the transcript).
+  // F11: the removal itself — the user's ruling at the surface it is about.
+  // Neither is a module, so neither has an icon here. Their panels are
+  // untouched and reached by command instead (Pipeline > Mix for the
+  // positioner, Transcribe for the transcript).
   it('draws NO icon for Spatial or Transcript, in either remix state', () => {
     for (const hasRemix of [false, true]) {
       const { unmount } = render(
@@ -46,6 +48,7 @@ describe('ModuleStrip', () => {
     }
   });
 
+  // F11: the user's rule — "Remix should only appear when a remix is created".
   it('shows Remix only once a remix exists, and last in the roster', () => {
     const { rerender } = render(
       <ModuleStrip activeTab="history" hasRemix={false} onSelect={() => {}} />
@@ -60,6 +63,7 @@ describe('ModuleStrip', () => {
     expect(labels).toEqual([...PERMANENT, 'Remix']);
   });
 
+  // F11: one roster function, so App and the strip cannot disagree about it.
   it('states that roster once, as `stripTabs`, so the strip and App cannot disagree', () => {
     expect(stripTabs(false).map((t) => t.id)).toEqual([
       'files',
@@ -78,8 +82,8 @@ describe('ModuleStrip', () => {
     ]);
   });
 
-  // The card's registry is the WIDER list: a panel with no icon is still a
-  // panel the card renders, which is the whole point of the split.
+  // F11: the card's registry is the WIDER list — a panel with no icon is still
+  // a panel the card renders, which is the whole point of the split.
   it('keeps every panel in MODULE_PANELS, icons or not', () => {
     expect(MODULE_PANELS.map((p) => p.id)).toEqual([
       'files',
@@ -119,8 +123,9 @@ describe('ModuleStrip', () => {
     expect(history).toHaveAttribute('aria-pressed', 'false');
   });
 
-  // A card CAN be open on a panel the strip draws no icon for (Spatial,
-  // Transcript). No entry may claim that card as its own.
+  // F11: a state only reachable since the split — a card CAN be open on a
+  // panel the strip draws no icon for (Spatial, Transcript), and no entry may
+  // claim that card as its own.
   it('marks nothing pressed while the card shows a panel with no icon', () => {
     render(<ModuleStrip activeTab="spatial" hasRemix onSelect={() => {}} />);
     const strip = screen.getByTestId('sidebar-tabs');
