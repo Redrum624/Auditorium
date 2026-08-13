@@ -87,9 +87,15 @@ import {
   runCoverChain,
   type CoverChainReport,
 } from './coverChain';
-// CC3: the fade constant the refusal arm shares with the apply-the-guess
-// action. One direction only — `coverPlacement` never imports this module.
-import { JOURNEY_FADE_MS } from './coverPlacement';
+// CC3: the refusal arm's copy, and the fade constant it shares with the
+// apply-the-guess action. One direction only — `coverPlacement` never imports
+// this module.
+import {
+  JOURNEY_FADE_MS,
+  guessCharacterisation,
+  guessKind,
+  guessRemedy,
+} from './coverPlacement';
 import { cancelStemSeparation, separateStems, STEM_LABELS } from './stemService';
 import { landStems, STEM_TRACK_LABELS } from './stemLanding';
 import {
@@ -727,6 +733,10 @@ export async function runCoverJourney(
 
   // ── 3. Align ──────────────────────────────────────────────────────────────
   let takeStartSeconds = 0;
+  // CC3: why the take went to zero, when it went there as a FALLBACK rather
+  // than as a measurement. `null` means the zero (if it is zero) really was
+  // measured, so the Place row below may cite it as one.
+  let placedAtZeroBecause: string | null = null;
   {
     const stage = journeyStageById('align');
     if (begin(stage) === CANCELLED) return finish(false);
@@ -756,6 +766,9 @@ export async function runCoverJourney(
 
     if (!alignment) {
       // A refusal to MEASURE, which is not the same as a refusal to BELIEVE.
+      // CC3: and the Place row has to say which of the two it was.
+      placedAtZeroBecause =
+        'the fallback this pass uses when it cannot guess: the alignment above could not be measured at all, so the take starts where the original does';
       record({
         id: stage.id,
         label: stage.label,
@@ -769,11 +782,29 @@ export async function runCoverJourney(
     } else if (!alignment.confident) {
       alignmentRefused = true;
       takeStartSeconds = 0;
+      // CC3: the guess survives the refusal as an OFFER. Three things changed
+      // here and each answers a reported defect:
+      //  - the remedy is sign-aware. A clip start clamps to >= 0, so a
+      //    NEGATIVE guess (the reported case: −8.258 s) can only be realised
+      //    by dragging the INSTRUMENTAL later. The old sentence named the
+      //    take for both signs, i.e. named the one clip that cannot help.
+      //  - 'or run Align Vocal Timing' is gone. It warps document audio to a
+      //    beat grid the fresh take does not have and cannot move a clip at
+      //    all; it survives in the BELIEVED arm's drift warning below, which
+      //    is the question it actually answers.
+      //  - the measurement's own outcome word rides along when it carries
+      //    one, and NOTHING is asserted about the kind of failure when it
+      //    does not.
+      const characterisation = guessCharacterisation(guessKind(alignment));
+      placedAtZeroBecause = `the fallback this pass uses when it will not guess: the alignment above was refused, so the take starts where the original does. Nothing measured +0.000 s — the guess was ${secondsStr(alignment.offsetSeconds)}, and it is offered rather than applied`;
       record({
         id: stage.id,
         label: stage.label,
         status: 'declined',
-        reason: `the best alignment found was ${secondsStr(alignment.offsetSeconds)}, and it is not believable: correlation ${alignment.peakCorrelation.toFixed(3)} against a floor of ${ALIGN_MIN_CORRELATION}, standing ${alignment.prominence.toFixed(3)} above the next best lag against a floor of ${ALIGN_MIN_PROMINENCE}. The take is placed at the start of the original instead of at a guess — drag it on the timeline, or run Align Vocal Timing, to place it yourself`,
+        reason:
+          `the best alignment found was ${secondsStr(alignment.offsetSeconds)}, and it is not believable: correlation ${alignment.peakCorrelation.toFixed(3)} against a floor of ${ALIGN_MIN_CORRELATION}, standing ${alignment.prominence.toFixed(3)} above the next best lag against a floor of ${ALIGN_MIN_PROMINENCE}. ` +
+          (characterisation ? `${characterisation}. ` : '') +
+          `The take is placed at the start of the original instead of at a guess. ${guessRemedy(alignment.offsetSeconds)}`,
         derived: [],
         undoEntries: [],
         elapsedMs: Date.now() - at,
@@ -959,7 +990,15 @@ export async function runCoverJourney(
           from:
             shiftedSamples > 0
               ? `the measured offset ${secondsStr(takeStartSeconds)}, with BOTH tracks pushed ${(shiftedSamples / sessionRate).toFixed(3)} s later so neither starts before zero — the interval between them is exactly what was measured`
-              : `the measured offset ${secondsStr(takeStartSeconds)} at the session's ${sessionRate} Hz`,
+              : // CC3: the zero fallback is not a measurement. This branch used
+                // to render "from the measured offset +0.000 s" whenever the
+                // align stage above had refused or had nothing to measure —
+                // asserting a measurement that never happened, and directly
+                // contradicting the row above it. The believed arm keeps citing
+                // its real offset, zero included.
+                placedAtZeroBecause !== null
+                ? placedAtZeroBecause
+                : `the measured offset ${secondsStr(takeStartSeconds)} at the session's ${sessionRate} Hz`,
         },
         {
           label: 'Session',

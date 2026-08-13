@@ -524,6 +524,110 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
     expect(report!.placement!.takeStartSample).toBe(0);
     expect(report!.completed).toBe(true);
   });
+
+  // ── CC3: what the refusal TELLS the user to do ────────────────────────────
+
+  /** A refusal at `offsetSeconds`, with whatever extra outcome fields a
+   * measurement of the day carries. */
+  const refusedAlignment = (offsetSeconds: number, extra: Record<string, unknown> = {}) => ({
+    ...confidentAlignment(offsetSeconds),
+    peakCorrelation: 0.423,
+    rivalCorrelation: 0.344,
+    prominence: 0.079,
+    confident: false,
+    ...extra,
+  });
+
+  const alignReason = async (measurement: unknown): Promise<string> => {
+    alignTakeToReference.mockReturnValue(measurement);
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    return report!.stages.find((s) => s.id === 'align')!.reason!;
+  };
+
+  it('sends a NEGATIVE refused guess to the instrumental, not to the take', async () => {
+    const reason = await alignReason(refusedAlignment(-8.258));
+    // The reported case, verbatim: only the instrumental can realise it.
+    expect(reason).toContain('Instrumental');
+    expect(reason).toContain('8.258 s');
+    expect(reason).toContain('cannot start before zero');
+    expect(reason).not.toMatch(/drag (it|your take) on the timeline/i);
+  });
+
+  it('sends a POSITIVE refused guess to the take', async () => {
+    const reason = await alignReason(refusedAlignment(8.258));
+    expect(reason).toContain('drag your take to about 8.258 s');
+    expect(reason).not.toContain('Instrumental');
+  });
+
+  it('stops recommending Align Vocal Timing, which cannot move a clip at all', async () => {
+    for (const offset of [-8.258, 8.258]) {
+      expect(await alignReason(refusedAlignment(offset))).not.toContain('Align Vocal Timing');
+    }
+  });
+
+  it('still names Align Vocal Timing in the BELIEVED arm, where it is the right tool', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.stages.find((s) => s.id === 'align')!.warning).toContain('Align Vocal Timing');
+  });
+
+  it('asserts no kind of failure when the measurement did not classify itself', async () => {
+    const reason = await alignReason(refusedAlignment(-8.258));
+    expect(reason).not.toContain('weak but plausible');
+    expect(reason).not.toContain('probably wrong');
+    expect(reason).not.toContain('several places');
+  });
+
+  it('carries the measurement\'s own outcome word when it has one', async () => {
+    expect(await alignReason(refusedAlignment(-8.258, { outcome: 'unrelated' }))).toContain(
+      'probably wrong'
+    );
+    expect(await alignReason(refusedAlignment(-8.258, { outcome: 'weak' }))).toContain(
+      'weak but plausible'
+    );
+    expect(await alignReason(refusedAlignment(-8.258, { outcome: 'ambiguous' }))).toContain(
+      'several places'
+    );
+  });
+});
+
+// ── CC3: the Place row stops calling the zero fallback a measurement ────────
+
+describe('runCoverJourney — what the Place row says it placed at', () => {
+  const takeAtRow = (report: Awaited<ReturnType<typeof runCoverJourney>>) =>
+    report!.stages.find((s) => s.id === 'place')!.derived.find((d) => d.label === 'Take at')!;
+
+  it('says the alignment was REFUSED rather than claiming a measured +0.000 s', async () => {
+    alignTakeToReference.mockReturnValue({
+      ...confidentAlignment(-8.258),
+      peakCorrelation: 0.423,
+      prominence: 0.079,
+      confident: false,
+    });
+    const row = takeAtRow(await runCoverJourney({ songDocId: songId, takeDocId: takeId }));
+    expect(row.value).toBe('0.000 s');
+    expect(row.from).toContain('refused');
+    expect(row.from).not.toContain('the measured offset +0.000 s');
+  });
+
+  it('says the alignment could not be MEASURED when there was nothing to measure', async () => {
+    alignTakeToReference.mockReturnValue(null);
+    const row = takeAtRow(await runCoverJourney({ songDocId: songId, takeDocId: takeId }));
+    expect(row.from).toContain('could not be measured');
+    expect(row.from).not.toContain('the measured offset +0.000 s');
+  });
+
+  it('still cites the measured offset when the alignment WAS believed', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
+    const row = takeAtRow(await runCoverJourney({ songDocId: songId, takeDocId: takeId }));
+    expect(row.from).toContain('the measured offset +1.250 s');
+  });
+
+  it('still cites the measured offset for a believed offset of exactly zero', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(0));
+    const row = takeAtRow(await runCoverJourney({ songDocId: songId, takeDocId: takeId }));
+    expect(row.from).toContain('the measured offset +0.000 s');
+  });
 });
 
 // ── Smoothing ───────────────────────────────────────────────────────────────
