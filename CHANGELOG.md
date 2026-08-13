@@ -97,8 +97,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the toolbar pill's centre in BOTH card states — it had been collecting that rectangle and never
   checking it — and asserts that the pill clears the strip at the default zoom and at the deepest
   zoom the fixture allows. Affects: `src/components/Layout/Toolbar.tsx`, `scripts/e2e-smoke.cjs`.
+<!-- F11: the F11 series' Fixed entries start here. -->
+- **The dev app no longer wedges itself the second time a large file changes.** Cause: React 19's
+  DEVELOPMENT react-dom publishes every commit to the DevTools performance track with
+  `performance.measure(name, { detail })`, and the `detail` carries the props that CHANGED on the
+  re-rendered component, serialised by a generic leaf walker. A `Float32Array` is neither a plain Array
+  nor a plain Object to that walker, so it falls into generic recursion and is enumerated one entry per
+  sample. `<WaveformView doc={doc}/>` and `<SpectrogramView doc={doc}/>` passed the WHOLE
+  `AudioDocument`, whose `channels` is a top-level field, so the second change of a large document
+  asked the structured cloner to serialise ~30.7 million entries — about 4 GB against a 3.5 GB renderer
+  ceiling. The resulting `DataCloneError` escaped `flushPassiveEffects` BEFORE `executionContext` was
+  restored, leaving React's `CommitContext` bit set permanently: every later update died with "Should
+  not already be working", so the renderer never rendered again, the zustand subscriptions registered
+  in the never-mounted passive effects went deaf, the playback engine never loaded, and no shortcut or
+  dialog ever installed. Fix, in two parts. Both editor views now take a **document id** and select the
+  document out of the store, so the prop is a string and the profiler's diff is two cheap entries —
+  which is also the right shape regardless of the profiler, since a 65 MiB object graph in a prop
+  defeats memoisation and hangs DevTools' own prop inspector. And a dev-only backstop covers every
+  other component: react-dom computes `supportsUserTiming` ONCE, when its module evaluates, from
+  `typeof performance.measure === "function"`, so a side-effect module imported first in `main.tsx`
+  makes `performance.measure` non-callable for exactly the span of the (synchronous) import graph's
+  evaluation and restores it on the next microtask — after react-dom's init, before any app code. The
+  app itself never calls `performance.measure`. Production is unaffected either way: the production
+  react-dom has no `logComponentRender` at all. Affects: `src/App.tsx`,
+  `src/components/Editor/WaveformView.tsx`, `src/components/Editor/SpectrogramView.tsx`,
+  `src/dev/userTimingGuard.ts`, `src/dev/installUserTimingGuard.ts`, `src/main.tsx`.
 
 ### Added
+<!-- F11: the F11 series' Added entries start here. -->
+- **The position line has a red handle you can drag.** Why: the line could be placed by clicking but
+  never *grabbed*, so nudging it meant re-clicking and hoping. A red triangle now sits at the top of
+  the line, centred on it, with a generous grab area and `grab`/`grabbing` feedback. It is drawn by one
+  function shared by the waveform and spectral views, so the two cannot drift, and it is deliberately
+  unmistakable next to a marker flag: red against the marker's orange, isoceles and centred ON the line
+  against the marker's right-hanging right angle, over the same solid white line as before. Grabbing it
+  does not move it, dragging it never touches the selection, and a double-press on it does not select
+  all. The drag reuses the existing magnet verbatim — the same `snapSample` call, the same targets
+  frozen at pointerdown, the same `Alt` escape hatch re-read on every event. The cursor stays view
+  state: nothing here is undoable. Affects: `src/components/Editor/waveformRender.ts`,
+  `src/components/Editor/useEditorGestures.ts`, `src/components/Editor/SpectrogramView.tsx`.
+- **The timeline seeks on the press and scrubs while you hold it.** Why: the ruler already seeked, but
+  on `click` — which fires only after the button comes back up, so the line lagged the press, and
+  holding the pointer did nothing at all. The handler moved to pointerdown/move/up: the seek lands on
+  the press, and holding and dragging scrubs the position line live out of the same code. The position
+  goes through the same magnet the canvas uses, with the same `Alt` suspension and with the targets
+  frozen at the press so an analysis completing mid-scrub cannot move the pointer under your hand; the
+  multitrack ruler passes its own session targets at its own zoom rather than being quantised at the
+  editor's scale. Seeks are clamped to the track's length now, not only at zero. Playback is untouched:
+  moving the position line has never re-seeked a running engine. Affects:
+  `src/components/Editor/TimelineRuler.tsx`, `src/components/Editor/WaveformView.tsx`,
+  `src/components/Editor/SpectrogramView.tsx`, `src/components/Multitrack/MultitrackView.tsx`.
 
 - **DevTools open by themselves on a dev run.** Why: a standing user rule — while developing, the
   console is open without anyone asking for it. Detached, so it never takes width from the window the

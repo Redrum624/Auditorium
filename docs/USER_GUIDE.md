@@ -90,6 +90,32 @@ the underlying unit; the UI always displays formatted time). Double-click
 selects the entire document. Shift+click extends the selection from the
 current cursor. `Ctrl+A` selects all; `Escape` clears the selection.
 
+### The position line and the timeline
+
+The **position line** is the white vertical line on the waveform and spectral
+canvases — it is where playback starts and where a paste lands. Three ways to
+move it:
+
+- **Click anywhere on the canvas.** The line goes there, as it always has.
+- **Drag its red handle.** A small red triangle sits at the top of the line,
+  centred on it. Grab it (the pointer becomes a hand) and drag: the line
+  follows live. Grabbing it does not move it, and dragging it never changes
+  the selection, so you can slide the line through a selected region without
+  disturbing it. The red triangle is deliberately unlike the **orange** marker
+  flags, which hang to the *right* of their own dashed lines — you can tell at
+  a glance which one you are about to grab.
+- **Click or drag the timeline ruler** above the canvas. The line jumps to
+  that time the moment you press, and holding the button and moving scrubs it
+  along. The ruler stops at the end of the track.
+
+All three obey the magnet (see *Snapping to the grid* below): the line lands on
+the nearest beat, bar or marker within 8 pixels, and holding `Alt` suspends
+that for as long as you hold it. Moving the position line while something is
+playing does not interrupt playback — the line is where the *next* play starts.
+
+The position line is not part of the undo history: moving it is a view change,
+not an edit, and `Ctrl+Z` will not bring it back.
+
 ### Cut / Copy / Paste / Delete
 
 Standard editing acts on the current selection: `Ctrl+X` cut, `Ctrl+C` copy,
