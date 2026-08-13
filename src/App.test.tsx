@@ -554,38 +554,74 @@ describe('view-change stops both playback engines (Task 23 / Task 22 review find
   });
 });
 
-// F11: a file dropped anywhere but a track lane must do NOTHING. Chromium's
-// default is to navigate to it, which in this renderer means replacing the
-// whole app — every open document and unsaved edit — with a file viewer. F11-4
-// made near-misses an everyday gesture by giving the lanes a real drop target.
-describe('the window refuses a stray file drop (F11)', () => {
-  function dispatch(type: 'dragover' | 'drop'): Event {
-    // jsdom has no DragEvent; the guard reads nothing off the event but
-    // `preventDefault`, so a cancelable Event of the right type is a faithful
-    // stand-in — and `defaultPrevented` is exactly what Chromium consults.
+// F11 fix round (I1): the window drop guard — and, just as importantly, what
+// it must NOT catch.
+//
+// The first version preventDefault'd EVERY drop on the window, justified by a
+// data-loss story that cannot actually happen here: `navigateOnDragDrop` has
+// defaulted to FALSE since Electron 3 and this app never sets it, so Chromium
+// does not navigate on a dropped file. What the unconditional preventDefault
+// DID do was suppress the default action of text drops — which is how text
+// gets inserted into a text control — silently breaking drag-into-field in the
+// lyrics, remix, voice-changer and properties surfaces.
+//
+// The guard stays, because insuring against config drift costs one condition;
+// it now fires only for drags that actually carry files.
+describe('the window drop guard is about Files, and only Files (F11)', () => {
+  function dispatch(type: 'dragover' | 'drop', types: string[]): Event {
+    // jsdom has neither DragEvent nor DataTransfer. The guard reads exactly one
+    // thing off the event — `dataTransfer.types` — so a cancelable Event with
+    // that one property attached is a faithful stand-in, and `defaultPrevented`
+    // is precisely what Chromium consults afterwards.
     const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', { value: { types } });
     act(() => {
       window.dispatchEvent(event);
     });
     return event;
   }
 
-  it('refuses the default for a drop anywhere on the window', () => {
+  it('refuses a FILE drop anywhere on the window', () => {
     render(<App />);
-    expect(dispatch('drop').defaultPrevented).toBe(true);
+    expect(dispatch('drop', ['Files']).defaultPrevented).toBe(true);
   });
 
-  it('refuses it for dragover too, so the cursor does not contradict the rule', () => {
+  it('refuses file dragover too, so the cursor does not contradict the rule', () => {
     render(<App />);
-    expect(dispatch('dragover').defaultPrevented).toBe(true);
+    expect(dispatch('dragover', ['Files']).defaultPrevented).toBe(true);
+  });
+
+  it('LEAVES A TEXT DRAG ALONE — dropping text into a text field still inserts it', () => {
+    render(<App />);
+    expect(dispatch('drop', ['text/plain']).defaultPrevented).toBe(false);
+    expect(dispatch('dragover', ['text/plain']).defaultPrevented).toBe(false);
+  });
+
+  it('leaves a drag carrying nothing recognisable alone, including our own clip payload', () => {
+    render(<App />);
+    expect(dispatch('drop', []).defaultPrevented).toBe(false);
+    expect(
+      dispatch('drop', ['application/x-auditorium-document-id']).defaultPrevented
+    ).toBe(false);
+  });
+
+  it('does not throw when an event carries no dataTransfer at all', () => {
+    render(<App />);
+    const event = new Event('drop', { bubbles: true, cancelable: true });
+    expect(() => {
+      act(() => {
+        window.dispatchEvent(event);
+      });
+    }).not.toThrow();
+    expect(event.defaultPrevented).toBe(false);
   });
 
   it('stops refusing once the app unmounts — the listeners are cleaned up', () => {
     const { unmount } = render(<App />);
-    expect(dispatch('drop').defaultPrevented).toBe(true);
+    expect(dispatch('drop', ['Files']).defaultPrevented).toBe(true);
 
     unmount();
 
-    expect(dispatch('drop').defaultPrevented).toBe(false);
+    expect(dispatch('drop', ['Files']).defaultPrevented).toBe(false);
   });
 });

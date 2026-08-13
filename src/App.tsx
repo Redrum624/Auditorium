@@ -136,32 +136,40 @@ export default function App() {
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
 
-  // F11: the window-level drop guard.
+  // F11: the window-level FILE-drop guard.
   //
-  // Chromium's default action for a file dropped on a page is to NAVIGATE to
-  // it. In a browser that loses a tab; in this renderer it replaces the whole
-  // app with a file viewer — every open document, every unsaved edit and the
-  // whole session, gone, with no prompt and no undo. F11-4 gave the track
-  // lanes a real drop target, which makes a *near miss* an everyday gesture:
-  // aim at a lane, land on the toolbar, lose your work.
+  // What this is honestly for. `navigateOnDragDrop` — the webPreferences flag
+  // that would make Chromium navigate to a dropped file, replacing the whole
+  // app with a file viewer — has defaulted to FALSE since Electron 3, and
+  // `electron/main.cjs` never sets it. So the catastrophe this guard was
+  // originally justified by is not currently reachable. It stays because the
+  // insurance costs one condition and the failure mode it covers is total: if
+  // that flag is ever flipped, or a future Electron changes its default back,
+  // a near miss on a track lane would silently discard every open document.
   //
-  // So the default is refused for the whole window. This is not a competing
-  // drop handler — it neither reads the payload nor imports anything. The lane
-  // handlers are React listeners on the root container, which is INSIDE
-  // `window`, so they have already run by the time this fires; all it removes
-  // is the navigation that would otherwise follow. A drop anywhere else
-  // therefore does nothing at all, which is exactly the "no highlight, no
-  // action" rule F11-4 states, enforced at the one level that can guarantee it.
+  // What it must NOT do is fire on anything else. The first version refused
+  // EVERY drop, and the default action it was suppressing for text drags is
+  // the one that inserts the text into a text control — which silently broke
+  // dragging text into the lyrics, remix, voice-changer and properties fields.
+  // Gating on `types` restores all of them: a text drag carries `text/plain`,
+  // a clip drag carries our own MIME, and neither carries `Files`.
   //
-  // `dragover` needs the same treatment: without it Chromium shows a "no drop"
-  // cursor over most of the window, so the affordance would contradict itself.
+  // It is not a competing drop handler: it reads one field and imports nothing.
+  // The lane handlers are React listeners on the root container, inside
+  // `window`, so they have already run by the time this fires.
+  //
+  // `dragover` gets the same condition, because a `drop` whose `dragover` was
+  // not prevented never fires at all — treating the two differently would make
+  // the guard's own behaviour depend on which half ran.
   useEffect(() => {
-    const refuse = (e: DragEvent) => e.preventDefault();
-    window.addEventListener('dragover', refuse);
-    window.addEventListener('drop', refuse);
+    const refuseFiles = (e: DragEvent) => {
+      if (e.dataTransfer?.types.includes('Files')) e.preventDefault();
+    };
+    window.addEventListener('dragover', refuseFiles);
+    window.addEventListener('drop', refuseFiles);
     return () => {
-      window.removeEventListener('dragover', refuse);
-      window.removeEventListener('drop', refuse);
+      window.removeEventListener('dragover', refuseFiles);
+      window.removeEventListener('drop', refuseFiles);
     };
   }, []);
 
