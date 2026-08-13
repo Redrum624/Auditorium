@@ -90,7 +90,6 @@
  * hold.
  */
 import { createDocument, docLength, type AudioDocument } from '../audio/AudioDocument';
-import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { createClip, createTrack, type Session, type Track } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { clearSessionHistory } from '../multitrack/sessionUndo';
@@ -251,8 +250,6 @@ export function landStems(output: StemSeparationOutput): StemLandingResult {
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
   });
-  // No cached mini-waveform bitmap belongs to any clip in the new session (F9).
-  clearClipWaveformCache();
   // R3: stem landing is a LOAD-shaped replacement (this module deliberately
   // follows openSessionViaDialog's apply block) — it starts a new editing
   // timeline, so the previous session's undo history is dropped rather than

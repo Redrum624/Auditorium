@@ -14,7 +14,6 @@ import * as beatGridService from '../../services/beatGrid';
 import type { BeatGrid } from '../../services/beatGrid';
 import { _resetSnapPreference, setSnapEnabled } from '../../services/snapPreference';
 import { makeInitialState, useAppStore } from '../../stores/appStore';
-import { _resetClipWaveformCache } from './clipWaveformCache';
 
 /**
  * R3 — ruling 2 driven through ClipView's REAL pointer handlers: the
@@ -98,7 +97,6 @@ const doneLabels = () => getHistory(SESSION_UNDO_KEY).done;
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(SESSION_RATE);
-  _resetClipWaveformCache();
   _resetSnapPreference();
   setSnapEnabled(false); // deterministic drag arithmetic; the magnet is not under test
   doc = createDocument({ name: 'beat.wav', sampleRate: SESSION_RATE, channels: [new Float32Array(400_000)] });

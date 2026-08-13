@@ -7,7 +7,6 @@ import * as beatGridService from '../../services/beatGrid';
 import type { BeatGrid } from '../../services/beatGrid';
 import { _resetSnapPreference, setSnapEnabled } from '../../services/snapPreference';
 import { makeInitialState, useAppStore } from '../../stores/appStore';
-import { _resetClipWaveformCache } from './clipWaveformCache';
 
 /**
  * Task B4 integration — the magnet on a multitrack clip, driven with REAL
@@ -144,7 +143,6 @@ function previewDx(el: HTMLElement): number {
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(SESSION_RATE);
-  _resetClipWaveformCache();
   _resetSnapPreference();
   const channel = new Float32Array(400_000);
   doc = createDocument({ name: 'beat.wav', sampleRate: SESSION_RATE, channels: [channel] });

@@ -21,7 +21,6 @@ import { withSessionGesture } from '../multitrack/sessionUndo';
 import type { AutomationLane, AutomationParam } from '../multitrack/automation';
 import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
-import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { getEffectFailureCount, runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import {
@@ -1500,7 +1499,6 @@ export function installTestHooks(): void {
         mtPlayState: 'stopped',
         mtPlayheadSample: 0,
       });
-      clearClipWaveformCache();
       useAppStore.getState().setView('multitrack');
       return {
         docCount: result.documents.length,

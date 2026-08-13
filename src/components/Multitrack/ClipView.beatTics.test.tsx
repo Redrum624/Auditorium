@@ -17,7 +17,6 @@
 import { act, render } from '@testing-library/react';
 import ClipView from './ClipView';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
-import { _resetClipWaveformCache } from './clipWaveformCache';
 import { getBeatGrid, type BeatGrid } from '../../services/beatGrid';
 import { setBeatGridVisible } from '../../services/beatGridDisplay';
 import { TIC_WINDOW_QUANTUM_PX, CLIP_TIC_BAND_PX } from './clipBeatTics';
@@ -101,7 +100,6 @@ function makeCtx(canvas: HTMLCanvasElement): CanvasRenderingContext2D {
 }
 
 beforeEach(() => {
-  _resetClipWaveformCache();
   recorders = new Map();
   mockGetBeatGrid.mockReset();
   setBeatGridVisible(true);

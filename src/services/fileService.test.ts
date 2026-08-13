@@ -24,7 +24,6 @@ import { pushMarkerUndo, deleteSelection } from './editOps';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
-import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 import * as tempoAnalysis from './tempoAnalysis';
 import { runTempoAnalysis, getTempo, clearAllTempo } from './tempoAnalysis';
 import { createRemixDocument, getRemixSession, clearAllRemix as clearAllRemixSessions } from './remixService';
@@ -1987,15 +1986,6 @@ describe('closeDocumentFlow', () => {
     expect(stopSpy).toHaveBeenCalled();
   });
 
-  it('clears the mini-waveform cache on close (Task F9 — a closing doc may invalidate many clips)', async () => {
-    installApi();
-    const cacheSpy = jest.spyOn(clipWaveformCache, 'clearClipWaveformCache');
-    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
-
-    await closeDocumentFlow(doc.id);
-
-    expect(cacheSpy).toHaveBeenCalledTimes(1);
-  });
 
   describe('tempo/remix analysis lifetime (Task T4)', () => {
     beforeEach(() => {

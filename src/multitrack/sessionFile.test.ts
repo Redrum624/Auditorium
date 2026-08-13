@@ -13,7 +13,6 @@ import {
 import { useSessionStore } from './sessionStore';
 import { defaultSessionZoom } from './sessionZoom';
 import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from './sessionViewport';
-import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 
 interface MockApi {
   readFile: jest.Mock;
@@ -1217,23 +1216,6 @@ describe('openSessionViaDialog', () => {
     expect(restoredDoc!.channels[0]).toEqual(doc.channels[0]);
   });
 
-  it('clears the mini-waveform cache (F9) — a loaded session invalidates every stale clip bitmap', async () => {
-    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
-    const track = createTrack('Loaded Track');
-    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
-    const session: Session = { name: 'Loaded Session', sampleRate: 44100, tracks: [track] };
-    const { json } = serializeSession(session, [doc]);
-    const bytes = new TextEncoder().encode(json);
-    installApi({
-      showOpenDialog: jest.fn(async () => ['D:\\in\\session.audm']),
-      readFile: jest.fn(async () => bytes.buffer),
-    });
-    const clearSpy = jest.spyOn(clipWaveformCache, 'clearClipWaveformCache');
-
-    await openSessionViaDialog();
-
-    expect(clearSpy).toHaveBeenCalled();
-  });
 
   it('is a no-op when the open dialog is cancelled', async () => {
     const api = installApi({ showOpenDialog: jest.fn(async () => null) });

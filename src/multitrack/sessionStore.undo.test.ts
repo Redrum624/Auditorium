@@ -9,7 +9,6 @@ import {
   undoSession,
 } from './sessionUndo';
 import { getHistory } from '../services/undoHistory';
-import * as clipWaveformCache from '../components/Multitrack/clipWaveformCache';
 
 /**
  * R3 — the REAL store's recording wiring: every listed mutation records
@@ -320,27 +319,6 @@ describe('gesture wiring against the real store (ruling 2)', () => {
 });
 
 describe('F9 cache discipline across undo/redo', () => {
-  it('redo of a clip removal purges the clip bitmap exactly as the original call did', () => {
-    const clipId = seeded.tracks[0].clips[0].id;
-    const seed = () =>
-      clipWaveformCache.getClipWaveformCanvas(
-        { clipId, lengthSample: 1000, bucket: 0, height: 40, offsetSample: 0, channels: [] },
-        10,
-        () => {}
-      );
-
-    clipWaveformCache._resetClipWaveformCache();
-    seed();
-    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(1);
-    store().removeClip(clipId); // original call purges (pre-R3 behaviour)
-    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(0);
-
-    undoSession(); // clip back; nothing to purge
-    seed(); // the restored clip re-renders and re-caches
-    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(1);
-    redoSession(); // snapshot swap — the apply-side diff must purge the dead clip
-    expect(clipWaveformCache._clipWaveformCacheSize()).toBe(0);
-  });
 });
 
 describe('a session snapshot retains no audio (the byte-bound question)', () => {

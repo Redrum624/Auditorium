@@ -54,6 +54,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `components/UI/glass.tsx`, `components/Dialogs/CoverChainDialog.tsx`,
   `components/Panels/SpatialPanel.tsx`.
 
+### Removed
+
+- **`clipWaveformCache` and its eight call sites.** Once clip waveforms started drawing straight to
+  the on-screen canvas, nothing produced a cache entry any more: `getClipWaveformCanvas` had zero
+  production callers, so the eight `purgeClip`/`clearClipWaveformCache` calls scattered across the
+  store, the session loader, `fileService`, stem landing and the test hooks were maintaining a Map
+  that was permanently empty — as was the undo binding's clip-id diffing and `removeTrack`'s
+  `removedClipIds` bookkeeping, which existed only to feed it. Its 170-line suite passed by calling
+  the dead producer directly to manufacture the entries it then certified were purged. Deleted
+  rather than left as a trap for the next reader to wire something into.
+
 ### Changed
 
 - **The first-play latency rig can build the session that was reported** (`--content=songs`,

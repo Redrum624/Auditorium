@@ -8,10 +8,6 @@ import {
   type AutomationParam,
 } from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
-import {
-  purgeClip as purgeClipWaveform,
-  clearClipWaveformCache,
-} from '../components/Multitrack/clipWaveformCache';
 import { bindSessionUndo, recordSessionMutation } from './sessionUndo';
 // MT1-1: the session's zoom limits live in one module now, so this store states
 // requests and `resolveSessionZoom` answers them — the shape `appStore` took in
@@ -558,10 +554,6 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         mtEnvelope: null,
       });
     });
-    // A fresh session discards every track/clip that could own a cached
-    // mini-waveform bitmap (F9) — clear the whole cache rather than track
-    // which entries belonged to the discarded session.
-    clearClipWaveformCache();
   },
 
   addTrack() {
@@ -574,14 +566,10 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   removeTrack(id) {
-    // Captured inside the set() updater below so the post-set purge (F9) knows
-    // exactly which clips died with the track, without a second state lookup.
-    let removedClipIds: string[] = [];
     recordSessionMutation('Remove track', () => {
       set((s) => {
         const removed = s.session.tracks.find((t) => t.id === id);
         if (!removed) return s;
-        removedClipIds = removed.clips.map((c) => c.id);
         const tracks = s.session.tracks.filter((t) => t.id !== id);
         const selectedClipId =
           s.selectedClipId !== null && removed.clips.some((c) => c.id === s.selectedClipId)
@@ -590,9 +578,6 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         return { session: { ...s.session, tracks }, selectedClipId };
       });
     });
-    // Each removed clip's mini-waveform bitmap (and the doc channels reference
-    // it holds) must not sit in the cache until unrelated churn evicts it (F9).
-    for (const clipId of removedClipIds) purgeClipWaveform(clipId);
   },
 
   renameTrack(id, name) {
@@ -791,9 +776,6 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         return { session: { ...s.session, tracks }, selectedClipId };
       });
     });
-    // A dead clip's mini-waveform bitmap (and the doc channels reference it
-    // holds) must not sit in the cache until unrelated churn evicts it (F9).
-    purgeClipWaveform(clipId);
   },
 
   setClipGain(clipId, gainDb) {
@@ -1083,30 +1065,22 @@ useSessionStore.subscribe((s) => {
 // R3 — binds the session undo plumbing to this store (one-way dependency:
 // this module imports sessionUndo, never the reverse). The snapshot is
 // `{ session, selectedClipId }` — see SessionSnapshot in sessionUndo.ts for
-// the ruling-3 view-state pin. `apply` also maintains the F9 cache
-// discipline the ORIGINAL mutations maintain out-of-band: `removeClip`/
-// `removeTrack` purge dead clips' mini-waveform bitmaps after their set(),
-// but an undo/redo swaps whole snapshots without re-running the action, so
-// the purge is re-derived here by diffing clip ids — a clip present before
-// the swap but absent after it is dead and its bitmap (holding a doc
-// channels reference) must not linger until unrelated churn evicts it.
+// the ruling-3 view-state pin.
+//
+// MT1 (I7): `apply` used to re-derive the F9 clip-bitmap purge here by diffing
+// clip ids across the snapshot swap, because an undo does not re-run the
+// mutation that would otherwise have purged. That whole discipline went with
+// `clipWaveformCache` — there is no per-clip bitmap to strand any more, since
+// `ClipView` draws the visible band straight to its on-screen canvas.
 bindSessionUndo({
   capture: () => {
     const s = useSessionStore.getState();
     return { session: s.session, selectedClipId: s.selectedClipId };
   },
   apply: (snapshot) => {
-    const before = useSessionStore.getState().session;
     useSessionStore.setState({
       session: snapshot.session,
       selectedClipId: snapshot.selectedClipId,
     });
-    if (before !== snapshot.session) {
-      const kept = new Set<string>();
-      for (const t of snapshot.session.tracks) for (const c of t.clips) kept.add(c.id);
-      for (const t of before.tracks) {
-        for (const c of t.clips) if (!kept.has(c.id)) purgeClipWaveform(c.id);
-      }
-    }
   },
 });

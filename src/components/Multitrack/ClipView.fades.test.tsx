@@ -6,7 +6,6 @@ import { useSessionStore } from '../../multitrack/sessionStore';
 import { _resetSnapPreference } from '../../services/snapPreference';
 import { makeInitialState, useAppStore } from '../../stores/appStore';
 import { formatTime } from '../../utils/timeFormat';
-import { _resetClipWaveformCache } from './clipWaveformCache';
 
 /**
  * X4 — the clip fade UI, driven with REAL pointer events through the corner
@@ -121,7 +120,6 @@ function byTestId(root: Element, id: string): HTMLElement | null {
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(SESSION_RATE);
-  _resetClipWaveformCache();
   _resetSnapPreference();
   const channel = new Float32Array(400_000);
   doc = createDocument({ name: 'fade.wav', sampleRate: SESSION_RATE, channels: [channel] });

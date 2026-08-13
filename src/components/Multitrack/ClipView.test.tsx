@@ -1,7 +1,6 @@
 import { render } from '@testing-library/react';
 import ClipView from './ClipView';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
-import { _resetClipWaveformCache } from './clipWaveformCache';
 import { TIC_WINDOW_QUANTUM_PX } from './clipBeatTics';
 import type { Clip } from '../../multitrack/session';
 
@@ -32,7 +31,6 @@ let strokes: RecordedStroke[];
 let getContextSpy: jest.SpyInstance;
 
 beforeEach(() => {
-  _resetClipWaveformCache();
   drawImage = jest.fn();
   fills = [];
   strokes = [];

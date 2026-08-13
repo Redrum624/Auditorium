@@ -21,7 +21,6 @@ import { clearNoiseProfile, getNoiseProfile } from './noiseProfile';
 import { beginOpen, endOpen } from './openProgress';
 import { invalidatePeaks } from './peaksCache';
 import { clearHistory, markSavePoint, invalidateSavePoint } from './undoHistory';
-import { clearClipWaveformCache } from '../components/Multitrack/clipWaveformCache';
 import { invalidateTempo, invalidateRemix } from './tempoAnalysis';
 import { releaseBeatGrid } from './beatGrid';
 // Two layers, two calls: `tempoAnalysis.invalidateRemix` drops the cached
@@ -815,7 +814,6 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   // A closing doc can invalidate many clips' cached mini-waveforms at once
   // (every clip sourced from it); clearing the whole cache is cheap and
   // avoids leaking the doc's channels arrays via a retained cache entry (F9).
-  clearClipWaveformCache();
   // unload() (not just stop()) when the closed doc is the one actually loaded
   // into the engine, or when no documents remain open at all — otherwise the
   // engine's full AudioBuffer for the closed doc stays resident for the rest
