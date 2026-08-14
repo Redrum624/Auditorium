@@ -27,11 +27,18 @@
  * click instead of a memorised number and a drag.
  *
  * ── The arithmetic is not a second opinion ──────────────────────────────────
- * `applyMeasuredOffset` reproduces the confident arm's placement exactly: the
- * both-track shift (`shiftedSamples = rawTakeStart < 0 ? -rawTakeStart : 0`),
- * the journey's own edge fades, and a cursor parked where the take enters so
- * the user can press play and judge the guess by ear. It is one undoable
- * gesture, so a guess that turns out wrong costs one Ctrl+Z.
+ * `applyMeasuredOffset` does not reproduce the confident arm's placement — it
+ * CALLS it. {@link placementFor} is the one implementation of the both-track
+ * shift, and the journey's Place stage calls the same function, so the applied
+ * guess lands exactly where a believed alignment would have put it and cannot
+ * drift away from it. (H1: this paragraph used to restate the shift formula in
+ * the pre-refactor identifiers — a third textual copy of a rule with one
+ * implementation, and the copy nothing would have failed if the rule changed.
+ * Read `placementFor`.)
+ *
+ * Around that call it lays the journey's own edge fades and parks a cursor
+ * where the take enters, so the user can press play and judge the guess by ear.
+ * It is one undoable gesture, so a guess that turns out wrong costs one Ctrl+Z.
  */
 
 import {
