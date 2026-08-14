@@ -727,31 +727,62 @@ describe('deriveRemoveSilence', () => {
     }, 60000);
 
     it('still measures the SAME floor when the silence sits beside an even one', () => {
-      // The converse, and the class N2 protects: an ordinary take with a
-      // trimmed lead-in has nothing louder beside its zeros, so refusing the
-      // boundary window changes the answer by a fraction of a decibel and the
-      // stage goes on running. Measured: 0.04-0.60 dB, always in the direction
-      // of cutting less.
-      for (const sr of [SR, 44100]) {
-        for (const leadSec of [0.35, 1.0, 2.0]) {
-          const head = new Float32Array(Math.round(leadSec * sr));
-          const body = gaussFloorDb(Math.round(4 * sr), -50, 7);
-          const phraseN = Math.round(0.8 * sr);
-          let phase = 0;
-          for (let i = 0; i < phraseN; i++) {
-            phase += (2 * Math.PI * 220) / sr;
-            body[Math.round(1.0 * sr) + i] += 0.25 * Math.sin(phase);
-          }
-          const channel = new Float32Array(head.length + body.length);
-          channel.set(body, head.length);
+      // The converse, and the class N2 protects: an ordinary take whose zeros
+      // adjoin nothing louder than its own floor — whether the zeros are a
+      // trimmed LEAD-IN or an editing CUT carved into a pause — reads the same
+      // floor either way, so refusing the boundary window changes the answer by
+      // a fraction of a decibel and the stage goes on running.
+      /** A floor take with a sung phrase, and `cutSec` of zeros placed either
+       * in front of it or carved out of its opening pause. */
+      function evenFloorTake(sr: number, sec: number, where: 'lead-in' | 'cut'): Float32Array {
+        const body = gaussFloorDb(Math.round(4 * sr), -50, 7);
+        const phraseN = Math.round(0.8 * sr);
+        let phase = 0;
+        for (let i = 0; i < phraseN; i++) {
+          phase += (2 * Math.PI * 220) / sr;
+          body[Math.round(1.5 * sr) + i] += 0.25 * Math.sin(phase);
+        }
+        if (where === 'cut') {
+          body.fill(0, Math.round(0.2 * sr), Math.round(0.2 * sr) + Math.round(sec * sr));
+          return body;
+        }
+        const channel = new Float32Array(Math.round(sec * sr) + body.length);
+        channel.set(body, Math.round(sec * sr));
+        return channel;
+      }
 
-          const res = deriveRemoveSilence([channel], sr);
-          expect(res.run).toBe(true);
-          if (!res.run) return;
-          const bare = measureNoiseWindow([channel], sr)!;
-          expect(Math.abs(Number(res.params.thresholdDb) - bare.envelopePeakDb)).toBeLessThan(1);
+      const deltas: number[] = [];
+      for (const sr of [SR, 44100]) {
+        for (const where of ['lead-in', 'cut'] as const) {
+          for (const sec of [0.2, 0.35, 1.0, 2.0]) {
+            const channel = evenFloorTake(sr, sec, where);
+            // The precondition: the bare search really does land on a boundary
+            // window on at least some of these, or the converse is vacuous.
+            const bare = measureNoiseWindow([channel], sr)!;
+            const res = deriveRemoveSilence([channel], sr);
+            expect(res.run).toBe(true);
+            if (!res.run) return;
+            deltas.push(Number(res.params.thresholdDb) - bare.envelopePeakDb);
+          }
         }
       }
+
+      expect(deltas).toHaveLength(16);
+      // The two readings agree to a fraction of a decibel across both shapes,
+      // both rates and four lengths. Measured: -0.065 to +0.823 dB.
+      for (const d of deltas) expect(Math.abs(d)).toBeLessThan(1);
+
+      // DIRECTION, asserted rather than claimed. The bare reading is taken over
+      // FEWER real samples, so it almost always under-reads the floor's own
+      // peak and the shipped stage cut marginally LESS than the honest
+      // measurement does: fifteen of sixteen members are at or above it. The
+      // sixteenth is NOT a theorem broken — a boundary window's envelope peak
+      // is a maximum over a DIFFERENT span, so the sign was never guaranteed —
+      // and it misses by 0.065 dB, which is why the docblock says
+      // "0.00-0.82 dB below, one member 0.07 dB above" and not "always below".
+      expect(deltas.filter((d) => d < -0.001)).toHaveLength(1);
+      expect(Math.min(...deltas)).toBeGreaterThan(-0.1);
+      expect(Math.max(...deltas)).toBeGreaterThan(0.5);
     }, 60000);
 
     it('declines when no half-second of real material exists to measure at all', () => {
