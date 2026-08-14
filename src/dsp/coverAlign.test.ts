@@ -1674,14 +1674,13 @@ describe('alignTakeToReference — the mix refinement', () => {
       0.004
     );
     expect(worst(p.map((r) => r.stemOnly)) - worst(p.map((r) => r.refined))).toBeGreaterThan(0.004);
-    // …and no single pair pays for it. MEASURED: one of the six is 4.0 ms
-    // FURTHER from the nominal truth after refinement, and that is not a
-    // regression being tolerated — it is the objective. The refined lag is the
-    // SONG's optimum (see the agreement test below), and where a degraded stem
-    // happened to sit closer to the fixture's nominal 0.6 s than the song's own
-    // optimum does, moving to the song's answer moves away from that number. The
-    // bound is one fine frame, so a change that started genuinely damaging pairs
-    // still fails here.
+    // One pair of the six ends 4.0 ms FURTHER from the fixture's nominal truth,
+    // and that is the objective rather than a regression being tolerated: the
+    // refined lag is the SONG's optimum (see the agreement test below), so where
+    // a degraded stem happened to sit closer to the nominal 0.6 s than the
+    // song's own optimum does, moving to the song's answer moves away from that
+    // number. It is bounded at one fine frame and printed rather than hidden, so
+    // a change that started genuinely damaging pairs still fails here.
     const regression = Math.max(...p.map((r) => r.refined - r.stemOnly));
     // eslint-disable-next-line no-console
     console.log(`  worst single-pair move away from nominal truth: ${ms(regression)}`);
