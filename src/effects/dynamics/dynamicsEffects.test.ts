@@ -502,6 +502,40 @@ describe('noiseGateEffect', () => {
       expect(removedPct(input, out, zeros.length, zeros.length + blip.length)).toBeLessThan(0.1);
     });
 
+    it('needs EVERY channel silent — one silent side of a stereo pair is not a pause', () => {
+      // The same product-versus-sum care the noise search takes: a frame is
+      // digital silence only when nothing is playing anywhere. A left channel
+      // faded to zeros while the right still carries floor is a pan, not an
+      // edit, and the gate goes on closing on it.
+      const zeros = new Float32Array(Math.round(0.3 * SR));
+      const island = floorDb(Math.round(0.2 * SR), -60, 41);
+      const loud = sine(220, 0.5, 0.25);
+      const head = floorDb(Math.round(3.0 * SR), -60, 7);
+      const L = cat([loud, head, zeros, island, loud]);
+      const at = loud.length + head.length + zeros.length;
+
+      // Right channel silent too: the run is real and the island passes.
+      const bothSilent = run(noiseGateEffect, [Float32Array.from(L), Float32Array.from(L)], {
+        thresholdDb: THRESHOLD_DB,
+        attackMs: 1,
+        releaseMs: 20,
+        holdMs: 500,
+      })[0];
+      expect(removedPct(L, bothSilent, at, at + island.length)).toBeLessThan(0.1);
+
+      // Right channel still playing floor across the same span: no run, and
+      // the island is gated exactly as an unbracketed one is.
+      const R = Float32Array.from(L);
+      R.set(floorDb(zeros.length, -60, 13), loud.length + head.length);
+      const oneSilent = run(noiseGateEffect, [Float32Array.from(L), R], {
+        thresholdDb: THRESHOLD_DB,
+        attackMs: 1,
+        releaseMs: 20,
+        holdMs: 500,
+      })[0];
+      expect(removedPct(L, oneSilent, at, at + island.length)).toBeGreaterThan(99);
+    });
+
     it('leaves digital silence digitally silent, held open or not', () => {
       const zeros = new Float32Array(Math.round(0.6 * SR));
       const loud = sine(220, 0.3, 0.25);
