@@ -541,6 +541,50 @@ describe('runCoverJourney — a second pass on the same song', () => {
     // documents in the Files panel is exactly what the row exists to explain.
     expect(third!.stages[0].derived[1].from).toMatch(/already holds/i);
     expect(third!.stages[0].derived[1].from).toMatch(/another document of this name/i);
+    // The copy left beside really was edited, so the row may say so.
+    expect(third!.stages[0].derived[1].from).toMatch(/your own edits/i);
+  });
+
+  /**
+   * H1 fix-round 1 (I1). TWO copies that both hold the sum — reachable through
+   * exactly the case Note 3 documents: the user edits pass 1's copy, pass 2
+   * leaves it alone and creates a pristine one beside it, and then the user
+   * presses Ctrl+Z. Undo puts the samples back to this pass's own sum, so pass
+   * 3 sees two candidates that BOTH hold it.
+   *
+   * `previous` is `find`'s answer — the FIRST content match — so the other one
+   * is pristine too, and describing it as "your own edits to it, or an earlier
+   * separation" is a statement about the user's document that is not true. The
+   * pre-H1 code said nothing on this pass; the row must not buy its new
+   * completeness with a falsehood.
+   */
+  it('does not accuse the copy it left beside when that copy holds the sum too', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const theirs = first!.separation!.instrumentalDocId;
+    applyEdit('Amplify', theirs, (doc) => ({
+      ...doc,
+      channels: doc.channels.map((ch) => ch.map((v) => v * 0.5) as Float32Array),
+    }));
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(second!.separation!.instrumentalDocId).not.toBe(theirs);
+    // The edit is undone, so BOTH documents now hold this pass's own sum.
+    undo(theirs);
+
+    const third = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    // The first content match is adopted — and it is the one whose edit was
+    // undone, which is what puts a pristine copy on the other side.
+    expect(third!.separation!.instrumentalDocId).toBe(theirs);
+    expect(
+      useAppStore.getState().documents.filter((d) => d.name === 'song — Instrumental')
+    ).toHaveLength(2);
+    const row = third!.stages[0].derived[1].from;
+    // Still told about the second document…
+    expect(row).toMatch(/already holds/i);
+    expect(row).toMatch(/another document of this name/i);
+    // …but not accused of an edit that is not in it.
+    expect(row).not.toMatch(/your own edits/i);
+    expect(row).not.toMatch(/NOT this sum/i);
   });
 
   /**

@@ -781,13 +781,26 @@ export async function runCoverJourney(
           docLength(d) === docLength(song)
       );
     const previous = candidates.find((d) => holdsExactly(d, instrumentalChannels)) ?? null;
-    // A candidate of the right shape whose samples are somebody else's business.
+    // A candidate of the right shape this pass did not adopt.
+    //
     // H1 (round-2 re-review, Nit 2): asked of the candidates OTHER than the
     // adopted one, not of `previous === null`. The pass that both adopts a
     // pristine copy and leaves the user's edited one open is the one where the
     // Files panel really does hold two same-named full-length documents, and it
     // was the one pass that said nothing about the second.
-    const foreignCopies = candidates.some((d) => d !== previous);
+    //
+    // H1 fix-round 1 (I1): and what it says about them is asked of their
+    // SAMPLES, not inferred from the fact that they were not adopted. `previous`
+    // is `find`'s answer — the FIRST content match — so a second copy can hold
+    // the sum too and simply not be the one picked (the user edits pass 1's
+    // copy, pass 2 creates a pristine one beside it, the user presses Ctrl+Z:
+    // now both hold it). Calling that one "your own edits to it" is a statement
+    // about their document that is not true. The test runs only over the copies
+    // left beside, which is empty on the ordinary reuse pass, so it costs a scan
+    // only when there is something to describe.
+    const otherCopies = candidates.filter((d) => d !== previous);
+    const editedCopies = otherCopies.some((d) => !holdsExactly(d, instrumentalChannels));
+    const foreignCopies = otherCopies.length > 0;
     const instrumental: AudioDocument =
       previous ??
       createDocument({
@@ -837,7 +850,9 @@ export async function runCoverJourney(
               : '') +
             (foreignCopies
               ? previous
-                ? '. Another document of this name is open too, whose samples are NOT this sum — your own edits to it, or an earlier separation — and it was left exactly as it is'
+                ? editedCopies
+                  ? '. Another document of this name is open too, whose samples are NOT this sum — your own edits to it, or an earlier separation — and it was left exactly as it is'
+                  : '. Another document of this name is open too, holding this same sum — only one of them can be the one reused, and the other was left exactly as it is'
                 : '. A document of this name is also open whose samples are NOT this sum — your own edits to it, or an earlier separation — so it was left exactly as it is and this is a new one beside it'
               : ''),
         },
