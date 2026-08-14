@@ -682,29 +682,52 @@ samples come from before the chain; the take document still supplies the sample 
 a take closed mid-run declines the stage rather than measuring against a ghost.) Your whole
 take is then placed at that offset — nothing is stretched and no syllable is moved, so a take that drifts against the record
 still drifts. Two thresholds have to be cleared before the number is believed, and both
-are measured rather than chosen; below either one the stage places your take at the start
-of the original and **tells you the numbers** instead of guessing.
+are measured rather than chosen.
 
-**A refused guess is still one click away.** Under the align row, a refusal carries its
-offer with the measurement's own correlation, prominence and overlap next to it. Which
-control that is follows what was measured. A match the stage calls *ambiguous* ("several
-places about equally well") or *weak* always brings its rival lags with it, and each
-becomes its own **Place at ±X s** button showing that lag's correlation and how far it
-stands above the next — the measured guess is the first of them. A match with no rival
-worth listing — *unrelated*, or a measurement that classified itself not at all — carries
-the single **Apply the measured offset anyway** button instead. The refusal's own sentence
-names whichever of the two is on screen for that measurement, and never the other one.
-Pressing either re-places both clips at that offset — the same both-tracks-move
-arithmetic a believed alignment uses, with the same 25 ms edge fades
-— as a single undo entry, so a guess that turns out wrong costs one Ctrl+Z. It is offered
-and never applied for you: the numbers that produced the refusal sit inside the range
-measured for *unrelated* pairs, so the app will not pretend to a confidence it just said it
-did not have. And the refusal's advice is **sign-aware**, because it has to be: no clip can
-start before zero, so a guess *before* the original's start can only be realised by
-dragging the **Instrumental** later — dragging your take can only make it worse. (The
-refusal no longer suggests Align Vocal Timing. That tool warps document audio to a
-confirmed beat grid; it cannot move a clip on the timeline at all, for either sign. It
-stays recommended where it belongs — under a *believed* alignment, for a take that drifts.)
+**The lag is refined against the original song, not only against the separated vocal.**
+After the coarse pass has decided *which* alignment this is and the fine pass has narrowed
+it, a third pass moves the answer one last time — by at most ±0.12 s — against the
+**original song**. The separated vocal is the one signal in the whole run that has been
+through a model, and its attacks are the model's opinion of the singer's attacks; the song
+has been through nothing, and it shares the stem's timeline exactly, because separation's
+five outputs sum back to the mix bit for bit. It is also the ruler that matters: your take
+is going to be heard against the instrumental, so being in time with the *song* is the
+thing being asked for. Measured on a population whose stem attacks are displaced 30 ms,
+the third pass takes the median placement error from 18.1 ms to 12.0 ms and the worst from
+24.5 ms to 18.1 ms, does not move a clean reference off an answer that was already right,
+and leaves the final lag identical whether the stem it started from was degraded or
+pristine. The number the report shows is the refined one, and the row states how far the
+song moved it. It is a refinement and never a second opinion — every confidence number
+still comes from the separated vocal — so it corrects a *displaced* answer and cannot
+rescue a wrong one.
+
+**The pass places the tracks itself, even when it cannot fully believe the number.** A
+match the stage calls *ambiguous* ("several places about equally well") or *weak* is
+**placed at its own measured lag**, with the same both-tracks-move arithmetic and the same
+25 ms edge fades a believed alignment uses. It is not offered for you to accept: the
+measured guess is the best evidence there is, and asking you to press a button to apply it
+is asking a question the pass could already answer. What the align row does instead is tell
+you what it did and hand you the alternatives — "placed at −8.257 s; if that is the wrong
+spot, these matched too" — with each rival lag its own **Place at ±X s** button showing
+that lag's correlation and how far it stands above the next, and the measured guess first
+among them; one press re-places both clips at any other lag as a single undo entry. (The
+first placement itself is not undoable, and the row does not claim it is: it was made while
+the session was being built, and building a session clears session history the same way
+opening one does. Dragging a clip, or typing a new **Start** in the Properties panel, is
+always available.)
+
+**Two outcomes are still placed at the start.** *Unrelated* — a take no arm could
+distinguish from the band measured for pairs with no relation at all — and a measurement
+that classified itself not at all: auto-placing those would be the app guessing exactly
+where it has just said it has no guess. Those rows say so, state the numbers, and carry
+the single **Apply the measured offset anyway** button. Whichever arm you get, the row's
+own sentence names the control that is actually on screen for that measurement and never
+the other one, and its advice is **sign-aware**, because it has to be: no clip can start
+before zero, so a guess *before* the original's start can only be realised by dragging the
+**Instrumental** later — dragging your take can only make it worse. (No row suggests Align
+Vocal Timing for this. That tool warps document audio to a confirmed beat grid; it cannot
+move a clip on the timeline at all, for either sign. It stays recommended where it belongs
+— under a *believed* alignment, for a take that drifts.)
 Any offset can also simply be typed: the Properties panel's clip **Start** is an editable
 time field. Known offsets come back
 within 10 ms in both signs, at equal rates and across 44.1/48 kHz — but that figure assumes
