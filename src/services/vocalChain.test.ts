@@ -1583,6 +1583,116 @@ describe('deriveGate', () => {
     });
   });
 
+  // M4 — the half-second the content checks read is mixed INLINE (mixing the
+  // whole take would allocate 25 MB to look at 500 ms of it), and the helper
+  // it replaced had stereo tests of its own that the inline form inherited
+  // none of. Every property that loop has to have, pinned as gate behaviour on
+  // a real stereo fixture: it reads EVERY channel, it reads the WINNING
+  // window rather than the head of the take, and it takes the MEAN rather
+  // than the sum.
+  describe('the half-second the checks read, in stereo', () => {
+    /** `[2 s floor][3.5 s soft passage][3.5 s loud chorus]` per channel, with
+     * the soft passage chosen independently for each — the chorus keeps the
+     * all-or-nothing guard quiet and the floor is never the quietest window. */
+    function stereoTake(soft: (n: number, seed: number) => Float32Array[]): Float32Array[] {
+      const floorLen = Math.round(2 * SR);
+      const softLen = Math.round(3.5 * SR);
+      const chorusLen = Math.round(3.5 * SR);
+      const softs = soft(softLen, 41);
+      return softs.map((s, ch) => {
+        const out = new Float32Array(floorLen + softLen + chorusLen);
+        out.set(gaussFloorDb(floorLen, -40, 7 + ch), 0);
+        out.set(s, floorLen);
+        let phase = 0;
+        for (let i = 0; i < chorusLen; i++) {
+          phase += (2 * Math.PI * 196) / SR;
+          out[floorLen + softLen + i] = 0.25 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase) + 0.2 * Math.sin(3 * phase));
+        }
+        return out;
+      });
+    }
+
+    it('reads every channel: a whisper in ONE channel is still a whisper', () => {
+      // The destructive shape a channel-0-only mix would produce: the right
+      // channel's whispered verse is the quietest 500 ms, and a gate that
+      // never looked at it would derive a threshold above it and mute it.
+      // The left channel is 20 dB down, so the mix is essentially the right
+      // channel halved and its formants survive it — which is the point: a
+      // mix that never adds the right channel reads the left one's plain
+      // floor, gates, and mutes a whisper.
+      const asymmetric = stereoTake((n, seed) => [gaussFloorDb(n, -70, 3), whisper(n, -50, seed)]);
+      const res = deriveGate(asymmetric, SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('vocal tract');
+
+      // The converse, same levels, same window: with a floor in BOTH channels
+      // there is nothing to find and the take gates.
+      const symmetric = stereoTake((n) => [gaussFloorDb(n, -70, 3), gaussFloorDb(n, -50, 5)]);
+      const both = deriveGate(symmetric, SR);
+      expect(both.run).toBe(true);
+      if (!both.run) return;
+      expect(Number(both.params.thresholdDb)).toBeLessThan(-35);
+    });
+
+    it('reads the window the search won, not the head of the take', () => {
+      // A whispered opening, then a take whose quietest 500 ms is an ordinary
+      // floor. A mix taken from sample 0 rather than from the winner would
+      // read the whisper and refuse a take that has real pauses in it.
+      const { channel, pauses } = takeWithSilentLeadIn(0);
+      const head = whisper(Math.round(3.5 * SR), -36, 41);
+      const L = new Float32Array(head.length + channel.length);
+      L.set(head, 0);
+      L.set(channel, head.length);
+      const R = Float32Array.from(L);
+      const res = deriveGate([L, R], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      // The precondition: the winner really is past the whispered head.
+      const w = measureNoiseWindow([L, R], SR, { rejectMostlySilentWindows: true })!;
+      expect(w.startSample).toBeGreaterThanOrEqual(head.length);
+      const out = noiseGateEffect.process([Float32Array.from(L), Float32Array.from(R)], SR, res.params).channels[0];
+      const shifted = pauses.map((p) => ({ start: p.start + head.length, end: p.end + head.length }));
+      let sum = 0;
+      let n = 0;
+      for (const p of shifted) {
+        for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += out[i] * out[i];
+        n += Math.round(0.3 * SR);
+      }
+      expect(toDb(Math.sqrt(sum / n))).toBeLessThanOrEqual(-80);
+    });
+
+    it('takes the MEAN of the channels, not their sum — pinned in dB at the cancellation boundary', () => {
+      // The mix's LEVEL is observable through exactly one check, so that is
+      // where it is pinned. For `[L, -g·L]` the mean mixes to L·(1-g)/2, so
+      // the cancellation depth is -20·log10(1-g) + 6.02 dB and the guard's
+      // 60 dB lands at 1-g = 0.002. A sum would drop the +6.02 and move the
+      // crossing to 1-g = 0.001 — so a pair at 1-g = 0.0015 declines with the
+      // mean (62.5 dB deep) and would NOT with the sum (56.5 dB).
+      const { channel } = continuousTakeWithWhisperedVerse();
+      const scaled = (g: number): Float32Array[] => {
+        const R = new Float32Array(channel.length);
+        for (let i = 0; i < channel.length; i++) R[i] = -g * channel[i];
+        return [Float32Array.from(channel), R];
+      };
+
+      const deep = deriveGate(scaled(1 - 0.0015), SR);
+      expect(deep.run).toBe(false);
+      if (deep.run) return;
+      expect(deep.reason).toContain('cancel');
+
+      // ...and the converse a decibel the other way: 1-g = 0.003 is 50.5 dB
+      // deep with the mean, under the guard, so the ordinary checks decide —
+      // and on this whispered take they decline for the whisper, not for a
+      // polarity flip.
+      const shallow = deriveGate(scaled(1 - 0.003), SR);
+      expect(shallow.run).toBe(false);
+      if (shallow.run) return;
+      expect(shallow.reason).toContain('vocal tract');
+      expect(shallow.reason).not.toContain('cancel');
+    });
+  });
+
   // N6 — the census's own blind spot, and the only destructive shape this
   // stage still had. A window may carry a quiet island BESIDE louder material
   // and still be accepted, because the acceptance bound constrains a window's
