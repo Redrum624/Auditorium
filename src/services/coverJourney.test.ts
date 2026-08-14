@@ -988,6 +988,38 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
       'several places'
     );
   });
+
+  /** The rival lags the emitter attaches to every 'ambiguous' and every 'weak'
+   * measurement — best first, `candidates[0].offsetSeconds === offsetSeconds`. */
+  const candidateList = () => [
+    { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+    { offsetSeconds: 12.5, correlation: 0.41, prominence: 0.06 },
+  ];
+
+  // The reason is the PRIMARY instruction of a refusal, and it is read next to
+  // the offer it describes. The dialog swaps the single button for one row per
+  // candidate whenever the measurement lists any, so on the two outcomes that
+  // always list them the button sentence sent the user looking for a control
+  // that is not on screen.
+  it('points a candidate-bearing refusal at the rows, not at the button they replace', async () => {
+    for (const outcome of ['ambiguous', 'weak']) {
+      const reason = await alignReason(
+        refusedAlignment(-8.258, { outcome, candidates: candidateList() })
+      );
+      expect(reason).toContain(coverPlacement.CANDIDATE_PLACEMENT_LABEL);
+      expect(reason).not.toContain(coverPlacement.APPLY_GUESS_LABEL);
+    }
+  });
+
+  it('keeps the button sentence where the button is what renders', async () => {
+    // 'unrelated' has no guess worth listing and today's outcome-less shape
+    // lists nothing either, so both render the single apply button.
+    for (const extra of [{ outcome: 'unrelated' }, {}]) {
+      const reason = await alignReason(refusedAlignment(-8.258, extra));
+      expect(reason).toContain(coverPlacement.APPLY_GUESS_LABEL);
+      expect(reason).not.toContain(coverPlacement.CANDIDATE_PLACEMENT_LABEL);
+    }
+  });
 });
 
 // ── CC3 fix round 1: one shift arithmetic, shared with the apply arm ────────

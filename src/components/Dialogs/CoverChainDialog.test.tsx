@@ -12,6 +12,7 @@ import {
 import {
   COVER_JOURNEY_STAGES,
   journeyStageById,
+  refusalReason,
   runCoverJourney,
   type CoverJourneyReport,
   type CoverJourneyStageId,
@@ -22,6 +23,7 @@ import {
   APPLY_GUESS_LABEL,
   APPLY_GUESS_UNDO_LABEL,
   applyMeasuredOffset,
+  CANDIDATE_PLACEMENT_LABEL,
 } from '../../services/coverPlacement';
 import { clearHistory, pushUndo } from '../../services/undoHistory';
 
@@ -983,5 +985,82 @@ describe('CoverChainDialog — applying the refused guess', () => {
     expect(offer).not.toHaveTextContent('weak but plausible');
     expect(offer).not.toHaveTextContent('probably wrong');
     expect(offer).not.toHaveTextContent('several places');
+  });
+
+  // ── The seam: the sentence and the controls, driven by ONE measurement ─────
+  //
+  // The refusal's copy is written in `coverJourney` and the controls are
+  // rendered here, and each was right inside its own lane: the copy named the
+  // single button because no emitter produced candidates when it was written,
+  // and the dialog swaps that button for the candidate rows because the
+  // shipped emitter attaches candidates to every 'ambiguous' and every 'weak'
+  // measurement. Composed, the primary instruction on two of the four outcomes
+  // named a control that is not on screen — the exact defect class this offer
+  // exists to remove ("the message named the one clip that could not help").
+  //
+  // The invariant, and the only one worth pinning across the seam: the refusal
+  // reason never names a control the dialog does not render for that same
+  // measurement. Both halves are driven from ONE measurement here, through the
+  // engine's REAL sentence (`refusalReason`), so neither side can be corrected
+  // alone and still pass.
+  describe('the refusal names the control the dialog actually renders', () => {
+    /** Every control the copy is allowed to name, and where it renders. */
+    const CONTROLS: { control: string; phrase: string; testId: string }[] = [
+      {
+        control: 'the single apply button',
+        phrase: APPLY_GUESS_LABEL,
+        testId: 'cover-journey-guess-apply',
+      },
+      {
+        control: 'the candidate rows',
+        phrase: CANDIDATE_PLACEMENT_LABEL,
+        testId: 'cover-journey-guess-candidate-0',
+      },
+    ];
+
+    /** A candidate list of the shape the emitter attaches: best first, and
+     * `candidates[0].offsetSeconds === offsetSeconds`. */
+    const candidates = (rival: number) => [
+      { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+      { offsetSeconds: rival, correlation: 0.41, prominence: 0.06 },
+    ];
+
+    /** The four shapes a real emission can have. Candidates ride along on
+     * 'ambiguous' and 'weak' — the two outcomes that are OFFERS — and on
+     * neither of the others; the last row is the outcome-less measurement the
+     * feature-detecting path still has to serve. */
+    const SHAPES: [string, Record<string, unknown>][] = [
+      ['ambiguous, which always carries candidates', { outcome: 'ambiguous', candidates: candidates(12.5) }],
+      ['weak, which always carries candidates too', { outcome: 'weak', candidates: candidates(3.75) }],
+      ['unrelated, which carries none', { outcome: 'unrelated' }],
+      ['a measurement that classified itself not at all', {}],
+    ];
+
+    it.each(SHAPES)('%s', async (_shape, extra) => {
+      const alignment = measurement(-8.258, extra);
+      // The ENGINE's sentence, not a re-composition of it: a test that wrote
+      // its own copy would pass with the shipped copy still wrong.
+      const reason = refusalReason(alignment!);
+      await runRefused({
+        alignment,
+        stages: stagesWith({
+          id: 'align',
+          label: 'Align with the Original',
+          status: 'declined',
+          reason,
+          derived: [],
+          undoEntries: [],
+        }),
+      });
+
+      const named = CONTROLS.filter((c) => reason.includes(c.phrase)).map((c) => c.control);
+      const rendered = CONTROLS.filter((c) => screen.queryByTestId(c.testId) !== null).map(
+        (c) => c.control
+      );
+      expect(named).toEqual(rendered);
+      // …and it names the one that IS there. A refusal that points at no
+      // control at all is the state this whole arm was built to leave behind.
+      expect(rendered).toHaveLength(1);
+    });
   });
 });

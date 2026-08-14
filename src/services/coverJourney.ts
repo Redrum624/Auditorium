@@ -100,6 +100,7 @@ import {
 // this module.
 import {
   JOURNEY_FADE_MS,
+  guessCandidates,
   guessCharacterisation,
   guessKind,
   guessRemedy,
@@ -485,10 +486,14 @@ const dbStr = (v: number): string => `${v >= 0 ? '+' : ''}${v.toFixed(2)} dB`;
  */
 export function refusalReason(alignment: AlignmentMeasurement): string {
   const characterisation = guessCharacterisation(guessKind(alignment));
+  // The remedy's one-click half names the control the dialog will render, and
+  // the dialog decides that from the candidate list — so this reads the same
+  // list rather than the outcome word.
+  const hasCandidates = guessCandidates(alignment).length > 0;
   return (
     `the best alignment found was ${secondsStr(alignment.offsetSeconds)}, and it is not believable: correlation ${alignment.peakCorrelation.toFixed(3)} against a floor of ${ALIGN_MIN_CORRELATION}, standing ${alignment.prominence.toFixed(3)} above the next best lag against a floor of ${ALIGN_MIN_PROMINENCE}. ` +
     (characterisation ? `${characterisation}. ` : '') +
-    `The take is placed at the start of the original instead of at a guess. ${guessRemedy(alignment.offsetSeconds)}`
+    `The take is placed at the start of the original instead of at a guess. ${guessRemedy(alignment.offsetSeconds, hasCandidates)}`
   );
 }
 

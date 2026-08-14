@@ -26,6 +26,7 @@ import {
   APPLY_GUESS_LABEL,
   APPLY_GUESS_UNDO_LABEL,
   applyMeasuredOffset,
+  CANDIDATE_PLACEMENT_LABEL,
   guessCandidates,
   guessCharacterisation,
   guessKind,
@@ -135,6 +136,27 @@ describe('guessRemedy — the sentence a refused guess ends with', () => {
     const remedy = guessRemedy(0);
     expect(remedy).toContain('already');
     expect(remedy).not.toContain(APPLY_GUESS_LABEL);
+  });
+
+  // Which one-click control exists is not a constant: a measurement carrying
+  // candidate lags renders one row per candidate INSTEAD of the single button,
+  // so the sentence has to name the rows there or it names nothing on screen.
+  it('names the candidate rows, not the button they replace, when the rows are what render', () => {
+    for (const offset of [-8.258, 8.258]) {
+      const remedy = guessRemedy(offset, true);
+      expect(remedy).toContain(CANDIDATE_PLACEMENT_LABEL);
+      expect(remedy).not.toContain(APPLY_GUESS_LABEL);
+      // The by-hand half is untouched by this: it is about the measured lag,
+      // which is the first of the rows, and it is right on both arms.
+      expect(remedy).toContain('8.258 s');
+    }
+  });
+
+  it('points at the rows from the zero guess too, and at nothing when there are none', () => {
+    const withRows = guessRemedy(0, true);
+    expect(withRows).toContain('already');
+    expect(withRows).toContain(CANDIDATE_PLACEMENT_LABEL);
+    expect(guessRemedy(0)).not.toContain(CANDIDATE_PLACEMENT_LABEL);
   });
 });
 

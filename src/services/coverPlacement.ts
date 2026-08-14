@@ -176,24 +176,46 @@ function amountStr(offsetSeconds: number): string {
  * The negative branch carries its reason ("a clip cannot start before zero")
  * because the instruction is counter-intuitive: the take is the clip the user
  * is thinking about, and it is precisely the one that cannot move.
+ *
+ * ── Which one-click control the sentence names ──────────────────────────────
+ * `hasCandidates` is not decoration and it is not the outcome word: the dialog
+ * renders one "Place at …" row per candidate INSTEAD of the single button
+ * whenever the measurement lists any, so the sentence has to branch on exactly
+ * the fact the render branches on. It was written when no emitter produced
+ * candidates and named the button unconditionally; the shipped emitter
+ * attaches candidates to every 'ambiguous' and every 'weak' measurement, which
+ * made the primary refusal instruction point at a control that is not on
+ * screen for two of the four outcomes.
+ *
+ * It defaults to `false` because that is what a caller who knows of no
+ * candidate list is looking at: a candidate-less measurement renders the
+ * single button.
  */
-export function guessRemedy(offsetSeconds: number): string {
+export function guessRemedy(offsetSeconds: number, hasCandidates = false): string {
   const amount = amountStr(offsetSeconds);
+  const oneClick = hasCandidates
+    ? `Or pick one of the “${CANDIDATE_PLACEMENT_LABEL} …” rows offered under the align row — each moves both clips to its own lag in one step.`
+    : `Or press “${APPLY_GUESS_LABEL}” to have this pass move both clips there in one step.`;
   // Rounded to the same three decimals the amount is printed at: a guess that
   // displays as 0.000 s is a guess that asks for no move.
   if (Math.abs(offsetSeconds) < 0.0005) {
-    return 'The guess is +0.000 s, which is where the take already sits, so there is nothing to move by hand.';
+    const nothingToMove =
+      'The guess is +0.000 s, which is where the take already sits, so there is nothing to move by hand.';
+    // Zero is where the take already is, so the button offers nothing worth
+    // naming — but candidate rows offer OTHER lags, and those are worth
+    // pointing at even here.
+    return hasCandidates ? `${nothingToMove} ${oneClick}` : nothingToMove;
   }
   if (offsetSeconds < 0) {
     return (
       `To place it by hand you have to move the INSTRUMENTAL, not the take: drag the Instrumental clip about ${amount} later. ` +
       'A clip cannot start before zero, so a guess on this side of zero can only be realised by moving the instrumental — dragging the take can only make it worse. ' +
-      `Or press “${APPLY_GUESS_LABEL}” to have this pass move both clips there in one step.`
+      oneClick
     );
   }
   return (
     `To place it by hand, drag your take to about ${amount} — the take is the clip that moves for a guess on this side of zero. ` +
-    `Or press “${APPLY_GUESS_LABEL}” to have this pass move both clips there in one step.`
+    oneClick
   );
 }
 
