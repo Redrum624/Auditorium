@@ -17,7 +17,22 @@ export const SHORTCUT_TABLE: Shortcut[] = [
   { combo: 'ctrl+c', commandId: 'edit.copy' },
   { combo: 'ctrl+v', commandId: 'edit.paste' },
   { combo: 'delete', commandId: 'edit.delete' },
+  // K1 — Ripple Delete. `Shift+Delete` was free in this table (checked against
+  // every row above and below), and it is the combo the verb carries in the
+  // NLEs this feature was asked to match. Its command is multitrack-only, so
+  // in the editor views the key reaches a disabled command and does nothing —
+  // `runCommand` re-checks `enabled` before running, which is what keeps a
+  // global table from needing a per-view table beside it.
+  { combo: 'shift+delete', commandId: 'edit.rippleDelete' },
   { combo: 'ctrl+a', commandId: 'edit.selectAll' },
+  // K1 — clip-edge navigation. `e.key` for the arrows is 'ArrowLeft'/
+  // 'ArrowRight', so the normalized combos carry the 'arrow' prefix; the menu
+  // rows advertise them as the Ctrl+Left / Ctrl+Right a user would write.
+  // Nothing else in this app binds an arrow: the editor's own surfaces read
+  // arrows only inside form controls (ConvertDialog), which this handler
+  // already declines to touch.
+  { combo: 'ctrl+arrowleft', commandId: 'multitrack.prevClipEdge' },
+  { combo: 'ctrl+arrowright', commandId: 'multitrack.nextClipEdge' },
   { combo: 'home', commandId: 'transport.goToStart' },
   { combo: 'end', commandId: 'transport.goToEnd' },
   { combo: 'ctrl+o', commandId: 'file.open' },

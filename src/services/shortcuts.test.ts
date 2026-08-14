@@ -60,7 +60,10 @@ describe('SHORTCUT_TABLE', () => {
       { combo: 'ctrl+c', commandId: 'edit.copy' },
       { combo: 'ctrl+v', commandId: 'edit.paste' },
       { combo: 'delete', commandId: 'edit.delete' },
+      { combo: 'shift+delete', commandId: 'edit.rippleDelete' }, // K1
       { combo: 'ctrl+a', commandId: 'edit.selectAll' },
+      { combo: 'ctrl+arrowleft', commandId: 'multitrack.prevClipEdge' }, // K1
+      { combo: 'ctrl+arrowright', commandId: 'multitrack.nextClipEdge' }, // K1
       { combo: 'home', commandId: 'transport.goToStart' },
       { combo: 'end', commandId: 'transport.goToEnd' },
       { combo: 'ctrl+o', commandId: 'file.open' },

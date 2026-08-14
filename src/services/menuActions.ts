@@ -1,7 +1,8 @@
 import { createDocument, docLength, nextId } from '../audio/AudioDocument';
 import type { AppState, Marker } from '../stores/appStore';
 import { applyEditorZoom, useAppStore } from '../stores/appStore';
-import { useSessionStore } from '../multitrack/sessionStore';
+import { removeClips, rippleDeleteClips, useSessionStore } from '../multitrack/sessionStore';
+import { clipBoundaries, nextClipEdge } from '../multitrack/clipEdges'; // K1
 import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { mixdownSession } from '../multitrack/mixdown';
 import { canRecord, transportPlayPause, transportRecord, transportStop } from './transportService';
@@ -127,6 +128,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.copy',
       'edit.paste',
       'edit.delete',
+      // K1: the same verb with the gap closed behind it. Directly after
+      // Delete, because that is the row a user comparing the two reads next.
+      'edit.rippleDelete',
       // M1: Trim and Silence act on the same `[start, end)` selection as the
       // four above and share Cut's predicate, so they belong in that group
       // rather than behind a separator of their own. Until now the floating
@@ -149,6 +153,11 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'separator',
       'multitrack.insertDoc',
       'multitrack.addTrack',
+      // K1: cursor navigation over the session's edit points. Filed with the
+      // multitrack group rather than with the markers below, because these two
+      // exist only in that view and the marker pair exists only outside it.
+      'multitrack.prevClipEdge',
+      'multitrack.nextClipEdge',
       'separator',
       'marker.add',
       'marker.next',
@@ -343,11 +352,23 @@ function registerSelectionAndTransportCommands(): void {
       },
     },
     {
+      // K1 view routing (the `edit.delete` shape): Escape clears whatever the
+      // visible surface calls a selection. In the multitrack view that is the
+      // clip selection — the document region behind it is not on screen, and
+      // clearing it there was the same invisible edit F1 gated cut/copy/paste
+      // out of that view for.
       id: 'edit.deselect',
       label: 'Deselect',
       shortcut: 'Esc',
-      enabled: (s) => s.selection !== null,
+      enabled: (s) =>
+        s.view === 'multitrack'
+          ? useSessionStore.getState().selectedClipId !== null
+          : s.selection !== null,
       run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          useSessionStore.getState().setSelectedClip(null);
+          return;
+        }
         useAppStore.getState().setSelection(null);
       },
     },
@@ -522,6 +543,13 @@ function registerEditCommands(): void {
     {
       // In the multitrack view, Delete removes the selected clip; elsewhere it
       // deletes the active document's selected region (Task 22 view routing).
+      //
+      // K1: "the selected clip" is now "the selection", which may hold several
+      // clips across several tracks. The predicate is unchanged — the set is
+      // empty exactly when the primary is null — and a single-clip delete is
+      // byte-for-byte the act it always was (`removeClips` keeps the label and
+      // takes the same path); what changed is that a Ctrl+Click set goes in one
+      // undo entry rather than needing one Delete per clip.
       id: 'edit.delete',
       label: 'Delete',
       shortcut: 'Del',
@@ -531,12 +559,28 @@ function registerEditCommands(): void {
           : hasSelection(s),
       run: async () => {
         if (useAppStore.getState().view === 'multitrack') {
-          const clipId = useSessionStore.getState().selectedClipId;
-          if (clipId) useSessionStore.getState().removeClip(clipId);
+          removeClips(useSessionStore.getState().selectedClipIds);
           return;
         }
         deleteSelection();
       },
+    },
+    {
+      // K1 R3 — Audition's Ripple Delete: remove the selected clip(s) AND close
+      // the gap, so everything later on each affected track moves up. Deleting
+      // a bad take out of the middle of an arrangement is the reason it exists;
+      // plain Delete leaves the hole.
+      //
+      // Multitrack-only, with no editor counterpart: a ripple over a document
+      // REGION is a different feature (it would rewrite the audio), and it is
+      // out of K1's scope. The command reports disabled in the editor views
+      // rather than quietly doing the wrong thing there.
+      id: 'edit.rippleDelete',
+      label: 'Ripple Delete',
+      shortcut: 'Shift+Del',
+      enabled: (s) =>
+        s.view === 'multitrack' && useSessionStore.getState().selectedClipId !== null,
+      run: async () => rippleDeleteClips(useSessionStore.getState().selectedClipIds),
     },
     // U1: `trimToSelection` and `silenceSelection` have existed in editOps
     // since Task 22 with no command in front of them — the Edit menu never
@@ -879,7 +923,43 @@ function registerMultitrackCommands(): void {
       enabled: (s) => s.view === 'multitrack' && sessionHasClips(),
       run: async () => mixdownToNewFile(),
     },
+    // K1 R1 — the two halves of clip-edge navigation. Both are the same
+    // two-line adapter over `clipEdges`: read the session's boundaries, ask
+    // which one lies in that direction, write the cursor if there is one.
+    //
+    // `setMtCursor` is the whole write. The multitrack cursor is where the NEXT
+    // play starts (`transportService` reads it once, at `play()`), so moving it
+    // during playback moves the next start and nothing else — the running
+    // transport is driven by `mtPlayheadSample`, which these never touch. That
+    // is what makes them safe while playing, and it is a property of the
+    // existing cursor contract rather than anything K1 added.
+    //
+    // Enabled on `sessionHasClips()` — no clips, no edges, so the key would
+    // have nowhere to go and the menu row should say so.
+    {
+      id: 'multitrack.prevClipEdge',
+      label: 'Previous Clip Edge',
+      shortcut: 'Ctrl+Left',
+      enabled: (s) => s.view === 'multitrack' && sessionHasClips(),
+      run: async () => moveCursorToClipEdge('prev'),
+    },
+    {
+      id: 'multitrack.nextClipEdge',
+      label: 'Next Clip Edge',
+      shortcut: 'Ctrl+Right',
+      enabled: (s) => s.view === 'multitrack' && sessionHasClips(),
+      run: async () => moveCursorToClipEdge('next'),
+    },
   ]);
+}
+
+/** K1 R1 — moves the multitrack cursor to the previous/next clip boundary, or
+ * leaves it exactly where it is when there is none in that direction. */
+function moveCursorToClipEdge(direction: 'prev' | 'next'): void {
+  const { session, mtCursorSample, setMtCursor } = useSessionStore.getState();
+  const target = nextClipEdge(clipBoundaries(session), mtCursorSample, direction);
+  if (target === null) return;
+  setMtCursor(target);
 }
 
 /** Returns the active document's markers (sorted by position, per the store's

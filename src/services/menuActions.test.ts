@@ -147,12 +147,17 @@ describe('edit.trim / edit.silence (U1)', () => {
   // toolbar was their ONLY surface — a verb reachable by mouse and by nothing
   // else, invisible to anyone who looks for it where every other edit verb
   // lives. They now sit with the selection verbs they belong to.
+  // K1 inserted Ripple Delete between Delete and Trim — the same verb as
+  // Delete with the gap closed behind it, so it belongs to Delete's row rather
+  // than after the region verbs. The claim this test carries is unchanged:
+  // Trim and Silence sit in the Delete GROUP, in that order, not exiled to a
+  // toolbar.
   it('appears in the Edit menu directly after Delete, with the other selection verbs', () => {
     const editIds = commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items);
     expect(editIds).toContain('edit.trim');
     expect(editIds).toContain('edit.silence');
-    expect(editIds.slice(editIds.indexOf('edit.delete'), editIds.indexOf('edit.delete') + 3)).toEqual(
-      ['edit.delete', 'edit.trim', 'edit.silence']
+    expect(editIds.slice(editIds.indexOf('edit.delete'), editIds.indexOf('edit.delete') + 4)).toEqual(
+      ['edit.delete', 'edit.rippleDelete', 'edit.trim', 'edit.silence']
     );
   });
 
@@ -346,6 +351,7 @@ describe('getMenuSections', () => {
       'edit.copy',
       'edit.paste',
       'edit.delete',
+      'edit.rippleDelete', // K1
       'edit.trim',
       'edit.silence',
       'edit.selectAll',
@@ -353,6 +359,8 @@ describe('getMenuSections', () => {
       'edit.convertChannels',
       'multitrack.insertDoc',
       'multitrack.addTrack',
+      'multitrack.prevClipEdge', // K1
+      'multitrack.nextClipEdge', // K1
       'marker.add',
       'marker.next',
       'marker.prev',
