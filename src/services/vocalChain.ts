@@ -616,14 +616,46 @@ export function deriveDeHum(channels: Float32Array[], sampleRate: number): Stage
  * The derivation reproduces the shipped default independently, which is the
  * strongest evidence available that it is the right rule: it lands on
  * -50.4 dBFS where the effect's own hand-derived default is -50.
+ *
+ * It asks for the same MOSTLY-REAL search the gate does, and for the same
+ * reason one stage earlier. A candidate window that is mostly exact zeros has
+ * its RMS diluted by them and takes its envelope peak from the sliver of real
+ * material at its edge, so on a take carrying digital silence the bare search
+ * can win with a window that measures the wrong passage. On the shapes the
+ * gate's own N3 was found on — a trimmed lead-in or a mid-file cut beside a
+ * take with an EVEN floor — that costs nothing: the sliver is the same floor,
+ * read over fewer samples, so the boundary window's peak lands 0.0-0.6 dB
+ * BELOW the honest one at 8 and 44.1 kHz and this stage merely cuts less.
+ * When the floor is UNEVEN it costs material: with the louder stretch beside
+ * the zeros, the boundary window is diluted under the take's own quietest
+ * window and reports the LOUDER stretch's peak. Measured on a take whose
+ * quietest floor is -70 dBFS and whose lead-in adjoins a -60 dBFS stretch,
+ * the head ending 25 ms after a search step: threshold -54.98 dBFS against
+ * the honest -64.55 at 8 kHz and -55.31 against -65.31 at 44.1 kHz, with 51
+ * to 80 % of a real -62 dBFS sung phrase reading as silence to a stage that
+ * DELETES what it calls silence. Unlike the gate this stage has no content
+ * checks to catch it afterwards, so the measurement is the only defence.
+ *
+ * When no mostly-real window exists at all it DECLINES, exactly as the gate
+ * does on the same shape. That refuses a strip-silenced take a stage it used
+ * to run — but what it used to run was a threshold derived from a fragment's
+ * own peak, and this stage removes what falls under its threshold, so the
+ * alternative to refusing is deleting.
+ *
+ * `hiddenRealSamples` is deliberately NOT consulted here: it is the gate's
+ * question ("was a threshold derived without seeing material that a gate
+ * would then mute?"), and this stage's answer to hidden material is the same
+ * decline the null case already gives when it is severe enough to leave no
+ * mostly-real window. A take that hides fragments AND has a real floor to
+ * measure is cut against that real floor, which is the right level for it.
  */
 export function deriveRemoveSilence(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('remove-silence');
-  const noise = measureNoiseWindow(channels, sampleRate);
+  const noise = measureNoiseWindow(channels, sampleRate, { rejectMostlySilentWindows: true });
   if (!noise) {
     return {
       run: false,
-      reason: `no ${NOISE_WINDOW_MS} ms passage above digital silence to measure the noise floor from, so the threshold cannot be derived`,
+      reason: `no ${NOISE_WINDOW_MS} ms passage of real material to measure the noise floor from — every candidate window is digital silence, or mostly digital silence — so the threshold cannot be derived. A take whose quiet stretches are already exact zeros has no floor to tell them from`,
     };
   }
   const thresholdDb = clampToParam('remove-silence', 'thresholdDb', noise.envelopePeakDb);

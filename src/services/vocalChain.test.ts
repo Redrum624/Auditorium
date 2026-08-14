@@ -610,6 +610,171 @@ describe('deriveRemoveSilence', () => {
   it('declines without a measurable noise floor', () => {
     expect(deriveRemoveSilence([new Float32Array(WIN * 4)], SR).run).toBe(false);
   });
+
+  // The gate's root cause, one stage away. A window that is mostly exact zeros
+  // has its RMS diluted by them and its envelope peak taken from the sliver of
+  // REAL material at its edge, so on a take with a stretch of digital silence
+  // the bare search can return a window that measures the wrong thing. The
+  // gate was taught to refuse those windows; this stage consumed them still.
+  //
+  // Measured first, because the direction was not obvious. On the shapes that
+  // broke the gate — a silent lead-in or a mid-file cut beside a take with an
+  // even floor — the derivation is SAFE and stays safe: the boundary window's
+  // envelope peak is that same floor's, read over fewer samples, so it lands
+  // 0.0-0.6 dB BELOW the honest reading at 8 and 44.1 kHz and Remove Silence
+  // cuts marginally less. What is NOT safe is a floor that is not even: when
+  // the material beside the zeros is LOUDER than the take's own quietest
+  // stretch, the boundary window wins the search on its dilution and reports
+  // the louder material's peak, and the threshold lands as far above the
+  // floor as the two stretches are apart. Remove Silence removes material.
+  describe('a stretch of digital silence beside an uneven floor', () => {
+    /** `[trimmed head of zeros][louder floor][phrase][quiet sung passage]
+     * [the take's own quietest floor]`.
+     *
+     * The head's length is deliberately NOT a whole number of search steps:
+     * candidate windows start on 50 ms boundaries, so a head that ends 25 ms
+     * after one leaves a candidate that is 95 % zeros and 25 ms of the louder
+     * floor. That is what dilutes it under the -70 dBFS tail and wins it the
+     * bare search — a trimmed lead-in landing anywhere but exactly on a step,
+     * which is where a trim lands. */
+    function unevenFloorTake(sr: number): {
+      channel: Float32Array;
+      quiet: { start: number; end: number };
+    } {
+      const step = Math.round(0.05 * sr);
+      const head = new Float32Array(Math.round(1.5 * sr) - Math.round(step / 2));
+      const louder = gaussFloorDb(Math.round(1.5 * sr), -60, 23);
+      const phraseN = Math.round(0.8 * sr);
+      const phrase = new Float32Array(phraseN);
+      let phase = 0;
+      for (let i = 0; i < phraseN; i++) {
+        phase += (2 * Math.PI * 220) / sr;
+        phrase[i] = 0.25 * Math.sin(phase);
+      }
+      // A quiet sustained phrase — real material, 8 dB over the take's own
+      // floor, and the thing a wrong threshold deletes.
+      const quietN = Math.round(1.5 * sr);
+      const quiet = new Float32Array(quietN);
+      phase = 0;
+      const amp = Math.pow(10, -62 / 20) * Math.SQRT2;
+      for (let i = 0; i < quietN; i++) {
+        phase += (2 * Math.PI * 220) / sr;
+        quiet[i] = amp * Math.sin(phase);
+      }
+      const tail = gaussFloorDb(Math.round(2.5 * sr), -70, 7);
+      const channel = new Float32Array(head.length + louder.length + phraseN + quietN + tail.length);
+      let at = head.length;
+      for (const part of [louder, phrase, quiet, tail]) {
+        channel.set(part, at);
+        at += part.length;
+      }
+      const quietAt = head.length + louder.length + phraseN;
+      return { channel, quiet: { start: quietAt, end: quietAt + quietN } };
+    }
+
+    /** The share of a span the silence detector reads BELOW a threshold — the
+     * effect's own question, asked directly. */
+    function underThreshold(
+      channel: Float32Array,
+      sr: number,
+      span: { start: number; end: number },
+      thresholdDb: number,
+    ): number {
+      const env = envelopeFollower(maxAcrossChannels([channel]), sr, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
+      let under = 0;
+      for (let i = span.start; i < span.end; i++) if (toDb(env[i]) < thresholdDb) under++;
+      return under / (span.end - span.start);
+    }
+
+    it('measures the floor, not the sliver of louder material beside the zeros', () => {
+      for (const sr of [SR, 44100]) {
+        const { channel, quiet } = unevenFloorTake(sr);
+
+        // The precondition — this really is the boundary-window shape: the
+        // bare search returns a window that is almost all zeros, while the
+        // search that refuses those returns one with none.
+        const bare = measureNoiseWindow([channel], sr)!;
+        const honest = measureNoiseWindow([channel], sr, { rejectMostlySilentWindows: true })!;
+        const zeroFraction = (w: { startSample: number; lengthSamples: number }): number => {
+          let z = 0;
+          for (let i = w.startSample; i < w.startSample + w.lengthSamples; i++) if (channel[i] === 0) z++;
+          return z / w.lengthSamples;
+        };
+        expect(zeroFraction(bare)).toBeGreaterThan(0.9);
+        expect(zeroFraction(honest)).toBe(0);
+        // ...and the two readings really are 9-10 dB apart, which is the whole
+        // defect: measured -54.98 against -64.55 at 8 kHz, -55.31 against
+        // -65.31 at 44.1 kHz.
+        expect(bare.envelopePeakDb - honest.envelopePeakDb).toBeGreaterThan(8);
+
+        const res = deriveRemoveSilence([channel], sr);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        const thresholdDb = Number(res.params.thresholdDb);
+        expect(thresholdDb).toBeCloseTo(honest.envelopePeakDb, 6);
+
+        // And the quiet phrase is not silence: before this, half to four
+        // fifths of it read as silence and a length-changing stage cut it.
+        expect(underThreshold(channel, sr, quiet, thresholdDb)).toBeLessThan(0.05);
+        expect(underThreshold(channel, sr, quiet, bare.envelopePeakDb)).toBeGreaterThan(0.4);
+
+        // End to end: the phrase survives the effect. Its samples are still
+        // there, so the output cannot be shorter than the material kept.
+        const params = { ...res.params, minSilenceMs: 500 };
+        const out = silenceRemoverEffect.process([Float32Array.from(channel)], sr, params).channels[0];
+        expect(out.length).toBeGreaterThan(quiet.end - quiet.start);
+      }
+    }, 60000);
+
+    it('still measures the SAME floor when the silence sits beside an even one', () => {
+      // The converse, and the class N2 protects: an ordinary take with a
+      // trimmed lead-in has nothing louder beside its zeros, so refusing the
+      // boundary window changes the answer by a fraction of a decibel and the
+      // stage goes on running. Measured: 0.04-0.60 dB, always in the direction
+      // of cutting less.
+      for (const sr of [SR, 44100]) {
+        for (const leadSec of [0.35, 1.0, 2.0]) {
+          const head = new Float32Array(Math.round(leadSec * sr));
+          const body = gaussFloorDb(Math.round(4 * sr), -50, 7);
+          const phraseN = Math.round(0.8 * sr);
+          let phase = 0;
+          for (let i = 0; i < phraseN; i++) {
+            phase += (2 * Math.PI * 220) / sr;
+            body[Math.round(1.0 * sr) + i] += 0.25 * Math.sin(phase);
+          }
+          const channel = new Float32Array(head.length + body.length);
+          channel.set(body, head.length);
+
+          const res = deriveRemoveSilence([channel], sr);
+          expect(res.run).toBe(true);
+          if (!res.run) return;
+          const bare = measureNoiseWindow([channel], sr)!;
+          expect(Math.abs(Number(res.params.thresholdDb) - bare.envelopePeakDb)).toBeLessThan(1);
+        }
+      }
+    }, 60000);
+
+    it('declines when no half-second of real material exists to measure at all', () => {
+      // The cost of asking for the honest search: on a take whose every
+      // candidate window is mostly zeros there is no floor to read, and this
+      // stage now says so instead of deriving one from a sliver. The same
+      // refusal the gate makes on the same shape — and the safe one here,
+      // because the alternative is a threshold that deletes material.
+      const on = Math.round(0.15 * SR);
+      const off = Math.round(0.35 * SR);
+      const channel = new Float32Array(Math.round(8 * SR));
+      let at = 0;
+      let seed = 11;
+      while (at + on <= channel.length) {
+        channel.set(noise(on, 0.05, seed++), at);
+        at += on + off;
+      }
+      const res = deriveRemoveSilence([channel], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('real material');
+    });
+  });
 });
 
 // ── deriveGate (CC1) ────────────────────────────────────────────────────────

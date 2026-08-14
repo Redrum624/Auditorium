@@ -447,7 +447,12 @@ and the chain overrides only what the recording decides:
   while it is actually sounding, and its **makeup gain** is exactly the level
   the compression took away;
 - the **noise print** is learned from the quietest 500 ms in the selection;
-- the **silence threshold** is the loudest that quiet passage ever reads;
+- the **silence threshold** is the loudest that quiet passage ever reads —
+  measured over the quietest 500 ms of **real material**, so a trimmed lead-in
+  or an edited cut cannot pass a sliver of louder audio off as the floor;
+  Remove Silence declines outright on a take with no half-second of real
+  material left in it, because a stage that deletes what it calls silence must
+  not guess the level;
 - the **gate threshold** is that same reading plus 3 dB;
 - the **high-pass** sits an octave below the lowest note actually sung.
 
