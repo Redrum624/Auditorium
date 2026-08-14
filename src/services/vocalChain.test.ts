@@ -3,6 +3,7 @@ import {
   DE_ESSER_RMS_OFFSET_DB,
   GATE_HEADROOM_DB,
   GATE_HOLD_MS,
+  GATE_VOICED_FRACTION,
   STAGE_MEASURING_DETAIL,
   STAGE_RENDERING_DETAIL,
   VOCAL_CHAIN_STAGES,
@@ -26,6 +27,8 @@ import { defaultParamsFor, getEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
 import { compressorEffect } from '../effects/dynamics/CompressorEffect';
 import { noiseGateEffect } from '../effects/dynamics/NoiseGateEffect';
+import { noiseReductionEffect } from '../effects/restoration/NoiseReductionEffect';
+import { detectPitch } from '../dsp/pitchDetect';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
@@ -600,6 +603,42 @@ describe('deriveGate', () => {
     return out;
   }
 
+  /** A take that never stops but changes dynamic: a soft sustained verse
+   * followed by a loud one, over a floor so low that no window is ever bare
+   * room tone, and with only 150 ms breaths between phrases — every gap
+   * shorter than the 500 ms this app calls a pause. The quietest 500 ms is
+   * therefore SUNG, and a threshold derived from it sits over real singing. */
+  function continuousTakeWithSoftVerse(): { channel: Float32Array; soft: { start: number; end: number } } {
+    // No lead-in: a bare stretch of floor even a fraction of a window long
+    // would win the quietest-window search and turn this back into the
+    // ordinary case the stage already handles.
+    const lead = 0;
+    const verse = Math.round(3.5 * SR);
+    const channel = noise(lead + 2 * verse, Math.pow(10, -70 / 20) * Math.sqrt(3), 55);
+    const soft = { start: lead, end: lead + verse };
+    // Sung with a 150 ms breath every 1.1 s, at two levels a wide dynamic
+    // apart: pianissimo verse, then the chorus. Two harmonics over the
+    // fundamental, because what is under test is whether the passage reads as
+    // VOICE, and a bare sine is a weaker case than real singing rather than a
+    // stronger one.
+    for (let seg = 0; seg < 2; seg++) {
+      const amp = seg === 0 ? 0.022 : 0.25;
+      const from = lead + seg * verse;
+      let phase = 0;
+      for (let i = 0; i < verse; i++) {
+        const t = i / SR;
+        // Phase is INTEGRATED, not f(t)·t: the latter makes the instantaneous
+        // frequency f(t) + t·f'(t), which turns a ±3 Hz vibrato into a sweep
+        // hundreds of Hz wide over a phrase this long.
+        phase += (2 * Math.PI * (196 * (1 + 0.006 * Math.sin(2 * Math.PI * 5.5 * t)))) / SR;
+        if (t % 1.1 > 0.95) continue;
+        channel[from + i] +=
+          amp * (Math.sin(phase) + 0.4 * Math.sin(2 * phase) + 0.2 * Math.sin(3 * phase));
+      }
+    }
+    return { channel, soft };
+  }
+
   it('sets the threshold from the measured floor, above the loudest the detector reads there', () => {
     const signal = withNoisyGap(8, 0.5, 0.006, 4);
     const floor = measureNoiseWindow([signal], SR)!;
@@ -703,6 +742,29 @@ describe('deriveGate', () => {
       expect(res.reason).toContain('gating would mute all of it');
     });
 
+    // The middle regime, and the dangerous one. The three cases above fail
+    // TOTALLY — nothing at all survives the threshold — so an all-or-nothing
+    // guard separates them. A take that never stops but whose DYNAMICS vary
+    // does not fail totally: the quietest 500 ms lands inside the softest sung
+    // passage, the threshold lands above that passage, the loud material
+    // elsewhere keeps the take from looking empty, and the gate fades a real
+    // sung phrase to hard zero while reporting a cheerful Gated N s.
+    it('declines when its quietest window is quiet SINGING rather than a pause', () => {
+      const { channel, soft } = continuousTakeWithSoftVerse();
+
+      // The fixture is what it claims: the quietest 500 ms really does land
+      // inside the soft verse, so this is the regime under test and not a
+      // take with a pause the search preferred.
+      const window = measureNoiseWindow([channel], SR)!;
+      expect(window.startSample).toBeGreaterThanOrEqual(soft.start);
+      expect(window.startSample + window.lengthSamples).toBeLessThanOrEqual(soft.end);
+
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('singing');
+    });
+
     it('still runs on the take those three are the boundary of — pauses a window long', () => {
       // Same clicks, one noise window apart instead of half of one, over a real
       // floor. The guard must not have swallowed the case the stage is for.
@@ -732,6 +794,203 @@ describe('deriveGate', () => {
   });
 });
 
+// ── The two constants deriveGate introduces, and their populations ─────────
+// Both are kept sweeps rather than docblock narrative: a constant whose only
+// justification is a comment is a constant that can be edited without anything
+// failing, and both of these are load-bearing in BOTH directions.
+
+describe('GATE_HEADROOM_DB', () => {
+  /** Gaussian floor — a heavier tail than uniform, and the distribution the
+   * worst graze in the full sweep came from. RMS is solved for, not guessed:
+   * a sum of four uniforms on [-1,1] has variance 4/3. */
+  function gaussFloor(n: number, rmsDb: number, seed: number): Float32Array {
+    let s = seed >>> 0;
+    const next = (): number => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return (s / 0xffffffff) * 2 - 1;
+    };
+    const out = new Float32Array(n);
+    const k = Math.pow(10, rmsDb / 20) / Math.sqrt(4 / 3);
+    for (let i = 0; i < n; i++) out[i] = (next() + next() + next() + next()) * k;
+    return out;
+  }
+
+  function takeWithPauses(gapSec: number, floorDb: number, seed: number) {
+    const plan = [
+      { sung: false, sec: gapSec },
+      { sung: true, sec: 1.2 },
+      { sung: false, sec: gapSec },
+      { sung: true, sec: 1.0 },
+      { sung: false, sec: gapSec },
+    ];
+    const total = plan.reduce((a, p) => a + Math.round(p.sec * SR), 0);
+    const ch = gaussFloor(total, floorDb, seed);
+    const pauses: { start: number; end: number }[] = [];
+    let at = 0;
+    for (const p of plan) {
+      const n = Math.round(p.sec * SR);
+      if (!p.sung) pauses.push({ start: at, end: at + n });
+      else {
+        let phase = 0;
+        for (let i = 0; i < n; i++) {
+          const t = i / SR;
+          phase += (2 * Math.PI * 220) / SR;
+          const c = Math.min(1, t / 0.04) * Math.min(1, (n / SR - t) / 0.06);
+          ch[at + i] += 0.25 * c * Math.sin(phase);
+        }
+      }
+      at += n;
+    }
+    return { ch, pauses };
+  }
+
+  /** How far the floor's own envelope rises ABOVE the threshold derived from
+   * the quietest window, measured in the settled part of each interior pause —
+   * 300 ms clear of the previous phrase's decay and of the next one's onset, so
+   * what is measured is the floor and not a phrase edge. */
+  function graze(ch: Float32Array, pauses: { start: number; end: number }[], floorPeakDb: number): number {
+    const env = envelopeFollower(maxAcrossChannels([ch]), SR, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
+    const guard = Math.round(0.3 * SR);
+    let worst = -Infinity;
+    for (const p of pauses.slice(1, -1)) {
+      for (let i = p.start + guard; i < p.end - guard; i++) {
+        const d = toDb(env[i]) - floorPeakDb;
+        if (d > worst) worst = d;
+      }
+    }
+    return worst;
+  }
+
+  it('is larger than the floor ever grazes the level it is measured from, raw AND after Noise Reduction', () => {
+    // The corner the full 144-take sweep (4 rates x 3 gap lengths x 3 floors x
+    // 2 distributions x 2 seeds) found worst, reproduced here in eight takes:
+    // 8 kHz, short pauses, Gaussian floor. The lean slice lands on the full
+    // sweep's exact worst figures, which is why it is the slice that is kept.
+    let worstRaw = -Infinity;
+    let worstAfterNr = -Infinity;
+    for (const gapSec of [1.5, 3.0]) {
+      for (const floorDb of [-35, -45]) {
+        for (const seed of [7, 23]) {
+          const { ch, pauses } = takeWithPauses(gapSec, floorDb, seed);
+          const raw = measureNoiseWindow([ch], SR)!;
+          worstRaw = Math.max(worstRaw, graze(ch, pauses, raw.envelopePeakDb));
+
+          const nr = deriveNoiseReduction([ch], SR);
+          if (!nr.run) throw new Error('expected Noise Reduction to run on this fixture');
+          (globalThis as { __effectExtra?: unknown }).__effectExtra = nr.extra;
+          const out = noiseReductionEffect.process([Float32Array.from(ch)], SR, nr.params).channels;
+          delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+          const after = measureNoiseWindow(out, SR)!;
+          worstAfterNr = Math.max(worstAfterNr, graze(out[0], pauses, after.envelopePeakDb));
+        }
+      }
+    }
+
+    // The graze is REAL — a headroom of 0 would put the threshold under the
+    // floor's own extreme, which is the defect this constant exists for.
+    expect(worstRaw).toBeGreaterThan(0.3);
+    // Noise Reduction makes it worse, not better: its residual is peakier than
+    // the floor it replaced. This is why a 1 dB headroom would not do, and the
+    // audio that reaches this stage is always the post-NR audio.
+    expect(worstAfterNr).toBeGreaterThan(worstRaw);
+
+    // Absolute windows, so this fails if either population moves — writing the
+    // bounds in terms of GATE_HEADROOM_DB would move with the constant and so
+    // could never fail. Measured: 0.946 dB raw, 2.369 dB after NR.
+    expect(worstRaw).toBeLessThan(1.5);
+    expect(worstAfterNr).toBeGreaterThan(1.8);
+    expect(worstAfterNr).toBeLessThan(2.9);
+
+    // And the constant covers the worst of them. Drop it to 2 and this fails.
+    expect(worstAfterNr).toBeLessThan(GATE_HEADROOM_DB);
+    expect(GATE_HEADROOM_DB).toBe(3);
+  }, 60000);
+});
+
+describe('GATE_VOICED_FRACTION', () => {
+  /** The voiced share of a 500 ms window — the statistic the gate declines on. */
+  function voicedFraction(window: Float32Array): number {
+    const track = detectPitch(window, SR);
+    if (track.frames.length === 0) return 0;
+    let voiced = 0;
+    for (const f of track.frames) if (f.f0Hz !== null) voiced++;
+    return voiced / track.frames.length;
+  }
+
+  const WINDOW = Math.round((NOISE_WINDOW_MS / 1000) * SR);
+
+  /** Soft singing: a fundamental with two harmonics and vibrato, over its own
+   * faint floor. Phase is integrated so the vibrato stays a vibrato. */
+  function sung(rmsDb: number, f0: number, breathMs: number): Float32Array {
+    const amp = Math.pow(10, rmsDb / 20);
+    const out = noise(WINDOW, amp * 0.02, 5);
+    let phase = 0;
+    for (let i = 0; i < WINDOW; i++) {
+      const t = i / SR;
+      phase += (2 * Math.PI * f0 * (1 + 0.006 * Math.sin(2 * Math.PI * 5.5 * t))) / SR;
+      out[i] += amp * 1.2 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase) + 0.2 * Math.sin(3 * phase));
+    }
+    if (breathMs > 0) {
+      const bn = Math.round((breathMs / 1000) * SR);
+      const at = Math.round((WINDOW - bn) / 2);
+      const quiet = noise(bn, Math.pow(10, (rmsDb - 25) / 20), 77);
+      out.set(quiet, at);
+    }
+    return out;
+  }
+
+  it('separates every noise floor from every soft sung window, with the constant between them', () => {
+    // Floors: uniform and Gaussian, across the range room tone actually
+    // occupies, three seeds. Voice is periodic; room tone is not.
+    const floors: number[] = [];
+    for (const rmsDb of [-30, -45, -60, -75]) {
+      for (const seed of [7, 23, 101]) {
+        floors.push(voicedFraction(noise(WINDOW, Math.pow(10, rmsDb / 20) * Math.sqrt(3), seed)));
+        let s = seed >>> 0;
+        const g = new Float32Array(WINDOW);
+        const k = Math.pow(10, rmsDb / 20) / Math.sqrt(4 / 3);
+        for (let i = 0; i < WINDOW; i++) {
+          const nx = (): number => {
+            s = (s * 1664525 + 1013904223) >>> 0;
+            return (s / 0xffffffff) * 2 - 1;
+          };
+          g[i] = (nx() + nx() + nx() + nx()) * k;
+        }
+        floors.push(voicedFraction(g));
+      }
+    }
+
+    // Voices: three fundamentals across the sung range, four levels down to
+    // -50 dBFS, and — the hard case — windows carrying a breath of up to
+    // 350 ms of the 500, which is what drags a real sung window's fraction
+    // down toward the floors.
+    const voices: number[] = [];
+    for (const rmsDb of [-20, -30, -40, -50]) {
+      for (const f0 of [98, 196, 392]) {
+        for (const breathMs of [0, 150, 250, 350]) voices.push(voicedFraction(sung(rmsDb, f0, breathMs)));
+      }
+    }
+
+    expect(floors).toHaveLength(24);
+    expect(voices).toHaveLength(48);
+
+    // Absolute bounds on both populations, so a drift in either fails here
+    // rather than silently widening or closing the gap. Measured over the
+    // wider sweep: floors 0.000 exactly (every one), voices 0.156 at worst.
+    const worstFloor = Math.max(...floors);
+    const worstVoice = Math.min(...voices);
+    expect(worstFloor).toBeLessThan(0.02);
+    expect(worstVoice).toBeGreaterThan(0.12);
+
+    // The constant sits between them, with room on both sides: above the
+    // floors by more than two frames' worth, and more than three times below
+    // the hardest sung window.
+    expect(GATE_VOICED_FRACTION).toBeGreaterThan(worstFloor);
+    expect(GATE_VOICED_FRACTION).toBeLessThan(worstVoice / 3);
+    expect(GATE_VOICED_FRACTION).toBe(0.05);
+  }, 60000);
+});
+
 // ── deriveCompressor ────────────────────────────────────────────────────────
 
 describe('deriveCompressor', () => {
@@ -759,46 +1018,88 @@ describe('deriveCompressor', () => {
   // This is the test that stops those two constants drifting apart. Shorten the
   // hold below the noise window and the pauses stop carrying a measurable
   // floor; this is where that shows up.
-  describe('the floor survives the gate', () => {
+  describe('what survives the gate, and what does not', () => {
     /** Phrases over a real floor with pauses long enough that the gate reaches
-     * hard zero inside them — the precondition asserted below, not assumed. */
-    function gappedProgramme(): Float32Array {
-      const out = noise(WIN * 20, 0.004, 5);
+     * hard zero inside them. `padSamples` slides the whole take against
+     * `measureNoiseWindow`'s 50 ms chunk grid, so the gate's fade lands at
+     * every phase relative to the windows the search can choose from — the
+     * variable this describe exists to sweep. */
+    function gappedProgramme(floorDb: number, padSamples: number): Float32Array {
+      const out = noise(WIN * 20 + padSamples, Math.pow(10, floorDb / 20) * Math.sqrt(3), 5);
       for (const w of [4, 5, 10, 11, 16, 17]) {
-        for (let i = 0; i < WIN; i++) out[w * WIN + i] += 0.2 * Math.sin((2 * Math.PI * 220 * i) / SR);
+        let phase = 0;
+        for (let i = 0; i < WIN; i++) {
+          phase += (2 * Math.PI * 220) / SR;
+          out[padSamples + w * WIN + i] += 0.2 * Math.sin(phase);
+        }
       }
       return out;
     }
 
-    it('leaves a measurable noise window in every pause, and the same threshold with it', () => {
-      const raw = gappedProgramme();
-      const gate = deriveGate([raw], SR);
-      if (!gate.run) throw new Error('expected the gate to run');
-      const gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
+    it('the FLOOR READING does not: on a gated take the quietest window is a fade tail, tens of dB low', () => {
+      // The mechanism, stated honestly because a previous version of this test
+      // asserted the opposite and passed on one lucky fixture. `measureNoiseWindow`
+      // does NOT return the untouched hold window — it returns the QUIETEST
+      // window it accepts, and after gating that is one straddling the fade,
+      // kept out of the reject bin only by sitting above SILENCE_RMS
+      // (2^-15, chainAnalysis.ts). Which window wins depends on where the fade
+      // falls against the 50 ms chunk grid, so it moves with the floor level
+      // and with the take's alignment.
+      let worstUnderRead = 0;
+      for (const floorDb of [-30, -40, -50]) {
+        for (const padSamples of [0, 137, 331]) {
+          const raw = gappedProgramme(floorDb, padSamples);
+          const gate = deriveGate([raw], SR);
+          if (!gate.run) throw new Error('expected the gate to run');
+          const gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
+          const before = measureNoiseWindow([raw], SR)!;
+          const after = measureNoiseWindow(gated, SR);
+          // It is always still MEASURABLE — that much of the old claim holds,
+          // and it is what stops `deriveCompressor` declining.
+          expect(after).not.toBeNull();
+          worstUnderRead = Math.max(worstUnderRead, before.envelopePeakDb - after!.envelopePeakDb);
+        }
+      }
+      // Measured across this sweep and the wider one: the under-read reaches
+      // tens of dB. Asserted so that restating the old "reads the same level"
+      // claim fails here instead of shipping.
+      expect(worstUnderRead).toBeGreaterThan(3);
+    }, 60000);
 
-      // The gate really did silence a large part of the take: without this the
-      // rest of the test would pass on audio it never touched.
-      const zeros = gated[0].reduce((n: number, v: number) => (v === 0 ? n + 1 : n), 0);
-      expect(zeros / gated[0].length).toBeGreaterThan(0.3);
+    it('the COMPRESSOR THRESHOLD does, across floor levels and fade phases', () => {
+      // The invariant that actually matters, and the one the ordering
+      // constraint (N2) needed: whatever the floor reading does, the boundary
+      // the compressor derives from it barely moves, because the samples the
+      // under-read newly admits are few beside the sounding material and the
+      // gated gaps are exactly zero — never above any positive threshold.
+      let worstDelta = 0;
+      let sawRealGating = false;
+      for (const floorDb of [-30, -40, -50]) {
+        for (const padSamples of [0, 137, 331]) {
+          const raw = gappedProgramme(floorDb, padSamples);
+          const gate = deriveGate([raw], SR);
+          if (!gate.run) throw new Error('expected the gate to run');
+          const gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
 
-      // The floor is still there to measure...
-      const after = measureNoiseWindow(gated, SR);
-      expect(after).not.toBeNull();
-      // ...and reads the floor's own level rather than a voice window's. The
-      // tolerance is 1 dB because the surviving window need not be the SAME
-      // 500 ms the ungated search picked (measured here: 0.61 dB apart); the
-      // failure this guards against is tens of dB away, not fractions.
-      const before = measureNoiseWindow([raw], SR)!;
-      expect(Math.abs(after!.envelopePeakDb - before.envelopePeakDb)).toBeLessThan(1);
+          const zeros = gated[0].reduce((n: number, v: number) => (v === 0 ? n + 1 : n), 0);
+          if (zeros / gated[0].length > 0.3) sawRealGating = true;
 
-      // Which is the whole point: the compressor derives the same threshold on
-      // the gated take as it would have on the ungated one, with no knowledge
-      // of the gate and no parameter handed to it.
-      const onRaw = deriveCompressor([raw], SR);
-      const onGated = deriveCompressor(gated, SR);
-      if (!onRaw.run || !onGated.run) throw new Error('expected both to run');
-      expect(Number(onGated.params.thresholdDb)).toBeCloseTo(Number(onRaw.params.thresholdDb), 1);
-    });
+          const onRaw = deriveCompressor([raw], SR);
+          const onGated = deriveCompressor(gated, SR);
+          if (!onRaw.run || !onGated.run) throw new Error('expected both to run');
+          worstDelta = Math.max(
+            worstDelta,
+            Math.abs(Number(onGated.params.thresholdDb) - Number(onRaw.params.thresholdDb))
+          );
+        }
+      }
+      // Without this the sweep could pass on audio the gate never touched.
+      expect(sawRealGating).toBe(true);
+      // Measured worst across the wider sweep (two rates, four floor levels,
+      // six fade phases): 0.052 dB. An absolute bound, not one phrased in
+      // terms of anything that moves with it.
+      expect(worstDelta).toBeLessThan(0.5);
+    }, 60000);
   });
 
   it('derives a threshold inside the programme, well above the shipped absolute default', () => {
@@ -2118,11 +2419,15 @@ describe('the audio between sung phrases', () => {
   /** One sung note: vibrato, and an attack/decay contour so the boundaries are
    * real onsets and releases rather than steps. */
   function sing(channel: Float32Array, at: number, n: number, rate: number): void {
+    let phase = 0;
     for (let i = 0; i < n; i++) {
       const t = i / rate;
       const contour = Math.min(1, t / 0.04) * Math.min(1, (n / rate - t) / 0.06);
-      const hz = 220 + 4 * Math.sin(2 * Math.PI * 5.5 * t);
-      channel[at + i] += 0.25 * contour * Math.sin(2 * Math.PI * hz * t);
+      // Integrated phase, so the ±4 Hz vibrato stays ±4 Hz: writing
+      // sin(2*pi*f(t)*t) instead gives an instantaneous frequency of
+      // f(t) + t*f'(t), which sweeps far outside the vibrato band.
+      phase += (2 * Math.PI * (220 + 4 * Math.sin(2 * Math.PI * 5.5 * t))) / rate;
+      channel[at + i] += 0.25 * contour * Math.sin(phase);
     }
   }
 

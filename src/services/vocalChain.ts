@@ -123,6 +123,7 @@ import type { EffectParamValue, EffectReport } from '../effects/types';
 import { reductionDb } from '../effects/dynamics/CompressorEffect';
 import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
 import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
+import { detectPitch } from '../dsp/pitchDetect';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
 import {
   HUM_EXCESS_THRESHOLD_DB,
@@ -251,7 +252,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Noise Gate',
     effectId: 'noise-gate',
     defaultEnabled: true,
-    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is the loudest the silence detector reads inside the quietest ${NOISE_WINDOW_MS} ms, the same measurement Remove Silence uses. It holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
+    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from the quietest ${NOISE_WINDOW_MS} ms, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the quietest passage turns out to be the recording itself or a softly sung phrase. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
     weight: 4,
   },
   {
@@ -415,19 +416,30 @@ export function deriveDeEsser(channels: Float32Array[]): StageResolution {
  *
  * ── Why this still works on a take the gate has been through (CC1 / N2) ─────
  * "Sounding" is defined against the noise floor, and the gate that now runs
- * before this stage silences the pauses the floor was measured in — so the
- * obvious worry is that there is no floor left here to measure, and that this
- * derivation would decline or read the boundary off a window containing voice.
- * It does not, and the reason is an identity rather than luck: the gate holds
- * its gain at 1 for `GATE_HOLD_MS` after the level drops, and `GATE_HOLD_MS`
- * IS `NOISE_WINDOW_MS`. Every pause the gate closes on therefore keeps a full
- * untouched noise window in front of the fade — exactly the window this
- * measurement needs. Measured over 16 gated takes (8/22.05/44.1/48 kHz x
- * 0.8/1.5/3/8 s pauses, up to 86 % of the take silenced): `measureNoiseWindow`
- * never came back null, and the derived threshold moved by at most 0.02 dB
- * against the same take ungated. `the floor survives the gate` in
- * vocalChain.test.ts pins it, and it is the reason those two constants may not
- * drift apart.
+ * before this stage silences the pauses that floor was measured in — so the
+ * worry is that there is nothing left here to measure and this derivation would
+ * decline, or would read the boundary off a window containing voice.
+ *
+ * What actually happens, stated precisely, because an earlier version of this
+ * note got it wrong and a fixture-lucky test agreed with it. `measureNoiseWindow`
+ * does NOT return the untouched window the gate's hold leaves in front of each
+ * fade. It returns the QUIETEST window it accepts, and after gating that is a
+ * window straddling the fade — mostly hard zeros — which is kept out of the
+ * reject bin only by sitting above `SILENCE_RMS` (2^-15, chainAnalysis.ts:148).
+ * Which window wins depends on where the fade falls against the 50 ms chunk
+ * grid, so the FLOOR READING is not preserved at all: swept over two rates,
+ * four floor levels and six fade phases it came back as much as 41 dB below
+ * the ungated reading.
+ *
+ * The boundary this derivation builds on it moves anyway, and that is the
+ * invariant worth having: the same sweep moved the derived threshold by at most
+ * 0.052 dB. Two reasons, both structural rather than lucky — the gated gaps are
+ * exactly zero, so no under-read threshold can admit them (an envelope of 0 is
+ * above no positive level), and the extra fade-tail samples an under-read does
+ * admit are a vanishing share of the sounding population the median is taken
+ * over. `what survives the gate, and what does not` in vocalChain.test.ts pins
+ * both halves: that the floor reading is NOT preserved, and that the threshold
+ * is.
  */
 export function deriveCompressor(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('compressor');
@@ -638,16 +650,19 @@ export function deriveRemoveSilence(channels: Float32Array[], sampleRate: number
  * cannot: its reopen is instant, so one grazing sample re-opens it for a whole
  * hold. And the level IS grazed, because it is a maximum taken over 500 ms
  * being asked to bound pauses several times longer — the same floor simply
- * reaches it again. Measured over 216 constructed takes (8/22.05/44.1/48 kHz,
- * 1.5/3/6 s pauses, -35/-45/-60 dBFS floors, uniform and Gaussian floors, three
+ * reaches it again. Measured over 144 constructed takes (8/22.05/44.1/48 kHz,
+ * 1.5/3/6 s pauses, -35/-45/-60 dBFS floors, uniform and Gaussian floors, two
  * seeds each), the floor's envelope in the settled part of a pause exceeds that
- * threshold by up to 0.946 dB raw — and by up to 2.270 dB after Noise
+ * threshold by up to 0.946 dB raw — and by up to 2.369 dB after Noise
  * Reduction, whose residual is peakier than the floor it replaced and which is
  * what actually reaches this stage in the chain. `GATE_HEADROOM_DB` is
  * therefore 3 dB: the smallest whole decibel above the worst measured graze.
  * It is not a safety cushion over the voice — on the reference take it moves
  * the threshold from -50.4 to -47.4 dBFS, still some 22 dB below the sounding
- * median `deriveCompressor` measures on the same take.
+ * median `deriveCompressor` measures on the same take. The worst corner is
+ * 8 kHz with short pauses over a Gaussian floor; the eight takes of it that
+ * reproduce both figures exactly are KEPT as the `GATE_HEADROOM_DB` suite in
+ * vocalChain.test.ts, rather than living only in this comment.
  *
  * It needs no clean noise print, so unlike Noise Reduction this stage does NOT
  * decline on a noisy take — which is the whole point, since that is the take
@@ -686,10 +701,46 @@ export const GATE_HOLD_MS = NOISE_WINDOW_MS;
 
 /** How far above the measured floor peak the gate's threshold sits, dB. See the
  * derivation note above: 3 dB is the smallest whole decibel above the worst
- * graze measured over 216 constructed takes (0.946 dB raw, 2.270 dB after Noise
+ * graze measured over 144 constructed takes (0.946 dB raw, 2.369 dB after Noise
  * Reduction). Zero would put the threshold exactly ON the floor's own extreme,
- * which is where it re-opens. */
+ * which is where it re-opens. Pinned by the `GATE_HEADROOM_DB` suite. */
 export const GATE_HEADROOM_DB = 3;
+
+/**
+ * The share of the quietest window's pitch frames that may read VOICED before
+ * this stage refuses to treat that window as a pause.
+ *
+ * The threshold is only meaningful if the quietest 500 ms is room tone. On a
+ * take that never stops but changes dynamic — a pianissimo verse and a loud
+ * chorus, with only breaths between phrases — the quietest window lies inside
+ * the SOFTEST SUNG PASSAGE, the threshold lands above that passage's whole
+ * envelope, and the all-or-nothing guard above waves it through because the
+ * chorus keeps the take from looking empty. Measured on exactly that fixture:
+ * 100 % of the soft verse faded to hard zero, sung material destroyed by a
+ * stage that is on by default. That is the regime this constant exists for.
+ *
+ * Voice is periodic and room tone is not, which is a question `detectPitch`
+ * already answers per frame — and `pitchDetect`'s own note says so: its silence
+ * gate is a digital-silence floor, and "audible noise floors are rejected by
+ * the periodicity threshold instead". The two populations do not overlap.
+ * Measured over a 500 ms window at 8/22.05/44.1 kHz:
+ *
+ *   - 96 noise floors — uniform and Gaussian, -30 to -75 dBFS, three seeds, plus
+ *     the post-Noise-Reduction residual that actually reaches this stage —
+ *     read a voiced fraction of 0.000. Not "near zero": every one was exactly
+ *     zero frames out of 46.
+ *   - 144 sung windows — three fundamentals (98/196/392 Hz) with harmonics and
+ *     vibrato, -20 to -50 dBFS, alone and carrying breaths of 150/250/350 ms —
+ *     read 0.156 at worst, and that worst case is a window that is 70 % breath.
+ *
+ * 0.05 sits between them with margin in both directions: it tolerates two
+ * spurious voiced frames in a floor window (the populations gave none), and it
+ * is more than three times below the hardest real sung window. When it fires
+ * the stage DECLINES rather than guessing a lower threshold — the chain's
+ * other stages refuse when their measurement is not the one they need, and a
+ * gate that cannot tell a pause from a soft phrase must not pick one.
+ */
+export const GATE_VOICED_FRACTION = 0.05;
 
 export function deriveGate(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('noise-gate');
@@ -730,6 +781,24 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
     return {
       run: false,
       reason: `nothing in the selection rises above the ${dbfsStr(thresholdDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`,
+    };
+  }
+
+  // ...and is it a pause rather than SOFT SINGING? The guard above only catches
+  // takes that fail totally. A take that never stops but changes dynamic keeps
+  // plenty of material above the threshold — its loud half — while the quietest
+  // window sits inside its soft half, so the threshold covers a real phrase and
+  // the gate mutes it. See `GATE_VOICED_FRACTION`: voice is periodic, room tone
+  // is not, and the pitch detector already answers that per frame.
+  const window = monoMix(channels).subarray(noise.startSample, noise.startSample + noise.lengthSamples);
+  const track = detectPitch(Float32Array.from(window), sampleRate);
+  let voicedFrames = 0;
+  for (const frame of track.frames) if (frame.f0Hz !== null) voicedFrames++;
+  const voicedFraction = track.frames.length === 0 ? 0 : voicedFrames / track.frames.length;
+  if (voicedFraction > GATE_VOICED_FRACTION) {
+    return {
+      run: false,
+      reason: `the quietest ${NOISE_WINDOW_MS} ms is singing rather than a pause — ${(voicedFraction * 100).toFixed(0)}% of it reads as voiced, where room tone reads none — so a threshold measured there would sit above a real phrase and mute it. Nothing was gated`,
     };
   }
 
