@@ -3,6 +3,7 @@ import {
   DE_ESSER_RMS_OFFSET_DB,
   GATE_HEADROOM_DB,
   GATE_HOLD_MS,
+  GATE_SHAPED_RESIDUAL_DB,
   GATE_VOICED_FRACTION,
   STAGE_MEASURING_DETAIL,
   STAGE_RENDERING_DETAIL,
@@ -33,7 +34,13 @@ import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
 import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
-import { NOISE_WINDOW_MS, measureNoiseWindow, programmeRmsDb, toDb } from '../dsp/chainAnalysis';
+import {
+  NOISE_WINDOW_MS,
+  measureNoiseWindow,
+  programmeRmsDb,
+  spectralTiltResidualDb,
+  toDb,
+} from '../dsp/chainAnalysis';
 import * as chainAnalysis from '../dsp/chainAnalysis';
 import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
@@ -639,6 +646,65 @@ describe('deriveGate', () => {
     return { channel, soft };
   }
 
+  /** A two-pole resonator — how a vocal tract shapes the noise a whisper is
+   * made of. Room tone has no such resonances; that difference is what the
+   * unvoiced guard measures. */
+  function resonate(x: Float32Array, hz: number, q: number): Float32Array {
+    const w = (2 * Math.PI * hz) / SR;
+    const r = Math.exp(-w / (2 * q));
+    const a1 = 2 * r * Math.cos(w);
+    const a2 = -r * r;
+    const out = new Float32Array(x.length);
+    let y1 = 0;
+    let y2 = 0;
+    for (let i = 0; i < x.length; i++) {
+      const y = x[i] + a1 * y1 + a2 * y2;
+      out[i] = y;
+      y2 = y1;
+      y1 = y;
+    }
+    return out;
+  }
+
+  function atRms(x: Float32Array, rms: number): Float32Array {
+    let s = 0;
+    for (let i = 0; i < x.length; i++) s += x[i] * x[i];
+    const g = rms / Math.sqrt(s / Math.max(1, x.length));
+    const out = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i++) out[i] = x[i] * g;
+    return out;
+  }
+
+  /** A whispered passage: noise through three vocal-tract formants, with the
+   * syllabic swell of speech. Unvoiced by construction — no fundamental — so
+   * the voiced check reads exactly zero on it. */
+  function whisper(n: number, rmsDb: number, seed: number): Float32Array {
+    let x = noise(n, 1, seed);
+    for (const [hz, q] of [
+      [500, 8],
+      [1500, 10],
+      [2500, 12],
+    ] as const) {
+      if (hz < (SR / 2) * 0.9) x = resonate(x, hz, q);
+    }
+    for (let i = 0; i < n; i++) x[i] *= 0.55 + 0.45 * Math.sin((2 * Math.PI * 4 * i) / SR);
+    return atRms(x, Math.pow(10, rmsDb / 20));
+  }
+
+  /** The N1 shape: a whispered verse and a loud sung chorus, with no pause
+   * anywhere. The quietest 500 ms lands in the whisper. */
+  function continuousTakeWithWhisperedVerse(): { channel: Float32Array; soft: { start: number; end: number } } {
+    const verse = Math.round(3.5 * SR);
+    const channel = new Float32Array(2 * verse);
+    channel.set(whisper(verse, -36, 41), 0);
+    let phase = 0;
+    for (let i = 0; i < verse; i++) {
+      phase += (2 * Math.PI * 196) / SR;
+      channel[verse + i] = 0.25 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase) + 0.2 * Math.sin(3 * phase));
+    }
+    return { channel, soft: { start: 0, end: verse } };
+  }
+
   it('sets the threshold from the measured floor, above the loudest the detector reads there', () => {
     const signal = withNoisyGap(8, 0.5, 0.006, 4);
     const floor = measureNoiseWindow([signal], SR)!;
@@ -763,6 +829,27 @@ describe('deriveGate', () => {
       expect(res.run).toBe(false);
       if (res.run) return;
       expect(res.reason).toContain('singing');
+    });
+
+    // N1 — the unvoiced neighbour of the case above. Periodicity cannot see it:
+    // a whisper has no fundamental, so the voiced check reads 0.000 and waves it
+    // through, and the passage is muted exactly as the sung one was.
+    it('declines when its quietest window is an unvoiced vocal passage — a whisper', () => {
+      const { channel, soft } = continuousTakeWithWhisperedVerse();
+
+      const window = measureNoiseWindow([channel], SR)!;
+      expect(window.startSample).toBeGreaterThanOrEqual(soft.start);
+      expect(window.startSample + window.lengthSamples).toBeLessThanOrEqual(soft.end);
+      // The precondition that makes this the N1 case and not the C1 one.
+      const mono = Float32Array.from(channel.subarray(window.startSample, window.startSample + window.lengthSamples));
+      const track = detectPitch(mono, SR);
+      const voiced = track.frames.filter((f) => f.f0Hz !== null).length / track.frames.length;
+      expect(voiced).toBe(0);
+
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('vocal tract');
     });
 
     it('still runs on the take those three are the boundary of — pauses a window long', () => {
@@ -991,6 +1078,128 @@ describe('GATE_VOICED_FRACTION', () => {
   }, 60000);
 });
 
+describe('GATE_SHAPED_RESIDUAL_DB', () => {
+  function res2(x: Float32Array, sr: number, hz: number, q: number): Float32Array {
+    const w = (2 * Math.PI * hz) / sr;
+    const r = Math.exp(-w / (2 * q));
+    const a1 = 2 * r * Math.cos(w);
+    const a2 = -r * r;
+    const out = new Float32Array(x.length);
+    let y1 = 0;
+    let y2 = 0;
+    for (let i = 0; i < x.length; i++) {
+      const y = x[i] + a1 * y1 + a2 * y2;
+      out[i] = y;
+      y2 = y1;
+      y1 = y;
+    }
+    return out;
+  }
+
+  function at(x: Float32Array, rmsDb: number): Float32Array {
+    let s = 0;
+    for (let i = 0; i < x.length; i++) s += x[i] * x[i];
+    const g = Math.pow(10, rmsDb / 20) / Math.sqrt(s / Math.max(1, x.length));
+    const out = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i++) out[i] = x[i] * g;
+    return out;
+  }
+
+  /** Room tone rolled off by a one-pole at `cutHz` — rumble, HVAC, a preamp's
+   * hiss. The tilted members are the point: they are what defeats spectral
+   * flatness and centroid, and what the straight-line fit absorbs. */
+  function floorTilted(n: number, sr: number, rmsDb: number, seed: number, cutHz: number): Float32Array {
+    const src = noise(n, 1, seed);
+    const a = Math.exp((-2 * Math.PI * cutHz) / sr);
+    const out = new Float32Array(n);
+    let y = 0;
+    for (let i = 0; i < n; i++) {
+      y = a * y + (1 - a) * src[i];
+      out[i] = y;
+    }
+    return at(out, rmsDb);
+  }
+
+  function whisperWin(n: number, sr: number, rmsDb: number, seed: number, modulated: boolean): Float32Array {
+    let x = noise(n, 1, seed);
+    for (const [hz, q] of [
+      [500, 8],
+      [1500, 10],
+      [2500, 12],
+    ] as const) {
+      if (hz < (sr / 2) * 0.9) x = res2(x, sr, hz, q);
+    }
+    if (modulated) for (let i = 0; i < n; i++) x[i] *= 0.55 + 0.45 * Math.sin((2 * Math.PI * 4 * i) / sr);
+    return at(x, rmsDb);
+  }
+
+  it('separates a vocal tract from a room, where flatness and centroid cannot', () => {
+    const floors: number[] = [];
+    const vocals: number[] = [];
+    for (const sr of [8000, 22050, 44100, 48000]) {
+      const n = Math.round((NOISE_WINDOW_MS / 1000) * sr);
+      for (const seed of [7, 23, 101]) {
+        floors.push(spectralTiltResidualDb(at(noise(n, 1, seed), -40), sr));
+        for (const cut of [400, 800, 2500]) {
+          floors.push(spectralTiltResidualDb(floorTilted(n, sr, -40, seed, cut), sr));
+        }
+      }
+      for (const seed of [7, 23]) {
+        vocals.push(spectralTiltResidualDb(whisperWin(n, sr, -40, seed, true), sr));
+        vocals.push(spectralTiltResidualDb(whisperWin(n, sr, -40, seed, false), sr));
+        // Sibilants as a SINGLE broad resonance — the least-shaped member of
+        // the family, and the one that sets the lower bound. Only those below
+        // Nyquist at this rate, which is why 8 kHz keeps just the low ones.
+        for (const [hz, q] of [
+          [2800, 3],
+          [3000, 3],
+          [4000, 4],
+          [6000, 5],
+        ] as const) {
+          if (hz < (sr / 2) * 0.9) vocals.push(spectralTiltResidualDb(at(res2(noise(n, 1, seed), sr, hz, q), -40), sr));
+        }
+      }
+    }
+    expect(floors).toHaveLength(48);
+    expect(vocals.length).toBeGreaterThanOrEqual(20);
+
+    // Absolute windows on both populations, so a drift in either fails here
+    // rather than quietly closing the gap. Measured across the four rates:
+    // floors 0.63-1.91 dB, unvoiced vocal 3.20-10.58 dB.
+    const worstFloor = Math.max(...floors);
+    const worstVocal = Math.min(...vocals);
+    expect(worstFloor).toBeLessThan(2.2);
+    expect(worstVocal).toBeGreaterThan(3.0);
+
+    // The constant sits inside the measured gap, with margin on both sides.
+    expect(GATE_SHAPED_RESIDUAL_DB).toBeGreaterThan(worstFloor * 1.25);
+    expect(GATE_SHAPED_RESIDUAL_DB).toBeLessThan(worstVocal * 0.8);
+    expect(GATE_SHAPED_RESIDUAL_DB).toBe(2.5);
+  }, 60000);
+
+  it('the one unvoiced passage this cannot catch, measured rather than forgotten', () => {
+    // Broadband hiss with no vocal-tract shaping, at a constant level — a
+    // first-order high-passed noise. A person can make this sound, but nothing
+    // about the SIGNAL is vocal: it lands inside the floor population here, and
+    // it lands inside it on the four other statistics that were tried. This
+    // test exists so that limitation stays measured; if some future signal
+    // separates it, this is what will fail and say so.
+    for (const sr of [8000, 44100]) {
+      const n = Math.round((NOISE_WINDOW_MS / 1000) * sr);
+      const src = noise(n, 1, 41);
+      const a = Math.exp((-2 * Math.PI * Math.min(1200, sr * 0.3)) / sr);
+      const hp = new Float32Array(n);
+      let y = 0;
+      for (let i = 0; i < n; i++) {
+        y = a * y + (1 - a) * src[i];
+        hp[i] = src[i] - y;
+      }
+      const shaped = spectralTiltResidualDb(at(hp, -36), sr);
+      expect(shaped).toBeLessThan(GATE_SHAPED_RESIDUAL_DB);
+    }
+  }, 60000);
+});
+
 // ── deriveCompressor ────────────────────────────────────────────────────────
 
 describe('deriveCompressor', () => {
@@ -1095,9 +1304,11 @@ describe('deriveCompressor', () => {
       }
       // Without this the sweep could pass on audio the gate never touched.
       expect(sawRealGating).toBe(true);
-      // Measured worst across the wider sweep (two rates, four floor levels,
-      // six fade phases): 0.052 dB. An absolute bound, not one phrased in
-      // terms of anything that moves with it.
+      // Measured worst on THIS sweep — the one running here, three floor
+      // levels x three fade phases: 0.0917 dB, at floor -30 dB / pad 137. (The
+      // wider out-of-tree sweep at two rates and six phases read 0.052 dB; the
+      // number quoted beside a test has to be the one that test measures.) An
+      // absolute bound, not one phrased in terms of anything that moves with it.
       expect(worstDelta).toBeLessThan(0.5);
     }, 60000);
   });

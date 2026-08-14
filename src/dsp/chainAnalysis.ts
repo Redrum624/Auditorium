@@ -13,6 +13,7 @@
 import { envelopeFollower, maxAcrossChannels } from './envelope';
 import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from './silenceDetect';
 import { SILENCE_RMS } from './pitchDetect';
+import { stft } from './stft';
 
 /** Floor for every dB conversion here (-240 dBFS). Digital silence has no dB
  * value; clamping keeps `-Infinity` out of arithmetic and out of the UI. */
@@ -163,6 +164,71 @@ export function measureNoiseWindow(channels: Float32Array[], sampleRate: number)
     rmsDb: toDb(bestRms),
     envelopePeakDb: toDb(envPeak),
   };
+}
+
+/**
+ * How far a passage's spectrum departs from a straight line in log-frequency,
+ * in dB — the measurement that tells a NOISE FLOOR from an UNVOICED VOICE.
+ *
+ * Periodicity answers "is this voice" for anything with a fundamental, and
+ * `deriveGate` asks it first. It cannot answer for a whisper, a sustained
+ * aspirate or a held sibilant: those are noise, so a pitch detector reads them
+ * as unvoiced exactly as it reads room tone. What still separates them is where
+ * the noise has been: a vocal tract imposes RESONANCES, and a room does not.
+ * Room tone is a tilt — white hiss is flat, rumble and HVAC slope down, a
+ * spectral-subtraction residual keeps the tilt of whatever it subtracted — and
+ * a tilt is a straight line in log-frequency. Formants are bumps on it.
+ *
+ * So: average power spectrum over the passage, in dB, least-squares fit of
+ * `a + b·log(bin)` across the band, and the RMS of what the line does not
+ * explain. The fit absorbs the tilt, whatever its slope, which is why this
+ * separates a formant-shaped whisper from a heavily rolled-off floor where
+ * spectral flatness and centroid do not — measured, both of those put a −45 dBFS
+ * one-pole-tilted floor and a whisper on the same side.
+ *
+ * Band: 120 Hz up to 0.84 of Nyquist, so the DC/rumble corner and the
+ * anti-alias rolloff — neither of which is programme — stay out of the fit.
+ * Returns 0 for a passage shorter than one analysis block, which is not a
+ * verdict but an absence of one: the caller must not read it as "floor".
+ */
+export function spectralTiltResidualDb(window: Float32Array, sampleRate: number): number {
+  const fftSize = 1024;
+  if (window.length < fftSize) return 0;
+  const { frames } = stft(window, fftSize, fftSize / 2);
+  if (frames.length === 0) return 0;
+  const bins = fftSize / 2 + 1;
+  const power = new Float64Array(bins);
+  for (const frame of frames) for (let k = 0; k < bins; k++) power[k] += frame[k] * frame[k];
+
+  const binHz = sampleRate / fftSize;
+  const lo = Math.max(1, Math.round(120 / binHz));
+  const hi = Math.min(bins - 1, Math.round((0.42 * sampleRate) / binHz));
+  if (hi - lo < 8) return 0;
+
+  let sx = 0;
+  let sy = 0;
+  let n = 0;
+  for (let k = lo; k <= hi; k++) {
+    sx += Math.log(k);
+    sy += 10 * Math.log10(power[k] / frames.length + 1e-20);
+    n++;
+  }
+  const mx = sx / n;
+  const my = sy / n;
+  let sxy = 0;
+  let sxx = 0;
+  for (let k = lo; k <= hi; k++) {
+    const dx = Math.log(k) - mx;
+    sxy += dx * (10 * Math.log10(power[k] / frames.length + 1e-20) - my);
+    sxx += dx * dx;
+  }
+  const slope = sxx > 0 ? sxy / sxx : 0;
+  let ss = 0;
+  for (let k = lo; k <= hi; k++) {
+    const r = 10 * Math.log10(power[k] / frames.length + 1e-20) - (my + slope * (Math.log(k) - mx));
+    ss += r * r;
+  }
+  return Math.sqrt(ss / n);
 }
 
 /**

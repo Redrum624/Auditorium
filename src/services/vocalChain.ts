@@ -136,6 +136,7 @@ import {
   monoMix,
   peakDb,
   programmeRmsDb,
+  spectralTiltResidualDb,
   toDb,
   toneExcessDb,
   type StageDelta,
@@ -252,7 +253,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Noise Gate',
     effectId: 'noise-gate',
     defaultEnabled: true,
-    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from the quietest ${NOISE_WINDOW_MS} ms, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the quietest passage turns out to be the recording itself or a softly sung phrase. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
+    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from the quietest ${NOISE_WINDOW_MS} ms, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the quietest passage turns out to be the recording itself, a softly sung phrase, or a whispered one. A take with no half-second pause anywhere in it is not gated at all. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
     weight: 4,
   },
   {
@@ -433,7 +434,8 @@ export function deriveDeEsser(channels: Float32Array[]): StageResolution {
  *
  * The boundary this derivation builds on it moves anyway, and that is the
  * invariant worth having: the same sweep moved the derived threshold by at most
- * 0.052 dB. Two reasons, both structural rather than lucky — the gated gaps are
+ * 0.052 dB, and the slice of it kept as a test — three floor levels x three
+ * fade phases — by 0.0917 dB. Two reasons, both structural rather than lucky — the gated gaps are
  * exactly zero, so no under-read threshold can admit them (an envelope of 0 is
  * above no positive level), and the extra fade-tail samples an under-read does
  * admit are a vanishing share of the sounding population the median is taken
@@ -742,6 +744,55 @@ export const GATE_HEADROOM_DB = 3;
  */
 export const GATE_VOICED_FRACTION = 0.05;
 
+/**
+ * How far the quietest window's spectrum may depart from a straight line in
+ * log-frequency, dB, before this stage stops believing it is room tone.
+ *
+ * `GATE_VOICED_FRACTION` settles the case where the quietest window is SUNG.
+ * It cannot settle the case where it is vocal but UNVOICED — a whisper, a
+ * sustained aspirate, a held sibilant — because those are noise, and a pitch
+ * detector reads them unvoiced exactly as it reads a floor. Measured, the
+ * consequence is identical to the sung one: a take whose soft half is whispered
+ * and whose loud half is sung comes back with 100 % of the whisper faded to
+ * hard zero.
+ *
+ * What still separates them is where the noise has been — a vocal tract puts
+ * resonances on it, a room does not. `spectralTiltResidualDb` measures exactly
+ * that (see its own note for why the tilt has to be fitted out rather than
+ * assumed flat). Measured over 500 ms windows at 8/22.05/44.1/48 kHz:
+ *
+ *   - noise floors — white, one-pole-tilted at 400, 800 and 2500 Hz, and the
+ *     post-Noise-Reduction residual — read 0.63 … 1.91 dB.
+ *   - unvoiced VOCAL — whispers (three formants, sustained and with syllabic
+ *     swell) and sibilants (single resonances from 2.8 to 6 kHz) — read
+ *     3.20 … 10.58 dB.
+ *
+ * 2.5 dB is the midpoint of that gap in the ratio sense (sqrt(1.91 x 3.20) =
+ * 2.47): 1.31x above the worst floor and 1.28x below the closest vocal window,
+ * which is a wider margin than the voiced check's. The closest vocal member is
+ * the least shaped one — a sibilant modelled as ONE broad resonance near
+ * Nyquist at the lowest rate, where a single wide hump is nearly a tilt; the
+ * whispers, which have three formants, sit three to five times clear.
+ *
+ * Four other signals were measured and rejected because their populations
+ * overlap outright: spectral flatness, spectral centroid, envelope modulation
+ * depth and voiced fraction all put a rolled-off floor and a whisper on the
+ * same side of every possible constant.
+ *
+ * ── The residual this does NOT close, stated plainly ────────────────────────
+ * One member of the unvoiced-vocal family survives every one of those five
+ * measurements: broadband noise with no vocal-tract shaping at all, at a
+ * constant level — a first-order high-passed hiss. It reads 1.60-2.04 dB here,
+ * inside the floor population, and is likewise inside it on flatness, centroid
+ * and modulation. That is not a gap in the measurement; it is what the
+ * measurement is telling us. Such a passage IS a noise floor in every physical
+ * sense, and no statistic can call it voice, because the only thing that makes
+ * it voice is that a person made it. `the one unvoiced passage this cannot
+ * catch` pins that overlap so the limitation stays measured rather than
+ * forgotten, and the user guide states it.
+ */
+export const GATE_SHAPED_RESIDUAL_DB = 2.5;
+
 export function deriveGate(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('noise-gate');
   const noise = measureNoiseWindow(channels, sampleRate);
@@ -807,6 +858,20 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
     return {
       run: false,
       reason: `the quietest ${NOISE_WINDOW_MS} ms is singing rather than a pause — ${(voicedFraction * 100).toFixed(0)}% of it reads as voiced, where room tone reads none — so a threshold measured there would sit above a real phrase and mute it. Nothing was gated`,
+    };
+  }
+
+  // ...and unvoiced voice? A whisper has no fundamental, so the check above
+  // reads zero on it and would wave a whispered verse through to be muted. The
+  // question that still has an answer is whether the noise has been through a
+  // VOCAL TRACT: resonances make it depart from the straight-line tilt a room's
+  // own noise follows. See `GATE_SHAPED_RESIDUAL_DB`, including the one member
+  // of this family that no measurement can catch.
+  const shapingDb = spectralTiltResidualDb(window, sampleRate);
+  if (shapingDb > GATE_SHAPED_RESIDUAL_DB) {
+    return {
+      run: false,
+      reason: `the quietest ${NOISE_WINDOW_MS} ms carries the resonances of a vocal tract rather than the plain tilt of a room — its spectrum departs from a straight tilt by ${shapingDb.toFixed(1)} dB, where a noise floor reads under ${GATE_SHAPED_RESIDUAL_DB} dB — so it is an unvoiced vocal passage (a whisper, a breath, a held consonant) and not a pause. Nothing was gated`,
     };
   }
 
