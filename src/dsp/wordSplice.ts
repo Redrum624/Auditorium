@@ -223,8 +223,8 @@ function rms(channels: readonly Float32Array[], start: number, end: number): num
  *
  * The threshold above is the peak of the quietest 500 ms `measureNoiseWindow`
  * hands back — and that window is the recording's FLOOR only when the recording
- * HAS one above digital silence. Two recordings break that, and both were
- * measured on the shipped app rather than imagined:
+ * HAS one above digital silence. Three recordings break that, and all three
+ * were measured rather than imagined:
  *
  * - **The pauses are literal zeros.** `measureNoiseWindow` rejects every window
  *   at or below `SILENCE_RMS` — it must, because an all-zero noise print makes
@@ -240,10 +240,29 @@ function rms(channels: readonly Float32Array[], start: number, end: number): num
  *   nothing clears it: measured on 1.52 s of stationary tone, **0 samples of
  *   72 960** rose above the threshold.
  *
- * Both are one mistake: a SELF-RELATIVE threshold cannot tell "uniformly loud"
- * from "uniformly silent", and it refuses the wrong one. So the threshold is a
- * two-rung ladder — the recording's own floor when it has one, and digital
- * silence itself when that finds nothing. `SILENCE_RMS` is not a new number
+ * - **The zeros sit beside an UNEVEN floor**, which is a fresh mic take's
+ *   ordinary shape: a preamp or an AGC settles over the first second, so the
+ *   top of the take is a stretch of floor above the steady one. Candidate
+ *   windows start on 50 ms boundaries and a trimmed head does not, so a
+ *   candidate can be almost all zeros with a sliver of that louder stretch in
+ *   it — diluted BELOW the take's own steady floor, therefore the winner, and
+ *   its envelope peak is the louder stretch's. The rung comes out ~12 dB high.
+ *   The word's loud core still clears it, so this one does not decline: it
+ *   shaves. Measured on a take with a 1.43 s zero head, a -62 dBFS settling
+ *   stretch and a -74 dBFS steady floor, the trim kept **19 449** samples of a
+ *   26 019-sample word — the vowel and its release overhang, with the
+ *   aspirated onset and release deleted. The FIX is upstream of the ladder:
+ *   rung 1 asks `measureNoiseWindow` for the mostly-real search, the same one
+ *   `deriveGate` and `deriveRemoveSilence` ask for and for the same reason —
+ *   this threshold decides what is removed.
+ *
+ * The first two are one mistake: a SELF-RELATIVE threshold cannot tell
+ * "uniformly loud" from "uniformly silent", and it refuses the wrong one. So
+ * the threshold is a two-rung ladder — the recording's own floor when it has
+ * one, and digital silence itself when that finds nothing. A recording with no
+ * mostly-real window at all offers no floor to read, so rung 1 is DROPPED
+ * rather than derived from a sliver, and the ladder starts at rung 2 — which
+ * keeps strictly more material, never less. `SILENCE_RMS` is not a new number
  * either: it is the same 2^-15 that `measureNoiseWindow` already rejects
  * windows at and that `pitchDetect` already gates frames on, restated — one LSB
  * of 16-bit PCM, the level below which the most common source format cannot
@@ -262,11 +281,25 @@ function trimSilence(
   sampleRate: number
 ): { start: number; end: number; skipped: boolean } {
   const length = channels[0]?.length ?? 0;
-  const noise = measureNoiseWindow(channels as Float32Array[], sampleRate);
-  if (noise) {
+  // The bare search is consulted for ONE thing only — whether this recording is
+  // long enough to have a 500 ms window at all, which is the condition the trim
+  // declines on and the only reason this call still exists.
+  const measurable = measureNoiseWindow(channels as Float32Array[], sampleRate);
+  if (measurable) {
+    // Rung 1 asks for the MOSTLY-REAL search. A candidate window that is mostly
+    // exact zeros has its RMS diluted by them while taking its envelope peak
+    // from the sliver of real material at its edge, so on a take carrying
+    // device-written zeros the bare search can win with a window that measures
+    // the wrong passage — and here that is the destructive direction, because
+    // this threshold decides what is DELETED before the splice.
+    const real = measureNoiseWindow(channels as Float32Array[], sampleRate, { rejectMostlySilentWindows: true });
     const env = envelopeFollower(maxAcrossChannels(channels as Float32Array[]), sampleRate, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
     const minRun = Math.max(1, Math.round((DETECT_RELEASE_MS / 1000) * sampleRate));
-    for (const threshold of [Math.pow(10, noise.envelopePeakDb / 20), SILENCE_RMS]) {
+    // No mostly-real window means the recording has no floor to offer, so the
+    // rung is DROPPED rather than guessed at and the ladder falls through to
+    // digital silence — which keeps strictly more, never less.
+    const thresholds = real ? [Math.pow(10, real.envelopePeakDb / 20), SILENCE_RMS] : [SILENCE_RMS];
+    for (const threshold of thresholds) {
       const span = firstToLastRun(env, threshold, minRun);
       if (span) return { start: span.start, end: span.end, skipped: false };
     }

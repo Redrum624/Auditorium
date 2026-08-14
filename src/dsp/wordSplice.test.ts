@@ -573,6 +573,117 @@ describe('spliceWord trimming', () => {
     expect(r.report.trimmedSamples).toBe(continuous[0].length - 1);
   });
 
+  // The trim's first rung is the peak of the quietest 500 ms, and a candidate
+  // window that is mostly EXACT ZEROS has its RMS diluted by them while taking
+  // its envelope peak from the sliver of real material at its edge. A fresh
+  // replacement take is exactly where device-written zeros live (a gated
+  // interface, a DAW bounce, Chromium's fake capture device), and a mic's floor
+  // is not stationary at the top of a take — a preamp or an AGC settles. Put
+  // those two together and the boundary window wins the search on its dilution
+  // and reports the SETTLING floor's peak, ~12 dB over the take's own steady
+  // floor. The word's loud core still clears that, so the trim does not decline
+  // — it just starts later and ends earlier, and the soft onset and tail of the
+  // word are deleted before the splice.
+  describe('a replacement take carrying device-written zeros', () => {
+    /** Gaussian floor at a stated dBFS RMS. */
+    function floorAt(n: number, rmsDb: number, seed: number): Float32Array {
+      let s = seed >>> 0;
+      const next = (): number => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return (s / 0xffffffff) * 2 - 1;
+      };
+      const out = new Float32Array(n);
+      const k = Math.pow(10, rmsDb / 20) / Math.sqrt(4 / 3);
+      for (let i = 0; i < n; i++) out[i] = (next() + next() + next() + next()) * k;
+      return out;
+    }
+
+    /** Noise at a stated dBFS RMS — an aspirated onset or release, which is
+     * unvoiced and therefore noise, not a ramp: a ramp crosses any low
+     * threshold within a millisecond and could never show a shave. */
+    function breathAt(n: number, rmsDb: number, seed: number): Float32Array {
+      return floorAt(n, rmsDb, seed);
+    }
+
+    const CHUNK = Math.round(0.05 * SR);
+    const ASPIRATE = Math.round(0.12 * SR);
+    const VOWEL = Math.round(0.35 * SR);
+    const WORD = ASPIRATE + VOWEL + ASPIRATE;
+
+    /** `[head][settling floor -62 dBFS][steady floor -74][aspirate][vowel]
+     * [aspirate][steady floor]`.
+     *
+     * The head is 1.430 s rather than 1.4: candidate windows start on 50 ms
+     * boundaries, so a head ending 20 ms BEFORE one leaves a candidate that is
+     * 96 % zeros and 20 ms of the settling floor, which dilutes it to about
+     * -76 dBFS — under the -74 steady floor, so it wins the bare search. A
+     * trimmed head lands wherever the trim landed, not on a search step. */
+    function take(head: (n: number) => Float32Array): Float32Array[] {
+      const headLen = Math.round(1.4 * SR) + (CHUNK - Math.round(0.02 * SR));
+      return [
+        concat(
+          head(headLen),
+          floorAt(Math.round(1.0 * SR), -62, 23),
+          floorAt(Math.round(0.7 * SR), -74, 7),
+          breathAt(ASPIRATE, -68, 31),
+          tone(VOWEL, 220, 0.1),
+          breathAt(ASPIRATE, -68, 37),
+          floorAt(Math.round(0.8 * SR), -74, 11)
+        ),
+      ];
+    }
+
+    /** A 1.0 s word, so both the shaved answer and the honest one land inside
+     * WSOLA's ratio range and the report can be read in either case. */
+    const wordTarget = () => {
+      const word = Math.round(1.0 * SR);
+      const doc = concat(tone(SR, 200), tone(word, 330, 0.5), tone(SR, 200));
+      return { target: [doc], startSample: SR, endSample: SR + word };
+    };
+
+    const keptSamples = (replacement: Float32Array[]): number => {
+      const r = spliceWord({
+        ...wordTarget(),
+        replacement,
+        sampleRate: SR,
+        seamSamples: 100,
+        matchPitch: false,
+      });
+      expect(r.ok).toBe(true);
+      if (!r.ok) throw new Error('expected a splice');
+      expect(r.report.trimSkipped).toBe(false);
+      return r.report.trimmedSamples;
+    };
+
+    it('keeps the word whole, and keeps the same span it would without the zeros', () => {
+      const withZeros = keptSamples(take(silence));
+      // The same take recorded by a device that writes its floor instead of
+      // zeros — an ordinary mic take, nothing else changed.
+      const withoutZeros = keptSamples(take((n) => floorAt(n, -74, 3)));
+
+      // The requirement: the aspirated onset and release are still there.
+      // Measured before the fix, the zeros version kept 19 449 samples against
+      // the word's own 26 019 — the vowel and its release overhang, with both
+      // breaths shaved off the ends.
+      expect(withZeros).toBeGreaterThanOrEqual(WORD);
+
+      // ...and the zeros changed nothing. The trim is a measurement of the
+      // recording's floor, and a stretch of digital silence is not one.
+      expect(Math.abs(withZeros - withoutZeros) / withoutZeros).toBeLessThan(0.05);
+    });
+
+    it('still trims: the settling floor is sound by the take own rule, the zeros are not', () => {
+      // The converse, and the honest cost of a self-relative threshold on an
+      // uneven floor: the -62 dBFS settling stretch IS above the -74 floor's
+      // peak, so it is kept as sound — but the 1.43 s of digital silence in
+      // front of it is not, and the trim removes all of it. A fix that simply
+      // stopped trimming would keep the whole recording and fail this.
+      const replacement = take(silence);
+      const kept = keptSamples(replacement);
+      expect(kept).toBeLessThan(replacement[0].length - Math.round(1.4 * SR));
+    });
+  });
+
   it('declines to trim a recording too short for the noise window it derives its threshold from', () => {
     const t = makeTarget();
     // 0.3 s total: under the 500 ms `measureNoiseWindow` needs.

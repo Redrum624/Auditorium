@@ -161,11 +161,18 @@ export function monoMix(channels: Float32Array[]): Float32Array {
  * semantics is measured and pinned: on a gated take its quietest window is a
  * fade tail reading tens of dB low, and its derived threshold still moves by
  * under 0.1 dB (the `what survives the gate` pair in vocalChain.test.ts). The
- * two consumers that turn a boundary window straight into lost programme ask
+ * three consumers that turn a boundary window straight into lost programme ask
  * for the honest search: `deriveGate`, where a threshold over the material
- * mutes it, and `deriveRemoveSilence`, where it DELETES it (measured, a
- * lead-in beside an uneven floor derived 9.6 dB high and read 51-80 % of a
- * real sung phrase as silence).
+ * mutes it; `deriveRemoveSilence`, where it DELETES it (measured, a lead-in
+ * beside an uneven floor derived 9.6 dB high and read 51-80 % of a real sung
+ * phrase as silence); and `wordSplice`'s `trimSilence`, where it shaves the
+ * soft onset off a replacement take before the splice (measured, a device's
+ * zero head beside a settling floor kept 19 449 samples of a 26 019-sample
+ * word). The rest read the bare search and are degraded rather than
+ * destructive by it: `deriveCompressor` (a gain error, pinned under 0.1 dB on
+ * the gated shape by the `what survives the gate` pair), `deriveNoiseReduction`
+ * (under-reduction, bounded by its own 12 dB cap) and the `noiseFloorDb` that
+ * `measureMetrics` prints, which no parameter consumes.
  *
  * Search step is 50 ms, and the window is a whole number of steps, so the scan
  * sums squares once per 50 ms CHUNK and then slides a 10-chunk sum: O(n) time
