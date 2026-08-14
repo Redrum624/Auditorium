@@ -394,18 +394,46 @@ export function priorJourneyPasses(docId: string): string[] {
 }
 
 /**
- * CC4 fix-round 1 (I1) — whether this document has been EDITED, in either
- * direction.
+ * CC4 fix-round 2 (N1) — whether `doc` ALREADY holds exactly `channels`, sample
+ * for sample.
  *
- * Undo entries exist only where an edit was committed, so a non-empty stack is
- * the app's own record that someone changed this document. BOTH stacks count: an
- * edit the user undid is still their work — it is one keystroke from being back
- * — and rewriting the channels underneath it would leave their redo restoring
- * audio from before a rewrite it knows nothing about.
+ * This is the whole adoption test, and it is a content test rather than a
+ * provenance one for a reason no in-process signal can get around: `.audm`
+ * persists a document's samples and NOT its undo history, and reopening a
+ * session re-adds every document under a fresh id, so an instrumental the user
+ * edited, saved and reopened reads pristine to any history test while carrying
+ * their edit in its samples. Round 1's history predicate closed the live-session
+ * half of that and could not close this one.
+ *
+ * What the content test buys instead is a proof rather than an inference: when a
+ * candidate already equals the sum this pass computed, adopting it is a no-op —
+ * there is nothing to write, so there is nothing to destroy, whoever made it and
+ * whatever else they did to it. When it differs, SOMETHING changed it (their
+ * edit, a different separation, another song) and the pass creates its own
+ * beside it rather than deciding whose bytes those were.
+ *
+ * A non-finite sample compares unequal to itself, so a document carrying NaN
+ * never matches and is never adopted — the safe direction, and unreachable in
+ * practice: `separateStems` sanitises non-finite model output before it lands.
+ *
+ * COST, measured rather than assumed: 29.7 ms median (min 28.1, max 32.5, five
+ * runs, node v24.13.0) for the worst case — two channels of a four-minute song
+ * at 44.1 kHz, 21.17 M samples / 80.7 MB per side, scanned to the end because
+ * they are EQUAL, which is the adoption path. A mismatch exits at the first
+ * differing sample: 0.0 ms when it differs early, 27.8 ms when it differs only
+ * at the very last sample. Against a pass whose separation stage alone is
+ * minutes (`stemService` measures 1.52x real time), and once per run, this is
+ * not a cost worth trading a data-loss hole for.
  */
-function hasEditHistory(docId: string): boolean {
-  const history = getHistory(docId);
-  return history.done.length > 0 || history.undone.length > 0;
+function holdsExactly(doc: AudioDocument, channels: readonly Float32Array[]): boolean {
+  if (doc.channels.length !== channels.length) return false;
+  for (let c = 0; c < channels.length; c++) {
+    const held = doc.channels[c];
+    const wanted = channels[c];
+    if (held.length !== wanted.length) return false;
+    for (let i = 0; i < held.length; i++) if (held[i] !== wanted[i]) return false;
+  }
+  return true;
 }
 
 /**
@@ -694,54 +722,41 @@ export async function runCoverJourney(
     // grid, and it is what makes adoption safe — a copy that no longer matches
     // is left alone and a fresh one is created beside it, exactly as before.
     //
-    // CC4 fix-round 1 (I1): and ONE more condition, which the precondition above
-    // cannot express — the candidate must be an artifact this pass made and the
-    // user has NOT touched. Adoption rewrites channels in place, and every edit
-    // that keeps the length (amplify, EQ, noise reduction, a same-length paste)
-    // leaves name/rate/length true, so without this a user who cleaned up the
-    // instrumental between two runs lost that work with no undo path back to it
-    // — and the document's surviving entries would then restore pre-rewrite
-    // audio over the fresh sum. Any editing history at all means the document is
-    // theirs: this pass leaves it exactly where it is and creates its own beside
-    // it, which is the arm that shipped before adoption existed and has never
-    // destroyed anything.
+    // CC4 fix-round 2 (N1/N2/N3): and adoption REWRITES NOTHING. A candidate is
+    // adopted only when `holdsExactly` proves it already IS the sum this pass
+    // computed, which makes reuse a no-op that cannot destroy anything — see
+    // that function for why a content test rather than a provenance one is the
+    // only thing that survives a Save Session and reopen. Anything else — the
+    // user's edit, a stale sum, another song's — is left exactly where it is and
+    // this pass creates its own document beside it.
     //
-    // Recording the rewrite as an undo entry instead was the other candidate and
-    // is rejected: it makes the destruction undoable rather than avoided, leaves
-    // the user to NOTICE the loss and to think of reaching for undo on a
-    // document they ran nothing on, and charges the undo budget a full-length
-    // document per pass for a generated artifact. The take is a different case
-    // and keeps its entries — it is the document the user asked this pass to
-    // process; the instrumental is one the pass made for itself.
+    // EVERY name-matching candidate is tested, not just the first (N2): a user
+    // who edits the pass-1 copy once would otherwise have the pass re-find that
+    // same document forever and stack a fresh full-length one on every later
+    // pass. Testing all of them means pass 3 adopts the pristine copy pass 2
+    // created, so the cost of an edited copy is one document, once.
     const instrumentalName = `${song.name} ${INSTRUMENTAL_SUFFIX}`;
     const instrumentalChannels = sumInstrumental(stems);
-    const candidate =
-      useAppStore
-        .getState()
-        .documents.find(
-          (d) =>
-            d.id !== song.id &&
-            d.name === instrumentalName &&
-            d.sampleRate === song.sampleRate &&
-            docLength(d) === docLength(song)
-        ) ?? null;
-    // Both stacks, not just `done`: an edit the user UNDID is still theirs, and
-    // rewriting under it would leave their redo restoring stale audio.
-    const candidateEdited = candidate !== null && hasEditHistory(candidate.id);
-    const previous = candidateEdited ? null : candidate;
-    const instrumental: AudioDocument = previous
-      ? // `dirty: true` because the samples now differ from whatever is on disk —
-        // the same stamp every channel-replacing helper in `AudioDocument` makes.
-        // A user who had SAVED an earlier pass's instrumental would otherwise be
-        // holding a document that reads clean and is not.
-        { ...previous, channels: instrumentalChannels, dirty: true }
-      : createDocument({
-          name: instrumentalName,
-          sampleRate: song.sampleRate,
-          channels: instrumentalChannels,
-        });
-    if (previous) useAppStore.getState().updateDocument(instrumental);
-    else useAppStore.getState().addDocument(instrumental);
+    const candidates = useAppStore
+      .getState()
+      .documents.filter(
+        (d) =>
+          d.id !== song.id &&
+          d.name === instrumentalName &&
+          d.sampleRate === song.sampleRate &&
+          docLength(d) === docLength(song)
+      );
+    const previous = candidates.find((d) => holdsExactly(d, instrumentalChannels)) ?? null;
+    // A candidate of the right shape whose samples are somebody else's business.
+    const foreignCopies = previous === null && candidates.length > 0;
+    const instrumental: AudioDocument =
+      previous ??
+      createDocument({
+        name: instrumentalName,
+        sampleRate: song.sampleRate,
+        channels: instrumentalChannels,
+      });
+    if (!previous) useAppStore.getState().addDocument(instrumental);
     // Same identity-copy precondition `createStemDocuments` records for the stems: the
     // instrumental is a time-aligned combination of the song at the same rate
     // and length, so the song's beat grid IS its grid. `linkDerivedDocument`
@@ -779,9 +794,9 @@ export async function runCoverJourney(
           from:
             `${nonVocalNames.join(' + ')} summed — separation's guarantee is that its stems sum back to the mix exactly, so this is the original with its vocal removed to the last bit` +
             (previous
-              ? '. The document of this name that an earlier pass left open was reused, its samples rewritten with this pass\'s own sum — it still carries the song\'s rate and exact length, so it is this song\'s'
-              : candidateEdited
-                ? '. A document of this name from an earlier pass is also open, and it carries your own edits — so it was left alone, exactly as you made it, and this is a new one beside it'
+              ? '. A document of this name from an earlier pass was already open and already holds exactly this sum, sample for sample, so it was reused as it stands — nothing was written to it'
+              : foreignCopies
+                ? '. A document of this name is also open whose samples are NOT this sum — your own edits to it, or an earlier separation — so it was left exactly as it is and this is a new one beside it'
                 : ''),
         },
       ],

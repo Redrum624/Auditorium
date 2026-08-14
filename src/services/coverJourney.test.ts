@@ -14,6 +14,7 @@ import { createDocument, docLength } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
+import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
 import { PEAK_BLOCK_SAMPLES, mixdownSession } from '../multitrack/mixdown';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import * as coverAlign from '../dsp/coverAlign';
@@ -35,8 +36,8 @@ import {
   type CoverJourneyStageResult,
 } from './coverJourney';
 import { MONO_PAN_COMPENSATION_DB, STEM_TRACK_LABELS } from './stemLanding';
-import { clearHistory, getHistory, pushUndo, undo } from './undoHistory';
-import { applyEdit } from './editOps';
+import { clearHistory, getHistory, pushUndo, redo, undo } from './undoHistory';
+import { applyEdit, pushMarkerUndo } from './editOps';
 import { VOCAL_CHAIN_UNDO_LABEL } from './vocalChain';
 import { COVER_CHAIN_UNDO_LABEL } from './coverChain';
 
@@ -326,14 +327,15 @@ describe('runCoverJourney — a second pass on the same song', () => {
       useAppStore.getState().documents.filter((d) => d.name === 'song — Instrumental')
     ).toHaveLength(1);
     expect(second!.separation!.instrumentalDocId).toBe(first!.separation!.instrumentalDocId);
-    expect(second!.stages[0].derived[1].from).toMatch(/rewritten|reused/i);
+    expect(second!.stages[0].derived[1].from).toMatch(/already holds/i);
   });
 
-  it('rewrites the reused instrumental rather than trusting last run\'s samples', async () => {
-    await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+  it('never adopts a copy whose samples are not this pass\'s own sum', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
     // A stem changes between the passes — same name, same rate, same length, so
-    // the separation is still reused, but the instrumental it sums to is not the
-    // one on disk from last time.
+    // the separation is still reused and the old instrumental still passes the
+    // name/rate/length precondition. Its SAMPLES are now stale, though, so it is
+    // not this pass's instrumental and is not written over either.
     useAppStore.setState({
       documents: useAppStore.getState().documents.map((d) =>
         d.name === 'song — Drums' ? { ...d, channels: [tone(SONG_SAMPLES, 440, SR, 0.9)] } : d
@@ -341,6 +343,7 @@ describe('runCoverJourney — a second pass on the same song', () => {
     });
     const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
 
+    expect(second!.separation!.instrumentalDocId).not.toBe(first!.separation!.instrumentalDocId);
     const instrumental = useAppStore
       .getState()
       .documents.find((d) => d.id === second!.separation!.instrumentalDocId)!;
@@ -352,16 +355,35 @@ describe('runCoverJourney — a second pass on the same song', () => {
   });
 
   /**
-   * CC4 fix-round 1 (I1). Adoption rewrites a document's channels in place, and
-   * a length-preserving edit — EQ, amplify, noise reduction, a same-length paste
-   * — leaves the name/rate/length precondition true. So the pass could silently
-   * destroy work the user had done on the instrumental between two runs, with no
-   * undo path back to it, while the document's own surviving undo entries would
-   * then restore pre-rewrite audio over the fresh sum.
+   * CC4 fix-round 2 (N3). Markers do not change samples, and adoption does not
+   * touch markers, so nothing of the user's is at risk — the content test says
+   * so without having to be told.
+   */
+  it('adopts one the user has only marked up — markers are not samples', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const id = first!.separation!.instrumentalDocId;
+    pushMarkerUndo('Add Marker', id, [], [{ id: 'm1', name: 'verse', positionSample: 100 }]);
+
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(second!.separation!.instrumentalDocId).toBe(id);
+    expect(
+      useAppStore.getState().documents.filter((d) => d.name === 'song — Instrumental')
+    ).toHaveLength(1);
+  });
+
+  /**
+   * CC4 fix-round 1 (I1), re-pinned in round 2 against the content test.
    *
-   * The rule: this pass adopts only artifacts it made and the user has not
-   * touched. A document carrying ANY editing history is theirs, and the pass
-   * falls back to the create-beside arm that was always safe.
+   * Adoption used to rewrite a document's channels in place, and a
+   * length-preserving edit — EQ, amplify, noise reduction, a same-length paste —
+   * leaves the name/rate/length precondition true. So the pass could silently
+   * destroy work the user had done on the instrumental between two runs, with no
+   * undo path back to it.
+   *
+   * The rule now: a document is adopted only when it ALREADY holds exactly the
+   * sum this pass computed, which makes adoption a provable no-op. Anything else
+   * — theirs, stale, or another song's — is left alone and this pass creates its
+   * own beside it.
    */
   it('leaves an instrumental the user has edited alone, and creates its own beside it', async () => {
     const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
@@ -390,18 +412,135 @@ describe('runCoverJourney — a second pass on the same song', () => {
     expect(second!.stages[0].derived[1].from).toMatch(/your own edits|left alone/i);
   });
 
-  it('does not adopt one whose edit was merely UNDONE — redo would restore stale audio', async () => {
+  /**
+   * CC4 fix-round 2. An UNDONE edit puts the samples back to this pass's own
+   * sum, so the content test adopts — and because adoption writes nothing, the
+   * user's redo is still theirs to press and still does exactly what it says.
+   * Round 1's history predicate refused this case; refusing it was safe but
+   * unnecessary, and it cost a full-length document.
+   */
+  it('adopts one whose edit was undone, and leaves the redo intact', async () => {
     const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
     const theirs = first!.separation!.instrumentalDocId;
     applyEdit('Amplify', theirs, (doc) => ({
       ...doc,
       channels: doc.channels.map((ch) => ch.map((v) => v * 0.5) as Float32Array),
     }));
+    const edited = useAppStore.getState().documents.find((d) => d.id === theirs)!.channels[0][1000];
     undo(theirs);
-    expect(getHistory(theirs).undone).toEqual(['Amplify']);
+    const restored = useAppStore.getState().documents.find((d) => d.id === theirs)!.channels[0][1000];
 
     const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(second!.separation!.instrumentalDocId).toBe(theirs);
+    // Nothing was written, so their redo still restores their own edit.
+    expect(useAppStore.getState().documents.find((d) => d.id === theirs)!.channels[0][1000]).toBe(
+      restored
+    );
+    redo(theirs);
+    expect(useAppStore.getState().documents.find((d) => d.id === theirs)!.channels[0][1000]).toBe(
+      edited
+    );
+  });
+
+  /**
+   * CC4 fix-round 2 (N2). `find` always re-landed on the pass-1 document, so a
+   * user who edited it once paid a fresh ~85 MB document on EVERY later pass,
+   * unbounded. Every name-matching candidate is considered now, so the pass
+   * adopts the pristine copy a later pass created.
+   */
+  it('stops accumulating after the one document the edited copy costs', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const theirs = first!.separation!.instrumentalDocId;
+    applyEdit('Amplify', theirs, (doc) => ({
+      ...doc,
+      channels: doc.channels.map((ch) => ch.map((v) => v * 0.5) as Float32Array),
+    }));
+
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const afterSecond = useAppStore.getState().documents.length;
     expect(second!.separation!.instrumentalDocId).not.toBe(theirs);
+
+    const third = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    // The pass-2 document is adopted rather than a third being stacked on.
+    expect(third!.separation!.instrumentalDocId).toBe(second!.separation!.instrumentalDocId);
+    expect(useAppStore.getState().documents.length).toBe(afterSecond);
+    expect(
+      useAppStore.getState().documents.filter((d) => d.name === 'song — Instrumental')
+    ).toHaveLength(2);
+  });
+
+  /**
+   * CC4 fix-round 2 (N1) — THE case an in-process signal cannot see.
+   *
+   * `.audm` persists documents and NOT their undo history, and reopening re-adds
+   * them fresh, so an instrumental the user edited, saved and reopened reads
+   * pristine to any history test while carrying their edit in its samples. This
+   * round-trips the REAL serializer and the REAL parser; only the file dialog is
+   * bypassed.
+   */
+  it('survives a save and reopen — the edit is in the samples, not in a stack', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const theirs = first!.separation!.instrumentalDocId;
+    applyEdit('Amplify', theirs, (doc) => ({
+      ...doc,
+      channels: doc.channels.map((ch) => ch.map((v) => v * 0.5) as Float32Array),
+    }));
+    const mine = useAppStore.getState().documents.find((d) => d.id === theirs)!.channels[0][1000];
+
+    // Save Session: the real writer, over the session the journey just built.
+    const { bytes } = serializeSessionV3(
+      useSessionStore.getState().session,
+      useAppStore.getState().documents
+    );
+
+    // Quit and reopen. A new process has no undo stacks at all, and `histories`
+    // is a module-level Map that outlives a store reset — so clearing them is
+    // what makes this simulation faithful rather than accidentally easy.
+    const beforeReopen = useAppStore.getState().documents.map((d) => d.id);
+    useAppStore.setState(makeInitialState());
+    for (const id of beforeReopen) clearHistory(id);
+
+    // The song and its stems were never on a track, so the file does not carry
+    // them: the user reopens them from their own files, under the same names.
+    const song = createDocument({
+      name: 'song',
+      sampleRate: SR,
+      channels: [tone(SONG_SAMPLES, 220, SR)],
+    });
+    const stems = STEM_TRACK_LABELS.map((label) =>
+      createDocument({
+        name: `song — ${label}`,
+        sampleRate: SR,
+        channels: [tone(SONG_SAMPLES, 440, SR, 0.1)],
+      })
+    );
+    for (const d of [song, ...stems]) useAppStore.getState().addDocument(d);
+
+    // Open Session: the real parser, applied the way `openSessionViaDialog` does.
+    const parsed = parseSessionFileBytes(
+      bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
+    );
+    for (const doc of parsed.documents) {
+      useAppStore.getState().addDocument(doc);
+      clearHistory(doc.id); // a freshly opened document has no history
+    }
+    useSessionStore.setState({ session: parsed.session });
+
+    const restored = useAppStore
+      .getState()
+      .documents.find((d) => d.name === 'song — Instrumental')!;
+    const restoredTake = useAppStore.getState().documents.find((d) => d.name === 'take')!;
+    expect(restored.channels[0][1000]).toBe(mine); // their edit really did survive the file
+    expect(getHistory(restored.id).done).toEqual([]); // …and its history really is gone
+
+    const second = await runCoverJourney({ songDocId: song.id, takeDocId: restoredTake.id });
+
+    // Their reopened document is not this pass's instrumental, and not one
+    // sample of it was touched.
+    expect(second!.separation!.instrumentalDocId).not.toBe(restored.id);
+    expect(
+      useAppStore.getState().documents.find((d) => d.id === restored.id)!.channels[0][1000]
+    ).toBe(mine);
   });
 
   it('creates a fresh one when the old copy no longer describes the song', async () => {
