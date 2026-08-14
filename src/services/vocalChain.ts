@@ -128,7 +128,9 @@ import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
 import {
   HUM_EXCESS_THRESHOLD_DB,
   MAINS_BASE_FREQUENCIES,
+  NOISE_WINDOW_MAX_SILENT_FRACTION,
   NOISE_WINDOW_MS,
+  TILT_FFT_SIZE,
   detectMainsHum,
   humMeasurable,
   measureNoiseWindow,
@@ -253,7 +255,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Noise Gate',
     effectId: 'noise-gate',
     defaultEnabled: true,
-    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from the quietest ${NOISE_WINDOW_MS} ms, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the quietest passage turns out to be the recording itself, a softly sung phrase, or a whispered one — so a take that never stops for half a second is usually left alone, the exception being an unshaped breath, which no measurement can tell from room tone. A stretch of digital silence is the opposite — proof of a pause — and a take carrying one still gates, but the silence itself is never measured: the threshold comes from the quietest ${NOISE_WINDOW_MS} ms of REAL material, so zeros next to a whispered line cannot launder that whisper into a noise floor, and a take whose pauses are all already exact zeros declines, having nothing left for a gate to do. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
+    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from the quietest ${NOISE_WINDOW_MS} ms, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the quietest passage turns out to be the recording itself, a softly sung phrase, or a whispered one — so a take that never stops for half a second is usually left alone, the exception being an unshaped breath, which no measurement can tell from room tone. A stretch of digital silence is the opposite — proof of a pause — and a take carrying one still gates, but the silence itself is never measured: the threshold comes from the quietest ${NOISE_WINDOW_MS} ms of REAL material, so zeros next to a whispered line cannot launder that whisper into a noise floor, quiet audio that survives only as fragments between zeros (an 8-bit transfer, a stem strip-silenced by a tool with no hold) declines rather than being priced by a floor that never contained it, and a take whose pauses are all already exact zeros declines, having nothing left for a gate to do. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
     weight: 4,
   },
   {
@@ -908,6 +910,22 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
   // fixed: the boundary window it waved through carried a whisper's envelope
   // peak, and the whisper was muted. Measurement first, then the checks — not
   // checks with an exemption.
+  //
+  // One thing the mix CAN still hide (M9): the search counts a frame silent
+  // only when EVERY channel is exactly zero, but these checks read the MIX,
+  // and the mix of an exactly polarity-inverted pair (L = -R) is all zeros —
+  // both checks would read a silent window and wave through a take whose mono
+  // version declines. The window arrived here guaranteed mostly-real
+  // frame-wise, so a mostly-zero mix can only mean cancellation, and the
+  // stage declines rather than classifying audio it cannot see.
+  let mixZeros = 0;
+  for (let i = 0; i < window.length; i++) if (window[i] === 0) mixZeros++;
+  if (window.length > 0 && mixZeros / window.length > NOISE_WINDOW_MAX_SILENT_FRACTION) {
+    return {
+      run: false,
+      reason: `the channels of the quietest ${NOISE_WINDOW_MS} ms cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see this passage at all. Fix the inverted channel's polarity and run the chain again. Nothing was gated`,
+    };
+  }
   const track = detectPitch(window, sampleRate);
   let voicedFrames = 0;
   for (const frame of track.frames) if (frame.f0Hz !== null) voicedFrames++;
@@ -930,6 +948,30 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
     return {
       run: false,
       reason: `the quietest ${NOISE_WINDOW_MS} ms carries the resonances of a vocal tract rather than the plain tilt of a room — its spectrum departs from a straight tilt by ${shapingDb.toFixed(1)} dB, where a noise floor reads under ${GATE_SHAPED_RESIDUAL_DB} dB — so it is an unvoiced vocal passage (a whisper, a breath, a held consonant) and not a pause. Nothing was gated`,
+    };
+  }
+
+  // ...and the audio the search never SAW? (N4, the eviction's blind spot.)
+  // Refusing mostly-silent windows is right for the threshold, but when a
+  // quiet passage is ITSELF mostly zeros — an 8-bit transfer whose whisper
+  // sits at its own LSB, a verse strip-silenced into 150 ms fragments —
+  // every window over it is refused, the search falls through to a louder
+  // floor-like window, and the threshold lands above the hidden passage
+  // (measured before this guard: 100 % of such a verse muted). The search
+  // keeps accounts: real frames inside evicted-quieter windows that no
+  // accepted window covers. On silence-beside-floor takes that number is
+  // zero, which is exactly why they may gate; here it is not, and the stage
+  // declines rather than classifying — measured, a tilt fit at the lengths
+  // that can stay hidden has single-frame variance (an all-real FLOOR run of
+  // 1024 samples reads up to 3.9 dB, above the whisper population's own
+  // 44.1 kHz minimum of 2.41 dB), so no constant separates the populations
+  // there. Below one `TILT_FFT_SIZE` frame in total, the hidden material
+  // could not carry even one verdict and is treated as debris.
+  const hiddenReal = noise.hiddenRealSamples ?? 0;
+  if (hiddenReal >= TILT_FFT_SIZE) {
+    return {
+      run: false,
+      reason: `this take hides real audio inside its stretches of digital silence — ${(hiddenReal / sampleRate).toFixed(2)} s of fragments too interleaved with exact zeros for any ${NOISE_WINDOW_MS} ms window of the noise search to measure — and a threshold derived without ever seeing them could mute a quiet phrase. Nothing was gated`,
     };
   }
 

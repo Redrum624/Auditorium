@@ -110,7 +110,32 @@ export function monoMix(channels: Float32Array[]): Float32Array {
  * When the flag is set, such windows are excluded and the search returns the
  * quietest MOSTLY-REAL window — the measurement the caller was asking for.
  * A frame counts as silent only when EVERY channel is exactly zero, so an
- * exactly polarity-cancelling stereo pair is not mistaken for silence.
+ * exactly polarity-cancelling stereo pair is not mistaken for silence by THIS
+ * SEARCH — the gate's content checks, which mono-mix, carry their own guard
+ * for that pair, because the mix of `L = -R` really is all zeros (see the
+ * cancelling-mix decline in `deriveGate`).
+ *
+ * THE EVICTION KEEPS ACCOUNTS (`hiddenRealSamples`). Refusing mostly-silent
+ * windows can hide real audio from the search entirely: when a quiet passage
+ * is ITSELF mostly zeros — an 8-bit transfer whose whisper sits at its own
+ * LSB, a verse strip-silenced into 150 ms fragments — every window over it is
+ * refused, the search falls through to a LOUDER floor-like window, and a
+ * threshold derived there sits above the hidden passage (measured before this
+ * accounting existed: 100 % of such a verse muted). So, with the flag set, the
+ * result also reports how many real frames live in evicted-quieter windows
+ * that NO accepted candidate window covers. On the ordinary silence-beside-
+ * floor shapes that number is zero — every real sample an evicted boundary
+ * window contains also lies inside an accepted all-real window, which is
+ * exactly why proceeding is safe there — and where it is not zero the caller
+ * must not trust a threshold measured without that material (the gate
+ * declines above one `TILT_FFT_SIZE` frame's worth; less than one frame of
+ * the only classifier that could vouch for it is treated as debris). The
+ * classify-instead-of-decline alternative was measured and rejected: a
+ * spectral-tilt fit on runs this short has single-frame estimator variance —
+ * an all-real FLOOR run of 1024 samples reads up to 3.9 dB, above the whisper
+ * population's own minimum at 44.1 kHz (2.41 dB), so the two populations
+ * INVERT at exactly the lengths that can stay hidden, and no constant exists
+ * for the arm to use.
  *
  * The flag is opt-in because `deriveCompressor`'s consumption of the OLD
  * semantics is measured and pinned: on a gated take its quietest window is a
@@ -133,6 +158,11 @@ export interface NoiseWindow {
   rmsDb: number;
   /** Peak of the Remove-Silence detector envelope inside the window, dBFS. */
   envelopePeakDb: number;
+  /** Only with `rejectMostlySilentWindows`: how many real (non-silent) frames
+   * live inside evicted-quieter candidate windows that no accepted candidate
+   * window covers — the audio the returned measurement never saw. 0 on takes
+   * where the eviction hid nothing but silence. See the docblock. */
+  hiddenRealSamples?: number;
 }
 
 export const NOISE_WINDOW_MS = 500;
@@ -163,9 +193,10 @@ const CHUNKS_PER_WINDOW = NOISE_WINDOW_MS / NOISE_SEARCH_STEP_MS;
  * samples at -60 dBFS, 4.3-5.0 % at -72, 9.1-9.7 % at -78, 17.7-19.3 % at -84
  * and 21.6-22.7 % at -85.5 dBFS. Those windows are real recordings' noise
  * floors and must stay in the search, so the bound cannot drop to 0.20 without
- * evicting the two quietest members. Quieter still (-87 dBFS reads 24.7-27.2 %)
- * the class crosses the bound and the caller declines fail-safe — a floor
- * within 3 dB of `SILENCE_RMS` is at the edge of measurability either way.
+ * evicting the two quietest members. Quieter still the class crosses the
+ * bound (-87 dBFS reads 25.2-26.4 % on the same population, pinned by the
+ * same kept test) and the caller declines fail-safe — a floor within 3 dB of
+ * `SILENCE_RMS` is at the edge of measurability either way.
  */
 export const NOISE_WINDOW_MAX_SILENT_FRACTION = 0.25;
 
@@ -250,6 +281,53 @@ export function measureNoiseWindow(
   }
   if (bestAt < 0) return null;
 
+  // The eviction's accounts (see the docblock): with the FINAL winner known,
+  // classify every chunk by the candidates that contain it — covered by an
+  // accepted (mostly-real, above-silence) window, or only inside evicted
+  // quieter-than-the-winner ones — then count the real frames the accepted
+  // search never saw. One more O(chunks) slide plus one walk over the
+  // affected chunks, only on the opt-in path.
+  let hiddenRealSamples: number | undefined;
+  if (chunkSilent) {
+    const covered = new Uint8Array(chunkCount);
+    const evicted = new Uint8Array(chunkCount);
+    let running2 = 0;
+    let silentRun2 = 0;
+    for (let k = 0; k < chunkCount; k++) {
+      running2 += chunkSum[k];
+      silentRun2 += chunkSilent[k];
+      if (k < CHUNKS_PER_WINDOW - 1) continue;
+      if (k >= CHUNKS_PER_WINDOW) {
+        running2 -= chunkSum[k - CHUNKS_PER_WINDOW];
+        silentRun2 -= chunkSilent[k - CHUNKS_PER_WINDOW];
+      }
+      const rms = Math.sqrt(running2 / (win * nch));
+      if (rms <= SILENCE_RMS) continue;
+      if (silentRun2 / win > NOISE_WINDOW_MAX_SILENT_FRACTION) {
+        if (rms < bestRms) for (let c = k - (CHUNKS_PER_WINDOW - 1); c <= k; c++) evicted[c] = 1;
+      } else {
+        for (let c = k - (CHUNKS_PER_WINDOW - 1); c <= k; c++) covered[c] = 1;
+      }
+    }
+    let hidden = 0;
+    for (let c = 0; c < chunkCount; c++) {
+      if (!evicted[c] || covered[c]) continue;
+      const from = c * chunk;
+      const to = from + chunk;
+      for (let i = from; i < to; i++) {
+        let allZero = true;
+        for (const ch of channels) {
+          if (ch[i] !== 0) {
+            allZero = false;
+            break;
+          }
+        }
+        if (!allZero) hidden++;
+      }
+    }
+    hiddenRealSamples = hidden;
+  }
+
   const segment = channels.map((c) => c.subarray(bestAt, bestAt + win));
   const env = envelopeFollower(maxAcrossChannels(segment), sampleRate, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
   let envPeak = 0;
@@ -260,6 +338,7 @@ export function measureNoiseWindow(
     lengthSamples: win,
     rmsDb: toDb(bestRms),
     envelopePeakDb: toDb(envPeak),
+    ...(hiddenRealSamples === undefined ? {} : { hiddenRealSamples }),
   };
 }
 
@@ -288,8 +367,17 @@ export function measureNoiseWindow(
  * Returns 0 for a passage shorter than one analysis block, which is not a
  * verdict but an absence of one: the caller must not read it as "floor".
  */
+/** One STFT analysis frame of the tilt fit — the shortest passage on which
+ * ANY of the gate's classifiers can produce a verdict, and therefore the
+ * gate's floor for "real audio worth accounting for" (see `deriveGate`'s
+ * hidden-material decline). Verdicts on passages NEAR this floor are still
+ * unreliable — a single-frame fit on an all-real floor run reads up to 3.9 dB
+ * where the 500 ms population tops out at 1.91 — which is why the gate
+ * declines on hidden material instead of classifying it. */
+export const TILT_FFT_SIZE = 1024;
+
 export function spectralTiltResidualDb(window: Float32Array, sampleRate: number): number {
-  const fftSize = 1024;
+  const fftSize = TILT_FFT_SIZE;
   if (window.length < fftSize) return 0;
   const { frames } = stft(window, fftSize, fftSize / 2);
   if (frames.length === 0) return 0;

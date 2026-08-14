@@ -37,6 +37,7 @@ import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
 import {
   NOISE_WINDOW_MAX_SILENT_FRACTION,
   NOISE_WINDOW_MS,
+  TILT_FFT_SIZE,
   measureNoiseWindow,
   programmeRmsDb,
   spectralTiltResidualDb,
@@ -1097,9 +1098,14 @@ describe('deriveGate', () => {
 
       it('still gates a take whose undithered 16-bit floor quantises a fifth of it to exact zero', () => {
         // The realistic member: a -84 dBFS Gaussian floor through a 16-bit
-        // converter reads 18-20 % exact zeros per 500 ms window. Every floor
-        // window carries them, so a bound of 0.2 would evict them ALL from the
-        // search and decline a take the gate handles today.
+        // converter reads 18-20 % exact zeros per 500 ms window — under the
+        // bound with real margin, and this member pins that the class of
+        // ordinary quiet 16-bit recordings stays in the search. (Measured: a
+        // bound of 0.2 does NOT fail this take, whose windows sit just under
+        // 0.2 as well — the members that defend the lower side against a drop
+        // to 0.2 are the exact-scatter fixtures below and the population
+        // assertion in the NOISE_WINDOW_MAX_SILENT_FRACTION suite, whose
+        // -85.5 dBFS member reads 21.6-22.7 %.)
         const { channel, pauses } = takeOverFloor(-84);
         const q = new Float32Array(channel.length);
         for (let i = 0; i < channel.length; i++) q[i] = Math.round(channel[i] * 32768) / 32768;
@@ -1162,6 +1168,180 @@ describe('deriveGate', () => {
         }
       }
       expect(deriveGate([signal], SR).run).toBe(true);
+    });
+  });
+
+  // N4 — the eviction's blind spot. Refusing mostly-silent windows is right
+  // for the THRESHOLD, but it can hide real audio from the search entirely:
+  // when a quiet passage is ITSELF mostly zeros, every window over it is
+  // refused, the search falls through to a LOUDER floor-like window, and the
+  // threshold lands above the hidden passage — measured before this guard,
+  // 100 % of such a whispered verse was muted. The search now keeps accounts
+  // (`hiddenRealSamples`): real frames inside evicted-quieter windows that no
+  // accepted window covers. Above one `TILT_FFT_SIZE` analysis frame's worth,
+  // the stage DECLINES rather than classifying, because classification at
+  // hidable lengths was measured and found impossible: a single-frame tilt
+  // fit on an all-real FLOOR run reads up to 3.9 dB, above the whisper
+  // population's own minimum at 44.1 kHz (2.41 dB) — the populations INVERT
+  // at exactly the lengths that can stay hidden.
+  describe("the eviction's blind spot: quiet audio that is itself mostly zeros", () => {
+    /** [2 s floor @ floorDb][3.5 s verse][3.5 s chorus] — the chorus keeps the
+     * all-or-nothing guard from firing, the floor stretch gives the search a
+     * mostly-real window to fall through to. */
+    function n4Take(verse: Float32Array, floorDb: number): { channel: Float32Array; verseAt: { start: number; end: number } } {
+      const floorLen = Math.round(2 * SR);
+      const chorusLen = Math.round(3.5 * SR);
+      const channel = new Float32Array(floorLen + verse.length + chorusLen);
+      channel.set(gaussFloorDb(floorLen, floorDb, 7), 0);
+      channel.set(verse, floorLen);
+      let phase = 0;
+      for (let i = 0; i < chorusLen; i++) {
+        phase += (2 * Math.PI * 196) / SR;
+        channel[floorLen + verse.length + i] = 0.25 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase) + 0.2 * Math.sin(3 * phase));
+      }
+      return { channel, verseAt: { start: floorLen, end: floorLen + verse.length } };
+    }
+
+    /** A verse surviving only as bursts between exact zeros — a strip-silenced
+     * stem, a codec that writes hard zeros between speech. */
+    function choppedVerse(kind: 'whisper' | 'sung', rmsDb: number, onSmp: number, offSmp: number): Float32Array {
+      const n = Math.round(3.5 * SR);
+      const out = new Float32Array(n);
+      let at = 0;
+      let seed = 91;
+      while (at + onSmp <= n) {
+        if (kind === 'whisper') out.set(whisper(onSmp, rmsDb, seed++), at);
+        else {
+          let ph = 0;
+          const burst = new Float32Array(onSmp);
+          for (let i = 0; i < onSmp; i++) {
+            ph += (2 * Math.PI * 196) / SR;
+            burst[i] = Math.sin(ph) + 0.4 * Math.sin(2 * ph) + 0.2 * Math.sin(3 * ph);
+          }
+          out.set(atRms(burst, Math.pow(10, rmsDb / 20)), at);
+        }
+        at += onSmp + offSmp;
+      }
+      return out;
+    }
+
+    const pauseTailDb = (out: Float32Array, pauses: { start: number; end: number }[]): number => {
+      let sum = 0;
+      let n = 0;
+      for (const p of pauses) {
+        for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += out[i] * out[i];
+        n += Math.round(0.3 * SR);
+      }
+      return toDb(Math.sqrt(sum / n));
+    };
+
+    it('declines when an 8-bit transfer leaves the whispered verse as fragments at its own LSB', () => {
+      // At 8 bits, a -42 dBFS whisper sits at one LSB: most of its samples
+      // quantise to exact zero and the rest to isolated ±1 LSB spikes. Every
+      // window over the verse is mostly silent, so before this guard the
+      // search fell through to the -30 dBFS floor stretch and the threshold
+      // (floor peak + 3 dB) sat ~20 dB over the verse: measured, 100 % of it
+      // was muted. The same take at 10 or 12 bits declines by other guards.
+      const { channel } = n4Take(whisper(Math.round(3.5 * SR), -42, 41), -30);
+      const q = new Float32Array(channel.length);
+      for (let i = 0; i < channel.length; i++) q[i] = Math.round(channel[i] * 128) / 128;
+
+      // The mechanism: the honest search hides a verse's worth of real frames.
+      const w = measureNoiseWindow([q], SR, { rejectMostlySilentWindows: true })!;
+      expect(w.hiddenRealSamples!).toBeGreaterThanOrEqual(TILT_FFT_SIZE);
+
+      const res = deriveGate([q], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('fragments');
+    });
+
+    it('declines when the whispered verse arrives chopped between exact zeros', () => {
+      // 150 ms bursts, 350 ms gaps: every 500 ms window over the verse is 70 %
+      // zeros and is evicted, while no accepted window contains the bursts.
+      // Before this guard: threshold from the -30 dBFS floor, 100 % muted.
+      const { channel } = n4Take(choppedVerse('whisper', -42, Math.round(0.15 * SR), Math.round(0.35 * SR)), -30);
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('fragments');
+    });
+
+    it('declines the chopped SUNG sibling too', () => {
+      // Here the accepted boundary window straddling floor and the first sung
+      // burst already reads voiced, so the winner check catches it — pinned so
+      // the sung shape stays declined whichever guard gets there first.
+      const { channel } = n4Take(choppedVerse('sung', -42, Math.round(0.15 * SR), Math.round(0.35 * SR)), -30);
+      expect(deriveGate([channel], SR).run).toBe(false);
+    });
+
+    it('draws the negligibility line at one analysis frame, exactly', () => {
+      // A floor fragment planted inside the lead-in zeros, off the chunk grid
+      // and zero-bounded: at exactly TILT_FFT_SIZE hidden real samples the
+      // stage declines; one sample shorter is debris and the take gates. The
+      // line is the tilt fit's own frame — the shortest passage ANY of the
+      // gate's classifiers can even form a verdict on.
+      for (const [fragLen, shouldRun] of [
+        [TILT_FFT_SIZE, false],
+        [TILT_FFT_SIZE - 1, true],
+      ] as const) {
+        const { channel, pauses } = takeWithSilentLeadIn(2.0);
+        channel.set(gaussFloorDb(fragLen, -50, 55), Math.round(0.5 * SR) + 200);
+        const res = deriveGate([channel], SR);
+        expect(res.run).toBe(shouldRun);
+        if (res.run) {
+          const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+          expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
+        } else if (!res.run) {
+          expect(res.reason).toContain('fragments');
+        }
+      }
+    });
+
+    it('ignores a single stray sample inside the silence', () => {
+      const { channel, pauses } = takeWithSilentLeadIn(1.0);
+      channel[Math.round(0.5 * SR)] = 0.01;
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
+    });
+
+    it('hides nothing on the silence-beside-floor shape — the converse, pinned at the mechanism', () => {
+      // Why N2 still gates: every real sample inside the boundary windows the
+      // eviction refuses ALSO lies inside an accepted all-real floor window,
+      // so nothing is hidden and proceeding is safe. This is the structural
+      // form of "evicted material that genuinely is floor still gates".
+      const { channel } = takeWithSilentLeadIn(1.0);
+      const w = measureNoiseWindow([channel], SR, { rejectMostlySilentWindows: true })!;
+      expect(w.hiddenRealSamples).toBe(0);
+      expect(deriveGate([channel], SR).run).toBe(true);
+    });
+
+    // M9 — the content checks mono-mix, and the mix of an exactly
+    // polarity-inverted pair is all zeros: both checks would read a silent
+    // window and wave it through, where the same take in mono declines.
+    // The search itself is not fooled (a frame is silent only when EVERY
+    // channel is zero), so a mostly-zero MIX of a window the search accepted
+    // as mostly-real can only mean cancellation — and the stage declines.
+    it('declines an exactly polarity-cancelling stereo pair instead of reading its mix as a pause', () => {
+      const { channel } = continuousTakeWithWhisperedVerse();
+      const neg = new Float32Array(channel.length);
+      for (let i = 0; i < channel.length; i++) neg[i] = -channel[i];
+      const res = deriveGate([Float32Array.from(channel), neg], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('cancel');
+    });
+
+    it('still gates an ordinary correlated stereo pair — the cancellation guard needs exact inversion', () => {
+      const { channel, pauses } = takeWithSilentLeadIn(1.0);
+      const res = deriveGate([Float32Array.from(channel), Float32Array.from(channel)], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
     });
   });
 
@@ -1575,6 +1755,24 @@ describe('NOISE_WINDOW_MAX_SILENT_FRACTION', () => {
     }
     expect(worst).toBeGreaterThan(0.2);
     expect(worst).toBeLessThan(NOISE_WINDOW_MAX_SILENT_FRACTION);
+
+    // ...and the very next step down crosses it: a -87 dBFS floor reads
+    // 25.2-26.4 % on the same population — every member above the bound — so
+    // that is where the class starts declining fail-safe. This is the figure
+    // the constant's docblock quotes; pinned here so it cannot drift (M8).
+    let crossedMin = 1;
+    for (const sr of [8000, 44100]) {
+      const n = Math.round((NOISE_WINDOW_MS / 1000) * sr);
+      for (const seed of [7, 23, 101]) {
+        const w = gaussFloorDb(n, -87, seed);
+        let zeros = 0;
+        for (let i = 0; i < n; i++) {
+          if (Math.round(w[i] * 32768) / 32768 === 0) zeros++;
+        }
+        crossedMin = Math.min(crossedMin, zeros / n);
+      }
+    }
+    expect(crossedMin).toBeGreaterThan(NOISE_WINDOW_MAX_SILENT_FRACTION);
   });
 
   it('pins the constant the two populations bracket', () => {
