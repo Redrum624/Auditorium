@@ -12,6 +12,7 @@
 import { act, renderHook } from '@testing-library/react';
 import {
   buildClipTicOverlay,
+  laneWidthBound,
   mapBeatsToClip,
   useClipBeatTics,
   ticWindow,
@@ -27,6 +28,7 @@ import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { _resetTempoWorkerTestState } from '../../__mocks__/createTempoWorkerMock';
 import type { Clip } from '../../multitrack/session';
+import { MT_HEADER_W } from '../../multitrack/sessionViewport';
 
 const SR = 44100;
 
@@ -324,6 +326,28 @@ describe('ticWindow', () => {
     expect(ticWindow(0, 300, 0).width).toBe(0);
     expect(ticWindow(0, 0, VIEW).width).toBe(0);
     expect(ticWindow(Number.NaN, 300, VIEW).width).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3b. laneWidthBound — V1, the bound ticWindow is actually handed
+// ---------------------------------------------------------------------------
+
+describe('laneWidthBound', () => {
+  it('takes the header column off the window width — a lane never gets those px', () => {
+    // Every track row is [TrackHeader | TrackLane], so no lane in any layout is
+    // wider than this. Handing `ticWindow` the raw window width (what shipped
+    // before V1) over-sized every clip raster by exactly one header column.
+    expect(laneWidthBound(1024)).toBe(1024 - MT_HEADER_W);
+    expect(laneWidthBound(1920)).toBe(1920 - MT_HEADER_W);
+  });
+
+  it('is 0, never negative, for a window no wider than the header column', () => {
+    // A negative bound would make `ticWindow`'s end edge run BACKWARDS past its
+    // start; 0 makes the band empty, which is what a lane of no width means.
+    expect(laneWidthBound(MT_HEADER_W)).toBe(0);
+    expect(laneWidthBound(10)).toBe(0);
+    expect(ticWindow(0, 5000, laneWidthBound(10)).width).toBe(0);
   });
 });
 

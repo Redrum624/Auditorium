@@ -19,7 +19,7 @@ import ClipView from './ClipView';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { getBeatGrid, type BeatGrid } from '../../services/beatGrid';
 import { setBeatGridVisible } from '../../services/beatGridDisplay';
-import { TIC_WINDOW_QUANTUM_PX, CLIP_TIC_BAND_PX } from './clipBeatTics';
+import { laneWidthBound, TIC_WINDOW_QUANTUM_PX, CLIP_TIC_BAND_PX } from './clipBeatTics';
 import type { Clip } from '../../multitrack/session';
 
 jest.mock('../../services/beatGrid', () => {
@@ -402,7 +402,7 @@ describe('ClipView beat tics — nothing to draw', () => {
 // ---------------------------------------------------------------------------
 
 describe('ClipView beat tics — bounded cost', () => {
-  it('keeps the overlay bounded by the VIEWPORT on a clip far wider than any screen', () => {
+  it('keeps the overlay bounded by the LANE on a clip far wider than any screen', () => {
     // 20 000 beats over ~2 000 000 px of timeline. A clip-width overlay would be
     // a 2 000 000 px canvas — past the browser's max dimension, and the very
     // regression the 4096-px waveform cap fixed.
@@ -417,7 +417,9 @@ describe('ClipView beat tics — bounded cost', () => {
     );
 
     const overlay = overlayOf(container)!;
-    const bound = window.innerWidth + 2 * TIC_WINDOW_QUANTUM_PX;
+    // V1: the widest a LANE can be (the window less the 224 px header column),
+    // plus at most one quantum of snap-out at each edge.
+    const bound = laneWidthBound(window.innerWidth) + 2 * TIC_WINDOW_QUANTUM_PX;
     expect(parseFloat(overlay.style.width)).toBeLessThanOrEqual(bound);
     expect(overlay.width).toBeLessThanOrEqual(Math.round(bound * (window.devicePixelRatio || 1)));
     // And the tic count is bounded by the band, not by the clip's beat count.

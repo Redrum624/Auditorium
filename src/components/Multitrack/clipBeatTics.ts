@@ -65,6 +65,7 @@ import { useMemo, useSyncExternalStore } from 'react';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 import type { Clip } from '../../multitrack/session';
+import { MT_HEADER_W } from '../../multitrack/sessionViewport';
 import { getBeatGrid, isDownbeat, useBeatGridVersion, type BeatGrid } from '../../services/beatGrid';
 import { useBeatGridVisible } from '../../services/beatGridDisplay';
 import type { BeatGridOverlay } from '../Editor/waveformRender';
@@ -110,11 +111,11 @@ export const TIC_WINDOW_QUANTUM_PX = 256;
  * would be both displaced and fattened.
  *
  * So the overlay covers only the part of the clip that can be on screen. The
- * clip does not know the lane's width, but the lane cannot be wider than the
- * window, so `viewportPx` (`window.innerWidth`, measured — see
- * {@link useViewportWidth}) is a true upper bound: the lane starts 224 px in,
- * so the bound is generous by that much on top of the quantum. A clip entirely
- * outside the viewport gets width 0 and no canvas at all.
+ * clip does not know the lane's width, but it knows an upper bound on it: the
+ * lane cannot be wider than the window less the header column every row spends
+ * before the lane starts — see {@link laneWidthBound} and
+ * {@link useLaneWidthBound}. A clip entirely outside that band gets width 0 and
+ * no canvas at all.
  *
  * @param laneOriginLocal clip-local x of the lane's left edge, i.e. `-left`
  *   (plus any in-flight drag translation).
@@ -144,14 +145,34 @@ function viewportSnapshot(): number {
 }
 
 /**
- * The window's CSS width, re-read on resize. `ticWindow` needs an upper bound
- * on the lane width and nothing in the multitrack tree re-renders on a resize,
- * so without this subscription a window widened past the last-known bound would
- * leave the right-hand part of a wide clip without tics until the next
- * zoom/scroll.
+ * The widest a track lane can be inside a window `viewportPx` CSS px wide.
+ *
+ * Every track row is `[TrackHeader | TrackLane]`, so the lane starts
+ * {@link MT_HEADER_W} px in and no lane, in any layout, can be wider than this.
+ * V1 — `ticWindow` used to be handed the raw window width, which over-sized
+ * every clip raster by exactly one header column on top of the quantum.
+ *
+ * Deliberately a BOUND derived from the window rather than
+ * `sessionViewport.sessionLaneWidth()`, which is the real measurement: that
+ * value publishes no change notification of its own, so a ClipView reading it
+ * could hold a stale, too-SMALL width and leave the right-hand strip of a clip
+ * unrastered — a visible hole, where an over-wide band only costs columns. The
+ * band's job is to be an upper bound, not a best guess.
  */
-export function useViewportWidth(): number {
-  return useSyncExternalStore(subscribeViewport, viewportSnapshot, viewportSnapshot);
+export function laneWidthBound(viewportPx: number): number {
+  return Math.max(0, viewportPx - MT_HEADER_W);
+}
+
+/**
+ * {@link laneWidthBound} of the window's CSS width, re-read on resize.
+ * `ticWindow` needs an upper bound on the lane width and nothing in the
+ * multitrack tree re-renders on a resize, so without this subscription a window
+ * widened past the last-known bound would leave the right-hand part of a wide
+ * clip without tics until the next zoom/scroll.
+ */
+export function useLaneWidthBound(): number {
+  const viewportPx = useSyncExternalStore(subscribeViewport, viewportSnapshot, viewportSnapshot);
+  return laneWidthBound(viewportPx);
 }
 
 /** The only three clip fields the mapping reads. Narrowed from `Clip` so the

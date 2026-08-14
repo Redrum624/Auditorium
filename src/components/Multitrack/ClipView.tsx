@@ -17,7 +17,7 @@ import {
   CLIP_TIC_BAND_PX,
   ticWindow,
   useClipBeatTics,
-  useViewportWidth,
+  useLaneWidthBound,
 } from './clipBeatTics';
 import { snapClipStart } from './clipDropPosition';
 import { sessionSnapTargets } from './sessionSnapTargets';
@@ -216,7 +216,7 @@ export default function ClipView({
   // whenever there is nothing to draw: no cached analysis, the toggle off, the
   // source document closed, or a clip taken from past the analysed prefix.
   const beatTics = useClipBeatTics(clip, doc, sessionRate);
-  const viewportPx = useViewportWidth();
+  const laneBoundPx = useLaneWidthBound();
   // Only the on-screen slice of the clip is rasterised — see ticWindow. The
   // drag translation is included so the band still covers the lane while a clip
   // is being dragged, and the window is quantised so that costs a canvas resize
@@ -229,7 +229,12 @@ export default function ClipView({
   // clip is on screen (a half-pixel disagreement would show as tics sliding
   // against the audio they describe). It also means the quantum buys BOTH
   // canvases their "resize once per 256 px of travel" instead of one.
-  const band = ticWindow(-(left + moveDx), widthPx, viewportPx);
+  // V1 — bounded by the widest a LANE can be, not by the whole window: every
+  // row spends MT_HEADER_W on its header before the lane starts, so the raw
+  // window width over-sized every raster by a header column (see
+  // `laneWidthBound`). The quantum is untouched, so the band still only moves
+  // once per 256 px of scroll or drag.
+  const band = ticWindow(-(left + moveDx), widthPx, laneBoundPx);
   const showTics = beatTics !== null && band.width > 0;
   // Hoisted so the waveform effect can depend on the document's channel-array
   // identity and rate, not merely on the document object: an audio EDIT

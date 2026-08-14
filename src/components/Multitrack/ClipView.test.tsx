@@ -1,7 +1,7 @@
 import { render } from '@testing-library/react';
 import ClipView from './ClipView';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
-import { TIC_WINDOW_QUANTUM_PX } from './clipBeatTics';
+import { laneWidthBound, TIC_WINDOW_QUANTUM_PX } from './clipBeatTics';
 import type { Clip } from '../../multitrack/session';
 
 // jsdom has no 2d backend (getContext returns null, which makes ClipView's
@@ -122,7 +122,12 @@ describe('ClipView waveform is rasterised at VISIBLE resolution (MT1-2)', () => 
     const { container } = renderClip(doc, makeClip(20000), 1);
 
     const canvas = waveformOf(container);
-    const band = window.innerWidth; // jsdom: 1024, an exact multiple of the quantum
+    // V1: the bound is the widest a LANE can be — the window less the header
+    // column — and the window's right edge is then snapped OUT to the quantum.
+    // In jsdom that is 1024 - 224 = 800, rounded out to 1024.
+    const band = Math.ceil(laneWidthBound(window.innerWidth) / TIC_WINDOW_QUANTUM_PX) *
+      TIC_WINDOW_QUANTUM_PX;
+    expect(band).toBe(1024);
     expect(canvas.style.width).toBe(`${band}px`);
     expect(canvas.width).toBe(band); // dpr 1 -> one backing-store column per CSS px
     expect(canvas.height).toBe(42); // laneHeight - 22, dpr 1 -- unchanged
@@ -132,11 +137,12 @@ describe('ClipView waveform is rasterised at VISIBLE resolution (MT1-2)', () => 
     expect(drawImage).not.toHaveBeenCalled();
   });
 
-  it('bounds the raster by the VIEWPORT, not by the clip, however wide the clip is', () => {
+  it('bounds the raster by the LANE, not by the clip, however wide the clip is', () => {
     const doc = seedDoc(20000);
     const { container } = renderClip(doc, makeClip(20000), 0.5); // 40 000 px wide
     const canvas = waveformOf(container);
-    const bound = window.innerWidth + 2 * TIC_WINDOW_QUANTUM_PX;
+    // V1: one header column tighter than the old window-width bound.
+    const bound = laneWidthBound(window.innerWidth) + 2 * TIC_WINDOW_QUANTUM_PX;
     expect(parseFloat(canvas.style.width)).toBeLessThanOrEqual(bound);
     expect(canvas.width).toBeLessThanOrEqual(Math.round(bound * (window.devicePixelRatio || 1)));
   });
@@ -173,13 +179,15 @@ describe('ClipView waveform is rasterised at VISIBLE resolution (MT1-2)', () => 
 
   it('follows the scroll: the band tracks the visible slice of the clip', () => {
     const doc = seedDoc(20000);
-    // Scrolled 5 000 px into a 20 000 px clip. The window is snapped OUT to the
-    // 256 px quantum, so the band starts at 4864 and is 1280 px wide.
+    // Scrolled 5 000 px into a 20 000 px clip. Both edges are snapped OUT to the
+    // 256 px quantum, so the band starts at 4864 (floor) and ends at 5888
+    // (ceil of 5000 + the 800 px lane bound) — 1024 px wide. V1 took 256 px off
+    // that: on the old window-width bound the same band was 1280 px.
     const { container } = renderClip(doc, makeClip(20000), 1, 5000);
 
     const canvas = waveformOf(container);
     expect(canvas.style.left).toBe('4864px');
-    expect(canvas.width).toBe(1280);
+    expect(canvas.width).toBe(1024);
     // Positioned inside the clip element, so it rides the move-drag transform.
     expect(canvas.style.bottom).toBe('0px');
   });
