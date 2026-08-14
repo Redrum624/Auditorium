@@ -469,6 +469,22 @@ closure, a breath, or a dip inside a held note is far shorter than that, so the
 gate does not so much as begin to close on one. The gate's row in the report
 says how much of the selection it actually silenced, in seconds and per cent.
 
+**And it does not close on what comes out of digital silence.** A run of
+exact zeros — 50 ms or more of them — is silence somebody already put there,
+so the gate has nothing to remove across it and does not spend it closing:
+whatever follows the zeros gets the same 500 ms hold that follows a phrase.
+That is what protects a soft pickup consonant or an inhale sitting in a
+strip-silenced pre-roll, which is quiet, has no phrase before it to hold the
+gate open, and used to be muted whole. The threshold is unchanged by this —
+it still comes from the quietest half-second of real material — and the
+recording's own pauses still reach silence as before, because the scattered
+exact zeros an undithered converter leaves in a noise floor never run
+anywhere near 50 ms (measured: 1 ms at worst on the floors this app will
+measure a threshold from). **The cost, stated:** a stray noise blip that
+happens to sit inside a stretch of digital silence is passed through as well,
+up to half a second of it, because nothing distinguishes it from that
+consonant. Passing a tick costs less than muting a word.
+
 **And when it cannot tell a pause from a phrase, it declines instead of
 guessing.** Everything above depends on the quietest 500 ms of your selection
 actually being a pause, and on some recordings it is not. The rule underneath

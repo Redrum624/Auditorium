@@ -1,8 +1,9 @@
 import { envelopeFollower } from './envelope';
 import { compressorEffect, reductionDb } from './CompressorEffect';
 import { limiterEffect } from './LimiterEffect';
-import { noiseGateEffect } from './NoiseGateEffect';
+import { GATE_SILENT_RUN_MS, noiseGateEffect } from './NoiseGateEffect';
 import { getAllEffects } from '../EffectRegistry';
+import { NOISE_WINDOW_MAX_SILENT_FRACTION } from '../../dsp/chainAnalysis';
 import { registerAllEffects } from '../registerAll';
 import type { EffectDefinition, EffectParamValue } from '../types';
 
@@ -356,6 +357,293 @@ describe('noiseGateEffect', () => {
     const out = run(noiseGateEffect, [input], {});
     out[0].forEach((v) => expect(Number.isFinite(v)).toBe(true));
   });
+
+  // N6 — quiet material bracketed by digital silence. A run of exact zeros is
+  // already silent: the gate removes nothing across it, so it spends the run
+  // OPEN and what comes out of the run gets the same hold a phrase's tail gets.
+  // See `GATE_SILENT_RUN_MS` for both measured sides of the run bound.
+  describe('a run of digital silence', () => {
+    const THRESHOLD_DB = -42;
+
+    /** Gaussian noise at a stated dBFS RMS — a floor, or a quiet island. */
+    function floorDb(n: number, rmsDb: number, seed: number): Float32Array {
+      let s = seed >>> 0;
+      const next = (): number => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return (s / 0xffffffff) * 2 - 1;
+      };
+      const out = new Float32Array(n);
+      const k = Math.pow(10, rmsDb / 20) / Math.sqrt(4 / 3);
+      for (let i = 0; i < n; i++) out[i] = (next() + next() + next() + next()) * k;
+      return out;
+    }
+
+    function cat(parts: Float32Array[]): Float32Array {
+      const out = new Float32Array(parts.reduce((a, p) => a + p.length, 0));
+      let at = 0;
+      for (const p of parts) {
+        out.set(p, at);
+        at += p.length;
+      }
+      return out;
+    }
+
+    /** How much of a span's energy the gate removed, as a percentage. */
+    function removedPct(input: Float32Array, out: Float32Array, from: number, to: number): number {
+      let a = 0;
+      let b = 0;
+      for (let i = from; i < to; i++) {
+        a += input[i] * input[i];
+        b += out[i] * out[i];
+      }
+      return (1 - b / a) * 100;
+    }
+
+    const gate = (input: Float32Array): Float32Array =>
+      run(noiseGateEffect, [input], {
+        thresholdDb: THRESHOLD_DB,
+        attackMs: 1,
+        releaseMs: 20,
+        holdMs: 500,
+      })[0];
+
+    it('lets a quiet island bracketed by zeros through, where the same island beside a floor is muted', () => {
+      const zeros = new Float32Array(Math.round(0.3 * SR));
+      const island = floorDb(Math.round(0.2 * SR), -60, 41);
+      const loud = sine(220, 0.5, 0.25);
+
+      // Bracketed: nothing before the island but exact zeros, and the gate has
+      // removed nothing across them, so it has no business closing on it.
+      const bracketed = cat([zeros, island, loud, new Float32Array(zeros.length)]);
+      const outBracketed = gate(bracketed);
+      expect(removedPct(bracketed, outBracketed, zeros.length, zeros.length + island.length)).toBeLessThan(0.1);
+
+      // The converse, same island, same level: reached across REAL material
+      // that the gate legitimately closed on, it is still muted. The zeros are
+      // what changes the verdict, not the island.
+      const head = floorDb(Math.round(3.0 * SR), -60, 7);
+      const beside = cat([loud, head, island, loud, new Float32Array(zeros.length)]);
+      const outBeside = gate(beside);
+      const at = loud.length + head.length;
+      expect(removedPct(beside, outBeside, at, at + island.length)).toBeGreaterThan(99);
+    });
+
+    it('takes a run at the bound and refuses one a sample under it — behaviour, both sides', () => {
+      const bound = Math.round((GATE_SILENT_RUN_MS / 1000) * SR);
+      const island = floorDb(Math.round(0.2 * SR), -60, 41);
+      const loud = sine(220, 0.5, 0.25);
+      for (const [runSamples, expectPassed] of [
+        [bound, true],
+        [bound - 1, false],
+      ] as const) {
+        // The zeros are reached across real material the gate closes on, so the
+        // ONLY thing that can hold it open at the island is the zero run itself.
+        const head = floorDb(Math.round(3.0 * SR), -60, 7);
+        const input = cat([loud, head, new Float32Array(runSamples), island, loud]);
+        const at = loud.length + head.length + runSamples;
+        const removed = removedPct(input, gate(input), at, at + island.length);
+        if (expectPassed) expect(removed).toBeLessThan(0.1);
+        else expect(removed).toBeGreaterThan(99);
+      }
+    });
+
+    it('is not fooled by the scattered zeros an undithered floor really carries', () => {
+      // 16-bit quantisation of a quiet Gaussian floor: a fifth of its samples
+      // are EXACT zeros, in runs of a handful of samples. A gate that treated
+      // any zero as an edit would never close on a real recording again.
+      const step = Math.pow(2, -15);
+      const raw = floorDb(Math.round(3.0 * SR), -84, 7);
+      const quantised = new Float32Array(raw.length);
+      let zeros = 0;
+      let longestRun = 0;
+      let currentRun = 0;
+      for (let i = 0; i < raw.length; i++) {
+        quantised[i] = Math.round(raw[i] / step) * step;
+        if (quantised[i] === 0) {
+          zeros++;
+          currentRun++;
+          if (currentRun > longestRun) longestRun = currentRun;
+        } else currentRun = 0;
+      }
+      // The precondition: this really is the scattered-zeros class, and its
+      // longest run is far under the bound.
+      expect(zeros / quantised.length).toBeGreaterThan(0.15);
+      expect(longestRun).toBeLessThan(Math.round((GATE_SILENT_RUN_MS / 1000) * SR));
+
+      const loud = sine(220, 0.5, 0.25);
+      const input = cat([loud, quantised]);
+      const out = gate(input);
+      // Past the hold and the fade, the floor is gone — the gate still closes.
+      const tail = loud.length + Math.round(1.0 * SR);
+      expect(maxAbs(out, tail, out.length)).toBeLessThan(1e-6);
+    });
+
+    it('holds for one hold and then closes — a zero run buys a hold, not an exemption', () => {
+      const zeros = new Float32Array(Math.round(0.3 * SR));
+      const quiet = floorDb(Math.round(3.0 * SR), -60, 7);
+      const input = cat([zeros, quiet]);
+      const out = gate(input);
+      // The first half-second out of the silence passes at full level...
+      expect(Math.abs(dbGain(input, out, zeros.length, zeros.length + Math.round(0.4 * SR)))).toBeLessThan(0.5);
+      // ...and past hold + release the gate is shut again.
+      const closed = zeros.length + Math.round(0.7 * SR);
+      expect(maxAbs(out, closed, out.length)).toBeLessThan(1e-6);
+    });
+
+    it('lets a floor blip inside the silence through too — the cost of the rule, stated', () => {
+      // The gate cannot tell a whispered pickup from a stray noise blip: both
+      // are quiet material bracketed by zeros. The direction is deliberate —
+      // the material was put between zeros by whoever edited the file, and
+      // passing a blip costs a tick where muting a pickup costs a word.
+      const zeros = new Float32Array(Math.round(0.3 * SR));
+      const blip = floorDb(Math.round(0.05 * SR), -60, 3);
+      const input = cat([zeros, blip, zeros]);
+      const out = gate(input);
+      expect(removedPct(input, out, zeros.length, zeros.length + blip.length)).toBeLessThan(0.1);
+    });
+
+    it('leaves digital silence digitally silent, held open or not', () => {
+      const zeros = new Float32Array(Math.round(0.6 * SR));
+      const loud = sine(220, 0.3, 0.25);
+      const input = cat([loud, zeros, loud]);
+      const out = gate(input);
+      for (let i = loud.length; i < loud.length + zeros.length; i++) expect(out[i]).toBe(0);
+    });
+  });
+});
+
+// The population the LOWER side of `GATE_SILENT_RUN_MS` is derived from: the
+// exact zeros an undithered converter scatters through a real noise floor. The
+// gate must never read one of those runs as an edit, or it would stop closing
+// on real recordings — so the constant has to clear the longest run this class
+// produces, and the figures behind that claim live here rather than only in the
+// comment.
+describe('GATE_SILENT_RUN_MS', () => {
+  /** A quantised floor, and the two statistics that decide the bound. */
+  function quantisedFloor(
+    n: number,
+    rmsDb: number,
+    seed: number,
+    bits: number,
+    sr: number,
+    tilted: boolean,
+  ): { zeroFraction: number; longestRun: number; rmsDb: number } {
+    let s = seed >>> 0;
+    const next = (): number => {
+      s = (s * 1664525 + 1013904223) >>> 0;
+      return (s / 0xffffffff) * 2 - 1;
+    };
+    const raw = new Float32Array(n);
+    const k = Math.pow(10, rmsDb / 20) / Math.sqrt(4 / 3);
+    for (let i = 0; i < n; i++) raw[i] = (next() + next() + next() + next()) * k;
+    if (tilted) {
+      // One pole at 400 Hz. A tilted floor is the hard case: neighbouring
+      // samples are correlated, so its zeros CLUSTER instead of scattering.
+      const a = Math.exp((-2 * Math.PI * 400) / sr);
+      let y = 0;
+      let sum = 0;
+      for (let i = 0; i < n; i++) {
+        y = (1 - a) * raw[i] + a * y;
+        raw[i] = y;
+        sum += y * y;
+      }
+      const g = Math.pow(10, rmsDb / 20) / Math.sqrt(sum / n);
+      for (let i = 0; i < n; i++) raw[i] *= g;
+    }
+    const step = Math.pow(2, -(bits - 1));
+    let zeros = 0;
+    let run = 0;
+    let longestRun = 0;
+    let sumSq = 0;
+    for (let i = 0; i < n; i++) {
+      const q = Math.round(raw[i] / step) * step;
+      sumSq += q * q;
+      if (q === 0) {
+        zeros++;
+        run++;
+        if (run > longestRun) longestRun = run;
+      } else run = 0;
+    }
+    return {
+      zeroFraction: zeros / n,
+      longestRun,
+      rmsDb: 20 * Math.log10(Math.max(Math.sqrt(sumSq / n), 1e-12)),
+    };
+  }
+
+  it('clears the longest run of exact zeros a real quantised floor produces', () => {
+    let worstRunMs = 0;
+    let worstMeasurableRunMs = 0;
+    let worstMostlyRealRunMs = 0;
+    let worstRunMemberDb = 0;
+    let worstRunMemberZeros = 0;
+    let heaviestZeroFraction = 0;
+    let members = 0;
+    for (const sr of [8000, 44100]) {
+      const bound = (GATE_SILENT_RUN_MS / 1000) * sr;
+      for (const tilted of [false, true]) {
+        for (const bits of [16, 12, 10, 8]) {
+          for (const rmsDb of [-30, -40, -50, -60, -66, -72, -78, -84, -90]) {
+            for (const seed of [7, 23]) {
+              const { zeroFraction, longestRun, rmsDb: quantisedDb } = quantisedFloor(
+                Math.round(3 * sr),
+                rmsDb,
+                seed,
+                bits,
+                sr,
+                tilted,
+              );
+              // A floor that quantises away entirely IS digital silence, not a
+              // floor: holding the gate open across it removes nothing.
+              if (zeroFraction >= 0.999) continue;
+              members++;
+              heaviestZeroFraction = Math.max(heaviestZeroFraction, zeroFraction);
+              const ms = (longestRun / sr) * 1000;
+              if (ms > worstRunMs) {
+                worstRunMs = ms;
+                worstRunMemberDb = quantisedDb;
+                worstRunMemberZeros = zeroFraction;
+              }
+              // The floors the noise search will still accept as a measurement
+              // — the ones a derived threshold is actually built on.
+              if (zeroFraction <= NOISE_WINDOW_MAX_SILENT_FRACTION) worstMeasurableRunMs = Math.max(worstMeasurableRunMs, ms);
+              // ...and the wider class that is still more sound than silence.
+              if (zeroFraction <= 0.75) worstMostlyRealRunMs = Math.max(worstMostlyRealRunMs, ms);
+              expect(longestRun).toBeLessThan(bound);
+            }
+          }
+        }
+      }
+    }
+
+    // The class is real: this population genuinely reaches the zero fractions
+    // the noise search's own bound is drawn against.
+    expect(members).toBeGreaterThan(180);
+    expect(heaviestZeroFraction).toBeGreaterThan(0.9);
+
+    // Absolute windows, so a drift in the population fails here rather than
+    // silently eating the margin. Measured over the wider sweep (4 rates x 3
+    // distributions x 4 depths x 14 levels x 3 seeds): 1.00 ms among the floors
+    // this app will still measure a threshold from, 5.38 ms up to
+    // three-quarters zeros, 29.63 ms worst of all.
+    expect(worstMeasurableRunMs).toBeLessThan(1.5);
+    expect(worstMostlyRealRunMs).toBeLessThan(6);
+    expect(worstRunMs).toBeGreaterThan(10);
+    expect(worstRunMs).toBeLessThan(35);
+
+    // What the narrowest margin is actually against, measured rather than
+    // assumed: the member whose run comes nearest the bound is nine-tenths
+    // exact zeros and sits near -80 dBFS — a converter's floor quantising away
+    // under its own LSB, not a floor anything is gated against.
+    expect(worstRunMemberZeros).toBeGreaterThan(0.9);
+    expect(worstRunMemberDb).toBeLessThan(-70);
+
+    // And the constant clears them, with the stated margins.
+    expect(GATE_SILENT_RUN_MS).toBeGreaterThan(30 * worstMeasurableRunMs);
+    expect(GATE_SILENT_RUN_MS).toBeGreaterThan(8 * worstMostlyRealRunMs);
+    expect(GATE_SILENT_RUN_MS).toBeGreaterThan(worstRunMs);
+    expect(GATE_SILENT_RUN_MS).toBe(50);
+  }, 120000);
 });
 
 describe('dynamics effects registration', () => {

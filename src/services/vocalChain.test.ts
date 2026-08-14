@@ -1418,6 +1418,210 @@ describe('deriveGate', () => {
     });
   });
 
+  // N6 — the census's own blind spot, and the only destructive shape this
+  // stage still had. A window may carry a quiet island BESIDE louder material
+  // and still be accepted, because the acceptance bound constrains a window's
+  // ZEROS and not its LEVELS; its RMS is then the louder material's, so it is
+  // never the winner, never checked, and — being covered — never counted
+  // hidden. The threshold comes from elsewhere and the island is muted whole.
+  //
+  // The fix is not in the derivation, which measures correctly: it is in the
+  // gate, which now spends a run of digital silence OPEN (see
+  // `GATE_SILENT_RUN_MS`). The two halves close on each other exactly:
+  // `GATE_HOLD_MS` is `NOISE_WINDOW_MS`, so an island long enough to outlast
+  // the hold is long enough to contain a whole search window and be measured
+  // on its own terms — which is why the sweep below flips from RUN to a
+  // vocal-tract DECLINE at 400 ms and never leaves a band uncovered.
+  describe('a quiet island bracketed by digital silence (N6)', () => {
+    function res2At(x: Float32Array, sr: number, hz: number, q: number): Float32Array {
+      const w = (2 * Math.PI * hz) / sr;
+      const r = Math.exp(-w / (2 * q));
+      const a1 = 2 * r * Math.cos(w);
+      const a2 = -r * r;
+      const out = new Float32Array(x.length);
+      let y1 = 0;
+      let y2 = 0;
+      for (let i = 0; i < x.length; i++) {
+        const y = x[i] + a1 * y1 + a2 * y2;
+        out[i] = y;
+        y2 = y1;
+        y1 = y;
+      }
+      return out;
+    }
+
+    /** The suite's whisper, at an arbitrary rate. */
+    function whisperAt(n: number, rmsDb: number, seed: number, sr: number): Float32Array {
+      let x = noise(n, 1, seed);
+      for (const [hz, q] of [
+        [500, 8],
+        [1500, 10],
+        [2500, 12],
+      ] as const) {
+        if (hz < (sr / 2) * 0.9) x = res2At(x, sr, hz, q);
+      }
+      for (let i = 0; i < n; i++) x[i] *= 0.55 + 0.45 * Math.sin((2 * Math.PI * 4 * i) / sr);
+      return atRms(x, Math.pow(10, rmsDb / 20));
+    }
+
+    function sungAt(n: number, sr: number, amp: number): Float32Array {
+      const out = new Float32Array(n);
+      let phase = 0;
+      for (let i = 0; i < n; i++) {
+        phase += (2 * Math.PI * 220) / sr;
+        out[i] = amp * Math.sin(phase);
+      }
+      return out;
+    }
+
+    /** `takeWithSilentLeadIn(0)` at an arbitrary rate: two sung phrases with
+     * real 1 s pauses over a -50 dBFS floor. This is what sets the threshold. */
+    function floorTakeAt(sr: number): Float32Array {
+      const pause = Math.round(1.0 * sr);
+      const phrase = Math.round(0.8 * sr);
+      const channel = gaussFloorDb(3 * pause + 2 * phrase, -50, 7);
+      let at = 0;
+      for (const [sung, n] of [
+        [false, pause],
+        [true, phrase],
+        [false, pause],
+        [true, phrase],
+        [false, pause],
+      ] as const) {
+        if (sung) {
+          let phase = 0;
+          for (let i = 0; i < n; i++) {
+            const t = i / sr;
+            phase += (2 * Math.PI * 220) / sr;
+            const c = Math.min(1, t / 0.04) * Math.min(1, (n / sr - t) / 0.06);
+            channel[at + i] += 0.25 * c * Math.sin(phase);
+          }
+        }
+        at += n;
+      }
+      return channel;
+    }
+
+    function cat(parts: Float32Array[]): Float32Array {
+      const out = new Float32Array(parts.reduce((a, p) => a + p.length, 0));
+      let at = 0;
+      for (const p of parts) {
+        out.set(p, at);
+        at += p.length;
+      }
+      return out;
+    }
+
+    /** `[floor take][0.3 s zeros][island and burst, in the given order][zeros]`
+     * — the re-review's own fixture, at an arbitrary rate. */
+    function islandTake(
+      sr: number,
+      islandMs: number,
+      order: 'before' | 'after',
+    ): { channel: Float32Array; island: { start: number; end: number } } {
+      const zeros = new Float32Array(Math.round(0.3 * sr));
+      const island = whisperAt(Math.round((islandMs / 1000) * sr), -60, 41, sr);
+      const burst = sungAt(Math.round(0.5 * sr), sr, 0.25);
+      const head = floorTakeAt(sr);
+      const channel =
+        order === 'before'
+          ? cat([head, zeros, island, burst, new Float32Array(zeros.length)])
+          : cat([head, zeros, burst, island, new Float32Array(zeros.length)]);
+      const start = head.length + zeros.length + (order === 'before' ? 0 : burst.length);
+      return { channel, island: { start, end: start + island.length } };
+    }
+
+    const removedPct = (input: Float32Array, out: Float32Array, span: { start: number; end: number }): number => {
+      let a = 0;
+      let b = 0;
+      for (let i = span.start; i < span.end; i++) {
+        a += input[i] * input[i];
+        b += out[i] * out[i];
+      }
+      return (1 - b / a) * 100;
+    };
+
+    it('is left alone, on either side of the phrase it approaches', () => {
+      // Measured before the fix, at all three rates: the island BEFORE the
+      // burst was removed 100.0 %, hiddenRealSamples = 0, the stage running at
+      // -41.1 / -42.2 / -42.2 dBFS off the floor take's own pauses. The mirror
+      // island AFTER the burst lost 0.0 %, because `GATE_HOLD_MS` equals the
+      // window length and holds the gate open across it — the exposure was
+      // exactly quiet material APPROACHING a phrase out of digital silence.
+      for (const sr of [SR, 44100, 48000]) {
+        for (const islandMs of [200, 300]) {
+          for (const order of ['before', 'after'] as const) {
+            const { channel, island } = islandTake(sr, islandMs, order);
+            // The precondition: the census really does see nothing here, so
+            // this is the shape the hidden-material decline cannot catch.
+            const noise = measureNoiseWindow([channel], sr, { rejectMostlySilentWindows: true })!;
+            expect(noise.hiddenRealSamples).toBe(0);
+
+            const res = deriveGate([channel], sr);
+            expect(res.run).toBe(true);
+            if (!res.run) return;
+            // And the derivation is untouched by the fix: still the floor's.
+            expect(Number(res.params.thresholdDb)).toBeGreaterThan(-45);
+            expect(Number(res.params.thresholdDb)).toBeLessThan(-40);
+
+            const out = noiseGateEffect.process([Float32Array.from(channel)], sr, res.params).channels[0];
+            expect(removedPct(channel, out, island)).toBeLessThan(0.1);
+          }
+        }
+      }
+    }, 120000);
+
+    it('still gates the take it sits in — the island is spared, the pauses are not', () => {
+      // The converse: sparing the island must not cost the stage its job. The
+      // floor take's own real pauses still reach digital silence.
+      const pause = Math.round(1.0 * SR);
+      const phrase = Math.round(0.8 * SR);
+      const pauses = [
+        { start: 0, end: pause },
+        { start: pause + phrase, end: 2 * pause + phrase },
+        { start: 2 * pause + 2 * phrase, end: 3 * pause + 2 * phrase },
+      ];
+      const { channel } = islandTake(SR, 300, 'before');
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      let sum = 0;
+      let n = 0;
+      for (const p of pauses) {
+        for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += out[i] * out[i];
+        n += Math.round(0.3 * SR);
+      }
+      expect(toDb(Math.sqrt(sum / n))).toBeLessThanOrEqual(-80);
+    });
+
+    it('runs out exactly where the search takes over: the band is 375 ms, the hold is 500', () => {
+      // Why one hold is enough, measured rather than argued. Up to 375 ms an
+      // island is never the winner and never covered on its own terms, so the
+      // gate is the only thing standing between it and the threshold; from
+      // 400 ms a 500 ms search window reaches inside it, the island becomes
+      // the measurement, and the vocal-tract check declines the take outright.
+      // There is no island length at which neither protection applies.
+      for (const sr of [SR, 44100]) {
+        for (const islandMs of [100, 200, 300, 375]) {
+          const { channel, island } = islandTake(sr, islandMs, 'before');
+          const res = deriveGate([channel], sr);
+          expect(res.run).toBe(true);
+          if (!res.run) return;
+          const out = noiseGateEffect.process([Float32Array.from(channel)], sr, res.params).channels[0];
+          expect(removedPct(channel, out, island)).toBeLessThan(0.1);
+        }
+        for (const islandMs of [400, 500, 800]) {
+          const { channel } = islandTake(sr, islandMs, 'before');
+          const res = deriveGate([channel], sr);
+          expect(res.run).toBe(false);
+          if (res.run) return;
+          expect(res.reason).toContain('vocal tract');
+        }
+      }
+    }, 120000);
+  });
+
   it('does NOT share Noise Reduction’s decline: gating needs no clean print (N3)', () => {
     // A take whose quietest passage sits within 12 dB of programme level: NR
     // refuses, because a print learned there would contain voice. The gate has
