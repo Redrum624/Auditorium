@@ -967,33 +967,81 @@ to be fixed here: warping needs a confirmed beat grid (Align Vocal Timing) or a 
 (Align Lyrics), and both refuse to guess for the reason each states. The journey lists them as
 refinements to run afterwards.
 
-**The thresholds are measured, and what they were measured ON is constructed audio.** The
-sweep in `coverAlign.test.ts` builds sixteen cover pairs — one syllable schedule rendered
-twice, the second at pitches scaled 1.26× with ±50 % dynamics jitter and noise, 44.1 kHz
-against 48 kHz — and sixteen pairs from unrelated schedules:
+CC2 put a number on "still drifts" rather than leaving it as a shrug. The overlap is cut into
+windows that are aligned **independently**, and the slope of the line through their lags is the
+drift. Below **0.057 s of slide across the overlap** the take is still placed and the drift is
+reported alongside it; above that one rigid lag has stopped being an answer and the placement
+becomes a `weak` guess with the drift named. Measured: a take running 0.5 % slow over 20 s
+slides 0.084–0.101 s and lands in that arm. The regime this arm cannot resolve is stated below.
+
+**The thresholds are measured, and what they were measured ON is constructed audio.** The sweep
+in `coverAlign.test.ts` builds twenty-four cover pairs — one syllable schedule rendered twice,
+the second at pitches scaled 1.26× with ±50 % dynamics jitter and noise, 44.1 kHz against
+48 kHz — of which eight also carry **±40 ms of per-syllable human timing variance**, against an
+unrelated population of twenty-eight pairs: sixteen from unrelated schedules, four whose
+reference is a **leakage stem** (the song's accompaniment 40 dB down under a noise floor), and
+eight that are **room tone**, taking each side in turn.
 
 | | prominence | peak correlation |
 |---|---|---|
-| covers | 0.2092 – 0.5093 | 0.7674 – 0.8325 |
-| unrelated | 0.0002 – 0.1635 | 0.2937 – 0.4476 |
-| **shipped floor** | **0.186** | **0.607** |
+| covers (incl. ±40 ms human timing) | 0.217 – 0.537 | 0.8085 – 0.9326 |
+| unrelated (incl. leakage, room tone) | 0.0001 – 0.2491 | 0.3776 – 0.6538 |
+| a song whose section repeats | 0.0011 – 0.0139 | 0.8763 – 0.8991 |
+| two metronomes at one tempo | 0.0132 – 0.0241 | 0.9539 – 0.9577 |
+| **shipped floor** | **0.12** | **0.731** (guess floor **0.692**) |
 
-Both floors are points inside a measured gap and the test fails if a gap ever stops containing
-its floor. What no ground truth is available for is a **real** cover against a **real**
-separated vocal: nobody knows the true offset of a recording made in a room, and the negative
-case — a take that is not the same song — cannot be constructed from a fixture pair that is
-related by construction. So the numbers above describe how the measure behaves on audio built
-to exercise it, not a false-accept rate on real material. The refusal arm is what that
-uncertainty is spent on: below either floor the take goes to the start of the original and the
-two numbers are stated, because a take placed at a confidently wrong offset is harder to notice
-than one left at zero.
+Read that table carefully, because the two columns no longer answer the same question. **Peak
+correlation is what separates a cover from unrelated audio** — floor 0.731, the middle of a
+measured gap it clears by 0.077 on both sides. **Prominence no longer can**, and the table says
+why: against the enlarged unrelated population it does not merely fail to separate, it
+*inverts*, the best unrelated pair reaching 0.2491 against the worst cover's 0.217. What
+prominence separates cleanly is a different question — "does ONE lag stand out, or several?" —
+and its floor of 0.12 is derived against the last two rows, where a genuine partial match one
+section (or one beat) away collapses it while the peak stays high. Those rows are answered
+`ambiguous`, with the guard-separated candidate lags carried for the user to choose from, and
+are never applied automatically.
+
+Between 0.692 and 0.731 sits a **gap zone**: above every unrelated pair the sweep can build,
+below acceptance. A take landing there is offered as a `weak` guess when nothing contradicts it,
+and called unrelated only when the independently-aligned windows ran and disagreed.
+
+Every floor is a point inside a measured gap and the test fails if a gap ever stops containing
+its floor by the stated margin. What no ground truth is available for is a **real** cover
+against a **real** separated vocal: nobody knows the true offset of a recording made in a room,
+and the negative case — a take that is not the same song — cannot be constructed from a fixture
+pair that is related by construction. The leakage and room-tone members model the two failures
+this repo has actually measured, but they are models: real separator artifacts have spectral
+character no fixture here reproduces. So the numbers above describe how the measure behaves on
+audio built to exercise it, not a false-accept rate on real material. The refusal arm is what
+that uncertainty is spent on: the take goes to the start of the original and the numbers are
+stated, because a take placed at a confidently wrong offset is harder to notice than one left
+at zero.
+
+**The evidence was rebuilt once already, because it refused a real cover.** The floors before
+CC2 were 0.186 prominence / 0.607 correlation, calibrated on cover pairs whose take shared the
+reference's onsets *to the sample*. A human being does not: at ±40 ms of per-syllable variance
+the peak fell to 0.434–0.569 and the run was refused **while the recovered offset was still
+correct to 29 ms**. That was not a threshold in the wrong place — 0.423, the figure a real user
+was refused at, sat inside the old unrelated population's own range, so no floor could have
+separated them. Both coarse envelopes are now low-passed (240 ms, swept) so onset lobes span
+human timing, which is why the floors above are higher and the populations wider.
 
 **Accuracy, and where it stops.** Known offsets are recovered to within **10 ms** in both
 signs, at equal sample rates and across 44.1/48 kHz, mono and stereo. On the harsher sweep —
-where the two recordings are genuinely different performances — the residual is **6.6–10.4 ms**,
-and that is disagreement between two performances about where a syllable starts rather than
-error in the measurement. The fine pass may only refine the coarse answer inside ±0.2 s; it can
-never find a different verse.
+where the two recordings are genuinely different performances, eight of them sung with ±40 ms
+of human timing variance — the residual is up to **28.9 ms**, and that is disagreement between
+two performances about where a syllable starts rather than error in the measurement. Note it is
+*below* the 40 ms of variance that produced it: the aligner averages the jitter out rather than
+following any one syllable. The fine pass runs on **unsmoothed** envelopes and may only refine
+the coarse answer inside ±0.2 s; it can never find a different verse.
+
+**A drift too small to name still costs you milliseconds.** The piecewise arm's slope is fitted
+through three to twelve windows, and on a short take the noise on that fit is comparable to a
+real, mild drift: measured, a take running 0.2 % slow over 20 s produces a slope inside the
+no-drift control's own band, so it is **reported and not gated** — and its placement error is a
+real **15–30 ms**. The number is on the measurement (`driftSecondsPerMinute`) precisely so a
+caller quoting the ±10 ms above can quote the drift beside it. A longer recording measures its
+own drift better; twenty seconds is where this arm is weakest.
 
 **That accuracy is measured at one GAIN, and a quiet take degrades it.** The onset envelope is
 spectral flux, and flux falls with level while the analysis floor does not, so a take recorded

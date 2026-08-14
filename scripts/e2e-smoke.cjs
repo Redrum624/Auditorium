@@ -3274,10 +3274,16 @@ async function main() {
       // noise through two first-order FIRs, plus transients in the take — because
       // they were made to give Match EQ a monotone tilt and Match Loudness an
       // unambiguous move. Continuous noise has no syllables, so the two share no
-      // ONSET structure whatever, and the alignment correctly refuses: measured
-      // here, correlation 0.210 against its 0.607 floor and prominence 0.031
-      // against 0.186. It places at zero and states both numbers, which is the
-      // refusal arm doing exactly its job on real audio in the packaged app.
+      // ONSET structure whatever, and the alignment correctly refuses. Measured
+      // here BEFORE CC2 rebuilt the evidence: correlation 0.210 against the then
+      // floor of 0.607, prominence 0.031 against 0.186. CC2 low-passes both
+      // envelopes, which lifts every peak — the floors are now 0.731 and 0.12
+      // (see the constants at the top of this file) and the numbers this
+      // material produces will have moved with them. The REFUSAL is what this
+      // pass asserts and it is not in doubt: the unit sweep's room-tone members
+      // are the same shape as this fixture and top out at 0.6538, well under the
+      // floor. The two figures above are the last measured pair and want
+      // refreshing from this run's own log line, printed just below.
       //
       // So THIS pass exercises the REFUSED arm end to end and the believed arm
       // not at all. M4 closed that gap rather than relaxing an assertion here:

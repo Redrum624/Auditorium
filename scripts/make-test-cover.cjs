@@ -186,10 +186,14 @@ function addTransients(signal) {
 // M4. The three files above are filtered NOISE, built to give Match EQ a tilt
 // and Match Loudness a move. Continuous noise has no syllables, so the pair
 // shares no ONSET structure and `coverAlign` correctly REFUSES on it — measured
-// in the packaged run at correlation 0.210 against its 0.607 floor and
-// prominence 0.031 against 0.186. That refusal is the right answer for that
-// material, and it means the packaged app has never once exercised the arm that
-// BELIEVES an offset. These two files exist for exactly that arm.
+// in the packaged run at correlation 0.210 against the then floor of 0.607 and
+// prominence 0.031 against 0.186. (CC2 rebuilt the evidence and re-derived both:
+// the floors are 0.731 and 0.12 now, and these two measured figures predate the
+// smoothing that raised every peak. The refusal itself is unchanged — the unit
+// sweep's room-tone members are this fixture's shape and top out at 0.6538.)
+// That refusal is the right answer for that material, and it means the packaged
+// app has never once exercised the arm that BELIEVES an offset. These two files
+// exist for exactly that arm.
 //
 // The ground truth is BUILT rather than measured: both files render the SAME
 // syllable schedule, and the take's is laid down `SYNC_OFFSET_SECONDS` later.
@@ -216,9 +220,11 @@ function addTransients(signal) {
 //   came back Drums -54.71, Bass -73.04, VOCALS -59.28, Other -17.99, Residual
 //   -77.96. The model does not hear a synthetic three-harmonic tone as a voice,
 //   so the Vocals stem is 41 dB below the source: empty. The journey then aligns
-//   the take against a silent reference and correctly refuses (prominence 0.003
-//   against its 0.186 floor). Nothing is wrong with the alignment there; the
-//   reference simply has no onsets in it.
+//   the take against a silent reference and correctly refuses (prominence 0.003,
+//   measured against the pre-CC2 floor of 0.186; the floor is 0.12 now and 0.003
+//   is nowhere near it either way). Nothing is wrong with the alignment there;
+//   the reference simply has no onsets in it — which is the exact shape CC2's
+//   unit sweep now carries as a kept LEAKAGE member of the unrelated population.
 //
 // Exercising the believed arm through a fresh model pass would need a song a
 // trained separation model recognises as singing — i.e. a real vocal recording,

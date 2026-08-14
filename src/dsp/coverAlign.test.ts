@@ -1007,10 +1007,12 @@ describe('alignTakeToReference — the measured separation', () => {
 
     // The gap itself, so a regression reads as a number rather than as a boolean
     // that flipped. CC2: only the CORRELATION gap is asserted against unrelated
-    // audio now. The prominence gap against this population has CLOSED at the
-    // smoothing width the correlation arm needs — measured, an unrelated pair
-    // reaches 0.237 while the worst cover reaches 0.247 — and that is stated
-    // rather than papered over: prominence stopped being able to carry
+    // audio now. The prominence gap against this population has not closed but
+    // INVERTED at the smoothing width the correlation arm needs — measured, the
+    // best unrelated pair reaches 0.2491 while the worst cover reaches 0.217,
+    // so the populations overlap by 0.032 in the WRONG direction. That is stated
+    // rather than papered over, and asserted twenty lines below in the direction
+    // the run actually takes: prominence stopped being able to carry
     // relatedness, and the floor derived below is for the question it CAN
     // answer. Relatedness is carried by correlation and by the piecewise
     // agreement two tests down.
@@ -1234,6 +1236,69 @@ describe('alignTakeToReference — the measured separation', () => {
     // ceiling 68 % above anything the sweep produces.
     expect(Math.max(...error(mild))).toBeLessThan(0.035);
     expect(Math.max(...error(mild))).toBeGreaterThan(Math.max(...error(control)));
+  });
+
+  /**
+   * CC2 fix-round 2 (New-1). The drift gate, pinned in BOTH directions.
+   *
+   * `driftIsMeaningful = piecewise !== null && windowsAgree` was the whole
+   * content of the IMP-4 fix and nothing asserted the `&& windowsAgree` half:
+   * deleting that conjunct left all thirty-two tests green, which means the
+   * distinction between "a slope through windows that agree" and "a slope
+   * through windows that landed seconds apart" was documented and not defended.
+   *
+   * A slope needs the windows to have agreed before it is a drift at all. Fitted
+   * through windows that scattered over four seconds of unrelated audio it is an
+   * arbitrary number wearing a unit — and a caller feature-detecting on the
+   * field would show it to a user as "your take slides N s per minute".
+   *
+   * The pair below is the gate from both sides: windows that ran and DISAGREED
+   * carry no drift number, and windows that ran and AGREED on a genuinely
+   * drifting take still do.
+   */
+  it('reports a drift only when the windows it was fitted through agreed', () => {
+    // ── the arm that must be SILENT ──────────────────────────────────────────
+    // 45 s unrelated pairs are the population whose windows measurably scatter
+    // (0.65–7.355 s against a 0.34 s ceiling), and they are long enough that the
+    // piecewise arm actually RUNS — which is what makes this a test of the
+    // agreement conjunct rather than of the `piecewise === null` one.
+    const disagreeing = Array.from(
+      { length: PIECEWISE_SEEDS },
+      (_, s) => alignEnvelopes(longUnrelated(7000 + s))!
+    );
+    for (const m of disagreeing) {
+      // The premise: the arm SPOKE, and what it said was "these do not agree".
+      expect(m.windowsMeasured).toBeGreaterThanOrEqual(ALIGN_PIECEWISE_MIN_WINDOWS);
+      expect(m.windowLagSpreadSeconds).toBeDefined();
+      expect(m.windowLagSpreadSeconds!).toBeGreaterThan(ALIGN_MAX_LAG_SPREAD_SECONDS);
+      // …so the slope through them is not a drift, and is not reported as one.
+      expect(m.driftSecondsPerMinute).toBeUndefined();
+      expect(m.driftSpanSeconds).toBeUndefined();
+    }
+
+    // A repeated section is the second shape the finding named: its windows lock
+    // onto different repeats, so the slope runs through repeat-hopping points.
+    const hopping = Array.from({ length: REPEAT_SEEDS }, (_, s) => alignEnvelopes(repeated(5000 + s))!)
+      .filter((m) => (m.windowLagSpreadSeconds ?? 0) > ALIGN_MAX_LAG_SPREAD_SECONDS);
+    expect(hopping.length).toBeGreaterThan(0);
+    for (const m of hopping) {
+      expect(m.windowsMeasured).toBeGreaterThan(0);
+      expect(m.driftSecondsPerMinute).toBeUndefined();
+    }
+
+    // ── and the arm that must SPEAK ─────────────────────────────────────────
+    // The same gate, the other way round: a take that really is drifting, whose
+    // windows agree about it, keeps the number that explains its outcome.
+    const drifted = Array.from(
+      { length: DRIFT_SEEDS },
+      (_, s) => alignEnvelopes(drifting(4000 + s, 1.005))!
+    );
+    for (const m of drifted) {
+      expect(m.windowLagSpreadSeconds!).toBeLessThanOrEqual(ALIGN_MAX_LAG_SPREAD_SECONDS);
+      expect(m.driftSecondsPerMinute).toBeDefined();
+      expect(m.driftSpanSeconds).toBeDefined();
+      expect(m.outcome).toBe('weak');
+    }
   });
 
   /**
