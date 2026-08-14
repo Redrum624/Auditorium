@@ -513,6 +513,7 @@ function ClipProperties() {
   const documents = useAppStore((s) => s.documents);
   const session = useSessionStore((s) => s.session);
   const selectedClipId = useSessionStore((s) => s.selectedClipId);
+  const selectedClipIds = useSessionStore((s) => s.selectedClipIds); // K1
   const setClipGain = useSessionStore((s) => s.setClipGain);
   const setClipFade = useSessionStore((s) => s.setClipFade);
   const moveClip = useSessionStore((s) => s.moveClip); // CC3
@@ -639,6 +640,21 @@ function ClipProperties() {
 
   return (
     <div className="flex flex-col py-1" data-testid="properties-clip">
+      {/* K1 — the group header. Everything below it edits the PRIMARY clip and
+          says so by showing the primary's own values; this row exists so that a
+          Delete or a Ripple Delete over a Ctrl+Click set is never a surprise
+          about how much it will take. Absent for a single clip, where the panel
+          is exactly what it always was. */}
+      {selectedClipIds.length > 1 && (
+        <div
+          data-testid="clip-selection-count"
+          className="px-2 py-1 text-xs font-semibold"
+          style={{ color: 'var(--accent)' }}
+          title="Delete, Ripple Delete and a drag act on all of them; the fields below edit the last-clicked clip"
+        >
+          {selectedClipIds.length} clips selected
+        </div>
+      )}
       <Row label="Source" value={srcDoc?.name ?? '—'} />
       <Row label="Track" value={trackName} />
       {/* CC3: the one clip fact that was a readout and had to be a field —

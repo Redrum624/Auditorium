@@ -6,7 +6,7 @@ import { getPyramids } from '../../services/peaksCache';
 import { crossfadeGains, fadeInShape, fadeOutShape } from '../../dsp/fades';
 import type { Clip } from '../../multitrack/session';
 import { CROSSFADE_RHO, resolveClipFadeSpecs } from '../../multitrack/mixdown';
-import { useSessionStore } from '../../multitrack/sessionStore';
+import { moveClipsBy, useSessionStore } from '../../multitrack/sessionStore'; // K1
 import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
 import { snapSample } from '../../services/snap';
 import { formatTime } from '../../utils/timeFormat';
@@ -142,6 +142,19 @@ interface DragState {
   origStart: number;
   origEnd: number;
   exceeded: boolean;
+  /** K1 — what this gesture moves: the whole extended selection when the
+   * pressed clip was a member of it, otherwise just this clip. Captured at
+   * pointerdown for the reason `targets` is (the set a gesture uses must not
+   * change under the user's hand), and it is also what tells pointerup whether
+   * to commit a group move or the single cross-track move it always did. */
+  groupIds: string[];
+  /** K1 — Ctrl at pointerdown. Read at pointerUP to decide what a CLICK meant
+   * (toggle vs. single-select); the DROP's own `e.ctrlKey` still decides the
+   * X5 push-clear nudge, which is what keeps the two meanings apart. */
+  ctrlAtDown: boolean;
+  /** K1 — true when pointerdown deliberately left the selection alone, so
+   * pointerup owes it a commit if the gesture turns out to be a click. */
+  deferSelection: boolean;
   /** Task B4 — the SESSION's snap targets as they stood when this drag began,
    * with this clip's own contribution excluded (trap 27). Captured once because
    * building it walks every clip in the session, and because the set a drag
@@ -188,6 +201,17 @@ export default function ClipView({
   const moveClip = useSessionStore((s) => s.moveClip);
   const trimClip = useSessionStore((s) => s.trimClip);
   const setSelectedClip = useSessionStore((s) => s.setSelectedClip);
+  // K1 — the extended selection is read from the STORE here rather than
+  // threaded down through MultitrackView and TrackLane as a prop. Two reasons,
+  // and the second is the load-bearing one: this component needs the set for
+  // its own gesture decisions (is this press the start of a group drag?), not
+  // only for chrome, so a prop would be a second copy of something the handler
+  // has to read anyway; and the `selected` prop keeps meaning exactly what it
+  // meant before K1 — the PRIMARY — so every existing caller and test is
+  // untouched. The array reference is stable between selection writes, so this
+  // subscription costs no extra renders.
+  const selectedClipIds = useSessionStore((s) => s.selectedClipIds);
+  const toggleSelectedClip = useSessionStore((s) => s.toggleSelectedClip);
   const setClipFade = useSessionStore((s) => s.setClipFade);
   // X4 — the whole track list: this clip's own track feeds the fade/overlap
   // visuals, and the track hovered during a move drag feeds the overlap hint.
@@ -207,6 +231,12 @@ export default function ClipView({
   // listener below exists for exactly as long as there is a preview to keep
   // honest and not one render longer.
   const [moveDragging, setMoveDragging] = useState(false);
+
+  // K1 — chrome membership: the primary (the `selected` prop) OR any other
+  // member of the extended set. The `||` is not redundancy but independence —
+  // several tests render this component with `selected` set and no store
+  // selection at all, and those must keep meaning what they meant.
+  const inSelection = selected || selectedClipIds.includes(clip.id);
 
   const left = sampleToPixel(clip.startSample, zoom.scrollSample, zoom.samplesPerPixel);
   const widthPx = Math.max(2, clip.lengthSample / zoom.samplesPerPixel);
@@ -620,7 +650,22 @@ export default function ClipView({
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     e.stopPropagation();
-    setSelectedClip(clip.id);
+
+    // K1 — WHEN THE SELECTION IS COMMITTED, and why it is not always here.
+    //
+    // A press on a clip that is already IN the selection must change nothing
+    // yet: that press is how a group drag starts, and selecting the pressed
+    // clip alone would dissolve the group a fraction of a second before the
+    // gesture that was going to move it. A press with CTRL held is deferred
+    // for the mirror-image reason — Ctrl at the drop is X5's push-clear nudge,
+    // so a Ctrl press that turns into a drag was never a selection act at all.
+    //
+    // Everything else commits here exactly as it always did: pressing a clip
+    // that is not selected selects it, before any drag, so the Properties
+    // panel and the fade handles follow the clip under the pointer.
+    const memberAtDown = selectedClipIds.includes(clip.id);
+    const deferSelection = memberAtDown || e.ctrlKey;
+    if (!deferSelection) setSelectedClip(clip.id);
 
     const rect = e.currentTarget.getBoundingClientRect();
     const localX = e.clientX - rect.left;
@@ -631,6 +676,9 @@ export default function ClipView({
       origStart: clip.startSample,
       origEnd: clip.startSample + clip.lengthSample,
       exceeded: false,
+      groupIds: memberAtDown ? [...selectedClipIds] : [clip.id], // K1
+      ctrlAtDown: e.ctrlKey, // K1
+      deferSelection, // K1
       targets: sessionSnapTargets(clip.id),
       lastClientX: e.clientX,
     };
@@ -692,7 +740,33 @@ export default function ClipView({
     // too via the JSX binding.
     endSessionGesture();
     e.currentTarget.releasePointerCapture?.(e.pointerId);
-    if (drag && drag.mode === 'move' && drag.exceeded) {
+    // K1 — the CLICK branch: a press the pointer never carried anywhere is a
+    // selection act, and this is the moment it is safe to know that. Ctrl
+    // toggles this clip in the set; a plain click collapses the set to it.
+    // Only fires when pointerdown deferred, so the ordinary "press an
+    // unselected clip" path is not re-committed here.
+    if (drag && drag.mode === 'move' && !drag.exceeded && drag.deferSelection) {
+      if (drag.ctrlAtDown) toggleSelectedClip(clip.id);
+      else setSelectedClip(clip.id);
+    }
+    if (drag && drag.mode === 'move' && drag.exceeded && drag.groupIds.length > 1) {
+      // K1 — THE GROUP DRAG. Every member moves by the delta this clip's own
+      // snapped position asks for, on its own track: the magnet still resolves
+      // against the clip under the pointer (it is the one the user is aiming),
+      // and `moveClipsBy` is what keeps the group rigid and the whole thing one
+      // undo entry.
+      //
+      // No cross-track re-routing and no `clearOverlap` here, deliberately.
+      // Both are v1 scope calls rather than oversights: a group spanning three
+      // tracks has no single "target lane" to route to, and a per-member push
+      // forward would break the rigidity that makes this one gesture. The
+      // single-clip drag below keeps both, unchanged.
+      moveClipsBy(drag.groupIds, moveStartFor(drag, e.clientX, snapSuspended(e)) - drag.origStart);
+    } else if (drag && drag.mode === 'move' && drag.exceeded) {
+      // K1: a drag of one clip ends with that clip selected — which the
+      // pointerdown select already achieved for every path except the deferred
+      // Ctrl press, and which this restates in one place for all of them.
+      if (useSessionStore.getState().selectedClipId !== clip.id) setSelectedClip(clip.id);
       const target = resolveTrackAt(e.clientX, e.clientY) ?? trackId;
       // SNAP-ONLY BY DEFAULT (v1.9 X5) — v1.8's snap-then-nudge ordering
       // degraded exactly as its ordering note predicted: the magnet still
@@ -740,8 +814,13 @@ export default function ClipView({
         backgroundColor: 'var(--accent-soft)',
         borderWidth: 1,
         borderStyle: 'solid',
-        borderColor: selected ? 'var(--accent)' : 'var(--accent-ring)',
-        boxShadow: selected
+        // K1: every MEMBER of the selection wears the selected chrome, so a
+        // Ctrl+Click set reads as one thing on the timeline. The fade handles
+        // below stay on the PRIMARY alone — they are a single-clip editor, and
+        // two sets of corner handles would be two gestures competing for the
+        // same corner.
+        borderColor: inSelection ? 'var(--accent)' : 'var(--accent-ring)',
+        boxShadow: inSelection
           ? '0 0 0 1px var(--accent-ring), 0 8px 24px rgba(0,0,0,0.45)'
           : '0 6px 18px rgba(0,0,0,0.35)',
         cursor: 'grab',
