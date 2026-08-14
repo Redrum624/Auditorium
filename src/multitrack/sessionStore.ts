@@ -77,7 +77,7 @@ export interface SessionActions {
    * sum, hard-clamped to +/-1 in `mixdown.ts`, so it can clip — see
    * `resolveClipFadeSpecs` for the render-side gate. */
   addClip(trackId: string, clip: Clip): void; // inserts sorted; accepts overlap verbatim; never writes fades
-  moveClip(clipId: string, toTrackId: string, newStartSample: number, opts?: { clearOverlap?: boolean }): void; // clamps >=0; commits verbatim + maintains facing fades; opts.clearOverlap = v1.8 nudge
+  moveClip(clipId: string, toTrackId: string, newStartSample: number, opts?: { clearOverlap?: boolean }): void; // clamps >=0; commits verbatim + maintains facing fades; opts.clearOverlap = v1.8 nudge; H1 no-op guard: same track + same RESOLVED sample records nothing
   trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour; re-clamps fades (X2 — see setClipFade) and maintains facing fades on the overlap it reshapes (X5)
   removeClip(clipId: string): void;
   /** Sets a clip's gain trim in dB, clamped to [-24, 24]. No-op for an unknown
@@ -693,6 +693,15 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         const resolvedStart = opts?.clearOverlap
           ? resolveOverlap(tracks[targetTrackIdx].clips, clip.lengthSample, requestedStart)
           : requestedStart;
+        // H1: the R3 no-op guard `setClipFade` has stated since v1.9, arriving
+        // here at last. A move to the track and sample the clip already holds
+        // must cost nothing — no rebuilt session, so no `Move clip` entry
+        // against UNDO_LIMIT and no `maintainFacingFades` pass re-arming or
+        // reshaping a crossfade over a move that never happened. It is asked
+        // AFTER the clamp and the overlap resolution, on the position that
+        // would actually be committed, because a request the store resolves
+        // back to where the clip already is is a no-op too.
+        if (targetTrackIdx === loc.trackIdx && resolvedStart === clip.startSample) return s;
         const movedClip: Clip = { ...clip, startSample: resolvedStart };
         tracks[targetTrackIdx].clips = insertSorted(tracks[targetTrackIdx].clips, movedClip);
 

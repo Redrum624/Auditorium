@@ -225,6 +225,65 @@ describe('no-op mutations record nothing (reference-stable guards)', () => {
     expect(sessionRef()).toBe(after);
     expect(doneLabels()).toEqual(['Set clip gain']);
   });
+
+  /**
+   * H1 (CC3 review I1's deferred half). `setClipFade` carries the R3 no-op
+   * guard and states it; `moveClip` did not, so every caller committing the
+   * position a clip already holds rebuilt the tracks array, minted a
+   * `Move clip` entry against `UNDO_LIMIT`, and re-ran `maintainFacingFades`
+   * over a move that never happened — which can re-arm or reshape a crossfade
+   * the user never touched. The Properties panel's Start field needed a field
+   * of its own to work around it; every OTHER caller had nothing.
+   *
+   * 44101 is deliberately OFF the millisecond grid. Every fixture in the suite
+   * this defect was reported from was millisecond-exact, which is precisely
+   * what hid it: at a whole-millisecond position the re-commit round-trips
+   * through `formatTime`/`parseTime` unchanged, so the phantom move lands back
+   * on the same sample and only the wasted history entry shows. A dragged clip
+   * — i.e. every clip a user has actually placed — sits between two
+   * milliseconds, and there the guard has to be sample-exact.
+   *
+   * The reference assertion is the strong one: an identical `session` object
+   * means no rebuilt tracks array, so `maintainFacingFades` demonstrably did
+   * not run either.
+   */
+  it('re-committing the position a clip already holds records nothing', () => {
+    const track = seeded.tracks[0];
+    const clip = track.clips[0];
+    store().moveClip(clip.id, track.id, 44101);
+    const after = sessionRef();
+    expect(doneLabels()).toEqual(['Move clip']);
+
+    store().moveClip(clip.id, track.id, 44101);
+
+    expect(sessionRef()).toBe(after);
+    expect(doneLabels()).toEqual(['Move clip']);
+  });
+
+  /** The guard is on the position the store RESOLVES, not the one it was
+   * handed: a negative request against a clip already at zero is the clamp
+   * asking for the position it is already at. */
+  it('a request the clamp resolves to where the clip already is records nothing', () => {
+    const track = seeded.tracks[0];
+    const clip = track.clips[0]; // seeded at 0
+    const pre = sessionRef();
+
+    store().moveClip(clip.id, track.id, -5);
+
+    expect(sessionRef()).toBe(pre);
+    expect(doneLabels()).toEqual([]);
+  });
+
+  /** …and it is not over-broad: the same start sample on a DIFFERENT track is
+   * a real move, and still records one. */
+  it('the same start sample on another track is still a move', () => {
+    const clip = seeded.tracks[0].clips[0];
+
+    store().moveClip(clip.id, seeded.tracks[2].id, clip.startSample);
+
+    expect(doneLabels()).toEqual(['Move clip']);
+    expect(sessionRef().tracks[2].clips).toHaveLength(1);
+  });
 });
 
 describe('view-state actions record nothing (ruling 3)', () => {
