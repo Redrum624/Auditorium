@@ -72,6 +72,35 @@ describe('the primary selection carries the set with it', () => {
     expect(store().selectedClipId).toBeNull();
     expect(store().selectedClipIds).toEqual([]);
   });
+
+  // The no-op guard the rest of this store already spells for its session
+  // writers, needed here for the same kind of reason. `TrackLane` calls
+  // `setSelectedClip(null)` on EVERY empty-lane press, and a fresh `[]` each
+  // time would be a new array for every clip's subscription to see — a repaint
+  // of the whole timeline for a click that changed nothing.
+  it('re-committing the selection it already holds returns the SAME state', () => {
+    store().setSelectedClip(fx.a);
+    const held = useSessionStore.getState();
+    store().setSelectedClip(fx.a);
+    expect(useSessionStore.getState()).toBe(held);
+    expect(useSessionStore.getState().selectedClipIds).toBe(held.selectedClipIds);
+
+    store().setSelectedClip(null);
+    const cleared = useSessionStore.getState();
+    store().setSelectedClip(null);
+    expect(useSessionStore.getState()).toBe(cleared);
+  });
+
+  it('still collapses a MULTI selection down to the clip it names', () => {
+    // The guard must compare the whole selection, not just the primary: the
+    // primary is already `a` here and the set must still shrink to [a].
+    store().setSelectedClip(fx.b);
+    store().toggleSelectedClip(fx.a);
+    expect(store().selectedClipIds).toEqual([fx.b, fx.a]);
+
+    store().setSelectedClip(fx.a);
+    expect(store().selectedClipIds).toEqual([fx.a]);
+  });
 });
 
 describe('toggleSelectedClip (Ctrl+Click)', () => {

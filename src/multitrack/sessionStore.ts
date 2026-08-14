@@ -1035,7 +1035,22 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   setSelectedClip(id) {
     // K1: a single select IS the whole selection — the set follows the primary
     // rather than accumulating beside it.
-    set({ selectedClipId: id, selectedClipIds: id === null ? [] : [id] });
+    set((s) => {
+      // K1 no-op guard, in the spirit of the ones on the session writers above
+      // and load-bearing for the same kind of reason rather than as an
+      // optimisation. `TrackLane` calls this with `null` on EVERY press on
+      // empty lane space; without the guard each of those presses would mint a
+      // fresh `[]`, which is a new value for every clip's subscription to see
+      // and therefore a repaint of the whole timeline for a click that changed
+      // nothing. The comparison is over the WHOLE selection, not just the
+      // primary — collapsing a multi-clip set down to its own primary is a
+      // real change.
+      const unchanged =
+        s.selectedClipId === id &&
+        s.selectedClipIds.length === (id === null ? 0 : 1) &&
+        (id === null || s.selectedClipIds[0] === id);
+      return unchanged ? s : { selectedClipId: id, selectedClipIds: id === null ? [] : [id] };
+    });
   },
 
   toggleSelectedClip(id) {
