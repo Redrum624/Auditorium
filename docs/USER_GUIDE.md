@@ -466,8 +466,10 @@ says how much of the selection it actually silenced, in seconds and per cent.
 
 **And when it cannot tell a pause from a phrase, it declines instead of
 guessing.** Everything above depends on the quietest 500 ms of your selection
-actually being a pause, and on some recordings it is not. The stage checks, and
-refuses in two cases rather than gating.
+actually being a pause, and on some recordings it is not. The rule underneath
+the three cases below is one sentence: **a take with no half-second pause
+anywhere in it will not be gated at all** — a legato or continuous performance
+is simply left alone, whatever its level. The stage refuses like this:
 
 - **Nothing in the recording ever stops.** A held tone, a stretch of room tone
   with no voice in it, or clicks spaced closer together than half a second: the
@@ -482,10 +484,25 @@ refuses in two cases rather than gating.
   pitch and room tone does not, and it uses the same pitch detector Pitch
   Correct does. If more than a twentieth of the quietest passage reads as
   voiced, it declines and says what it measured.
+- **The quietest passage is WHISPERED.** A whisper, a breath or a held "sss"
+  has no pitch at all, so the check above cannot see it — and a whispered verse
+  would be muted exactly as a sung one would. What still gives it away is that
+  a whisper is noise that has been through a vocal tract, so it carries
+  resonances, while a room's own noise is a plain tilt: hiss, rumble, the hum of
+  a fan. The stage measures how far the quietest passage departs from that plain
+  tilt, and declines when it looks like a voice.
 
-In both cases the stage reports **Did not run** with its reason, and not one
-sample is changed. It errs toward leaving a noisy take alone rather than toward
-muting a sung one.
+In all three cases the stage reports **Did not run** with its reason, and not
+one sample is changed. It errs toward leaving a noisy take alone rather than
+toward muting a sung one.
+
+**One thing it genuinely cannot catch, stated so you can avoid it.** A passage
+that is *unshaped* broadband hiss at a steady level — a breath recorded so far
+off-mic that the room, not your voice, is what shaped it — is indistinguishable
+from room tone by any measurement: it has no pitch, no resonances, no syllabic
+movement. If such a passage is the quietest half-second of a take that has no
+real pause, the gate will treat it as the floor and mute it. If that is your
+recording, switch this stage off.
 
 **One stage depends on another.** The high-pass corner comes from the lowest note
 the pitch detector measured, so **switching Pitch Correct off also switches the EQ
