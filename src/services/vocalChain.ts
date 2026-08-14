@@ -253,7 +253,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Noise Gate',
     effectId: 'noise-gate',
     defaultEnabled: true,
-    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from the quietest ${NOISE_WINDOW_MS} ms, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the quietest passage turns out to be the recording itself, a softly sung phrase, or a whispered one. A take with no half-second pause anywhere in it is not gated at all. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
+    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from the quietest ${NOISE_WINDOW_MS} ms, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the quietest passage turns out to be the recording itself, a softly sung phrase, or a whispered one — so a take that never stops for half a second is usually left alone, the exception being an unshaped breath, which no measurement can tell from room tone. A quietest passage of digital silence is the opposite: it is proof of a pause, and the stage gates on it without asking. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
     weight: 4,
   },
   {
@@ -761,8 +761,11 @@ export const GATE_VOICED_FRACTION = 0.05;
  * that (see its own note for why the tilt has to be fitted out rather than
  * assumed flat). Measured over 500 ms windows at 8/22.05/44.1/48 kHz:
  *
- *   - noise floors — white, one-pole-tilted at 400, 800 and 2500 Hz, and the
- *     post-Noise-Reduction residual — read 0.63 … 1.91 dB.
+ *   - noise floors — white and one-pole-tilted at 400, 800 and 2500 Hz, three
+ *     seeds, 48 members — read 0.63 … 1.91 dB. (The post-Noise-Reduction
+ *     residual is NOT among them: it was measured separately at 0.75 … 1.66 dB,
+ *     inside the range, but the kept population is the 48 above and this note
+ *     names only what the test measures.)
  *   - unvoiced VOCAL — whispers (three formants, sustained and with syllabic
  *     swell) and sibilants (single resonances from 2.8 to 6 kHz) — read
  *     3.20 … 10.58 dB.
@@ -782,8 +785,12 @@ export const GATE_VOICED_FRACTION = 0.05;
  * ── The residual this does NOT close, stated plainly ────────────────────────
  * One member of the unvoiced-vocal family survives every one of those five
  * measurements: broadband noise with no vocal-tract shaping at all, at a
- * constant level — a first-order high-passed hiss. It reads 1.60-2.04 dB here,
- * inside the floor population, and is likewise inside it on flatness, centroid
+ * constant level — a first-order high-passed hiss. The two members the kept
+ * test measures read 1.931 dB at 8 kHz and 1.473 dB at 44.1 kHz, and across
+ * four rates and four seeds it spans 1.411 … 2.075 dB — inside the floor
+ * population at every rate but 8 kHz, where it sits 1 % above the worst floor
+ * member (1.931 against 1.911) and still inside the population's own asserted
+ * bound. It is likewise inside the floor population on flatness, centroid
  * and modulation. That is not a gap in the measurement; it is what the
  * measurement is telling us. Such a passage IS a noise floor in every physical
  * sense, and no statistic can call it voice, because the only thing that makes
@@ -792,6 +799,43 @@ export const GATE_VOICED_FRACTION = 0.05;
  * forgotten, and the user guide states it.
  */
 export const GATE_SHAPED_RESIDUAL_DB = 2.5;
+
+/**
+ * How much of the quietest window may be EXACT ZEROS before the two content
+ * checks above stop being asked at all.
+ *
+ * Both of them exist to catch a quietest window that is not a pause. Digital
+ * silence is the opposite: it is the strongest evidence of a pause a recording
+ * can carry, because nothing else in audio is exactly zero. But the window
+ * `measureNoiseWindow` returns on such a take is neither the silence nor the
+ * floor — it rejects anything at or under `SILENCE_RMS`, so what comes back is
+ * the BOUNDARY between them, mostly zeros with a little real floor at one end.
+ * The spectrum of that is an impulse's, not a room's, and the shaping check
+ * read it as a vocal tract: measured on a take with real one-second pauses and
+ * a one-second silent lead-in, it refused at 10 of 10 sub-chunk offsets at 8 and
+ * 22.05 kHz and 7 of 10 at 44.1 kHz — telling the user their room tone "carries
+ * the resonances of a vocal tract". The class is ordinary: trimmed lead-ins,
+ * edited stems, silence-removed takes, and this chain's own gated output when
+ * the user runs it twice.
+ *
+ * The predicate is a fraction of exact zeros rather than anything built on
+ * `SILENCE_RMS`, because `SILENCE_RMS` cannot see this case by construction —
+ * these windows are ACCEPTED by it, which is how they arrive here. Where to put
+ * it is measured: swept over a floor window with a growing zero head, the
+ * residual climbs monotonically, and the fraction at which a floor stops
+ * reading like a floor — leaving the 0.63…1.91 dB population the constant above
+ * is derived from — sits between 20 % (1.80 dB) and 30 % (1.93 dB) at 8 kHz,
+ * the worst rate. 0.25 is that boundary: every window the checks still run on
+ * measures inside the floor population, and every window they are skipped for is
+ * unmeasurable by them. The observed pathological windows are 87…99.9 % zeros,
+ * i.e. 3.5x clear of it.
+ *
+ * The threshold the stage then derives is unaffected and stays sane: the
+ * envelope follower rises to the real samples at the boundary, so it reads the
+ * floor rather than the silence (-44.9 dBFS against a -50 dBFS floor in the
+ * measurement above).
+ */
+export const GATE_SILENT_WINDOW_FRACTION = 0.25;
 
 export function deriveGate(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('noise-gate');
@@ -850,7 +894,16 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
     for (const c of channels) sum += c[noise.startSample + i];
     window[i] = sum / channels.length;
   }
-  const track = detectPitch(window, sampleRate);
+  // ...unless the window is mostly DIGITAL SILENCE, in which case both content
+  // checks are skipped: exact zeros are a pause, and neither a pitch nor a
+  // spectrum measured across them describes anything. Mono-mixing preserves the
+  // test — the mix is zero exactly where every channel is. See
+  // `GATE_SILENT_WINDOW_FRACTION`.
+  let zeroSamples = 0;
+  for (let i = 0; i < window.length; i++) if (window[i] === 0) zeroSamples++;
+  const mostlySilent = window.length > 0 && zeroSamples / window.length > GATE_SILENT_WINDOW_FRACTION;
+
+  const track = mostlySilent ? { frames: [] } : detectPitch(window, sampleRate);
   let voicedFrames = 0;
   for (const frame of track.frames) if (frame.f0Hz !== null) voicedFrames++;
   const voicedFraction = track.frames.length === 0 ? 0 : voicedFrames / track.frames.length;
@@ -867,7 +920,7 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
   // VOCAL TRACT: resonances make it depart from the straight-line tilt a room's
   // own noise follows. See `GATE_SHAPED_RESIDUAL_DB`, including the one member
   // of this family that no measurement can catch.
-  const shapingDb = spectralTiltResidualDb(window, sampleRate);
+  const shapingDb = mostlySilent ? 0 : spectralTiltResidualDb(window, sampleRate);
   if (shapingDb > GATE_SHAPED_RESIDUAL_DB) {
     return {
       run: false,

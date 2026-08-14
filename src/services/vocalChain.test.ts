@@ -4,6 +4,7 @@ import {
   GATE_HEADROOM_DB,
   GATE_HOLD_MS,
   GATE_SHAPED_RESIDUAL_DB,
+  GATE_SILENT_WINDOW_FRACTION,
   GATE_VOICED_FRACTION,
   STAGE_MEASURING_DETAIL,
   STAGE_RENDERING_DETAIL,
@@ -81,6 +82,20 @@ function withQuietWindow(windows: number, loud: number, quiet: number, quietAt: 
   const out = flat(WIN * windows, loud);
   const q = flat(WIN, quiet);
   out.set(q, quietAt * WIN);
+  return out;
+}
+
+/** Gaussian floor at a stated dBFS RMS — a heavier tail than uniform, and what
+ * the gate's own populations are measured on. */
+function gaussFloorDb(n: number, rmsDb: number, seed: number): Float32Array {
+  let s = seed >>> 0;
+  const next = (): number => {
+    s = (s * 1664525 + 1013904223) >>> 0;
+    return (s / 0xffffffff) * 2 - 1;
+  };
+  const out = new Float32Array(n);
+  const k = Math.pow(10, rmsDb / 20) / Math.sqrt(4 / 3);
+  for (let i = 0; i < n; i++) out[i] = (next() + next() + next() + next()) * k;
   return out;
 }
 
@@ -705,6 +720,52 @@ describe('deriveGate', () => {
     return { channel, soft: { start: 0, end: verse } };
   }
 
+  /** Real 1 s pauses over a -50 dBFS floor with two sung phrases, preceded by
+   * a stretch of DIGITAL SILENCE — a trimmed lead-in, an edited stem, or this
+   * chain's own gated output on a second pass. `measureNoiseWindow` rejects
+   * windows at or under SILENCE_RMS, so what it returns here is not the silence
+   * and not the floor but the boundary between them: mostly exact zeros with a
+   * little real floor in it. */
+  function takeWithSilentLeadIn(silenceSec: number): {
+    channel: Float32Array;
+    pauses: { start: number; end: number }[];
+  } {
+    const sil = Math.round(silenceSec * SR);
+    const pause = Math.round(1.0 * SR);
+    const phrase = Math.round(0.8 * SR);
+    const body = 3 * pause + 2 * phrase;
+    const channel = new Float32Array(sil + body);
+    channel.set(gaussFloorDb(body, -50, 7), sil);
+    const pauses: { start: number; end: number }[] = [];
+    let at = sil;
+    for (const [sung, n] of [
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+    ] as const) {
+      if (!sung) pauses.push({ start: at, end: at + n });
+      else {
+        let phase = 0;
+        for (let i = 0; i < n; i++) {
+          const t = i / SR;
+          phase += (2 * Math.PI * 220) / SR;
+          const c = Math.min(1, t / 0.04) * Math.min(1, (n / SR - t) / 0.06);
+          channel[at + i] += 0.25 * c * Math.sin(phase);
+        }
+      }
+      at += n;
+    }
+    return { channel, pauses };
+  }
+
+  function zeroFractionOf(w: Float32Array): number {
+    let z = 0;
+    for (let i = 0; i < w.length; i++) if (w[i] === 0) z++;
+    return z / w.length;
+  }
+
   it('sets the threshold from the measured floor, above the loudest the detector reads there', () => {
     const signal = withNoisyGap(8, 0.5, 0.006, 4);
     const floor = measureNoiseWindow([signal], SR)!;
@@ -850,6 +911,80 @@ describe('deriveGate', () => {
       expect(res.run).toBe(false);
       if (res.run) return;
       expect(res.reason).toContain('vocal tract');
+    });
+
+    // N2 — the converse of all three guards. Digital silence IS a pause, and the
+    // strongest evidence of one there is; but the window `measureNoiseWindow`
+    // returns on such a take is the BOUNDARY between the silence and the floor,
+    // mostly exact zeros, and the spectrum of that is an impulse's rather than a
+    // room's. The shaping check read it as a vocal tract and refused a take with
+    // real one-second pauses in it.
+    describe('a take carrying a stretch of digital silence', () => {
+      it('gates it, instead of mistaking the silence for a vocal tract', () => {
+        const { channel } = takeWithSilentLeadIn(1.0);
+
+        // The window really is the zeros/floor boundary — the precondition.
+        const w = measureNoiseWindow([channel], SR)!;
+        const win = Float32Array.from(channel.subarray(w.startSample, w.startSample + w.lengthSamples));
+        expect(zeroFractionOf(win)).toBeGreaterThan(0.5);
+        // ...and the shaping measure on it really does read like a voice, which
+        // is what used to fire. Without this the test could pass because the
+        // fit happened to come out low.
+        expect(spectralTiltResidualDb(win, SR)).toBeGreaterThan(GATE_SHAPED_RESIDUAL_DB);
+
+        // Yet the stage runs: exact zeros are a pause, not a phrase.
+        const res = deriveGate([channel], SR);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        // And on a sane threshold — the envelope peak of the boundary window is
+        // still the real floor's, because the follower rises to the non-zero
+        // samples in it.
+        expect(Number(res.params.thresholdDb)).toBeGreaterThan(-60);
+        expect(Number(res.params.thresholdDb)).toBeLessThan(-30);
+      });
+
+      it('brings the take’s real pauses to digital silence, silent lead-in or not', () => {
+        for (const silenceSec of [0, 1.0]) {
+          const { channel, pauses } = takeWithSilentLeadIn(silenceSec);
+          const res = deriveGate([channel], SR);
+          expect(res.run).toBe(true);
+          if (!res.run) return;
+          const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+          // The last 300 ms of each real pause, past the hold and the fade.
+          let sum = 0;
+          let n = 0;
+          for (const p of pauses) {
+            for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += out[i] * out[i];
+            n += Math.round(0.3 * SR);
+          }
+          expect(toDb(Math.sqrt(sum / n))).toBeLessThanOrEqual(-80);
+        }
+      });
+
+      it('still gates on a SECOND pass, over the zeros the first pass wrote', () => {
+        // User-reachable: running the chain twice. The gate writes exact zeros,
+        // so pass two sees a take that is largely digital silence — the same
+        // shape as the trimmed lead-in above, produced by this stage itself.
+        const { channel, pauses } = takeWithSilentLeadIn(0);
+        const first = deriveGate([channel], SR);
+        expect(first.run).toBe(true);
+        if (!first.run) return;
+        const once = noiseGateEffect.process([Float32Array.from(channel)], SR, first.params).channels;
+        expect(zeroFractionOf(once[0])).toBeGreaterThan(0.2);
+
+        const second = deriveGate(once, SR);
+        expect(second.run).toBe(true);
+        if (!second.run) return;
+        // Idempotent where it matters: the pauses are already silent and stay so.
+        const twice = noiseGateEffect.process([Float32Array.from(once[0])], SR, second.params).channels[0];
+        let sum = 0;
+        let n = 0;
+        for (const p of pauses) {
+          for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += twice[i] * twice[i];
+          n += Math.round(0.3 * SR);
+        }
+        expect(toDb(Math.sqrt(sum / n))).toBeLessThanOrEqual(-80);
+      });
     });
 
     it('still runs on the take those three are the boundary of — pauses a window long', () => {
@@ -1198,6 +1333,51 @@ describe('GATE_SHAPED_RESIDUAL_DB', () => {
       expect(shaped).toBeLessThan(GATE_SHAPED_RESIDUAL_DB);
     }
   }, 60000);
+});
+
+describe('GATE_SILENT_WINDOW_FRACTION', () => {
+  /** A floor window with its leading `f` replaced by exact zeros — the shape
+   * `measureNoiseWindow` returns when a take carries digital silence: not the
+   * silence (rejected under SILENCE_RMS) and not the floor, but the boundary. */
+  function withZeroHead(n: number, f: number, seed: number): Float32Array {
+    const w = gaussFloorDb(n, -50, seed);
+    const z = Math.round(f * n);
+    for (let i = 0; i < z; i++) w[i] = 0;
+    return w;
+  }
+
+  it('is set where a floor window stops reading like a floor', () => {
+    const fractions = [0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95];
+    const worstAt = new Map<number, number>();
+    for (const sr of [8000, 22050, 44100, 48000]) {
+      const n = Math.round((NOISE_WINDOW_MS / 1000) * sr);
+      for (const f of fractions) {
+        for (const seed of [7, 23, 101]) {
+          const v = spectralTiltResidualDb(withZeroHead(n, f, seed), sr);
+          worstAt.set(f, Math.max(worstAt.get(f) ?? -Infinity, v));
+        }
+      }
+    }
+
+    // The residual climbs with the zero head: the fit is describing an impulse
+    // more and more and a room less and less.
+    for (let i = 1; i < fractions.length; i++) {
+      expect(worstAt.get(fractions[i])!).toBeGreaterThan(worstAt.get(fractions[i - 1])! - 0.05);
+    }
+
+    // Everything the content checks are still ASKED about reads inside the
+    // floor population the shaping constant was derived from — the same
+    // absolute bound its own test asserts. Measured worst at 0.25: ~1.85 dB.
+    expect(worstAt.get(GATE_SILENT_WINDOW_FRACTION)!).toBeLessThan(2.2);
+    // ...and just past it, a floor starts reading like something else.
+    expect(worstAt.get(0.3)!).toBeGreaterThan(1.9);
+
+    // Far past it the fit reads a plain floor as a vocal tract, which is the
+    // false decline this predicate exists to stop.
+    expect(worstAt.get(0.9)!).toBeGreaterThan(GATE_SHAPED_RESIDUAL_DB);
+
+    expect(GATE_SILENT_WINDOW_FRACTION).toBe(0.25);
+  }, 120000);
 });
 
 // ── deriveCompressor ────────────────────────────────────────────────────────
