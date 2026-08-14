@@ -108,6 +108,29 @@ export const RESIDUAL_BAND_HI_HZ = 4000;
 export const RESIDUAL_IN_BAND_BEST_DB = 11.8;
 export const RESIDUAL_IN_BAND_WORST_DB = 9.5;
 
+// V4 — the obvious remedy, measured with the real model before it was believed.
+//
+// A user looking at that residual asks the same question every time, and this
+// pair came from one: "maybe do a more targeted second pass on what's left".
+// It was answered by measuring rather than by arguing — four real model passes
+// over a constructed mix whose bed is known to the sample, with the ghost read
+// by the SAME `longTermAverageSpectrum` + `bandLevelDb` these figures name.
+// The verdict, the gate it was judged against and every level are committed in
+// `docs/bench/stem-second-pass-rejected.json`; the probe that produced them is
+// `scripts/stem-second-pass-probe.cjs`, and the reasoning is in
+// `docs/KNOWN_LIMITATIONS.md`.
+//
+// The numbers are stated to the user for the same reason all the others are:
+// the suggestion is a good one, it is the first thing anyone would try, and the
+// only thing that closes it permanently is a measurement they can see.
+
+/** What a second pass over the instrumental moves the residual by, in the band
+ * above. Zero — not "a little": the model's second answer is its first one. */
+export const RESIDUAL_SECOND_PASS_DB = 0.0;
+/** The largest per-octave move in that band, so the zero above is bounded
+ * rather than rounded. */
+export const RESIDUAL_SECOND_PASS_WORST_OCTAVE_DB = 0.04;
+
 /**
  * Ruling A, in one sentence, rendered verbatim wherever the limitation is
  * stated. Same idiom as `ALIGN_ACCURACY_SENTENCE`: one string, so the UI, the
@@ -121,7 +144,14 @@ export const COVER_CHAIN_RESIDUAL_SENTENCE =
   `${RESIDUAL_BAND_LO_HZ} Hz–${RESIDUAL_BAND_HI_HZ / 1000} kHz, the band your own voice occupies ` +
   `(worst measured second: ${RESIDUAL_WORST_SECOND_DB} dB). You will hear a ghost of the original ` +
   `singer under your cover, most audibly in sparse passages. Separation's guarantee is that the ` +
-  `stems sum back to the mix exactly; it never was that each stem is perceptually clean.`;
+  `stems sum back to the mix exactly; it never was that each stem is perceptually clean. ` +
+  // V4: and the remedy everyone reaches for first, closed off with its own
+  // measurement rather than left open to be re-suggested every release.
+  `Running a SECOND pass over that instrumental does not help, and that was measured rather than ` +
+  `assumed: it moves the residual ${RESIDUAL_SECOND_PASS_DB.toFixed(2)} dB in that band ` +
+  `(worst octave ${RESIDUAL_SECOND_PASS_WORST_OCTAVE_DB.toFixed(2)} dB). What is left is precisely ` +
+  `what the model already decided was music, so asking the same model the same question a second ` +
+  `time gets the same answer.`;
 
 /**
  * Ruling D, first half. The match is a gentle shaping, and the name must not

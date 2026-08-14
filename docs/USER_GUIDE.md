@@ -845,7 +845,10 @@ gated, which makes it a property of the analysis rather than of the singer.
 still contains the original singer, about 18 dB below the music and only 10 dB below it
 in the band your own voice occupies. Exact summation is a statement about arithmetic, not
 about whether the original singer is audible in the bed; she is, most audibly in sparse
-passages. And the match is a *shaping*: on the song it was built against it moved about
+passages. **Running the separation a second time over the instrumental does not fix this**,
+and that was measured rather than assumed: it moves the residual 0.00 dB across
+250 Hz–4 kHz (worst octave 0.04 dB), because what survives the first pass is exactly what
+the model already decided was music. The numbers are in `docs/KNOWN_LIMITATIONS.md`. And the match is a *shaping*: on the song it was built against it moved about
 ±1.2 dB across 500 Hz–4 kHz with +3.5 dB of air at 8 kHz. It is a real, measured
 correction. It will not turn a poor take into a good one.
 

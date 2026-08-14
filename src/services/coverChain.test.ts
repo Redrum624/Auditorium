@@ -11,6 +11,8 @@ import {
   RESIDUAL_BELOW_VOCAL_DB,
   RESIDUAL_IN_BAND_BEST_DB,
   RESIDUAL_IN_BAND_WORST_DB,
+  RESIDUAL_SECOND_PASS_DB,
+  RESIDUAL_SECOND_PASS_WORST_OCTAVE_DB,
   REFERENCE_BELOW_MIX_FLOOR_DB,
   RESIDUAL_WORST_SECOND_DB,
   coverStageById,
@@ -296,6 +298,11 @@ describe('Ruling A — the residual is stated with its measured numbers', () => 
     expect(RESIDUAL_BAND_HI_HZ).toBe(4000);
     expect(RESIDUAL_IN_BAND_WORST_DB).toBe(9.5);
     expect(RESIDUAL_IN_BAND_BEST_DB).toBe(11.8);
+    // V4: the user's own suggestion, measured with the real model before it was
+    // believed — `docs/bench/stem-second-pass-rejected.json`, produced by
+    // `scripts/stem-second-pass-probe.cjs`.
+    expect(RESIDUAL_SECOND_PASS_DB).toBe(0);
+    expect(RESIDUAL_SECOND_PASS_WORST_OCTAVE_DB).toBe(0.04);
   });
 
   it('renders every one of them into the sentence the user reads', () => {
@@ -315,8 +322,13 @@ describe('Ruling A — the residual is stated with its measured numbers', () => 
       { value: RESIDUAL_BAND_HI_HZ, text: '4 kHz' },
       { value: RESIDUAL_IN_BAND_WORST_DB, text: '9.5\u201311.8 dB' },
       { value: RESIDUAL_IN_BAND_BEST_DB, text: '9.5\u201311.8 dB' },
+      // V4: two more measured figures, and the same rule applies to them \u2014 a
+      // number that is measured and then not shown is a number the user is
+      // entitled to and does not get.
+      { value: RESIDUAL_SECOND_PASS_DB, text: '0.00 dB' },
+      { value: RESIDUAL_SECOND_PASS_WORST_OCTAVE_DB, text: '0.04 dB' },
     ];
-    expect(shown).toHaveLength(7);
+    expect(shown).toHaveLength(9);
     for (const { value, text } of shown) {
       expect(Number.isFinite(value)).toBe(true);
       expect(COVER_CHAIN_RESIDUAL_SENTENCE).toContain(text);
@@ -326,6 +338,19 @@ describe('Ruling A — the residual is stated with its measured numbers', () => 
   it('says the limitation is what separation does NOT promise, not a footnote', () => {
     expect(COVER_CHAIN_RESIDUAL_SENTENCE).toMatch(/ghost of the original\s+singer/);
     expect(COVER_CHAIN_RESIDUAL_SENTENCE).toMatch(/sum back to the mix exactly/);
+  });
+
+  // V4 — the obvious remedy, answered in the copy so it is answered for good.
+  it('closes off the second pass, saying it was MEASURED rather than assumed', () => {
+    // A user looking at a ghost asks the same question every time: run it
+    // again on what is left. The sentence has to say that this was tried with
+    // the real model and what came back, or the suggestion is re-asked every
+    // release and re-argued from first principles every time.
+    expect(COVER_CHAIN_RESIDUAL_SENTENCE).toMatch(/second pass/i);
+    expect(COVER_CHAIN_RESIDUAL_SENTENCE).toMatch(/measured/i);
+    // The reason, not just the verdict: a verdict with no mechanism reads as an
+    // implementation excuse, and this one has a mechanism.
+    expect(COVER_CHAIN_RESIDUAL_SENTENCE).toMatch(/same answer/i);
   });
 
   it('is stated verbatim by both stages that put a cover near the bed', () => {

@@ -888,6 +888,36 @@ own cover will compete for. A 10 dB margin is not masking.
 **In practice:** you will hear a ghost of the original singer under your cover, most audibly
 in sparse passages.
 
+**A second separation pass over the instrumental does not help, and that was measured.** It is
+the first thing anyone suggests — a user did, in a real Cover Chain run: "maybe do a more
+targeted second pass on what's left". Four real model passes were run to answer it
+(`scripts/stem-second-pass-probe.cjs`; verdict `docs/bench/stem-second-pass-rejected.json`),
+over a mix constructed so the bed is known to the sample: a real vocal-free master, plus a
+real singing recording, summed. The residual is then `instrumental − bed` exactly — no
+alignment, no estimate — and it is read by the same `longTermAverageSpectrum` /
+`bandLevelDb` the figures above name.
+
+| Measured over a 28 s window, 250 Hz–4 kHz | |
+|---|---|
+| The residual after pass 1, below the bed | **−17.29 dB** (the −17.95 dB above, reproduced on different material) |
+| The residual after pass 2, below the bed | **−17.29 dB** |
+| **What the second pass removed** | **0.00 dB** (worst octave 0.04 dB) |
+| The second pass's own Vocals output, below the instrumental | −43.04 dB in band (−58.37 below 250 Hz, −45.17 above 4 kHz) |
+| Vocal-free music through the same pass | unchanged: 0.00 dB in band, what it removed 88.83 dB down |
+| Exact sum, all four passes | 0 ULP, 100 % bit-exact |
+
+The decision gate was written down before the measurement: build the pass if it took ≥ 3 dB
+off the residual AND left vocal-free music within 1 dB. It passed the second test and failed
+the first by the whole margin. The reason is not that the pass needs better targeting: what
+survives pass 1 is precisely the energy this model's mask already assigned to the music, so
+the same model asked the same question a second time returns the same answer. The only
+quantity that moves at all is the instrumental's *ungated* broadband level, +1.78 dB — every
+gated band level, which is what the figures above measure, is unchanged to 0.00 dB. Whatever
+the second pass emits, it is not in the frames the app calls sounding, and it is not a
+reduction of anything. **So there is no second-pass feature, and this is why** — the cost
+would have been another ~20 s of inference per 30 s of audio and ~5 GB of RSS for a change
+of zero.
+
 **The figure is documentation, not a per-song estimate**, and that is deliberate. Three
 run-time estimators were built and all three were measured wrong. Complex-STFT coherence
 between the bed and the vocal stem is degenerate by construction for this separator (both
