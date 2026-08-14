@@ -130,12 +130,36 @@ describe('TrackLane bounds its clips at the lane, not at the row (V1)', () => {
     const { getByTestId } = renderLane();
     const lane = getByTestId('track-lane');
 
-    expect(lane).toHaveClass('overflow-hidden');
+    expect(lane).toHaveClass('overflow-clip');
     // ...and the lane must stay the clip's CONTAINING BLOCK, because an
     // absolutely-positioned descendant is only clipped by an ancestor that is
     // one. Dropping `relative` here would silently hand every clip back to the
     // nearest positioned ancestor and un-clip the lot.
     expect(lane).toHaveClass('relative');
     expect(lane.contains(getByTestId('clip'))).toBe(true);
+  });
+
+  it('clips WITHOUT becoming a scroll container, which would corrupt every lane x', () => {
+    const { getByTestId } = renderLane();
+    const lane = getByTestId('track-lane');
+
+    // `overflow: hidden` would clip identically but still make the lane a
+    // scroll container — and a clip extends millions of px past the lane's
+    // right edge, so there is real scrollable overflow to scroll. Every
+    // pointer→sample mapping under this element reads the border-box left with
+    // NO scrollLeft term (`laneRawStart` here, `pixelToSample(clientX -
+    // rectLeft, …)` in EnvelopeLane), so a lane scrolled by one stray
+    // `scrollIntoView`/focus would paint clips shifted by −scrollLeft while
+    // drops, envelope keys and the drop ghost landed at the unshifted sample,
+    // with nothing to notice or reset it. `overflow: clip` cannot be scrolled
+    // at all, so the invariant is a property of the CSS rather than of nobody
+    // having added a focusable control to a lane yet.
+    // One class per assertion: `not.toHaveClass(a, b)` only says the element is
+    // missing at least ONE of them, which would pass on a lane that is still
+    // `overflow-hidden`.
+    expect(lane).not.toHaveClass('overflow-hidden');
+    expect(lane).not.toHaveClass('overflow-auto');
+    expect(lane).not.toHaveClass('overflow-scroll');
+    expect(lane).not.toHaveClass('overflow-x-hidden');
   });
 });

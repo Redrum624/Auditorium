@@ -41,7 +41,7 @@ interface TrackLaneProps {
  * dragged onto — by a clip's own pointer drag, or (F11-4) by an HTML5 drag
  * carrying a Files-panel row or a file from Explorer.
  *
- * V1 — WHY THIS ELEMENT IS `overflow-hidden`, AND WHY IT HAS TO BE THIS ONE.
+ * V1 — WHY THIS ELEMENT IS `overflow-clip`, AND WHY IT HAS TO BE THIS ONE.
  * A clip's `left` is `(startSample − scrollSample) / spp`, so every clip whose
  * start has been scrolled past has a NEGATIVE left: its box legitimately
  * extends thousands of px to the left of the lane's origin, and its waveform
@@ -60,6 +60,19 @@ interface TrackLaneProps {
  * because this element is `relative`: an absolutely-positioned descendant is
  * only clipped by an ancestor that is its containing block. The two classes are
  * one mechanism — `TrackLane.clipping.test.tsx` pins both.
+ *
+ * `clip`, NOT `hidden`. Both clip painting and hit-testing identically, but
+ * `hidden` also makes the lane a SCROLL CONTAINER, and a clip really does
+ * extend millions of px past the lane's right edge at a working zoom, so there
+ * would be genuine scrollable overflow to scroll. Nothing here ever resets
+ * `scrollLeft`, and every pointer→sample mapping in this subtree reads the
+ * border-box left with no `scrollLeft` term (`laneRawStart` below,
+ * `pixelToSample(clientX − rectLeft, …)` in `EnvelopeLane`): one stray
+ * `scrollIntoView`, or the first focusable control anyone adds to a lane, would
+ * leave clips painted shifted by −`scrollLeft` while drops, envelope keys and
+ * the drag ghost landed at the unshifted sample. `overflow: clip` cannot be
+ * scrolled at all, so that is ruled out by the CSS instead of by an invariant
+ * nothing enforces. (Chromium 90+; the app ships on Electron.)
  *
  * The two drag mechanisms stay strictly apart: a clip move is a POINTER
  * gesture with capture (it must track a pointer that has left the element),
@@ -186,7 +199,7 @@ export default function TrackLane({
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      className="relative min-w-0 flex-1 overflow-hidden"
+      className="relative min-w-0 flex-1 overflow-clip"
       style={{
         height: laneHeight,
         // G6: the floating .glass-track-row card paints the lane fill; the
