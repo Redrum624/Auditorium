@@ -26,6 +26,31 @@ import { laneWidthFromScrollerWidth, sessionLaneWidth, setSessionLaneWidth } fro
 export interface SessionState {
   session: Session;
   selectedClipId: string | null;
+  /**
+   * K1 — the EXTENDED clip selection (Ctrl+Click), view state beside the
+   * primary above rather than a replacement for it. Two invariants, held by
+   * every writer and re-established by `reconcileSelection` after any session
+   * change:
+   *
+   *   1. `selectedClipId === null` iff this array is empty;
+   *   2. a non-null primary is always a member of this array.
+   *
+   * So every existing single-selection consumer — the Properties panel's
+   * fields, the fade handles, the gesture code — keeps reading
+   * `selectedClipId` and keeps meaning exactly what it meant before K1. What
+   * the SET adds is the group verbs and nothing else: group drag, Delete,
+   * Ripple Delete, and the panel's "N clips selected" header.
+   *
+   * NOT in `SessionSnapshot` (ruling 3 stands): an undo restores
+   * `{session, selectedClipId}`, and this array is reconciled against the
+   * session that came back — members whose clips are gone drop out, and the
+   * restored primary is put back in. That is the same treatment the cursor
+   * gets, for the same reason: remembering a selection would yank the user's
+   * working set around for no comprehension gain, while an array pointing at
+   * clips that no longer exist would be a dangling reference the group verbs
+   * would then act on.
+   */
+  selectedClipIds: string[];
   mtCursorSample: number;
   mtZoom: { samplesPerPixel: number; scrollSample: number };
   mtPlayState: 'stopped' | 'playing';
@@ -165,7 +190,17 @@ export interface SessionActions {
     positionSample: number,
     curve: FadeCurve
   ): void;
+  /** Single-select: `id` becomes the primary AND the whole extended set (or
+   * both are cleared for `null`). Unchanged for every caller that predates
+   * K1 — a plain click still replaces the selection. */
   setSelectedClip(id: string | null): void;
+  /** K1 — Ctrl+Click: adds `id` to the extended set and makes it the primary
+   * (last clicked wins, so the single-target verbs follow the pointer), or
+   * removes it when it was already a member. Removing the primary promotes
+   * the last remaining member; removing the last member selects nothing. An
+   * id no clip in the session carries is ignored — the set may never hold a
+   * dangling reference. Records no undo entry: a selection is view state. */
+  toggleSelectedClip(id: string): void;
   /** F0 — opens/closes a track's envelope lane (see `mtEnvelope`). */
   setMtEnvelope(v: SessionState['mtEnvelope']): void;
   setMtCursor(s: number): void;
@@ -189,6 +224,41 @@ function freshSessionState(sampleRate: number): Pick<SessionState, 'session' | '
  * reads, and the one `menuActions`/`MultitrackView` state for their own gates. */
 function hasAnyClip(session: Session): boolean {
   return session.tracks.some((t) => t.clips.length > 0);
+}
+
+/** K1 — every clip id the session currently holds. */
+function liveClipIds(session: Session): Set<string> {
+  const ids = new Set<string>();
+  for (const t of session.tracks) for (const c of t.clips) ids.add(c.id);
+  return ids;
+}
+
+/**
+ * K1 — THE selection invariant, re-established against a session (see
+ * `SessionState.selectedClipIds`). One function because there is one rule, and
+ * because the paths that can break it do not resemble each other: a clip
+ * removal, a track removal, an undo/redo restore, a session load, `newSession`.
+ * A per-action fixup would have to be written five times and would still miss
+ * the sixth (undo restores a snapshot without running ANY of the actions).
+ *
+ * Members whose clips are gone drop out. A primary whose clip is gone yields
+ * to the last surviving member — deleting one of three selected clips leaves
+ * two selected with a valid primary, rather than nothing selected. A primary
+ * that survives but is missing from the set is put back in: that is exactly
+ * the state an undo produces, since the snapshot restores the primary and
+ * deliberately does not restore the set.
+ */
+function reconcileSelection(
+  session: Session,
+  primary: string | null,
+  ids: readonly string[]
+): { selectedClipId: string | null; selectedClipIds: string[] } {
+  const live = liveClipIds(session);
+  const members = ids.filter((id) => live.has(id));
+  let next = primary !== null && live.has(primary) ? primary : null;
+  if (next === null) next = members.length > 0 ? members[members.length - 1] : null;
+  if (next !== null && !members.includes(next)) members.push(next);
+  return { selectedClipId: next, selectedClipIds: members };
 }
 
 /**
@@ -535,6 +605,7 @@ function trackParamCoalesceKey(
 export const useSessionStore = create<SessionState & SessionActions>()((set) => ({
   ...freshSessionState(44100),
   selectedClipId: null,
+  selectedClipIds: [], // K1
   mtCursorSample: 0,
   mtPlayState: 'stopped',
   mtPlayheadSample: 0,
@@ -548,6 +619,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       set({
         ...freshSessionState(sampleRate),
         selectedClipId: null,
+        selectedClipIds: [], // K1
         mtCursorSample: 0,
         mtPlayState: 'stopped',
         mtPlayheadSample: 0,
@@ -942,7 +1014,27 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   },
 
   setSelectedClip(id) {
-    set({ selectedClipId: id });
+    // K1: a single select IS the whole selection — the set follows the primary
+    // rather than accumulating beside it.
+    set({ selectedClipId: id, selectedClipIds: id === null ? [] : [id] });
+  },
+
+  toggleSelectedClip(id) {
+    // K1 (Ctrl+Click).
+    set((s) => {
+      if (s.selectedClipIds.includes(id)) {
+        const selectedClipIds = s.selectedClipIds.filter((x) => x !== id);
+        const selectedClipId =
+          s.selectedClipId === id
+            ? (selectedClipIds[selectedClipIds.length - 1] ?? null)
+            : s.selectedClipId;
+        return { selectedClipId, selectedClipIds };
+      }
+      // A set member must name a live clip: the group verbs act on this array
+      // directly, and a dangling id would be a silent partial delete.
+      if (!liveClipIds(s.session).has(id)) return s;
+      return { selectedClipId: id, selectedClipIds: [...s.selectedClipIds, id] };
+    });
   },
 
   setMtEnvelope(v) {
@@ -1154,6 +1246,42 @@ useSessionStore.subscribe((s) => {
   // The re-resolve below writes mtZoom, which re-enters this subscriber; the
   // length is unchanged by then, so it returns at the guard above.
   if (shrank) applySessionZoom(s.mtZoom);
+});
+
+/**
+ * K1 — the selection invariant, held by watching the SESSION rather than by
+ * being restated in each action that could break it.
+ *
+ * Same shape and same argument as the I2 subscription above: the paths that
+ * can strand a selection member are `removeClip`, `removeTrack`, `newSession`,
+ * a `.audm` load, a stem/cover landing AND undo/redo restore — and the restore
+ * runs none of the actions, so a per-action fixup would have missed exactly the
+ * case the brief calls out. Watching the session is also the honest statement
+ * of the rule: a member whose clip is gone is not a member, whatever removed
+ * it.
+ *
+ * Gated on the session REFERENCE (the store is immutable, so that is the
+ * cheapest possible test) and skipped entirely while nothing is selected,
+ * which is the common case — a trim drag committing per pointermove must not
+ * pay for a scan of every clip in the session on every event.
+ *
+ * The reconcile writes only the two selection fields, which does not change
+ * the session reference, so the re-entry it causes returns at the guard.
+ */
+let lastReconciledSession = useSessionStore.getState().session;
+useSessionStore.subscribe((s) => {
+  if (s.session === lastReconciledSession) return;
+  lastReconciledSession = s.session;
+  if (s.selectedClipId === null && s.selectedClipIds.length === 0) return;
+  const next = reconcileSelection(s.session, s.selectedClipId, s.selectedClipIds);
+  if (
+    next.selectedClipId === s.selectedClipId &&
+    next.selectedClipIds.length === s.selectedClipIds.length &&
+    next.selectedClipIds.every((id, i) => id === s.selectedClipIds[i])
+  ) {
+    return; // nothing stranded — no new array, no repaint
+  }
+  useSessionStore.setState(next);
 });
 
 // R3 — binds the session undo plumbing to this store (one-way dependency:
