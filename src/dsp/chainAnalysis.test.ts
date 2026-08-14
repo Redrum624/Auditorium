@@ -6,6 +6,7 @@ import {
   goertzelAmplitude,
   humMeasurable,
   measureNoiseWindow,
+  measureNoiseWindows,
   measureStageDelta,
   monoMix,
   peakDb,
@@ -235,6 +236,141 @@ describe('measureNoiseWindow — the envelope peak it reports', () => {
     expect(result).not.toBeNull();
     expect(result!.startSample).toBe(quietStart);
     expect(result!.envelopePeakDb).toBeGreaterThan(result!.rmsDb);
+  });
+});
+
+/**
+ * V2 — the search that returns MORE than the single quietest window.
+ *
+ * `measureNoiseWindow` answers "where is the quietest 500 ms", and one caller —
+ * the gate — needs "where are the quietest N distinct 500 ms, so I can keep
+ * looking when the first one turns out to be a breath". Everything below pins
+ * that the multi-candidate form is the same search: same acceptance, same
+ * tie-break, same first element, same eviction census.
+ */
+describe('measureNoiseWindows — the quietest N, not just the quietest', () => {
+  const win = Math.round((NOISE_WINDOW_MS / 1000) * SR);
+
+  /** `levels` half-second blocks, each at a stated exact RMS. */
+  function blocks(levels: number[]): Float32Array {
+    const out = new Float32Array(win * levels.length);
+    for (let b = 0; b < levels.length; b++) {
+      for (let i = 0; i < win; i++) out[b * win + i] = (i % 2 === 0 ? 1 : -1) * levels[b];
+    }
+    return out;
+  }
+
+  it('returns exactly one window by default — the one `measureNoiseWindow` returns', () => {
+    const signal = blocks([0.5, 0.002, 0.5, 0.001, 0.5]);
+    const many = measureNoiseWindows([signal], SR);
+    const one = measureNoiseWindow([signal], SR)!;
+    expect(many).toHaveLength(1);
+    expect(many[0]).toEqual(one);
+  });
+
+  it('returns the candidates quietest FIRST, and never more than asked for', () => {
+    const signal = blocks([0.5, 0.002, 0.5, 0.001, 0.5, 0.004]);
+    const got = measureNoiseWindows([signal], SR, { maxCandidates: 3 });
+    expect(got).toHaveLength(3);
+    expect(got[0].rmsDb).toBeLessThan(got[1].rmsDb);
+    expect(got[1].rmsDb).toBeLessThan(got[2].rmsDb);
+    // The three quiet blocks, in level order, not in time order.
+    expect(got.map((w) => w.startSample)).toEqual([win * 3, win, win * 5]);
+  });
+
+  it('returns DISTINCT passages — no candidate overlaps another', () => {
+    // One long quiet stretch. A search that just took the N lowest sliding
+    // positions would return N windows one 50 ms step apart, all measuring the
+    // same half-second — N answers to one question.
+    const signal = new Float32Array(win * 10);
+    for (let i = 0; i < signal.length; i++) signal[i] = (i % 2 === 0 ? 1 : -1) * 0.5;
+    const quiet = noise(win * 4, 0.002, 31);
+    signal.set(quiet, win * 2);
+    const got = measureNoiseWindows([signal], SR, { maxCandidates: 4 });
+    expect(got.length).toBeGreaterThan(1);
+    for (let a = 0; a < got.length; a++) {
+      for (let b = a + 1; b < got.length; b++) {
+        const gap = Math.abs(got[a].startSample - got[b].startSample);
+        expect(gap).toBeGreaterThanOrEqual(win);
+      }
+    }
+  });
+
+  it('returns fewer than asked for when the region holds no more distinct windows', () => {
+    // Two windows' worth of material: one candidate, and asking for twelve
+    // cannot invent an eleventh half-second that is not there.
+    const signal = blocks([0.01, 0.5]);
+    expect(measureNoiseWindows([signal], SR, { maxCandidates: 12 }).length).toBeLessThan(12);
+  });
+
+  it('returns an empty list where `measureNoiseWindow` returns null', () => {
+    expect(measureNoiseWindows([new Float32Array(win * 4)], SR, { maxCandidates: 12 })).toEqual([]);
+    expect(measureNoiseWindow([new Float32Array(win * 4)], SR)).toBeNull();
+  });
+
+  it('applies the mostly-silent reject to every candidate, not only the first', () => {
+    // Zeros, then a quiet real stretch, then loud. The boundary windows between
+    // the zeros and the real material are mostly silent and must not appear
+    // ANYWHERE in the list — the whole point of the reject is that such a
+    // window measures nothing, and that is as true of candidate five as of
+    // candidate one.
+    const signal = new Float32Array(win * 12);
+    signal.set(noise(win * 4, 0.002, 41), win * 4);
+    signal.set(noise(win * 4, 0.4, 42), win * 8);
+    const got = measureNoiseWindows([signal], SR, { maxCandidates: 6, rejectMostlySilentWindows: true });
+    expect(got.length).toBeGreaterThan(1);
+    for (const w of got) {
+      let zeros = 0;
+      for (let i = w.startSample; i < w.startSample + w.lengthSamples; i++) if (signal[i] === 0) zeros++;
+      expect(zeros / w.lengthSamples).toBeLessThanOrEqual(0.25);
+    }
+  });
+
+  /**
+   * The eviction census is per candidate, and it has to be: it counts the real
+   * frames hidden inside evicted windows QUIETER THAN the window in hand, so a
+   * louder candidate hides at least as much as a quieter one. Reporting the
+   * first candidate's count against a later candidate would under-state exactly
+   * the material a threshold derived there could mute.
+   */
+  it('reports the hidden-material census per candidate, and it never falls as the candidates get louder', () => {
+    // Real material chopped into 150 ms fragments between stretches of exact
+    // zeros — no window over it is three-quarters real — then two honest quiet
+    // stretches at different levels, then loud material.
+    const signal = new Float32Array(win * 16);
+    const frag = Math.round(0.15 * SR);
+    for (let k = 0; k < 10; k++) {
+      const at = k * (frag * 3);
+      signal.set(noise(frag, 0.0015, 50 + k), at);
+    }
+    signal.set(noise(win * 3, 0.004, 61), win * 6);
+    signal.set(noise(win * 3, 0.02, 62), win * 10);
+    signal.set(noise(win * 3, 0.4, 63), win * 13);
+    const got = measureNoiseWindows([signal], SR, { maxCandidates: 6, rejectMostlySilentWindows: true });
+    expect(got.length).toBeGreaterThan(2);
+    for (const w of got) expect(w.hiddenRealSamples).toEqual(expect.any(Number));
+    for (let i = 1; i < got.length; i++) {
+      expect(got[i].hiddenRealSamples!).toBeGreaterThanOrEqual(got[i - 1].hiddenRealSamples!);
+    }
+    // ...and the first candidate's census is the one the single-window search
+    // has always reported, unchanged.
+    expect(got[0].hiddenRealSamples).toBe(
+      measureNoiseWindow([signal], SR, { rejectMostlySilentWindows: true })!.hiddenRealSamples
+    );
+  });
+
+  it('omits the census entirely when the caller did not ask for the reject', () => {
+    const signal = blocks([0.5, 0.002, 0.5, 0.001, 0.5]);
+    for (const w of measureNoiseWindows([signal], SR, { maxCandidates: 3 })) {
+      expect(w.hiddenRealSamples).toBeUndefined();
+    }
+  });
+
+  it('breaks a tie towards the earlier window, exactly as the single search does', () => {
+    const signal = blocks([0.5, 0.001, 0.5, 0.001, 0.5]);
+    const got = measureNoiseWindows([signal], SR, { maxCandidates: 2 });
+    expect(got[0].startSample).toBe(win);
+    expect(got[1].startSample).toBe(win * 3);
   });
 });
 

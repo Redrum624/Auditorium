@@ -189,9 +189,12 @@ export interface NoiseWindow {
   /** Peak of the Remove-Silence detector envelope inside the window, dBFS. */
   envelopePeakDb: number;
   /** Only with `rejectMostlySilentWindows`: how many real (non-silent) frames
-   * live inside evicted-quieter candidate windows that no accepted candidate
-   * window covers — the audio the returned measurement never saw. 0 on takes
-   * where the eviction hid nothing but silence. See the docblock. */
+   * live inside evicted candidate windows QUIETER THAN THIS ONE that no
+   * accepted candidate window covers — the audio a measurement taken here
+   * never saw. 0 on takes where the eviction hid nothing but silence. See the
+   * docblock. The bound is this window's own RMS, so the count rises as the
+   * candidates get louder: a threshold derived from a louder window sits over
+   * more of what stayed hidden. */
   hiddenRealSamples?: number;
 }
 
@@ -235,18 +238,52 @@ export interface MeasureNoiseWindowOptions {
    * `NOISE_WINDOW_MAX_SILENT_FRACTION`), returning the quietest MOSTLY-REAL
    * window instead — or null when none exists. Opt-in; see the docblock. */
   rejectMostlySilentWindows?: boolean;
+  /** How many candidates `measureNoiseWindows` may return. Default 1, which is
+   * exactly `measureNoiseWindow`. See that function's own note (V2). */
+  maxCandidates?: number;
 }
 
-export function measureNoiseWindow(
+/**
+ * The quietest N DISTINCT passages, quietest first — the same search as
+ * `measureNoiseWindow`, asked for more than one answer (V2).
+ *
+ * WHY MORE THAN ONE. "The quietest 500 ms" is the right question only when the
+ * quietest 500 ms is a pause. A caller that then INTERROGATES the window it
+ * gets — the gate does, with three content checks — has nowhere to go when the
+ * answer comes back "that was a breath", and declines a whole take on one
+ * half-second. A real 2 min 22 s take that declined that way is what this
+ * exists for: its quietest window read 4.0 dB of vocal-tract shaping, and no
+ * other window in the take was ever looked at.
+ *
+ * DISTINCT, not merely lowest. The scan steps 50 ms, so the ten lowest sliding
+ * positions over one quiet stretch are ten views of the same half-second. Each
+ * returned candidate is therefore chosen greedily in level order and must not
+ * OVERLAP one already chosen — N candidates are N different passages, which is
+ * what a caller asking for a second opinion means by a second candidate.
+ *
+ * Everything else is the single-window search unchanged: the digital-silence
+ * reject, the mostly-silent reject, the first-of-equals tie-break, and the
+ * eviction census. The census is per candidate and MUST be: it counts real
+ * frames hidden inside evicted windows quieter than the window in hand, so it
+ * rises with the candidate's own level, and a caller that derives a threshold
+ * from candidate five needs candidate five's count rather than candidate one's.
+ *
+ * Cost over the single search: one sort of the accepted positions (at most one
+ * per 50 ms of region) and one envelope-follower pass per returned candidate,
+ * each over 500 ms. The per-sample passes over the region are unchanged in
+ * number.
+ */
+export function measureNoiseWindows(
   channels: Float32Array[],
   sampleRate: number,
   options?: MeasureNoiseWindowOptions,
-): NoiseWindow | null {
+): NoiseWindow[] {
   const n = channels[0]?.length ?? 0;
   const nch = channels.length;
   const chunk = Math.max(1, Math.round((NOISE_SEARCH_STEP_MS / 1000) * sampleRate));
   const win = chunk * CHUNKS_PER_WINDOW;
-  if (nch === 0 || n < win) return null;
+  const wanted = Math.max(1, Math.floor(options?.maxCandidates ?? 1));
+  if (nch === 0 || n < win) return [];
 
   // Sum of squares per 50 ms chunk, over all channels. float64 because a
   // float32 accumulator loses the tail of a long region.
@@ -283,8 +320,14 @@ export function measureNoiseWindow(
     }
   }
 
-  let bestRms = Infinity;
-  let bestAt = -1;
+  // Every candidate position, split into the two classes the census needs:
+  // ACCEPTED (above digital silence and, when asked, not mostly silent) and
+  // EVICTED (above digital silence but mostly silent). `covered` marks the
+  // chunks an accepted window contains, and is what makes an evicted window's
+  // real material harmless — see the docblock.
+  const accepted: { at: number; rms: number }[] = [];
+  const evictedPositions: { startChunk: number; rms: number }[] = [];
+  const covered = chunkSilent ? new Uint8Array(chunkCount) : null;
   let running = 0;
   let silentRun = 0;
   for (let k = 0; k < chunkCount; k++) {
@@ -296,80 +339,89 @@ export function measureNoiseWindow(
       if (chunkSilent) silentRun -= chunkSilent[k - CHUNKS_PER_WINDOW];
     }
     const rms = Math.sqrt(running / (win * nch));
-    // Strictly above digital silence, and strictly quieter than the incumbent
-    // (so the FIRST of several equally quiet windows wins — deterministic).
-    // The silent-fraction comparison is strictly greater: a window at exactly
-    // the bound is still a measurement (pinned in vocalChain.test.ts).
-    if (
-      rms > SILENCE_RMS &&
-      rms < bestRms &&
-      !(chunkSilent && silentRun / win > NOISE_WINDOW_MAX_SILENT_FRACTION)
-    ) {
-      bestRms = rms;
-      bestAt = (k - (CHUNKS_PER_WINDOW - 1)) * chunk;
+    // Strictly above digital silence. The silent-fraction comparison is
+    // strictly greater: a window at exactly the bound is still a measurement
+    // (pinned in vocalChain.test.ts).
+    if (rms <= SILENCE_RMS) continue;
+    const startChunk = k - (CHUNKS_PER_WINDOW - 1);
+    if (chunkSilent && silentRun / win > NOISE_WINDOW_MAX_SILENT_FRACTION) {
+      evictedPositions.push({ startChunk, rms });
+      continue;
     }
+    accepted.push({ at: startChunk * chunk, rms });
+    if (covered) for (let c = startChunk; c <= k; c++) covered[c] = 1;
   }
-  if (bestAt < 0) return null;
+  if (accepted.length === 0) return [];
 
-  // The eviction's accounts (see the docblock): with the FINAL winner known,
-  // classify every chunk by the candidates that contain it — covered by an
-  // accepted (mostly-real, above-silence) window, or only inside evicted
-  // quieter-than-the-winner ones — then count the real frames the accepted
-  // search never saw. One more O(chunks) slide plus one walk over the
-  // affected chunks, only on the opt-in path.
-  let hiddenRealSamples: number | undefined;
-  if (chunkSilent) {
-    const covered = new Uint8Array(chunkCount);
+  // Quietest first, and the EARLIER window wins a tie — so the first element is
+  // the one the single-window search has always returned, deterministically.
+  accepted.sort((a, b) => a.rms - b.rms || a.at - b.at);
+
+  // Distinct passages: a candidate that overlaps one already taken is another
+  // view of the same half-second, not a second opinion about the take.
+  const picked: { at: number; rms: number }[] = [];
+  for (const cand of accepted) {
+    if (picked.length >= wanted) break;
+    let overlaps = false;
+    for (const taken of picked) {
+      if (Math.abs(taken.at - cand.at) < win) {
+        overlaps = true;
+        break;
+      }
+    }
+    if (!overlaps) picked.push(cand);
+  }
+
+  // The eviction's accounts (see the docblock), per candidate. The set of
+  // evicted-quieter windows only GROWS as the candidates get louder, and the
+  // candidates are already in ascending level order, so one pointer over the
+  // evicted positions sorted by level accumulates every candidate's count in a
+  // single sweep. `chunk - chunkSilent[c]` IS the count of frames in that chunk
+  // where some channel is non-zero, which is what the census asks for, so no
+  // second per-sample pass is needed.
+  const hiddenFor = new Float64Array(picked.length);
+  if (chunkSilent && covered) {
+    evictedPositions.sort((a, b) => a.rms - b.rms);
     const evicted = new Uint8Array(chunkCount);
-    let running2 = 0;
-    let silentRun2 = 0;
-    for (let k = 0; k < chunkCount; k++) {
-      running2 += chunkSum[k];
-      silentRun2 += chunkSilent[k];
-      if (k < CHUNKS_PER_WINDOW - 1) continue;
-      if (k >= CHUNKS_PER_WINDOW) {
-        running2 -= chunkSum[k - CHUNKS_PER_WINDOW];
-        silentRun2 -= chunkSilent[k - CHUNKS_PER_WINDOW];
-      }
-      const rms = Math.sqrt(running2 / (win * nch));
-      if (rms <= SILENCE_RMS) continue;
-      if (silentRun2 / win > NOISE_WINDOW_MAX_SILENT_FRACTION) {
-        if (rms < bestRms) for (let c = k - (CHUNKS_PER_WINDOW - 1); c <= k; c++) evicted[c] = 1;
-      } else {
-        for (let c = k - (CHUNKS_PER_WINDOW - 1); c <= k; c++) covered[c] = 1;
-      }
-    }
+    let p = 0;
     let hidden = 0;
-    for (let c = 0; c < chunkCount; c++) {
-      if (!evicted[c] || covered[c]) continue;
-      const from = c * chunk;
-      const to = from + chunk;
-      for (let i = from; i < to; i++) {
-        let allZero = true;
-        for (const ch of channels) {
-          if (ch[i] !== 0) {
-            allZero = false;
-            break;
-          }
+    for (let i = 0; i < picked.length; i++) {
+      while (p < evictedPositions.length && evictedPositions[p].rms < picked[i].rms) {
+        const from = evictedPositions[p].startChunk;
+        for (let c = from; c < from + CHUNKS_PER_WINDOW; c++) {
+          if (evicted[c]) continue;
+          evicted[c] = 1;
+          if (!covered[c]) hidden += chunk - chunkSilent[c];
         }
-        if (!allZero) hidden++;
+        p++;
       }
+      hiddenFor[i] = hidden;
     }
-    hiddenRealSamples = hidden;
   }
 
-  const segment = channels.map((c) => c.subarray(bestAt, bestAt + win));
-  const env = envelopeFollower(maxAcrossChannels(segment), sampleRate, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
-  let envPeak = 0;
-  for (let i = 0; i < env.length; i++) if (env[i] > envPeak) envPeak = env[i];
+  return picked.map((cand, i) => {
+    const segment = channels.map((c) => c.subarray(cand.at, cand.at + win));
+    const env = envelopeFollower(maxAcrossChannels(segment), sampleRate, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
+    let envPeak = 0;
+    for (let j = 0; j < env.length; j++) if (env[j] > envPeak) envPeak = env[j];
+    return {
+      startSample: cand.at,
+      lengthSamples: win,
+      rmsDb: toDb(cand.rms),
+      envelopePeakDb: toDb(envPeak),
+      ...(chunkSilent ? { hiddenRealSamples: hiddenFor[i] } : {}),
+    };
+  });
+}
 
-  return {
-    startSample: bestAt,
-    lengthSamples: win,
-    rmsDb: toDb(bestRms),
-    envelopePeakDb: toDb(envPeak),
-    ...(hiddenRealSamples === undefined ? {} : { hiddenRealSamples }),
-  };
+/** The quietest passage there is — `measureNoiseWindows` asked for one answer,
+ * which is the question every caller but the gate is asking. */
+export function measureNoiseWindow(
+  channels: Float32Array[],
+  sampleRate: number,
+  options?: MeasureNoiseWindowOptions,
+): NoiseWindow | null {
+  return measureNoiseWindows(channels, sampleRate, { ...options, maxCandidates: 1 })[0] ?? null;
 }
 
 /**
