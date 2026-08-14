@@ -41,6 +41,26 @@ interface TrackLaneProps {
  * dragged onto — by a clip's own pointer drag, or (F11-4) by an HTML5 drag
  * carrying a Files-panel row or a file from Explorer.
  *
+ * V1 — WHY THIS ELEMENT IS `overflow-hidden`, AND WHY IT HAS TO BE THIS ONE.
+ * A clip's `left` is `(startSample − scrollSample) / spp`, so every clip whose
+ * start has been scrolled past has a NEGATIVE left: its box legitimately
+ * extends thousands of px to the left of the lane's origin, and its waveform
+ * raster starts up to 255 px left of that origin as well, because the band is
+ * quantised OUT to 256 px so a scroll within a quantum costs no re-raster
+ * (`ticWindow`). The header column is 224 px — narrower than that worst case —
+ * and it is a STATIC flex sibling, so a positioned clip paints over it, name,
+ * M/S/R/X and all (the reported defect, seen at 381 % zoom).
+ *
+ * This lane is the only element that can bound it. `.glass-track-row`'s own
+ * `overflow: hidden` clips at the ROW box, which contains the header, so it
+ * arrives 224 px too late; clamping `band.start` to the lane origin would fix
+ * the raster (and only the raster — not the clip's own fill, border, fade
+ * overlay or label) at the cost of the quantum, i.e. a re-raster per scrolled
+ * pixel. Clipping here bounds every clip child at once, and it works precisely
+ * because this element is `relative`: an absolutely-positioned descendant is
+ * only clipped by an ancestor that is its containing block. The two classes are
+ * one mechanism — `TrackLane.clipping.test.tsx` pins both.
+ *
  * The two drag mechanisms stay strictly apart: a clip move is a POINTER
  * gesture with capture (it must track a pointer that has left the element),
  * while a drop from outside the window can only be an HTML5 drag, because the
@@ -166,7 +186,7 @@ export default function TrackLane({
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
       onDrop={onDrop}
-      className="relative min-w-0 flex-1"
+      className="relative min-w-0 flex-1 overflow-hidden"
       style={{
         height: laneHeight,
         // G6: the floating .glass-track-row card paints the lane fill; the
