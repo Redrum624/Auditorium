@@ -470,10 +470,16 @@ actually being a pause, and on some recordings it is not. The rule underneath
 the three cases below: **a take that never stops for half a second is usually
 left alone** — a legato or continuous performance is not gated, whatever its
 level, with one exception named at the end of this section. The opposite also
-holds, and needs no checking: where that quietest half-second is **digital
-silence** — a trimmed lead-in, an edited stem, or this chain's own output when
-you run it twice — that is proof of a pause, and the stage gates on it. The
-three refusals are:
+holds, with one care taken: a stretch of **digital silence** — a trimmed
+lead-in, an edited stem, or this chain's own output when you run it twice — is
+proof of a pause, and a take carrying one is still gated. But the silence
+itself is never *measured*: the threshold always comes from the quietest
+half-second of **real material**, so a run of zeros sitting next to a
+whispered line cannot pass that whisper off as the noise floor — the whisper
+is judged on its own, by the checks below — and a take whose every quiet
+stretch is mostly zeros is declined instead, because its pauses are already
+perfectly silent and a gate has nothing left to do there. The three refusals
+are:
 
 - **Nothing in the recording ever stops.** A held tone, a stretch of room tone
   with no voice in it, or clicks spaced closer together than half a second: the
