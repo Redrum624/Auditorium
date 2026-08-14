@@ -418,10 +418,11 @@ function ClipStartInput({
 
   const commit = () => {
     if (escapingRef.current) return;
-    // Fix round 1 (I1) — the R3 no-op guard, which `setClipFade` states
-    // explicitly and `moveClip` does NOT have: it rebuilds the tracks array
-    // unconditionally, so any commit mints a 'Move clip' entry. Two ways a
-    // commit can be a no-op, and both must cost nothing:
+    // Fix round 1 (I1) — the field's half of the R3 no-op guard. `moveClip`
+    // now carries the store-level one too (H1), and this stays: it is what
+    // stops a no-op from reaching the store at all, and it owns the question
+    // the store cannot answer — what the FIELD is showing. Two ways a commit
+    // can be a no-op, and both must cost nothing:
     //  - the draft was never edited (a click into the field to READ it). This
     //    matters more here than for a fade length, because `formatTime`
     //    rounds to whole milliseconds and `parseTime` re-derives samples from
@@ -429,10 +430,17 @@ function ClipStartInput({
     //    clip — would be silently nudged, with `maintainFacingFades` re-run on
     //    a move the user never made.
     //  - the draft is another spelling of where the clip already is ('1' for
-    //    '0:01.000'). Different text, same sample; nothing to write.
+    //    '0:01.000'). Different text, same position; nothing to write.
     if (draft === committedText) return;
     const parsed = parseTime(draft, sampleRate);
-    if (parsed === null || parsed === valueSample) {
+    // H1 (fix-round-1 re-review, m1): "same position" is decided on what the
+    // user can SEE, not on the sample. Sample-equality left the off-grid case
+    // open — a clip at 44101 reads `0:01.000`, and typing `1` parsed to 44100,
+    // one sample away, so it committed a move and an undo entry while the field
+    // read identically before and after. Formatting the parse and comparing
+    // TEXT closes it, and it makes the two spellings of one request ('1' and
+    // '0:01.000') behave the same way, which they did not before.
+    if (parsed === null || formatTime(parsed, sampleRate) === committedText) {
       setDraft(committedText); // revert garbage, or normalise the spelling
       return;
     }

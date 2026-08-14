@@ -448,6 +448,47 @@ describe('PropertiesPanel (multitrack view)', () => {
       expect(field.value).toBe('0:01.000'); // …and the field says so in its own words
     });
 
+    /**
+     * H1 (fix-round-1 re-review, m1). The spelling guard used to be
+     * SAMPLE-exact, so it did not fire on an off-grid clip: at 44101 the field
+     * reads `0:01.000`, the user types `1`, and 44100 ≠ 44101 committed a
+     * one-sample move, a `maintainFacingFades` pass and an undo entry — while
+     * the field read `0:01.000` before and `0:01.000` after. Typing the same
+     * request as `0:01.000` was caught by the first guard and wrote nothing, so
+     * two spellings of one request behaved differently and neither showed the
+     * user anything.
+     *
+     * The guard is on what the user can SEE: input that formats to the text
+     * already committed is another spelling of the position the clip already
+     * holds, whatever the sub-millisecond remainder says. A move the display
+     * cannot show is not a move the user asked for.
+     */
+    it('does not move an OFF-GRID clip when the typed text formats to what it already reads', () => {
+      const clip = seedStartedClip(OFF_GRID);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      expect(field.value).toBe('0:01.000');
+      fireEvent.change(field, { target: { value: '1' } }); // 1 s formats to 0:01.000
+      fireEvent.blur(field);
+
+      expect(clipStart(clip.id)).toBe(OFF_GRID);
+      expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+      expect(field.value).toBe('0:01.000');
+    });
+
+    /** …and the guard is not over-broad: a request that formats DIFFERENTLY is
+     * a real move, off-grid start or not, and still commits one entry. */
+    it('still commits a typed position that reads differently from an off-grid one', () => {
+      const clip = seedStartedClip(OFF_GRID);
+      render(<PropertiesPanel />);
+      const field = screen.getByLabelText(/clip start/i) as HTMLInputElement;
+      fireEvent.change(field, { target: { value: '1.001' } });
+      fireEvent.blur(field);
+
+      expect(clipStart(clip.id)).toBe(Math.round(1.001 * 44100));
+      expect(getHistory(SESSION_UNDO_KEY).done).toEqual(['Move clip']);
+    });
+
     it('picks up a position that moved from elsewhere while the panel was open', () => {
       const clip = seedStartedClip(0);
       const { rerender } = render(<PropertiesPanel />);
