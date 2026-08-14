@@ -231,9 +231,11 @@ export default function ClipView({
   // canvases their "resize once per 256 px of travel" instead of one.
   // V1 — bounded by the widest a LANE can be, not by the whole window: every
   // row spends MT_HEADER_W on its header before the lane starts, so the raw
-  // window width over-sized every raster by a header column (see
-  // `laneWidthBound`). The quantum is untouched, so the band still only moves
-  // once per 256 px of scroll or drag.
+  // window width over-sized every raster by a header column. The bound is
+  // rounded OUT to a whole number of quanta (`laneWidthBound`), which is what
+  // keeps `ticWindow`'s two edges stepping together — without that, the band
+  // moves twice per 256 px of travel and each move costs both canvases below a
+  // full re-raster.
   const band = ticWindow(-(left + moveDx), widthPx, laneBoundPx);
   const showTics = beatTics !== null && band.width > 0;
   // Hoisted so the waveform effect can depend on the document's channel-array

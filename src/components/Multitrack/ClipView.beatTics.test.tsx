@@ -417,8 +417,8 @@ describe('ClipView beat tics — bounded cost', () => {
     );
 
     const overlay = overlayOf(container)!;
-    // V1: the widest a LANE can be (the window less the 224 px header column),
-    // plus at most one quantum of snap-out at each edge.
+    // V1: the widest a LANE can be (the window less the 224 px header column,
+    // rounded out to a quantum), plus at most one quantum of snap-out per edge.
     const bound = laneWidthBound(window.innerWidth) + 2 * TIC_WINDOW_QUANTUM_PX;
     expect(parseFloat(overlay.style.width)).toBeLessThanOrEqual(bound);
     expect(overlay.width).toBeLessThanOrEqual(Math.round(bound * (window.devicePixelRatio || 1)));

@@ -123,10 +123,10 @@ describe('ClipView waveform is rasterised at VISIBLE resolution (MT1-2)', () => 
 
     const canvas = waveformOf(container);
     // V1: the bound is the widest a LANE can be — the window less the header
-    // column — and the window's right edge is then snapped OUT to the quantum.
-    // In jsdom that is 1024 - 224 = 800, rounded out to 1024.
-    const band = Math.ceil(laneWidthBound(window.innerWidth) / TIC_WINDOW_QUANTUM_PX) *
-      TIC_WINDOW_QUANTUM_PX;
+    // column — rounded out to a whole number of quanta so `ticWindow`'s two
+    // edges step together. In jsdom that is 1024 - 224 = 800, rounded out to
+    // 1024, and a clip starting at the lane origin gets exactly that.
+    const band = laneWidthBound(window.innerWidth);
     expect(band).toBe(1024);
     expect(canvas.style.width).toBe(`${band}px`);
     expect(canvas.width).toBe(band); // dpr 1 -> one backing-store column per CSS px
@@ -141,7 +141,8 @@ describe('ClipView waveform is rasterised at VISIBLE resolution (MT1-2)', () => 
     const doc = seedDoc(20000);
     const { container } = renderClip(doc, makeClip(20000), 0.5); // 40 000 px wide
     const canvas = waveformOf(container);
-    // V1: one header column tighter than the old window-width bound.
+    // V1: the lane bound, not the raw window width — equal on a window that is
+    // a whole number of quanta (jsdom's 1024), tighter on one that is not.
     const bound = laneWidthBound(window.innerWidth) + 2 * TIC_WINDOW_QUANTUM_PX;
     expect(parseFloat(canvas.style.width)).toBeLessThanOrEqual(bound);
     expect(canvas.width).toBeLessThanOrEqual(Math.round(bound * (window.devicePixelRatio || 1)));
@@ -179,15 +180,16 @@ describe('ClipView waveform is rasterised at VISIBLE resolution (MT1-2)', () => 
 
   it('follows the scroll: the band tracks the visible slice of the clip', () => {
     const doc = seedDoc(20000);
-    // Scrolled 5 000 px into a 20 000 px clip. Both edges are snapped OUT to the
-    // 256 px quantum, so the band starts at 4864 (floor) and ends at 5888
-    // (ceil of 5000 + the 800 px lane bound) — 1024 px wide. V1 took 256 px off
-    // that: on the old window-width bound the same band was 1280 px.
+    // Scrolled 5 000 px into a 20 000 px clip. The band starts at 4864 (5000
+    // floored to the quantum) and ends at 6144 (5000 + the 1024 px lane bound,
+    // ceiled) — 1280 px wide. The bound is a whole number of quanta, so the
+    // width here is the SAME 1280 the unscrolled clip would get one quantum
+    // further right: that invariance IS the edge lockstep the band relies on.
     const { container } = renderClip(doc, makeClip(20000), 1, 5000);
 
     const canvas = waveformOf(container);
     expect(canvas.style.left).toBe('4864px');
-    expect(canvas.width).toBe(1024);
+    expect(canvas.width).toBe(1280);
     // Positioned inside the clip element, so it rides the move-drag transform.
     expect(canvas.style.bottom).toBe('0px');
   });

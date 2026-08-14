@@ -145,22 +145,41 @@ function viewportSnapshot(): number {
 }
 
 /**
- * The widest a track lane can be inside a window `viewportPx` CSS px wide.
+ * The widest a track lane can be inside a window `viewportPx` CSS px wide,
+ * rounded OUT to a whole number of {@link TIC_WINDOW_QUANTUM_PX}.
  *
  * Every track row is `[TrackHeader | TrackLane]`, so the lane starts
- * {@link MT_HEADER_W} px in and no lane, in any layout, can be wider than this.
- * V1 — `ticWindow` used to be handed the raw window width, which over-sized
- * every clip raster by exactly one header column on top of the quantum.
+ * {@link MT_HEADER_W} px in and no lane, in any layout, can be wider than
+ * `viewportPx − MT_HEADER_W`. V1 — `ticWindow` used to be handed the raw window
+ * width, one header column looser than that.
+ *
+ * WHY THE ROUNDING, AND WHY OUT (V1 fix round 1). `ticWindow` snaps `start`
+ * DOWN and `end` UP to the same grid, so the two edges step at the same scroll
+ * positions only when the span between them is a whole number of quanta. Handed
+ * a bare `viewportPx − 224` they fall out of phase — `end` steps at
+ * `origin ≡ 224 (mod 256)`, `start` at `≡ 0` — and every visible clip
+ * reallocates and repaints BOTH its canvases twice per 256 px of travel instead
+ * of once, which is the promise {@link TIC_WINDOW_QUANTUM_PX} makes in so many
+ * words. Measured at 2.00 transitions per quantum against 1.00; the
+ * distinct-window pin could not see it, so `clipBeatTics.test.ts`'s lockstep
+ * suite counts TRANSITIONS.
+ *
+ * Rounding OUT rather than in, because the result must stay an upper bound: a
+ * bound short of the real lane width leaves an unrastered strip down the right
+ * of every wide clip — a visible hole, where an over-wide band only costs
+ * columns. The slack is under one quantum, and the result is never worse than
+ * the window width it replaced: equal on a window that is a whole number of
+ * quanta, tighter on every other (1792 rather than 1920, say).
  *
  * Deliberately a BOUND derived from the window rather than
  * `sessionViewport.sessionLaneWidth()`, which is the real measurement: that
  * value publishes no change notification of its own, so a ClipView reading it
- * could hold a stale, too-SMALL width and leave the right-hand strip of a clip
- * unrastered — a visible hole, where an over-wide band only costs columns. The
- * band's job is to be an upper bound, not a best guess.
+ * could hold a stale, too-SMALL width and leave exactly that hole. The band's
+ * job is to be an upper bound, not a best guess.
  */
 export function laneWidthBound(viewportPx: number): number {
-  return Math.max(0, viewportPx - MT_HEADER_W);
+  const lane = Math.max(0, viewportPx - MT_HEADER_W);
+  return Math.ceil(lane / TIC_WINDOW_QUANTUM_PX) * TIC_WINDOW_QUANTUM_PX;
 }
 
 /**

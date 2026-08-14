@@ -334,12 +334,18 @@ describe('ticWindow', () => {
 // ---------------------------------------------------------------------------
 
 describe('laneWidthBound', () => {
-  it('takes the header column off the window width — a lane never gets those px', () => {
+  it('takes the header column off the window width, then rounds OUT to a quantum', () => {
     // Every track row is [TrackHeader | TrackLane], so no lane in any layout is
-    // wider than this. Handing `ticWindow` the raw window width (what shipped
-    // before V1) over-sized every clip raster by exactly one header column.
-    expect(laneWidthBound(1024)).toBe(1024 - MT_HEADER_W);
-    expect(laneWidthBound(1920)).toBe(1920 - MT_HEADER_W);
+    // wider than `windowPx - MT_HEADER_W`. The rounding out is what keeps both
+    // of `ticWindow`'s edges stepping together (see the lockstep suite below);
+    // it is never wider than the raw window width the bound replaced, and on a
+    // window that is not itself a whole number of quanta it is tighter.
+    expect(laneWidthBound(1920)).toBe(1792); // 1696 rounded out — 128 px tighter
+    expect(laneWidthBound(1440)).toBe(1280); // 1216 rounded out — 160 px tighter
+    expect(laneWidthBound(1024)).toBe(1024); // 800 rounded out — equal, not tighter
+    for (const windowPx of [1024, 1366, 1440, 1600, 1920, 2560, 3440, 3840]) {
+      expect(laneWidthBound(windowPx)).toBeLessThanOrEqual(windowPx);
+    }
   });
 
   it('is 0, never negative, for a window no wider than the header column', () => {
@@ -348,6 +354,109 @@ describe('laneWidthBound', () => {
     expect(laneWidthBound(MT_HEADER_W)).toBe(0);
     expect(laneWidthBound(10)).toBe(0);
     expect(ticWindow(0, 5000, laneWidthBound(10)).width).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 3c. The band's edge LOCKSTEP — how OFTEN the canvases are reallocated
+// ---------------------------------------------------------------------------
+
+/**
+ * `ticWindow` results seen while the lane origin travels `travelPx` clip-local
+ * px, counted as TRANSITIONS — the number of times the answer CHANGES.
+ *
+ * This is deliberately a different measurement from the "at most 3 distinct
+ * windows per quantum" pin above, and the difference is the whole point: a
+ * distinct-value count cannot see how often the value moves. Every transition
+ * costs both of a clip's canvases a backing-store reallocation and a full
+ * re-rasterisation, so the transition RATE is the cost this module's whole
+ * quantisation design exists to hold down, and it was the thing an earlier
+ * V1 draft regressed (from 1.00 to 2.00 per quantum) with every existing
+ * assertion still green.
+ */
+function bandTransitions(bound: number, travelPx: number, from = 1000.25): number {
+  const CLIP_PX = 50_000_000; // far wider than any band, so `end` never clamps
+  let previous: string | null = null;
+  let transitions = 0;
+  for (let origin = from; origin <= from + travelPx; origin += 0.5) {
+    const w = ticWindow(origin, CLIP_PX, bound);
+    const key = `${w.start}:${w.width}`;
+    if (previous !== null && key !== previous) transitions++;
+    previous = key;
+  }
+  return transitions;
+}
+
+describe('band edge lockstep', () => {
+  const QUANTA = 4;
+  const TRAVEL = QUANTA * TIC_WINDOW_QUANTUM_PX;
+
+  it('changes ONCE per quantum of travel at every real window width', () => {
+    // `start` snaps DOWN and `end` snaps UP to the same 256-px grid, so the two
+    // edges only step at the same scroll positions when the bound between them
+    // is a whole number of quanta. Then a clip re-rasterises once per 256 px of
+    // scroll or drag — which is exactly what `TIC_WINDOW_QUANTUM_PX`'s docblock
+    // promises the reader.
+    for (const windowPx of [1024, 1280, 1366, 1440, 1600, 1920, 2560, 3440, 3840]) {
+      expect(bandTransitions(laneWidthBound(windowPx), TRAVEL)).toBe(QUANTA);
+    }
+  });
+
+  it('is a whole number of quanta, because an unaligned bound doubles the rate', () => {
+    // The regression this guard exists for, stated as the arithmetic that
+    // causes it: a bound of `innerWidth - 224` puts `end`'s steps at
+    // `origin = 224 (mod 256)` while `start`'s stay at `0 (mod 256)`, so the
+    // band changes twice as often for no extra coverage.
+    expect(bandTransitions(1024 - MT_HEADER_W, TRAVEL)).toBe(2 * QUANTA);
+    for (const windowPx of [1024, 1366, 1600, 1920, 2560, 3840]) {
+      expect(laneWidthBound(windowPx) % TIC_WINDOW_QUANTUM_PX).toBe(0);
+    }
+  });
+
+  it('costs ONE extra step at an origin landing exactly on a quantum, and that is all', () => {
+    // Stated rather than sampled around, because it is real and it is not what
+    // the guard above is about. `start` floors and `end` ceils, so an origin
+    // landing EXACTLY on a multiple of the quantum is the one position where
+    // the two disagree: `start` has already stepped, `end` has not, and the
+    // band is one quantum narrower for that single position before widening
+    // again. A scroll offset is a float derived from samples/pixel, so this is
+    // a measure-zero state — and it behaves identically with an unaligned
+    // bound, so it neither caused the regression nor is fixed by the rounding.
+    const q = TIC_WINDOW_QUANTUM_PX;
+    expect(ticWindow(1024, 50_000_000, laneWidthBound(1024))).toEqual({ start: 1024, width: 1024 });
+    expect(ticWindow(1024.5, 50_000_000, laneWidthBound(1024))).toEqual({
+      start: 1024,
+      width: 1280,
+    });
+    // Sampling straight through those points doubles the count for aligned and
+    // unaligned bounds alike — which is exactly why it is not the measurement.
+    expect(bandTransitions(laneWidthBound(1024), 4 * q, 1000)).toBe(8);
+    expect(bandTransitions(1024 - MT_HEADER_W, 4 * q, 1000)).toBe(8);
+  });
+
+  it('never buys that alignment with a hole at the right of a clip', () => {
+    // Rounding the lane width OUT is what keeps the bound an upper bound.
+    // Rounding it in (flooring) would put the band's right edge short of the
+    // lane's, leaving an unrastered strip of every wide clip — a visible hole,
+    // which is strictly worse than the columns an over-wide band costs.
+    for (let windowPx = MT_HEADER_W; windowPx <= 4096; windowPx += 7) {
+      const bound = laneWidthBound(windowPx);
+      expect(bound).toBeGreaterThanOrEqual(windowPx - MT_HEADER_W);
+      expect(bound - (windowPx - MT_HEADER_W)).toBeLessThan(TIC_WINDOW_QUANTUM_PX);
+    }
+  });
+
+  it('can round out PAST the window width, by less than the header column', () => {
+    // Recorded rather than papered over: on a window whose width sits just past
+    // a quantum boundary the rounded bound exceeds the window itself (a 1000 px
+    // window bounds at 1024). It is still an upper bound on the LANE, which is
+    // all `ticWindow` needs, and the excess is bounded — so this is a few dozen
+    // raster columns, never a wrong picture. Flooring instead would trade those
+    // columns for the hole the previous test rules out.
+    expect(laneWidthBound(1000)).toBe(1024);
+    for (let windowPx = MT_HEADER_W; windowPx <= 4096; windowPx += 1) {
+      expect(laneWidthBound(windowPx) - windowPx).toBeLessThan(MT_HEADER_W);
+    }
   });
 });
 
