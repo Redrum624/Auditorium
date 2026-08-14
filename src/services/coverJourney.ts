@@ -753,6 +753,17 @@ export async function runCoverJourney(
     // user's edit, a stale sum, another song's — is left exactly where it is and
     // this pass creates its own document beside it.
     //
+    // One consequence of adopting rather than copying, stated because round 1
+    // did not have it (round-2 re-review, Note 3): the document stage 5 hangs
+    // the `Instrumental` clip on is the USER'S, live, with its undo stack
+    // intact. A copy they edited and then UNDID holds this sum again and is
+    // adopted — and their redo is still there, so one Ctrl+Y after the pass
+    // changes the audio under the built session's instrumental clip. That is
+    // the app's model everywhere (a clip references a live document, and any
+    // later edit to an adopted copy does the same), and it is the price of not
+    // spending an ~85 MB document on a case that is provably a no-op — but it
+    // is a consequence worth being able to read here rather than discover.
+    //
     // EVERY name-matching candidate is tested, not just the first (N2): a user
     // who edits the pass-1 copy once would otherwise have the pass re-find that
     // same document forever and stack a fresh full-length one on every later
@@ -771,7 +782,12 @@ export async function runCoverJourney(
       );
     const previous = candidates.find((d) => holdsExactly(d, instrumentalChannels)) ?? null;
     // A candidate of the right shape whose samples are somebody else's business.
-    const foreignCopies = previous === null && candidates.length > 0;
+    // H1 (round-2 re-review, Nit 2): asked of the candidates OTHER than the
+    // adopted one, not of `previous === null`. The pass that both adopts a
+    // pristine copy and leaves the user's edited one open is the one where the
+    // Files panel really does hold two same-named full-length documents, and it
+    // was the one pass that said nothing about the second.
+    const foreignCopies = candidates.some((d) => d !== previous);
     const instrumental: AudioDocument =
       previous ??
       createDocument({
@@ -818,9 +834,12 @@ export async function runCoverJourney(
             `${nonVocalNames.join(' + ')} summed — separation's guarantee is that its stems sum back to the mix exactly, so this is the original with its vocal removed to the last bit` +
             (previous
               ? '. A document of this name from an earlier pass was already open and already holds exactly this sum, sample for sample, so it was reused as it stands — nothing was written to it'
-              : foreignCopies
-                ? '. A document of this name is also open whose samples are NOT this sum — your own edits to it, or an earlier separation — so it was left exactly as it is and this is a new one beside it'
-                : ''),
+              : '') +
+            (foreignCopies
+              ? previous
+                ? '. Another document of this name is open too, whose samples are NOT this sum — your own edits to it, or an earlier separation — and it was left exactly as it is'
+                : '. A document of this name is also open whose samples are NOT this sum — your own edits to it, or an earlier separation — so it was left exactly as it is and this is a new one beside it'
+              : ''),
         },
       ],
       warning: COVER_CHAIN_RESIDUAL_SENTENCE,

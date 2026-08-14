@@ -534,6 +534,13 @@ describe('runCoverJourney — a second pass on the same song', () => {
     expect(
       useAppStore.getState().documents.filter((d) => d.name === 'song — Instrumental')
     ).toHaveLength(2);
+    // H1 (round-2 re-review, Nit 2): this pass BOTH adopts a pristine copy and
+    // leaves the user's edited one open, and the row used to say only the first
+    // half — `foreignCopies` was `previous === null && …`, so the pass that
+    // adopts went quiet about the second document. Two same-named full-length
+    // documents in the Files panel is exactly what the row exists to explain.
+    expect(third!.stages[0].derived[1].from).toMatch(/already holds/i);
+    expect(third!.stages[0].derived[1].from).toMatch(/another document of this name/i);
   });
 
   /**
