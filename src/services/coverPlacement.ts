@@ -187,11 +187,16 @@ function amountStr(offsetSeconds: number): string {
  * made the primary refusal instruction point at a control that is not on
  * screen for two of the four outcomes.
  *
- * It defaults to `false` because that is what a caller who knows of no
- * candidate list is looking at: a candidate-less measurement renders the
- * single button.
+ * It is REQUIRED rather than defaulted, and that is the whole hardening. The
+ * default it used to carry was `false` — "a caller who knows of no candidate
+ * list" — which is precisely the assumption that produced the defect above: the
+ * copy's author knew of no candidate list while the emitter was attaching one.
+ * A second composition path calling `guessRemedy(offset)` would inherit that
+ * assumption silently and regrow the wrong wording; requiredness makes it a
+ * compile error instead. Callers with no measurement in hand pass `false`
+ * deliberately, which is a statement rather than an omission.
  */
-export function guessRemedy(offsetSeconds: number, hasCandidates = false): string {
+export function guessRemedy(offsetSeconds: number, hasCandidates: boolean): string {
   const amount = amountStr(offsetSeconds);
   const oneClick = hasCandidates
     ? `Or pick one of the “${CANDIDATE_PLACEMENT_LABEL} …” rows offered under the align row — each moves both clips to its own lag in one step.`

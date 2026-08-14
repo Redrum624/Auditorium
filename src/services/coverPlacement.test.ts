@@ -103,7 +103,7 @@ beforeEach(() => {
 
 describe('guessRemedy — the sentence a refused guess ends with', () => {
   it('sends a NEGATIVE guess to the instrumental, with the amount and the reason', () => {
-    const remedy = guessRemedy(-8.258);
+    const remedy = guessRemedy(-8.258, false);
     expect(remedy).toContain('Instrumental');
     expect(remedy).toContain('8.258 s');
     expect(remedy).toContain('later');
@@ -115,7 +115,7 @@ describe('guessRemedy — the sentence a refused guess ends with', () => {
   });
 
   it('sends a POSITIVE guess to the take, with the amount', () => {
-    const remedy = guessRemedy(8.258);
+    const remedy = guessRemedy(8.258, false);
     expect(remedy).toContain('take');
     expect(remedy).toContain('8.258 s');
     expect(remedy).not.toContain('Instrumental');
@@ -123,17 +123,17 @@ describe('guessRemedy — the sentence a refused guess ends with', () => {
 
   it('never recommends Align Vocal Timing, which cannot move a clip at all', () => {
     for (const offset of [-8.258, 8.258, 0]) {
-      expect(guessRemedy(offset)).not.toContain('Align Vocal Timing');
+      expect(guessRemedy(offset, false)).not.toContain('Align Vocal Timing');
     }
   });
 
   it('names the one-click control by the label the button actually carries', () => {
-    expect(guessRemedy(-8.258)).toContain(APPLY_GUESS_LABEL);
-    expect(guessRemedy(8.258)).toContain(APPLY_GUESS_LABEL);
+    expect(guessRemedy(-8.258, false)).toContain(APPLY_GUESS_LABEL);
+    expect(guessRemedy(8.258, false)).toContain(APPLY_GUESS_LABEL);
   });
 
   it('says there is nothing to move when the guess is already zero', () => {
-    const remedy = guessRemedy(0);
+    const remedy = guessRemedy(0, false);
     expect(remedy).toContain('already');
     expect(remedy).not.toContain(APPLY_GUESS_LABEL);
   });
@@ -156,7 +156,7 @@ describe('guessRemedy — the sentence a refused guess ends with', () => {
     const withRows = guessRemedy(0, true);
     expect(withRows).toContain('already');
     expect(withRows).toContain(CANDIDATE_PLACEMENT_LABEL);
-    expect(guessRemedy(0)).not.toContain(CANDIDATE_PLACEMENT_LABEL);
+    expect(guessRemedy(0, false)).not.toContain(CANDIDATE_PLACEMENT_LABEL);
   });
 });
 
