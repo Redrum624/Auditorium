@@ -5,6 +5,113 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.28.0] - 2026-08-14
+
+The Cover Chain wave — born from one real cover session and three user reports:
+noise survived between phrases, a real song's alignment was refused, and "check
+for any other bugs". A verified hunt confirmed both reports and found four more.
+Four lanes, four reviews, eleven fix rounds, one train, one assembly review.
+
+### Fixed
+
+<!-- CC1: the gate -->
+- **Audio between sung phrases now reaches actual silence.** Cause: **the Vocal
+  Chain had no gate stage at all** — its header claimed Noise Reduction "handles
+  the floor", but NR is hard-capped at −12 dB per bin, declines entirely on noisy
+  takes (the margin was measured against ungated whole-take RMS), and the
+  compressor's makeup then lifted the residue. A registered-but-unused
+  `noise-gate` effect existed with zero call sites. Fix: a measured gate stage —
+  threshold from the quietest **mostly-real** window (windows over 25% exact
+  zeros are refused by the measurement itself, because digital silence is proof
+  of a pause, never the measurement of one), a 3 dB swept headroom, and two
+  fail-safe refusals derived from non-overlapping populations: a YIN voiced
+  check (voice is periodic) and a spectral-tilt residual check (a whisper
+  carries vocal-tract resonances; a room's noise is a straight line in
+  log-frequency — the log axis is load-bearing: a linear fit inverts the
+  populations). A census of real samples hidden inside evicted windows declines
+  when more than one FFT frame's worth exists. Inter-phrase floor measured:
+  raw −45.01 dBFS → old chain −55.81 → **gated −240 dBFS, digital silence**.
+  Five review rounds each found the previous guard's converse; every surviving
+  predicate now has both sides pinned by behaviour tests. Known limits recorded
+  in `docs/KNOWN_LIMITATIONS.md`: takes with no ≥500 ms pause decline (legato),
+  steady unshaped hiss is physically indistinguishable from a pause and declines,
+  and a quiet island ≤ ~375 ms bracketed by digital silence immediately before a
+  burst is invisible to the census (the hold protects the mirror side).
+  Affects: `services/vocalChain.ts`, `dsp/chainAnalysis.ts`,
+  `effects/dynamics/NoiseGateEffect.ts` (first consumer).
+<!-- CC2: alignment evidence -->
+- **A real human cover is no longer refused by the aligner.** The reported case:
+  correlation 0.423 against a floor of 0.607, refused — while the measured
+  offset was very likely correct. Cause: **the confidence floors were calibrated
+  on constructed covers whose take shared the reference's onsets to the sample**;
+  ±40 ms of ordinary human timing variance dropped correlation into 0.43–0.57
+  with the offset still correct to 0.029 s, and the old single-envelope evidence
+  provably could not separate that band from unrelated audio (no floor value
+  could work). Fix: the evidence changed, not just the floors — 240 ms ODF
+  smoothing (lifts real covers +0.42, unrelated only +0.20, restoring
+  separability), piecewise per-window lag agreement as a drift-robust second
+  signal, and every threshold re-derived from enlarged populations (timing
+  jitter, tempo drift, repeated choruses, leakage-like stems, room tone,
+  same-tempo metronomes) inside kept tests with asserted margins:
+  correlation floor 0.607 → **0.731**, prominence repurposed to drive ambiguity
+  (**0.12**), new weak-guess floor **0.692**. The ±40 ms regime now scores
+  0.809–0.933 vs unrelated ≤ 0.653. Four outcomes replace the binary verdict:
+  `confident` (applied), `ambiguous` (repeated chorus — candidate placements
+  offered, never auto-applied), `weak` (a usable guess, offered), `unrelated`.
+  Measured drift is reported as seconds-per-minute instead of "not believable".
+  Gain dependence and synthetic-population calibration remain recorded limits.
+  Affects: `dsp/coverAlign.ts`, its fixtures, `services/coverJourney.ts`.
+<!-- CC3: the refusal becomes actionable -->
+- **A refused alignment is now actionable — and the advice is finally honest.**
+  The user's case: best guess −8.258 s, refused, message said "drag it on the
+  timeline, or run Align Vocal Timing". Cause: **for a negative offset only the
+  instrumental can move** (clips clamp at zero — dragging the take can only
+  increase the error), and Align Vocal Timing is a marker-to-grid warp that
+  cannot move clips at all and needs a beat grid a fresh take doesn't have.
+  Fix: sign-aware refusal copy naming the clip that can actually move and the
+  amount; a one-click **"Apply the measured offset anyway"** (or per-candidate
+  "Place at ±X s" rows when several placements are offered) that moves both
+  clips through the same arithmetic as the confident arm, as one undoable
+  gesture; the Place row stops claiming "measured offset +0.000 s" on refusal;
+  and the clip Start in Properties became a typeable field. The refusal
+  sentence and the dialog's controls branch on the same predicate, so the
+  message can never name a control that isn't on screen.
+  Affects: `services/coverJourney.ts`, `services/coverPlacement.ts` (new),
+  `components/Dialogs/CoverChainDialog.tsx`, `components/Panels/PropertiesPanel.tsx`.
+<!-- CC4: journey correctness -->
+- **The Cover Chain keeps its own promises.** Four defects from the verified
+  hunt: (1) a fresh separation installed a Stems session at stage 1 — four
+  stages before the journey's own contract said any session is touched,
+  destroying the user's session and undo history, with the cancel report then
+  claiming "there is no session"; fixed by splitting stem landing into a
+  documents-only half the journey uses (cancel now genuinely leaves the session
+  untouched). (2) A mono take rendered 3.01 dB under the loudness Match
+  Loudness had just set (constant-power pan vs the stereo instrumental's unity
+  law); compensated at placement, stated in the Place row, and preserved by the
+  apply-guess path. (3) A leakage-only Vocals stem (a real model behaviour,
+  measured 41 dB down) crushed the take via Match Loudness with no warning; a
+  measured plausibility floor now declines with the number. (4) Re-running the
+  journey double-processed the take and accumulated ~85 MB duplicate
+  Instrumental documents; reuse is now proven by content — a candidate is
+  adopted only when it already holds the freshly computed sum sample-for-sample,
+  so adoption writes nothing and can never destroy an edit (in-process or after
+  a save/reopen round-trip), and a prior pass is announced before Run. Plus:
+  honest decline wording when a document is closed mid-run, and the smoothing
+  stage reads its one peak through a peak-only mixdown instead of allocating a
+  ~346 MB full render. Affects: `services/coverJourney.ts`,
+  `services/stemLanding.ts`, `services/coverChain.ts`, `multitrack/mixdown.ts`.
+
+### Added
+
+- **Noise Gate** as the Vocal Chain's eleventh automatic stage (see above) —
+  in both the standalone Vocal Chain and the Cover Chain's clean stage.
+- **Alignment outcome model** with candidate placements and measured drift,
+  consumed by the Cover Chain's stepper and report.
+- **Editable clip Start** in the Properties panel — type an exact position;
+  commits like the sibling fields, one undo entry, no phantom moves on blur.
+- **Peak-only mixdown mode** (`mixdownSessionPeak`) for consumers that need one
+  number, not a render.
+
 ## [1.27.0] - 2026-08-13
 
 ### Fixed
