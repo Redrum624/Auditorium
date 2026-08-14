@@ -155,7 +155,13 @@ function createSplashController({
       },
     });
 
-    splashWindow.loadFile(splashFile);
+    // A splash that cannot load its own page has no business existing: close it
+    // rather than leave an empty rectangle on screen and an unhandled rejection
+    // in main. The handoff does not depend on it — it waits on the editor
+    // window and the renderer, neither of which is affected.
+    Promise.resolve(splashWindow.loadFile(splashFile)).catch(() => {
+      if (alive(splashWindow)) splashWindow.close();
+    });
 
     splashWindow.webContents.on('did-finish-load', () => {
       splashLoaded = true;

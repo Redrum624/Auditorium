@@ -164,6 +164,37 @@ describe('the splash window itself', () => {
     });
   });
 
+  test('closes itself if it cannot load its own page, and the launch goes on', async () => {
+    // The failure mode being denied is two-fold: an unhandled rejection in the
+    // main process, and an empty rectangle sitting on screen. Neither the
+    // editor window nor the renderer is involved in the handoff's other half,
+    // so the launch itself is unaffected.
+    const created = [];
+    function FakeBrowserWindow(options) {
+      const win = makeFakeWindow(options);
+      win.loadFile = () => Promise.reject(new Error('ENOENT'));
+      created.push(win);
+      return win;
+    }
+    const splash = createSplashController({
+      BrowserWindow: FakeBrowserWindow,
+      ipcMain: makeFakeIpcMain(),
+      splashFile: 'C:\\gone\\splash.html',
+      preloadFile: 'C:\\app\\electron\\preload.cjs',
+    });
+    const splashWin = splash.open();
+    const mainWin = makeFakeWindow({});
+    splash.adoptMainWindow(mainWin);
+
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(splashWin.destroyed).toBe(true);
+
+    mainWin.emit('ready-to-show');
+    splash.rendererIsReady();
+    expect(mainWin.shown).toBe(true);
+  });
+
   test('does not show once the handoff has already happened', () => {
     // The editor can be ready before the splash page has painted (a warm cache,
     // a fast machine). Showing the splash then would flash a window that exists
