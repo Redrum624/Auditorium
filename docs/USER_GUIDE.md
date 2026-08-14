@@ -478,8 +478,11 @@ half-second of **real material**, so a run of zeros sitting next to a
 whispered line cannot pass that whisper off as the noise floor — the whisper
 is judged on its own, by the checks below — and a take whose every quiet
 stretch is mostly zeros is declined instead, because its pauses are already
-perfectly silent and a gate has nothing left to do there. The three refusals
-are:
+perfectly silent and a gate has nothing left to do there. And when quiet
+audio itself survives only as fragments between zeros — a transfer through an
+8-bit source, a stem another tool strip-silenced with no hold — the stage
+declines rather than derive a threshold that was measured without ever seeing
+those fragments. The three refusals are:
 
 - **Nothing in the recording ever stops.** A held tone, a stretch of room tone
   with no voice in it, or clicks spaced closer together than half a second: the
