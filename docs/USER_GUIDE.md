@@ -620,17 +620,29 @@ Six stages run, top to bottom, each reporting what it measured:
    tracks actually sum to.
 
 **The alignment is a placement, not a warp.** Stage 3 cross-correlates the onset envelope
-of your cleaned take with the separated original vocal's and reports the offset it found
-along with the confidence that produced it. Your whole take is then placed at that offset
-— nothing is stretched and no syllable is moved, so a take that drifts against the record
+of your take **as you recorded it** with the separated original vocal's and reports the
+offset it found along with the confidence that produced it. Not the cleaned take: the
+take's samples are snapshotted before stage 2 runs, because this measurement reads
+*onsets* and the chain writes its own — the noise gate puts an attack at every open and
+close that the original never had, and the pitch corrector moves the real ones. (Only the
+samples come from before the chain; the take document still supplies the sample rate, and
+a take closed mid-run declines the stage rather than measuring against a ghost.) Your whole
+take is then placed at that offset — nothing is stretched and no syllable is moved, so a take that drifts against the record
 still drifts. Two thresholds have to be cleared before the number is believed, and both
 are measured rather than chosen; below either one the stage places your take at the start
 of the original and **tells you the numbers** instead of guessing.
 
-**A refused guess is still one click away.** Under the align row, a refusal carries an
-**Apply the measured offset anyway** button with the measurement's own correlation,
-prominence and overlap next to it. Pressing it re-places both clips at the offset — the
-same both-tracks-move arithmetic a believed alignment uses, with the same 25 ms edge fades
+**A refused guess is still one click away.** Under the align row, a refusal carries its
+offer with the measurement's own correlation, prominence and overlap next to it. Which
+control that is follows what was measured. A match the stage calls *ambiguous* ("several
+places about equally well") or *weak* always brings its rival lags with it, and each
+becomes its own **Place at ±X s** button showing that lag's correlation and how far it
+stands above the next — the measured guess is the first of them. A match with no rival
+worth listing — *unrelated*, or a measurement that classified itself not at all — carries
+the single **Apply the measured offset anyway** button instead. The refusal's own sentence
+names whichever of the two is on screen for that measurement, and never the other one.
+Pressing either re-places both clips at that offset — the same both-tracks-move
+arithmetic a believed alignment uses, with the same 25 ms edge fades
 — as a single undo entry, so a guess that turns out wrong costs one Ctrl+Z. It is offered
 and never applied for you: the numbers that produced the refusal sit inside the range
 measured for *unrelated* pairs, so the app will not pretend to a confidence it just said it
