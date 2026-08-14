@@ -11,6 +11,10 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { _electron: electron } = require('playwright');
+// S1: the launch splash is a second BrowserWindow, so the editor's window is
+// found by URL through the shared helper rather than by arrival order —
+// screenshotting the splash would be a very quiet way to break the README.
+const { acquireMainWindow } = require('./e2e-lib.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
@@ -35,7 +39,7 @@ async function main() {
   });
 
   try {
-    const page = await app.firstWindow();
+    const page = await acquireMainWindow(app); // S1: the editor, not the splash
     await page.waitForLoadState('domcontentloaded');
     await page.waitForFunction(() => Boolean(window.__test), null, { timeout: 20000 });
 

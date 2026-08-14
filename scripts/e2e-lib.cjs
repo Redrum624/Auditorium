@@ -45,6 +45,49 @@ const SMOKE_WINDOW = { width: 1600, height: 1000 };
 // a real refusal to resize should fail the check.
 const SMOKE_WINDOW_TOLERANCE_PX = 4;
 
+// S1: which window is the editor.
+//
+// The launch splash (electron/splash.html) is a second, real BrowserWindow that
+// exists at the same time as the editor's, so `app.firstWindow()` and
+// `BrowserWindow.getAllWindows()[0]` — what every rig here used to say — became
+// coin flips. The failure that would cause is silent rather than loud: pinning
+// the SPLASH to 1600x1000 succeeds, and the run goes on to measure a window
+// that is not the app.
+//
+// The splash is deliberately NOT switched off under AUDITORIUM_TEST. A feature
+// disabled under test is a feature that only works where nobody is looking, so
+// every walker run launches the real thing and identifies the real window.
+//
+// The test is POSITIVE — "this window loaded the app" — rather than "this
+// window is not the splash", because a BrowserWindow reports `about:blank`
+// between construction and its first commit, and "not the splash" would hand
+// back that window. These are the only two URLs electron/main.cjs ever loads.
+const MAIN_WINDOW_URL = /(dist[\\/]index\.html|localhost:3005)/i;
+
+/**
+ * Waits for the editor's own window and returns its Playwright page.
+ *
+ * Polls the window list rather than waiting on a 'window' event, because the
+ * editor window may already be open before the first call (Playwright's
+ * `launch()` resolves once the app is up) and an event-only wait would then
+ * wait forever for a window that has already arrived.
+ */
+async function acquireMainWindow(app, { timeout = 30000, pollMs = 50 } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    const pages = app.windows();
+    const found = pages.find((p) => MAIN_WINDOW_URL.test(p.url()));
+    if (found) return found;
+    if (Date.now() >= deadline) {
+      const seen = pages.map((p) => p.url()).join(', ') || 'none';
+      throw new Error(
+        `the editor window never appeared within ${timeout} ms (windows open: ${seen})`
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  }
+}
+
 // Every `ok:` line this module has printed. The smoke does not read it (its
 // count is the `ok:` lines on stdout); the walker reports it as its own
 // assertion count, which is the honest number precisely because it is
@@ -227,8 +270,12 @@ async function openModuleCard(page, label) {
  * Returns the geometry actually realised, so the caller can assert the pin took
  * rather than discovering it later as a mysterious pixel count. */
 async function pinWindowGeometry(app, want) {
-  return app.evaluate(({ BrowserWindow, screen }, size) => {
-    const win = BrowserWindow.getAllWindows()[0];
+  return app.evaluate(({ BrowserWindow, screen }, { size, mainUrlPattern }) => {
+    // S1: by URL, not by index — the splash is `getAllWindows()[0]` for as long
+    // as it lives. A regex cannot cross `evaluate`'s structured clone, so its
+    // source travels and it is rebuilt here.
+    const isMain = new RegExp(mainUrlPattern, 'i');
+    const win = BrowserWindow.getAllWindows().find((w) => isMain.test(w.webContents.getURL()));
     if (!win) return null;
     if (win.isMinimized()) win.restore();
     if (win.isFullScreen()) win.setFullScreen(false);
@@ -249,7 +296,7 @@ async function pinWindowGeometry(app, want) {
       scaleFactor: roomiest.scaleFactor,
       workArea: roomiest.workArea,
     };
-  }, want);
+  }, { size: want, mainUrlPattern: MAIN_WINDOW_URL.source });
 }
 
 /**
@@ -287,7 +334,9 @@ async function launchApp({ extraArgs = [] } = {}) {
     cwd: ROOT,
     env: { ...process.env, AUDITORIUM_TEST: '1' },
   });
-  const page = await app.firstWindow();
+  // S1: the editor's window, not whichever one opened first — the splash is a
+  // real BrowserWindow and Playwright lists it like any other.
+  const page = await acquireMainWindow(app);
   await page.waitForLoadState('domcontentloaded');
   await page.waitForFunction(() => Boolean(window.__test), null, { timeout: 20000 });
   return { app, page };
@@ -314,9 +363,11 @@ async function closeApp(app) {
 }
 
 module.exports = {
+  MAIN_WINDOW_URL,
   ROOT,
   SMOKE_WINDOW,
   SMOKE_WINDOW_TOLERANCE_PX,
+  acquireMainWindow,
   assert,
   assertionCount,
   canvasHash,

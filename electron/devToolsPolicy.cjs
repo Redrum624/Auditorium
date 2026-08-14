@@ -20,9 +20,12 @@ const { isPackagedGateOpen } = require('./prodGate.cjs');
  *
  * AUDITORIUM_TEST suppresses it unconditionally, ahead of everything else: the
  * packaged smoke pins the window to an exact CSS-pixel size and measures
- * canvases against it, and a detached DevTools window would add a second
- * window for `firstWindow()` to race and cost the run time it does not budget
- * for. Suppression is deliberately keyed on "the variable is set to anything
+ * canvases against it, and a detached DevTools window is a second window that
+ * costs the run time it does not budget for. (S1: it can no longer be MISTAKEN
+ * for the app — since the launch splash made a second window normal, every rig
+ * identifies the editor by the URL it loaded rather than by arrival order; see
+ * `acquireMainWindow` in scripts/e2e-lib.cjs. The cost reason stands on its
+ * own.) Suppression is deliberately keyed on "the variable is set to anything
  * non-empty" rather than on the exact '1' the harness uses — a suppression
  * must fail SAFE (not opening) on a value it does not recognise, which is the
  * opposite of `isPackagedGateOpen`'s fail-closed direction for a capability.

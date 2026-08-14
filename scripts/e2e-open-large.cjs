@@ -20,6 +20,9 @@
 const path = require('node:path');
 const fs = require('node:fs');
 const { _electron: electron } = require('playwright');
+// S1: window acquisition is shared, so this rig cannot drift from the smoke's
+// rule about which of the app's windows is the editor.
+const { acquireMainWindow, MAIN_WINDOW_URL } = require('./e2e-lib.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const FIRST = path.join(ROOT, 'test-assets', 'P1177605.wav');
@@ -47,8 +50,11 @@ function mib(bytes) {
 }
 
 async function pinWindowGeometry(app, want) {
-  return app.evaluate(({ BrowserWindow, screen }, size) => {
-    const win = BrowserWindow.getAllWindows()[0];
+  return app.evaluate(({ BrowserWindow, screen }, { size, mainUrlPattern }) => {
+    // S1: by URL, not by index — the splash is `getAllWindows()[0]` while it
+    // lives, and pinning IT to 1600x1000 would succeed and mean nothing.
+    const isMain = new RegExp(mainUrlPattern, 'i');
+    const win = BrowserWindow.getAllWindows().find((w) => isMain.test(w.webContents.getURL()));
     if (!win) return null;
     if (win.isMinimized()) win.restore();
     if (win.isFullScreen()) win.setFullScreen(false);
@@ -63,7 +69,7 @@ async function pinWindowGeometry(app, want) {
     win.setContentSize(size.width, size.height);
     const [contentWidth, contentHeight] = win.getContentSize();
     return { contentWidth, contentHeight };
-  }, want);
+  }, { size: want, mainUrlPattern: MAIN_WINDOW_URL.source });
 }
 
 /** True when the waveform canvas holds more than one colour — i.e. a waveform
@@ -102,7 +108,7 @@ async function main() {
   });
 
   try {
-    const page = await app.firstWindow();
+    const page = await acquireMainWindow(app); // S1: the editor, not the splash
     await page.waitForLoadState('domcontentloaded');
     await page.waitForFunction(() => Boolean(window.__test), null, { timeout: 20000 });
     await pinWindowGeometry(app, WINDOW);

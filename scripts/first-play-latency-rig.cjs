@@ -79,6 +79,9 @@ const path = require('node:path');
 const fs = require('node:fs');
 const { execFileSync } = require('node:child_process');
 const { _electron: electron } = require('playwright');
+// S1: the launch splash is a second BrowserWindow, so the editor's window is
+// found by URL through the shared helper rather than by arrival order.
+const { acquireMainWindow } = require('./e2e-lib.cjs');
 
 const ROOT = path.resolve(__dirname, '..');
 const TONE = path.join(ROOT, 'test-assets', 'tone.wav');
@@ -204,7 +207,7 @@ async function measureOneLaunch(probesPerLaunch, content) {
     env: { ...process.env, AUDITORIUM_TEST: '1' },
   });
   try {
-    const page = await app.firstWindow();
+    const page = await acquireMainWindow(app); // S1: the editor, not the splash
     await page.waitForLoadState('domcontentloaded');
     await page.waitForFunction(() => typeof window.__test !== 'undefined', undefined, {
       timeout: 15000,
