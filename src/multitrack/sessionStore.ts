@@ -8,7 +8,7 @@ import {
   type AutomationParam,
 } from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
-import { bindSessionUndo, recordSessionMutation } from './sessionUndo';
+import { bindSessionUndo, recordSessionMutation, withSessionGesture } from './sessionUndo';
 // MT1-1: the session's zoom limits live in one module now, so this store states
 // requests and `resolveSessionZoom` answers them — the shape `appStore` took in
 // F11-9. The store-touching writers (`applySessionZoom`,
@@ -1247,6 +1247,174 @@ useSessionStore.subscribe((s) => {
   // length is unchanged by then, so it returns at the guard above.
   if (shrank) applySessionZoom(s.mtZoom);
 });
+
+// ---------------------------------------------------------------------------
+// K1 — the GROUP verbs
+// ---------------------------------------------------------------------------
+/**
+ * All three are module-level functions rather than store actions, exactly as
+ * `adoptSessionRate` is, and all three are the same shape: a `withSessionGesture`
+ * bracket around the store's OWN single-clip actions. That shape is the design,
+ * not an implementation detail:
+ *
+ *  - ONE undo entry per gesture is the store's law (ruling 2), and a bracket is
+ *    how this codebase already spells it (`Arm crossfade` writes two fades
+ *    inside one).
+ *  - Composing `removeClip`/`moveClip` means the overlap maintenance a group
+ *    edit needs is the maintenance a drag already gets — `maintainFacingFades`,
+ *    reached through the same door. A ripple shift that lands a clip on its
+ *    neighbour arms the pair; a group move that dissolves a pair disarms it.
+ *    There is no second opinion about overlaps anywhere in this file, which is
+ *    what keeps K1 from re-opening the X4/X5 fade-maintenance surface.
+ *  - The no-op guards inside those actions carry through unchanged: a member
+ *    that would not move records nothing, so an empty gesture pushes no entry.
+ *
+ * Each resolves ids against the live session and silently skips ones no clip
+ * carries (the selection is reconciled, but a caller may pass anything).
+ */
+
+/** Where a clip currently lives — `{trackId, clip}`, or null when the session
+ * does not carry that id. */
+function locateClip(session: Session, clipId: string): { trackId: string; clip: Clip } | null {
+  for (const t of session.tracks) {
+    const clip = t.clips.find((c) => c.id === clipId);
+    if (clip) return { trackId: t.id, clip };
+  }
+  return null;
+}
+
+/** Deletes every clip in `clipIds`, in one undo entry. Single-member calls keep
+ * the label a single delete has always had, so the History panel does not
+ * suddenly read differently for the gesture that has not changed. */
+export function removeClips(clipIds: readonly string[]): void {
+  const state = useSessionStore.getState();
+  const present = clipIds.filter((id) => locateClip(state.session, id) !== null);
+  if (present.length === 0) return;
+  withSessionGesture(present.length === 1 ? 'Remove clip' : 'Remove clips', () => {
+    for (const id of present) useSessionStore.getState().removeClip(id);
+  });
+}
+
+/** The merged, ascending, non-overlapping union of the given spans. Ripple
+ * delete measures the timeline it REMOVES, and two selected clips that overlap
+ * each other remove their union once, not their lengths twice. */
+function mergeSpans(spans: { start: number; end: number }[]): { start: number; end: number }[] {
+  const sorted = [...spans].sort((a, b) => a.start - b.start);
+  const merged: { start: number; end: number }[] = [];
+  for (const s of sorted) {
+    const last = merged[merged.length - 1];
+    if (last !== undefined && s.start <= last.end) last.end = Math.max(last.end, s.end);
+    else merged.push({ start: s.start, end: s.end });
+  }
+  return merged;
+}
+
+/**
+ * K1 R3 — Ripple Delete: remove the named clips and close the gaps they leave.
+ *
+ * Per TRACK (a ripple is a statement about one timeline, and the other tracks
+ * have their own): every surviving clip that lies entirely AFTER a removed span
+ * shifts left by that span. "Entirely after" is `survivor.start >= removed.end`
+ * — a survivor that OVERLAPS a removed clip is not later than it, it is beside
+ * it, and shifting it would move a clip the user can see was not in the gap.
+ *
+ * The shift is applied through `moveClip`, one member at a time, LEFTMOST
+ * FIRST: shifts are monotonic in start position, so processing left to right
+ * means each clip moves into space that has already been vacated. A shift that
+ * still lands on a neighbour (reachable when a removed clip overlapped a
+ * survivor) is an overlap like any other and gets the drag's own facing-fade
+ * maintenance — see the note on this section.
+ */
+export function rippleDeleteClips(clipIds: readonly string[]): void {
+  const session = useSessionStore.getState().session;
+  /** trackId -> the removed clips' spans on it. */
+  const removedByTrack = new Map<string, { start: number; end: number }[]>();
+  const present: string[] = [];
+  for (const id of clipIds) {
+    const found = locateClip(session, id);
+    if (!found) continue;
+    present.push(id);
+    const spans = removedByTrack.get(found.trackId) ?? [];
+    spans.push({
+      start: found.clip.startSample,
+      end: found.clip.startSample + found.clip.lengthSample,
+    });
+    removedByTrack.set(found.trackId, spans);
+  }
+  if (present.length === 0) return;
+
+  // Resolved BEFORE anything is removed: the shifts describe the timeline the
+  // user is looking at, and every survivor's target is fixed by that timeline
+  // rather than by the intermediate states the removals pass through.
+  const shifts: { clipId: string; trackId: string; toSample: number }[] = [];
+  const removedIds = new Set(present);
+  for (const track of session.tracks) {
+    const spans = removedByTrack.get(track.id);
+    if (spans === undefined) continue;
+    const merged = mergeSpans(spans);
+    for (const clip of track.clips) {
+      if (removedIds.has(clip.id)) continue;
+      let shift = 0;
+      for (const span of merged) {
+        if (span.end <= clip.startSample) shift += span.end - span.start;
+      }
+      if (shift > 0) {
+        shifts.push({ clipId: clip.id, trackId: track.id, toSample: clip.startSample - shift });
+      }
+    }
+  }
+  shifts.sort((a, b) => a.toSample - b.toSample); // leftmost first
+
+  withSessionGesture('Ripple delete', () => {
+    for (const id of present) useSessionStore.getState().removeClip(id);
+    for (const s of shifts) useSessionStore.getState().moveClip(s.clipId, s.trackId, s.toSample);
+  });
+}
+
+/**
+ * K1 R2 — the group drag: every member moves by the SAME delta, on its own
+ * track, in one undo entry.
+ *
+ * The delta is clamped ONCE, against the earliest member, rather than each
+ * member being clamped by `moveClip`'s own `>= 0`: clamping per member would
+ * silently deform the group (the leading clip stops at zero while the rest keep
+ * going), and a group drag that changes the spacing between the clips it is
+ * dragging is not the gesture the user made. Rigid or nothing.
+ *
+ * Members are moved AWAY-EDGE FIRST — rightmost first when moving right,
+ * leftmost first when moving left — so that no member ever passes THROUGH a
+ * sibling that has not moved yet. The end state is the same either way, but the
+ * intermediate states are not: `maintainFacingFades` runs per move, so a
+ * transient collision between two clips that are travelling together would arm
+ * a crossfade between them and then have to dissolve it, writing fades the
+ * gesture never asked for.
+ *
+ * No member changes track. Cross-track group drag is deliberately out of v1 —
+ * see the report; the single-clip drag keeps its cross-lane move unchanged.
+ */
+export function moveClipsBy(clipIds: readonly string[], deltaSample: number): void {
+  const session = useSessionStore.getState().session;
+  const members: { clipId: string; trackId: string; startSample: number }[] = [];
+  for (const id of clipIds) {
+    const found = locateClip(session, id);
+    if (!found) continue;
+    members.push({ clipId: id, trackId: found.trackId, startSample: found.clip.startSample });
+  }
+  if (members.length === 0 || !Number.isFinite(deltaSample)) return;
+
+  const earliest = Math.min(...members.map((m) => m.startSample));
+  const delta = Math.round(Math.max(deltaSample, -earliest));
+  if (delta === 0) return;
+
+  const ordered = [...members].sort((a, b) =>
+    delta > 0 ? b.startSample - a.startSample : a.startSample - b.startSample
+  );
+  withSessionGesture(ordered.length === 1 ? 'Move clip' : 'Move clips', () => {
+    for (const m of ordered) {
+      useSessionStore.getState().moveClip(m.clipId, m.trackId, m.startSample + delta);
+    }
+  });
+}
 
 /**
  * K1 — the selection invariant, held by watching the SESSION rather than by
