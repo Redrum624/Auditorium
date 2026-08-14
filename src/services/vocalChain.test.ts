@@ -1916,76 +1916,122 @@ describe('GATE_HEADROOM_DB', () => {
 });
 
 describe('GATE_VOICED_FRACTION', () => {
-  /** The voiced share of a 500 ms window — the statistic the gate declines on. */
-  function voicedFraction(window: Float32Array): number {
-    const track = detectPitch(window, SR);
+  /** The voiced share of a 500 ms window — the statistic the gate declines on.
+   * Measured at the window's OWN rate, because that is the only rate the gate
+   * ever sees it at: `detectPitch` sizes its frame from `sampleRate / F0_MIN`,
+   * so the same 500 ms carries the same 46 frames whatever the rate, and any
+   * difference between rates is the detector's, not the window's. */
+  function voicedFraction(window: Float32Array, sr: number): number {
+    const track = detectPitch(window, sr);
     if (track.frames.length === 0) return 0;
     let voiced = 0;
     for (const f of track.frames) if (f.f0Hz !== null) voiced++;
     return voiced / track.frames.length;
   }
 
-  const WINDOW = Math.round((NOISE_WINDOW_MS / 1000) * SR);
+  const windowAt = (sr: number): number => Math.round((NOISE_WINDOW_MS / 1000) * sr);
 
   /** Soft singing: a fundamental with two harmonics and vibrato, over its own
    * faint floor. Phase is integrated so the vibrato stays a vibrato. */
-  function sung(rmsDb: number, f0: number, breathMs: number): Float32Array {
+  function sung(rmsDb: number, f0: number, breathMs: number, sr: number): Float32Array {
+    const n = windowAt(sr);
     const amp = Math.pow(10, rmsDb / 20);
-    const out = noise(WINDOW, amp * 0.02, 5);
+    const out = noise(n, amp * 0.02, 5);
     let phase = 0;
-    for (let i = 0; i < WINDOW; i++) {
-      const t = i / SR;
-      phase += (2 * Math.PI * f0 * (1 + 0.006 * Math.sin(2 * Math.PI * 5.5 * t))) / SR;
+    for (let i = 0; i < n; i++) {
+      const t = i / sr;
+      phase += (2 * Math.PI * f0 * (1 + 0.006 * Math.sin(2 * Math.PI * 5.5 * t))) / sr;
       out[i] += amp * 1.2 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase) + 0.2 * Math.sin(3 * phase));
     }
     if (breathMs > 0) {
-      const bn = Math.round((breathMs / 1000) * SR);
-      const at = Math.round((WINDOW - bn) / 2);
+      const bn = Math.round((breathMs / 1000) * sr);
+      const at = Math.round((n - bn) / 2);
       const quiet = noise(bn, Math.pow(10, (rmsDb - 25) / 20), 77);
       out.set(quiet, at);
     }
     return out;
   }
 
+  /** The residual a real Noise Reduction pass leaves in a pause — the floor
+   * that ACTUALLY reaches this stage in the chain, since NR runs before the
+   * gate. Its spectrum is a subtraction remnant, not the room's own, which is
+   * why it is a member of the population rather than a footnote to it. */
+  function postNrPauseWindow(sr: number): Float32Array {
+    const pause = Math.round(1.0 * sr);
+    const phrase = Math.round(0.8 * sr);
+    const channel = gaussFloorDb(3 * pause + 2 * phrase, -50, 7);
+    let at = 0;
+    for (const [sungPart, n] of [
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+    ] as const) {
+      if (sungPart) {
+        let phase = 0;
+        for (let i = 0; i < n; i++) {
+          const t = i / sr;
+          phase += (2 * Math.PI * 220) / sr;
+          const c = Math.min(1, t / 0.04) * Math.min(1, (n / sr - t) / 0.06);
+          channel[at + i] += 0.25 * c * Math.sin(phase);
+        }
+      }
+      at += n;
+    }
+    const nr = deriveNoiseReduction([channel], sr);
+    if (!nr.run) throw new Error('expected Noise Reduction to run on this fixture');
+    (globalThis as { __effectExtra?: unknown }).__effectExtra = nr.extra;
+    const out = noiseReductionEffect.process([Float32Array.from(channel)], sr, nr.params).channels[0];
+    delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+    // The middle of the second pause: 300 ms clear of the phrase either side.
+    const from = pause + phrase + Math.round(0.3 * sr);
+    return Float32Array.from(out.subarray(from, from + windowAt(sr)));
+  }
+
   it('separates every noise floor from every soft sung window, with the constant between them', () => {
+    // Every rate this app records and imports at, because the detector's frame
+    // is sized in samples and the classifier is the thing under test — a
+    // population taken at one rate says nothing about the others.
+    const RATES = [8000, 22050, 44100, 48000];
+
     // Floors: uniform and Gaussian, across the range room tone actually
     // occupies, three seeds. Voice is periodic; room tone is not.
     const floors: number[] = [];
-    for (const rmsDb of [-30, -45, -60, -75]) {
-      for (const seed of [7, 23, 101]) {
-        floors.push(voicedFraction(noise(WINDOW, Math.pow(10, rmsDb / 20) * Math.sqrt(3), seed)));
-        let s = seed >>> 0;
-        const g = new Float32Array(WINDOW);
-        const k = Math.pow(10, rmsDb / 20) / Math.sqrt(4 / 3);
-        for (let i = 0; i < WINDOW; i++) {
-          const nx = (): number => {
-            s = (s * 1664525 + 1013904223) >>> 0;
-            return (s / 0xffffffff) * 2 - 1;
-          };
-          g[i] = (nx() + nx() + nx() + nx()) * k;
+    for (const sr of RATES) {
+      const n = windowAt(sr);
+      for (const rmsDb of [-30, -45, -60, -75]) {
+        for (const seed of [7, 23, 101]) {
+          floors.push(voicedFraction(noise(n, Math.pow(10, rmsDb / 20) * Math.sqrt(3), seed), sr));
+          floors.push(voicedFraction(gaussFloorDb(n, rmsDb, seed), sr));
         }
-        floors.push(voicedFraction(g));
       }
     }
+
+    // ...and the one member the constant's own note claims and the population
+    // used to omit: what Noise Reduction actually hands this stage.
+    const residuals = RATES.map((sr) => voicedFraction(postNrPauseWindow(sr), sr));
 
     // Voices: three fundamentals across the sung range, four levels down to
     // -50 dBFS, and — the hard case — windows carrying a breath of up to
     // 350 ms of the 500, which is what drags a real sung window's fraction
     // down toward the floors.
     const voices: number[] = [];
-    for (const rmsDb of [-20, -30, -40, -50]) {
-      for (const f0 of [98, 196, 392]) {
-        for (const breathMs of [0, 150, 250, 350]) voices.push(voicedFraction(sung(rmsDb, f0, breathMs)));
+    for (const sr of RATES) {
+      for (const rmsDb of [-20, -30, -40, -50]) {
+        for (const f0 of [98, 196, 392]) {
+          for (const breathMs of [0, 150, 250, 350]) voices.push(voicedFraction(sung(rmsDb, f0, breathMs, sr), sr));
+        }
       }
     }
 
-    expect(floors).toHaveLength(24);
-    expect(voices).toHaveLength(48);
+    expect(floors).toHaveLength(96);
+    expect(residuals).toHaveLength(4);
+    expect(voices).toHaveLength(192);
 
     // Absolute bounds on both populations, so a drift in either fails here
-    // rather than silently widening or closing the gap. Measured over the
-    // wider sweep: floors 0.000 exactly (every one), voices 0.156 at worst.
-    const worstFloor = Math.max(...floors);
+    // rather than silently widening or closing the gap.
+    const worstFloor = Math.max(...floors, ...residuals);
     const worstVoice = Math.min(...voices);
     expect(worstFloor).toBeLessThan(0.02);
     expect(worstVoice).toBeGreaterThan(0.12);
@@ -1996,7 +2042,7 @@ describe('GATE_VOICED_FRACTION', () => {
     expect(GATE_VOICED_FRACTION).toBeGreaterThan(worstFloor);
     expect(GATE_VOICED_FRACTION).toBeLessThan(worstVoice / 3);
     expect(GATE_VOICED_FRACTION).toBe(0.05);
-  }, 60000);
+  }, 600000);
 });
 
 describe('GATE_SHAPED_RESIDUAL_DB', () => {

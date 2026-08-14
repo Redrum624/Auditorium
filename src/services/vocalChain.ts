@@ -758,22 +758,33 @@ export const GATE_HEADROOM_DB = 3;
  * already answers per frame — and `pitchDetect`'s own note says so: its silence
  * gate is a digital-silence floor, and "audible noise floors are rejected by
  * the periodicity threshold instead". The two populations do not overlap.
- * Measured over a 500 ms window at 8/22.05/44.1 kHz:
+ * Measured over a 500 ms window at 8/22.05/44.1/48 kHz — every rate, because
+ * `detectPitch` sizes its analysis frame in SAMPLES, so a population taken at
+ * one rate is evidence about that rate only. Each of these members is a
+ * member of the kept `GATE_VOICED_FRACTION` sweep, not a figure quoted past
+ * what the test measures:
  *
- *   - 96 noise floors — uniform and Gaussian, -30 to -75 dBFS, three seeds, plus
- *     the post-Noise-Reduction residual that actually reaches this stage —
- *     read a voiced fraction of 0.000. Not "near zero": every one was exactly
- *     zero frames out of 46.
- *   - 144 sung windows — three fundamentals (98/196/392 Hz) with harmonics and
- *     vibrato, -20 to -50 dBFS, alone and carrying breaths of 150/250/350 ms —
- *     read 0.156 at worst, and that worst case is a window that is 70 % breath.
+ *   - 96 noise floors — uniform and Gaussian, -30 to -75 dBFS, three seeds,
+ *     four rates — read a voiced fraction of 0.000. Not "near zero": every one
+ *     was exactly zero voiced frames of the 45-46 the detector fits in 500 ms.
+ *   - 4 post-Noise-Reduction residuals, one per rate — the floor that actually
+ *     reaches this stage in the chain, taken from the middle of a real pause
+ *     of a real NR pass rather than modelled — read 0.000 as well. NR's
+ *     remnant is a subtracted spectrum, not the room's own, so it belongs in
+ *     the population rather than beside it.
+ *   - 192 sung windows — three fundamentals (98/196/392 Hz) with harmonics and
+ *     vibrato, -20 to -50 dBFS, four rates, alone and carrying breaths of
+ *     150/250/350 ms — read 0.156 at worst (7 voiced frames of 45, at
+ *     22.05 kHz), and that worst case is a window that is 70 % breath.
  *
  * 0.05 sits between them with margin in both directions: it tolerates two
  * spurious voiced frames in a floor window (the populations gave none), and it
- * is more than three times below the hardest real sung window. When it fires
- * the stage DECLINES rather than guessing a lower threshold — the chain's
- * other stages refuse when their measurement is not the one they need, and a
- * gate that cannot tell a pause from a soft phrase must not pick one.
+ * is more than three times below the hardest real sung window. Widening the
+ * sweep from one rate to four moved neither end — the gap is 0.000 to 0.156
+ * at 8 kHz and 0.000 to 0.156 over all four. When it fires the stage DECLINES
+ * rather than guessing a lower threshold — the chain's other stages refuse
+ * when their measurement is not the one they need, and a gate that cannot
+ * tell a pause from a soft phrase must not pick one.
  */
 export const GATE_VOICED_FRACTION = 0.05;
 
