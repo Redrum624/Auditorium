@@ -63,6 +63,17 @@ export const JOURNEY_FADE_MS = 25;
 /** The button, named once so the copy and the control cannot disagree. */
 export const APPLY_GUESS_LABEL = 'Apply the measured offset anyway';
 
+/**
+ * The candidate rows, named once for the same reason the button above is.
+ *
+ * The refusal's copy and the offer's controls are written in two different
+ * files, and the dialog renders EITHER the single button OR one row per
+ * candidate — never both. A sentence that names the wrong one of the two sends
+ * the user looking for a control that is not on screen, so both names are
+ * constants and both are read from here.
+ */
+export const CANDIDATE_PLACEMENT_LABEL = 'Place at';
+
 /** The single session undo entry the apply gesture leaves. */
 export const APPLY_GUESS_UNDO_LABEL = 'Place at the measured offset';
 

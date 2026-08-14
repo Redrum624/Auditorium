@@ -474,6 +474,24 @@ const dbfsStr = (v: number): string => `${v.toFixed(2)} dBFS`;
 /** CC4 (CJ-2): a signed gain, the cover chain's own idiom for the same thing. */
 const dbStr = (v: number): string => `${v >= 0 ? '+' : ''}${v.toFixed(2)} dB`;
 
+/**
+ * What the align stage says when it will not believe the offset it measured.
+ *
+ * Exported because the sentence and the controls it names live in two files:
+ * this composes the copy, `CoverChainDialog` renders the offer, and the ONE
+ * thing that must hold between them — the reason never names a control the
+ * dialog does not render for that same measurement — is only testable if both
+ * sides can be driven from the same measurement.
+ */
+export function refusalReason(alignment: AlignmentMeasurement): string {
+  const characterisation = guessCharacterisation(guessKind(alignment));
+  return (
+    `the best alignment found was ${secondsStr(alignment.offsetSeconds)}, and it is not believable: correlation ${alignment.peakCorrelation.toFixed(3)} against a floor of ${ALIGN_MIN_CORRELATION}, standing ${alignment.prominence.toFixed(3)} above the next best lag against a floor of ${ALIGN_MIN_PROMINENCE}. ` +
+    (characterisation ? `${characterisation}. ` : '') +
+    `The take is placed at the start of the original instead of at a guess. ${guessRemedy(alignment.offsetSeconds)}`
+  );
+}
+
 /** The cancellation sentinel, so every stage's early return is one shape. */
 const CANCELLED = Symbol('cancelled');
 
@@ -954,16 +972,12 @@ export async function runCoverJourney(
       //  - the measurement's own outcome word rides along when it carries
       //    one, and NOTHING is asserted about the kind of failure when it
       //    does not.
-      const characterisation = guessCharacterisation(guessKind(alignment));
       placedAtZeroBecause = `the fallback this pass uses when it will not guess: the alignment above was refused, so the take starts where the original does. Nothing measured +0.000 s — the guess was ${secondsStr(alignment.offsetSeconds)}, and it is offered rather than applied`;
       record({
         id: stage.id,
         label: stage.label,
         status: 'declined',
-        reason:
-          `the best alignment found was ${secondsStr(alignment.offsetSeconds)}, and it is not believable: correlation ${alignment.peakCorrelation.toFixed(3)} against a floor of ${ALIGN_MIN_CORRELATION}, standing ${alignment.prominence.toFixed(3)} above the next best lag against a floor of ${ALIGN_MIN_PROMINENCE}. ` +
-          (characterisation ? `${characterisation}. ` : '') +
-          `The take is placed at the start of the original instead of at a guess. ${guessRemedy(alignment.offsetSeconds)}`,
+        reason: refusalReason(alignment),
         derived: [],
         undoEntries: [],
         elapsedMs: Date.now() - at,

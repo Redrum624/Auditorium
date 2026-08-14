@@ -24,6 +24,7 @@ import {
   APPLY_GUESS_LABEL,
   APPLY_GUESS_UNDO_LABEL,
   applyMeasuredOffset,
+  CANDIDATE_PLACEMENT_LABEL,
   guessCandidates,
   guessCharacterisation,
   guessKind,
@@ -251,7 +252,8 @@ function GuessOffer({
             data-testid={`cover-journey-guess-candidate-${i}`}
             onClick={() => apply(c.offsetSeconds)}
           >
-            Place at {signedSecs(c.offsetSeconds)} — correlation {c.correlation.toFixed(3)},
+            {CANDIDATE_PLACEMENT_LABEL} {signedSecs(c.offsetSeconds)} — correlation{' '}
+            {c.correlation.toFixed(3)},
             standing {c.prominence.toFixed(3)} above the next
           </GlassButton>
         ))
