@@ -467,9 +467,13 @@ says how much of the selection it actually silenced, in seconds and per cent.
 **And when it cannot tell a pause from a phrase, it declines instead of
 guessing.** Everything above depends on the quietest 500 ms of your selection
 actually being a pause, and on some recordings it is not. The rule underneath
-the three cases below is one sentence: **a take with no half-second pause
-anywhere in it will not be gated at all** — a legato or continuous performance
-is simply left alone, whatever its level. The stage refuses like this:
+the three cases below: **a take that never stops for half a second is usually
+left alone** — a legato or continuous performance is not gated, whatever its
+level, with one exception named at the end of this section. The opposite also
+holds, and needs no checking: where that quietest half-second is **digital
+silence** — a trimmed lead-in, an edited stem, or this chain's own output when
+you run it twice — that is proof of a pause, and the stage gates on it. The
+three refusals are:
 
 - **Nothing in the recording ever stops.** A held tone, a stretch of room tone
   with no voice in it, or clicks spaced closer together than half a second: the
@@ -496,7 +500,7 @@ In all three cases the stage reports **Did not run** with its reason, and not
 one sample is changed. It errs toward leaving a noisy take alone rather than
 toward muting a sung one.
 
-**One thing it genuinely cannot catch, stated so you can avoid it.** A passage
+**The one exception to the rule above, stated so you can avoid it.** A passage
 that is *unshaped* broadband hiss at a steady level — a breath recorded so far
 off-mic that the room, not your voice, is what shaped it — is indistinguishable
 from room tone by any measurement: it has no pitch, no resonances, no syllabic
