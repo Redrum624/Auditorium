@@ -4,6 +4,8 @@ import {
   GATE_CANCELLATION_DEPTH_DB,
   GATE_HEADROOM_DB,
   GATE_HOLD_MS,
+  GATE_QUIET_WINDOWS,
+  GATE_SEARCH_CLIMB_DB,
   GATE_SHAPED_RESIDUAL_DB,
   GATE_VOICED_FRACTION,
   STAGE_MEASURING_DETAIL,
@@ -31,6 +33,7 @@ import { compressorEffect } from '../effects/dynamics/CompressorEffect';
 import { noiseGateEffect } from '../effects/dynamics/NoiseGateEffect';
 import { noiseReductionEffect } from '../effects/restoration/NoiseReductionEffect';
 import { detectPitch } from '../dsp/pitchDetect';
+import * as pitchDetect from '../dsp/pitchDetect';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
@@ -40,6 +43,7 @@ import {
   NOISE_WINDOW_MS,
   TILT_FFT_SIZE,
   measureNoiseWindow,
+  measureNoiseWindows,
   programmeRmsDb,
   spectralTiltResidualDb,
   toDb,
@@ -1928,6 +1932,206 @@ describe('deriveGate', () => {
     }, 120000);
   });
 
+  /**
+   * V2 — the shape a real 2 min 22 s take came in with, reported 2026-08-14:
+   * the quietest 500 ms of it read 4.0 dB of vocal-tract shaping, the stage
+   * declined, and "the noise in the non-singing parts was not removed".
+   *
+   * The construction is that report's own arithmetic. The take has two halves,
+   * because a room is not one level for two minutes: the singer's half is quiet
+   * (a −66 dBFS floor) and every gap in it is filled by an audible breath at
+   * −60 dBFS, none of them shorter than the 500 ms search window; the other
+   * half is louder (a −55 dBFS floor) and carries one real 2 s pause. So the
+   * quietest windows in the whole take are the BREATHES — they sit 5 dB under
+   * the pause that is the only honest measurement in the file — and the take
+   * declines on a half-second the derivation had no reason to prefer.
+   */
+  function takeWhoseQuietestWindowIsABreath(breathGaps: number): {
+    channel: Float32Array;
+    pause: { start: number; end: number };
+    phrases: { start: number; end: number }[];
+  } {
+    const phrase = Math.round(1.2 * SR);
+    const gap = Math.round(0.55 * SR);
+    const quietLen = breathGaps * (phrase + gap) + phrase;
+    const pauseLen = Math.round(2.0 * SR);
+    const loudLen = phrase + pauseLen + phrase;
+    const channel = new Float32Array(quietLen + loudLen);
+    const phrases: { start: number; end: number }[] = [];
+    const sing = (from: number, n: number, amp: number): void => {
+      let phase = 0;
+      for (let i = 0; i < n && from + i < channel.length; i++) {
+        phase += (2 * Math.PI * 196) / SR;
+        channel[from + i] += amp * (Math.sin(phase) + 0.4 * Math.sin(2 * phase));
+      }
+      phrases.push({ start: from, end: from + n });
+    };
+
+    channel.set(gaussFloorDb(quietLen, -66, 5), 0);
+    let at = 0;
+    for (let g = 0; g < breathGaps; g++) {
+      sing(at, phrase, 0.15);
+      at += phrase;
+      const br = whisper(gap, -60, 31 + g);
+      for (let i = 0; i < gap && at + i < quietLen; i++) channel[at + i] += br[i];
+      at += gap;
+    }
+    sing(at, phrase, 0.15);
+
+    channel.set(gaussFloorDb(loudLen, -55, 82), quietLen);
+    sing(quietLen, phrase, 0.2);
+    const pause = { start: quietLen + phrase, end: quietLen + phrase + pauseLen };
+    sing(pause.end, phrase, 0.2);
+    return { channel, pause, phrases };
+  }
+
+  /** The share of `span` the gate changed — a phrase it left alone reads 0. */
+  function changedPct(before: Float32Array, after: Float32Array, span: { start: number; end: number }): number {
+    let changed = 0;
+    for (let i = span.start; i < span.end; i++) if (before[i] !== after[i]) changed++;
+    return (changed / (span.end - span.start)) * 100;
+  }
+
+  describe('a take whose quietest window is a breath but whose pauses are real (V2)', () => {
+    it('is that shape: the quietest window is an unvoiced vocal passage, and it is NOT the pause', () => {
+      const { channel, pause } = takeWhoseQuietestWindowIsABreath(4);
+      const w = measureNoiseWindow([channel], SR, { rejectMostlySilentWindows: true })!;
+      // The window the old derivation interrogated: a breath, by the stage's
+      // own measurement, and nowhere near the take's one real pause.
+      const mono = Float32Array.from(channel.subarray(w.startSample, w.startSample + w.lengthSamples));
+      expect(spectralTiltResidualDb(mono, SR)).toBeGreaterThan(GATE_SHAPED_RESIDUAL_DB);
+      expect(w.startSample + w.lengthSamples).toBeLessThanOrEqual(pause.start);
+      // ...and the pause really is a pause the stage would accept, on its own.
+      const alone = Float32Array.from(channel.subarray(pause.start, pause.end));
+      expect(spectralTiltResidualDb(alone, SR)).toBeLessThan(GATE_SHAPED_RESIDUAL_DB);
+    });
+
+    it('gates it, taking the threshold from the pause rather than declining on the breath', () => {
+      const { channel, pause, phrases } = takeWhoseQuietestWindowIsABreath(4);
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+
+      // The threshold is the PAUSE's, not the breath's: above the floor the
+      // pause is made of, and below the breath the old search settled on.
+      const pauseWindow = measureNoiseWindow(
+        [Float32Array.from(channel.subarray(pause.start, pause.end))],
+        SR,
+        { rejectMostlySilentWindows: true }
+      )!;
+      expect(Number(res.params.thresholdDb)).toBeCloseTo(pauseWindow.envelopePeakDb + GATE_HEADROOM_DB, 1);
+
+      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      // The gaps go silent...
+      let sum = 0;
+      const tail = Math.round(0.3 * SR);
+      for (let i = pause.end - tail; i < pause.end; i++) sum += out[i] * out[i];
+      expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
+      // ...and every sung phrase comes back untouched.
+      for (const phrase of phrases) expect(changedPct(channel, out, phrase)).toBeLessThan(0.1);
+    });
+
+    it('the same take with ONE breath gap gates too — the search is not a fixture-count trick', () => {
+      const { channel, pause } = takeWhoseQuietestWindowIsABreath(1);
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      let sum = 0;
+      const tail = Math.round(0.3 * SR);
+      for (let i = pause.end - tail; i < pause.end; i++) sum += out[i] * out[i];
+      expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
+    });
+
+    // Both sides of `GATE_QUIET_WINDOWS`, as behaviour. Each breath is one
+    // DISTINCT candidate, so the take's real pause is candidate number
+    // (breaths + 1): a take with one fewer breath than the bound still reaches
+    // its pause, and a take with exactly the bound does not.
+    it('reaches a pause that is the LAST candidate it is allowed to look at', () => {
+      const { channel, pause } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS - 1);
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      let sum = 0;
+      const tail = Math.round(0.3 * SR);
+      for (let i = pause.end - tail; i < pause.end; i++) sum += out[i] * out[i];
+      expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
+    }, 120000);
+
+    it('declines one breath further out, and names the threshold the user can set', () => {
+      const { channel } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS);
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      // It still names the quietest window's own failure — the passage the
+      // user can hear as the quietest thing in the take...
+      expect(res.reason).toContain('vocal tract');
+      // ...says how much was actually looked at, rather than implying the
+      // whole take was...
+      expect(res.reason).toContain(`the ${GATE_QUIET_WINDOWS} quietest`);
+      // ...and points at the escape, because silence must stay reachable.
+      expect(res.reason).toContain("set this stage's threshold yourself");
+    }, 120000);
+
+    it('costs at most one pitch track and one tilt fit per candidate, however long the take', () => {
+      // The tilt fit is an STFT and the pitch track is 12-14x dearer again, so
+      // the price of looking further has to be bounded by the CANDIDATE COUNT
+      // and not by the length of the recording.
+      const pitch = jest.spyOn(pitchDetect, 'detectPitch');
+      const tilt = jest.spyOn(chainAnalysis, 'spectralTiltResidualDb');
+      try {
+        const counts: number[][] = [];
+        for (const gaps of [GATE_QUIET_WINDOWS, GATE_QUIET_WINDOWS * 3]) {
+          pitch.mockClear();
+          tilt.mockClear();
+          deriveGate([takeWhoseQuietestWindowIsABreath(gaps).channel], SR);
+          counts.push([pitch.mock.calls.length, tilt.mock.calls.length]);
+        }
+        for (const [pitchCalls, tiltCalls] of counts) {
+          expect(pitchCalls).toBeLessThanOrEqual(GATE_QUIET_WINDOWS);
+          expect(tiltCalls).toBeLessThanOrEqual(GATE_QUIET_WINDOWS);
+        }
+        // A take three times as long does not cost three times as much.
+        expect(counts[1][0]).toBeLessThanOrEqual(counts[0][0]);
+        expect(counts[1][1]).toBeLessThanOrEqual(counts[0][1]);
+        // ...and the cheap check does the walking: only the quietest window is
+        // judged in the order the messages were derived in, so the pitch track
+        // runs once where the tilt fit runs on every candidate.
+        expect(counts[0][0]).toBe(1);
+        expect(counts[0][1]).toBe(GATE_QUIET_WINDOWS);
+      } finally {
+        pitch.mockRestore();
+        tilt.mockRestore();
+      }
+    }, 300000);
+
+    it('says in the row the user reads what it actually searches', () => {
+      // The note is rendered verbatim in the dialog. A stage that quietly
+      // changed what it looks at, while its own row still described one
+      // window, would be a stage nobody could reason about.
+      const note = stageById('gate').note;
+      expect(note).toContain(`${GATE_QUIET_WINDOWS} quietest distinct passages`);
+      expect(note).toContain(`${GATE_SEARCH_CLIMB_DB} dB`);
+      expect(note).not.toContain(`measured from the quietest ${NOISE_WINDOW_MS} ms`);
+    });
+
+    // The converse, and the one that matters most: a take where EVERY quiet
+    // window is vocal must still decline. The search widens what is looked at;
+    // it does not lower the bar any of them has to clear.
+    it('still declines when every quiet passage in the take is vocal', () => {
+      for (const [name, take] of [
+        ['soft singing', continuousTakeWithSoftVerse().channel],
+        ['a whisper', continuousTakeWithWhisperedVerse().channel],
+      ] as const) {
+        const res = deriveGate([take], SR);
+        expect([name, res.run]).toEqual([name, false]);
+        if (res.run) return;
+        expect(res.reason).toContain(name === 'soft singing' ? 'singing' : 'vocal tract');
+      }
+    });
+  });
+
   it('does NOT share Noise Reduction’s decline: gating needs no clean print (N3)', () => {
     // A take whose quietest passage sits within 12 dB of programme level: NR
     // refuses, because a print learned there would contain voice. The gate has
@@ -2306,6 +2510,183 @@ describe('GATE_SHAPED_RESIDUAL_DB', () => {
       expect(shaped).toBeLessThan(GATE_SHAPED_RESIDUAL_DB);
     }
   }, 60000);
+});
+
+/**
+ * V2 — the two populations behind the bound on how far the search may climb.
+ *
+ * The search walks the take's quietest passages until one reads as a pause, and
+ * the threshold it then derives sits ABOVE every quieter passage it stepped
+ * over. Whether that is a fix or a fresh act of destruction is a question of
+ * how far it climbed, measured in the very statistic the threshold is built
+ * from — the envelope peak the silence detector reads inside a window. So the
+ * quantity is `accepted.envelopePeakDb - quietest.envelopePeakDb`: how much
+ * higher the gate closes than it would have closed on the quietest passage.
+ */
+describe('GATE_SEARCH_CLIMB_DB', () => {
+  function res2At(x: Float32Array, sr: number, hz: number, q: number): Float32Array {
+    const w = (2 * Math.PI * hz) / sr;
+    const r = Math.exp(-w / (2 * q));
+    const a1 = 2 * r * Math.cos(w);
+    const a2 = -r * r;
+    const out = new Float32Array(x.length);
+    let y1 = 0;
+    let y2 = 0;
+    for (let i = 0; i < x.length; i++) {
+      const y = x[i] + a1 * y1 + a2 * y2;
+      out[i] = y;
+      y2 = y1;
+      y1 = y;
+    }
+    return out;
+  }
+
+  function whisperAt(n: number, rmsDb: number, seed: number, sr: number): Float32Array {
+    let x = noise(n, 1, seed);
+    for (const [hz, q] of [
+      [500, 8],
+      [1500, 10],
+      [2500, 12],
+    ] as const) {
+      if (hz < (sr / 2) * 0.9) x = res2At(x, sr, hz, q);
+    }
+    for (let i = 0; i < n; i++) x[i] *= 0.55 + 0.45 * Math.sin((2 * Math.PI * 4 * i) / sr);
+    let s = 0;
+    for (let i = 0; i < n; i++) s += x[i] * x[i];
+    const g = Math.pow(10, rmsDb / 20) / Math.sqrt(s / Math.max(1, n));
+    for (let i = 0; i < n; i++) x[i] *= g;
+    return x;
+  }
+
+  function sing(into: Float32Array, from: number, n: number, sr: number, amp: number): void {
+    let phase = 0;
+    for (let i = 0; i < n && from + i < into.length; i++) {
+      phase += (2 * Math.PI * 196) / sr;
+      into[from + i] += amp * (Math.sin(phase) + 0.4 * Math.sin(2 * phase));
+    }
+  }
+
+  /** The reported shape: a quiet half whose every gap is an audible breath, and
+   * a louder half carrying the take's one real pause. */
+  function breathTake(sr: number, gaps: number, seed: number): { channel: Float32Array; pause: { start: number; end: number } } {
+    const phrase = Math.round(1.2 * sr);
+    const gap = Math.round(0.55 * sr);
+    const quietLen = gaps * (phrase + gap) + phrase;
+    const pauseLen = Math.round(2.0 * sr);
+    const loudLen = phrase + pauseLen + phrase;
+    const channel = new Float32Array(quietLen + loudLen);
+    channel.set(gaussFloorDb(quietLen, -66, seed), 0);
+    let at = 0;
+    for (let g = 0; g < gaps; g++) {
+      sing(channel, at, phrase, sr, 0.15);
+      at += phrase;
+      const br = whisperAt(gap, -60, seed * 31 + g, sr);
+      for (let i = 0; i < gap && at + i < quietLen; i++) channel[at + i] += br[i];
+      at += gap;
+    }
+    sing(channel, at, phrase, sr, 0.15);
+    channel.set(gaussFloorDb(loudLen, -55, seed + 77), quietLen);
+    sing(channel, quietLen, phrase, sr, 0.2);
+    const pause = { start: quietLen + phrase, end: quietLen + phrase + pauseLen };
+    sing(channel, pause.end, phrase, sr, 0.2);
+    return { channel, pause };
+  }
+
+  /** The destructive converse: a quiet vocal PASSAGE that lives below an
+   * ordinary floor, so a threshold taken from the floor mutes it whole. */
+  function whisperUnderFloorTake(sr: number, seed: number): { channel: Float32Array; floor: { start: number; end: number } } {
+    const floorLen = Math.round(2 * sr);
+    const softLen = Math.round(3.5 * sr);
+    const chorusLen = Math.round(3.5 * sr);
+    const channel = new Float32Array(floorLen + softLen + chorusLen);
+    channel.set(gaussFloorDb(floorLen, -40, seed), 0);
+    channel.set(whisperAt(softLen, -50, seed + 3, sr), floorLen);
+    sing(channel, floorLen + softLen, chorusLen, sr, 0.25);
+    return { channel, floor: { start: 0, end: floorLen } };
+  }
+
+  /** The same converse in the shape N6 records: a quiet island bracketed by
+   * digital silence, beside a take whose own pauses set the threshold. */
+  function islandUnderFloorTake(sr: number, islandMs: number, seed: number): { channel: Float32Array; floor: { start: number; end: number } } {
+    const pause = Math.round(1.0 * sr);
+    const phrase = Math.round(0.8 * sr);
+    const headLen = 3 * pause + 2 * phrase;
+    const zeros = Math.round(0.3 * sr);
+    const islandLen = Math.round((islandMs / 1000) * sr);
+    const burst = Math.round(0.5 * sr);
+    const channel = new Float32Array(headLen + zeros + islandLen + burst + zeros);
+    channel.set(gaussFloorDb(headLen, -50, seed), 0);
+    sing(channel, pause, phrase, sr, 0.25);
+    sing(channel, 2 * pause + phrase, phrase, sr, 0.25);
+    channel.set(whisperAt(islandLen, -60, seed + 5, sr), headLen + zeros);
+    sing(channel, headLen + zeros + islandLen, burst, sr, 0.25);
+    return { channel, floor: { start: 0, end: headLen } };
+  }
+
+  /** The climb from the quietest candidate to the quietest candidate lying
+   * wholly inside `span` — the passage that IS the take's honest floor. */
+  function climb(channel: Float32Array, sr: number): number | null {
+    const cands = measureNoiseWindows([channel], sr, {
+      rejectMostlySilentWindows: true,
+      maxCandidates: GATE_QUIET_WINDOWS,
+    });
+    const reads = (w: { startSample: number; lengthSamples: number }): boolean => {
+      const mono = Float32Array.from(channel.subarray(w.startSample, w.startSample + w.lengthSamples));
+      if (spectralTiltResidualDb(mono, sr) > GATE_SHAPED_RESIDUAL_DB) return false;
+      const track = detectPitch(mono, sr);
+      const voiced =
+        track.frames.length === 0 ? 0 : track.frames.filter((f) => f.f0Hz !== null).length / track.frames.length;
+      return voiced <= GATE_VOICED_FRACTION;
+    };
+    if (cands.length === 0 || reads(cands[0])) return null;
+    for (let i = 1; i < cands.length; i++) {
+      if (reads(cands[i])) return cands[i].envelopePeakDb - cands[0].envelopePeakDb;
+    }
+    return null;
+  }
+
+  it('separates the take that must gate from the take that must not', () => {
+    const breaths: number[] = [];
+    const passages: number[] = [];
+    for (const sr of [8000, 22050, 44100, 48000]) {
+      for (const seed of [5, 17, 29]) {
+        for (const gaps of [1, 2, 4]) {
+          const c = climb(breathTake(sr, gaps, seed).channel, sr);
+          if (c !== null) breaths.push(c);
+        }
+        const w = climb(whisperUnderFloorTake(sr, seed).channel, sr);
+        if (w !== null) passages.push(w);
+        for (const islandMs of [400, 500, 800]) {
+          const i = climb(islandUnderFloorTake(sr, islandMs, seed).channel, sr);
+          if (i !== null) passages.push(i);
+        }
+      }
+    }
+    // Both populations are non-empty: every member really is a take whose
+    // quietest window is vocal and whose search therefore climbs.
+    expect(breaths).toHaveLength(36);
+    expect(passages).toHaveLength(45);
+
+    const worstBreath = Math.max(...breaths);
+    const closestPassage = Math.min(...passages);
+    // A breath peaks with the room it sits on, so the pause that vouches for
+    // the take reaches very nearly the same level — some members NEGATIVE.
+    expect(Math.min(...breaths)).toBeLessThan(0);
+    expect(worstBreath).toBeLessThan(2.0);
+    // A quiet vocal passage under an ordinary floor is a level regime of its
+    // own, and the take's own pauses sit well clear of it.
+    expect(closestPassage).toBeGreaterThan(3.1);
+    expect(Math.max(...passages)).toBeGreaterThan(6.5);
+
+    // The constant sits inside the measured gap with the same margin on both
+    // sides — the profile `GATE_SHAPED_RESIDUAL_DB` carries.
+    expect(GATE_SEARCH_CLIMB_DB / worstBreath).toBeGreaterThan(1.25);
+    expect(closestPassage / GATE_SEARCH_CLIMB_DB).toBeGreaterThan(1.25);
+    expect(GATE_SEARCH_CLIMB_DB).toBe(2.5);
+    // ...and it is under the headroom the stage already adds: the search may
+    // not move the threshold by as much as the derivation itself does.
+    expect(GATE_SEARCH_CLIMB_DB).toBeLessThan(GATE_HEADROOM_DB);
+  }, 600000);
 });
 
 describe('NOISE_WINDOW_MAX_SILENT_FRACTION', () => {
@@ -3992,3 +4373,4 @@ describe('the audio between sung phrases', () => {
     expect(rmsDbOver(out, [{ start: pause.end - RATE, end: pause.end }])).toBeLessThanOrEqual(-80);
   }, 120000);
 });
+

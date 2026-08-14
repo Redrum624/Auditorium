@@ -490,9 +490,24 @@ happens to sit inside a stretch of digital silence is passed through as well,
 up to half a second of it, because nothing distinguishes it from that
 consonant. Passing a tick costs less than muting a word.
 
+**It looks at more than one quiet passage before giving up.** The threshold
+needs *a* pause, not *the* quietest half-second, and on a long take those are
+not always the same thing: an audible breath between two phrases can read
+quieter than the room tone in the take's real gaps, and a stage that
+interrogated only the single quietest window would decline a recording full of
+usable pauses. So it walks the **twelve quietest distinct passages** of the
+selection in level order and takes the threshold from the first that reads as a
+pause; only if none of them does is the stage declined. Two limits keep that
+honest. It never climbs more than **2.5 dB** above where it would have closed on
+the quietest passage — beyond that it is not correcting a misread window but
+choosing a different level regime, and a threshold from a louder part of the
+room would mute the quieter passage it just stepped over. And twelve is where
+the search stops, because each passage costs a pitch track and a spectral fit;
+a take that needs a thirteenth is a take the stage declines.
+
 **And when it cannot tell a pause from a phrase, it declines instead of
-guessing.** Everything above depends on the quietest 500 ms of your selection
-actually being a pause, and on some recordings it is not. The rule underneath
+guessing.** Everything above depends on some quiet 500 ms of your selection
+actually being a pause, and on some recordings none is. The rule underneath
 the three cases below: **a take that never stops for half a second is usually
 left alone** — a legato or continuous performance is not gated, whatever its
 level, with one exception named at the end of this section. The opposite also
@@ -508,7 +523,9 @@ perfectly silent and a gate has nothing left to do there. And when quiet
 audio itself survives only as fragments between zeros — a transfer through an
 8-bit source, a stem another tool strip-silenced with no hold — the stage
 declines rather than derive a threshold that was measured without ever seeing
-those fragments. The three refusals are:
+those fragments. The three refusals below are stated in terms of *the quietest
+passage*, because that is the one the report names — but each is only reached
+after every comparable quiet passage in the take has failed the same check:
 
 - **Nothing in the recording ever stops.** A held tone, a stretch of room tone
   with no voice in it, or clicks spaced closer together than half a second: the
