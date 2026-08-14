@@ -11,6 +11,7 @@ const { createTranscribeManager, registerTranscribeIpc } = require('./transcribe
 const { createVoiceManager, registerVoiceIpc } = require('./voiceManager.cjs');
 const { createAlignManager, registerAlignIpc } = require('./alignManager.cjs');
 const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs');
+const { createSplashController } = require('./splash.cjs');
 
 app.setName('audition_app');
 
@@ -58,7 +59,15 @@ const closeGuard = createCloseGuard({
   autoConfirmQuit: isPackagedGateOpen(app.isPackaged, process.env.AUDITORIUM_TEST),
 });
 
-function createWindow() {
+/**
+ * S1: `showWhenReady` is false for the launch window, because the splash
+ * controller shows it — at the LAST of Electron's `ready-to-show` and the
+ * renderer's own "the editor is committed" signal, which in a normal launch is
+ * `ready-to-show` itself (see electron/splash.cjs for why that ordering holds
+ * and why it costs nothing). The macOS re-open path passes nothing and gets the
+ * old behaviour: the window shows itself, with no splash in front of it.
+ */
+function createWindow({ showWhenReady = true } = {}) {
   const win = new BrowserWindow({
     width: 1600,
     height: 1000,
@@ -91,7 +100,7 @@ function createWindow() {
   });
 
   win.once('ready-to-show', () => {
-    win.show();
+    if (showWhenReady) win.show();
     // USER RULE: while developing, the console is open without being asked
     // for. Dev runs only -- see devToolsPolicy.cjs for why a packaged build
     // and the smoke harness are both excluded. Detached so it never takes
@@ -159,8 +168,37 @@ app.whenReady().then(() => {
     return isMediaAllowed(permission, requestingOrigin, details);
   });
 
-  createWindow();
+  // S1 (splash) — the launch splash. Order is the whole latency argument: the editor
+  // window is constructed and its `loadURL`/`loadFile` is already in flight
+  // BEFORE the splash BrowserWindow is created, so nothing on the critical path
+  // waits on this feature. (The reference implementation this follows defers
+  // its main window behind `setTimeout(..., 300)` to give the splash a head
+  // start; that is 300 ms of pure added launch latency, and it is not copied.)
+  const win = createWindow({ showWhenReady: false });
+
+  const splash = createSplashController({
+    BrowserWindow,
+    ipcMain,
+    splashFile: path.join(__dirname, 'splash.html'),
+    preloadFile: path.join(__dirname, 'preload.cjs'),
+    icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
+    // A second BrowserWindow is a second attack surface: same DevTools policy
+    // as the editor, compiled out of a packaged build.
+    devTools: !app.isPackaged,
+    // A dev run loads http://localhost:3005, and a cold Vite transforms the
+    // whole module graph on that first request — legitimately longer than the
+    // packaged failsafe allows. Same gate as the loadURL in createWindow, so
+    // the two can never disagree about what a dev run is.
+    failsafeMs: isPackagedGateOpen(app.isPackaged, process.env.VITE_DEV_SERVER) ? 20000 : 5000,
+  });
+  splash.open();
+  splash.adoptMainWindow(win);
+  splash.progress(35, 'Opening the editor window…');
+
   registerIpc(() => mainWindow);
+  splash.progress(45, 'Wiring file and window services…');
+
+  splash.progress(55, 'Preparing the audio engines…');
 
   // Stem separation (S1): the manager owns the model download and the
   // inference utility-process lifetime; dispose on quit guarantees no orphan
@@ -189,9 +227,12 @@ app.whenReady().then(() => {
   const alignManager = createAlignManager({ userDataDir: app.getPath('userData') });
   registerAlignIpc({ ipcMain, manager: alignManager, getWin: () => mainWindow });
   app.on('will-quit', () => alignManager.dispose());
+  splash.progress(75, 'Audio engines ready.');
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
+      // No splash on this path: the app is already warm, there is no init left
+      // to report, and the window shows itself as it always did.
       createWindow();
     }
   });

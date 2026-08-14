@@ -150,6 +150,18 @@ const electronAPI = {
 
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
+  // Launch splash (S1). Both ends of one handoff, and the same preload serves
+  // both windows: `onSplashProgress` is consumed only by electron/splash.html,
+  // `splashRendererReady` only by src/splashHandoff.ts. The ready signal is
+  // one-shot and carries nothing — main treats a second one as a no-op — so a
+  // renderer can at most show a window main was about to show anyway.
+  onSplashProgress: (cb) => {
+    const listener = (_event, payload) => cb(payload);
+    ipcRenderer.on('splash:progress', listener);
+    return () => ipcRenderer.removeListener('splash:progress', listener);
+  },
+  splashRendererReady: () => ipcRenderer.send('splash:renderer-ready'),
+
   pathBasename: (p) => p.split(/[\\/]/).pop(),
 
   // F11-4: where a file dragged in from Explorer actually lives. Electron 32

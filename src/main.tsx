@@ -7,6 +7,7 @@ import './dev/installUserTimingGuard';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import { signalUiReady } from './splashHandoff';
 import './index.css';
 
 const container = document.getElementById('root');
@@ -19,3 +20,10 @@ createRoot(container).render(
     <App />
   </StrictMode>
 );
+
+// S1: the editor window is created hidden behind the launch splash and is shown
+// when this reports the UI is genuinely committed. Armed AFTER render() and
+// before any paint, so it observes React's first commit rather than guessing at
+// it — see src/splashHandoff.ts for why it is a DOM observation and not a frame
+// callback. A no-op anywhere there is no splash (a browser tab, the unit suite).
+signalUiReady(container);

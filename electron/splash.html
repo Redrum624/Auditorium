@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- This page loads NOTHING: no stylesheet, no script file, no font, no
+         image. Everything it needs is in this file, which is what lets it paint
+         the instant the window exists. The policy says so rather than trusting
+         it: only the inline style and the inline script below are permitted,
+         and every other source — including this window's own origin — is
+         denied. `default-src 'none'` is the whole point; the two 'unsafe-inline'
+         grants are exactly the two blocks in this file. -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'"
+    />
+    <title>Auditorium</title>
+    <style>
+      /* Glass · Sectioned design tokens — mirrored from src/index.css :root.
+         This page runs in its OWN BrowserWindow and cannot import the app
+         stylesheet, so the values are copied by hand; they are, verbatim:
+
+           --accent, --accent-ring          (the Auditorium cyan trio)
+           --glass-bg, --glass-border, --glass-shadow, --radius-card
+           --glass-text-title/-label/-secondary/-muted
+           --canvas-bg                      (rescaled — see below)
+
+         electron/splashHtml.test.cjs reads BOTH files and fails if a token here
+         drifts from the one it was mirrored from. --canvas-bg is the deliberate
+         exception it allows: the app's radial gradient is sized for a 1600px
+         stage, so the same two stops are re-fitted to this 460x360 window. */
+      :root {
+        --accent: #26c6da;
+        --accent-ring: rgba(38, 198, 218, 0.35);
+        --glass-bg: rgba(15, 15, 19, 0.78);
+        --glass-border: rgba(255, 255, 255, 0.08);
+        --glass-shadow: 0 32px 90px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+        --glass-text-title: #f0f0f2;
+        --glass-text-label: #c2c2ca;
+        --glass-text-secondary: #a8a8b0;
+        --glass-text-muted: #7a7a82;
+        --radius-card: 20px;
+      }
+
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        width: 100vw;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        /* --canvas-bg, re-fitted from the app's 1400x800 stage to this window. */
+        background: radial-gradient(640px 460px at 42% 45%, #121216, #08080a);
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        cursor: default;
+      }
+
+      .splash {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 22px;
+        padding: 18px;
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(10px);
+        }
+        to {
+          opacity: 1;
+          transform: translateY(0);
+        }
+      }
+
+      .rise {
+        animation: rise 380ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+      }
+
+      .brand {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+      }
+
+      .mark {
+        width: 88px;
+        height: 88px;
+        border-radius: 20px;
+        box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+      }
+
+      .name {
+        margin-top: 16px;
+        font-size: 19px;
+        font-weight: 600;
+        letter-spacing: 3px;
+        text-transform: uppercase;
+        color: var(--glass-text-title);
+      }
+
+      .tagline {
+        margin-top: 7px;
+        font-size: 9px;
+        font-weight: 700;
+        letter-spacing: 3.5px;
+        text-transform: uppercase;
+        color: var(--accent);
+      }
+
+      .card {
+        min-width: 340px;
+        padding: 16px 18px;
+        border: 1px solid var(--glass-border);
+        border-radius: var(--radius-card);
+        background: var(--glass-bg);
+        box-shadow: var(--glass-shadow);
+        animation-delay: 70ms;
+      }
+
+      .status {
+        min-height: 18px;
+        margin-bottom: 11px;
+        text-align: center;
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--glass-text-label);
+      }
+
+      .spinner {
+        display: inline-block;
+        width: 11px;
+        height: 11px;
+        margin-right: 8px;
+        vertical-align: middle;
+        border: 2px solid var(--accent-ring);
+        border-top-color: var(--accent);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+
+      .track {
+        position: relative;
+        overflow: hidden;
+        width: 100%;
+        height: 5px;
+        border-radius: 3px;
+        background: rgba(255, 255, 255, 0.09);
+        box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6);
+      }
+
+      .bar {
+        position: relative;
+        overflow: hidden;
+        width: 0%;
+        height: 100%;
+        border-radius: 3px;
+        background: var(--accent);
+        box-shadow: 0 0 12px var(--accent-ring);
+        transition: width 0.3s ease;
+      }
+
+      .bar::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.25), transparent);
+        animation: shimmer 2s infinite;
+      }
+
+      @keyframes shimmer {
+        from {
+          transform: translateX(-100%);
+        }
+        to {
+          transform: translateX(100%);
+        }
+      }
+
+      .percent {
+        margin-top: 8px;
+        text-align: center;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--glass-text-secondary);
+      }
+
+      .error {
+        display: none;
+        margin-top: 9px;
+        text-align: center;
+        font-size: 11px;
+        line-height: 1.4;
+        color: #f87171;
+      }
+
+      .error.shown {
+        display: block;
+      }
+
+      .version {
+        position: absolute;
+        right: 14px;
+        bottom: 10px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 10px;
+        font-weight: 500;
+        color: var(--glass-text-muted);
+      }
+
+      /* Someone who has asked the OS for less motion is asking for it here too:
+         the entrance, the shimmer and the spin all stop. The spinner keeps a
+         slow rotation rather than freezing, because a frozen spinner reads as a
+         hung app — the exact thing this window exists to deny. */
+      @media (prefers-reduced-motion: reduce) {
+        .rise {
+          animation: none;
+        }
+        .bar::after {
+          animation: none;
+        }
+        .bar {
+          transition: none;
+        }
+        .spinner {
+          animation-duration: 2.4s;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="splash">
+      <div class="brand rise">
+        <!-- Auditorium's real mark, drawn to the same geometry as
+             scripts/gen-icon.cjs (the source of assets/icon.ico): a #1a1a1e
+             rounded square, the cyan zero axis at 45% alpha, and the nine
+             symmetric waveform bars at heights .2/.45/.7/.95/.6/.85/.5/.3/.15
+             of 62% of the canvas, 12 wide with an 8 gap. Inline rather than
+             referenced so the page still loads nothing. -->
+        <svg class="mark" viewBox="0 0 256 256" width="88" height="88" aria-hidden="true">
+          <rect x="0" y="0" width="256" height="256" rx="48" ry="48" fill="#1a1a1e" />
+          <line
+            x1="30.72"
+            y1="128"
+            x2="225.28"
+            y2="128"
+            stroke="#26c6da"
+            stroke-opacity="0.45"
+            stroke-width="2"
+          />
+          <g fill="#26c6da">
+            <rect x="42" y="112.128" width="12" height="31.744" rx="6" />
+            <rect x="62" y="92.288" width="12" height="71.424" rx="6" />
+            <rect x="82" y="72.448" width="12" height="111.104" rx="6" />
+            <rect x="102" y="52.608" width="12" height="150.784" rx="6" />
+            <rect x="122" y="80.384" width="12" height="95.232" rx="6" />
+            <rect x="142" y="60.544" width="12" height="134.912" rx="6" />
+            <rect x="162" y="88.32" width="12" height="79.36" rx="6" />
+            <rect x="182" y="104.192" width="12" height="47.616" rx="6" />
+            <rect x="202" y="116.096" width="12" height="23.808" rx="6" />
+          </g>
+        </svg>
+        <div class="name">Auditorium</div>
+        <!-- package.json's own description opens with this; it is what the app
+             is, not a slogan written for a splash screen. -->
+        <div class="tagline">Audition-class audio editor</div>
+      </div>
+
+      <div class="card rise">
+        <div class="status">
+          <span class="spinner"></span>
+          <span id="status">Starting…</span>
+        </div>
+        <div class="track">
+          <div class="bar" id="bar"></div>
+        </div>
+        <div class="percent" id="percent">0%</div>
+        <div class="error" id="error"></div>
+      </div>
+    </div>
+
+    <div class="version" id="version"></div>
+
+    <script>
+      window.addEventListener('DOMContentLoaded', () => {
+        const bar = document.getElementById('bar');
+        const percent = document.getElementById('percent');
+        const status = document.getElementById('status');
+        const error = document.getElementById('error');
+        const version = document.getElementById('version');
+        const api = window.electronAPI;
+
+        // The real version, over the same IPC the About box uses. Left blank if
+        // it cannot be had: an invented version number on a launch screen is
+        // worse than none, and is where a wrong one is least likely to be
+        // noticed. (splashHtml.test.cjs asserts no literal fallback exists.)
+        if (api && api.getAppVersion) {
+          api.getAppVersion().then(
+            (v) => {
+              version.textContent = 'v' + v;
+            },
+            () => {}
+          );
+        }
+
+        function paint(value) {
+          const pct = Math.min(100, Math.max(0, value));
+          bar.style.width = pct + '%';
+          percent.textContent = Math.round(pct) + '%';
+        }
+
+        // Filler for the span before main can say anything real: the editor
+        // window is created and its bundle load issued BEFORE this window
+        // exists, so the first genuine milestone is already in the buffer by
+        // the time this page can hear it. Creeps to 30 and stops there — it
+        // never overtakes a real number, and the first real one cancels it.
+        let filler = 0;
+        const fillerTimer = setInterval(() => {
+          if (filler >= 30) return;
+          filler = Math.min(30, filler + 2 + Math.random() * 3);
+          paint(filler);
+        }, 180);
+
+        if (api && api.onSplashProgress) {
+          api.onSplashProgress((data) => {
+            clearInterval(fillerTimer);
+            if (!data) return;
+            if (data.error) {
+              error.textContent = data.error;
+              error.classList.add('shown');
+            }
+            if (typeof data.message === 'string' && data.message) {
+              status.textContent = data.message;
+            }
+            if (typeof data.progress === 'number') {
+              paint(data.progress);
+            }
+          });
+        }
+      });
+    </script>
+  </body>
+</html>
