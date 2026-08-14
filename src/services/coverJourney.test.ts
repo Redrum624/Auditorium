@@ -1000,6 +1000,63 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
     ...extra,
   });
 
+  /**
+   * H1 (seam-fix re-review, triage). The two OFFER outcomes, in shapes the
+   * emitter can actually produce — `refusedAlignment` with an outcome word set
+   * on it is not one, and three tests below were using exactly that.
+   *
+   * Its 0.423 peak cannot be `'ambiguous'`: ambiguity means "several lags match
+   * EQUALLY WELL", which the emitter only asks about once the peak has CLEARED
+   * the acceptance floor (`coverAlign.ts` — `peakClears && prominence <
+   * ALIGN_MIN_PROMINENCE`). And neither offer outcome can be candidate-LESS:
+   * the list rides every `'ambiguous'` and every `'weak'` measurement, and its
+   * first entry restates the measurement's own lag, correlation and prominence
+   * because the emitter builds it from the winning lag. Nothing here changes
+   * what any test asserts; these are the same two arms in states a run can
+   * reach.
+   */
+  const ambiguousAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurement => ({
+    // The repeated-section regime: a high peak that means nothing, because
+    // three other lags match about as well. The base's agreeing windows are
+    // legal here — the drift pair rides any arm whose windows ran and agreed.
+    ...confidentAlignment(offsetSeconds),
+    peakCorrelation: 0.95,
+    rivalCorrelation: 0.93,
+    prominence: 0.02,
+    outcome: 'ambiguous',
+    confident: false,
+    candidates: [
+      { offsetSeconds, correlation: 0.95, prominence: 0.02 },
+      { offsetSeconds: offsetSeconds + 12.5, correlation: 0.93, prominence: 0.01 },
+    ],
+  });
+
+  /**
+   * `'weak'` in the gap-zone shape: a peak above every unrelated pair the sweep
+   * can build but below the acceptance floor, on a take too short for the
+   * piecewise arm to have an opinion — so `windowsMeasured: 0`, no spread, and
+   * no drift, because a slope needs windows that ran and agreed before it is a
+   * drift at all.
+   */
+  const weakAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurement => {
+    const base = confidentAlignment(offsetSeconds);
+    delete base.windowLagSpreadSeconds;
+    delete base.driftSecondsPerMinute;
+    return {
+      ...base,
+      peakCorrelation: 0.71,
+      rivalCorrelation: 0.631,
+      prominence: 0.079,
+      outcome: 'weak',
+      confident: false,
+      windowsMeasured: 0,
+      candidates: [
+        { offsetSeconds, correlation: 0.71, prominence: 0.079 },
+        { offsetSeconds: offsetSeconds + 12.5, correlation: 0.7, prominence: 0.05 },
+      ],
+    };
+  };
+
   const alignReason = async (measurement: unknown): Promise<string> => {
     alignTakeToReference.mockReturnValue(measurement);
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
@@ -1041,23 +1098,12 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
   });
 
   it('carries the measurement\'s own outcome word when it has one', async () => {
-    expect(await alignReason(refusedAlignment(-8.258, { outcome: 'unrelated' }))).toContain(
+    expect(await alignReason(unrelatedAlignment(-8.258, 0.423, 0.079))).toContain(
       'probably wrong'
     );
-    expect(await alignReason(refusedAlignment(-8.258, { outcome: 'weak' }))).toContain(
-      'weak but plausible'
-    );
-    expect(await alignReason(refusedAlignment(-8.258, { outcome: 'ambiguous' }))).toContain(
-      'several places'
-    );
+    expect(await alignReason(weakAlignment(-8.258))).toContain('weak but plausible');
+    expect(await alignReason(ambiguousAlignment(-8.258))).toContain('several places');
   });
-
-  /** The rival lags the emitter attaches to every 'ambiguous' and every 'weak'
-   * measurement — best first, `candidates[0].offsetSeconds === offsetSeconds`. */
-  const candidateList = () => [
-    { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
-    { offsetSeconds: 12.5, correlation: 0.41, prominence: 0.06 },
-  ];
 
   // The reason is the PRIMARY instruction of a refusal, and it is read next to
   // the offer it describes. The dialog swaps the single button for one row per
@@ -1065,10 +1111,8 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
   // always list them the button sentence sent the user looking for a control
   // that is not on screen.
   it('points a candidate-bearing refusal at the rows, not at the button they replace', async () => {
-    for (const outcome of ['ambiguous', 'weak']) {
-      const reason = await alignReason(
-        refusedAlignment(-8.258, { outcome, candidates: candidateList() })
-      );
+    for (const measurement of [ambiguousAlignment(-8.258), weakAlignment(-8.258)]) {
+      const reason = await alignReason(measurement);
       expect(reason).toContain(coverPlacement.CANDIDATE_PLACEMENT_LABEL);
       expect(reason).not.toContain(coverPlacement.APPLY_GUESS_LABEL);
     }
@@ -1076,9 +1120,11 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
 
   it('keeps the button sentence where the button is what renders', async () => {
     // 'unrelated' has no guess worth listing and today's outcome-less shape
-    // lists nothing either, so both render the single apply button.
-    for (const extra of [{ outcome: 'unrelated' }, {}]) {
-      const reason = await alignReason(refusedAlignment(-8.258, extra));
+    // lists nothing either, so both render the single apply button. H1: the
+    // 'unrelated' half is the emitter's own shape now — windows that ran and
+    // AGREED are what excludes 'unrelated', so the fixture cannot inherit them.
+    for (const measurement of [unrelatedAlignment(-8.258, 0.423, 0.079), refusedAlignment(-8.258)]) {
+      const reason = await alignReason(measurement);
       expect(reason).toContain(coverPlacement.APPLY_GUESS_LABEL);
       expect(reason).not.toContain(coverPlacement.CANDIDATE_PLACEMENT_LABEL);
     }
