@@ -81,11 +81,24 @@
 // is invented here. Ungated broadband RMS is reported alongside as a
 // gate-independent cross-check, not as a criterion.
 //
-// The exact-sum law is asserted on every pass: stems + residual reconstruct
-// that pass's input within 2 float32 ULP, the same bound `stemService.test.ts`
-// holds the shipped path to. So is the identity every figure below rests on —
-// that instrumental_k is EXACTLY its pass's input minus that pass's Vocals
-// stem — because each of those figures is a difference of two signals.
+// The exact-sum law is ENFORCED on every pass — a violation throws, writes no
+// verdict file and exits nonzero: stems + residual must reconstruct that pass's
+// input within 2 float32 ULP and be > 99 % bit-exact, the bounds
+// `stemService.test.ts` holds the shipped path to. So is the identity every
+// figure below rests on — that instrumental_k is EXACTLY its pass's input minus
+// that pass's Vocals stem, within -120 dBFS — because each of those figures is
+// a difference of two signals, and a broken rig would otherwise print a
+// confident verdict on a foundation that had silently gone.
+//
+// ── What the pass-1 figure does and does not corroborate ────────────────────
+// Pass 1 here reads -17.29 dB below the bed against the -17.95 dB this repo
+// ships. That is a check on the MEASUREMENT PATH, not an independent
+// replication: it is the SAME reference song, a DIFFERENT ~28 s window, and a
+// mix this script CONSTRUCTS rather than the released master the shipped figure
+// was taken from. What it establishes is that this rig measures the quantity
+// the shipped warning is about, by a route that shares no arithmetic with the
+// original (exact bed by construction here; aligned master subtraction there).
+// It is not evidence that the figure holds across songs.
 //
 // Out-of-process for the same reasons as `stem-bench-driver.cjs` (onnxruntime
 // needs same-realm Float32Arrays, and peak RSS is the inference process), and
@@ -121,16 +134,49 @@ const { partitionStems } = require(path.join(ROOT, 'src', 'dsp', 'stemPartition.
 const { createStemHost } = require('../electron/stemHost.cjs');
 const {
   MODEL_SAMPLE_RATE,
+  STEM_NAMES,
   STEM_COUNT,
   MODEL_CHANNELS,
 } = require('../electron/stemSegmentation.cjs');
 
-// `stemService.ts`'s own constants, repeated here rather than imported because
-// that module pulls in the whole renderer store graph. The test below pins them
-// against the real ones.
+/**
+ * The APP's stem order, which is not the HOST's.
+ *
+ * `stemService.ts` lands four documents in `STEM_LABELS` order and reorders the
+ * host's outputs into it on the way (its private `HOST_INDEX_FOR_LABEL`). This
+ * probe has to hand `partitionStems` the same order, or it would measure the
+ * Other stem as the Vocals one and say so confidently.
+ *
+ * Only the LABEL LIST is repeated: `stemService.ts` cannot be required from a
+ * plain-node script (it pulls in the whole renderer store graph), and the swap
+ * is module-private there in any case. The swap and the Vocals position are
+ * DERIVED from that list and from the host's own exported `STEM_NAMES`, so a
+ * change to the HOST's order flows through here by itself and cannot silently
+ * mis-map. The list itself, the derived swap and the derived index are pinned
+ * against the real ones by `scripts/stem-second-pass-probe.test.cjs`, which
+ * reads both sources as text — the `electron/prodGate.test.cjs` idiom for a
+ * module a test cannot require.
+ */
 const STEM_LABELS = ['Drums', 'Bass', 'Vocals', 'Other'];
-const HOST_INDEX_FOR_LABEL = [0, 1, 3, 2];
-const VOCALS_LABEL_INDEX = 2;
+const HOST_INDEX_FOR_LABEL = STEM_LABELS.map((label) => STEM_NAMES.indexOf(label.toLowerCase()));
+const VOCALS_LABEL_INDEX = STEM_LABELS.indexOf('Vocals');
+// Loud at load rather than wrong at the verdict: a label the host no longer
+// emits maps to -1, and every measurement below would then read a stem that is
+// not the one it names.
+if (HOST_INDEX_FOR_LABEL.some((i) => i < 0) || VOCALS_LABEL_INDEX < 0) {
+  throw new Error(
+    `stem order mismatch: labels [${STEM_LABELS}] against host [${STEM_NAMES}]`
+  );
+}
+
+// The rig's own preconditions, as bounds rather than as recorded numbers (see
+// the assertions in `main`). `stemService.test.ts`'s own exact-sum bounds, and
+// -120 dBFS for the identities: ~34 dB of headroom over the worst this material
+// has produced (-153.83 dB) and still ~18 dB under one float32 ULP at full
+// scale, so it fails on a broken rig and not on rounding.
+const EXACT_SUM_MAX_ULPS = 2;
+const EXACT_SUM_MIN_EXACT_FRACTION = 0.99;
+const IDENTITY_MAX_RMS_DB = -120;
 
 // The band the shipped warning names, and its four octaves.
 const BAND_LO_HZ = 250;
@@ -202,9 +248,12 @@ function add(a, b) {
  * ULP, but the app's number is the one being measured. */
 function sumInstrumental(partition) {
   const parts = [
-    partition.stems[0],
-    partition.stems[1],
-    partition.stems[3],
+    // Every stem that is NOT the Vocals one, in label order, then the Residual
+    // last — derived from `VOCALS_LABEL_INDEX` rather than written out, for the
+    // same reason the swap above is.
+    ...STEM_LABELS.map((_, i) => i)
+      .filter((i) => i !== VOCALS_LABEL_INDEX)
+      .map((i) => partition.stems[i]),
     partition.residual,
   ];
   return [0, 1].map((c) => {
@@ -460,7 +509,7 @@ async function main() {
     const damage = subtract(bedAfter, bed);
 
     // Identity checks: the exact-sum law says instrumental_k is EXACTLY its
-    // pass's input minus that pass's Vocals stem. Asserted on the signals
+    // pass's input minus that pass's Vocals stem. Measured on the signals
     // themselves rather than trusted, because every number below is a
     // difference of two of them.
     const checks = {
@@ -477,6 +526,40 @@ async function main() {
         rmsDbOf(subtract(ghost1, subtract(voc, vocals1))).toFixed(2)
       ),
     };
+
+    // …and now ENFORCED. Recording these and carrying on would mean a rig whose
+    // foundation had silently gone still printed a confident go/no-go: the
+    // residual figures are differences of two signals, so a partition that no
+    // longer reconstructs, or an instrumental that is no longer its input minus
+    // its Vocals stem, does not make the verdict visibly wrong — it makes it
+    // wrong and plausible. A violation is a hard stop: no verdict, no file,
+    // nonzero exit.
+    const exactSumByPass = {
+      passA: passA.exactSum,
+      pass1: pass1.exactSum,
+      pass2: pass2.exactSum,
+      nullPass: passN.exactSum,
+    };
+    for (const [name, e] of Object.entries(exactSumByPass)) {
+      // Negated comparisons, so a NaN fails rather than slipping through.
+      if (!(e.worstUlps <= EXACT_SUM_MAX_ULPS)) {
+        throw new Error(
+          `exact-sum law broken on ${name}: worst ${e.worstUlps} float32 ULP, bound ${EXACT_SUM_MAX_ULPS}`
+        );
+      }
+      if (!(e.exactFraction >= EXACT_SUM_MIN_EXACT_FRACTION)) {
+        throw new Error(
+          `exact-sum law broken on ${name}: ${e.exactFraction} bit-exact, bound ${EXACT_SUM_MIN_EXACT_FRACTION}`
+        );
+      }
+    }
+    for (const [name, rms] of Object.entries(checks)) {
+      if (!(rms <= IDENTITY_MAX_RMS_DB)) {
+        throw new Error(
+          `identity broken — ${name} is ${rms} dB, bound ${IDENTITY_MAX_RMS_DB} dB`
+        );
+      }
+    }
 
     const L = {
       bed: levels(bed),
@@ -549,12 +632,7 @@ async function main() {
         bedRmsDb: L.bed.rmsDb,
       },
       checks,
-      exactSum: {
-        passA: passA.exactSum,
-        pass1: pass1.exactSum,
-        pass2: pass2.exactSum,
-        nullPass: passN.exactSum,
-      },
+      exactSum: exactSumByPass,
       levels: L,
       material: {
         samples: n,

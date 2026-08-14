@@ -899,7 +899,7 @@ alignment, no estimate — and it is read by the same `longTermAverageSpectrum` 
 
 | Measured over a 28 s window, 250 Hz–4 kHz | |
 |---|---|
-| The residual after pass 1, below the bed | **−17.29 dB** (the −17.95 dB above, reproduced on different material) |
+| The residual after pass 1, below the bed | **−17.29 dB** — the −17.95 dB above, re-measured by a different route (same song, a different 28 s window, a constructed mix) |
 | The residual after pass 2, below the bed | **−17.29 dB** |
 | **What the second pass removed** | **0.00 dB** (worst octave 0.04 dB) |
 | The second pass's own Vocals output, below the instrumental | −43.04 dB in band (−58.37 below 250 Hz, −45.17 above 4 kHz) |
