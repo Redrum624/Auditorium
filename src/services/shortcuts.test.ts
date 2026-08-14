@@ -122,6 +122,44 @@ describe('installShortcuts', () => {
     expect(runCommandSpy).toHaveBeenCalledWith('transport.playPause');
   });
 
+  // K1 — the three new bindings, driven from a REAL keydown rather than from
+  // the table. The table rows encode what `comboFromEvent` produces, and for
+  // the arrows that is a claim about the DOM (`e.key` is 'ArrowLeft', not
+  // 'Left'), which only a dispatched event can check. A typo in either half
+  // would leave a menu row advertising a key that does nothing — the exact
+  // defect this repo has already paid for twice.
+  it.each([
+    ['ArrowLeft', { ctrlKey: true }, 'multitrack.prevClipEdge'],
+    ['ArrowRight', { ctrlKey: true }, 'multitrack.nextClipEdge'],
+    ['Delete', { shiftKey: true }, 'edit.rippleDelete'],
+  ])('dispatches %s to its multitrack command', (key, mods, commandId) => {
+    const runCommandSpy = jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
+    uninstall = installShortcuts(window);
+
+    window.dispatchEvent(keydown({ key, ...mods }));
+
+    expect(runCommandSpy).toHaveBeenCalledWith(commandId);
+  });
+
+  it('leaves an UNMODIFIED arrow key alone — only Ctrl+arrow is bound', () => {
+    const runCommandSpy = jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
+    uninstall = installShortcuts(window);
+
+    window.dispatchEvent(keydown({ key: 'ArrowLeft' }));
+    window.dispatchEvent(keydown({ key: 'ArrowRight' }));
+
+    expect(runCommandSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps plain Delete on edit.delete — Shift is what makes it a ripple', () => {
+    const runCommandSpy = jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
+    uninstall = installShortcuts(window);
+
+    window.dispatchEvent(keydown({ key: 'Delete' }));
+
+    expect(runCommandSpy).toHaveBeenCalledWith('edit.delete');
+  });
+
   it('calls preventDefault on a matched combo', () => {
     jest.spyOn(menuActionsModule, 'runCommand').mockResolvedValue(undefined);
     uninstall = installShortcuts(window);
