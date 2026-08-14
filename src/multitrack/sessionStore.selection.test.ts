@@ -17,7 +17,8 @@ import { _resetSessionUndo, undoSession } from './sessionUndo';
 
 const store = () => useSessionStore.getState();
 
-/** Three clips: a and b on track 1, c on track 2. */
+/** Three clips: a and b on track 1, c on track 2. `session` is the object the
+ * store was seeded with, so a test can build a "reloaded" copy of it. */
 function seed(): { session: Session; a: string; b: string; c: string } {
   const t1 = createTrack('Track 1');
   const t2 = createTrack('Track 2');
@@ -125,9 +126,9 @@ describe('toggleSelectedClip (Ctrl+Click)', () => {
 });
 
 describe('a member whose clip is gone is not a member, whatever removed it', () => {
-  it('removeClip drops the member and promotes a survivor to primary', () => {
-    store().setSelectedClip(fx.a);
-    store().toggleSelectedClip(fx.b);
+  it('removeClip drops a NON-primary member and leaves the primary alone', () => {
+    store().setSelectedClip(fx.b);
+    store().toggleSelectedClip(fx.a); // primary = a
     store().removeClip(fx.b);
     expect(store().selectedClipIds).toEqual([fx.a]);
     expect(store().selectedClipId).toBe(fx.a);
@@ -140,10 +141,36 @@ describe('a member whose clip is gone is not a member, whatever removed it', () 
     expect(store().selectedClipId).toBeNull();
   });
 
+  it('removing the PRIMARY clears the whole selection — the set never invents one', () => {
+    // The reconcile follows the primary and only ever removes references; it
+    // must never promote, or a session load (whose clip ids are preserved on
+    // disk) would have its explicit `selectedClipId: null` overridden by a
+    // stale member and hand back a selection nobody made.
+    store().setSelectedClip(fx.a);
+    store().toggleSelectedClip(fx.b); // primary = b
+    store().removeClip(fx.b);
+    expect(store().selectedClipId).toBeNull();
+    expect(store().selectedClipIds).toEqual([]);
+  });
+
+  it('a reloaded session whose clip ids repeat does not resurrect the old selection', () => {
+    // What `sessionFile.openSession` does: replace the session and state that
+    // nothing is selected — with clip ids that came back verbatim off disk.
+    store().setSelectedClip(fx.a);
+    store().toggleSelectedClip(fx.b);
+    const reloaded: Session = {
+      ...fx.session,
+      tracks: fx.session.tracks.map((t) => ({ ...t, clips: [...t.clips] })),
+    };
+    useSessionStore.setState({ session: reloaded, selectedClipId: null });
+    expect(store().selectedClipId).toBeNull();
+    expect(store().selectedClipIds).toEqual([]);
+  });
+
   it('removeTrack drops every member that lived on it', () => {
     store().setSelectedClip(fx.a);
     store().toggleSelectedClip(fx.b);
-    store().toggleSelectedClip(fx.c);
+    store().toggleSelectedClip(fx.c); // primary = c, on the surviving track
     store().removeTrack(store().session.tracks[0].id);
     expect(store().selectedClipIds).toEqual([fx.c]);
     expect(store().selectedClipId).toBe(fx.c);

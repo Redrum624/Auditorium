@@ -241,12 +241,30 @@ function liveClipIds(session: Session): Set<string> {
  * A per-action fixup would have to be written five times and would still miss
  * the sixth (undo restores a snapshot without running ANY of the actions).
  *
- * Members whose clips are gone drop out. A primary whose clip is gone yields
- * to the last surviving member — deleting one of three selected clips leaves
- * two selected with a valid primary, rather than nothing selected. A primary
- * that survives but is missing from the set is put back in: that is exactly
- * the state an undo produces, since the snapshot restores the primary and
- * deliberately does not restore the set.
+ * THE RULE IS "FOLLOW THE PRIMARY", and it is deliberately that narrow. The
+ * primary is the field everything else already writes deliberately — it rides
+ * the undo snapshot, every loader sets it, every selection action sets it — so
+ * this derives the set from it and never the other way round: dead members drop
+ * out, a live primary is put back into a set that lost it (exactly the state an
+ * undo leaves, since the snapshot restores the primary and deliberately does
+ * not restore the set), and a NULL primary means an empty set.
+ *
+ * That last clause is the one worth arguing, because the obvious alternative —
+ * promote a surviving member when the primary's clip is removed — is a bug
+ * waiting on a real code path. `.audm` files PERSIST clip ids (`sessionFile`
+ * only bumps the id counter past them), so re-opening the session you were just
+ * working in restores clips carrying the very ids the stale set still names.
+ * A promoting reconcile would then override the loader's explicit
+ * `selectedClipId: null` and hand back a selection nobody made. A reconcile
+ * that only ever REMOVES references — plus the one growth the primary itself
+ * authorises — cannot override anybody's deliberate write.
+ *
+ * The cost is stated plainly: removing the primary out of a multi-clip
+ * selection clears the whole selection rather than leaving the rest of it
+ * standing. In practice the group verbs remove every member anyway
+ * (`removeClips`), so the case is reachable mainly through undo/redo landing on
+ * a session that is missing the primary — where "nothing is selected" is a
+ * perfectly honest answer.
  */
 function reconcileSelection(
   session: Session,
@@ -254,11 +272,12 @@ function reconcileSelection(
   ids: readonly string[]
 ): { selectedClipId: string | null; selectedClipIds: string[] } {
   const live = liveClipIds(session);
+  if (primary === null || !live.has(primary)) {
+    return { selectedClipId: null, selectedClipIds: [] };
+  }
   const members = ids.filter((id) => live.has(id));
-  let next = primary !== null && live.has(primary) ? primary : null;
-  if (next === null) next = members.length > 0 ? members[members.length - 1] : null;
-  if (next !== null && !members.includes(next)) members.push(next);
-  return { selectedClipId: next, selectedClipIds: members };
+  if (!members.includes(primary)) members.push(primary);
+  return { selectedClipId: primary, selectedClipIds: members };
 }
 
 /**
