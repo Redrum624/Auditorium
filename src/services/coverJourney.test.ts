@@ -1663,6 +1663,31 @@ describe('runCoverJourney — smoothing and the level check', () => {
     ).not.toContain('Level trim');
   });
 
+  it('never runs the journey\'s progress backwards to pay for the second summation', async () => {
+    // V4: the trim arm sums the session TWICE, and the stage's fraction feeds
+    // the journey's single overall bar. Two 0→1 sweeps inside one stage would
+    // walk that bar backwards in front of the user — the one visible cost the
+    // second measurement could have had.
+    // Long enough that a summation spans SEVERAL peak blocks — a session that
+    // fits in one block reports one fraction per pass and could not show the
+    // bar moving at all, let alone moving backwards.
+    seed(true, SR, SR * 20);
+    expect(SR * 20).toBeGreaterThan(PEAK_BLOCK_SAMPLES);
+    overCeilingFixture();
+    const progress: number[] = [];
+    const report = await runCoverJourney({
+      songDocId: songId,
+      takeDocId: takeId,
+      onProgress: (f) => progress.push(f),
+    });
+    expect(report!.smoothing!.trimDb).toBeGreaterThan(0); // the arm really ran
+    expect(progress.length).toBeGreaterThan(2);
+    for (let i = 1; i < progress.length; i++) {
+      expect(progress[i]).toBeGreaterThanOrEqual(progress[i - 1]);
+    }
+    expect(progress[progress.length - 1]).toBeCloseTo(1, 5);
+  });
+
   it('stops at the fader floor rather than writing a level the mixer cannot show, and says so', async () => {
     // An overshoot deeper than the fader's own −60 dB floor. Nothing musical
     // produces this; the point is that the clamp is REPORTED rather than

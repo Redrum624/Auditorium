@@ -1491,8 +1491,13 @@ export async function runCoverJourney(
     // succeeded. The number is identical (mixdown's suite asserts that with
     // `toBe` over every fixture shape), so nothing about the report changes.
     const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const));
+    // V4: HALF the stage's range, because there may be a second summation
+    // below and the stage's fraction feeds the journey's single overall bar —
+    // two 0→1 sweeps inside one stage would walk that bar backwards in front
+    // of the user. When the sum fits, the other half is not spent and the
+    // fraction is completed immediately after, so the common path still fills.
     const peakBeforeClamp = mixdownSessionPeak(useSessionStore.getState().session, docs, (f) =>
-      emit(stage, 'summing the session to measure what it peaks at', f)
+      emit(stage, 'summing the session to measure what it peaks at', f * 0.5)
     );
     const summedPeakDb = toDb(peakBeforeClamp);
     const overCeiling = peakBeforeClamp > 1;
@@ -1544,9 +1549,11 @@ export async function runCoverJourney(
       // two clips, which is what a measured number is worth here.
       trimmedPeakDb = toDb(
         mixdownSessionPeak(useSessionStore.getState().session, docs, (f) =>
-          emit(stage, 'summing the trimmed session to check what it peaks at', f)
+          emit(stage, 'summing the trimmed session to check what it peaks at', 0.5 + f * 0.5)
         )
       );
+    } else {
+      emit(stage, 'summing the session to measure what it peaks at', 1);
     }
     const stillOver = trimmedPeakDb !== null && trimmedPeakDb > 0;
 
