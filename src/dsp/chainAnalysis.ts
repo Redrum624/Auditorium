@@ -95,6 +95,30 @@ export function monoMix(channels: Float32Array[]): Float32Array {
  * failure Ruling 3 forbids. Rejecting them makes the chain say "no usable quiet
  * passage" instead.
  *
+ * MOSTLY-SILENT WINDOWS ARE REJECTED ONLY ON REQUEST
+ * (`rejectMostlySilentWindows`, bound by `NOISE_WINDOW_MAX_SILENT_FRACTION`).
+ * On a take carrying a stretch of exact zeros, the RMS reject above leaves the
+ * BOUNDARY windows in the race — mostly zeros, a little real material at one
+ * end — and zeros dilute an RMS, so a boundary window outbids every honest
+ * window and wins the search while measuring nothing: its `rmsDb` under-reads
+ * the floor by 10·log10(1 / (1 − zeroFraction)) dB, and its `envelopePeakDb` is the
+ * adjacent MATERIAL's peak, because exact zeros contribute nothing to a peak.
+ * Measured consequence in `deriveGate`: with 200 ms of digital silence trimmed
+ * in next to a whispered verse, the boundary window's envelope peak was the
+ * whisper's (-26.55 dBFS against the verse's -36.00 dBFS RMS), the derived
+ * threshold landed 12.45 dB over the verse, and the gate muted 85-100 % of it.
+ * When the flag is set, such windows are excluded and the search returns the
+ * quietest MOSTLY-REAL window — the measurement the caller was asking for.
+ * A frame counts as silent only when EVERY channel is exactly zero, so an
+ * exactly polarity-cancelling stereo pair is not mistaken for silence.
+ *
+ * The flag is opt-in because `deriveCompressor`'s consumption of the OLD
+ * semantics is measured and pinned: on a gated take its quietest window is a
+ * fade tail reading tens of dB low, and its derived threshold still moves by
+ * under 0.1 dB (the `what survives the gate` pair in vocalChain.test.ts). The
+ * gate is the consumer for which a boundary window turns directly into muted
+ * programme, so the gate asks for the honest search.
+ *
  * Search step is 50 ms, and the window is a whole number of steps, so the scan
  * sums squares once per 50 ms CHUNK and then slides a 10-chunk sum: O(n) time
  * and O(n / chunk) extra memory. A prefix-sum array over the samples would be
@@ -116,7 +140,47 @@ const NOISE_SEARCH_STEP_MS = 50;
 
 const CHUNKS_PER_WINDOW = NOISE_WINDOW_MS / NOISE_SEARCH_STEP_MS;
 
-export function measureNoiseWindow(channels: Float32Array[], sampleRate: number): NoiseWindow | null {
+/**
+ * The largest share of a candidate window that may be digitally-silent frames
+ * (every channel exactly 0) before `rejectMostlySilentWindows` refuses it as a
+ * noise-floor measurement. Both sides of 0.25 are measured populations:
+ *
+ * ABOVE — a zero-headed floor window swept at 8/22.05/44.1/48 kHz x 3 seeds
+ * reads a spectral-tilt residual of 1.78 dB at 0.25 zeros, still inside the
+ * 0.63…1.91 dB floor population `GATE_SHAPED_RESIDUAL_DB` is derived from; at
+ * 0.30 it reads 1.93 dB, already outside that population, and by 0.60
+ * (2.60 dB) a plain floor reads as a vocal tract. 0.25 is therefore the
+ * largest swept fraction at which every window this search can still return
+ * measures like a floor to the content checks downstream of it. The envelope
+ * peak — the statistic the gate's threshold is built on — under-reads a
+ * 25 %-zeros floor window by at most 0.30 dB against the full window
+ * (44.1 kHz, worst of three seeds), small beside the 0.63 dB margin the 3 dB
+ * gate headroom keeps over its worst measured graze.
+ *
+ * BELOW — an undithered 16-bit floor quantises its smallest samples to EXACT
+ * zero, scattered through every window: measured per 500 ms window on
+ * quantised Gaussian floors at 8 and 44.1 kHz, three seeds each, 1.0-1.3 % of
+ * samples at -60 dBFS, 4.3-5.0 % at -72, 9.1-9.7 % at -78, 17.7-19.3 % at -84
+ * and 21.6-22.7 % at -85.5 dBFS. Those windows are real recordings' noise
+ * floors and must stay in the search, so the bound cannot drop to 0.20 without
+ * evicting the two quietest members. Quieter still (-87 dBFS reads 24.7-27.2 %)
+ * the class crosses the bound and the caller declines fail-safe — a floor
+ * within 3 dB of `SILENCE_RMS` is at the edge of measurability either way.
+ */
+export const NOISE_WINDOW_MAX_SILENT_FRACTION = 0.25;
+
+export interface MeasureNoiseWindowOptions {
+  /** Refuse candidate windows that are mostly digital silence (see
+   * `NOISE_WINDOW_MAX_SILENT_FRACTION`), returning the quietest MOSTLY-REAL
+   * window instead — or null when none exists. Opt-in; see the docblock. */
+  rejectMostlySilentWindows?: boolean;
+}
+
+export function measureNoiseWindow(
+  channels: Float32Array[],
+  sampleRate: number,
+  options?: MeasureNoiseWindowOptions,
+): NoiseWindow | null {
   const n = channels[0]?.length ?? 0;
   const nch = channels.length;
   const chunk = Math.max(1, Math.round((NOISE_SEARCH_STEP_MS / 1000) * sampleRate));
@@ -136,17 +200,50 @@ export function measureNoiseWindow(channels: Float32Array[], sampleRate: number)
     }
   }
 
+  // Silent frames per chunk — counted only when the caller asked for the
+  // mostly-silent reject, since the count is an extra O(n·channels) pass.
+  let chunkSilent: Uint32Array | null = null;
+  if (options?.rejectMostlySilentWindows) {
+    chunkSilent = new Uint32Array(chunkCount);
+    for (let k = 0; k < chunkCount; k++) {
+      const start = k * chunk;
+      let silent = 0;
+      for (let i = 0; i < chunk; i++) {
+        let allZero = true;
+        for (const c of channels) {
+          if (c[start + i] !== 0) {
+            allZero = false;
+            break;
+          }
+        }
+        if (allZero) silent++;
+      }
+      chunkSilent[k] = silent;
+    }
+  }
+
   let bestRms = Infinity;
   let bestAt = -1;
   let running = 0;
+  let silentRun = 0;
   for (let k = 0; k < chunkCount; k++) {
     running += chunkSum[k];
+    if (chunkSilent) silentRun += chunkSilent[k];
     if (k < CHUNKS_PER_WINDOW - 1) continue;
-    if (k >= CHUNKS_PER_WINDOW) running -= chunkSum[k - CHUNKS_PER_WINDOW];
+    if (k >= CHUNKS_PER_WINDOW) {
+      running -= chunkSum[k - CHUNKS_PER_WINDOW];
+      if (chunkSilent) silentRun -= chunkSilent[k - CHUNKS_PER_WINDOW];
+    }
     const rms = Math.sqrt(running / (win * nch));
     // Strictly above digital silence, and strictly quieter than the incumbent
     // (so the FIRST of several equally quiet windows wins — deterministic).
-    if (rms > SILENCE_RMS && rms < bestRms) {
+    // The silent-fraction comparison is strictly greater: a window at exactly
+    // the bound is still a measurement (pinned in vocalChain.test.ts).
+    if (
+      rms > SILENCE_RMS &&
+      rms < bestRms &&
+      !(chunkSilent && silentRun / win > NOISE_WINDOW_MAX_SILENT_FRACTION)
+    ) {
       bestRms = rms;
       bestAt = (k - (CHUNKS_PER_WINDOW - 1)) * chunk;
     }

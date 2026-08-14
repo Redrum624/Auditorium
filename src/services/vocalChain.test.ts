@@ -4,7 +4,6 @@ import {
   GATE_HEADROOM_DB,
   GATE_HOLD_MS,
   GATE_SHAPED_RESIDUAL_DB,
-  GATE_SILENT_WINDOW_FRACTION,
   GATE_VOICED_FRACTION,
   STAGE_MEASURING_DETAIL,
   STAGE_RENDERING_DETAIL,
@@ -36,6 +35,7 @@ import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
 import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
 import {
+  NOISE_WINDOW_MAX_SILENT_FRACTION,
   NOISE_WINDOW_MS,
   measureNoiseWindow,
   programmeRmsDb,
@@ -985,6 +985,170 @@ describe('deriveGate', () => {
         }
         expect(toDb(Math.sqrt(sum / n))).toBeLessThanOrEqual(-80);
       });
+
+      // N3 — the destructive converse of the case above: digital silence
+      // ADJACENT TO a soft unvoiced passage. The quietest window straddles the
+      // zeros and the whisper, and exact zeros contribute nothing to an
+      // envelope PEAK, so that window's peak is the WHISPER's own level — the
+      // derived threshold landed 12.45 dB over the verse and the gate muted
+      // 85-100 % of it at nine of ten measured lead-in lengths, the original
+      // Critical's damage in the destructive direction. The fix is upstream of
+      // every check: `measureNoiseWindow` refuses mostly-silent candidate
+      // windows, so the measurement lands on the whisper itself — all real
+      // samples — and the vocal-tract check declines exactly as it does with
+      // no lead-in at all.
+      it('declines on a whispered verse behind a silent lead-in — silence must not launder a whisper', () => {
+        for (const leadSec of [0.2, 0.3, 0.5, 1.0, 2.0]) {
+          const { channel: base } = continuousTakeWithWhisperedVerse();
+          const lead = Math.round(leadSec * SR);
+          const channel = new Float32Array(lead + base.length);
+          channel.set(base, lead);
+
+          const res = deriveGate([channel], SR);
+          expect(res.run).toBe(false);
+          if (res.run) return;
+          expect(res.reason).toContain('vocal tract');
+        }
+
+        // The mechanism, pinned once: the bare search still returns the
+        // zeros/whisper boundary window — that shape is real and other callers
+        // keep it — while the search the gate asks for lands inside the
+        // whispered verse, on real samples only.
+        const { channel: base, soft } = continuousTakeWithWhisperedVerse();
+        const lead = Math.round(1.0 * SR);
+        const channel = new Float32Array(lead + base.length);
+        channel.set(base, lead);
+        const bare = measureNoiseWindow([channel], SR)!;
+        expect(zeroFractionOf(Float32Array.from(channel.subarray(bare.startSample, bare.startSample + bare.lengthSamples)))).toBeGreaterThan(0.5);
+        const real = measureNoiseWindow([channel], SR, { rejectMostlySilentWindows: true })!;
+        expect(zeroFractionOf(Float32Array.from(channel.subarray(real.startSample, real.startSample + real.lengthSamples)))).toBe(0);
+        expect(real.startSample).toBeGreaterThanOrEqual(lead + soft.start);
+        expect(real.startSample + real.lengthSamples).toBeLessThanOrEqual(lead + soft.end);
+      }, 60000);
+    });
+
+    // The boundary of `NOISE_WINDOW_MAX_SILENT_FRACTION`, exercised as gate
+    // BEHAVIOUR on both sides and on the equality — not as a literal. The
+    // scattered-zeros construction is the real class the lower side protects:
+    // an undithered 16-bit converter quantises the smallest samples of a quiet
+    // floor to exact zero, spread through every window.
+    describe('the mostly-silent bound of the measurement behind the gate', () => {
+      /** Two sung phrases with real 1 s pauses over a Gaussian floor — the
+       * `takeWithSilentLeadIn(0)` shape with the floor level a parameter. */
+      function takeOverFloor(floorDb: number): { channel: Float32Array; pauses: { start: number; end: number }[] } {
+        const pause = Math.round(1.0 * SR);
+        const phrase = Math.round(0.8 * SR);
+        const body = 3 * pause + 2 * phrase;
+        const channel = gaussFloorDb(body, floorDb, 7);
+        const pauses: { start: number; end: number }[] = [];
+        let at = 0;
+        for (const [sung, n] of [
+          [false, pause],
+          [true, phrase],
+          [false, pause],
+          [true, phrase],
+          [false, pause],
+        ] as const) {
+          if (!sung) pauses.push({ start: at, end: at + n });
+          else {
+            let phase = 0;
+            for (let i = 0; i < n; i++) {
+              const t = i / SR;
+              phase += (2 * Math.PI * 220) / SR;
+              const c = Math.min(1, t / 0.04) * Math.min(1, (n / SR - t) / 0.06);
+              channel[at + i] += 0.25 * c * Math.sin(phase);
+            }
+          }
+          at += n;
+        }
+        return { channel, pauses };
+      }
+
+      /** Zero EXACTLY `fraction` of each 50 ms chunk of every pause, at
+       * LCG-shuffled positions — aperiodic, deterministic, and exact in every
+       * window the search can choose, so a fixture sits ON the boundary by
+       * arithmetic rather than by luck. */
+      function scatterZeros(channel: Float32Array, pauses: { start: number; end: number }[], fraction: number): void {
+        const chunk = Math.round(0.05 * SR);
+        const per = Math.round(fraction * chunk);
+        let s = 12345 >>> 0;
+        const next = (): number => ((s = (s * 1664525 + 1013904223) >>> 0), s / 0x100000000);
+        for (const p of pauses) {
+          for (let at = p.start; at + chunk <= p.end; at += chunk) {
+            const idx = Array.from({ length: chunk }, (_, i) => i);
+            for (let i = chunk - 1; i > 0; i--) {
+              const j = Math.floor(next() * (i + 1));
+              [idx[i], idx[j]] = [idx[j], idx[i]];
+            }
+            for (let k = 0; k < per; k++) channel[at + idx[k]] = 0;
+          }
+        }
+      }
+
+      const pauseTailDb = (out: Float32Array, pauses: { start: number; end: number }[]): number => {
+        let sum = 0;
+        let n = 0;
+        for (const p of pauses) {
+          for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += out[i] * out[i];
+          n += Math.round(0.3 * SR);
+        }
+        return toDb(Math.sqrt(sum / n));
+      };
+
+      it('still gates a take whose undithered 16-bit floor quantises a fifth of it to exact zero', () => {
+        // The realistic member: a -84 dBFS Gaussian floor through a 16-bit
+        // converter reads 18-20 % exact zeros per 500 ms window. Every floor
+        // window carries them, so a bound of 0.2 would evict them ALL from the
+        // search and decline a take the gate handles today.
+        const { channel, pauses } = takeOverFloor(-84);
+        const q = new Float32Array(channel.length);
+        for (let i = 0; i < channel.length; i++) q[i] = Math.round(channel[i] * 32768) / 32768;
+
+        const res = deriveGate([q], SR);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        // The threshold tracks the quantised floor, not a phrase: well under
+        // the -12 dBFS the phrases peak at, above the effect's -80 dB minimum.
+        expect(Number(res.params.thresholdDb)).toBeLessThan(-70);
+        expect(Number(res.params.thresholdDb)).toBeGreaterThan(-80);
+        const out = noiseGateEffect.process([Float32Array.from(q)], SR, res.params).channels[0];
+        expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
+      });
+
+      it('a floor window just UNDER the bound is still a measurement, and the take gates', () => {
+        const { channel, pauses } = takeOverFloor(-50);
+        scatterZeros(channel, pauses, 0.24);
+        const res = deriveGate([channel], SR);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+        expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
+      });
+
+      it('a floor window at EXACTLY the bound is still a measurement — the comparison is strict', () => {
+        const { channel, pauses } = takeOverFloor(-50);
+        scatterZeros(channel, pauses, 0.25);
+        expect(Math.round(0.25 * Math.round(0.05 * SR)) / Math.round(0.05 * SR)).toBe(NOISE_WINDOW_MAX_SILENT_FRACTION);
+        const res = deriveGate([channel], SR);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+        expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
+      });
+
+      it('a floor just PAST the bound is not a measurement, and the stage declines fail-safe', () => {
+        // With every floor window refused, the quietest window the search can
+        // still return is inside a phrase; the threshold derived there sits
+        // over the whole take and the all-or-nothing guard declines. Nothing
+        // is gated — the fail-safe direction, chosen over measuring material
+        // this close to unmeasurable.
+        const { channel, pauses } = takeOverFloor(-50);
+        scatterZeros(channel, pauses, 0.26);
+        const res = deriveGate([channel], SR);
+        expect(res.run).toBe(false);
+        if (res.run) return;
+        expect(res.reason.length).toBeGreaterThan(0);
+      });
     });
 
     it('still runs on the take those three are the boundary of — pauses a window long', () => {
@@ -1335,10 +1499,16 @@ describe('GATE_SHAPED_RESIDUAL_DB', () => {
   }, 60000);
 });
 
-describe('GATE_SILENT_WINDOW_FRACTION', () => {
-  /** A floor window with its leading `f` replaced by exact zeros — the shape
-   * `measureNoiseWindow` returns when a take carries digital silence: not the
-   * silence (rejected under SILENCE_RMS) and not the floor, but the boundary. */
+describe('NOISE_WINDOW_MAX_SILENT_FRACTION', () => {
+  // The bound `measureNoiseWindow` applies when `deriveGate` asks it to refuse
+  // mostly-silent candidate windows. Its BEHAVIOUR on both sides and on the
+  // equality is pinned in the `deriveGate` suite (`the mostly-silent bound of
+  // the measurement behind the gate`, plus the whisper-launder and the three
+  // digital-silence tests); what lives here is the two measured populations
+  // its placement comes from.
+
+  /** A floor window with its leading `f` replaced by exact zeros — the
+   * boundary shape a take with a stretch of digital silence produces. */
   function withZeroHead(n: number, f: number, seed: number): Float32Array {
     const w = gaussFloorDb(n, -50, seed);
     const z = Math.round(f * n);
@@ -1346,8 +1516,8 @@ describe('GATE_SILENT_WINDOW_FRACTION', () => {
     return w;
   }
 
-  it('is set where a floor window stops reading like a floor', () => {
-    const fractions = [0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.95];
+  it('every window it can still return measures like a floor to the checks downstream', () => {
+    const fractions = [0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5, 0.6, 0.9];
     const worstAt = new Map<number, number>();
     for (const sr of [8000, 22050, 44100, 48000]) {
       const n = Math.round((NOISE_WINDOW_MS / 1000) * sr);
@@ -1359,25 +1529,57 @@ describe('GATE_SILENT_WINDOW_FRACTION', () => {
       }
     }
 
-    // The residual climbs with the zero head: the fit is describing an impulse
-    // more and more and a room less and less.
-    for (let i = 1; i < fractions.length; i++) {
-      expect(worstAt.get(fractions[i])!).toBeGreaterThan(worstAt.get(fractions[i - 1])! - 0.05);
-    }
-
-    // Everything the content checks are still ASKED about reads inside the
-    // floor population the shaping constant was derived from — the same
-    // absolute bound its own test asserts. Measured worst at 0.25: ~1.85 dB.
-    expect(worstAt.get(GATE_SILENT_WINDOW_FRACTION)!).toBeLessThan(2.2);
-    // ...and just past it, a floor starts reading like something else.
-    expect(worstAt.get(0.3)!).toBeGreaterThan(1.9);
-
-    // Far past it the fit reads a plain floor as a vocal tract, which is the
-    // false decline this predicate exists to stop.
+    // Measured worst per fraction over this sweep (4 rates x 3 seeds):
+    // 1.709 / 1.747 / 1.801 / 1.777 / 1.935 / 1.968 / 2.234 / 2.598 / 4.244 dB.
+    // The climb is NOT monotone — it dips at 0.2 -> 0.25 — which is why no
+    // assertion here claims it is; the placement rests on the absolute levels.
+    //
+    // At the bound itself, a zero-headed floor window still reads INSIDE the
+    // 0.63…1.91 dB floor population `GATE_SHAPED_RESIDUAL_DB` is derived from:
+    // the largest swept fraction with that property, so nothing the search can
+    // hand the content checks is outside what their constant was measured on.
+    const atBound = worstAt.get(NOISE_WINDOW_MAX_SILENT_FRACTION);
+    expect(atBound).toBeDefined();
+    expect(atBound!).toBeLessThan(1.911);
+    // One step further and the window has already left that population...
+    expect(worstAt.get(0.3)!).toBeGreaterThan(1.911);
+    // ...and past half zeros the fit reads a plain floor as a VOCAL TRACT —
+    // the measured false decline (N2: 10 of 10 sub-chunk offsets refused at
+    // 8 kHz) that rejecting these windows exists to prevent.
+    expect(worstAt.get(0.6)!).toBeGreaterThan(GATE_SHAPED_RESIDUAL_DB);
     expect(worstAt.get(0.9)!).toBeGreaterThan(GATE_SHAPED_RESIDUAL_DB);
-
-    expect(GATE_SILENT_WINDOW_FRACTION).toBe(0.25);
   }, 120000);
+
+  it('sits above the scattered exact zeros an undithered 16-bit floor really carries', () => {
+    // The lower side's population: quantising a Gaussian floor to 16 bits
+    // turns its smallest samples into EXACT zeros, scattered through every
+    // window. Per 500 ms window, measured here at 8 and 44.1 kHz, three seeds:
+    // 1.0-1.3 % at -60 dBFS, 4.3-5.0 % at -72, 9.1-9.7 % at -78, 17.7-19.3 %
+    // at -84 and 21.6-22.7 % at -85.5 dBFS (worst member 22.73 %, at 8 kHz).
+    // Those windows are ordinary quiet recordings and must stay
+    // in the search — the bound cannot drop to 0.2 without evicting a real
+    // floor, and the -85.5 dBFS member proves the corridor is that narrow.
+    let worst = 0;
+    for (const sr of [8000, 44100]) {
+      const n = Math.round((NOISE_WINDOW_MS / 1000) * sr);
+      for (const floorDb of [-60, -72, -78, -84, -85.5]) {
+        for (const seed of [7, 23, 101]) {
+          const w = gaussFloorDb(n, floorDb, seed);
+          let zeros = 0;
+          for (let i = 0; i < n; i++) {
+            if (Math.round(w[i] * 32768) / 32768 === 0) zeros++;
+          }
+          worst = Math.max(worst, zeros / n);
+        }
+      }
+    }
+    expect(worst).toBeGreaterThan(0.2);
+    expect(worst).toBeLessThan(NOISE_WINDOW_MAX_SILENT_FRACTION);
+  });
+
+  it('pins the constant the two populations bracket', () => {
+    expect(NOISE_WINDOW_MAX_SILENT_FRACTION).toBe(0.25);
+  });
 });
 
 // ── deriveCompressor ────────────────────────────────────────────────────────
