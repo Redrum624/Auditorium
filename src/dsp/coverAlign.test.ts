@@ -18,6 +18,8 @@ import {
   ALIGN_PROMINENCE_MARGIN,
   ALIGN_REFINE_SECONDS,
   ALIGN_SMOOTHING_MS,
+  ALIGN_WEAK_CORRELATION,
+  ALIGN_WEAK_CORRELATION_MARGIN,
   alignEnvelopes,
   alignmentOdf,
   alignTakeToReference,
@@ -27,6 +29,7 @@ import {
 import { BANDS, computeBandTable } from './tempoCore';
 import {
   makeVocalLike,
+  mulberry32,
   perturbSchedule,
   syllableSchedule,
 } from './__fixtures__/coverAlignFixtures';
@@ -400,25 +403,141 @@ describe('alignTakeToReference — refusal', () => {
     const reference = makeVocalLike({ seed: 7, sampleRate: RATE, seconds: SECONDS, leadSeconds: 1.4 });
     const take = makeVocalLike({ seed: 7, sampleRate: RATE, seconds: SECONDS, leadSeconds: 0.2 });
     const stranger = makeVocalLike({ seed: 640, sampleRate: RATE, seconds: SECONDS, leadSeconds: 0.2 });
-    for (const other of [take, stranger]) {
-      const r = alignTakeToReference(reference, RATE, other, RATE)!;
+    // A song whose section repeats — the outcome that exists to BE a choice.
+    const period = 6;
+    const chorus = (leadSeconds: number, jitterSeed: number) =>
+      makeVocalLike({
+        seed: 55,
+        sampleRate: RATE,
+        seconds: period * 3,
+        leadSeconds,
+        repeatPeriodSeconds: period,
+        timingJitterSeconds: 0.02,
+        timingSeed: jitterSeed,
+      });
+
+    const results = [
+      alignTakeToReference(reference, RATE, take, RATE)!,
+      alignTakeToReference(reference, RATE, stranger, RATE)!,
+      alignTakeToReference(chorus(0.9, 1), RATE, chorus(0.3, 2), RATE)!,
+    ];
+    // The three arms this test is worth running over, so none of the assertions
+    // below is reached only for one kind of answer.
+    expect(results.map((r) => r.outcome)).toEqual(['confident', 'unrelated', 'ambiguous']);
+
+    for (const r of results) {
       expect(r.confident).toBe(r.outcome === 'confident');
-      expect(r.candidates).toBeDefined();
-      expect(r.candidates!.length).toBeGreaterThan(0);
+
+      // CC2 fix-round (IMP-4): presence is OUTCOME-CORRELATED. Candidates ride
+      // the two outcomes that are offers and nothing else, so a consumer that
+      // feature-detects on the field cannot be handed three guesses by a result
+      // that means "no usable guess".
+      const offers = r.outcome === 'ambiguous' || r.outcome === 'weak';
+      expect(r.candidates !== undefined).toBe(offers);
+      if (!offers) continue;
+
+      expect(r.candidates!.length).toBeGreaterThan(1);
       expect(r.candidates!.length).toBeLessThanOrEqual(ALIGN_CANDIDATE_COUNT);
       expect(r.candidates![0].offsetSeconds).toBe(r.offsetSeconds);
       expect(r.candidates![0].correlation).toBeCloseTo(r.peakCorrelation, 12);
       expect(r.candidates![0].prominence).toBeCloseTo(r.prominence, 12);
-      // Guard-separated, in descending order of correlation, every pair.
+
+      // CC2 fix-round (IMP-2): the guard separation, asserted at the FULL guard
+      // and on the REFINED offsets the caller will actually place. The previous
+      // bound was `ALIGN_GUARD_SECONDS − 2 × ALIGN_REFINE_SECONDS` = −0.05
+      // against an absolute value — a comparison that could not fail, standing
+      // where the contract's one structural promise about this list was
+      // supposed to be.
       for (let i = 1; i < r.candidates!.length; i++) {
         expect(r.candidates![i].correlation).toBeLessThanOrEqual(r.candidates![i - 1].correlation);
         for (let j = 0; j < i; j++) {
           expect(
             Math.abs(r.candidates![i].offsetSeconds - r.candidates![j].offsetSeconds)
-          ).toBeGreaterThanOrEqual(ALIGN_GUARD_SECONDS - 2 * ALIGN_REFINE_SECONDS);
+          ).toBeGreaterThanOrEqual(ALIGN_GUARD_SECONDS);
         }
       }
     }
+  });
+
+  /**
+   * CC2 fix-round (IMP-2). The separation above is enforced after refinement
+   * rather than inherited from the coarse walk, and this is the case that proves
+   * the enforcement is load-bearing rather than decorative: the fine pass may
+   * move each candidate by up to ±ALIGN_REFINE_SECONDS (0.2 s) while the coarse
+   * walk only guarantees ALIGN_GUARD_SECONDS (0.35 s) between them, so two
+   * candidates CAN be brought within a guard of each other by refinement alone.
+   */
+  it('cannot emit two candidates the fine pass has moved together', () => {
+    expect(2 * ALIGN_REFINE_SECONDS).toBeGreaterThan(ALIGN_GUARD_SECONDS);
+    const period = 6;
+    const chorus = (leadSeconds: number, jitterSeed: number) =>
+      makeVocalLike({
+        seed: 91,
+        sampleRate: RATE,
+        seconds: period * 3,
+        leadSeconds,
+        repeatPeriodSeconds: period,
+        timingJitterSeconds: 0.02,
+        timingSeed: jitterSeed,
+      });
+    const r = alignTakeToReference(chorus(0.9, 5), RATE, chorus(0.3, 6), RATE)!;
+    expect(r.candidates).toBeDefined();
+    const offsets = r.candidates!.map((c) => c.offsetSeconds);
+    for (let i = 0; i < offsets.length; i++) {
+      for (let j = i + 1; j < offsets.length; j++) {
+        expect(Math.abs(offsets[i] - offsets[j])).toBeGreaterThanOrEqual(ALIGN_GUARD_SECONDS);
+      }
+    }
+    // …and the list is not empty of alternatives merely because the filter ran.
+    expect(offsets.length).toBeGreaterThan(1);
+  });
+
+  /**
+   * CC2 fix-round (IMP-3). The gap zone: a peak above every unrelated pair the
+   * sweep can build, below the acceptance floor, on a take too short for the
+   * piecewise arm to have an opinion. Before the weak floor existed this was
+   * `'unrelated'` — "no usable guess" — about a measurement the populations say
+   * IS distinguishable from unrelated audio.
+   */
+  it('offers a gap-zone peak as a guess when no second arm can contradict it', () => {
+    // Constructed by degrading a genuine pair until its peak lands between the
+    // two floors: the same schedule, but the take is buried in noise. Searched
+    // rather than asserted blind, so this test measures the zone instead of
+    // hoping a magic number sits in it.
+    const seconds = 6;
+    const reference = makeVocalLike({ seed: 7, sampleRate: RATE, seconds, leadSeconds: 1.4 });
+    let found: ReturnType<typeof alignTakeToReference> = null;
+    for (const noiseAmplitude of [0.06, 0.075, 0.09, 0.11, 0.13, 0.16, 0.2]) {
+      const take = makeVocalLike({
+        seed: 7,
+        sampleRate: RATE,
+        seconds,
+        leadSeconds: 0.2,
+        noiseAmplitude,
+        varianceSeed: 4242,
+        timingJitterSeconds: 0.04,
+        timingSeed: 99,
+      });
+      const r = alignTakeToReference(reference, RATE, take, RATE);
+      if (
+        r &&
+        r.peakCorrelation >= ALIGN_WEAK_CORRELATION &&
+        r.peakCorrelation < ALIGN_MIN_CORRELATION
+      ) {
+        found = r;
+        break;
+      }
+    }
+    expect(found).not.toBeNull();
+    // The premise: the piecewise arm genuinely has nothing to say here.
+    expect(found!.windowsMeasured).toBe(0);
+    expect(found!.outcome).toBe('weak');
+    expect(found!.confident).toBe(false);
+    // A guess, offered with its alternatives — not a refusal.
+    expect(found!.candidates).toBeDefined();
+    expect(found!.candidates![0].offsetSeconds).toBe(found!.offsetSeconds);
+    // …and it is a guess worth offering: the true answer is 1.2 s.
+    expect(Math.abs(found!.offsetSeconds - 1.2)).toBeLessThan(0.05);
   });
 
   /**
@@ -483,6 +602,10 @@ describe('alignTakeToReference — the measured separation', () => {
    * rather than re-rendering the audio, which is what makes a smoothing-width
    * sweep affordable at all. */
   const envelopeCache = new Map<string, { a: AlignmentEnvelopes; b: AlignmentEnvelopes }>();
+  // The cache is what makes a smoothing-width sweep affordable, and it is also
+  // the largest thing this file holds; dropping it at the end lets the worker
+  // exit with its hands empty rather than at its high-water mark.
+  afterAll(() => envelopeCache.clear());
 
   interface PairOptions {
     timingJitterSeconds?: number;
@@ -598,6 +721,163 @@ describe('alignTakeToReference — the measured separation', () => {
       timingJitterSeconds: 0.02,
     });
 
+  // ── CC2 fix-round (IMP-1): the adversarial half of "unrelated" ─────────────
+  //
+  // Seed-diverse aperiodic schedules were the WHOLE unrelated population, and
+  // three things happened to the safety side at once: the correlation margin
+  // over unrelated audio halved, smoothing lifted the unrelated ceiling by 0.21,
+  // and prominence retired as a second independent barrier. A population that
+  // did not grow to match that is a margin measured against the easy case.
+  //
+  // These are the shapes the journey actually feeds the aligner, not shapes
+  // chosen to be beatable.
+
+  /** Envelopes for an arbitrary pair of signals, cached like `sweepPair`'s. */
+  function envelopePair(
+    key: string,
+    build: () => { reference: Float32Array[]; referenceRate: number; take: Float32Array[]; takeRate: number }
+  ): { a: AlignmentEnvelopes; b: AlignmentEnvelopes } {
+    const hit = envelopeCache.get(key);
+    if (hit) return hit;
+    const { reference, referenceRate, take, takeRate } = build();
+    const a = alignmentOdf(reference, referenceRate);
+    const b = alignmentOdf(take, takeRate);
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    const built = { a: a!, b: b! };
+    envelopeCache.set(key, built);
+    return built;
+  }
+
+  /** Broadband noise at a peak amplitude — a room, a preamp, a stem the model
+   * emptied. NOT digital silence: silence returns `null` through the no-onset
+   * path and never reaches a threshold, which is precisely why it proves
+   * nothing about one. */
+  const roomTone = (seed: number, seconds: number, rate: number, amplitude: number) => {
+    const rng = mulberry32(seed);
+    const n = new Float32Array(Math.round(seconds * rate));
+    for (let i = 0; i < n.length; i++) n[i] = amplitude * (rng() * 2 - 1);
+    return [n];
+  };
+
+  /**
+   * (a) LEAKAGE. The journey's reference is a SEPARATED vocal stem, and this
+   * repo has already measured what the real model does to a synthetic mix:
+   * routed the voice almost entirely to Other and returned Vocals 41 dB down and
+   * empty (`e2e-smoke.cjs`, finding CJ-3). What is left in that stem is the
+   * song's ACCOMPANIMENT — a different rhythm from the vocal line — under a
+   * noise floor. The ODF is std-normalised, so being 40 dB down does not make
+   * those onsets weak; it makes them the ONLY onsets, at full strength.
+   */
+  const leakagePair = (seed: number) =>
+    envelopePair(`leak/${seed}`, () => {
+      const accompaniment = makeVocalLike({
+        // A different schedule: the band is not singing the vocal line.
+        seed: seed * 31 + 7,
+        sampleRate: 44100,
+        seconds: SWEEP_SECONDS,
+        leadSeconds: 0.9,
+      });
+      const gain = Math.pow(10, -40 / 20);
+      const floor = roomTone(seed * 5 + 1, SWEEP_SECONDS + 0.9, 44100, 0.0008)[0];
+      const stem = Float32Array.from(accompaniment[0], (v, i) => v * gain + (floor[i] ?? 0));
+      return {
+        reference: [stem],
+        referenceRate: 44100,
+        take: makeVocalLike({
+          seed,
+          sampleRate: 48000,
+          seconds: SWEEP_SECONDS,
+          leadSeconds: 0.3,
+          hzScale: 1.26,
+          amplitudeJitter: 0.5,
+          noiseAmplitude: 0.012,
+          varianceSeed: seed * 7 + 3,
+          timingJitterSeconds: HUMAN_JITTER_SECONDS,
+          timingSeed: seed * 3 + 17,
+        }),
+        takeRate: 48000,
+      };
+    });
+
+  /** (b) ROOM TONE, both ways round: a stem with nothing in it against a real
+   * take, and a real stem against a take where the singer never came in. */
+  const roomToneReference = (seed: number) =>
+    envelopePair(`tone-ref/${seed}`, () => ({
+      reference: roomTone(seed, SWEEP_SECONDS + 0.9, 44100, 0.02),
+      referenceRate: 44100,
+      take: makeVocalLike({
+        seed,
+        sampleRate: 48000,
+        seconds: SWEEP_SECONDS,
+        leadSeconds: 0.3,
+        hzScale: 1.26,
+        amplitudeJitter: 0.5,
+        noiseAmplitude: 0.012,
+        varianceSeed: seed * 7 + 3,
+      }),
+      takeRate: 48000,
+    }));
+  const roomToneTake = (seed: number) =>
+    envelopePair(`tone-take/${seed}`, () => ({
+      reference: makeVocalLike({
+        seed,
+        sampleRate: 44100,
+        seconds: SWEEP_SECONDS,
+        leadSeconds: 0.9,
+      }),
+      referenceRate: 44100,
+      take: roomTone(seed * 11 + 3, SWEEP_SECONDS + 0.3, 48000, 0.02),
+      takeRate: 48000,
+    }));
+
+  /**
+   * (c) PERIODIC, SAME TEMPO. The shape smoothing favours most, and the one the
+   * guard interacts with: at this period the beat sits INSIDE
+   * ALIGN_GUARD_SECONDS, so the nearest beat-phase rival is excluded from the
+   * rival search by construction. Two recordings with no relation beyond a
+   * shared tempo — which is not a relation at all.
+   */
+  const METRONOME_PERIOD_SECONDS = 0.34;
+  const metronomicUnrelated = (seed: number) =>
+    envelopePair(`metro/${seed}`, () => ({
+      reference: makeVocalLike({
+        seed,
+        sampleRate: 44100,
+        seconds: SWEEP_SECONDS,
+        leadSeconds: 0.9,
+        repeatPeriodSeconds: METRONOME_PERIOD_SECONDS,
+        minSyllables: 1,
+      }),
+      referenceRate: 44100,
+      take: makeVocalLike({
+        seed: seed + 7919,
+        sampleRate: 48000,
+        seconds: SWEEP_SECONDS,
+        leadSeconds: 0.3,
+        repeatPeriodSeconds: METRONOME_PERIOD_SECONDS,
+        minSyllables: 1,
+        hzScale: 1.26,
+        amplitudeJitter: 0.5,
+        noiseAmplitude: 0.012,
+        varianceSeed: seed * 13 + 5,
+      }),
+      takeRate: 48000,
+    }));
+
+  const ADVERSARIAL_SEEDS = 4;
+  const adversarialTier1 = (smoothingMs: number) =>
+    Array.from({ length: ADVERSARIAL_SEEDS }, (_, s) => [
+      alignEnvelopes(leakagePair(8000 + s), smoothingMs)!,
+      alignEnvelopes(roomToneReference(8100 + s), smoothingMs)!,
+      alignEnvelopes(roomToneTake(8200 + s), smoothingMs)!,
+    ]).flat();
+  const adversarialPeriodic = (smoothingMs: number) =>
+    Array.from(
+      { length: ADVERSARIAL_SEEDS },
+      (_, s) => alignEnvelopes(metronomicUnrelated(8300 + s), smoothingMs)!
+    );
+
   const span = (v: number[]) => ({
     min: Number(Math.min(...v).toFixed(4)),
     max: Number(Math.max(...v).toFixed(4)),
@@ -605,7 +885,14 @@ describe('alignTakeToReference — the measured separation', () => {
 
   interface Population {
     cover: AlignmentMeasurement[];
+    /** TIER 1: everything a CORRELATION floor has to sit above. */
     unrelated: AlignmentMeasurement[];
+    /** TIER 2: unrelated audio that a correlation floor CANNOT catch and does
+     * not have to — two metronomes at one tempo genuinely do match at many
+     * lags, so the prominence arm answers them with `'ambiguous'`. Kept out of
+     * the floor derivation for the same reason the repeated-section population
+     * is, and asserted separately to never reach `'confident'`. */
+    periodic: AlignmentMeasurement[];
   }
 
   /** Every pair measured at one smoothing width. */
@@ -625,7 +912,8 @@ describe('alignTakeToReference — the measured separation', () => {
       expect(h).not.toBeNull();
       cover.push(h!);
     }
-    return { cover, unrelated: unrel };
+    unrel.push(...adversarialTier1(smoothingMs));
+    return { cover, unrelated: unrel, periodic: adversarialPeriodic(smoothingMs) };
   }
 
   /** The gap the CORRELATION floor has to live in — the arm that now carries
@@ -698,6 +986,10 @@ describe('alignTakeToReference — the measured separation', () => {
     // eslint-disable-next-line no-console
     console.log(
       [
+        `adversarial leakage   ${JSON.stringify(span(adversarialTier1(ALIGN_SMOOTHING_MS).filter((_, i) => i % 3 === 0).map((m) => m.peakCorrelation)))}`,
+        `adversarial tone ref  ${JSON.stringify(span(adversarialTier1(ALIGN_SMOOTHING_MS).filter((_, i) => i % 3 === 1).map((m) => m.peakCorrelation)))}`,
+        `adversarial tone take ${JSON.stringify(span(adversarialTier1(ALIGN_SMOOTHING_MS).filter((_, i) => i % 3 === 2).map((m) => m.peakCorrelation)))}`,
+        `periodic peak/prom    ${JSON.stringify(span(p.periodic.map((m) => m.peakCorrelation)))} / ${JSON.stringify(span(p.periodic.map((m) => m.prominence)))}`,
         `cover prominence      ${JSON.stringify(span(relatedProminence))}`,
         `unrelated prominence  ${JSON.stringify(span(unrelatedProminence))}`,
         `cover correlation     ${JSON.stringify(span(relatedPeak))}`,
@@ -740,15 +1032,34 @@ describe('alignTakeToReference — the measured separation', () => {
     expect(worstRelatedProminence - ALIGN_MIN_PROMINENCE).toBeGreaterThanOrEqual(
       ALIGN_PROMINENCE_MARGIN
     );
-    expect(bestUnrelatedProminence).toBeGreaterThan(0);
+    // CC2 fix-round (IMP-5): and the direction of the prominence relationship is
+    // asserted rather than described. Against the ENLARGED unrelated population
+    // it does not merely fail to separate — it INVERTS: the best unrelated pair
+    // out-prominences the worst cover. Pinning that keeps the docblock honest,
+    // and a future change that restored a positive gap would fail here and force
+    // someone to re-read why this floor stopped answering that question.
+    expect(bestUnrelatedProminence).toBeGreaterThan(worstRelatedProminence);
+
+    // CC2 fix-round (IMP-3): the WEAK floor, in the same gap, from the same two
+    // edges. It exists because a peak above every unrelated pair the sweep can
+    // build is evidence even when nothing else can be measured — and calling
+    // that 'unrelated' was the outcome label overclaiming.
+    expect(ALIGN_WEAK_CORRELATION - bestUnrelatedPeak).toBeGreaterThanOrEqual(
+      ALIGN_WEAK_CORRELATION_MARGIN
+    );
+    expect(ALIGN_MIN_CORRELATION - ALIGN_WEAK_CORRELATION).toBeGreaterThanOrEqual(
+      ALIGN_WEAK_CORRELATION_MARGIN
+    );
 
     // The fine pass is a REFINEMENT, not a second opinion. The clamp is
     // structural (the window is what `lagSurface` is given), so asserting it
-    // alone could never fail — measured, the refinement moves 3.2-6.4 ms against
-    // a 200 ms clamp, 31x of slack. Both are asserted: the structural bound for
-    // what it guarantees, and the MEASURED bound so the assertion has teeth.
+    // alone could never fail. CC2 fix-round: the measured figure is 0.4-39.4 ms,
+    // not the 3.2-6.4 ms this comment claimed before the envelopes were smoothed
+    // — a wider coarse lobe leaves the fine pass more to correct. Both bounds
+    // are asserted: the structural one for what it guarantees, and the MEASURED
+    // one (45 ms, 1.14x of the worst case) so the assertion has teeth.
     expect(Math.max(...relatedRefinement)).toBeLessThanOrEqual(ALIGN_REFINE_SECONDS);
-    expect(Math.max(...relatedRefinement)).toBeLessThan(0.05);
+    expect(Math.max(...relatedRefinement)).toBeLessThan(0.045);
 
     // The ±10 ms requirement is pinned by the ground-truth cases above, where
     // the take IS the reference at a known offset and the answer is not a
@@ -758,16 +1069,34 @@ describe('alignTakeToReference — the measured separation', () => {
     // ±40 ms the fixture now draws. The ceiling is on that disagreement, not a
     // restatement of the requirement — and it is BELOW the jitter itself, which
     // is the point: the aligner averages the variance out rather than following
-    // any one syllable.
+    // any one syllable. CC2 fix-round (IMP-6): pinned at the MEASURED 28.9 ms
+    // plus a little headroom rather than at the 40 ms of jitter, which was a
+    // ceiling loose enough to pass without measuring anything.
+    expect(Math.max(...relatedError)).toBeLessThan(0.035);
     expect(Math.max(...relatedError)).toBeLessThan(HUMAN_JITTER_SECONDS);
   });
 
   it('every related pair is accepted and every unrelated pair refused', () => {
     const p = populationsAt(ALIGN_SMOOTHING_MS);
     for (const m of p.cover) expect(m.outcome).toBe('confident');
+    // TIER 1 — seed-diverse schedules, a leakage stem, and room tone on either
+    // side: all under the correlation floor AND under the weak floor, so the
+    // answer is the one that means "no usable guess".
     for (const m of p.unrelated) expect(m.outcome).toBe('unrelated');
+    // TIER 2 — two recordings sharing only a tempo. A correlation floor cannot
+    // catch these and does not have to: they peak at 0.95 because they genuinely
+    // DO match at many lags, and the prominence arm says exactly that. The
+    // property that matters is the one asserted — never `'confident'`, never
+    // applied automatically — and the offer they produce is a choice of lags.
+    expect(p.periodic.length).toBeGreaterThan(0);
+    for (const m of p.periodic) {
+      expect(m.outcome).toBe('ambiguous');
+      expect(m.confident).toBe(false);
+      expect(m.peakCorrelation).toBeGreaterThan(ALIGN_MIN_CORRELATION);
+      expect(m.prominence).toBeLessThan(ALIGN_MIN_PROMINENCE);
+    }
     // The half that matters: a cover sung by a human being, refused before CC2.
-    expect(p.cover.slice(SEEDS)).toHaveLength(JITTER_SEEDS);
+    expect(p.cover.slice(SEEDS, SEEDS + JITTER_SEEDS)).toHaveLength(JITTER_SEEDS);
   });
 
   /**
@@ -901,7 +1230,9 @@ describe('alignTakeToReference — the measured separation', () => {
     // error the investigation measured, which is stated here as a ceiling rather
     // than asserted away.
     for (const m of mild) expect(m.outcome).toBe('confident');
-    expect(Math.max(...error(mild))).toBeLessThan(0.05);
+    // CC2 fix-round (IMP-6): the measured 29.8 ms with headroom, not a 50 ms
+    // ceiling 68 % above anything the sweep produces.
+    expect(Math.max(...error(mild))).toBeLessThan(0.035);
     expect(Math.max(...error(mild))).toBeGreaterThan(Math.max(...error(control)));
   });
 
@@ -924,16 +1255,22 @@ describe('alignTakeToReference — the measured separation', () => {
     );
     const repeatProminence = repeats.map((m) => m.prominence);
     const repeatPeak = repeats.map((m) => m.peakCorrelation);
+    // CC2 fix-round (IMP-1): two metronomes at one tempo are the OTHER
+    // several-places population, and the harder one — their prominence ceiling
+    // is above the repeated section's, so it is what this floor's lower margin
+    // is really measured against.
+    const periodicProminence = p.periodic.map((m) => m.prominence);
     // eslint-disable-next-line no-console
     console.log(
       [
         `aperiodic prominence  ${JSON.stringify(span(aperiodic))}`,
         `repeated  prominence  ${JSON.stringify(span(repeatProminence))}`,
         `repeated  peak        ${JSON.stringify(span(repeatPeak))}`,
+        `periodic  prominence  ${JSON.stringify(span(periodicProminence))}`,
       ].join('\n  ')
     );
     const worstAperiodic = Math.min(...aperiodic);
-    const bestRepeat = Math.max(...repeatProminence);
+    const bestRepeat = Math.max(...repeatProminence, ...periodicProminence);
     expect(bestRepeat).toBeLessThan(worstAperiodic);
     expect(ALIGN_MIN_PROMINENCE - bestRepeat).toBeGreaterThanOrEqual(ALIGN_PROMINENCE_MARGIN);
     expect(worstAperiodic - ALIGN_MIN_PROMINENCE).toBeGreaterThanOrEqual(ALIGN_PROMINENCE_MARGIN);

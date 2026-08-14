@@ -201,10 +201,11 @@ export const ALIGN_SMOOTHING_MS = 240;
  *
  * CC2 changed what this floor is FOR. It used to be half of the "is this even
  * the same song" test, derived against unrelated audio — and at the smoothing
- * width the correlation arm now needs, that gap has closed: an unrelated pair
- * reaches 0.237 while the worst cover reaches 0.247. Prominence cannot carry
- * relatedness any more, and pretending otherwise would be a floor with no
- * margin.
+ * width the correlation arm now needs, that gap has not merely closed but
+ * INVERTED: unrelated audio reaches 0.2491 prominence while the worst cover
+ * reaches 0.217. The populations overlap by 0.032 in the wrong direction.
+ * Prominence cannot carry relatedness any more, and pretending otherwise would
+ * be a floor with no margin — or a floor with a negative one.
  *
  * What prominence separates CLEANLY is a different question, and the one it was
  * always really asking: does ONE lag stand out, or do several? MEASURED, in
@@ -212,8 +213,9 @@ export const ALIGN_SMOOTHING_MS = 240;
  * calibration never had — a song whose section repeats three times, where the
  * rival lag one section away is a GENUINE partial match:
  *
- *     aperiodic cover prominence   see the printed sweep
- *     repeated-section prominence  collapses to ~0.01 with the peak still ~0.89
+ *     aperiodic cover prominence     0.217 … 0.537
+ *     repeated-section prominence    0.0011 … 0.0139, peak still 0.876 … 0.899
+ *     two metronomes at one tempo    0.0132 … 0.0241, peak 0.9539 … 0.9577
  *
  * A run below this floor is not refused as unbelievable — it is reported as
  * {@link AlignmentMeasurement.outcome} `'ambiguous'`, with the guard-separated
@@ -221,7 +223,7 @@ export const ALIGN_SMOOTHING_MS = 240;
  * different sentence from "this take matches nothing" and the user can answer
  * only the first one.
  */
-export const ALIGN_MIN_PROMINENCE = 0.115;
+export const ALIGN_MIN_PROMINENCE = 0.12;
 
 /**
  * …and the floor on the peak correlation itself, which is what now carries
@@ -229,11 +231,51 @@ export const ALIGN_MIN_PROMINENCE = 0.115;
  * ±40 ms human timing variance the shipped 0.607 was never calibrated against.
  * See the printed populations; the constant is the middle of the measured gap.
  *
- * A run below this floor is only 'unrelated' when the piecewise arm ALSO fails
- * (see {@link ALIGN_MAX_LAG_SPREAD_SECONDS}) — the two are OR'd for "is there a
- * relation at all" and AND'ed for "can it be believed".
+ * CC2 fix-round (IMP-1): the population it sits above is no longer only
+ * different-seed syllable schedules. Smoothing lifted unrelated audio by 0.21
+ * and prominence retired as a second barrier, so the safety side had to grow to
+ * match — it now also contains a LEAKAGE stem (the song's accompaniment 40 dB
+ * down under a noise floor, which is what this repo measured the real separator
+ * leaving behind), and ROOM TONE on each side in turn. Measured ceilings:
+ * leakage 0.6454, room-tone reference 0.6345, room-tone take 0.6538 — the last
+ * of which is what this floor's lower margin is actually measured against.
+ *
+ * One unrelated shape is deliberately NOT under this floor and cannot be: two
+ * recordings sharing only a TEMPO peak at 0.9539–0.9577, because two metronomes
+ * genuinely do match at many lags. Their prominence collapses to ≤0.0241 and
+ * they are answered by {@link ALIGN_MIN_PROMINENCE} as `'ambiguous'` — never
+ * `'confident'`, which is the property that matters and which the sweep asserts.
  */
 export const ALIGN_MIN_CORRELATION = 0.731;
+
+/**
+ * CC2 fix-round (IMP-3). The correlation above which a take is DISTINGUISHABLE
+ * from unrelated audio, even when nothing else can be measured about it.
+ *
+ * Between this and {@link ALIGN_MIN_CORRELATION} lies a gap zone: a peak too low
+ * to be believed, yet above every unrelated pair the sweep can produce —
+ * including the leakage and room-tone members. Before this constant existed such
+ * a take was called `'unrelated'` ("no usable guess") whenever the overlap was
+ * too short for the piecewise arm to speak, which is exactly the length of take
+ * users record. Correlation above the unrelated ceiling IS evidence, and the
+ * honest answer is `'weak'`: a guess to OFFER. The harm is bounded because
+ * `'weak'` is never applied automatically.
+ *
+ * The rule the gap zone follows, in full:
+ *   - piecewise evidence UNAVAILABLE → `'weak'`. Nothing contradicts the peak.
+ *   - piecewise windows AVAILABLE AND DISAGREEING → `'unrelated'`. The second
+ *     arm is actively against it, and two arms disagreeing is not a guess worth
+ *     showing.
+ *
+ * MEASURED like every other threshold: the middle of the gap between the
+ * unrelated ceiling (0.6538) and the acceptance floor, asserted from both edges.
+ */
+export const ALIGN_WEAK_CORRELATION = 0.692;
+
+/** …and its margin from the unrelated ceiling below and the acceptance floor
+ * above. Narrower than the acceptance margins because it splits what is left of
+ * one gap rather than spanning a gap of its own — stated rather than hidden. */
+export const ALIGN_WEAK_CORRELATION_MARGIN = 0.03;
 
 /**
  * CP1 fix-round. How far each floor must sit from BOTH population edges.
@@ -251,7 +293,7 @@ export const ALIGN_MIN_CORRELATION = 0.731;
  * sit in is narrower. It is a real 0.07 on both sides of a measured gap rather
  * than a comfortable number over a population no user will ever produce.
  */
-export const ALIGN_PROMINENCE_MARGIN = 0.1;
+export const ALIGN_PROMINENCE_MARGIN = 0.09;
 /** …and the same for the correlation gap. */
 export const ALIGN_CORRELATION_MARGIN = 0.07;
 
@@ -335,11 +377,18 @@ export const ALIGN_CANDIDATE_COUNT = 3;
  *   with a repeated chorus looks like. `candidates` carries the guard-separated
  *   rivals. NEVER auto-accepted: the peak lands on the wrong repeat about half
  *   the time, so this is a question for the user, not an answer.
- * - `weak` — below acceptance, but distinguishable from unrelated audio: either
- *   the peak clears its floor without the windows agreeing, or the windows agree
- *   without the peak clearing. A usable guess to OFFER, not to apply.
- * - `unrelated` — inside the measured unrelated band on both arms. No guess
- *   worth showing.
+ * - `weak` — below acceptance, but distinguishable from unrelated audio. Three
+ *   ways in: the peak clears its floor without the windows agreeing; the windows
+ *   agree without the peak clearing; or the peak sits in the GAP ZONE between
+ *   {@link ALIGN_WEAK_CORRELATION} and {@link ALIGN_MIN_CORRELATION} — above
+ *   every unrelated pair the sweep can build — with no piecewise evidence to
+ *   contradict it. A usable guess to OFFER, not to apply. `candidates` is
+ *   carried here too, so a caller can show the alternatives rather than one
+ *   number the user has to trust.
+ * - `unrelated` — no arm distinguishes it from the measured unrelated band. A
+ *   gap-zone peak lands here ONLY when the piecewise windows are available AND
+ *   disagree: evidence actively against, rather than evidence merely absent.
+ *   No guess worth showing.
  */
 export type AlignmentOutcome = 'confident' | 'ambiguous' | 'weak' | 'unrelated';
 
@@ -374,10 +423,18 @@ export interface AlignmentMeasurement {
   /** `outcome === 'confident'`. Kept as a field so every existing consumer of
    * the boolean keeps compiling and keeps meaning what it meant. */
   confident: boolean;
-  /** CC2. The guard-separated lags the surface likes, best first, at most
-   * {@link ALIGN_CANDIDATE_COUNT}. Always present when a surface was formed;
-   * `candidates[0].offsetSeconds === offsetSeconds`. The reason an `'ambiguous'`
-   * outcome can be shown as a choice rather than as a refusal. */
+  /**
+   * CC2. The guard-separated lags the surface likes, best first, at most
+   * {@link ALIGN_CANDIDATE_COUNT}, separated by at least
+   * {@link ALIGN_GUARD_SECONDS} AFTER refinement.
+   * `candidates[0].offsetSeconds === offsetSeconds`.
+   *
+   * Present on `'ambiguous'` and `'weak'` — the two outcomes that are OFFERS —
+   * and absent on the other two. `'confident'` has its answer in
+   * `offsetSeconds`, and `'unrelated'` has no guess worth showing, which is what
+   * the word means. Presence is therefore safe to feature-detect on, though
+   * `outcome` remains the dispatch key.
+   */
   candidates?: AlignmentCandidate[];
   /**
    * CC2. How fast the take slides against the reference, in seconds per minute,
@@ -387,9 +444,15 @@ export interface AlignmentMeasurement {
    * {@link ALIGN_PIECEWISE_MIN_WINDOWS} windows.
    *
    * Present even when small: at a drift this arm cannot resolve from timing
-   * jitter on a 20 s take the sweep still measured 25–30 ms of placement error,
+   * jitter on a 20 s take the sweep still measured 15–30 ms of placement error,
    * so a caller quoting the module's ±10 ms needs the number rather than a
    * boolean.
+   *
+   * CC2 fix-round (IMP-4): present only when the windows AGREED — on
+   * `'confident'`, and on the `'weak'` arm that drift itself produced. A slope
+   * fitted through windows that scattered across a repeated section, or across
+   * four seconds of unrelated audio, is an arbitrary number wearing a unit, and
+   * it used to be attached anyway.
    */
   driftSecondsPerMinute?: number;
   /**
@@ -397,13 +460,16 @@ export interface AlignmentMeasurement {
    * other, in seconds — `|driftSecondsPerMinute| / 60 × overlapSeconds`. This is
    * the quantity the confidence gate is on (see
    * {@link ALIGN_MAX_DRIFT_SPAN_SECONDS}) and the one worth saying out loud:
-   * "your take slides 90 ms across the part that overlaps".
+   * "your take slides 90 ms across the part that overlaps". Present exactly when
+   * `driftSecondsPerMinute` is.
    */
   driftSpanSeconds?: number;
   /**
    * CC2. How far the independently-aligned windows disagree once that line is
    * taken out, in seconds — the median deviation from their own median lag.
-   * Absent for the same reason `driftSecondsPerMinute` is.
+   * Absent only when the arm could not run at all: unlike the drift pair this
+   * one MEANS something when the windows disagree, because it is what the
+   * disagreement verdict was made of.
    */
   windowLagSpreadSeconds?: number;
   /** CC2. How many windows the piecewise pass actually aligned. 0 when it could
@@ -929,21 +995,29 @@ export function alignEnvelopes(
   // Every candidate is refined the same way the winner is, so a caller offering
   // the user a choice is offering three answers of one accuracy rather than one
   // good one and two coarse ones.
-  const candidates: AlignmentCandidate[] = candidatesOf(
-    coarse,
-    guardFrames,
-    ALIGN_CANDIDATE_COUNT
-  ).map((idx, rank) => {
+  //
+  // CC2 fix-round (IMP-2): and the separation is enforced AFTER refinement, not
+  // assumed from before it. The coarse walk picks lags at least a guard apart,
+  // but each is then moved independently by up to ±ALIGN_REFINE_SECONDS — two
+  // candidates 0.35 s apart could in principle converge, and a picker offering
+  // two near-identical "choices" is worse than offering one. Measured, the
+  // refinement moves up to 39 ms and this filter drops nothing; it exists so
+  // that a future change to the fine pass cannot make the contract quietly
+  // false.
+  const candidates: AlignmentCandidate[] = [];
+  for (const [rank, idx] of candidatesOf(coarse, guardFrames, ALIGN_CANDIDATE_COUNT).entries()) {
     const lagSeconds =
       rank === 0 ? coarseOffsetSeconds : (idx + coarse.kLo) / ALIGN_COARSE_FRAME_RATE_HZ;
     // Rank 0 IS the winner, whose refinement has already been paid for.
     const candidateRefined = rank === 0 ? refinedBest : refine(lagSeconds);
-    return {
-      offsetSeconds: Number.isFinite(candidateRefined) ? candidateRefined : lagSeconds,
+    const offset = Number.isFinite(candidateRefined) ? candidateRefined : lagSeconds;
+    if (candidates.some((c) => Math.abs(c.offsetSeconds - offset) < ALIGN_GUARD_SECONDS)) continue;
+    candidates.push({
+      offsetSeconds: offset,
       correlation: coarse.rho[idx],
       prominence: coarse.rho[idx] - rivalOfIndex(coarse, idx, guardFrames),
-    };
-  });
+    });
+  }
 
   const piecewise = piecewiseEvidence(
     aCoarse,
@@ -968,12 +1042,28 @@ export function alignEnvelopes(
       : (Math.abs(piecewise.driftSecondsPerMinute) / 60) * overlapSeconds;
   const drifts = driftSpanSeconds !== undefined && driftSpanSeconds > ALIGN_MAX_DRIFT_SPAN_SECONDS;
   const measuredAgreement = piecewise !== null && windowsAgree;
+  // CC2 fix-round (IMP-3): the gap zone. A peak above every unrelated pair the
+  // sweep can build is evidence in itself — but only while the second arm is
+  // SILENT. Windows that ran and disagreed are evidence against, and outrank it.
+  const aboveUnrelatedBand = peak >= ALIGN_WEAK_CORRELATION && piecewise === null;
 
   let outcome: AlignmentOutcome;
-  if (!peakClears && !measuredAgreement) outcome = 'unrelated';
+  if (!peakClears && !measuredAgreement && !aboveUnrelatedBand) outcome = 'unrelated';
   else if (peakClears && prominence < ALIGN_MIN_PROMINENCE) outcome = 'ambiguous';
   else if (peakClears && windowsAgree && !drifts) outcome = 'confident';
   else outcome = 'weak';
+
+  // CC2 fix-round (IMP-4): a field is present only where its value MEANS
+  // something, so that a consumer feature-detecting on presence cannot be told
+  // something false. `candidates` goes to the two outcomes that are offers —
+  // 'ambiguous' (pick one of these) and 'weak' (here is the guess and its
+  // alternatives). 'confident' already has its answer in `offsetSeconds`, and
+  // 'unrelated' has no guess worth showing, which is the whole meaning of the
+  // word. The drift pair is gated on the windows AGREEING: a slope fitted
+  // through windows that scattered across a repeated section or across four
+  // seconds of unrelated audio is an arbitrary number wearing a unit.
+  const offersCandidates = outcome === 'ambiguous' || outcome === 'weak';
+  const driftIsMeaningful = piecewise !== null && windowsAgree;
 
   return {
     offsetSeconds,
@@ -982,14 +1072,14 @@ export function alignEnvelopes(
     prominence,
     outcome,
     confident: outcome === 'confident',
-    candidates,
-    ...(piecewise
-      ? {
-          driftSecondsPerMinute: piecewise.driftSecondsPerMinute,
-          driftSpanSeconds,
-          windowLagSpreadSeconds: piecewise.spreadSeconds,
-        }
+    ...(offersCandidates ? { candidates } : {}),
+    ...(driftIsMeaningful
+      ? { driftSecondsPerMinute: piecewise.driftSecondsPerMinute, driftSpanSeconds }
       : {}),
+    // The spread is the ONE piecewise field whose meaning survives
+    // disagreement: it is what the disagreement verdict was made of, so it is
+    // reported whenever the arm spoke at all.
+    ...(piecewise ? { windowLagSpreadSeconds: piecewise.spreadSeconds } : {}),
     windowsMeasured: piecewise ? piecewise.windowLagSeconds.length : 0,
     coarseOffsetSeconds,
     lagsEvaluated: coarse.evaluated,
