@@ -137,6 +137,23 @@ export function monoMix(channels: Float32Array[]): Float32Array {
  * INVERT at exactly the lengths that can stay hidden, and no constant exists
  * for the arm to use.
  *
+ * KNOWN LIMITATION OF THE CENSUS (N6 — pre-existing: the round-4 code, and
+ * the code before the eviction existed, remove the same material; parked by
+ * controller ruling pending a design round). The census sees only what no
+ * accepted window covers, and the acceptance bound constrains a window's
+ * ZEROS, not its LEVELS — so a quiet island of up to ~375 ms (sixteen
+ * `TILT_FFT_SIZE` frames: an accepted covering window needs only 75 % real
+ * material, and a loud neighbour supplies it) sitting inside an accepted
+ * MIXED window is invisible here. Measured at 44.1 kHz: a 200-300 ms whisper
+ * island at -60 dBFS, bracketed by digital silence immediately BEFORE a loud
+ * burst, reports hiddenRealSamples = 0, the gate runs at the floor's
+ * threshold, and 100 % of the island is removed. The mirror island AFTER the
+ * burst loses 0.0 %: `GATE_HOLD_MS` equals the window length and holds the
+ * gate open across it, but the gate's short attack protects nothing
+ * backwards. The exposure is therefore quiet material approaching a phrase
+ * from inside digital silence — a strip-silenced pre-roll holding an inhale,
+ * a soft pickup consonant.
+ *
  * The flag is opt-in because `deriveCompressor`'s consumption of the OLD
  * semantics is measured and pinned: on a gated take its quietest window is a
  * fade tail reading tens of dB low, and its derived threshold still moves by

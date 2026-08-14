@@ -1,6 +1,7 @@
 import {
   DE_ESSER_BIT_EXACT_OFFSET_DB,
   DE_ESSER_RMS_OFFSET_DB,
+  GATE_CANCELLATION_DEPTH_DB,
   GATE_HEADROOM_DB,
   GATE_HOLD_MS,
   GATE_SHAPED_RESIDUAL_DB,
@@ -1342,6 +1343,78 @@ describe('deriveGate', () => {
       if (!res.run) return;
       const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
       expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
+    });
+
+    // N5 — the guard's first version counted exact zeros in the MIX and read
+    // anything over the window bound as cancellation. That premise is false
+    // for independent channels a few LSB wide: frame silence is a PRODUCT
+    // (every channel zero) while mix zeros are a SUM (L = -R at that sample),
+    // and the sum runs several times the product — the quietest window of the
+    // rows below reads ~26-27 % mix zeros against ~14 % silent frames, so
+    // ordinary quiet quantised stereo was refused with instructions to fix a
+    // polarity flip it did not have. Depth tells the cases apart where
+    // counting cannot: these windows mix exactly 3.0-3.1 dB below the window
+    // RMS (the uncorrelated sum of two independent channels), where a real
+    // inversion mixes to digital zero, 203 dB deep.
+    it('does not mistake coincidental LSB collisions for polarity — quiet quantised stereo gates (N5)', () => {
+      /** Independent floors per channel (different seeds), correlated sung
+       * phrases, the whole take quantised to `bits` — everyday material for a
+       * quiet recording through a coarse converter. */
+      function stereoQuantisedTake(bits: number, floorDb: number): { L: Float32Array; R: Float32Array; pauses: { start: number; end: number }[] } {
+        const pause = Math.round(1.0 * SR);
+        const phrase = Math.round(0.8 * SR);
+        const body = 3 * pause + 2 * phrase;
+        const L = gaussFloorDb(body, floorDb, 7);
+        const R = gaussFloorDb(body, floorDb, 23);
+        const pauses: { start: number; end: number }[] = [];
+        let at = 0;
+        for (const [sung, n] of [
+          [false, pause],
+          [true, phrase],
+          [false, pause],
+          [true, phrase],
+          [false, pause],
+        ] as const) {
+          if (!sung) pauses.push({ start: at, end: at + n });
+          else {
+            let ph = 0;
+            for (let i = 0; i < n; i++) {
+              const t = i / SR;
+              ph += (2 * Math.PI * 220) / SR;
+              const c = Math.min(1, t / 0.04) * Math.min(1, (n / SR - t) / 0.06);
+              L[at + i] += 0.25 * c * Math.sin(ph);
+              R[at + i] += 0.25 * c * Math.sin(ph);
+            }
+          }
+          at += n;
+        }
+        const steps = Math.pow(2, bits - 1);
+        for (let i = 0; i < body; i++) {
+          L[i] = Math.round(L[i] * steps) / steps;
+          R[i] = Math.round(R[i] * steps) / steps;
+        }
+        return { L, R, pauses };
+      }
+
+      for (const [bits, floorDb] of [
+        [8, -42],
+        [12, -66],
+        [16, -90],
+      ] as const) {
+        const { L, R, pauses } = stereoQuantisedTake(bits, floorDb);
+        const res = deriveGate([L, R], SR);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        const out = noiseGateEffect.process([Float32Array.from(L), Float32Array.from(R)], SR, res.params).channels[0];
+        expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
+      }
+
+      // The measured gap the constant sits in is enormous (3.1 vs 203 dB);
+      // mutations off either edge are caught by behaviour (a low bound fails
+      // the rows above on their 3 dB depth; a bound past 203 lets the
+      // [ch, -ch] member's all-zero mix through to checks that read silence
+      // and run). The literal pins the in-gap placement.
+      expect(GATE_CANCELLATION_DEPTH_DB).toBe(60);
     });
   });
 

@@ -128,7 +128,6 @@ import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
 import {
   HUM_EXCESS_THRESHOLD_DB,
   MAINS_BASE_FREQUENCIES,
-  NOISE_WINDOW_MAX_SILENT_FRACTION,
   NOISE_WINDOW_MS,
   TILT_FFT_SIZE,
   detectMainsHum,
@@ -802,6 +801,40 @@ export const GATE_VOICED_FRACTION = 0.05;
  */
 export const GATE_SHAPED_RESIDUAL_DB = 2.5;
 
+/**
+ * How far below the quietest window's own RMS its mono MIX may sit, in dB,
+ * before the gate concludes the channels cancel each other and declines
+ * (M9/N5).
+ *
+ * The content checks read the MIX, and the mix of a channel with its own
+ * inversion is digital zero — both checks would read silence and wave through
+ * a take whose mono version declines. The first version of this guard counted
+ * exact zeros in the mix against the window bound, and its premise — "a
+ * mostly-zero mix of a mostly-real window can only mean cancellation" — was
+ * measurably false: frame silence is a PRODUCT (every channel exactly zero)
+ * while a mix zero is a SUM (L = -R at that sample), and for two independent
+ * channels a few LSB wide the sum runs several times the product. Ordinary
+ * quiet quantised stereo (8-bit floors near -42 dBFS, 12-bit near -66,
+ * 16-bit near -90 — everyday material) read 26-27 % mix zeros against ~14 %
+ * silent frames, tripped the count, and was told to fix a polarity flip it
+ * did not have.
+ *
+ * LEVEL separates the cases where counting cannot. Measured on the quietest
+ * window of exactly those takes: two independent channels mix to the
+ * uncorrelated sum's 3.0 dB below the window RMS (3.00-3.10 dB across
+ * 8/12/16-bit floors at 8 and 44.1 kHz — the value is arithmetic, not
+ * fixture luck), while a truly inverted pair mixes to digital zero,
+ * 203 dB deep. 60 dB sits 57 dB above anything two non-derived channels
+ * measured across a whole broadband 500 ms window, and ~143 dB below a true
+ * inversion: at 60 dB of cancellation the mix retains less than a thousandth
+ * of the window's material, so checks reading it would be reading nothing. A
+ * gain-riding inversion (R = -g·L) crosses it only for |1 - g| < 0.002 —
+ * channels that are derived copies, for which the polarity diagnosis is the
+ * right one — while shallower pairs keep a faithful, merely attenuated mix
+ * and fall through to the ordinary checks.
+ */
+export const GATE_CANCELLATION_DEPTH_DB = 60;
+
 export function deriveGate(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('noise-gate');
   // The search refuses MOSTLY-SILENT candidate windows (the opt-in flag; see
@@ -915,12 +948,15 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
   // only when EVERY channel is exactly zero, but these checks read the MIX,
   // and the mix of an exactly polarity-inverted pair (L = -R) is all zeros —
   // both checks would read a silent window and wave through a take whose mono
-  // version declines. The window arrived here guaranteed mostly-real
-  // frame-wise, so a mostly-zero mix can only mean cancellation, and the
-  // stage declines rather than classifying audio it cannot see.
-  let mixZeros = 0;
-  for (let i = 0; i < window.length; i++) if (window[i] === 0) mixZeros++;
-  if (window.length > 0 && mixZeros / window.length > NOISE_WINDOW_MAX_SILENT_FRACTION) {
+  // version declines. Cancellation is detected by LEVEL, not by counting
+  // zeros in the mix: frame silence is a product where a mix zero is a sum,
+  // and for independent channels a few LSB wide the sum runs several times
+  // the product, so a zero count mistakes ordinary quiet quantised stereo
+  // for an inverted pair (N5). See `GATE_CANCELLATION_DEPTH_DB`.
+  let mixSumSq = 0;
+  for (let i = 0; i < window.length; i++) mixSumSq += window[i] * window[i];
+  const mixRmsDb = toDb(Math.sqrt(mixSumSq / Math.max(1, window.length)));
+  if (noise.rmsDb - mixRmsDb > GATE_CANCELLATION_DEPTH_DB) {
     return {
       run: false,
       reason: `the channels of the quietest ${NOISE_WINDOW_MS} ms cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see this passage at all. Fix the inverted channel's polarity and run the chain again. Nothing was gated`,
