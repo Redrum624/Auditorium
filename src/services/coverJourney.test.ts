@@ -362,6 +362,41 @@ describe('runCoverJourney — a second pass on the same song', () => {
     expect(second!.stages[0].derived[1].from).toMatch(/already holds/i);
   });
 
+  /**
+   * H1 (CC4 fix-round-2 re-review, Nit 1) — "adoption writes nothing" made
+   * falsifiable.
+   *
+   * Every other assertion about the adopt arm passes just as happily under an
+   * implementation that WRITES the identical channels back: `holdsExactly` has
+   * already proved the content equal, so an `updateDocument({ ...previous,
+   * channels: instrumentalChannels })` changes no sample anyone can read, and
+   * even the redo case survives it (`redo` replays a closure-captured snapshot
+   * rather than whatever the store now holds). The claim the code and the
+   * report both make in bold — that the adopt arm performs no store write at
+   * all — was therefore pinned by nothing.
+   *
+   * The assertion is on OBJECT IDENTITY, which is the strongest form available
+   * here and needs no spy: the store replaces documents by id with a new
+   * object, so the very same object surviving the pass is proof that no write
+   * of any content happened — a rewrite with identical channels still mints a
+   * new one. `dirty` is the second half, because the flag is the one
+   * user-visible difference between "already holds this" and "rewritten with
+   * the same bytes": it is what puts a ` *` in the Files panel and what makes
+   * closing the document ask about unsaved work.
+   */
+  it('writes nothing at all to the document it adopts', async () => {
+    const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const theirs = first!.separation!.instrumentalDocId;
+    const before = useAppStore.getState().documents.find((d) => d.id === theirs)!;
+
+    const second = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(second!.separation!.instrumentalDocId).toBe(theirs);
+    const after = useAppStore.getState().documents.find((d) => d.id === theirs)!;
+    expect(after).toBe(before);
+    expect(after.dirty).toBe(false);
+  });
+
   it('never adopts a copy whose samples are not this pass\'s own sum', async () => {
     const first = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
     // A stem changes between the passes — same name, same rate, same length, so
