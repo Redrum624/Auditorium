@@ -790,8 +790,16 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
   // window sits inside its soft half, so the threshold covers a real phrase and
   // the gate mutes it. See `GATE_VOICED_FRACTION`: voice is periodic, room tone
   // is not, and the pitch detector already answers that per frame.
-  const window = monoMix(channels).subarray(noise.startSample, noise.startSample + noise.lengthSamples);
-  const track = detectPitch(Float32Array.from(window), sampleRate);
+  // Mixed over the WINDOW only, not the take: `monoMix` on a 142 s stereo take
+  // would allocate 25 MB to look at half a second of it, and the cost of this
+  // check should not scale with a length it never reads.
+  const window = new Float32Array(noise.lengthSamples);
+  for (let i = 0; i < window.length; i++) {
+    let sum = 0;
+    for (const c of channels) sum += c[noise.startSample + i];
+    window[i] = sum / channels.length;
+  }
+  const track = detectPitch(window, sampleRate);
   let voicedFrames = 0;
   for (const frame of track.frames) if (frame.f0Hz !== null) voicedFrames++;
   const voicedFraction = track.frames.length === 0 ? 0 : voicedFrames / track.frames.length;
