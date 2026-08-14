@@ -185,6 +185,38 @@ const confidentAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurem
   refined: true,
 });
 
+/**
+ * A refusal of the ONE shape the contract emits for `'unrelated'`.
+ *
+ * Not `confidentAlignment` with the outcome swapped: that fixture's piecewise
+ * fields say the windows ran AND agreed (spread 0.005 ≤ the 0.34 limit), and
+ * agreement is exactly what excludes 'unrelated' — a peak this low with
+ * agreeing windows classifies 'weak'. The drift pair is stricter still: the
+ * emitter attaches it only on arms where the windows agreed, so an 'unrelated'
+ * measurement carrying a drift figure is a state no run can produce.
+ *
+ * `rivalCorrelation` is derived rather than inherited for the same reason:
+ * prominence IS `peakCorrelation − rivalCorrelation`.
+ */
+const unrelatedAlignment = (
+  offsetSeconds: number,
+  peakCorrelation: number,
+  prominence: number
+): coverAlign.AlignmentMeasurement => {
+  const base = confidentAlignment(offsetSeconds);
+  delete base.windowLagSpreadSeconds;
+  delete base.driftSecondsPerMinute;
+  return {
+    ...base,
+    peakCorrelation,
+    rivalCorrelation: peakCorrelation - prominence,
+    prominence,
+    outcome: 'unrelated',
+    confident: false,
+    windowsMeasured: 0,
+  };
+};
+
 beforeEach(() => {
   jest.clearAllMocks();
   runVocalChain.mockResolvedValue(okVocalReport());
@@ -861,15 +893,11 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
   });
 
   it('places at zero and states the numbers when the alignment is not believed', async () => {
-    alignTakeToReference.mockReturnValue({
-      ...confidentAlignment(3.5),
-      peakCorrelation: 0.31,
-      prominence: 0.02,
-      // CC2's contract: a 0.31 peak is below every floor and every unrelated
-      // band, and `confident` must equal `outcome === 'confident'`.
-      outcome: 'unrelated',
-      confident: false,
-    });
+    // CC2's contract: a 0.31 peak is below every floor and every unrelated
+    // band, and with no window agreement to speak against it that is
+    // 'unrelated' — the one outcome whose `confident` is false and whose
+    // piecewise fields are absent.
+    alignTakeToReference.mockReturnValue(unrelatedAlignment(3.5, 0.31, 0.02));
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
 
     expect(report!.alignmentRefused).toBe(true);
@@ -1067,14 +1095,8 @@ describe('runCoverJourney — what the Place row says it placed at', () => {
     report!.stages.find((s) => s.id === 'place')!.derived.find((d) => d.label === 'Take at')!;
 
   it('says the alignment was REFUSED rather than claiming a measured +0.000 s', async () => {
-    alignTakeToReference.mockReturnValue({
-      ...confidentAlignment(-8.258),
-      peakCorrelation: 0.423,
-      prominence: 0.079,
-      // CC2's contract: `confident` must equal `outcome === 'confident'`.
-      outcome: 'unrelated',
-      confident: false,
-    });
+    // The reported case's numbers, in the shape the contract emits for them.
+    alignTakeToReference.mockReturnValue(unrelatedAlignment(-8.258, 0.423, 0.079));
     const row = takeAtRow(await runCoverJourney({ songDocId: songId, takeDocId: takeId }));
     expect(row.value).toBe('0.000 s');
     expect(row.from).toContain('refused');

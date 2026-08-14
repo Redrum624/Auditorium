@@ -967,9 +967,30 @@ describe('CoverChainDialog — applying the refused guess', () => {
     });
   });
 
-  it('words the offer as weak-but-plausible when the measurement says so', async () => {
-    await runRefused({ alignment: measurement(-8.258, { outcome: 'weak' }) });
+  // The fixture used to be `{ outcome: 'weak' }` with no candidates, which
+  // pinned a render arm the emitter cannot produce: candidates ride along on
+  // EVERY 'weak' measurement, so the single button is never what a real weak
+  // refusal shows. That blind spot is what let the refusal copy keep naming
+  // the button on this arm. The button arm is still covered, on the two shapes
+  // that genuinely reach it — 'unrelated' below, and the outcome-less
+  // measurement the tests above run on.
+  it('words the offer as weak-but-plausible and offers its lags as rows', async () => {
+    await runRefused({
+      alignment: measurement(-8.258, {
+        outcome: 'weak',
+        candidates: [
+          { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+          { offsetSeconds: 3.75, correlation: 0.41, prominence: 0.06 },
+        ],
+      }),
+    });
     expect(screen.getByTestId('cover-journey-guess-offer')).toHaveTextContent('weak but plausible');
+    // The first row IS the measured guess — `candidates[0].offsetSeconds ===
+    // offsetSeconds` — so the weak arm offers its own answer first and its
+    // alternatives after, rather than a second way to apply the same one.
+    expect(screen.getByTestId('cover-journey-guess-candidate-0')).toHaveTextContent('−8.258 s');
+    expect(screen.getByTestId('cover-journey-guess-candidate-1')).toHaveTextContent('+3.750 s');
+    expect(screen.queryByTestId('cover-journey-guess-apply')).not.toBeInTheDocument();
   });
 
   it('words the offer as probably-wrong when the measurement found no relation', async () => {
