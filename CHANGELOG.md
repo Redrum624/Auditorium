@@ -5,6 +5,66 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.29.0] - 2026-08-14
+
+The fix wave — "fix what needs fixing": a controller triage of every finding
+the v1.28.0 reviews recorded, closing every known destructive-direction defect
+in the codebase. Two lanes, two reviews, two fix rounds, zero train conflicts.
+
+### Fixed
+
+<!-- G1: the gate follow-through -->
+- **A quiet voice island bracketed by digital silence is no longer muted by the
+  gate.** Cause: the gate's census counted real audio hidden in evicted-quieter
+  windows, but an island sitting beside a burst lived in loud windows the
+  census never saw — v1.28.0 shipped this documented (~375 ms bound). Fix: the
+  gate has nothing to remove inside a run of exact zeros, so it no longer
+  spends one closing — a zero-run ≥ 50 ms (measured: quantisation produces at
+  most 29.63 ms of contiguous zeros; edits write 300 ms and up) leaves the gate
+  open, and what emerges gets the same hold a phrase's tail gets. The rule is
+  monotone in the pass direction — it can only pass more audio, never mute
+  more — so every failure mode is a leak, not a chop. The manual Noise Gate
+  effect gains the same rule. Affects: `effects/dynamics/NoiseGateEffect.ts`,
+  `services/vocalChain.ts`.
+- **Remove Silence no longer deletes soft singing on uneven noise floors.**
+  Cause: its threshold derivation consumed the same quietest-window search the
+  gate's five review rounds interrogated, WITHOUT the mostly-silent-window
+  rejection — measured: a boundary window diluted by digital silence reported
+  a threshold ~10 dB high, reading 51–80% of a real −62 dBFS sung phrase as
+  silence for a stage that deletes what it names. Same fix, same mechanism;
+  Remove Silence now declines honestly on strip-silenced takes it used to run
+  on. The same defect's last consumer, `wordSplice`'s trim threshold — which
+  could shave a replacement word's aspirated onset when the take carried
+  device-written zeros — got the same rejection; the whole word now survives.
+  The remaining consumers of the bare search were classified and are safe or
+  degraded-only (gain error / under-reduction), recorded in the review.
+  Affects: `services/vocalChain.ts`, `dsp/wordSplice.ts`, `dsp/chainAnalysis.ts`.
+<!-- H1: the hygiene batch -->
+- **A clip moved to where it already is costs nothing.** Cause: `moveClip` had
+  no no-op guard (its sibling `setClipFade` did), so a bare click into the new
+  Start field re-quantised the clip, re-ran fade maintenance, and minted an
+  undo entry. Both guards now exist: the store early-returns on a same-position
+  move, and the Start field treats input that formats to the committed display
+  as a no-op — typing `1` on an off-grid clip no longer commits a one-sample
+  move. Affects: `multitrack/sessionStore.ts`, `components/Panels/PropertiesPanel.tsx`.
+- **The Cover Chain's reuse row tells the truth about the copy it left
+  beside.** Cause: the description inferred "your own edits" from a document
+  not having been picked, which is false when two copies match the sum (the
+  undone-edit case). The description now derives from the samples themselves.
+  Affects: `services/coverJourney.ts`.
+
+### Changed
+
+- `guessRemedy`'s candidate flag is now a required parameter — its default was
+  the mechanism of a prior bug; a future caller must now decide explicitly.
+- The gate's voiced-check populations are measured at 8, 44.1 and 48 kHz (were
+  8 kHz only) with the post-NR member the docblock always claimed; stereo
+  coverage restored for the gate's window mix; the alignment fixtures the
+  reviews flagged as emitter-impossible now match the shipped contract.
+- "Adoption writes nothing" is a claim a test can now falsify (identity +
+  dirty pin), and the even-floor converse asserts its direction with its one
+  measured exception explicitly accounted.
+
 ## [1.28.0] - 2026-08-14
 
 The Cover Chain wave — born from one real cover session and three user reports:
