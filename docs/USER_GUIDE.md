@@ -1437,6 +1437,64 @@ same limits as the buttons.
   reports success or failure explicitly instead of failing quietly. Older
   `.audm` files (v1/v2) still open normally.
 
+<!-- K1: clip selection, edge navigation, ripple delete -->
+### Selecting clips, walking the edges, and ripple delete
+
+**Selecting.** Clicking a clip selects it, and clicking empty lane space
+clears the selection — as before. **`Ctrl+Click` adds a clip to the selection
+instead of replacing it**, and `Ctrl+Click` on a clip already in the selection
+takes it back out. The set may span tracks. `Escape` clears it. Every selected
+clip wears the selected border, and the Properties panel shows **"N clips
+selected"** above its fields.
+
+The clip you clicked **last** is the *primary*, and it is the one the panel's
+single-clip controls edit — Start, Gain, the fade lengths and curves — as well
+as the one carrying the corner fade handles. Those controls are single-clip
+editors and stay that way: a length field showing one clip's value while
+committing to five would be lying about what it does.
+
+**What the set does.** Three things, and each is one undo step:
+
+- **Drag** any selected clip and the **whole set moves with it**, rigidly, by
+  the same amount. Members stay on their own tracks — a group drag does not
+  re-route clips to another lane in this version, though a *single*-clip drag
+  still does. If the drag would push the earliest member before the start of
+  the timeline, the whole group stops there together rather than the leading
+  clip flattening against zero while the rest keep going.
+  (Only the clip under the pointer previews the move while you drag; the rest
+  jump to their new positions when you release.)
+- **`Delete`** removes every selected clip, leaving the gaps where they were.
+- **`Shift+Delete`** is **Ripple Delete** — see below.
+
+**Walking the clip edges.** `Ctrl+Left` and `Ctrl+Right` move the multitrack
+cursor to the previous/next **clip boundary**. With the cursor inside a clip
+that means its start and its end; keep pressing and the cursor walks the union
+of every clip start and end **across all tracks**, which is what makes it a
+navigation gesture rather than a two-position toggle. Standing exactly on a
+boundary, the next press moves to the one beyond it, so the key never appears
+stuck. Past the last edge (or before the first) nothing moves — there is no
+wraparound, and no invented boundary at the start of the session. The magnet is
+not involved: these targets are already exact, and snapping could only pull the
+cursor off the edge you asked for.
+
+It also works while the session is playing. The multitrack cursor is **where
+the next Play starts**, not the running playhead, so moving it mid-playback
+re-arms the next start and leaves the transport alone.
+
+**Ripple Delete** (`Shift+Delete`, or **Edit → Ripple Delete**) removes the
+selected clip(s) **and closes the gap**: on each affected track, every clip
+that lies entirely after a removed clip slides left by that clip's span. It is
+per track — deleting a clip on track 1 never moves anything on track 2 — and
+per selection: with several clips selected, each track closes its own gaps, and
+two selected clips that overlap each other remove their union once rather than
+their two lengths twice. A clip that merely *overlapped* the removed one is not
+"after" it and does not move.
+
+The whole thing is one undo step: one `Ctrl+Z` puts the clips back **and**
+undoes every shift. If a shifted clip lands on top of its new neighbour, that
+overlap arms a crossfade exactly as dragging it there would have — it goes
+through the same maintenance a drag does, not a special case.
+
 ### Undo in the multitrack (session history)
 
 Every session edit is undoable: clip moves, trims, deletes and gain changes,
