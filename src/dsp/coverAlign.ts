@@ -448,11 +448,18 @@ export interface AlignmentMeasurement {
    * so a caller quoting the module's ±10 ms needs the number rather than a
    * boolean.
    *
-   * CC2 fix-round (IMP-4): present only when the windows AGREED — on
-   * `'confident'`, and on the `'weak'` arm that drift itself produced. A slope
-   * fitted through windows that scattered across a repeated section, or across
-   * four seconds of unrelated audio, is an arbitrary number wearing a unit, and
-   * it used to be attached anyway.
+   * CC2 fix-round (IMP-4): present only when the windows RAN AND AGREED —
+   * `windowsMeasured > 0 && windowLagSpreadSeconds <=
+   * {@link ALIGN_MAX_LAG_SPREAD_SECONDS}`, which is a predicate a consumer can
+   * compute for itself from two exported quantities. H1: that admits EVERY
+   * outcome except `'unrelated'`, which is defined by the windows not agreeing
+   * — `'confident'`, the `'weak'` arm that drift itself produced, the `'weak'`
+   * arm whose peak simply did not clear, and `'ambiguous'` with agreeing
+   * windows. The enumeration here used to name only the first two, so a
+   * consumer reading it as the rule would not have expected the field on an
+   * `'ambiguous'` result. A slope fitted through windows that scattered across
+   * a repeated section, or across four seconds of unrelated audio, is an
+   * arbitrary number wearing a unit, and it used to be attached anyway.
    */
   driftSecondsPerMinute?: number;
   /**

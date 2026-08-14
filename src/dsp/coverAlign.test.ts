@@ -541,6 +541,68 @@ describe('alignTakeToReference — refusal', () => {
   });
 
   /**
+   * H1 (CC2 fix-round-2 re-review, New-5). The OTHER half of the gap-zone rule,
+   * which had no fixture: the same band of peaks, the opposite verdict, because
+   * the second arm is not silent this time. `aboveUnrelatedBand` requires
+   * `piecewise === null` — windows that ran and DISAGREED are evidence against,
+   * and they outrank a peak that merely clears the unrelated population.
+   *
+   * Every pair the derivation sweep builds peaks either below 0.692 or above
+   * 0.731 when its windows disagree, which is why the branch went unmeasured:
+   * the usual way to make windows scatter — per-syllable timing jitter heavy
+   * enough to break them apart — destroys the global peak on the way. This
+   * construction separates the two. A song whose section REPEATS gives windows
+   * that lock onto different repeats (spread in whole sections) while the
+   * global peak stays high, and noise on the take then walks that peak DOWN
+   * into the zone. Searched rather than asserted blind, for the same reason the
+   * test above searches: the zone is 39 thousandths wide.
+   */
+  it('refuses a gap-zone peak when the windows ran and disagreed', () => {
+    const period = 6;
+    const chorus = (leadSeconds: number, jitterSeed: number, noiseAmplitude: number) =>
+      makeVocalLike({
+        seed: 55,
+        sampleRate: RATE,
+        seconds: period * 4, // long enough for the piecewise arm to speak
+        leadSeconds,
+        repeatPeriodSeconds: period,
+        timingJitterSeconds: 0.02,
+        timingSeed: jitterSeed,
+        noiseAmplitude,
+        varianceSeed: 4242,
+      });
+    const reference = chorus(0.9, 1, 0);
+    let found: ReturnType<typeof alignTakeToReference> = null;
+    for (const noiseAmplitude of [0.07, 0.1, 0.13, 0.16, 0.2]) {
+      const r = alignTakeToReference(reference, RATE, chorus(0.3, 2, noiseAmplitude), RATE);
+      if (
+        r &&
+        r.peakCorrelation >= ALIGN_WEAK_CORRELATION &&
+        r.peakCorrelation < ALIGN_MIN_CORRELATION &&
+        r.windowsMeasured > 0
+      ) {
+        found = r;
+        break;
+      }
+    }
+    expect(found).not.toBeNull();
+    // The premise, both halves: the peak is in the gap zone, and the windows
+    // ran and did NOT agree.
+    expect(found!.peakCorrelation).toBeGreaterThanOrEqual(ALIGN_WEAK_CORRELATION);
+    expect(found!.peakCorrelation).toBeLessThan(ALIGN_MIN_CORRELATION);
+    expect(found!.windowLagSpreadSeconds).toBeGreaterThan(ALIGN_MAX_LAG_SPREAD_SECONDS);
+    // …so the verdict is the one that means "no usable guess", not the 'weak'
+    // the silent-second-arm case above gets from the same band of peaks.
+    expect(found!.outcome).toBe('unrelated');
+    expect(found!.confident).toBe(false);
+    // And the contract holds on it: 'unrelated' lists no candidates, and a
+    // slope through windows that scattered is not reported as a drift.
+    expect(found!.candidates).toBeUndefined();
+    expect(found!.driftSecondsPerMinute).toBeUndefined();
+    expect(found!.driftSpanSeconds).toBeUndefined();
+  });
+
+  /**
    * CC2. The piecewise arm can only ever REFUSE confidence, never grant it — so
    * a pair too short to cut into windows must fall back to the two floors rather
    * than be refused for silence. The shipped e2e fixture pair lands exactly
@@ -1096,8 +1158,23 @@ describe('alignTakeToReference — the measured separation', () => {
       expect(m.confident).toBe(false);
       expect(m.peakCorrelation).toBeGreaterThan(ALIGN_MIN_CORRELATION);
       expect(m.prominence).toBeLessThan(ALIGN_MIN_PROMINENCE);
+      // H1 (CC2 fix-round-2 re-review, New-6): the contract puts no MINIMUM on
+      // `candidates`. The post-refinement separation filter drops entries
+      // without backfilling from the next coarse peak, so an offer could in
+      // principle arrive with nothing to offer — "pick one below" over an empty
+      // list. Asserted on every 'ambiguous' this population emits, which is the
+      // population the filter is most likely to bite on: these pairs match at
+      // several lags by construction.
+      expect(m.candidates).toBeDefined();
+      expect(m.candidates!.length).toBeGreaterThanOrEqual(1);
     }
     // The half that matters: a cover sung by a human being, refused before CC2.
+    // H1 (New-7): the SIZE pin the `slice(SEEDS, SEEDS + JITTER_SEEDS)` rework
+    // dropped. The slice form alone is a lower bound — it says the human half
+    // is there, not that the population is only what it says it is — so a
+    // member silently added or lost above would go unnoticed while every
+    // outcome assertion above kept passing.
+    expect(p.cover).toHaveLength(SEEDS + JITTER_SEEDS);
     expect(p.cover.slice(SEEDS, SEEDS + JITTER_SEEDS)).toHaveLength(JITTER_SEEDS);
   });
 
