@@ -454,7 +454,7 @@ pause was quieter but never quiet. It **mutes in place rather than cutting**,
 which is why it can be on by default where Remove Silence cannot: nothing moves,
 so a take stays lined up with its backing track.
 
-It will not chew up your phrasing. The threshold is measured from your own
+**It does not close inside a phrase.** The threshold is measured from your own
 recording — the loudest the silence detector reads in its quietest 500 ms, plus
 3 dB, because the same room tone reaches that level again in a longer pause and
 one graze would re-open the gate for half a second. And it **holds open for
@@ -464,13 +464,28 @@ closure, a breath, or a dip inside a held note is far shorter than that, so the
 gate does not so much as begin to close on one. The gate's row in the report
 says how much of the selection it actually silenced, in seconds and per cent.
 
-**And it declines rather than muting a recording that has no pause in it.** The
-threshold comes from the quietest 500 ms in the selection, and on a recording
-that never stops — a held tone, a stretch of room tone with no voice, or clicks
-spaced closer together than half a second — that quietest passage is the
-material itself, so the threshold would sit above everything and the whole take
-would go silent. When nothing at all is above the level it would gate at, the
-stage says so with the number it measured and leaves your audio alone.
+**And when it cannot tell a pause from a phrase, it declines instead of
+guessing.** Everything above depends on the quietest 500 ms of your selection
+actually being a pause, and on some recordings it is not. The stage checks, and
+refuses in two cases rather than gating.
+
+- **Nothing in the recording ever stops.** A held tone, a stretch of room tone
+  with no voice in it, or clicks spaced closer together than half a second: the
+  quietest 500 ms is the material itself, so the threshold would sit above
+  everything and the whole take would go silent. When nothing at all is above
+  the level it would gate at, the stage says so and leaves your audio alone.
+- **The quietest passage is quiet SINGING.** A take that never really stops but
+  swings between a pianissimo verse and a loud chorus has its quietest 500 ms
+  inside the soft verse, and a threshold measured there sits above that whole
+  verse — the loud chorus would keep the first check happy while the soft verse
+  was muted. So the stage asks whether that passage is *voiced*: singing has a
+  pitch and room tone does not, and it uses the same pitch detector Pitch
+  Correct does. If more than a twentieth of the quietest passage reads as
+  voiced, it declines and says what it measured.
+
+In both cases the stage reports **Did not run** with its reason, and not one
+sample is changed. It errs toward leaving a noisy take alone rather than toward
+muting a sung one.
 
 **One stage depends on another.** The high-pass corner comes from the lowest note
 the pitch detector measured, so **switching Pitch Correct off also switches the EQ
