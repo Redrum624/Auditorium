@@ -85,7 +85,11 @@ import {
 } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
-import { clearSessionHistory } from '../multitrack/sessionUndo';
+// V4: the trim's two fader writes are ONE user-visible act, and the fader's
+// legal range is already stated once — in the automation layer, which the
+// mixer strip and the parse boundary both read.
+import { clearSessionHistory, withSessionGesture } from '../multitrack/sessionUndo';
+import { clampAutomationValue } from '../multitrack/automation';
 import { useAppStore } from '../stores/appStore';
 import { linkDerivedDocument } from './beatGrid';
 import {
@@ -190,7 +194,12 @@ export const COVER_JOURNEY_STAGES: readonly CoverJourneyStage[] = [
   {
     id: 'smooth',
     label: 'Smooth and Check the Level',
-    note: "Puts edge fades on the placed take so neither end starts or stops mid-waveform, then mixes the session down once to measure what the two tracks actually sum to. If that sum passes full scale the number is reported — nothing is normalised, limited or mastered on your behalf.",
+    // V4: the note used to end "the number is reported — nothing is normalised,
+    // limited or mastered on your behalf", which was true and was also the
+    // problem: the pass built the overshoot and then handed it back. It now
+    // says what the pass does about it, and keeps the promise that matters —
+    // the only thing it changes is one level, on both faders at once.
+    note: "Puts edge fades on the placed take so neither end starts or stops mid-waveform, then mixes the session down to measure what the two tracks actually sum to. If that sum passes full scale, BOTH faders come down by the overshoot — equally, so the balance the match set is untouched — the trimmed session is summed again to check, and the number is reported. Nothing is normalised, limited or mastered on your behalf, and the trim is one undo away.",
     weight: 1,
   },
 ];
@@ -210,6 +219,42 @@ export { JOURNEY_FADE_MS };
 
 /** Suffix for the summed non-vocal document the journey creates. */
 export const INSTRUMENTAL_SUFFIX = '— Instrumental';
+
+/**
+ * V4 — the level stage 6 trims its own session down to when the two tracks it
+ * built sum past full scale, in dBFS.
+ *
+ * ONE dB of headroom, not zero, and both halves of that are deliberate.
+ *
+ * Zero would be the arithmetically exact answer — scaling both faders by the
+ * same factor scales the summed peak by exactly that factor, so a trim of
+ * `summedPeakDb` lands the sum on 1.0. But it lands there through a dB→linear
+ * round trip in double and a per-sample multiply in float32, either of which
+ * may leave the last sample a ULP above 1.0, and the WAV writer's clamp and
+ * the MP3 encoder do not care that it was a rounding error. A target that can
+ * fail by rounding is not a target.
+ *
+ * A dB is also the smallest margin that answers the OTHER half of the warning
+ * this stage has always carried: the MP3 encoder. A stream whose sample peak
+ * is 0 dBFS reconstructs, on decode, above 0 dBFS between the samples — the
+ * inter-sample overshoot lossy delivery is conventionally given ~1 dB for. The
+ * journey cannot measure a decoder's reconstruction, so it spends the
+ * conventional dB and SAYS it did, rather than hitting a ceiling it can only
+ * verify at the sample grid.
+ *
+ * It is a level trim on two faders and nothing else: no normalisation (the sum
+ * is never brought UP to a target), no limiting, no mastering. A session that
+ * already fits is not touched.
+ */
+export const JOURNEY_PEAK_TARGET_DB = -1;
+
+/**
+ * V4 — the History label the trim's single session entry carries. Named for
+ * what it is rather than for the stage, because it is the one thing in the
+ * finished session that the user did not ask for and may want back: undoing it
+ * restores the faders the pass found, clipping and all.
+ */
+export const JOURNEY_TRIM_UNDO_LABEL = 'Cover level trim';
 
 /** Name of the session the journey builds: `<song> — Cover`. */
 export function coverSessionName(songName: string): string {
@@ -284,10 +329,21 @@ export interface CoverJourneySmoothing {
   fadeInSample: number;
   fadeOutSample: number;
   curve: string;
-  /** Peak of the summed session BEFORE the master bus's ±1 clamp, in dBFS. */
+  /** Peak of the summed session BEFORE the master bus's ±1 clamp, in dBFS.
+   * ALWAYS the peak as the pass BUILT it — the trim below does not rewrite
+   * this number, because what the two tracks summed to is the reason the trim
+   * happened and stays reportable. */
   summedPeakDb: number;
   /** True when that peak passed full scale. */
   overCeiling: boolean;
+  /** V4 — how far DOWN both faders were moved, in dB, or 0 when the sum fitted
+   * and nothing was touched. Positive; the faders hold its negation. */
+  trimDb: number;
+  /** V4 — the peak of the trimmed session, in dBFS, MEASURED by a second
+   * summation rather than derived from `summedPeakDb - trimDb`. `null` when
+   * there was no trim, which is also how a reader tells that no second
+   * summation was spent. */
+  trimmedPeakDb: number | null;
 }
 
 export interface CoverJourneyReport {
@@ -1441,12 +1497,67 @@ export async function runCoverJourney(
     const summedPeakDb = toDb(peakBeforeClamp);
     const overCeiling = peakBeforeClamp > 1;
 
+    // V4: the pass built this overshoot, so the pass takes it back out.
+    //
+    // Until now the stage measured the sum, named the number, told the user to
+    // move a fader by it and stopped — which made the journey's own arithmetic
+    // the user's problem, on a session the journey had just built out of two
+    // levels IT chose (Match Loudness's, and the mono routing compensation).
+    // The fix is the one the sentence already named: move the faders.
+    //
+    // BOTH faders, by the SAME amount. Match Loudness spent a whole stage
+    // deciding where the take sits against the original vocal; trimming one
+    // side would spend that decision on a level problem it did not cause. An
+    // equal trim is a change of overall level and nothing else — every
+    // relative level in the session, faders and clip gains alike, survives it,
+    // and because the mixdown is linear the summed peak moves by exactly the
+    // trim.
+    //
+    // Clamped to the fader's own floor via `clampAutomationValue`, the range
+    // the automation lanes, the parse boundary and the mixer strip already
+    // share — a trim written past the floor would be a number the mixer cannot
+    // show and the automation layer would refuse. Nothing musical reaches it
+    // (it would need a sum ~60 dB over full scale); when something does, the
+    // measurement below reports what the floor actually achieved and the
+    // warning goes back to naming what is left for the user to do.
+    let trimDb = 0;
+    let trimmedPeakDb: number | null = null;
+    if (overCeiling) {
+      const wanted = summedPeakDb - JOURNEY_PEAK_TARGET_DB;
+      const faderDb = clampAutomationValue('volumeDb', -wanted);
+      trimDb = -faderDb;
+      const { setTrackParam } = useSessionStore.getState();
+      // ONE session-history entry for what is ONE act. The two writes are
+      // recorded store mutations, so bracketing them is also what keeps this
+      // stage inside the recording invariant: stage 5 cleared the session
+      // stack, and this is the first thing to push onto it.
+      withSessionGesture(JOURNEY_TRIM_UNDO_LABEL, () => {
+        for (const t of useSessionStore.getState().session.tracks) {
+          setTrackParam(t.id, { volumeDb: t.volumeDb + faderDb });
+        }
+      });
+      // A SECOND summation, and only on this arm. The trimmed peak is
+      // arithmetically `summedPeakDb - trimDb` and stating it that way would be
+      // a promise about the mixdown rather than a reading of it — and on the
+      // clamped arm it would be a false one. The peak-only mode makes the
+      // second pass cost one block-sized buffer and one more walk of the same
+      // two clips, which is what a measured number is worth here.
+      trimmedPeakDb = toDb(
+        mixdownSessionPeak(useSessionStore.getState().session, docs, (f) =>
+          emit(stage, 'summing the trimmed session to check what it peaks at', f)
+        )
+      );
+    }
+    const stillOver = trimmedPeakDb !== null && trimmedPeakDb > 0;
+
     smoothing = {
       fadeInSample: fadeIn,
       fadeOutSample: fadeOut,
       curve: DEFAULT_FADE_CURVE,
       summedPeakDb,
       overCeiling,
+      trimDb,
+      trimmedPeakDb,
     };
 
     record({
@@ -1464,9 +1575,33 @@ export async function runCoverJourney(
           value: dbfsStr(summedPeakDb),
           from: 'one mixdown of the finished session, measured BEFORE the master bus\'s ±1 clamp — the clamped output peaks at 0 dBFS by construction and could not tell you this',
         },
+        // V4: stated, with the number, beside the peak that caused it — the
+        // same rule the mono routing compensation follows one stage up. A level
+        // the user did not set is exactly the kind of thing they are entitled
+        // to find in the report when they notice it on the faders.
+        ...(trimDb > 0
+          ? [
+              {
+                label: 'Level trim',
+                value: `${dbStr(-trimDb)} on both tracks`,
+                from:
+                  `the sum reached ${dbfsStr(summedPeakDb)} and this session's target is ${dbfsStr(JOURNEY_PEAK_TARGET_DB)}, so both faders came down by the same ${trimDb.toFixed(2)} dB — equally, because the balance Match Loudness set is between the two tracks and an equal trim does not touch it. Summing the trimmed session measures ${dbfsStr(trimmedPeakDb!)}. It is one undo entry, “${JOURNEY_TRIM_UNDO_LABEL}”, on the session's own history` +
+                  (stillOver
+                    ? `, and it is the deepest the faders go: ${dbfsStr(trimmedPeakDb!)} is still above full scale`
+                    : ''),
+              },
+            ]
+          : []),
       ],
+      // V4: the copy still opens on the measured overshoot, because that is
+      // still what happened and the number is still the user's to know. What
+      // changed is the second half: the pass no longer names a fader move and
+      // leaves it undone. The old sentence survives verbatim on the clamped
+      // arm, where naming it IS all that is left.
       warning: overCeiling
-        ? `the two tracks sum to ${dbfsStr(summedPeakDb)}, above full scale, and both the WAV writer and the MP3 encoder hard-clip that. Nothing here normalises or limits it on your behalf: bring the Cover Vocal track's fader (or the Instrumental's) down by at least ${summedPeakDb.toFixed(2)} dB before you Mix Down, or accept the clipping.`
+        ? stillOver
+          ? `the two tracks sum to ${dbfsStr(summedPeakDb)}, above full scale, and both the WAV writer and the MP3 encoder hard-clip that. Both faders were taken to ${dbStr(-trimDb)}, as far down as a track fader goes, and the session STILL peaks at ${dbfsStr(trimmedPeakDb!)}: bring the levels down inside the clips or the documents themselves before you Mix Down, or accept the clipping.`
+          : `the two tracks summed to ${dbfsStr(summedPeakDb)}, above full scale, and both the WAV writer and the MP3 encoder hard-clip that — so both faders were brought down ${trimDb.toFixed(2)} dB, equally, and the session now peaks at ${dbfsStr(trimmedPeakDb!)}. Nothing was normalised, limited or mastered: this is a level trim on two faders, and undoing “${JOURNEY_TRIM_UNDO_LABEL}” puts the clipping level back. Raising either fader again can put the sum back over full scale, and nothing checks it a second time.`
         : undefined,
       undoEntries: [],
       elapsedMs: Date.now() - at,

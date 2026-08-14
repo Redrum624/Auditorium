@@ -15,7 +15,7 @@ import { makeInitialState, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
-import { PEAK_BLOCK_SAMPLES, mixdownSession } from '../multitrack/mixdown';
+import { PEAK_BLOCK_SAMPLES, mixdownSession, mixdownSessionPeak } from '../multitrack/mixdown';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import * as coverAlign from '../dsp/coverAlign';
 import * as stemService from './stemService';
@@ -25,6 +25,11 @@ import * as coverPlacement from './coverPlacement';
 import {
   COVER_JOURNEY_STAGES,
   JOURNEY_FADE_MS,
+  // V4: the level target the trim aims at, and the label its one session entry
+  // carries — both read from the module rather than re-typed here, so a change
+  // to either is a change to these tests too.
+  JOURNEY_PEAK_TARGET_DB,
+  JOURNEY_TRIM_UNDO_LABEL,
   coverSessionName,
   findExistingSeparation,
   journeyStageById,
@@ -35,6 +40,9 @@ import {
   type CoverJourneyStageProgress,
   type CoverJourneyStageResult,
 } from './coverJourney';
+// V4: the session stack the trim lands on — a DIFFERENT stack from the take's
+// document history the rest of this suite reads through `getHistory(takeId)`.
+import { SESSION_UNDO_KEY, canUndoSession, undoSession } from '../multitrack/sessionUndo';
 import { MONO_PAN_COMPENSATION_DB, STEM_TRACK_LABELS } from './stemLanding';
 import { clearHistory, getHistory, pushUndo, redo, undo } from './undoHistory';
 import { applyEdit, pushMarkerUndo } from './editOps';
@@ -1499,6 +1507,21 @@ describe('runCoverJourney — the placed take renders at its calibrated level', 
 // ── Smoothing ───────────────────────────────────────────────────────────────
 
 describe('runCoverJourney — smoothing and the level check', () => {
+  /** V4: a session whose two tracks sum well past full scale — the shape the
+   * user's run produced, and the only shape the trim has anything to do. Two
+   * full-scale sources: the loudest stem the instrumental is summed from, and
+   * the take. The clamped mixdown could never show the overshoot, which is the
+   * whole reason the pre-clamp peak exists. */
+  function overCeilingFixture(): void {
+    useAppStore.setState({
+      documents: useAppStore.getState().documents.map((d) =>
+        d.name === 'song — Drums' || d.id === takeId
+          ? { ...d, channels: [tone(docLength(d), 300, d.sampleRate, 1)] }
+          : d
+      ),
+    });
+  }
+
   it('fades both edges of the placed take with the v1.9 curve', async () => {
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
     const expected = Math.round((JOURNEY_FADE_MS / 1000) * SR);
@@ -1528,20 +1551,141 @@ describe('runCoverJourney — smoothing and the level check', () => {
   it('measures the summed peak before the clamp and warns when it passes full scale', async () => {
     // Two full-scale tracks sum well over 0 dBFS; the clamped mixdown could
     // never show that, which is the whole reason the pre-clamp peak exists.
-    useAppStore.setState({
-      documents: useAppStore.getState().documents.map((d) =>
-        d.name === 'song — Drums' || d.id === takeId
-          ? { ...d, channels: [tone(docLength(d), 300, d.sampleRate, 1)] }
-          : d
-      ),
-    });
+    overCeilingFixture();
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
     expect(report!.smoothing!.overCeiling).toBe(true);
     expect(report!.smoothing!.summedPeakDb).toBeGreaterThan(0);
     const stage = report!.stages.find((s) => s.id === 'smooth')!;
     expect(stage.warning).toContain('above full scale');
-    // Nothing was normalised on the user's behalf — the fix is named, not done.
+    // V4: this assertion used to read "nothing was normalised on the user's
+    // behalf — the fix is named, not done", and the run in the user's report is
+    // what retired it: the journey built the overshoot, so naming it and
+    // walking away made the journey's own arithmetic the user's problem. The
+    // faders are still what the sentence is about, but now because the pass
+    // moved them and says by how much.
     expect(stage.warning).toMatch(/fader/);
+    expect(stage.warning).toContain(report!.smoothing!.trimDb.toFixed(2));
+  });
+
+  // V4 — R1: the trim itself.
+
+  it('trims both faders by the overshoot rather than handing over a clipping session', async () => {
+    overCeilingFixture();
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const s = report!.smoothing!;
+    expect(s.overCeiling).toBe(true);
+    // The overshoot, plus the stated headroom — one number, both faders.
+    expect(s.trimDb).toBeCloseTo(s.summedPeakDb - JOURNEY_PEAK_TARGET_DB, 6);
+
+    const tracks = useSessionStore.getState().session.tracks;
+    expect(tracks.map((t) => t.name)).toEqual(['Instrumental', 'Cover Vocal']);
+    for (const t of tracks) expect(t.volumeDb).toBeCloseTo(-s.trimDb, 6);
+
+    // …and the session really does peak at the target now — measured HERE, from
+    // the store the user is left looking at, not read back out of the report.
+    const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const));
+    const peak = mixdownSessionPeak(useSessionStore.getState().session, docs);
+    expect(20 * Math.log10(peak)).toBeLessThanOrEqual(JOURNEY_PEAK_TARGET_DB + 1e-6);
+    expect(peak).toBeLessThan(1);
+    expect(s.trimmedPeakDb!).toBeCloseTo(20 * Math.log10(peak), 6);
+  });
+
+  it('trims BOTH tracks equally, so the balance Match Loudness set survives it', async () => {
+    overCeilingFixture();
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const [inst, take] = useSessionStore.getState().session.tracks;
+    // Equal trim on faders that both started at 0 — the difference between the
+    // two tracks, which is the whole of what Match Loudness set, is untouched.
+    expect(take.volumeDb - inst.volumeDb).toBe(0);
+    expect(inst.volumeDb).toBeLessThan(0);
+    // The take clip's mono pan compensation is a routing correction, not a
+    // level choice, and the trim does not touch it either.
+    expect(take.clips[0].gainDb).toBeCloseTo(MONO_PAN_COMPENSATION_DB, 6);
+    expect(report!.placement!.takeGainDb).toBeCloseTo(MONO_PAN_COMPENSATION_DB, 6);
+  });
+
+  it('states the trim in the row, with the number', async () => {
+    overCeilingFixture();
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const s = report!.smoothing!;
+    const stage = report!.stages.find((st) => st.id === 'smooth')!;
+    const row = stage.derived.find((d) => d.label === 'Level trim')!;
+    expect(row).toBeDefined();
+    expect(row.value).toContain(s.trimDb.toFixed(2));
+    expect(row.value).toMatch(/both tracks/i);
+    // The row cites the measured post-trim peak, not an arithmetic promise.
+    expect(row.from).toContain(s.trimmedPeakDb!.toFixed(2));
+    expect(row.from).toContain(JOURNEY_TRIM_UNDO_LABEL);
+    // The peak the sum reached is still reported, unchanged, beside it.
+    expect(stage.derived.find((d) => d.label === 'Summed peak')!.value).toContain(
+      s.summedPeakDb.toFixed(2)
+    );
+  });
+
+  it('leaves the trim as ONE undoable session entry, and undoing it restores the clipping level', async () => {
+    overCeilingFixture();
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    // Exactly one entry: stage 5 cleared the session stack, and the two fader
+    // writes are one act, not two.
+    expect(getHistory(SESSION_UNDO_KEY)).toEqual({
+      done: [JOURNEY_TRIM_UNDO_LABEL],
+      undone: [],
+    });
+    expect(canUndoSession()).toBe(true);
+
+    undoSession();
+    const tracks = useSessionStore.getState().session.tracks;
+    for (const t of tracks) expect(t.volumeDb).toBe(0);
+    // …and the undo restores the FADERS only. The edge fades stage 6 wrote
+    // before the trim are not on the entry, so they survive it.
+    const clip = tracks[1].clips[0];
+    expect(clip.fadeInSample).toBe(report!.smoothing!.fadeInSample);
+    expect(clip.fadeOutSample).toBe(report!.smoothing!.fadeOutSample);
+
+    // The trim is a SESSION entry; the pass still claims only the two document
+    // entries its chains left, because the dialog's list is about the take.
+    expect(report!.undoEntries).toEqual([VOCAL_CHAIN_UNDO_LABEL, COVER_CHAIN_UNDO_LABEL]);
+    expect(report!.stages.find((s) => s.id === 'smooth')!.undoEntries).toEqual([]);
+  });
+
+  it('does not spend a second summation, a fader write or a history entry when the sum fits', async () => {
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const s = report!.smoothing!;
+    expect(s.overCeiling).toBe(false);
+    expect(s.trimDb).toBe(0);
+    // Null, not "the same number again": the second summation only runs when
+    // there is a trim to verify.
+    expect(s.trimmedPeakDb).toBeNull();
+    for (const t of useSessionStore.getState().session.tracks) expect(t.volumeDb).toBe(0);
+    expect(canUndoSession()).toBe(false);
+    expect(
+      report!.stages.find((st) => st.id === 'smooth')!.derived.map((d) => d.label)
+    ).not.toContain('Level trim');
+  });
+
+  it('stops at the fader floor rather than writing a level the mixer cannot show, and says so', async () => {
+    // An overshoot deeper than the fader's own −60 dB floor. Nothing musical
+    // produces this; the point is that the clamp is REPORTED rather than
+    // quietly turning the trim into a promise the session does not keep.
+    useAppStore.setState({
+      documents: useAppStore.getState().documents.map((d) =>
+        d.name === 'song — Drums' || d.id === takeId
+          ? { ...d, channels: [tone(docLength(d), 300, d.sampleRate, 5000)] }
+          : d
+      ),
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const s = report!.smoothing!;
+    expect(s.summedPeakDb).toBeGreaterThan(60);
+    expect(s.trimDb).toBe(60); // the floor, not summedPeakDb − target
+    for (const t of useSessionStore.getState().session.tracks) expect(t.volumeDb).toBe(-60);
+    // Still over full scale after the deepest trim the faders allow — so the
+    // copy goes back to naming what the user has to do.
+    expect(s.trimmedPeakDb!).toBeGreaterThan(0);
+    const warning = report!.stages.find((st) => st.id === 'smooth')!.warning!;
+    expect(warning).toContain('-60.00 dB');
+    expect(warning).toContain(s.trimmedPeakDb!.toFixed(2));
+    expect(warning).toMatch(/still/i);
   });
 
   // CC4 (CJ-6): the stage needs ONE number and was allocating two session-length

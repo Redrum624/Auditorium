@@ -823,11 +823,19 @@ matching stages on their own — or open the take and run the Vocal Chain — an
 tool reports itself in full, exactly as before. Nothing was removed from the engines; the
 numbers are one tool away rather than in front of you.
 
-**The level check is a measurement, not a fix.** Stage 6 mixes the finished session down
-once and reports the peak the two tracks summed to **before** the master bus's ±1 clamp —
+**The level check fixes what the pass itself created.** Stage 6 mixes the finished session
+down and reports the peak the two tracks summed to **before** the master bus's ±1 clamp —
 the clamped render peaks at 0 dBFS by construction and could never tell you this. If that
-sum passes full scale you get the number and the amount to come down by; nothing is
-normalised, limited or mastered on your behalf.
+sum passes full scale, the pass does not hand the overshoot back to you: **both** faders
+come down by it (plus 1 dB of headroom, for the inter-sample overshoot an MP3 decoder
+reconstructs), the trimmed session is summed a second time to check, and the row states the
+trim, the target and the measured result. Both faders move by the *same* amount, so the
+balance Match Loudness set between your take and the instrumental is untouched — this is a
+level trim on two faders and nothing else. Nothing is normalised, limited or mastered on
+your behalf: a session that already fits is not touched, and a sum that fits is never
+brought *up* to a target. The trim is one undo away — `Cover level trim` on the session's
+own history — and if you move a fader back up afterwards, nothing checks the sum a second
+time.
 
 **The envelope spread is reported and never corrected.** A "matched compressor" was
 built and cut: the move it asks for changes sign depending on how the measurement is
