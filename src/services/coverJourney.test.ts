@@ -865,6 +865,9 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
       ...confidentAlignment(3.5),
       peakCorrelation: 0.31,
       prominence: 0.02,
+      // CC2's contract: a 0.31 peak is below every floor and every unrelated
+      // band, and `confident` must equal `outcome === 'confident'`.
+      outcome: 'unrelated',
       confident: false,
     });
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
@@ -919,12 +922,17 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
   // ── CC3: what the refusal TELLS the user to do ────────────────────────────
 
   /** A refusal at `offsetSeconds`, with whatever extra outcome fields a
-   * measurement of the day carries. */
+   * measurement of the day carries. The base is UNCLASSIFIED — `outcome` is
+   * stripped, not inherited from `confidentAlignment`, because a measurement
+   * with `outcome: 'confident'` and `confident: false` violates CC2's invariant
+   * (`confident === (outcome === 'confident')`) and can never be produced.
+   * Tests that want a classified refusal pass the outcome via `extra`. */
   const refusedAlignment = (offsetSeconds: number, extra: Record<string, unknown> = {}) => ({
     ...confidentAlignment(offsetSeconds),
     peakCorrelation: 0.423,
     rivalCorrelation: 0.344,
     prominence: 0.079,
+    outcome: undefined,
     confident: false,
     ...extra,
   });
@@ -1031,6 +1039,8 @@ describe('runCoverJourney — what the Place row says it placed at', () => {
       ...confidentAlignment(-8.258),
       peakCorrelation: 0.423,
       prominence: 0.079,
+      // CC2's contract: `confident` must equal `outcome === 'confident'`.
+      outcome: 'unrelated',
       confident: false,
     });
     const row = takeAtRow(await runCoverJourney({ songDocId: songId, takeDocId: takeId }));

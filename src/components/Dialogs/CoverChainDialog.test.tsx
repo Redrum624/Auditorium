@@ -382,13 +382,13 @@ describe('CoverChainDialog — what it says afterwards', () => {
         id: 'align',
         label: 'Align with the Original',
         status: 'declined',
-        reason: 'correlation 0.310 against a floor of 0.607',
+        reason: 'correlation 0.310 against a floor of 0.731',
         derived: [],
         undoEntries: [],
       }),
     });
     const reason = screen.getByTestId('cover-journey-reason-align');
-    expect(reason).toHaveTextContent('Did not run — correlation 0.310 against a floor of 0.607');
+    expect(reason).toHaveTextContent('Did not run — correlation 0.310 against a floor of 0.731');
     expect(reason).toHaveStyle({ color: '#e0a458' });
   });
 
