@@ -183,6 +183,11 @@ const confidentAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurem
   unevaluatedLagSeconds: 0,
   overlapSeconds: 5,
   refined: true,
+  // V3: the third pass ran and moved this lag. Stated on the base fixture
+  // because the field is not optional — "was the original song used as the
+  // ruler" is a fact every measurement knows about itself.
+  refinedAgainstMix: true,
+  mixRefinementSeconds: 0.014,
 });
 
 /**
@@ -1108,10 +1113,20 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
     };
   };
 
+  /**
+   * The align row's own copy, whichever field carries it.
+   *
+   * V3 split the arm in two: a measurement that is PLACED says so in the row's
+   * `warning` (the row is `done`), and one placed at zero says so in its
+   * `reason` (the row is `declined`). The invariant these tests are about — the
+   * copy names the control the dialog renders — is about the copy the user
+   * reads, not about which field it arrived in, so this reads both.
+   */
   const alignReason = async (measurement: unknown): Promise<string> => {
     alignTakeToReference.mockReturnValue(measurement);
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
-    return report!.stages.find((s) => s.id === 'align')!.reason!;
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    return [stage.reason, stage.warning].filter(Boolean).join(' ');
   };
 
   it('sends a NEGATIVE refused guess to the instrumental, not to the take', async () => {
@@ -1179,6 +1194,124 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
       expect(reason).toContain(coverPlacement.APPLY_GUESS_LABEL);
       expect(reason).not.toContain(coverPlacement.CANDIDATE_PLACEMENT_LABEL);
     }
+  });
+
+  // ── V3: the pass places the tracks itself ────────────────────────────────
+  //
+  // "it should place the tracks by itself!" — the user, after clicking the
+  // first of three offered candidates and finding it right. CC3 built the offer
+  // because a refusal that threw its number away was worse than useless; V3
+  // goes the rest of the way for the two outcomes that carry a usable guess,
+  // and keeps the alternatives one click away for when the guess is wrong.
+
+  it('PLACES a weak guess at its own lag rather than at the start of the original', async () => {
+    const report = await (async () => {
+      alignTakeToReference.mockReturnValue(weakAlignment(-0.75));
+      return runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    })();
+    // The same both-track arithmetic the believed arm uses: nothing is clamped.
+    const shift = Math.round(0.75 * SR);
+    expect(report!.placement!.takeStartSample).toBe(0);
+    expect(report!.placement!.instrumentalStartSample).toBe(shift);
+    expect(report!.placement!.shiftedSamples).toBe(shift);
+    // It is not a refusal any more, and the report says which of the two it is.
+    expect(report!.alignmentRefused).toBe(false);
+    expect(report!.alignmentAutoPlaced).toBe(true);
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    expect(stage.status).toBe('done');
+    expect(stage.reason).toBeUndefined();
+    // …and it says so where a `done` row says things, with the measurement in
+    // it and the alternatives named.
+    expect(stage.warning).toContain('0.750 s');
+    expect(stage.warning).toContain('weak but plausible');
+    expect(stage.warning).toContain(coverPlacement.CANDIDATE_PLACEMENT_LABEL);
+    // The measurement is stated in the row, not only in the sentence.
+    expect(stage.derived.map((d) => d.label)).toContain('Offset');
+    expect(stage.derived.map((d) => d.label)).toContain('Confidence');
+    expect(report!.completed).toBe(true);
+  });
+
+  it('PLACES an ambiguous guess at its best candidate, with the rivals still offered', async () => {
+    const measurement = ambiguousAlignment(1.5);
+    alignTakeToReference.mockReturnValue(measurement);
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    // `candidates[0].offsetSeconds === offsetSeconds` is the DSP's contract, so
+    // placing the reported offset IS placing the best candidate.
+    expect(measurement.candidates![0].offsetSeconds).toBe(measurement.offsetSeconds);
+    expect(report!.placement!.takeStartSample).toBe(Math.round(1.5 * SR));
+    expect(report!.alignmentAutoPlaced).toBe(true);
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    expect(stage.status).toBe('done');
+    expect(stage.warning).toContain('several places');
+    expect(stage.warning).toContain(coverPlacement.CANDIDATE_PLACEMENT_LABEL);
+  });
+
+  it('does NOT place an unrelated guess — that one still goes to zero', async () => {
+    alignTakeToReference.mockReturnValue(unrelatedAlignment(-8.258, 0.423, 0.079));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.placement!.takeStartSample).toBe(0);
+    expect(report!.placement!.shiftedSamples).toBe(0);
+    expect(report!.alignmentRefused).toBe(true);
+    expect(report!.alignmentAutoPlaced).toBe(false);
+    expect(report!.stages.find((s) => s.id === 'align')!.status).toBe('declined');
+  });
+
+  it('does NOT place a measurement that classified itself not at all', async () => {
+    alignTakeToReference.mockReturnValue(refusedAlignment(-8.258));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.placement!.takeStartSample).toBe(0);
+    expect(report!.alignmentAutoPlaced).toBe(false);
+    expect(report!.alignmentRefused).toBe(true);
+  });
+
+  it('places an auto-placed guess through the SHARED placement function', async () => {
+    alignTakeToReference.mockReturnValue(weakAlignment(-0.75));
+    // Values no arithmetic would produce from −0.75 s: if the auto-place arm
+    // ever grows its own copy of the shift rule, the session stops matching
+    // what the shared function said and this fails.
+    placementFor.mockReturnValueOnce({
+      rawTakeStartSample: -7,
+      shiftedSamples: 3,
+      takeStartSample: 10,
+      instrumentalStartSample: 3,
+    });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(report!.placement!.takeStartSample).toBe(10);
+    expect(report!.placement!.instrumentalStartSample).toBe(3);
+  });
+
+  it('states the refinement in the row when the original song moved the lag', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    const refined = stage.derived.find((d) => d.label === 'Refinement');
+    expect(refined).toBeDefined();
+    // The fixture's mix pass moved the lag by 14 ms, and the row says so rather
+    // than leaving the user to wonder which of two numbers was placed.
+    expect(refined!.value).toContain('14');
+    expect(refined!.from).toMatch(/original song/i);
+  });
+
+  it('says nothing about a refinement that did not run', async () => {
+    const base = confidentAlignment(1.25);
+    delete base.mixRefinementSeconds;
+    alignTakeToReference.mockReturnValue({ ...base, refinedAgainstMix: false });
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    const stage = report!.stages.find((s) => s.id === 'align')!;
+    expect(stage.derived.find((d) => d.label === 'Refinement')).toBeUndefined();
+  });
+
+  it('hands the ORIGINAL SONG to the aligner, so the lag can be refined against it', async () => {
+    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
+    await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+    expect(alignTakeToReference).toHaveBeenCalledTimes(1);
+    const song = useAppStore.getState().documents.find((d) => d.id === songId)!;
+    const mix = alignTakeToReference.mock.calls[0][4];
+    // The SONG's own samples and rate — not the vocal stem's, and not a copy
+    // taken before the run, so a song the user edited mid-pass is not aligned
+    // against a ghost.
+    expect(mix.sampleRate).toBe(song.sampleRate);
+    expect(mix.channels).toBe(song.channels);
   });
 });
 

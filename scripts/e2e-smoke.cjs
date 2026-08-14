@@ -3425,12 +3425,24 @@ async function main() {
           `a refused alignment places at zero rather than guessing (take ${journey.takeStartSample}, shift ${journey.shiftedSamples})`
         );
         console.log(
-          '  alignment arm: REFUSED — placed at zero and the numbers were stated (the believed arm did not run this pass)'
+          '  alignment arm: REFUSED — placed at zero and the numbers were stated (the placed arms did not run this pass)'
         );
       } else {
+        // V3: THREE arms reach a placement now, not one. The believed arm places
+        // because both floors cleared; the auto-placed arm ('weak'/'ambiguous')
+        // places because the guess is the best evidence there is and the user
+        // asked for the tracks to be placed rather than offered. Both land the
+        // clips through the same `placementFor`, which is what the arithmetic
+        // below checks — so the two share this branch and only the claim about
+        // CONFIDENCE differs.
         assert(
-          journey.alignmentOffsetSeconds !== null && journey.alignmentConfident === true,
-          `a non-refused alignment reports a believed offset (offset ${journey.alignmentOffsetSeconds}, confident ${journey.alignmentConfident})`
+          journey.alignmentOffsetSeconds !== null &&
+            (journey.alignmentConfident === true || journey.alignmentAutoPlaced === true),
+          `a non-refused alignment reports an offset it placed at (offset ${journey.alignmentOffsetSeconds}, confident ${journey.alignmentConfident}, auto-placed ${journey.alignmentAutoPlaced})`
+        );
+        assert(
+          journey.alignmentConfident !== journey.alignmentAutoPlaced,
+          `exactly one of the two placed arms ran (confident ${journey.alignmentConfident}, auto-placed ${journey.alignmentAutoPlaced})`
         );
         const raw = Math.round(journey.alignmentOffsetSeconds * journey.sessionRate);
         const expectedTake = Math.max(0, raw);
@@ -3451,7 +3463,7 @@ async function main() {
           `the measured interval survives the shift (raw ${raw}, actual ${journey.takeStartSample - journey.instrumentalStartSample})`
         );
         console.log(
-          `  alignment arm: BELIEVED — raw ${raw}, take@${journey.takeStartSample}, instrumental@${journey.instrumentalStartSample} (the refused arm did not run this pass)`
+          `  alignment arm: ${journey.alignmentConfident ? 'BELIEVED' : 'AUTO-PLACED'} — raw ${raw}, take@${journey.takeStartSample}, instrumental@${journey.instrumentalStartSample} (the place-at-zero arm did not run this pass)`
         );
       }
       // Smoothing: both edges faded, and the summed peak measured rather than

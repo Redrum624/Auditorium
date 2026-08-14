@@ -11,6 +11,7 @@ import {
 } from '../../services/coverChain';
 import {
   COVER_JOURNEY_STAGES,
+  autoPlacedReason,
   journeyStageById,
   refusalReason,
   runCoverJourney,
@@ -23,7 +24,9 @@ import {
   APPLY_GUESS_LABEL,
   APPLY_GUESS_UNDO_LABEL,
   applyMeasuredOffset,
+  autoPlaces,
   CANDIDATE_PLACEMENT_LABEL,
+  guessKind,
 } from '../../services/coverPlacement';
 import { clearHistory, pushUndo } from '../../services/undoHistory';
 
@@ -80,6 +83,7 @@ function report(over: Partial<CoverJourneyReport> = {}): CoverJourneyReport {
     separation: null,
     alignment: null,
     alignmentRefused: false,
+    alignmentAutoPlaced: false,
     placement: {
       sessionName: 'song.wav — Cover',
       sessionRate: SR,
@@ -1008,6 +1012,46 @@ describe('CoverChainDialog — applying the refused guess', () => {
     expect(offer).not.toHaveTextContent('several places');
   });
 
+  // ── V3: the two outcomes that are now PLACED rather than offered ──────────
+
+  const offerOutcome = (outcome: string, rival: number) =>
+    measurement(-8.258, {
+      outcome,
+      candidates: [
+        { offsetSeconds: -8.258, correlation: 0.423, prominence: 0.079 },
+        { offsetSeconds: rival, correlation: 0.41, prominence: 0.06 },
+      ],
+    });
+
+  it.each([
+    ['weak', 3.75],
+    ['ambiguous', 12.5],
+  ])('says where an auto-placed %s guess was PUT, not how to put it there', async (outcome, rival) => {
+    await runRefused({
+      alignmentRefused: false,
+      alignmentAutoPlaced: true,
+      alignment: offerOutcome(outcome as string, rival as number),
+    });
+    const placed = screen.getByTestId('cover-journey-guess-placed');
+    expect(placed).toHaveTextContent('8.258 s');
+    expect(placed).toHaveTextContent(/placed/i);
+    // The alternatives are still one click each — that is the whole point of
+    // placing rather than asking.
+    expect(screen.getByTestId('cover-journey-guess-candidate-1')).toBeInTheDocument();
+    // …and nothing on screen still calls this an offer.
+    expect(screen.getByTestId('cover-journey-guess-numbers')).not.toHaveTextContent(
+      'offered rather than applied'
+    );
+  });
+
+  it('keeps the offered-not-applied wording exactly where nothing was placed', async () => {
+    await runRefused({ alignment: measurement(-8.258, { outcome: 'unrelated' }) });
+    expect(screen.queryByTestId('cover-journey-guess-placed')).not.toBeInTheDocument();
+    expect(screen.getByTestId('cover-journey-guess-numbers')).toHaveTextContent(
+      'offered rather than applied'
+    );
+  });
+
   // ── The seam: the sentence and the controls, driven by ONE measurement ─────
   //
   // The refusal's copy is written in `coverJourney` and the controls are
@@ -1059,16 +1103,25 @@ describe('CoverChainDialog — applying the refused guess', () => {
 
     it.each(SHAPES)('%s', async (_shape, extra) => {
       const alignment = measurement(-8.258, extra);
+      // V3: the arm is chosen by the SHIPPED predicate, and each arm's copy
+      // comes from the engine's own builder. Two dispositions now exist — the
+      // take placed at its measured lag, and the take at zero — and the
+      // invariant has to hold across both, so the fixture asks the predicate
+      // rather than hard-coding which shape lands where.
+      const placed = autoPlaces(guessKind(alignment!));
       // The ENGINE's sentence, not a re-composition of it: a test that wrote
       // its own copy would pass with the shipped copy still wrong.
-      const reason = refusalReason(alignment!);
+      const reason = placed ? autoPlacedReason(alignment!) : refusalReason(alignment!);
       await runRefused({
         alignment,
+        alignmentRefused: !placed,
+        alignmentAutoPlaced: placed,
         stages: stagesWith({
           id: 'align',
           label: 'Align with the Original',
-          status: 'declined',
-          reason,
+          status: placed ? 'done' : 'declined',
+          reason: placed ? undefined : reason,
+          warning: placed ? reason : undefined,
           derived: [],
           undoEntries: [],
         }),

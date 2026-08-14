@@ -24,6 +24,7 @@ import {
   APPLY_GUESS_LABEL,
   APPLY_GUESS_UNDO_LABEL,
   applyMeasuredOffset,
+  autoPlaces,
   CANDIDATE_PLACEMENT_LABEL,
   guessCandidates,
   guessCharacterisation,
@@ -198,12 +199,22 @@ function StageResult({ result }: { result: CoverJourneyStageResult }) {
  * clip to it by eye — with, for a negative guess, the take unable to go where
  * the sentence pointed at all.
  *
- * The refusal itself is unchanged: the take stays at zero and the offer is an
- * OFFER. The reported case's 0.423 correlation and 0.079 prominence sit inside
- * the measured unrelated-pair bands, so auto-applying would be the app
- * pretending to a confidence it just said it did not have. What this adds is
- * that the user can act on it in one press, with the measurement's own numbers
- * in front of them, and undo it in one.
+ * V3 changed what the rows MEAN for two of the four outcomes, and the component
+ * asks `coverPlacement.autoPlaces` — the same predicate the journey placed
+ * from — rather than reading the report, so the sentence here and the clips on
+ * the timeline cannot come apart.
+ *
+ *  - `'weak'` / `'ambiguous'`: the take is ALREADY at the first row's lag. The
+ *    rows stop being "accept the guess" and become "that was the wrong one of
+ *    these, use this instead", and the copy says where the take was put.
+ *  - `'unrelated'` / unclassified: unchanged, and deliberately. The take is at
+ *    zero and the offer is an OFFER — the reported case's 0.423 correlation and
+ *    0.079 prominence sit inside the measured unrelated-pair bands, so placing
+ *    it would be the app pretending to a confidence it just said it did not
+ *    have.
+ *
+ * Either way the user acts in one press, with the measurement's own numbers in
+ * front of them, and undoes it in one.
  *
  * The CC2 outcome fields are read through `coverPlacement`'s feature-detecting
  * helpers: on today's measurement shape (no `outcome`, no `candidates`) this
@@ -229,6 +240,10 @@ function GuessOffer({
   const kind = guessKind(alignment);
   const characterisation = guessCharacterisation(kind);
   const candidates = guessCandidates(alignment);
+  // V3: the SHIPPED predicate, not a re-reading of the report. The journey sets
+  // `alignmentAutoPlaced` from this same function, so asking it here means the
+  // sentence on screen and the clips on the timeline cannot come apart.
+  const placed = autoPlaces(kind);
 
   const apply = (offsetSeconds: number): void => {
     setOutcome(applyMeasuredOffset({ offsetSeconds, instrumentalDocId, takeDocId }));
@@ -240,6 +255,18 @@ function GuessOffer({
       className="mt-2 flex flex-col gap-1 rounded-lg"
       style={{ border: `1px solid ${AMBER}33`, padding: '6px 8px' }}
     >
+      {placed && (
+        <p data-testid="cover-journey-guess-placed" className="text-xs" style={{ color: AMBER }}>
+          Placed at {signedSecs(alignment.offsetSeconds)}
+          {alignment.refinedAgainstMix && alignment.mixRefinementSeconds !== undefined
+            ? ` — refined ${(alignment.mixRefinementSeconds * 1000).toFixed(1)} ms against the original song itself`
+            : ''}
+          . The evidence was below the floors, so it is a placement rather than a verdict —{' '}
+          {candidates.length > 1
+            ? 'if it is the wrong spot, these lags matched too:'
+            : 'if it is the wrong spot, drag a clip or type a new Start in the Properties panel.'}
+        </p>
+      )}
       {characterisation && (
         <p className="text-xs" style={{ color: AMBER }}>
           {characterisation}.
@@ -269,9 +296,11 @@ function GuessOffer({
       >
         Measured over {alignment.overlapSeconds.toFixed(1)} s of overlap: correlation{' '}
         {alignment.peakCorrelation.toFixed(3)}, standing {alignment.prominence.toFixed(3)} above the
-        next best lag. Both are below the floors this pass believes, so the guess may be wrong —
-        that is why it is offered rather than applied. Applying it moves BOTH clips and leaves one
-        undo entry.
+        next best lag. Both are below the floors this pass believes, so the guess may be wrong —{' '}
+        {placed
+          ? 'which is why every lag it also liked is still one press away'
+          : 'that is why it is offered rather than applied'}
+        . {placed ? 'Re-placing' : 'Applying it'} moves BOTH clips and leaves one undo entry.
       </p>
       {outcome && (
         <p

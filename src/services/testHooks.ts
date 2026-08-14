@@ -436,6 +436,11 @@ export interface TestApi {
     alignmentPeakCorrelation: number | null;
     alignmentProminence: number | null;
     alignmentRefused: boolean;
+    /** V3. True when the take was placed at a lag the pass could not fully
+     * believe — the 'weak' and 'ambiguous' outcomes, which now place rather
+     * than offer. `alignmentRefused` and this are mutually exclusive, and both
+     * false is the believed arm. */
+    alignmentAutoPlaced: boolean;
     /** Where the two clips actually landed, in SESSION samples. */
     sessionName: string | null;
     sessionTrackCount: number;
@@ -2586,6 +2591,7 @@ export function installTestHooks(): void {
         alignmentPeakCorrelation: null,
         alignmentProminence: null,
         alignmentRefused: false,
+        alignmentAutoPlaced: false,
         sessionName: null,
         sessionTrackCount: 0,
         sessionRate: null,
@@ -2622,6 +2628,7 @@ export function installTestHooks(): void {
         alignmentPeakCorrelation: report.alignment ? report.alignment.peakCorrelation : null,
         alignmentProminence: report.alignment ? report.alignment.prominence : null,
         alignmentRefused: report.alignmentRefused,
+        alignmentAutoPlaced: report.alignmentAutoPlaced,
         sessionName: report.placement ? report.placement.sessionName : null,
         sessionTrackCount: useSessionStore.getState().session.tracks.length,
         sessionRate: report.placement ? report.placement.sessionRate : null,

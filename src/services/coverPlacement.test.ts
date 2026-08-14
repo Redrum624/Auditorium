@@ -26,11 +26,13 @@ import {
   APPLY_GUESS_LABEL,
   APPLY_GUESS_UNDO_LABEL,
   applyMeasuredOffset,
+  autoPlaces,
   CANDIDATE_PLACEMENT_LABEL,
   guessCandidates,
   guessCharacterisation,
   guessKind,
   guessRemedy,
+  placedRemedy,
   placementFor,
 } from './coverPlacement';
 
@@ -215,6 +217,73 @@ describe('guessKind / guessCandidates — read defensively, never invented', () 
     expect(guessCharacterisation('unrelated')).toContain('probably wrong');
     expect(guessCharacterisation('unclassified')).toBeNull();
     expect(guessCharacterisation('confident')).toBeNull();
+  });
+});
+
+// ── V3: what the pass does with a guess, rather than what it says about it ───
+
+/**
+ * V3. The user's directive was one sentence — "it should place the tracks by
+ * itself!" — and this predicate is where it lives, so the journey that places
+ * and the dialog that describes the placement cannot come to two different
+ * opinions about which run was placed.
+ */
+describe('autoPlaces — which outcomes this pass places on the user\'s behalf', () => {
+  it('places the two outcomes that carry a usable guess', () => {
+    expect(autoPlaces('weak')).toBe(true);
+    expect(autoPlaces('ambiguous')).toBe(true);
+  });
+
+  it('does NOT place noise, and does not place a measurement that said nothing', () => {
+    // 'unrelated' means no arm distinguished the take from the measured
+    // unrelated band. Placing that would be the app guessing where it has just
+    // said it has no guess — which is not what "place it yourself" asked for.
+    expect(autoPlaces('unrelated')).toBe(false);
+    // …and a measurement with no outcome word asserted nothing about itself, so
+    // nothing may be asserted on its behalf either.
+    expect(autoPlaces('unclassified')).toBe(false);
+  });
+
+  it('is not the confident arm in disguise', () => {
+    // 'confident' is placed by the believed arm, which existed before this
+    // predicate and does not consult it.
+    expect(autoPlaces('confident')).toBe(false);
+  });
+});
+
+describe('placedRemedy — the sentence an AUTO-PLACED guess ends with', () => {
+  it('states where the take was put, in the amount and sign that were measured', () => {
+    const placed = placedRemedy(-8.257, true);
+    expect(placed).toContain('8.257 s');
+    // The negative arm is the reported case, and the thing worth saying about it
+    // is that both clips moved rather than the take being clamped away.
+    expect(placed).toContain('both');
+    // It does NOT tell the user to drag anything: it already moved them.
+    expect(placedRemedy(-8.257, true)).not.toMatch(/drag the Instrumental/i);
+    expect(placedRemedy(8.257, true)).not.toMatch(/drag your take/i);
+  });
+
+  it('offers the alternatives by the label the rows actually carry', () => {
+    for (const offset of [-8.257, 8.257, 0]) {
+      const placed = placedRemedy(offset, true);
+      expect(placed).toContain(CANDIDATE_PLACEMENT_LABEL);
+      expect(placed).not.toContain(APPLY_GUESS_LABEL);
+    }
+  });
+
+  // The same seam the refusal sentence has: the dialog swaps the rows for the
+  // single button whenever the measurement lists no candidate, so this sentence
+  // branches on exactly the fact the render branches on.
+  it('names the single button when there are no rows to point at', () => {
+    for (const offset of [-8.257, 8.257]) {
+      const placed = placedRemedy(offset, false);
+      expect(placed).toContain(APPLY_GUESS_LABEL);
+      expect(placed).not.toContain(CANDIDATE_PLACEMENT_LABEL);
+    }
+  });
+
+  it('says the take did not move when the measured lag was zero', () => {
+    expect(placedRemedy(0, true)).toContain('already');
   });
 });
 

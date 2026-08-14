@@ -232,3 +232,51 @@ export function makeVocalLike(opts: VocalLikeOptions): Float32Array[] {
   for (let c = 1; c < channels; c++) out.push(Float32Array.from(mono));
   return out;
 }
+
+/**
+ * V3. What a separated stem's ATTACKS look like next to the mix's: later, and
+ * softer.
+ *
+ * The signal's amplitude envelope is made to rise over `tauMs` instead of
+ * instantly, and the waveform is re-gained to follow it — so the spectrum is
+ * untouched and only the TIMING of the energy moves. That distinction is the
+ * whole point: a naive lowpass of the samples was tried first and it destroys a
+ * vocal outright (measured: alignment errors of 8–10 SECONDS), which tests
+ * nothing about a refinement.
+ *
+ * ── What this is a model OF, and what it is not ─────────────────────────────
+ * It is a model of mask-induced transient spreading: a mask estimated on an
+ * analysis grid cannot open faster than its own window, so a note's attack
+ * arrives spread over that window rather than at the sample it really began.
+ * It is NOT a measurement of this repo's separator, and no claim is made here
+ * about how large `tauMs` is for htdemucs on real music.
+ *
+ * What the tests built on it prove is therefore conditional and stated that
+ * way: WHEN the stem's onsets are displaced from the song's, refining against
+ * the song recovers the displacement; when they are not, the refinement does not
+ * move a right answer. Both halves are asserted, because only the pair of them
+ * is a reason to ship a refinement.
+ *
+ * Causal on purpose. Real separation also produces pre-echo, which would
+ * displace onsets EARLY; smearing one way only makes the displacement a signed
+ * quantity a test can point at, rather than a symmetric blur that averages to
+ * nothing and proves neither direction.
+ */
+export function smearAttacks(x: Float32Array, sampleRate: number, tauMs: number): Float32Array {
+  if (!(tauMs > 0)) return Float32Array.from(x);
+  // A 2 ms follower is fast enough to track a real attack, so what the slow
+  // stage below smears is the attack rather than the follower's own lag.
+  const fast = 1 - Math.exp(-1 / (0.002 * sampleRate));
+  const slow = 1 - Math.exp(-1 / ((tauMs / 1000) * sampleRate));
+  const out = new Float32Array(x.length);
+  let env = 0;
+  let smeared = 0;
+  for (let i = 0; i < x.length; i++) {
+    env += (Math.abs(x[i]) - env) * fast;
+    smeared += (env - smeared) * slow;
+    // The epsilon keeps silence silent rather than dividing 0 by 0; it is far
+    // below anything the onset envelope's own std floor would keep.
+    out[i] = x[i] * (smeared / (env + 1e-6));
+  }
+  return out;
+}

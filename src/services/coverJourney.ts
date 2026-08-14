@@ -98,12 +98,16 @@ import {
 // CC3: the refusal arm's copy, and the fade constant it shares with the
 // apply-the-guess action. One direction only — `coverPlacement` never imports
 // this module.
+// V3: `autoPlaces` (which outcomes this pass places) and `placedRemedy` (what a
+// placed one says for itself) join the refusal copy above.
 import {
   JOURNEY_FADE_MS,
+  autoPlaces,
   guessCandidates,
   guessCharacterisation,
   guessKind,
   guessRemedy,
+  placedRemedy,
   placementFor,
 } from './coverPlacement';
 import { getHistory } from './undoHistory';
@@ -167,7 +171,8 @@ export const COVER_JOURNEY_STAGES: readonly CoverJourneyStage[] = [
   {
     id: 'align',
     label: 'Align with the Original',
-    note: "Finds where your take belongs on the original's timeline by cross-correlating the two onset envelopes, and reports the offset with the confidence that produced it. This is a PLACEMENT, not a warp — nothing is stretched and no syllable is moved. If the confidence is below the measured threshold the take is placed at zero and the numbers are stated instead of guessed. Align Vocal Timing and Align Lyrics stay manual, and are worth running afterwards if the take drifts or a word came out wrong.",
+    // V3: the note names the third refinement pass and the placement arms.
+    note: "Finds where your take belongs on the original's timeline by cross-correlating the two onset envelopes, then refines that lag once more against the ORIGINAL SONG — which has not been through the separation model — and reports the offset with the confidence that produced it. This is a PLACEMENT, not a warp — nothing is stretched and no syllable is moved. A lag the confidence cannot fully believe is still PLACED, with its measurement stated and its rival lags one click away; only a take nothing could relate to the song at all is placed at zero instead. Align Vocal Timing and Align Lyrics stay manual, and are worth running afterwards if the take drifts or a word came out wrong.",
     weight: 2,
   },
   {
@@ -291,8 +296,29 @@ export interface CoverJourneyReport {
   stages: CoverJourneyStageResult[];
   separation: CoverJourneySeparation | null;
   alignment: AlignmentMeasurement | null;
-  /** True when alignment ran but was not believed, so the take went to zero. */
+  /**
+   * True when alignment ran, was not believed, and the take therefore went to
+   * ZERO.
+   *
+   * V3 narrowed this. It used to mean "not believed", which was the same thing
+   * as "placed at zero" because nothing but the confident arm placed. Now the
+   * two OFFER outcomes are placed at their own measured lag, so "not believed"
+   * and "placed at zero" have come apart, and this field kept the meaning that
+   * describes what happened to the timeline. `'unrelated'` and a measurement
+   * carrying no outcome word are what reach it; see
+   * {@link alignmentAutoPlaced} for the other half.
+   */
   alignmentRefused: boolean;
+  /**
+   * V3. True when the take was placed at a lag the pass could not fully believe
+   * — the `'weak'` and `'ambiguous'` outcomes, which carry a usable guess and
+   * its alternatives.
+   *
+   * Set from `coverPlacement.autoPlaces`, the SAME predicate the dialog uses to
+   * decide what to say about the placement, so the report and the screen cannot
+   * disagree about whether the clips were moved.
+   */
+  alignmentAutoPlaced: boolean;
   placement: CoverJourneyPlacement | null;
   smoothing: CoverJourneySmoothing | null;
   /** The stage the user cancelled at, or `null` for a run that finished. */
@@ -497,6 +523,26 @@ export function refusalReason(alignment: AlignmentMeasurement): string {
   );
 }
 
+/**
+ * V3. What the align stage says when it PLACED an offset it could not fully
+ * believe — the sibling of {@link refusalReason}, for the arm the user asked
+ * for ("it should place the tracks by itself!").
+ *
+ * The seam it has to hold is the same one, for the same reason: the copy is
+ * written here and the controls are rendered in `CoverChainDialog`, so the ONE
+ * fact both branch on is `guessCandidates(...).length > 0` — the rows exist, or
+ * the single button does. Nothing here may name the other.
+ */
+export function autoPlacedReason(alignment: AlignmentMeasurement): string {
+  const characterisation = guessCharacterisation(guessKind(alignment));
+  const hasCandidates = guessCandidates(alignment).length > 0;
+  return (
+    `this placement was made on evidence BELOW the floors, and the numbers are worth reading before you trust it: correlation ${alignment.peakCorrelation.toFixed(3)} against a floor of ${ALIGN_MIN_CORRELATION}, standing ${alignment.prominence.toFixed(3)} above the next best lag against a floor of ${ALIGN_MIN_PROMINENCE}. ` +
+    (characterisation ? `${characterisation}. ` : '') +
+    placedRemedy(alignment.offsetSeconds, hasCandidates)
+  );
+}
+
 /** The cancellation sentinel, so every stage's early return is one shape. */
 const CANCELLED = Symbol('cancelled');
 
@@ -550,6 +596,9 @@ export async function runCoverJourney(
   let separation: CoverJourneySeparation | null = null;
   let alignment: AlignmentMeasurement | null = null;
   let alignmentRefused = false;
+  // V3: the other half of the same question — whether the take was PLACED at a
+  // lag the pass could not fully believe, rather than sent to zero.
+  let alignmentAutoPlaced = false;
   /** CC2 (ALIGN-5): the take's channels as the singer recorded them, taken at
    * stage 2 before the Vocal Chain rewrites them, because stage 3 measures onset
    * envelopes and the chain moves onsets. Set in stage 2, read in stage 3. */
@@ -565,6 +614,8 @@ export async function runCoverJourney(
     separation,
     alignment,
     alignmentRefused,
+    // V3:
+    alignmentAutoPlaced,
     placement,
     smoothing,
     cancelledAt,
@@ -954,13 +1005,25 @@ export async function runCoverJourney(
     // the samples come from before the chain.
     const takeChannels = preCleanTakeChannels ?? cleaned?.channels ?? null;
 
+    // V3: the ORIGINAL SONG, for the third refinement pass. Looked up NOW rather
+    // than reusing the `song` binding captured before stage 1: the files panel
+    // stays live across the minutes separation takes, and the song the aligner
+    // refines against has to be the one still open. A song that has gone simply
+    // means no refinement — the two stem passes are a complete measurement.
+    //
+    // It is the SONG, not the instrumental: the stem the reference was
+    // separated out of is the mix, and the mix still contains the original
+    // singer's own attacks, which are the ones the take's attacks correspond to.
+    const mixDoc = state.documents.find((d) => d.id === song.id) ?? null;
+
     alignment =
       vocals && cleaned && takeChannels
         ? alignTakeToReference(
             vocals.channels,
             vocals.sampleRate,
             takeChannels,
-            cleaned.sampleRate
+            cleaned.sampleRate,
+            mixDoc ? { channels: mixDoc.channels, sampleRate: mixDoc.sampleRate } : null
           )
         : null;
 
@@ -995,7 +1058,8 @@ export async function runCoverJourney(
         undoEntries: [],
         elapsedMs: Date.now() - at,
       });
-    } else if (!alignment.confident) {
+    } else if (!alignment.confident && !autoPlaces(guessKind(alignment))) {
+      // V3: the place-at-zero arm, narrowed to the outcomes with no usable guess.
       alignmentRefused = true;
       takeStartSeconds = 0;
       // CC3: the guess survives the refusal as an OFFER. Three things changed
@@ -1011,6 +1075,13 @@ export async function runCoverJourney(
       //  - the measurement's own outcome word rides along when it carries
       //    one, and NOTHING is asserted about the kind of failure when it
       //    does not.
+      //
+      // V3 narrowed this arm to what it should always have been: the outcomes
+      // with NO usable guess. 'unrelated' means no arm distinguished the take
+      // from the measured unrelated band, and a measurement with no outcome
+      // word asserted nothing about itself — placing either would be the pass
+      // guessing exactly where it has just said it cannot. The two that DO
+      // carry a guess are placed by the arm below.
       placedAtZeroBecause = `the fallback this pass uses when it will not guess: the alignment above was refused, so the take starts where the original does. Nothing measured +0.000 s — the guess was ${secondsStr(alignment.offsetSeconds)}, and it is offered rather than applied`;
       record({
         id: stage.id,
@@ -1022,6 +1093,14 @@ export async function runCoverJourney(
         elapsedMs: Date.now() - at,
       });
     } else {
+      // V3: ONE placed arm, for the believed alignment and for the two OFFER
+      // outcomes alike. They differ in what is SAID about the placement, never
+      // in the placement itself: `takeStartSeconds` is the measured lag either
+      // way, and stage 5 turns it into two clip starts through the one shared
+      // `placementFor`. An arm that placed its own way is how a row comes to
+      // promise one number while another sits on the timeline.
+      const believed = alignment.confident;
+      alignmentAutoPlaced = !believed;
       takeStartSeconds = alignment.offsetSeconds;
       record({
         id: stage.id,
@@ -1036,11 +1115,33 @@ export async function runCoverJourney(
           {
             label: 'Confidence',
             value: `correlation ${alignment.peakCorrelation.toFixed(3)}, standing ${alignment.prominence.toFixed(3)} above the next best lag`,
-            from: `two floors, both measured rather than chosen: ${ALIGN_MIN_CORRELATION} and ${ALIGN_MIN_PROMINENCE}. Below either one this stage places at zero and says so instead of guessing`,
+            from: believed
+              ? `two floors, both measured rather than chosen: ${ALIGN_MIN_CORRELATION} and ${ALIGN_MIN_PROMINENCE}. Your take cleared both, so the offset above was applied without asking`
+              // V3: deliberately NAMES NO FLOOR. Which piece of evidence fell
+              // short differs by outcome — 'ambiguous' clears the correlation
+              // floor and fails the prominence one, and a 'weak' run can clear
+              // both and still be weak because the piecewise windows disagreed
+              // or the take drifts. The warning below carries the measurement's
+              // own word for it; this row must not guess.
+              : `two floors, both measured rather than chosen: ${ALIGN_MIN_CORRELATION} and ${ALIGN_MIN_PROMINENCE}. The evidence did not add up to a believed alignment — the warning below says what it did add up to — but the offset above is still the best evidence there is, so it was applied rather than thrown away, and the alternatives are one click below`,
           },
+          // V3 (R2): the number shown IS the number placed, and when the
+          // original song moved it the row says by how much. Absent when that
+          // pass did not run at all, because a delta of zero and a pass that
+          // never happened are different facts.
+          ...(alignment.refinedAgainstMix && alignment.mixRefinementSeconds !== undefined
+            ? [
+                {
+                  label: 'Refinement',
+                  value: `${(alignment.mixRefinementSeconds * 1000).toFixed(1)} ms`,
+                  from: 'how far the ORIGINAL SONG moved the lag the separated vocal had chosen. The song has not been through the separation model, so its attacks are the singer’s own rather than the model’s opinion of them; the offset above is the refined one',
+                },
+              ]
+            : []),
         ],
-        warning:
-          'This is a PLACEMENT, not a warp: the whole take is moved by one offset, and a take that drifts against the original still drifts. Align Vocal Timing (which needs you to confirm a beat grid) and Align Lyrics (which needs you to pick the word) remain manual, and are the tools for that.',
+        warning: believed
+          ? 'This is a PLACEMENT, not a warp: the whole take is moved by one offset, and a take that drifts against the original still drifts. Align Vocal Timing (which needs you to confirm a beat grid) and Align Lyrics (which needs you to pick the word) remain manual, and are the tools for that.'
+          : autoPlacedReason(alignment),
         undoEntries: [],
         elapsedMs: Date.now() - at,
       });

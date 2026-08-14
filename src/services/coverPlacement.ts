@@ -20,11 +20,22 @@
  *
  * So this module owns two things: the sentence that tells the truth about
  * which clip moves, and the one-click action that does the move so the user
- * does not have to eyeball it. The action is OFFERED, never applied on the
- * user's behalf: the refusal stands, because the guess really may be wrong —
- * the reported case's 0.423 correlation and 0.079 prominence sit inside the
- * measured UNRELATED-pair bands. What changes is that acting on it costs one
- * click instead of a memorised number and a drag.
+ * does not have to eyeball it.
+ *
+ * ── V3: and for two outcomes, the pass does the move itself ─────────────────
+ * CC3 shipped the action as an OFFER and said so here: the refusal stands, the
+ * guess really may be wrong. Then a user ran it, was shown three candidates,
+ * clicked the first, and found it right — and said the thing this module now
+ * follows: "it should place the tracks by itself!". {@link autoPlaces} is that
+ * sentence, and it is deliberately narrow. `'weak'` and `'ambiguous'` carry a
+ * usable guess and are PLACED, with the alternatives still one click each.
+ * `'unrelated'` and an unclassified measurement carry none and are still placed
+ * at zero with the button beside them, because auto-placing a lag nothing could
+ * distinguish from noise is not what was asked for.
+ *
+ * The click is therefore no longer only "accept the guess": on a placed arm it
+ * is "that was the wrong one of the lags, use this one instead" — which is the
+ * question the user can actually answer.
  *
  * ── The arithmetic is not a second opinion ──────────────────────────────────
  * `applyMeasuredOffset` does not reproduce the confident arm's placement — it
@@ -153,6 +164,31 @@ export function guessCandidates(measurement: unknown): GuessCandidate[] {
 }
 
 /**
+ * V3. Which outcomes this pass PLACES on the user's behalf.
+ *
+ * The user's directive was one sentence — "it should place the tracks by
+ * itself!" — and it supersedes CC3's offer-only stance for the two outcomes that
+ * carry a usable guess. Their real run measured `'weak'`, listed three
+ * candidates, and they clicked the first one; it was right. Making them click is
+ * the app asking a question it already has the best available answer to.
+ *
+ * `'unrelated'` is deliberately NOT here, and that is not timidity: it is the
+ * outcome defined by no arm distinguishing the take from the measured unrelated
+ * band. Placing that would be guessing exactly where the measurement has just
+ * said it has no guess, and "place it yourself" was not a request to place
+ * noise. `'unclassified'` — a measurement carrying no outcome word at all —
+ * is out for the same reason `guessCharacterisation` says nothing about it: it
+ * asserted nothing about itself, so nothing may be asserted on its behalf.
+ *
+ * ONE predicate, exported, because the journey places from it and the dialog
+ * describes the placement from it. Two copies of this rule would be two
+ * opinions about whether the take on screen was moved.
+ */
+export function autoPlaces(kind: GuessKind): boolean {
+  return kind === 'weak' || kind === 'ambiguous';
+}
+
+/**
  * One sentence naming WHAT KIND of failure this was — or `null` when the
  * measurement did not say, in which case the numbers already in the refusal
  * are the whole of what is known and nothing further may be asserted.
@@ -228,6 +264,51 @@ export function guessRemedy(offsetSeconds: number, hasCandidates: boolean): stri
   return (
     `To place it by hand, drag your take to about ${amount} — the take is the clip that moves for a guess on this side of zero. ` +
     oneClick
+  );
+}
+
+/**
+ * V3. What an AUTO-PLACED guess says for itself — the sibling of
+ * {@link guessRemedy}, for the arm that moved the clips instead of describing
+ * how to.
+ *
+ * Two things had to change and neither is cosmetic. The take is already at the
+ * measured lag, so every "drag it to about 8.257 s" instruction in the refusal
+ * above is now WRONG here — which is why this is a separate builder rather than
+ * a flag threaded through that one: the two sentences share no clause that could
+ * leak the by-hand half across. And the candidate rows change meaning: they stop
+ * being "pick the answer" and become "if this is the wrong spot, these matched
+ * too".
+ *
+ * What does NOT change is the one thing the seam fix pinned: which control this
+ * names is decided by `hasCandidates`, the same fact the dialog decides its
+ * render from, so the sentence can never point at a control that is not on
+ * screen.
+ */
+export function placedRemedy(offsetSeconds: number, hasCandidates: boolean): string {
+  const amount = amountStr(offsetSeconds);
+  // The placement itself is NOT undoable and the copy must not pretend it is:
+  // it was made while the session was being built, and building a session
+  // clears session history the way opening one does. A RE-place is one undo
+  // entry, and that is the sentence each branch is allowed to make.
+  const alternatives = hasCandidates
+    ? `If that is the wrong spot, these other lags matched too — each “${CANDIDATE_PLACEMENT_LABEL} …” row under the align row re-places both clips at its own lag in one step, as a single undo entry.`
+    : `If that is the wrong spot, drag a clip or type a new Start in the Properties panel — “${APPLY_GUESS_LABEL}” only puts both clips back at the lag they are already on.`;
+  // Rounded to the three decimals the amount prints at, exactly as the refusal
+  // is: a placement that displays as 0.000 s moved nothing.
+  if (Math.abs(offsetSeconds) < 0.0005) {
+    return `Your take was placed at +0.000 s, which is where it already sat, so nothing moved. ${alternatives}`;
+  }
+  if (offsetSeconds < 0) {
+    return (
+      `Your take was placed at −${amount} — it belongs BEFORE the original's own start, so both clips were pushed ${amount} later rather than your take being clamped to zero, ` +
+      'which keeps the interval between them exactly what was measured. ' +
+      alternatives
+    );
+  }
+  return (
+    `Your take was placed at +${amount} into the original, and the instrumental stayed where it was. ` +
+    alternatives
   );
 }
 
