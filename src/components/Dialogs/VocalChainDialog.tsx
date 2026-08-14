@@ -475,7 +475,11 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                           id="vocal-chain-gate-manual"
                           data-testid="vocal-chain-gate-manual"
                           checked={gateManual}
-                          disabled={locked}
+                          // ...and inert when the stage itself is off, which is
+                          // the only dependency between two controls here: a
+                          // level for a stage that will not run is a promise
+                          // the Apply cannot keep.
+                          disabled={locked || !enabled.gate}
                           onChange={(e) => setGateManual(e.target.checked)}
                           className="accent-[#26c6da]"
                         />
@@ -496,7 +500,7 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                               min={GATE_THRESHOLD_PARAM.min}
                               max={GATE_THRESHOLD_PARAM.max}
                               step={GATE_THRESHOLD_PARAM.step}
-                              disabled={locked}
+                              disabled={locked || !enabled.gate}
                               onChange={(e) => {
                                 const v = Number(e.target.value);
                                 if (Number.isFinite(v)) setGateThresholdDb(v);

@@ -281,6 +281,16 @@ describe('VocalChainDialog — the gate threshold the user can set', () => {
     expect(mockRun.mock.calls[0][0].gateThresholdDb).toBeUndefined();
   });
 
+  it('goes inert when the stage it belongs to is switched off', () => {
+    // Otherwise the dialog offers a level for a stage that will not run, and
+    // pressing Apply gates nothing while the row still shows a threshold.
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-toggle-gate'));
+    expect(screen.getByTestId('vocal-chain-toggle-gate')).not.toBeChecked();
+    expect(screen.getByTestId('vocal-chain-gate-manual')).toBeDisabled();
+  });
+
   it('carries the effect’s own range, so a level the gate cannot take is not offered', () => {
     seedDoc();
     open();

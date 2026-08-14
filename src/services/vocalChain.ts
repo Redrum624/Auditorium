@@ -1092,14 +1092,17 @@ export function deriveGate(
   params.releaseMs = releaseMs;
   params.holdMs = holdMs;
 
-  /** How long the take spends under a level, for the `Gated` row — the same
-   * comparison the effect makes, so the number predicts what it will do. */
-  const gatedSecondsAt = (db: number, env: Float32Array): number => {
+  /** How many samples of `env` sit ABOVE a level — the effect's own comparison,
+   * so both things this function asks of it (is anything left at all, and how
+   * many seconds go quiet) predict what the effect will actually do. */
+  const soundingAbove = (db: number, env: Float32Array): number => {
     const lin = Math.pow(10, db / 20);
-    let sounding = 0;
-    for (let i = 0; i < env.length; i++) if (env[i] > lin) sounding++;
-    return (env.length - sounding) / sampleRate;
+    let n = 0;
+    for (let i = 0; i < env.length; i++) if (env[i] > lin) n++;
+    return n;
   };
+  const gatedSecondsAt = (db: number, env: Float32Array): number =>
+    (env.length - soundingAbove(db, env)) / sampleRate;
 
   // R2 — THE LAST WORD IS THE USER'S.
   //
@@ -1222,18 +1225,12 @@ export function deriveGate(
   // take. If nothing survives the lowest threshold on offer, nothing survives
   // any of them, and the verdict is the take's rather than one window's.
   const env = envelopeFollower(maxAcrossChannels(channels), sampleRate, attackMs, releaseMs);
-  const soundingAbove = (db: number): number => {
-    const lin = Math.pow(10, db / 20);
-    let n = 0;
-    for (let i = 0; i < env.length; i++) if (env[i] > lin) n++;
-    return n;
-  };
   const quietestThresholdDb = clampToParam(
     'noise-gate',
     'thresholdDb',
     noise.envelopePeakDb + GATE_HEADROOM_DB
   );
-  if (soundingAbove(quietestThresholdDb) === 0) {
+  if (soundingAbove(quietestThresholdDb, env) === 0) {
     return decline(
       `nothing in the selection rises above the ${dbfsStr(quietestThresholdDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`
     );
@@ -1289,7 +1286,6 @@ export function deriveGate(
     );
   }
   const thresholdDb = clampToParam('noise-gate', 'thresholdDb', accepted.envelopePeakDb + GATE_HEADROOM_DB);
-  const soundingSamples = soundingAbove(thresholdDb);
 
   // ...and the audio the search never SAW? (N4, the eviction's blind spot.)
   // Refusing mostly-silent windows is right for the threshold, but when a
@@ -1336,7 +1332,7 @@ export function deriveGate(
       },
       {
         label: 'Gated',
-        value: `${((env.length - soundingSamples) / sampleRate).toFixed(1)} s`,
+        value: `${gatedSecondsAt(thresholdDb, env).toFixed(1)} s`,
         from: `the part of the selection sitting under that threshold — the rest stays at full level`,
       },
       {

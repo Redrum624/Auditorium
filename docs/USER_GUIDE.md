@@ -514,8 +514,8 @@ level, with one exception named at the end of this section. The opposite also
 holds, with one care taken: a stretch of **digital silence** — a trimmed
 lead-in, an edited stem, or this chain's own output when you run it twice — is
 proof of a pause, and a take carrying one is still gated. But the silence
-itself is never *measured*: the threshold always comes from the quietest
-half-second of **real material**, so a run of zeros sitting next to a
+itself is never *measured*: the threshold always comes from a half-second of
+**real material** that read as a pause, so a run of zeros sitting next to a
 whispered line cannot pass that whisper off as the noise floor — the whisper
 is judged on its own, by the checks below — and a take whose every quiet
 stretch is mostly zeros is declined instead, because its pauses are already
