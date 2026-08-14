@@ -2074,6 +2074,25 @@ describe('deriveGate', () => {
       expect(res.reason).toContain("set this stage's threshold yourself");
     }, 120000);
 
+    it('names the escape in EVERY refusal, not only the one the search produced', () => {
+      // A user who cannot reach silence has not been served by any of these
+      // paragraphs, whichever measurement ran out.
+      const takes: Float32Array[][] = [
+        [new Float32Array(WIN * 4)], // no measurable floor at all
+        [tone(SR * 3, 440, 0.25)], // nothing that is not the material
+        [noise(SR * 3, 0.01, 9)], // steady room tone, no pause
+        [continuousTakeWithSoftVerse().channel], // quiet singing
+        [continuousTakeWithWhisperedVerse().channel], // a whisper
+      ];
+      for (const take of takes) {
+        const res = deriveGate(take, SR);
+        expect(res.run).toBe(false);
+        if (res.run) return;
+        expect(res.reason).toContain("set this stage's threshold yourself");
+        expect(res.reason.endsWith('Nothing was gated')).toBe(true);
+      }
+    }, 120000);
+
     it('costs at most one pitch track and one tilt fit per candidate, however long the take', () => {
       // The tilt fit is an STFT and the pitch track is 12-14x dearer again, so
       // the price of looking further has to be bounded by the CANDIDATE COUNT
@@ -2105,6 +2124,87 @@ describe('deriveGate', () => {
         tilt.mockRestore();
       }
     }, 300000);
+
+    /**
+     * R2 — the last word is the user's. No measurement can tell an unshaped
+     * breath from room tone, and no search can conjure a pause into a take
+     * that has none; but "no word, no sound" has to stay REACHABLE, so the
+     * stage takes a threshold it did not measure and runs the same state
+     * machine at it.
+     */
+    describe('the threshold the user sets when no measurement can be made', () => {
+      it('gates a take that declines, at exactly the level asked for', () => {
+        const { channel } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS);
+        expect(deriveGate([channel], SR).run).toBe(false);
+
+        const res = deriveGate([channel], SR, -40);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        expect(Number(res.params.thresholdDb)).toBe(-40);
+        // Only the SOURCE of the threshold changes: the detector, the hold and
+        // the fades are the stage's own, so the manual run is the derived run
+        // with one number replaced.
+        expect(Number(res.params.attackMs)).toBe(DETECT_ATTACK_MS);
+        expect(Number(res.params.releaseMs)).toBe(DETECT_RELEASE_MS);
+        expect(Number(res.params.holdMs)).toBe(GATE_HOLD_MS);
+
+        const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+        let silent = 0;
+        for (let i = 0; i < out.length; i++) if (out[i] === 0) silent++;
+        expect(silent).toBeGreaterThan(0);
+      }, 120000);
+
+      it('says the threshold is the user’s, not a measurement it never took', () => {
+        const { channel } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS);
+        const res = deriveGate([channel], SR, -40);
+        if (!res.run) throw new Error('expected run');
+        const threshold = res.derived.find((d) => d.label.includes('Threshold'))!;
+        expect(threshold.label).toContain('manual');
+        expect(threshold.value).toBe('-40.0 dBFS');
+        expect(threshold.from).toContain('you set');
+        // It must not claim a derivation it did not make.
+        expect(threshold.from).not.toContain(`${GATE_HEADROOM_DB} dB over`);
+        // ...and it still reports how much of the take it will silence, which
+        // is the only way the user can tell they set it too high.
+        expect(res.derived.some((d) => d.label === 'Gated')).toBe(true);
+      }, 120000);
+
+      it('clamps into the effect’s own range rather than emitting a level it cannot take', () => {
+        const { channel } = takeWhoseQuietestWindowIsABreath(1);
+        const param = getEffect('noise-gate')!.params.find((p) => p.id === 'thresholdDb')!;
+        for (const [asked, expected] of [
+          [-500, param.min as number],
+          [+40, param.max as number],
+        ] as const) {
+          const res = deriveGate([channel], SR, asked);
+          if (!res.run) throw new Error('expected run');
+          expect(Number(res.params.thresholdDb)).toBe(expected);
+        }
+      }, 120000);
+
+      it('overrides the derivation on a take that would have gated on its own', () => {
+        // The user's judgement wins over a measurement that succeeded too —
+        // otherwise the box would silently do nothing on most takes.
+        const { channel } = takeWhoseQuietestWindowIsABreath(1);
+        const derivedRun = deriveGate([channel], SR);
+        if (!derivedRun.run) throw new Error('expected the derived run to gate');
+        expect(Number(derivedRun.params.thresholdDb)).not.toBe(-40);
+        const manual = deriveGate([channel], SR, -40);
+        if (!manual.run) throw new Error('expected run');
+        expect(Number(manual.params.thresholdDb)).toBe(-40);
+      }, 120000);
+
+      it('spends nothing on a search whose answer it is about to discard', () => {
+        const spy = jest.spyOn(chainAnalysis, 'measureNoiseWindows');
+        try {
+          const { channel } = takeWhoseQuietestWindowIsABreath(2);
+          deriveGate([channel], SR, -40);
+          expect(spy).not.toHaveBeenCalled();
+        } finally {
+          spy.mockRestore();
+        }
+      }, 120000);
+    });
 
     it('says in the row the user reads what it actually searches', () => {
       // The note is rendered verbatim in the dialog. A stage that quietly
@@ -3196,6 +3296,45 @@ describe('runVocalChain', () => {
     expect(report!.after.rmsDb).toBe(report!.before.rmsDb);
     expect(report!.after.peakDb).toBe(report!.before.peakDb);
   });
+
+  // V2/R2 — the escape has to reach the audio, not merely exist in the
+  // derivation. One option on the run, one stage, one number.
+  it('carries a gate threshold the user set through to the stage that runs', async () => {
+    // Steady room tone with no voice and no pause: the stage declines, and no
+    // search can change that — there is nothing in the take BUT the floor.
+    const roomTone = noise(SR * 3, 0.01, 9);
+    seedDoc([Float32Array.from(roomTone)]);
+    const declined = await runVocalChain({ enabled: only('gate') });
+    const before = declined!.stages.find((s) => s.id === 'gate')!;
+    expect(before.status).toBe('declined');
+    expect(before.reason).toContain("set this stage's threshold yourself");
+
+    useAppStore.setState(makeInitialState());
+    seedDoc([Float32Array.from(roomTone)]);
+    const manual = await runVocalChain({ enabled: only('gate'), gateThresholdDb: -30 });
+    const after = manual!.stages.find((s) => s.id === 'gate')!;
+    expect(after.status).toBe('applied');
+    expect(after.derived[0].label).toContain('manual');
+    expect(after.derived[0].value).toBe('-30.0 dBFS');
+    // ...and the audio really was gated at it: the take is a −44 dBFS floor,
+    // so a −30 dBFS gate takes all of it to digital silence.
+    expect(activeDoc().channels[0].some((v) => v !== 0)).toBe(false);
+  }, 60000);
+
+  it('leaves the derivation alone when the user set no threshold', async () => {
+    // The converse: the option is absent on every ordinary run, and its
+    // absence must not change a single number the stage derives.
+    const take = flat(WIN * 8, 0.5);
+    take.set(noise(WIN, 0.006, 101), 4 * WIN);
+    seedDoc([Float32Array.from(take)]);
+    const report = await runVocalChain({ enabled: only('gate') });
+    const gate = report!.stages.find((s) => s.id === 'gate')!;
+    expect(gate.status).toBe('applied');
+    expect(gate.derived[0].label).toBe('Threshold');
+    const direct = deriveGate([take], SR);
+    if (!direct.run) throw new Error('expected run');
+    expect(gate.derived[0].value).toBe(`${Number(direct.params.thresholdDb).toFixed(1)} dBFS`);
+  }, 60000);
 
   it('every stage disabled leaves EVERY stage reported as off or manual — none runs unseen', async () => {
     seedDoc([zeroMean(WIN * 4)]);

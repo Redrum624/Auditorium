@@ -16,6 +16,7 @@ import {
   type VocalChainStageProgress,
   type VocalChainStageResult,
 } from '../../services/vocalChain';
+import { noiseGateEffect } from '../../effects/dynamics/NoiseGateEffect';
 import { GlassButton, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
 
@@ -98,6 +99,13 @@ const PHASE_TEXT: Record<ChainStagePhase, string> = {
   measuring: 'Measuring',
   rendering: 'Rendering',
 };
+
+/** The gate's OWN threshold parameter — its range, step and default come from
+ * the effect that will receive them, so the box cannot offer a level the gate
+ * would silently clamp. Taken from the definition rather than through
+ * `getEffect`, which needs a registry this module cannot assume has been
+ * filled by the time it is imported. */
+const GATE_THRESHOLD_PARAM = noiseGateEffect.params.find((p) => p.id === 'thresholdDb')!;
 
 const METRIC_ROWS: { key: keyof VocalChainMetrics; label: string; unit: 'dbfs' | 'db' }[] = [
   { key: 'rmsDb', label: 'RMS', unit: 'dbfs' },
@@ -238,6 +246,16 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
   const selection = useAppStore((s) => s.selection);
 
   const [enabled, setEnabled] = useState<Record<VocalChainStageId, boolean>>(defaultStageSelection);
+  // V2/R2 — the one setting here that comes from a person rather than from the
+  // recording. Two pieces of state, not one: the tick is the user SAYING they
+  // want to name a level, and only then does a level exist to send. A single
+  // nullable number would make "off" and "off, but I typed -42 earlier"
+  // indistinguishable, and the engine would receive a threshold nobody asked
+  // it to use. Untying them also means the box is gone entirely until asked
+  // for — an empty field beside a stage that derives its own threshold reads
+  // as a setting the user forgot to fill in.
+  const [gateManual, setGateManual] = useState(false);
+  const [gateThresholdDb, setGateThresholdDb] = useState(GATE_THRESHOLD_PARAM.default as number);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [running, setRunning] = useState<string | null>(null);
@@ -297,6 +315,8 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
     try {
       const result = await runVocalChain({
         enabled,
+        // Sent only when the user asked for it — see the state above.
+        ...(gateManual ? { gateThresholdDb } : {}),
         onProgress: (fraction) => {
           if (!cancelledRef.current) setProgress(fraction);
         },
@@ -448,6 +468,54 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                     >
                       {stage.note}
                     </p>
+                    {stage.id === 'gate' && (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                        <input
+                          type="checkbox"
+                          id="vocal-chain-gate-manual"
+                          data-testid="vocal-chain-gate-manual"
+                          checked={gateManual}
+                          disabled={locked}
+                          onChange={(e) => setGateManual(e.target.checked)}
+                          className="accent-[#26c6da]"
+                        />
+                        <label
+                          htmlFor="vocal-chain-gate-manual"
+                          className="text-xs"
+                          style={{ color: 'var(--glass-text-label)' }}
+                        >
+                          Gate at a level I set instead
+                        </label>
+                        {gateManual && (
+                          <>
+                            <input
+                              type="number"
+                              aria-label="Gate threshold in dBFS"
+                              data-testid="vocal-chain-gate-threshold"
+                              value={gateThresholdDb}
+                              min={GATE_THRESHOLD_PARAM.min}
+                              max={GATE_THRESHOLD_PARAM.max}
+                              step={GATE_THRESHOLD_PARAM.step}
+                              disabled={locked}
+                              onChange={(e) => {
+                                const v = Number(e.target.value);
+                                if (Number.isFinite(v)) setGateThresholdDb(v);
+                              }}
+                              className="w-20 rounded px-1.5 py-0.5 text-right font-mono text-xs"
+                              style={{
+                                background: 'rgba(255, 255, 255, 0.06)',
+                                border: '1px solid var(--glass-border)',
+                                color: 'var(--glass-text-title)',
+                              }}
+                            />
+                            <span className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+                              dBFS — everything under this goes to silence, with the same hold and fades. The
+                              stage will say the threshold was yours.
+                            </span>
+                          </>
+                        )}
+                      </div>
+                    )}
                     {activity && (
                       <div className="mt-1 flex flex-col gap-1">
                         <p

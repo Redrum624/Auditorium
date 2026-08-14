@@ -1237,6 +1237,60 @@ toward removing *less*. The gap's END is accurate to ~1 ms (1 ms attack), so
 speech onsets are never clipped. If a bordering gap must be caught, lowering
 "Min silence" by ~100 ms compensates exactly.
 
+## The Noise Gate's decisions rest on constructed populations — and a real recording has already fallen outside them
+
+<!-- V2 -->
+**Area:** the Vocal Chain's Noise Gate stage (`deriveGate` in
+`src/services/vocalChain.ts`), the search behind it
+(`measureNoiseWindows` in `src/dsp/chainAnalysis.ts`), and every constant either
+of them consults: `GATE_HEADROOM_DB`, `GATE_VOICED_FRACTION`,
+`GATE_SHAPED_RESIDUAL_DB`, `GATE_CANCELLATION_DEPTH_DB`,
+`NOISE_WINDOW_MAX_SILENT_FRACTION`, `GATE_QUIET_WINDOWS`,
+`GATE_SEARCH_CLIMB_DB`.
+
+**Every one of those constants is placed between two measured populations, and
+every member of every population is audio this repository generated.** Gaussian
+and uniform floors, one-pole tilts at 400/800/2500 Hz, whispers modelled as
+noise through three resonators, sibilants as one resonator, sung tones as a
+fundamental with two harmonics and vibrato. They are honest models and the gaps
+they leave are wide — the vocal-tract check separates 0.63–1.91 dB of floor from
+3.20–10.58 dB of unvoiced voice — but a gap between two synthetic populations is
+evidence about the synthesis, not a promise about a microphone.
+
+**A real recording has already landed outside them.** Reported 2026-08-14: a
+2 min 22 s sung take whose quietest 500 ms measured **4.0 dB** of departure from
+a straight spectral tilt, against the 2.5 dB the check calls voice and the
+1.91 dB worst floor member the constant was derived above. The stage declined
+and the user's report was "the noise in the non-singing parts was not removed".
+Two readings of that number are both consistent with everything measured here,
+and nothing in the file distinguishes them: either that half-second really was a
+breath — in which case the take had usable pauses elsewhere that the derivation
+never looked at — or the room itself is spectrally shaped (a fan, an HVAC duct,
+a nearby machine) and 4.0 dB is what a REAL floor reads, in which case the
+synthetic floor population simply does not reach that far.
+
+**What was done about it.** The first reading is now handled: the stage searches
+the twelve quietest distinct passages instead of the single quietest one. The
+second cannot be, because there is no measurement to fix — a shaped room and a
+whisper are the same shape, and raising the constant to admit that floor would
+admit whispers with it and mute them. So the second reading is answered by
+giving the decision back to the user: **the Noise Gate row takes a threshold you
+name**, and every refusal of the stage ends by saying so. Silence stays
+reachable whether or not the populations describe your room.
+
+**What that means for you.** If your recording room has a fan, a computer, an
+air conditioner or anything else with a spectrum of its own, expect this stage
+to refuse more often than the numbers above suggest, and use the manual
+threshold when it does. The refusal is the safe direction — the stage is
+declining to mute audio it cannot vouch for — but it is a refusal, not a
+verdict about your take.
+
+**How it would be closed.** Only by measuring real rooms: a population of noise
+floors recorded in ordinary domestic and project spaces, with their spectral
+tilt residuals, against a population of real whispers and breaths from real
+singers. Until that exists, these constants are calibrated to models, and this
+entry says so.
+
 ## The Vocal Chain evens out the envelope; it does not lower the peak-to-RMS ratio
 
 **Area:** Vocal Chain (`src/services/vocalChain.ts`), compressor and limiter stages.

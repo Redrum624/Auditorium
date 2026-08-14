@@ -344,7 +344,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Noise Gate',
     effectId: 'noise-gate',
     defaultEnabled: true,
-    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from a ${NOISE_WINDOW_MS} ms passage, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the passage turns out to be the recording itself, a softly sung phrase, or a whispered one — so a take that never stops for half a second is usually left alone, the exception being an unshaped breath, which no measurement can tell from room tone. It does not judge only the QUIETEST half-second: an audible breath between two phrases can read quieter than the room tone in the take's real gaps, so it walks the ${GATE_QUIET_WINDOWS} quietest distinct passages in level order and takes the threshold from the first that reads as a pause — never climbing more than ${GATE_SEARCH_CLIMB_DB} dB above where it would have closed on the quietest one, because past that it is choosing a different level regime and would mute the quieter passage it stepped over. A stretch of digital silence is the opposite — proof of a pause — and a take carrying one still gates, but the silence itself is never measured: the threshold comes from the quietest ${NOISE_WINDOW_MS} ms of REAL material, so zeros next to a whispered line cannot launder that whisper into a noise floor, quiet audio that survives only as fragments between zeros (an 8-bit transfer, a stem strip-silenced by a tool with no hold) declines rather than being priced by a floor that never contained it, and a take whose pauses are all already exact zeros declines, having nothing left for a gate to do. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. The same hold is given to whatever comes OUT of a run of digital silence, because a gate has nothing to remove inside one: a soft pickup consonant or an inhale left in a strip-silenced pre-roll has no phrase before it to hold the gate open, and used to be muted whole. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
+    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from a ${NOISE_WINDOW_MS} ms passage, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the passage turns out to be the recording itself, a softly sung phrase, or a whispered one — so a take that never stops for half a second is usually left alone, the exception being an unshaped breath, which no measurement can tell from room tone. It does not judge only the QUIETEST half-second: an audible breath between two phrases can read quieter than the room tone in the take's real gaps, so it walks the ${GATE_QUIET_WINDOWS} quietest distinct passages in level order and takes the threshold from the first that reads as a pause — never climbing more than ${GATE_SEARCH_CLIMB_DB} dB above where it would have closed on the quietest one, because past that it is choosing a different level regime and would mute the quieter passage it stepped over. When it still cannot find one, the box under this note gates at a level you name instead — the one setting in this chain that comes from you, and the row says so. A stretch of digital silence is the opposite — proof of a pause — and a take carrying one still gates, but the silence itself is never measured: the threshold comes from the quietest ${NOISE_WINDOW_MS} ms of REAL material, so zeros next to a whispered line cannot launder that whisper into a noise floor, quiet audio that survives only as fragments between zeros (an 8-bit transfer, a stem strip-silenced by a tool with no hold) declines rather than being priced by a floor that never contained it, and a take whose pauses are all already exact zeros declines, having nothing left for a gate to do. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. The same hold is given to whatever comes OUT of a run of digital silence, because a gate has nothing to remove inside one: a soft pickup consonant or an inhale left in a strip-silenced pre-roll has no phrase before it to hold the gate open, and used to be muted whole. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
     weight: 4,
   },
   {
@@ -1065,8 +1065,86 @@ function classifyQuietWindow(
   return null;
 }
 
-export function deriveGate(channels: Float32Array[], sampleRate: number): StageResolution {
+/**
+ * @param manualThresholdDb A level the USER named, in dBFS. When present the
+ * derivation is not attempted at all and this is the threshold — see the block
+ * below for why the escape has to exist and why it wins.
+ */
+export function deriveGate(
+  channels: Float32Array[],
+  sampleRate: number,
+  manualThresholdDb?: number
+): StageResolution {
   const params = defaultParamsFor('noise-gate');
+  // EVERY refusal of this stage ends the same way (V2/R2). Whatever the
+  // measurement could not do — no pause anywhere, no floor above digital
+  // silence, an unshaped breath no statistic can tell from a room — the user
+  // can still name a level, and a refusal that does not say so leaves them
+  // with a paragraph where they asked for silence.
+  const decline = (reason: string): StageResolution => ({
+    run: false,
+    reason: `${reason}. If you can hear a gap that ought to be silent, set this stage's threshold yourself — the Vocal Chain's Noise Gate row takes a level in dBFS and gates at it, with the same hold, fades and digital-silence rules. Nothing was gated`,
+  });
+  const attackMs = clampToParam('noise-gate', 'attackMs', DETECT_ATTACK_MS);
+  const releaseMs = clampToParam('noise-gate', 'releaseMs', DETECT_RELEASE_MS);
+  const holdMs = clampToParam('noise-gate', 'holdMs', GATE_HOLD_MS);
+  params.attackMs = attackMs;
+  params.releaseMs = releaseMs;
+  params.holdMs = holdMs;
+
+  /** How long the take spends under a level, for the `Gated` row — the same
+   * comparison the effect makes, so the number predicts what it will do. */
+  const gatedSecondsAt = (db: number, env: Float32Array): number => {
+    const lin = Math.pow(10, db / 20);
+    let sounding = 0;
+    for (let i = 0; i < env.length; i++) if (env[i] > lin) sounding++;
+    return (env.length - sounding) / sampleRate;
+  };
+
+  // R2 — THE LAST WORD IS THE USER'S.
+  //
+  // Everything below this block is a measurement, and a measurement can be
+  // absent: no statistic tells an UNSHAPED breath from room tone (see
+  // `GATE_SHAPED_RESIDUAL_DB`'s closing note), no search finds a pause in a
+  // take that has none, and `GATE_SEARCH_CLIMB_DB` deliberately refuses takes
+  // whose only readable pause is a different level regime. On those takes the
+  // stage used to have nothing to offer but a paragraph, and "no word, no
+  // sound" — the thing the user actually asked for — was unreachable.
+  //
+  // So a threshold the user names is taken as given. It wins over a successful
+  // derivation as well, because a box that silently did nothing on the takes
+  // that DO measure would be worse than no box: the user sets it after reading
+  // a refusal, and would have no way to tell whether it had been honoured.
+  // Only the threshold's SOURCE changes — the detector constants, the hold, the
+  // fades and the digital-silence rule are the stage's own, unchanged — and the
+  // `Gated` row still reports what the level will actually silence, which is
+  // the only way to see that it was set too high.
+  if (manualThresholdDb !== undefined && Number.isFinite(manualThresholdDb)) {
+    const thresholdDb = clampToParam('noise-gate', 'thresholdDb', manualThresholdDb);
+    params.thresholdDb = thresholdDb;
+    const env = envelopeFollower(maxAcrossChannels(channels), sampleRate, attackMs, releaseMs);
+    return {
+      run: true,
+      params,
+      derived: [
+        {
+          label: 'Threshold (manual)',
+          value: dbfsStr(thresholdDb),
+          from: `the level you set yourself — this stage measured nothing, and says so rather than dressing your number up as a derivation`,
+        },
+        {
+          label: 'Gated',
+          value: `${gatedSecondsAt(thresholdDb, env).toFixed(1)} s`,
+          from: `the part of the selection sitting under that threshold — the rest stays at full level. Set it lower if this is more than the pauses`,
+        },
+        {
+          label: 'Hold',
+          value: `${holdMs.toFixed(0)} ms`,
+          from: `the shortest gap this app calls a pause rather than articulation (Remove Silence's own minimum), so nothing briefer can close the gate — the ${releaseMs.toFixed(0)} ms release is the detector this stage always runs`,
+        },
+      ],
+    };
+  }
   // The search refuses MOSTLY-SILENT candidate windows (the opt-in flag; see
   // `NOISE_WINDOW_MAX_SILENT_FRACTION` in chainAnalysis.ts for both measured
   // sides of its bound). On a take carrying a stretch of exact zeros — a
@@ -1112,21 +1190,15 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
       let anySounding = false;
       for (let i = 0; i < bareEnv.length && !anySounding; i++) if (bareEnv[i] > bareGateLin) anySounding = true;
       if (!anySounding) {
-        return {
-          run: false,
-          reason: `nothing in the selection rises above the ${dbfsStr(wouldGateAtDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`,
-        };
+        return decline(
+          `nothing in the selection rises above the ${dbfsStr(wouldGateAtDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`
+        );
       }
     }
-    return {
-      run: false,
-      reason: `no ${NOISE_WINDOW_MS} ms passage of real material to measure the noise floor from — every candidate window is digital silence, or mostly digital silence — so the threshold cannot be derived. A take whose pauses are already exact zeros has nothing for a gate to do`,
-    };
+    return decline(
+      `no ${NOISE_WINDOW_MS} ms passage of real material to measure the noise floor from — every candidate window is digital silence, or mostly digital silence — so the threshold cannot be derived. A take whose pauses are already exact zeros has nothing for a gate to do`
+    );
   }
-  const attackMs = clampToParam('noise-gate', 'attackMs', DETECT_ATTACK_MS);
-  const releaseMs = clampToParam('noise-gate', 'releaseMs', DETECT_RELEASE_MS);
-  const holdMs = clampToParam('noise-gate', 'holdMs', GATE_HOLD_MS);
-
   // Is the quietest window actually a PAUSE, or is it the programme?
   //
   // `measureNoiseWindow` returns the quietest 500 ms there is, which on a
@@ -1162,10 +1234,9 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
     noise.envelopePeakDb + GATE_HEADROOM_DB
   );
   if (soundingAbove(quietestThresholdDb) === 0) {
-    return {
-      run: false,
-      reason: `nothing in the selection rises above the ${dbfsStr(quietestThresholdDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`,
-    };
+    return decline(
+      `nothing in the selection rises above the ${dbfsStr(quietestThresholdDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`
+    );
   }
 
   // ...and is it a pause rather than SOFT SINGING, or an unvoiced vocal
@@ -1205,9 +1276,8 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
     }
   }
   if (accepted === null) {
-    return {
-      run: false,
-      reason: `${quietestReason as string}. ${
+    return decline(
+      `${quietestReason as string}. ${
         searched === 1
           ? `It is the only ${NOISE_WINDOW_MS} ms passage in the selection this stage can measure a floor from${
               skippedForClimb > 0
@@ -1215,8 +1285,8 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
                 : ''
             }`
           : `Nor does anything else: the ${searched} quietest comparable passages of the selection were each checked, and every one of them reads as material rather than a floor`
-      }. If you can hear a gap that ought to be silent, set this stage's threshold yourself — the Vocal Chain's Noise Gate row takes a level in dBFS and gates at it, with the same hold, fades and digital-silence rules. Nothing was gated`,
-    };
+      }`
+    );
   }
   const thresholdDb = clampToParam('noise-gate', 'thresholdDb', accepted.envelopePeakDb + GATE_HEADROOM_DB);
   const soundingSamples = soundingAbove(thresholdDb);
@@ -1245,16 +1315,12 @@ export function deriveGate(channels: Float32Array[], sampleRate: number): StageR
   // is no louder candidate that could pass it after this one has failed.
   const hiddenReal = accepted.hiddenRealSamples ?? 0;
   if (hiddenReal >= TILT_FFT_SIZE) {
-    return {
-      run: false,
-      reason: `this take hides real audio inside its stretches of digital silence — ${(hiddenReal / sampleRate).toFixed(2)} s of fragments too interleaved with exact zeros for any ${NOISE_WINDOW_MS} ms window of the noise search to measure — and a threshold derived without ever seeing them could mute a quiet phrase. Nothing was gated`,
-    };
+    return decline(
+      `this take hides real audio inside its stretches of digital silence — ${(hiddenReal / sampleRate).toFixed(2)} s of fragments too interleaved with exact zeros for any ${NOISE_WINDOW_MS} ms window of the noise search to measure — and a threshold derived without ever seeing them could mute a quiet phrase`
+    );
   }
 
   params.thresholdDb = thresholdDb;
-  params.attackMs = attackMs;
-  params.releaseMs = releaseMs;
-  params.holdMs = holdMs;
   return {
     run: true,
     params,
@@ -1399,7 +1465,8 @@ function resolveStage(
   stage: VocalChainStage,
   channels: Float32Array[],
   sampleRate: number,
-  f0P1Hz: number | null
+  f0P1Hz: number | null,
+  gateThresholdDb?: number
 ): StageResolution {
   switch (stage.id) {
     case 'noise':
@@ -1409,7 +1476,7 @@ function resolveStage(
     case 'silence':
       return deriveRemoveSilence(channels, sampleRate);
     case 'gate':
-      return deriveGate(channels, sampleRate);
+      return deriveGate(channels, sampleRate, gateThresholdDb);
     case 'compressor':
       return deriveCompressor(channels, sampleRate);
     case 'deEsser':
@@ -1651,6 +1718,14 @@ export async function announceMeasuring<Id extends string>(
 
 export interface RunVocalChainOptions {
   enabled: Partial<Record<VocalChainStageId, boolean>>;
+  /**
+   * A Noise Gate threshold in dBFS the USER named, which the stage takes as
+   * given instead of deriving one (V2/R2). The one setting in this chain that
+   * comes from a person rather than from the recording, and it exists because
+   * the derivation can legitimately have no answer — see `deriveGate`. Absent
+   * on an ordinary run, and its absence changes nothing.
+   */
+  gateThresholdDb?: number;
   onProgress?: (fraction: number) => void;
   /** Fires as each stage starts, so the UI can name what is running. */
   onStageStart?: (stage: VocalChainStage) => void;
@@ -1684,7 +1759,7 @@ export interface RunVocalChainOptions {
  * what: a chain that did nothing still owes the user the reason each stage gave.
  */
 export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalChainReport | null> {
-  const { enabled, onProgress, onStageStart, onStageProgress, onStageResult } = opts;
+  const { enabled, gateThresholdDb, onProgress, onStageStart, onStageProgress, onStageResult } = opts;
   const state = useAppStore.getState();
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
   if (!doc) return null;
@@ -1749,7 +1824,7 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
     // the verdict of a measurement that has to happen first, and Match Reverb's
     // is the longest in either chain.
     await announceMeasuring(onStageProgress, stage.id, stage.label);
-    const resolution = resolveStage(stage, channels, sampleRate, f0P1Hz);
+    const resolution = resolveStage(stage, channels, sampleRate, f0P1Hz, gateThresholdDb);
     if (!resolution.run) {
       record({
         id: stage.id,

@@ -560,6 +560,21 @@ movement. If such a passage is the quietest half-second of a take that has no
 real pause, the gate will treat it as the floor and mute it. If that is your
 recording, switch this stage off.
 
+**And when it refuses, you can still gate it yourself.** Every refusal above
+ends by saying so, because a refusal that leaves you with nothing is not a
+service: tick **Gate at a level I set instead** on the Noise Gate row and type
+a threshold in dBFS. Everything under that level goes to silence. This is the
+one setting in the whole chain that comes from you rather than from the
+recording, so the stage says so — its row reads **Threshold (manual)** and
+states, next to it, how many seconds of the selection the level will actually
+silence, which is how you tell you set it too high. Nothing else changes: the
+same 500 ms hold, the same 20 ms fades, the same rule about digital silence.
+It also wins on a take the stage *could* measure, deliberately — a box that
+quietly did nothing on most recordings would be worse than no box. If you do
+not know where to start, run the chain once without it and read the noise floor
+in the before-and-after table; a few decibels above that figure is the level
+the stage would have chosen for itself.
+
 **One stage depends on another.** The high-pass corner comes from the lowest note
 the pitch detector measured, so **switching Pitch Correct off also switches the EQ
 off** — it declines and says so rather than guessing a corner. That matters

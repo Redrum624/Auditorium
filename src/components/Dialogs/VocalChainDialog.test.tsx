@@ -158,7 +158,17 @@ describe('VocalChainDialog — every stage is listed and switchable', () => {
 
     for (const stage of VOCAL_CHAIN_STAGES) {
       const row = screen.getByTestId(`vocal-chain-stage-${stage.id}`);
-      expect(within(row).queryAllByRole('checkbox')).toHaveLength(stage.effectId === null ? 0 : 1);
+      // The ON/OFF toggle specifically, by its own testid rather than by
+      // counting checkboxes in the row: the gate row carries a SECOND tick —
+      // the manual-threshold one, pinned by its own suite below — and a count
+      // would read that as a duplicate switch.
+      expect(within(row).queryAllByTestId(`vocal-chain-toggle-${stage.id}`)).toHaveLength(
+        stage.effectId === null ? 0 : 1
+      );
+      // ...and no stage but the gate has any second control at all.
+      expect(within(row).queryAllByRole('checkbox')).toHaveLength(
+        stage.effectId === null ? 0 : stage.id === 'gate' ? 2 : 1
+      );
     }
     for (const stage of manual) {
       expect(screen.queryByTestId(`vocal-chain-toggle-${stage.id}`)).toBeNull();
@@ -215,6 +225,83 @@ describe('VocalChainDialog — the switches reach the engine', () => {
       if (box.checked) fireEvent.click(box);
     }
     expect(screen.getByTestId('vocal-chain-apply')).toBeDisabled();
+  });
+});
+
+/**
+ * V2/R2 — the one setting in this dialog that comes from a person.
+ *
+ * The gate can legitimately fail to measure a threshold, and when it does the
+ * user still wants their pauses silent. So the gate row carries a level they
+ * can name; it is off until they ask for it, because a chain whose whole claim
+ * is that nothing is set by taste must not open with a taste control armed.
+ */
+describe('VocalChainDialog — the gate threshold the user can set', () => {
+  it('offers the box on the gate row and nowhere else, switched off', () => {
+    seedDoc();
+    open();
+    expect(screen.getByTestId('vocal-chain-gate-manual')).not.toBeChecked();
+    // No level input until it is asked for: an empty box beside a stage that
+    // derives its own threshold reads as a setting the user forgot to fill in.
+    expect(screen.queryByTestId('vocal-chain-gate-threshold')).toBeNull();
+    for (const stage of VOCAL_CHAIN_STAGES) {
+      if (stage.id === 'gate') continue;
+      expect(screen.queryByTestId(`vocal-chain-${stage.id}-manual`)).toBeNull();
+    }
+  });
+
+  it('sends nothing while it is off, however the rest of the dialog is used', async () => {
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-toggle-reverb'));
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(mockRun).toHaveBeenCalledTimes(1));
+    expect(mockRun.mock.calls[0][0].gateThresholdDb).toBeUndefined();
+  });
+
+  it('sends the level once it is switched on and typed', async () => {
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    const box = screen.getByTestId('vocal-chain-gate-threshold');
+    fireEvent.change(box, { target: { value: '-42.5' } });
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(mockRun).toHaveBeenCalledTimes(1));
+    expect(mockRun.mock.calls[0][0].gateThresholdDb).toBe(-42.5);
+  });
+
+  it('switching it back off drops the level rather than remembering it', async () => {
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    fireEvent.change(screen.getByTestId('vocal-chain-gate-threshold'), { target: { value: '-42.5' } });
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(mockRun).toHaveBeenCalledTimes(1));
+    expect(mockRun.mock.calls[0][0].gateThresholdDb).toBeUndefined();
+  });
+
+  it('carries the effect’s own range, so a level the gate cannot take is not offered', () => {
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    const box = screen.getByTestId('vocal-chain-gate-threshold');
+    expect(box).toHaveAttribute('min', '-80');
+    expect(box).toHaveAttribute('max', '0');
+  });
+
+  it('is locked while the pass is running, like every other control here', async () => {
+    seedDoc();
+    let settle: (r: VocalChainReport) => void = () => {};
+    mockRun.mockImplementation(() => new Promise<VocalChainReport>((r) => (settle = r)));
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(screen.getByTestId('vocal-chain-gate-manual')).toBeDisabled());
+    expect(screen.getByTestId('vocal-chain-gate-threshold')).toBeDisabled();
+    await act(async () => {
+      settle(makeReport());
+    });
   });
 });
 
