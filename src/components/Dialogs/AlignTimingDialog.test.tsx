@@ -375,3 +375,126 @@ describe('AlignTimingDialog — octave correction', () => {
     await waitFor(() => expect(screen.getByTestId('align-grid-confirmed')).not.toBeChecked());
   });
 });
+
+/**
+ * T6-3 — the cancel ref this dialog had none of.
+ *
+ * U2's fix round corrected its own claim that all nine hosted tools discard
+ * their work on unmount: seven do, and the two that did not — this one and
+ * `TempoDialog` — committed a finished pass into a document the user had walked
+ * away from. The module lock has been standing in for the discipline; these are
+ * the tests that make the discipline real, so the lock's job can be argued
+ * about on evidence rather than on hope.
+ *
+ * Both of this dialog's committing paths are covered, because they fail
+ * differently: Apply commits inside the effect runner (so the flag has to be
+ * handed DOWN), Suggest commits in this file one animation frame later (so the
+ * frame has to be cancelled).
+ */
+describe('AlignTimingDialog — a walk-away commits nothing (T6-3)', () => {
+  function startApply(): { unmount: () => void; onClose: jest.Mock } {
+    const doc = seedDoc();
+    offBeatMarkers(doc.id, 1500);
+    const onClose = jest.fn();
+    const { unmount } = render(<AlignTimingDialog onClose={onClose} />);
+    fireEvent.click(screen.getByTestId('align-grid-confirmed'));
+    fireEvent.click(screen.getByTestId('align-apply'));
+    return { unmount, onClose };
+  }
+
+  it('hands the service a cancel that reads false while it is open and true once it is gone', () => {
+    // Never resolves: the pass is still in flight for the whole test, which is
+    // exactly the window a walk-away lands in.
+    mockApply.mockReturnValue(new Promise(() => {}));
+    const { unmount } = startApply();
+
+    const shouldCancel = mockApply.mock.calls[0][0].shouldCancel;
+    expect(shouldCancel).toBeDefined();
+    expect(shouldCancel!()).toBe(false);
+
+    unmount();
+
+    // The runner reads this between the warped audio arriving and `applyEdit`
+    // writing it, so `true` here is the whole of "commits nothing".
+    expect(shouldCancel!()).toBe(true);
+  });
+
+  it('acts on nothing when the pass resolves after the tool is gone', async () => {
+    // Settled SUCCESSFULLY on purpose. A refusal would prove nothing here: the
+    // `if (outcome.ok)` arm is already false for one, so the test would pass
+    // with the unmount guard deleted — which is exactly what a mutation run
+    // showed the first version of this test doing. Success is the only outcome
+    // that makes the guard the reason `onClose` is not called.
+    let settle: (v: { ok: true; markersMoved: number }) => void = () => {};
+    mockApply.mockReturnValue(new Promise((resolve) => {
+      settle = resolve as typeof settle;
+    }));
+    const { unmount, onClose } = startApply();
+
+    unmount();
+    await act(async () => {
+      settle({ ok: true, markersMoved: 3 });
+    });
+
+    // `onClose` on an already-dropped tool asks the host to drop it twice.
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('cancels the frame Suggest deferred its detection to, so no markers are written', () => {
+    const frames: FrameRequestCallback[] = [];
+    const raf = jest
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb: FrameRequestCallback) => {
+        frames.push(cb);
+        return frames.length;
+      });
+    const cancelled: number[] = [];
+    const caf = jest
+      .spyOn(window, 'cancelAnimationFrame')
+      .mockImplementation((h: number) => void cancelled.push(h));
+    try {
+      const doc = seedDoc();
+      offBeatMarkers(doc.id, 1500);
+      const { unmount } = render(<AlignTimingDialog onClose={() => {}} />);
+
+      fireEvent.click(screen.getByTestId('align-suggest'));
+      expect(frames).toHaveLength(1);
+
+      unmount();
+      expect(cancelled).toEqual([1]);
+
+      // And if the frame was already dispatched when the unmount landed, the
+      // callback still runs — so it re-reads the decision rather than trusting
+      // the cancel. `suggestSyllableMarkers` writes markers AND an undo entry.
+      act(() => {
+        frames[0](0);
+      });
+      expect(mockSuggest).not.toHaveBeenCalled();
+    } finally {
+      raf.mockRestore();
+      caf.mockRestore();
+    }
+  });
+
+  it('still runs Suggest normally while the tool is open', () => {
+    const doc = seedDoc();
+    offBeatMarkers(doc.id, 1500);
+    const frames: FrameRequestCallback[] = [];
+    const raf = jest
+      .spyOn(window, 'requestAnimationFrame')
+      .mockImplementation((cb: FrameRequestCallback) => {
+        frames.push(cb);
+        return frames.length;
+      });
+    try {
+      render(<AlignTimingDialog onClose={() => {}} />);
+      fireEvent.click(screen.getByTestId('align-suggest'));
+      act(() => {
+        frames[0](0);
+      });
+      expect(mockSuggest).toHaveBeenCalledTimes(1);
+    } finally {
+      raf.mockRestore();
+    }
+  });
+});

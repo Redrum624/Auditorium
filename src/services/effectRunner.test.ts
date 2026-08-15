@@ -320,7 +320,7 @@ describe('runEffectOnSelection', () => {
 
     // Must resolve (not hang, not reject) even though applyEdit throws
     // 'document not found' in the done branch.
-    await expect(runEffectOnSelection('test-close-doc', {})).resolves.toBeUndefined();
+    await expect(runEffectOnSelection('test-close-doc', {})).resolves.toBe('refused');
     expect(canUndo(docId)).toBe(false);
   });
 
@@ -338,7 +338,7 @@ describe('runEffectOnSelection', () => {
     // unable to fail.
     const failuresBefore = getEffectFailureCount();
 
-    await expect(runEffectOnSelection('amplify', { gainDb: 6 })).resolves.toBeUndefined();
+    await expect(runEffectOnSelection('amplify', { gainDb: 6 })).resolves.toBe('refused');
 
     expect(showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({ type: 'error', title: 'Effect failed' })
@@ -391,7 +391,7 @@ describe('runEffectOnSelection', () => {
     const values = [0.1, 0.2, 0.3];
     const docId = seedDoc(values);
 
-    await expect(runEffectOnSelection('amplify', { gainDb: 6 })).resolves.toBeUndefined();
+    await expect(runEffectOnSelection('amplify', { gainDb: 6 })).resolves.toBe('refused');
 
     expect(terminateCalls).toBe(1);
     expect(showMessageBox).toHaveBeenCalledWith(
@@ -546,5 +546,130 @@ describe('describeRemoval (ruling 5 formatting)', () => {
     // 44078 samples = 999.5 ms: rounds to 1000, so it must read "1.00 s",
     // never "1000 ms".
     expect(describeRemoval([{ start: 0, end: 44078 }], 44100)).toBe('1 gap, 1.00 s removed');
+  });
+});
+
+/**
+ * T6-3 — cancellation observed between the worker and the commit.
+ *
+ * The Cover Chain's stages have polled a `shouldCancel` since CC; the single-run
+ * path never had one, so the two tools built on a single run (Match Tempo,
+ * Align Vocal Timing) had nowhere to put a cancel and were left ORPHANING a
+ * finished pass into a document the user had walked away from — recorded in U2's
+ * fix round as the follow-up its module lock was mitigating.
+ *
+ * The check has to live HERE rather than in either dialog: `applyEdit` is called
+ * from inside this function, after the await, so no caller can get between the
+ * two. And it has to be AFTER the await, or "cancelled" would only ever mean
+ * "cancelled before it started" — which is the one moment nobody walks away in.
+ */
+describe('a cancelled run (T6-3)', () => {
+  /** An effect that flips its own cancel flag WHILE the worker leg is running,
+   * which is the window a walk-away actually lands in. One id per call: the
+   * registry refuses a second registration of the same one. */
+  function probeCancelledMidRun(id: string): { shouldCancel: () => boolean } {
+    let cancelled = false;
+    registerEffect({
+      id,
+      name: 'Cancel Probe',
+      category: 'Utility',
+      params: [],
+      process: (channels) => {
+        cancelled = true;
+        return { channels: channels.map((c) => c.map(() => 1)) };
+      },
+    });
+    return { shouldCancel: () => cancelled };
+  }
+
+  it('commits nothing — no document write, no undo entry — and reports it', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3, 0.4]);
+    const before = activeChannel();
+
+    const outcome = await runEffectOnSelection('test-cancel-a', {}, probeCancelledMidRun('test-cancel-a'));
+
+    expect(outcome).toBe('cancelled');
+    // Identity, not equality: `replaceRegion` allocates fresh arrays, so a value
+    // comparison would pass on a commit that really had happened.
+    expect(activeChannel()).toBe(before);
+    expect(canUndo(docId)).toBe(false);
+  });
+
+  it('leaves the selection and the cursor where the user left them', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3, 0.4]);
+    useAppStore.getState().setSelection({ start: 1, end: 3 });
+    useAppStore.getState().setCursor(2);
+
+    await runEffectOnSelection('test-cancel-b', {}, probeCancelledMidRun('test-cancel-b'));
+
+    // `applyEdit` writes both of these GLOBALLY, whichever document it commits
+    // to, so a half-cancelled run would move the user's caret for them.
+    expect(useAppStore.getState().selection).toEqual({ start: 1, end: 3 });
+    expect(useAppStore.getState().cursorSample).toBe(2);
+  });
+
+  it('commits as usual when nothing cancelled it', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3, 0.4]);
+    const before = activeChannel();
+    probeCancelledMidRun('test-cancel-c');
+
+    const outcome = await runEffectOnSelection('test-cancel-c', {}, {
+      shouldCancel: () => false,
+    });
+
+    expect(outcome).toBe('committed');
+    expect(activeChannel()).not.toBe(before);
+    expect(canUndo(docId)).toBe(true);
+  });
+
+  it('commits as usual when no caller asked about cancellation at all', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3, 0.4]);
+    probeCancelledMidRun('test-cancel-d');
+
+    const outcome = await runEffectOnSelection('test-cancel-d', {});
+
+    expect(outcome).toBe('committed');
+    expect(canUndo(docId)).toBe(true);
+  });
+
+  it('asks ONCE, after the worker leg, rather than polling before it starts', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3, 0.4]);
+    let workerRan = false;
+    registerEffect({
+      id: 'test-cancel-order',
+      name: 'Cancel Order',
+      category: 'Utility',
+      params: [],
+      process: (channels) => {
+        workerRan = true;
+        return { channels: channels.map((c) => c.slice()) };
+      },
+    });
+    const asked: boolean[] = [];
+
+    await runEffectOnSelection('test-cancel-order', {}, {
+      shouldCancel: () => {
+        asked.push(workerRan);
+        return true;
+      },
+    });
+
+    // A check placed before the await would have recorded `false` here.
+    expect(asked).toEqual([true]);
+  });
+
+  it('reports a worker failure as refused, not as cancelled', async () => {
+    const docId = seedDoc([0.1, 0.2, 0.3, 0.4]);
+    _setDspWorkerLoadFailure('worker unavailable');
+    (window as { electronAPI?: unknown }).electronAPI = { showMessageBox: () => Promise.resolve() };
+
+    const outcome = await runEffectOnSelection('amplify', { gainDb: 6 }, {
+      shouldCancel: () => false,
+    });
+
+    // The two are different events and the caller acts differently on them: a
+    // failure has already shown its dialog, a cancellation must stay silent.
+    expect(outcome).toBe('refused');
+    expect(canUndo(docId)).toBe(false);
   });
 });

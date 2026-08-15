@@ -102,6 +102,14 @@ function refusalMessage(reason: TempoRefusal | undefined): string {
       return 'The selected region is empty.';
     case 'no-document':
       return 'No document is open.';
+    case 'cancelled':
+      // T6-3. Unreachable from THIS dialog by construction — a cancelled pass is
+      // one whose tool is already gone, so `handleApply` returns before it can
+      // set an error line — and it is written anyway because the reason is part
+      // of the service's contract, and `testHooks` reads the same outcome.
+      // Without an arm of its own it would fall to the default, which says the
+      // change "did not apply" as though something had gone wrong.
+      return 'The tempo change was cancelled. Nothing was changed.';
     default:
       return 'The tempo change did not apply.';
   }
@@ -166,6 +174,29 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   const [applyError, setApplyError] = useState<string | null>(null);
 
   const sourceInputRef = useRef<HTMLInputElement>(null);
+
+  /**
+   * T6-3 — the unmount guard this dialog did not have.
+   *
+   * U2's fix round found the claim that "all nine discard on unmount" false:
+   * seven do, and this one guarded only a DOM ref, so an Apply that resolved
+   * after the tool was gone committed its stretch, its marker correction and its
+   * beat grid into a document the user had walked away from. The module lock has
+   * been holding the app still to prevent that; this is the discipline it was
+   * standing in for.
+   *
+   * A ref rather than state, for the reason `CoverChainDialog` records: the
+   * cleanup has to read the CURRENT value, and a state variable captured in a
+   * closure is the value at the last render. Reset on mount as well as set on
+   * unmount, because StrictMode mounts twice and a ref survives the remount.
+   */
+  const cancelledRef = useRef(false);
+  useEffect(() => {
+    cancelledRef.current = false;
+    return () => {
+      cancelledRef.current = true;
+    };
+  }, []);
 
   // Low-confidence focus (spec item 2): only on the INITIAL estimate, once.
   useEffect(() => {
@@ -266,6 +297,12 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
     setDetecting(true);
     try {
       const result = await runTempoAnalysis(doc);
+      // T6-3: an analysis that lands after the tool is gone is a warmed CACHE,
+      // keyed by document — not an edit, not undoable, and correct for the
+      // document it measured. So the run is left alone and only the setState is
+      // guarded. What must not happen is this dialog's state being written after
+      // it is gone; what may happen is the next opening finding the answer ready.
+      if (cancelledRef.current) return;
       setDocEntry(result);
       setRegionOverride(null);
       setCorrectionFailed(false);
@@ -301,7 +338,7 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
       setLastEstimateSelection(useAppStore.getState().selection);
       if (result?.bpm != null) setSourceDraft(String(result.bpm));
     } finally {
-      setDetecting(false);
+      if (!cancelledRef.current) setDetecting(false);
     }
   }
 
@@ -326,6 +363,11 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
     setGridConfirmed(false);
     const newPeriodFrames = docEntry.periodFrames / periodMultiplier;
     const result = await regridTempo(doc.id, newPeriodFrames);
+    // Same reading as `handleDetect`: a re-track writes the analysis cache for
+    // the document it re-tracked, never the document itself. See the concern
+    // recorded in the T6 report — the cache write itself is not cancellable from
+    // here, and is the one thing this retrofit does not close.
+    if (cancelledRef.current) return;
     if (result && result.bpm !== null) {
       setDocEntry(result);
       setRegionOverride(null);
@@ -363,16 +405,28 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
           ...(correction === 'follow-beats' && gridConfirmed && confirmableGrid !== null
             ? { variableRate: { beatSamples: confirmableGrid } }
             : {}),
+          // T6-3: read by the effect runner between the stretched audio arriving
+          // and `applyEdit` writing it. True here means the tool is gone, so the
+          // whole pass — audio, marker correction and beat grid — is dropped.
+          shouldCancel: () => cancelledRef.current,
         },
-        setProgress
+        // Progress into a component that may have unmounted is a no-op React
+        // warns about; the guard keeps the console honest as well as the state.
+        (f) => {
+          if (!cancelledRef.current) setProgress(f);
+        }
       );
+      // Nothing below may run after a cancel: `onClose()` would ask a host that
+      // has already dropped this tool to drop it again, and the error line would
+      // be set on a component nobody can read.
+      if (cancelledRef.current) return;
       if (outcome.ok) {
         onClose();
       } else {
         setApplyError(refusalMessage(outcome.reason));
       }
     } finally {
-      setBusy(false);
+      if (!cancelledRef.current) setBusy(false);
     }
   }
 

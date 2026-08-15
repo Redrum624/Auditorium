@@ -81,7 +81,13 @@ export type AlignRefusal =
   | 'no-grid'
   | 'no-anchors'
   | 'no-change'
-  | 'region-too-short';
+  | 'region-too-short'
+  /** T6-3 — the user left while the warp was running. Distinct from
+   * `'no-change'`, which is what an un-plumbed cancellation used to look like
+   * from outside: both leave the document untouched, but only one of them is
+   * something the user did on purpose, and telling them "nothing to move at
+   * this strength" for their own cancel is the app misreading the room. */
+  | 'cancelled';
 
 export interface AlignedAnchor {
   /** The marker this anchor came from. */
@@ -397,24 +403,37 @@ function remapRegionMarkers(docId: string, plan: AlignPlan, map: WarpMap): numbe
  * reported as `'no-change'` rather than as a silent success — the channels
  * array identity does change on a pass-through apply, so this is checked
  * against the plan instead.
+ *
+ * T6-3 — `shouldCancel` is polled by the runner between the warped audio
+ * arriving and `applyEdit` writing it. This pass commits in TWO places: the
+ * audio through the runner, and the markers through `remapRegionMarkers`
+ * afterwards. Both are governed by the one answer, and they cannot come apart,
+ * because everything from the runner's check to the marker write is one
+ * synchronous block — there is no second await for a walk-away to land in.
+ * Shaped like `runCoverJourney`'s `shouldCancel`, which is the same question
+ * asked between stages rather than between the run and its commit.
  */
 export async function applyTimingAlignment(
-  req: { plan: AlignPlan; strength: number },
+  req: { plan: AlignPlan; strength: number; shouldCancel?: () => boolean },
   onProgress?: (fraction: number) => void
 ): Promise<AlignOutcome> {
   const doc = activeDoc();
   if (!doc) return { ok: false, reason: 'no-document' };
 
-  const { plan, strength } = req;
+  const { plan, strength, shouldCancel } = req;
   const map = buildWarpMap(plan.effectAnchors, plan.regionEnd - plan.regionStart, { strength });
   if (map.identity) return { ok: false, reason: 'no-change' };
 
   const extra: AlignTimingExtra = { anchors: plan.effectAnchors };
-  await runEffectOnSelection(
+  const outcome = await runEffectOnSelection(
     ALIGN_TIMING_EFFECT_ID,
     { strengthPercent: strength * 100 },
-    { onProgress, extra, label: 'Align Vocal Timing' }
+    { onProgress, extra, label: 'Align Vocal Timing', shouldCancel }
   );
+  // Before the success gate, not after it: a cancelled run leaves the channels
+  // untouched, so the gate below would read it as `'no-change'` and tell the
+  // user their own cancel was a strength that moved nothing.
+  if (outcome === 'cancelled') return { ok: false, reason: 'cancelled' };
 
   const postDoc = useAppStore.getState().documents.find((d) => d.id === doc.id);
   if (!postDoc || postDoc.channels === doc.channels) return { ok: false, reason: 'no-change' };

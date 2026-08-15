@@ -83,7 +83,12 @@ export type TempoRefusal =
   | 'out-of-range'
   | 'no-grid'
   | 'empty-region'
-  | 'plan-mismatch';
+  | 'plan-mismatch'
+  /** T6-3 — the user left while the stretch was running. Distinct from the bare
+   * `{ok: false}` an un-plumbed cancellation used to produce: both leave the
+   * document untouched, but only one of them is something the user chose, and
+   * only one of them should stay silent about it. */
+  | 'cancelled';
 
 export interface TempoChangeRequest {
   sourceBpm: number;
@@ -131,6 +136,22 @@ export interface ApplyTempoChangeRequest extends TempoChangeRequest {
    * grid's first in-region beat. `null`/`undefined` skips beat-marker
    * creation even when `addBeatMarkers` is true. */
   firstBeatSample?: number | null;
+  /**
+   * T6-3 — "is this pass still wanted?", polled by the runner between the
+   * stretched audio arriving and `applyEdit` writing it.
+   *
+   * It governs the WHOLE pass, not only the audio: this call commits up to
+   * three undo entries (the stretch, the marker correction, the beat grid), and
+   * every one of them after the first is synchronous with it, so one answer at
+   * the one await is enough to make the pass all-or-nothing. Without it,
+   * walking away mid-stretch landed all three in a document the user had left —
+   * the orphaning U2's module lock was mitigating.
+   *
+   * Carried on the request rather than as another positional, matching
+   * `runCoverJourney`, whose `shouldCancel` rides its request object for the
+   * same reason: two adjacent optional callbacks transpose silently.
+   */
+  shouldCancel?: () => boolean;
 }
 
 export type TempoCheckResult = { ok: true; ratio: number } | { ok: false; reason: TempoRefusal };
@@ -727,12 +748,17 @@ export async function applyTempoChange(
   // reads that fresh allocation as "applied". Same refusal both chains make.
   if (end <= start) return { ok: false, reason: 'empty-region' };
 
-  await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, {
+  const outcome = await runEffectOnSelection('time-stretch', { stretchPercent: ratio * 100 }, {
     onProgress,
     // v1.9.2 (R2-1): the History entry names what the user asked for — Match
     // Tempo — not the Time Stretch effect the work happens to run through.
     label: 'Match Tempo',
+    shouldCancel: req.shouldCancel,
   });
+  // T6-3: before the `applied` gate, which would otherwise report a cancelled
+  // pass as a bare failure — and before `addBeatMarkersAfterStretch`, so a
+  // cancelled pass leaves no grid over audio that was never stretched.
+  if (outcome === 'cancelled') return { ok: false, reason: 'cancelled' };
 
   const postDoc = useAppStore.getState().documents.find((d) => d.id === docId);
   const applied = postDoc !== undefined && postDoc.channels !== doc.channels;
@@ -792,11 +818,17 @@ async function applyVariableTempoChange(
   // computed from. See {@link correctMarkersForWarp}.
   const markersBefore: Marker[] = useAppStore.getState().markers[docId] ?? [];
 
-  await runEffectOnSelection(
+  const outcome = await runEffectOnSelection(
     MATCH_TEMPO_VARIABLE_EFFECT_ID,
     {},
-    { onProgress, extra: check.plan.extra, label: 'Match Tempo' }
+    { onProgress, extra: check.plan.extra, label: 'Match Tempo', shouldCancel: req.shouldCancel }
   );
+  // T6-3: this path's three undo entries are the reason the check has to be
+  // here rather than in the dialog. `correctMarkersForWarp` and
+  // `addBeatMarkersFromMap` below are synchronous with the runner's own check,
+  // so one answer covers all three — but only if it is read before the first of
+  // them, and a cancelled run has no stretch for either to be correct against.
+  if (outcome === 'cancelled') return { ok: false, reason: 'cancelled' };
 
   const postDoc = useAppStore.getState().documents.find((d) => d.id === docId);
   const applied = postDoc !== undefined && postDoc.channels !== doc.channels;

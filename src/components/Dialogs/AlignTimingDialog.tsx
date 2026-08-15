@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AlignHorizontalDistributeCenter, Wand2 } from 'lucide-react';
 import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 import { DEFAULT_STRENGTH, MAX_LOCAL_RATIO, MIN_LOCAL_RATIO } from '../../dsp/timingWarp';
@@ -39,6 +39,14 @@ function refusalMessage(reason: AlignRefusal): string {
       return 'The selected region is too short to align.';
     case 'no-change':
       return 'Nothing to move at this strength.';
+    case 'cancelled':
+      // T6-3. Unreachable from THIS dialog by construction — a cancelled pass is
+      // one whose tool is already gone, so `handleApply` returns before it can
+      // set an error line — and written anyway because the reason is part of the
+      // service's contract and `testHooks` reads the same outcome. Without its
+      // own arm it would fall to the default and report the user's own cancel as
+      // a failure to apply.
+      return 'The alignment was cancelled. Nothing was changed.';
     default:
       return 'The alignment did not apply.';
   }
@@ -99,6 +107,35 @@ export default function AlignTimingDialog({ onClose }: { onClose: () => void }) 
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
 
+  /**
+   * T6-3 — the unmount guard this dialog had NONE of.
+   *
+   * U2's fix round found the claim that "all nine discard on unmount" false and
+   * named this one the worse of the two exceptions: `TempoDialog` at least
+   * guarded a DOM ref, this had nothing, so both of its committing paths landed
+   * in a document the user had walked away from. The module lock has been
+   * holding the app still to prevent that.
+   *
+   * Two things need the guard, and they are not the same kind:
+   *
+   * - **Apply** is asynchronous work whose commit is inside the effect runner,
+   *   so the flag is handed DOWN and read there, between the warped audio and
+   *   `applyEdit`.
+   * - **Suggest** is synchronous work deferred by one frame. Its commit is in
+   *   this file, so the frame is cancelled on unmount and the flag re-checked
+   *   inside the callback — a `requestAnimationFrame` scheduled by a component
+   *   that is gone still fires, and this one writes markers and an undo entry.
+   */
+  const cancelledRef = useRef(false);
+  const suggestFrameRef = useRef<number | null>(null);
+  useEffect(() => {
+    cancelledRef.current = false;
+    return () => {
+      cancelledRef.current = true;
+      if (suggestFrameRef.current !== null) cancelAnimationFrame(suggestFrameRef.current);
+    };
+  }, []);
+
   // `getBeatGrid` is a cached read that never starts an analysis, so opening
   // this dialog cannot kick off a worker (beatGrid.ts guarantee 1).
   const grid = useMemo(
@@ -144,6 +181,10 @@ export default function AlignTimingDialog({ onClose }: { onClose: () => void }) 
     setError(null);
     setConfirmed(false);
     const result = await regridTempo(doc.id, entry.periodFrames / periodMultiplier);
+    // A re-track writes the analysis CACHE for the document it re-tracked — not
+    // the document, not an undo entry — so the run is left alone and only the
+    // setState is guarded. See the T6 report's recorded concern.
+    if (cancelledRef.current) return;
     if (!result || result.bpm === null) setError('Could not re-track at that tempo.');
   }
 
@@ -152,7 +193,13 @@ export default function AlignTimingDialog({ onClose }: { onClose: () => void }) 
     setBusy(true);
     // Detection is synchronous (≈350 ms per 30 s at 48 kHz). Yield one frame
     // first so the busy state actually paints before the thread blocks.
-    requestAnimationFrame(() => {
+    suggestFrameRef.current = requestAnimationFrame(() => {
+      suggestFrameRef.current = null;
+      // T6-3: belt and braces with the cleanup's `cancelAnimationFrame`. The
+      // cancel is what normally stops this, but a frame already dispatched when
+      // the unmount lands still runs, and this call WRITES markers plus an undo
+      // entry — so the decision is re-read here rather than assumed.
+      if (cancelledRef.current) return;
       try {
         const outcome = suggestSyllableMarkers();
         if (!outcome) {
@@ -177,11 +224,22 @@ export default function AlignTimingDialog({ onClose }: { onClose: () => void }) 
     setProgress(0);
     setError(null);
     try {
-      const outcome = await applyTimingAlignment({ plan, strength }, setProgress);
+      const outcome = await applyTimingAlignment(
+        // T6-3: read by the effect runner between the warped audio arriving and
+        // `applyEdit` writing it, and again before the marker remap — so a
+        // walk-away leaves neither the audio nor the markers moved.
+        { plan, strength, shouldCancel: () => cancelledRef.current },
+        (f) => {
+          if (!cancelledRef.current) setProgress(f);
+        }
+      );
+      // `onClose()` on a tool the host has already dropped, and an error line on
+      // a component nobody can read, are both writes to a dialog that is gone.
+      if (cancelledRef.current) return;
       if (outcome.ok) onClose();
       else setError(refusalMessage(outcome.reason));
     } finally {
-      setBusy(false);
+      if (!cancelledRef.current) setBusy(false);
     }
   }
 

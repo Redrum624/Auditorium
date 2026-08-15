@@ -175,7 +175,38 @@ export interface RunEffectOptions {
    * in History as what the USER asked for, not how the work was done. The label
    * is display-only and in-memory (never serialized into `.audm`). */
   label?: string;
+  /**
+   * T6-3 — "is this run still wanted?", asked ONCE, after the worker has
+   * returned and before anything is committed.
+   *
+   * The Cover Chain's engine has polled a predicate of this shape between its
+   * stages since CC; a single run has no between, so the only moment that
+   * matters is the seam between the audio arriving and `applyEdit` writing it.
+   * That seam is inside THIS function, which is why the option is here rather
+   * than in the two dialogs that pass it: a caller awaiting this promise cannot
+   * get between the two, and by the time it is resumed the edit has landed.
+   *
+   * Returning `true` makes the run commit NOTHING — no document write, no undo
+   * entry, no selection or cursor move (`applyEdit` writes both of those
+   * globally, so a half-cancelled run would move the user's caret in whatever
+   * document they moved on to) — and resolve `'cancelled'` so the caller can
+   * say so instead of reporting the run as a no-op.
+   *
+   * Omitted means "always wanted", which is every existing caller's behaviour
+   * unchanged.
+   */
+  shouldCancel?: () => boolean;
 }
+
+/**
+ * What one {@link runEffectOnSelection} call did. `'refused'` covers every
+ * path that already resolved silently — no document, unknown effect, a worker
+ * failure that has shown its own dialog, a commit that threw — and is kept
+ * distinct from `'cancelled'` because the caller acts differently on them: a
+ * failure has already been reported to the user, a cancellation must stay
+ * silent, because the user is the one who caused it.
+ */
+export type EffectRunOutcome = 'committed' | 'cancelled' | 'refused';
 
 /**
  * Runs an effect over the target region (the active selection, or the whole
@@ -188,18 +219,22 @@ export interface RunEffectOptions {
  * fails — e.g. the document was closed while the worker was busy — the failure is
  * surfaced via an error dialog and the promise resolves with no edit applied, so
  * callers (EffectDialog's busy state) reliably settle.
+ *
+ * T6-3: it resolves with WHICH of those happened ({@link EffectRunOutcome}), so
+ * a caller can tell a cancelled pass from one that found nothing to do. Callers
+ * that ignore the value are unaffected.
  */
 export async function runEffectOnSelection(
   effectId: string,
   params: Record<string, EffectParamValue>,
   opts: RunEffectOptions = {}
-): Promise<void> {
-  const { onProgress, extra, label } = opts;
+): Promise<EffectRunOutcome> {
+  const { onProgress, extra, label, shouldCancel } = opts;
   const state = useAppStore.getState();
   const doc = state.documents.find((d) => d.id === state.activeDocumentId) ?? null;
-  if (!doc) return;
+  if (!doc) return 'refused';
   const def = getEffect(effectId);
-  if (!def) return;
+  if (!def) return 'refused';
 
   // ONE resolved region, read by every consumer below — the worker's audio, the
   // `replaceRegion` write, the marker remap, and the post-edit selection/cursor.
@@ -226,8 +261,16 @@ export async function runEffectOnSelection(
     // Worker error / load failure / unpostable message — all three used to be
     // handled by three separate copies of this dialog call inside the executor.
     reportEffectFailure(err);
-    return;
+    return 'refused';
   }
+
+  // T6-3: the ONE seam a walk-away can be observed at. Everything from here to
+  // `applyEdit` is synchronous, so nothing can unmount, close a document or
+  // change the active one between this answer and the commit — which is what
+  // makes "a cancelled pass commits nothing" a property rather than a hope.
+  // Silent by design: the user caused this, and a dialog telling them so would
+  // be the app arguing with a decision they already made.
+  if (shouldCancel?.()) return 'cancelled';
 
   const resultChannels = output.channels;
   const resultLen = resultChannels[0]?.length ?? 0;
@@ -262,9 +305,11 @@ export async function runEffectOnSelection(
       remap
     );
     onProgress?.(1);
+    return 'committed';
   } catch (err) {
     // The doc may have been closed/removed while the worker was busy.
     // Surface it and settle — no edit was applied.
     reportEffectFailure(err);
+    return 'refused';
   }
 }
