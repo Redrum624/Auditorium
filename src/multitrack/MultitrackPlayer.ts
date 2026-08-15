@@ -636,12 +636,43 @@ export class MultitrackPlayer {
     }
 
     const buffer = ctx.createBuffer(slice.length, Math.max(1, len), sessionRate);
+    // Only the actual fade regions take the per-sample envelope pass. The
+    // head is the fade-in OR the incoming crossfade (mutually exclusive:
+    // `resolveClipFadeSpecs` zeroes `fadeIn` under `crossIn`), the tail the
+    // fade-out OR the outgoing crossfade; between them `clipFadeGainAt`
+    // returns exactly 1, and ·1 is exact in float, so copying the middle
+    // (times the baked clip gain) is byte-identical to running the full
+    // per-sample loop — while skipping the envelope calls over the bulk of
+    // the clip. That full-length loop was the tens-of-ms bake wedge that sat
+    // between two tracks' schedules before the shared epoch existed; now it
+    // is just wasted work, removed. Regions are positioned by the SPEC's
+    // clip length (a short slice truncates them) and clamped so a
+    // pathological spec degrades to per-sample evaluation, never to a wrong
+    // middle.
+    const headEnd = fadeSpec
+      ? Math.min(len, Math.max(fadeSpec.fadeIn, fadeSpec.crossIn?.lengthSample ?? 0))
+      : 0;
+    const tailStart = fadeSpec
+      ? Math.max(
+          headEnd,
+          Math.min(
+            len,
+            fadeSpec.lengthSample - Math.max(fadeSpec.fadeOut, fadeSpec.crossOut?.lengthSample ?? 0)
+          )
+        )
+      : len;
     for (let c = 0; c < slice.length; c++) {
       let data = slice[c];
       if (clipGain !== 1 || fadeSpec) {
         const scaled = new Float32Array(len);
         if (fadeSpec) {
-          for (let i = 0; i < len; i++) scaled[i] = data[i] * clipGain * clipFadeGainAt(fadeSpec, i);
+          for (let i = 0; i < headEnd; i++) scaled[i] = data[i] * clipGain * clipFadeGainAt(fadeSpec, i);
+          if (clipGain !== 1) {
+            for (let i = headEnd; i < tailStart; i++) scaled[i] = data[i] * clipGain;
+          } else {
+            scaled.set(data.subarray(headEnd, tailStart), headEnd);
+          }
+          for (let i = tailStart; i < len; i++) scaled[i] = data[i] * clipGain * clipFadeGainAt(fadeSpec, i);
         } else {
           for (let i = 0; i < len; i++) scaled[i] = data[i] * clipGain;
         }

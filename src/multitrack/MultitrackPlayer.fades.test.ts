@@ -444,6 +444,42 @@ describe('MultitrackPlayer fade baking (buffer contents)', () => {
     expect(bufB[1]).toBe(Math.fround(0.4)); // and after it
   });
 
+  it('bakes region-exact values at BOTH memcpy seams (boundary fixture, one sample either side)', () => {
+    // The bake runs the per-sample envelope only over the fade regions and
+    // copies the unity middle. The seams are the probe positions: the head
+    // region is [0, 8) (fade-in 8) and the tail region [492, 500) (fade-out
+    // 8 on a 500-length clip), each asserted at the region edge and one
+    // sample either side. The ramps are endpoint-inclusive (env(7) = 1 on
+    // the way in, env(492) = 1 on the way out), so a boundary off by ONE is
+    // value-neutral by the law itself; the probes one sample INSIDE each
+    // region (6 and 493) catch any larger slip, and 8/491 pin that the
+    // copied middle still carries the clip gain. Clip gain is non-unity so
+    // the gain-only middle path (not the raw memcpy) is the one under test.
+    const { player, ctx } = makePlayer();
+    const s = session([
+      track({
+        clips: [
+          clip({ documentId: 'd', lengthSample: 500, gainDb: -6, fadeInSample: 8, fadeOutSample: 8 }),
+        ],
+      }),
+    ]);
+    player.play(0, s, docs(monoDoc('d', 0.5, 500)));
+
+    const data = ctx.sources[0].buffer?.copied[0];
+    if (!data) throw new Error('no baked buffer');
+    const g = Math.pow(10, -6 / 20);
+    // Head seam (region edge 7|8): last two faded samples, first copied one.
+    expect(data[6]).toBe(Math.fround(0.5 * g * Math.sin((6 / 7) * (Math.PI / 2)))); // mid-ramp, ≠ plateau
+    expect(data[7]).toBe(Math.fround(0.5 * g * Math.sin((7 / 7) * (Math.PI / 2)))); // ramp endpoint (= plateau by law)
+    expect(data[8]).toBe(Math.fround(0.5 * g)); // first middle sample
+    // Tail seam (region edge 491|492): last copied sample, first two faded.
+    expect(data[491]).toBe(Math.fround(0.5 * g)); // last middle sample
+    expect(data[492]).toBe(Math.fround(0.5 * g * Math.cos((0 / 7) * (Math.PI / 2)))); // region start (= plateau by law)
+    expect(data[493]).toBe(Math.fround(0.5 * g * Math.cos((1 / 7) * (Math.PI / 2)))); // first strictly-attenuated
+    // A plateau probe deep in the middle: the copy still carries the gain.
+    expect(data[250]).toBe(Math.fround(0.5 * g));
+  });
+
   it('applies one envelope identically to both channels of a stereo clip', () => {
     const { player, ctx } = makePlayer();
     const s = session([
