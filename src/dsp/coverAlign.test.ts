@@ -1691,6 +1691,12 @@ describe('alignTakeToReference — the mix refinement', () => {
    * V3. The other half, and the one a refinement usually fails: a reference that
    * was ALREADY right must not be moved off it. The control is the same take
    * against the undegraded vocal, with and without the mix pass.
+   *
+   * Three assertions, and the third is the one with teeth. Population summaries
+   * are the natural way to write this test and they are blind to precisely the
+   * failure it exists to catch — one good answer walked a long way while the
+   * others absorb it. See the comment on that line for the substitution that
+   * proves the blindness is real rather than theoretical.
    */
   it('does not move a clean reference off an answer that was already right', () => {
     const p = rows();
@@ -1699,12 +1705,26 @@ describe('alignTakeToReference — the mix refinement', () => {
       `clean stem: unrefined median ${ms(middle(p.map((r) => r.cleanOnly)))} worst ${ms(worst(p.map((r) => r.cleanOnly)))}, ` +
         `refined median ${ms(middle(p.map((r) => r.cleanRefined)))} worst ${ms(worst(p.map((r) => r.cleanRefined)))}`
     );
-    // No pair is made worse by more than a coarse frame, and the population's
-    // two summary figures do not regress at all.
+    const regression = Math.max(...p.map((r) => r.cleanRefined - r.cleanOnly));
+    // eslint-disable-next-line no-console
+    console.log(`  worst single clean pair moved: ${ms(regression)}`);
+    // The population's two summary figures do not regress at all…
     expect(worst(p.map((r) => r.cleanRefined))).toBeLessThanOrEqual(worst(p.map((r) => r.cleanOnly)));
     expect(middle(p.map((r) => r.cleanRefined))).toBeLessThanOrEqual(
       middle(p.map((r) => r.cleanOnly))
     );
+    // …and NO SINGLE PAIR is made worse by more than one frame of the grid these
+    // lags live on. This line is not decoration for the two above it: they
+    // cannot see a single pair being damaged, and the population says so in its
+    // own numbers. The six pairs run 1.69 → 4.20, 6.24 → 4.81, 7.37 → 10.62,
+    // 15.01 → 15.63, 17.81 → 18.13 and 20.24 → 12.04 ms, so the pair sitting at
+    // 1.69 ms could be walked to 12 ms — a 10.3 ms regression, twice this bound —
+    // and BOTH summary assertions stay green: the worst is still 18.13 ms
+    // against a 20.24 ms ceiling and the median is still 12.04 ms against
+    // 15.01 ms. That exact substitution was run and this assertion is the only
+    // one that failed (10.31 ms against 5 ms), which is the whole reason it is
+    // here. Measured, the real worst move is 3.25 ms.
+    expect(regression).toBeLessThanOrEqual(1 / ALIGN_COARSE_FRAME_RATE_HZ);
   });
 
   /**
