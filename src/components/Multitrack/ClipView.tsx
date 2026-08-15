@@ -9,7 +9,7 @@ import { CROSSFADE_RHO, resolveClipFadeSpecs } from '../../multitrack/mixdown';
 import { moveClipsBy, useSessionStore } from '../../multitrack/sessionStore'; // K1
 import { clampGroupDelta, resolveGroupTrackDelta } from '../../multitrack/groupDrag'; // T5
 import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
-import { snapSample } from '../../services/snap';
+import { snapSampleTiered } from '../../services/snap';
 import { formatTime } from '../../utils/timeFormat';
 import { drawBeatTics, drawWaveformLane, sampleToPixel } from '../Editor/waveformRender';
 import {
@@ -21,7 +21,7 @@ import {
   useLaneWidthBound,
 } from './clipBeatTics';
 import { snapClipStart } from './clipDropPosition';
-import { sessionSnapTargets } from './sessionSnapTargets';
+import { sessionSnapTiers, type SessionSnapTiers } from './sessionSnapTargets';
 
 const HANDLE_PX = 6;
 const DRAG_THRESHOLD = 4;
@@ -161,10 +161,13 @@ interface DragState {
    * pointerup owes it a commit if the gesture turns out to be a click. */
   deferSelection: boolean;
   /** Task B4 — the SESSION's snap targets as they stood when this drag began,
-   * with this clip's own contribution excluded (trap 27). Captured once because
+   * with this clip's own contribution excluded (trap 27) — and, since W2, the
+   * whole contribution of every co-moving group member with it (their captured
+   * positions are stale by the drag's own rigid delta). Captured once because
    * building it walks every clip in the session, and because the set a drag
-   * uses must not change under the user's hand mid-gesture. */
-  targets: number[];
+   * uses must not change under the user's hand mid-gesture. W2: priority
+   * tiers — edges+cursor over markers over beats. */
+  targets: SessionSnapTiers;
   /** Task B4 — the last pointer x seen, so a modifier press with the pointer
    * STILL can recompute the preview from the same position. */
   lastClientX: number;
@@ -601,12 +604,14 @@ export default function ClipView({
       drag.targets,
       zoom.samplesPerPixel,
       alt
-    );
+    ).start;
 
-  /** A single trim boundary, snapped unless suspended. */
+  /** A single trim boundary, snapped unless suspended. A trim IS a clip-edge
+   * gesture, so it takes the same tier priority a move does — trimming an end
+   * to butt against a neighbour's start must not lose to a nearby beat. */
   const snapBoundary = (raw: number, drag: DragState, alt: boolean): number => {
-    if (alt || drag.targets.length === 0) return raw;
-    return snapSample(raw, drag.targets, zoom.samplesPerPixel).sample;
+    if (alt) return raw;
+    return snapSampleTiered(raw, drag.targets, zoom.samplesPerPixel).sample;
   };
 
   // Task B4 — the ONE case a per-pointer-event modifier read cannot cover.
@@ -794,17 +799,22 @@ export default function ClipView({
     const rect = e.currentTarget.getBoundingClientRect();
     const localX = e.clientX - rect.left;
     const mode = modeForX(localX);
+    // K1 — what this gesture moves. Computed BEFORE the targets because it is
+    // also the snap exclusion set (W2): every co-moving member's captured
+    // contribution is stale by the drag's own rigid delta, and `groupIds`
+    // always contains this clip, so the trap-27 self-exclusion is subsumed.
+    const groupIds = memberAtDown ? [...idsAtDown] : [clip.id];
     dragRef.current = {
       mode,
       startClientX: e.clientX,
       origStart: clip.startSample,
       origEnd: clip.startSample + clip.lengthSample,
       exceeded: false,
-      groupIds: memberAtDown ? [...idsAtDown] : [clip.id], // K1
+      groupIds, // K1
       ctrlAtDown: e.ctrlKey, // K1
       shiftAtDown: e.shiftKey, // T5
       deferSelection, // K1
-      targets: sessionSnapTargets(clip.id),
+      targets: sessionSnapTiers(groupIds),
       lastClientX: e.clientX,
     };
     if (mode === 'move') setMoveDragging(true);

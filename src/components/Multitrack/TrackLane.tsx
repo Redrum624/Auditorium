@@ -14,9 +14,9 @@ import type { Track } from '../../multitrack/session';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { sampleToPixel } from '../Editor/waveformRender';
 import ClipView from './ClipView';
-import { laneRawStart, snapClipStart } from './clipDropPosition';
+import { laneRawStart, snapClipStart, type ClipStartSnap } from './clipDropPosition';
 import EnvelopeLane from './EnvelopeLane';
-import { sessionSnapTargets } from './sessionSnapTargets';
+import { SNAP_TIER_EDGE, sessionSnapTiers, type SessionSnapTiers } from './sessionSnapTargets';
 
 interface Zoom {
   samplesPerPixel: number;
@@ -96,9 +96,11 @@ export default function TrackLane({
   // F11-4 — the drop in flight over THIS lane. The snap targets are captured
   // once when the drag enters (walking every clip in the session on each of
   // the many dragover events would be the trap-18 cost again), and the ghost
-  // is the snapped position the drop will actually commit, in lane pixels.
-  const dropTargetsRef = useRef<number[] | null>(null);
-  const [ghostPx, setGhostPx] = useState<number | null>(null);
+  // is the snapped position the drop will actually commit, in lane pixels —
+  // W2: plus the TIER that took it, so an edge snap looks different from a
+  // beat snap while the user can still see both.
+  const dropTargetsRef = useRef<SessionSnapTiers | null>(null);
+  const [ghost, setGhost] = useState<{ px: number; tier: number | null } | null>(null);
 
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     // Only a click on empty lane space (not a clip) reaches here — clips call
@@ -114,7 +116,7 @@ export default function TrackLane({
   /** Where the drop would land — the same arithmetic a clip move drag uses
    * (`snapClipStart`), from an absolute lane x instead of a pointer delta, and
    * with the same Alt escape hatch. */
-  const dropStartSample = (e: ReactDragEvent<HTMLDivElement>): number =>
+  const dropStartSample = (e: ReactDragEvent<HTMLDivElement>): ClipStartSnap =>
     snapClipStart(
       laneRawStart(e.clientX, e.currentTarget.getBoundingClientRect().left, zoom),
       draggedClipLength(sessionRate),
@@ -125,7 +127,7 @@ export default function TrackLane({
 
   const endDrag = () => {
     dropTargetsRef.current = null;
-    setGhostPx(null);
+    setGhost(null);
     onDragOverTrack(null);
   };
 
@@ -135,7 +137,7 @@ export default function TrackLane({
     // Captured at the start of the gesture, exactly as a clip drag captures
     // its set at pointerdown: the targets a drag uses must not change under
     // the user's hand mid-gesture.
-    dropTargetsRef.current = sessionSnapTargets(null);
+    dropTargetsRef.current = sessionSnapTiers([]);
     onDragOverTrack(track.id);
   };
 
@@ -147,9 +149,13 @@ export default function TrackLane({
     if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy';
     // A dragenter can be missed (a drag that begins already inside the lane);
     // the targets are still captured once, not per move.
-    if (dropTargetsRef.current === null) dropTargetsRef.current = sessionSnapTargets(null);
+    if (dropTargetsRef.current === null) dropTargetsRef.current = sessionSnapTiers([]);
     onDragOverTrack(track.id);
-    setGhostPx(sampleToPixel(dropStartSample(e), zoom.scrollSample, zoom.samplesPerPixel));
+    const snap = dropStartSample(e);
+    setGhost({
+      px: sampleToPixel(snap.start, zoom.scrollSample, zoom.samplesPerPixel),
+      tier: snap.tier,
+    });
   };
 
   const onDragLeave = (e: ReactDragEvent<HTMLDivElement>) => {
@@ -162,7 +168,7 @@ export default function TrackLane({
     if (to instanceof Node && e.currentTarget.contains(to)) return;
     // This lane's own transient state always goes.
     dropTargetsRef.current = null;
-    setGhostPx(null);
+    setGhost(null);
     // F11: but the SHARED highlight is only relinquished if this lane still
     // holds it. Crossing into a neighbouring lane fires that lane's `dragenter`
     // BEFORE this lane's `dragleave`, so clearing unconditionally would blank
@@ -175,7 +181,7 @@ export default function TrackLane({
     const kind = kindOf(e);
     if (!kind) return; // not ours — and no preventDefault, so nothing happened
     e.preventDefault();
-    const startSample = dropStartSample(e);
+    const startSample = dropStartSample(e).start;
     const dt = e.dataTransfer;
     endDrag();
 
@@ -248,13 +254,21 @@ export default function TrackLane({
           that sample is itself drawn with a negative left and clipped by the
           same edge, so the lane origin is precisely where its start will
           appear. The committed sample is untouched — only the drawing. */}
-      {ghostPx !== null && (
+      {ghost !== null && (
         <div
           data-testid="clip-drop-ghost"
+          /* W2 — the line names the tier that took the drop, and an
+             EDGE/CURSOR snap paints near-white instead of accent: hard
+             geometry the user placed reads differently from a derived beat,
+             so a butt join is visibly a butt join before letting go. */
+          data-snap-tier={
+            ghost.tier === null ? undefined : (['edge', 'marker', 'beat'] as const)[ghost.tier]
+          }
           className="pointer-events-none absolute top-0 bottom-0 w-0.5"
           style={{
-            left: Math.max(0, ghostPx),
-            backgroundColor: 'var(--accent)',
+            left: Math.max(0, ghost.px),
+            backgroundColor:
+              ghost.tier === SNAP_TIER_EDGE ? 'var(--glass-text-title)' : 'var(--accent)',
             boxShadow: '0 0 8px var(--accent-ring)',
           }}
         />

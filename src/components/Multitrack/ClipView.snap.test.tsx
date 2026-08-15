@@ -461,6 +461,146 @@ describe('clip trim snaps', () => {
   });
 });
 
+describe('clip move — edge targets and priority (W2)', () => {
+  // A second document with NO grid, so a clip of it contributes edges and
+  // nothing else — the un-analysed clip is exactly the case the old trap-27
+  // mitigation ("the first beat usually IS the start") never covered.
+  let doc2: AudioDocument;
+
+  beforeEach(() => {
+    doc2 = createDocument({
+      name: 'plain.wav',
+      sampleRate: SESSION_RATE,
+      channels: [new Float32Array(400_000)],
+    });
+    useAppStore.getState().addDocument(doc2);
+    gridSpy.mockImplementation((docId: string) => (docId === doc.id ? makeGrid() : null));
+  });
+
+  const plainClip = (id: string, startSample: number, lengthSample: number): Clip => ({
+    id,
+    documentId: doc2.id,
+    startSample,
+    offsetSample: 0,
+    lengthSample,
+    gainDb: 0,
+  });
+
+  it('the HEAD lands sample-exact on a same-track predecessor’s END — the butt join', () => {
+    // The predecessor ends at 199 999, an odd number on purpose: only exact
+    // sample equality survives it. "Within a millisecond" is 44 samples off
+    // at 44.1 kHz and would fail this expectation.
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: plainClip('dragged', 0, 20_000) },
+        { trackIdx: 0, clip: plainClip('other', 100_000, 99_999) },
+      ],
+      'dragged'
+    );
+    const grab = grabX(20_000);
+    firePointer(el, 'pointerdown', { clientX: grab });
+    firePointer(el, 'pointermove', { clientX: grab + 2002.5 }); // raw 200 250, 251 past the end
+    firePointer(el, 'pointerup', { clientX: grab + 2002.5 });
+
+    expect(startOf('dragged')).toBe(199_999);
+    // end == start exactly: ZERO overlap, so the join arms NO crossfade —
+    // edge snapping produces the clean butt join, not the micro-overlap the
+    // superseded trap-27 note feared (crossfadableOverlap rule 1).
+    expect(clipById('other').startSample + clipById('other').lengthSample).toBe(199_999);
+    expect(clipById('dragged').fadeInSample).toBeUndefined();
+    expect(clipById('other').fadeOutSample).toBeUndefined();
+  });
+
+  it('the TAIL lands sample-exact on a cross-track clip’s START', () => {
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: plainClip('dragged', 0, 20_000) },
+        { trackIdx: 1, clip: plainClip('other', 50_001, 30_000) },
+      ],
+      'dragged'
+    );
+    const grab = grabX(20_000);
+    firePointer(el, 'pointerdown', { clientX: grab });
+    firePointer(el, 'pointermove', { clientX: grab + 297 }); // raw 29 700 -> tail 49 700, 301 short
+    firePointer(el, 'pointerup', { clientX: grab + 297 });
+
+    expect(startOf('dragged')).toBe(50_001 - 20_000); // tail exactly on 50 001
+  });
+
+  it('an EDGE outranks a strictly NEARER beat (tier priority, H3’s hazard closed)', () => {
+    // The beat at 122 050 is 150 samples from the raw start; the un-analysed
+    // clip's edge at 122 500 is 300. Flat nearest-wins took the beat and the
+    // butt join was silently impossible; the edge tier takes the edge.
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: plainClip('dragged', 0, 20_000) },
+        { trackIdx: 1, clip: clipOf('beatclip', 100_000, 100_000) },
+        { trackIdx: 2, clip: plainClip('edgeclip', 122_500, 50_000) },
+      ],
+      'dragged'
+    );
+    const grab = grabX(20_000);
+    firePointer(el, 'pointerdown', { clientX: grab });
+    firePointer(el, 'pointermove', { clientX: grab + 1222 }); // raw 122 200
+    firePointer(el, 'pointerup', { clientX: grab + 1222 });
+
+    expect(startOf('dragged')).toBe(122_500);
+  });
+
+  it('the parked CURSOR outranks a strictly nearer beat', () => {
+    useSessionStore.getState().setMtCursor(122_500);
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: plainClip('dragged', 0, 20_000) },
+        { trackIdx: 1, clip: clipOf('beatclip', 100_000, 100_000) },
+      ],
+      'dragged'
+    );
+    const grab = grabX(20_000);
+    firePointer(el, 'pointerdown', { clientX: grab });
+    firePointer(el, 'pointermove', { clientX: grab + 1222 }); // raw 122 200: beat 150 away, cursor 300
+    firePointer(el, 'pointerup', { clientX: grab + 1222 });
+
+    expect(startOf('dragged')).toBe(122_500);
+  });
+
+  it('a group drag never snaps to a co-moving member’s captured edge', () => {
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: plainClip('dragged', 0, 20_000) },
+        { trackIdx: 0, clip: plainClip('member', 50_000, 20_000) },
+      ],
+      'dragged'
+    );
+    act(() => useSessionStore.getState().setSelectedClips(['dragged', 'member']));
+    const grab = grabX(20_000);
+    firePointer(el, 'pointerdown', { clientX: grab });
+    // Raw 49 700: the member's captured start (50 000) is 300 away — inside
+    // tolerance, and STALE: the member is moving by the same delta. Excluded,
+    // so the drop commits the raw position and the group stays rigid.
+    firePointer(el, 'pointermove', { clientX: grab + 497 });
+    firePointer(el, 'pointerup', { clientX: grab + 497 });
+
+    expect(startOf('dragged')).toBe(49_700);
+    expect(startOf('member')).toBe(99_700); // the identical, unsnapped delta
+  });
+
+  it('Alt suspends an edge snap exactly as it suspends a beat snap', () => {
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: plainClip('dragged', 0, 20_000) },
+        { trackIdx: 0, clip: plainClip('other', 100_000, 99_999) },
+      ],
+      'dragged'
+    );
+    const grab = grabX(20_000);
+    firePointer(el, 'pointerdown', { clientX: grab, altKey: true });
+    firePointer(el, 'pointermove', { clientX: grab + 2002.5, altKey: true });
+    firePointer(el, 'pointerup', { clientX: grab + 2002.5, altKey: true });
+    expect(startOf('dragged')).toBe(200_250);
+  });
+});
+
 describe('clip drag — the pixel-space tolerance, at the multitrack’s OWN zoom', () => {
   // Trap 26: the multitrack has its own zoom source. A snap helper that reached
   // for the editor's `samplesPerPixel` would quantise this surface at the wrong

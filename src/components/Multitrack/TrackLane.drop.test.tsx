@@ -267,6 +267,29 @@ describe('dragging a Files-panel row over a lane', () => {
     expect(parseFloat(ghost()!.style.left)).toBeCloseTo(200, 5);
   });
 
+  it('W2: the ghost names the tier that took the drop — an edge snap looks different from a beat snap', () => {
+    const dt = startPanelDrag();
+    fireDrag(lanes()[0], 'dragenter', dt);
+
+    // Near the seeded clip's TAIL edge at 200 000: the last mapped beat
+    // (188 200) is 10 800 samples away — far outside the 4 096-sample radius —
+    // so only the EDGE can take this drop.
+    fireDrag(lanes()[0], 'dragover', dt, { clientX: 199_000 / SPP });
+    expect(parseFloat(ghost()!.style.left)).toBeCloseTo(200_000 / SPP, 5);
+    expect(ghost()!.dataset.snapTier).toBe('edge');
+    expect(ghost()!.style.backgroundColor).toBe('var(--glass-text-title)');
+
+    // Near a beat with no edge in reach: 122 500 → the beat at 122 050.
+    fireDrag(lanes()[0], 'dragover', dt, { clientX: 122_500 / SPP });
+    expect(ghost()!.dataset.snapTier).toBe('beat');
+    expect(ghost()!.style.backgroundColor).toBe('var(--accent)');
+
+    // Nothing in reach names no tier and keeps the accent line.
+    fireDrag(lanes()[0], 'dragover', dt, { clientX: 160_000 / SPP });
+    expect(ghost()!.dataset.snapTier).toBeUndefined();
+    expect(ghost()!.style.backgroundColor).toBe('var(--accent)');
+  });
+
   it('clears the highlight and the ghost when the drag leaves the lane', () => {
     const dt = startPanelDrag();
     fireDrag(lanes()[1], 'dragenter', dt);

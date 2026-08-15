@@ -22,7 +22,7 @@
  * (`sessionSnapTargets` decides WHO the targets are; this module only decides
  * where the clip lands among them).
  */
-import { snapSpan } from '../../services/snap';
+import { snapSpanTiered, type SnapTierList } from '../../services/snap';
 import { pixelToSample } from '../Editor/waveformRender';
 
 /** The lane's horizontal mapping — the session store's `mtZoom`. */
@@ -44,14 +44,25 @@ export function laneRawStart(clientX: number, laneLeft: number, zoom: LaneZoom):
   return pixelToSample(clientX - laneLeft, zoom.scrollSample, zoom.samplesPerPixel);
 }
 
+/** What `snapClipStart` resolved: the start to commit, and the tier of the
+ * winning target (`sessionSnapTiers`'s indices — 0 edge/cursor, 1 marker,
+ * 2 beat) or `null` when nothing snapped, so a preview can show WHAT kind of
+ * target took the clip without recomputing anything. */
+export interface ClipStartSnap {
+  start: number;
+  tier: number | null;
+}
+
 /**
  * The clip start a gesture is asking for, snapped unless suspended.
  *
  * Shared by a preview and its commit so the two cannot disagree (trap 23).
  * Both edges of the span may catch a target — aligning a clip's tail to a beat
- * is as ordinary as aligning its head — which is `snapSpan`'s job. The clamp
- * mirrors `moveClip`'s own `Math.max(0, …)`, and the rounding makes the result
- * a whole sample, as every clip position is.
+ * is as ordinary as aligning its head — which is `snapSpanTiered`'s job, and
+ * since W2 the targets arrive as PRIORITY TIERS: an edge or the cursor
+ * outranks a marker outranks a beat (see `sessionSnapTargets`'s header). The
+ * clamp mirrors `moveClip`'s own `Math.max(0, …)`, and the rounding makes the
+ * result a whole sample, as every clip position is.
  *
  * @param suspended Alt held on the event that produced `rawStart` — the
  *   escape hatch. With the magnet suspended (or with no targets at all) the
@@ -60,11 +71,11 @@ export function laneRawStart(clientX: number, laneLeft: number, zoom: LaneZoom):
 export function snapClipStart(
   rawStart: number,
   lengthSample: number,
-  targets: ArrayLike<number>,
+  tiers: SnapTierList,
   samplesPerPixel: number,
   suspended: boolean
-): number {
-  if (suspended || targets.length === 0) return Math.max(0, Math.round(rawStart));
-  const s = snapSpan(rawStart, lengthSample, targets, samplesPerPixel);
-  return Math.max(0, Math.round(s.sample));
+): ClipStartSnap {
+  if (suspended) return { start: Math.max(0, Math.round(rawStart)), tier: null };
+  const s = snapSpanTiered(rawStart, lengthSample, tiers, samplesPerPixel);
+  return { start: Math.max(0, Math.round(s.sample)), tier: s.tier };
 }
