@@ -89,7 +89,7 @@ import { defaultSessionZoom } from '../multitrack/sessionZoom';
 // legal range is already stated once — in the automation layer, which the
 // mixer strip and the parse boundary both read.
 import { clearSessionHistory, withSessionGesture } from '../multitrack/sessionUndo';
-import { clampAutomationValue } from '../multitrack/automation';
+import { clampAutomationValue, resolveAutomation } from '../multitrack/automation';
 import { useAppStore } from '../stores/appStore';
 import { linkDerivedDocument } from './beatGrid';
 import {
@@ -603,6 +603,49 @@ export function autoPlacedReason(alignment: AlignmentMeasurement): string {
     (characterisation ? `${characterisation}. ` : '') +
     placedRemedy(alignment.offsetSeconds, candidates)
   );
+}
+
+/**
+ * T3 (V4 MIN-5). Why the level trim's arithmetic is allowed to work the way it
+ * does — stated, and checked, instead of held by construction alone.
+ *
+ * The trim clamps ONCE, to the delta both tracks share
+ * (`clampAutomationValue('volumeDb', -wanted)`), and then writes
+ * `t.volumeDb + faderDb` to each. Two facts make that valid, and neither is
+ * enforced anywhere else in the system:
+ *
+ *  - **Every fader starts at 0.** `setTrackParam` stores its patch verbatim
+ *    with no clamp of its own (`sessionStore.ts`), so on a track that started
+ *    below 0 the sum can land past the −60 dB floor — a level the mixer strip
+ *    cannot show and the automation layer would refuse — while the stage's
+ *    warning goes on quoting the floor as though it had been respected.
+ *  - **No track carries a volume LANE.** A lane OVERRIDES the static fader
+ *    rather than offsetting it (F0's override-not-offset ruling), so the write
+ *    would land and change nothing audible: the trim inert, the second
+ *    summation still over, and the `stillOver` copy blaming the fader floor for
+ *    a floor that was never reached.
+ *
+ * Both hold because stage 5 builds this session two stages earlier, through
+ * `createTrack` (fader 0) and with no automation. That is exactly why this
+ * THROWS rather than declining: a violation is this module contradicting
+ * itself, not a state a user can arrive in, and the journey's own catch turns a
+ * throw into a failed stage carrying the reason. Trimming the wrong amount
+ * quietly is the outcome worth refusing.
+ *
+ * Returns the reason the trim may not proceed, or `null`.
+ */
+export function trimBlockedBy(tracks: readonly Track[]): string | null {
+  for (const t of tracks) {
+    if (t.volumeDb !== 0) {
+      return `track ${t.id}'s fader starts at ${t.volumeDb} dB, but the level trim clamps one shared delta against a start of 0`;
+    }
+    // Through the shipped resolver, so "a lane with no keys" and "a lane on
+    // another parameter" mean here exactly what they mean to the engines.
+    if (resolveAutomation(t.automation)?.volume) {
+      return `track ${t.id} carries a volume automation lane, which overrides the fader the level trim writes rather than taking it`;
+    }
+  }
+  return null;
 }
 
 /** The cancellation sentinel, so every stage's early return is one shape. */
@@ -1509,6 +1552,11 @@ export async function runCoverJourney(
     let trimDb = 0;
     let trimmedPeakDb: number | null = null;
     if (overCeiling) {
+      // T3 (V4 MIN-5): the assumption under the single shared clamp below,
+      // checked against the session as it stands rather than trusted from two
+      // stages ago. See `trimBlockedBy` for what each arm would cost.
+      const blocked = trimBlockedBy(useSessionStore.getState().session.tracks);
+      if (blocked) throw new Error(`the level trim cannot be applied: ${blocked}`);
       const wanted = summedPeakDb - JOURNEY_PEAK_TARGET_DB;
       const faderDb = clampAutomationValue('volumeDb', -wanted);
       trimDb = -faderDb;

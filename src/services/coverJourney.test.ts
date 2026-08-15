@@ -13,7 +13,7 @@
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
-import { createClip, createTrack, type Session } from '../multitrack/session';
+import { createClip, createTrack, type Session, type Track } from '../multitrack/session';
 import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
 import { PEAK_BLOCK_SAMPLES, mixdownSession, mixdownSessionPeak } from '../multitrack/mixdown';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
@@ -36,6 +36,8 @@ import {
   priorJourneyPasses,
   runCoverJourney,
   sumInstrumental,
+  // T3 (V4 MIN-5): the invariant the trim's shared clamp rests on.
+  trimBlockedBy,
   type CoverJourneyStageId,
   type CoverJourneyStageProgress,
   type CoverJourneyStageResult,
@@ -1608,6 +1610,77 @@ describe('runCoverJourney — smoothing and the level check', () => {
     // entries its chains left, because the dialog's list is about the take.
     expect(report!.undoEntries).toEqual([VOCAL_CHAIN_UNDO_LABEL, COVER_CHAIN_UNDO_LABEL]);
     expect(report!.stages.find((s) => s.id === 'smooth')!.undoEntries).toEqual([]);
+  });
+
+  // T3 (V4 MIN-5) — the invariant the trim's arithmetic rests on, stated.
+  //
+  // The clamp is applied ONCE, to the shared delta, against an implicit start of
+  // 0: `clampAutomationValue('volumeDb', -wanted)` and then `t.volumeDb +
+  // faderDb` per track. That is correct only while every fader IS 0 and no track
+  // carries a volume automation lane — `setTrackParam` stores its patch verbatim
+  // with no clamp of its own, so a nonzero start writes a level past the floor
+  // the mixer can show, and a volume lane overrides the static fader outright
+  // (F0's override-not-offset ruling), which would make the trim inert while the
+  // stage's warning went on blaming the fader floor.
+  //
+  // It held by construction and by nothing else. Stated here, checked in the
+  // trim path, and proved to hold on the session the journey actually builds.
+  describe('the trim states the invariant its arithmetic rests on', () => {
+    const clean = (): Track[] => [
+      { ...createTrack('a'), volumeDb: 0 },
+      { ...createTrack('b'), volumeDb: 0 },
+    ];
+
+    it('passes the session stage 5 builds', () => {
+      expect(trimBlockedBy(clean())).toBeNull();
+    });
+
+    it('names a fader that did not start at 0, because the shared clamp assumed it did', () => {
+      const tracks = clean();
+      tracks[1] = { ...tracks[1], volumeDb: -55 };
+      const blocked = trimBlockedBy(tracks);
+      expect(blocked).not.toBeNull();
+      expect(blocked).toMatch(/fader/i);
+      // The reason has to carry WHICH track, or it sends the reader to look at
+      // both of them.
+      expect(blocked).toContain(tracks[1].id);
+    });
+
+    it('names a volume lane, which would override the trim rather than take it', () => {
+      const tracks = clean();
+      tracks[0] = {
+        ...tracks[0],
+        automation: [{ param: 'volumeDb', keys: [{ positionSample: 0, value: -3, curve: 'equal-gain' }] }],
+      };
+      const blocked = trimBlockedBy(tracks);
+      expect(blocked).not.toBeNull();
+      expect(blocked).toMatch(/automation|lane/i);
+      expect(blocked).toContain(tracks[0].id);
+    });
+
+    it('ignores a lane with no keys and a lane on another parameter', () => {
+      // An empty lane is indistinguishable from no lane by the module's own
+      // rule, and a pan lane does not touch the quantity being trimmed —
+      // refusing on either would be this check inventing a problem.
+      const tracks = clean();
+      tracks[0] = {
+        ...tracks[0],
+        automation: [
+          { param: 'volumeDb', keys: [] },
+          { param: 'pan', keys: [{ positionSample: 0, value: 0.5, curve: 'equal-gain' }] },
+        ],
+      };
+      expect(trimBlockedBy(tracks)).toBeNull();
+    });
+
+    it('holds on the session the journey really builds, at the moment the trim would read it', async () => {
+      // The run that does NOT trim: the faders are therefore still exactly as
+      // stage 5 left them, which is the state stage 6's arithmetic assumes. A
+      // build that started to set a fader, or to lay a volume lane, fails here.
+      const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+      expect(report!.smoothing!.overCeiling).toBe(false);
+      expect(trimBlockedBy(useSessionStore.getState().session.tracks)).toBeNull();
+    });
   });
 
   it('does not spend a second summation, a fader write or a history entry when the sum fits', async () => {
