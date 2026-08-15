@@ -719,9 +719,10 @@ export function deriveDeHum(channels: Float32Array[], sampleRate: number): Stage
  * take with an EVEN floor — that costs nothing: the sliver is the same floor,
  * read over FEWER samples, so the boundary window's peak almost always
  * under-reads and this stage merely cut less. Measured over both shapes x 4
- * lengths x 8 and 44.1 kHz, the honest reading sits 0.00-0.82 dB ABOVE the
- * bare one in fifteen of sixteen members; the sixteenth is 0.07 dB the other
- * way, because a boundary window's envelope peak is a maximum over a
+ * lengths (0.2/0.35/1.0/2.0 s, every cut landing wholly inside the take's
+ * opening pause) x 8 and 44.1 kHz, the honest reading sits 0.00-0.82 dB ABOVE
+ * the bare one in fifteen of sixteen members; the sixteenth is 0.07 dB the
+ * other way, because a boundary window's envelope peak is a maximum over a
  * DIFFERENT span and the sign was never a theorem. All sixteen are kept.
  * When the floor is UNEVEN it costs material: with the louder stretch beside
  * the zeros, the boundary window is diluted under the take's own quietest

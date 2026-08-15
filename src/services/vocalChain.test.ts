@@ -736,15 +736,24 @@ describe('deriveRemoveSilence', () => {
       // trimmed LEAD-IN or an editing CUT carved into a pause — reads the same
       // floor either way, so refusing the boundary window changes the answer by
       // a fraction of a decibel and the stage goes on running.
-      /** A floor take with a sung phrase, and `cutSec` of zeros placed either
-       * in front of it or carved out of its opening pause. */
+      /** A floor take with a sung phrase, and `sec` of zeros placed either in
+       * front of it or carved out of its opening pause.
+       *
+       * The phrase starts at 2.5 s and the cut runs from 0.2 s, so the LONGEST
+       * cut this population uses (2.0 s, ending at 2.2 s) still lands wholly
+       * inside the opening pause. It used to start at 1.5 s, which meant the
+       * 2.0 s members overwrote 0.7 s of the 0.8 s phrase — `fill(0, …)`
+       * overwrites rather than adds — and two of the sixteen members were
+       * quietly testing "the cut removed the pause AND most of the phrase", a
+       * different shape from the one named here. Any `sec` over 2.3 s would
+       * reach the phrase again. */
       function evenFloorTake(sr: number, sec: number, where: 'lead-in' | 'cut'): Float32Array {
         const body = gaussFloorDb(Math.round(4 * sr), -50, 7);
         const phraseN = Math.round(0.8 * sr);
         let phase = 0;
         for (let i = 0; i < phraseN; i++) {
           phase += (2 * Math.PI * 220) / sr;
-          body[Math.round(1.5 * sr) + i] += 0.25 * Math.sin(phase);
+          body[Math.round(2.5 * sr) + i] += 0.25 * Math.sin(phase);
         }
         if (where === 'cut') {
           body.fill(0, Math.round(0.2 * sr), Math.round(0.2 * sr) + Math.round(sec * sr));
@@ -753,6 +762,20 @@ describe('deriveRemoveSilence', () => {
         const channel = new Float32Array(Math.round(sec * sr) + body.length);
         channel.set(body, Math.round(sec * sr));
         return channel;
+      }
+
+      // The fixture says what it does: for every member, the sung phrase comes
+      // out of the cut intact. Cheap, and it is the assertion whose absence let
+      // the overlap sit unnoticed through two rounds of review.
+      for (const sr of [SR, 44100]) {
+        for (const sec of [0.2, 0.35, 1.0, 2.0]) {
+          const cut = evenFloorTake(sr, sec, 'cut');
+          const phraseStart = Math.round(2.5 * sr);
+          const phraseEnd = phraseStart + Math.round(0.8 * sr);
+          let zeroed = 0;
+          for (let i = phraseStart; i < phraseEnd; i++) if (cut[i] === 0) zeroed++;
+          expect(zeroed).toBe(0);
+        }
       }
 
       const deltas: number[] = [];
@@ -773,7 +796,11 @@ describe('deriveRemoveSilence', () => {
 
       expect(deltas).toHaveLength(16);
       // The two readings agree to a fraction of a decibel across both shapes,
-      // both rates and four lengths. Measured: -0.065 to +0.823 dB.
+      // both rates and four lengths. Measured: -0.065 to +0.823 dB — the same
+      // envelope as before the fixture's phrase was moved out of the way of the
+      // 2.0 s cut, but now over four DISTINCT cut lengths: the 2.0 s members
+      // used to read exactly their 1.0 s siblings' numbers (0.823 / 0.483),
+      // which was the overlap showing through, and now read 0.823 / 0.463.
       for (const d of deltas) expect(Math.abs(d)).toBeLessThan(1);
 
       // DIRECTION, asserted rather than claimed. The bare reading is taken over
