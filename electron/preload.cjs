@@ -150,16 +150,14 @@ const electronAPI = {
 
   getAppVersion: () => ipcRenderer.invoke('app:version'),
 
-  // Launch splash (S1). Both ends of one handoff, and the same preload serves
-  // both windows: `onSplashProgress` is consumed only by electron/splash.html,
-  // `splashRendererReady` only by src/splashHandoff.ts. The ready signal is
-  // one-shot and carries nothing — main treats a second one as a no-op — so a
-  // renderer can at most show a window main was about to show anyway.
-  onSplashProgress: (cb) => {
-    const listener = (_event, payload) => cb(payload);
-    ipcRenderer.on('splash:progress', listener);
-    return () => ipcRenderer.removeListener('splash:progress', listener);
-  },
+  // Launch splash (S1): the EDITOR's end of the handoff. `splashRendererReady`
+  // is consumed only by src/splashHandoff.ts. The signal is one-shot and
+  // carries nothing — main treats a second one as a no-op — so a renderer can
+  // at most show a window main was about to show anyway.
+  //
+  // The splash page's end (`onSplashProgress`) is NOT here: the splash window
+  // runs electron/splashPreload.cjs, which is those two methods and nothing
+  // else, so a status page is not handed this whole privileged surface.
   splashRendererReady: () => ipcRenderer.send('splash:renderer-ready'),
 
   pathBasename: (p) => p.split(/[\\/]/).pop(),

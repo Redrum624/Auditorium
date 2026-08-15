@@ -101,7 +101,7 @@ function harness(overrides = {}) {
     BrowserWindow: FakeBrowserWindow,
     ipcMain,
     splashFile: 'C:\\app\\electron\\splash.html',
-    preloadFile: 'C:\\app\\electron\\preload.cjs',
+    preloadFile: 'C:\\app\\electron\\splashPreload.cjs',
     icon: 'C:\\app\\assets\\icon.ico',
     ...overrides,
   });
@@ -158,7 +158,10 @@ describe('the splash window itself', () => {
   test('runs under the same renderer hardening as the editor window', () => {
     // A splash is a second BrowserWindow, and a second BrowserWindow is a
     // second attack surface. It gets the identical sandbox the editor gets --
-    // there is no "it is only a splash" exemption.
+    // there is no "it is only a splash" exemption. The preload is the one
+    // place the two windows differ, and they differ in the safe direction:
+    // whatever main hands in here, the splash's is the small one (M-3, pinned
+    // against main.cjs's source below and by splashPreload.test.cjs).
     const { splash } = harness();
     const win = splash.open();
     expect(win.options.webPreferences).toMatchObject({
@@ -166,7 +169,7 @@ describe('the splash window itself', () => {
       contextIsolation: true,
       sandbox: true,
       webSecurity: true,
-      preload: 'C:\\app\\electron\\preload.cjs',
+      preload: 'C:\\app\\electron\\splashPreload.cjs',
     });
   });
 
@@ -210,7 +213,7 @@ describe('the splash window itself', () => {
       BrowserWindow: FakeBrowserWindow,
       ipcMain: makeFakeIpcMain(),
       splashFile: 'C:\\gone\\splash.html',
-      preloadFile: 'C:\\app\\electron\\preload.cjs',
+      preloadFile: 'C:\\app\\electron\\splashPreload.cjs',
     });
     const splashWin = splash.open();
     const mainWin = makeFakeWindow({});
@@ -694,6 +697,16 @@ describe('main.cjs wires the splash without inserting a wait', () => {
     const lastManager = source.lastIndexOf('registerAlignIpc(');
     expect(lastManager).toBeGreaterThan(-1);
     expect(sendAt).toBeGreaterThan(lastManager);
+  });
+
+  test('the splash is given its own preload, not the editor’s', () => {
+    // Fix round 2, M-3. The controller takes `preloadFile` as an argument, so
+    // the only place the choice is visible is here. A 9 KB status page must not
+    // be handed the privileged `electronAPI` — see electron/splashPreload.cjs
+    // and the exact-key-set assertion in splashPreload.test.cjs.
+    const wiring = codeOnly(source.slice(source.indexOf('createSplashController({')));
+    expect(wiring).toMatch(/preloadFile:\s*path\.join\(__dirname,\s*'splashPreload\.cjs'\)/);
+    expect(wiring.slice(0, wiring.indexOf('});'))).not.toMatch(/'preload\.cjs'/);
   });
 
   test('the dev run gets the longer failsafe, keyed off the same dev-server gate', () => {

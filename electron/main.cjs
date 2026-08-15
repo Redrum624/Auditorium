@@ -180,7 +180,10 @@ app.whenReady().then(() => {
     BrowserWindow,
     ipcMain,
     splashFile: path.join(__dirname, 'splash.html'),
-    preloadFile: path.join(__dirname, 'preload.cjs'),
+    // Its OWN preload, not the editor's: a 9 KB status page has no use for
+    // file reads, dialogs or the manager IPC, and a second window is a second
+    // attack surface. See electron/splashPreload.cjs.
+    preloadFile: path.join(__dirname, 'splashPreload.cjs'),
     icon: path.join(__dirname, '..', 'assets', 'icon.ico'),
     // A second BrowserWindow is a second attack surface: same DevTools policy
     // as the editor, compiled out of a packaged build.

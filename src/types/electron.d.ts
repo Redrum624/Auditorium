@@ -10,12 +10,11 @@ export interface ElectronAPI {
   respondCloseRequest(dirtyCount: number, inFlightSaveCount: number): void; // renderer's reply to 'app:close-requested'
   getAppVersion(): Promise<string>;
 
-  // Launch splash (S1). `onSplashProgress` is consumed ONLY by the splash's own
-  // page (electron/splash.html, plain JS in its own BrowserWindow) — it is
-  // declared here because this interface is the whole preload surface, not just
-  // the part React uses. `splashRendererReady` is the editor renderer's
-  // one-shot "the UI is committed" signal; see src/splashHandoff.ts.
-  onSplashProgress(cb: (p: { progress?: number; message?: string; error?: string }) => void): () => void; // returns unsubscribe
+  // Launch splash (S1): the editor renderer's one-shot "the UI is committed"
+  // signal; see src/splashHandoff.ts. The splash page's own half
+  // (`onSplashProgress`) is NOT part of this interface — the splash window runs
+  // its own two-method preload (electron/splashPreload.cjs) and its page is
+  // plain JS, so nothing typed by this file can call it.
   splashRendererReady(): void;
   // Stem separation (v1.7, tasks S1/S3). Renderer code goes through
   // `src/services/stemService.ts`, never these directly.
