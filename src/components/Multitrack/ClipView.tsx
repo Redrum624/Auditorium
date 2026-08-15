@@ -7,6 +7,7 @@ import { crossfadeGains, fadeInShape, fadeOutShape } from '../../dsp/fades';
 import type { Clip } from '../../multitrack/session';
 import { CROSSFADE_RHO, resolveClipFadeSpecs } from '../../multitrack/mixdown';
 import { moveClipsBy, useSessionStore } from '../../multitrack/sessionStore'; // K1
+import { clampGroupDelta } from '../../multitrack/groupDrag'; // T5
 import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
 import { snapSample } from '../../services/snap';
 import { formatTime } from '../../utils/timeFormat';
@@ -230,6 +231,20 @@ export default function ClipView({
   const inSet = useSessionStore((s) => s.selectedClipIds.includes(clip.id));
   const toggleSelectedClip = useSessionStore((s) => s.toggleSelectedClip);
   const extendSelectionToClip = useSessionStore((s) => s.extendSelectionToClip); // T5
+  const setGroupDragPreview = useSessionStore((s) => s.setGroupDragPreview); // T5
+  // T5 — the translate this clip owes to a group drag ANOTHER clip is driving,
+  // in samples, and 0 when there is none.
+  //
+  // Subscribed as a NUMBER for the reason T1's M3 fix established one line
+  // above: selecting the store's object would re-render every clip in the
+  // session on every pointermove of every group drag. Selecting the answer
+  // means zustand's `Object.is` compares 0 with 0 for every clip that is not a
+  // member, and those never re-render at all.
+  const groupPreviewSample = useSessionStore((s) =>
+    s.groupDragPreview !== null && s.groupDragPreview.clipIds.includes(clip.id)
+      ? s.groupDragPreview.deltaSample
+      : 0
+  );
   const setClipFade = useSessionStore((s) => s.setClipFade);
   // X4 — the whole track list: this clip's own track feeds the fade/overlap
   // visuals, and the track hovered during a move drag feeds the overlap hint.
@@ -284,7 +299,13 @@ export default function ClipView({
   // keeps `ticWindow`'s two edges stepping together — without that, the band
   // moves twice per 256 px of travel and each move costs both canvases below a
   // full re-raster.
-  const band = ticWindow(-(left + moveDx), widthPx, laneBoundPx);
+  // T5 — THE ONE TRANSLATE this element draws, whichever gesture caused it:
+  // `moveDx` when this clip is the one under the pointer, the group preview
+  // when another member is. A SUM rather than a precedence rule, and it is
+  // exact because at most one of them is ever non-zero: the writer excludes
+  // the grabbed clip from `clipIds`, so no element can be both.
+  const previewDx = moveDx + groupPreviewSample / zoom.samplesPerPixel;
+  const band = ticWindow(-(left + previewDx), widthPx, laneBoundPx);
   const showTics = beatTics !== null && band.width > 0;
   // Hoisted so the waveform effect can depend on the document's channel-array
   // identity and rate, not merely on the document object: an audio EDIT
@@ -574,9 +595,22 @@ export default function ClipView({
       if (e.key !== 'Alt') return;
       const drag = dragRef.current;
       if (!drag || drag.mode !== 'move' || !drag.exceeded) return;
-      setMoveDx(
-        (moveStartFor(drag, drag.lastClientX, e.altKey) - drag.origStart) / zoom.samplesPerPixel
-      );
+      // T5 — through the same clamp and republishing the same preview as
+      // `onPointerMove`. Suspending the magnet changes the delta, and a
+      // recomputation that skipped either would leave the members translated
+      // by the number the previous position asked for.
+      const requested = moveStartFor(drag, drag.lastClientX, e.altKey) - drag.origStart;
+      const isGroup = drag.groupIds.length > 1;
+      const delta = isGroup
+        ? clampGroupDelta(useSessionStore.getState().session, drag.groupIds, requested)
+        : requested;
+      setMoveDx(delta / zoom.samplesPerPixel);
+      if (isGroup) {
+        setGroupDragPreview({
+          clipIds: drag.groupIds.filter((id) => id !== clip.id),
+          deltaSample: delta,
+        });
+      }
     };
     window.addEventListener('keydown', onAltChange);
     window.addEventListener('keyup', onAltChange);
@@ -607,6 +641,22 @@ export default function ClipView({
       window.removeEventListener('keyup', onCtrlChange);
     };
   }, [moveDragging]);
+
+  // T5 — the group preview is the one piece of this gesture's transient state
+  // that OUTLIVES this component, so it is the one that needs an unmount to
+  // take it back. `moveDx` and the rest are local state and die with the
+  // element; a stranded `groupDragPreview` would translate every other member
+  // of that selection for the rest of the session.
+  //
+  // Gated on `dragRef.current`, which is exact ownership rather than a guess:
+  // only the clip currently driving a drag has a live drag record, so a clip
+  // unmounting for any other reason cannot clear a preview it did not write.
+  useEffect(
+    () => () => {
+      if (dragRef.current !== null) setGroupDragPreview(null);
+    },
+    [setGroupDragPreview]
+  );
 
   // --- X4, the corner fade-handle gesture ----------------------------------
   //
@@ -755,7 +805,29 @@ export default function ClipView({
       // `left` still reflects `origStart` (the store is only written on drop),
       // so translating by exactly (snappedStart − origStart) puts the element
       // on the position the drop will commit.
-      setMoveDx((moveStartFor(drag, e.clientX, alt) - drag.origStart) / zoom.samplesPerPixel);
+      //
+      // T5 — THROUGH THE COMMIT'S OWN CLAMP for a group drag. `moveClipsBy`
+      // floors the delta so the earliest member lands no earlier than sample 0,
+      // and this preview did not know it: a group dragged left past the start
+      // showed a move the drop then refused, and every clip snapped back. Both
+      // sides call `clampGroupDelta` now. A single-clip drag is deliberately
+      // NOT routed through it — that path has its own semantics at the drop
+      // (`moveClip`, the X5 nudge) and is not what this task is about.
+      const requested = moveStartFor(drag, e.clientX, alt) - drag.origStart;
+      const isGroup = drag.groupIds.length > 1;
+      const delta = isGroup
+        ? clampGroupDelta(useSessionStore.getState().session, drag.groupIds, requested)
+        : requested;
+      setMoveDx(delta / zoom.samplesPerPixel);
+      // The OTHER members, which have no gesture of their own to learn the
+      // delta from. Excluding this clip is what lets the render add the two
+      // translates instead of ranking them.
+      if (isGroup) {
+        setGroupDragPreview({
+          clipIds: drag.groupIds.filter((id) => id !== clip.id),
+          deltaSample: delta,
+        });
+      }
       // X4 — the hovered track and the Ctrl state feed the overlap drop hint;
       // the commit itself still reads e.ctrlKey at the drop, exactly as X5
       // wired it (nothing here changes what pointerUp does).
@@ -799,6 +871,7 @@ export default function ClipView({
     setDragTrackId(null);
     setCtrlHeld(false);
     onDragOverTrack(null);
+    setGroupDragPreview(null); // T5 — and the members' translates with it
   };
 
   /**
@@ -895,7 +968,7 @@ export default function ClipView({
         left,
         width: widthPx,
         height: laneHeight - 8,
-        transform: moveDx ? `translateX(${moveDx}px)` : undefined,
+        transform: previewDx ? `translateX(${previewDx}px)` : undefined, // T5
         // G6 clip chrome, token-routed (mockup accent-soft / accent-ring):
         // idle = soft accent wash inside a ring-alpha border; selected = full
         // accent border with a ring halo + lift shadow. Geometry (left/width/

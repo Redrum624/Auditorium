@@ -22,6 +22,7 @@ import {
   type SessionZoomRequest,
 } from './sessionZoom';
 import { laneWidthFromScrollerWidth, sessionLaneWidth, setSessionLaneWidth } from './sessionViewport';
+import { clampGroupDelta } from './groupDrag'; // T5
 
 export interface SessionState {
   session: Session;
@@ -68,6 +69,27 @@ export interface SessionState {
    * unambiguous (an open envelope overlay owns its lane's pointer events).
    */
   mtEnvelope: { trackId: string; param: AutomationParam } | null;
+  /**
+   * T5 — the live group-drag preview: what the members the pointer is NOT on
+   * must draw while a group drag is in flight, and `null` whenever none is.
+   *
+   * UI-only state, never serialized and never in `SessionSnapshot` — nothing is
+   * committed until the drop, so an undo has nothing to restore here. It lives
+   * in the store rather than in `ClipView` for the one reason a component's own
+   * state could not serve: the clip that must move is a DIFFERENT component
+   * from the clip the pointer is on, and the two are siblings under a lane that
+   * neither of them owns.
+   *
+   * `clipIds` EXCLUDES the grabbed clip, which previews itself through its own
+   * `moveDx` exactly as it did before this field existed. That keeps the two
+   * translates from ever being applied to the same element, so the render can
+   * add them without a precedence rule.
+   *
+   * `deltaSample` is already through `clampGroupDelta` — the same call the drop
+   * makes — so the preview shows what will be committed rather than what was
+   * asked for.
+   */
+  groupDragPreview: { clipIds: string[]; deltaSample: number } | null;
 }
 
 export interface SessionActions {
@@ -217,6 +239,10 @@ export interface SessionActions {
   extendSelectionToClip(id: string): void;
   /** F0 — opens/closes a track's envelope lane (see `mtEnvelope`). */
   setMtEnvelope(v: SessionState['mtEnvelope']): void;
+  /** T5 — publishes (or clears, with `null`) the live group-drag preview. The
+   * raw setter: the caller has already clamped, because it needed the clamped
+   * number for its own translate too. */
+  setGroupDragPreview(v: SessionState['groupDragPreview']): void;
   setMtCursor(s: number): void;
   setMtZoom(z: SessionState['mtZoom']): void;
   setMtPlayState(state: SessionState['mtPlayState']): void;
@@ -670,6 +696,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   mtPlayState: 'stopped',
   mtPlayheadSample: 0,
   mtEnvelope: null,
+  groupDragPreview: null, // T5
 
   newSession(sampleRate) {
     // R3: recorded — File > New Session is a store mutation of the current
@@ -1192,6 +1219,17 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
     set({ mtEnvelope: v });
   },
 
+  setGroupDragPreview(v) {
+    // T5. The no-op guard the selection writers carry, in the one case that
+    // recurs: `clearMovePreview` runs on every pointerup, including the ones
+    // that end a click or a trim, and clearing what is already clear would
+    // otherwise wake every store subscriber for a write that says nothing.
+    // Deliberately NOT claimed as a repaint saving — the clips subscribe to a
+    // NUMBER derived from this field (see `ClipView`), so `null` → `null`
+    // leaves their selected value at 0 either way.
+    set((s) => (s.groupDragPreview === null && v === null ? s : { groupDragPreview: v }));
+  },
+
   setMtCursor(sample) {
     set({ mtCursorSample: sample });
   },
@@ -1553,8 +1591,10 @@ export function moveClipsBy(clipIds: readonly string[], deltaSample: number): vo
   }
   if (members.length === 0 || !Number.isFinite(deltaSample)) return;
 
-  const earliest = Math.min(...members.map((m) => m.startSample));
-  const delta = Math.round(Math.max(deltaSample, -earliest));
+  // T5: the clamp K1 computed here is `clampGroupDelta` now, so the live
+  // preview can ask for the same answer before this runs. Same arithmetic,
+  // one home — see that module's header for why it moved.
+  const delta = clampGroupDelta(session, clipIds, deltaSample);
   if (delta === 0) return;
 
   const ordered = [...members].sort((a, b) =>
