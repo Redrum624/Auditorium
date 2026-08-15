@@ -257,4 +257,82 @@ describe('the overlap drop hint tells the truth about Ctrl', () => {
 
     expect(hintOf(container)).toBe('Drop crossfades');
   });
+
+  /**
+   * Review I1 — the other arm of the same label-lie, in the membership test
+   * rather than in the text. The scan excluded only the GRABBED clip, so a
+   * CO-MOVING sibling counted as something to crossfade with — but the group is
+   * rigid, so a member the preview crosses is a member that will have moved by
+   * the identical delta by the time the drop lands. The hint promised a
+   * crossfade the commit then did not arm.
+   */
+  it('does not promise a crossfade with a sibling that is moving out of the way', () => {
+    const { el, container } = mount(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0) },
+        { trackIdx: 0, clip: clipOf('b', 40_000) }, // the ONLY clip under the preview
+      ],
+      'a',
+      0
+    );
+    act(() => store().setSelectedClips(['a', 'b']));
+
+    firePointer(el, 'pointerdown', { clientX: GRAB_X });
+    // +250 px == +25 000 samples: `a` previews [25 000, 45 000), which crosses
+    // `b`'s STORED span [40 000, 60 000).
+    firePointer(el, 'pointermove', { clientX: GRAB_X + 250 });
+    expect(hintOf(container)).toBeNull();
+
+    // And the drop proves the hint would have been lying: both moved by the
+    // same delta, they are as far apart as they were, and nothing armed.
+    firePointer(el, 'pointerup', { clientX: GRAB_X + 250 });
+    const clips = store().session.tracks[0].clips;
+    expect(clips.find((c) => c.id === 'a')?.startSample).toBe(25_000);
+    expect(clips.find((c) => c.id === 'b')?.startSample).toBe(65_000);
+    expect(clips.find((c) => c.id === 'a')?.fadeOutSample ?? 0).toBe(0);
+    expect(clips.find((c) => c.id === 'b')?.fadeInSample ?? 0).toBe(0);
+  });
+
+  it('still promises one when the overlap is with a clip that is NOT moving', () => {
+    // The converse, so the fix cannot be "never show the hint during a group
+    // drag": same gesture, same geometry, but the clip under the preview is an
+    // outsider that will still be there at the drop.
+    const { el, container } = mount(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0) },
+        { trackIdx: 0, clip: clipOf('blocker', 40_000) },
+        { trackIdx: 1, clip: clipOf('b', 200_000) },
+      ],
+      'a',
+      0
+    );
+    act(() => store().setSelectedClips(['a', 'b']));
+
+    firePointer(el, 'pointerdown', { clientX: GRAB_X });
+    firePointer(el, 'pointermove', { clientX: GRAB_X + 250 });
+    expect(hintOf(container)).toBe('Drop crossfades');
+
+    firePointer(el, 'pointerup', { clientX: GRAB_X + 250 });
+    const clips = store().session.tracks[0].clips;
+    expect(clips.find((c) => c.id === 'a')?.fadeOutSample).toBeGreaterThan(0);
+    expect(clips.find((c) => c.id === 'blocker')?.fadeInSample).toBeGreaterThan(0);
+  });
+
+  it('a SINGLE-clip drag still counts every other clip on the lane (unchanged)', () => {
+    // The membership rule must narrow only by what THIS gesture moves: with one
+    // clip selected, `groupIds` is `[a]` and every neighbour still counts.
+    const { el, container } = mount(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0) },
+        { trackIdx: 0, clip: clipOf('b', 40_000) },
+      ],
+      'a',
+      0
+    );
+    act(() => store().setSelectedClip('a')); // `b` is NOT in the selection
+
+    firePointer(el, 'pointerdown', { clientX: GRAB_X });
+    firePointer(el, 'pointermove', { clientX: GRAB_X + 250 });
+    expect(hintOf(container)).toBe('Drop crossfades — hold Ctrl to push clear');
+  });
 });

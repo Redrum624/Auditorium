@@ -180,10 +180,10 @@ function snapSuspended(e: { altKey: boolean }): boolean {
  * One clip on a track lane: a rounded rect (cyan) with the source name and,
  * over the slice of it that is on screen, the editor's own waveform drawn at
  * the current zoom (MT1-2). Pointer interactions:
- *   - click               → select (Ctrl+Click toggles this clip in the
+ *   - click               → select. T5: Ctrl+Click toggles this clip in the
  *                            selection; Shift+Click extends it from the primary
  *                            to here along THIS track, and acts as a plain
- *                            click across tracks. Ctrl wins if both are held.)
+ *                            click across tracks — Ctrl wins if both are held.
  *   - drag body (>4px)     → move horizontally (live transform) and across
  *                            tracks (target lane highlighted), committed on
  *                            release. A same-track overlap commits verbatim
@@ -395,6 +395,23 @@ export default function ClipView({
   // is true exactly when the record exists, and the `&&` is what ties the ref
   // read to a value React did schedule a render for.
   const draggingGroup = moveDragging && (dragRef.current?.groupIds.length ?? 0) > 1;
+  // T5 (review I1) — EVERY CLIP THIS GESTURE MOVES, not just the grabbed one.
+  //
+  // The scan below used to exclude `clip.id` alone, which was right while a
+  // drag could only ever move one clip. Under a group drag it made a CO-MOVING
+  // sibling count as something to crossfade with: the preview crosses that
+  // member's STORED span, but the group is rigid, so by the time the drop lands
+  // the sibling has moved by the identical delta and the two are exactly as far
+  // apart as they began. The hint promised a crossfade the commit never armed —
+  // the same label-lies class as the `Ctrl` text beside it, one level down in
+  // the membership test rather than in the string.
+  //
+  // `groupIds` always contains this clip (K1 seeds it `[clip.id]` for a
+  // single-clip drag, and a group is only captured when the pressed clip was
+  // already a member), so this SUBSUMES the old exclusion rather than sitting
+  // beside it. The `?? [clip.id]` is the same value the old line assumed and
+  // keeps the expression total.
+  const movingIds = (moveDragging ? dragRef.current?.groupIds : undefined) ?? [clip.id];
   const overlapUnderPreview = (() => {
     if (!moveDragging || moveDx === 0) return false;
     const targetClips = tracks.find((t) => t.id === (dragTrackId ?? trackId))?.clips;
@@ -403,7 +420,7 @@ export default function ClipView({
     const previewEnd = previewStart + clip.lengthSample;
     return targetClips.some(
       (m) =>
-        m.id !== clip.id &&
+        !movingIds.includes(m.id) &&
         Math.min(previewEnd, m.startSample + m.lengthSample) -
           Math.max(previewStart, m.startSample) >
           0
