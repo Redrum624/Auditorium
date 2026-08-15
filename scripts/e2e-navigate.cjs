@@ -802,6 +802,11 @@ const coverage = [];
  * dialog walk's own counter is scoped to that step. Asserted non-zero once both
  * panels have been walked, so the panel half cannot go vacuous either. */
 let panelSelectsSwept = 0;
+/** T4: how many selects the Properties card mounted with a DOCUMENT showing.
+ * The control for the clip arm below — the fade-curve pickers exist only in the
+ * clip view, so this is the number that arm has to beat for its sweep to be
+ * about anything. */
+let propertiesDocumentSelects = -1;
 /**
  * MT1 — every `<select>` currently on screen must have an OPAQUE background.
  *
@@ -1879,15 +1884,15 @@ async function main() {
       // M4: with the card MOUNTED, its own selects are real. The dialog walk
       // never opens this panel, so until now nothing swept it.
       //
-      // MEASURED: this currently sweeps ZERO selects, and that is reported
-      // rather than papered over. The panel's only select is `FadeCurveSelect`,
-      // which renders in the CLIP properties view; this step opens the card on a
-      // DOCUMENT (`properties-document`), so the picker is not mounted. The
-      // sweep is left here because it is the right place for it the moment a
-      // clip is selected, and because a silent zero is exactly what the count
-      // below exists to expose. The Spatial card is what makes the panel half
-      // non-vacuous today.
+      // MEASURED, and it is ZERO here on purpose: this step opens the card on a
+      // DOCUMENT (`properties-document`), and the panel's only selects are the
+      // `FadeCurveSelect` pickers, which render in the CLIP view. That zero is
+      // now the CONTROL for the step below — T4 added the clip-selection step
+      // this sweep was waiting for, so the arm that used to be honestly marked
+      // vacuous is a real sweep over real selects, and the difference between
+      // the two counts is what proves it.
       const propsSelects = await sweepSelects(page, 'the Properties card');
+      propertiesDocumentSelects = propsSelects;
       panelSelectsSwept += propsSelects;
       console.log(`  selects mounted in the Properties card: ${propsSelects}`);
       const facts = await page.evaluate(() => {
@@ -1926,6 +1931,107 @@ async function main() {
         'the document really is dirty here, so the Dirty comparison is not passing on a shared default'
       );
       record('Module: Properties', 'five facts compared against the live store', 'PASS');
+    });
+
+    await step(page, 'Module: Properties — a selected clip mounts the pickers the sweep was waiting for', async () => {
+      // T4 — the vacuous arm, closed. The sweep above was honestly annotated as
+      // finding ZERO selects: the Properties card only mounts its
+      // `FadeCurveSelect` pickers in the CLIP view, and the walk had no step
+      // that selected a clip. K1's real clip selection makes one possible, so
+      // the annotation is replaced by the thing it was waiting for.
+      //
+      // The selection is a REAL pointer click on the clip, not a store write:
+      // the sweep is about what Chromium paints for a mounted `<select>`, and a
+      // select mounted by a hook the user cannot press is a select nobody has
+      // proven the app can show.
+      await page.evaluate(() => window.__test.setView('multitrack'));
+      await page.waitForSelector('[data-testid="clip"]', { timeout: 5000 });
+      await openModuleCard(page, 'Properties');
+
+      const wasSelected = await page.evaluate(
+        () => window.__test.getClipFadeState().selectedClipId
+      );
+      console.log(`  clip selected before the click: ${JSON.stringify(wasSelected)}`);
+
+      // A quarter of the way in, not the middle: the module column is a FIXED
+      // overlay down the right-hand side (App.tsx anchors it, the stage does not
+      // reflow around it), so a clip fitted to the lane width has its centre
+      // nearer that column than it needs to be.
+      const clip = await page.evaluate(() => {
+        const r = document.querySelector('[data-testid="clip"]').getBoundingClientRect();
+        return { x: r.x + r.width * 0.25, y: r.y + r.height / 2, w: r.width, h: r.height };
+      });
+      assert(clip.w > 0 && clip.h > 0, `the clip has a real box to click (${clip.w}x${clip.h})`);
+      // Hit-tested before the pointer moves. Without this, a point covered by
+      // the module card fails as a five-second wait for a selection that never
+      // happens, which says nothing about why.
+      const onClip = await page.evaluate(
+        (p) => {
+          const el = document.elementFromPoint(p.x, p.y);
+          return {
+            hit: el !== null && el.closest('[data-testid="clip"]') !== null,
+            top: el ? el.getAttribute('data-testid') || el.tagName.toLowerCase() : null,
+          };
+        },
+        { x: clip.x, y: clip.y }
+      );
+      assert(
+        onClip.hit,
+        `the clip is the topmost element at the point about to be clicked (found ` +
+          `${JSON.stringify(onClip.top)}) — nothing is covering it`
+      );
+      await realClick(page, clip.x, clip.y);
+
+      // ClipView commits a plain click's selection on pointerUP for the
+      // deferred case, so the store is the thing to wait on rather than the
+      // next frame.
+      await page.waitForFunction(
+        () => window.__test.getClipFadeState().selectedClipId !== null,
+        null,
+        { timeout: 5000 }
+      );
+      const selected = await page.evaluate(
+        () => window.__test.getClipFadeState().selectedClipId
+      );
+      assert(
+        selected !== null,
+        `a real click on the clip selected it (selectedClipId ${JSON.stringify(selected)})`
+      );
+
+      await page.waitForSelector('[data-testid="properties-clip"]', { timeout: 5000 });
+      const clipSelects = await sweepSelects(page, 'the Properties card with a clip selected');
+      panelSelectsSwept += clipSelects;
+      console.log(
+        `  selects mounted in the Properties card: ${propertiesDocumentSelects} with a document, ` +
+          `${clipSelects} with a clip`
+      );
+      assert(
+        clipSelects > propertiesDocumentSelects,
+        `selecting a clip MOUNTED selects the document view has none of ` +
+          `(${propertiesDocumentSelects} → ${clipSelects}) — the differential is what makes this ` +
+          `sweep a sweep rather than a pass over an empty panel`
+      );
+      const labels = await page.evaluate(() =>
+        [...document.querySelectorAll('[data-testid="properties-clip"] select')].map(
+          (s) => s.dataset.testid || s.getAttribute('aria-label') || '(unlabelled)'
+        )
+      );
+      console.log(`  pickers: ${JSON.stringify(labels)}`);
+      assert(
+        labels.length > 0,
+        `the selects swept are INSIDE the clip properties panel (${JSON.stringify(labels)}), not ` +
+          `elsewhere on the screen`
+      );
+
+      // Back to where the rest of the walk expects to be. The clip stays
+      // selected, which is exactly what a user who clicked one would leave
+      // behind.
+      await page.evaluate(() => window.__test.setView('waveform'));
+      record(
+        'Module: Properties — clip',
+        'real click selects a clip; its fade-curve pickers mount and are swept',
+        'PASS'
+      );
     });
 
     // U2: the user's headline ask — "add a module 'Pipeline' to choose
@@ -2466,11 +2572,42 @@ async function main() {
     });
 
     await step(page, 'F11 — the ruler seeks, and the playhead handle drags', async () => {
-      const ruler = await page.evaluate(() => {
+      const readRuler = () =>
+        page.evaluate(() => {
+          const r = document
+            .querySelector('[data-testid="timeline-ruler"]')
+            .getBoundingClientRect();
+          return { x: r.x, y: r.y, w: r.width, h: r.height };
+        });
+      const firstRead = await readRuler();
+
+      // T4 — the flake this closes. The v1.29.0 ceremony's combined-tree
+      // navigate missed this click ONCE, immediately after a 411 s 14-worker
+      // gate, and landed exactly on rerun and on the release build. That is the
+      // signature of a rect read before a late layout shift rather than of a
+      // seek that is wrong: the pointer went where the ruler HAD been.
+      //
+      // So the rect is re-read immediately before the pointer moves, in the
+      // same evaluate as the view state — one snapshot of one layout, from
+      // which BOTH the click coordinate and the expected sample are derived, so
+      // the two cannot disagree about where the ruler is. The arithmetic below
+      // is unchanged; only which rect it is about is.
+      const { ruler, before } = await page.evaluate(() => {
         const r = document.querySelector('[data-testid="timeline-ruler"]').getBoundingClientRect();
-        return { x: r.x, y: r.y, w: r.width, h: r.height };
+        return {
+          ruler: { x: r.x, y: r.y, w: r.width, h: r.height },
+          before: window.__test.getEditorViewState(),
+        };
       });
-      const before = await page.evaluate(() => window.__test.getEditorViewState());
+      if (ruler.x !== firstRead.x || ruler.w !== firstRead.w) {
+        // Reported rather than asserted: a shift here is the condition being
+        // defended against, not a failure. Seeing it in a log is how the next
+        // person learns the defence earned its keep.
+        console.log(
+          `  ruler moved between reads: x ${firstRead.x} → ${ruler.x}, w ${firstRead.w} → ${ruler.w}`
+        );
+      }
+
       // Alt suspends the magnet, so the expected sample is arithmetic rather
       // than "whatever the nearest snap target happened to be".
       const seekX = ruler.x + ruler.w * 0.4;
