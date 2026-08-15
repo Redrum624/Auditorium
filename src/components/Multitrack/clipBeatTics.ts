@@ -65,7 +65,7 @@ import { useMemo, useSyncExternalStore } from 'react';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 import type { Clip } from '../../multitrack/session';
-import { MT_HEADER_W } from '../../multitrack/sessionViewport';
+import { laneWidthFromScrollerWidth } from '../../multitrack/sessionViewport';
 import { getBeatGrid, isDownbeat, useBeatGridVersion, type BeatGrid } from '../../services/beatGrid';
 import { useBeatGridVisible } from '../../services/beatGridDisplay';
 import type { BeatGridOverlay } from '../Editor/waveformRender';
@@ -148,10 +148,13 @@ function viewportSnapshot(): number {
  * The widest a track lane can be inside a window `viewportPx` CSS px wide,
  * rounded OUT to a whole number of {@link TIC_WINDOW_QUANTUM_PX}.
  *
- * Every track row is `[TrackHeader | TrackLane]`, so the lane starts
- * {@link MT_HEADER_W} px in and no lane, in any layout, can be wider than
- * `viewportPx − MT_HEADER_W`. V1 — `ticWindow` used to be handed the raw window
- * width, one header column looser than that.
+ * Every track row is `[TrackHeader | TrackLane]`, so the lane starts one header
+ * column in and no lane, in any layout, can be wider than the window minus that
+ * column. V1 — `ticWindow` used to be handed the raw window width, one header
+ * column looser than that. The subtraction itself is
+ * {@link laneWidthFromScrollerWidth}, borrowed rather than repeated (V1 review,
+ * Minor 1): its argument is any outer box a row lies inside, which the window
+ * is, and one arithmetic cannot drift from itself.
  *
  * WHY THE ROUNDING, AND WHY OUT (V1 fix round 1). `ticWindow` snaps `start`
  * DOWN and `end` UP to the same grid, so the two edges step at the same scroll
@@ -178,7 +181,7 @@ function viewportSnapshot(): number {
  * job is to be an upper bound, not a best guess.
  */
 export function laneWidthBound(viewportPx: number): number {
-  const lane = Math.max(0, viewportPx - MT_HEADER_W);
+  const lane = Math.max(0, laneWidthFromScrollerWidth(viewportPx));
   return Math.ceil(lane / TIC_WINDOW_QUANTUM_PX) * TIC_WINDOW_QUANTUM_PX;
 }
 

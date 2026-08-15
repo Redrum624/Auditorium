@@ -57,6 +57,15 @@ export function sessionLaneWidth(): number {
  * in the view) so the subtraction is pinned by a test instead of by a reader
  * noticing it; a scroller narrower than the header yields <= 0, which
  * {@link setSessionLaneWidth} then rejects.
+ *
+ * V1 review, Minor 1 — THE ONLY COPY OF THIS SUBTRACTION. `clipBeatTics`'
+ * `laneWidthBound` needs the same `x − MT_HEADER_W` over the WINDOW rather than
+ * the scroller (an upper bound on any lane, for the raster band) and had written
+ * its own. The header note above says two copies of a geometry CONSTANT is how a
+ * lane and its ruler drift apart; the arithmetic over it is no different, so the
+ * bound calls this. The argument is any outer box the row lies inside — a
+ * scroller for the fit, the window for the bound — and the subtraction is the
+ * same fact about the row either way.
  */
 export function laneWidthFromScrollerWidth(scrollerWidth: number): number {
   return scrollerWidth - MT_HEADER_W;
