@@ -26,7 +26,8 @@ import { runCommand } from '../services/menuActions';
 import { _resetClipResampleCache } from './clipResampleCache';
 import { placeDocumentClips } from './laneDrop';
 import { readClipSlice } from './mixdown';
-import { createClip, createTrack } from './session';
+import { parseSessionFileBytes, serializeSessionV3 } from './sessionFile';
+import { createClip, createTrack, type Session } from './session';
 import { adoptSessionRate, applySessionZoom, useSessionStore } from './sessionStore';
 import { _resetSessionUndo, redoSession, undoSession } from './sessionUndo';
 import { _resetSessionLaneWidth, FALLBACK_SESSION_LANE_WIDTH } from './sessionViewport';
@@ -122,17 +123,30 @@ describe('an empty session adopts the inserted document rate — all three inser
 
 describe('adoption asks the session what it holds, never where it came from', () => {
   it('a session OPENED from a .audm with no clips adopts on the next insert', () => {
-    // The shape `sessionFile`'s Open Session commits: the whole `Session` from
-    // the file, its zoom fitted, everything else reset. `formatVersion` is
-    // untouched by MT2 — a v3 file written before it loads identically — so
-    // what matters is only that the loaded session is empty, and it is asked
-    // rather than assumed.
-    const loaded = { name: 'From disk', sampleRate: SESSION_RATE, tracks: [createTrack('Track 1')] };
+    // T1 (MT2 review, Minor 4) — a REAL v3 round trip, not a hand-built shape.
+    // This used to `setState` the object the loader was believed to commit,
+    // which inherits the claim "a pre-task v3 file loads identically" instead
+    // of pinning it: `formatVersion` is untouched by MT2, but only the actual
+    // writer and reader can say that the file still comes back empty, at its
+    // own rate, under its own name.
+    const onDisk: Session = {
+      name: 'From disk',
+      sampleRate: SESSION_RATE,
+      tracks: [createTrack('Track 1')],
+    };
+    const { bytes } = serializeSessionV3(onDisk, []);
+    const parsed = parseSessionFileBytes(bytes.buffer);
+    expect(parsed.session.sampleRate).toBe(SESSION_RATE);
+    expect(parsed.session.tracks.flatMap((t) => t.clips)).toHaveLength(0);
+    expect(parsed.documents).toHaveLength(0);
+
+    // The rest is exactly what `openSessionViaDialog` commits for the parsed
+    // result: the session, its zoom fitted, everything else reset.
     useSessionStore.setState({
-      session: loaded,
+      session: parsed.session,
       selectedClipId: null,
       mtCursorSample: 0,
-      mtZoom: defaultSessionZoom(loaded),
+      mtZoom: defaultSessionZoom(parsed.session),
       mtPlayState: 'stopped',
       mtPlayheadSample: 0,
       mtEnvelope: null,
@@ -417,7 +431,7 @@ describe('undoing an adopting insert restores the denominator, not just the rate
     expectZoomResolved();
   });
 
-  it('carries the live playhead with the cursor', () => {
+  it('carries the live playhead with the cursor, in both directions', () => {
     useSessionStore.setState({ mtPlayheadSample: SESSION_RATE }); // 1.000 s
     const doc = addDoc(HI_RATE, HI_LEN);
     placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
@@ -426,6 +440,60 @@ describe('undoing an adopting insert restores the denominator, not just the rate
     undoSession();
 
     expect(store().mtPlayheadSample).toBe(SESSION_RATE);
+
+    // T1 (MT2 fix-round re-review, nit 3): the REDO hop was inherited from the
+    // cursor's own redo assertion and from the shared `viewStateAtRate`, i.e.
+    // asserted nowhere. The playhead is the one of the three that moves on its
+    // own while the transport runs, so "the cursor's test covers it" is the
+    // assumption most worth spending one line on.
+    redoSession();
+
+    expect(store().mtPlayheadSample).toBe(HI_RATE);
+  });
+
+  /**
+   * T1 (MT2 fix-round re-review, nit 2) — THE ONE-SAMPLE FLOOR, pinned as a
+   * floor rather than left unstated.
+   *
+   * `viewStateAtRate` rounds, so `round(round(x·r)/r)` with r < 1 can come back
+   * one sample off: the down hop quantises to a coarser grid and the up hop
+   * cannot recover which side of it the value came from. Only the exactly
+   * round-tripping cursor (88 200 at 44.1 → 96 kHz and back) was asserted, so
+   * the tests said nothing about the case that does drift.
+   *
+   * It is one sample — ~10 µs at 96 kHz, below any edit the surface can express
+   * — and it CONVERGES rather than accumulating: the second round trip returns
+   * the same pair of values as the first. Both halves are asserted, because
+   * "small" and "does not grow" are different claims and only the second one
+   * makes it safe to leave alone.
+   */
+  it('drifts at most one sample when the first hop scales DOWN, and never further', () => {
+    store().newSession(HI_RATE); // 96 kHz, empty: the adoption will scale DOWN
+    _resetSessionUndo();
+    store().setMtCursor(3); // deliberately tiny: the drift is one sample, not one part in N
+    const doc = addDoc(SESSION_RATE, SESSION_RATE);
+
+    placeDocumentClips([doc.id], store().session.tracks[0].id, 0);
+    expect(store().session.sampleRate).toBe(SESSION_RATE);
+    expect(store().mtCursorSample).toBe(1); // round(3 · 44 100/96 000) = round(1.378)
+
+    undoSession();
+
+    // Back at 96 kHz — and at 2, not the 3 the user set: round(1 · 2.1769).
+    expect(store().session.sampleRate).toBe(HI_RATE);
+    expect(store().mtCursorSample).toBe(2);
+    expect(Math.abs(store().mtCursorSample - 3)).toBeLessThanOrEqual(1);
+
+    // ...and it stops there. The pair {1, 2} is a fixed cycle: every further
+    // round trip returns the same two numbers, so the error is a floor and not
+    // a rate.
+    redoSession();
+    expect(store().mtCursorSample).toBe(1);
+    undoSession();
+    expect(store().mtCursorSample).toBe(2);
+    redoSession();
+    undoSession();
+    expect(store().mtCursorSample).toBe(2);
   });
 
   it('redo lands back in the adopted denomination, coherently', () => {
