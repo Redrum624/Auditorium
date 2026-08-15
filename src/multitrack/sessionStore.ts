@@ -1578,31 +1578,63 @@ export function rippleDeleteClips(clipIds: readonly string[]): void {
  * a crossfade between them and then have to dissolve it, writing fades the
  * gesture never asked for.
  *
- * No member changes track. Cross-track group drag is deliberately out of v1 —
- * see the report; the single-clip drag keeps its cross-lane move unchanged.
+ * T5 — THE GROUP CROSSES TRACKS. `trackDelta` shifts every member by the same
+ * number of LANES, which is the vertical statement of the same rigidity: the
+ * relative offsets survive, so a group spanning two lanes still spans two
+ * afterwards. It is all-or-nothing — a delta that would put any member off
+ * either end of the track list moves nothing at all, rather than scattering the
+ * members that happen to fit. `resolveGroupTrackDelta` is what the drag asks
+ * before it commits; the refusal here is the last line of defence for a caller
+ * that computed its own.
+ *
+ * This SUPERSEDES K1's "no member changes track" rule. The single-clip drag's
+ * cross-lane move is untouched — it never went through this function.
  */
-export function moveClipsBy(clipIds: readonly string[], deltaSample: number): void {
+export function moveClipsBy(
+  clipIds: readonly string[],
+  deltaSample: number,
+  trackDelta = 0
+): void {
   const session = useSessionStore.getState().session;
-  const members: { clipId: string; trackId: string; startSample: number }[] = [];
+  const members: { clipId: string; trackIdx: number; startSample: number }[] = [];
   for (const id of clipIds) {
-    const found = locateClip(session, id);
-    if (!found) continue;
-    members.push({ clipId: id, trackId: found.trackId, startSample: found.clip.startSample });
+    const trackIdx = session.tracks.findIndex((t) => t.clips.some((c) => c.id === id));
+    if (trackIdx === -1) continue;
+    const clip = session.tracks[trackIdx].clips.find((c) => c.id === id)!;
+    members.push({ clipId: id, trackIdx, startSample: clip.startSample });
   }
   if (members.length === 0 || !Number.isFinite(deltaSample)) return;
+  if (!Number.isInteger(trackDelta)) return;
 
   // T5: the clamp K1 computed here is `clampGroupDelta` now, so the live
   // preview can ask for the same answer before this runs. Same arithmetic,
   // one home — see that module's header for why it moved.
   const delta = clampGroupDelta(session, clipIds, deltaSample);
-  if (delta === 0) return;
+  // A purely VERTICAL drag is a real gesture: the early return is about the
+  // horizontal delta alone, so it may only fire when there is no lane change
+  // either.
+  if (delta === 0 && trackDelta === 0) return;
+  if (members.some((m) => m.trackIdx + trackDelta < 0 || m.trackIdx + trackDelta >= session.tracks.length))
+    return;
 
-  const ordered = [...members].sort((a, b) =>
-    delta > 0 ? b.startSample - a.startSample : a.startSample - b.startSample
-  );
+  // AWAY-EDGE FIRST, now in both axes. Horizontally that is rightmost first
+  // when moving right; VERTICALLY it is bottom-most first when moving down, so
+  // that a member never lands in a lane a sibling has not left yet — the same
+  // argument, since `maintainFacingFades` runs per move and a transient
+  // collision between two clips travelling together would arm a crossfade the
+  // gesture never asked for and then have to dissolve it. The lane is the
+  // PRIMARY key when there is a lane change, because two members in the same
+  // lane cannot collide with each other by changing lane together.
+  const ordered = [...members].sort((a, b) => {
+    if (trackDelta !== 0 && a.trackIdx !== b.trackIdx) {
+      return trackDelta > 0 ? b.trackIdx - a.trackIdx : a.trackIdx - b.trackIdx;
+    }
+    return delta > 0 ? b.startSample - a.startSample : a.startSample - b.startSample;
+  });
   withSessionGesture(ordered.length === 1 ? 'Move clip' : 'Move clips', () => {
     for (const m of ordered) {
-      useSessionStore.getState().moveClip(m.clipId, m.trackId, m.startSample + delta);
+      const targetTrackId = useSessionStore.getState().session.tracks[m.trackIdx + trackDelta].id;
+      useSessionStore.getState().moveClip(m.clipId, targetTrackId, m.startSample + delta);
     }
   });
 }

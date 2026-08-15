@@ -193,7 +193,11 @@ describe('moveClipsBy — the group drag', () => {
     expect(doneLabels()).toEqual(['Move clips']);
   });
 
-  it('never re-routes a member to another track (no cross-track group move in v1)', () => {
+  // T5: the claim this test used to make — "no cross-track group move in v1" —
+  // is superseded; the group follows the pointer across lanes now (see the
+  // describe below). What survives, and is what this arm was really holding, is
+  // that a call which does not ASK for a lane change never causes one.
+  it('never re-routes a member when no track delta is asked for', () => {
     const { ids } = seed([[0, 1000]], [[4000, 1000]]);
     moveClipsBy([ids[0][0], ids[1][0]], 500);
     const tracks = store().session.tracks;
@@ -260,5 +264,88 @@ describe('moveClipsBy — the group drag', () => {
     expect(clipById(ids[0][0])!.fadeOutSample).toBe(500);
     expect(clipById(ids[0][1])!.fadeInSample).toBe(500);
     expect(doneLabels()).toEqual(['Move clips']);
+  });
+});
+
+/** The track a clip currently sits on, by index. */
+function trackIdxOf(id: string): number {
+  return useSessionStore.getState().session.tracks.findIndex((t) => t.clips.some((c) => c.id === id));
+}
+
+describe('moveClipsBy — the group crosses tracks (T5)', () => {
+  it('shifts every member by the SAME track delta, keeping the shape', () => {
+    const { ids } = seed([[0, 1000]], [[4000, 1000]], [], []);
+    moveClipsBy([ids[0][0], ids[1][0]], 500, 1);
+    expect(trackIdxOf(ids[0][0])).toBe(1);
+    expect(trackIdxOf(ids[1][0])).toBe(2);
+    expect(startOf(ids[0][0])).toBe(500); // and the horizontal move still happens
+    expect(startOf(ids[1][0])).toBe(4500);
+    expect(doneLabels()).toEqual(['Move clips']);
+  });
+
+  it('is ONE undo entry that puts both the lane and the position back', () => {
+    const { ids } = seed([[0, 1000]], [[4000, 1000]], [], []);
+    moveClipsBy([ids[0][0], ids[1][0]], 500, 1);
+    undoSession();
+    expect(trackIdxOf(ids[0][0])).toBe(0);
+    expect(trackIdxOf(ids[1][0])).toBe(1);
+    expect(startOf(ids[0][0])).toBe(0);
+    expect(startOf(ids[1][0])).toBe(4000);
+    redoSession();
+    expect(trackIdxOf(ids[1][0])).toBe(2);
+    expect(startOf(ids[1][0])).toBe(4500);
+  });
+
+  it('a lane change with NO horizontal travel is still a move', () => {
+    // The `delta === 0` early return is about the horizontal delta only; a
+    // purely vertical drag is a real gesture and must not be swallowed by it.
+    const { ids } = seed([[1000, 1000]], []);
+    moveClipsBy([ids[0][0]], 0, 1);
+    expect(trackIdxOf(ids[0][0])).toBe(1);
+    expect(startOf(ids[0][0])).toBe(1000);
+    expect(doneLabels()).toEqual(['Move clip']);
+  });
+
+  it('a member landing where a sibling still sits does not arm a crossfade with it', () => {
+    // Two members one lane apart, both moving DOWN one lane: the upper one's
+    // target is the lane the lower one is vacating. Ordering the moves so the
+    // lower one leaves first is what stops the pair colliding in mid-gesture
+    // and writing facing fades the drag never asked for.
+    const { ids } = seed([[0, 2000]], [[0, 2000]], []);
+    moveClipsBy([ids[0][0], ids[1][0]], 0, 1);
+    expect(trackIdxOf(ids[0][0])).toBe(1);
+    expect(trackIdxOf(ids[1][0])).toBe(2);
+    expect(clipById(ids[0][0])!.fadeOutSample ?? 0).toBe(0);
+    expect(clipById(ids[0][0])!.fadeInSample ?? 0).toBe(0);
+    expect(clipById(ids[1][0])!.fadeInSample ?? 0).toBe(0);
+  });
+
+  it('the same collision avoided in the other direction (moving UP)', () => {
+    const { ids } = seed([], [[0, 2000]], [[0, 2000]]);
+    moveClipsBy([ids[1][0], ids[2][0]], 0, -1);
+    expect(trackIdxOf(ids[1][0])).toBe(0);
+    expect(trackIdxOf(ids[2][0])).toBe(1);
+    expect(clipById(ids[1][0])!.fadeOutSample ?? 0).toBe(0);
+    expect(clipById(ids[2][0])!.fadeInSample ?? 0).toBe(0);
+  });
+
+  it('a track delta that would run off the end moves nothing at all', () => {
+    // The store is the last line of defence: `resolveGroupTrackDelta` will not
+    // hand it such a delta, but a caller that computed one itself must not be
+    // able to scatter half the group or drop clips into nowhere.
+    const { ids, session } = seed([[0, 1000]], [[4000, 1000]]);
+    moveClipsBy([ids[0][0], ids[1][0]], 500, 1);
+    expect(store().session).toBe(session);
+    expect(doneLabels()).toEqual([]);
+  });
+
+  it('lands on the track under it, overlaps included, through the usual maintenance', () => {
+    const { ids } = seed([[0, 2000]], [[1000, 2000]]);
+    moveClipsBy([ids[0][0]], 0, 1);
+    expect(trackIdxOf(ids[0][0])).toBe(1);
+    // The pair now overlaps on track 2 and is armed as a crossfade, exactly as
+    // a single-clip drag onto it would be — no bespoke logic for the group.
+    expect(clipById(ids[0][0])!.fadeOutSample).toBeGreaterThan(0);
+    expect(clipById(ids[1][0])!.fadeInSample).toBeGreaterThan(0);
   });
 });

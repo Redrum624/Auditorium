@@ -7,7 +7,7 @@ import { crossfadeGains, fadeInShape, fadeOutShape } from '../../dsp/fades';
 import type { Clip } from '../../multitrack/session';
 import { CROSSFADE_RHO, resolveClipFadeSpecs } from '../../multitrack/mixdown';
 import { moveClipsBy, useSessionStore } from '../../multitrack/sessionStore'; // K1
-import { clampGroupDelta } from '../../multitrack/groupDrag'; // T5
+import { clampGroupDelta, resolveGroupTrackDelta } from '../../multitrack/groupDrag'; // T5
 import { beginSessionGesture, endSessionGesture } from '../../multitrack/sessionUndo';
 import { snapSample } from '../../services/snap';
 import { formatTime } from '../../utils/timeFormat';
@@ -382,6 +382,19 @@ export default function ClipView({
   // move drag's PREVIEWED span overlaps any clip on the hovered target track,
   // say what the drop will do. `moveDx !== 0` doubles as "the drag exceeded
   // the threshold and actually moved" — a plain click never shows it.
+  //
+  // T5 — WHETHER THE DRAG IN FLIGHT IS A GROUP, which the hint below needs
+  // because Ctrl means nothing at a group drop. Read from the drag RECORD
+  // rather than from the selection, so it describes the gesture that is
+  // actually running and not a set that changed after it started.
+  //
+  // Reading a ref during render is safe here only because the flag beside it
+  // makes it so: `dragRef.current` is assigned and `setMoveDragging(true)` is
+  // called in the same synchronous handler, and `releaseGesture` nulls the ref
+  // and clears the flag in the same one — so at every render `moveDragging`
+  // is true exactly when the record exists, and the `&&` is what ties the ref
+  // read to a value React did schedule a render for.
+  const draggingGroup = moveDragging && (dragRef.current?.groupIds.length ?? 0) > 1;
   const overlapUnderPreview = (() => {
     if (!moveDragging || moveDx === 0) return false;
     const targetClips = tracks.find((t) => t.id === (dragTrackId ?? trackId))?.clips;
@@ -786,6 +799,26 @@ export default function ClipView({
     e.currentTarget.setPointerCapture?.(e.pointerId);
   };
 
+  /**
+   * T5 — the lane THIS clip will land on if a group drag drops now: the pointed
+   * one when every member's target lane exists, its own when the move is
+   * refused, and `null` when the pointer is over no row at all (where the
+   * single-clip drag also highlights nothing and commits in place).
+   *
+   * One expression for the highlight and the commit, so the lit lane is the
+   * committed lane by construction rather than by two call sites agreeing.
+   */
+  const groupLandingTrack = (groupIds: string[], hover: string | null): string | null => {
+    if (hover === null) return null;
+    const delta = resolveGroupTrackDelta(
+      useSessionStore.getState().session,
+      groupIds,
+      clip.id,
+      hover
+    );
+    return delta === 0 ? trackId : hover;
+  };
+
   const onPointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
     const drag = dragRef.current;
     if (!drag) return;
@@ -831,10 +864,19 @@ export default function ClipView({
       // X4 — the hovered track and the Ctrl state feed the overlap drop hint;
       // the commit itself still reads e.ctrlKey at the drop, exactly as X5
       // wired it (nothing here changes what pointerUp does).
+      //
+      // T5 — THE LIT LANE IS THE LANDING LANE. For a group drag the pointed
+      // lane and the committed lane are not always the same: the move is
+      // all-or-nothing, so a group that cannot fit stays where it is. Lighting
+      // the pointed lane in that case is a promise the drop breaks — the
+      // mismatch T1 recorded as concern 2 and named cross-track group drag as
+      // a close for. Both sides call `resolveGroupTrackDelta`, so the highlight
+      // cannot disagree with the commit.
       const hover = resolveTrackAt(e.clientX, e.clientY);
-      setDragTrackId(hover);
+      const landing = isGroup ? groupLandingTrack(drag.groupIds, hover) : hover;
+      setDragTrackId(landing);
       setCtrlHeld(e.ctrlKey);
-      onDragOverTrack(hover);
+      onDragOverTrack(landing);
     } else if (drag.mode === 'trim-start') {
       trimClip(clip.id, 'start', Math.round(snapBoundary(drag.origStart + dxSamples, drag, alt)));
     } else {
@@ -921,12 +963,30 @@ export default function ClipView({
       // and `moveClipsBy` is what keeps the group rigid and the whole thing one
       // undo entry.
       //
-      // No cross-track re-routing and no `clearOverlap` here, deliberately.
-      // Both are v1 scope calls rather than oversights: a group spanning three
-      // tracks has no single "target lane" to route to, and a per-member push
-      // forward would break the rigidity that makes this one gesture. The
-      // single-clip drag below keeps both, unchanged.
-      moveClipsBy(drag.groupIds, moveStartFor(drag, e.clientX, snapSuspended(e)) - drag.origStart);
+      // T5 — AND IT CROSSES TRACKS NOW. K1's "a group spanning three tracks
+      // has no single target lane" was answered by making the pointed lane the
+      // GRABBED clip's, with every member shifted by that same lane offset:
+      // the group's shape survives, which is the vertical statement of the
+      // rigidity K1 already required horizontally. The move is all-or-nothing
+      // (`resolveGroupTrackDelta` answers 0 rather than scattering the members
+      // that fit), and the same call drives the highlight, so what the user
+      // sees lit is what lands.
+      //
+      // Still no `clearOverlap`: a per-member push forward would change the
+      // spacing between the clips being dragged, and a group drag that deforms
+      // the group is not the gesture the user made. The single-clip drag below
+      // keeps it, unchanged, and the drop hint above says which one is which.
+      const groupTrackDelta = resolveGroupTrackDelta(
+        useSessionStore.getState().session,
+        drag.groupIds,
+        clip.id,
+        resolveTrackAt(e.clientX, e.clientY)
+      );
+      moveClipsBy(
+        drag.groupIds,
+        moveStartFor(drag, e.clientX, snapSuspended(e)) - drag.origStart,
+        groupTrackDelta
+      );
     } else if (drag && drag.mode === 'move' && drag.exceeded) {
       // K1: a drag of one clip ends with that clip selected — which the
       // pointerdown select already achieved for every path except the deferred
@@ -1153,7 +1213,14 @@ export default function ClipView({
       )}
       {/* X4 — the overlap drop hint: X5 made an overlapping drop commit
           verbatim and arm a crossfade, with Ctrl at the drop restoring the
-          old push-clear nudge. Nothing in the UI said so until now. */}
+          old push-clear nudge. Nothing in the UI said so until now.
+
+          T5 — and it offers the nudge only where the nudge EXISTS. A group
+          drop passes no `clearOverlap`, so Ctrl does nothing there; this hint
+          went on advertising it anyway, which is the label-lies defect this
+          repo has already paid for — and in the one surface the user reads
+          DURING the gesture. T1's I1 corrected the docs about the same fact
+          and could not reach this string. */}
       {overlapUnderPreview && (
         <div
           data-testid="overlap-drag-hint"
@@ -1167,7 +1234,11 @@ export default function ClipView({
             color: 'var(--glass-text-label)',
           }}
         >
-          {ctrlHeld ? 'Drop pushes clear of the overlap' : 'Drop crossfades — hold Ctrl to push clear'}
+          {draggingGroup
+            ? 'Drop crossfades'
+            : ctrlHeld
+              ? 'Drop pushes clear of the overlap'
+              : 'Drop crossfades — hold Ctrl to push clear'}
         </div>
       )}
       {/* X4 — corner fade handles, the universal DAW affordance (ruling 7).

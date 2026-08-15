@@ -1473,6 +1473,18 @@ takes it back out. The set may span tracks. `Escape` clears it. Every selected
 clip wears the selected border, and the Properties panel shows **"N clips
 selected"** above its fields.
 
+**`Shift+Click`** extends the selection from the primary (below) to the clip you
+click, taking **every clip between them on that track**, in timeline order. It
+*adds* to what is already selected rather than replacing it, so a set built with
+`Ctrl+Click` survives a `Shift+Click` that extends it. Across tracks it acts as
+a plain click: a range needs one timeline to be a range, and sweeping every clip
+inside a rectangle is not what `Shift+Click` means in a track-based editor. With
+both modifiers held, `Ctrl` wins and the click is a toggle.
+
+**`Ctrl+A`** selects every clip on every track. In the waveform and spectral
+editors the same key still selects the whole file — the multitrack view has no
+document region on screen to select.
+
 The clip you clicked **last** is the *primary*, and it is the one the panel's
 single-clip controls edit — Start, Gain, the fade lengths and curves — as well
 as the one carrying the corner fade handles. Those controls are single-clip
@@ -1482,18 +1494,30 @@ committing to five would be lying about what it does.
 **What the set does.** Three things, and each is one undo step:
 
 - **Drag** any selected clip and the **whole set moves with it**, rigidly, by
-  the same amount. Members stay on their own tracks — a group drag does not
-  re-route clips to another lane in this version, though a *single*-clip drag
-  still does. If the drag would push the earliest member before the start of
-  the timeline, the whole group stops there together rather than the leading
-  clip flattening against zero while the rest keep going.
-  (Only the clip under the pointer previews the move while you drag; the rest
-  jump to their new positions when you release.)
+  the same amount. **Every member previews the move while you drag**, not just
+  the one under the pointer, and the preview is the position the drop will
+  commit — including where the drop is refused. If the drag would push the
+  earliest member before the start of the timeline, the whole group stops there
+  together rather than the leading clip flattening against zero while the rest
+  keep going, and the preview stops with it instead of sliding somewhere the
+  clips then snap back from.
+
+  **Onto another track.** The clip you grabbed joins the track under the
+  pointer, and every other member shifts by the same number of tracks — so a
+  group spread over two lanes is still spread over two lanes when it lands. If
+  that would push any member off the top or the bottom of the track list,
+  **nothing changes track at all**: the group is never half-moved, because
+  there is no partial shift that keeps its shape. The highlighted lane always
+  shows where the grabbed clip will actually land, so a group that cannot move
+  down lights its own lane rather than the one you are pointing at.
+
   Holding **`Ctrl` at the drop** — the push-clear nudge on a single-clip drag —
   does **nothing** on a group drag: pushing only the colliding member clear
   would change the spacing between the clips you are dragging, and a group drag
   that deforms the group is not the gesture you made. The group lands where you
-  dropped it, and any overlap that creates arms a crossfade as usual.
+  dropped it, and any overlap that creates arms a crossfade as usual. The drop
+  hint that appears over an overlap says so — during a group drag it offers no
+  `Ctrl` nudge, because there is none to offer.
 - **`Delete`** removes every selected clip, leaving the gaps where they were.
 - **`Shift+Delete`** is **Ripple Delete** — see below.
 
@@ -1511,6 +1535,13 @@ cursor off the edge you asked for.
 It also works while the session is playing. The multitrack cursor is **where
 the next Play starts**, not the running playhead, so moving it mid-playback
 re-arms the next start and leaves the transport alone.
+
+**`Home` and `End`** move the same cursor to the two ends of the session:
+`Home` to sample 0, `End` to the end of the **last clip on any track**, each
+scrolling the timeline so the destination is on screen. Both leave the zoom
+level alone. `End` is unavailable in an empty session, where the end and the
+start are the same place; `Home` always works. In the waveform and spectral
+editors the two keys still address the active file, unchanged.
 
 **Ripple Delete** (`Shift+Delete`, or **Edit → Ripple Delete**) removes the
 selected clip(s) **and closes the gap**: on each affected track, every clip

@@ -30,11 +30,11 @@ finishes. Mouse interaction is never suspended by either.
 | `Ctrl+V` | Paste |
 | `Delete` | Delete selection (or every selected multitrack clip) |
 | `Shift+Delete` | Ripple Delete — multitrack only: remove the selected clip(s) and close the gap |
-| `Ctrl+A` | Select All |
+| `Ctrl+A` | Select All — the whole file in the editor; **every clip on every track** in the multitrack view |
 | `Ctrl+Left` | Previous clip edge — multitrack only |
 | `Ctrl+Right` | Next clip edge — multitrack only |
-| `Home` | Go to Start |
-| `End` | Go to End |
+| `Home` | Go to Start — the file's, or the **session's** in the multitrack view |
+| `End` | Go to End — the file's, or the **end of the last clip** in the multitrack view |
 | `Ctrl+O` | Open… |
 | `Ctrl+S` | Save |
 | `Ctrl+Shift+S` | Save As… |
@@ -58,7 +58,9 @@ The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 | Gesture | What it does |
 |---|---|
 | `Ctrl+Click` on a clip | Adds it to the selection (or takes it back out). The clip you clicked last is the one the Properties panel's fields edit |
-| Drag any selected clip | Moves **every** selected clip by the same amount, as one undo step. Clips stay on their own tracks |
+| `Shift+Click` on a clip | Extends the selection from the last-clicked clip to this one, taking every clip between them **on that track**. Across tracks it acts as a plain click. It adds to what is already selected, so it composes with `Ctrl+Click`; with both modifiers held, `Ctrl` wins and the click is a toggle |
+| Drag any selected clip | Moves **every** selected clip by the same amount, as one undo step. Every member previews the move live, so what you see is what lands |
+| Drag a group onto another track | The clip you grabbed joins the track under the pointer and the others shift by the same number of tracks, so the group keeps its shape. If that would push any member off the top or bottom of the track list, **nothing changes track** — the group is never scattered, and the highlighted lane is the one the grabbed clip will actually land on |
 | `Ctrl` held at the **drop** of a **single-clip** drag | Still the push-clear nudge it has always been — the clip is pushed past the neighbour it would have overlapped, instead of crossfading into it |
 | `Ctrl` held at the drop of a **group** drag (2+ clips) | **Nothing.** A group drag has no nudge in this version: pushing only the colliding member clear would change the spacing between the clips you are dragging, and a group drag that deforms the group is not the gesture you made. The group lands where you dropped it, and any overlap it creates arms a crossfade as usual |
 

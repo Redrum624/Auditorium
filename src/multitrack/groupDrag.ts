@@ -57,3 +57,49 @@ export function clampGroupDelta(
   // (a test, a memo) would be told the delta changed when it did not.
   return Math.round(Math.max(deltaSample, -earliest)) || 0;
 }
+
+/**
+ * The VERTICAL delta a group drag may take: how many lanes down (positive) or
+ * up (negative) every member shifts when the grabbed clip is dropped on
+ * `pointedTrackId`. 0 means "stay where you are", which is also the answer for
+ * every case the gesture cannot honour.
+ *
+ * THE GRABBED CLIP LANDS ON THE TRACK THE POINTER NAMES, and the rest of the
+ * group shifts by that same index delta, so the relative lane offsets survive:
+ * a group spanning two lanes still spans two lanes afterwards. That is the same
+ * rigidity `clampGroupDelta` gives the horizontal axis, and it is what makes
+ * one drop one gesture instead of N.
+ *
+ * ALL OR NOTHING at the edges. When any member's target lane does not exist,
+ * the answer is 0 and the drag stays on its own tracks. The alternative —
+ * moving the members that fit — would scatter the group and silently change
+ * the arrangement's shape, and there is no partial shift that preserves the
+ * offsets, so there is nothing honest between "all of it" and "none of it".
+ * Adding tracks to make room would be a bigger edit than the one the user
+ * made, and it is not this gesture's to make.
+ *
+ * Ids no clip carries are skipped rather than refused: a stale member cannot
+ * fall off a track it is not on, and refusing on it would make an unrelated
+ * bug look like an edge of the session.
+ */
+export function resolveGroupTrackDelta(
+  session: Session,
+  clipIds: readonly string[],
+  grabbedClipId: string,
+  pointedTrackId: string | null
+): number {
+  if (pointedTrackId === null) return 0;
+  const grabbed = locate(session, grabbedClipId);
+  if (grabbed === null) return 0;
+  const pointedIdx = session.tracks.findIndex((t) => t.id === pointedTrackId);
+  if (pointedIdx === -1) return 0;
+  const delta = pointedIdx - grabbed.trackIdx;
+  if (delta === 0) return 0;
+  for (const id of clipIds) {
+    const at = locate(session, id);
+    if (at === null) continue;
+    const target = at.trackIdx + delta;
+    if (target < 0 || target >= session.tracks.length) return 0;
+  }
+  return delta;
+}

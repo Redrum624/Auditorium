@@ -1,5 +1,5 @@
 import { createClip, createTrack, type Session } from './session';
-import { clampGroupDelta } from './groupDrag';
+import { clampGroupDelta, resolveGroupTrackDelta } from './groupDrag';
 
 /**
  * T5 — the group drag's arithmetic, as pure functions, so the PREVIEW and the
@@ -75,5 +75,93 @@ describe('clampGroupDelta — rigid or nothing', () => {
     const { session, ids } = sessionOf([{ track: 0, start: 5000 }]);
     expect(clampGroupDelta(session, ids, Number.NaN)).toBe(0);
     expect(clampGroupDelta(session, ids, Number.POSITIVE_INFINITY)).toBe(0);
+  });
+});
+
+/**
+ * The VERTICAL half. Same rigidity rule as the horizontal one and for the same
+ * reason: the group keeps its shape or it does not move. Here that shows as
+ * all-or-nothing rather than as a floor — there is no "as far down as it will
+ * go" that preserves the relative track offsets, so a group that cannot fit
+ * stays on the tracks it is on.
+ */
+describe('resolveGroupTrackDelta — the lanes the group can reach', () => {
+  const trackId = (session: Session, i: number) => session.tracks[i].id;
+
+  it('is the offset from the grabbed clip’s track to the pointed one', () => {
+    const { session, ids } = sessionOf([
+      { track: 0, start: 0 },
+      { track: 1, start: 0 },
+    ]);
+    expect(resolveGroupTrackDelta(session, ids, ids[0], trackId(session, 1))).toBe(1);
+  });
+
+  it('is 0 when the pointer is on the grabbed clip’s own track', () => {
+    const { session, ids } = sessionOf([
+      { track: 0, start: 0 },
+      { track: 1, start: 0 },
+    ]);
+    expect(resolveGroupTrackDelta(session, ids, ids[0], trackId(session, 0))).toBe(0);
+  });
+
+  it('is 0 when the pointer is over no track at all', () => {
+    const { session, ids } = sessionOf([{ track: 0, start: 0 }]);
+    expect(resolveGroupTrackDelta(session, ids, ids[0], null)).toBe(0);
+  });
+
+  it('refuses the move when ANY member would fall off the bottom', () => {
+    // Members on tracks 1 and 2 (of three). Grabbing the track-1 member and
+    // pointing at track 2 would send the other one to a track 3 that does not
+    // exist — so nothing changes lane, rather than one clip scattering.
+    const { session, ids } = sessionOf([
+      { track: 1, start: 0 },
+      { track: 2, start: 0 },
+    ]);
+    expect(resolveGroupTrackDelta(session, ids, ids[0], trackId(session, 2))).toBe(0);
+  });
+
+  it('refuses the move when ANY member would fall off the top', () => {
+    const { session, ids } = sessionOf([
+      { track: 0, start: 0 },
+      { track: 1, start: 0 },
+    ]);
+    // Grab the track-1 member, point at track 0: the other would go to −1.
+    expect(resolveGroupTrackDelta(session, ids, ids[1], trackId(session, 0))).toBe(0);
+  });
+
+  it('allows the move when every member’s target exists, edges included', () => {
+    const { session, ids } = sessionOf([
+      { track: 0, start: 0 },
+      { track: 1, start: 0 },
+    ]);
+    // Grab the track-0 member and point at track 1: members land on 1 and 2,
+    // the last of which is exactly the last track.
+    expect(resolveGroupTrackDelta(session, ids, ids[0], trackId(session, 1))).toBe(1);
+  });
+
+  it('preserves the relative offsets — a two-lane gap stays two lanes', () => {
+    const { session, ids } = sessionOf([
+      { track: 0, start: 0 },
+      { track: 2, start: 0 },
+    ]);
+    // Any downward move would push the track-2 member off the end; upward is
+    // impossible for the track-0 member. A three-track session pins the group.
+    expect(resolveGroupTrackDelta(session, ids, ids[0], trackId(session, 1))).toBe(0);
+    expect(resolveGroupTrackDelta(session, ids, ids[1], trackId(session, 1))).toBe(0);
+  });
+
+  it('is 0 when the grabbed clip is not in the session', () => {
+    const { session, ids } = sessionOf([{ track: 0, start: 0 }]);
+    expect(resolveGroupTrackDelta(session, ids, 'ghost', trackId(session, 1))).toBe(0);
+  });
+
+  it('is 0 for a track id the session does not carry', () => {
+    const { session, ids } = sessionOf([{ track: 0, start: 0 }]);
+    expect(resolveGroupTrackDelta(session, ids, ids[0], 'no-such-track')).toBe(0);
+  });
+
+  it('ignores members no clip carries rather than refusing on them', () => {
+    const { session, ids } = sessionOf([{ track: 0, start: 0 }]);
+    expect(resolveGroupTrackDelta(session, [...ids, 'ghost'], ids[0], trackId(session, 1))).toBe(1);
   });
 });
