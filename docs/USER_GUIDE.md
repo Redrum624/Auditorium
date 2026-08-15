@@ -446,7 +446,15 @@ and the chain overrides only what the recording decides:
 - the **compressor's threshold** is the level your take is above half the time
   while it is actually sounding, and its **makeup gain** is exactly the level
   the compression took away;
-- the **noise print** is learned from the quietest 500 ms in the selection;
+- the **noise print** is learned from the quietest 500 ms of **real material**
+  in the selection — never from a stretch of digital silence or from a window
+  mostly made of one, because the print *is* that window's spectrum and zeros in
+  it describe the zeros rather than your room. Measured on a take with a trimmed
+  lead-in, reading the diluted window left 4.7 dB (at 8 kHz) to 8.3 dB (at
+  44.1 kHz) of the stage's 12 dB of reduction unused. Noise Reduction declines
+  outright when no half-second of real material exists at all — a stem
+  strip-silenced by a tool with no hold — because a print learned from a
+  fragment is priced by a floor that never contained it;
 - the **silence threshold** is the loudest that quiet passage ever reads —
   measured over the quietest 500 ms of **real material**, so a trimmed lead-in
   or an edited cut cannot pass a sliver of louder audio off as the floor;

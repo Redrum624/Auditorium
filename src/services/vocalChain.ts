@@ -536,6 +536,32 @@ export function deriveDeEsser(channels: Float32Array[]): StageResolution {
  * over. `what survives the gate, and what does not` in vocalChain.test.ts pins
  * both halves: that the floor reading is NOT preserved, and that the threshold
  * is.
+ *
+ * ── Why this stage KEEPS the bare search, measured (T2) ─────────────────────
+ * The gate, Remove Silence, `wordSplice.trimSilence` and Noise Reduction were
+ * each moved onto `rejectMostlySilentWindows` because a window diluted by exact
+ * zeros gave them a wrong THRESHOLD or a wrong PRINT. Here the window is
+ * neither: it is only the boundary between "sounding" and "silent" for a MEDIAN
+ * taken over the sounding samples, and a median is decided by what sits in the
+ * middle of a distribution, not by where its edge is.
+ *
+ * Measured on the same defect the others were destroyed by — a trimmed head of
+ * exact zeros beside a settling stretch 10 dB above the take's own floor, which
+ * inflates the window by 9-10 dB. On an ordinary take with three sung phrases
+ * the derived threshold moves by 0.021 dB at 8 kHz and 0.017 dB at 44.1, and the
+ * makeup by under 0.01 dB — two orders of magnitude under the 1 dB broadband
+ * JND that was written down as the bound BEFORE the measurement was taken.
+ *
+ * On a take that is nearly ALL floor — Remove Silence's own RED fixture, 90 %
+ * room tone around one short phrase — the same substitution moves the threshold
+ * 43.66 dB, because there the boundary IS most of the distribution. That answer
+ * is correct by this stage's own definition and worse in the room: it asks for
+ * +31.17 dB of makeup where the shipped path asks +0.53, the parameter clamps it
+ * to +24 (so the makeup identity this whole design rests on is broken by 7 dB),
+ * and it lifts the take's peak from -12.0 dBFS to about -1. A gain error that
+ * does nothing is a better failure than a loudness jump into the limiter, so
+ * this stage keeps the bare search. Both halves are kept as measurements in
+ * `the noise window this stage does NOT ask to be honest, and why`.
  */
 export function deriveCompressor(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('compressor');
@@ -625,14 +651,48 @@ export function deriveCompressor(channels: Float32Array[], sampleRate: number): 
  * here: the effect is about to pull bins down by up to that much, so if the
  * quiet passage sits closer than that to the programme, what it would pull down
  * is the voice.
+ *
+ * ── The print is learned from REAL material (T2) ────────────────────────────
+ * It asks for the MOSTLY-REAL search, the same one the gate, Remove Silence and
+ * `wordSplice.trimSilence` each moved to, and here the reason is the sharpest of
+ * the four: this stage's print IS the window's magnitude spectrum. A candidate
+ * window that is mostly exact zeros has every bin of that spectrum diluted by
+ * them, so the print describes the zeros rather than the recording, and the
+ * subtraction that follows works to a fraction of its own depth. Nothing is
+ * deleted — the failure is quiet, which is why it survived a classification
+ * round as "degraded" without anyone putting a number on it.
+ *
+ * MEASURED, on an ordinary take: a trimmed head of exact zeros ending 25 ms
+ * after a 50 ms search step, a settling stretch 10 dB above the take's own
+ * between-phrase floor, three sung phrases. The bare search wins with a window
+ * that is >90 % zeros; its print sits 6.79 dB (8 kHz) and 13.82 dB (44.1 kHz)
+ * below the honest one in mean bin magnitude. End to end through the shipped
+ * effect, out of the take's own pause: the honest print removes 9.38 dB (8 kHz)
+ * and 11.22 dB (44.1 kHz) of floor where the diluted print removed 4.69 and
+ * 2.88 — so the bare search was leaving 4.7 to 8.3 dB of the 12 dB this stage
+ * promises in the recording. Both are kept as behaviour in
+ * `the print, when the take carries digital silence beside an uneven floor`.
+ *
+ * The converse is fixtured beside it: the zeros are not the trigger, a diluted
+ * WINNER is. On a take whose material beside the zeros is a sung phrase the
+ * boundary window dilutes to about -30 dBFS and never comes near winning, both
+ * searches return the same window, and the print does not move by a bin.
+ *
+ * And the cost, stated: when NO mostly-real window exists — a stem strip-
+ * silenced by a tool with no hold, real audio surviving only as fragments
+ * between zeros — the stage now DECLINES rather than learning a print from a
+ * fragment's own diluted spectrum. That is the answer the gate and Remove
+ * Silence already give on the same shape. It is also the cheap direction here:
+ * a diluted print subtracts almost nothing, so refusing costs the user nothing
+ * they were getting, and it says so instead.
  */
 export function deriveNoiseReduction(channels: Float32Array[], sampleRate: number): StageResolution {
   const params = defaultParamsFor('noise-reduction');
-  const noise = measureNoiseWindow(channels, sampleRate);
+  const noise = measureNoiseWindow(channels, sampleRate, { rejectMostlySilentWindows: true });
   if (!noise) {
     return {
       run: false,
-      reason: `no ${NOISE_WINDOW_MS} ms passage above digital silence anywhere in the selection, so there is no noise to learn — nothing was subtracted`,
+      reason: `no ${NOISE_WINDOW_MS} ms passage of real material anywhere in the selection to learn a print from — every candidate window is digital silence, or mostly digital silence, and a print taken there is the zeros' own spectrum rather than this recording's floor — nothing was subtracted`,
     };
   }
   const rmsDb = programmeRmsDb(channels);

@@ -29,7 +29,8 @@ import {
 } from './vocalChain';
 import { defaultParamsFor, getEffect } from '../effects/EffectRegistry';
 import { registerAllEffects } from '../effects/registerAll';
-import { compressorEffect } from '../effects/dynamics/CompressorEffect';
+import { compressorEffect, reductionDb } from '../effects/dynamics/CompressorEffect';
+import { averageMagnitudeSpectra } from './noiseProfile';
 import { noiseGateEffect } from '../effects/dynamics/NoiseGateEffect';
 import { noiseReductionEffect } from '../effects/restoration/NoiseReductionEffect';
 import { detectPitch } from '../dsp/pitchDetect';
@@ -475,6 +476,182 @@ describe('deriveNoiseReduction', () => {
 
   it('declines when the region is shorter than one noise window', () => {
     expect(deriveNoiseReduction([noise(WIN - 1, 0.1)], SR).run).toBe(false);
+  });
+
+  /**
+   * T2 — the uneven-floor bias, measured rather than classified.
+   *
+   * This stage read the BARE noise search, the one the gate, Remove Silence and
+   * `trimSilence` were each moved off. A candidate window that is mostly exact
+   * zeros has its magnitude spectrum diluted by them, and this stage's print IS
+   * that spectrum: a diluted print subtracts too little, which is the stage's
+   * whole job done at a fraction of its depth. The review classed that
+   * "degraded, cannot delete material" and left it unmeasured. Measured, it is
+   * 4.7 dB (8 kHz) to 8.3 dB (44.1 kHz) of the 12 dB this stage promises, left
+   * in the recording — on an ORDINARY take, not a pathological one.
+   */
+  describe('the print, when the take carries digital silence beside an uneven floor', () => {
+    /** An ordinary vocal take with the defect: a trimmed head of exact zeros
+     * ending 25 ms after a 50 ms search step (a trim lands anywhere but on
+     * one), a settling stretch 10 dB above the take's own between-phrase floor,
+     * then three sung phrases with pauses between them. */
+    function takeWithTrimmedHead(sr: number): { channel: Float32Array; pause: { start: number; end: number } } {
+      const step = Math.round(0.05 * sr);
+      const head = Math.round(1.5 * sr) - Math.round(step / 2);
+      const settle = Math.round(1.0 * sr);
+      const phraseN = Math.round(1.2 * sr);
+      const pauseN = Math.round(0.8 * sr);
+      const channel = new Float32Array(head + settle + 3 * (phraseN + pauseN));
+      channel.set(gaussFloorDb(settle, -50, 23), head);
+      let at = head + settle;
+      let last = { start: at, end: at };
+      for (let p = 0; p < 3; p++) {
+        channel.set(gaussFloorDb(phraseN, -60, 31 + p), at);
+        let phase = 0;
+        for (let i = 0; i < phraseN; i++) {
+          phase += (2 * Math.PI * 196) / sr;
+          channel[at + i] += 0.18 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase));
+        }
+        at += phraseN;
+        channel.set(gaussFloorDb(pauseN, -60, 41 + p), at);
+        last = { start: at, end: at + pauseN };
+        at += pauseN;
+      }
+      return { channel, pause: last };
+    }
+
+    /** RMS in dBFS over a span. */
+    function rmsOver(x: Float32Array, from: number, to: number): number {
+      let s = 0;
+      for (let i = from; i < to; i++) s += x[i] * x[i];
+      return toDb(Math.sqrt(s / (to - from)));
+    }
+
+    /** What the stage's print actually removes from the take's own floor, run
+     * through the shipped effect over the production side channel. */
+    function removedFromFloorDb(channel: Float32Array, sr: number, span: { start: number; end: number }): number {
+      const res = deriveNoiseReduction([channel], sr);
+      if (!res.run) throw new Error('expected Noise Reduction to run');
+      (globalThis as { __effectExtra?: unknown }).__effectExtra = res.extra;
+      const out = noiseReductionEffect.process([Float32Array.from(channel)], sr, res.params).channels[0];
+      delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+      const from = span.start + Math.round(0.1 * sr);
+      const to = span.end - Math.round(0.1 * sr);
+      return rmsOver(channel, from, to) - rmsOver(out, from, to);
+    }
+
+    it.each([
+      [SR, 9.0],
+      [44100, 10.5],
+    ])('removes the floor it promised at %i Hz, not the fraction a diluted print reaches', (sr, floorOfRemoval) => {
+      const { channel, pause } = takeWithTrimmedHead(sr);
+
+      // The precondition — this really is the boundary-window shape. The bare
+      // search wins with a window that is almost all zeros; the honest one
+      // returns a window with none.
+      const bare = measureNoiseWindow([channel], sr)!;
+      const honest = measureNoiseWindow([channel], sr, { rejectMostlySilentWindows: true })!;
+      const zeroFraction = (w: { startSample: number; lengthSamples: number }): number => {
+        let z = 0;
+        for (let i = w.startSample; i < w.startSample + w.lengthSamples; i++) if (channel[i] === 0) z++;
+        return z / w.lengthSamples;
+      };
+      expect(zeroFraction(bare)).toBeGreaterThan(0.9);
+      expect(zeroFraction(honest)).toBe(0);
+
+      // The print is the honest window's, bin for bin — not the diluted one's.
+      const res = deriveNoiseReduction([channel], sr);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const expected = averageMagnitudeSpectra([
+        Float32Array.from(channel.subarray(honest.startSample, honest.startSample + honest.lengthSamples)),
+      ])[0];
+      const print = (res.extra as { spectra: Float32Array[] }).spectra[0];
+      expect(Array.from(print)).toEqual(Array.from(expected));
+
+      // ...and the mean magnitude gap between the two prints is the reduction
+      // that was being thrown away: measured 6.79 dB at 8 kHz, 13.82 at 44.1.
+      const diluted = averageMagnitudeSpectra([
+        Float32Array.from(channel.subarray(bare.startSample, bare.startSample + bare.lengthSamples)),
+      ])[0];
+      let gap = 0;
+      for (let i = 0; i < print.length; i++) {
+        gap += 20 * Math.log10(Math.max(print[i], 1e-20) / Math.max(diluted[i], 1e-20));
+      }
+      expect(gap / print.length).toBeGreaterThan(5);
+
+      // The audible half, end to end through the shipped effect: how much of
+      // the take's own floor comes out of a pause. Measured 9.38 dB at 8 kHz
+      // and 11.22 at 44.1 against the diluted print's 4.69 and 2.88 — 4.69 and
+      // 8.34 dB of the stage's 12 dB job, left in the recording.
+      expect(removedFromFloorDb(channel, sr, pause)).toBeGreaterThan(floorOfRemoval);
+    }, 120000);
+
+    it('leaves a take whose bare winner is already real EXACTLY as it was, which is the converse', () => {
+      // The zeros are not the trigger — a DILUTED WINNER is. Here the material
+      // beside the zeros is a sung phrase, so the boundary window is diluted to
+      // about -30 dBFS and never comes near winning against the take's -60 dBFS
+      // pauses. The bare search's winner is already mostly real, the honest
+      // search returns the same window, and the print does not move by a bin.
+      for (const sr of [SR, 44100]) {
+        const step = Math.round(0.05 * sr);
+        const head = Math.round(1.0 * sr) - Math.round(step / 2);
+        const phraseN = Math.round(1.2 * sr);
+        const pauseN = Math.round(2.0 * sr);
+        const channel = new Float32Array(head + 2 * (phraseN + pauseN));
+        let at = head;
+        for (let p = 0; p < 2; p++) {
+          let phase = 0;
+          for (let i = 0; i < phraseN; i++) {
+            phase += (2 * Math.PI * 196) / sr;
+            channel[at + i] = 0.18 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase));
+          }
+          at += phraseN;
+          channel.set(gaussFloorDb(pauseN, -60, 13 + p), at);
+          at += pauseN;
+        }
+
+        const bare = measureNoiseWindow([channel], sr)!;
+        const honest = measureNoiseWindow([channel], sr, { rejectMostlySilentWindows: true })!;
+        // The precondition that makes this a converse: the two searches agree.
+        expect(bare.startSample).toBe(honest.startSample);
+
+        const res = deriveNoiseReduction([channel], sr);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        const expected = averageMagnitudeSpectra([
+          Float32Array.from(channel.subarray(bare.startSample, bare.startSample + bare.lengthSamples)),
+        ])[0];
+        expect(Array.from((res.extra as { spectra: Float32Array[] }).spectra[0])).toEqual(Array.from(expected));
+      }
+    }, 120000);
+
+    it('declines, naming what it could not find, when every candidate is mostly zeros', () => {
+      // The cost of asking for the honest search, and the same answer the gate
+      // and Remove Silence give on this shape: a stem strip-silenced by a tool
+      // with no hold leaves real audio only as fragments between zeros, and a
+      // print learned from a fragment is priced by a floor that never contained
+      // it. Subtracting nothing and saying so beats subtracting a guess.
+      // The shape `deriveRemoveSilence`'s own null case uses, unchanged.
+      const sr = SR;
+      const on = Math.round(0.15 * sr);
+      const off = Math.round(0.35 * sr);
+      const channel = new Float32Array(Math.round(8 * sr));
+      let at = 0;
+      let seed = 11;
+      while (at + on <= channel.length) {
+        channel.set(noise(on, 0.05, seed++), at);
+        at += on + off;
+      }
+      expect(measureNoiseWindow([channel], sr)).not.toBeNull();
+      expect(measureNoiseWindow([channel], sr, { rejectMostlySilentWindows: true })).toBeNull();
+
+      const res = deriveNoiseReduction([channel], sr);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toMatch(/real material/);
+      expect(res.reason).toMatch(/nothing was subtracted/);
+    }, 120000);
   });
 
   describe('the viability margin, which IS the stage own reduction depth', () => {
@@ -3373,6 +3550,178 @@ describe('deriveCompressor', () => {
       // absolute bound, not one phrased in terms of anything that moves with it.
       expect(worstDelta).toBeLessThan(0.5);
     }, 60000);
+  });
+
+  /**
+   * T2 — the uneven-floor bias, measured, and the reason this stage keeps the
+   * BARE search where its three siblings were moved off it.
+   *
+   * The gate, Remove Silence, `wordSplice.trimSilence` and now Noise Reduction
+   * all ask `measureNoiseWindow` to refuse mostly-silent candidates. This stage
+   * does not, and that is a decision with numbers behind it rather than an
+   * omission. Its noise window is not a threshold and not a print: it is only
+   * the boundary between "sounding" and "silent" for a MEDIAN taken over the
+   * sounding samples. A median is what makes the difference — moving the
+   * boundary moves the population's edge, not its middle.
+   */
+  describe('the noise window this stage does NOT ask to be honest, and why', () => {
+    /** `deriveCompressor`'s own arithmetic with the window's envelope peak
+     * supplied rather than measured, so the honest reading can be substituted
+     * without touching production. Validated against the shipped function
+     * below by feeding it the BARE reading. */
+    function thresholdFrom(channel: Float32Array, sr: number, windowPeakDb: number): { thresholdDb: number; makeupDb: number; peakReductionDb: number } {
+      const params = defaultParamsFor('compressor');
+      const detector = maxAcrossChannels([channel]);
+      const gateEnv = envelopeFollower(detector, sr, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
+      const compEnv = envelopeFollower(detector, sr, Number(params.attackMs), Number(params.releaseMs));
+      const gateLin = Math.pow(10, windowPeakDb / 20);
+      const stride = Math.max(1, Math.round(sr / 1000));
+      const activeDb: number[] = [];
+      for (let i = 0; i < compEnv.length; i += stride) if (gateEnv[i] > gateLin) activeDb.push(toDb(compEnv[i]));
+      activeDb.sort((a, b) => a - b);
+      const thresholdDb = activeDb[activeDb.length >> 1];
+      let sumSqIn = 0;
+      let sumSqOut = 0;
+      let peakReductionDb = 0;
+      for (let i = 0; i < compEnv.length; i++) {
+        const r = reductionDb(toDb(compEnv[i]) - thresholdDb, Number(params.ratio), Number(params.kneeDb));
+        if (r > peakReductionDb) peakReductionDb = r;
+        const g = Math.pow(10, -r / 20);
+        sumSqIn += channel[i] * channel[i];
+        sumSqOut += channel[i] * g * (channel[i] * g);
+      }
+      return {
+        thresholdDb,
+        makeupDb: sumSqOut > 0 && sumSqIn > 0 ? 10 * Math.log10(sumSqIn / sumSqOut) : 0,
+        peakReductionDb,
+      };
+    }
+
+    /** An ordinary vocal take carrying the defect: a trimmed head of exact
+     * zeros ending 25 ms after a 50 ms search step, a settling stretch 10 dB
+     * above the take's own between-phrase floor, three sung phrases. */
+    function takeWithTrimmedHead(sr: number): Float32Array {
+      const step = Math.round(0.05 * sr);
+      const head = Math.round(1.5 * sr) - Math.round(step / 2);
+      const settle = Math.round(1.0 * sr);
+      const phraseN = Math.round(1.2 * sr);
+      const pauseN = Math.round(0.8 * sr);
+      const channel = new Float32Array(head + settle + 3 * (phraseN + pauseN));
+      channel.set(gaussFloorDb(settle, -50, 23), head);
+      let at = head + settle;
+      for (let p = 0; p < 3; p++) {
+        channel.set(gaussFloorDb(phraseN, -60, 31 + p), at);
+        let phase = 0;
+        for (let i = 0; i < phraseN; i++) {
+          phase += (2 * Math.PI * 196) / sr;
+          channel[at + i] += 0.18 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase));
+        }
+        at += phraseN;
+        channel.set(gaussFloorDb(pauseN, -60, 41 + p), at);
+        at += pauseN;
+      }
+      return channel;
+    }
+
+    it.each([[SR], [44100]])(
+      'moves the threshold by hundredths of a decibel on a take that HAS programme, at %i Hz',
+      (sr) => {
+        const channel = takeWithTrimmedHead(sr);
+        const bare = measureNoiseWindow([channel], sr)!;
+        const honest = measureNoiseWindow([channel], sr, { rejectMostlySilentWindows: true })!;
+        // The precondition — the defect really is present, and it is the same
+        // 9-10 dB window inflation Remove Silence was destroyed by.
+        expect(bare.envelopePeakDb - honest.envelopePeakDb).toBeGreaterThan(8);
+
+        // The mirror is production's own arithmetic: fed the bare reading it
+        // reproduces the shipped numbers exactly, which is what licenses using
+        // it for the counterfactual.
+        const shipped = deriveCompressor([channel], sr);
+        expect(shipped.run).toBe(true);
+        if (!shipped.run) return;
+        const mirrored = thresholdFrom(channel, sr, bare.envelopePeakDb);
+        expect(mirrored.thresholdDb).toBe(Number(shipped.params.thresholdDb));
+        expect(mirrored.makeupDb).toBeCloseTo(Number(shipped.params.makeupDb), 10);
+
+        // The bias, measured: 0.021 dB at 8 kHz and 0.017 at 44.1 — a 9-10 dB
+        // move of the SOUNDING BOUNDARY changes the median of the sounding
+        // material by two hundredths of a decibel, because on a take with
+        // programme in it the boundary is nowhere near the middle. The bound
+        // stated before measuring was 1.0 dB, the classical broadband JND.
+        const honestSide = thresholdFrom(channel, sr, honest.envelopePeakDb);
+        expect(Math.abs(mirrored.thresholdDb - honestSide.thresholdDb)).toBeLessThan(0.05);
+        expect(Math.abs(mirrored.makeupDb - honestSide.makeupDb)).toBeLessThan(0.05);
+      },
+      120000
+    );
+
+    it('and asking for the honest window on a take that is nearly ALL floor would make it worse', () => {
+      // The other half of the measurement, and the reason the mechanism is not
+      // applied here. On a take that is 90 % room tone with one short phrase —
+      // the fixture Remove Silence's own RED is built on — the same
+      // substitution moves the threshold by 43 dB, because there the sounding
+      // boundary IS most of the distribution. The honest answer is correct by
+      // this stage's definition and worse in the room: it asks for +31 dB of
+      // makeup, which the parameter clamps to +24 (so the makeup identity that
+      // justifies the whole design is broken by 7 dB), and it lifts the take's
+      // peak from -12 dBFS to about -1. A gain error that does nothing is the
+      // better failure, so this stage keeps the bare search and says so.
+      const sr = SR;
+      const step = Math.round(0.05 * sr);
+      const head = new Float32Array(Math.round(1.5 * sr) - Math.round(step / 2));
+      const louder = gaussFloorDb(Math.round(1.5 * sr), -60, 23);
+      const phraseN = Math.round(0.8 * sr);
+      const phrase = new Float32Array(phraseN);
+      let phase = 0;
+      for (let i = 0; i < phraseN; i++) {
+        phase += (2 * Math.PI * 220) / sr;
+        phrase[i] = 0.25 * Math.sin(phase);
+      }
+      const quietN = Math.round(1.5 * sr);
+      const quiet = new Float32Array(quietN);
+      phase = 0;
+      const amp = Math.pow(10, -62 / 20) * Math.SQRT2;
+      for (let i = 0; i < quietN; i++) {
+        phase += (2 * Math.PI * 220) / sr;
+        quiet[i] = amp * Math.sin(phase);
+      }
+      const tail = gaussFloorDb(Math.round(2.5 * sr), -70, 7);
+      const channel = new Float32Array(head.length + louder.length + phraseN + quietN + tail.length);
+      let at = head.length;
+      for (const part of [louder, phrase, quiet, tail]) {
+        channel.set(part, at);
+        at += part.length;
+      }
+
+      const bare = measureNoiseWindow([channel], sr)!;
+      const honest = measureNoiseWindow([channel], sr, { rejectMostlySilentWindows: true })!;
+      const shipped = thresholdFrom(channel, sr, bare.envelopePeakDb);
+      const honestSide = thresholdFrom(channel, sr, honest.envelopePeakDb);
+      // 43.66 dB, measured.
+      expect(honestSide.thresholdDb - shipped.thresholdDb).toBeLessThan(-40);
+      // ...and 31.17 dB of makeup asked for against the shipped 0.53.
+      expect(honestSide.makeupDb).toBeGreaterThan(30);
+      expect(shipped.makeupDb).toBeLessThan(1);
+
+      // The consequence in the room, through the shipped effect: the peak.
+      const maxMakeup = Number(getEffect('compressor')!.params.find((q) => q.id === 'makeupDb')!.max);
+      const peakOf = (x: Float32Array): number => {
+        let p = 0;
+        for (let i = 0; i < x.length; i++) p = Math.max(p, Math.abs(x[i]));
+        return toDb(p);
+      };
+      const run = (m: { thresholdDb: number; makeupDb: number }): Float32Array => {
+        const p = defaultParamsFor('compressor');
+        p.thresholdDb = m.thresholdDb;
+        p.makeupDb = Math.min(m.makeupDb, maxMakeup);
+        return compressorEffect.process([Float32Array.from(channel)], sr, p).channels[0];
+      };
+      expect(peakOf(channel)).toBeCloseTo(-12.04, 1);
+      expect(peakOf(run(shipped))).toBeLessThan(-10);
+      expect(peakOf(run(honestSide))).toBeGreaterThan(-3);
+      // And the clamp really is what breaks the makeup identity here.
+      expect(honestSide.makeupDb).toBeGreaterThan(maxMakeup + 5);
+    }, 120000);
   });
 
   it('derives a threshold inside the programme, well above the shipped absolute default', () => {
