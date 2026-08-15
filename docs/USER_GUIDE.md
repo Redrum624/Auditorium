@@ -1557,6 +1557,17 @@ undoes every shift. If a shifted clip lands on top of its new neighbour, that
 overlap arms a crossfade exactly as dragging it there would have — it goes
 through the same maintenance a drag does, not a special case.
 
+**Edit → Ripple Delete Time Selection** sits under it and is **greyed out in
+every view**, in this version and deliberately. It would remove a stretch of
+*time* from every track at once and close the gap everywhere — but the
+multitrack view has no way to select a stretch of time: it has a cursor and a
+clip selection, and dragging on its ruler moves the cursor rather than sweeping
+a range. Until that gesture exists there is nothing for the command to act on,
+so the row says so by staying unavailable rather than by silently doing
+something else. Ripple Delete of the **selected clips** (above) is the form that
+works today, and selecting the clips that cover the stretch you want gone is the
+way to get the same result.
+
 ### Undo in the multitrack (session history)
 
 Every session edit is undoable: clip moves, trims, deletes and gain changes,

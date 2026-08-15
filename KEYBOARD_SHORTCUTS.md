@@ -65,7 +65,17 @@ The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 | `Ctrl` held at the drop of a **group** drag (2+ clips) | **Nothing.** A group drag has no nudge in this version: pushing only the colliding member clear would change the spacing between the clips you are dragging, and a group drag that deforms the group is not the gesture you made. The group lands where you dropped it, and any overlap it creates arms a crossfade as usual |
 
 In neither case does a held `Ctrl` toggle the selection — that is what
-`Ctrl+Click` does, and a drag is not a click.
+`Ctrl+Click` does, and a drag is not a click. The hint that appears over an
+overlap mid-drag offers the `Ctrl` nudge only on a single-clip drag, for the
+same reason.
+
+**`Edit → Ripple Delete Time Selection`** has no key and is greyed out in every
+view: it would ripple a stretch of *time* out of every track, and the multitrack
+view has no gesture for selecting a stretch of time yet (its ruler seeks; there
+is a cursor and a clip selection and nothing else). It carries no combo
+deliberately — a matched combo is claimed before the command's own predicate is
+consulted, so a key bound to a permanently disabled row would be swallowed in
+every view and give nothing back.
 
 ## `Escape` and the two kinds of surface
 

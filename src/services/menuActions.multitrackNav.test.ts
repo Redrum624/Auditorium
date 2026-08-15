@@ -1,4 +1,6 @@
-import { isCommandEnabled, runCommand } from './menuActions';
+import { getMenuSections, isCommandEnabled, runCommand } from './menuActions';
+import type { MenuCommand } from './menuActions';
+import { SHORTCUT_TABLE } from './shortcuts';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import { createDocument } from '../audio/AudioDocument';
 import { createClip, createTrack, type Session } from '../multitrack/session';
@@ -200,5 +202,65 @@ describe('Home / End in the multitrack view move the session cursor', () => {
     await runCommand('transport.goToStart');
     expect(useAppStore.getState().cursorSample).toBe(0);
     expect(mt().mtCursorSample).toBe(0); // untouched throughout
+  });
+});
+
+/**
+ * T5 item 6, in the shape the code forced. The brief asked for ripple delete of
+ * a TIME RANGE across every track; the multitrack view has no time selection to
+ * name one with. The store's state is `{session, selectedClipId,
+ * selectedClipIds, mtCursorSample, mtZoom, mtPlayState, mtPlayheadSample,
+ * mtEnvelope}` — a cursor, no range — the shared `TimelineRuler` seeks rather
+ * than drag-selects, `.audm` persists no range, and `appStore.selection` is the
+ * DOCUMENT's region, which `edit.deselect` already documents as not being on
+ * screen in this view. `sessionStore.ts`'s rate-adoption invariant says the
+ * same thing in code: "there is no multitrack selection or loop range to carry
+ * (only the cursor exists)".
+ *
+ * So the brief's own fallback applies: the row exists, greyed, and the reason
+ * lives in the comment beside it and in the USER_GUIDE. What it must NOT do is
+ * pretend — hence the arms below.
+ */
+function editRow(id: string): MenuCommand {
+  const items = getMenuSections().find((s) => s.title === 'Edit')!.items;
+  const row = items.find((i): i is MenuCommand => i !== 'separator' && i.id === id);
+  expect(row).toBeDefined();
+  return row!;
+}
+
+describe('Ripple Delete Time Selection — listed, and honestly unavailable', () => {
+  it('sits directly under Ripple Delete in the Edit menu', () => {
+    const ids = getMenuSections()
+      .find((s) => s.title === 'Edit')!
+      .items.filter((i): i is MenuCommand => i !== 'separator')
+      .map((i) => i.id);
+    expect(ids.indexOf('edit.rippleDeleteTime')).toBe(ids.indexOf('edit.rippleDelete') + 1);
+    expect(editRow('edit.rippleDeleteTime').label).toBe('Ripple Delete Time Selection');
+  });
+
+  it('is disabled in EVERY view and under every selection there is', () => {
+    seedDoc();
+    for (const view of ['multitrack', 'waveform', 'spectral'] as const) {
+      useAppStore.setState({ view, selection: { start: 0, end: 5000 } });
+      expect(isCommandEnabled('edit.rippleDeleteTime')).toBe(false);
+    }
+    useAppStore.setState({ view: 'multitrack' });
+    mt().setSelectedClips([fx.a, fx.b]); // a CLIP selection is not a time one
+    expect(isCommandEnabled('edit.rippleDeleteTime')).toBe(false);
+  });
+
+  it('carries no accelerator, because a key on it would only be swallowed', () => {
+    // `installShortcuts` claims a matched combo before consulting `enabled`, so
+    // binding this row would take a key away from the platform in every view
+    // and give nothing back.
+    expect(editRow('edit.rippleDeleteTime').shortcut).toBeUndefined();
+    expect(SHORTCUT_TABLE.filter((s) => s.commandId === 'edit.rippleDeleteTime')).toEqual([]);
+  });
+
+  it('changes nothing if it is run anyway', async () => {
+    useAppStore.setState({ view: 'multitrack' });
+    const before = mt().session;
+    await runCommand('edit.rippleDeleteTime');
+    expect(mt().session).toBe(before);
   });
 });

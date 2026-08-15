@@ -150,6 +150,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       // K1: the same verb with the gap closed behind it. Directly after
       // Delete, because that is the row a user comparing the two reads next.
       'edit.rippleDelete',
+      // T5: and the range form of it, listed and permanently greyed — see the
+      // command's own note for why it cannot be built yet.
+      'edit.rippleDeleteTime',
       // M1: Trim and Silence act on the same `[start, end)` selection as the
       // four above and share Cut's predicate, so they belong in that group
       // rather than behind a separator of their own. Until now the floating
@@ -652,6 +655,47 @@ function registerEditCommands(): void {
       enabled: (s) =>
         s.view === 'multitrack' && useSessionStore.getState().selectedClipId !== null,
       run: async () => rippleDeleteClips(useSessionStore.getState().selectedClipIds),
+    },
+    {
+      /**
+       * T5 — RIPPLE DELETE OF A TIME RANGE: listed, and disabled everywhere,
+       * because there is nothing in this app that can name the range.
+       *
+       * The ask was "with a time selection active in the multitrack, remove
+       * that span from ALL tracks and close the gap everywhere". The multitrack
+       * view has no time selection to be active. Its state is a CURSOR and a
+       * clip selection and nothing else (`SessionState`); the ruler it renders
+       * is the editor's `TimelineRuler`, whose pointer drag SEEKS rather than
+       * sweeping a range; `.audm` persists no range; the transport's only
+       * loop plumbing belongs to the single-document engine; and
+       * `appStore.selection` is the DOCUMENT's region, which `edit.deselect`
+       * above already documents as not being on screen in this view.
+       * `adoptSessionRate`'s invariant states the same fact from the other
+       * side, having had to enumerate every session-sample value that exists:
+       * "there is no multitrack selection or loop range to carry (only the
+       * cursor exists)".
+       *
+       * Building the range-sweep gesture — anchor, rendering, snapping,
+       * persistence, and what it means for the cursor — is a feature of its
+       * own, not the tail of this one. What ships is the row, so the verb is
+       * where a user goes looking for it, and this note, so the next editor
+       * knows the blocker is upstream of the ripple arithmetic rather than in
+       * it. `mergeSpans` and the shift loop in `rippleDeleteClips` are the
+       * whole computation once a range exists.
+       *
+       * NO ACCELERATOR, deliberately: `installShortcuts` claims a matched combo
+       * before it consults `enabled`, so a key bound here would be swallowed in
+       * every view and hand nothing back.
+       *
+       * The reason is NOT surfaced as a tooltip. A `title` on a disabled button
+       * is not reliably shown in Chromium, and this repo does not ship
+       * affordances it has not seen work — the USER_GUIDE carries the sentence
+       * instead.
+       */
+      id: 'edit.rippleDeleteTime',
+      label: 'Ripple Delete Time Selection',
+      enabled: () => false,
+      run: async () => {},
     },
     // U1: `trimToSelection` and `silenceSelection` have existed in editOps
     // since Task 22 with no command in front of them — the Edit menu never

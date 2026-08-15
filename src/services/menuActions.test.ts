@@ -156,8 +156,11 @@ describe('edit.trim / edit.silence (U1)', () => {
     const editIds = commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items);
     expect(editIds).toContain('edit.trim');
     expect(editIds).toContain('edit.silence');
-    expect(editIds.slice(editIds.indexOf('edit.delete'), editIds.indexOf('edit.delete') + 4)).toEqual(
-      ['edit.delete', 'edit.rippleDelete', 'edit.trim', 'edit.silence']
+    // T5: the run grew by one — the range form of Ripple Delete is listed
+    // between the clip form and Trim. The claim is unchanged: these verbs are
+    // one uninterrupted group under Delete.
+    expect(editIds.slice(editIds.indexOf('edit.delete'), editIds.indexOf('edit.delete') + 5)).toEqual(
+      ['edit.delete', 'edit.rippleDelete', 'edit.rippleDeleteTime', 'edit.trim', 'edit.silence']
     );
   });
 
@@ -379,6 +382,7 @@ describe('getMenuSections', () => {
       'edit.paste',
       'edit.delete',
       'edit.rippleDelete', // K1
+      'edit.rippleDeleteTime', // T5 — listed and permanently disabled
       'edit.trim',
       'edit.silence',
       'edit.selectAll',
