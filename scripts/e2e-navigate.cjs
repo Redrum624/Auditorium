@@ -509,10 +509,12 @@ async function openDialogInfo(page) {
     return {
       count: overlays.length,
       label: panel ? panel.getAttribute('aria-label') : null,
-      // The evidence that a body rendered is its CONTROLS, not its testids:
-      // NewFileDialog carries no `data-testid` at all and ExportDialog's are
-      // conditional on the chosen format, so a testid count would fail on two
-      // dialogs that are working perfectly.
+      // The evidence that a body rendered is its CONTROLS, not its testids.
+      // T4 gave New File and Export the testids they were missing, so the two
+      // dialogs that used to have none or nearly none now have them — but the
+      // rule stands for the roster as a whole: a testid COUNT is a claim about
+      // how a dialog was written, and a dialog can render its body perfectly
+      // without carrying one on every control.
       controls: panel ? panel.querySelectorAll('button, input, select, textarea').length : 0,
       testids: [...top.querySelectorAll('[data-testid]')]
         .map((e) => e.getAttribute('data-testid'))
@@ -1458,11 +1460,12 @@ async function main() {
       const label = commandLabels.get(commandId);
       await step(page, `Dialog: ${d.component} — open from “${label}”, cancel, store unchanged`, async () => {
         // Which real surface opens this command. A menu row is the usual door,
-        // but not every command has one: `transport.record` is in NO menu
-        // section — its doors are the toolbar's Record button and the keyboard.
-        // Falling back through the toolbar and the Effects card keeps that a
-        // walked path rather than a hole, and a command none of the three
-        // reaches would fail here as a genuine finding.
+        // and since T4 every dialog-opening command has one — `transport.record`
+        // was the last that did not, which made the Record dialog the one
+        // dialog a menu-only user could not reach. The toolbar and Effects-card
+        // fallbacks stay: the effect dialogs are opened from the card, and a
+        // command none of the three reaches would fail here as a genuine
+        // finding rather than as a harness gap.
         const opener = await resolveOpener(page, commandId, label, menuLabelIndex);
         assert(
           opener !== null,

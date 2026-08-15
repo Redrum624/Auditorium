@@ -48,11 +48,12 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
       width={400}
       onClose={onClose}
     >
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3" data-testid="export-dialog">
         <div>
           <FieldLabel htmlFor="export-format">Format</FieldLabel>
           <GlassSelect
             id="export-format"
+            data-testid="export-format"
             value={format}
             onChange={(e) => {
               const v = e.target.value;
@@ -127,8 +128,10 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
         )}
 
         <div className="mt-2 flex justify-end gap-2">
-          <GlassButton onClick={onClose}>Cancel</GlassButton>
-          <GlassButton variant="primary" onClick={doExport} disabled={busy}>
+          <GlassButton data-testid="export-cancel" onClick={onClose}>
+            Cancel
+          </GlassButton>
+          <GlassButton variant="primary" data-testid="export-confirm" onClick={doExport} disabled={busy}>
             Export
           </GlassButton>
         </div>

@@ -45,6 +45,18 @@ export const SHORTCUT_TABLE: Shortcut[] = [
   { combo: 'ctrl+o', commandId: 'file.open' },
   { combo: 'ctrl+s', commandId: 'file.save' },
   { combo: 'ctrl+n', commandId: 'file.new' },
+  // T4 — the third of the same drift, and the one the Ctrl+W fix left behind.
+  // `file.saveAs` has advertised `Ctrl+Shift+S` on its File menu row since the
+  // row existed, with no combo here: the label named a key that did nothing.
+  // It routes to the same `saveDocument(id, true)` the row runs, so the
+  // accelerator does exactly what clicking the row does — including the save
+  // dialog, so it can never overwrite anything without being asked.
+  //
+  // `ctrl+shift+s` was free: checked against every row above and below, and
+  // `comboFromEvent` emits modifiers in a fixed `ctrl+shift+alt` order, so
+  // there is one spelling of it and this is it. The sweep in shortcuts.test.ts
+  // now checks the whole class rather than this one key.
+  { combo: 'ctrl+shift+s', commandId: 'file.saveAs' },
   // The File menu has advertised `Ctrl+W` on its Close row since Task 11, but
   // this table never carried the combo, so the label named a key that did
   // nothing. It routes to `file.close`, i.e. `closeDocumentFlow` — the

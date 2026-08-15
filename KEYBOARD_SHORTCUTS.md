@@ -37,7 +37,9 @@ finishes. Mouse interaction is never suspended by either.
 | `End` | Go to End |
 | `Ctrl+O` | Open… |
 | `Ctrl+S` | Save |
+| `Ctrl+Shift+S` | Save As… |
 | `Ctrl+N` | New… |
+| `Ctrl+W` | Close |
 | `M` | Add Marker at the cursor |
 | `Ctrl+E` | Export… |
 | `Escape` | Deselect |
@@ -90,11 +92,8 @@ table above:
 |---|---|
 | Next Marker | Edit → Next Marker |
 | Previous Marker | Edit → Previous Marker |
-| Save As… | File → Save As… (`Ctrl+Shift+S` shown in the menu, but the
-global handler does not intercept it — use the menu) |
-| Close | File → Close (`Ctrl+W` shown in the menu; use the menu) |
+| Record | File → Record, or the transport bar's record button |
 | Loop toggle | Transport bar loop button |
-| Record | Transport bar record button |
 | Convert Sample Rate… / Convert Channels… | Edit menu |
 | Insert Active File at Cursor / Add Track / Mix Down to New File | Edit /
 File menus, multitrack-only |

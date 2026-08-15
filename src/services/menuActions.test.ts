@@ -314,6 +314,7 @@ describe('getMenuSections', () => {
     expect(commandIds(file.items)).toEqual([
       'file.new',
       'file.open',
+      'transport.record', // T4
       'file.save',
       'file.saveAs',
       'file.export',
@@ -322,6 +323,32 @@ describe('getMenuSections', () => {
       'multitrack.mixdown',
       'file.close',
     ]);
+  });
+
+  it('every dialog-opening command has a menu row, Record included', () => {
+    // T4. `transport.record` was in NO section: its only doors were the
+    // transport bar's Record button and — for a while — nothing else, which
+    // made the Record dialog the one dialog a menu-only user could not reach.
+    // Every other dialog in the app is openable from the menu bar, so this was
+    // an inconsistency in the menu rather than a deliberate omission.
+    //
+    // Filed under File, after Open: New, Open and Record are the three ways
+    // audio gets in front of you, and File already carries a non-`file.*` id
+    // for the same reason (`multitrack.mixdown` makes material too).
+    const ids = getMenuSections().flatMap((s) => commandIds(s.items));
+    expect(ids).toContain('transport.record');
+    const file = getMenuSections().find((s) => s.title === 'File')!;
+    const record = file.items.find(
+      (i): i is MenuCommand => i !== 'separator' && i.id === 'transport.record'
+    )!;
+    expect(record.label).toBe('Record');
+    // No ellipsis, and that is not an oversight: the row opens a dialog in the
+    // waveform/spectral views but PUNCHES IN directly in the multitrack view
+    // (transportService.transportRecord), so "…" would be a promise it breaks
+    // half the time. No accelerator either — nothing in SHORTCUT_TABLE binds
+    // one, and this repo has paid twice for a label naming a key that does
+    // nothing.
+    expect(record.shortcut).toBeUndefined();
   });
 
   it('session.save is only enabled in the multitrack view; session.open is always enabled', () => {

@@ -108,6 +108,18 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
     itemIds: [
       'file.new',
       'file.open',
+      // T4: Record. This command was in NO section, which made the Record
+      // dialog the one dialog in the app a menu-only user could not open —
+      // its doors were the transport bar's button and nothing else. Filed
+      // here, after Open, because New / Open / Record are the three ways audio
+      // gets in front of you; File already carries a non-`file.*` id on the
+      // same principle (`multitrack.mixdown` makes material too).
+      //
+      // The label stays 'Record' with no ellipsis. The row opens a dialog in
+      // the waveform/spectral views but punches straight in on the armed
+      // tracks in the multitrack view (transportService.transportRecord), so
+      // an ellipsis would be a promise it breaks half the time.
+      'transport.record',
       'file.save',
       'file.saveAs',
       'file.export',

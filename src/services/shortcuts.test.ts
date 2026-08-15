@@ -69,6 +69,7 @@ describe('SHORTCUT_TABLE', () => {
       { combo: 'ctrl+o', commandId: 'file.open' },
       { combo: 'ctrl+s', commandId: 'file.save' },
       { combo: 'ctrl+n', commandId: 'file.new' },
+      { combo: 'ctrl+shift+s', commandId: 'file.saveAs' }, // T4
       { combo: 'ctrl+w', commandId: 'file.close' },
       { combo: 'm', commandId: 'marker.add' },
       { combo: 'ctrl+e', commandId: 'file.export' },
@@ -81,6 +82,82 @@ describe('SHORTCUT_TABLE', () => {
     // drifted: `file.close` has advertised Ctrl+W since Task 11 with no entry
     // here, so the label named a key that did nothing.
     expect(SHORTCUT_TABLE).toContainEqual({ combo: 'ctrl+w', commandId: 'file.close' });
+  });
+
+  it('carries the Ctrl+Shift+S the File > Save As row advertises', () => {
+    // The third of the same drift. `file.saveAs` has advertised Ctrl+Shift+S
+    // with no entry here, so the row named a key that did nothing — the exact
+    // shape of the Ctrl+W defect above, found by the same reading and left
+    // recorded rather than fixed for three releases.
+    expect(SHORTCUT_TABLE).toContainEqual({ combo: 'ctrl+shift+s', commandId: 'file.saveAs' });
+  });
+
+  /** A menu row's accelerator LABEL, spelled the way a user writes it, as the
+   * combo `comboFromEvent` produces for the key that would be pressed. Only the
+   * spellings the menu actually uses are handled; an unknown one throws rather
+   * than quietly normalising to something that is in the table. */
+  const labelToCombo = (label: string): string =>
+    label
+      .toLowerCase()
+      .split('+')
+      .map((part) => {
+        const named: Record<string, string> = {
+          esc: 'escape',
+          del: 'delete',
+          left: 'arrowleft',
+          right: 'arrowright',
+          up: 'arrowup',
+          down: 'arrowdown',
+        };
+        if (part in named) return named[part];
+        if (/^(ctrl|shift|alt|space|home|end|delete|escape|[a-z0-9])$/.test(part)) return part;
+        throw new Error(`unhandled accelerator spelling: ${JSON.stringify(part)} in ${label}`);
+      })
+      .join('+');
+
+  it('every accelerator the menus ADVERTISE is a key that actually runs', () => {
+    // The general form of the two tests above, and the reason there should not
+    // need to be a third. A `shortcut` string on a menu row is a promise to the
+    // user; this repo has now paid for that promise being broken twice (Ctrl+W,
+    // Ctrl+Shift+S), each time found by reading rather than by a test. The
+    // promise is checkable, so it is checked: every advertised label must
+    // normalise to a combo the table binds, and to the SAME command the row
+    // runs.
+    // The registry is populated at menuActions module scope, so importing it is
+    // all the setup this needs.
+    const bound = new Map(SHORTCUT_TABLE.map((s) => [s.combo, s.commandId]));
+    const advertised: { id: string; label: string; combo: string }[] = [];
+    for (const section of menuActionsModule.getMenuSections()) {
+      for (const item of section.items) {
+        if (item === 'separator' || !item.shortcut) continue;
+        advertised.push({ id: item.id, label: item.shortcut, combo: labelToCombo(item.shortcut) });
+      }
+    }
+    const dead = advertised.filter((a) => bound.get(a.combo) !== a.id);
+    expect(dead).toEqual([]);
+    // Not vacuous: the menus really do advertise accelerators, and the
+    // normaliser really did convert the awkward spellings rather than passing
+    // over labels it could not read. (`Esc` is NOT among them — `edit.deselect`
+    // is registered with that label but sits in no LAYOUT section, so no row
+    // advertises it and nothing here is owed about it.)
+    expect(advertised.length).toBeGreaterThanOrEqual(15);
+    const combos = advertised.map((a) => a.combo);
+    expect(combos).toContain('ctrl+shift+s'); // 'Ctrl+Shift+S'
+    expect(combos).toContain('ctrl+arrowleft'); // 'Ctrl+Left'
+    expect(combos).toContain('shift+delete'); // 'Shift+Del'
+  });
+
+  it('…and the check would notice a label naming a key nothing binds', () => {
+    // Guards the guard: `labelToCombo` must not map an unbound spelling onto a
+    // bound one, which is the only way the sweep above could pass while a label
+    // stayed dead.
+    expect(labelToCombo('Ctrl+Shift+S')).toBe('ctrl+shift+s');
+    expect(labelToCombo('Shift+Del')).toBe('shift+delete');
+    expect(labelToCombo('Ctrl+Left')).toBe('ctrl+arrowleft');
+    expect(labelToCombo('Esc')).toBe('escape');
+    const bound = new Set(SHORTCUT_TABLE.map((s) => s.combo));
+    expect(bound.has(labelToCombo('Ctrl+Shift+Q'))).toBe(false);
+    expect(() => labelToCombo('Ctrl+F13')).toThrow(/unhandled accelerator/);
   });
 });
 

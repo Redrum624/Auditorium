@@ -34,6 +34,26 @@ describe('ExportDialog', () => {
     expect(screen.queryByTestId('export-kbps')).not.toBeInTheDocument();
   });
 
+  it('the controls that are ALWAYS present carry testids too', () => {
+    // T4. The three quality selects have had testids since they were written;
+    // the root, the format select and the two buttons had none, and those are
+    // exactly the controls a walker leg needs — the quality select it can find
+    // is the one that changes identity with the format. So `e2e-navigate` was
+    // left querying this dialog by visible text.
+    seedActiveDoc();
+    render(<ExportDialog onClose={() => {}} />);
+    for (const id of ['export-dialog', 'export-format', 'export-cancel', 'export-confirm']) {
+      expect([id, screen.queryByTestId(id) !== null]).toEqual([id, true]);
+    }
+    expect(screen.getByTestId('export-format')).toBe(screen.getByLabelText('Format'));
+    expect(screen.getByTestId('export-confirm')).toBe(
+      screen.getByRole('button', { name: 'Export' })
+    );
+    expect(screen.getByTestId('export-cancel')).toBe(
+      screen.getByRole('button', { name: 'Cancel' })
+    );
+  });
+
   it('swaps bit-depth for kbps when the format is set to MP3', () => {
     seedActiveDoc();
     render(<ExportDialog onClose={() => {}} />);

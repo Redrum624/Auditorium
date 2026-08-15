@@ -36,6 +36,34 @@ describe('NewFileDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('every control carries the testid the walkers ask for it by', () => {
+    // T4. This dialog had NO `data-testid` anywhere, so `e2e-navigate` could
+    // only find its controls by visible text — a query that breaks on a copy
+    // edit and cannot tell two buttons with the same word apart. RecordDialog's
+    // `record-device` / `record-toggle` naming is the convention followed here.
+    // Asserted per control rather than as a count: a count passes while the one
+    // control a future leg needs is the one still missing.
+    render(<NewFileDialog onClose={() => {}} />);
+    for (const id of [
+      'new-file-dialog',
+      'new-name',
+      'new-rate',
+      'new-channels',
+      'new-duration',
+      'new-cancel',
+      'new-create',
+    ]) {
+      expect([id, screen.queryByTestId(id) !== null]).toEqual([id, true]);
+    }
+    // The testids are on the controls they name, not scattered onto wrappers.
+    expect(screen.getByTestId('new-name')).toBe(screen.getByLabelText('Name'));
+    expect(screen.getByTestId('new-rate')).toBe(screen.getByLabelText('Sample rate'));
+    expect(screen.getByTestId('new-channels')).toBe(screen.getByLabelText('Channels'));
+    expect(screen.getByTestId('new-duration')).toBe(screen.getByLabelText('Duration (seconds)'));
+    expect(screen.getByTestId('new-create')).toBe(screen.getByRole('button', { name: 'Create' }));
+    expect(screen.getByTestId('new-cancel')).toBe(screen.getByRole('button', { name: 'Cancel' }));
+  });
+
   it('Cancel closes without creating anything', () => {
     const onClose = jest.fn();
     render(<NewFileDialog onClose={onClose} />);

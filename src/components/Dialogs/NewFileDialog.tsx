@@ -28,16 +28,17 @@ export default function NewFileDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <DialogShell title="New File" icon={<FilePlus2 size={15} />} width={380} onClose={onClose}>
-      <div className="flex flex-col gap-3">
+      <div className="flex flex-col gap-3" data-testid="new-file-dialog">
         <div>
           <FieldLabel htmlFor="new-name">Name</FieldLabel>
-          <GlassField id="new-name" value={name} onChange={(e) => setName(e.target.value)} />
+          <GlassField id="new-name" data-testid="new-name" value={name} onChange={(e) => setName(e.target.value)} />
         </div>
 
         <div>
           <FieldLabel htmlFor="new-rate">Sample rate</FieldLabel>
           <GlassSelect
             id="new-rate"
+            data-testid="new-rate"
             value={sampleRate}
             onChange={(e) => setSampleRate(Number(e.target.value))}
           >
@@ -53,6 +54,7 @@ export default function NewFileDialog({ onClose }: { onClose: () => void }) {
           <FieldLabel htmlFor="new-channels">Channels</FieldLabel>
           <GlassSelect
             id="new-channels"
+            data-testid="new-channels"
             value={channels}
             onChange={(e) => setChannels(Number(e.target.value) === 1 ? 1 : 2)}
           >
@@ -65,6 +67,7 @@ export default function NewFileDialog({ onClose }: { onClose: () => void }) {
           <FieldLabel htmlFor="new-duration">Duration (seconds)</FieldLabel>
           <GlassField
             id="new-duration"
+            data-testid="new-duration"
             type="number"
             min={0}
             step={0.1}
@@ -74,8 +77,10 @@ export default function NewFileDialog({ onClose }: { onClose: () => void }) {
         </div>
 
         <div className="mt-2 flex justify-end gap-2">
-          <GlassButton onClick={onClose}>Cancel</GlassButton>
-          <GlassButton variant="primary" onClick={create}>
+          <GlassButton data-testid="new-cancel" onClick={onClose}>
+            Cancel
+          </GlassButton>
+          <GlassButton variant="primary" data-testid="new-create" onClick={create}>
             Create
           </GlassButton>
         </div>

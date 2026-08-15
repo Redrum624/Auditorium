@@ -124,9 +124,9 @@ blank document of a chosen length.
 
 ### Recording
 
-The **Record** button in the toolbar pill opens the Record dialog: pick an
-input device, channel count, and sample rate, watch the live input level
-meter, then start/stop. A finished recording is added to the Files panel as a
+**File → Record**, or the **Record** button in the toolbar pill, opens the
+Record dialog: pick an input device, channel count, and sample rate, watch the
+live input level meter, then start/stop. A finished recording is added to the Files panel as a
 new document. To record straight into a session instead, see **Recording into
 the multitrack** below.
 
