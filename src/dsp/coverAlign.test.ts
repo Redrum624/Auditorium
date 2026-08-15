@@ -665,10 +665,54 @@ describe('alignTakeToReference — the measured separation', () => {
    * rather than re-rendering the audio, which is what makes a smoothing-width
    * sweep affordable at all. */
   const envelopeCache = new Map<string, { a: AlignmentEnvelopes; b: AlignmentEnvelopes }>();
-  // The cache is what makes a smoothing-width sweep affordable, and it is also
-  // the largest thing this file holds; dropping it at the end lets the worker
-  // exit with its hands empty rather than at its high-water mark.
-  afterAll(() => envelopeCache.clear());
+  /**
+   * T3. The same thing keyed per SIDE rather than per pair, for the
+   * constructions where one side is shared and the pair key hid it.
+   *
+   * Profiled: 98 % of this file's runtime is building these envelopes, not
+   * correlating them — one population of 56 ten-second pairs costs 125 s cold
+   * and 1.5 s warm, and inside a pair `alignmentOdf` is ~70 % against
+   * `makeVocalLike`'s ~30 %. So every avoided ODF is the whole saving, and a
+   * pair key that varies on a parameter only the TAKE reads pays for the
+   * reference again each time.
+   *
+   * `drifting` is where that bites: three tempo scales over four seeds is
+   * twelve pairs and twelve pair keys, but only FOUR distinct references —
+   * `tempoScale` and `timingJitterSeconds` are applied to the take alone. The
+   * eight extra references were 20 s of audio each, built and framed for
+   * nothing.
+   *
+   * The key must name every parameter its side's samples depend on, or two
+   * different signals collide on one entry. The reference reads
+   * `referenceSeed`, `seconds` and `repeatPeriodSeconds` and nothing else: its
+   * rate and lead are fixed here, and with `amplitudeJitter` and
+   * `noiseAmplitude` both 0 the variance stream is drawn but multiplies out, so
+   * `varianceSeed` cannot reach the samples. The take reads all of those plus
+   * `varianceSeed`, `tempoScale` and `timingJitterSeconds` (`timingSeed` is
+   * derived from `varianceSeed`, so it is covered).
+   */
+  const sideCache = new Map<string, AlignmentEnvelopes>();
+  // The caches are what make a smoothing-width sweep affordable, and they are
+  // also the largest thing this file holds; dropping them at the end lets the
+  // worker exit with its hands empty rather than at its high-water mark.
+  afterAll(() => {
+    envelopeCache.clear();
+    sideCache.clear();
+  });
+
+  /** One side's envelopes, framed once per distinct construction. */
+  function sideEnvelopes(
+    key: string,
+    build: () => Float32Array[],
+    rate: number
+  ): AlignmentEnvelopes {
+    const hit = sideCache.get(key);
+    if (hit) return hit;
+    const env = alignmentOdf(build(), rate);
+    expect(env).not.toBeNull();
+    sideCache.set(key, env!);
+    return env!;
+  }
 
   interface PairOptions {
     timingJitterSeconds?: number;
@@ -689,37 +733,41 @@ describe('alignTakeToReference — the measured separation', () => {
       seconds = SWEEP_SECONDS,
       repeatPeriodSeconds = 0,
     } = opts;
-    const key = `${referenceSeed}/${takeSeed}/${varianceSeed}/${timingJitterSeconds}/${tempoScale}/${seconds}/${repeatPeriodSeconds}`;
-    const hit = envelopeCache.get(key);
-    if (hit) return hit;
-    const reference = makeVocalLike({
-      seed: referenceSeed,
-      sampleRate: 44100,
-      seconds,
-      leadSeconds: 0.9,
-      repeatPeriodSeconds,
-    });
-    const take = makeVocalLike({
-      seed: takeSeed,
-      sampleRate: 48000,
-      seconds,
-      leadSeconds: 0.3,
-      hzScale: 1.26,
-      amplitudeJitter: 0.5,
-      noiseAmplitude: 0.012,
-      varianceSeed,
-      repeatPeriodSeconds,
-      tempoScale,
-      timingJitterSeconds,
-      timingSeed: varianceSeed * 3 + 17,
-    });
-    const a = alignmentOdf(reference, 44100);
-    const b = alignmentOdf(take, 48000);
-    expect(a).not.toBeNull();
-    expect(b).not.toBeNull();
-    const built = { a: a!, b: b! };
-    envelopeCache.set(key, built);
-    return built;
+    // T3: keyed per side. The reference's key omits the three take-only knobs
+    // BECAUSE its samples cannot see them, which is the whole saving; see
+    // `sideCache`.
+    const a = sideEnvelopes(
+      `ref/${referenceSeed}/${seconds}/${repeatPeriodSeconds}`,
+      () =>
+        makeVocalLike({
+          seed: referenceSeed,
+          sampleRate: 44100,
+          seconds,
+          leadSeconds: 0.9,
+          repeatPeriodSeconds,
+        }),
+      44100
+    );
+    const b = sideEnvelopes(
+      `take/${takeSeed}/${varianceSeed}/${timingJitterSeconds}/${tempoScale}/${seconds}/${repeatPeriodSeconds}`,
+      () =>
+        makeVocalLike({
+          seed: takeSeed,
+          sampleRate: 48000,
+          seconds,
+          leadSeconds: 0.3,
+          hzScale: 1.26,
+          amplitudeJitter: 0.5,
+          noiseAmplitude: 0.012,
+          varianceSeed,
+          repeatPeriodSeconds,
+          tempoScale,
+          timingJitterSeconds,
+          timingSeed: varianceSeed * 3 + 17,
+        }),
+      48000
+    );
+    return { a, b };
   }
 
   /** Same schedule, different performance, onsets shared TO THE SAMPLE — the
@@ -958,8 +1006,24 @@ describe('alignTakeToReference — the measured separation', () => {
     periodic: AlignmentMeasurement[];
   }
 
+  /**
+   * T3. Measured populations, cached by width — five tests below ask for
+   * `ALIGN_SMOOTHING_MS` and the sweep asks for it a sixth time, and the answer
+   * cannot differ between them: `alignEnvelopes` is pure over envelopes that
+   * are themselves cached, so the six calls were six identical correlation
+   * passes over the same arrays.
+   *
+   * Read-only by contract. Every consumer maps, filters or slices; none writes
+   * to a member or to the arrays, and a test that started to would be handing
+   * the next test a population that is no longer what its own name says.
+   */
+  const populationCache = new Map<number, Population>();
+  afterAll(() => populationCache.clear());
+
   /** Every pair measured at one smoothing width. */
   function populationsAt(smoothingMs: number): Population {
+    const cached = populationCache.get(smoothingMs);
+    if (cached) return cached;
     const cover: AlignmentMeasurement[] = [];
     const unrel: AlignmentMeasurement[] = [];
     for (let s = 0; s < SEEDS; s++) {
@@ -976,7 +1040,13 @@ describe('alignTakeToReference — the measured separation', () => {
       cover.push(h!);
     }
     unrel.push(...adversarialTier1(smoothingMs));
-    return { cover, unrelated: unrel, periodic: adversarialPeriodic(smoothingMs) };
+    const built: Population = {
+      cover,
+      unrelated: unrel,
+      periodic: adversarialPeriodic(smoothingMs),
+    };
+    populationCache.set(smoothingMs, built);
+    return built;
   }
 
   /** The gap the CORRELATION floor has to live in — the arm that now carries
@@ -1468,6 +1538,39 @@ describe('alignTakeToReference — the measured separation', () => {
  * silent).
  */
 describe('alignTakeToReference — the reference is the stem, and here is why', () => {
+  // ── COUPLED TO `scripts/make-test-cover.cjs`, AND NOTHING ENFORCES IT ───────
+  //
+  // Every constant in this block is a hand-matched copy of one in that script,
+  // because the script may not import app code (it must run under bare `node`)
+  // and this suite may not shell a generator. The reconstruction is what makes
+  // the packaged smoke's exact property assertable here, in 8 s, instead of only
+  // through a build — but it is held together by nothing except this comment, so
+  // a change to EITHER side silently desyncs them: the script would ship one
+  // fixture while this block went on measuring another, both green.
+  //
+  // The pairs, in full:
+  //
+  //   this block                     make-test-cover.cjs
+  //   SEED                  0x51d3a7  SYNC_SCHEDULE_SEED           0x51d3a7
+  //   SONG_VARIANCE_SEED    0x1a2b3c  SYNC_SONG_VARIANCE_SEED      0x1a2b3c
+  //   TAKE_VARIANCE_SEED    0x4d5e6f  SYNC_TAKE_VARIANCE_SEED      0x4d5e6f
+  //   BED_SEED              0x7c4e11  sourceNoise(0x7c4e11)
+  //   tiltedNoise coeff          0.7  tilt(…, 0.7)
+  //   hzScale                   1.06  SYNC_TAKE_HZ_SCALE           1.06
+  //   amplitudeJitter           0.25  SYNC_TAKE_AMPLITUDE_JITTER   0.25
+  //   MIX_LEAD_SECONDS          0.75  SYNC_OFFSET_SECONDS          0.75
+  //                                     (now in cover-fixture-manifest.cjs)
+  //   SMOKE_BED_DB_UNDER_VOCAL   -14  SYNC_BED_RMS_DBFS -32 MINUS
+  //                                     SYNC_VOCAL_RMS_DBFS -18
+  //   MIX_RATE                 48000  SAMPLE_RATE                  48000
+  //   MIX_SECONDS                  6  SECONDS                      6
+  //
+  // Change one side and change the other. The offset is the one pair that IS
+  // bound at its own end — `make-test-cover.cjs` and `e2e-smoke.cjs` now read it
+  // from `scripts/cover-fixture-manifest.cjs`, so the plant and the smoke's
+  // assertion cannot drift from each other — but that binding does not extend
+  // here: this is a renderer unit suite and it does not reach into `scripts/`,
+  // so `MIX_LEAD_SECONDS` remains a copy and stays on this list.
   const MIX_RATE = 48000;
   const MIX_SECONDS = 6;
   /** The take's lead, and therefore MINUS the offset the aligner must report:
