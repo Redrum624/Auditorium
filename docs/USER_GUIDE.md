@@ -1463,6 +1463,11 @@ committing to five would be lying about what it does.
   clip flattening against zero while the rest keep going.
   (Only the clip under the pointer previews the move while you drag; the rest
   jump to their new positions when you release.)
+  Holding **`Ctrl` at the drop** — the push-clear nudge on a single-clip drag —
+  does **nothing** on a group drag: pushing only the colliding member clear
+  would change the spacing between the clips you are dragging, and a group drag
+  that deforms the group is not the gesture you made. The group lands where you
+  dropped it, and any overlap that creates arms a crossfade as usual.
 - **`Delete`** removes every selected clip, leaving the gaps where they were.
 - **`Shift+Delete`** is **Ripple Delete** — see below.
 

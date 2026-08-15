@@ -66,12 +66,16 @@ function clipOf(id: string, startSample: number, lengthSample: number): Clip {
   return { id, documentId: doc.id, startSample, offsetSample: 0, lengthSample, gainDb: 0 };
 }
 
-function startOf(id: string): number | undefined {
+function clipById(id: string): Clip | undefined {
   for (const t of store().session.tracks) {
     const c = t.clips.find((x) => x.id === id);
-    if (c) return c.startSample;
+    if (c) return c;
   }
   return undefined;
+}
+
+function startOf(id: string): number | undefined {
+  return clipById(id)?.startSample;
 }
 
 /** Seeds `clips` (one entry per track index) and renders the named one. */
@@ -309,5 +313,35 @@ describe('dragging', () => {
     firePointer(el, 'pointermove', { clientX: GRAB_X + 100 });
     firePointer(el, 'pointerup', { clientX: GRAB_X + 100 });
     expect(doneLabels()).toEqual(['Move clip']);
+  });
+
+  // Fix round 1, I1. The group branch deliberately passes no `clearOverlap`,
+  // so a held Ctrl has NO nudge on a multi-clip drag — the rigidity that makes
+  // the group one gesture is worth more than a per-member push, and a push
+  // applied to only the colliding member would deform the group. Pinned here
+  // because the only user-facing statement about the modifier used to say the
+  // opposite; the doc row now matches this test.
+  it('Ctrl at the drop of a GROUP drag does not push clear — the group commits verbatim', () => {
+    const el = mount(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0, 20_000) },
+        { trackIdx: 0, clip: clipOf('blocker', 100_000, 200_000) }, // NOT selected
+        { trackIdx: 1, clip: clipOf('b', 0, 20_000) },
+      ],
+      'a'
+    );
+    select(() => store().setSelectedClip('a'));
+    select(() => store().toggleSelectedClip('b'));
+
+    firePointer(el, 'pointerdown', { clientX: GRAB_X, ctrlKey: true });
+    firePointer(el, 'pointermove', { clientX: GRAB_X + 1050, ctrlKey: true });
+    firePointer(el, 'pointerup', { clientX: GRAB_X + 1050, ctrlKey: true });
+
+    // 1050 px * 100 spp = 105 000. `a` lands INSIDE `blocker` [100 000,
+    // 300 000) instead of being pushed to its end, and `b` moved by the very
+    // same delta — the group stayed rigid.
+    expect(startOf('a')).toBe(105_000);
+    expect(startOf('b')).toBe(105_000);
+    expect(startOf('blocker')).toBe(100_000);
   });
 });

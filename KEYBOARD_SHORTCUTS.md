@@ -51,13 +51,17 @@ document you cannot see. There is one global key table and no per-view table
 beside it: every key runs a command, and a command re-checks its own predicate
 before it runs, which is what makes a view-scoped key inert outside its view.
 
-Three more multitrack behaviours are mouse gestures rather than table rows:
+The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 
 | Gesture | What it does |
 |---|---|
 | `Ctrl+Click` on a clip | Adds it to the selection (or takes it back out). The clip you clicked last is the one the Properties panel's fields edit |
 | Drag any selected clip | Moves **every** selected clip by the same amount, as one undo step. Clips stay on their own tracks |
-| `Ctrl` held at the **drop** of a drag | Still the push-clear nudge it has always been. A held `Ctrl` never toggles the selection, because a drag is not a click |
+| `Ctrl` held at the **drop** of a **single-clip** drag | Still the push-clear nudge it has always been — the clip is pushed past the neighbour it would have overlapped, instead of crossfading into it |
+| `Ctrl` held at the drop of a **group** drag (2+ clips) | **Nothing.** A group drag has no nudge in this version: pushing only the colliding member clear would change the spacing between the clips you are dragging, and a group drag that deforms the group is not the gesture you made. The group lands where you dropped it, and any overlap it creates arms a crossfade as usual |
+
+In neither case does a held `Ctrl` toggle the selection — that is what
+`Ctrl+Click` does, and a drag is not a click.
 
 ## `Escape` and the two kinds of surface
 
