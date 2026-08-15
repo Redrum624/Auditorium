@@ -181,6 +181,42 @@ describe('the global arm: exceptions React never sees', () => {
     expect(screen.getByTestId('crash-detail').textContent).toMatch(/17/);
   });
 
+  it('…and it does not freeze the app it just said is still standing', () => {
+    // The card the fatal arm shows takes the screen, because there is nothing
+    // behind it. This one must NOT: a full-screen modal over a working editor
+    // blocks every gesture until acknowledged, which is a milder version of the
+    // wedge this whole component exists to end — and it would stop a packaged
+    // walker run dead on a notice that was never fatal.
+    render(
+      <CrashBoundary>
+        <Boom when={false} />
+      </CrashBoundary>
+    );
+    fireGlobalError('a background job died');
+
+    const card = screen.getByTestId('crash-card');
+    expect(card).toHaveAttribute('data-variant', 'notice');
+    expect(card).toHaveStyle({ pointerEvents: 'none', background: 'transparent' });
+    // …while the card itself stays clickable, or Dismiss would be scenery.
+    expect(screen.getByTestId('crash-dismiss').closest('div')).toHaveStyle({
+      pointerEvents: 'auto',
+    });
+  });
+
+  it('the FATAL card, by contrast, does take the screen', () => {
+    const log = silenceReactErrorLog();
+    render(
+      <CrashBoundary>
+        <Boom />
+      </CrashBoundary>
+    );
+    const card = screen.getByTestId('crash-card');
+    expect(card).toHaveAttribute('data-variant', 'fatal');
+    expect(card).toHaveStyle({ pointerEvents: 'auto' });
+    expect(card).not.toHaveStyle({ background: 'transparent' });
+    log.mockRestore();
+  });
+
   it('that card IS dismissible, and dismissing leaves the app running', () => {
     render(
       <CrashBoundary>

@@ -87,10 +87,33 @@ const ORIGIN_TEXT: Record<CrashInfo['origin'], string> = {
   rejection: 'A background job failed and nothing was waiting to hear about it.',
 };
 
-function CrashCard({ info, onDismiss }: { info: CrashInfo; onDismiss?: () => void }) {
+/**
+ * One card, two placements — and the difference is the honest part.
+ *
+ * `fatal` takes the screen, because there is nothing behind it: React has
+ * unmounted the tree.
+ *
+ * `notice` does NOT. The app behind an uncaught background exception is still
+ * standing, and a full-screen modal over a working editor would freeze it until
+ * acknowledged — a milder version of the exact failure this component exists to
+ * end. So the wrapper takes no pointer events and paints no backdrop: the card
+ * sits in the corner, over an app the user can keep using mid-drag, and only the
+ * card itself is clickable.
+ */
+function CrashCard({
+  info,
+  onDismiss,
+  variant,
+}: {
+  info: CrashInfo;
+  onDismiss?: () => void;
+  variant: 'fatal' | 'notice';
+}) {
+  const fatal = variant === 'fatal';
   return (
     <div
       data-testid="crash-card"
+      data-variant={variant}
       role="alertdialog"
       aria-label="Something went wrong"
       style={{
@@ -98,15 +121,17 @@ function CrashCard({ info, onDismiss }: { info: CrashInfo; onDismiss?: () => voi
         inset: 0,
         zIndex: 9999,
         display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
+        alignItems: fatal ? 'center' : 'flex-end',
+        justifyContent: fatal ? 'center' : 'flex-end',
         padding: 24,
-        background: 'rgba(10,10,12,0.82)',
+        background: fatal ? 'rgba(10,10,12,0.82)' : 'transparent',
+        pointerEvents: fatal ? 'auto' : 'none',
       }}
     >
       <div
         style={{
-          width: 'min(560px, 100%)',
+          pointerEvents: 'auto',
+          width: fatal ? 'min(560px, 100%)' : 'min(420px, 100%)',
           maxHeight: '100%',
           display: 'flex',
           flexDirection: 'column',
@@ -130,8 +155,9 @@ function CrashCard({ info, onDismiss }: { info: CrashInfo; onDismiss?: () => voi
 
         <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5 }}>
           {ORIGIN_TEXT[info.origin]} Save your work if possible — use{' '}
-          <strong>File → Save As…</strong> on anything you cannot lose — then reload. Nothing has
-          been sent anywhere; this message exists only on this screen.
+          <strong>File → Save As…</strong> on anything you cannot lose
+          {fatal ? ' — then reload' : ''}. Nothing has been sent anywhere; this message exists only
+          on this screen.
         </p>
 
         <pre
@@ -275,11 +301,13 @@ export default class CrashBoundary extends Component<{ children: ReactNode }, St
     const { renderCrash, globalCrash } = this.state;
     // Fatal arm: nothing of the app is left to render behind it, and no Dismiss
     // — a blank window is not an alternative worth offering.
-    if (renderCrash) return <CrashCard info={renderCrash} />;
+    if (renderCrash) return <CrashCard info={renderCrash} variant="fatal" />;
     return (
       <>
         {this.props.children}
-        {globalCrash ? <CrashCard info={globalCrash} onDismiss={this.dismiss} /> : null}
+        {globalCrash ? (
+          <CrashCard info={globalCrash} variant="notice" onDismiss={this.dismiss} />
+        ) : null}
       </>
     );
   }
