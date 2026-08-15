@@ -5,10 +5,55 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.31.0] - 2026-08-15
+
+The overnight close: the clip-editing set completed, three structural refactors the
+backlog had carried for weeks, a crash surface, and every deferred review minor from
+every prior wave — thirty-plus recorded items — fixed or honestly re-recorded. Ten
+lanes total across the night, every one reviewed; three cleared review with zero
+findings of any severity.
+
+### Added
+
+- **The clip-editing set is complete**: `Ctrl+A` selects every clip; `Home`/`End`
+  jump the multitrack cursor to the session's start / the last clip's end;
+  `Shift+Click` range-selects along a track (Ctrl wins on Ctrl+Shift); a group drag
+  ghosts EVERY member live, clamped as a group exactly as it will commit; and a group
+  drag now crosses tracks — members keep their relative track offsets, and when any
+  member's target track would not exist the whole drag honestly stays on its own
+  tracks rather than scattering. `Edit → Ripple Delete Time Selection` ships listed
+  but greyed: the multitrack has no time selection yet, and the row says so rather
+  than pretending. Affects: `multitrack/groupDrag.ts` (new), `sessionStore.ts`,
+  `components/Multitrack/ClipView.tsx`, `services/menuActions.ts`.
+- **A crash surface.** The app has had a renderer wedge in its history; it now has an
+  answer: a top-level error boundary renders an honest crash card (the error text
+  selectable, a Reload button) and `window.onerror`/`unhandledrejection` route
+  non-React exceptions to the same card — non-fatal ones in a non-blocking notice
+  that cannot freeze the app it reports on. Affects: `src/App.tsx`,
+  `components/CrashSurface` (new).
+- **A drop lands on the track the pointer names — header included** (single-clip
+  drags; in the codebase since the original multitrack commit for the lane area, now
+  honoured over the header too, with the lit lane always the lane the clip joins).
 
 ### Fixed
 
+- **Noise Reduction stops leaving 5–8 dB of its reduction unused on uneven floors.**
+  Cause: its noise print was learned from the quietest window even when that window
+  was diluted by digital silence — the print described the zeros, not the floor.
+  Same fix as its three siblings (the mostly-silent-window rejection), measured under
+  a pre-registered bound: floor removal improved from 4.7→9.4 dB (8 kHz) and
+  2.9→11.2 dB (44.1 kHz). The compressor was measured against the same bound and
+  deliberately left alone — the prescribed fix is measurably worse on the one shape
+  that trips it, and its error direction is "do less", which is the safe one; the
+  full record lives in `docs/bench/vocal-chain-uneven-floor-bias.md` under the
+  measurement discipline now written down in `docs/bench/README.md`.
+- **A cleared manual gate level means "no level"** — an empty field was read as
+  `0 dBFS`, a full-scale gate. Affects: `components/Dialogs/VocalChainDialog.tsx`.
+- **Selection and drag polish across the multitrack**: cancelled gestures commit
+  nothing; re-selecting the selected repaints nothing (and only the affected clips
+  re-render on selection changes); the drop ghost holds at the lane edge; the group
+  drop hint counts only clips the drag is not already moving, so it can no longer
+  promise a crossfade with a clip that is vacating.
 - **A selection dragged right-to-left names the span it swept.** Cause: `setSelection`
   stored whatever it was handed, so an inverted pair (`start > end`) reached the audio
   primitives, where `clampRange` throws — Copy, Silence and every effect run raised a
