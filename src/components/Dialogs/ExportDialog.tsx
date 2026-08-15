@@ -131,7 +131,12 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
           <GlassButton data-testid="export-cancel" onClick={onClose}>
             Cancel
           </GlassButton>
-          <GlassButton variant="primary" data-testid="export-confirm" onClick={doExport} disabled={busy}>
+          <GlassButton
+            variant="primary"
+            data-testid="export-confirm"
+            onClick={doExport}
+            disabled={busy}
+          >
             Export
           </GlassButton>
         </div>

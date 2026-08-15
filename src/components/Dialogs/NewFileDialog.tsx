@@ -31,7 +31,12 @@ export default function NewFileDialog({ onClose }: { onClose: () => void }) {
       <div className="flex flex-col gap-3" data-testid="new-file-dialog">
         <div>
           <FieldLabel htmlFor="new-name">Name</FieldLabel>
-          <GlassField id="new-name" data-testid="new-name" value={name} onChange={(e) => setName(e.target.value)} />
+          <GlassField
+            id="new-name"
+            data-testid="new-name"
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+          />
         </div>
 
         <div>
