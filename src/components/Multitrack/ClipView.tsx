@@ -208,9 +208,19 @@ export default function ClipView({
   // only for chrome, so a prop would be a second copy of something the handler
   // has to read anyway; and the `selected` prop keeps meaning exactly what it
   // meant before K1 — the PRIMARY — so every existing caller and test is
-  // untouched. The array reference is stable between selection writes, so this
-  // subscription costs no extra renders.
-  const selectedClipIds = useSessionStore((s) => s.selectedClipIds);
+  // untouched.
+  //
+  // T1 (review M3) — SUBSCRIBE TO THE ANSWER, NOT TO THE ARRAY. This read used
+  // to be `(s) => s.selectedClipIds`, and the comment beside it claimed the
+  // array reference was stable between selection writes. It is not: every
+  // selection write mints a fresh array, so a Ctrl+Click on one clip re-rendered
+  // EVERY clip in the session, where before K1 only the two whose `selected`
+  // prop flipped did. Selecting a boolean makes zustand's `Object.is` compare
+  // the answer this component actually renders, so the write reaches only the
+  // clips whose membership changed. The handlers below want the whole set, and
+  // take it from `getState()` at pointerdown — which is where they capture it in
+  // any case, since the set must not change under the user's hand mid-gesture.
+  const inSet = useSessionStore((s) => s.selectedClipIds.includes(clip.id));
   const toggleSelectedClip = useSessionStore((s) => s.toggleSelectedClip);
   const setClipFade = useSessionStore((s) => s.setClipFade);
   // X4 — the whole track list: this clip's own track feeds the fade/overlap
@@ -236,7 +246,7 @@ export default function ClipView({
   // member of the extended set. The `||` is not redundancy but independence —
   // several tests render this component with `selected` set and no store
   // selection at all, and those must keep meaning what they meant.
-  const inSelection = selected || selectedClipIds.includes(clip.id);
+  const inSelection = selected || inSet;
 
   const left = sampleToPixel(clip.startSample, zoom.scrollSample, zoom.samplesPerPixel);
   const widthPx = Math.max(2, clip.lengthSample / zoom.samplesPerPixel);
@@ -621,7 +631,7 @@ export default function ClipView({
       // The write is kept for the case where this clip is NOT in the selection,
       // which preserves the pre-K1 single-select semantics for any caller that
       // renders a handle on an unselected clip.
-      if (!selectedClipIds.includes(clip.id)) setSelectedClip(clip.id);
+      if (!inSet) setSelectedClip(clip.id);
       fadeDragRef.current = {
         edge,
         startClientX: e.clientX,
@@ -679,7 +689,12 @@ export default function ClipView({
     // Everything else commits here exactly as it always did: pressing a clip
     // that is not selected selects it, before any drag, so the Properties
     // panel and the fade handles follow the clip under the pointer.
-    const memberAtDown = selectedClipIds.includes(clip.id);
+    // T1 (review M3): the whole set, read once from the store at press time.
+    // The component subscribes only to its OWN membership now, and this is the
+    // one place that needs the rest of it — captured, not subscribed, because
+    // `groupIds` below must be the set as it stood when the gesture began.
+    const idsAtDown = useSessionStore.getState().selectedClipIds;
+    const memberAtDown = idsAtDown.includes(clip.id);
     const deferSelection = memberAtDown || e.ctrlKey;
     if (!deferSelection) setSelectedClip(clip.id);
 
@@ -692,7 +707,7 @@ export default function ClipView({
       origStart: clip.startSample,
       origEnd: clip.startSample + clip.lengthSample,
       exceeded: false,
-      groupIds: memberAtDown ? [...selectedClipIds] : [clip.id], // K1
+      groupIds: memberAtDown ? [...idsAtDown] : [clip.id], // K1
       ctrlAtDown: e.ctrlKey, // K1
       deferSelection, // K1
       targets: sessionSnapTargets(clip.id),
@@ -746,16 +761,55 @@ export default function ClipView({
     }
   };
 
-  const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+  /**
+   * Everything a gesture has to give back, whatever it meant: the drag record,
+   * the "a move is in flight" flag, the undo bracket and the pointer capture.
+   * Returns the drag that was in flight so a caller that may COMMIT can read it.
+   *
+   * R3: `endSessionGesture` closes the trim gesture opened on pointerdown (one
+   * entry for the whole drag; none for a click). No-op for move mode — nothing
+   * is open there, and `moveClip` records its own entry.
+   */
+  const releaseGesture = (e: ReactPointerEvent<HTMLDivElement>): DragState | null => {
     const drag = dragRef.current;
     dragRef.current = null;
     setMoveDragging(false);
-    // R3: closes the trim gesture opened on pointerdown (one entry for the
-    // whole drag; none for a click). No-op for move mode — nothing is open,
-    // and the moveClip below records its own entry. Fires on pointercancel
-    // too via the JSX binding.
     endSessionGesture();
     e.currentTarget.releasePointerCapture?.(e.pointerId);
+    return drag;
+  };
+
+  /** The move preview's transient render state, put back. */
+  const clearMovePreview = () => {
+    setMoveDx(0);
+    setDragTrackId(null);
+    setCtrlHeld(false);
+    onDragOverTrack(null);
+  };
+
+  /**
+   * T1 (review M4) — A CANCELLED GESTURE COMMITS NOTHING.
+   *
+   * This was bound straight to `onPointerUp`, which meant a pointercancel ran
+   * the branches that decide what the gesture MEANT: a sub-threshold cancel on
+   * a deferred press committed a selection toggle, and a cancel past the
+   * threshold committed the move. But a pointercancel is the platform taking
+   * the gesture AWAY from this element — the OS claimed it, the device was
+   * lost — so the user never completed the press, and an interrupted press is
+   * not a click.
+   *
+   * Releasing is not committing, and still happens: the bracket a trim opened
+   * must close (its live per-pointermove writes are already in the store, and
+   * an open bracket would fold the user's next act into this one), the capture
+   * must be released, and the preview translate must go.
+   */
+  const onPointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
+    releaseGesture(e);
+    clearMovePreview();
+  };
+
+  const onPointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const drag = releaseGesture(e);
     // K1 — the CLICK branch: a press the pointer never carried anywhere is a
     // selection act, and this is the moment it is safe to know that. Ctrl
     // toggles this clip in the set; a plain click collapses the set to it.
@@ -804,10 +858,7 @@ export default function ClipView({
         clearOverlap: e.ctrlKey,
       });
     }
-    setMoveDx(0);
-    setDragTrackId(null);
-    setCtrlHeld(false);
-    onDragOverTrack(null);
+    clearMovePreview();
   };
 
   return (
@@ -816,7 +867,7 @@ export default function ClipView({
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
       onPointerUp={onPointerUp}
-      onPointerCancel={onPointerUp}
+      onPointerCancel={onPointerCancel}
       className="absolute top-1 overflow-hidden rounded-lg"
       style={{
         left,

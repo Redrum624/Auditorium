@@ -1,3 +1,4 @@
+import { Profiler } from 'react';
 import { act, render } from '@testing-library/react';
 import ClipView from './ClipView';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
@@ -32,7 +33,7 @@ const SESSION_RATE = 44_100;
 
 function firePointer(
   element: Element,
-  type: 'pointerdown' | 'pointermove' | 'pointerup',
+  type: 'pointerdown' | 'pointermove' | 'pointerup' | 'pointercancel',
   init: { clientX: number; clientY?: number; button?: number; ctrlKey?: boolean }
 ): void {
   const event = new MouseEvent(type, {
@@ -433,3 +434,153 @@ describe('the fade corner handles', () => {
     expect(store().selectedClipIds).toEqual(['a']);
   });
 });
+
+/**
+ * T1 (K1 review, Minor M3) — WHAT A SELECTION WRITE COSTS THE TIMELINE.
+ *
+ * K1 gave every ClipView a subscription to `selectedClipIds`, whose ARRAY
+ * IDENTITY changes on every selection write; before K1 only the two clips whose
+ * `selected` prop flipped re-rendered. So Ctrl+Clicking one clip re-rendered
+ * every clip in the session — React reconcile only (the canvas draws are
+ * dep-gated), but it grows with the clip count, which is exactly the direction
+ * a timeline grows in.
+ *
+ * The fix is to subscribe to THIS clip's membership — a boolean — so the store
+ * write only reaches the clips whose answer changed. The handlers still need the
+ * whole set, and read it from `getState()` at pointerdown, which is where they
+ * capture it anyway (the set must not change under the user's hand mid-drag).
+ *
+ * `Profiler.onRender` fires once per commit INSIDE its subtree, so a render
+ * zustand never scheduled is a callback that never fires — which is the
+ * property under test, rather than a proxy for it.
+ */
+describe('a selection write reaches only the clips it changes', () => {
+  /** Mounts `renderId` under a Profiler; the returned counter reads renders
+   * SINCE the mount, so the mount's own commits are not in the number. */
+  function mountCounted(seed: { trackIdx: number; clip: Clip }[], renderId: string): () => number {
+    const s = store();
+    for (const { trackIdx, clip } of seed) {
+      s.addClip(useSessionStore.getState().session.tracks[trackIdx].id, clip);
+    }
+    const target = seed.find((x) => x.clip.id === renderId)!;
+    const trackId = useSessionStore.getState().session.tracks[target.trackIdx].id;
+    let renders = 0;
+    render(
+      <Profiler
+        id={renderId}
+        onRender={() => {
+          renders += 1;
+        }}
+      >
+        <ClipView
+          clip={target.clip}
+          doc={doc}
+          trackId={trackId}
+          zoom={{ samplesPerPixel: SPP, scrollSample: 0 }}
+          sessionRate={SESSION_RATE}
+          laneHeight={96}
+          selected={useSessionStore.getState().selectedClipId === target.clip.id}
+          resolveTrackAt={() => trackId}
+          onDragOverTrack={() => {}}
+        />
+      </Profiler>
+    );
+    _resetSessionUndo();
+    const atMount = renders;
+    return () => renders - atMount;
+  }
+
+  const three = () => [
+    { trackIdx: 0, clip: clipOf('a', 0, 20_000) },
+    { trackIdx: 0, clip: clipOf('b', 40_000, 20_000) },
+    { trackIdx: 1, clip: clipOf('c', 0, 20_000) },
+  ];
+
+  it('leaves a clip that is in neither the old nor the new selection alone', () => {
+    const renders = mountCounted(three(), 'a');
+
+    select(() => store().setSelectedClip('b'));
+    select(() => store().toggleSelectedClip('c'));
+    select(() => store().toggleSelectedClip('c'));
+    select(() => store().setSelectedClip(null));
+
+    expect(renders()).toBe(0);
+  });
+
+  it('still re-renders the clip whose OWN membership changed, once per change', () => {
+    const renders = mountCounted(three(), 'a');
+
+    select(() => store().setSelectedClip('a')); // joins
+    expect(renders()).toBe(1);
+
+    select(() => store().toggleSelectedClip('b')); // `a` stays in: nothing to say
+    expect(renders()).toBe(1);
+
+    select(() => store().setSelectedClip('b')); // leaves
+    expect(renders()).toBe(2);
+  });
+});
+
+/**
+ * T1 (K1 review, Minor M4) — A CANCELLED GESTURE COMMITS NOTHING.
+ *
+ * `onPointerCancel` was bound straight to `onPointerUp`, so a cancel routed
+ * into the branches that decide what the gesture MEANT: a sub-threshold cancel
+ * on a deferred press committed a selection toggle, and a cancel past the
+ * threshold committed the move. A pointercancel is the platform saying the
+ * gesture was taken away from the element (the OS claimed it for a scroll or a
+ * gesture, the pointer device was lost) — the user never finished it, and an
+ * interrupted press must not be read as a click.
+ *
+ * What a cancel still does is RELEASE: the trim/fade undo bracket opened at
+ * pointerdown is closed (its live writes are already in the store, and leaving
+ * the bracket open would fold the user's next act into this one), the pointer
+ * capture is released, and the move preview is cleared.
+ */
+describe('a cancelled gesture', () => {
+  it('commits no selection toggle for a press the user never completed', () => {
+    const el = mount(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0, 20_000) },
+        { trackIdx: 1, clip: clipOf('b', 0, 20_000) },
+      ],
+      'a'
+    );
+    select(() => store().setSelectedClip('a'));
+    select(() => store().toggleSelectedClip('b')); // set = [a, b]
+
+    // Ctrl on a member: the press defers, so pointerup would have toggled.
+    firePointer(el, 'pointerdown', { clientX: GRAB_X, ctrlKey: true });
+    firePointer(el, 'pointercancel', { clientX: GRAB_X, ctrlKey: true });
+
+    expect(store().selectedClipIds).toEqual(['a', 'b']);
+    expect(store().selectedClipId).toBe('b');
+  });
+
+  it('commits no move for a drag the user never dropped', () => {
+    const el = mount([{ trackIdx: 0, clip: clipOf('a', 0, 20_000) }], 'a');
+
+    firePointer(el, 'pointerdown', { clientX: GRAB_X });
+    firePointer(el, 'pointermove', { clientX: GRAB_X + 100 });
+    firePointer(el, 'pointercancel', { clientX: GRAB_X + 100 });
+
+    expect(startOf('a')).toBe(0);
+    expect(doneLabels()).toEqual([]);
+  });
+
+  it('still closes the undo bracket a trim opened, so the next act is its own entry', () => {
+    // Grabbed inside the 6 px trim-start band (jsdom's rect.left is 0, so the
+    // clip-local x IS the clientX), and dragged far enough to write samples.
+    const el = mount([{ trackIdx: 0, clip: clipOf('a', 0, 20_000) }], 'a');
+
+    firePointer(el, 'pointerdown', { clientX: 2 });
+    firePointer(el, 'pointermove', { clientX: 52 });
+    firePointer(el, 'pointercancel', { clientX: 52 });
+
+    // The 5 000 samples the live trim already wrote are one closed entry — not
+    // an open bracket waiting to swallow whatever the user does next.
+    expect(startOf('a')).toBe(5_000);
+    expect(doneLabels()).toEqual(['Trim clip']);
+  });
+});
+
