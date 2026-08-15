@@ -1928,3 +1928,48 @@ from file…" button beside the lyrics box reads *words*; it never touches audio
 file whose lead-in is literal zeros would be refused) is fixed, above. Recording
 is also the better answer to the thing the feature is for: a replacement sung
 here **is** your voice, with no provenance to defend.
+
+## Opening a large file freezes the window for about a tenth of a second per 50 MiB, and it is the delivery, not the decode
+
+**Area:** `electron/ipc.cjs` `file:read` → `electron/preload.cjs` `readFile` →
+`src/services/fileService.ts`.
+
+**Behavior a user will notice:** opening a large WAV stops the window — no
+hover, no scroll, no keystroke — for roughly a tenth of a second per 50 MiB,
+before any decoding starts. It is short, it happens once per open, and it is
+real.
+
+**Measured** (`scripts/open-ipc-probe.cjs`, verdict
+`docs/bench/t4-open-ipc-delivery.json`, 5 reads per file in the built app):
+
+| File | Size | `await readFile()` | Main thread BLOCKED | One in-renderer copy of the same bytes |
+|---|---|---|---|---|
+| Scarlet Paintings 48000 1.wav | 65.2 MiB | 206.3 ms | **137.5 ms** | 14.8 ms |
+| P1177605.wav | 52.1 MiB | 173.5 ms | **114.2 ms** | 13.6 ms |
+| long70.wav (control) | 5.9 MiB | 20.1 ms | 14.4 ms | 1.8 ms |
+
+The block is measured rather than inferred: a 4 ms interval runs across the read
+and the longest gap between its ticks IS the stall. The detector is calibrated
+in the same run against a deliberate 120 ms block (detected: 122.2 ms).
+
+**Why.** It is per-byte work on the renderer's main thread — 2.11, 2.19 and
+2.44 ms per MiB across the three sizes, a straight line through the origin
+rather than a fixed per-call cost. Two copies are in it and neither is avoidable
+from where the code stands: `ipcRenderer.invoke` has no transfer list, so an
+`ArrayBuffer` returned from `ipcMain.handle` is **structured-cloned**, and
+`contextBridge` **copies it again** on the way into the page's world — the
+isolated-world boundary the whole security model rests on. `ipcRenderer` is
+main-thread-only, so both land there.
+
+**What it would cost to fix, and why it has not been.** One plain copy of
+65 MiB costs 14.8 ms on this machine; the delivery costs about **nine times**
+that. The headroom is real, and reaching it means carrying the buffer over a
+`MessageChannelMain` port as a *transferable* rather than as a return value — a
+new channel and a new protocol for every caller of `file:read`. That is an
+architecture change, and the pass that measured this was scoped to measure
+first and fix only what a cheap, safe change could clear. Chunking the delivery
+would break the freeze into slices without reducing the total work.
+
+**Not this:** the decode. The 308 ms decode freeze this app used to have was
+fixed along with three redundant copies (~205 → ~65 MiB per open). What remains
+is the hand-off itself.
