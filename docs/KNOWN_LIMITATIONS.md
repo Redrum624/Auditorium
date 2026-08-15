@@ -1158,7 +1158,7 @@ the others would be shown in the table and absent from the line that exists to m
 impossible to miss. What is never shown is the requested curve dressed
 up as an outcome.
 
-## The beat grid shows only what was measured; snapping targets beats, not clip edges
+## The beat grid shows only what was measured; snapping targets edges, beats and markers, by rank
 
 **Area:** Beat grid (`src/services/beatGrid.ts`,
 `src/components/Editor/waveformRender.ts`,
@@ -1167,10 +1167,10 @@ up as an outcome.
 `src/components/Editor/editorSnapTargets.ts`,
 `src/components/Multitrack/sessionSnapTargets.ts`)
 
-**v1.8 behavior, items 4–5 updated for v1.9:** Five limits, each a
-consequence of drawing only what the analysis actually produced — except
-item 5, which v1.9 resolved and which is kept here as the record of what
-remains of it.
+**v1.8 behavior, items 4–5 updated for v1.9, item 4 resolved since:** Five
+limits, each a consequence of drawing only what the analysis actually produced
+— except items 4 and 5, which later releases resolved and which are kept here
+as the record of what remains of them.
 
 **1. The tics are a tracked grid, so they follow a drifting take — and every
 tempo-detection limit above applies to them unchanged.** `beatSamples` comes
@@ -1208,19 +1208,26 @@ make a repaint reorder eviction, trading this surprise for a worse one. What
 keeps the workflow this feature exists for inside four rows is inheritance —
 a source plus its five stems occupy one row, not six.
 
-**4. Snapping targets beats, bar lines, markers and the playhead — not clip
-edges.**
-Butt-joining two clips is the other classic multitrack magnet and it is not
-here. Same-track clip boundaries became first-class crossfade joins in v1.9,
-but clip-edge snap targets still did not land with them; the precise butt-join
-affordance is instead the Ctrl-drag nudge (below), which lands a clip exactly
-at its neighbour's end. In practice head-to-head alignment mostly works
-anyway, because a clip's first beat usually coincides with its start. Bar lines
-add nothing to the target set even when they exist, and that is arithmetic rather
-than an omission: every bar line already *is* one of the beats. The multitrack
-cursor IS a target (`buildSessionSnapTargets` takes it as `extra`); the editor's
-own set is beats plus markers only. The timeline ruler does not snap either — it
-is a seek surface showing seconds, with its own zoom and time base.
+**4. RESOLVED — clip edges are snap targets now, and the set is ranked.**
+The exclusion this item recorded ("snapping targets beats, bar lines, markers
+and the playhead — not clip edges") ended exactly as its last sentence
+predicted: once v1.9 settled the boundary's meaning, edge targets could be
+defined without ambiguity, and they landed. Every *other* clip's start and end
+— cross-track and same-track — now pulls a dragged clip's head and tail, so a
+butt join is a drag instead of a Ctrl-nudge, and because a crossfade arms only
+on a *strict* overlap, the snapped join (end == start) arms nothing: edge
+snapping prevents the accidental micro-overlap crossfades the old exclusion
+feared. What remains of the item: the target set is now RANKED, not flat —
+edges and the session cursor outrank markers outrank beats, resolving
+nearest-first within the highest rank that has a candidate — so a beat one
+pixel nearer no longer silently robs an aimed-for edge. A group drag excludes
+every co-moving member's contribution (their captured positions are stale by
+the drag's own delta). Bar lines still add nothing to the target set even when
+they exist, and that is arithmetic rather than an omission: every bar line
+already *is* one of the beats. The editor's own set is still beats plus
+markers, flat; the multitrack ruler's seek and envelope keys snap against the
+flat union of the session set (a seeked cursor aims no clip edge, and its own
+old position as a dominant target would pin it in place).
 
 **5. The Ctrl-drag nudge commits somewhere the preview does not show.** v1.8's
 "overlap nudge outranks the magnet" limitation resolved exactly as predicted:
@@ -1238,11 +1245,10 @@ the overlap it had just been moved clear of.
 **Intended behavior:** 1–3 are properties of the data and are surfaced rather
 than smoothed over: a provisional grid (stale, or below `CONFIDENCE_LOW`) is
 drawn dimmed and dashed with its geometry unchanged, and no grid at all is drawn
-without a cached analysis. 4 remains sequenced, not dropped — clip-edge snap
-targets can now be defined without ambiguity (the boundary's meaning settled in
-v1.9) and Ctrl-drag covers the butt-join in the meantime. 5 is the pinned
-preview/commit contract: divergence exists only under the Ctrl opt-out, never
-on a default drop.
+without a cached analysis. 4 is delivered — the sequencing it promised ran its
+course, and the record above describes the shipped ranked target set. 5 is the
+pinned preview/commit contract: divergence exists only under the Ctrl opt-out,
+never on a default drop.
 
 ## Remove Silence detects a pause starting ~100 ms late (safe direction, by design)
 

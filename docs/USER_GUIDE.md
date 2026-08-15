@@ -930,8 +930,17 @@ would be in the wrong places. Run Detect Tempo on the remix itself.
 With the magnet on, editing lands on the beat. Clicking the waveform puts the
 cursor on the nearest **beat or marker** within 8 screen pixels; dragging a
 selection snaps the edge you are dragging (the anchor never moves); and in the
-multitrack, dragging or trimming a clip snaps it to the beats and markers of the
-*other* clips and to the session cursor.
+multitrack, dragging or trimming a clip snaps it to the **edges** (start and
+end) of the *other* clips — on any track — to their beats and markers, and to
+the session cursor.
+
+When two kinds of target are both within reach, the magnet prefers what you
+**placed** over what was **derived**: a clip edge or the session cursor beats a
+marker, and a marker beats a beat line. Drag a clip's head onto its
+neighbour's end and it lands there sample-exact — a clean butt join with no
+overlap and no crossfade — even when a beat happens to sit a pixel closer.
+When dropping from the Files panel, the drop line turns **white** when an edge
+or the cursor has caught the clip, and stays **cyan** on a beat or marker.
 
 - **Switch it on and off** with the **magnet button** in the toolbar pill, or
   **View → Toggle Snap to Grid**. It ships on.
