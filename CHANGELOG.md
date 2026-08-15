@@ -5,6 +5,58 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A selection dragged right-to-left names the span it swept.** Cause: `setSelection`
+  stored whatever it was handed, so an inverted pair (`start > end`) reached the audio
+  primitives, where `clampRange` throws — Copy, Silence and every effect run raised a
+  `RangeError`, the status bar showed a negative duration, and the transport played
+  from the later sample. `editOps.ts` had recorded the case as deliberately deferred
+  to "this family's next round"; this is that round. Fix: ordered at the store WRITE,
+  which is where the invariant has to live — eight consumers resolve a region against
+  a document, but around twenty-five just read the pair (the status bar, the
+  properties panel, the transport, the playback engine's loop bounds, three dialogs'
+  readouts) and need no document to be right, so a read helper could not have reached
+  them. Same shape as `applyEditorZoom`, "the ONE clamping writer". An already-ordered
+  pair is returned by identity, so an unchanged write is not a new store snapshot.
+  Affects: `stores/appStore.ts`, `services/selectionRegion.ts`.
+- **The two passes that orphaned a finished edit now observe a cancel.** Cause: U2's
+  fix round corrected its own claim that all nine hosted tools discard their work on
+  unmount — seven do; Match Tempo guarded only a DOM ref and Align Vocal Timing had no
+  ref at all, so a pass resolving after the tool was gone committed its stretch, its
+  marker correction and its beat grid into a document the user had walked away from.
+  The module lock has been mitigating it since. Fix: the cancel seam is in
+  `runEffectOnSelection`, between the audio arriving and `applyEdit` writing it —
+  `applyEdit` is called from inside that function, so no caller can get between the
+  two, and everything from the check to the last of the three undo entries is one
+  synchronous block. A cancelled pass commits nothing and reports `'cancelled'`
+  instead of "nothing to move at this strength". Align's Suggest needed the same fix
+  in a different shape: the animation frame it defers to still fires after unmount,
+  and it writes markers plus an undo entry, so the frame is cancelled and the decision
+  re-read inside it. **The module lock is deliberately NOT relaxed** — `moduleLock` is
+  one flag driving four things, and the fourth (suspending the keyboard) guards a
+  hazard that happens with the tool still mounted, where no cancel ref can reach it:
+  `Ctrl+O` mid-pass makes another document active, and `applyEdit` writes the GLOBAL
+  selection and cursor. Reasoning recorded at the lock. Affects:
+  `services/effectRunner.ts`, `services/tempoService.ts`, `services/timingAlignService.ts`,
+  `components/Dialogs/TempoDialog.tsx`, `components/Dialogs/AlignTimingDialog.tsx`.
+
+### Changed
+
+- **One resolved region, in one function.** The clamp family's rule — "resolve once,
+  do not clamp twice and hope the two agree" — was written out in eight places
+  (`tempoService`, `effectRunner`, `vocalChain`, `coverChain`, `timingAlignService`,
+  `editOps`, `TempoDialog`, `noiseProfile`), each under its own paragraph restating
+  it; `editOps.ts` counted itself the FIFTH application. The family reached fourteen
+  members precisely because every new consumer re-derived the pair instead of reading
+  one. Now `services/selectionRegion.ts` holds the arithmetic and the eight import it.
+  Behaviour is byte-identical, pinned before the move by a suite that drives the same
+  trap table through three independent surfaces. `noiseProfile` was the last raw
+  member — recorded as benign because `cloneRegion` clamps what it slices, which is
+  true and is not the same as correct.
+
 ## [1.30.0] - 2026-08-15
 
 Six lanes from one day of real use: two rendering defects, the gate's real-recording

@@ -69,11 +69,15 @@ panel.)
 
 **While a pass is actually running**, the module strip greys out and the tool's
 **✕** refuses, both saying why: a running pass keeps its progress inside the
-tool, so closing it or switching module would either discard the work or leave
-it committing to a file you have walked away from. Two things are suspended for
-the duration and nothing else — the module switch, and **keyboard shortcuts**
-(`Space`, `Ctrl+Z`, the arrows: a `Ctrl+O` mid-pass would land the result on a
-file you had just replaced). The **mouse** is untouched throughout: keep
+tool, so closing it or switching module would throw the work away. It would only
+ever throw it away — every tool now stops cleanly when its window closes, so a
+pass you abandon changes nothing at all rather than half-landing an edit in a
+file you have walked away from. Two things are suspended for the duration and
+nothing else — the module switch, and **keyboard shortcuts** (`Space`, `Ctrl+Z`,
+the arrows). The keyboard is held for a reason the clean stop does not cover:
+`Ctrl+O` mid-pass would make another file the active one while the pass is still
+running, and the result would land with your selection and cursor pointing into
+the file you had just opened. The **mouse** is untouched throughout: keep
 selecting, scrubbing, zooming and switching view while it runs. Everything comes
 back by itself the moment the pass finishes.
 
