@@ -345,3 +345,91 @@ describe('dragging', () => {
     expect(startOf('blocker')).toBe(100_000);
   });
 });
+
+describe('the fade corner handles', () => {
+  /** Mounts `renderId` with `selected` forced on, so its corner handles exist. */
+  function mountWithHandles(seed: { trackIdx: number; clip: Clip }[], renderId: string): HTMLElement {
+    const s = store();
+    for (const { trackIdx, clip } of seed) {
+      s.addClip(useSessionStore.getState().session.tracks[trackIdx].id, clip);
+    }
+    const target = seed.find((x) => x.clip.id === renderId)!;
+    const trackId = useSessionStore.getState().session.tracks[target.trackIdx].id;
+    const { container } = render(
+      <ClipView
+        clip={target.clip}
+        doc={doc}
+        trackId={trackId}
+        zoom={{ samplesPerPixel: SPP, scrollSample: 0 }}
+        sessionRate={SESSION_RATE}
+        laneHeight={96}
+        selected={true}
+        resolveTrackAt={() => trackId}
+        onDragOverTrack={() => {}}
+      />
+    );
+    _resetSessionUndo();
+    return container.querySelector('[data-testid="fade-handle-in"]') as HTMLElement;
+  }
+
+  // Fix round 1, I2. Grabbing a fade corner is an EDIT gesture on one clip, not
+  // a selection act — the same rule the trim bands already follow. Before this
+  // it called `setSelectedClip`, which under K1 IS the whole selection, so
+  // touching the primary's corner silently dropped every other member and a
+  // following Delete took one clip instead of N.
+  it('grabbing the corner of a clip already in the selection keeps the whole set', () => {
+    const handle = mountWithHandles(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0, 20_000) },
+        { trackIdx: 1, clip: clipOf('b', 0, 20_000) },
+      ],
+      'a'
+    );
+    select(() => store().setSelectedClip('b'));
+    select(() => store().toggleSelectedClip('a')); // primary = a, set = [b, a]
+
+    firePointer(handle, 'pointerdown', { clientX: 0 });
+    firePointer(handle, 'pointerup', { clientX: 0 });
+
+    expect(store().selectedClipIds).toEqual(['b', 'a']);
+    expect(store().selectedClipId).toBe('a');
+  });
+
+  it('a fade drag on a member still edits only that clip, and still keeps the set', () => {
+    const handle = mountWithHandles(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0, 20_000) },
+        { trackIdx: 1, clip: clipOf('b', 0, 20_000) },
+      ],
+      'a'
+    );
+    select(() => store().setSelectedClip('b'));
+    select(() => store().toggleSelectedClip('a'));
+
+    firePointer(handle, 'pointerdown', { clientX: 0 });
+    firePointer(handle, 'pointermove', { clientX: 50 });
+    firePointer(handle, 'pointerup', { clientX: 50 });
+
+    // 50 px * 100 spp = 5 000 samples of fade-in on the primary only.
+    expect(clipById('a')!.fadeInSample).toBe(5_000);
+    expect(clipById('b')!.fadeInSample).toBeUndefined();
+    expect(store().selectedClipIds).toEqual(['b', 'a']);
+  });
+
+  it('grabbing the corner of a clip that is NOT selected selects it, as before', () => {
+    const handle = mountWithHandles(
+      [
+        { trackIdx: 0, clip: clipOf('a', 0, 20_000) },
+        { trackIdx: 1, clip: clipOf('b', 0, 20_000) },
+      ],
+      'a'
+    );
+    select(() => store().setSelectedClip('b')); // `a` is not in the selection
+
+    firePointer(handle, 'pointerdown', { clientX: 0 });
+    firePointer(handle, 'pointerup', { clientX: 0 });
+
+    expect(store().selectedClipId).toBe('a');
+    expect(store().selectedClipIds).toEqual(['a']);
+  });
+});

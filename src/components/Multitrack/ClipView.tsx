@@ -605,7 +605,23 @@ export default function ClipView({
     (e: ReactPointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
       e.stopPropagation();
-      setSelectedClip(clip.id);
+      // K1 (fix round 1) — a fade grab is an EDIT gesture on ONE clip, not a
+      // selection act, so it must not disturb a selection that already holds
+      // this clip. Before K1 the unconditional `setSelectedClip` was inert here
+      // (the handles only render on the selected clip, so it re-selected what
+      // was already selected); under K1 that call IS the whole selection, so it
+      // silently dropped every other member — and a following Delete or Ripple
+      // Delete would then take one clip instead of N.
+      //
+      // This is the rule the TRIM bands already follow: their gesture is not
+      // 'move', so it never reaches the click branch in `onPointerUp` and never
+      // collapses the set. It is also the press-time rule the root uses — a
+      // press on a clip already in the selection commits nothing.
+      //
+      // The write is kept for the case where this clip is NOT in the selection,
+      // which preserves the pre-K1 single-select semantics for any caller that
+      // renders a handle on an unselected clip.
+      if (!selectedClipIds.includes(clip.id)) setSelectedClip(clip.id);
       fadeDragRef.current = {
         edge,
         startClientX: e.clientX,
