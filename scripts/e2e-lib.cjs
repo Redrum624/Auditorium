@@ -318,6 +318,12 @@ async function pinWindowGeometry(app, want) {
  * (the state before this existed), and a string it matches that was never a
  * require costs one unnecessary regeneration. Both are cheaper than a parser.
  *
+ * The likeliest miss is not a dynamic require but an EXTENSIONLESS one —
+ * `require('./cover-fixture-manifest')`. `path.resolve` does not perform Node's
+ * extension search, so `readFileSync` fails and the `catch` below drops that
+ * module from the digest silently. No generator in this repo writes one today;
+ * write requires with their extension and this keeps holding.
+ *
  * The NAME is hashed beside the bytes so two generators that happen to hold
  * identical source are still told apart.
  */
@@ -342,12 +348,32 @@ function generatorRecipe(scriptPath, seen = new Set()) {
   return parts;
 }
 
-/** The digest of that recipe — what a fixture is stamped with. */
+/**
+ * The digest of that recipe — what a fixture is stamped with.
+ *
+ * T3 fix round 1 — the parts are framed by LENGTH, not by a delimiter.
+ *
+ * This used to join them with a raw NUL, which made this shared rig file
+ * BINARY to `file(1)`, to grep and to ripgrep ("Binary file … matches"), and
+ * left every fixture stamp at the mercy of any tool that strips control
+ * characters — one invisible rewrite and every fixture in the repo silently
+ * changes its recipe.
+ *
+ * A printable delimiter cannot replace it honestly, which is why this is
+ * framing instead. The parts are whole SOURCE FILES, so no fixed string —
+ * `|#|`, a newline, any of them — is provably absent from a part, and a part
+ * that happened to contain the delimiter could forge a boundary and collide
+ * two different recipes onto one digest. A byte length cannot be forged by
+ * content: `27:…` says how far the part runs whatever is inside it, so the
+ * encoding is unambiguous without asking anything of the sources at all.
+ *
+ * The framing is printable, so this file reads as text again.
+ */
 function generatorStamp(scriptPath) {
-  return crypto
-    .createHash('sha256')
-    .update(generatorRecipe(scriptPath).join(' '))
-    .digest('hex');
+  const framed = generatorRecipe(scriptPath)
+    .map((part) => `${Buffer.byteLength(part)}:${part}`)
+    .join('');
+  return crypto.createHash('sha256').update(framed).digest('hex');
 }
 
 /** Where a fixture records the generator it was built by. Beside the fixture,
