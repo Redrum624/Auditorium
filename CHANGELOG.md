@@ -5,6 +5,30 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.31.1] - 2026-08-15
+
+### Fixed
+
+- **Multitrack playback no longer plays one track early against the others.** Found
+  by a real Cover Chain session: instrumental audibly ahead of both the take and a
+  hand-placed original, while every clip sat exactly where the screen showed it — the
+  screen was honest and the placement was sample-exact. Cause: `MultitrackPlayer.play()`
+  read `ctx.currentTime` per clip, after each track's synchronous buffer bake, on a
+  context that keeps running between plays — so each track was scheduled against its
+  own clock base, and a slow bake (the take's 25 ms edge fades forced a per-sample
+  gain pass over the whole clip) became tens of milliseconds of real inter-track
+  displacement. Mix Down was always immune (offline ground truth). Fix: every track's
+  buffers are built first, then ONE epoch is read and every source is scheduled
+  against it — relative placement now derives from `startSample` deltas only, and the
+  visual playhead anchors to the same epoch; the red test reproduced the exact drift
+  before the fix. Affects: `multitrack/MultitrackPlayer.ts`.
+- **The fade bake now touches only the fade.** A clip with 25 ms edge fades paid a
+  per-sample gain call over its entire length at every play; the head and tail get
+  the gain pass, the unity middle is copied. Byte-identical output, proven at the
+  fade-region seam with a boundary fixture. Affects: `multitrack/MultitrackPlayer.ts`,
+  `docs/KNOWN_LIMITATIONS.md` (the "clean play is exact" passage now says what was
+  actually true — value parity held, schedule-time parity did not until this fix).
+
 ## [1.31.0] - 2026-08-15
 
 The overnight close: the clip-editing set completed, three structural refactors the
