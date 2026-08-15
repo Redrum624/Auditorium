@@ -1398,10 +1398,10 @@ anchored to their own `ctx.currentTime` reading, taken after that track's
 synchronous buffer bakes, so on a warm context a clean play could start one
 track tens of milliseconds early against its siblings while every sample
 value was still right. `play()` now builds every track first, reads the
-clock once, and schedules all sources against that single epoch
-(`SCHEDULE_LEAD` in `MultitrackPlayer.ts`), so a clean play is value-exact
-AND placement-exact: track-to-track timing derives from clip positions
-alone.
+clock once, and schedules all sources against that single epoch (plus
+`SCHEDULE_LEAD`, on a running clock only, in `MultitrackPlayer.ts`), so a
+clean play is value-exact AND placement-exact: track-to-track timing
+derives from clip positions alone.
 
 **Why it is built this way:** (1) is the standard DAW automation-mode
 contract — a lane cannot serve two gesture vocabularies at once, and the

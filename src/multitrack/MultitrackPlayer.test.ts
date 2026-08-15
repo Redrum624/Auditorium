@@ -1,6 +1,6 @@
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { monoPanGains, stereoBalanceGains } from './mixdown';
-import { MultitrackPlayer } from './MultitrackPlayer';
+import { MultitrackPlayer, SCHEDULE_LEAD } from './MultitrackPlayer';
 import type { Clip, Session, Track } from './session';
 
 // ---------------------------------------------------------------------------
@@ -521,6 +521,11 @@ describe('MultitrackPlayer', () => {
       // Sources are created in session order: A.a1, B.b1, B.b2, C.c1.
       const effStart = [100, 100, 2500, 400];
 
+      // The epoch read is the FIRST clock read play() performs (any earlier
+      // read would burn a 30 ms tick and shift every start), so a play-start
+      // clip's `when` is exactly read-value 0 + the running-clock lead.
+      expect(whens[0]).toBe(SCHEDULE_LEAD);
+
       // The co-started pair on different tracks: bit-identical start times.
       expect(whens[1]).toBe(whens[0]);
 
@@ -564,6 +569,24 @@ describe('MultitrackPlayer', () => {
       // The epoch is SCHEDULE_LEAD ahead of the clock: no audio has advanced
       // yet, and the playhead must not sit BEFORE the cursor.
       expect(player.getPositionSample()).toBe(200);
+    });
+
+    it('applies the lead on a RUNNING clock: the first start sits SCHEDULE_LEAD ahead of the epoch read', () => {
+      // The gate's RUNNING arm, pinned on PRODUCTION output (review round 2:
+      // mutating schedulingEpoch to drop the lead entirely passed every
+      // test; this one fails it — a lead-less warm start can be in the past
+      // by drain time, and Web Audio clamping late starts to "now" displaces
+      // entered-at-position clips against future-scheduled ones, the same
+      // skew family P1 kills). Running state, frozen clock: the epoch read
+      // returns 0, so a clip entering at the play position starts exactly at
+      // the lead. Asserting the exported constant against the RAW captured
+      // `when` is not round 1's compensation sin — nothing here feeds a
+      // renderer.
+      const { player, ctx } = makePlayer();
+      ctx.state = 'running';
+      const s = session([track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] })]);
+      player.play(100, s, docs(doc('doc-1')));
+      expect(ctx.sources[0].startCalls[0].when).toBe(SCHEDULE_LEAD);
     });
 
     it('schedules a suspended (cold/offline) context with ZERO displacement — sample 0 at time 0', () => {
