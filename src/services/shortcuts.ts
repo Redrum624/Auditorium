@@ -28,9 +28,16 @@ export const SHORTCUT_TABLE: Shortcut[] = [
   // K1 — clip-edge navigation. `e.key` for the arrows is 'ArrowLeft'/
   // 'ArrowRight', so the normalized combos carry the 'arrow' prefix; the menu
   // rows advertise them as the Ctrl+Left / Ctrl+Right a user would write.
-  // Nothing else in this app binds an arrow: the editor's own surfaces read
-  // arrows only inside form controls (ConvertDialog), which this handler
-  // already declines to touch.
+  //
+  // Nothing else in this app binds an arrow, and the evidence is stronger than
+  // the sentence that used to stand here: a repo-wide search for
+  // `ArrowLeft|ArrowRight` outside tests finds these two rows and a
+  // `lucide-react` ICON import in `ConvertDialog` (`ArrowLeftRight`, drawn on a
+  // button) — there is no arrow-key handler anywhere in `src/`. The earlier
+  // wording cited ConvertDialog's "form controls" as the one arrow reader,
+  // which described a handler that does not exist; a phantom to defer to is a
+  // worse note to leave behind than the real absence, because the next editor
+  // goes looking for it.
   { combo: 'ctrl+arrowleft', commandId: 'multitrack.prevClipEdge' },
   { combo: 'ctrl+arrowright', commandId: 'multitrack.nextClipEdge' },
   { combo: 'home', commandId: 'transport.goToStart' },
@@ -102,6 +109,20 @@ export function installShortcuts(target: Window): () => void {
     const commandId = COMBO_TO_COMMAND.get(combo);
     if (!commandId) return;
 
+    // A MATCHED combo is claimed here, before `runCommand` consults the
+    // command's own `enabled` predicate — so a row whose command is disabled in
+    // the current view still swallows the platform default. K1's
+    // `ctrl+arrowleft`/`ctrl+arrowright` and `shift+delete` are multitrack-only
+    // commands, so that is now observable in the waveform and spectral views.
+    //
+    // Kept deliberately rather than gated on `isCommandEnabled`, and recorded
+    // here so it is not rediscovered as a defect: enablement-gating would hand
+    // Chromium's own defaults back exactly where this table means to own the
+    // key — Ctrl+S "save page as", Ctrl+O "open file", space-scroll — in every
+    // view where the app happens to have nothing to do with it. The cost is
+    // bounded by `isEditableTarget` above, which has already returned for
+    // INPUT/TEXTAREA/SELECT/contentEditable, so word-jump and Delete still
+    // behave normally in the only places a user types.
     e.preventDefault();
     void runCommand(commandId);
   };
