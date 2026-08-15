@@ -1402,7 +1402,13 @@ same limits as the buttons.
   document as a clip on the selected (or first) track at the multitrack
   cursor. Drag a clip to move it and drag its edges to trim; both snap to the
   beats and markers of the other clips and to the session cursor (hold `Alt` to
-  suspend that — see **Snapping to the grid**). A clip dropped over a
+  suspend that — see **Snapping to the grid**). A single clip dragged onto
+  another track lands there: the track under the pointer is the one that
+  highlights and the one the drop commits to, and **its name column counts as
+  part of it**, so a drag that has wandered left over the controls still drops
+  on the row you are pointing at. Point at no row at all — the ruler, the space
+  below the last track — and the clip simply stays on its own track, which is
+  what the preview showed you. A clip dropped over a
   neighbour on the same track overlaps it deliberately and the overlap plays
   as a crossfade; hold `Ctrl` at the drop to nudge it forward clear of the
   neighbour instead (see **Clip fades and crossfades** below). Click a clip

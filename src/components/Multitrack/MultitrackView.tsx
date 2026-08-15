@@ -172,6 +172,24 @@ export default function MultitrackView() {
           {session.tracks.map((track) => (
             <div
               key={track.id}
+              // V1 review, Minor 3 — THE WHOLE ROW IS THE TRACK, header
+              // included. `resolveTrackAt` walks up from the element under the
+              // pointer to the nearest `[data-track-id]`; only the LANE carried
+              // one, so a drag whose pointer sat over another track's header
+              // resolved to nothing and `?? trackId` in ClipView committed the
+              // move back on the source track — a drop the highlight never
+              // offered, because nothing was highlighted either. (Before V1
+              // clipped the lane, the same pointer hit that lane's overhanging
+              // clip box and DID resolve to the foreign track; V1 removed the
+              // overhang, and this row attribute is what puts the answer back
+              // on purpose rather than by accident.)
+              //
+              // The lane keeps its own attribute and still wins inside it —
+              // `closest` takes the nearest — so this only speaks for the 224 px
+              // header column. Nothing here widens a GROUP drag: that branch
+              // never consults the resolver (K1 v1 moves every member on its own
+              // track), and this is the single-clip drop's answer.
+              data-track-id={track.id}
               className="glass-track-row flex"
               style={{ height: LANE_H, marginBottom: 10 }}
             >
