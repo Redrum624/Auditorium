@@ -18,7 +18,15 @@
  * The alternative considered and rejected was to REJECT a drop over a foreign
  * header (commit nothing). That was conditioned on cross-track move being out of
  * scope, and it is not: a SINGLE-clip drag has committed to the lane under the
- * pointer since X4. Rejecting would also need a visual language the surface does
+ * pointer since the ORIGINAL multitrack commit, `0360219`. `git log -S` puts
+ * `resolveTrackAt` and `onDragOverTrack` in that commit, and `git log -S` over
+ * the `ClipView` docblock line that describes the behaviour — "move
+ * horizontally (live transform) and across tracks (target lane highlighted),
+ * committed on release" (`ClipView.tsx:179-181`) — returns that same single
+ * commit, so the sentence has stood unedited since the feature landed. (An
+ * earlier version of this docblock dated it "since X4". Wrong: X4 edited those
+ * call sites, it did not introduce them. The behaviour is older than stated,
+ * not younger.) Rejecting would also need a visual language the surface does
  * not have — a gesture that does nothing, with no target highlighted to explain
  * it — whereas routing makes the highlight and the commit agree, because both
  * read this one resolver. The GROUP branch never consults it (K1 v1 moves every
