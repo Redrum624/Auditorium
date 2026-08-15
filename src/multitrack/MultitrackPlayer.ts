@@ -77,12 +77,21 @@ function isEffectivelyMuted(track: Track, anySolo: boolean): boolean {
 const PARAM_SMOOTH = 0.015;
 
 /**
- * Seconds added to the shared scheduling epoch so no `start(when)` is already
- * in the past by the time the command queue drains. 10 ms is safe by
- * construction: the slow work (the per-track buffer bakes) happens BEFORE the
- * epoch is read, and the scheduling loop itself is just a handful of
- * `start()` calls — microseconds — so the lead only needs to outlive the
- * command drain, never a bake.
+ * Seconds added to the shared scheduling epoch — on a RUNNING context only —
+ * so no `start(when)` is already in the past by the time the command queue
+ * drains. 10 ms is safe by construction: the slow work (the per-track buffer
+ * bakes) happens BEFORE the epoch is read, and the scheduling loop itself is
+ * just a handful of `start()` calls — microseconds — so the lead only needs
+ * to outlive the command drain, never a bake.
+ *
+ * A context whose clock is NOT advancing (suspended cold first play, or an
+ * OfflineAudioContext before `startRendering`) gets NO lead: a frozen clock
+ * cannot move between the epoch read and the command drain, so `when ≥
+ * currentTime` already holds — and any lead there is a pure displacement of
+ * the entire render/playback against the timeline (the packaged smoke's
+ * offline playback≡mixdown comparison measures exactly that axis and failed
+ * on an unconditional lead: every sample 10 ms late reads as full-scale
+ * error outside a crossfade).
  */
 export const SCHEDULE_LEAD = 0.01;
 
@@ -123,8 +132,9 @@ interface PendingStart {
  *
  * SCHEDULING: play() is two-phase. Phase 1 builds every track's chain and
  * bakes every buffer (the slow part) WITHOUT starting anything; phase 2 reads
- * the clock ONCE — `epoch = ctx.currentTime + SCHEDULE_LEAD` — and starts
- * every source at `epoch + max(0, (clipStart − from)/rate)` in a tight loop,
+ * the clock ONCE — `epoch = ctx.currentTime`, plus `SCHEDULE_LEAD` only on a
+ * running clock — and starts every source at
+ * `epoch + max(0, (clipStart − from)/rate)` in a tight loop,
  * with a mid-clip start offset and the remaining duration, so seeking into
  * the middle of the timeline plays every clip from exactly the right point.
  * One shared epoch means track-to-track alignment derives from startSample
@@ -220,7 +230,7 @@ export class MultitrackPlayer {
 
     // Phase 2 — the fast part: ONE shared scheduling epoch, read AFTER all
     // builds, so every clip's placement derives from startSample deltas only.
-    const epoch = ctx.currentTime + SCHEDULE_LEAD;
+    const epoch = this.schedulingEpoch(ctx);
     this.scheduleSources(pending, epoch, from, sr);
 
     this.playStartSample = from;
@@ -233,6 +243,16 @@ export class MultitrackPlayer {
 
     if (typeof ctx.resume === 'function') void ctx.resume();
     this.emitState();
+  }
+
+  /**
+   * The shared scheduling epoch: the clock, read once, plus `SCHEDULE_LEAD`
+   * only when the clock is actually RUNNING (see the constant's rationale —
+   * a frozen clock needs no lead, and a lead on a frozen clock displaces the
+   * whole render against the timeline).
+   */
+  private schedulingEpoch(ctx: AudioContext): number {
+    return ctx.currentTime + (ctx.state === 'running' ? SCHEDULE_LEAD : 0);
   }
 
   /**
@@ -455,7 +475,7 @@ export class MultitrackPlayer {
     // scheduled against ONE epoch read after all the rebakes, so a multi-track
     // refresh stays internally aligned. The handover remains scheduled-clock
     // accurate, not sample-seamless (ruling D) — `startedAt` is untouched.
-    this.scheduleSources(pending, ctx.currentTime + SCHEDULE_LEAD, from, this.rate);
+    this.scheduleSources(pending, this.schedulingEpoch(ctx), from, this.rate);
   }
 
   stop(): void {

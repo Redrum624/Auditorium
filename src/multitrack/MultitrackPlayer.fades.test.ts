@@ -1,7 +1,7 @@
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { crossfadeGains } from '../dsp/fades';
 import { mixdownSession, monoPanGains } from './mixdown';
-import { MultitrackPlayer, SCHEDULE_LEAD } from './MultitrackPlayer';
+import { MultitrackPlayer } from './MultitrackPlayer';
 import type { Clip, Session, Track } from './session';
 
 // ---------------------------------------------------------------------------
@@ -190,9 +190,14 @@ function renderPlayerGraph(ctx: FakeAudioContext, sr: number, outLen: number): [
   for (const src of ctx.sources) {
     if (!src.buffer || src.startCalls.length === 0) continue;
     const call = src.startCalls[0];
-    // Play-relative sample 0 sounds at the shared scheduling epoch; with the
-    // fake clock at 0 the epoch is exactly SCHEDULE_LEAD.
-    const pos0 = Math.round((call.when - SCHEDULE_LEAD) * sr);
+    // ABSOLUTE placement: play-relative sample 0 must sound at render time 0
+    // — `when` is measured on the same clock a render starts from, which is
+    // the axis the packaged smoke's real OfflineAudioContext render compares
+    // against mixdownSession. A scheduling displacement (e.g. a lead applied
+    // on this suite's frozen clock) must land HERE as a shifted render; the
+    // renderer must never subtract it away (fix round 1's lesson: doing so
+    // hid a 10 ms whole-render shift from every parity assertion).
+    const pos0 = Math.round(call.when * sr);
     const off = Math.round((call.offset ?? 0) * sr);
     const n = Math.min(Math.round((call.duration ?? 0) * sr), src.buffer.length - off);
     for (const r of routesOf(src)) {

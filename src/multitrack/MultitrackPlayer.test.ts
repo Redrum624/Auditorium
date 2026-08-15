@@ -1,6 +1,6 @@
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { monoPanGains, stereoBalanceGains } from './mixdown';
-import { MultitrackPlayer, SCHEDULE_LEAD } from './MultitrackPlayer';
+import { MultitrackPlayer } from './MultitrackPlayer';
 import type { Clip, Session, Track } from './session';
 
 // ---------------------------------------------------------------------------
@@ -98,6 +98,10 @@ class FakeSource extends FakeNode {
 }
 
 class FakeAudioContext {
+  /** A fresh context is 'suspended' (frozen clock — the cold-play and
+   * offline-render condition); the warm epoch tests flip it to 'running',
+   * the only state whose clock advances under play()'s feet. */
+  state = 'suspended';
   /** Seconds the clock advances on EVERY `currentTime` read. 0 keeps the
    * legacy frozen-clock behaviour (cold context); the epoch tests set it to
    * simulate a WARM context whose clock keeps running while play() bakes
@@ -237,7 +241,7 @@ describe('MultitrackPlayer', () => {
 
     expect(ctx.sources).toHaveLength(1);
     const call = ctx.sources[0].startCalls[0];
-    expect(call.when).toBeCloseTo(SCHEDULE_LEAD + 0.5, 6); // epoch + (500 - 0) / 1000
+    expect(call.when).toBeCloseTo(0.5, 6); // (500 - 0) / 1000 — suspended clock: no lead
     expect(call.offset).toBeCloseTo(0, 6);
     expect(call.duration).toBeCloseTo(0.5, 6); // (1000 - 500) / 1000
   });
@@ -248,7 +252,7 @@ describe('MultitrackPlayer', () => {
     player.play(700, s, docs(doc('doc-1')));
 
     const call = ctx.sources[0].startCalls[0];
-    expect(call.when).toBeCloseTo(SCHEDULE_LEAD, 6); // starts at the epoch
+    expect(call.when).toBeCloseTo(0, 6); // starts immediately — suspended clock: no lead
     expect(call.offset).toBeCloseTo(0.2, 6); // (700 - 500) / 1000
     expect(call.duration).toBeCloseTo(0.3, 6); // (1000 - 700) / 1000
   });
@@ -438,10 +442,10 @@ describe('MultitrackPlayer', () => {
     const { player, ctx } = makePlayer();
     const s = session([track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] })]);
     player.play(200, s, docs(doc('doc-1')));
-    ctx.advance(0.3); // 300 samples at 1000 Hz, minus the schedule lead
-    expect(player.getPositionSample()).toBeCloseTo(200 + (0.3 - SCHEDULE_LEAD) * 1000, 6);
+    ctx.advance(0.3); // 300 samples at 1000 Hz (suspended clock: epoch = play time, no lead)
+    expect(player.getPositionSample()).toBe(500);
 
-    ctx.advance(1.0); // way past the end, clamped to end (1000)
+    ctx.advance(1.0); // would be 1500, clamped to end (1000)
     expect(player.getPositionSample()).toBe(1000);
   });
 
@@ -508,6 +512,7 @@ describe('MultitrackPlayer', () => {
 
     it('keeps every pair of start times exactly startSample-delta apart on a warm advancing clock', () => {
       const { player, ctx } = makePlayer();
+      ctx.state = 'running'; // warm context
       ctx.advancePerRead = 0.03; // 30 ms of warm clock pass on every read
       player.play(100, threeTrackSession(), docs(doc('doc-1')));
 
@@ -538,6 +543,7 @@ describe('MultitrackPlayer', () => {
 
     it('anchors the playhead to the same epoch the sources were scheduled against', () => {
       const { player, ctx } = makePlayer();
+      ctx.state = 'running';
       ctx.advancePerRead = 0.03;
       player.play(100, threeTrackSession(), docs(doc('doc-1')));
       ctx.advancePerRead = 0; // freeze the clock for a stable readback
@@ -550,14 +556,32 @@ describe('MultitrackPlayer', () => {
       expect(player.getPositionSample()).toBeCloseTo(100 + (now - epoch) * 1000, 6);
     });
 
-    it('holds the playhead at the play start while the schedule lead has not elapsed (cold clock)', () => {
+    it('holds the playhead at the play start while the schedule lead has not elapsed', () => {
       const { player, ctx } = makePlayer();
+      ctx.state = 'running'; // running context: the lead applies
       const s = session([track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] })]);
       player.play(200, s, docs(doc('doc-1')));
-      // Frozen clock (suspended context): no audio has advanced yet, and the
-      // playhead must not sit BEFORE the cursor because the epoch is in the
-      // (near) future.
+      // The epoch is SCHEDULE_LEAD ahead of the clock: no audio has advanced
+      // yet, and the playhead must not sit BEFORE the cursor.
       expect(player.getPositionSample()).toBe(200);
+    });
+
+    it('schedules a suspended (cold/offline) context with ZERO displacement — sample 0 at time 0', () => {
+      // The packaged smoke renders this SAME play() into an
+      // OfflineAudioContext and compares ABSOLUTELY against mixdownSession:
+      // play-relative sample 0 must sound at render time 0. A suspended
+      // clock cannot advance between the epoch read and the command drain,
+      // so no lead is needed — and any lead displaces the ENTIRE render
+      // against the timeline (measured as full-scale error outside the
+      // crossfade overlap by the smoke's bit-identical assertion).
+      const { player, ctx } = makePlayer(); // state stays 'suspended'
+      const s = session([
+        track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 500 })] }),
+        track({ clips: [clip({ documentId: 'doc-1', startSample: 250, lengthSample: 500 })] }),
+      ]);
+      player.play(0, s, docs(doc('doc-1')));
+      expect(ctx.sources[0].startCalls[0].when).toBe(0); // exactly render time 0
+      expect(ctx.sources[1].startCalls[0].when).toBeCloseTo(0.25, 6); // (250 - 0) / 1000
     });
   });
 
