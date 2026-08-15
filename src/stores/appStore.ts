@@ -8,10 +8,49 @@ import { editorLaneWidth, setEditorLaneWidth } from '../services/editorViewport'
 export { nextId } from '../audio/AudioDocument';
 
 export type EditorView = 'waveform' | 'spectral' | 'multitrack';
+/**
+ * Samples, half-open `[start, end)`. **`start <= end` always** — the store's
+ * `setSelection` is the one writer and it orders what it is handed (T6-2), so
+ * every reader may subtract the two without checking which way the drag went.
+ */
 export interface SelectionRange {
   start: number;
   end: number;
-} // samples, [start,end)
+}
+
+/**
+ * T6-2 — the ordering that makes {@link SelectionRange}'s invariant true.
+ *
+ * A selection dragged right-to-left is `start > end`. `dragToSelection` has
+ * always ordered the pair it builds, so no drag produced one — but this store
+ * action is public, with callers in the E2E hooks and in a rollback restore,
+ * and it used to store whatever it was handed. Everything downstream then
+ * inherited the inversion and split three ways on it: the audio primitives
+ * THREW (`clampRange`'s `RangeError`, which reached the user through Copy,
+ * Silence and every effect), a few readers guarded and degraded, and most
+ * assumed. `editOps.ts` recorded the case as deferred to "this family's next
+ * round"; this is that round.
+ *
+ * Ordered HERE, at the write, rather than at a read helper, because the readers
+ * that most need it are the ones a helper cannot reach: the status bar's
+ * duration, the properties panel, the transport's play-from and loop region,
+ * the playback engine's loop bounds, three dialogs' region readouts. Those
+ * describe the selection rather than resolve it against a document, and they
+ * need no document to be right. This codebase's own precedent for the shape is
+ * `applyEditorZoom` — "the ONE clamping writer", introduced after six surfaces
+ * were found writing zoom raw.
+ *
+ * Only the ORDER is fixed here. The extent is clamped into `[0, docLength]` by
+ * `selectionRegion.ts`, at the read, because that is where the document is
+ * known — two invariants, each placed where its inputs are.
+ *
+ * An ordered pair is returned by IDENTITY, so an unchanged write is not a new
+ * store snapshot repainting every subscriber.
+ */
+export function orderSelection(sel: SelectionRange | null): SelectionRange | null {
+  if (!sel || sel.start <= sel.end) return sel;
+  return { start: sel.end, end: sel.start };
+}
 export interface Marker {
   id: string;
   name: string;
@@ -326,7 +365,7 @@ export const useAppStore = create<AppState & AppActions>()((set) => ({
   },
 
   setSelection(sel) {
-    set({ selection: sel });
+    set({ selection: orderSelection(sel) });
   },
 
   setCursor(sample) {

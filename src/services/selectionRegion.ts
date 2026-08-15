@@ -34,7 +34,18 @@ import { useAppStore, type SelectionRange } from '../stores/appStore';
  *    touch, so a consumer that skipped this described a region the audio never
  *    used: an `end` past the document inflated every length measured from it,
  *    and a `start` below zero slid every offset derived from it.
- * 3. **A zero-length region stays zero-length.** It is never re-expanded to the
+ * 3. **An inverted pair is ordered, not refused** (T6-2). `start > end` is a
+ *    right-to-left sweep, and the honest answer to it is the span the user
+ *    swept. The store's `setSelection` already orders on the way in — that is
+ *    where the invariant lives, because most readers of a selection never
+ *    resolve it against a document at all — so from the store this arm is
+ *    unreachable. It is here because this function also takes selections from
+ *    its CALLERS (`editOps` and the lyric aligner both pass one in), and the
+ *    single place has to be a total function or it is not the single place.
+ *    Ordering after clamping is safe: clamping is monotone, so it cannot turn
+ *    an ordered pair into an inverted one, and the two steps agree in either
+ *    order.
+ * 4. **A zero-length region stays zero-length.** It is never re-expanded to the
  *    whole document — the callers that must refuse an empty region (the chains'
  *    `null`, tempo's `'empty-region'`, the aligner's `'region-too-short'`) each
  *    decide that for themselves, with their own threshold, and they can only do
@@ -46,21 +57,15 @@ import { useAppStore, type SelectionRange } from '../stores/appStore';
  * rounds and then re-expands an empty region to the whole document; that is a
  * genuinely different contract for a genuinely different question, so it keeps
  * its own function and states the difference there.
- *
- * Nor does it order an inverted pair — yet. `start > end` is the family's third
- * trap and `editOps.ts` deferred it to this round; it is deliberately absent
- * from the MOVE so that the move is byte-identical to the six copies it
- * replaces, and arrives next with its own failing test.
  */
 export function resolveRegion(
   doc: AudioDocument,
   selection: SelectionRange | null
 ): { start: number; end: number } {
   const length = docLength(doc);
-  return {
-    start: Math.min(Math.max(selection ? selection.start : 0, 0), length),
-    end: Math.min(Math.max(selection ? selection.end : length, 0), length),
-  };
+  const start = Math.min(Math.max(selection ? selection.start : 0, 0), length);
+  const end = Math.min(Math.max(selection ? selection.end : length, 0), length);
+  return start <= end ? { start, end } : { start: end, end: start };
 }
 
 /**
