@@ -201,6 +201,20 @@ export interface SessionActions {
    * id no clip in the session carries is ignored — the set may never hold a
    * dangling reference. Records no undo entry: a selection is view state. */
   toggleSelectedClip(id: string): void;
+  /** T5 — the whole selection, named at once (Ctrl+A's writer). Ids no clip
+   * carries are dropped and duplicates collapse, so the set's "every member is
+   * live" invariant holds by construction. The primary SURVIVES when the new
+   * set still holds it and otherwise becomes the last member — Ctrl+A over a
+   * standing selection must not move the Properties panel to another clip.
+   * Records no undo entry: a selection is view state. */
+  setSelectedClips(ids: readonly string[]): void;
+  /** T5 — Shift+Click: adds every clip between the PRIMARY and `id` (by start
+   * order, on the track they share) to the set, and makes `id` the primary.
+   * Extends rather than replaces, so it composes with a Ctrl+Click set. Falls
+   * back to a plain single select when there is no primary or when `id` is on
+   * another track — a range across two timelines is not a range. An id no clip
+   * carries is ignored. Records no undo entry: a selection is view state. */
+  extendSelectionToClip(id: string): void;
   /** F0 — opens/closes a track's envelope lane (see `mtEnvelope`). */
   setMtEnvelope(v: SessionState['mtEnvelope']): void;
   setMtCursor(s: number): void;
@@ -231,6 +245,33 @@ function liveClipIds(session: Session): Set<string> {
   const ids = new Set<string>();
   for (const t of session.tracks) for (const c of t.clips) ids.add(c.id);
   return ids;
+}
+
+/**
+ * T5 — the ids a Shift+Click range covers: every clip on the track `anchorId`
+ * and `targetId` SHARE, from one to the other inclusive, in START ORDER.
+ *
+ * Start order, not array order, because the range the user drew is the one
+ * they can see: `track.clips` is insertion-ordered and a clip dropped into an
+ * existing arrangement sits at the end of it. The sort is stable, so two clips
+ * starting on the same sample keep their array order and the answer stays
+ * deterministic.
+ *
+ * `null` when the two are not on one track (or either is not in the session) —
+ * the caller's cue that this gesture is not a range at all. A range across two
+ * timelines would have to invent a rule for what "between" means vertically,
+ * and every clip that happened to lie in the rectangle is not what Shift+Click
+ * means in a track-based editor.
+ */
+function clipRangeOnTrack(session: Session, anchorId: string, targetId: string): string[] | null {
+  const track = session.tracks.find(
+    (t) => t.clips.some((c) => c.id === anchorId) && t.clips.some((c) => c.id === targetId)
+  );
+  if (track === undefined) return null;
+  const ordered = [...track.clips].sort((a, b) => a.startSample - b.startSample);
+  const i = ordered.findIndex((c) => c.id === anchorId);
+  const j = ordered.findIndex((c) => c.id === targetId);
+  return ordered.slice(Math.min(i, j), Math.max(i, j) + 1).map((c) => c.id);
 }
 
 /**
@@ -1082,6 +1123,68 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       // directly, and a dangling id would be a silent partial delete.
       if (!liveClipIds(s.session).has(id)) return s;
       return { selectedClipId: id, selectedClipIds: [...s.selectedClipIds, id] };
+    });
+  },
+
+  setSelectedClips(ids) {
+    // T5 (Ctrl+A, and the writer any future "select these" gesture wants).
+    set((s) => {
+      // The liveness filter `toggleSelectedClip` applies one id at a time,
+      // applied to the whole list for the same reason: the group verbs read
+      // this array directly and a dangling member would be a silent partial
+      // delete. De-duplication is part of the same guarantee — `removeClips`
+      // would otherwise be handed the same clip twice.
+      const live = liveClipIds(s.session);
+      const seen = new Set<string>();
+      const selectedClipIds: string[] = [];
+      for (const id of ids) {
+        if (!live.has(id) || seen.has(id)) continue;
+        seen.add(id);
+        selectedClipIds.push(id);
+      }
+      const selectedClipId =
+        s.selectedClipId !== null && seen.has(s.selectedClipId)
+          ? s.selectedClipId
+          : (selectedClipIds[selectedClipIds.length - 1] ?? null);
+      // The same no-op guard the two writers above carry, and load-bearing for
+      // the same reason: Ctrl+A pressed twice must not mint a fresh array for
+      // every clip's subscription to see.
+      const unchanged =
+        selectedClipId === s.selectedClipId &&
+        selectedClipIds.length === s.selectedClipIds.length &&
+        selectedClipIds.every((id, i) => id === s.selectedClipIds[i]);
+      return unchanged ? s : { selectedClipId, selectedClipIds };
+    });
+  },
+
+  extendSelectionToClip(id) {
+    // T5 (Shift+Click).
+    set((s) => {
+      if (!liveClipIds(s.session).has(id)) return s;
+      const range =
+        s.selectedClipId === null ? null : clipRangeOnTrack(s.session, s.selectedClipId, id);
+      if (range === null) {
+        // No primary to anchor to, or a target on another track: this gesture
+        // is a plain click, and says so by behaving exactly like one. Stated
+        // here rather than left to the caller so the rule has one home — the
+        // docs promise "cross-track Shift+Click acts as a plain click", and
+        // this is the line that keeps that promise.
+        const unchanged =
+          s.selectedClipId === id &&
+          s.selectedClipIds.length === 1 &&
+          s.selectedClipIds[0] === id;
+        return unchanged ? s : { selectedClipId: id, selectedClipIds: [id] };
+      }
+      // EXTENDS, so a set built with Ctrl+Click survives: the range is unioned
+      // into the standing selection in the order it was drawn, and members
+      // already present keep the position they had.
+      const selectedClipIds = [...s.selectedClipIds];
+      for (const rid of range) if (!selectedClipIds.includes(rid)) selectedClipIds.push(rid);
+      const unchanged =
+        s.selectedClipId === id &&
+        selectedClipIds.length === s.selectedClipIds.length &&
+        selectedClipIds.every((x, i) => x === s.selectedClipIds[i]);
+      return unchanged ? s : { selectedClipId: id, selectedClipIds };
     });
   },
 
