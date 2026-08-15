@@ -502,8 +502,12 @@ honest. It never climbs more than **2.5 dB** above where it would have closed on
 the quietest passage — beyond that it is not correcting a misread window but
 choosing a different level regime, and a threshold from a louder part of the
 room would mute the quieter passage it just stepped over. And twelve is where
-the search stops, because each passage costs a pitch track and a spectral fit;
-a take that needs a thirteenth is a take the stage declines.
+the search stops, because a passage can cost a pitch track and a spectral fit —
+that is the *worst* case, and the number the cap is set against; in practice
+only the quietest passage is priced that way and the rest are checked with the
+cheaper fit alone. A take that needs a thirteenth is a take the stage declines.
+Twelve is not a guess: eleven breath-filled gaps in front of a take's one real
+pause put that pause exactly twelfth, which is the deepest take the cap covers.
 
 **And when it cannot tell a pause from a phrase, it declines instead of
 guessing.** Everything above depends on some quiet 500 ms of your selection

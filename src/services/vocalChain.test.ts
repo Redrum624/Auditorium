@@ -4786,4 +4786,3 @@ describe('the audio between sung phrases', () => {
     expect(rmsDbOver(out, [{ start: pause.end - RATE, end: pause.end }])).toBeLessThanOrEqual(-80);
   }, 120000);
 });
-
