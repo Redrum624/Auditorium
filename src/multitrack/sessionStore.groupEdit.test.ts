@@ -121,6 +121,19 @@ describe('rippleDeleteClips — remove and close the gap', () => {
     expect(startOf(ids[0][2])).toBe(7000); // 9000 - (1000 + 1000)
   });
 
+  it('shifts a survivor BETWEEN two removed spans by only the spans before it', () => {
+    // T1 (K1 review, Minor M5). The case above cannot tell "sum the spans that
+    // end before me" from "sum every removed span", because its survivor is
+    // after all of them and the two rules agree there. This one disagrees:
+    // `mid` sits between the two removals, so it closes the FIRST gap only,
+    // and `tail` — the same fixture, after both — closes both.
+    const { ids } = seed([[0, 1000], [3000, 1000], [6000, 1000], [9000, 1000]]);
+    rippleDeleteClips([ids[0][0], ids[0][2]]);
+
+    expect(startOf(ids[0][1])).toBe(2000); // 3000 - 1000, not 3000 - 2000
+    expect(startOf(ids[0][3])).toBe(7000); // 9000 - (1000 + 1000)
+  });
+
   it('measures the UNION of removed spans, so two overlapping removals count once', () => {
     // [0,1000) and [500,1500) remove 1500 samples of timeline, not 2000.
     const { ids } = seed([[0, 1000], [500, 1000], [9000, 1000]]);
