@@ -70,6 +70,7 @@ import { SOLVE_TOLERANCE_DB, solveCascadeGains } from '../dsp/graphicEqCascade';
 import { useAppStore } from '../stores/appStore';
 import { applyEdit, type MarkerRemap } from './editOps';
 import { reportEffectFailure, runEffectOnChannels, type EffectRunOutput } from './effectRunner';
+import { resolveRegion } from './selectionRegion';
 import {
   announceMeasuring,
   clampToParam,
@@ -1091,11 +1092,9 @@ export async function runCoverChain(opts: RunCoverChainOptions): Promise<CoverCh
   // 0 left the document selected from a negative sample. Same defect family as
   // R7's `plan.regionStart`, L1's `resolveRegion` and L9's
   // `runEffectOnSelection`: resolve once, not clamp twice and hope the two
-  // agree.
-  const selection = state.selection;
-  const length = docLength(doc);
-  const start = Math.min(Math.max(selection ? selection.start : 0, 0), length);
-  const end = Math.min(Math.max(selection ? selection.end : length, 0), length);
+  // agree — and T6-1 made that ruling an import rather than six copies of two
+  // expressions.
+  const { start, end } = resolveRegion(doc, state.selection);
   if (end <= start) return null;
   const docId = doc.id;
   const sampleRate = doc.sampleRate;

@@ -45,6 +45,7 @@
  */
 
 import { cloneRegion, docLength, nextId, type AudioDocument } from '../audio/AudioDocument';
+import { activeRegion } from './selectionRegion';
 import {
   buildWarpMap,
   detectVocalOnsets,
@@ -143,14 +144,16 @@ function activeDoc(): AudioDocument | null {
  * did not. Fourth instance of one defect (R7's `plan.regionStart`, L1's
  * `resolveRegion`, L9's runner): resolve once, and every consumer reads that
  * pair.
+ *
+ * T6-1: the claim is now structural instead of documented. This and the runner
+ * call the SAME function, so "the same resolve `runEffectOnSelection` applies"
+ * cannot go false again the way it did last time — the only way to break it is
+ * to stop calling `activeRegion`, which is a visible edit rather than a silent
+ * divergence. The name stays because `buildAlignPlan`, `suggestSyllableMarkers`
+ * and the test suite all read it.
  */
 export function alignRegion(doc: AudioDocument): { start: number; end: number } {
-  const selection = useAppStore.getState().selection;
-  const length = docLength(doc);
-  return {
-    start: Math.min(Math.max(selection ? selection.start : 0, 0), length),
-    end: Math.min(Math.max(selection ? selection.end : length, 0), length),
-  };
+  return activeRegion(doc);
 }
 
 function mixDown(channels: Float32Array[]): Float32Array {

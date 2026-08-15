@@ -1,4 +1,4 @@
-import { cloneRegion, docLength, replaceRegion } from '../audio/AudioDocument';
+import { cloneRegion, replaceRegion } from '../audio/AudioDocument';
 import { getEffect } from '../effects/EffectRegistry';
 import type { EffectParamValue, EffectReport } from '../effects/types';
 import { useAppStore } from '../stores/appStore';
@@ -6,6 +6,7 @@ import { createDspWorker } from '../workers/createDspWorker';
 import type { DspWorkerReply, DspWorkerRunMessage } from '../workers/dspWorkerMessages';
 import { applyEdit } from './editOps';
 import type { MarkerRemap } from './editOps';
+import { resolveRegion } from './selectionRegion';
 
 /**
  * Human-readable summary of what a span-deleting effect removed (ruling 5:
@@ -210,11 +211,10 @@ export async function runEffectOnSelection(
   // `remapMarkers`' floor piled them onto sample 0 — and left the document
   // selected from a negative sample afterwards. Third instance of one defect
   // (R7's plan.regionStart, L1's resolveRegion): the ruling is resolve once, not
-  // clamp twice and hope the two agree.
-  const selection = state.selection;
-  const length = docLength(doc);
-  const start = Math.min(Math.max(selection ? selection.start : 0, 0), length);
-  const end = Math.min(Math.max(selection ? selection.end : length, 0), length);
+  // clamp twice and hope the two agree. T6-1: and the ruling is now the import
+  // below, because six modules had each written this arithmetic out for
+  // themselves — which is how the family reached fourteen members.
+  const { start, end } = resolveRegion(doc, state.selection);
   const docId = doc.id;
   const sampleRate = doc.sampleRate;
   const regionChannels = cloneRegion(doc, start, end);

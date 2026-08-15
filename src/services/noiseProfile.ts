@@ -13,9 +13,10 @@
  */
 
 import { useSyncExternalStore } from 'react';
-import { cloneRegion, docLength } from '../audio/AudioDocument';
+import { cloneRegion } from '../audio/AudioDocument';
 import { stft } from '../dsp/stft';
 import { useAppStore } from '../stores/appStore';
+import { resolveRegion } from './selectionRegion';
 
 export interface NoiseProfile {
   /** Id of the document the profile was captured from (Task F8). */
@@ -77,9 +78,13 @@ export function captureNoiseProfile(): void {
   const doc = state.documents.find((d) => d.id === state.activeDocumentId);
   if (!doc) return;
 
-  const selection = state.selection;
-  const start = selection ? selection.start : 0;
-  const end = selection ? selection.end : docLength(doc);
+  // T6-1: the last raw member of the clamp family. It was recorded as "same
+  // shape, verified benign" because its only consumer is `cloneRegion`, which
+  // clamps what it slices — so the spectra were always measured over the clamped
+  // region and this reads identically. Benign is not the same as correct: a
+  // second consumer added beside it would have inherited the raw pair, which is
+  // exactly how the other members of this family were born.
+  const { start, end } = resolveRegion(doc, state.selection);
   const region = cloneRegion(doc, start, end);
 
   const spectra = averageMagnitudeSpectra(region);

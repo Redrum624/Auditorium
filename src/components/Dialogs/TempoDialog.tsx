@@ -19,6 +19,7 @@ import {
   type RegionTempoDetection,
   type TempoRefusal,
 } from '../../services/tempoService';
+import { resolveRegion } from '../../services/selectionRegion';
 import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
 import { MIN_RATIO, MAX_RATIO } from '../../dsp/wsola';
 import { Gauge } from 'lucide-react';
@@ -188,9 +189,10 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
     docEntry !== null && docEntry.bpm !== null && !docEntry.stale && docEntry.beatSamples.length > 0;
   const selectionChanged = !sameSelection(lastEstimateSelection, selection);
 
-  // Resolved through the SAME clamp `tempoService`'s `resolveRegion` (and
-  // therefore `cloneRegion`) applies, so what this dialog measures and what
-  // Apply acts on cannot describe different audio.
+  // Resolved through the SAME clamp `tempoService` (and therefore `cloneRegion`)
+  // applies, so what this dialog measures and what Apply acts on cannot describe
+  // different audio. T6-1: literally the same function now, not the same two
+  // expressions typed out again — this was the view-layer copy of six.
   //
   // The premise is unreachable — no UI path produces an out-of-bounds selection
   // (the editor gestures clamp, select-all uses `docLength`) — and the earlier
@@ -203,9 +205,7 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
   // which beats satisfy `regionStart <= b < regionEnd`, nor which is the first
   // at or after it. Clamped anyway, because "insensitive today" is a property of
   // the consumers and not of the value.
-  const docLen = docLength(doc);
-  const regionStart = Math.min(Math.max(selection ? selection.start : 0, 0), docLen);
-  const regionEnd = Math.min(Math.max(selection ? selection.end : docLen, 0), docLen);
+  const { start: regionStart, end: regionEnd } = resolveRegion(doc, selection);
   const regionSeconds = (regionEnd - regionStart) / doc.sampleRate;
 
   const scopeText = selection

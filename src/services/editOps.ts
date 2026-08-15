@@ -10,6 +10,7 @@ import type { Marker, SelectionRange } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 import { pushUndo } from './undoHistory';
 import { getClipboard, setClipboard } from './clipboard';
+import { resolveRegion } from './selectionRegion';
 import { resampleChannel } from '../dsp/resample';
 
 interface AfterState {
@@ -319,16 +320,20 @@ function activeDoc(): AudioDocument | null {
  * gestures clamp, select-all uses `docLength`), so both were latent; the store
  * API is public and `setSelection`/`setCursor` store whatever they are handed.
  *
- * Inverted selections (`start > end` after clamping) are deliberately NOT
- * handled here: `clampRange` throws `RangeError` on them, which is the recorded
- * ruling deferred to this family's next round.
+ * T6-1: the two expressions this used to hold are `selectionRegion.ts`, which
+ * six modules had each written out for themselves. The paragraph above stays
+ * because it records the two verified consequences that earned the ruling; the
+ * arithmetic does not, because a ruling six modules re-type is a ruling one edit
+ * can break in five of them.
+ *
+ * Inverted selections (`start > end` after clamping) were deliberately NOT
+ * handled here, deferred to this family's next round: T6-2 is that round, and it
+ * closed the case at the store's `setSelection` rather than here. This still
+ * resolves rather than assumes, because the selection arrives as a PARAMETER —
+ * see `resolveRegion`'s own note on why it stays total.
  */
 function resolveSelection(doc: AudioDocument, selection: SelectionRange): { start: number; end: number } {
-  const len = docLength(doc);
-  return {
-    start: Math.min(Math.max(selection.start, 0), len),
-    end: Math.min(Math.max(selection.end, 0), len),
-  };
+  return resolveRegion(doc, selection);
 }
 
 /** Copies the selection to the clipboard, then removes it. Requires a selection. */

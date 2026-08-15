@@ -52,6 +52,7 @@ import {
 } from '../effects/time/MatchTempoVariableEffect';
 import { runEffectOnSelection } from './effectRunner';
 import { pushMarkerUndo } from './editOps';
+import { activeRegion } from './selectionRegion';
 
 /** Why `checkTempoChange`/`applyTempoChange` refused to run.
  *
@@ -66,7 +67,7 @@ import { pushMarkerUndo } from './editOps';
  *
  * `'empty-region'` is the RESOLVED region collapsing to nothing — a selection
  * that clamps to `end <= start`, e.g. `{4000, 9000}` on a 4000-sample document
- * once {@link resolveRegion} has done its work. Both chains already refuse this
+ * once {@link activeRegion} has done its work. Both chains already refuse this
  * case (`end <= start` -> `null`, test-pinned); the tempo paths did not, and
  * the constant one ran the whole way through on it: `planStretch` returned its
  * 'empty' plan, `replaceRegion` allocated fresh channels holding the same
@@ -158,9 +159,8 @@ function activeDoc(): AudioDocument | null {
 }
 
 /**
- * The region every tempo operation acts on: the live selection, or the whole
- * document when there is none, clamped into `[0, docLength]` **exactly as
- * `cloneRegion`'s own `clampRange` clamps it** (`AudioDocument.ts`).
+ * The region every tempo operation acts on: `activeRegion` — the live selection
+ * clamped into the document, or the whole document when there is none.
  *
  * ONE resolution that every path in this module reads, and that is a
  * correctness requirement rather than tidiness — the same ruling
@@ -176,15 +176,11 @@ function activeDoc(): AudioDocument | null {
  * gestures clamp, select-all uses `docLength`), so it was latent — but two
  * clamps that have to agree is that bug waiting to recur, and one resolved value
  * cannot drift.
+ *
+ * T6-1: this module WROTE that arithmetic out, and so did five others. The
+ * ruling it states is now `selectionRegion.ts`, which the four call sites below
+ * import; the paragraph stays because it records the defect that earned it.
  */
-function resolveRegion(doc: AudioDocument): { start: number; end: number } {
-  const len = docLength(doc);
-  const selection = useAppStore.getState().selection;
-  return {
-    start: Math.min(Math.max(selection ? selection.start : 0, 0), len),
-    end: Math.min(Math.max(selection ? selection.end : len, 0), len),
-  };
-}
 
 /** `sourceBpm/targetBpm` — the output/input length ratio `timeStretchLinked`
  * expects (a slower target makes the result longer: ratio > 1). */
@@ -312,9 +308,9 @@ export function checkVariableTempoChange(req: ApplyTempoChangeRequest): Variable
 
   // Clamped exactly as `cloneRegion` clamps it, so the region this plan
   // describes and the region the worker is handed cannot differ — through the
-  // shared {@link resolveRegion}, which is what keeps the constant path's
+  // shared {@link activeRegion}, which is what keeps the constant path's
   // resolution from drifting away from this one again.
-  const { start, end } = resolveRegion(doc);
+  const { start, end } = activeRegion(doc);
   // A resolved region that collapsed to nothing, refused by name. `buildTempoMap`
   // already refuses it — `inLen <= 0` returns its own 'empty-region' identity map,
   // which the `map.refusal` arm below turns into `'no-grid'` — so this path never
@@ -385,7 +381,7 @@ export function tempoQualityBand(ratio: number): TempoQualityBand {
  * floor instead of describing beats inside the region.
  *
  * `start`/`end` are the caller's RESOLVED region and must already be inside
- * `[0, docLength]` — {@link resolveRegion} is the only thing that produces
+ * `[0, docLength]` — {@link activeRegion} is the only thing that produces
  * them. That precondition is what the `firstBeatSample` clamp above relies on:
  * a negative `start` survives `Math.max(start, firstBeatSample)` untouched and
  * puts `newFirstBeat` below zero anyway, which is the very pile-up this clamp
@@ -622,7 +618,7 @@ function layBeatGridAtCurrentTempo(req: ApplyTempoChangeRequest): TempoChangeOut
   if (!doc) return { ok: false, reason: 'no-document' };
   if (req.firstBeatSample == null) return { ok: false, reason: 'no-op' };
 
-  const { start, end } = resolveRegion(doc);
+  const { start, end } = activeRegion(doc);
   // Named rather than reported as a bare `{ok: false}`. This path already
   // no-ops on an empty region by arithmetic — `regionEnd === start` makes
   // `computeBeatMarkerPositions` produce no candidate, so no marker is written
@@ -722,7 +718,7 @@ export async function applyTempoChange(
   if (!doc) return { ok: false, reason: 'no-document' };
   const docId = doc.id;
   const sampleRate = doc.sampleRate;
-  const { start, end } = resolveRegion(doc);
+  const { start, end } = activeRegion(doc);
   // BEFORE the effect, because after it there is an undo entry to un-push.
   // A region that clamps to nothing has no samples to stretch, and running
   // anyway committed a 'Match Tempo' entry over a byte-identical document: the
@@ -849,7 +845,7 @@ async function applyVariableTempoChange(
   // as a `number[]` and a double (exact under structured clone), and the
   // worker's `inputLength` is `channels[0].length` where `channels =
   // cloneRegion(doc, start, end)` — clamped by the same `clampRange` that
-  // `resolveRegion` mirrors, so it equals `plan.regionLength` exactly. Both
+  // `activeRegion` mirrors, so it equals `plan.regionLength` exactly. Both
   // store reads happen in the same synchronous tick, and the output length is
   // exactly `map.outLen` (`wsola.ts`). So `realisedDelta === plannedDelta`
   // always, including the wobble-110→110 case where both are 0 correctly.
@@ -912,7 +908,7 @@ export function detectRegionTempo(): RegionTempoDetection | null {
   const doc = activeDoc();
   if (!doc) return null;
 
-  const { start, end } = resolveRegion(doc);
+  const { start, end } = activeRegion(doc);
   const excerpt = centeredExcerpt(start, end, doc.sampleRate);
 
   const mono = mixDown(cloneRegion(doc, excerpt.start, excerpt.end));

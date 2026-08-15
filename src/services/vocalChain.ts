@@ -117,7 +117,7 @@
  * it in amber, and the run goes ahead.
  */
 
-import { cloneRegion, docLength, replaceRegion } from '../audio/AudioDocument';
+import { cloneRegion, replaceRegion } from '../audio/AudioDocument';
 import { defaultParamsFor, getEffect } from '../effects/EffectRegistry';
 import type { EffectParamValue, EffectReport } from '../effects/types';
 import { reductionDb } from '../effects/dynamics/CompressorEffect';
@@ -153,6 +153,7 @@ import {
   type EffectRunOutput,
 } from './effectRunner';
 import { averageMagnitudeSpectra } from './noiseProfile';
+import { resolveRegion } from './selectionRegion';
 
 export const VOCAL_CHAIN_UNDO_LABEL = 'Vocal Chain';
 
@@ -1909,11 +1910,9 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
   // and left the document selected from a negative sample. Same defect family
   // as R7's `plan.regionStart`, L1's `resolveRegion` and L9's
   // `runEffectOnSelection`: resolve once, not clamp twice and hope the two
-  // agree.
-  const selection = state.selection;
-  const length = docLength(doc);
-  const start = Math.min(Math.max(selection ? selection.start : 0, 0), length);
-  const end = Math.min(Math.max(selection ? selection.end : length, 0), length);
+  // agree — and T6-1 made that ruling an import rather than six copies of two
+  // expressions.
+  const { start, end } = resolveRegion(doc, state.selection);
   if (end <= start) return null;
   const docId = doc.id;
   const sampleRate = doc.sampleRate;
