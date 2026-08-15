@@ -586,16 +586,22 @@ export function refusalReason(alignment: AlignmentMeasurement): string {
  *
  * The seam it has to hold is the same one, for the same reason: the copy is
  * written here and the controls are rendered in `CoverChainDialog`, so the ONE
- * fact both branch on is `guessCandidates(...).length > 0` — the rows exist, or
- * the single button does. Nothing here may name the other.
+ * fact both branch on is the candidate list — the rows exist, or the single
+ * button does. Nothing here may name the other.
+ *
+ * T3 (MIN-1): the LIST is handed over whole rather than reduced to a boolean
+ * here, because the placed arm also has to say whether there is anywhere ELSE
+ * to go, and `candidates[0]` is the lag the take is already on. Reducing it
+ * here is what let the sentence promise "these other lags matched too" over a
+ * single row that was the winner's own.
  */
 export function autoPlacedReason(alignment: AlignmentMeasurement): string {
   const characterisation = guessCharacterisation(guessKind(alignment));
-  const hasCandidates = guessCandidates(alignment).length > 0;
+  const candidates = guessCandidates(alignment);
   return (
     `this placement was made on evidence BELOW the floors, and the numbers are worth reading before you trust it: correlation ${alignment.peakCorrelation.toFixed(3)} against a floor of ${ALIGN_MIN_CORRELATION}, standing ${alignment.prominence.toFixed(3)} above the next best lag against a floor of ${ALIGN_MIN_PROMINENCE}. ` +
     (characterisation ? `${characterisation}. ` : '') +
-    placedRemedy(alignment.offsetSeconds, hasCandidates)
+    placedRemedy(alignment.offsetSeconds, candidates)
   );
 }
 

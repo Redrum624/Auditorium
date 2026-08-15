@@ -1090,13 +1090,22 @@ describe('CoverChainDialog — applying the refused guess', () => {
       { offsetSeconds: rival, correlation: 0.41, prominence: 0.06 },
     ];
 
-    /** The four shapes a real emission can have. Candidates ride along on
+    /** T3 (MIN-1). The SAME emitter shape with its rivals gone — a real state,
+     * not a hypothetical: `candidatesOf` stops early when the guard swallows
+     * the rest of the surface, the post-refinement dedupe drops a rival that
+     * converged onto the winner, and `guessCandidates` drops any entry whose
+     * three numbers are not all finite. What survives is `candidates[0]`, which
+     * IS the lag the take was just placed on. */
+    const onlyTheWinner = () => [candidates(0)[0]];
+
+    /** The five shapes a real emission can have. Candidates ride along on
      * 'ambiguous' and 'weak' — the two outcomes that are OFFERS — and on
      * neither of the others; the last row is the outcome-less measurement the
      * feature-detecting path still has to serve. */
     const SHAPES: [string, Record<string, unknown>][] = [
       ['ambiguous, which always carries candidates', { outcome: 'ambiguous', candidates: candidates(12.5) }],
       ['weak, which always carries candidates too', { outcome: 'weak', candidates: candidates(3.75) }],
+      ['weak whose rivals did not survive, leaving only the placed lag', { outcome: 'weak', candidates: onlyTheWinner() }],
       ['unrelated, which carries none', { outcome: 'unrelated' }],
       ['a measurement that classified itself not at all', {}],
     ];
@@ -1135,6 +1144,27 @@ describe('CoverChainDialog — applying the refused guess', () => {
       // …and it names the one that IS there. A refusal that points at no
       // control at all is the state this whole arm was built to leave behind.
       expect(rendered).toHaveLength(1);
+
+      if (placed) {
+        // T3 (MIN-1). The placed arm promises ALTERNATIVES in two places — the
+        // engine's sentence and the dialog's own paragraph — and until now they
+        // branched on different facts: the sentence on "any candidates at all",
+        // the paragraph on "more than one". Only the second is the question
+        // being asked, because `candidates[0]` IS the lag the take was placed
+        // on: with a single row on screen there is nothing else on offer, and
+        // the sentence promised "these other lags matched too" over it while
+        // the paragraph, one line above, told the user to drag a clip.
+        //
+        // Derived from what RENDERED rather than from the fixture's literal:
+        // the alternatives are the rows, minus the one the take already sits
+        // on. A test reading the fixture's length would pass with the shipped
+        // rows counted differently.
+        const rows = screen.queryAllByTestId(/^cover-journey-guess-candidate-/);
+        const hasOtherLags = rows.length > 1;
+        const paragraph = screen.getByTestId('cover-journey-guess-placed').textContent ?? '';
+        expect(/other lags/i.test(reason)).toBe(hasOtherLags);
+        expect(/matched too/i.test(paragraph)).toBe(hasOtherLags);
+      }
     });
   });
 });

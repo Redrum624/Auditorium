@@ -29,6 +29,7 @@ import {
   guessCandidates,
   guessCharacterisation,
   guessKind,
+  offersOtherLags,
   type ApplyMeasuredOffsetResult,
 } from '../../services/coverPlacement';
 import { useHistoryVersion } from '../../services/undoHistory';
@@ -258,7 +259,12 @@ function GuessOffer({
       {placed && (
         <p data-testid="cover-journey-guess-placed" className="text-xs" style={{ color: AMBER }}>
           Placed at {signedSecs(alignment.offsetSeconds)}. The evidence was below the floors, so it is a placement rather than a verdict —{' '}
-          {candidates.length > 1
+          {/* T3 (MIN-1): the SHIPPED predicate, not a second `length > 1`. The
+              engine's sentence below this offer asks the same question through
+              the same function, so the paragraph and the sentence can no longer
+              disagree about whether the user has somewhere else to go — which
+              they did, on the one-row emission, in opposite directions. */}
+          {offersOtherLags(candidates)
             ? 'if it is the wrong spot, these lags matched too:'
             : 'if it is the wrong spot, drag a clip or type a new Start in the Properties panel.'}
         </p>

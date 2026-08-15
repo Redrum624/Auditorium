@@ -189,6 +189,31 @@ export function autoPlaces(kind: GuessKind): boolean {
 }
 
 /**
+ * T3 (MIN-1). Whether an auto-placed take has ALTERNATIVES to be offered — a
+ * different question from `hasCandidates`, and the one the placed arm asks.
+ *
+ * `candidates[0].offsetSeconds === offsetSeconds` by the emitter's contract, so
+ * the first row is the lag the take is already sitting on. "Any candidates at
+ * all" therefore answers "which control is on screen"; it does NOT answer "is
+ * there anywhere else to go". A one-entry list is a real emission — the coarse
+ * walk stops early when the guard swallows the rest of the surface, the
+ * post-refinement dedupe drops a rival that converged onto the winner, and
+ * {@link guessCandidates} drops any entry whose three numbers are not all
+ * finite — and over it the placed copy used to promise "these OTHER lags
+ * matched too" while the dialog's paragraph, one line above, told the user to
+ * drag a clip instead. Two branches, two different thresholds, one state where
+ * they contradicted each other on screen.
+ *
+ * ONE predicate, exported, for the same reason {@link autoPlaces} is: the
+ * sentence is composed in `coverJourney` and the paragraph is rendered in
+ * `CoverChainDialog`, and two copies of this rule would be two opinions about
+ * whether the user has a choice.
+ */
+export function offersOtherLags(candidates: readonly GuessCandidate[]): boolean {
+  return candidates.length > 1;
+}
+
+/**
  * One sentence naming WHAT KIND of failure this was — or `null` when the
  * measurement did not say, in which case the numbers already in the refusal
  * are the whole of what is known and nothing further may be asserted.
@@ -281,19 +306,38 @@ export function guessRemedy(offsetSeconds: number, hasCandidates: boolean): stri
  * too".
  *
  * What does NOT change is the one thing the seam fix pinned: which control this
- * names is decided by `hasCandidates`, the same fact the dialog decides its
+ * names is decided by the candidate list, the same fact the dialog decides its
  * render from, so the sentence can never point at a control that is not on
  * screen.
+ *
+ * T3 (MIN-1). It takes the LIST rather than a `hasCandidates` boolean because
+ * the placed arm has to answer two questions off it and they have different
+ * thresholds: which control is on screen (any candidate → rows, none → the
+ * button) and whether there is anywhere else to go ({@link offersOtherLags},
+ * because `candidates[0]` IS where the take already is). Given the list, the
+ * two answers cannot be supplied inconsistently; given two booleans, they
+ * could — and a caller passing `true, true` for a one-entry list is exactly the
+ * defect this replaces.
  */
-export function placedRemedy(offsetSeconds: number, hasCandidates: boolean): string {
+export function placedRemedy(
+  offsetSeconds: number,
+  candidates: readonly GuessCandidate[]
+): string {
   const amount = amountStr(offsetSeconds);
   // The placement itself is NOT undoable and the copy must not pretend it is:
   // it was made while the session was being built, and building a session
   // clears session history the way opening one does. A RE-place is one undo
   // entry, and that is the sentence each branch is allowed to make.
-  const alternatives = hasCandidates
+  //
+  // Three states, not two. The middle one — one row, and it is the lag we are
+  // on — has to name the control that IS rendered (the row) while promising
+  // nothing the row cannot deliver, so it borrows the by-hand remedy from the
+  // no-candidates branch and says plainly why the row is not the answer.
+  const alternatives = offersOtherLags(candidates)
     ? `If that is the wrong spot, these other lags matched too — each “${CANDIDATE_PLACEMENT_LABEL} …” row under the align row re-places both clips at its own lag in one step, as a single undo entry.`
-    : `If that is the wrong spot, drag a clip or type a new Start in the Properties panel — “${APPLY_GUESS_LABEL}” only puts both clips back at the lag they are already on.`;
+    : candidates.length === 1
+      ? `If that is the wrong spot, drag a clip or type a new Start in the Properties panel — the single “${CANDIDATE_PLACEMENT_LABEL} …” row under the align row is this same lag, so it has nothing else to offer.`
+      : `If that is the wrong spot, drag a clip or type a new Start in the Properties panel — “${APPLY_GUESS_LABEL}” only puts both clips back at the lag they are already on.`;
   // Rounded to the three decimals the amount prints at, exactly as the refusal
   // is: a placement that displays as 0.000 s moved nothing.
   if (Math.abs(offsetSeconds) < 0.0005) {

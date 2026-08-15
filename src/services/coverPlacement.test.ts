@@ -32,6 +32,7 @@ import {
   guessCharacterisation,
   guessKind,
   guessRemedy,
+  offersOtherLags,
   placedRemedy,
   placementFor,
 } from './coverPlacement';
@@ -252,20 +253,32 @@ describe('autoPlaces — which outcomes this pass places on the user\'s behalf',
 });
 
 describe('placedRemedy — the sentence an AUTO-PLACED guess ends with', () => {
+  /** The emitter's own shape: best first, and `candidates[0].offsetSeconds ===
+   * offsetSeconds`. The rival's lag is a guard away and its numbers are lower,
+   * exactly as `candidatesOf` walks them. */
+  const rivals = (offsetSeconds: number) => [
+    { offsetSeconds, correlation: 0.423, prominence: 0.079 },
+    { offsetSeconds: offsetSeconds + 4.2, correlation: 0.41, prominence: 0.06 },
+  ];
+  /** T3 (MIN-1). The same emission with the rivals gone — one row, and it is
+   * the lag the take was placed on. */
+  const winnerOnly = (offsetSeconds: number) => rivals(offsetSeconds).slice(0, 1);
+  const none: ReturnType<typeof rivals> = [];
+
   it('states where the take was put, in the amount and sign that were measured', () => {
-    const placed = placedRemedy(-8.257, true);
+    const placed = placedRemedy(-8.257, rivals(-8.257));
     expect(placed).toContain('8.257 s');
     // The negative arm is the reported case, and the thing worth saying about it
     // is that both clips moved rather than the take being clamped away.
     expect(placed).toContain('both');
     // It does NOT tell the user to drag anything: it already moved them.
-    expect(placedRemedy(-8.257, true)).not.toMatch(/drag the Instrumental/i);
-    expect(placedRemedy(8.257, true)).not.toMatch(/drag your take/i);
+    expect(placedRemedy(-8.257, rivals(-8.257))).not.toMatch(/drag the Instrumental/i);
+    expect(placedRemedy(8.257, rivals(8.257))).not.toMatch(/drag your take/i);
   });
 
   it('offers the alternatives by the label the rows actually carry', () => {
     for (const offset of [-8.257, 8.257, 0]) {
-      const placed = placedRemedy(offset, true);
+      const placed = placedRemedy(offset, rivals(offset));
       expect(placed).toContain(CANDIDATE_PLACEMENT_LABEL);
       expect(placed).not.toContain(APPLY_GUESS_LABEL);
     }
@@ -276,14 +289,44 @@ describe('placedRemedy — the sentence an AUTO-PLACED guess ends with', () => {
   // branches on exactly the fact the render branches on.
   it('names the single button when there are no rows to point at', () => {
     for (const offset of [-8.257, 8.257]) {
-      const placed = placedRemedy(offset, false);
+      const placed = placedRemedy(offset, none);
       expect(placed).toContain(APPLY_GUESS_LABEL);
       expect(placed).not.toContain(CANDIDATE_PLACEMENT_LABEL);
     }
   });
 
+  // T3 (MIN-1). The middle state, which had no branch of its own and took the
+  // rows branch: one candidate, and it is the lag the take is already on. The
+  // sentence promised "these other lags matched too" over it while the dialog's
+  // paragraph one line above told the user to drag a clip — two thresholds,
+  // one screen, opposite advice.
+  it('promises no OTHER lags when the only row is the lag it placed on', () => {
+    for (const offset of [-8.257, 8.257, 0]) {
+      const placed = placedRemedy(offset, winnerOnly(offset));
+      expect(placed).not.toMatch(/other lags/i);
+      // …and it still points at the control that IS rendered. A single
+      // candidate renders a row, not the button, so naming the button here
+      // would trade this defect for the seam defect the arm was built to close.
+      expect(placed).toContain(CANDIDATE_PLACEMENT_LABEL);
+      expect(placed).not.toContain(APPLY_GUESS_LABEL);
+    }
+  });
+
   it('says the take did not move when the measured lag was zero', () => {
-    expect(placedRemedy(0, true)).toContain('already');
+    expect(placedRemedy(0, rivals(0))).toContain('already');
+  });
+});
+
+// T3 (MIN-1). The predicate both sides of the seam now ask, pinned on the three
+// list lengths a real emission produces — and on WHY the middle one is false:
+// `candidates[0]` is the lag the take is on, so one row is no alternative.
+describe('offersOtherLags — whether a placed take has anywhere else to go', () => {
+  const at = (offsetSeconds: number) => ({ offsetSeconds, correlation: 0.4, prominence: 0.05 });
+
+  it('is false for no candidates and for the winner alone, true once a rival survives', () => {
+    expect(offersOtherLags([])).toBe(false);
+    expect(offersOtherLags([at(-8.258)])).toBe(false);
+    expect(offersOtherLags([at(-8.258), at(-4.058)])).toBe(true);
   });
 });
 
