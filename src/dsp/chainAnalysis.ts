@@ -199,7 +199,10 @@ export interface NoiseWindow {
 }
 
 export const NOISE_WINDOW_MS = 500;
-const NOISE_SEARCH_STEP_MS = 50;
+/** The noise search's scan step — and, since G2, the grid the gate's activity
+ * segmentation reads `windowedTiltResidualsDb` on, which is why it is public:
+ * the gate's region-edge slack is bounded by exactly one of these steps. */
+export const NOISE_SEARCH_STEP_MS = 50;
 
 const CHUNKS_PER_WINDOW = NOISE_WINDOW_MS / NOISE_SEARCH_STEP_MS;
 

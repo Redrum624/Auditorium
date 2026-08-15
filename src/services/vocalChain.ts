@@ -128,22 +128,26 @@ import { DETECT_ATTACK_MS, DETECT_RELEASE_MS } from '../dsp/silenceDetect';
 import {
   HUM_EXCESS_THRESHOLD_DB,
   MAINS_BASE_FREQUENCIES,
+  NOISE_SEARCH_STEP_MS,
+  NOISE_WINDOW_MAX_SILENT_FRACTION,
   NOISE_WINDOW_MS,
   TILT_FFT_SIZE,
   detectMainsHum,
   humMeasurable,
   measureNoiseWindow,
-  measureNoiseWindows,
   measureStageDelta,
   monoMix,
   peakDb,
   programmeRmsDb,
-  spectralTiltResidualDb,
   toDb,
   toneExcessDb,
+  windowedTiltResidualsDb,
   type NoiseWindow,
   type StageDelta,
 } from '../dsp/chainAnalysis';
+import { GATE_SILENT_RUN_MS } from '../effects/dynamics/NoiseGateEffect';
+import { getLyricsAlignment, isLyricsAlignmentStale } from './alignLyricsService';
+import { getTranscript, isTranscriptStale } from './transcribeService';
 import { useAppStore } from '../stores/appStore';
 import { applyEdit, type MarkerRemap } from './editOps';
 import {
@@ -205,96 +209,38 @@ export interface VocalChainStage {
   weight: number;
 }
 
-// The two constants the STAGE TABLE below quotes, so they are declared ahead
-// of it. Their siblings live with the gate's derivation further down.
+// The one geometry constant the STAGE TABLE below quotes, declared ahead of
+// it. Its veto siblings live with the gate's derivation further down.
 /**
- * How many of the take's quietest passages this stage is willing to interrogate
- * before it gives up on measuring a threshold (V2).
+ * The shortest stretch between vocal activity the automatic gate will mute,
+ * in ms (G2).
  *
- * WHY THE SEARCH EXISTS AT ALL. Every check below asks "is THIS half-second a
- * pause", and until V2 there was only ever one half-second to ask about: the
- * quietest in the take. A real 2 min 22 s take (reported 2026-08-14) declined
- * because that one window read 4.0 dB of vocal-tract shaping — a breath — while
- * the same take carried pauses the stage would have accepted, which nothing
- * ever looked at. "The noise in the non-singing parts was not removed" is what
- * that costs. The stage now walks the quietest passages in level order and
- * derives from the quietest one that passes EVERY check; it declines only when
- * none of them does. The checks themselves are unchanged — the search widens
- * what is looked at, it does not lower the bar any window has to clear.
+ * It is `NOISE_WINDOW_MS`, and that is a REUSE, not a number: Remove Silence's
+ * own `minSilenceMs` — this app's already-derived answer to "how long is a gap
+ * before it is unambiguously a pause rather than articulation" (stop-consonant
+ * closures run to ~150 ms; pauses start reading as pauses around ~250 ms) —
+ * exactly the reuse `GATE_HOLD_MS` already makes for the manual path. The gate
+ * may only mute what Remove Silence would have been willing to cut.
  *
- * BELOW — why not fewer. Each candidate is a DISTINCT passage
- * (`measureNoiseWindows` refuses overlaps), so on the reported shape — a quiet
- * half whose every gap is an audible breath, and a louder half carrying the one
- * real pause — the pause is candidate number (breaths + 1). Measured on exactly
- * that fixture at 8 kHz, the pause is reached at depth 2, 3, 5, 7, 9, 12 and 13
- * for 1, 2, 4, 6, 8, 11 and 12 breath-filled gaps ahead of it — a KEPT
- * measurement rather than a narration (`vocalChain.test.ts`, "is exactly the
- * depth the deepest take it covers needs"), which searches twice this deep so
- * the reading is of the shape and not of the bound being derived from it.
- * Twelve therefore covers a take with eleven such gaps and is pinned on both
- * sides: eleven gates, twelve declines. It is not a claim that eleven is all a take can have — it is
- * where the cost below stops being worth paying, and the take with more is
- * exactly the take `manualThresholdDb` exists for.
+ * The vetoes CAP it from below independently, and the kept
+ * `GATE_MIN_REGION_MS` suite measures that cap: the vocal-tract boundary
+ * (`GATE_SHAPED_RESIDUAL_DB`) separates its floor and unvoiced-vocal
+ * populations at this length at every rate — floors at most 1.92 dB, vocal
+ * material at least 3.09 dB, the 2.5 dB constant inside the gap — while at
+ * 250 ms the floor population CROSSES the constant (2.72 dB at 8 kHz: a
+ * quarter-second of plain room tone reads as a vocal tract), and at one
+ * `TILT_FFT_SIZE` frame the two populations invert outright (a floor run reads
+ * 3.9 dB where a whisper reads 2.6 at 44.1 kHz). So no shorter minimum could
+ * keep the vetoes trustworthy, and no longer one is asked for by them — the
+ * binding value is the app's own pause definition, which the classifier's
+ * floor exactly meets.
  *
- * ABOVE — why not more, and what it costs. A candidate costs one pitch track
- * and one spectral-tilt fit over 500 ms of audio. Measured on this machine,
- * per candidate: 7.6 + 4.7 ms at 8 kHz, 59.4 + 11.3 at 22.05, 200.6 + 16.9 at
- * 44.1 and 293.2 + 20.9 at 48 kHz. Twelve of them is at most 3.8 s at 48 kHz —
- * inside the 4.1 s this stage's own render already takes on the 142 s reference
- * take, so the worst case at most doubles the stage and moves the eleven-stage
- * pass by ~3.5 %. The cost is bounded by this constant and NOT by the length of
- * the take, which is the property the kept test pins.
- *
- * The typical cost is a fraction of that worst case, because the pitch track is
- * 12-14x the tilt fit at the rates people record at and every candidate but the
- * first is checked cheap-first. See `classifyQuietWindow`.
+ * THE COST, STATED. A real pause SHORTER than this is left un-muted, exactly
+ * as the old hold left it un-faded: nothing shorter than the app's own
+ * definition of a pause is worth a mute that could clip articulation, and the
+ * decline says so when it is the only reason nothing qualified.
  */
-export const GATE_QUIET_WINDOWS = 12;
-
-/**
- * How far the search may RAISE the gate, in dB, over where it would have closed
- * on the take's quietest passage (V2).
- *
- * The search's danger is the exact one this stage was built to refuse. Stepping
- * past a window the checks called VOICE and deriving from a louder one puts the
- * threshold above that voice, and a whispered verse or a quiet island under an
- * ordinary floor is then muted whole — the destruction N1, N3 and N6 each cost
- * a round to close. So the search is allowed to correct a MISREAD WINDOW and
- * not to choose a different level regime, and the line between those two is a
- * level: how much higher the gate closes than it would have closed on the
- * quietest passage, measured in the very statistic the threshold is built from
- * (`envelopePeakDb`, since `thresholdDb` is that plus `GATE_HEADROOM_DB`).
- *
- * The two populations, measured at 8/22.05/44.1/48 kHz x 3 seeds, over takes
- * whose quietest window is itself vocal — the only regime in which the search
- * climbs at all:
- *
- *   - 36 members of the REPORTED shape (a quiet half whose every gap is an
- *     audible breath, a louder half carrying the one real pause, 1/2/4 gaps):
- *     -3.65 … 1.91 dB. A breath sits ON the room's own floor and peaks with it,
- *     so the pause that vouches for the take reaches very nearly the same
- *     level — several members are NEGATIVE, the pause closing the gate LOWER
- *     than the breath would have.
- *   - 45 members of the DESTRUCTIVE shapes — a whispered verse living under an
- *     ordinary floor, and a 400/500/800 ms quiet island bracketed by digital
- *     silence beside a take whose own pauses set the threshold: 3.17 … 7.01 dB.
- *     Those passages are a level regime of their own, tens of dB under the
- *     floor the take's pauses are made of.
- *
- * 2.5 dB is the midpoint of that gap in the ratio sense (sqrt(1.91 x 3.17) =
- * 2.46): 1.31x above the worst breath and 1.27x below the closest destructive
- * member, the same margin profile `GATE_SHAPED_RESIDUAL_DB` carries. It is
- * also, and not by accident, just under the `GATE_HEADROOM_DB` the stage
- * already adds: the search may not move the threshold by as much as the
- * headroom does.
- *
- * THE COST, STATED. A take whose only readable pause sits more than 2.5 dB
- * above its quietest passage declines — the room changed level more than a
- * breath can account for, and no measurement here can say whether the quiet
- * passage is a whisper or an empty corner of the room. That take is exactly
- * the one `manualThresholdDb` exists for, and the decline says so.
- */
-export const GATE_SEARCH_CLIMB_DB = 2.5;
+export const GATE_MIN_REGION_MS = NOISE_WINDOW_MS;
 
 /**
  * The order, and it is the brief's order but for the two stages moved ahead of
@@ -348,7 +294,7 @@ export const VOCAL_CHAIN_STAGES: readonly VocalChainStage[] = [
     label: 'Noise Gate',
     effectId: 'noise-gate',
     defaultEnabled: true,
-    note: `Brings the pauses between phrases to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. The threshold is measured from a ${NOISE_WINDOW_MS} ms passage, so it only means anything if that passage is a pause: this stage checks that it is, and DECLINES rather than gating when the passage turns out to be the recording itself, a softly sung phrase, or a whispered one — so a take that never stops for half a second is usually left alone, the exception being an unshaped breath, which no measurement can tell from room tone. It does not judge only the QUIETEST half-second: an audible breath between two phrases can read quieter than the room tone in the take's real gaps, so it walks the ${GATE_QUIET_WINDOWS} quietest distinct passages in level order and takes the threshold from the first that reads as a pause — never climbing more than ${GATE_SEARCH_CLIMB_DB} dB above where it would have closed on the quietest one, because past that it is choosing a different level regime and would mute the quieter passage it stepped over. When it still cannot find one, the box under this note gates at a level you name instead — the one setting in this chain that comes from you, and the row says so. A stretch of digital silence is the opposite — proof of a pause — and a take carrying one still gates, but the silence itself is never measured: the threshold comes from the quietest ${NOISE_WINDOW_MS} ms of REAL material, so zeros next to a whispered line cannot launder that whisper into a noise floor, quiet audio that survives only as fragments between zeros (an 8-bit transfer, a stem strip-silenced by a tool with no hold) declines rather than being priced by a floor that never contained it, and a take whose pauses are all already exact zeros declines, having nothing left for a gate to do. It then holds the gate open for ${NOISE_WINDOW_MS} ms after the level drops, so nothing shorter than this app's own definition of a pause can close it: a stop-consonant closure or a dip inside a held note comes back untouched. The same hold is given to whatever comes OUT of a run of digital silence, because a gate has nothing to remove inside one: a soft pickup consonant or an inhale left in a strip-silenced pre-roll has no phrase before it to hold the gate open, and used to be muted whole. After Noise Reduction and DeHum, which lower the floor it has to find, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
+    note: `Brings the stretches where you are not singing to actual silence, which nothing else in this chain can: Noise Reduction lowers the floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting, so the take still lines up with a backing track. It decides WHERE, not how loud: a stretch is muted only when the evidence says no vocal activity lives in it, so pause noise LOUDER than your softest singing still goes — the case no level threshold can reach. The evidence, in order: your aligned lyrics or transcript place the words, when you have run either and the audio has not changed since; with or without them, every ${NOISE_WINDOW_MS} ms of the selection is measured for the resonances of a vocal tract, and anything carrying them — a whisper, a breath, a held consonant — is kept, as is anything whose frames read as voiced (singing, humming), even where no word maps. Only stretches of at least ${GATE_MIN_REGION_MS} ms qualify — the shortest gap this app calls a pause rather than articulation (Remove Silence's own minimum) — so a stop-consonant closure or a dip inside a held note comes back untouched, and each muted stretch closes behind the same fade the manual gate uses and reopens instantly at the next activity. A stretch of digital silence is left exactly as it is: zeros stay zeros, silence is never evidence about the material beside it, quiet audio surviving only as fragments between zeros is never muted unheard, and a take whose pauses are all already exact zeros declines, having nothing left for a gate to do. When nothing qualifies — the take never pauses, every stretch carries vocal evidence, or everything between activity reads like the material itself — this stage declines and says which, and the box under this note gates at a level you name instead: the one setting in this chain that comes from you, with the level-gate behaviour of earlier releases unchanged. After Noise Reduction and DeHum, which lower the floor around the activity, and BEFORE the dynamics stages, so the compressor's makeup gain multiplies zeros instead of lifting a floor back up.`,
     weight: 4,
   },
   {
@@ -890,28 +836,43 @@ export function deriveRemoveSilence(channels: Float32Array[], sampleRate: number
  * 120 ms and the 400 ms dip come back bit-identical. The delay this buys is
  * additive with the detector's own decay, so nothing shorter than 500 ms of
  * true silence can start the fade.
+ *
+ * Since G2 the automatic path is region-based and has no hold state — but the
+ * constant keeps a second job there: material emerging from a
+ * `GATE_SILENT_RUN_MS` run of digital silence is left un-muted for exactly
+ * this long (the emergence split in `deriveGate`), which is the same one-hold
+ * grace the old state machine gave whatever came out of a zero run.
  */
 export const GATE_HOLD_MS = NOISE_WINDOW_MS;
 
-/** How far above the measured floor peak the gate's threshold sits, dB. See the
- * derivation note above: 3 dB is the smallest whole decibel above the worst
- * graze measured over 144 constructed takes (0.946 dB raw, 2.369 dB after Noise
- * Reduction). Zero would put the threshold exactly ON the floor's own extreme,
- * which is where it re-opens. Pinned by the `GATE_HEADROOM_DB` suite. */
+/** How far a floor's envelope can stray above the envelope peak of its own
+ * quietest window, dB — the smallest whole decibel above the worst graze
+ * measured over 144 constructed takes (0.946 dB raw, 2.369 dB after Noise
+ * Reduction; the `GATE_HEADROOM_DB` suite keeps the worst corner). Through
+ * v1.31 this cleared the derived THRESHOLD over that peak, so one graze could
+ * not re-open the gate. G2 retired the threshold, and the constant survives in
+ * the one role the same measurement still justifies: `floor peak + this` is
+ * "a level the settled floor never reaches", which is what the region-edge
+ * placement reads — a region's start advances off a word's decay tail while
+ * the envelope still sits above it, and a region's end walks forward over the
+ * floor to the next onset knowing no graze can stop it early. */
 export const GATE_HEADROOM_DB = 3;
 
 /**
- * The share of the quietest window's pitch frames that may read VOICED before
- * this stage refuses to treat that window as a pause.
+ * The share of a 500 ms window's pitch frames that may read VOICED before the
+ * gate refuses to call that window part of a pause — since G2, the VOICED VETO:
+ * a candidate mute region is kept whole when any 500 ms window inside it
+ * crosses this, however loud or quiet the region is.
  *
- * The threshold is only meaningful if the quietest 500 ms is room tone. On a
- * take that never stops but changes dynamic — a pianissimo verse and a loud
- * chorus, with only breaths between phrases — the quietest window lies inside
- * the SOFTEST SUNG PASSAGE, the threshold lands above that passage's whole
- * envelope, and the all-or-nothing guard above waves it through because the
- * chorus keeps the take from looking empty. Measured on exactly that fixture:
- * 100 % of the soft verse faded to hard zero, sung material destroyed by a
- * stage that is on by default. That is the regime this constant exists for.
+ * The regime it exists for, in both designs: sung material so soft that every
+ * level statistic reads it as floor. Under the old threshold a pianissimo
+ * verse's quietest window put the threshold above the whole passage — measured
+ * on exactly that fixture, 100 % of the soft verse faded to hard zero. Under
+ * the region design the same regime arrives as a voiced passage whose TILT the
+ * shape veto cannot see: a soft voice with its power spread across ~40
+ * partials reads a residual of 2.2 dB at 44.1 kHz — under the 2.5 dB boundary
+ * — while every frame of it reads voiced (the kept "voiced veto, live" test).
+ * This constant is the only protection standing there.
  *
  * Voice is periodic and room tone is not, which is a question `detectPitch`
  * already answers per frame — and `pitchDetect`'s own note says so: its silence
@@ -940,24 +901,33 @@ export const GATE_HEADROOM_DB = 3;
  * spurious voiced frames in a floor window (the populations gave none), and it
  * is more than three times below the hardest real sung window. Widening the
  * sweep from one rate to four moved neither end — the gap is 0.000 to 0.156
- * at 8 kHz and 0.000 to 0.156 over all four. When it fires the stage DECLINES
- * rather than guessing a lower threshold — the chain's other stages refuse
- * when their measurement is not the one they need, and a gate that cannot
- * tell a pause from a soft phrase must not pick one.
+ * at 8 kHz and 0.000 to 0.156 over all four. When it fires, the region it
+ * fired in is KEPT — never muted, never split around the voice — and the
+ * report counts it: a gate that cannot tell a pause from a soft phrase must
+ * not mute one, which is the same refusal the old design made take-wide.
+ *
+ * Applied per 500 ms window INSIDE a region (the sliding maximum), not as one
+ * fraction over the whole region, because the populations were measured on
+ * 500 ms windows and a region-wide fraction would dilute a one-second hum
+ * inside a five-second pause below any constant these populations support.
  */
 export const GATE_VOICED_FRACTION = 0.05;
 
 /**
- * How far the quietest window's spectrum may depart from a straight line in
- * log-frequency, dB, before this stage stops believing it is room tone.
+ * How far a 500 ms window's spectrum may depart from a straight line in
+ * log-frequency, dB, before the gate stops believing it is room tone — since
+ * G2 the boundary of BOTH halves of the vocal-tract evidence: the activity
+ * segmentation (a window above it is vocal activity, so the stretches the gate
+ * may mute are the stretches between such windows) and the per-region veto
+ * that re-asks the question of every candidate before it is muted.
  *
- * `GATE_VOICED_FRACTION` settles the case where the quietest window is SUNG.
- * It cannot settle the case where it is vocal but UNVOICED — a whisper, a
+ * `GATE_VOICED_FRACTION` settles the case where the material is SUNG. It
+ * cannot settle the case where it is vocal but UNVOICED — a whisper, a
  * sustained aspirate, a held sibilant — because those are noise, and a pitch
- * detector reads them unvoiced exactly as it reads a floor. Measured, the
- * consequence is identical to the sung one: a take whose soft half is whispered
- * and whose loud half is sung comes back with 100 % of the whisper faded to
- * hard zero.
+ * detector reads them unvoiced exactly as it reads a floor. Measured under the
+ * old threshold design, the consequence was identical to the sung one: a take
+ * whose soft half is whispered and whose loud half is sung came back with
+ * 100 % of the whisper faded to hard zero.
  *
  * What still separates them is where the noise has been — a vocal tract puts
  * resonances on it, a room does not. `spectralTiltResidualDb` measures exactly
@@ -984,6 +954,19 @@ export const GATE_VOICED_FRACTION = 0.05;
  * overlap outright: spectral flatness, spectral centroid, envelope modulation
  * depth and voiced fraction all put a rolled-off floor and a whisper on the
  * same side of every possible constant.
+ *
+ * ── Why the veto is NOT relaxed where words say "no words here" (G2) ────────
+ * The transients the user wants gone — chair creaks, thumps — are resonant,
+ * and resonance is exactly what this statistic calls a vocal tract: a 120 ms
+ * creak burst (a 180 Hz two-pole resonance) inside a 500 ms floor window
+ * reads 4.06 dB, INSIDE the unvoiced-vocal population's own 3.20…10.58 dB
+ * range. No relaxed boundary exists that admits the creak and still keeps the
+ * whisper, so the veto stays even where word evidence says nothing was sung —
+ * a creak-holding half-second survives as a short kept island while the floor
+ * around it is muted, and the report's Kept row is where that shows up. An
+ * isolated soft tick inside a LONG window is different arithmetic — averaged
+ * over the window it may stay under the boundary and mute with the floor —
+ * and that is the correct reading of the same evidence, not an exception.
  *
  * ── The residual this does NOT close, stated plainly ────────────────────────
  * One member of the unvoiced-vocal family survives every one of those five
@@ -1035,159 +1018,201 @@ export const GATE_SHAPED_RESIDUAL_DB = 2.5;
  * right one — while shallower pairs keep a faithful, merely attenuated mix
  * and fall through to the ordinary checks.
  *
- * WHAT V2 CHANGED ABOUT IT (I1). The search made every other refusal
- * per-window: a candidate that is not a pause is stepped past, and the next
- * one is asked. This one is not a refusal of that kind and is never stepped
- * past — see `cancellationDiagnosis`. The take that forced the distinction:
- * only the QUIET passage is inverted, an ordinary floor sits a decibel above
- * it, and the level bound the search is otherwise governed by
- * (`GATE_SEARCH_CLIMB_DB`) puts that step squarely in its permissive half —
- * measured, twelve members at 8/22.05/44.1/48 kHz x 3 seeds, all inside the
- * band, kept beside that constant's own populations. Level cannot decide this
- * shape, so the diagnosis decides it.
+ * WHAT SURVIVES EVERY REDESIGN ABOUT IT (I1/G2). Every other refusal is
+ * per-candidate in the ordinary sense: a candidate that is not a pause is
+ * kept, and the next one is asked. This one is not a refusal of that kind and
+ * is never stepped past, because it is a fact about the FILE rather than about
+ * one candidate's suitability: the mix of an exactly inverted pair is digital
+ * zero, so a whispered line and an empty room are the same measurement, and
+ * whatever a gate did there would be done to something nothing was able to
+ * read. So it is asked of EVERY candidate region before any veto runs, and
+ * the first one found ends the stage with the polarity diagnosis — the same
+ * principle the V2 search already enforced window by window.
  */
 export const GATE_CANCELLATION_DEPTH_DB = 60;
 
-// The gate's remaining two constants — `GATE_QUIET_WINDOWS` and
-// `GATE_SEARCH_CLIMB_DB`, which govern the SEARCH rather than any one window —
-// are declared near the top of this file, because the stage table quotes both
-// in the note the dialog shows and a const cannot be read before it exists.
+// ── The region machinery (G2) ───────────────────────────────────────────────
+// The automatic gate no longer derives a level. It decides WHERE: the
+// stretches between vocal activity are the candidates, every candidate must
+// pass the protective evidence, and what passes is muted through the effect's
+// mute-region side channel (`NoiseGateMuteRegionsExtra`). The manual path is
+// untouched.
+
+/** Word-level (or segment-level) activity spans for the automatic gate, in
+ * REGION-relative samples, with the source named so the report can say which
+ * evidence decided. Collected by {@link collectGateWordEvidence}. */
+export interface GateWordEvidence {
+  source: 'lyrics-alignment' | 'transcript-segments';
+  spans: { startSample: number; endSample: number }[];
+}
 
 /**
- * Whether one candidate window is a PAUSE — the three content checks, in one
- * place so every candidate is judged by the same bar. Returns the reason it is
- * not, or `null` when it is.
+ * The word evidence the automatic gate reads, mapped into the REGION frame.
  *
- * `costOrder` runs the cheap spectral check before the expensive pitch one. It
- * cannot change WHICH windows are accepted — a window is a pause only if it
- * passes all three — only which failure is named first, so the quietest window,
- * whose failure is the one the decline reports, is always judged in the order
- * these messages were derived in.
+ * Word-level spans (Align Lyrics) win over segment-level ones (the
+ * transcript): both mark where the performance is, but only the alignment
+ * knows it word by word, and a transcript SEGMENT deliberately over-covers —
+ * it can span several phrases with their internal pauses, which merely makes
+ * the gate more conservative, never less.
+ *
+ * Either source is used only while FRESH, by the same channel-identity test
+ * the panels show staleness with: an edit that moved samples leaves spans
+ * describing audio that no longer exists, and gating on those would mute the
+ * performance itself. Stale evidence, and evidence whose spans do not touch
+ * this region at all, returns null — the caller then falls back to measured
+ * activity, because evidence that says nothing must not be read as evidence
+ * of absence.
  */
-/** The mono MIX of one candidate window — what the content checks read.
- * Mixed over the WINDOW only, not the take: `monoMix` on a 142 s stereo take
- * would allocate 25 MB to look at half a second of it, and the cost of these
- * checks should not scale with a length they never read. */
-function mixQuietWindow(channels: Float32Array[], noise: NoiseWindow): Float32Array {
-  const window = new Float32Array(noise.lengthSamples);
-  for (let i = 0; i < window.length; i++) {
-    let sum = 0;
-    for (const c of channels) sum += c[noise.startSample + i];
-    window[i] = sum / channels.length;
+export function collectGateWordEvidence(
+  docId: string,
+  regionStart: number,
+  regionEnd: number
+): GateWordEvidence | null {
+  const clip = (
+    spans: readonly { startSample: number; endSample: number }[]
+  ): { startSample: number; endSample: number }[] =>
+    spans
+      .filter((s) => s.startSample < regionEnd && s.endSample > regionStart)
+      .map((s) => ({
+        startSample: Math.max(0, s.startSample - regionStart),
+        endSample: Math.min(regionEnd, s.endSample) - regionStart,
+      }));
+
+  const alignment = getLyricsAlignment(docId);
+  if (alignment && !isLyricsAlignmentStale(docId)) {
+    const spans = clip(alignment.words);
+    if (spans.length > 0) return { source: 'lyrics-alignment', spans };
   }
-  return window;
-}
-
-/**
- * The M9 CANCELLATION diagnosis for one candidate window, or `null`.
- *
- * Separated from the content checks (I1) because it is not one of them. Those
- * answer "is THIS half-second a pause", and a `no` is a fact about that window
- * which the search may act on by looking at the next one. This answers "can
- * this half-second be judged AT ALL", and a `no` is a fact about the FILE: the
- * mix of an exactly polarity-inverted pair is digital zero, so a whispered line
- * and an empty room are the same measurement, and nothing downstream can tell
- * anyone which was muted. V2's search made that verdict steppable for a while —
- * a take whose quiet passage alone was inverted, with an ordinary floor a
- * decibel up, gated over it and never showed the polarity warning — and
- * `GATE_SEARCH_CLIMB_DB` cannot be the guard, because a cancelling passage
- * lands in that constant's PERMISSIVE half (measured, twelve members, kept
- * beside the population it belongs to). So it is asked of EVERY candidate the
- * search returned and is never stepped past.
- *
- * Cancellation is detected by LEVEL, not by counting zeros in the mix: frame
- * silence is a product where a mix zero is a sum, and for independent channels
- * a few LSB wide the sum runs several times the product, so a zero count
- * mistakes ordinary quiet quantised stereo for an inverted pair (N5). See
- * `GATE_CANCELLATION_DEPTH_DB`.
- */
-function cancellationDiagnosis(
-  channels: Float32Array[],
-  sampleRate: number,
-  noise: NoiseWindow,
-  isQuietest: boolean
-): string | null {
-  const window = mixQuietWindow(channels, noise);
-  let mixSumSq = 0;
-  for (let i = 0; i < window.length; i++) mixSumSq += window[i] * window[i];
-  const mixRmsDb = toDb(Math.sqrt(mixSumSq / Math.max(1, window.length)));
-  if (noise.rmsDb - mixRmsDb <= GATE_CANCELLATION_DEPTH_DB) return null;
-  // Named by POSITION when it is not the quietest window, because after V2 it
-  // need not be: a message claiming the quietest half-second cancelled would
-  // send the user to the wrong part of their take.
-  const where = isQuietest
-    ? `the quietest ${NOISE_WINDOW_MS} ms`
-    : `a quiet ${NOISE_WINDOW_MS} ms passage of this take (at ${(noise.startSample / sampleRate).toFixed(1)} s)`;
-  return `the channels of ${where} cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see this passage at all, and a threshold derived anywhere in this take could mute it without anything having been able to say what it was. Fix the inverted channel's polarity and run the chain again`;
-}
-
-function classifyQuietWindow(
-  channels: Float32Array[],
-  sampleRate: number,
-  noise: NoiseWindow,
-  costOrder: boolean
-): string | null {
-  const window = mixQuietWindow(channels, noise);
-  // Both checks always run, and can: the search above never hands them a
-  // mostly-silent window, so what they measure is real material — at least
-  // three quarters of it — and a floor window carrying its share of scattered
-  // zeros still reads inside the populations both constants were derived from
-  // (the `NOISE_WINDOW_MAX_SILENT_FRACTION` suite measures exactly that). A
-  // round of this stage's history skipped these checks on mostly-silent
-  // windows instead, and the skip was the destructive half of the bug it
-  // fixed: the boundary window it waved through carried a whisper's envelope
-  // peak, and the whisper was muted. Measurement first, then the checks — not
-  // checks with an exemption.
-  //
-  // The one thing the mix CAN hide — an exactly polarity-inverted pair, whose
-  // mix is all zeros, so both checks below would read silence and wave the
-  // window through — is answered before any candidate reaches here, by
-  // `cancellationDiagnosis` (M9/I1).
-
-  // Is this a pause rather than SOFT SINGING? A take that never stops but
-  // changes dynamic keeps plenty of material above the threshold — its loud
-  // half — while a quiet window sits inside its soft half, so the threshold
-  // covers a real phrase and the gate mutes it. See `GATE_VOICED_FRACTION`:
-  // voice is periodic, room tone is not, and the pitch detector already
-  // answers that per frame.
-  const voiced = (): string | null => {
-    const track = detectPitch(window, sampleRate);
-    let voicedFrames = 0;
-    for (const frame of track.frames) if (frame.f0Hz !== null) voicedFrames++;
-    const voicedFraction = track.frames.length === 0 ? 0 : voicedFrames / track.frames.length;
-    if (voicedFraction <= GATE_VOICED_FRACTION) return null;
-    return `the quietest ${NOISE_WINDOW_MS} ms is singing rather than a pause — ${(voicedFraction * 100).toFixed(0)}% of it reads as voiced, where room tone reads none — so a threshold measured there would sit above a real phrase and mute it`;
-  };
-
-  // ...and unvoiced voice? A whisper has no fundamental, so the check above
-  // reads zero on it and would wave a whispered verse through to be muted. The
-  // question that still has an answer is whether the noise has been through a
-  // VOCAL TRACT: resonances make it depart from the straight-line tilt a room's
-  // own noise follows. See `GATE_SHAPED_RESIDUAL_DB`, including the one member
-  // of this family that no measurement can catch.
-  const shaped = (): string | null => {
-    const shapingDb = spectralTiltResidualDb(window, sampleRate);
-    if (shapingDb <= GATE_SHAPED_RESIDUAL_DB) return null;
-    return `the quietest ${NOISE_WINDOW_MS} ms carries the resonances of a vocal tract rather than the plain tilt of a room — its spectrum departs from a straight tilt by ${shapingDb.toFixed(1)} dB, where a noise floor reads under ${GATE_SHAPED_RESIDUAL_DB} dB — so it is an unvoiced vocal passage (a whisper, a breath, a held consonant) and not a pause`;
-  };
-
-  const order = costOrder ? [shaped, voiced] : [voiced, shaped];
-  for (const check of order) {
-    const reason = check();
-    if (reason !== null) return reason;
+  const transcript = getTranscript(docId);
+  if (transcript && !isTranscriptStale(docId)) {
+    const spans = clip(transcript.segments);
+    if (spans.length > 0) return { source: 'transcript-segments', spans };
   }
   return null;
 }
 
+/** The mono MIX of one span — what the vetoes read, so a whisper living in ONE
+ * channel is still a whisper (M4). Mixed over the SPAN only, not the take:
+ * `monoMix` on a 142 s stereo take would allocate 25 MB to look at a stretch
+ * of it. */
+function mixSpan(channels: Float32Array[], start: number, end: number): Float32Array {
+  const out = new Float32Array(end - start);
+  for (let i = 0; i < out.length; i++) {
+    let sum = 0;
+    for (const c of channels) sum += c[start + i];
+    out[i] = sum / channels.length;
+  }
+  return out;
+}
+
+/**
+ * The M9 CANCELLATION diagnosis for one candidate region, or `null`.
+ *
+ * Not one of the vetoes: those answer "is this stretch a pause", and a `no`
+ * keeps the stretch. This answers "can this stretch be judged AT ALL", and a
+ * `no` is a fact about the FILE — the mix of an exactly polarity-inverted
+ * pair is digital zero, so every mix-reading measurement here (the activity
+ * windows, both vetoes) sees silence where there may be a whispered line.
+ * Detected by LEVEL, not by counting zeros in the mix: frame silence is a
+ * product where a mix zero is a sum, and a zero count mistakes ordinary quiet
+ * quantised stereo for an inverted pair (N5). See
+ * `GATE_CANCELLATION_DEPTH_DB`. Asked of EVERY candidate region, before any
+ * veto, and never stepped past (I1).
+ */
+function regionCancellation(
+  channels: Float32Array[],
+  sampleRate: number,
+  span: { start: number; end: number }
+): string | null {
+  const length = Math.max(1, span.end - span.start);
+  let sumSq = 0;
+  for (const c of channels) {
+    for (let i = span.start; i < span.end; i++) sumSq += c[i] * c[i];
+  }
+  const rmsDb = toDb(Math.sqrt(sumSq / (length * Math.max(1, channels.length))));
+  const mix = mixSpan(channels, span.start, span.end);
+  let mixSumSq = 0;
+  for (let i = 0; i < mix.length; i++) mixSumSq += mix[i] * mix[i];
+  const mixRmsDb = toDb(Math.sqrt(mixSumSq / length));
+  if (rmsDb - mixRmsDb <= GATE_CANCELLATION_DEPTH_DB) return null;
+  return `the channels of the stretch at ${(span.start / sampleRate).toFixed(1)} s cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see it at all, and muting between activity could silence something nothing was able to read. Fix the inverted channel's polarity and run the chain again`;
+}
+
+/**
+ * The VOICED veto's statistic: the worst (largest) voiced fraction of any
+ * `NOISE_WINDOW_MS` group of pitch frames inside the region — a sliding
+ * maximum rather than one region-wide fraction, because
+ * `GATE_VOICED_FRACTION`'s populations were measured on 500 ms windows and a
+ * region-wide fraction would dilute a one-second hum inside a five-second
+ * pause below any constant those populations support. The pitch track runs
+ * once over the region; the sliding maximum reuses its frames.
+ */
+function maxWindowedVoicedFraction(mix: Float32Array, sampleRate: number): number {
+  const track = detectPitch(mix, sampleRate);
+  const frames = track.frames;
+  if (frames.length === 0) return 0;
+  const winSamples = Math.round((NOISE_WINDOW_MS / 1000) * sampleRate);
+  const perGroup = Math.min(
+    frames.length,
+    Math.max(1, Math.floor((winSamples - track.frameSamples) / track.hopSamples) + 1)
+  );
+  const prefix = new Int32Array(frames.length + 1);
+  for (let i = 0; i < frames.length; i++) {
+    prefix[i + 1] = prefix[i] + (frames[i].f0Hz !== null ? 1 : 0);
+  }
+  let worst = 0;
+  for (let i = 0; i + perGroup <= frames.length; i++) {
+    const fraction = (prefix[i + perGroup] - prefix[i]) / perGroup;
+    if (fraction > worst) worst = fraction;
+  }
+  return worst;
+}
+
+/** The VOCAL-TRACT veto's statistic: the worst windowed tilt residual inside
+ * the region — the same per-window measurement the activity segmentation
+ * reads, re-asked of the candidate on its own grid so a region whose edges
+ * moved during padding is still judged whole. Grid coverage reaches to within
+ * one 50 ms step of the region's end; the remainder is shorter than any
+ * length the classifier can carry a verdict on (see `GATE_MIN_REGION_MS`).
+ *
+ * MOSTLY-SILENT windows are not verdicts and are skipped, by the same
+ * `NOISE_WINDOW_MAX_SILENT_FRACTION` bound the noise search applies: the
+ * spectrum of a window straddling a digital-silence edge is the edge's own
+ * broadband step, not a room's or a voice's (the N2 boundary artefact), and a
+ * candidate holding a stretch of zeros beside its floor would otherwise be
+ * vetoed by its own silence. Nothing vocal hides in what this skips: a window
+ * that is mostly zeros beside REAL vocal material reads the material's shape
+ * and was already activity at segmentation, and an exactly cancelling pair —
+ * whose mix is zeros wall to wall — was declined before any veto ran. */
+function maxWindowedTilt(mix: Float32Array, sampleRate: number): number {
+  const win = Math.round((NOISE_WINDOW_MS / 1000) * sampleRate);
+  const zeroPrefix = new Float64Array(mix.length + 1);
+  for (let i = 0; i < mix.length; i++) zeroPrefix[i + 1] = zeroPrefix[i] + (mix[i] === 0 ? 1 : 0);
+  let worst = 0;
+  for (const row of windowedTiltResidualsDb(mix, sampleRate)) {
+    const zeros = zeroPrefix[Math.min(mix.length, row.startSample + win)] - zeroPrefix[row.startSample];
+    if (zeros / win > NOISE_WINDOW_MAX_SILENT_FRACTION) continue;
+    if (row.residualDb > worst) worst = row.residualDb;
+  }
+  return worst;
+}
+
 /**
  * @param manualThresholdDb A level the USER named, in dBFS. When present the
- * derivation is not attempted at all and this is the threshold — see the block
- * below for why the escape has to exist and why it wins.
+ * region derivation is not attempted at all and the old level-gate runs at
+ * this threshold — see the block below for why the escape has to exist and
+ * why it wins.
+ * @param words Fresh word evidence for this region, from
+ * {@link collectGateWordEvidence}, or null/absent when none exists — the
+ * automatic path then finds the activity by measurement alone, which is the
+ * MORE conservative rule (sub-floor singing is invisible to measurement, so
+ * without words such a take declines rather than gambles).
  */
 export function deriveGate(
   channels: Float32Array[],
   sampleRate: number,
-  manualThresholdDb?: number
+  manualThresholdDb?: number,
+  words?: GateWordEvidence | null
 ): StageResolution {
   const params = defaultParamsFor('noise-gate');
   // EVERY refusal of this stage ends the same way (V2/R2). Whatever the
@@ -1231,11 +1256,12 @@ export function deriveGate(
   //
   // Everything below this block is a measurement, and a measurement can be
   // absent: no statistic tells an UNSHAPED breath from room tone (see
-  // `GATE_SHAPED_RESIDUAL_DB`'s closing note), no search finds a pause in a
-  // take that has none, and `GATE_SEARCH_CLIMB_DB` deliberately refuses takes
-  // whose only readable pause is a different level regime. On those takes the
-  // stage used to have nothing to offer but a paragraph, and "no word, no
-  // sound" — the thing the user actually asked for — was unreachable.
+  // `GATE_SHAPED_RESIDUAL_DB`'s closing note), no evidence finds a pause in a
+  // take that has none, and the region path deliberately refuses to mute a
+  // take whose singing is too quiet for any measurement to vouch for when no
+  // word evidence exists. On those takes the stage used to have nothing to
+  // offer but a paragraph, and "no word, no sound" — the thing the user
+  // actually asked for — was unreachable.
   //
   // So a threshold the user names is taken as given. It wins over a successful
   // derivation as well, because a box that silently did nothing on the takes
@@ -1271,215 +1297,418 @@ export function deriveGate(
       ],
     };
   }
-  // The search refuses MOSTLY-SILENT candidate windows (the opt-in flag; see
-  // `NOISE_WINDOW_MAX_SILENT_FRACTION` in chainAnalysis.ts for both measured
-  // sides of its bound). On a take carrying a stretch of exact zeros — a
-  // trimmed lead-in, an edited stem, this chain's own gated output on a second
-  // run — the plain search returns the BOUNDARY between the silence and
-  // whatever adjoins it, and that window measures nothing: zeros dilute its
-  // RMS below every honest window's, its spectrum is an impulse's rather than
-  // a room's (measured, the shaping check refused a take with real one-second
-  // pauses at 10 of 10 sub-chunk offsets at 8 kHz over exactly that window),
-  // and its envelope peak is the ADJACENT material's, because exact zeros
-  // contribute nothing to a peak — so when the neighbour was a whispered verse
-  // the derived threshold sat 12.45 dB over it and the gate muted the verse
-  // the vocal-tract check exists to protect. Refusing those windows keeps the
-  // measurement honest for silence-next-to-floor (the next-quietest real
-  // window IS the floor, and the take gates) and for silence-next-to-whisper
-  // (the next-quietest real window IS the whisper, and the checks below
-  // decline) with the same rule.
+  // ── The automatic path: regions from activity (G2) ──────────────────────
   //
-  // It asks for the quietest `GATE_QUIET_WINDOWS` DISTINCT passages rather than
-  // the single quietest one, because the checks below can refuse a window and
-  // the take may still hold a pause somewhere else (V2). See that constant.
-  const candidates = measureNoiseWindows(channels, sampleRate, {
-    rejectMostlySilentWindows: true,
-    maxCandidates: GATE_QUIET_WINDOWS,
-  });
-  const noise = candidates[0];
-  if (!noise) {
-    // Nothing mostly-real anywhere: no 500 ms stretch is even three-quarters
-    // real samples, so whatever real material exists comes in fragments
-    // shorter than this app's own definition of a pause — and the stretches
-    // between them are already exact zeros, which is the very thing a gate
-    // produces. Always a DECLINE; the bare search is consulted only to phrase
-    // it. When even the bare window's material-plus-headroom level covers the
-    // whole take (the click train, the fake-mic tone over silence), the
-    // all-or-nothing wording is the actionable one and is kept — the same
-    // wording this shape produced before the mostly-silent reject existed. The
-    // stage never RUNS from a mostly-silent window in either case.
-    const bare = measureNoiseWindow(channels, sampleRate);
-    if (bare) {
-      const wouldGateAtDb = clampToParam('noise-gate', 'thresholdDb', bare.envelopePeakDb + GATE_HEADROOM_DB);
-      const bareEnv = envelopeFollower(maxAcrossChannels(channels), sampleRate, DETECT_ATTACK_MS, DETECT_RELEASE_MS);
-      const bareGateLin = Math.pow(10, wouldGateAtDb / 20);
-      let anySounding = false;
-      for (let i = 0; i < bareEnv.length && !anySounding; i++) if (bareEnv[i] > bareGateLin) anySounding = true;
-      if (!anySounding) {
-        return decline(
-          `nothing in the selection rises above the ${dbfsStr(wouldGateAtDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`
-        );
-      }
-    }
+  // No level is derived. The stage asks WHERE the vocal activity is, takes
+  // the stretches between as candidates, and mutes a candidate only when
+  // every protective check agrees nothing vocal lives in it:
+  //
+  //   1. ACTIVITY — word spans, when `collectGateWordEvidence` found fresh
+  //      ones: the only evidence that can vouch for singing too quiet to
+  //      measure (the louder-pauses scenario, which is the user's actual
+  //      complaint). With or without words, every 500 ms window reading
+  //      vocal-tract shape (`windowedTiltResidualsDb` over
+  //      `GATE_SHAPED_RESIDUAL_DB`) is activity too, so a whisper, a breath
+  //      or an unscripted line between words keeps its stretch out of the
+  //      candidates entirely.
+  //   2. GEOMETRY — a candidate seed is the union of the windows that read
+  //      as FLOOR, minus every word span, so a sample qualifies only when a
+  //      whole half-second around it measured floor-like and no word claims
+  //      it. Its start advances off the preceding activity's decay while the
+  //      envelope sits above the gap's own floor reference (the gap's
+  //      quietest mostly-real window's envelope peak plus `GATE_HEADROOM_DB`
+  //      — the level the settled floor never reaches); its end walks forward
+  //      over the floor to the next true onset the same way — the grid's
+  //      straddling windows leave up to half a second of plain floor
+  //      before an onset outside the seed, and the walk claims it, stopped
+  //      only by the envelope rising off the floor, by a word span's start,
+  //      or by material emerging from a `GATE_SILENT_RUN_MS` run of digital
+  //      silence, because silence is not evidence about what sits beside it
+  //      (N6's principle, region form). A finished candidate is at least
+  //      `GATE_MIN_REGION_MS` long.
+  //   3. VETOES — cancellation first, asked of EVERY candidate (a fact
+  //      about the file, never stepped past); then the voiced veto and the
+  //      vocal-tract veto per candidate, in the order the messages were
+  //      derived in. No stretch is muted on word-absence alone.
+  //   4. SILENCE — a gap that is digital silence, or that holds real audio
+  //      only as fragments inside digital silence, is skipped whole: zeros
+  //      stay zeros, and fragments the search cannot measure must not be
+  //      muted unheard (the eviction census's principle, in region form).
+  const n = channels[0]?.length ?? 0;
+  const windowSamples = Math.round((NOISE_WINDOW_MS / 1000) * sampleRate);
+  const stepSamples = Math.max(1, Math.round((NOISE_SEARCH_STEP_MS / 1000) * sampleRate));
+  const minRegionSamples = Math.round((GATE_MIN_REGION_MS / 1000) * sampleRate);
+  const silentRunSamples = Math.max(1, Math.round((GATE_SILENT_RUN_MS / 1000) * sampleRate));
+  if (n < windowSamples) {
     return decline(
-      `no ${NOISE_WINDOW_MS} ms passage of real material to measure the noise floor from — every candidate window is digital silence, or mostly digital silence — so the threshold cannot be derived. A take whose pauses are already exact zeros has nothing for a gate to do`
-    );
-  }
-  // Is the quietest window actually a PAUSE, or is it the programme?
-  //
-  // `measureNoiseWindow` returns the quietest 500 ms there is, which on a
-  // recording containing no pause at all is simply 500 ms of the recording. The
-  // threshold then lands above the material itself and the gate mutes the whole
-  // take. Three measured examples, all of which did exactly that before this
-  // guard: a continuous 440 Hz tone (100 % silenced), a stretch of room tone
-  // with no voice in it (100 %), and a click train whose clicks are 500 ms
-  // apart, so that EVERY window contains one and the quietest window still
-  // reads -5.6 dBFS (100 %).
-  //
-  // The test needs no threshold of its own, because the failure is total: on
-  // those three nothing whatsoever sits above the derived level, while a real
-  // take with pauses has 42 % of its samples above it and a very noisy take —
-  // the one Noise Reduction refuses, and the one this stage exists for — has
-  // 85 %. So the question is simply whether anything is left, asked with the
-  // effect's own comparison so the answer predicts what the effect would do.
-  //
-  // Asked of the QUIETEST candidate only, and that is not a shortcut: every
-  // other candidate is louder, so its threshold covers strictly more of the
-  // take. If nothing survives the lowest threshold on offer, nothing survives
-  // any of them, and the verdict is the take's rather than one window's.
-  const env = envelopeFollower(maxAcrossChannels(channels), sampleRate, attackMs, releaseMs);
-  const quietestThresholdDb = clampToParam(
-    'noise-gate',
-    'thresholdDb',
-    noise.envelopePeakDb + GATE_HEADROOM_DB
-  );
-  if (soundingAbove(quietestThresholdDb, env) === 0) {
-    return decline(
-      `nothing in the selection rises above the ${dbfsStr(quietestThresholdDb)} this stage would gate at, so the quietest ${NOISE_WINDOW_MS} ms is the material itself rather than a pause — there is no floor here to tell from the recording, and gating would mute all of it`
+      `the selection is shorter than the ${NOISE_WINDOW_MS} ms this app calls a pause, so nothing in it can be one`
     );
   }
 
-  // ...and is it a pause rather than SOFT SINGING, or an unvoiced vocal
-  // passage, or a cancelling stereo pair? `classifyQuietWindow` asks all three,
-  // and the answer decides only that ONE window: a take whose quietest
-  // half-second is a breath may still hold a pause a few decibels up, and until
-  // V2 nothing ever looked (see `GATE_QUIET_WINDOWS`). So the candidates are
-  // walked in level order and the threshold comes from the quietest one that
-  // passes every check.
-  //
-  // The QUIETEST window's verdict is kept whatever happens, because it is the
-  // one the decline reports: it is the passage the user can hear as the
-  // quietest thing in their take, and naming a louder one would send them
-  // looking in the wrong place. Only that window is judged in the canonical
-  // order; the rest are judged cheap-first, which cannot change whether they
-  // pass.
-  //
-  // First, though, the one verdict that is NOT a content check and may not be
-  // stepped past (M9/I1). A cancelling window is not a window that failed to
-  // be a pause; it is a window nothing can read, and what a threshold would
-  // mute there is unknowable by construction. It is therefore asked of EVERY
-  // candidate the search returned — including the ones the climb bound would
-  // skip, since the diagnosis is about the file rather than about this
-  // window's suitability — and the first one found ends the stage. Cheap: one
-  // mix and one sum over 500 ms per candidate, beside a pitch track that costs
-  // a hundred times more.
-  for (let i = 0; i < candidates.length; i++) {
-    const cancelling = cancellationDiagnosis(channels, sampleRate, candidates[i], i === 0);
+  const mono = monoMix(channels);
+  const frameSilent = (i: number): boolean => {
+    for (const c of channels) if (c[i] !== 0) return false;
+    return true;
+  };
+
+  // 1. The per-window verdicts, once over the whole region. A window over the
+  // vocal-tract boundary is ACTIVITY; a window under it is a FLOOR VERDICT,
+  // and the muteable seed is the union of the floor windows' spans minus
+  // every word span — a sample is a candidate only when at least one whole
+  // half-second containing it measured floor-like AND no word claims it.
+  // Both edge behaviours of this construction are load-bearing: a window
+  // straddling a phrase edge reads the phrase's shape (activity), so the
+  // seed's boundary lands within one 50 ms grid step of where the floor
+  // really begins; and a window that touches vocal material with almost all
+  // of its span in digital silence still reads the MATERIAL's shape — zeros
+  // have no spectrum to dilute with — so silence never vouches for what sits
+  // beside it (the N2/N3 family).
+  const tiltRows = windowedTiltResidualsDb(mono, sampleRate);
+  const shapedSpans: { start: number; end: number }[] = [];
+  const floorCovered = new Uint8Array(n);
+  for (const row of tiltRows) {
+    const rowEnd = Math.min(n, row.startSample + windowSamples);
+    if (row.residualDb > GATE_SHAPED_RESIDUAL_DB) {
+      const last = shapedSpans[shapedSpans.length - 1];
+      if (last && row.startSample <= last.end) last.end = rowEnd;
+      else shapedSpans.push({ start: row.startSample, end: rowEnd });
+      continue;
+    }
+    floorCovered.fill(1, row.startSample, rowEnd);
+  }
+  // What is deliberately NOT subtracted: the SPANS of the shaped windows. A
+  // shaped window straddling a phrase edge covers up to 450 ms of plain
+  // floor, and subtracting its whole span erases every pause shorter than
+  // about 1.4 s — measured, the fixtures with 0.8-1.0 s pauses lost their
+  // seeds entirely. The floor-verdict windows' own testimony stands instead,
+  // and the cost is bounded and stated: a boundary window can carry a sliver
+  // of an adjacent quiet vocal's edge (at most the fraction that still reads
+  // under the boundary — beyond ~a fifth of a window the shape verdict flips)
+  // and that sliver can be muted with the floor. The vocal's BODY is
+  // protected by the windows centred on it, the envelope contraction below
+  // trims any edge that rises above the local floor, and the old threshold
+  // design muted the same sub-floor slivers wholesale.
+  const wordSpans = (words ? words.spans : [])
+    .map((s) => ({
+      start: Math.max(0, Math.min(n, Math.floor(s.startSample))),
+      end: Math.max(0, Math.min(n, Math.ceil(s.endSample))),
+    }))
+    .filter((s) => s.end > s.start);
+  for (const s of wordSpans) floorCovered.fill(0, s.start, s.end);
+
+  if (shapedSpans.length === 0 && wordSpans.length === 0) {
+    // Nothing anywhere reads as a performance, so "the stretches between
+    // activity" would be the whole selection and muting them would mute all
+    // of it. Before saying so, the one file this measurement cannot read at
+    // all: the activity pass reads the MIX, and the mix of an exactly
+    // inverted pair is digital zero — silence to every window — so the
+    // quietest real half-second is asked whether it cancels first (M9).
+    const quietest = measureNoiseWindow(channels, sampleRate, { rejectMostlySilentWindows: true });
+    if (quietest) {
+      const cancelling = regionCancellation(channels, sampleRate, {
+        start: quietest.startSample,
+        end: quietest.startSample + quietest.lengthSamples,
+      });
+      if (cancelling !== null) return decline(cancelling);
+      return decline(
+        `nothing in the selection reads as vocal activity — every ${NOISE_WINDOW_MS} ms of it measures like a noise floor, with no voiced frames and no vocal-tract shape — so the quiet stretches ARE the material, and muting the stretches between activity would mute all of it`
+      );
+    }
+    return decline(
+      `no ${NOISE_WINDOW_MS} ms passage of real material anywhere in the selection — every stretch is digital silence, or real audio surviving only as fragments inside digital silence — and a take whose pauses are already exact zeros has nothing for a gate to do`
+    );
+  }
+
+  // The word spans' starts bound the end-walk below: evidence boundaries are
+  // never crossed, where a measured window boundary is grid quantisation the
+  // walk exists to cross.
+  const hardStarts = wordSpans.map((s) => s.start).sort((a, b) => a - b);
+  // Infinity, not `n`, when no word start lies ahead: the sentinel must not
+  // masquerade as a word boundary, because a cap AT a word boundary is
+  // trusted evidence while a cap at the take's end is as blind as any other.
+  const nextHardStart = (from: number): number => {
+    for (const h of hardStarts) if (h >= from) return h;
+    return Infinity;
+  };
+
+  // 2. The gaps: maximal runs of the muteable seed, each judged on its own
+  // local evidence.
+  const gaps: { start: number; end: number }[] = [];
+  {
+    let runStart = -1;
+    for (let i = 0; i <= n; i++) {
+      const covered = i < n && floorCovered[i] === 1;
+      if (covered && runStart < 0) runStart = i;
+      else if (!covered && runStart >= 0) {
+        gaps.push({ start: runStart, end: i });
+        runStart = -1;
+      }
+    }
+  }
+  if (gaps.length === 0) {
+    return decline(
+      `the selection never pauses — vocal activity covers all of it, and a stretch between activity is the only thing this stage may mute`
+    );
+  }
+
+  const env = envelopeFollower(maxAcrossChannels(channels), sampleRate, attackMs, releaseMs);
+  const holdSamples = Math.max(1, Math.round((GATE_HOLD_MS / 1000) * sampleRate));
+  // Shape coverage, for the edges level cannot place: a vocal QUIETER than
+  // the gap's own floor never lifts the envelope over the reference, so where
+  // the envelope rule runs out, the region's edge retreats out of any sample
+  // the shaped windows claim.
+  const shapedCovered = new Uint8Array(n);
+  for (const s of shapedSpans) shapedCovered.fill(1, s.start, s.end);
+  let shortGaps = 0;
+  let silentGaps = 0;
+  const candidates: { start: number; end: number }[] = [];
+  for (const gap of gaps) {
+    if (gap.end - gap.start < minRegionSamples) {
+      shortGaps++;
+      continue;
+    }
+    // The gap's own floor, as CONTEXT only — the energy reference the edges
+    // are placed against, never a threshold that decides muting. Two refusals
+    // ride on the same measurement, and both are the eviction census's
+    // principle in region form (quiet content must not be destroyed
+    // unexamined): a gap with NO mostly-real window is digital silence or
+    // fragments inside it, and a gap whose census reports at least one
+    // `TILT_FFT_SIZE` frame of real audio hidden inside evicted windows is
+    // skipped whole, because at fragment lengths the veto populations invert
+    // (an all-real floor run of 1024 samples reads 3.9 dB where a whisper
+    // reads 2.6 at 44.1 kHz) and no veto can vouch for what it cannot read.
+    //
+    // The census arm is LAST-LINE defence, stated honestly: every constructed
+    // member of the hidden-fragment family is caught before it — a fragment
+    // needs digital silence around it to hide, a window straddling a silence
+    // edge reads the edge's broadband step as vocal shape and splits the gap,
+    // and the emergence hold below spares whatever follows a run of zeros —
+    // so no fixture has reached this check with the guards above intact. It
+    // stands because the cost of a shape that someday defeats all three is a
+    // muted whisper, and the check is one comparison on a measurement already
+    // taken.
+    const gapChannels = channels.map((c) => c.subarray(gap.start, gap.end));
+    const local = measureNoiseWindow(gapChannels, sampleRate, { rejectMostlySilentWindows: true });
+    if (!local || (local.hiddenRealSamples ?? 0) >= TILT_FFT_SIZE) {
+      silentGaps++;
+      continue;
+    }
+    const floorRefLin = Math.pow(10, (local.envelopePeakDb + GATE_HEADROOM_DB) / 20);
+    // Start: pad off the preceding activity's decay tail — grow while the
+    // envelope still sits above the floor reference (evidence-extended, not a
+    // fixed pad). When there is no decay to pad off — the envelope already
+    // sits at the floor — level has nothing to say about this edge, and the
+    // start instead advances out of any samples the SHAPED windows claim:
+    // after an ordinary phrase that is the straddle slack (about the old
+    // design's hold), and after a sub-floor vocal it is the vocal's own tail,
+    // which the envelope could never have seen.
+    // The follower warms up from zero over its 1 ms attack, so a gap starting
+    // at the take's very first sample reads a cold envelope there; the branch
+    // is decided where the envelope first carries a settled reading (four
+    // attack constants in — 98 % settled), and the pad walks through the cold
+    // zone it skipped.
+    let start = gap.start;
+    const settledAt =
+      start === 0
+        ? Math.min(gap.end - 1, Math.max(1, Math.round(((DETECT_ATTACK_MS * 4) / 1000) * sampleRate)))
+        : start;
+    if (env[settledAt] > floorRefLin) {
+      while (start < gap.end && (start < settledAt || env[start] > floorRefLin)) start++;
+    } else {
+      while (start < gap.end && shapedCovered[start] === 1) start++;
+    }
+    // End: pad back off onset energy the same way — or, when the gap already
+    // ends at the floor, walk forward to the true onset over the one grid
+    // step of slack the seed's window quantisation leaves before real
+    // material. The floor cannot stop that walk early — its envelope never
+    // reaches the reference, which is GATE_HEADROOM_DB's own population.
+    // HOW THE WALK STOPS is itself evidence: stopping on the envelope rising
+    // means a real onset was found and the edge is placed exactly there;
+    // running out of cap with the envelope still at the floor means whatever
+    // comes next is QUIETER than the muteable floor — an edge level cannot
+    // place — and the end then retreats out of every sample the shaped
+    // windows claim, so a whisper's sub-floor head is surrendered to the
+    // shape evidence rather than muted on level's blindness.
+    let end = gap.end;
+    if (end > start && env[end - 1] > floorRefLin) {
+      while (end > start && env[end - 1] > floorRefLin) end--;
+    } else {
+      const hardCap = nextHardStart(gap.end);
+      const cap = Math.min(n, gap.end + stepSamples, hardCap);
+      while (end < cap && env[end] <= floorRefLin) end++;
+      // A blind stop — the cap reached with the envelope still at the floor —
+      // only counts as blind when the cap was NOT a word boundary: a word
+      // span's start IS the evidence of the edge (a word can begin from
+      // nothing), where a grid cap with no envelope rise means the next
+      // material is quieter than the floor and only the shape evidence can
+      // place the edge.
+      if (end >= cap && cap < hardCap && (end >= n || env[end] <= floorRefLin)) {
+        while (end > start && shapedCovered[end - 1] === 1) end--;
+      }
+    }
+    if (end <= start) {
+      shortGaps++;
+      continue;
+    }
+    // The GATE_SILENT_RUN_MS principle in region form (N6): a run of digital
+    // silence is silence somebody put there, and the material that emerges
+    // from it must not be muted on the silence's account — it gets the same
+    // `GATE_HOLD_MS` the old gate spent open after every such run. So the
+    // region is SPLIT at each emergence: the part before the run is kept as
+    // its own candidate, the emerging material and one hold after it are
+    // left alone, and muting may resume beyond the hold. A quiet island
+    // bracketed by zeros, a stray blip inside a trimmed lead-in, and the
+    // first pause after that lead-in all fall out of this one rule exactly
+    // as they fell out of the old state machine.
+    const parts: { start: number; end: number }[] = [];
+    {
+      let partStart = start;
+      let zeroRun = 0;
+      let i = start;
+      while (i < end) {
+        if (frameSilent(i)) {
+          zeroRun++;
+          i++;
+          continue;
+        }
+        if (zeroRun >= silentRunSamples) {
+          if (i > partStart) parts.push({ start: partStart, end: i });
+          partStart = Math.min(end, i + holdSamples);
+          i = partStart;
+        } else {
+          i++;
+        }
+        zeroRun = 0;
+      }
+      if (end > partStart) parts.push({ start: partStart, end });
+    }
+    for (const part of parts) {
+      if (part.end - part.start < minRegionSamples) {
+        shortGaps++;
+        continue;
+      }
+      let anyReal = false;
+      for (let i = part.start; i < part.end && !anyReal; i++) if (!frameSilent(i)) anyReal = true;
+      if (!anyReal) {
+        silentGaps++;
+        continue;
+      }
+      candidates.push(part);
+    }
+  }
+
+  // 3a. Cancellation — every candidate, before any veto, never stepped past.
+  for (const candidate of candidates) {
+    const cancelling = regionCancellation(channels, sampleRate, candidate);
     if (cancelling !== null) return decline(cancelling);
   }
 
-  // A candidate that would raise the close by more than `GATE_SEARCH_CLIMB_DB`
-  // is not a second reading of the same room, it is a different level regime,
-  // and deriving there would mute the quieter passage the checks just called
-  // voice. Skipped rather than stopped on: the list is ordered by window RMS,
-  // and a later candidate can peak lower than an earlier one.
-  let accepted: NoiseWindow | null = null;
-  let quietestReason: string | null = null;
-  let searched = 0;
-  let skippedForClimb = 0;
-  for (let i = 0; i < candidates.length; i++) {
-    if (i > 0 && candidates[i].envelopePeakDb - noise.envelopePeakDb > GATE_SEARCH_CLIMB_DB) {
-      skippedForClimb++;
+  // 3b. The vetoes, voiced first — the canonical order the messages were
+  // derived in. A veto keeps the WHOLE candidate: a gate that cannot tell a
+  // pause from a soft phrase must not mute one, and chopping around a voice
+  // would be muting on the same ignorance.
+  let keptVoiced = 0;
+  let keptShapedVeto = 0;
+  const muteRegions: { start: number; end: number }[] = [];
+  for (const candidate of candidates) {
+    const mix = mixSpan(channels, candidate.start, candidate.end);
+    // The vetoes stop one grid step short of the region's end. The end was
+    // placed by the envelope CROSSING INTO the next activity, so the final
+    // samples can carry the onset's own leading edge (the follower's 1 ms
+    // attack admits it) — and on a quiet floor even a few full-scale onset
+    // samples dominate a window's average spectrum and would veto the region
+    // with evidence about the NEIGHBOUR, which the walk already knew was
+    // activity when it stopped there. Regions at the minimum length keep
+    // their one full window regardless — a false veto there errs toward
+    // keeping audio, never toward muting it.
+    const vetoLen = Math.max(windowSamples, mix.length - stepSamples);
+    const vetoMix = vetoLen < mix.length ? mix.subarray(0, vetoLen) : mix;
+    if (maxWindowedVoicedFraction(vetoMix, sampleRate) > GATE_VOICED_FRACTION) {
+      keptVoiced++;
       continue;
     }
-    searched++;
-    const reason = classifyQuietWindow(channels, sampleRate, candidates[i], i > 0);
-    if (i === 0) quietestReason = reason;
-    if (reason === null) {
-      accepted = candidates[i];
-      break;
+    if (maxWindowedTilt(vetoMix, sampleRate) > GATE_SHAPED_RESIDUAL_DB) {
+      keptShapedVeto++;
+      continue;
+    }
+    muteRegions.push(candidate);
+  }
+
+  if (muteRegions.length === 0) {
+    const parts: string[] = [];
+    if (keptVoiced + keptShapedVeto > 0) {
+      parts.push(
+        `${keptVoiced + keptShapedVeto} carry vocal evidence themselves (${keptVoiced} voiced — singing or humming — and ${keptShapedVeto} shaped by a vocal tract: a whisper, a breath, a held consonant)`
+      );
+    }
+    if (shortGaps > 0) {
+      parts.push(`${shortGaps} are shorter than the ${GATE_MIN_REGION_MS} ms this app calls a pause rather than articulation`);
+    }
+    if (silentGaps > 0) {
+      parts.push(
+        `${silentGaps} are already digital silence, or hold real audio only as fragments inside digital silence, and a gate has nothing to do with either`
+      );
+    }
+    return decline(
+      `no stretch between this take's vocal activity qualifies for muting — of the ${gaps.length} ${
+        gaps.length === 1 ? 'stretch' : 'stretches'
+      } found, ${parts.join('; ')}`
+    );
+  }
+
+  // 4. The honest report: which evidence decided, what is muted, what was
+  // kept. The `Gated` truth is measured on the OUTPUT by `describeStage`, so
+  // these rows state the plan and the output row corroborates it.
+  // The stretches between words kept purely on MEASURED vocal-tract evidence
+  // (an unscripted whisper or breath no word claims) — counted only when word
+  // evidence exists, because without words the shaped stretches ARE how the
+  // performance itself is found and counting the singing as "kept" would be
+  // noise dressed as information. Counted as fragments of the shaped coverage
+  // OUTSIDE the word spans that are at least one window long: shorter
+  // remainders are the straddle slack every word's own edge windows leave and
+  // name nothing the user could listen for.
+  let keptShapedSpans = 0;
+  if (words) {
+    for (const s of shapedSpans) {
+      let cursor = s.start;
+      const cuts = wordSpans
+        .filter((w) => w.start < s.end && w.end > s.start)
+        .sort((a, b) => a.start - b.start);
+      for (const w of cuts) {
+        if (w.start - cursor >= windowSamples) keptShapedSpans++;
+        cursor = Math.max(cursor, w.end);
+      }
+      if (s.end - cursor >= windowSamples) keptShapedSpans++;
     }
   }
-  if (accepted === null) {
-    return decline(
-      `${quietestReason as string}. ${
-        searched === 1
-          ? `It is the only ${NOISE_WINDOW_MS} ms passage in the selection this stage can measure a floor from${
-              skippedForClimb > 0
-                ? `: the other quiet passages here sit more than ${GATE_SEARCH_CLIMB_DB} dB louder, and a threshold taken from one of those would mute this one`
-                : ''
-            }`
-          : `Nor does anything else: the ${searched} quietest comparable passages of the selection were each checked, and every one of them reads as material rather than a floor`
-      }`
-    );
+  const mutedSamples = muteRegions.reduce((sum, r) => sum + (r.end - r.start), 0);
+  const derived: DerivedValue[] = [
+    {
+      label: 'Evidence',
+      value: words
+        ? words.source === 'lyrics-alignment'
+          ? 'your aligned lyrics, plus measured activity'
+          : 'the transcript’s segments, plus measured activity'
+        : 'measured activity (no fresh lyrics alignment or transcript)',
+      from: words
+        ? `${words.spans.length} word ${words.spans.length === 1 ? 'span' : 'spans'} placed for exactly this audio mark the singing, every ${NOISE_WINDOW_MS} ms reading vocal-tract shape is kept as well, and only the stretches between all of that are candidates`
+        : `no word placement exists for this audio (run Pipeline → Align Lyrics… or Transcribe first for word-level evidence), so activity is what the vocal-tract measurement finds per ${NOISE_WINDOW_MS} ms, and only the stretches showing neither voice nor vocal shape are candidates`,
+    },
+    {
+      label: 'Muted',
+      value: `${muteRegions.length} ${muteRegions.length === 1 ? 'region' : 'regions'} · ${(mutedSamples / sampleRate).toFixed(1)} s`,
+      from: `the stretches of at least ${GATE_MIN_REGION_MS} ms between vocal activity that passed every protective check — each becomes digital silence behind a ${releaseMs.toFixed(0)} ms fade and reopens instantly at the next activity`,
+    },
+  ];
+  const keptTotal = keptVoiced + keptShapedVeto + keptShapedSpans;
+  if (keptTotal > 0) {
+    derived.push({
+      label: 'Kept',
+      value: `${keptTotal} ${keptTotal === 1 ? 'stretch' : 'stretches'}`,
+      from: `no stretch is muted on word-absence alone: ${keptVoiced} kept for voiced frames (singing or humming) and ${keptShapedVeto + keptShapedSpans} for vocal-tract evidence (a whisper, a breath, a held consonant)`,
+    });
   }
-  const thresholdDb = clampToParam('noise-gate', 'thresholdDb', accepted.envelopePeakDb + GATE_HEADROOM_DB);
-
-  // ...and the audio the search never SAW? (N4, the eviction's blind spot.)
-  // Refusing mostly-silent windows is right for the threshold, but when a
-  // quiet passage is ITSELF mostly zeros — an 8-bit transfer whose whisper
-  // sits at its own LSB, a verse strip-silenced into 150 ms fragments —
-  // every window over it is refused, the search falls through to a louder
-  // floor-like window, and the threshold lands above the hidden passage
-  // (measured before this guard: 100 % of such a verse muted). The search
-  // keeps accounts: real frames inside evicted-quieter windows that no
-  // accepted window covers. On silence-beside-floor takes that number is
-  // zero, which is exactly why they may gate; here it is not, and the stage
-  // declines rather than classifying — measured, a tilt fit at the lengths
-  // that can stay hidden has single-frame variance (an all-real FLOOR run of
-  // 1024 samples reads up to 3.9 dB, above the whisper population's own
-  // 44.1 kHz minimum of 2.41 dB), so no constant separates the populations
-  // there. Below one `TILT_FFT_SIZE` frame in total, the hidden material
-  // could not carry even one verdict and is treated as debris.
-  //
-  // Asked of the ACCEPTED candidate, whose census counts what stayed hidden
-  // BELOW ITS OWN LEVEL — the material a threshold derived there could mute.
-  // A louder candidate hides at least as much as a quieter one, so this is
-  // also the strictest question the accepted window could be asked, and there
-  // is no louder candidate that could pass it after this one has failed.
-  const hiddenReal = accepted.hiddenRealSamples ?? 0;
-  if (hiddenReal >= TILT_FFT_SIZE) {
-    return decline(
-      `this take hides real audio inside its stretches of digital silence — ${(hiddenReal / sampleRate).toFixed(2)} s of fragments too interleaved with exact zeros for any ${NOISE_WINDOW_MS} ms window of the noise search to measure — and a threshold derived without ever seeing them could mute a quiet phrase`
-    );
-  }
-
-  params.thresholdDb = thresholdDb;
-  return {
-    run: true,
-    params,
-    derived: [
-      {
-        label: 'Threshold',
-        value: dbfsStr(thresholdDb),
-        from: `${GATE_HEADROOM_DB} dB over the ${dbfsStr(accepted.envelopePeakDb)} the silence detector reads inside ${
-          accepted === noise
-            ? `the quietest ${NOISE_WINDOW_MS} ms`
-            : `the quietest ${NOISE_WINDOW_MS} ms that reads as a pause (at ${(accepted.startSample / sampleRate).toFixed(1)} s — quieter passages were checked first and turned out to be material)`
-        } — the same floor grazes that level again in a longer pause, and one graze re-opens a gate`,
-      },
-      {
-        label: 'Gated',
-        value: `${gatedSecondsAt(thresholdDb, env).toFixed(1)} s`,
-        from: `the part of the selection sitting under that threshold — the rest stays at full level`,
-      },
-      {
-        label: 'Hold',
-        value: `${holdMs.toFixed(0)} ms`,
-        from: `the shortest gap this app calls a pause rather than articulation (Remove Silence's own minimum), so nothing briefer can close the gate — the ${releaseMs.toFixed(0)} ms release is the detector the threshold was measured with`,
-      },
-    ],
-  };
+  return { run: true, params, extra: { muteRegions }, derived };
 }
 
 /**
@@ -1600,7 +1829,8 @@ function resolveStage(
   channels: Float32Array[],
   sampleRate: number,
   f0P1Hz: number | null,
-  gateThresholdDb?: number
+  gateThresholdDb?: number,
+  gateWords?: GateWordEvidence | null
 ): StageResolution {
   switch (stage.id) {
     case 'noise':
@@ -1610,7 +1840,7 @@ function resolveStage(
     case 'silence':
       return deriveRemoveSilence(channels, sampleRate);
     case 'gate':
-      return deriveGate(channels, sampleRate, gateThresholdDb);
+      return deriveGate(channels, sampleRate, gateThresholdDb, gateWords);
     case 'compressor':
       return deriveCompressor(channels, sampleRate);
     case 'deEsser':
@@ -1918,6 +2148,14 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
   const sampleRate = doc.sampleRate;
   const regionSamples = end - start;
 
+  // G2: the word evidence the gate reads, collected ONCE against the document
+  // the chain is about to edit and mapped into this run's region frame —
+  // there is no second doc identity to drift from, because this is the same
+  // `docId` the edit below lands on. Collected BEFORE any stage runs: the
+  // freshness test compares the stored spans' channel identity with the
+  // document's, and the chain's own edit has not landed yet.
+  const gateWords = collectGateWordEvidence(docId, start, end);
+
   const active = VOCAL_CHAIN_STAGES.filter((s) => s.effectId !== null && enabled[s.id] === true);
   const totalWeight = active.reduce((sum, s) => sum + s.weight, 0);
 
@@ -1956,7 +2194,14 @@ export async function runVocalChain(opts: RunVocalChainOptions): Promise<VocalCh
     // the verdict of a measurement that has to happen first, and Match Reverb's
     // is the longest in either chain.
     await announceMeasuring(onStageProgress, stage.id, stage.label);
-    const resolution = resolveStage(stage, channels, sampleRate, f0P1Hz, gateThresholdDb);
+    // The gate's word spans are region-frame sample positions, so they are
+    // only handed over while the audio still HAS that frame: a length-changing
+    // stage ahead of the gate (Remove Silence) moves every sample after its
+    // first cut, and spans applied to the moved audio would gate the
+    // performance itself. Dropped rather than mis-applied — the same rule the
+    // document-level staleness test enforces, one edit earlier.
+    const wordsStillPlaced = (channels[0]?.length ?? 0) === regionSamples ? gateWords : null;
+    const resolution = resolveStage(stage, channels, sampleRate, f0P1Hz, gateThresholdDb, wordsStillPlaced);
     if (!resolution.run) {
       record({
         id: stage.id,

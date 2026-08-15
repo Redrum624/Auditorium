@@ -4,14 +4,14 @@ import {
   GATE_CANCELLATION_DEPTH_DB,
   GATE_HEADROOM_DB,
   GATE_HOLD_MS,
-  GATE_QUIET_WINDOWS,
-  GATE_SEARCH_CLIMB_DB,
+  GATE_MIN_REGION_MS,
   GATE_SHAPED_RESIDUAL_DB,
   GATE_VOICED_FRACTION,
   STAGE_MEASURING_DETAIL,
   STAGE_RENDERING_DETAIL,
   VOCAL_CHAIN_STAGES,
   VOCAL_CHAIN_UNDO_LABEL,
+  collectGateWordEvidence,
   defaultStageSelection,
   deriveCompressor,
   deriveDeEsser,
@@ -23,6 +23,8 @@ import {
   runVocalChain,
   stageById,
   stageRenderingDetail,
+  type GateWordEvidence,
+  type StageResolution,
   type VocalChainStageId,
   type VocalChainStageProgress,
   type VocalChainStageResult,
@@ -37,6 +39,8 @@ import { detectPitch } from '../dsp/pitchDetect';
 import * as pitchDetect from '../dsp/pitchDetect';
 import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
+import * as alignLyricsService from './alignLyricsService';
+import * as transcribeService from './transcribeService';
 import { getHistory, undo } from './undoHistory';
 import { ALIGN_ACCURACY_SENTENCE } from '../dsp/ctcAlign';
 import {
@@ -44,7 +48,6 @@ import {
   NOISE_WINDOW_MS,
   TILT_FFT_SIZE,
   measureNoiseWindow,
-  measureNoiseWindows,
   programmeRmsDb,
   spectralTiltResidualDb,
   toDb,
@@ -1019,17 +1022,27 @@ describe('deriveRemoveSilence', () => {
 // ── deriveGate (CC1) ────────────────────────────────────────────────────────
 
 describe('deriveGate', () => {
-  const peakDbOf = (c: Float32Array): number => {
-    let peak = 0;
-    for (const v of c) peak = Math.max(peak, Math.abs(v));
-    return toDb(peak);
-  };
-
-  function withNoisyGap(windows: number, loud: number, quiet: number, quietAt: number): Float32Array {
-    const out = flat(WIN * windows, loud);
-    out.set(noise(WIN, quiet, 101), quietAt * WIN);
-    return out;
+  /** Applies an automatic (region) result the way the chain does: through the
+   * noise-gate effect's mute-region side channel. Manual results carry no
+   * `extra` and run the threshold machine, exactly as in the chain. */
+  function applyGate(channels: Float32Array[], res: StageResolution, sr = SR): Float32Array[] {
+    if (!res.run) throw new Error('expected run');
+    (globalThis as { __effectExtra?: unknown }).__effectExtra = res.extra;
+    try {
+      return noiseGateEffect.process(
+        channels.map((c) => Float32Array.from(c)),
+        sr,
+        res.params
+      ).channels;
+    } finally {
+      delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+    }
   }
+
+  const muteRegionsOf = (res: StageResolution): { start: number; end: number }[] => {
+    if (!res.run) throw new Error('expected run');
+    return (res.extra as { muteRegions: { start: number; end: number }[] }).muteRegions;
+  };
 
   /** A take that never stops but changes dynamic: a soft sustained verse
    * followed by a loud one, over a floor so low that no window is ever bare
@@ -1172,63 +1185,95 @@ describe('deriveGate', () => {
     return z / w.length;
   }
 
-  it('sets the threshold from the measured floor, above the loudest the detector reads there', () => {
-    const signal = withNoisyGap(8, 0.5, 0.006, 4);
-    const floor = measureNoiseWindow([signal], SR)!;
-    const res = deriveGate([signal], SR);
-    if (!res.run) throw new Error('expected run');
-    // Strictly above, not equal: a threshold AT the floor's own peak is grazed
-    // by the same floor a moment later and the gate re-opens for a full hold.
-    expect(Number(res.params.thresholdDb)).toBeGreaterThan(floor.envelopePeakDb);
-    expect(Number(res.params.thresholdDb)).toBe(floor.envelopePeakDb + GATE_HEADROOM_DB);
+  it('decides regions, not a level: every muted region lies inside a pause, and each pause’s tail reaches silence', () => {
+    const { channel, pauses } = takeWithSilentLeadIn(0);
+    const res = deriveGate([channel], SR);
+    expect(res.run).toBe(true);
+    if (!res.run) return;
+    const regions = muteRegionsOf(res);
+    expect(regions.length).toBeGreaterThan(0);
+    // WHERE, not how loud: each region sits inside a pause — its start past
+    // the phrase's decay, its end at the next onset (the walk may overshoot
+    // by the few ms the onset contour needs to rise off the floor).
+    for (const r of regions) {
+      expect(pauses.some((p) => r.start >= p.start && r.end <= p.end + Math.round(0.01 * SR))).toBe(true);
+    }
+    const out = applyGate([channel], res)[0];
+    for (const p of pauses) {
+      let sum = 0;
+      const tail = Math.round(0.3 * SR);
+      for (let i = p.end - tail; i < p.end; i++) sum += out[i] * out[i];
+      expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
+    }
   });
 
-  it('tracks the material: a 6 dB quieter floor gives a 6 dB lower threshold', () => {
-    const a = deriveGate([withNoisyGap(8, 0.5, 0.012, 4)], SR);
-    const b = deriveGate([withNoisyGap(8, 0.5, 0.006, 4)], SR);
-    if (!a.run || !b.run) throw new Error('expected both to run');
-    expect(Number(a.params.thresholdDb) - Number(b.params.thresholdDb)).toBeCloseTo(6.0206, 1);
+  it('mutes pause noise at ANY level — a 12 dB louder floor changes the regions, not the verdict', () => {
+    // The design's core property, stated as the old threshold's inverse: the
+    // decision is where the activity is, so making the pauses LOUDER changes
+    // nothing about whether they are muted.
+    for (const floorDb of [-50, -38]) {
+      const pause = Math.round(1.0 * SR);
+      const phrase = Math.round(0.8 * SR);
+      const channel = gaussFloorDb(3 * pause + 2 * phrase, floorDb, 7);
+      const pauses: { start: number; end: number }[] = [];
+      let at = 0;
+      for (const [sung, len] of [
+        [false, pause],
+        [true, phrase],
+        [false, pause],
+        [true, phrase],
+        [false, pause],
+      ] as const) {
+        if (!sung) pauses.push({ start: at, end: at + len });
+        else {
+          let phase = 0;
+          for (let i = 0; i < len; i++) {
+            const t = i / SR;
+            phase += (2 * Math.PI * 220) / SR;
+            const c = Math.min(1, t / 0.04) * Math.min(1, (len / SR - t) / 0.06);
+            channel[at + i] += 0.25 * c * Math.sin(phase);
+          }
+        }
+        at += len;
+      }
+      const res = deriveGate([channel], SR);
+      expect([floorDb, res.run]).toEqual([floorDb, true]);
+      if (!res.run) return;
+      const out = applyGate([channel], res)[0];
+      const tail = Math.round(0.3 * SR);
+      for (const p of pauses) {
+        let sum = 0;
+        for (let i = p.end - tail; i < p.end; i++) sum += out[i] * out[i];
+        expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
+      }
+    }
   });
 
-  it('runs its detector with the constants the threshold was measured with', () => {
-    // Not a preference: `envelopePeakDb` IS the peak of an envelope followed at
-    // these two constants, so a gate detector using any others measures a
-    // different envelope and the threshold stops meaning what it measured.
-    const res = deriveGate([withNoisyGap(8, 0.5, 0.006, 4)], SR);
+  it('carries the detector constants and the geometry constants as the reuses they are', () => {
+    // The fade the regions close behind is the silence detector's own release
+    // (the same 20 ms linear-in-dB edge the manual gate uses), and the
+    // minimum region is Remove Silence's own minimum pause — the same reuse
+    // GATE_HOLD_MS makes. Reuses, not new numbers.
+    const { channel } = takeWithSilentLeadIn(0);
+    const res = deriveGate([channel], SR);
     if (!res.run) throw new Error('expected run');
     expect(Number(res.params.attackMs)).toBe(DETECT_ATTACK_MS);
     expect(Number(res.params.releaseMs)).toBe(DETECT_RELEASE_MS);
-  });
-
-  it('holds for the shortest gap this app is willing to call a pause', () => {
-    const res = deriveGate([withNoisyGap(8, 0.5, 0.006, 4)], SR);
-    if (!res.run) throw new Error('expected run');
-    // Remove Silence's own minimum, and the same constant the noise window is
-    // measured over: the gate may only close on what Remove Silence would have
-    // been willing to cut.
     const minSilence = getEffect('remove-silence')!.params.find((p) => p.id === 'minSilenceMs')!.default;
-    expect(GATE_HOLD_MS).toBe(Number(minSilence));
+    expect(GATE_MIN_REGION_MS).toBe(Number(minSilence));
+    expect(GATE_MIN_REGION_MS).toBe(NOISE_WINDOW_MS);
     expect(GATE_HOLD_MS).toBe(NOISE_WINDOW_MS);
-    expect(Number(res.params.holdMs)).toBe(GATE_HOLD_MS);
   });
 
-  it('clamps into the param range instead of emitting settings the effect cannot take', () => {
-    // A floor quiet enough that peak + headroom lands under the effect's -80 dB
-    // minimum, but still ABOVE digital silence so `measureNoiseWindow` accepts
-    // the window at all — the two constraints leave a narrow band, and a floor
-    // below it makes the quietest MEASURABLE window the programme instead.
-    const res = deriveGate([withNoisyGap(8, 0.5, 6.6e-5, 4)], SR);
+  it('reports the evidence, the regions and what was kept — every decision readable afterwards', () => {
+    const { channel } = takeWithSilentLeadIn(0);
+    const res = deriveGate([channel], SR);
     if (!res.run) throw new Error('expected run');
-    const floor = measureNoiseWindow([withNoisyGap(8, 0.5, 6.6e-5, 4)], SR)!;
-    expect(floor.envelopePeakDb + GATE_HEADROOM_DB).toBeLessThan(-80);
-    expect(Number(res.params.thresholdDb)).toBe(-80);
-
-    const def = getEffect('noise-gate')!;
-    for (const id of ['thresholdDb', 'attackMs', 'releaseMs', 'holdMs']) {
-      const param = def.params.find((p) => p.id === id)!;
-      expect(Number(res.params[id])).toBeGreaterThanOrEqual(param.min!);
-      expect(Number(res.params[id])).toBeLessThanOrEqual(param.max!);
-    }
+    const evidence = res.derived.find((d) => d.label === 'Evidence')!;
+    expect(evidence.value).toContain('measured activity');
+    const muted = res.derived.find((d) => d.label === 'Muted')!;
+    expect(muted.value).toMatch(/\d+ regions? · \d+\.\d s/);
+    expect(muted.from).toContain(`${GATE_MIN_REGION_MS} ms`);
   });
 
   it('declines without a measurable noise floor', () => {
@@ -1243,25 +1288,29 @@ describe('deriveGate', () => {
   // it was asked to remove.
   describe('a selection with no pause in it at all', () => {
     it('declines on a continuous tone rather than muting the whole recording', () => {
+      // A tone's spectrum is one huge departure from a straight tilt, so
+      // every window reads as activity and there is no stretch BETWEEN
+      // activity for the stage to mute — muting would only ever mean muting
+      // the material itself.
       const t = tone(SR * 3, 440, 0.25);
       const res = deriveGate([t], SR);
       expect(res.run).toBe(false);
       if (res.run) return;
-      expect(res.reason).toContain('rather than a pause');
-      // The guard is what stops it: the threshold really would have covered the
-      // tone, so this is not a fixture that was never going to be gated.
-      const floor = measureNoiseWindow([t], SR)!;
-      expect(floor.envelopePeakDb + GATE_HEADROOM_DB).toBeGreaterThan(peakDbOf(t) - 6);
+      expect(res.reason).toContain('never pauses');
     });
 
-    it('declines on steady room tone with no voice in it', () => {
-      expect(deriveGate([noise(SR * 3, 0.01, 9)], SR).run).toBe(false);
+    it('declines on steady room tone with no voice in it — the quiet stretches ARE the material', () => {
+      const res = deriveGate([noise(SR * 3, 0.01, 9)], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('mute all of it');
     });
 
-    it('declines when every window holds a click, so the quietest one is not a pause', () => {
-      // Clicks 500 ms apart: each gap is real silence but none is a whole noise
-      // window long, so every 500 ms window contains a click and the quietest
-      // window reads the CLICK. Measured before the guard: 100 % silenced.
+    it('declines when the take is clicks over digital silence — fragments are not a performance to gate around', () => {
+      // Clicks 500 ms apart over exact zeros: a click reads floor-like to the
+      // tilt (an impulse has no resonances), nothing reads as vocal activity,
+      // and the only real material is fragments inside digital silence —
+      // exactly what the fragment rule refuses to mute unheard.
       const clicks = new Float32Array(SR * 4);
       for (let k = 0; k * 0.5 * SR < clicks.length; k++) {
         const at = Math.round(k * 0.5 * SR);
@@ -1272,22 +1321,20 @@ describe('deriveGate', () => {
       const res = deriveGate([clicks], SR);
       expect(res.run).toBe(false);
       if (res.run) return;
-      expect(res.reason).toContain('gating would mute all of it');
+      expect(res.reason).toContain('nothing for a gate to do');
     });
 
-    // The middle regime, and the dangerous one. The three cases above fail
-    // TOTALLY — nothing at all survives the threshold — so an all-or-nothing
-    // guard separates them. A take that never stops but whose DYNAMICS vary
-    // does not fail totally: the quietest 500 ms lands inside the softest sung
-    // passage, the threshold lands above that passage, the loud material
-    // elsewhere keeps the take from looking empty, and the gate fades a real
-    // sung phrase to hard zero while reporting a cheerful Gated N s.
-    it('declines when its quietest window is quiet SINGING rather than a pause', () => {
+    // The middle regime, and the dangerous one under any level design: a take
+    // that never stops but whose DYNAMICS vary. The old threshold put its
+    // level above the soft verse and faded real singing to hard zero; the
+    // region design reads the verse's harmonics as vocal activity, finds no
+    // stretch between activity, and declines — the soft singing is never a
+    // candidate at all.
+    it('declines when the quietest passage is quiet SINGING — soft sung material is activity, not a pause', () => {
       const { channel, soft } = continuousTakeWithSoftVerse();
 
       // The fixture is what it claims: the quietest 500 ms really does land
-      // inside the soft verse, so this is the regime under test and not a
-      // take with a pause the search preferred.
+      // inside the soft verse, so this is the regime the old design destroyed.
       const window = measureNoiseWindow([channel], SR)!;
       expect(window.startSample).toBeGreaterThanOrEqual(soft.start);
       expect(window.startSample + window.lengthSamples).toBeLessThanOrEqual(soft.end);
@@ -1295,13 +1342,14 @@ describe('deriveGate', () => {
       const res = deriveGate([channel], SR);
       expect(res.run).toBe(false);
       if (res.run) return;
-      expect(res.reason).toContain('singing');
+      expect(res.reason).toContain('never pauses');
     });
 
-    // N1 — the unvoiced neighbour of the case above. Periodicity cannot see it:
-    // a whisper has no fundamental, so the voiced check reads 0.000 and waves it
-    // through, and the passage is muted exactly as the sung one was.
-    it('declines when its quietest window is an unvoiced vocal passage — a whisper', () => {
+    // N1 — the unvoiced neighbour. Periodicity cannot see a whisper, but the
+    // vocal-tract measurement can, and in region form it protects by
+    // SEGMENTATION: every window over the whisper reads shaped, so the
+    // whisper is activity and no stretch qualifies.
+    it('declines when the quietest passage is an unvoiced whisper — vocal-tract shape is activity too', () => {
       const { channel, soft } = continuousTakeWithWhisperedVerse();
 
       const window = measureNoiseWindow([channel], SR)!;
@@ -1316,7 +1364,7 @@ describe('deriveGate', () => {
       const res = deriveGate([channel], SR);
       expect(res.run).toBe(false);
       if (res.run) return;
-      expect(res.reason).toContain('vocal tract');
+      expect(res.reason).toContain('never pauses');
     });
 
     // N2 — the converse of all three guards. Digital silence IS a pause, and the
@@ -1327,26 +1375,31 @@ describe('deriveGate', () => {
     // real one-second pauses in it.
     describe('a take carrying a stretch of digital silence', () => {
       it('gates it, instead of mistaking the silence for a vocal tract', () => {
-        const { channel } = takeWithSilentLeadIn(1.0);
+        const { channel, pauses } = takeWithSilentLeadIn(1.0);
 
-        // The window really is the zeros/floor boundary — the precondition.
+        // The zeros/floor boundary window still reads like a voice to the
+        // tilt — the precondition that used to fire, kept so this fixture
+        // stays the shape it claims.
         const w = measureNoiseWindow([channel], SR)!;
         const win = Float32Array.from(channel.subarray(w.startSample, w.startSample + w.lengthSamples));
         expect(zeroFractionOf(win)).toBeGreaterThan(0.5);
-        // ...and the shaping measure on it really does read like a voice, which
-        // is what used to fire. Without this the test could pass because the
-        // fit happened to come out low.
         expect(spectralTiltResidualDb(win, SR)).toBeGreaterThan(GATE_SHAPED_RESIDUAL_DB);
 
-        // Yet the stage runs: exact zeros are a pause, not a phrase.
+        // Yet the stage runs: the phantom activity a boundary window paints
+        // costs at most one window of pause edge, and the pauses' interiors
+        // still read as floor and are muted.
         const res = deriveGate([channel], SR);
         expect(res.run).toBe(true);
         if (!res.run) return;
-        // And on a sane threshold — the envelope peak of the boundary window is
-        // still the real floor's, because the follower rises to the non-zero
-        // samples in it.
-        expect(Number(res.params.thresholdDb)).toBeGreaterThan(-60);
-        expect(Number(res.params.thresholdDb)).toBeLessThan(-30);
+        const out = applyGate([channel], res)[0];
+        const tail = Math.round(0.3 * SR);
+        let sum = 0;
+        let count = 0;
+        for (const p of pauses) {
+          for (let i = p.end - tail; i < p.end; i++) sum += out[i] * out[i];
+          count += tail;
+        }
+        expect(toDb(Math.sqrt(sum / count))).toBeLessThanOrEqual(-80);
       });
 
       it('brings the take’s real pauses to digital silence, silent lead-in or not', () => {
@@ -1355,8 +1408,8 @@ describe('deriveGate', () => {
           const res = deriveGate([channel], SR);
           expect(res.run).toBe(true);
           if (!res.run) return;
-          const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
-          // The last 300 ms of each real pause, past the hold and the fade.
+          const out = applyGate([channel], res)[0];
+          // The last 300 ms of each real pause, past the fade.
           let sum = 0;
           let n = 0;
           for (const p of pauses) {
@@ -1367,29 +1420,32 @@ describe('deriveGate', () => {
         }
       });
 
-      it('still gates on a SECOND pass, over the zeros the first pass wrote', () => {
-        // User-reachable: running the chain twice. The gate writes exact zeros,
-        // so pass two sees a take that is largely digital silence — the same
-        // shape as the trimmed lead-in above, produced by this stage itself.
+      it('a SECOND pass over the zeros the first wrote declines honestly, changing nothing', () => {
+        // User-reachable: running the chain twice. The gate writes exact
+        // zeros, so pass two sees pauses that are already digital silence
+        // with only fade tails and pad slivers of real floor left — fragments
+        // shorter than anything a verdict can be formed on. The old design
+        // re-derived a threshold and re-gated no-ops; this one says the
+        // truth: there is nothing left for a gate to do, and nothing changes.
         const { channel, pauses } = takeWithSilentLeadIn(0);
         const first = deriveGate([channel], SR);
         expect(first.run).toBe(true);
         if (!first.run) return;
-        const once = noiseGateEffect.process([Float32Array.from(channel)], SR, first.params).channels;
+        const once = applyGate([channel], first);
         expect(zeroFractionOf(once[0])).toBeGreaterThan(0.2);
-
-        const second = deriveGate(once, SR);
-        expect(second.run).toBe(true);
-        if (!second.run) return;
-        // Idempotent where it matters: the pauses are already silent and stay so.
-        const twice = noiseGateEffect.process([Float32Array.from(once[0])], SR, second.params).channels[0];
+        // The pauses' tails are already silent...
         let sum = 0;
         let n = 0;
         for (const p of pauses) {
-          for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += twice[i] * twice[i];
+          for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += once[0][i] * once[0][i];
           n += Math.round(0.3 * SR);
         }
         expect(toDb(Math.sqrt(sum / n))).toBeLessThanOrEqual(-80);
+        // ...and the second pass declines rather than inventing work.
+        const second = deriveGate(once, SR);
+        expect(second.run).toBe(false);
+        if (second.run) return;
+        expect(second.reason).toContain('digital silence');
       });
 
       // N3 — the destructive converse of the case above: digital silence
@@ -1404,6 +1460,11 @@ describe('deriveGate', () => {
       // samples — and the vocal-tract check declines exactly as it does with
       // no lead-in at all.
       it('declines on a whispered verse behind a silent lead-in — silence must not launder a whisper', () => {
+        // The whisper reads as activity at every lead-in length, so no length
+        // of silence can turn it into a muteable pause: a short lead-in never
+        // even yields a floor window (the boundary window reads the whisper's
+        // shape), and a long one yields only zeros — nothing for a gate to
+        // do. Either way, the answer is a decline and the whisper stands.
         for (const leadSec of [0.2, 0.3, 0.5, 1.0, 2.0]) {
           const { channel: base } = continuousTakeWithWhisperedVerse();
           const lead = Math.round(leadSec * SR);
@@ -1411,9 +1472,9 @@ describe('deriveGate', () => {
           channel.set(base, lead);
 
           const res = deriveGate([channel], SR);
-          expect(res.run).toBe(false);
+          expect([leadSec, res.run]).toEqual([leadSec, false]);
           if (res.run) return;
-          expect(res.reason).toContain('vocal tract');
+          expect(res.reason).toMatch(/never pauses|digital silence/);
         }
 
         // The mechanism, pinned once: the bare search still returns the
@@ -1518,11 +1579,7 @@ describe('deriveGate', () => {
         const res = deriveGate([q], SR);
         expect(res.run).toBe(true);
         if (!res.run) return;
-        // The threshold tracks the quantised floor, not a phrase: well under
-        // the -12 dBFS the phrases peak at, above the effect's -80 dB minimum.
-        expect(Number(res.params.thresholdDb)).toBeLessThan(-70);
-        expect(Number(res.params.thresholdDb)).toBeGreaterThan(-80);
-        const out = noiseGateEffect.process([Float32Array.from(q)], SR, res.params).channels[0];
+        const out = applyGate([q], res)[0];
         expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
       });
 
@@ -1532,7 +1589,7 @@ describe('deriveGate', () => {
         const res = deriveGate([channel], SR);
         expect(res.run).toBe(true);
         if (!res.run) return;
-        const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+        const out = applyGate([channel], res)[0];
         expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
       });
 
@@ -1543,16 +1600,16 @@ describe('deriveGate', () => {
         const res = deriveGate([channel], SR);
         expect(res.run).toBe(true);
         if (!res.run) return;
-        const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+        const out = applyGate([channel], res)[0];
         expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
       });
 
       it('a floor just PAST the bound is not a measurement, and the stage declines fail-safe', () => {
-        // With every floor window refused, the quietest window the search can
-        // still return is inside a phrase; the threshold derived there sits
-        // over the whole take and the all-or-nothing guard declines. Nothing
-        // is gated — the fail-safe direction, chosen over measuring material
-        // this close to unmeasurable.
+        // With every window over the pauses refused as mostly silent, no gap
+        // has a floor to place its edges against — the gaps read as fragments
+        // inside digital silence and are skipped whole. Nothing is gated —
+        // the fail-safe direction, chosen over measuring material this close
+        // to unmeasurable.
         const { channel, pauses } = takeOverFloor(-50);
         scatterZeros(channel, pauses, 0.26);
         const res = deriveGate([channel], SR);
@@ -1640,66 +1697,102 @@ describe('deriveGate', () => {
       return toDb(Math.sqrt(sum / n));
     };
 
-    it('declines when an 8-bit transfer leaves the whispered verse as fragments at its own LSB', () => {
+    it('leaves an 8-bit transfer’s whispered verse untouched at its own LSB, and still mutes the floor beside it', () => {
       // At 8 bits, a -42 dBFS whisper sits at one LSB: most of its samples
-      // quantise to exact zero and the rest to isolated ±1 LSB spikes. Every
-      // window over the verse is mostly silent, so before this guard the
-      // search fell through to the -30 dBFS floor stretch and the threshold
-      // (floor peak + 3 dB) sat ~20 dB over the verse: measured, 100 % of it
-      // was muted. The same take at 10 or 12 bits declines by other guards.
-      const { channel } = n4Take(whisper(Math.round(3.5 * SR), -42, 41), -30);
+      // quantise to exact zero and the rest to isolated ±1 LSB spikes no veto
+      // could read (at fragment lengths the tilt populations invert). The
+      // level search genuinely hides it — the census precondition below — but
+      // the REGION design never derives a level from what the search returns:
+      // the verse's stretch is fenced off by the silence-edge windows around
+      // its fragments and by the emergence hold, so it comes back
+      // bit-identical while the -30 dBFS floor head is muted. The old design
+      // could only refuse the whole take; this does the job AND spares the
+      // verse.
+      const { channel, verseAt } = n4Take(whisper(Math.round(3.5 * SR), -42, 41), -30);
       const q = new Float32Array(channel.length);
       for (let i = 0; i < channel.length; i++) q[i] = Math.round(channel[i] * 128) / 128;
 
-      // The mechanism: the honest search hides a verse's worth of real frames.
+      // The precondition that makes this the N4 shape: the honest level
+      // search hides a verse's worth of real frames.
       const w = measureNoiseWindow([q], SR, { rejectMostlySilentWindows: true })!;
       expect(w.hiddenRealSamples!).toBeGreaterThanOrEqual(TILT_FFT_SIZE);
 
       const res = deriveGate([q], SR);
-      expect(res.run).toBe(false);
-      if (res.run) return;
-      expect(res.reason).toContain('fragments');
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyGate([q], res)[0];
+      let changed = 0;
+      for (let i = verseAt.start; i < verseAt.end; i++) if (!Object.is(out[i], q[i])) changed++;
+      expect(changed).toBe(0);
+      // ...and the head floor reached silence over its early stretch (its
+      // last portion is the straddle slack the silence-edge windows claim).
+      expect(pauseTailDb(out, [{ start: 0, end: Math.round(1.75 * SR) }])).toBeLessThanOrEqual(-80);
     });
 
-    it('declines when the whispered verse arrives chopped between exact zeros', () => {
-      // 150 ms bursts, 350 ms gaps: every 500 ms window over the verse is 70 %
-      // zeros and is evicted, while no accepted window contains the bursts.
-      // Before this guard: threshold from the -30 dBFS floor, 100 % muted.
-      const { channel } = n4Take(choppedVerse('whisper', -42, Math.round(0.15 * SR), Math.round(0.35 * SR)), -30);
+    it('leaves a whispered verse chopped between exact zeros untouched, and still mutes the floor beside it', () => {
+      // 150 ms bursts, 350 ms gaps, at -42 dBFS beside a -30 dBFS floor: the
+      // bursts sit 12 dB UNDER the floor, so level can never place an edge
+      // around them. What fences them off is shape: a window touching a burst
+      // beside zeros reads the whisper's own resonances (zeros dilute
+      // nothing), the verse's stretch never enters a seed, and a blind edge
+      // walking toward it retreats out of the shaped windows' claim. The old
+      // design could only refuse the whole take; this mutes the -30 dBFS
+      // floor head and returns the verse bit-identical.
+      const { channel, verseAt } = n4Take(choppedVerse('whisper', -42, Math.round(0.15 * SR), Math.round(0.35 * SR)), -30);
       const res = deriveGate([channel], SR);
-      expect(res.run).toBe(false);
-      if (res.run) return;
-      expect(res.reason).toContain('fragments');
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyGate([channel], res)[0];
+      let changed = 0;
+      for (let i = verseAt.start; i < verseAt.end; i++) if (!Object.is(out[i], channel[i])) changed++;
+      expect(changed).toBe(0);
+      expect(pauseTailDb(out, [{ start: 0, end: Math.round(1.75 * SR) }])).toBeLessThanOrEqual(-80);
     });
 
-    it('declines the chopped SUNG sibling too', () => {
-      // Here the accepted boundary window straddling floor and the first sung
-      // burst already reads voiced, so the winner check catches it — pinned so
-      // the sung shape stays declined whichever guard gets there first.
-      const { channel } = n4Take(choppedVerse('sung', -42, Math.round(0.15 * SR), Math.round(0.35 * SR)), -30);
-      expect(deriveGate([channel], SR).run).toBe(false);
+    it('protects the chopped SUNG sibling the same way', () => {
+      const { channel, verseAt } = n4Take(choppedVerse('sung', -42, Math.round(0.15 * SR), Math.round(0.35 * SR)), -30);
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyGate([channel], res)[0];
+      let changed = 0;
+      for (let i = verseAt.start; i < verseAt.end; i++) if (!Object.is(out[i], channel[i])) changed++;
+      expect(changed).toBe(0);
     });
 
-    it('draws the negligibility line at one analysis frame, exactly', () => {
-      // A floor fragment planted inside the lead-in zeros, off the chunk grid
-      // and zero-bounded: at exactly TILT_FFT_SIZE hidden real samples the
-      // stage declines; one sample shorter is debris and the take gates. The
-      // line is the tilt fit's own frame — the shortest passage ANY of the
-      // gate's classifiers can even form a verdict on.
-      for (const [fragLen, shouldRun] of [
-        [TILT_FFT_SIZE, false],
-        [TILT_FFT_SIZE - 1, true],
-      ] as const) {
-        const { channel, pauses } = takeWithSilentLeadIn(2.0);
-        channel.set(gaussFloorDb(fragLen, -50, 55), Math.round(0.5 * SR) + 200);
+    it('spares a sub-window fragment inside digital silence on BOTH sides of the old census line, and the pauses still gate', () => {
+      // The old design drew a take-wide line at one analysis frame of hidden
+      // audio: at TILT_FFT_SIZE the whole take declined, one sample short was
+      // debris. In region form the line has no take to decide — a fragment
+      // needs digital silence around it to hide, a window straddling a
+      // silence edge reads the edge's step as vocal shape and fences the
+      // fragment's stretch out of every seed, and the emergence hold spares
+      // what follows the zeros regardless — so the fragment survives
+      // bit-identical at EITHER length while the take's real pauses gate on.
+      // The per-gap census stays in the code as last-line defence (its own
+      // comment says why), but the fragment family's protection is what this
+      // test pins: no length of hidden fragment costs the take its gate, and
+      // no gate costs the fragment a sample.
+      const lead = Math.round(1.0 * SR);
+      const zerosLen = Math.round(1.5 * SR);
+      for (const fragLen of [TILT_FFT_SIZE, TILT_FFT_SIZE - 1] as const) {
+        const { channel: body, pauses } = takeWithSilentLeadIn(0);
+        const channel = new Float32Array(lead + zerosLen + body.length);
+        channel.set(gaussFloorDb(lead, -50, 7), 0);
+        const fragAt = lead + Math.round(0.6 * SR) + 200;
+        channel.set(gaussFloorDb(fragLen, -50, 55), fragAt);
+        channel.set(body, lead + zerosLen);
+
         const res = deriveGate([channel], SR);
-        expect(res.run).toBe(shouldRun);
-        if (res.run) {
-          const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
-          expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
-        } else if (!res.run) {
-          expect(res.reason).toContain('fragments');
-        }
+        expect([fragLen, res.run]).toEqual([fragLen, true]);
+        if (!res.run) return;
+        const out = applyGate([channel], res)[0];
+        let changed = 0;
+        for (let i = fragAt; i < fragAt + fragLen; i++) if (!Object.is(out[i], channel[i])) changed++;
+        expect([fragLen, changed]).toEqual([fragLen, 0]);
+        // Every pause of the body still reaches silence.
+        const shifted = pauses.map((p) => ({ start: p.start + lead + zerosLen, end: p.end + lead + zerosLen }));
+        expect(pauseTailDb(out, shifted)).toBeLessThanOrEqual(-80);
       }
     });
 
@@ -1709,7 +1802,7 @@ describe('deriveGate', () => {
       const res = deriveGate([channel], SR);
       expect(res.run).toBe(true);
       if (!res.run) return;
-      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      const out = applyGate([channel], res)[0];
       expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
     });
 
@@ -1742,10 +1835,11 @@ describe('deriveGate', () => {
 
     it('still gates an ordinary correlated stereo pair — the cancellation guard needs exact inversion', () => {
       const { channel, pauses } = takeWithSilentLeadIn(1.0);
-      const res = deriveGate([Float32Array.from(channel), Float32Array.from(channel)], SR);
+      const stereo = [Float32Array.from(channel), Float32Array.from(channel)];
+      const res = deriveGate(stereo, SR);
       expect(res.run).toBe(true);
       if (!res.run) return;
-      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      const out = applyGate(stereo, res)[0];
       expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
     });
 
@@ -1807,9 +1901,9 @@ describe('deriveGate', () => {
       ] as const) {
         const { L, R, pauses } = stereoQuantisedTake(bits, floorDb);
         const res = deriveGate([L, R], SR);
-        expect(res.run).toBe(true);
+        expect([bits, res.run]).toEqual([bits, true]);
         if (!res.run) return;
-        const out = noiseGateEffect.process([Float32Array.from(L), Float32Array.from(R)], SR, res.params).channels[0];
+        const out = applyGate([L, R], res)[0];
         expect(pauseTailDb(out, pauses)).toBeLessThanOrEqual(-80);
       }
 
@@ -1851,33 +1945,44 @@ describe('deriveGate', () => {
       });
     }
 
-    it('reads every channel: a whisper in ONE channel is still a whisper', () => {
+    it('reads every channel: a whisper in ONE channel is still a whisper — kept whole, while the floor beside it is muted', () => {
       // The destructive shape a channel-0-only mix would produce: the right
-      // channel's whispered verse is the quietest 500 ms, and a gate that
-      // never looked at it would derive a threshold above it and mute it.
-      // The left channel is 20 dB down, so the mix is essentially the right
-      // channel halved and its formants survive it — which is the point: a
-      // mix that never adds the right channel reads the left one's plain
-      // floor, gates, and mutes a whisper.
+      // channel carries a whispered verse the left channel's plain floor
+      // would drown in a mix that never added it. The verse's formants
+      // survive the honest mix, so the shaped windows claim it — and because
+      // it sits 10 dB UNDER the -40 dBFS head floor, the head-side edge is
+      // one LEVEL CANNOT PLACE (the envelope never rises off the floor into
+      // it), which is exactly the case the edge rule surrenders to the shape
+      // evidence. The head floor is muted up to where the shaped windows
+      // begin; the verse comes back bit-identical.
       const asymmetric = stereoTake((n, seed) => [gaussFloorDb(n, -70, 3), whisper(n, -50, seed)]);
       const res = deriveGate(asymmetric, SR);
-      expect(res.run).toBe(false);
-      if (res.run) return;
-      expect(res.reason).toContain('vocal tract');
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyGate(asymmetric, res);
+      const verse = { start: Math.round(2 * SR), end: Math.round(5.5 * SR) };
+      let changed = 0;
+      for (let i = verse.start; i < verse.end; i++) {
+        if (!Object.is(out[1][i], asymmetric[1][i])) changed++;
+      }
+      expect(changed).toBe(0);
+      // ...and the stage was not inert: the head floor's early stretch went
+      // to digital silence (its last half-second belongs to the straddle
+      // slack the shape evidence reclaims, so the measurement stops short of
+      // it).
+      let tailSq = 0;
+      const span = { start: Math.round(1.0 * SR), end: Math.round(1.4 * SR) };
+      for (let i = span.start; i < span.end; i++) tailSq += out[0][i] * out[0][i];
+      expect(toDb(Math.sqrt(tailSq / (span.end - span.start)))).toBeLessThanOrEqual(-80);
 
-      // The converse, same levels, same window: with a floor in BOTH channels
-      // there is nothing to find and the take gates.
+      // The converse, same levels, the whisper replaced by a floor: nothing
+      // vocal to see, and the take gates.
       const symmetric = stereoTake((n) => [gaussFloorDb(n, -70, 3), gaussFloorDb(n, -50, 5)]);
       const both = deriveGate(symmetric, SR);
       expect(both.run).toBe(true);
-      if (!both.run) return;
-      expect(Number(both.params.thresholdDb)).toBeLessThan(-35);
     });
 
-    it('reads the window the search won, not the head of the take', () => {
-      // A whispered opening, then a take whose quietest 500 ms is an ordinary
-      // floor. A mix taken from sample 0 rather than from the winner would
-      // read the whisper and refuse a take that has real pauses in it.
+    it('reads the whole take, not the head of it: a whispered opening does not stop the pauses behind it from gating', () => {
       const { channel, pauses } = takeWithSilentLeadIn(0);
       const head = whisper(Math.round(3.5 * SR), -36, 41);
       const L = new Float32Array(head.length + channel.length);
@@ -1887,10 +1992,12 @@ describe('deriveGate', () => {
       const res = deriveGate([L, R], SR);
       expect(res.run).toBe(true);
       if (!res.run) return;
-      // The precondition: the winner really is past the whispered head.
-      const w = measureNoiseWindow([L, R], SR, { rejectMostlySilentWindows: true })!;
-      expect(w.startSample).toBeGreaterThanOrEqual(head.length);
-      const out = noiseGateEffect.process([Float32Array.from(L), Float32Array.from(R)], SR, res.params).channels[0];
+      const out = applyGate([L, R], res)[0];
+      // The whispered head survives...
+      let changed = 0;
+      for (let i = 0; i < head.length; i++) if (!Object.is(out[i], L[i])) changed++;
+      expect(changed).toBe(0);
+      // ...and the pauses behind it still reach silence.
       const shifted = pauses.map((p) => ({ start: p.start + head.length, end: p.end + head.length }));
       let sum = 0;
       let n = 0;
@@ -1907,8 +2014,10 @@ describe('deriveGate', () => {
       // the cancellation depth is -20·log10(1-g) + 6.02 dB and the guard's
       // 60 dB lands at 1-g = 0.002. A sum would drop the +6.02 and move the
       // crossing to 1-g = 0.001 — so a pair at 1-g = 0.0015 declines with the
-      // mean (62.5 dB deep) and would NOT with the sum (56.5 dB).
-      const { channel } = continuousTakeWithWhisperedVerse();
+      // mean (62.5 dB deep) and would NOT with the sum (56.5 dB). The pair
+      // carries a REAL pause so the depth is asked of a candidate region —
+      // the place the diagnosis now lives.
+      const { channel } = takeWithSilentLeadIn(0);
       const scaled = (g: number): Float32Array[] => {
         const R = new Float32Array(channel.length);
         for (let i = 0; i < channel.length; i++) R[i] = -g * channel[i];
@@ -1921,14 +2030,12 @@ describe('deriveGate', () => {
       expect(deep.reason).toContain('cancel');
 
       // ...and the converse a decibel the other way: 1-g = 0.003 is 50.5 dB
-      // deep with the mean, under the guard, so the ordinary checks decide —
-      // and on this whispered take they decline for the whisper, not for a
-      // polarity flip.
+      // deep with the mean, under the guard, so the ordinary path decides —
+      // the mix is faithful, merely attenuated, and the pauses gate.
       const shallow = deriveGate(scaled(1 - 0.003), SR);
-      expect(shallow.run).toBe(false);
-      if (shallow.run) return;
-      expect(shallow.reason).toContain('vocal tract');
-      expect(shallow.reason).not.toContain('cancel');
+      expect(shallow.run).toBe(true);
+      if (!shallow.run) return;
+      expect(muteRegionsOf(shallow).length).toBeGreaterThan(0);
     });
   });
 
@@ -1995,39 +2102,25 @@ describe('deriveGate', () => {
       return { channels: [L, R], inverted, floor };
     }
 
-    it('is the shape it claims: a cancelling quietest window with a passing one INSIDE the climb bound', () => {
-      const { channels, inverted, floor } = takeWithOneInvertedPassage();
-      const cands = measureNoiseWindows(channels, SR, {
-        rejectMostlySilentWindows: true,
-        maxCandidates: GATE_QUIET_WINDOWS,
-      });
-      const inWindow = (w: { startSample: number; lengthSamples: number }, span: { start: number; end: number }) =>
-        w.startSample >= span.start && w.startSample + w.lengthSamples <= span.end;
-
-      // The quietest candidate is the inverted passage, and it really cancels:
-      // its mono mix is digital zero, so the two content checks see nothing.
-      expect(inWindow(cands[0], inverted)).toBe(true);
-      const mono = new Float32Array(cands[0].lengthSamples);
+    it('is the shape it claims: the inverted stretch reads as silence to every mix-reading measurement', () => {
+      const { channels, inverted } = takeWithOneInvertedPassage();
+      // Its mono mix is digital zero, so the activity windows and both vetoes
+      // — everything that reads the mix — would call it an empty pause and
+      // mute it, and nothing downstream could say what it had been. That is
+      // exactly why the depth diagnosis must be asked of every candidate.
+      const mono = new Float32Array(inverted.end - inverted.start);
       for (let i = 0; i < mono.length; i++) {
-        mono[i] = (channels[0][cands[0].startSample + i] + channels[1][cands[0].startSample + i]) / 2;
+        mono[i] = (channels[0][inverted.start + i] + channels[1][inverted.start + i]) / 2;
       }
-      let sq = 0;
-      for (let i = 0; i < mono.length; i++) sq += mono[i] * mono[i];
-      expect(cands[0].rmsDb - toDb(Math.sqrt(sq / mono.length))).toBeGreaterThan(GATE_CANCELLATION_DEPTH_DB);
-
-      // ...and an ordinary floor sits within the climb bound of it, so the
-      // search would have stepped from the one to the other. This is the
-      // calibration gap: `GATE_SEARCH_CLIMB_DB` was derived on breath and
-      // whisper populations, and a cancelling window lands in its PERMISSIVE
-      // half.
-      const passing = cands.find((c) => inWindow(c, floor));
-      expect(passing).toBeDefined();
-      expect(passing!.envelopePeakDb - cands[0].envelopePeakDb).toBeLessThanOrEqual(GATE_SEARCH_CLIMB_DB);
-
-      // ...and a threshold taken there really would cover the inverted
-      // passage, which is the damage: it sits below the level the gate closes
-      // at, and nothing in the checks could have told anyone what it was.
-      expect(passing!.envelopePeakDb + GATE_HEADROOM_DB).toBeGreaterThan(cands[0].envelopePeakDb);
+      let mixSq = 0;
+      for (let i = 0; i < mono.length; i++) mixSq += mono[i] * mono[i];
+      let realSq = 0;
+      for (const c of channels) {
+        for (let i = inverted.start; i < inverted.end; i++) realSq += c[i] * c[i];
+      }
+      const realDb = toDb(Math.sqrt(realSq / (2 * mono.length)));
+      const mixDb = toDb(Math.sqrt(mixSq / mono.length));
+      expect(realDb - mixDb).toBeGreaterThan(GATE_CANCELLATION_DEPTH_DB);
     }, 120000);
 
     it('declines on the polarity diagnosis instead of gating past it', () => {
@@ -2040,20 +2133,20 @@ describe('deriveGate', () => {
     }, 120000);
 
     it('refuses even when the cancelling passage is NOT the quietest, and says which one it is', () => {
-      // The harder half of the same shape: an ordinary floor is the quietest
-      // window and passes every check, so the old walk would accept it and
-      // stop — the cancelling passage three decibels up would never be looked
-      // at, and the gate would close over it. The diagnosis is about the FILE,
-      // so it is asked of every candidate the search returned.
+      // The harder half of the same shape: an ordinary floor QUIETER than the
+      // inverted passage is a perfectly good candidate on its own — a design
+      // that only ever diagnosed the quietest stretch would gate the floor
+      // and close over the inverted passage without a word. The diagnosis is
+      // about the FILE, so it is asked of every candidate.
       const { channels, inverted, floor } = takeWithOneInvertedPassage(-55, -58);
-      const cands = measureNoiseWindows(channels, SR, {
-        rejectMostlySilentWindows: true,
-        maxCandidates: GATE_QUIET_WINDOWS,
-      });
-      // The precondition: the quietest window is the honest floor, not the
+      // The precondition: the honest floor really is quieter than the
       // inverted passage.
-      expect(cands[0].startSample).toBeGreaterThanOrEqual(floor.start);
-      expect(cands[0].startSample + cands[0].lengthSamples).toBeLessThanOrEqual(floor.end);
+      const rmsOver = (span: { start: number; end: number }): number => {
+        let sq = 0;
+        for (const c of channels) for (let i = span.start; i < span.end; i++) sq += c[i] * c[i];
+        return toDb(Math.sqrt(sq / (channels.length * (span.end - span.start))));
+      };
+      expect(rmsOver(floor)).toBeLessThan(rmsOver(inverted));
 
       const res = deriveGate(channels, SR);
       expect(res.run).toBe(false);
@@ -2213,11 +2306,7 @@ describe('deriveGate', () => {
             const res = deriveGate([channel], sr);
             expect(res.run).toBe(true);
             if (!res.run) return;
-            // And the derivation is untouched by the fix: still the floor's.
-            expect(Number(res.params.thresholdDb)).toBeGreaterThan(-45);
-            expect(Number(res.params.thresholdDb)).toBeLessThan(-40);
-
-            const out = noiseGateEffect.process([Float32Array.from(channel)], sr, res.params).channels[0];
+            const out = applyGate([channel], res, sr)[0];
             expect(removedPct(channel, out, island)).toBeLessThan(0.1);
           }
         }
@@ -2226,53 +2315,50 @@ describe('deriveGate', () => {
 
     it('still gates the take it sits in — the island is spared, the pauses are not', () => {
       // The converse: sparing the island must not cost the stage its job. The
-      // floor take's own real pauses still reach digital silence.
+      // first two pauses reach digital silence through their tails; the LAST
+      // pause adjoins the zeros bracket, and its final ~300 ms is the slack
+      // the silence-edge windows claim (a blind edge surrenders to shape
+      // evidence near digital silence), so it is measured one step short of
+      // that slack — still deep inside the pause, and still silent.
       const pause = Math.round(1.0 * SR);
       const phrase = Math.round(0.8 * SR);
-      const pauses = [
-        { start: 0, end: pause },
-        { start: pause + phrase, end: 2 * pause + phrase },
-        { start: 2 * pause + 2 * phrase, end: 3 * pause + 2 * phrase },
+      const fullTails = [
+        { start: pause - Math.round(0.3 * SR), end: pause },
+        { start: 2 * pause + phrase - Math.round(0.3 * SR), end: 2 * pause + phrase },
+        // Last pause: [end - 0.75s, end - 0.45s], clear of the zeros-edge slack.
+        { start: 3 * pause + 2 * phrase - Math.round(0.75 * SR), end: 3 * pause + 2 * phrase - Math.round(0.45 * SR) },
       ];
       const { channel } = islandTake(SR, 300, 'before');
       const res = deriveGate([channel], SR);
       expect(res.run).toBe(true);
       if (!res.run) return;
-      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
-      let sum = 0;
-      let n = 0;
-      for (const p of pauses) {
-        for (let i = p.end - Math.round(0.3 * SR); i < p.end; i++) sum += out[i] * out[i];
-        n += Math.round(0.3 * SR);
+      const out = applyGate([channel], res)[0];
+      for (const span of fullTails) {
+        let sum = 0;
+        for (let i = span.start; i < span.end; i++) sum += out[i] * out[i];
+        expect(toDb(Math.sqrt(sum / (span.end - span.start)))).toBeLessThanOrEqual(-80);
       }
-      expect(toDb(Math.sqrt(sum / n))).toBeLessThanOrEqual(-80);
     });
 
-    it('runs out exactly where the search takes over: the band is 375 ms, the hold is 500', () => {
-      // Why one hold is enough, measured rather than argued. Up to 375 ms an
-      // island is never the winner and never covered on its own terms, so the
-      // gate is the only thing standing between it and the threshold; from
-      // 400 ms a 500 ms search window reaches inside it, the island becomes
-      // the measurement, and the vocal-tract check declines the take outright.
-      // There is no island length at which neither protection applies.
+    it('is spared at EVERY length — the old 400-800 ms take-wide decline is gone, and the take still gates', () => {
+      // Under the threshold design the protections handed over at 400 ms:
+      // shorter islands rode the silent-run hold, longer ones became the
+      // quietest window and declined the WHOLE take. In region form one rule
+      // covers every length — an island's windows read its vocal-tract shape
+      // (zeros dilute nothing), so it is activity, never a candidate, and a
+      // walk toward it stops at the silence it emerges from — while the
+      // take's real pauses still gate around it.
       for (const sr of [SR, 44100]) {
-        for (const islandMs of [100, 200, 300, 375]) {
+        for (const islandMs of [100, 200, 300, 375, 400, 500, 800]) {
           const { channel, island } = islandTake(sr, islandMs, 'before');
           const res = deriveGate([channel], sr);
-          expect(res.run).toBe(true);
+          expect([sr, islandMs, res.run]).toEqual([sr, islandMs, true]);
           if (!res.run) return;
-          const out = noiseGateEffect.process([Float32Array.from(channel)], sr, res.params).channels[0];
+          const out = applyGate([channel], res, sr)[0];
           expect(removedPct(channel, out, island)).toBeLessThan(0.1);
         }
-        for (const islandMs of [400, 500, 800]) {
-          const { channel } = islandTake(sr, islandMs, 'before');
-          const res = deriveGate([channel], sr);
-          expect(res.run).toBe(false);
-          if (res.run) return;
-          expect(res.reason).toContain('vocal tract');
-        }
       }
-    }, 120000);
+    }, 240000);
   });
 
   /**
@@ -2349,23 +2435,21 @@ describe('deriveGate', () => {
       expect(spectralTiltResidualDb(alone, SR)).toBeLessThan(GATE_SHAPED_RESIDUAL_DB);
     });
 
-    it('gates it, taking the threshold from the pause rather than declining on the breath', () => {
+    it('gates it: the pause is muted because of WHERE it is, and every breath and phrase comes back untouched', () => {
       const { channel, pause, phrases } = takeWhoseQuietestWindowIsABreath(4);
       const res = deriveGate([channel], SR);
       expect(res.run).toBe(true);
       if (!res.run) return;
 
-      // The threshold is the PAUSE's, not the breath's: above the floor the
-      // pause is made of, and below the breath the old search settled on.
-      const pauseWindow = measureNoiseWindow(
-        [Float32Array.from(channel.subarray(pause.start, pause.end))],
-        SR,
-        { rejectMostlySilentWindows: true }
-      )!;
-      expect(Number(res.params.thresholdDb)).toBeCloseTo(pauseWindow.envelopePeakDb + GATE_HEADROOM_DB, 1);
+      // The muted region lies inside the take's one real pause — the breaths,
+      // 5 dB QUIETER than that pause, are activity and were never candidates.
+      for (const r of muteRegionsOf(res)) {
+        expect(r.start).toBeGreaterThanOrEqual(pause.start);
+        expect(r.end).toBeLessThanOrEqual(pause.end + Math.round(0.01 * SR));
+      }
 
-      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
-      // The gaps go silent...
+      const out = applyGate([channel], res)[0];
+      // The pause goes silent...
       let sum = 0;
       const tail = Math.round(0.3 * SR);
       for (let i = pause.end - tail; i < pause.end; i++) sum += out[i] * out[i];
@@ -2374,88 +2458,49 @@ describe('deriveGate', () => {
       for (const phrase of phrases) expect(changedPct(channel, out, phrase)).toBeLessThan(0.1);
     });
 
-    it('the same take with ONE breath gap gates too — the search is not a fixture-count trick', () => {
+    it('the same take with ONE breath gap gates too', () => {
       const { channel, pause } = takeWhoseQuietestWindowIsABreath(1);
       const res = deriveGate([channel], SR);
       expect(res.run).toBe(true);
       if (!res.run) return;
-      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
+      const out = applyGate([channel], res)[0];
       let sum = 0;
       const tail = Math.round(0.3 * SR);
       for (let i = pause.end - tail; i < pause.end; i++) sum += out[i] * out[i];
       expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
     });
 
-    // Both sides of `GATE_QUIET_WINDOWS`, as behaviour. Each breath is one
-    // DISTINCT candidate, so the take's real pause is candidate number
-    // (breaths + 1): a take with one fewer breath than the bound still reaches
-    // its pause, and a take with exactly the bound does not.
-    it('reaches a pause that is the LAST candidate it is allowed to look at', () => {
-      const { channel, pause } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS - 1);
+    // The decline family the old search's depth bound created is GONE: the
+    // reported take declined at twelve breath-filled gaps because its pause
+    // was the thirteenth candidate a level-ordered walk was allowed to reach.
+    // Regions have no walk — the pause is found by WHERE it is — so the count
+    // of breaths ahead of it stops existing as a quantity.
+    it('gates the take however many breath-filled gaps precede the pause — twelve was the old decline, fourteen for margin', () => {
+      for (const gaps of [12, 14]) {
+        const { channel, pause } = takeWhoseQuietestWindowIsABreath(gaps);
+        const res = deriveGate([channel], SR);
+        expect([gaps, res.run]).toEqual([gaps, true]);
+        if (!res.run) return;
+        const out = applyGate([channel], res)[0];
+        let sum = 0;
+        const tail = Math.round(0.3 * SR);
+        for (let i = pause.end - tail; i < pause.end; i++) sum += out[i] * out[i];
+        expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
+      }
+    }, 300000);
+
+    it('still keeps every breath, at every count — the widening never lowered the bar', () => {
+      const { channel, pause, phrases } = takeWhoseQuietestWindowIsABreath(12);
       const res = deriveGate([channel], SR);
       expect(res.run).toBe(true);
       if (!res.run) return;
-      const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
-      let sum = 0;
-      const tail = Math.round(0.3 * SR);
-      for (let i = pause.end - tail; i < pause.end; i++) sum += out[i] * out[i];
-      expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
-    }, 120000);
-
-    it('declines one breath further out, and names the threshold the user can set', () => {
-      const { channel } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS);
-      const res = deriveGate([channel], SR);
-      expect(res.run).toBe(false);
-      if (res.run) return;
-      // It still names the quietest window's own failure — the passage the
-      // user can hear as the quietest thing in the take...
-      expect(res.reason).toContain('vocal tract');
-      // ...says how much was actually looked at, rather than implying the
-      // whole take was...
-      expect(res.reason).toContain(`the ${GATE_QUIET_WINDOWS} quietest`);
-      // ...and points at the escape, because silence must stay reachable.
-      expect(res.reason).toContain("set this stage's threshold yourself");
-    }, 120000);
-
-    it('is exactly the depth the deepest take it covers needs — the derivation, measured', () => {
-      // M3. Both SIDES of this constant are pinned as behaviour just above
-      // (eleven gaps gate, twelve decline). What was missing is the DERIVATION
-      // those two pins were cut from: how deep the search must go to reach a
-      // take's real pause when N breath-filled gaps sit in front of it. Each
-      // breath is one DISTINCT candidate — `measureNoiseWindows` refuses
-      // overlaps — so the pause is candidate (breaths + 1). The docblock
-      // narrated that law; this measures it, so widening or narrowing the
-      // constant has to be argued against the shape rather than against prose.
-      const depths: { gaps: number; depth: number }[] = [];
-      for (const gaps of [1, 2, 4, 6, 8, 11, GATE_QUIET_WINDOWS]) {
-        const { channel, pause } = takeWhoseQuietestWindowIsABreath(gaps);
-        // Searched DEEPER than the constant on purpose: a measurement clipped
-        // by the bound it is deriving would only be able to agree with it.
-        const cands = measureNoiseWindows([channel], SR, {
-          rejectMostlySilentWindows: true,
-          maxCandidates: GATE_QUIET_WINDOWS * 2,
-        });
-        const at = cands.findIndex(
-          (c) => c.startSample >= pause.start && c.startSample + c.lengthSamples <= pause.end
-        );
-        expect(at).toBeGreaterThanOrEqual(0);
-        depths.push({ gaps, depth: at + 1 });
-      }
-
-      // The measured law, and the docblock's own numbers.
-      expect(depths.map((d) => d.depth)).toEqual([2, 3, 5, 7, 9, 12, 13]);
-      for (const { gaps, depth } of depths) expect(depth).toBe(gaps + 1);
-
-      // ...and the constant is where that law was CUT. It is exactly the depth
-      // an eleven-gap take needs and one short of a twelve-gap take's, which is
-      // what makes the pair of behaviour pins above a boundary rather than two
-      // arbitrary fixtures. It is not a claim that eleven is all a take can
-      // have: each candidate costs a pitch track and a tilt fit, so the bound
-      // is a price, and the take with more gaps is the one `manualThresholdDb`
-      // exists for.
-      expect(depths.find((d) => d.gaps === 11)!.depth).toBe(GATE_QUIET_WINDOWS);
-      expect(depths.find((d) => d.gaps === GATE_QUIET_WINDOWS)!.depth).toBeGreaterThan(GATE_QUIET_WINDOWS);
-      expect(GATE_QUIET_WINDOWS).toBe(12);
+      const out = applyGate([channel], res)[0];
+      // Nothing outside the pause changed: phrases bit-identical, and the
+      // breath-filled gaps between them too.
+      for (const phrase of phrases) expect(changedPct(channel, out, phrase)).toBeLessThan(0.1);
+      let changedOutsidePause = 0;
+      for (let i = 0; i < pause.start; i++) if (out[i] !== channel[i]) changedOutsidePause++;
+      expect(changedOutsidePause).toBe(0);
     }, 300000);
 
     it('names an escape the user can actually reach from where the refusal leaves them', () => {
@@ -2492,48 +2537,46 @@ describe('deriveGate', () => {
       }
     }, 120000);
 
-    it('costs at most one pitch track and one tilt fit per candidate, however long the take', () => {
-      // The tilt fit is an STFT and the pitch track is 12-14x dearer again, so
-      // the price of looking further has to be bounded by the CANDIDATE COUNT
-      // and not by the length of the recording.
+    it('spends its pitch tracks on the candidate stretches only, not on the take', () => {
+      // The pitch track is the dear measurement (12-14x the tilt fit), so the
+      // voiced veto runs once per CANDIDATE, over the candidate's own
+      // samples — never over the whole recording. The tilt pass is one
+      // shared-STFT sweep for the segmentation plus one per candidate for the
+      // veto.
       const pitch = jest.spyOn(pitchDetect, 'detectPitch');
-      const tilt = jest.spyOn(chainAnalysis, 'spectralTiltResidualDb');
+      const tiltPass = jest.spyOn(chainAnalysis, 'windowedTiltResidualsDb');
       try {
-        const counts: number[][] = [];
-        for (const gaps of [GATE_QUIET_WINDOWS, GATE_QUIET_WINDOWS * 3]) {
-          pitch.mockClear();
-          tilt.mockClear();
-          deriveGate([takeWhoseQuietestWindowIsABreath(gaps).channel], SR);
-          counts.push([pitch.mock.calls.length, tilt.mock.calls.length]);
-        }
-        for (const [pitchCalls, tiltCalls] of counts) {
-          expect(pitchCalls).toBeLessThanOrEqual(GATE_QUIET_WINDOWS);
-          expect(tiltCalls).toBeLessThanOrEqual(GATE_QUIET_WINDOWS);
-        }
-        // A take three times as long does not cost three times as much.
-        expect(counts[1][0]).toBeLessThanOrEqual(counts[0][0]);
-        expect(counts[1][1]).toBeLessThanOrEqual(counts[0][1]);
-        // ...and the cheap check does the walking: only the quietest window is
-        // judged in the order the messages were derived in, so the pitch track
-        // runs once where the tilt fit runs on every candidate.
-        expect(counts[0][0]).toBe(1);
-        expect(counts[0][1]).toBe(GATE_QUIET_WINDOWS);
+        const { channel, pauses } = takeWithSilentLeadIn(0);
+        const res = deriveGate([channel], SR);
+        expect(res.run).toBe(true);
+        if (!res.run) return;
+        const regions = (res.extra as { muteRegions: { start: number; end: number }[] }).muteRegions;
+        // One pitch track per candidate, each over that candidate's length —
+        // together they cover about the pauses, never the take.
+        expect(pitch.mock.calls.length).toBe(regions.length);
+        let pitchSamples = 0;
+        for (const call of pitch.mock.calls) pitchSamples += (call[0] as Float32Array).length;
+        const pauseSamples = pauses.reduce((s, p) => s + (p.end - p.start), 0);
+        expect(pitchSamples).toBeLessThanOrEqual(pauseSamples + pauses.length * Math.round(0.1 * SR));
+        // One segmentation sweep over the take, plus one veto sweep per
+        // candidate.
+        expect(tiltPass.mock.calls.length).toBe(1 + regions.length);
       } finally {
         pitch.mockRestore();
-        tilt.mockRestore();
+        tiltPass.mockRestore();
       }
-    }, 300000);
+    }, 120000);
 
     /**
      * R2 — the last word is the user's. No measurement can tell an unshaped
-     * breath from room tone, and no search can conjure a pause into a take
+     * breath from room tone, and no evidence can conjure a pause into a take
      * that has none; but "no word, no sound" has to stay REACHABLE, so the
      * stage takes a threshold it did not measure and runs the same state
-     * machine at it.
+     * machine at it — the LEVEL gate of earlier releases, byte for byte.
      */
     describe('the threshold the user sets when no measurement can be made', () => {
       it('gates a take that declines, at exactly the level asked for', () => {
-        const { channel } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS);
+        const { channel } = continuousTakeWithWhisperedVerse();
         expect(deriveGate([channel], SR).run).toBe(false);
 
         const res = deriveGate([channel], SR, -40);
@@ -2541,11 +2584,13 @@ describe('deriveGate', () => {
         if (!res.run) return;
         expect(Number(res.params.thresholdDb)).toBe(-40);
         // Only the SOURCE of the threshold changes: the detector, the hold and
-        // the fades are the stage's own, so the manual run is the derived run
-        // with one number replaced.
+        // the fades are the stage's own, so the manual run is the old derived
+        // run with one number replaced — and it carries NO mute regions, so
+        // the effect runs its threshold state machine untouched.
         expect(Number(res.params.attackMs)).toBe(DETECT_ATTACK_MS);
         expect(Number(res.params.releaseMs)).toBe(DETECT_RELEASE_MS);
         expect(Number(res.params.holdMs)).toBe(GATE_HOLD_MS);
+        expect(res.extra).toBeUndefined();
 
         const out = noiseGateEffect.process([Float32Array.from(channel)], SR, res.params).channels[0];
         let silent = 0;
@@ -2554,7 +2599,7 @@ describe('deriveGate', () => {
       }, 120000);
 
       it('says the threshold is the user’s, not a measurement it never took', () => {
-        const { channel } = takeWhoseQuietestWindowIsABreath(GATE_QUIET_WINDOWS);
+        const { channel } = continuousTakeWithWhisperedVerse();
         const res = deriveGate([channel], SR, -40);
         if (!res.run) throw new Error('expected run');
         const threshold = res.derived.find((d) => d.label.includes('Threshold'))!;
@@ -2569,7 +2614,7 @@ describe('deriveGate', () => {
       }, 120000);
 
       it('clamps into the effect’s own range rather than emitting a level it cannot take', () => {
-        const { channel } = takeWhoseQuietestWindowIsABreath(1);
+        const { channel } = takeWithSilentLeadIn(0);
         const param = getEffect('noise-gate')!.params.find((p) => p.id === 'thresholdDb')!;
         for (const [asked, expected] of [
           [-500, param.min as number],
@@ -2584,40 +2629,48 @@ describe('deriveGate', () => {
       it('overrides the derivation on a take that would have gated on its own', () => {
         // The user's judgement wins over a measurement that succeeded too —
         // otherwise the box would silently do nothing on most takes.
-        const { channel } = takeWhoseQuietestWindowIsABreath(1);
+        const { channel } = takeWithSilentLeadIn(0);
         const derivedRun = deriveGate([channel], SR);
         if (!derivedRun.run) throw new Error('expected the derived run to gate');
-        expect(Number(derivedRun.params.thresholdDb)).not.toBe(-40);
+        expect(muteRegionsOf(derivedRun).length).toBeGreaterThan(0);
         const manual = deriveGate([channel], SR, -40);
         if (!manual.run) throw new Error('expected run');
         expect(Number(manual.params.thresholdDb)).toBe(-40);
+        expect(manual.extra).toBeUndefined();
       }, 120000);
 
-      it('spends nothing on a search whose answer it is about to discard', () => {
-        const spy = jest.spyOn(chainAnalysis, 'measureNoiseWindows');
+      it('spends nothing on a derivation whose answer it is about to discard', () => {
+        const tiltPass = jest.spyOn(chainAnalysis, 'windowedTiltResidualsDb');
+        const pitch = jest.spyOn(pitchDetect, 'detectPitch');
+        const floor = jest.spyOn(chainAnalysis, 'measureNoiseWindow');
         try {
-          const { channel } = takeWhoseQuietestWindowIsABreath(2);
+          const { channel } = takeWithSilentLeadIn(0);
           deriveGate([channel], SR, -40);
-          expect(spy).not.toHaveBeenCalled();
+          expect(tiltPass).not.toHaveBeenCalled();
+          expect(pitch).not.toHaveBeenCalled();
+          expect(floor).not.toHaveBeenCalled();
         } finally {
-          spy.mockRestore();
+          tiltPass.mockRestore();
+          pitch.mockRestore();
+          floor.mockRestore();
         }
       }, 120000);
     });
 
-    it('says in the row the user reads what it actually searches', () => {
-      // The note is rendered verbatim in the dialog. A stage that quietly
-      // changed what it looks at, while its own row still described one
-      // window, would be a stage nobody could reason about.
+    it('says in the row the user reads what it actually does now', () => {
+      // The note is rendered verbatim in the dialog. A stage that changed its
+      // whole strategy while its row still described a threshold search would
+      // be a stage nobody could reason about.
       const note = stageById('gate').note;
-      expect(note).toContain(`${GATE_QUIET_WINDOWS} quietest distinct passages`);
-      expect(note).toContain(`${GATE_SEARCH_CLIMB_DB} dB`);
+      expect(note).toContain('WHERE, not how loud');
+      expect(note).toContain(`${GATE_MIN_REGION_MS} ms`);
+      expect(note).not.toContain('quietest distinct passages');
       expect(note).not.toContain(`measured from the quietest ${NOISE_WINDOW_MS} ms`);
     });
 
     // The converse, and the one that matters most: a take where EVERY quiet
-    // window is vocal must still decline. The search widens what is looked at;
-    // it does not lower the bar any of them has to clear.
+    // stretch is vocal must still decline — the region design widens what can
+    // be muted, it does not lower the bar for calling something a pause.
     it('still declines when every quiet passage in the take is vocal', () => {
       for (const [name, take] of [
         ['soft singing', continuousTakeWithSoftVerse().channel],
@@ -2626,30 +2679,479 @@ describe('deriveGate', () => {
         const res = deriveGate([take], SR);
         expect([name, res.run]).toEqual([name, false]);
         if (res.run) return;
-        expect(res.reason).toContain(name === 'soft singing' ? 'singing' : 'vocal tract');
+        expect(res.reason).toContain('never pauses');
       }
+    });
+  });
+
+  // ── G2 — the gate asks WHERE, not how loud ────────────────────────────────
+  // The automatic path no longer derives a level: it mutes the stretches
+  // between vocal activity, each stretch validated by the same protective
+  // evidence the old checks carried. These are the scenarios the redesign
+  // exists for — the ones no threshold could reach.
+  describe('regions from activity — the automatic path (G2)', () => {
+    /** Applies the automatic result the way the chain does: through the
+     * noise-gate effect's mute-region side channel. */
+    function applyRegions(channels: Float32Array[], res: StageResolution, sr = SR): Float32Array[] {
+      if (!res.run) throw new Error('expected run');
+      (globalThis as { __effectExtra?: unknown }).__effectExtra = res.extra;
+      try {
+        return noiseGateEffect.process(
+          channels.map((c) => Float32Array.from(c)),
+          sr,
+          res.params
+        ).channels;
+      } finally {
+        delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+      }
+    }
+
+    function changedCount(a: Float32Array, b: Float32Array, span: { start: number; end: number }): number {
+      let changed = 0;
+      for (let i = span.start; i < span.end; i++) if (!Object.is(a[i], b[i])) changed++;
+      return changed;
+    }
+
+    function tailDb(out: Float32Array, span: { start: number; end: number }, sr = SR): number {
+      const tail = Math.round(0.3 * sr);
+      let sum = 0;
+      for (let i = span.end - tail; i < span.end; i++) sum += out[i] * out[i];
+      return toDb(Math.sqrt(sum / tail));
+    }
+
+    /**
+     * The user's actual complaint, as a shape: pause noise LOUDER than the
+     * singing. The sung phrases sit UNDER the pause floor, so no level
+     * threshold exists that mutes the pauses and keeps the phrases — the
+     * regime every decline of the old design left unserved.
+     */
+    function takeWithLoudPauses(): {
+      channels: Float32Array[];
+      spans: { startSample: number; endSample: number }[];
+      pauses: { start: number; end: number }[];
+      phrases: { start: number; end: number }[];
+    } {
+      const pause = Math.round(1.2 * SR);
+      const phrase = Math.round(1.0 * SR);
+      const channel = gaussFloorDb(3 * pause + 2 * phrase, -30, 17);
+      const pauses: { start: number; end: number }[] = [];
+      const phrases: { start: number; end: number }[] = [];
+      let at = 0;
+      for (const [sung, n] of [
+        [false, pause],
+        [true, phrase],
+        [false, pause],
+        [true, phrase],
+        [false, pause],
+      ] as const) {
+        if (!sung) pauses.push({ start: at, end: at + n });
+        else {
+          phrases.push({ start: at, end: at + n });
+          let ph = 0;
+          for (let i = 0; i < n; i++) {
+            ph += (2 * Math.PI * 196) / SR;
+            channel[at + i] += 0.02 * (Math.sin(ph) + 0.4 * Math.sin(2 * ph));
+          }
+        }
+        at += n;
+      }
+      return {
+        channels: [channel],
+        spans: phrases.map((p) => ({ startSample: p.start, endSample: p.end })),
+        pauses,
+        phrases,
+      };
+    }
+
+    it('with words, mutes pause noise LOUDER than the singing — the complaint no threshold could reach', () => {
+      const { channels, spans, pauses, phrases } = takeWithLoudPauses();
+
+      // The precondition that makes this the reported regime: the sung
+      // phrases are QUIETER than the pauses' own noise.
+      const phraseDb = programmeRmsDb([Float32Array.from(channels[0].subarray(phrases[0].start, phrases[0].end))]);
+      const pauseDb = programmeRmsDb([Float32Array.from(channels[0].subarray(pauses[0].start, pauses[0].end))]);
+      expect(phraseDb).toBeLessThan(pauseDb + 3);
+
+      const res = deriveGate(channels, SR, undefined, { source: 'lyrics-alignment', spans });
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyRegions(channels, res);
+      // The pauses go to digital silence right up to each word's start...
+      for (const p of pauses) expect(tailDb(out[0], p)).toBeLessThanOrEqual(-80);
+      // ...and the words themselves come back bit-identical, however quiet.
+      for (const p of phrases) expect(changedCount(channels[0], out[0], p)).toBe(0);
+      // The report says which evidence decided, and what was muted.
+      const evidence = res.derived.find((d) => d.label === 'Evidence')!;
+      expect(evidence.value).toContain('lyrics');
+      expect(res.derived.some((d) => d.label === 'Muted')).toBe(true);
+    });
+
+    it('without words the same take DECLINES — sub-floor singing cannot be gated around on measurement alone', () => {
+      // The singing sits UNDER the pause noise, so measurement either sees
+      // nothing vocal at all (muting between activity would mute all of it)
+      // or catches only smeared traces of the phrases (every candidate then
+      // carries vocal evidence). Both are refusals; what matters is that no
+      // sample is muted without the word evidence that makes the phrases'
+      // positions knowable.
+      const { channels } = takeWithLoudPauses();
+      const res = deriveGate(channels, SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toMatch(/mute all of it|carry vocal evidence/);
+    });
+
+    /** A soft voice with a RICH harmonic stack over a floor — voiced to the
+     * frame detector, but with its power spread across ~40 partials the tilt
+     * fit's residual stays under the vocal-tract boundary at 44.1 kHz
+     * (measured: voiced 1.000, residual 2.2 dB against the 2.5 boundary).
+     * The one regime where the voiced veto is the only protection standing. */
+    function richVoiceInto(channel: Float32Array, at: number, n: number, f0: number, levelDb: number, sr: number): void {
+      const nyq = sr / 2;
+      const H = Math.min(40, Math.floor((0.9 * nyq) / f0));
+      let norm = 0;
+      for (let k = 1; k <= H; k++) norm += 1 / (k * k);
+      const amp = Math.pow(10, levelDb / 20) / Math.sqrt(norm / 2);
+      let ph = 0;
+      for (let i = 0; i < n; i++) {
+        const t = i / sr;
+        ph += (2 * Math.PI * (f0 * (1 + 0.006 * Math.sin(2 * Math.PI * 5.5 * t)))) / sr;
+        let v = 0;
+        for (let k = 1; k <= H; k++) v += Math.sin(k * ph) / k;
+        channel[at + i] += amp * v;
+      }
+    }
+
+    it('keeps a voiced passage between words that the tilt cannot see — the voiced veto, live (44.1 kHz)', () => {
+      const sr = 44100;
+      const sec = (s: number): number => Math.round(s * sr);
+      // [floor pause][sung word][gap: floor with a soft rich voice in its
+      // middle][sung word][floor pause] — the words are spans, the voice is
+      // unscripted, and the first/last pauses are what still gets muted.
+      const channel = gaussFloorDb(sec(7), -50, 21);
+      const spans = [
+        { startSample: sec(1.5), endSample: sec(2.5) },
+        { startSample: sec(4.5), endSample: sec(5.5) },
+      ];
+      for (const s of spans) {
+        let ph = 0;
+        for (let i = s.startSample; i < s.endSample; i++) {
+          ph += (2 * Math.PI * 220) / sr;
+          channel[i] += 0.25 * Math.sin(ph);
+        }
+      }
+      const voice = { start: sec(3.0), end: sec(4.0) };
+      richVoiceInto(channel, voice.start, voice.end - voice.start, 110, -40, sr);
+
+      // Preconditions, so this is the regime it claims: the voice reads
+      // voiced, and its tilt sits UNDER the boundary — the shape veto cannot
+      // be what protects it.
+      const voiceMono = Float32Array.from(channel.subarray(voice.start, voice.end));
+      const track = detectPitch(voiceMono, sr);
+      const voiced = track.frames.filter((f) => f.f0Hz !== null).length / Math.max(1, track.frames.length);
+      expect(voiced).toBeGreaterThan(GATE_VOICED_FRACTION);
+      expect(spectralTiltResidualDb(voiceMono, sr)).toBeLessThan(GATE_SHAPED_RESIDUAL_DB);
+
+      const res = deriveGate([channel], sr, undefined, { source: 'lyrics-alignment', spans });
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyRegions([channel], res, sr);
+      // The voiced passage comes back untouched...
+      expect(changedCount(channel, out[0], voice)).toBe(0);
+      // ...while the outer pauses still reach digital silence.
+      expect(tailDb(out[0], { start: 0, end: spans[0].startSample }, sr)).toBeLessThanOrEqual(-80);
+      // ...and the report counts the kept candidate against the voiced veto.
+      const kept = res.derived.find((d) => d.label === 'Kept')!;
+      expect(kept.from).toContain('voiced');
+    }, 120000);
+
+    it('keeps an unscripted whisper between words — the vocal-tract evidence in region form', () => {
+      // [pause][word][gap holding a whisper][word][pause] at the suite's rate.
+      const sec = (s: number): number => Math.round(s * SR);
+      const channel = gaussFloorDb(sec(7), -50, 33);
+      const spans = [
+        { startSample: sec(1.5), endSample: sec(2.5) },
+        { startSample: sec(4.5), endSample: sec(5.5) },
+      ];
+      for (const s of spans) {
+        let ph = 0;
+        for (let i = s.startSample; i < s.endSample; i++) {
+          ph += (2 * Math.PI * 220) / SR;
+          channel[i] += 0.25 * Math.sin(ph);
+        }
+      }
+      // A SUSTAINED whisper (the population's own steady member): its edges
+      // sit at its full level, so its whole span reads above the local floor.
+      let wh = noise(sec(1.0), 1, 61);
+      for (const [hz, q] of [
+        [500, 8],
+        [1500, 10],
+        [2500, 12],
+      ] as const) {
+        if (hz < (SR / 2) * 0.9) wh = resonate(wh, hz, q);
+      }
+      wh = atRms(wh, Math.pow(10, -40 / 20));
+      const whisperAtSpan = { start: sec(3.0), end: sec(4.0) };
+      for (let i = 0; i < wh.length; i++) channel[whisperAtSpan.start + i] += wh[i];
+
+      const res = deriveGate([channel], SR, undefined, { source: 'lyrics-alignment', spans });
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyRegions([channel], res);
+      // The whisper's body is protected by the windows centred on it, and its
+      // edges — at full level for a sustained whisper — by the envelope
+      // padding; only boundary-window slivers of an edge QUIETER than the
+      // local floor could ever be taken (the stated cost), and this whisper
+      // has none.
+      expect(changedCount(channel, out[0], whisperAtSpan)).toBe(0);
+      // ...and the outer pauses still go silent.
+      expect(tailDb(out[0], { start: 0, end: spans[0].startSample })).toBeLessThanOrEqual(-80);
+      // The report names the vocal-tract evidence it kept material for.
+      const kept = res.derived.find((d) => d.label === 'Kept')!;
+      expect(kept.from).toContain('vocal');
+    });
+
+    it('without words, a noisy pause is muted only when it is unvoiced AND floor-like', () => {
+      // Three gaps between sung phrases: plain floor (goes), a whisper-filled
+      // one (stays — vocal tract), and a floor with a soft tonal hum loud
+      // enough to shape the spectrum (stays). The conservative path: only
+      // what carries NO vocal evidence at all is muted.
+      const sec = (s: number): number => Math.round(s * SR);
+      const channel = gaussFloorDb(sec(10), -50, 41);
+      const sing = (from: number, n: number): void => {
+        let ph = 0;
+        for (let i = 0; i < n; i++) {
+          ph += (2 * Math.PI * 196) / SR;
+          channel[from + i] += 0.25 * (Math.sin(ph) + 0.4 * Math.sin(2 * ph));
+        }
+      };
+      // [gapA 1.5s][phrase 1s][gapB whisper 1.5s][phrase 1s][gapC hum 1.5s][phrase 1s][floor tail]
+      const gapA = { start: 0, end: sec(1.5) };
+      sing(sec(1.5), sec(1));
+      const gapB = { start: sec(2.5), end: sec(4.0) };
+      const wh = whisper(sec(1.5), -40, 71);
+      for (let i = 0; i < wh.length; i++) channel[gapB.start + i] += wh[i];
+      sing(sec(4.0), sec(1));
+      const gapC = { start: sec(5.0), end: sec(6.5) };
+      {
+        let ph = 0;
+        const amp = Math.pow(10, -45 / 20) * Math.SQRT2;
+        for (let i = gapC.start; i < gapC.end; i++) {
+          const t = i / SR;
+          ph += (2 * Math.PI * (196 * (1 + 0.006 * Math.sin(2 * Math.PI * 5.5 * t)))) / SR;
+          channel[i] += amp * Math.sin(ph);
+        }
+      }
+      sing(sec(6.5), sec(1));
+
+      const res = deriveGate([channel], SR);
+      expect(res.run).toBe(true);
+      if (!res.run) return;
+      const out = applyRegions([channel], res);
+      // Gap A (bare floor) reaches silence...
+      expect(tailDb(out[0], { start: gapA.start, end: gapA.end })).toBeLessThanOrEqual(-80);
+      // ...the whisper gap and the hum gap come back untouched.
+      expect(changedCount(channel, out[0], gapB)).toBe(0);
+      expect(changedCount(channel, out[0], gapC)).toBe(0);
+    });
+
+    it('ignores stale spans: evidence about audio that has changed places no words', () => {
+      // The collector is what enforces freshness (its own tests below); the
+      // derivation must simply treat "no evidence" as the conservative path.
+      const { channels } = takeWithLoudPauses();
+      const withNull = deriveGate(channels, SR, undefined, null);
+      const without = deriveGate(channels, SR);
+      expect(withNull.run).toBe(false);
+      expect(without.run).toBe(false);
     });
   });
 
   it('does NOT share Noise Reduction’s decline: gating needs no clean print (N3)', () => {
     // A take whose quietest passage sits within 12 dB of programme level: NR
-    // refuses, because a print learned there would contain voice. The gate has
-    // no print to learn — it needs only a level — and that take is exactly the
-    // one whose gaps are loudest, so a shared decline would abandon the user
-    // who needs the stage most.
-    const noisy = withNoisyGap(8, 0.5, 0.3, 4);
+    // refuses, because a print learned there would contain voice. The gate
+    // needs no print — it needs only to know WHERE the voice is — and this
+    // take is exactly the one whose gaps are loudest, so a shared decline
+    // would abandon the user who needs the stage most. The fixture: sung
+    // phrases only 9 dB over a very loud floor, with real one-second pauses.
+    const pause = Math.round(1.0 * SR);
+    const phrase = Math.round(0.8 * SR);
+    const noisy = gaussFloorDb(3 * pause + 2 * phrase, -22, 7);
+    const pauses: { start: number; end: number }[] = [];
+    let at = 0;
+    for (const [sung, len] of [
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+    ] as const) {
+      if (!sung) pauses.push({ start: at, end: at + len });
+      else {
+        let ph = 0;
+        for (let i = 0; i < len; i++) {
+          const t = i / SR;
+          ph += (2 * Math.PI * 220) / SR;
+          const c = Math.min(1, t / 0.04) * Math.min(1, (len / SR - t) / 0.06);
+          noisy[at + i] += 0.25 * c * Math.sin(ph);
+        }
+      }
+      at += len;
+    }
     const nr = deriveNoiseReduction([noisy], SR);
     expect(nr.run).toBe(false);
     if (nr.run) return;
     expect(nr.reason).toContain('would contain voice');
-    expect(deriveGate([noisy], SR).run).toBe(true);
+    const res = deriveGate([noisy], SR);
+    expect(res.run).toBe(true);
+    if (!res.run) return;
+    const out = applyGate([noisy], res)[0];
+    let sum = 0;
+    const tail = Math.round(0.3 * SR);
+    for (let i = pauses[1].end - tail; i < pauses[1].end; i++) sum += out[i] * out[i];
+    expect(toDb(Math.sqrt(sum / tail))).toBeLessThanOrEqual(-80);
   });
 });
 
-// ── The two constants deriveGate introduces, and their populations ─────────
-// Both are kept sweeps rather than docblock narrative: a constant whose only
-// justification is a comment is a constant that can be edited without anything
-// failing, and both of these are load-bearing in BOTH directions.
+// ── The word evidence the gate reads, and how it reaches the chain (G2) ─────
+describe('collectGateWordEvidence', () => {
+  const span = (startSample: number, endSample: number) => ({ startSample, endSample });
+
+  function mockAlignment(words: { startSample: number; endSample: number }[], stale: boolean): jest.SpyInstance[] {
+    return [
+      jest
+        .spyOn(alignLyricsService, 'getLyricsAlignment')
+        .mockReturnValue({ words } as unknown as ReturnType<typeof alignLyricsService.getLyricsAlignment>),
+      jest.spyOn(alignLyricsService, 'isLyricsAlignmentStale').mockReturnValue(stale),
+    ];
+  }
+
+  function mockTranscript(segments: { startSample: number; endSample: number }[], stale: boolean): jest.SpyInstance[] {
+    return [
+      jest
+        .spyOn(transcribeService, 'getTranscript')
+        .mockReturnValue({ segments } as unknown as ReturnType<typeof transcribeService.getTranscript>),
+      jest.spyOn(transcribeService, 'isTranscriptStale').mockReturnValue(stale),
+    ];
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('prefers fresh word-level spans over fresh segment-level ones', () => {
+    mockAlignment([span(100, 200)], false);
+    mockTranscript([span(300, 400)], false);
+    const evidence = collectGateWordEvidence('doc', 0, 1000)!;
+    expect(evidence.source).toBe('lyrics-alignment');
+    expect(evidence.spans).toEqual([span(100, 200)]);
+  });
+
+  it('ignores a STALE alignment and falls through to the transcript — spans about audio that changed place no words', () => {
+    mockAlignment([span(100, 200)], true);
+    mockTranscript([span(300, 400)], false);
+    const evidence = collectGateWordEvidence('doc', 0, 1000)!;
+    expect(evidence.source).toBe('transcript-segments');
+    expect(evidence.spans).toEqual([span(300, 400)]);
+  });
+
+  it('returns null when both sources are stale, and when neither exists', () => {
+    mockAlignment([span(100, 200)], true);
+    mockTranscript([span(300, 400)], true);
+    expect(collectGateWordEvidence('doc', 0, 1000)).toBeNull();
+    jest.restoreAllMocks();
+    expect(collectGateWordEvidence('doc', 0, 1000)).toBeNull();
+  });
+
+  it('maps document-absolute spans into the region frame, clipped at both edges', () => {
+    // A selection run: the chain's audio starts at the region's own zero, so
+    // a span half inside the region arrives clipped and shifted.
+    mockAlignment([span(50, 150), span(900, 1100), span(2000, 2100), span(1400, 1600)], false);
+    const evidence = collectGateWordEvidence('doc', 1000, 1500)!;
+    expect(evidence.spans).toEqual([span(0, 100), span(400, 500)]);
+  });
+
+  it('treats evidence with no span in the region as NO evidence, not as evidence of absence', () => {
+    mockAlignment([span(50, 150)], false);
+    mockTranscript([span(60, 160)], false);
+    expect(collectGateWordEvidence('doc', 1000, 1500)).toBeNull();
+  });
+});
+
+describe('the chain hands the gate the document’s word evidence (G2)', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  /** Two sung phrases with 1 s pauses over a floor, plus the phrase spans. */
+  function chainTake(): { channel: Float32Array; spans: { startSample: number; endSample: number }[] } {
+    const pause = Math.round(1.0 * SR);
+    const phrase = Math.round(0.8 * SR);
+    const channel = gaussFloorDb(3 * pause + 2 * phrase, -50, 7);
+    const spans: { startSample: number; endSample: number }[] = [];
+    let at = 0;
+    for (const [sung, n] of [
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+    ] as const) {
+      if (sung) {
+        spans.push({ startSample: at, endSample: at + n });
+        let phase = 0;
+        for (let i = 0; i < n; i++) {
+          const t = i / SR;
+          phase += (2 * Math.PI * 220) / SR;
+          const c = Math.min(1, t / 0.04) * Math.min(1, (n / SR - t) / 0.06);
+          channel[at + i] += 0.25 * c * Math.sin(phase);
+        }
+      }
+      at += n;
+    }
+    return { channel, spans };
+  }
+
+  it('a fresh alignment reaches the gate, and the report names it', async () => {
+    const { channel, spans } = chainTake();
+    seedDoc([channel]);
+    jest
+      .spyOn(alignLyricsService, 'getLyricsAlignment')
+      .mockReturnValue({ words: spans } as unknown as ReturnType<typeof alignLyricsService.getLyricsAlignment>);
+    jest.spyOn(alignLyricsService, 'isLyricsAlignmentStale').mockReturnValue(false);
+
+    const report = await runVocalChain({ enabled: only('gate') });
+    const gate = report!.stages.find((s) => s.id === 'gate')!;
+    expect(gate.status).toBe('applied');
+    expect(gate.derived.find((d) => d.label === 'Evidence')!.value).toContain('lyrics');
+  }, 120000);
+
+  it('drops the spans when a length-changing stage ran ahead of the gate — moved audio is not what they describe', async () => {
+    const { channel, spans } = chainTake();
+    seedDoc([channel]);
+    jest
+      .spyOn(alignLyricsService, 'getLyricsAlignment')
+      .mockReturnValue({ words: spans } as unknown as ReturnType<typeof alignLyricsService.getLyricsAlignment>);
+    jest.spyOn(alignLyricsService, 'isLyricsAlignmentStale').mockReturnValue(false);
+
+    // Remove Silence cuts the pauses, so every sample after its first cut has
+    // moved by the time the gate measures.
+    const report = await runVocalChain({ enabled: only('silence', 'gate') });
+    const silence = report!.stages.find((s) => s.id === 'silence')!;
+    expect(silence.status).toBe('applied');
+    expect(report!.outputSamples).toBeLessThan(report!.regionSamples);
+    const gate = report!.stages.find((s) => s.id === 'gate')!;
+    // The gate still reports (applied or declined on the shortened audio),
+    // but whatever it did, it did WITHOUT the spans.
+    if (gate.status === 'applied') {
+      expect(gate.derived.find((d) => d.label === 'Evidence')!.value).toContain('measured activity');
+    } else {
+      expect(gate.status).toBe('declined');
+    }
+  }, 120000);
+});
+
+// ── The gate's constants, and their populations ────────────────────────────
+// Kept sweeps rather than docblock narrative: a constant whose only
+// justification is a comment is a constant that can be edited without
+// anything failing. GATE_HEADROOM_DB survives G2 as the region-edge floor
+// reference (its graze population is unchanged); GATE_VOICED_FRACTION and
+// GATE_SHAPED_RESIDUAL_DB now justify the region vetoes and the activity
+// segmentation; GATE_MIN_REGION_MS is new with G2.
 
 describe('GATE_HEADROOM_DB', () => {
   /** Gaussian floor — a heavier tail than uniform, and the distribution the
@@ -3012,17 +3514,19 @@ describe('GATE_SHAPED_RESIDUAL_DB', () => {
 });
 
 /**
- * V2 — the two populations behind the bound on how far the search may climb.
+ * G2 — the length below which the gate must not form a verdict at all.
  *
- * The search walks the take's quietest passages until one reads as a pause, and
- * the threshold it then derives sits ABOVE every quieter passage it stepped
- * over. Whether that is a fix or a fresh act of destruction is a question of
- * how far it climbed, measured in the very statistic the threshold is built
- * from — the envelope peak the silence detector reads inside a window. So the
- * quantity is `accepted.envelopePeakDb - quietest.envelopePeakDb`: how much
- * higher the gate closes than it would have closed on the quietest passage.
+ * `GATE_MIN_REGION_MS` is a REUSE (`NOISE_WINDOW_MS`, Remove Silence's own
+ * minimum pause — pinned beside the detector constants above), but a reuse
+ * still has to be shown SUFFICIENT: the vocal-tract boundary the vetoes stand
+ * on was derived on 500 ms windows, and this suite measures what happens to
+ * its two populations as the passage shortens. The boundary survives at
+ * 500 ms, is CROSSED by the floor population by 250 ms (a quarter-second of
+ * plain room tone reads as a vocal tract), and inverts outright at one
+ * `TILT_FFT_SIZE` frame — so no shorter minimum could keep the vetoes
+ * trustworthy, and the app's own pause definition is exactly long enough.
  */
-describe('GATE_SEARCH_CLIMB_DB', () => {
+describe('GATE_MIN_REGION_MS', () => {
   function res2At(x: Float32Array, sr: number, hz: number, q: number): Float32Array {
     const w = (2 * Math.PI * hz) / sr;
     const r = Math.exp(-w / (2 * q));
@@ -3040,7 +3544,28 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
     return out;
   }
 
-  function whisperAt(n: number, rmsDb: number, seed: number, sr: number): Float32Array {
+  function at(x: Float32Array, rmsDb: number): Float32Array {
+    let s = 0;
+    for (let i = 0; i < x.length; i++) s += x[i] * x[i];
+    const g = Math.pow(10, rmsDb / 20) / Math.sqrt(s / Math.max(1, x.length));
+    const out = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i++) out[i] = x[i] * g;
+    return out;
+  }
+
+  function floorTilted(n: number, sr: number, rmsDb: number, seed: number, cutHz: number): Float32Array {
+    const src = noise(n, 1, seed);
+    const a = Math.exp((-2 * Math.PI * cutHz) / sr);
+    const out = new Float32Array(n);
+    let y = 0;
+    for (let i = 0; i < n; i++) {
+      y = a * y + (1 - a) * src[i];
+      out[i] = y;
+    }
+    return at(out, rmsDb);
+  }
+
+  function whisperAt(n: number, sr: number, rmsDb: number, seed: number): Float32Array {
     let x = noise(n, 1, seed);
     for (const [hz, q] of [
       [500, 8],
@@ -3050,291 +3575,54 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
       if (hz < (sr / 2) * 0.9) x = res2At(x, sr, hz, q);
     }
     for (let i = 0; i < n; i++) x[i] *= 0.55 + 0.45 * Math.sin((2 * Math.PI * 4 * i) / sr);
-    let s = 0;
-    for (let i = 0; i < n; i++) s += x[i] * x[i];
-    const g = Math.pow(10, rmsDb / 20) / Math.sqrt(s / Math.max(1, n));
-    for (let i = 0; i < n; i++) x[i] *= g;
-    return x;
+    return at(x, rmsDb);
   }
 
-  function sing(into: Float32Array, from: number, n: number, sr: number, amp: number): void {
-    let phase = 0;
-    for (let i = 0; i < n && from + i < into.length; i++) {
-      phase += (2 * Math.PI * 196) / sr;
-      into[from + i] += amp * (Math.sin(phase) + 0.4 * Math.sin(2 * phase));
-    }
-  }
-
-  /** The reported shape: a quiet half whose every gap is an audible breath, and
-   * a louder half carrying the take's one real pause. */
-  function breathTake(sr: number, gaps: number, seed: number): { channel: Float32Array; pause: { start: number; end: number } } {
-    const phrase = Math.round(1.2 * sr);
-    const gap = Math.round(0.55 * sr);
-    const quietLen = gaps * (phrase + gap) + phrase;
-    const pauseLen = Math.round(2.0 * sr);
-    const loudLen = phrase + pauseLen + phrase;
-    const channel = new Float32Array(quietLen + loudLen);
-    channel.set(gaussFloorDb(quietLen, -66, seed), 0);
-    let at = 0;
-    for (let g = 0; g < gaps; g++) {
-      sing(channel, at, phrase, sr, 0.15);
-      at += phrase;
-      const br = whisperAt(gap, -60, seed * 31 + g, sr);
-      for (let i = 0; i < gap && at + i < quietLen; i++) channel[at + i] += br[i];
-      at += gap;
-    }
-    sing(channel, at, phrase, sr, 0.15);
-    channel.set(gaussFloorDb(loudLen, -55, seed + 77), quietLen);
-    sing(channel, quietLen, phrase, sr, 0.2);
-    const pause = { start: quietLen + phrase, end: quietLen + phrase + pauseLen };
-    sing(channel, pause.end, phrase, sr, 0.2);
-    return { channel, pause };
-  }
-
-  /** The destructive converse: a quiet vocal PASSAGE that lives below an
-   * ordinary floor, so a threshold taken from the floor mutes it whole. */
-  function whisperUnderFloorTake(sr: number, seed: number): { channel: Float32Array; floor: { start: number; end: number } } {
-    const floorLen = Math.round(2 * sr);
-    const softLen = Math.round(3.5 * sr);
-    const chorusLen = Math.round(3.5 * sr);
-    const channel = new Float32Array(floorLen + softLen + chorusLen);
-    channel.set(gaussFloorDb(floorLen, -40, seed), 0);
-    channel.set(whisperAt(softLen, -50, seed + 3, sr), floorLen);
-    sing(channel, floorLen + softLen, chorusLen, sr, 0.25);
-    return { channel, floor: { start: 0, end: floorLen } };
-  }
-
-  /** The same converse in the shape N6 records: a quiet island bracketed by
-   * digital silence, beside a take whose own pauses set the threshold. */
-  function islandUnderFloorTake(sr: number, islandMs: number, seed: number): { channel: Float32Array; floor: { start: number; end: number } } {
-    const pause = Math.round(1.0 * sr);
-    const phrase = Math.round(0.8 * sr);
-    const headLen = 3 * pause + 2 * phrase;
-    const zeros = Math.round(0.3 * sr);
-    const islandLen = Math.round((islandMs / 1000) * sr);
-    const burst = Math.round(0.5 * sr);
-    const channel = new Float32Array(headLen + zeros + islandLen + burst + zeros);
-    channel.set(gaussFloorDb(headLen, -50, seed), 0);
-    sing(channel, pause, phrase, sr, 0.25);
-    sing(channel, 2 * pause + phrase, phrase, sr, 0.25);
-    channel.set(whisperAt(islandLen, -60, seed + 5, sr), headLen + zeros);
-    sing(channel, headLen + zeros + islandLen, burst, sr, 0.25);
-    return { channel, floor: { start: 0, end: headLen } };
-  }
-
-  /** I1's shape at an arbitrary rate: an ordinary floor a decibel above a
-   * quiet passage whose channels cancel. It belongs in THIS population because
-   * of where it lands in it — see the test that consumes it. */
-  function cancellingUnderFloorTake(
-    sr: number,
-    seed: number,
-    floorDb = -55
-  ): { channels: Float32Array[]; inverted: { start: number; end: number }; floor: { start: number; end: number } } {
-    const phrase = Math.round(1.2 * sr);
-    const gap = Math.round(0.9 * sr);
-    const L = new Float32Array(3 * phrase + 2 * gap);
-    const R = new Float32Array(L.length);
-    const both = (from: number, n: number): void => {
-      const before = Float32Array.from(L.subarray(from, from + n));
-      sing(L, from, n, sr, 0.2);
-      for (let i = 0; i < n; i++) R[from + i] += L[from + i] - before[i];
-    };
-    let at = 0;
-    both(at, phrase);
-    at += phrase;
-    const inverted = { start: at, end: at + gap };
-    const w = whisperAt(gap, -56, seed + 61, sr);
-    for (let i = 0; i < gap; i++) {
-      L[at + i] = w[i];
-      R[at + i] = -w[i];
-    }
-    at += gap;
-    both(at, phrase);
-    at += phrase;
-    const floor = { start: at, end: at + gap };
-    const fa = gaussFloorDb(gap, floorDb, seed + 71);
-    const fb = gaussFloorDb(gap, floorDb, seed + 72);
-    for (let i = 0; i < gap; i++) {
-      L[at + i] = fa[i];
-      R[at + i] = fb[i];
-    }
-    at += gap;
-    both(at, phrase);
-    return { channels: [L, R], inverted, floor };
-  }
-
-  /** The climb from the quietest candidate to the quietest candidate lying
-   * wholly inside `span` — the passage that IS the take's honest floor. */
-  function climb(channel: Float32Array, sr: number): number | null {
-    const cands = measureNoiseWindows([channel], sr, {
-      rejectMostlySilentWindows: true,
-      maxCandidates: GATE_QUIET_WINDOWS,
-    });
-    const reads = (w: { startSample: number; lengthSamples: number }): boolean => {
-      const mono = Float32Array.from(channel.subarray(w.startSample, w.startSample + w.lengthSamples));
-      if (spectralTiltResidualDb(mono, sr) > GATE_SHAPED_RESIDUAL_DB) return false;
-      const track = detectPitch(mono, sr);
-      const voiced =
-        track.frames.length === 0 ? 0 : track.frames.filter((f) => f.f0Hz !== null).length / track.frames.length;
-      return voiced <= GATE_VOICED_FRACTION;
-    };
-    if (cands.length === 0 || reads(cands[0])) return null;
-    for (let i = 1; i < cands.length; i++) {
-      if (reads(cands[i])) return cands[i].envelopePeakDb - cands[0].envelopePeakDb;
-    }
-    return null;
-  }
-
-  it('separates the take that must gate from the take that must not', () => {
-    const breaths: number[] = [];
-    const passages: number[] = [];
-    for (const sr of [8000, 22050, 44100, 48000]) {
-      for (const seed of [5, 17, 29]) {
-        for (const gaps of [1, 2, 4]) {
-          const c = climb(breathTake(sr, gaps, seed).channel, sr);
-          if (c !== null) breaths.push(c);
-        }
-        const w = climb(whisperUnderFloorTake(sr, seed).channel, sr);
-        if (w !== null) passages.push(w);
-        for (const islandMs of [400, 500, 800]) {
-          const i = climb(islandUnderFloorTake(sr, islandMs, seed).channel, sr);
-          if (i !== null) passages.push(i);
+  /** floorMax and vocalMin of the tilt statistic over `n`-sample members —
+   * the same generators the GATE_SHAPED_RESIDUAL_DB suite measures at 500 ms,
+   * asked at a different length. */
+  function populationsAt(n: number, sr: number): { floorMax: number; vocalMin: number } {
+    let floorMax = -Infinity;
+    let vocalMin = Infinity;
+    for (const seed of [7, 23, 101]) {
+      floorMax = Math.max(floorMax, spectralTiltResidualDb(at(noise(n, 1, seed), -40), sr));
+      for (const cut of [400, 800, 2500]) {
+        floorMax = Math.max(floorMax, spectralTiltResidualDb(floorTilted(n, sr, -40, seed, cut), sr));
+      }
+      vocalMin = Math.min(vocalMin, spectralTiltResidualDb(whisperAt(n, sr, -40, seed), sr));
+      for (const [hz, q] of [
+        [2800, 3],
+        [6000, 5],
+      ] as const) {
+        if (hz < (sr / 2) * 0.9) {
+          vocalMin = Math.min(vocalMin, spectralTiltResidualDb(at(res2At(noise(n, 1, seed), sr, hz, q), -40), sr));
         }
       }
     }
-    // Both populations are non-empty: every member really is a take whose
-    // quietest window is vocal and whose search therefore climbs.
-    expect(breaths).toHaveLength(36);
-    expect(passages).toHaveLength(45);
-
-    const worstBreath = Math.max(...breaths);
-    const closestPassage = Math.min(...passages);
-    // A breath peaks with the room it sits on, so the pause that vouches for
-    // the take reaches very nearly the same level — some members NEGATIVE.
-    expect(Math.min(...breaths)).toBeLessThan(0);
-    expect(worstBreath).toBeLessThan(2.0);
-    // A quiet vocal passage under an ordinary floor is a level regime of its
-    // own, and the take's own pauses sit well clear of it.
-    expect(closestPassage).toBeGreaterThan(3.1);
-    expect(Math.max(...passages)).toBeGreaterThan(6.5);
-
-    // The constant sits inside the measured gap with the same margin on both
-    // sides — the profile `GATE_SHAPED_RESIDUAL_DB` carries.
-    expect(GATE_SEARCH_CLIMB_DB / worstBreath).toBeGreaterThan(1.25);
-    expect(closestPassage / GATE_SEARCH_CLIMB_DB).toBeGreaterThan(1.25);
-    expect(GATE_SEARCH_CLIMB_DB).toBe(2.5);
-    // ...and it is under the headroom the stage already adds: the search may
-    // not move the threshold by as much as the derivation itself does.
-    expect(GATE_SEARCH_CLIMB_DB).toBeLessThan(GATE_HEADROOM_DB);
-  }, 600000);
-
-  /**
-   * I1 — the population's own boundary, stated: a CANCELLING quiet passage
-   * lands in the PERMISSIVE half of this constant, so the climb bound is not
-   * what protects it and never could be. That is why the cancellation verdict
-   * is a hard decline rather than a refusal the search may step past, and this
-   * test is here so the gap cannot silently reopen: if someone widens the
-   * populations above without reading them, this member still says the level
-   * is the wrong instrument for this shape.
-   */
-  /** True when `w` lies wholly inside `span` — the sibling idiom the I1 shape
-   * test uses, so "the next candidate is the ordinary floor" is a statement
-   * about WHERE the window is and not merely about its level. */
-  const inWindow = (
-    w: { startSample: number; lengthSamples: number },
-    span: { start: number; end: number }
-  ): boolean => w.startSample >= span.start && w.startSample + w.lengthSamples <= span.end;
-
-  /** How far the mono mix of `w` sits below its own per-channel RMS: the
-   * cancellation depth the diagnosis reads. */
-  function cancellationDepthDb(
-    channels: Float32Array[],
-    w: { startSample: number; lengthSamples: number; rmsDb: number }
-  ): number {
-    const mono = new Float32Array(w.lengthSamples);
-    for (let i = 0; i < mono.length; i++) {
-      mono[i] = (channels[0][w.startSample + i] + channels[1][w.startSample + i]) / 2;
-    }
-    let sq = 0;
-    for (let i = 0; i < mono.length; i++) sq += mono[i] * mono[i];
-    return w.rmsDb - toDb(Math.sqrt(sq / mono.length));
+    return { floorMax, vocalMin };
   }
 
-  /** The step the search would have taken on this shape: cancelling window to
-   * next candidate, asserted to be the inverted passage and the ordinary floor
-   * respectively, in that order and by POSITION. */
-  function stepFromCancellingToFloor(sr: number, seed: number, floorDb?: number): number {
-    const { channels, inverted, floor } = cancellingUnderFloorTake(sr, seed, floorDb);
-    const cands = measureNoiseWindows(channels, sr, {
-      rejectMostlySilentWindows: true,
-      maxCandidates: GATE_QUIET_WINDOWS,
-    });
-    expect(inWindow(cands[0], inverted)).toBe(true);
-    expect(cancellationDepthDb(channels, cands[0])).toBeGreaterThan(GATE_CANCELLATION_DEPTH_DB);
-    // The step's DESTINATION, pinned by position rather than inferred. Without
-    // this the climb below is a difference between two windows that could both
-    // have drifted anywhere, and the sentence "the next candidate up is the
-    // ordinary floor" would be a claim about the fixture nobody checks.
-    expect(inWindow(cands[1], floor)).toBe(true);
-    return cands[1].envelopePeakDb - cands[0].envelopePeakDb;
-  }
-
-  it('a cancelling passage lands INSIDE the permissive band, which is why level cannot decide it', () => {
-    // ARM 1 — the shape as I1 found it. The floor is a decibel above the
-    // cancelling passage in RMS, but its envelope peak is BELOW it (a floor is
-    // flat where a whisper is modulated), so every step is a DESCENT: the climb
-    // bound is satisfied by a take going downhill.
-    const descents: number[] = [];
+  it('is the length at which the vocal-tract boundary still separates its populations — and the last one', () => {
     for (const sr of [8000, 22050, 44100, 48000]) {
-      for (const seed of [5, 17, 29]) descents.push(stepFromCancellingToFloor(sr, seed));
+      // At the minimum itself, the boundary holds at every rate: every floor
+      // member under the constant, every vocal member over it.
+      const atMin = populationsAt(Math.round((GATE_MIN_REGION_MS / 1000) * sr), sr);
+      expect([sr, atMin.floorMax < GATE_SHAPED_RESIDUAL_DB]).toEqual([sr, true]);
+      expect([sr, atMin.vocalMin > GATE_SHAPED_RESIDUAL_DB]).toEqual([sr, true]);
     }
-    expect(descents).toHaveLength(12);
-    // Measured -3.49 … -1.10 dB. Stated as the descent it is, because a
-    // "≤ 2.5 dB" reading of a set of negative numbers says nothing about 2.5.
-    expect(Math.max(...descents)).toBeLessThan(0);
 
-    // ARM 2 — the same shape with the floor 3.5 dB louder, which is what makes
-    // the step a genuine CLIMB while leaving it legal. This arm is what gives
-    // the bound its bite here: the six members run 0.63 … 1.73 dB, so the
-    // "inside the band" assertion below now FAILS for any constant under
-    // 1.73 dB, where arm 1 alone would have passed with the constant at zero.
-    //
-    // Two rates rather than four, and the reason is a measurement: this shape's
-    // step spreads 2.39 dB across 4 rates x 3 seeds (its cancelling window's
-    // envelope peak is the modulated one), which is very nearly the whole 2.5 dB
-    // width of the band. At this floor level the 44.1/48 kHz members read 0.01
-    // and 2.40 dB — inside, but with no margin at either end to assert. The
-    // shape cannot be centred in the band at every rate at once, and saying so
-    // is more honest than picking a level that hides it.
-    const climbs: number[] = [];
-    for (const sr of [8000, 22050]) {
-      for (const seed of [5, 17, 29]) climbs.push(stepFromCancellingToFloor(sr, seed, -51.5));
-    }
-    expect(climbs).toHaveLength(6);
-    // A real climb, and one the search is allowed to make.
-    expect(Math.min(...climbs)).toBeGreaterThan(0);
-    expect(Math.max(...climbs)).toBeLessThanOrEqual(GATE_SEARCH_CLIMB_DB);
-    // Margins on the constant's own scale, both sides, so the arm stays useful
-    // if the constant moves and fails loudly if the fixture drifts into either
-    // wall: measured 0.25x and 0.69x of it.
-    expect(Math.min(...climbs) / GATE_SEARCH_CLIMB_DB).toBeGreaterThan(0.2);
-    expect(Math.max(...climbs) / GATE_SEARCH_CLIMB_DB).toBeLessThan(0.8);
+    // At half the minimum the boundary is no longer a boundary: the floor
+    // population CROSSES the constant (measured 2.72 dB at 8 kHz against the
+    // 2.5 dB boundary — a quarter-second of plain room tone reading as a
+    // vocal tract).
+    const atQuarter = populationsAt(Math.round(0.25 * 8000), 8000);
+    expect(atQuarter.floorMax).toBeGreaterThan(GATE_SHAPED_RESIDUAL_DB);
 
-    // ...and the stage refuses BOTH arms anyway, on the diagnosis rather than
-    // the level — which is the whole point. Arm 2 is the sharper witness: the
-    // level positively permits that step, and the take still declines.
-    for (const sr of [8000, 44100]) {
-      const descending = deriveGate(cancellingUnderFloorTake(sr, 5).channels, sr);
-      expect(descending.run).toBe(false);
-      if (descending.run) return;
-      expect(descending.reason).toContain('cancel');
-    }
-    for (const sr of [8000, 22050]) {
-      const climbing = deriveGate(cancellingUnderFloorTake(sr, 5, -51.5).channels, sr);
-      expect(climbing.run).toBe(false);
-      if (climbing.run) return;
-      expect(climbing.reason).toContain('cancel');
-    }
+    // ...and at one analysis frame the two populations INVERT outright
+    // (measured 3.9 dB floor against 2.6 dB whisper at 44.1 kHz) — the
+    // regime the fragment census refuses to classify in.
+    const atFrame = populationsAt(TILT_FFT_SIZE, 44100);
+    expect(atFrame.floorMax).toBeGreaterThan(atFrame.vocalMin);
   }, 600000);
 });
 
@@ -3499,7 +3787,13 @@ describe('deriveCompressor', () => {
           const raw = gappedProgramme(floorDb, padSamples);
           const gate = deriveGate([raw], SR);
           if (!gate.run) throw new Error('expected the gate to run');
-          const gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
+          (globalThis as { __effectExtra?: unknown }).__effectExtra = gate.extra;
+          let gated: Float32Array[];
+          try {
+            gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
+          } finally {
+            delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+          }
           const before = measureNoiseWindow([raw], SR)!;
           const after = measureNoiseWindow(gated, SR);
           // It is always still MEASURABLE — that much of the old claim holds,
@@ -3527,7 +3821,13 @@ describe('deriveCompressor', () => {
           const raw = gappedProgramme(floorDb, padSamples);
           const gate = deriveGate([raw], SR);
           if (!gate.run) throw new Error('expected the gate to run');
-          const gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
+          (globalThis as { __effectExtra?: unknown }).__effectExtra = gate.extra;
+          let gated: Float32Array[];
+          try {
+            gated = noiseGateEffect.process([Float32Array.from(raw)], SR, gate.params).channels;
+          } finally {
+            delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+          }
 
           const zeros = gated[0].reduce((n: number, v: number) => (v === 0 ? n + 1 : n), 0);
           if (zeros / gated[0].length > 0.3) sawRealGating = true;
@@ -4044,17 +4344,39 @@ describe('runVocalChain', () => {
 
   it('leaves the derivation alone when the user set no threshold', async () => {
     // The converse: the option is absent on every ordinary run, and its
-    // absence must not change a single number the stage derives.
-    const take = flat(WIN * 8, 0.5);
-    take.set(noise(WIN, 0.006, 101), 4 * WIN);
+    // absence must not change a single thing the stage derives — the chain's
+    // gate row carries exactly the rows a direct derivation of the same audio
+    // produces, evidence and regions included.
+    const pause = Math.round(1.0 * SR);
+    const phrase = Math.round(0.8 * SR);
+    const take = gaussFloorDb(3 * pause + 2 * phrase, -50, 7);
+    let at = 0;
+    for (const [sung, len] of [
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+      [true, phrase],
+      [false, pause],
+    ] as const) {
+      if (sung) {
+        let ph = 0;
+        for (let i = 0; i < len; i++) {
+          const t = i / SR;
+          ph += (2 * Math.PI * 220) / SR;
+          const c = Math.min(1, t / 0.04) * Math.min(1, (len / SR - t) / 0.06);
+          take[at + i] += 0.25 * c * Math.sin(ph);
+        }
+      }
+      at += len;
+    }
     seedDoc([Float32Array.from(take)]);
     const report = await runVocalChain({ enabled: only('gate') });
     const gate = report!.stages.find((s) => s.id === 'gate')!;
     expect(gate.status).toBe('applied');
-    expect(gate.derived[0].label).toBe('Threshold');
+    expect(gate.derived[0].label).toBe('Evidence');
     const direct = deriveGate([take], SR);
     if (!direct.run) throw new Error('expected run');
-    expect(gate.derived[0].value).toBe(`${Number(direct.params.thresholdDb).toFixed(1)} dBFS`);
+    expect(gate.derived).toEqual(direct.derived);
   }, 60000);
 
   it('every stage disabled leaves EVERY stage reported as off or manual — none runs unseen', async () => {
