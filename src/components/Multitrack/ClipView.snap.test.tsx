@@ -585,6 +585,28 @@ describe('clip move — edge targets and priority (W2)', () => {
     expect(startOf('member')).toBe(99_700); // the identical, unsnapped delta
   });
 
+  it('a TRIM snaps to a CO-SELECTED neighbour’s edge — only a rigid MOVE excludes the group', () => {
+    // Review W2 finding 2: a trim moves ONLY this clip, so a co-selected
+    // member is stationary and its edges are honest targets — the staleness
+    // argument holds for the rigid group move alone. The dragged clip is
+    // 100 000 samples = 1000 px wide; x >= 994 is the end-trim grip.
+    const el = mountDragged(
+      [
+        { trackIdx: 0, clip: plainClip('dragged', 0, 100_000) },
+        { trackIdx: 0, clip: plainClip('member', 100_701, 50_000) },
+      ],
+      'dragged'
+    );
+    act(() => useSessionStore.getState().setSelectedClips(['dragged', 'member']));
+    firePointer(el, 'pointerdown', { clientX: 996 });
+    // +7 px (past the 4 px drag threshold) -> raw new end 100 700, one sample
+    // short of the member's start.
+    firePointer(el, 'pointermove', { clientX: 1003 });
+    expect(clipById('dragged').lengthSample).toBe(100_701); // end exactly on 100 701
+    expect(clipById('dragged').startSample).toBe(0);
+    expect(startOf('member')).toBe(100_701); // a trim never moves the neighbour
+  });
+
   it('Alt suspends an edge snap exactly as it suspends a beat snap', () => {
     const el = mountDragged(
       [

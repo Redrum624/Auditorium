@@ -77,5 +77,10 @@ export function snapClipStart(
 ): ClipStartSnap {
   if (suspended) return { start: Math.max(0, Math.round(rawStart)), tier: null };
   const s = snapSpanTiered(rawStart, lengthSample, tiers, samplesPerPixel);
-  return { start: Math.max(0, Math.round(s.sample)), tier: s.tier };
+  const start = Math.max(0, Math.round(s.sample));
+  // A snapped result is a whole sample (targets are integral, and so is a
+  // clip's length), so the clamp is the only thing that can move `start` off
+  // `s.sample` — and when it does, the commit no longer lands on the winning
+  // target, so no tier label survives to make a preview claim otherwise.
+  return { start, tier: start === s.sample ? s.tier : null };
 }

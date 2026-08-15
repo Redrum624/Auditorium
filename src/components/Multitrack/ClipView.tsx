@@ -161,9 +161,10 @@ interface DragState {
    * pointerup owes it a commit if the gesture turns out to be a click. */
   deferSelection: boolean;
   /** Task B4 — the SESSION's snap targets as they stood when this drag began,
-   * with this clip's own contribution excluded (trap 27) — and, since W2, the
-   * whole contribution of every co-moving group member with it (their captured
-   * positions are stale by the drag's own rigid delta). Captured once because
+   * with this clip's own contribution excluded (trap 27) — and, since W2, on a
+   * MOVE, the whole contribution of every co-moving group member with it
+   * (their captured positions are stale by the drag's own rigid delta; a trim
+   * moves only this clip, so it excludes only itself). Captured once because
    * building it walks every clip in the session, and because the set a drag
    * uses must not change under the user's hand mid-gesture. W2: priority
    * tiers — edges+cursor over markers over beats. */
@@ -800,9 +801,13 @@ export default function ClipView({
     const localX = e.clientX - rect.left;
     const mode = modeForX(localX);
     // K1 — what this gesture moves. Computed BEFORE the targets because it is
-    // also the snap exclusion set (W2): every co-moving member's captured
-    // contribution is stale by the drag's own rigid delta, and `groupIds`
-    // always contains this clip, so the trap-27 self-exclusion is subsumed.
+    // also the snap exclusion set for a MOVE (W2): every co-moving member's
+    // captured contribution is stale by the drag's own rigid delta, and
+    // `groupIds` always contains this clip, so the trap-27 self-exclusion is
+    // subsumed. A TRIM moves ONLY this clip — co-selected members stay put and
+    // their edges are honest targets (trimming an end to butt against a
+    // co-selected neighbour is the exact workflow W2 exists for), so the trim
+    // exclusion is this clip alone.
     const groupIds = memberAtDown ? [...idsAtDown] : [clip.id];
     dragRef.current = {
       mode,
@@ -814,7 +819,7 @@ export default function ClipView({
       ctrlAtDown: e.ctrlKey, // K1
       shiftAtDown: e.shiftKey, // T5
       deferSelection, // K1
-      targets: sessionSnapTiers(groupIds),
+      targets: sessionSnapTiers(mode === 'move' ? groupIds : [clip.id]),
       lastClientX: e.clientX,
     };
     if (mode === 'move') setMoveDragging(true);

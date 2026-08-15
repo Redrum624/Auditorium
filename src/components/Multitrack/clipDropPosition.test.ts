@@ -70,7 +70,12 @@ describe('snapClipStart', () => {
 
   it('clamps to 0 — a tail snap may ask for a start before the timeline', () => {
     // Tail at 22 050 with a 40 000-sample clip means a start of -17 950.
-    expect(snapClipStart(-17_800, 40_000, targets, SPP, false).start).toBe(0);
+    const clamped = snapClipStart(-17_800, 40_000, targets, SPP, false);
+    expect(clamped.start).toBe(0);
+    // The clamp moved the commit OFF the winning target, so no tier label
+    // survives it — a ghost painted edge-white for a snap the drop no longer
+    // makes would lie (review W2, nit 3).
+    expect(clamped.tier).toBeNull();
     expect(snapClipStart(-500, 20_000, [], SPP, false).start).toBe(0);
   });
 

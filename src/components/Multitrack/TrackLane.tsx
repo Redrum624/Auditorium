@@ -269,7 +269,13 @@ export default function TrackLane({
             left: Math.max(0, ghost.px),
             backgroundColor:
               ghost.tier === SNAP_TIER_EDGE ? 'var(--glass-text-title)' : 'var(--accent)',
-            boxShadow: '0 0 8px var(--accent-ring)',
+            // The halo follows the line: --glass-text-title (#f0f0f2) at the
+            // same 35% alpha --accent-ring applies to --accent, so the white
+            // edge line does not wear a cyan glow (review W2, nit 4).
+            boxShadow:
+              ghost.tier === SNAP_TIER_EDGE
+                ? '0 0 8px rgba(240, 240, 242, 0.35)'
+                : '0 0 8px var(--accent-ring)',
           }}
         />
       )}
