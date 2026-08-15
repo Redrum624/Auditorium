@@ -805,8 +805,13 @@ export default function ClipView({
    * refused, and `null` when the pointer is over no row at all (where the
    * single-clip drag also highlights nothing and commits in place).
    *
-   * One expression for the highlight and the commit, so the lit lane is the
-   * committed lane by construction rather than by two call sites agreeing.
+   * ONE RESOLVER for the highlight and the commit — not one expression: this
+   * wants the track id and `onPointerUp` wants the delta itself, so they are
+   * two calls to `resolveGroupTrackDelta` rather than one shared value. What
+   * that buys is that the lit lane cannot disagree with the committed lane
+   * about WHETHER the move happens, which is the mismatch T1 recorded; it does
+   * NOT make them a single computation, and a future change that re-derives
+   * either one by hand would break the tie again.
    */
   const groupLandingTrack = (groupIds: string[], hover: string | null): string | null => {
     if (hover === null) return null;
@@ -969,8 +974,9 @@ export default function ClipView({
       // the group's shape survives, which is the vertical statement of the
       // rigidity K1 already required horizontally. The move is all-or-nothing
       // (`resolveGroupTrackDelta` answers 0 rather than scattering the members
-      // that fit), and the same call drives the highlight, so what the user
-      // sees lit is what lands.
+      // that fit), and `groupLandingTrack` asks that same resolver for the
+      // highlight — a second call, not a shared value; see its docblock for
+      // what that does and does not guarantee.
       //
       // Still no `clearOverlap`: a per-member push forward would change the
       // spacing between the clips being dragged, and a group drag that deforms
