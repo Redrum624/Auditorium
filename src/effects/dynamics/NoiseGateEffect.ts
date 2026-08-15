@@ -3,7 +3,31 @@ import { envelopeFollower, maxAcrossChannels, maybeReportProgress } from './enve
 
 type GateState = 'open' | 'holding' | 'closing' | 'closed';
 
-const FADE_FLOOR_DB = -80;
+export const FADE_FLOOR_DB = -80;
+
+/**
+ * The `__effectExtra` payload of the Vocal Chain's AUTOMATIC gate (G2): the
+ * regions to mute, region-relative, decided by `deriveGate` from where the
+ * vocal activity is rather than from a level. This effect's job in that mode
+ * is application only — each region becomes digital silence behind the same
+ * linear-in-dB `releaseMs` fade the threshold machine closes with, the reopen
+ * at a region's end is instant exactly as the machine's reopen is, and every
+ * sample outside the regions comes back bit-identical. Silence in is silence
+ * out: a zero inside a region stays zero whatever the gain.
+ *
+ * When the side channel is absent — the manual "Gate at a level I set
+ * instead" path, and every direct use of this effect — nothing here runs and
+ * the threshold state machine below is byte-for-byte what it was.
+ */
+export interface NoiseGateMuteRegionsExtra {
+  muteRegions: { start: number; end: number }[];
+}
+
+function readMuteRegions(): { start: number; end: number }[] | null {
+  const extra = (globalThis as { __effectExtra?: Partial<NoiseGateMuteRegionsExtra> }).__effectExtra;
+  const regions = extra?.muteRegions;
+  return Array.isArray(regions) ? regions : null;
+}
 
 /**
  * How long a run of DIGITAL SILENCE (every channel exactly 0) must be before
@@ -105,6 +129,52 @@ export const noiseGateEffect: EffectDefinition = {
     const attackMs = Number(params.attackMs ?? 1);
     const releaseMs = Number(params.releaseMs ?? 150);
     const holdMs = Number(params.holdMs ?? 50);
+
+    // Region mode (see `NoiseGateMuteRegionsExtra`): the WHERE was already
+    // decided; apply it and touch nothing else. The threshold machine below is
+    // never consulted in this mode — that is the mode's whole meaning.
+    const muteRegions = readMuteRegions();
+    if (muteRegions) {
+      const length = channels[0]?.length ?? 0;
+      const releaseSamples = Math.max(1, Math.round((releaseMs / 1000) * sampleRate));
+
+      // Clamp into the buffer, drop what is empty after clamping, and merge
+      // overlaps/adjacency: each merged region is faded ONCE from the source
+      // samples — a second region re-faded from source inside an already-muted
+      // stretch would write real samples back over the first one's zeros.
+      const clamped = muteRegions
+        .map((r) => ({ start: Math.max(0, Math.floor(r.start)), end: Math.min(length, Math.floor(r.end)) }))
+        .filter((r) => r.end > r.start)
+        .sort((a, b) => a.start - b.start);
+      const merged: { start: number; end: number }[] = [];
+      for (const r of clamped) {
+        const last = merged[merged.length - 1];
+        if (last && r.start <= last.end) last.end = Math.max(last.end, r.end);
+        else merged.push({ ...r });
+      }
+
+      // Bit-identical copy outside the regions — `new Float32Array(c)` copies
+      // sample bits, -0 included.
+      const out = channels.map((c) => new Float32Array(c));
+      for (const region of merged) {
+        const fadeEnd = Math.min(region.end, region.start + releaseSamples);
+        for (let i = region.start; i < fadeEnd; i++) {
+          // The state machine's own fade arithmetic: linear-in-dB down to
+          // FADE_FLOOR_DB across releaseSamples, applied identically to every
+          // channel. A zero times any gain stays zero.
+          const fadeDb = FADE_FLOOR_DB * ((i - region.start + 1) / releaseSamples);
+          const gain = Math.pow(10, fadeDb / 20);
+          for (let ch = 0; ch < channels.length; ch++) out[ch][i] = channels[ch][i] * gain;
+        }
+        for (let i = fadeEnd; i < region.end; i++) {
+          // The machine's `closed` state: gain hard 0.
+          for (let ch = 0; ch < channels.length; ch++) out[ch][i] = channels[ch][i] * 0;
+        }
+        maybeReportProgress(onProgress, region.end - 1, length);
+      }
+      onProgress?.(1);
+      return { channels: out };
+    }
 
     const holdSamples = Math.round((holdMs / 1000) * sampleRate);
     const releaseSamples = Math.max(1, Math.round((releaseMs / 1000) * sampleRate));

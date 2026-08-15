@@ -1,7 +1,7 @@
 import { envelopeFollower } from './envelope';
 import { compressorEffect, reductionDb } from './CompressorEffect';
 import { limiterEffect } from './LimiterEffect';
-import { GATE_SILENT_RUN_MS, noiseGateEffect } from './NoiseGateEffect';
+import { FADE_FLOOR_DB, GATE_SILENT_RUN_MS, noiseGateEffect } from './NoiseGateEffect';
 import { getAllEffects } from '../EffectRegistry';
 import { NOISE_WINDOW_MAX_SILENT_FRACTION } from '../../dsp/chainAnalysis';
 import { registerAllEffects } from '../registerAll';
@@ -356,6 +356,136 @@ describe('noiseGateEffect', () => {
     const input = sine(1000, 0.1, dbToLin(-10));
     const out = run(noiseGateEffect, [input], {});
     out[0].forEach((v) => expect(Number.isFinite(v)).toBe(true));
+  });
+
+  // The Vocal Chain's automatic gate decides WHERE to mute (regions between
+  // vocal activity) and hands the decision to this effect through the same
+  // `__effectExtra` side channel Noise Reduction's print uses. The effect's
+  // job in that mode is application only: the named regions become digital
+  // silence behind the same linear-in-dB edge fade the threshold machine
+  // closes with, and every other sample comes back bit-identical. Without the
+  // side channel nothing here runs — the threshold state machine is untouched,
+  // which is what keeps the manual path byte-for-byte what it was.
+  describe('the mute-region side channel (the Vocal Chain’s automatic gate)', () => {
+    const setRegions = (muteRegions: { start: number; end: number }[]): void => {
+      (globalThis as { __effectExtra?: unknown }).__effectExtra = { muteRegions };
+    };
+    afterEach(() => {
+      delete (globalThis as { __effectExtra?: unknown }).__effectExtra;
+    });
+
+    const RELEASE_MS = 20;
+    const releaseSamples = Math.round((RELEASE_MS / 1000) * SR);
+
+    function takeWithRegion(): { input: Float32Array; region: { start: number; end: number } } {
+      const input = sine(220, 1.0, dbToLin(-10));
+      // A -0 outside the region, so bit-identity is asserted at its hardest.
+      input[100] = -0;
+      return { input, region: { start: Math.round(0.3 * SR), end: Math.round(0.7 * SR) } };
+    }
+
+    it('fades linear-in-dB over releaseMs, holds hard zero to the region end, and reopens instantly', () => {
+      const { input, region } = takeWithRegion();
+      setRegions([region]);
+      const out = run(noiseGateEffect, [input], { releaseMs: RELEASE_MS });
+
+      // Before the region: every sample bit-identical, -0 included.
+      for (let i = 0; i < region.start; i++) {
+        if (!Object.is(out[0][i], input[i])) throw new Error(`sample ${i} changed before the region`);
+      }
+      // The fade: the state machine's own arithmetic, sample for sample —
+      // through Math.fround, because the store into a Float32Array rounds.
+      for (let k = 0; k < releaseSamples; k++) {
+        const gain = Math.pow(10, (FADE_FLOOR_DB * ((k + 1) / releaseSamples)) / 20);
+        expect(out[0][region.start + k]).toBe(Math.fround(input[region.start + k] * gain));
+      }
+      // Hard zero from the fade's end to the region's end.
+      for (let i = region.start + releaseSamples; i < region.end; i++) {
+        if (out[0][i] !== 0) throw new Error(`sample ${i} not silenced inside the region`);
+      }
+      // Instant reopen: the very first sample past the region is bit-identical.
+      for (let i = region.end; i < input.length; i++) {
+        if (!Object.is(out[0][i], input[i])) throw new Error(`sample ${i} changed after the region`);
+      }
+    });
+
+    it('applies the same gain to every channel, and zeros inside a region stay zeros', () => {
+      const L = sine(220, 0.6, dbToLin(-10));
+      const R = sine(330, 0.6, dbToLin(-14));
+      // A stretch of digital silence inside the region: silence in, silence out.
+      const zeroFrom = Math.round(0.3 * SR);
+      const zeroTo = Math.round(0.4 * SR);
+      for (let i = zeroFrom; i < zeroTo; i++) {
+        L[i] = 0;
+        R[i] = -0;
+      }
+      const region = { start: Math.round(0.2 * SR), end: Math.round(0.5 * SR) };
+      setRegions([region]);
+      const out = run(noiseGateEffect, [L, R], { releaseMs: RELEASE_MS });
+      for (let i = zeroFrom; i < zeroTo; i++) {
+        expect(out[0][i] === 0).toBe(true);
+        expect(out[1][i] === 0).toBe(true);
+      }
+      for (let i = region.start + releaseSamples; i < region.end; i++) {
+        expect(out[0][i] === 0).toBe(true);
+        expect(out[1][i] === 0).toBe(true);
+      }
+    });
+
+    it('never consults the threshold: audio below threshold outside a region is untouched', () => {
+      // The whole take sits far under the default -50 dB threshold, so the
+      // state machine would mute all of it. In region mode only the named
+      // region goes — WHERE, not how loud.
+      const input = sine(220, 1.0, dbToLin(-70));
+      const region = { start: Math.round(0.4 * SR), end: Math.round(0.6 * SR) };
+      setRegions([region]);
+      const out = run(noiseGateEffect, [input], { thresholdDb: -50, releaseMs: RELEASE_MS });
+      for (let i = 0; i < region.start; i++) {
+        if (!Object.is(out[0][i], input[i])) throw new Error(`sample ${i} changed before the region`);
+      }
+      for (let i = region.start + releaseSamples; i < region.end; i++) {
+        if (out[0][i] !== 0) throw new Error(`sample ${i} not silenced`);
+      }
+    });
+
+    it('clamps regions to the buffer, drops empty ones, and merges overlaps instead of re-fading over zeros', () => {
+      const input = sine(220, 0.5, dbToLin(-10));
+      const a = { start: Math.round(0.1 * SR), end: Math.round(0.3 * SR) };
+      // b starts inside a: a merge must keep a's zeros rather than fading b
+      // from the SOURCE samples again, which would un-zero a's tail.
+      const b = { start: Math.round(0.2 * SR), end: Math.round(0.4 * SR) };
+      setRegions([b, a, { start: -50, end: 10 }, { start: 300, end: 300 }, { start: input.length - 5, end: input.length + 99 }]);
+      const out = run(noiseGateEffect, [input], { releaseMs: RELEASE_MS });
+      // Inside the merged [a.start, b.end): one fade at a.start, zeros after.
+      for (let i = a.start + releaseSamples; i < b.end; i++) {
+        if (out[0][i] !== 0) throw new Error(`sample ${i} not silenced in merged region`);
+      }
+      // The clamped head region [0, 10) and tail region behave.
+      for (let i = 0; i < 10; i++) expect(Math.abs(out[0][i])).toBeLessThanOrEqual(Math.abs(input[i]));
+      for (let i = input.length - 5; i < input.length; i++) {
+        expect(Math.abs(out[0][i])).toBeLessThanOrEqual(Math.abs(input[i]));
+      }
+      // Between the merged region and the tail: untouched.
+      for (let i = b.end; i < input.length - 5; i++) {
+        if (!Object.is(out[0][i], input[i])) throw new Error(`sample ${i} changed outside regions`);
+      }
+    });
+
+    it('a side channel that carries no muteRegions leaves the threshold machine in charge', () => {
+      // Defensive specificity: another effect's payload shape (Noise
+      // Reduction's spectra) must not switch this effect into region mode.
+      (globalThis as { __effectExtra?: unknown }).__effectExtra = { spectra: [[0, 0, 0]] };
+      const loud = sine(1000, 0.3, dbToLin(-10));
+      const silent = new Float32Array(Math.round(0.5 * SR));
+      const input = new Float32Array(loud.length + silent.length);
+      input.set(loud, 0);
+      const params = { thresholdDb: -50, attackMs: 1, releaseMs: 150, holdMs: 50 };
+      const out = run(noiseGateEffect, [input], params);
+      const tailStart = loud.length + Math.round(0.3 * SR);
+      expect(maxAbs(out[0], tailStart, input.length)).toBeLessThan(1e-3);
+      const loudGain = dbGain(input, out[0], 500, loud.length);
+      expect(Math.abs(loudGain)).toBeLessThan(1);
+    });
   });
 
   // N6 — quiet material bracketed by digital silence. A run of exact zeros is
