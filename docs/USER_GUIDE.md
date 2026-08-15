@@ -575,6 +575,14 @@ not know where to start, run the chain once without it and read the noise floor
 in the before-and-after table; a few decibels above that figure is the level
 the stage would have chosen for itself.
 
+An **empty** box means no level has been named — not 0 dBFS, which is full
+scale and would gate the whole take. Apply waits until you type one, and says
+so beside the box; untick the option if you would rather the stage measured a
+threshold after all. And note *where* you usually read the refusal: if the rest
+of the chain applied, that run is finished and every control in the dialog is
+greyed, including this one. Close the dialog and open **Vocal Chain** again to
+set the level; the refusal's own text says the same thing.
+
 **One stage depends on another.** The high-pass corner comes from the lowest note
 the pitch detector measured, so **switching Pitch Correct off also switches the EQ
 off** — it declines and says so rather than guessing a corner. That matters

@@ -254,8 +254,14 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
   // it to use. Untying them also means the box is gone entirely until asked
   // for — an empty field beside a stage that derives its own threshold reads
   // as a setting the user forgot to fill in.
+  //
+  // The level is `number | null` rather than `number` because a person clears a
+  // box to unsay a number, and `Number('')` is 0 — which is not "nothing", it is
+  // FULL SCALE, the one threshold that gates an entire take. `null` is that
+  // cleared state: the tick still says the user means to name a level, and no
+  // level exists yet, so nothing may be applied until one does.
   const [gateManual, setGateManual] = useState(false);
-  const [gateThresholdDb, setGateThresholdDb] = useState(GATE_THRESHOLD_PARAM.default as number);
+  const [gateThresholdDb, setGateThresholdDb] = useState<number | null>(GATE_THRESHOLD_PARAM.default as number);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [running, setRunning] = useState<string | null>(null);
@@ -298,13 +304,19 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
   const anyEnabled = VOCAL_CHAIN_STAGES.some((s) => s.effectId !== null && enabled[s.id]);
   const done = report !== null && report.applied;
   const locked = busy || done;
+  // The tick is a promise to name a level, and an empty box has not named one.
+  // Applying anyway would either gate at full scale or silently fall back to the
+  // derivation the user just said they did not want — so Apply waits, and says
+  // what it is waiting for. Tied to `enabled.gate` for the same reason the
+  // controls are: a level for a stage that will not run blocks nothing.
+  const gateLevelMissing = gateManual && enabled.gate && gateThresholdDb === null;
 
   function toggle(id: VocalChainStageId, next: boolean): void {
     setEnabled((prev) => ({ ...prev, [id]: next }));
   }
 
   async function handleApply(): Promise<void> {
-    if (busy || done || !anyEnabled) return;
+    if (busy || done || !anyEnabled || gateLevelMissing) return;
     setBusy(true);
     setProgress(0);
     setRunning(null);
@@ -315,8 +327,10 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
     try {
       const result = await runVocalChain({
         enabled,
-        // Sent only when the user asked for it — see the state above.
-        ...(gateManual ? { gateThresholdDb } : {}),
+        // Sent only when the user asked for it AND named it — see the state
+        // above. `handleApply` cannot be reached with the tick on and the box
+        // empty, so this narrowing never silently swallows a level.
+        ...(gateManual && gateThresholdDb !== null ? { gateThresholdDb } : {}),
         onProgress: (fraction) => {
           if (!cancelledRef.current) setProgress(fraction);
         },
@@ -496,12 +510,21 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                               type="number"
                               aria-label="Gate threshold in dBFS"
                               data-testid="vocal-chain-gate-threshold"
-                              value={gateThresholdDb}
+                              value={gateThresholdDb ?? ''}
                               min={GATE_THRESHOLD_PARAM.min}
                               max={GATE_THRESHOLD_PARAM.max}
                               step={GATE_THRESHOLD_PARAM.step}
                               disabled={locked || !enabled.gate}
                               onChange={(e) => {
+                                // An empty box is the ONE input this reads as a
+                                // value rather than a typo: it is how the level
+                                // is unsaid. Everything else unparseable (a lone
+                                // "-", "e") leaves the last named level standing,
+                                // because a half-typed number is not a decision.
+                                if (e.target.value === '') {
+                                  setGateThresholdDb(null);
+                                  return;
+                                }
                                 const v = Number(e.target.value);
                                 if (Number.isFinite(v)) setGateThresholdDb(v);
                               }}
@@ -516,6 +539,14 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                               dBFS — everything under this goes to silence, with the same hold and fades. The
                               stage will say the threshold was yours.
                             </span>
+                            {gateLevelMissing && (
+                              <span
+                                data-testid="vocal-chain-gate-threshold-missing"
+                                className="text-xs text-[#ffb74d]"
+                              >
+                                Type a level, or untick this to let the stage measure one.
+                              </span>
+                            )}
                           </>
                         )}
                       </div>
@@ -646,7 +677,7 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                 variant="primary"
                 data-testid="vocal-chain-apply"
                 onClick={() => void handleApply()}
-                disabled={busy || !anyEnabled}
+                disabled={busy || !anyEnabled || gateLevelMissing}
               >
                 Apply
               </GlassButton>

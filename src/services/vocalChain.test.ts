@@ -2213,6 +2213,21 @@ describe('deriveGate', () => {
       expect(res.reason).toContain("set this stage's threshold yourself");
     }, 120000);
 
+    it('names an escape the user can actually reach from where the refusal leaves them', () => {
+      // M4. The refusal is READ in the dialog's results state, and the common
+      // way to get there is a MIXED run: Noise Reduction applied, the gate
+      // declined. `report.applied` is then true, the dialog is finished, and
+      // the very tick the message points at is greyed by that finish — so a
+      // message that stops at "tick the box" is an instruction the user cannot
+      // follow without knowing to close and reopen the dialog first. It has to
+      // name the control by the words on it, and name the reopen.
+      const res = deriveGate([noise(SR * 3, 0.01, 9)], SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('Gate at a level I set instead');
+      expect(res.reason).toContain('reopen');
+    }, 120000);
+
     it('names the escape in EVERY refusal, not only the one the search produced', () => {
       // A user who cannot reach silence has not been served by any of these
       // paragraphs, whichever measurement ran out.

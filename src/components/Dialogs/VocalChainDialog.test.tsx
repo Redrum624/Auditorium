@@ -281,6 +281,58 @@ describe('VocalChainDialog — the gate threshold the user can set', () => {
     expect(mockRun.mock.calls[0][0].gateThresholdDb).toBeUndefined();
   });
 
+  it('a cleared box means NO level was named, rather than 0 dBFS', async () => {
+    // `Number('')` is 0, and 0 dBFS is full scale: a box the user cleared used
+    // to snap the state to a threshold that gates the entire take. Clearing is
+    // how a person unsays a number, so it has to mean the number is unsaid.
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    const box = screen.getByTestId('vocal-chain-gate-threshold') as HTMLInputElement;
+    fireEvent.change(box, { target: { value: '-42.5' } });
+    fireEvent.change(box, { target: { value: '' } });
+    expect(box.value).toBe('');
+
+    // ...and a level nobody named cannot be applied. The tick says the user
+    // means to set the threshold themselves, so falling back to the derivation
+    // would be the dialog quietly overruling them.
+    expect(screen.getByTestId('vocal-chain-apply')).toBeDisabled();
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await act(async () => {});
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it('says why Apply is unavailable while the box is empty, and takes it back when a level is typed', async () => {
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    const box = screen.getByTestId('vocal-chain-gate-threshold');
+    fireEvent.change(box, { target: { value: '' } });
+    expect(screen.getByTestId('vocal-chain-gate-threshold-missing')).toBeInTheDocument();
+
+    fireEvent.change(box, { target: { value: '-38' } });
+    expect(screen.queryByTestId('vocal-chain-gate-threshold-missing')).toBeNull();
+    expect(screen.getByTestId('vocal-chain-apply')).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(mockRun).toHaveBeenCalledTimes(1));
+    expect(mockRun.mock.calls[0][0].gateThresholdDb).toBe(-38);
+  });
+
+  it('an empty box on a gate that is switched off blocks nothing', async () => {
+    // The level and the stage are already untied for the disabled case; the
+    // empty-box block has to follow the same rule, or a stale empty box would
+    // hold the whole chain hostage over a stage that will not run.
+    seedDoc();
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-gate-manual'));
+    fireEvent.change(screen.getByTestId('vocal-chain-gate-threshold'), { target: { value: '' } });
+    fireEvent.click(screen.getByTestId('vocal-chain-toggle-gate'));
+    expect(screen.getByTestId('vocal-chain-apply')).not.toBeDisabled();
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(mockRun).toHaveBeenCalledTimes(1));
+    expect(mockRun.mock.calls[0][0].gateThresholdDb).toBeUndefined();
+  });
+
   it('goes inert when the stage it belongs to is switched off', () => {
     // Otherwise the dialog offers a level for a stage that will not run, and
     // pressing Apply gates nothing while the row still shows a threshold.
@@ -298,6 +350,36 @@ describe('VocalChainDialog — the gate threshold the user can set', () => {
     const box = screen.getByTestId('vocal-chain-gate-threshold');
     expect(box).toHaveAttribute('min', '-80');
     expect(box).toHaveAttribute('max', '0');
+  });
+
+  it('is greyed after a mixed run, which is the state the gate’s own refusal describes', async () => {
+    // M4. The gate declined but the compressor applied, so `report.applied` is
+    // true and the whole dialog is finished: the tick the refusal points at is
+    // greyed, and the only button left is Close. This is not a bug to unlock —
+    // the run landed as one undo entry and a second Apply over it would be a
+    // second entry — it is the state the refusal's own text has to be true in,
+    // which is why that text names the reopen. Pinned here so the two cannot
+    // drift apart: if this lock is ever lifted, the copy is wrong.
+    seedDoc();
+    mockRun.mockResolvedValue(
+      makeReport({
+        applied: true,
+        stages: stagesWith(APPLIED_COMPRESSOR, {
+          id: 'gate',
+          label: 'Noise Gate',
+          status: 'declined',
+          reason:
+            'the quietest 500 ms carries the resonances of a vocal tract. If you can hear a gap that ought to be silent, set this stage’s threshold yourself: tick “Gate at a level I set instead” on the Vocal Chain’s Noise Gate row, type a level in dBFS and Apply — if the rest of the chain already applied, reopen Vocal Chain first. Nothing was gated',
+          derived: [],
+        }),
+      })
+    );
+    open();
+    fireEvent.click(screen.getByTestId('vocal-chain-apply'));
+    await waitFor(() => expect(screen.getByTestId('vocal-chain-close')).toBeInTheDocument());
+    expect(screen.getByTestId('vocal-chain-gate-manual')).toBeDisabled();
+    expect(screen.queryByTestId('vocal-chain-apply')).toBeNull();
+    expect(screen.getByTestId('vocal-chain-reason-gate')).toHaveTextContent('reopen Vocal Chain first');
   });
 
   it('is locked while the pass is running, like every other control here', async () => {

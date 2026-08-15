@@ -1130,9 +1130,18 @@ export function deriveGate(
   // silence, an unshaped breath no statistic can tell from a room — the user
   // can still name a level, and a refusal that does not say so leaves them
   // with a paragraph where they asked for silence.
+  //
+  // M4 — and the escape has to be reachable FROM WHERE THIS TEXT IS READ. The
+  // usual way to reach it is a mixed run: another stage applied, this one
+  // declined. The dialog is then finished (`report.applied`) and greys every
+  // control including the tick this sentence points at, so the recovery is
+  // close-and-reopen, not tick-and-Apply. Naming the control by the words
+  // printed on it and naming the reopen is what makes the sentence true in
+  // both states; the gate-only refusal leaves the dialog unlocked, where
+  // "reopen if it applied" simply does not apply.
   const decline = (reason: string): StageResolution => ({
     run: false,
-    reason: `${reason}. If you can hear a gap that ought to be silent, set this stage's threshold yourself — the Vocal Chain's Noise Gate row takes a level in dBFS and gates at it, with the same hold, fades and digital-silence rules. Nothing was gated`,
+    reason: `${reason}. If you can hear a gap that ought to be silent, set this stage's threshold yourself: tick “Gate at a level I set instead” on the Vocal Chain's Noise Gate row, type a level in dBFS and Apply — it gates at that level with the same hold, fades and digital-silence rules. If the rest of the chain already applied, this dialog is finished and its controls are greyed, so reopen Vocal Chain first. Nothing was gated`,
   });
   const attackMs = clampToParam('noise-gate', 'attackMs', DETECT_ATTACK_MS);
   const releaseMs = clampToParam('noise-gate', 'releaseMs', DETECT_RELEASE_MS);
