@@ -42,13 +42,19 @@ copy exists so the next such probe does not have the same hole: see the go-forwa
   is what separates those two, and it is the more representative of the two for a vocal chain.
 
 **What the addition changed, stated plainly.** It supplies the compressor's exculpatory
-0.021 / 0.017 dB readings and Noise Reduction's headline 4.69→9.38 and 2.88→11.22 dB
-end-to-end removal figures. **No verdict turns on it:** the registered shape alone puts NR
-over its bound (6.79 / 13.82 dB of print dilution), and the compressor departure rests on
+0.021 / 0.017 dB readings, and every NR figure quoted as the headline in the docblock, the
+user guide and the README: the print gap **6.79 / 13.82 dB** and the end-to-end removal
+**4.69→9.38** and **2.88→11.22 dB**. All five are the ADDED shape's; the Measured table below
+gives the REGISTERED shape's readings for the same quantities beside them.
+
+**No verdict turns on it.** The registered shape alone puts NR over its 1.0 dB bound by a
+factor of 6.7 and 13.8 — **6.71 / 13.80 dB** of print dilution, removing 5.39 / 2.91 dB where
+an honest print removes 10.47 / 11.24 — and the compressor departure rests entirely on
 fix-harm measured on the *registered* shape (+31.17 dB of makeup, clamped to +24, peak driven
 from −12.0 to about −1 dBFS). Had the added shape never existed, both verdicts would read the
-same. It is disclosed anyway, because an expansion that happens to be innocent is exactly the
-one a pre-registration is supposed to make visible.
+same, off numbers within 0.1 dB of the ones quoted. It is disclosed anyway, because an
+expansion that happens to be innocent is exactly the one a pre-registration is supposed to
+make visible.
 
 ## Bounds — what counts as AUDIBLE, decided in advance
 
@@ -83,25 +89,51 @@ Either outcome is success; no claim either way without a number.
 Counterfactuals were taken with a mirror of each derivation's own arithmetic, validated against
 the shipped function by reproducing its numbers exactly from the bare reading.
 
-| | 8 kHz | 44.1 kHz |
-|---|---|---|
-| window inflation (bare − honest, envelope peak) | 9.57 dB | 9.46 dB |
-| **NR** print gap, mean bin magnitude | 6.79 dB | 13.82 dB |
-| **NR** floor removed, diluted print (end to end) | 4.69 dB | 2.88 dB |
-| **NR** floor removed, honest print | 9.38 dB | 11.22 dB |
-| **NR** reduction left unused | **4.69 dB** | **8.34 dB** |
-| **NR** verdict flip | none on these shapes | none |
-| **Compressor** threshold shift, ordinary take (ADDED shape) | **0.021 dB** | 0.017 dB |
-| **Compressor** makeup shift, ordinary take (ADDED shape) | 0.008 dB | 0.006 dB |
-| **Compressor** threshold shift, registered shape | **43.66 dB** | 43.15 dB |
-| **Compressor** makeup there, honest vs shipped | +31.17 vs +0.53 dB | +31.11 vs +0.76 dB |
-| **Compressor** output peak there (input −12.04 dBFS) | −1.55 vs −11.51 | −0.63 vs −11.28 |
+**This table is the authority on shape attribution.** Every row carries the shape it was
+measured on — `REGISTERED` = `unevenFloorTake`, `ADDED` = `takeWithTrimmedHead`, `BOTH` where
+the reading is the same fact on each. Where a row's headline number comes from one shape, the
+other shape's reading for the same quantity is given beside it, so nothing rests on which one
+happened to be quoted. The lane report (`task-T2-report.md`) defers to this table.
+
+| Shape | Quantity | 8 kHz | 44.1 kHz |
+|---|---|---|---|
+| **REGISTERED** | window inflation (bare − honest, envelope peak) | **9.57 dB** | **9.46 dB** |
+| *ADDED* | *the same, on the ordinary take* | *9.23 dB* | *9.39 dB* |
+| **ADDED** | **NR** print gap, mean bin magnitude | **6.79 dB** | **13.82 dB** |
+| *REGISTERED* | *the same, on the registered shape* | *6.71 dB* | *13.80 dB* |
+| **ADDED** | **NR** floor removed, diluted print (end to end) | **4.69 dB** | **2.88 dB** |
+| *REGISTERED* | *the same* | *5.39 dB* | *2.91 dB* |
+| **ADDED** | **NR** floor removed, honest print (end to end) | **9.38 dB** | **11.22 dB** |
+| *REGISTERED* | *the same* | *10.47 dB* | *11.24 dB* |
+| **ADDED** | **NR** reduction left unused (honest − diluted) | **4.69 dB** | **8.34 dB** |
+| *REGISTERED* | *the same* | *5.08 dB* | *8.33 dB* |
+| **BOTH** | **NR** verdict flip (run ↔ decline) | none | none |
+| **ADDED** | **Compressor** threshold shift | **0.021 dB** | **0.017 dB** |
+| **ADDED** | **Compressor** makeup shift | **0.008 dB** | **0.006 dB** |
+| **REGISTERED** | **Compressor** threshold shift | **43.66 dB** | **43.15 dB** |
+| **REGISTERED** | **Compressor** makeup asked for, honest vs shipped | **+31.17 vs +0.53 dB** | **+31.11 vs +0.76 dB** |
+| **REGISTERED** | **Compressor** output peak, honest vs shipped (input −12.04 dBFS) | **−1.55 vs −11.51 dBFS** | **−0.63 vs −11.28 dBFS** |
+
+The eleven bold rows are the eleven measured quantities; the italic rows are the same
+quantities on the other shape, added here so the attribution is checkable rather than asserted.
+The two end-to-end NR rows and the "left unused" row are read over the same span on both shapes
+(the last 0.7 s to the last 0.1 s of the take, clear of the final phrase); an earlier
+registered-shape-only pass over a wider tail span read 5.35 / 10.36 dB at 8 kHz and 2.91 /
+11.30 dB at 44.1, which is why the comparable pass is the one quoted.
+
+**Correction (micro-fix).** The first version of this file left six of the eleven rows
+unlabelled and its Verdict prose attributed the print-dilution figures **6.79 / 13.82 dB** to
+the REGISTERED shape. Those are the **ADDED** shape's numbers; the registered shape reads
+**6.71 / 13.80 dB**. The claim they were supporting — that the registered shape alone puts NR
+over its 1.0 dB bound — is unaffected and remains true by a factor of 6.7 and 13.8.
 
 ## Verdict
 
-**`deriveNoiseReduction` — over the bound by 5–8× on the output. FIXED.** Its print *is* the
-window's magnitude spectrum, so a window mostly made of exact zeros describes the zeros rather
-than the room and the stage does its 12 dB job at a third to a half depth. It now asks for
+**`deriveNoiseReduction` — over the bound by 5–8× on the output, on BOTH shapes. FIXED.**
+4.69 / 8.34 dB of its 12 dB left unused on the ADDED ordinary take, 5.08 / 8.33 dB on the
+REGISTERED one — the verdict does not depend on which is read. Its print *is* the window's
+magnitude spectrum, so a window mostly made of exact zeros describes the zeros rather than
+the room and the stage does its 12 dB job at a third to a half depth. It now asks for
 `rejectMostlySilentWindows` — the mechanism the gate, Remove Silence and
 `wordSplice.trimSilence` already use — and declines when no half-second of real material
 exists. Kept as behaviour in `the print, when the take carries digital silence beside an uneven
@@ -109,8 +141,8 @@ floor` (`src/services/vocalChain.test.ts`), converse and null case fixtured besi
 
 **`deriveCompressor` — NOT changed, and the measurement is why.** Its window is neither a
 threshold nor a print: it is the sounding/silent boundary for a MEDIAN, and a median is decided
-by the middle of a distribution rather than its edge — hence 0.021 dB on a take that has
-programme. On the registered 90 %-room-tone shape the prescribed fix is measurably worse: the
+by the middle of a distribution rather than its edge — hence 0.021 dB on the ADDED take, which
+has programme in it. On the REGISTERED 90 %-room-tone shape the prescribed fix is worse: the
 +24 dB parameter clamp breaks by 7 dB the makeup identity the design rests on, and the peak is
 driven into the limiter. The shipped path's error direction is *do less*, which is the
 fail-safe direction; the three siblings were moved because their errors delete material or
