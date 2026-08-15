@@ -235,13 +235,25 @@ export default function TrackLane({
           the magnet. Not the raw pointer x: the whole point of showing a line
           is that the user can see the snap take hold before letting go. Last
           child so it paints over the clips, and pointer-events-none so it can
-          never eat the dragover it exists to describe. */}
+          never eat the dragover it exists to describe.
+
+          V1 review, Minor 2 — HELD AT THE LANE EDGE. `ghostPx` can be a few px
+          negative when the magnet pulls the drop to a target just left of the
+          lane origin (the drop sample itself is clamped at 0 by
+          `snapClipStart`, but the SCROLLED origin is not 0). That sliver used
+          to paint on the header — a symptom of the defect V1 fixed — and once
+          the lane was clipped it painted nowhere, so the line disappeared at
+          exactly the edge where a user most needs to see the snap take hold.
+          Clamping the LINE is honest rather than a white lie: a clip landing at
+          that sample is itself drawn with a negative left and clipped by the
+          same edge, so the lane origin is precisely where its start will
+          appear. The committed sample is untouched — only the drawing. */}
       {ghostPx !== null && (
         <div
           data-testid="clip-drop-ghost"
           className="pointer-events-none absolute top-0 bottom-0 w-0.5"
           style={{
-            left: ghostPx,
+            left: Math.max(0, ghostPx),
             backgroundColor: 'var(--accent)',
             boxShadow: '0 0 8px var(--accent-ring)',
           }}

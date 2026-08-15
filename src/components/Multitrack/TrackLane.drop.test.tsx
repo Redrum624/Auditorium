@@ -233,6 +233,33 @@ describe('dragging a Files-panel row over a lane', () => {
     expect(parseFloat(line!.style.left)).toBeCloseTo(SNAP_CLIP_START / SPP, 5);
   });
 
+  it('keeps the ghost visible when the magnet pulls the drop past the lane origin', () => {
+    // V1 review, Minor 2. Scrolled so the lane origin is 1 000 samples (~2 px)
+    // RIGHT of the seeded clip's first beat, a drop near the left edge snaps
+    // BACKWARDS to that beat — a ghost at −1.95 px, which used to paint on the
+    // header and now, with the lane clipped, painted nowhere at all: the line
+    // vanished at exactly the edge where the user most needs to see the snap
+    // take hold.
+    const dt = startPanelDrag();
+    act(() =>
+      useSessionStore.setState({
+        mtZoom: { samplesPerPixel: SPP, scrollSample: SNAP_CLIP_START + 1_000 },
+      })
+    );
+    fireDrag(lanes()[0], 'dragenter', dt);
+    fireDrag(lanes()[0], 'dragover', dt, { clientX: 2 });
+
+    // The position it describes really is off the left edge — otherwise this
+    // asserts nothing about the clamp.
+    expect((SNAP_CLIP_START - (SNAP_CLIP_START + 1_000)) / SPP).toBeLessThan(0);
+    expect(parseFloat(ghost()!.style.left)).toBe(0);
+
+    // The line stops at the lane edge; the DROP does not. The clip commits the
+    // snapped sample, and paints from the same clipped edge the ghost marked.
+    fireDrag(lanes()[0], 'drop', dt, { clientX: 2 });
+    expect(droppedClips()[0].startSample).toBe(SNAP_CLIP_START);
+  });
+
   it('the ghost follows the raw pointer while Alt suspends the magnet', () => {
     const dt = startPanelDrag();
     fireDrag(lanes()[0], 'dragenter', dt);
