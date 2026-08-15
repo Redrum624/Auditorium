@@ -55,8 +55,14 @@ function makeFakeWindow(options) {
       win.destroyed = true;
     },
     webContents: {
+      /** Whatever `setWindowOpenHandler` was last given, so a test can ask what
+       * the real Chromium would be told when the page opens a window. */
+      windowOpenHandler: null,
       on(event, fn) {
         return win.on(`webContents:${event}`, fn);
+      },
+      setWindowOpenHandler(fn) {
+        win.webContents.windowOpenHandler = fn;
       },
       send(channel, payload) {
         if (win.destroyed) throw new Error('Object has been destroyed');
@@ -162,6 +168,30 @@ describe('the splash window itself', () => {
       webSecurity: true,
       preload: 'C:\\app\\electron\\preload.cjs',
     });
+  });
+
+  test('cannot open a window, and cannot navigate anywhere', () => {
+    // Fix round 2, M-2. The webPreferences parity with the editor was exact; the
+    // NAVIGATION hardening parity (main.cjs:127-133) was not. Exploitation is
+    // implausible behind `default-src 'none'` on a static local page — which is
+    // the point: these two lines are free, and "it is only a splash" is the
+    // exemption this window has already been denied everywhere else.
+    //
+    // The splash's stance is stricter than the editor's: the editor allows a
+    // same-URL navigation (a reload), the splash allows none at all. It loads
+    // one file and shows a progress bar; there is nowhere it could legitimately
+    // go. `will-navigate` does not fire for the initial `loadFile`.
+    const { splash } = harness();
+    const win = splash.open();
+
+    expect(typeof win.webContents.windowOpenHandler).toBe('function');
+    expect(win.webContents.windowOpenHandler({ url: 'https://example.com' })).toEqual({
+      action: 'deny',
+    });
+
+    let prevented = false;
+    win.emit('webContents:will-navigate', { preventDefault: () => { prevented = true; } }, 'https://example.com');
+    expect(prevented).toBe(true);
   });
 
   test('closes itself if it cannot load its own page, and the launch goes on', async () => {

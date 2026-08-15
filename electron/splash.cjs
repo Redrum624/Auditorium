@@ -183,6 +183,17 @@ function createSplashController({
       },
     });
 
+    // The same navigation hardening the editor window gets (main.cjs), and
+    // stricter: the editor tolerates a same-URL navigation, this page loads one
+    // file and shows a progress bar, so there is nowhere it could legitimately
+    // go and nothing it could legitimately open. Implausible to exploit behind
+    // `default-src 'none'` on a static local page — and free, which is why the
+    // "it is only a splash" exemption is refused here as it is everywhere else
+    // in this window's configuration. `will-navigate` does not fire for the
+    // `loadFile` below.
+    splashWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
+    splashWindow.webContents.on('will-navigate', (event) => event.preventDefault());
+
     // A splash that cannot load its own page has no business existing: close it
     // rather than leave an empty rectangle on screen and an unhandled rejection
     // in main. The handoff does not depend on it — it waits on the editor
