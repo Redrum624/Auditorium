@@ -77,6 +77,25 @@ function isEffectivelyMuted(track: Track, anySolo: boolean): boolean {
 const PARAM_SMOOTH = 0.015;
 
 /**
+ * Seconds added to the shared scheduling epoch so no `start(when)` is already
+ * in the past by the time the command queue drains. 10 ms is safe by
+ * construction: the slow work (the per-track buffer bakes) happens BEFORE the
+ * epoch is read, and the scheduling loop itself is just a handful of
+ * `start()` calls — microseconds — so the lead only needs to outlive the
+ * command drain, never a bake.
+ */
+export const SCHEDULE_LEAD = 0.01;
+
+/** One clip's deferred start command: the source is fully built and wired at
+ * chain-build time, and `start()` is issued later — against the ONE shared
+ * scheduling epoch — so no clock read ever lands between two bakes. */
+interface PendingStart {
+  src: AudioBufferSourceNode;
+  startSample: number;
+  clipEnd: number;
+}
+
+/**
  * Realtime WebAudio playback of a multitrack session. On each `play(fromSample)`
  * the whole graph is rebuilt. Per track the chain is
  *   per-clip panL/panR (`GainNode` pairs) → shared `ChannelMergerNode(2)`
@@ -102,11 +121,18 @@ const PARAM_SMOOTH = 0.015;
  * law. Effective mute (mute + solo) rides the per-track `muteGain` (0/1), so
  * muting/soloing/un-muting is audible immediately.
  *
- * Sources are scheduled at `ctx.currentTime + max(0, (clipStart − from)/rate)`
- * with a mid-clip start offset and the remaining duration, so seeking into the
- * middle of the timeline plays every clip from exactly the right point. Position
- * is derived from `ctx.currentTime` (never a timer) and clamped to the last
- * clip end.
+ * SCHEDULING: play() is two-phase. Phase 1 builds every track's chain and
+ * bakes every buffer (the slow part) WITHOUT starting anything; phase 2 reads
+ * the clock ONCE — `epoch = ctx.currentTime + SCHEDULE_LEAD` — and starts
+ * every source at `epoch + max(0, (clipStart − from)/rate)` in a tight loop,
+ * with a mid-clip start offset and the remaining duration, so seeking into
+ * the middle of the timeline plays every clip from exactly the right point.
+ * One shared epoch means track-to-track alignment derives from startSample
+ * deltas only: on a warm context the clock keeps running through the
+ * synchronous bakes, and the old per-clip `ctx.currentTime` reads gave every
+ * track its own timeline origin (tens of ms of audible skew). Position is
+ * derived from `ctx.currentTime` against that same epoch (never a timer) and
+ * clamped between the play start and the last clip end.
  *
  * DELIBERATE LIMITATION (Audition-comparable, NOT a KNOWN_LIMITATIONS entry):
  * clip GEOMETRY and clip GAIN are baked per source buffer, so clip moves/trims
@@ -127,7 +153,9 @@ export class MultitrackPlayer {
   private _state: MultitrackPlayState = 'stopped';
   /** Sample the current play started from (stop/end return here). */
   private playStartSample = 0;
-  /** `ctx.currentTime` captured at play, for position derivation. */
+  /** The shared scheduling epoch of the current play (`ctx.currentTime +
+   * SCHEDULE_LEAD`, read once after all builds) — the position pump and the
+   * scheduled sources are anchored to the SAME value. */
   private startedAt = 0;
   /** Stored position used while stopped. */
   private position = 0;
@@ -162,11 +190,17 @@ export class MultitrackPlayer {
     master.connect(ctx.destination);
     this.master = master;
 
-    // Build EVERY track's full chain (even muted/solo-excluded ones) so live
-    // mute/solo/volume/pan changes can retro-apply to the running graph. A
-    // track with no clip past `from` contributes nothing and is skipped.
+    // Phase 1 — the slow part. Build EVERY track's full chain (even muted/
+    // solo-excluded ones) so live mute/solo/volume/pan changes can retro-apply
+    // to the running graph. A track with no clip past `from` contributes
+    // nothing and is skipped. No source is STARTED here: on a warm context
+    // the clock keeps running through these synchronous bakes, so a per-clip
+    // `ctx.currentTime` read would give every track its own timeline origin,
+    // shifted by the JS time spent since the previous track's start commands
+    // — the off-beat-tracks bug.
+    const pending: PendingStart[] = [];
     for (const t of session.tracks) {
-      this.buildTrackChain(ctx, t, sr, docs, anySolo, from, master);
+      this.buildTrackChain(ctx, t, sr, docs, anySolo, from, master, pending);
     }
 
     if (!this.finalizeSchedule()) {
@@ -184,9 +218,16 @@ export class MultitrackPlayer {
       return;
     }
 
+    // Phase 2 — the fast part: ONE shared scheduling epoch, read AFTER all
+    // builds, so every clip's placement derives from startSample deltas only.
+    const epoch = ctx.currentTime + SCHEDULE_LEAD;
+    this.scheduleSources(pending, epoch, from, sr);
+
     this.playStartSample = from;
     this.position = from;
-    this.startedAt = ctx.currentTime;
+    // The playhead is anchored to the SAME epoch the sources are scheduled
+    // against, so the visual position agrees with the audio.
+    this.startedAt = epoch;
     this.rate = sr;
     this._state = 'playing';
 
@@ -195,12 +236,29 @@ export class MultitrackPlayer {
   }
 
   /**
+   * Phase 2 of `play`/`refreshTracks`: issues every pending `start()` against
+   * ONE shared epoch in a tight loop. All relative placement is startSample
+   * arithmetic — the clock is never re-read between two starts.
+   */
+  private scheduleSources(pending: PendingStart[], epoch: number, from: number, sr: number): void {
+    for (const p of pending) {
+      const when = epoch + Math.max(0, (p.startSample - from) / sr);
+      const offsetSec = Math.max(0, (from - p.startSample) / sr);
+      const durationSec = (p.clipEnd - Math.max(from, p.startSample)) / sr;
+      p.src.start(when, offsetSec, durationSec);
+    }
+  }
+
+  /**
    * Builds one track's whole chain — baked clip buffers, per-clip pan pairs,
-   * merger → volume → mute → `master` — and schedules its sources from
-   * timeline sample `from`. Registers the chain in `trackNodes` (only when at
-   * least one source was scheduled, mirroring the pre-F0 skip of clip-less
-   * tracks). Shared verbatim by `play` and `refreshTracks`, so a mid-play
-   * automation rebuild cannot drift from the initial build.
+   * merger → volume → mute → `master` — and queues its sources' start
+   * commands onto `pending` for timeline sample `from`. It never calls
+   * `start()` itself: the caller schedules ALL pending sources against one
+   * shared epoch after every track is built, so this function's bake time
+   * cannot skew track-to-track alignment. Registers the chain in `trackNodes`
+   * (only when at least one source was queued, mirroring the pre-F0 skip of
+   * clip-less tracks). Shared verbatim by `play` and `refreshTracks`, so a
+   * mid-play automation rebuild cannot drift from the initial build.
    *
    * F0 (rulings A/B/C): the track's active automation is resolved from the
    * SAME `resolveAutomation` the mixdown gates on and handed to
@@ -216,7 +274,8 @@ export class MultitrackPlayer {
     docs: Map<string, AudioDocument>,
     anySolo: boolean,
     from: number,
-    master: GainNode
+    master: GainNode,
+    pending: PendingStart[]
   ): void {
     const auto = resolveAutomation(t.automation);
     // Fades/crossfades resolved from the SAME shared resolver as the offline
@@ -305,10 +364,7 @@ export class MultitrackPlayer {
       }
 
       const clipEnd = c.startSample + c.lengthSample;
-      const when = ctx.currentTime + Math.max(0, (c.startSample - from) / sr);
-      const offsetSec = Math.max(0, (from - c.startSample) / sr);
-      const durationSec = (clipEnd - Math.max(from, c.startSample)) / sr;
-      src.start(when, offsetSec, durationSec);
+      pending.push({ src, startSample: c.startSample, clipEnd });
       scheduled.push({ src, clipEnd });
     }
   }
@@ -359,6 +415,7 @@ export class MultitrackPlayer {
     if (!ctx || !master || this._state !== 'playing') return;
     const anySolo = session.tracks.some((t) => t.solo);
     const from = this.getPositionSample();
+    const pending: PendingStart[] = [];
     for (const id of trackIds) {
       const old = this.trackNodes.get(id);
       if (old) {
@@ -386,13 +443,19 @@ export class MultitrackPlayer {
       }
       const t = session.tracks.find((tr) => tr.id === id);
       if (!t) continue;
-      this.buildTrackChain(ctx, t, this.rate, docs, anySolo, from, master);
+      this.buildTrackChain(ctx, t, this.rate, docs, anySolo, from, master, pending);
     }
     if (!this.finalizeSchedule()) {
       // Every scheduled source is gone (the refreshed track was the last one
       // sounding and nothing of it remains past the position): natural end.
       this.handleEnded();
+      return;
     }
+    // Same two-phase discipline as play(): every rebuilt track's sources are
+    // scheduled against ONE epoch read after all the rebakes, so a multi-track
+    // refresh stays internally aligned. The handover remains scheduled-clock
+    // accurate, not sample-seamless (ruling D) — `startedAt` is untouched.
+    this.scheduleSources(pending, ctx.currentTime + SCHEDULE_LEAD, from, this.rate);
   }
 
   stop(): void {
@@ -406,7 +469,10 @@ export class MultitrackPlayer {
   getPositionSample(): number {
     if (this._state !== 'playing' || !this.ctx) return this.position;
     const pos = this.playStartSample + (this.ctx.currentTime - this.startedAt) * this.rate;
-    return Math.min(pos, this.endSample);
+    // Clamped below to the play start: while the SCHEDULE_LEAD window has not
+    // elapsed (epoch still ahead of the clock) no audio has advanced yet, and
+    // the playhead must not sit before the cursor.
+    return Math.min(Math.max(pos, this.playStartSample), this.endSample);
   }
 
   /**

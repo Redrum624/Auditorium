@@ -7,7 +7,7 @@ import {
   mixdownSession,
   monoPanGains,
 } from './mixdown';
-import { MultitrackPlayer } from './MultitrackPlayer';
+import { MultitrackPlayer, SCHEDULE_LEAD } from './MultitrackPlayer';
 import type { Clip, Session, Track } from './session';
 
 // ---------------------------------------------------------------------------
@@ -173,7 +173,9 @@ function renderPlayerGraph(ctx: FakeAudioContext, sr: number, outLen: number): [
   for (const src of ctx.sources) {
     if (!src.buffer || src.startCalls.length === 0 || src.stopped) continue;
     const call = src.startCalls[0];
-    const pos0 = Math.round(call.when * sr);
+    // Play-relative sample 0 sounds at the shared scheduling epoch; with the
+    // fake clock at 0 the epoch is exactly SCHEDULE_LEAD.
+    const pos0 = Math.round((call.when - SCHEDULE_LEAD) * sr);
     const off = Math.round((call.offset ?? 0) * sr);
     const n = Math.min(Math.round((call.duration ?? 0) * sr), src.buffer.length - off);
     for (const r of routesOf(src)) {
@@ -439,8 +441,9 @@ describe('refreshTracks (ruling D — rebuild ONE track in place, mid-play)', ()
     const nodes = player.liveTrackNodes(t1.id);
     expect(nodes?.bakedVolume).toBe(true);
     expect(nodes?.volumeGain.gain.value).toBe(1);
-    // Rescheduled from the current position (currentTime 0 → position 0).
-    expect(fresh.startCalls[0]).toEqual({ when: 0, offset: 0, duration: 1 });
+    // Rescheduled from the current position (currentTime 0 → position 0),
+    // against a fresh epoch (currentTime + SCHEDULE_LEAD).
+    expect(fresh.startCalls[0]).toEqual({ when: SCHEDULE_LEAD, offset: 0, duration: 1 });
   });
 
   it('re-wires the natural-end carrier onto the (possibly new) last-ending source', () => {

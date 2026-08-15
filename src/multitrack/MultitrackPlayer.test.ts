@@ -1,6 +1,6 @@
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { monoPanGains, stereoBalanceGains } from './mixdown';
-import { MultitrackPlayer } from './MultitrackPlayer';
+import { MultitrackPlayer, SCHEDULE_LEAD } from './MultitrackPlayer';
 import type { Clip, Session, Track } from './session';
 
 // ---------------------------------------------------------------------------
@@ -98,7 +98,17 @@ class FakeSource extends FakeNode {
 }
 
 class FakeAudioContext {
-  currentTime = 0;
+  /** Seconds the clock advances on EVERY `currentTime` read. 0 keeps the
+   * legacy frozen-clock behaviour (cold context); the epoch tests set it to
+   * simulate a WARM context whose clock keeps running while play() bakes
+   * buffers — the condition under which per-clip clock reads drift. */
+  advancePerRead = 0;
+  private clock = 0;
+  get currentTime(): number {
+    const t = this.clock;
+    this.clock += this.advancePerRead;
+    return t;
+  }
   sampleRate = 1000;
   destination = new FakeNode();
   sources: FakeSource[] = [];
@@ -135,7 +145,7 @@ class FakeAudioContext {
     return Promise.resolve();
   }
   advance(seconds: number): void {
-    this.currentTime += seconds;
+    this.clock += seconds;
   }
 }
 
@@ -227,7 +237,7 @@ describe('MultitrackPlayer', () => {
 
     expect(ctx.sources).toHaveLength(1);
     const call = ctx.sources[0].startCalls[0];
-    expect(call.when).toBeCloseTo(0.5, 6); // (500 - 0) / 1000
+    expect(call.when).toBeCloseTo(SCHEDULE_LEAD + 0.5, 6); // epoch + (500 - 0) / 1000
     expect(call.offset).toBeCloseTo(0, 6);
     expect(call.duration).toBeCloseTo(0.5, 6); // (1000 - 500) / 1000
   });
@@ -238,7 +248,7 @@ describe('MultitrackPlayer', () => {
     player.play(700, s, docs(doc('doc-1')));
 
     const call = ctx.sources[0].startCalls[0];
-    expect(call.when).toBeCloseTo(0, 6); // starts immediately
+    expect(call.when).toBeCloseTo(SCHEDULE_LEAD, 6); // starts at the epoch
     expect(call.offset).toBeCloseTo(0.2, 6); // (700 - 500) / 1000
     expect(call.duration).toBeCloseTo(0.3, 6); // (1000 - 700) / 1000
   });
@@ -428,10 +438,10 @@ describe('MultitrackPlayer', () => {
     const { player, ctx } = makePlayer();
     const s = session([track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] })]);
     player.play(200, s, docs(doc('doc-1')));
-    ctx.advance(0.3); // 300 samples at 1000 Hz
-    expect(player.getPositionSample()).toBe(500);
+    ctx.advance(0.3); // 300 samples at 1000 Hz, minus the schedule lead
+    expect(player.getPositionSample()).toBeCloseTo(200 + (0.3 - SCHEDULE_LEAD) * 1000, 6);
 
-    ctx.advance(1.0); // would be 1500, clamped to end (1000)
+    ctx.advance(1.0); // way past the end, clamped to end (1000)
     expect(player.getPositionSample()).toBe(1000);
   });
 
@@ -466,6 +476,89 @@ describe('MultitrackPlayer', () => {
 
     expect(player.state).toBe('stopped');
     expect(states).toEqual(['playing', 'stopped']);
+  });
+
+  describe('shared scheduling epoch (all tracks scheduled against ONE clock read)', () => {
+    // The user-reported bug: on a WARM (running, never-suspended) context the
+    // clock keeps advancing while play() synchronously bakes each track's
+    // buffers. Reading ctx.currentTime per clip AFTER each track's bake gives
+    // every track its own timeline origin, shifted by the JS time spent since
+    // the previous track's start commands — one track plays tens of ms early
+    // against the others while the screen shows everything correctly placed.
+    // The fake advances the clock on EVERY read to simulate the warm clock;
+    // correctness is that inter-clip start-time deltas equal their
+    // startSample deltas no matter how the clock moved between reads.
+
+    /** 3 tracks, 4 clips; play(100) enters a1/b1 mid-clip (a co-started pair
+     * on DIFFERENT tracks), c1 and b2 are future clips. Effective timeline
+     * starts (max(from, startSample)): a1=100, b1=100, b2=2500, c1=400. */
+    function threeTrackSession(): Session {
+      return session([
+        track({ id: 'A', clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 2000 })] }),
+        track({
+          id: 'B',
+          clips: [
+            clip({ documentId: 'doc-1', startSample: 0, lengthSample: 2000 }),
+            clip({ documentId: 'doc-1', startSample: 2500, lengthSample: 500 }),
+          ],
+        }),
+        track({ id: 'C', clips: [clip({ documentId: 'doc-1', startSample: 400, lengthSample: 1000 })] }),
+      ]);
+    }
+
+    it('keeps every pair of start times exactly startSample-delta apart on a warm advancing clock', () => {
+      const { player, ctx } = makePlayer();
+      ctx.advancePerRead = 0.03; // 30 ms of warm clock pass on every read
+      player.play(100, threeTrackSession(), docs(doc('doc-1')));
+
+      expect(ctx.sources).toHaveLength(4);
+      const whens = ctx.sources.map((s) => s.startCalls[0].when);
+      // Sources are created in session order: A.a1, B.b1, B.b2, C.c1.
+      const effStart = [100, 100, 2500, 400];
+
+      // The co-started pair on different tracks: bit-identical start times.
+      expect(whens[1]).toBe(whens[0]);
+
+      // Every pair's start-time delta, expressed in samples, equals its
+      // effective-start delta. Precision 6 (≪ one sample; double rounding
+      // noise only) — the per-clip clock reads would drift these by
+      // 30 samples per read.
+      for (let i = 0; i < whens.length; i++) {
+        for (let j = i + 1; j < whens.length; j++) {
+          expect((whens[j] - whens[i]) * 1000).toBeCloseTo(effStart[j] - effStart[i], 6);
+        }
+      }
+
+      // The intra-clip offset/duration math is untouched by the epoch.
+      expect(ctx.sources[0].startCalls[0].offset).toBeCloseTo(0.1, 6); // (100-0)/1000
+      expect(ctx.sources[0].startCalls[0].duration).toBeCloseTo(1.9, 6);
+      expect(ctx.sources[3].startCalls[0].offset).toBeCloseTo(0, 6);
+      expect(ctx.sources[3].startCalls[0].duration).toBeCloseTo(1.0, 6);
+    });
+
+    it('anchors the playhead to the same epoch the sources were scheduled against', () => {
+      const { player, ctx } = makePlayer();
+      ctx.advancePerRead = 0.03;
+      player.play(100, threeTrackSession(), docs(doc('doc-1')));
+      ctx.advancePerRead = 0; // freeze the clock for a stable readback
+
+      // A clip entering AT the play position starts exactly at the epoch, so
+      // its `when` IS the epoch. The visual playhead must map time→samples
+      // against that same anchor: pos = from + (now − epoch)·rate.
+      const epoch = ctx.sources[0].startCalls[0].when;
+      const now = ctx.currentTime;
+      expect(player.getPositionSample()).toBeCloseTo(100 + (now - epoch) * 1000, 6);
+    });
+
+    it('holds the playhead at the play start while the schedule lead has not elapsed (cold clock)', () => {
+      const { player, ctx } = makePlayer();
+      const s = session([track({ clips: [clip({ documentId: 'doc-1', startSample: 0, lengthSample: 1000 })] })]);
+      player.play(200, s, docs(doc('doc-1')));
+      // Frozen clock (suspended context): no audio has advanced yet, and the
+      // playhead must not sit BEFORE the cursor because the epoch is in the
+      // (near) future.
+      expect(player.getPositionSample()).toBe(200);
+    });
   });
 
   it('no-ops safely when no AudioContext is available', () => {
