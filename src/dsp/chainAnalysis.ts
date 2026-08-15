@@ -458,15 +458,18 @@ export function measureNoiseWindow(
  * declines on hidden material instead of classifying it. */
 export const TILT_FFT_SIZE = 1024;
 
-export function spectralTiltResidualDb(window: Float32Array, sampleRate: number): number {
-  const fftSize = TILT_FFT_SIZE;
-  if (window.length < fftSize) return 0;
-  const { frames } = stft(window, fftSize, fftSize / 2);
-  if (frames.length === 0) return 0;
+/** The straight-line fit and its residual, over a MEAN power spectrum. One
+ * body shared by `spectralTiltResidualDb` and `windowedTiltResidualsDb`, so the
+ * per-window statistic the gate's segmentation reads cannot drift from the
+ * single-window statistic its populations were measured on. `frameCount`
+ * carries the averaging denominator so callers can hand the raw power SUM. */
+function tiltResidualFromPowerSum(
+  power: Float64Array,
+  frameCount: number,
+  sampleRate: number,
+  fftSize: number
+): number {
   const bins = fftSize / 2 + 1;
-  const power = new Float64Array(bins);
-  for (const frame of frames) for (let k = 0; k < bins; k++) power[k] += frame[k] * frame[k];
-
   const binHz = sampleRate / fftSize;
   const lo = Math.max(1, Math.round(120 / binHz));
   const hi = Math.min(bins - 1, Math.round((0.42 * sampleRate) / binHz));
@@ -477,7 +480,7 @@ export function spectralTiltResidualDb(window: Float32Array, sampleRate: number)
   let n = 0;
   for (let k = lo; k <= hi; k++) {
     sx += Math.log(k);
-    sy += 10 * Math.log10(power[k] / frames.length + 1e-20);
+    sy += 10 * Math.log10(power[k] / frameCount + 1e-20);
     n++;
   }
   const mx = sx / n;
@@ -486,16 +489,111 @@ export function spectralTiltResidualDb(window: Float32Array, sampleRate: number)
   let sxx = 0;
   for (let k = lo; k <= hi; k++) {
     const dx = Math.log(k) - mx;
-    sxy += dx * (10 * Math.log10(power[k] / frames.length + 1e-20) - my);
+    sxy += dx * (10 * Math.log10(power[k] / frameCount + 1e-20) - my);
     sxx += dx * dx;
   }
   const slope = sxx > 0 ? sxy / sxx : 0;
   let ss = 0;
   for (let k = lo; k <= hi; k++) {
-    const r = 10 * Math.log10(power[k] / frames.length + 1e-20) - (my + slope * (Math.log(k) - mx));
+    const r = 10 * Math.log10(power[k] / frameCount + 1e-20) - (my + slope * (Math.log(k) - mx));
     ss += r * r;
   }
   return Math.sqrt(ss / n);
+}
+
+export function spectralTiltResidualDb(window: Float32Array, sampleRate: number): number {
+  const fftSize = TILT_FFT_SIZE;
+  if (window.length < fftSize) return 0;
+  const { frames } = stft(window, fftSize, fftSize / 2);
+  if (frames.length === 0) return 0;
+  const bins = fftSize / 2 + 1;
+  const power = new Float64Array(bins);
+  for (const frame of frames) for (let k = 0; k < bins; k++) power[k] += frame[k] * frame[k];
+  return tiltResidualFromPowerSum(power, frames.length, sampleRate, fftSize);
+}
+
+/**
+ * `spectralTiltResidualDb`, asked of EVERY `NOISE_WINDOW_MS` window of a region
+ * on the noise search's own 50 ms step — the measurement behind the Noise
+ * Gate's activity segmentation, which needs a vocal-tract verdict about each
+ * half-second of the selection rather than about one candidate window.
+ *
+ * Same fit, same band, same mean-power question (`tiltResidualFromPowerSum` is
+ * one body). Two deliberate differences from calling the single fit in a loop,
+ * both stated because the populations that justify the boundary constant were
+ * re-measured through THIS function (chainAnalysis.test.ts):
+ *
+ *   - The STFT runs ONCE over the whole region on a shared frame grid, and each
+ *     window averages the frames it fully contains. Calling the single fit per
+ *     50 ms step would repeat every FFT ten times over.
+ *   - Only FULLY-CONTAINED frames count, where the single fit zero-pads a tail
+ *     frame. That is not a small numerical nicety: a zero-padded tail frame is
+ *     a Hann-windowed hard cut whose broadband splash fills the valleys of a
+ *     SHAPED spectrum, so the single fit under-reads a 44.1 kHz whisper by a
+ *     measured 2.2-5.5 dB against its own fully-contained frames, while on
+ *     floors — no valleys to fill — the two agree within 0.25 dB at both
+ *     rates. The kept parity test pins the two statistics by DIRECTION:
+ *     identical on floors, and never more floor-like than the single fit on
+ *     vocal material — so nothing can slip under the boundary because of the
+ *     shared grid.
+ *
+ * An all-zero window has no spectrum to fit and reads 0 — an absence of a
+ * verdict, exactly as the single fit's short-input 0, and the caller must not
+ * read it as "floor" any more than there. A window STRADDLING a digital-silence
+ * edge reads the adjacent material's shape plus the edge's own broadband step —
+ * usually over the vocal boundary — and that direction is protective: the gate
+ * treats such windows as activity, so silence never vouches for the material
+ * beside it (the N2/N3 family in vocalChain.test.ts).
+ */
+export interface WindowedTiltResidual {
+  startSample: number;
+  residualDb: number;
+}
+
+export function windowedTiltResidualsDb(mono: Float32Array, sampleRate: number): WindowedTiltResidual[] {
+  const fftSize = TILT_FFT_SIZE;
+  const win = Math.round((NOISE_WINDOW_MS / 1000) * sampleRate);
+  const step = Math.max(1, Math.round((NOISE_SEARCH_STEP_MS / 1000) * sampleRate));
+  const n = mono.length;
+  if (n < win || win < fftSize) return [];
+
+  const hop = fftSize / 2;
+  const { frames } = stft(mono, fftSize, hop);
+  const bins = fftSize / 2 + 1;
+  const framePower: Float64Array[] = frames.map((frame) => {
+    const p = new Float64Array(bins);
+    for (let k = 0; k < bins; k++) p[k] = frame[k] * frame[k];
+    return p;
+  });
+
+  // Per-window sum over the frames the window fully contains, re-accumulated
+  // fresh for each window rather than slid with add/subtract: a subtracting
+  // accumulator leaves float residue in bins whose true sum is exactly zero,
+  // and an all-zero window read through that residue would carry a phantom
+  // spectrum. A window holds at most ~45 frames, so the fresh sums cost
+  // O(windows · window-frames · bins) — well under a second on the longest
+  // region this app measures — and every window's sum is exact.
+  const out: WindowedTiltResidual[] = [];
+  const sum = new Float64Array(bins);
+  for (let s = 0; s + win <= n; s += step) {
+    const firstFrame = Math.ceil(s / hop);
+    const lastFrameExcl = Math.min(framePower.length, Math.floor((s + win - fftSize) / hop) + 1);
+    const count = lastFrameExcl - firstFrame;
+    if (count <= 0) {
+      out.push({ startSample: s, residualDb: 0 });
+      continue;
+    }
+    sum.fill(0);
+    for (let f = firstFrame; f < lastFrameExcl; f++) {
+      const p = framePower[f];
+      for (let k = 0; k < bins; k++) sum[k] += p[k];
+    }
+    out.push({
+      startSample: s,
+      residualDb: tiltResidualFromPowerSum(sum, count, sampleRate, fftSize),
+    });
+  }
+  return out;
 }
 
 /**

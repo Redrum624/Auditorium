@@ -11,8 +11,10 @@ import {
   monoMix,
   peakDb,
   programmeRmsDb,
+  spectralTiltResidualDb,
   toDb,
   toneExcessDb,
+  windowedTiltResidualsDb,
 } from './chainAnalysis';
 import { SILENCE_RMS } from './pitchDetect';
 
@@ -624,5 +626,169 @@ describe('monoMix', () => {
   it('returns the single channel itself for mono', () => {
     const only = Float32Array.from([0.25]);
     expect(monoMix([only])).toBe(only);
+  });
+});
+
+// ── windowedTiltResidualsDb — the tilt fit, asked per window over a region ──
+// The Noise Gate's activity segmentation asks the vocal-tract question of
+// EVERY 500 ms of the selection rather than of one candidate window, so the
+// statistic has to be computable across a whole region at a cost that does not
+// repeat the STFT once per 50 ms step. These tests pin that the per-window
+// answers are the same MEASUREMENT `spectralTiltResidualDb` takes — same fit,
+// same band, same populations — differing only by the shared frame grid.
+describe('windowedTiltResidualsDb', () => {
+  const STEP = Math.round(0.05 * SR); // the noise search's own 50 ms step
+  const WIN = Math.round((NOISE_WINDOW_MS / 1000) * SR);
+
+  /** A two-pole resonator — the same vocal-tract model the gate's population
+   * suites use (vocalChain.test.ts). */
+  function res2(x: Float32Array, sr: number, hz: number, q: number): Float32Array {
+    const w = (2 * Math.PI * hz) / sr;
+    const r = Math.exp(-w / (2 * q));
+    const a1 = 2 * r * Math.cos(w);
+    const a2 = -r * r;
+    const out = new Float32Array(x.length);
+    let y1 = 0;
+    let y2 = 0;
+    for (let i = 0; i < x.length; i++) {
+      const y = x[i] + a1 * y1 + a2 * y2;
+      out[i] = y;
+      y2 = y1;
+      y1 = y;
+    }
+    return out;
+  }
+
+  function atRms(x: Float32Array, rmsDb: number): Float32Array {
+    let s = 0;
+    for (let i = 0; i < x.length; i++) s += x[i] * x[i];
+    const g = Math.pow(10, rmsDb / 20) / Math.sqrt(s / Math.max(1, x.length));
+    const out = new Float32Array(x.length);
+    for (let i = 0; i < x.length; i++) out[i] = x[i] * g;
+    return out;
+  }
+
+  function whisper(n: number, rmsDb: number, seed: number, sr: number): Float32Array {
+    let x = noise(n, 1, seed);
+    for (const [hz, q] of [
+      [500, 8],
+      [1500, 10],
+      [2500, 12],
+    ] as const) {
+      if (hz < (sr / 2) * 0.9) x = res2(x, sr, hz, q);
+    }
+    for (let i = 0; i < n; i++) x[i] *= 0.55 + 0.45 * Math.sin((2 * Math.PI * 4 * i) / sr);
+    return atRms(x, rmsDb);
+  }
+
+  it('returns one residual per 50 ms step, and none for a window that would run past the signal', () => {
+    const n = WIN + 3 * STEP + 7;
+    const positions = windowedTiltResidualsDb(noise(n, 0.01, 5), SR).map((w) => w.startSample);
+    expect(positions).toEqual([0, STEP, 2 * STEP, 3 * STEP]);
+    expect(windowedTiltResidualsDb(noise(WIN - 1, 0.01, 5), SR)).toEqual([]);
+  });
+
+  it('reads a floor as a floor and a whisper as a vocal tract, window by window, at both rates', () => {
+    // The same absolute bounds the GATE_SHAPED_RESIDUAL_DB population suite
+    // asserts (floors under 2.2 dB, unvoiced vocal over 3.0 dB), measured here
+    // through the WINDOWED statistic — the population justification has to be
+    // evidence about the function the segmentation actually calls, not about a
+    // sibling with a different frame grid.
+    for (const sr of [8000, 44100]) {
+      const sec = (s: number): number => Math.round(s * sr);
+      const parts = [
+        atRms(noise(sec(1), 1, 7), -40),
+        whisper(sec(1), -40, 23, sr),
+        atRms(noise(sec(1), 1, 13), -40),
+      ];
+      const signal = new Float32Array(sec(3));
+      signal.set(parts[0], 0);
+      signal.set(parts[1], sec(1));
+      signal.set(parts[2], sec(2));
+
+      const win = Math.round((NOISE_WINDOW_MS / 1000) * sr);
+      const rows = windowedTiltResidualsDb(signal, sr);
+      expect(rows.length).toBeGreaterThan(0);
+      let floorWindows = 0;
+      let whisperWindows = 0;
+      for (const row of rows) {
+        const inFloor =
+          row.startSample + win <= sec(1) || (row.startSample >= sec(2) && row.startSample + win <= sec(3));
+        const inWhisper = row.startSample >= sec(1) && row.startSample + win <= sec(2);
+        if (inFloor) {
+          floorWindows++;
+          expect(row.residualDb).toBeLessThan(2.2);
+        } else if (inWhisper) {
+          whisperWindows++;
+          expect(row.residualDb).toBeGreaterThan(3.0);
+        }
+        // Straddling windows carry both and are asserted by neither bound.
+      }
+      expect(floorWindows).toBeGreaterThan(5);
+      expect(whisperWindows).toBeGreaterThan(5);
+    }
+  }, 120000);
+
+  it('differs from the single fit only where the single fit under-reads a vocal tract, and never the other way', () => {
+    // Same fit, same band, same mean-power question — but the windowed pass
+    // averages only the frames a window FULLY contains, where the single fit
+    // zero-pads a tail frame. A zero-padded tail frame is a Hann-windowed hard
+    // cut, and its broadband splash fills the valleys of a SHAPED spectrum:
+    // measured here, the single fit reads a 44.1 kHz whisper 2.2-5.5 dB more
+    // floor-like than its own fully-contained frames do, while on floors —
+    // whose spectrum has no valleys to fill — the two agree within 0.25 dB at
+    // both rates. So the two statistics are pinned by DIRECTION, not by a
+    // small-delta claim that is false for shaped content: on floors they
+    // agree (the population that must not drift up toward the boundary), and
+    // on vocal material the windowed fit reads at or above the single one —
+    // the protective direction, since a passage the single fit already calls
+    // a vocal tract can only read MORE vocal here, never slip under the
+    // boundary because of the shared grid.
+    for (const sr of [8000, 44100]) {
+      const win = Math.round((NOISE_WINDOW_MS / 1000) * sr);
+      for (const [name, make] of [
+        ['floor', (): Float32Array => atRms(noise(win * 4, 1, 7), -40)],
+        ['whisper', (): Float32Array => whisper(win * 4, -40, 23, sr)],
+      ] as const) {
+        const signal = make();
+        const rows = windowedTiltResidualsDb(signal, sr);
+        for (const row of rows.filter((_, i) => i % 5 === 0)) {
+          const direct = spectralTiltResidualDb(
+            Float32Array.from(signal.subarray(row.startSample, row.startSample + win)),
+            sr
+          );
+          const delta = row.residualDb - direct;
+          // Never more floor-like than the single fit (beyond float noise)...
+          expect([name, sr, row.startSample, delta][3]).toBeGreaterThan(-0.1);
+          // ...and on floors, the same answer.
+          if (name === 'floor') expect([name, sr, row.startSample, Math.abs(delta)][3]).toBeLessThan(0.35);
+        }
+      }
+    }
+  }, 120000);
+
+  it('reads an all-zero window as 0 — an absence of verdict, exactly as the single fit does', () => {
+    const signal = new Float32Array(WIN * 3);
+    signal.set(noise(WIN, 0.01, 5), WIN * 2);
+    const rows = windowedTiltResidualsDb(signal, SR);
+    const zeroRows = rows.filter((w) => w.startSample + WIN <= WIN * 2 - STEP);
+    expect(zeroRows.length).toBeGreaterThan(0);
+    for (const row of zeroRows) expect(row.residualDb).toBeCloseTo(0, 3);
+    expect(spectralTiltResidualDb(new Float32Array(WIN), SR)).toBe(0);
+  });
+
+  it('is level-invariant: the same passage 20 dB down reads the same residuals', () => {
+    // The fit absorbs the intercept, so a residual is a fact about a passage's
+    // SHAPE and not its level — the property that lets the segmentation read a
+    // window's verdict without a threshold in it.
+    const signal = whisper(WIN * 3, -30, 41, SR);
+    const quiet = new Float32Array(signal.length);
+    for (let i = 0; i < signal.length; i++) quiet[i] = signal[i] * 0.1;
+    const loud = windowedTiltResidualsDb(signal, SR);
+    const down = windowedTiltResidualsDb(quiet, SR);
+    expect(down.length).toBe(loud.length);
+    for (let i = 0; i < loud.length; i++) {
+      expect(down[i].residualDb).toBeCloseTo(loud[i].residualDb, 4);
+    }
   });
 });
