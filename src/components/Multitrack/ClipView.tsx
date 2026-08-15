@@ -152,6 +152,10 @@ interface DragState {
    * (toggle vs. single-select); the DROP's own `e.ctrlKey` still decides the
    * X5 push-clear nudge, which is what keeps the two meanings apart. */
   ctrlAtDown: boolean;
+  /** T5 — Shift at pointerdown, read at pointerUP for the same reason
+   * `ctrlAtDown` is: a Shift press that turns into a drag was never a selection
+   * act. Ctrl still wins when both are held (K1's ruling, untouched). */
+  shiftAtDown: boolean;
   /** K1 — true when pointerdown deliberately left the selection alone, so
    * pointerup owes it a commit if the gesture turns out to be a click. */
   deferSelection: boolean;
@@ -175,7 +179,10 @@ function snapSuspended(e: { altKey: boolean }): boolean {
  * One clip on a track lane: a rounded rect (cyan) with the source name and,
  * over the slice of it that is on screen, the editor's own waveform drawn at
  * the current zoom (MT1-2). Pointer interactions:
- *   - click               → select
+ *   - click               → select (Ctrl+Click toggles this clip in the
+ *                            selection; Shift+Click extends it from the primary
+ *                            to here along THIS track, and acts as a plain
+ *                            click across tracks. Ctrl wins if both are held.)
  *   - drag body (>4px)     → move horizontally (live transform) and across
  *                            tracks (target lane highlighted), committed on
  *                            release. A same-track overlap commits verbatim
@@ -222,6 +229,7 @@ export default function ClipView({
   // any case, since the set must not change under the user's hand mid-gesture.
   const inSet = useSessionStore((s) => s.selectedClipIds.includes(clip.id));
   const toggleSelectedClip = useSessionStore((s) => s.toggleSelectedClip);
+  const extendSelectionToClip = useSessionStore((s) => s.extendSelectionToClip); // T5
   const setClipFade = useSessionStore((s) => s.setClipFade);
   // X4 — the whole track list: this clip's own track feeds the fade/overlap
   // visuals, and the track hovered during a move drag feeds the overlap hint.
@@ -693,9 +701,14 @@ export default function ClipView({
     // The component subscribes only to its OWN membership now, and this is the
     // one place that needs the rest of it — captured, not subscribed, because
     // `groupIds` below must be the set as it stood when the gesture began.
+    //
+    // T5 adds SHIFT to the deferral for a third instance of the same reason:
+    // the range is measured FROM the primary, so single-selecting the pressed
+    // clip here would replace the anchor a frame before the range was drawn
+    // from it — the gesture would always resolve to "just this clip".
     const idsAtDown = useSessionStore.getState().selectedClipIds;
     const memberAtDown = idsAtDown.includes(clip.id);
-    const deferSelection = memberAtDown || e.ctrlKey;
+    const deferSelection = memberAtDown || e.ctrlKey || e.shiftKey;
     if (!deferSelection) setSelectedClip(clip.id);
 
     const rect = e.currentTarget.getBoundingClientRect();
@@ -709,6 +722,7 @@ export default function ClipView({
       exceeded: false,
       groupIds: memberAtDown ? [...idsAtDown] : [clip.id], // K1
       ctrlAtDown: e.ctrlKey, // K1
+      shiftAtDown: e.shiftKey, // T5
       deferSelection, // K1
       targets: sessionSnapTargets(clip.id),
       lastClientX: e.clientX,
@@ -815,8 +829,16 @@ export default function ClipView({
     // toggles this clip in the set; a plain click collapses the set to it.
     // Only fires when pointerdown deferred, so the ordinary "press an
     // unselected clip" path is not re-committed here.
+    //
+    // T5 — the range arm sits BELOW the toggle, which is the modifier
+    // precedence written down: with both modifiers held Ctrl wins and the
+    // click is exactly K1's toggle. That leaves K1's ruling untouched, and
+    // "Shift composes with Ctrl+Click" is honoured by the STORE rather than by
+    // the modifier — `extendSelectionToClip` unions the range into the standing
+    // set, so a Ctrl-built selection survives the Shift+Click that extends it.
     if (drag && drag.mode === 'move' && !drag.exceeded && drag.deferSelection) {
       if (drag.ctrlAtDown) toggleSelectedClip(clip.id);
+      else if (drag.shiftAtDown) extendSelectionToClip(clip.id);
       else setSelectedClip(clip.id);
     }
     if (drag && drag.mode === 'move' && drag.exceeded && drag.groupIds.length > 1) {
