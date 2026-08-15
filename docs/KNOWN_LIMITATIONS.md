@@ -1267,16 +1267,15 @@ toward removing *less*. The gap's END is accurate to ~1 ms (1 ms attack), so
 speech onsets are never clipped. If a bordering gap must be caught, lowering
 "Min silence" by ~100 ms compensates exactly.
 
-## The Noise Gate's decisions rest on constructed populations — and a real recording has already fallen outside them
+## The Noise Gate's decisions rest on constructed populations — and what changed when a real recording fell outside them
 
-<!-- V2 -->
+<!-- V2 / G2 -->
 **Area:** the Vocal Chain's Noise Gate stage (`deriveGate` in
-`src/services/vocalChain.ts`), the search behind it
-(`measureNoiseWindows` in `src/dsp/chainAnalysis.ts`), and every constant either
-of them consults: `GATE_HEADROOM_DB`, `GATE_VOICED_FRACTION`,
+`src/services/vocalChain.ts`), the activity segmentation behind it
+(`windowedTiltResidualsDb` in `src/dsp/chainAnalysis.ts`), and every constant
+either of them consults: `GATE_HEADROOM_DB`, `GATE_VOICED_FRACTION`,
 `GATE_SHAPED_RESIDUAL_DB`, `GATE_CANCELLATION_DEPTH_DB`,
-`NOISE_WINDOW_MAX_SILENT_FRACTION`, `GATE_QUIET_WINDOWS`,
-`GATE_SEARCH_CLIMB_DB`.
+`NOISE_WINDOW_MAX_SILENT_FRACTION`, `GATE_MIN_REGION_MS`.
 
 **Every one of those constants is placed between two measured populations, and
 every member of every population is audio this repository generated.** Gaussian
@@ -1287,39 +1286,76 @@ they leave are wide — the vocal-tract check separates 0.63–1.91 dB of floor 
 3.20–10.58 dB of unvoiced voice — but a gap between two synthetic populations is
 evidence about the synthesis, not a promise about a microphone.
 
-**A real recording has already landed outside them.** Reported 2026-08-14: a
-2 min 22 s sung take whose quietest 500 ms measured **4.0 dB** of departure from
-a straight spectral tilt, against the 2.5 dB the check calls voice and the
-1.91 dB worst floor member the constant was derived above. The stage declined
-and the user's report was "the noise in the non-singing parts was not removed".
-Two readings of that number are both consistent with everything measured here,
-and nothing in the file distinguishes them: either that half-second really was a
-breath — in which case the take had usable pauses elsewhere that the derivation
-never looked at — or the room itself is spectrally shaped (a fan, an HVAC duct,
-a nearby machine) and 4.0 dB is what a REAL floor reads, in which case the
-synthetic floor population simply does not reach that far.
+**A real recording landed outside them twice, and the strategy changed because
+of it.** Reported 2026-08-14: a 2 min 22 s sung take whose quietest 500 ms
+measured **4.0 dB** of departure from a straight spectral tilt, against the
+2.5 dB the check calls voice. The take declined twice — once on that single
+window, once after a widened search ran out of candidates — and the user's
+report stood: "the noise in the non-singing parts was not removed". The user
+then named the correct inversion themselves: *"the vocals are well identified…
+so why can't we mute where there is no lyrics?"* Since G2 the automatic gate
+does exactly that: it derives **no level at all** and instead mutes the
+stretches between vocal activity — word spans from a fresh lyrics alignment or
+transcript when one exists, plus every half-second measuring as a vocal tract
+— with each stretch still vetoed by the voiced and vocal-tract checks before
+it is muted. The decline family that came from "cannot measure a trustworthy
+level floor" is gone: a pause is found by WHERE it is, not by being the
+quietest thing in the take, and the reported twelve-breath shape now gates at
+any breath count.
 
-**What was done about it.** The first reading is now handled: the stage searches
-the twelve quietest distinct passages instead of the single quietest one. The
-second cannot be, because there is no measurement to fix — a shaped room and a
-whisper are the same shape, and raising the constant to admit that floor would
-admit whispers with it and mute them. So the second reading is answered by
-giving the decision back to the user: **the Noise Gate row takes a threshold you
-name**, and every refusal of the stage ends by saying so. Silence stays
-reachable whether or not the populations describe your room.
+**What the redesign could NOT close, measured on that same take.** The 2.5 dB
+vocal-tract boundary is still an absolute constant, and the reported room
+defeats it wall to wall: every one of the take's 2833 half-second windows
+reads over it — 3.01 dB at the very quietest, 3.0–3.9 dB across its audible
+pauses, 4.8–10.2 dB across its vocal content — raw and after Noise Reduction
+alike. The room's own machinery IS a resonant source, so the take reads as
+vocal activity end to end and the stage declines (the message now names the
+shaped-room reading explicitly). A take-relative boundary was measured and
+rejected rather than guessed: over stationary shaped-room models (fan, HVAC,
+machinery, boom at three rates, three seeds) a room's windows spread only
+0.14–0.77 dB above their own minimum, but a whisper ON such a room stands
+0.00–2.19 dB above it — the zero being a whisper whose formants the room's
+stronger resonances bury — so the two populations overlap outright and no
+relative constant exists either. On this room, the manual threshold is the
+tool, and the measured numbers for that take: −50 dBFS gates 41.1 s of its
+142 s, −55 dBFS gates 22.1 s, −58 dBFS gates 9.5 s.
 
-**What that means for you.** If your recording room has a fan, a computer, an
-air conditioner or anything else with a spectrum of its own, expect this stage
-to refuse more often than the numbers above suggest, and use the manual
-threshold when it does. The refusal is the safe direction — the stage is
-declining to mute audio it cannot vouch for — but it is a refusal, not a
-verdict about your take.
+**What the redesign does NOT close, stated plainly:**
 
-**How it would be closed.** Only by measuring real rooms: a population of noise
-floors recorded in ordinary domestic and project spaces, with their spectral
-tilt residuals, against a population of real whispers and breaths from real
-singers. Until that exists, these constants are calibrated to models, and this
-entry says so.
+- **Vocal material quieter than the noise around it is invisible to
+  measurement.** With word evidence it is protected by its span; without, a
+  take whose singing sits under the pause noise DECLINES (nothing is muted on
+  ignorance), and sub-floor material *inside* a muted stretch — a whisper
+  10 dB under the room tone — is muted with the floor, exactly as a level
+  gate always muted it. Run **Pipeline → Align Lyrics…** first when a take has
+  passages like that; the word spans are the only evidence that can vouch for
+  them.
+- **A resonant non-vocal noise reads as a voice and is kept.** Measured: a
+  120 ms chair-creak burst (a 180 Hz resonance) inside a 500 ms floor window
+  reads **4.06 dB** of vocal-tract shape — inside the whisper population's own
+  3.20–10.58 dB range — so no boundary exists that mutes the creak and keeps
+  the whisper, even where word evidence says nothing was sung there. The veto
+  is kept in both paths: a creak survives as a short island while the floor
+  around it is muted, and the report's Kept row counts it. An isolated soft
+  tick averaged over a longer window stays under the boundary and mutes with
+  the floor.
+- **Unshaped broadband hiss at a steady level is still a floor** to every
+  statistic here (the pre-G2 limitation, unchanged): a breath recorded so far
+  off-mic that the room shaped it has no pitch, no resonances, no syllabic
+  movement, and a stretch of it between phrases will be muted. If that is your
+  recording, switch the stage off or use the manual threshold.
+
+**The manual escape is unchanged.** The **Gate at a level I set instead** box
+is the level gate of earlier releases, byte for byte — same hold, same fades,
+same digital-silence rules — and every refusal of the automatic path still
+ends by pointing at it. Silence stays reachable whether or not the populations
+describe your room.
+
+**How the remaining gaps would be closed.** Only by measuring real rooms and
+real singers: noise floors recorded in ordinary domestic and project spaces
+against real whispers and breaths, and a population of real non-vocal
+transients (chairs, pedals, thumps) against both. Until that exists, these
+constants are calibrated to models, and this entry says so.
 
 ## The Vocal Chain evens out the envelope; it does not lower the peak-to-RMS ratio
 

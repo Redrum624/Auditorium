@@ -200,12 +200,16 @@ export interface VocalChainStage {
    * 5.8 s, EQ 0.4 s, Reverb 1.4 s, Limiter 3.6 s. Equal weights would park the
    * bar for the minute Pitch Correct alone takes and then jump to done.
    *
-   * The gate's 4.1 s is the one figure not timed on the take itself, which is
-   * not in this repo: it was timed against the LIMITER — the stage whose time
-   * here is recorded — over identical synthetic audio of the take's dimensions
-   * (142 s stereo at 44.1 kHz), where the gate cost 3.81 s to the limiter's
-   * 3.38 s, i.e. 1.13x, so 1.13 x 3.6 s. Both are one O(n) pass with one
-   * envelope follower, which is why the ratio is the trustworthy part. */
+   * The gate's figure was re-measured for G2, because the stage changed
+   * shape: the region derivation (one shared-STFT tilt pass over the whole
+   * take, the per-gap floor measurements and edge walks, and a pitch track
+   * per candidate stretch) ran in 4.1-4.4 s on the 142 s reference take at
+   * 48 kHz — measured wall time, three runs — and the render in region mode
+   * is a copy plus fades, cheaper than the old state machine. The old weight
+   * of 4 therefore stands on a new measurement rather than surviving on an
+   * old one. The pitch cost scales with the candidate seconds rather than
+   * the take (the kept cost test), so a take that is half pause can roughly
+   * double this stage; the bar is weighted for the common case. */
   weight: number;
 }
 
@@ -983,6 +987,24 @@ export const GATE_VOICED_FRACTION = 0.05;
  * it voice is that a person made it. `the one unvoiced passage this cannot
  * catch` pins that overlap so the limitation stays measured rather than
  * forgotten, and the user guide states it.
+ *
+ * ── The converse it does not close either: the SHAPED ROOM, now measured ────
+ * The other direction fails on real rooms, wall to wall. The 2 min 22 s take
+ * that motivated G2 (a room with resonant machinery in it) reads OVER this
+ * boundary in every one of its 2833 windows — 3.01 dB at the very quietest,
+ * 3.0-3.9 across its audible pauses, 4.8-10.2 across its vocal content — raw
+ * AND after Noise Reduction, whose subtraction does not flatten the shape. On
+ * that room this stage finds no floor anywhere and declines, saying so in the
+ * message the user reads. A take-RELATIVE boundary (the take's own minimum
+ * windowed residual plus a derived excess) was measured and REJECTED, because
+ * its populations overlap outright: over stationary shaped-room models (a fan
+ * at 180 Hz, an HVAC pair, machinery, a bass boom, at 8/44.1/48 kHz x 3
+ * seeds) a room's windows spread only 0.14-0.77 dB above their own minimum —
+ * but a whisper ON such a room stands 0.00-2.19 dB above it, the zero being a
+ * whisper whose formants the room's stronger resonances simply bury. No
+ * constant separates "the room again" from "a whisper this room drowns", so
+ * the boundary stays absolute, the shaped room stays a decline, and the
+ * manual threshold stays the stated tool for that room.
  */
 export const GATE_SHAPED_RESIDUAL_DB = 2.5;
 
@@ -1447,7 +1469,7 @@ export function deriveGate(
   }
   if (gaps.length === 0) {
     return decline(
-      `the selection never pauses — vocal activity covers all of it, and a stretch between activity is the only thing this stage may mute`
+      `the selection never pauses — every ${NOISE_WINDOW_MS} ms of it reads as vocal activity, and a stretch between activity is the only thing this stage may mute. A room whose own noise carries resonances (a fan, an air conditioner, a machine) reads the same way, and no measurement here can tell the two apart — if the gaps you hear are that room, set the level yourself below`
     );
   }
 

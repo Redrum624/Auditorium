@@ -465,136 +465,108 @@ and the chain overrides only what the recording decides:
   Remove Silence declines outright on a take with no half-second of real
   material left in it, because a stage that deletes what it calls silence must
   not guess the level;
-- the **gate threshold** is that same reading plus 3 dB;
+- the **gate** derives no level at all: it mutes the stretches where the
+  evidence says no vocal activity lives (see its own section below);
 - the **high-pass** sits an octave below the lowest note actually sung.
 
-**The pauses between your phrases go to actual silence.** The **Noise Gate**
-stage mutes them, and it is on by default because it is what most people mean by
-"clean up this take" — Noise Reduction can only pull a floor down by 12 dB, and
-the compressor's makeup gain then lifts what is left, so before this stage a
-pause was quieter but never quiet. It **mutes in place rather than cutting**,
-which is why it can be on by default where Remove Silence cannot: nothing moves,
-so a take stays lined up with its backing track.
+**The stretches where you are not singing go to actual silence.** The **Noise
+Gate** stage mutes them, and it is on by default because it is what most people
+mean by "clean up this take" — Noise Reduction can only pull a floor down by
+12 dB, and the compressor's makeup gain then lifts what is left, so before this
+stage a pause was quieter but never quiet. It **mutes in place rather than
+cutting**, which is why it can be on by default where Remove Silence cannot:
+nothing moves, so a take stays lined up with its backing track.
 
-**It does not close inside a phrase.** The threshold is measured from your own
-recording — the loudest the silence detector reads in its quietest 500 ms, plus
-3 dB, because the same room tone reaches that level again in a longer pause and
-one graze would re-open the gate for half a second. And it **holds open for
-500 ms** after the level drops, which is the shortest gap this app is willing to
-call a pause at all (the same minimum Remove Silence uses): a stop-consonant
-closure, a breath, or a dip inside a held note is far shorter than that, so the
-gate does not so much as begin to close on one. The gate's row in the report
-says how much of the selection it actually silenced, in seconds and per cent.
+**It decides WHERE, not how loud.** Earlier releases derived a level and muted
+everything under it, which meant the noise in your pauses had to be *quieter*
+than your softest singing — and on a real take it often is not: a chair, a
+fan, a neighbour's TV can all sit above a pianissimo phrase. This stage now
+asks a different question: *where is the vocal activity?* A stretch is muted
+only when the evidence says no vocal activity lives in it — so pause noise
+**louder than your softest singing still goes**, which no threshold could ever
+reach. The evidence, in the order it is consulted:
 
-**And it does not close on what comes out of digital silence.** A run of
-exact zeros — 50 ms or more of them — is silence somebody already put there,
-so the gate has nothing to remove across it and does not spend it closing:
-whatever follows the zeros gets the same 500 ms hold that follows a phrase.
-That is what protects a soft pickup consonant or an inhale sitting in a
-strip-silenced pre-roll, which is quiet, has no phrase before it to hold the
-gate open, and used to be muted whole. The threshold is unchanged by this —
-it still comes from the quietest half-second of real material — and the
-recording's own pauses still reach silence as before, because the scattered
-exact zeros an undithered converter leaves in a noise floor never run
-anywhere near 50 ms (measured: 1 ms at worst on the floors this app will
-measure a threshold from). **The cost, stated:** a stray noise blip that
-happens to sit inside a stretch of digital silence is passed through as well,
-up to half a second of it, because nothing distinguishes it from that
-consonant. Passing a tick costs less than muting a word.
+- **Your aligned lyrics or transcript place the words.** If you have run
+  **Pipeline → Align Lyrics…** or **Transcribe** on this audio and have not
+  edited it since, every word's span marks singing, and nothing inside a word
+  span is ever muted — however quiet the word is. This is the strongest
+  evidence there is, and the only kind that can protect singing too quiet to
+  measure: run Align Lyrics first if your take has passages like that.
+- **Every half-second of the selection is measured for a vocal tract.** A
+  whisper, a breath, a held consonant — noise that has been through a mouth
+  carries resonances a room's noise does not, and any stretch showing them is
+  kept, whether or not a word maps there. Without lyrics or a transcript this
+  measurement is also how the singing itself is found, which makes the
+  no-words path deliberately more conservative: singing *quieter than the
+  pause noise* is invisible to measurement, and such a take declines rather
+  than gambles.
+- **Anything voiced is kept.** Humming, an "oooh", a soft line the tilt
+  measurement cannot see — if the pitch detector reads voiced frames in a
+  candidate stretch, the whole stretch stays.
 
-**It looks at more than one quiet passage before giving up.** The threshold
-needs *a* pause, not *the* quietest half-second, and on a long take those are
-not always the same thing: an audible breath between two phrases can read
-quieter than the room tone in the take's real gaps, and a stage that
-interrogated only the single quietest window would decline a recording full of
-usable pauses. So it walks the **twelve quietest distinct passages** of the
-selection in level order and takes the threshold from the first that reads as a
-pause; only if none of them does is the stage declined. Two limits keep that
-honest. It never climbs more than **2.5 dB** above where it would have closed on
-the quietest passage — beyond that it is not correcting a misread window but
-choosing a different level regime, and a threshold from a louder part of the
-room would mute the quieter passage it just stepped over. And twelve is where
-the search stops, because a passage can cost a pitch track and a spectral fit —
-that is the *worst* case, and the number the cap is set against; in practice
-only the quietest passage is priced that way and the rest are checked with the
-cheaper fit alone. A take that needs a thirteenth is a take the stage declines.
-Twelve is not a guess: eleven breath-filled gaps in front of a take's one real
-pause put that pause exactly twelfth, which is the deepest take the cap covers.
+**Only stretches of at least 500 ms qualify** — the shortest gap this app is
+willing to call a pause at all (the same minimum Remove Silence uses), so a
+stop-consonant closure, a breath gap or a dip inside a held note is never even
+a candidate. Each muted stretch closes behind the same 20 ms fade the manual
+gate uses and reopens instantly where the next activity begins. The gate's row
+in the report says which evidence decided, how many regions were muted and for
+how many seconds, how many candidate stretches were *kept* for vocal evidence,
+and — measured on the output — how much of the selection now sits at digital
+silence.
 
-**And when it cannot tell a pause from a phrase, it declines instead of
-guessing.** Everything above depends on some quiet 500 ms of your selection
-actually being a pause, and on some recordings none is. The rule underneath
-the three cases below: **a take that never stops for half a second is usually
-left alone** — a legato or continuous performance is not gated, whatever its
-level, with one exception named at the end of this section. The opposite also
-holds, with one care taken: a stretch of **digital silence** — a trimmed
-lead-in, an edited stem, or this chain's own output when you run it twice — is
-proof of a pause, and a take carrying one is still gated. But the silence
-itself is never *measured*: the threshold always comes from a half-second of
-**real material** that read as a pause, so a run of zeros sitting next to a
-whispered line cannot pass that whisper off as the noise floor — the whisper
-is judged on its own, by the checks below — and a take whose every quiet
-stretch is mostly zeros is declined instead, because its pauses are already
-perfectly silent and a gate has nothing left to do there. And when quiet
-audio itself survives only as fragments between zeros — a transfer through an
-8-bit source, a stem another tool strip-silenced with no hold — the stage
-declines rather than derive a threshold that was measured without ever seeing
-those fragments. The three refusals below are stated in terms of *the quietest
-passage*, because that is the one the report names — but each is only reached
-after every comparable quiet passage in the take has failed the same check:
+**Digital silence is left exactly as it is.** Zeros stay zeros; a run of exact
+zeros is never *evidence* about the material beside it, so a whispered line
+next to a trimmed lead-in cannot be muted on the silence's account; quiet
+audio that survives only as fragments between zeros — an 8-bit transfer, a
+stem another tool strip-silenced with no hold — is never muted unheard; and a
+take whose pauses are already exact zeros declines, having nothing left for a
+gate to do.
 
-- **Nothing in the recording ever stops.** A held tone, a stretch of room tone
-  with no voice in it, or clicks spaced closer together than half a second: the
-  quietest 500 ms is the material itself, so the threshold would sit above
-  everything and the whole take would go silent. When nothing at all is above
-  the level it would gate at, the stage says so and leaves your audio alone.
-- **The quietest passage is quiet SINGING.** A take that never really stops but
-  swings between a pianissimo verse and a loud chorus has its quietest 500 ms
-  inside the soft verse, and a threshold measured there sits above that whole
-  verse — the loud chorus would keep the first check happy while the soft verse
-  was muted. So the stage asks whether that passage is *voiced*: singing has a
-  pitch and room tone does not, and it uses the same pitch detector Pitch
-  Correct does. If more than a twentieth of the quietest passage reads as
-  voiced, it declines and says what it measured.
-- **The quietest passage is WHISPERED.** A whisper, a breath or a held "sss"
-  has no pitch at all, so the check above cannot see it — and a whispered verse
-  would be muted exactly as a sung one would. What still gives it away is that
-  a whisper is noise that has been through a vocal tract, so it carries
-  resonances, while a room's own noise is a plain tilt: hiss, rumble, the hum of
-  a fan. The stage measures how far the quietest passage departs from that plain
-  tilt, and declines when it looks like a voice.
+**And when nothing qualifies, it declines instead of guessing.** A take that
+never pauses for half a second is left alone entirely — a legato or continuous
+performance is not gated, whatever its level. A take where every stretch
+between activity carries vocal evidence declines and says how many stretches
+were kept, and for which evidence. A take that reads as one long noise floor —
+a held tone, bare room tone, clicks — declines rather than muting all of it.
+In every case the stage reports **Did not run** with its reason, and not one
+sample is changed.
 
-In all three cases the stage reports **Did not run** with its reason, and not
-one sample is changed. It errs toward leaving a noisy take alone rather than
-toward muting a sung one.
+**Three limitations, stated so you can avoid them.** A room whose own noise
+carries resonances — a fan, an air conditioner, a machine anywhere near the
+microphone — can read as vocal-tract shape in **every** half-second of a
+take: measured on the very recording that motivated this redesign, every one
+of its 2833 windows did, and the stage then declines outright (its message
+says so, and names this reading). For that room, the manual threshold below
+is the tool — no measurement in this stage can tell resonant machinery from a
+whisper, and it refuses to guess. Vocal material *quieter
+than the noise floor around it* — singing buried under the room, a whisper
+under hiss — is invisible to every measurement here; with word evidence it is
+protected by its span, but without words a muted stretch can take such
+material with it, exactly as a level gate always did. And a resonant noise
+that is not a voice — a chair creak, a squeaky pedal — reads as a vocal tract
+and is *kept*: the creak's half-second survives as a short island while the
+floor around it is muted. The measured populations overlap outright there (a
+creak reads 4.1 dB of vocal-tract shape, inside the whisper family's own
+range), so no boundary exists that mutes the creak and keeps the whisper —
+the stage keeps both and says so in its Kept row.
 
-**The one exception to the rule above, stated so you can avoid it.** A passage
-that is *unshaped* broadband hiss at a steady level — a breath recorded so far
-off-mic that the room, not your voice, is what shaped it — is indistinguishable
-from room tone by any measurement: it has no pitch, no resonances, no syllabic
-movement. If such a passage is the quietest half-second of a take that has no
-real pause, the gate will treat it as the floor and mute it. If that is your
-recording, switch this stage off.
-
-**And when it refuses, you can still gate it yourself.** Every refusal above
-ends by saying so, because a refusal that leaves you with nothing is not a
-service: tick **Gate at a level I set instead** on the Noise Gate row and type
-a threshold in dBFS. Everything under that level goes to silence. This is the
-one setting in the whole chain that comes from you rather than from the
-recording, so the stage says so — its row reads **Threshold (manual)** and
-states, next to it, how many seconds of the selection the level will actually
-silence, which is how you tell you set it too high. Nothing else changes: the
-same 500 ms hold, the same 20 ms fades, the same rule about digital silence.
-It also wins on a take the stage *could* measure, deliberately — a box that
-quietly did nothing on most recordings would be worse than no box. If you do
-not know where to start, run the chain once without it and read the noise floor
-in the before-and-after table; a few decibels above that figure is the level
-the stage would have chosen for itself.
+**And when it declines, you can still gate it yourself.** Every refusal ends
+by saying so, because a refusal that leaves you with nothing is not a service:
+tick **Gate at a level I set instead** on the Noise Gate row and type a
+threshold in dBFS. Everything under that level goes to silence — this is the
+level gate of earlier releases, byte for byte: the same 500 ms hold, the same
+20 ms fades, the same rule about digital silence. It is the one setting in the
+whole chain that comes from you rather than from the recording, so the stage
+says so — its row reads **Threshold (manual)** and states, next to it, how
+many seconds of the selection the level will actually silence, which is how
+you tell you set it too high. It also wins on a take the stage *could* decide
+for itself, deliberately — a box that quietly did nothing on most recordings
+would be worse than no box.
 
 An **empty** box means no level has been named — not 0 dBFS, which is full
 scale and would gate the whole take. Apply waits until you type one, and says
-so beside the box; untick the option if you would rather the stage measured a
-threshold after all. And note *where* you usually read the refusal: if the rest
+so beside the box; untick the option if you would rather the stage decided for
+itself after all. And note *where* you usually read the refusal: if the rest
 of the chain applied, that run is finished and every control in the dialog is
 greyed, including this one. Close the dialog and open **Vocal Chain** again to
 set the level; the refusal's own text says the same thing.
