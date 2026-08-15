@@ -734,4 +734,78 @@ describe('applyTimingAlignment', () => {
       reason: 'no-document',
     });
   });
+
+  /**
+   * T6-3 — a cancelled pass through the REAL runner and the REAL effect, which
+   * is the only way to prove "commits nothing": this pass commits in two places
+   * (the audio through `applyEdit`, the markers through `remapRegionMarkers`)
+   * and the second is not visible from the first.
+   */
+  describe('cancellation', () => {
+    it('leaves the audio, the markers and the history exactly as they were, and says cancelled', async () => {
+      const doc = await seedAnalysedDoc(120, 12);
+      const beats = Array.from(getBeatGrid(doc.id)!.beatSamples);
+      const positions = [beats[3] + 1500, beats[5] - 1200, beats[7] + 900];
+      setMarkers(doc.id, positions);
+      const r = buildAlignPlan({ division: 1, strength: 1 });
+      if (!r.ok) throw new Error('expected a plan');
+      const historyBefore = getHistory(doc.id).done.length;
+
+      const outcome = await applyTimingAlignment({
+        plan: r.plan,
+        strength: 1,
+        shouldCancel: () => true,
+      });
+
+      expect(outcome).toEqual({ ok: false, reason: 'cancelled' });
+      const post = useAppStore.getState().documents.find((d) => d.id === doc.id)!;
+      // Identity: `replaceRegion` allocates fresh arrays on a real commit, so a
+      // value comparison would pass on a commit that had happened and been
+      // numerically identical.
+      expect(post.channels[0]).toBe(doc.channels[0]);
+      expect((useAppStore.getState().markers[doc.id] ?? []).map((m) => m.positionSample)).toEqual(
+        positions
+      );
+      expect(getHistory(doc.id).done.length).toBe(historyBefore);
+    });
+
+    it('reports cancelled rather than no-change, which is what it used to look like', async () => {
+      const doc = await seedAnalysedDoc(120, 12);
+      const beats = Array.from(getBeatGrid(doc.id)!.beatSamples);
+      setMarkers(doc.id, [beats[4] + 1500]);
+      const r = buildAlignPlan({ division: 1, strength: 1 });
+      if (!r.ok) throw new Error('expected a plan');
+
+      const cancelled = await applyTimingAlignment({
+        plan: r.plan,
+        strength: 1,
+        shouldCancel: () => true,
+      });
+
+      // Both leave the document untouched, so the channels-identity gate reads
+      // them the same way. Only one of them is something the user chose, and
+      // telling them "nothing to move at this strength" for their own walk-away
+      // is the app misreading the room.
+      expect(cancelled).not.toEqual({ ok: false, reason: 'no-change' });
+      expect(cancelled).toEqual({ ok: false, reason: 'cancelled' });
+    });
+
+    it('commits normally when the cancel says no', async () => {
+      const doc = await seedAnalysedDoc(120, 12);
+      const beats = Array.from(getBeatGrid(doc.id)!.beatSamples);
+      setMarkers(doc.id, [beats[4] + 1500]);
+      const r = buildAlignPlan({ division: 1, strength: 1 });
+      if (!r.ok) throw new Error('expected a plan');
+
+      const outcome = await applyTimingAlignment({
+        plan: r.plan,
+        strength: 1,
+        shouldCancel: () => false,
+      });
+
+      expect(outcome.ok).toBe(true);
+      const post = useAppStore.getState().documents.find((d) => d.id === doc.id)!;
+      expect(post.channels[0]).not.toBe(doc.channels[0]);
+    });
+  });
 });

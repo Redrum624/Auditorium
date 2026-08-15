@@ -197,7 +197,7 @@ describe('TempoDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(mockApplyTempoChange).toHaveBeenCalledWith(
-      { sourceBpm: 100, targetBpm: 100, addBeatMarkers: true, firstBeatSample: 1000 },
+      { sourceBpm: 100, targetBpm: 100, addBeatMarkers: true, firstBeatSample: 1000, shouldCancel: expect.any(Function) },
       expect.any(Function)
     );
   });
@@ -217,7 +217,7 @@ describe('TempoDialog', () => {
 
     await waitFor(() => expect(onClose).toHaveBeenCalled());
     expect(mockApplyTempoChange).toHaveBeenCalledWith(
-      { sourceBpm: 120, targetBpm: 90, addBeatMarkers: true, firstBeatSample: 500 },
+      { sourceBpm: 120, targetBpm: 90, addBeatMarkers: true, firstBeatSample: 500, shouldCancel: expect.any(Function) },
       expect.any(Function)
     );
   });
@@ -748,5 +748,92 @@ describe('U2 — Cancel refuses while a tempo change is applying', () => {
     expect((screen.getByTestId('tempo-cancel') as HTMLButtonElement).disabled).toBe(true);
     fireEvent.click(screen.getByTestId('tempo-cancel'));
     expect(onClose).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * T6-3 — the unmount guard this dialog only half had.
+ *
+ * U2's fix round found the "all nine discard on unmount" claim false and named
+ * this one of the two exceptions: it guarded a DOM ref, which stops a focus call
+ * and nothing else, so an Apply that resolved after the tool was gone committed
+ * its stretch, its marker correction and its beat grid — up to three undo
+ * entries — into a document the user had walked away from.
+ */
+describe('TempoDialog — a walk-away commits nothing (T6-3)', () => {
+  function startApply(onClose = jest.fn()): { unmount: () => void; onClose: jest.Mock } {
+    seedDoc();
+    mockGetTempo.mockReturnValue(makeEntry({ bpm: 120, confidence: 0.8 }));
+    const { unmount } = render(<TempoDialog onClose={onClose} />);
+    fireEvent.change(screen.getByTestId('tempo-target'), { target: { value: '100' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    return { unmount, onClose };
+  }
+
+  it('hands the service a cancel that reads false while it is open and true once it is gone', () => {
+    // Never resolves: the pass is in flight for the whole test, which is the
+    // window a walk-away actually lands in.
+    mockApplyTempoChange.mockReturnValue(new Promise<TempoChangeOutcome>(() => {}));
+    const { unmount } = startApply();
+
+    const shouldCancel = mockApplyTempoChange.mock.calls[0][0].shouldCancel;
+    expect(shouldCancel).toBeDefined();
+    expect(shouldCancel!()).toBe(false);
+
+    unmount();
+
+    // The runner reads this between the stretched audio arriving and `applyEdit`
+    // writing it, and everything after that answer — the marker correction and
+    // the beat grid — is synchronous with it. So `true` here is the whole of
+    // "commits nothing", for all three entries.
+    expect(shouldCancel!()).toBe(true);
+  });
+
+  it('acts on nothing when the pass resolves after the tool is gone', async () => {
+    // Settled SUCCESSFULLY on purpose: a refusal would leave `if (outcome.ok)`
+    // false anyway, so the test would pass with the guard deleted.
+    let settle: (v: TempoChangeOutcome) => void = () => {};
+    mockApplyTempoChange.mockReturnValue(
+      new Promise<TempoChangeOutcome>((resolve) => {
+        settle = resolve;
+      })
+    );
+    const { unmount, onClose } = startApply();
+
+    unmount();
+    await act(async () => {
+      settle({ ok: true });
+    });
+
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('does not write its own state from a detection that lands after it is gone', async () => {
+    seedDoc();
+    mockGetTempo.mockReturnValue(null);
+    let settle: (v: TempoEntry | null) => void = () => {};
+    mockRunTempoAnalysis.mockReturnValue(
+      new Promise<TempoEntry | null>((resolve) => {
+        settle = resolve;
+      })
+    );
+    const { unmount } = render(<TempoDialog onClose={jest.fn()} />);
+    fireEvent.click(screen.getByTestId('tempo-detect-button'));
+
+    unmount();
+    // The analysis itself is left to finish — it warms a per-document CACHE, not
+    // an undo entry — so what must not happen is this component being written
+    // to afterwards. React logs an error for that, and the console is asserted
+    // on rather than trusted.
+    const errors: unknown[] = [];
+    const spy = jest.spyOn(console, 'error').mockImplementation((...a) => void errors.push(a));
+    try {
+      await act(async () => {
+        settle(makeEntry({ bpm: 128 }));
+      });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors).toEqual([]);
   });
 });

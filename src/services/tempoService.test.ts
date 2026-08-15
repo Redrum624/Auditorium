@@ -1627,3 +1627,93 @@ describe('L1-6 â€” markers inside a VARIABLE match follow the map, not the 
     expect(liveMarkers(docId)).toEqual(before);
   }, 30000);
 });
+
+/**
+ * T6-3 — a cancelled pass, through the REAL runner and the REAL effect.
+ *
+ * The variable path is the one worth pinning: it commits up to THREE undo
+ * entries (`Match Tempo`, `Match Tempo Markers`, `Add Beat Markers`), and only
+ * the first goes through the runner. The other two are synchronous with it, so
+ * one answer at the one await is what makes the pass all-or-nothing — a claim
+ * that is only worth as much as a test that would notice it being false.
+ */
+describe('a cancelled pass commits nothing (T6-3)', () => {
+  it('the constant path leaves the audio and the history untouched, and says cancelled', async () => {
+    const doc = seedDoc([sine(220, 4)]);
+    const before = docLength(liveDoc(doc.id));
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 60,
+      shouldCancel: () => true,
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'cancelled' });
+    expect(docLength(liveDoc(doc.id))).toBe(before);
+    expect(liveDoc(doc.id).channels[0]).toBe(doc.channels[0]);
+    expect(getHistory(doc.id).done).toEqual([]);
+  }, 20000);
+
+  it('the constant path lays no beat grid over audio that was never stretched', async () => {
+    const doc = seedDoc([sine(220, 4)]);
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 60,
+      addBeatMarkers: true,
+      firstBeatSample: 0,
+      shouldCancel: () => true,
+    });
+
+    expect(result.reason).toBe('cancelled');
+    // `addBeatMarkersAfterStretch` runs after the await, so without the check
+    // between them a cancelled pass still wrote a grid — describing beats of a
+    // tempo the document does not have.
+    expect(liveMarkers(doc.id)).toEqual([]);
+    expect(getHistory(doc.id).done).toEqual([]);
+  }, 20000);
+
+  it('the variable path commits none of its three entries', async () => {
+    const seconds = 8;
+    const doc = seedDoc([sine(220, seconds)]);
+    const docId = doc.id;
+    useAppStore.getState().setMarkersForDoc(docId, [
+      { id: 'm0', name: 'a', positionSample: Math.round(1.5 * SR) },
+      { id: 'm1', name: 'b', positionSample: Math.round(4.5 * SR) },
+    ]);
+    const markersBefore = liveMarkers(docId);
+    const lengthBefore = docLength(liveDoc(docId));
+
+    const result = await applyTempoChange({
+      sourceBpm: 110,
+      targetBpm: 110,
+      variableRate: { beatSamples: accelGrid(100, 130, seconds) },
+      addBeatMarkers: true,
+      firstBeatSample: 0,
+      shouldCancel: () => true,
+    });
+
+    expect(result).toEqual({ ok: false, reason: 'cancelled' });
+    expect(docLength(liveDoc(docId))).toBe(lengthBefore);
+    expect(liveDoc(docId).channels[0]).toBe(doc.channels[0]);
+    // Neither `correctMarkersForWarp` nor `addBeatMarkersFromMap` ran: the
+    // markers are where the user left them and no grid was appended.
+    expect(liveMarkers(docId)).toEqual(markersBefore);
+    expect(getHistory(docId).done).toEqual([]);
+  }, 30000);
+
+  it('commits normally when the cancel says no', async () => {
+    const doc = seedDoc([sine(220, 4)]);
+    const before = docLength(liveDoc(doc.id));
+
+    const result = await applyTempoChange({
+      sourceBpm: 120,
+      targetBpm: 60,
+      shouldCancel: () => false,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(docLength(liveDoc(doc.id))).toBe(Math.round(before * 2));
+    expect(getHistory(doc.id).done).toEqual(['Match Tempo']);
+  }, 20000);
+});
