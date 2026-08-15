@@ -175,11 +175,52 @@ describe('the page keeps its side of the IPC contract', () => {
   });
 });
 
+/**
+ * The brace-balanced body of the first block whose header matches.
+ *
+ * Fix round 2, M-9. This used to be one regex ending in `\n {6}\}` — the
+ * closing brace identified by its exact six-space indentation. A reformat would
+ * not have failed the test, it would have silently changed WHICH text was
+ * asserted against: the `}` of an inner rule indents differently, so the match
+ * would have stopped early and the assertions below would have run over a
+ * fragment. Counting braces is what the assertion actually means.
+ */
+function blockBody(text, header) {
+  const at = text.search(header);
+  if (at < 0) return null;
+  const open = text.indexOf('{', at);
+  if (open < 0) return null;
+  let depth = 0;
+  for (let i = open; i < text.length; i += 1) {
+    if (text[i] === '{') depth += 1;
+    else if (text[i] === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(open + 1, i);
+    }
+  }
+  return null;
+}
+
 test('a reduced-motion preference is honoured', () => {
   expect(html).toMatch(/@media \(prefers-reduced-motion: reduce\)/);
-  const block = html.match(/@media \(prefers-reduced-motion: reduce\) \{([\s\S]*?)\n {6}\}/);
+  const block = blockBody(html, /@media \(prefers-reduced-motion: reduce\)/);
   expect(block).not.toBeNull();
-  // The entrance, the shimmer and the width transition all stop.
-  expect(block[1]).toMatch(/\.rise\s*\{\s*animation: none/);
-  expect(block[1]).toMatch(/\.bar::after\s*\{\s*animation: none/);
+  // The entrance, the shimmer and the width transition all stop. The bar's
+  // transition is the one that matters most here: it is the only one the user
+  // sees for the whole of the launch rather than once.
+  expect(block).toMatch(/\.rise\s*\{\s*animation: none/);
+  expect(block).toMatch(/\.bar::after\s*\{\s*animation: none/);
+  expect(block).toMatch(/\.bar\s*\{\s*transition: none/);
+  // …and the extraction really did stop at the end of the media query rather
+  // than running on into the rest of the sheet, which is the failure the
+  // indentation-matched version could not tell from success.
+  expect(block).not.toMatch(/<\/style>/);
+});
+
+test('the block extractor stops at the matching brace, not at an indentation', () => {
+  // Guards the guard. If `blockBody` ran to the end of the file every assertion
+  // above would pass by being handed the whole sheet.
+  const sheet = '@media x {\n  .a {\n    animation: none;\n  }\n}\n.b { color: red; }';
+  expect(blockBody(sheet, /@media x/)).toBe('\n  .a {\n    animation: none;\n  }\n');
+  expect(blockBody(sheet, /@media nope/)).toBeNull();
 });

@@ -28,11 +28,24 @@ function makeFakeWindow(options) {
       handlers.get(event).push(fn);
       return win;
     },
+    /** Fix round 2, M-7. This used to be a plain alias for `on()`, which made
+     * the fake unable to tell the two apart — so a regression from
+     * `win.once('ready-to-show')` to `win.on(...)`, which re-runs the milestone
+     * on every subsequent paint, was invisible to this suite. Electron removes
+     * the listener BEFORE invoking it, and so does this. */
     once(event, fn) {
-      return win.on(event, fn);
+      const oneShot = (...args) => {
+        const list = handlers.get(event) ?? [];
+        const at = list.indexOf(oneShot);
+        if (at >= 0) list.splice(at, 1);
+        fn(...args);
+      };
+      return win.on(event, oneShot);
     },
     emit(event, ...args) {
-      for (const fn of handlers.get(event) ?? []) fn(...args);
+      // Over a COPY: a one-shot listener removes itself from this list while
+      // the loop is walking it.
+      for (const fn of [...(handlers.get(event) ?? [])]) fn(...args);
     },
     listenerCount(event) {
       return (handlers.get(event) ?? []).length;
@@ -245,6 +258,17 @@ describe('the splash window itself', () => {
 });
 
 describe('progress reaches the page even when it was sent before the page existed', () => {
+  // These are the BUFFERING contract, not the wired ladder: `progress()` takes
+  // any number and any string, and what is asserted here is that the channel
+  // delivers the right one at the right time. The numbers are therefore
+  // deliberately generic — three arbitrary ascending values. They used to be
+  // 35 / 45 / 55 with the stage names those rungs carried before fix round 1
+  // renumbered the ladder to 40/60/80/90/100, which read as coverage of
+  // milestones that no longer exist.
+  const A = { pct: 10, msg: 'first stage…' };
+  const B = { pct: 20, msg: 'second stage…' };
+  const C = { pct: 30, msg: 'third stage…' };
+
   test('a milestone sent before the load finishes is delivered when it does', () => {
     // photo_app works around this with `setTimeout(..., 100)` before its first
     // send. A buffered last-milestone is the same intent without the guess:
@@ -252,28 +276,28 @@ describe('progress reaches the page even when it was sent before the page existe
     // stage the page is told about.
     const { splash } = harness();
     const win = splash.open();
-    splash.progress(35, 'Opening the editor window…');
+    splash.progress(A.pct, A.msg);
     expect(win.sent).toHaveLength(0);
 
     win.emit('webContents:did-finish-load');
     expect(win.sent).toEqual([
-      { channel: 'splash:progress', payload: { progress: 35, message: 'Opening the editor window…' } },
+      { channel: 'splash:progress', payload: { progress: A.pct, message: A.msg } },
     ]);
   });
 
   test('only the LATEST buffered milestone is replayed, not a backlog', () => {
-    // Replaying 35 → 45 → 55 into a page that has just appeared would animate a
+    // Replaying three stages into a page that has just appeared would animate a
     // history the user never waited through. The truthful frame is where init
     // actually is now.
     const { splash } = harness();
     const win = splash.open();
-    splash.progress(35, 'Opening the editor window…');
-    splash.progress(45, 'Wiring services…');
-    splash.progress(55, 'Preparing audio engines…');
+    splash.progress(A.pct, A.msg);
+    splash.progress(B.pct, B.msg);
+    splash.progress(C.pct, C.msg);
 
     win.emit('webContents:did-finish-load');
     expect(win.sent).toEqual([
-      { channel: 'splash:progress', payload: { progress: 55, message: 'Preparing audio engines…' } },
+      { channel: 'splash:progress', payload: { progress: C.pct, message: C.msg } },
     ]);
   });
 
@@ -281,17 +305,17 @@ describe('progress reaches the page even when it was sent before the page existe
     const { splash } = harness();
     const win = splash.open();
     win.emit('webContents:did-finish-load');
-    splash.progress(45, 'Wiring services…');
-    splash.progress(55, 'Preparing audio engines…');
+    splash.progress(B.pct, B.msg);
+    splash.progress(C.pct, C.msg);
 
-    expect(win.sent.map((s) => s.payload.progress)).toEqual([45, 55]);
+    expect(win.sent.map((s) => s.payload.progress)).toEqual([B.pct, C.pct]);
   });
 
   test('a milestone sent with no splash open is dropped, not thrown', () => {
     // `open()` is skipped on the macOS re-activate path; progress calls from the
     // shared init sequence must stay harmless there.
     const { splash } = harness();
-    expect(() => splash.progress(35, 'Opening the editor window…')).not.toThrow();
+    expect(() => splash.progress(A.pct, A.msg)).not.toThrow();
   });
 
   test('a milestone sent after the splash closed is dropped, not thrown', () => {
@@ -454,6 +478,20 @@ describe('the handoff waits for BOTH halves of "ready"', () => {
     mainWin.emit('ready-to-show');
     splash.rendererIsReady();
     expect(splashWin.sent.map((s) => s.payload.progress)).toEqual([60, 80, 90, 100]);
+  });
+
+  test('a second paint does not re-announce the milestone the first one earned', () => {
+    // Fix round 2, M-7. `win.once('ready-to-show')` regressing to `win.on(...)`
+    // would re-send 90 on every subsequent paint. Before the renderer is ready
+    // the bar is AT 90, so the monotone clamp does not drop it (90 < 90 is
+    // false) and the page is told the same stage twice — a bar that stutters
+    // while the launch is still going. The fake now honours `once`, so this can
+    // be observed at all.
+    const { mainWin, splashWin } = launched();
+    mainWin.emit('ready-to-show');
+    mainWin.emit('ready-to-show');
+
+    expect(splashWin.sent.filter((s) => s.payload.progress === 90)).toHaveLength(1);
   });
 
   test("the window painting is itself a milestone the user sees", () => {
@@ -638,12 +676,30 @@ describe('main.cjs wires the splash without inserting a wait', () => {
   /** Source with its comments removed, for the assertions that are about what
    * the file DOES. The prose in main.cjs names the 300 ms `setTimeout` this
    * implementation deliberately does not copy, and a scan that cannot tell the
-   * warning from the mistake would fail on the warning. `//` is only treated as
-   * a comment when it is not preceded by a colon, so the dev-server URL in
-   * `loadURL` survives. */
+   * warning from the mistake would fail on the warning.
+   *
+   * `//` is only treated as a comment when it is preceded by neither a colon
+   * NOR a slash. The colon is what keeps the dev-server URL in `loadURL`; the
+   * slash is fix round 2, M-6 — in a `file:///…` literal the FIRST `//` is
+   * protected by its colon and the SECOND one, one character along, was not, so
+   * everything after it on that line was silently deleted before the scan ran.
+   * No source here contains such a literal today; the point is that a future
+   * one would have hidden a real violation rather than failed. */
   function codeOnly(text) {
-    return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:/])\/\/[^\n]*/g, '$1');
   }
+
+  test('the comment stripper keeps code and drops comments, triple slash included', () => {
+    // Guards every assertion below that runs over `codeOnly`: a stripper that
+    // ate real code would make those scans pass by having nothing to find.
+    expect(codeOnly("win.loadURL('http://localhost:3005'); // gone")).toContain('localhost:3005');
+    expect(codeOnly("win.loadURL('http://localhost:3005'); // gone")).not.toContain('gone');
+    expect(codeOnly("const u = 'file:///C:/app/x.html'; setTimeout(f, 300);")).toContain(
+      'setTimeout'
+    );
+    expect(codeOnly('a(); // setTimeout(f, 300)')).not.toContain('setTimeout');
+    expect(codeOnly('/* setTimeout(f, 300) */ a();')).not.toContain('setTimeout');
+  });
 
   test('the controller owns the lifecycle, not an inline BrowserWindow', () => {
     expect(source).toMatch(/require\('\.\/splash\.cjs'\)/);
@@ -663,10 +719,41 @@ describe('main.cjs wires the splash without inserting a wait', () => {
     expect(createAt).toBeLessThan(openAt);
   });
 
+  /** The body of `app.whenReady().then(…)`, from its head to the `});` that
+   * closes it at column 0.
+   *
+   * Fix round 2, M-8. This used to be "from `app.whenReady()` to END OF FILE",
+   * which quietly put `window-all-closed`, `before-quit` and anything else
+   * added below the launch path inside a scan that is only about the launch
+   * path. A `setTimeout` in a quit handler would have failed a test named for
+   * something else entirely. */
+  function launchPath() {
+    // The CALL, not the first mention: main.cjs's heap-flag comment near the
+    // top names `app.whenReady()` in prose, and the bare-string search found
+    // that instead — which the sibling test below caught the moment this slice
+    // stopped running to end of file and started having a beginning that
+    // mattered.
+    const from = source.indexOf('app.whenReady().then(');
+    const end = source.indexOf('\n});', from);
+    expect(from).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(from);
+    return codeOnly(source.slice(from, end));
+  }
+
   test('nothing in the launch path is deferred behind a timer', () => {
     // The splash must overlap the wait that already existed, never add one.
-    const whenReady = codeOnly(source.slice(source.indexOf('app.whenReady()')));
-    expect(whenReady).not.toMatch(/setTimeout/);
+    expect(launchPath()).not.toMatch(/setTimeout/);
+  });
+
+  test('…and that scan really is reading the launch path, and only it', () => {
+    // Guards the guard both ways: the slice must contain the launch (otherwise
+    // "no setTimeout in it" is a statement about nothing) and must stop before
+    // the app-lifetime handlers that follow it (otherwise the test above is
+    // secretly about them too).
+    const body = launchPath();
+    expect(body).toContain('splash.open()');
+    expect(body).toContain('registerIpc(');
+    expect(body).not.toContain('window-all-closed');
   });
 
   test('the splash is skipped for the self-test mode, which has no windows at all', () => {

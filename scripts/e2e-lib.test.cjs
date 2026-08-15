@@ -96,12 +96,33 @@ describe('no rig acquires a window by arrival order any more', () => {
   // rig that drives a 460x360 splash. This scan is what makes "all of them" a
   // claim the suite can keep rather than a claim in a report.
   /** Source with its comments removed. Several of these files now carry prose
-   * naming the two patterns that were removed and why; a scan that cannot tell
-   * the warning from the mistake would fail on the warning. `//` counts as a
-   * comment only when it is not preceded by a colon, so a URL survives. */
+   * naming the patterns that were removed and why; a scan that cannot tell the
+   * warning from the mistake would fail on the warning.
+   *
+   * `//` counts as a comment only when preceded by neither a colon NOR a
+   * slash. The colon is what lets a `http://` URL survive; the slash is fix
+   * round 2, M-6 — in a `file:///…` literal the first `//` is protected by its
+   * colon and the second one, one character along, was not, so the rest of that
+   * line was deleted before the scan saw it. No rig contains such a literal
+   * today, and the point is exactly that: a future one would have HIDDEN a
+   * violation rather than reported it. */
   function codeOnly(text) {
-    return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+    return text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/(^|[^:/])\/\/[^\n]*/g, '$1');
   }
+
+  test('the comment stripper keeps code and drops comments, triple slash included', () => {
+    // Guards every scan below: a stripper that ate real code would make them
+    // pass by having nothing left to find.
+    const url = 'const u = ' + "'file:///D:/app/dist/index.html';" + ' app.firs' + 'tWindow();';
+    expect(codeOnly(url)).toContain('firs' + 'tWindow(');
+    expect(codeOnly("await page.goto('http://localhost:3005'); // firs" + 'tWindow()')).toContain(
+      'localhost:3005'
+    );
+    expect(codeOnly("await page.goto('http://localhost:3005'); // firs" + 'tWindow()')).not.toContain(
+      'firs' + 'tWindow('
+    );
+    expect(codeOnly('/* firs' + 'tWindow() */ a();')).not.toContain('firs' + 'tWindow(');
+  });
 
   const dir = __dirname;
   const rigs = fs
@@ -109,21 +130,72 @@ describe('no rig acquires a window by arrival order any more', () => {
     .filter((f) => f.endsWith('.cjs') && !f.endsWith('.test.cjs'))
     .map((f) => [f, codeOnly(fs.readFileSync(path.join(dir, f), 'utf8'))]);
 
-  // Assembled rather than written out, so this file never matches itself.
-  const byArrival = 'first' + 'Window(';
-  const byIndex = 'getAllWindows()' + '[0]';
+  /**
+   * Every spelling of "take a window without asking which one it is".
+   *
+   * Fix round 2, M-5. This banned exactly two literals — `firstWindow(` and
+   * `getAllWindows()[0]` — which is the two that happened to be in the tree
+   * when the splash landed, not the class. `app.windows()[0]`,
+   * `getAllWindows()[1]` and a `waitForEvent('window')` race all sailed
+   * through, and each of them reintroduces precisely the silent failure the
+   * scan exists to prevent: a rig that pins the 460x360 SPLASH to 1600x1000,
+   * succeeds, and then measures a window that is not the app.
+   *
+   * Patterns rather than literals, so an index or a spacing variant cannot slip
+   * past. Assembled from fragments so this file never matches itself.
+   */
+  const BY_ARRIVAL = [
+    ['first' + 'Window(', /first[W]indow\s*\(/],
+    ['getAllWindows()[n]', /getAllWindows\(\)\s*\[/],
+    ['.windows()[n]', /\.windows\(\)\s*\[/],
+    ["waitForEvent('window')", /waitForEvent\s*\(\s*['"]window['"]/],
+  ];
 
   test.each(rigs.map(([f]) => f))('%s', (name) => {
     const source = rigs.find(([f]) => f === name)[1];
-    expect(source).not.toContain(byArrival);
-    expect(source).not.toContain(byIndex);
+    for (const [label, pattern] of BY_ARRIVAL) {
+      expect([label, pattern.test(source)]).toEqual([label, false]);
+    }
+  });
+
+  test('the ban is a ban: each pattern really would catch its spelling', () => {
+    // Guards the guard. Four regexes that match nothing in the tree are
+    // indistinguishable from four regexes that match nothing at all, and the
+    // finding this replaces was exactly that — a scan whose passing said less
+    // than it looked like it said.
+    const samples = [
+      'const p = await app.first' + 'Window();',
+      'const w = BrowserWindow.getAllWindows()[1];',
+      'const p = app.windows()[0];',
+      "const p = await app.waitForEvent('window');",
+    ];
+    samples.forEach((sample, i) => {
+      expect([i, BY_ARRIVAL[i][1].test(sample)]).toEqual([i, true]);
+      // …and each pattern is specific: it must not fire on the LEGITIMATE
+      // acquisition, which is a `windows()` call that is iterated rather than
+      // indexed (e2e-lib's own `acquireMainWindow`).
+      expect([i, BY_ARRIVAL[i][1].test('const pages = app.windows();')]).toEqual([i, false]);
+    });
   });
 
   test('and the rigs that launch the app go through the shared helper', () => {
+    // The load-bearing half: a rig may not launch Electron and then find its
+    // window by some means of its own. `acquireMainWindow` must be both
+    // IMPORTED from here (not redeclared locally, which is how the two copies
+    // in e2e-open-large drifted in the first place) and CALLED.
+    let checked = 0;
     for (const [name, source] of rigs) {
       if (!source.includes('electron.launch(')) continue;
-      expect([name, source.includes('acquireMainWindow')]).toEqual([name, true]);
+      checked += 1;
+      expect([name, /acquireMainWindow\s*\(/.test(source)]).toEqual([name, true]);
+      // e2e-lib.cjs is where the helper LIVES; everyone else imports it.
+      if (/function acquireMainWindow/.test(source)) continue;
+      expect([name, /require\((['"])\.\/e2e-lib\.cjs\1\)/.test(source)]).toEqual([name, true]);
     }
+    // A scan over zero files is not evidence: if the launch spelling ever
+    // changes, this says so instead of passing.
+    expect(checked).toBeGreaterThan(0);
+    console.log(`rigs launching Electron, all via acquireMainWindow: ${checked}`);
   });
 });
 
