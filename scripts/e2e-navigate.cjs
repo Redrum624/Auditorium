@@ -669,7 +669,17 @@ async function liveness(page, label) {
     dialogs: document.querySelectorAll('[data-testid="dialog-overlay"]').length,
     menus: document.querySelectorAll('[data-testid="menu-dropdown"]').length,
     tools: document.querySelectorAll('[data-testid="tool-host"]').length,
+    // T4: the crash surface. It is a full-screen overlay, so a step that raised
+    // one would fail the NEXT step with a click that landed on nothing — a
+    // symptom several removes from the cause. Read here so the run stops on the
+    // step that crashed and prints the error text the card is showing.
+    crash: document.querySelector('[data-testid="crash-detail"]')?.textContent ?? null,
   }));
+  if (stray.crash !== null) {
+    throw new Error(
+      `liveness: "${label}" raised the crash card — an exception reached the app shell:\n${stray.crash}`
+    );
+  }
   if (stray.dialogs !== 0 || stray.menus !== 0 || stray.tools !== 0) {
     throw new Error(
       `liveness: "${label}" left ${stray.dialogs} dialog(s), ${stray.menus} menu(s) and ` +

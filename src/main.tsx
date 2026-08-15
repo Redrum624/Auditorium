@@ -7,6 +7,7 @@ import './dev/installUserTimingGuard';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import App from './App';
+import CrashBoundary from './components/Layout/CrashBoundary';
 import { signalUiReady } from './splashHandoff';
 import './index.css';
 
@@ -15,9 +16,17 @@ if (!container) {
   throw new Error('root element not found');
 }
 
+// T4: the crash surface wraps the WHOLE app, and it is the outermost thing
+// inside the root for a reason — an error boundary catches only what is below
+// it, so anything mounted beside it here would crash to a blank window exactly
+// as the app used to. It also has to be inside `createRoot().render()` rather
+// than around it: React's own unhandled-render path is what left this app
+// frozen once, and only a boundary in the tree intercepts that.
 createRoot(container).render(
   <StrictMode>
-    <App />
+    <CrashBoundary>
+      <App />
+    </CrashBoundary>
   </StrictMode>
 );
 
@@ -26,4 +35,9 @@ createRoot(container).render(
 // before any paint, so it observes React's first commit rather than guessing at
 // it — see src/splashHandoff.ts for why it is a DOM observation and not a frame
 // callback. A no-op anywhere there is no splash (a browser tab, the unit suite).
+//
+// T4 interaction, and it is the right one: if the very first render throws, the
+// crash card is what React commits, so this still fires and the splash still
+// hands over. The user gets a window that says what happened rather than a
+// windowless wait ending in the failsafe.
 signalUiReady(container);
