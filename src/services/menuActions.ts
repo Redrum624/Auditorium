@@ -1,8 +1,15 @@
 import { createDocument, docLength, nextId } from '../audio/AudioDocument';
 import type { AppState, Marker } from '../stores/appStore';
 import { applyEditorZoom, useAppStore } from '../stores/appStore';
-import { removeClips, rippleDeleteClips, useSessionStore } from '../multitrack/sessionStore';
+import {
+  applySessionZoom,
+  removeClips,
+  rippleDeleteClips,
+  useSessionStore,
+} from '../multitrack/sessionStore';
 import { clipBoundaries, nextClipEdge } from '../multitrack/clipEdges'; // K1
+import { sessionEndSample } from '../multitrack/sessionZoom'; // T5
+import { sessionLaneWidth } from '../multitrack/sessionViewport'; // T5
 import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { mixdownSession } from '../multitrack/mixdown';
 import { canRecord, transportPlayPause, transportRecord, transportStop } from './transportService';
@@ -352,11 +359,22 @@ function activeDoc(s: AppState) {
 function registerSelectionAndTransportCommands(): void {
   registerCommands([
     {
+      // T5 view routing (the `edit.delete` shape): Ctrl+A selects whatever the
+      // visible surface has to select. In the multitrack view that is every
+      // CLIP on every track — the document region behind it is not on screen,
+      // which is the same argument `edit.deselect` below already makes, and
+      // until now the key reached a command gated on an active document and so
+      // did nothing in that view at all.
       id: 'edit.selectAll',
       label: 'Select All',
       shortcut: 'Ctrl+A',
-      enabled: (s) => activeDoc(s) !== null,
+      enabled: (s) => (s.view === 'multitrack' ? sessionHasClips() : activeDoc(s) !== null),
       run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          const { session, setSelectedClips } = useSessionStore.getState();
+          setSelectedClips(session.tracks.flatMap((t) => t.clips.map((c) => c.id)));
+          return;
+        }
         const { documents, activeDocumentId, setSelection } = useAppStore.getState();
         const doc = documents.find((d) => d.id === activeDocumentId);
         if (!doc) return;
@@ -385,11 +403,26 @@ function registerSelectionAndTransportCommands(): void {
       },
     },
     {
+      // T5 — view-routed like the pair below it. Both keys were gated on an
+      // active DOCUMENT and wrote the editor's cursor, so in the multitrack
+      // view Home and End did nothing (K1 noticed it while auditing the keymap
+      // and left it out of scope). Enabled with NO clips as well: sample 0 is
+      // where an empty session's cursor belongs just as much, and unlike the
+      // clip-edge keys there is always somewhere to go.
       id: 'transport.goToStart',
       label: 'Go to Start',
       shortcut: 'Home',
-      enabled: (s) => activeDoc(s) !== null,
+      enabled: (s) => (s.view === 'multitrack' ? true : activeDoc(s) !== null),
       run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          const { mtZoom, setMtCursor } = useSessionStore.getState();
+          setMtCursor(0);
+          // Through `applySessionZoom`, the session's one clamped writer, for
+          // the reason the editor arm below states: a second raw `setMtZoom`
+          // caller is how a clamp stops being single-sourced.
+          applySessionZoom({ samplesPerPixel: mtZoom.samplesPerPixel, scrollSample: 0 });
+          return;
+        }
         // F11 fix round (I2): through the one clamped writer. `scrollSample: 0`
         // is already legal at every zoom, so this is about routing rather than
         // about the value — a second `setZoom` caller is how the clamp stopped
@@ -399,11 +432,37 @@ function registerSelectionAndTransportCommands(): void {
       },
     },
     {
+      // T5 — "the end" of a SESSION is the end of its last clip, across every
+      // track (`sessionEndSample`, the same number the zoom's fit is stated
+      // in). Gated on `sessionHasClips()` rather than on the view alone: with
+      // no clips the end IS the start, and a key that lands where the cursor
+      // already is should say so by being disabled, exactly as the clip-edge
+      // pair does.
       id: 'transport.goToEnd',
       label: 'Go to End',
       shortcut: 'End',
-      enabled: (s) => activeDoc(s) !== null,
+      enabled: (s) => (s.view === 'multitrack' ? sessionHasClips() : activeDoc(s) !== null),
       run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          const { session, mtZoom, setMtCursor } = useSessionStore.getState();
+          const end = sessionEndSample(session);
+          setMtCursor(end);
+          // THE END AT THE RIGHT EDGE, asked for as a function of the resolved
+          // zoom rather than as `scrollSample: end`. The editor arm below can
+          // ask for `len` because its own clamp is `maxScroll` and pins the
+          // document's end to the right edge for it; the session's scrollable
+          // extent runs MT_TIMELINE_TAIL_SEC past the last clip, so the same
+          // request here would NOT clamp — it would park the end at the LEFT
+          // edge with a minute of emptiness beside it, which is the off-screen
+          // destination the editor's own End key was fixed for. The floor at 0
+          // for a session narrower than the lane is `resolveSessionZoom`'s, not
+          // a second clamp here.
+          applySessionZoom({
+            samplesPerPixel: mtZoom.samplesPerPixel,
+            scrollSample: (spp) => end - sessionLaneWidth() * spp,
+          });
+          return;
+        }
         const { documents, activeDocumentId, zoom, setCursor } = useAppStore.getState();
         const doc = documents.find((d) => d.id === activeDocumentId);
         if (!doc) return;
