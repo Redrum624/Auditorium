@@ -2213,6 +2213,47 @@ describe('deriveGate', () => {
       expect(res.reason).toContain("set this stage's threshold yourself");
     }, 120000);
 
+    it('is exactly the depth the deepest take it covers needs — the derivation, measured', () => {
+      // M3. Both SIDES of this constant are pinned as behaviour just above
+      // (eleven gaps gate, twelve decline). What was missing is the DERIVATION
+      // those two pins were cut from: how deep the search must go to reach a
+      // take's real pause when N breath-filled gaps sit in front of it. Each
+      // breath is one DISTINCT candidate — `measureNoiseWindows` refuses
+      // overlaps — so the pause is candidate (breaths + 1). The docblock
+      // narrated that law; this measures it, so widening or narrowing the
+      // constant has to be argued against the shape rather than against prose.
+      const depths: { gaps: number; depth: number }[] = [];
+      for (const gaps of [1, 2, 4, 6, 8, 11, GATE_QUIET_WINDOWS]) {
+        const { channel, pause } = takeWhoseQuietestWindowIsABreath(gaps);
+        // Searched DEEPER than the constant on purpose: a measurement clipped
+        // by the bound it is deriving would only be able to agree with it.
+        const cands = measureNoiseWindows([channel], SR, {
+          rejectMostlySilentWindows: true,
+          maxCandidates: GATE_QUIET_WINDOWS * 2,
+        });
+        const at = cands.findIndex(
+          (c) => c.startSample >= pause.start && c.startSample + c.lengthSamples <= pause.end
+        );
+        expect(at).toBeGreaterThanOrEqual(0);
+        depths.push({ gaps, depth: at + 1 });
+      }
+
+      // The measured law, and the docblock's own numbers.
+      expect(depths.map((d) => d.depth)).toEqual([2, 3, 5, 7, 9, 12, 13]);
+      for (const { gaps, depth } of depths) expect(depth).toBe(gaps + 1);
+
+      // ...and the constant is where that law was CUT. It is exactly the depth
+      // an eleven-gap take needs and one short of a twelve-gap take's, which is
+      // what makes the pair of behaviour pins above a boundary rather than two
+      // arbitrary fixtures. It is not a claim that eleven is all a take can
+      // have: each candidate costs a pitch track and a tilt fit, so the bound
+      // is a price, and the take with more gaps is the one `manualThresholdDb`
+      // exists for.
+      expect(depths.find((d) => d.gaps === 11)!.depth).toBe(GATE_QUIET_WINDOWS);
+      expect(depths.find((d) => d.gaps === GATE_QUIET_WINDOWS)!.depth).toBeGreaterThan(GATE_QUIET_WINDOWS);
+      expect(GATE_QUIET_WINDOWS).toBe(12);
+    }, 300000);
+
     it('names an escape the user can actually reach from where the refusal leaves them', () => {
       // M4. The refusal is READ in the dialog's results state, and the common
       // way to get there is a MIXED run: Noise Reduction applied, the gate

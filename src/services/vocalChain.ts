@@ -225,10 +225,13 @@ export interface VocalChainStage {
  * (`measureNoiseWindows` refuses overlaps), so on the reported shape — a quiet
  * half whose every gap is an audible breath, and a louder half carrying the one
  * real pause — the pause is candidate number (breaths + 1). Measured on exactly
- * that fixture at 8 kHz, the pause is reached at depth 2, 3, 5, 7, 9 and 12 for
- * 1, 2, 4, 6, 8 and 11 breath-filled gaps ahead of it. Twelve therefore covers
- * a take with eleven such gaps and is pinned on both sides: eleven gates,
- * twelve declines. It is not a claim that eleven is all a take can have — it is
+ * that fixture at 8 kHz, the pause is reached at depth 2, 3, 5, 7, 9, 12 and 13
+ * for 1, 2, 4, 6, 8, 11 and 12 breath-filled gaps ahead of it — a KEPT
+ * measurement rather than a narration (`vocalChain.test.ts`, "is exactly the
+ * depth the deepest take it covers needs"), which searches twice this deep so
+ * the reading is of the shape and not of the bound being derived from it.
+ * Twelve therefore covers a take with eleven such gaps and is pinned on both
+ * sides: eleven gates, twelve declines. It is not a claim that eleven is all a take can have — it is
  * where the cost below stops being worth paying, and the take with more is
  * exactly the take `manualThresholdDb` exists for.
  *
