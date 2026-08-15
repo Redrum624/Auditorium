@@ -45,6 +45,20 @@ import type { Clip } from './session';
  * ~138 MB warm, which is the size of the documents themselves; for a document
  * chopped into many clips it is bounded by the same number rather than by the
  * number of clips.
+ *
+ * THE TWO RATES IN THAT SENTENCE (MT2 review, Minor 6). The budget counts
+ * DOC-rate samples (`docLength` is a length in the document's own rate) while
+ * the entries it measures hold SESSION-rate samples, so "one document's worth"
+ * is approximate by exactly the conversion ratio: a whole-document entry
+ * upsampled 44.1 → 48 kHz is ~9 % over the budget, and a 44.1 kHz document in a
+ * 96 kHz session more than twice it. It stays a BOUND either way — the ratio is
+ * a constant per (document, session) pair, and the newest-kept rule already
+ * admits one over-budget entry by design — but it is a bound in the session's
+ * denomination, roughly `docLength · channels · sessionRate/docRate`, not the
+ * document's byte size. Denominating the budget in session samples would be a
+ * one-line change and is deliberately not made: `docLength` is the number this
+ * module can read without asking the session anything, and the imprecision is
+ * bounded by a ratio that is never large in practice.
  */
 
 /** One document's cached conversions. `entries` is LRU by Map insertion order:
@@ -73,7 +87,9 @@ function sampleCount(slices: readonly Float32Array[]): number {
   return n;
 }
 
-/** One document's worth of samples — see BOUNDED BY CONSTRUCTION above. */
+/** One document's worth of DOC-RATE samples, weighed against entries counted in
+ * SESSION-rate samples — approximate by the conversion ratio, and deliberately
+ * so. See BOUNDED BY CONSTRUCTION above. */
 function budgetFor(doc: AudioDocument): number {
   return Math.max(1, docLength(doc) * Math.max(1, doc.channels.length));
 }
