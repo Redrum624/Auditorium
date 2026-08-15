@@ -30,6 +30,15 @@
  * jsdom has neither layout nor a 2d backend, so nothing below is about pixels
  * that were painted. It is about the CSS boxes a browser would paint into, and
  * about the element that bounds them — which is where the defect lives.
+ *
+ * WHAT THIS STILL DOES NOT PROVE (V1 review, Minor 4). The two premise
+ * assertions are real geometry and a revert of the className does fail — but
+ * the clipping half would also pass if an ancestor set `overflow: visible` or
+ * if the class stopped resolving to any CSS, because jsdom never cascades.
+ * Only a live run can close that: the reported gesture is 381 % zoom, scrolled
+ * right, with the header still legible and still clickable. It is owed by the
+ * integration pass over the merged wave, not by this file, and it is recorded
+ * here so it is not mistaken for something the suite already covers.
  */
 import { render } from '@testing-library/react';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
