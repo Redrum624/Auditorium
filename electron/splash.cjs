@@ -67,6 +67,16 @@ function createSplashController({
   /** The most recent milestone, kept so a page that loads late still gets it. */
   /** @type {{ progress?: number, message?: string, error?: string } | null} */
   let latest = null;
+  /** The highest percentage the page has been told about. Progress is MONOTONE:
+   * a milestone that would lower the bar is dropped whole, message included.
+   *
+   * This is not a patch on one pair of senders, it is a property of the
+   * channel: the two ends of the handoff race by design (the renderer's signal
+   * normally arrives first, `ready-to-show` second), and `.bar` carries a 300 ms
+   * width transition, so any out-of-order send animates the bar BACKWARDS for
+   * exactly the window in which the splash is still on screen. A bar that goes
+   * backwards is a bar that is lying. */
+  let highWater = -1;
   let readyToShow = false;
   let rendererReady = false;
   let handedOff = false;
@@ -84,6 +94,8 @@ function createSplashController({
   /** Report an init milestone. Safe to call with no splash open (the macOS
    * re-activate path creates a window without one) and after it has closed. */
   function progress(percent, message) {
+    if (percent < highWater) return;
+    highWater = percent;
     latest = { progress: percent, message };
     flush();
   }
@@ -189,6 +201,21 @@ function createSplashController({
   function adoptMainWindow(win) {
     mainWindow = win;
 
+    // The stages the user can actually SEE.
+    //
+    // main.cjs's init — open the splash, create the editor, wire the IPC, build
+    // the four managers — is one synchronous block, and the main process cannot
+    // dispatch the splash page's 'did-finish-load' anywhere inside it. So every
+    // milestone sent from there collapses to the last one: reporting four
+    // stages from that block would put three names on screen that no user could
+    // ever read. The editor's own webContents events DO land in separate turns,
+    // and they cover the long part of the wait — the bundle load — which
+    // nothing was reporting at all. Registered with `on` rather than `once`
+    // because a reload may fire them again; monotone `progress` drops the
+    // repeat rather than rewinding the bar.
+    win.webContents.on('dom-ready', () => progress(60, 'Loading the editor…'));
+    win.webContents.on('did-finish-load', () => progress(80, 'Preparing the workspace…'));
+
     win.once('ready-to-show', () => {
       readyToShow = true;
       progress(90, 'Rendering the workspace…');
@@ -204,7 +231,14 @@ function createSplashController({
 
     failsafeTimer = setTimeout(() => {
       failsafeTimer = null;
-      reportError('The editor did not report ready — showing it anyway.');
+      // The error line ONLY when the window genuinely never painted. A launch
+      // that merely ran long has something in that window, and showing it
+      // silently is the correct, non-alarming thing to do; a red "did not
+      // report ready" over a perfectly good editor is a false alarm at the
+      // user, and this timer is a bound nobody has measured.
+      if (!readyToShow) {
+        reportError('The editor never reported ready — showing it anyway.');
+      }
       handOff();
     }, failsafeMs);
   }

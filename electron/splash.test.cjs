@@ -361,6 +361,68 @@ describe('the handoff waits for BOTH halves of "ready"', () => {
     expect(last.payload.progress).toBe(100);
   });
 
+  test('…and in the order the module calls NORMAL, where the renderer is first', () => {
+    // Fix round 1, I-1. The module header's own claim is that the renderer's
+    // signal arrives BEFORE 'ready-to-show' in a normal launch. That makes the
+    // natural send order {100,'Ready.'} then {90,'Rendering the workspace…'} —
+    // and with `.bar { transition: width .3s }` the bar animates BACKWARDS for
+    // exactly the window in which the splash is still on screen. The sibling
+    // test above only ever drove the other order, so nothing caught it.
+    const { splash, mainWin, splashWin } = launched();
+    splash.rendererIsReady();
+    mainWin.emit('ready-to-show');
+
+    const last = splashWin.sent[splashWin.sent.length - 1];
+    expect(last.payload.progress).toBe(100);
+  });
+
+  test('progress is monotone: no milestone can ever lower the bar', () => {
+    // Stated as a general rule rather than a patch on the one pair that broke
+    // it, because "a bar that goes backwards is a bar that is lying" is a
+    // property of the whole channel, not of those two senders.
+    const { splash, mainWin, splashWin } = launched();
+    splash.rendererIsReady(); // 100
+    mainWin.emit('webContents:dom-ready'); // 60 — late, must not land
+    mainWin.emit('webContents:did-finish-load'); // 80 — late, must not land
+    mainWin.emit('ready-to-show'); // 90 — late, must not land
+
+    const values = splashWin.sent.map((s) => s.payload.progress);
+    expect(values).toEqual([...values].sort((a, b) => a - b));
+    expect(values[values.length - 1]).toBe(100);
+  });
+
+  test('the editor DOM arriving is a milestone, because that one lands in its own turn', () => {
+    // Fix round 1, I-2. main.cjs's init is ONE synchronous block: the main
+    // process cannot dispatch the splash's 'did-finish-load' while it runs, so
+    // every milestone sent inside it collapses to the last one and the user
+    // sees a single jump. The stages that are genuinely observable are the
+    // editor webContents' own async events, which land in separate turns — and
+    // they cover the long part of the wait, the bundle load, which nothing was
+    // reporting before.
+    const { mainWin, splashWin } = launched();
+    mainWin.emit('webContents:dom-ready');
+    const last = splashWin.sent[splashWin.sent.length - 1];
+    expect(last.payload.progress).toBe(60);
+    expect(typeof last.payload.message).toBe('string');
+  });
+
+  test('so is the editor finishing its load', () => {
+    const { mainWin, splashWin } = launched();
+    mainWin.emit('webContents:dom-ready');
+    mainWin.emit('webContents:did-finish-load');
+    const values = splashWin.sent.map((s) => s.payload.progress);
+    expect(values).toEqual([60, 80]);
+  });
+
+  test('the four observable stages climb in the order they can occur', () => {
+    const { splash, mainWin, splashWin } = launched();
+    mainWin.emit('webContents:dom-ready');
+    mainWin.emit('webContents:did-finish-load');
+    mainWin.emit('ready-to-show');
+    splash.rendererIsReady();
+    expect(splashWin.sent.map((s) => s.payload.progress)).toEqual([60, 80, 90, 100]);
+  });
+
   test("the window painting is itself a milestone the user sees", () => {
     const { splash, mainWin, splashWin } = launched();
     mainWin.emit('ready-to-show');
@@ -395,15 +457,29 @@ describe('the failsafe: a splash that outlives its renderer still ends', () => {
     expect(splashWin.destroyed).toBe(true);
   });
 
-  test('says why on the splash before it goes', () => {
+  test('says why on the splash before it goes, when the window never painted', () => {
     // The error line exists for exactly this: the one case where the user is
     // owed a reason rather than a window that simply appears blank.
-    const { splash, mainWin, splashWin } = launched({ failsafeMs: 5000 });
+    const { mainWin, splashWin } = launched({ failsafeMs: 5000 });
     jest.advanceTimersByTime(5000);
     const errored = splashWin.sent.filter((s) => s.payload.error);
     expect(errored).toHaveLength(1);
     expect(typeof errored[0].payload.error).toBe('string');
     expect(errored[0].payload.error.length).toBeGreaterThan(0);
+    expect(mainWin.shown).toBe(true);
+  });
+
+  test('but says NOTHING when the window painted and only the renderer was slow', () => {
+    // Fix round 1, I-4. A launch that is merely slow is not a launch that
+    // failed. If Electron has painted, the window has something in it and
+    // showing it silently is the correct, non-alarming behaviour; a red "did
+    // not report ready" line there would be a false alarm at the user.
+    const { mainWin, splashWin } = launched({ failsafeMs: 5000 });
+    mainWin.emit('ready-to-show');
+    jest.advanceTimersByTime(5000);
+
+    expect(splashWin.sent.filter((s) => s.payload.error)).toHaveLength(0);
+    expect(mainWin.shown).toBe(true);
   });
 
   test('is disarmed by a normal handoff, so it can never fire afterwards', () => {
@@ -498,14 +574,24 @@ describe('main.cjs wires the splash without inserting a wait', () => {
     expect(source.slice(selftestGate, openAt)).toMatch(/return;/);
   });
 
-  test('the milestones are real init stages, sent as they complete', () => {
-    // Not a fixed script on a timer: each send sits after the work it reports.
-    expect(source).toMatch(/splash\.progress\(\s*\d+/);
+  test('main sends ONE milestone, because it only has one turn to send in', () => {
+    // Fix round 1, I-2. Everything from `splash.open()` to the last manager is
+    // one synchronous block, so the main process cannot dispatch the splash
+    // page's 'did-finish-load' anywhere inside it: only the LAST value written
+    // there can ever reach the page. Emitting 35/45/55/75 from that block put
+    // three stage names in the code, the report and the README that no user
+    // could ever see. One send, after the work it names, is the honest shape;
+    // the stages that the user CAN see hang off the editor's async events in
+    // splash.cjs.
     const sends = [...source.matchAll(/splash\.progress\(\s*(\d+)/g)].map((m) => Number(m[1]));
-    expect(sends.length).toBeGreaterThanOrEqual(4);
-    // Strictly increasing: a bar that goes backwards is a bar that is lying.
-    expect([...sends].sort((a, b) => a - b)).toEqual(sends);
-    expect(new Set(sends).size).toBe(sends.length);
+    expect(sends).toHaveLength(1);
+  });
+
+  test('and sends it AFTER the work it names, not before', () => {
+    const sendAt = source.indexOf('splash.progress(');
+    const lastManager = source.lastIndexOf('registerAlignIpc(');
+    expect(lastManager).toBeGreaterThan(-1);
+    expect(sendAt).toBeGreaterThan(lastManager);
   });
 
   test('the dev run gets the longer failsafe, keyed off the same dev-server gate', () => {

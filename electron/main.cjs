@@ -60,7 +60,7 @@ const closeGuard = createCloseGuard({
 });
 
 /**
- * S1: `showWhenReady` is false for the launch window, because the splash
+ * S1 (splash): `showWhenReady` is false for the launch window, because the splash
  * controller shows it — at the LAST of Electron's `ready-to-show` and the
  * renderer's own "the editor is committed" signal, which in a normal launch is
  * `ready-to-show` itself (see electron/splash.cjs for why that ordering holds
@@ -193,12 +193,8 @@ app.whenReady().then(() => {
   });
   splash.open();
   splash.adoptMainWindow(win);
-  splash.progress(35, 'Opening the editor window…');
 
   registerIpc(() => mainWindow);
-  splash.progress(45, 'Wiring file and window services…');
-
-  splash.progress(55, 'Preparing the audio engines…');
 
   // Stem separation (S1): the manager owns the model download and the
   // inference utility-process lifetime; dispose on quit guarantees no orphan
@@ -227,7 +223,15 @@ app.whenReady().then(() => {
   const alignManager = createAlignManager({ userDataDir: app.getPath('userData') });
   registerAlignIpc({ ipcMain, manager: alignManager, getWin: () => mainWindow });
   app.on('will-quit', () => alignManager.dispose());
-  splash.progress(75, 'Audio engines ready.');
+
+  // The ONE milestone main can honestly send. Everything above — the splash,
+  // the editor window, the IPC, the four managers — happens in this single
+  // synchronous block, and the main process cannot dispatch the splash page's
+  // 'did-finish-load' while it runs: only the last value written here can ever
+  // reach the page. So it is written once, after the work it names. The stages
+  // the user sees DURING the wait hang off the editor's own async events, in
+  // electron/splash.cjs.
+  splash.progress(40, 'Services and audio engines ready.');
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) {
