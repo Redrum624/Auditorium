@@ -1,4 +1,11 @@
-import { SNAP_TOLERANCE_PX, mergeTargets, snapSample, snapSpan } from './snap';
+import {
+  SNAP_TOLERANCE_PX,
+  mergeTargets,
+  snapSample,
+  snapSampleTiered,
+  snapSpan,
+  snapSpanTiered,
+} from './snap';
 
 // The snap engine is a PURE function of (position, targets, samplesPerPixel,
 // tolerancePx) — plan ruling: "Snap must never move something the user did not
@@ -259,5 +266,94 @@ describe('mergeTargets', () => {
     const a = [30, 10];
     mergeTargets(a);
     expect(a).toEqual([30, 10]);
+  });
+});
+
+// W2 — priority tiers. Hard geometry the user placed (clip edges, the session
+// cursor) outranks derived geometry (beats): within tolerance the magnet
+// resolves nearest-first WITHIN the highest tier that has a candidate at all,
+// and only an empty tier lets the next one speak. Distance still decides
+// within a tier, and the earlier-target tie-break is untouched there.
+
+describe('snapSampleTiered — the highest tier with a candidate wins', () => {
+  const spp = 100; // 8 px tolerance == 800 samples
+
+  it('an edge beats a NEARER beat when both are within tolerance', () => {
+    // Beat at 10_050 is 50 samples away; edge at 10_400 is 400 away. Flat
+    // nearest-wins would take the beat — the exact H3 hazard.
+    const r = snapSampleTiered(10_000, [[10_400], [], [10_050]], spp);
+    expect(r).toEqual({ sample: 10_400, target: 10_400, snapped: true, tier: 0 });
+  });
+
+  it('a marker beats a nearer beat, but loses to an edge', () => {
+    // Tier 1 (marker at 10_300) vs tier 2 (beat at 10_050): the marker wins.
+    expect(snapSampleTiered(10_000, [[], [10_300], [10_050]], spp)).toEqual({
+      sample: 10_300,
+      target: 10_300,
+      snapped: true,
+      tier: 1,
+    });
+    // Add an edge within tolerance and it outranks the marker.
+    expect(snapSampleTiered(10_000, [[10_400], [10_300], [10_050]], spp).tier).toBe(0);
+  });
+
+  it('falls through to a lower tier when the higher one has nothing IN TOLERANCE', () => {
+    // The edge exists but is 5 000 samples (50 px) away — out of reach. A tier
+    // only outranks by having a live candidate, not by merely existing.
+    const r = snapSampleTiered(10_000, [[15_000], [], [10_050]], spp);
+    expect(r).toEqual({ sample: 10_050, target: 10_050, snapped: true, tier: 2 });
+  });
+
+  it('within a tier, distance still decides and a tie keeps the earlier target', () => {
+    expect(snapSampleTiered(10_000, [[9_700, 10_100], [], []], spp).sample).toBe(10_100);
+    expect(snapSampleTiered(10_000, [[9_800, 10_200], [], []], spp).sample).toBe(9_800);
+  });
+
+  it('returns the input bit-for-bit, tier null, when no tier has a candidate', () => {
+    const r = snapSampleTiered(10_100.25, [[50_000], [], [90_000]], spp);
+    expect(r).toEqual({ sample: 10_100.25, target: null, snapped: false, tier: null });
+  });
+
+  it('an empty tier list is a no-op', () => {
+    expect(snapSampleTiered(123.5, [], spp)).toEqual({
+      sample: 123.5,
+      target: null,
+      snapped: false,
+      tier: null,
+    });
+  });
+
+  it('honours the explicit tolerance argument, like snapSample', () => {
+    expect(snapSampleTiered(10_000, [[10_400], [], []], spp, 2).snapped).toBe(false);
+    expect(snapSampleTiered(10_000, [[10_400], [], []], spp, 4).snapped).toBe(true);
+  });
+});
+
+describe('snapSpanTiered — tier dominance across the head/tail contest', () => {
+  const spp = 100;
+
+  it('a HEAD candidate in tier 0 beats a nearer TAIL candidate in tier 2', () => {
+    // Span [10_000, 30_000): head is 400 from the edge at 10_400, tail only 100
+    // from the beat at 30_100. Flat snapSpan would take the tail; the tier
+    // outranks the smaller pull.
+    const r = snapSpanTiered(10_000, 20_000, [[10_400], [], [30_100]], spp);
+    expect(r).toEqual({ sample: 10_400, target: 10_400, snapped: true, tier: 0 });
+  });
+
+  it('within one tier the smaller pull still wins (snapSpan verbatim)', () => {
+    // Both candidates are edges: head 400 away, tail 100 away — tail wins and
+    // the returned START places the tail exactly on its target.
+    const r = snapSpanTiered(10_000, 20_000, [[10_400, 30_100], [], []], spp);
+    expect(r).toEqual({ sample: 10_100, target: 30_100, snapped: true, tier: 0 });
+  });
+
+  it('falls through to the beat tier when no edge or marker is in reach', () => {
+    const r = snapSpanTiered(10_000, 20_000, [[90_000], [], [30_100]], spp);
+    expect(r).toEqual({ sample: 10_100, target: 30_100, snapped: true, tier: 2 });
+  });
+
+  it('returns the start unchanged, tier null, when nothing is in reach anywhere', () => {
+    const r = snapSpanTiered(10_000.5, 20_000, [[90_000], [77_000], [66_000]], spp);
+    expect(r).toEqual({ sample: 10_000.5, target: null, snapped: false, tier: null });
   });
 });

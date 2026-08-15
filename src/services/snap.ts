@@ -187,6 +187,71 @@ export function snapSpan(
 }
 
 /**
+ * ---------------------------------------------------------------------------
+ * PRIORITY TIERS (W2)
+ * ---------------------------------------------------------------------------
+ * A flat nearest-wins set has a silent failure mode (the H3 hazard): a dense
+ * beat grid almost always owns the sample nearest the pointer, so a beat could
+ * beat the session cursor — and, once clip edges became targets, a beat one
+ * pixel closer would rob the user of the butt join they were visibly aiming
+ * for. The rule that fixes it: HARD GEOMETRY THE USER PLACED (clip edges, the
+ * cursor they parked) OUTRANKS DERIVED GEOMETRY (an analysis's beat lines).
+ * `tiers` is ordered highest-priority first; the winner is the nearest target
+ * within tolerance IN THE HIGHEST TIER THAT HAS ONE, and lower tiers are
+ * consulted only when every tier above them has nothing in reach. Within a
+ * tier nothing changes: nearest wins, an exact tie keeps the earlier target.
+ * Behaviour therefore differs from the flat set ONLY when a higher-tier target
+ * is also within tolerance — exactly the case where the user's intent is
+ * unambiguous.
+ */
+
+/** Priority-ordered target tiers, highest first. Each tier is an ascending
+ * array, exactly as `snapSample` expects its `targets`. */
+export type SnapTierList = readonly ArrayLike<number>[];
+
+export interface TieredSnapResult extends SnapResult {
+  /** Index into the tier list of the tier the winning target came from, or
+   * `null` when nothing snapped. */
+  tier: number | null;
+}
+
+/** `snapSample` with tier priority: nearest-within-tolerance in the highest
+ * tier that has a candidate. */
+export function snapSampleTiered(
+  sample: number,
+  tiers: SnapTierList,
+  samplesPerPixel: number,
+  tolerancePx: number = SNAP_TOLERANCE_PX
+): TieredSnapResult {
+  for (let t = 0; t < tiers.length; t++) {
+    const r = snapSample(sample, tiers[t], samplesPerPixel, tolerancePx);
+    if (r.snapped) return { ...r, tier: t };
+  }
+  return { sample, target: null, snapped: false, tier: null };
+}
+
+/**
+ * `snapSpan` with tier priority. The head/tail contest (smaller pull wins, tie
+ * keeps the head) runs WITHIN each tier; across tiers, priority outranks pull —
+ * a head 4 px from a clip edge beats a tail 1 px from a beat, because the edge
+ * is what the user is aiming a clip at and the beat merely happens to be dense
+ * enough to be nearby.
+ */
+export function snapSpanTiered(
+  start: number,
+  length: number,
+  tiers: SnapTierList,
+  samplesPerPixel: number,
+  tolerancePx: number = SNAP_TOLERANCE_PX
+): TieredSnapResult {
+  for (let t = 0; t < tiers.length; t++) {
+    const r = snapSpan(start, length, tiers[t], samplesPerPixel, tolerancePx);
+    if (r.snapped) return { ...r, tier: t };
+  }
+  return { sample: start, target: null, snapped: false, tier: null };
+}
+
+/**
  * Combines several target sources into the one ascending, duplicate-free array
  * `snapSample` expects.
  *
