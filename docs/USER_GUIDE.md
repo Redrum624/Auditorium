@@ -684,22 +684,22 @@ take is then placed at that offset — nothing is stretched and no syllable is m
 still drifts. Two thresholds have to be cleared before the number is believed, and both
 are measured rather than chosen.
 
-**The lag is refined against the original song, not only against the separated vocal.**
-After the coarse pass has decided *which* alignment this is and the fine pass has narrowed
-it, a third pass moves the answer one last time — by at most ±0.12 s — against the
-**original song**. The separated vocal is the one signal in the whole run that has been
-through a model, and its attacks are the model's opinion of the singer's attacks; the song
-has been through nothing, and it shares the stem's timeline exactly, because separation's
-five outputs sum back to the mix bit for bit. It is also the ruler that matters: your take
-is going to be heard against the instrumental, so being in time with the *song* is the
-thing being asked for. Measured on a population whose stem attacks are displaced 30 ms,
-the third pass takes the median placement error from 18.1 ms to 12.0 ms and the worst from
-24.5 ms to 18.1 ms, does not move a clean reference off an answer that was already right,
-and leaves the final lag identical whether the stem it started from was degraded or
-pristine. The number the report shows is the refined one, and the row states how far the
-song moved it. It is a refinement and never a second opinion — every confidence number
-still comes from the separated vocal — so it corrects a *displaced* answer and cannot
-rescue a wrong one.
+**The reference is the separated vocal, and deliberately not the song.** Refining the lag
+against the **original song** as well was built, shipped, and withdrawn one release later,
+and it is worth saying why because the idea is a good one until it is measured. The song
+has not been through the separation model and it shares the stem's timeline exactly —
+separation's five outputs sum back to the mix bit for bit — so it looks like the better
+ruler. It is not, because sharing a *timeline* is not sharing *onsets*: the measurement
+reads spectral flux, and accompaniment sitting under a vocal dilutes the flux at that
+vocal's own attacks, so the song's onsets land late of the same singer's. Measured on the
+app's own test pair, sweeping the backing from 52 dB under the vocal up to 8 dB under it,
+the separated vocal recovers the built-in offset to 0.07 ms at every level while the song
+costs between 3.3 ms and 12.9 ms — growing with the backing, and past the ±10 ms promised
+below at an ordinary balance. There is no correction for it either: the only way to measure
+the bias is the lag between the two rulers, and subtracting that returns the separated
+vocal's answer. So the vocal stays the reference. The cost of that choice is stated rather
+than hidden: if the separation smears the attacks in the stem, your take is placed by that
+smear, and nothing in the two files can buy it back.
 
 **The pass places the tracks itself, even when it cannot fully believe the number.** A
 match the stage calls *ambiguous* ("several places about equally well") or *weak* is

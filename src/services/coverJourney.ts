@@ -175,8 +175,8 @@ export const COVER_JOURNEY_STAGES: readonly CoverJourneyStage[] = [
   {
     id: 'align',
     label: 'Align with the Original',
-    // V3: the note names the third refinement pass and the placement arms.
-    note: "Finds where your take belongs on the original's timeline by cross-correlating the two onset envelopes, then refines that lag once more against the ORIGINAL SONG — which has not been through the separation model — and reports the offset with the confidence that produced it. This is a PLACEMENT, not a warp — nothing is stretched and no syllable is moved. A lag the confidence cannot fully believe is still PLACED, with its measurement stated and its rival lags one click away; only a take nothing could relate to the song at all is placed at zero instead. Align Vocal Timing and Align Lyrics stay manual, and are worth running afterwards if the take drifts or a word came out wrong.",
+    // V3: the note names the placement arms.
+    note: "Finds where your take belongs on the original's timeline by cross-correlating the two onset envelopes, and reports the offset with the confidence that produced it. This is a PLACEMENT, not a warp — nothing is stretched and no syllable is moved. A lag the confidence cannot fully believe is still PLACED, with its measurement stated and its rival lags one click away; only a take nothing could relate to the song at all is placed at zero instead. Align Vocal Timing and Align Lyrics stay manual, and are worth running afterwards if the take drifts or a word came out wrong.",
     weight: 2,
   },
   {
@@ -1061,25 +1061,13 @@ export async function runCoverJourney(
     // the samples come from before the chain.
     const takeChannels = preCleanTakeChannels ?? cleaned?.channels ?? null;
 
-    // V3: the ORIGINAL SONG, for the third refinement pass. Looked up NOW rather
-    // than reusing the `song` binding captured before stage 1: the files panel
-    // stays live across the minutes separation takes, and the song the aligner
-    // refines against has to be the one still open. A song that has gone simply
-    // means no refinement — the two stem passes are a complete measurement.
-    //
-    // It is the SONG, not the instrumental: the stem the reference was
-    // separated out of is the mix, and the mix still contains the original
-    // singer's own attacks, which are the ones the take's attacks correspond to.
-    const mixDoc = state.documents.find((d) => d.id === song.id) ?? null;
-
     alignment =
       vocals && cleaned && takeChannels
         ? alignTakeToReference(
             vocals.channels,
             vocals.sampleRate,
             takeChannels,
-            cleaned.sampleRate,
-            mixDoc ? { channels: mixDoc.channels, sampleRate: mixDoc.sampleRate } : null
+            cleaned.sampleRate
           )
         : null;
 
@@ -1181,19 +1169,6 @@ export async function runCoverJourney(
               // own word for it; this row must not guess.
               : `two floors, both measured rather than chosen: ${ALIGN_MIN_CORRELATION} and ${ALIGN_MIN_PROMINENCE}. The evidence did not add up to a believed alignment — the warning below says what it did add up to — but the offset above is still the best evidence there is, so it was applied rather than thrown away, and the alternatives are one click below`,
           },
-          // V3 (R2): the number shown IS the number placed, and when the
-          // original song moved it the row says by how much. Absent when that
-          // pass did not run at all, because a delta of zero and a pass that
-          // never happened are different facts.
-          ...(alignment.refinedAgainstMix && alignment.mixRefinementSeconds !== undefined
-            ? [
-                {
-                  label: 'Refinement',
-                  value: `${(alignment.mixRefinementSeconds * 1000).toFixed(1)} ms`,
-                  from: 'how far the ORIGINAL SONG moved the lag the separated vocal had chosen. The song has not been through the separation model, so its attacks are the singer’s own rather than the model’s opinion of them; the offset above is the refined one',
-                },
-              ]
-            : []),
         ],
         warning: believed
           ? 'This is a PLACEMENT, not a warp: the whole take is moved by one offset, and a take that drifts against the original still drifts. Align Vocal Timing (which needs you to confirm a beat grid) and Align Lyrics (which needs you to pick the word) remain manual, and are the tools for that.'

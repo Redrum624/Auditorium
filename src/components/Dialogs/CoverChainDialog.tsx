@@ -257,11 +257,7 @@ function GuessOffer({
     >
       {placed && (
         <p data-testid="cover-journey-guess-placed" className="text-xs" style={{ color: AMBER }}>
-          Placed at {signedSecs(alignment.offsetSeconds)}
-          {alignment.refinedAgainstMix && alignment.mixRefinementSeconds !== undefined
-            ? ` — refined ${(alignment.mixRefinementSeconds * 1000).toFixed(1)} ms against the original song itself`
-            : ''}
-          . The evidence was below the floors, so it is a placement rather than a verdict —{' '}
+          Placed at {signedSecs(alignment.offsetSeconds)}. The evidence was below the floors, so it is a placement rather than a verdict —{' '}
           {candidates.length > 1
             ? 'if it is the wrong spot, these lags matched too:'
             : 'if it is the wrong spot, drag a clip or type a new Start in the Properties panel.'}

@@ -73,28 +73,60 @@
  * files' rates are — and so the coarse answer can be handed to the fine pass as
  * a window without a units conversion in between.
  *
- * ── V3: a third pass, because the reference itself is second-hand ────────────
- * Both passes above correlate the take against the SEPARATED VOCAL, and that
- * stem is the one signal in the whole journey that has been through a model. Its
- * attacks are the model's opinion of the singer's attacks — softened by whatever
- * the mask left of the transient, under a noise floor, next to whatever band
- * leaked through. A user whose placement was right to the second and still
- * audibly off asked the obvious question: why not compare against the ORIGINAL
- * SONG, which has been through nothing?
+ * ── REJECTED: a third pass against the ORIGINAL SONG ────────────────────────
+ * Both passes above correlate the take against the SEPARATED VOCAL, which is the
+ * one signal in the journey that has been through a model. A user whose
+ * placement was audibly off asked the obvious question — why not compare against
+ * the original song, which has been through nothing? — and V3 shipped exactly
+ * that: a third pass refining the stem passes' answer against the mix.
  *
- * So the answer is refined once more, against the mix, when the caller
- * supplies one. It is a REFINEMENT and not a third opinion: the lag it starts
- * from is the one the stem passes chose, it may move it by at most
- * {@link ALIGN_MIX_REFINE_SECONDS}, and every number the confidence is made of
- * still comes from the stem. Two facts make it legitimate rather than a
- * coordinate mix-up — the mix and the stem share ONE timeline, because this
- * repo's separation is a decomposition whose outputs sum back to the mix bit for
- * bit; and the take is correlated against the mix's own onsets, which contain
- * the original singer's, unsmeared.
+ * It was WRONG, it reached a release, and the packaged smoke caught it. The
+ * measurement is kept in `coverAlign.test.ts` → "the original song is a worse
+ * ruler than the stem that came out of it" so that the idea, which is a good one
+ * until it is measured, is not had twice.
  *
- * The winner and every candidate go through the SAME entry point, so a user who
- * clicks a rival lag places a number refined exactly like the one that was
- * offered first.
+ * The premise was that the mix and the stem share one timeline — true, they sum
+ * bit for bit — and therefore share one set of ONSETS. That second part is false.
+ * An onset envelope is spectral flux, and accompaniment sitting under a vocal
+ * DILUTES the flux at the vocal's attacks, so the mix's onsets land late of the
+ * same vocal's. Measured, on a reconstruction of the packaged smoke's own
+ * fixture, as the bed is swept from 52 dB under the vocal up to 8 dB under it
+ * (the figures are the kept test's own, printed by it):
+ *
+ *     bed under vocal   stem-path error   mix-refined error   stem-on-mix lag
+ *          −52 dB           −0.08 ms            3.34 ms            3.13 ms
+ *          −42 dB           −0.08 ms            4.97 ms            4.98 ms
+ *          −32 dB           −0.08 ms            7.13 ms            7.22 ms
+ *          −22 dB           −0.08 ms           10.15 ms           10.23 ms
+ *          −18 dB           −0.08 ms           11.39 ms           11.20 ms
+ *          −14 dB           −0.08 ms           12.72 ms           12.13 ms
+ *           −8 dB           −0.08 ms           12.94 ms           12.35 ms
+ *
+ * −14 dB is the shipped fixture's own balance, and 12.72 ms is the number the
+ * packaged smoke reported as 13.03 ms against the same pair's 16-bit stereo
+ * files. Run on those files directly, the two passes that ship now recover
+ * −0.7500725793196249 against a built-in −0.75 — an error of 0.07 ms.
+ *
+ * Past the bottom of that sweep the accompaniment stops biasing the answer and
+ * starts winning it outright: at 2 dB under the vocal the mix-refined error is
+ * −49.11 ms. That is a different failure and the sweep stops short of it
+ * deliberately, because the one being derived here is the bias.
+ *
+ * Two things to read there. The stem path is EXACT at every bed level, because
+ * its reference is the vocal and the bed is not in it. And the mix-refined error
+ * equals the stem-on-mix lag at every level — the pass's whole effect was to
+ * transfer the placement onto a ruler whose zero had moved, by exactly the amount
+ * the zero had moved. It never recovered anything about the take.
+ *
+ * There is no correction for it either, and the same table is the proof: the
+ * only way to measure the bias is the stem-on-mix lag, and subtracting that from
+ * the mix's answer returns the stem's answer, which is where we started. The mix
+ * carries no information about where the take belongs that the stem does not,
+ * and it carries a bias the stem does not. So the reference stays the stem.
+ *
+ * (The bias does not conveniently vanish for quiet accompaniment: 3.3 ms at
+ * 52 dB down, and 12 ms — larger than the ±10 ms this module publishes — at the
+ * 14 dB of an ordinary pop balance.)
  *
  * `onsetEnvelope`'s frame-attribution bias (module note in `tempoCore`: an
  * attack lands up to one hop LATE) applies identically to both signals and so
@@ -170,39 +202,6 @@ export const ALIGN_COARSE_FRAME_RATE_HZ = ALIGN_FRAME_RATE_HZ;
  * enough that the fine pass cannot wander to a different verse.
  */
 export const ALIGN_REFINE_SECONDS = 0.2;
-
-/**
- * V3. How far the MIX pass is allowed to move the answer the stem passes
- * produced. See {@link alignEnvelopes}'s third stage for what the pass is.
- *
- * This half-width is not a taste and it is not a copy of
- * {@link ALIGN_REFINE_SECONDS}: it is the distance the pass BEFORE it can be
- * wrong by. The stem path (coarse, then the stem's own fine pass) is handed to
- * the mix pass as a centre, so the window has to contain that path's own error
- * distribution with a stated margin — and no more, because every further metre
- * is a metre in which the mix's strongest LOCAL rival can win instead of the lag
- * the coarse pass chose.
- *
- * MEASURED, in `coverAlign.test.ts` → "derives the mix window from the distance
- * the stem path actually leaves", over six pairs whose stem attacks are
- * displaced 30 ms: the mix pass travels a median 27.2 ms and at worst 38.2 ms,
- * and the stem path's own error against ground truth is a median 18.1 ms and at
- * worst 24.5 ms. 0.12 s clears the larger of those by the margin below, and is
- * not itself clipping the travel — which the derivation asserts too, because a
- * window that bounded the figure it is derived from would be measuring itself.
- *
- * It is bounded above by half of {@link ALIGN_GUARD_SECONDS} for a structural
- * reason rather than a measured one: candidates are guard-separated, so two
- * candidates each moved by at most half a guard can never be brought onto one
- * lag by this stage.
- */
-export const ALIGN_MIX_REFINE_SECONDS = 0.12;
-
-/** …and how far that window must sit above the worst stem-path error the
- * derivation measured, on the same principle as the floor margins below: a
- * window that merely contains the population is a window one noisier pair
- * escapes from. */
-export const ALIGN_MIX_REFINE_MARGIN = 0.05;
 
 /**
  * How far from the winning lag a rival has to be before it counts as a rival.
@@ -564,37 +563,12 @@ export interface AlignmentMeasurement {
    * is its refined answer; false when none could (too little overlap at the
    * fine grid's own gate) and `offsetSeconds` fell back to the coarse lag.
    *
-   * V3: "a fine pass" — either the stem's or the mix's is enough, and which of
-   * them ran is {@link refinedAgainstMix}'s question rather than this one.
-   *
    * Reported rather than silent because the two carry different accuracy: the
    * ±10 ms this module claims is the refined figure, and a coarse-only answer is
    * one 11.6 ms frame plus interpolation. A caller that quotes an accuracy has to
    * be able to tell which it is holding.
    */
   refined: boolean;
-  /**
-   * V3. True when an ORIGINAL MIX was supplied AND its pass produced a surface
-   * for the winning lag, so `offsetSeconds` is the mix-refined answer.
-   *
-   * False both when no mix was given (the four-argument call, and every caller
-   * that predates this stage) and when one was given but could not be used —
-   * too little overlap at the fine grid's own gate. The two are not
-   * distinguished here on purpose: what a caller needs to know is which ruler
-   * the number in its hand was measured with.
-   */
-  refinedAgainstMix: boolean;
-  /**
-   * V3. How far the mix pass moved the winning lag, in seconds — signed, and
-   * measured from the STEM path's own refined answer rather than from the coarse
-   * lag, because that is the quantity the stage added.
-   *
-   * Present exactly when {@link refinedAgainstMix}. Reported because the numbers
-   * shown to the user are the refined ones, and a caller that wants to say "the
-   * separated vocal put it here, the song itself moved it 14 ms" needs the
-   * difference rather than two absolute figures to subtract.
-   */
-  mixRefinementSeconds?: number;
 }
 
 /**
@@ -1020,30 +994,12 @@ export function alignTakeToReference(
   reference: Float32Array[],
   referenceRate: number,
   take: Float32Array[],
-  takeRate: number,
-  /**
-   * V3. The ORIGINAL SONG the reference was separated out of, when the caller
-   * has it. Optional because the measurement is complete without it — every
-   * threshold, every outcome and every candidate come from the reference — and
-   * because a caller holding only two signals is a caller this module has always
-   * served. Supplying it buys the third refinement stage and nothing else.
-   *
-   * It must be the mix the reference came OUT of, on the reference's own
-   * timeline. That is not a hope: this repo's separation is a decomposition
-   * whose five outputs sum back to the mix bit for bit, so a lag against the
-   * stem and a lag against the mix are the same quantity.
-   */
-  mix?: { channels: Float32Array[]; sampleRate: number } | null
+  takeRate: number
 ): AlignmentMeasurement | null {
   const a = alignmentOdf(reference, referenceRate);
   const b = alignmentOdf(take, takeRate);
   if (!a || !b) return null;
-  // A mix with no onset anywhere in it (or too short to frame) yields null and
-  // is treated as "no mix given": the stem passes are a complete measurement,
-  // and refusing the whole alignment over the OPTIONAL half would be a
-  // regression for a caller that gained nothing.
-  const m = mix ? alignmentOdf(mix.channels, mix.sampleRate) : null;
-  return alignEnvelopes({ a, b, mix: m });
+  return alignEnvelopes({ a, b });
 }
 
 /**
@@ -1058,10 +1014,10 @@ export function alignTakeToReference(
  * passing another is what the sweep does and nothing else should.
  */
 export function alignEnvelopes(
-  pair: { a: AlignmentEnvelopes; b: AlignmentEnvelopes; mix?: AlignmentEnvelopes | null },
+  pair: { a: AlignmentEnvelopes; b: AlignmentEnvelopes },
   smoothingMs: number = ALIGN_SMOOTHING_MS
 ): AlignmentMeasurement | null {
-  const { a, b, mix } = pair;
+  const { a, b } = pair;
   const coarseMin = minOverlapFrames(
     a.coarse.length,
     b.coarse.length,
@@ -1087,60 +1043,24 @@ export function alignEnvelopes(
   // this is, and blurring the pass whose whole job is precision would spend the
   // ±10 ms for nothing.
   const fineMin = minOverlapFrames(a.fine.length, b.fine.length, ALIGN_FRAME_RATE_HZ);
-  const mixMin = mix ? minOverlapFrames(mix.fine.length, b.fine.length, ALIGN_FRAME_RATE_HZ) : 0;
 
-  /** One windowed fine-grid correlation, or NaN when the window carried no
-   * evaluable lag. The two refinement stages differ only in their reference,
-   * their minimum overlap and their half-width — so they are ONE function, and
-   * a change to how a refinement is read cannot reach one stage and miss the
-   * other. */
-  const windowedLag = (
-    reference: Float32Array,
-    minOverlap: number,
-    centreSeconds: number,
-    halfWidthSeconds: number
-  ): number => {
-    const surface = lagSurface(reference, b.fine, minOverlap, {
-      centre: centreSeconds * ALIGN_FRAME_RATE_HZ,
-      halfWidth: halfWidthSeconds * ALIGN_FRAME_RATE_HZ,
+  /**
+   * THE refinement entry point — the winner and every candidate go through this
+   * one function, so whatever the user ends up placing has been refined the same
+   * way. Two arms that each refined their own way is exactly how a row comes to
+   * promise −8.257 s while −8.243 s is placed.
+   */
+  const refine = (coarseSeconds: number): number => {
+    const surface = lagSurface(a.fine, b.fine, fineMin, {
+      centre: coarseSeconds * ALIGN_FRAME_RATE_HZ,
+      halfWidth: ALIGN_REFINE_SECONDS * ALIGN_FRAME_RATE_HZ,
     });
     return surface ? interpolatedLag(surface) / ALIGN_FRAME_RATE_HZ : NaN;
   };
 
-  /**
-   * V3 (R3). THE refinement entry point — the winner and every candidate go
-   * through this one function, so whatever the user ends up placing has been
-   * through the same stages. Two arms that each refined their own way is exactly
-   * how a row comes to promise −8.257 s while −8.243 s is placed.
-   */
-  const refine = (
-    coarseSeconds: number
-  ): { offsetSeconds: number; refined: boolean; mixDeltaSeconds: number | null } => {
-    const stem = windowedLag(a.fine, fineMin, coarseSeconds, ALIGN_REFINE_SECONDS);
-    const refinedByStem = Number.isFinite(stem);
-    const base = refinedByStem ? stem : coarseSeconds;
-    if (!mix) return { offsetSeconds: base, refined: refinedByStem, mixDeltaSeconds: null };
-    // V3: the third stage, against the ORIGINAL SONG. Its window is sized to the
-    // error of the pass that produced its CENTRE, which is the only thing a
-    // half-width can honestly be derived against: ALIGN_MIX_REFINE_SECONDS is
-    // measured over the stem FINE pass's residual, so when that pass could not
-    // run the centre is the coarse lag instead and the wider ALIGN_REFINE_SECONDS
-    // — the window that coarse lag was always corrected inside — applies.
-    const fromMix = windowedLag(
-      mix.fine,
-      mixMin,
-      base,
-      refinedByStem ? ALIGN_MIX_REFINE_SECONDS : ALIGN_REFINE_SECONDS
-    );
-    if (!Number.isFinite(fromMix)) {
-      return { offsetSeconds: base, refined: refinedByStem, mixDeltaSeconds: null };
-    }
-    return { offsetSeconds: fromMix, refined: true, mixDeltaSeconds: fromMix - base };
-  };
-
-  const best = refine(coarseOffsetSeconds);
-  const refined = best.refined;
-  const offsetSeconds = best.offsetSeconds;
+  const refinedBest = refine(coarseOffsetSeconds);
+  const refined = Number.isFinite(refinedBest);
+  const offsetSeconds = refined ? refinedBest : coarseOffsetSeconds;
 
   // Every candidate is refined the same way the winner is, so a caller offering
   // the user a choice is offering three answers of one accuracy rather than one
@@ -1159,7 +1079,8 @@ export function alignEnvelopes(
     const lagSeconds =
       rank === 0 ? coarseOffsetSeconds : (idx + coarse.kLo) / ALIGN_COARSE_FRAME_RATE_HZ;
     // Rank 0 IS the winner, whose refinement has already been paid for.
-    const offset = rank === 0 ? offsetSeconds : refine(lagSeconds).offsetSeconds;
+    const candidateRefined = rank === 0 ? refinedBest : refine(lagSeconds);
+    const offset = Number.isFinite(candidateRefined) ? candidateRefined : lagSeconds;
     if (candidates.some((c) => Math.abs(c.offsetSeconds - offset) < ALIGN_GUARD_SECONDS)) continue;
     candidates.push({
       offsetSeconds: offset,
@@ -1237,7 +1158,5 @@ export function alignEnvelopes(
       (coarse.rho.length - coarse.evaluated) / ALIGN_COARSE_FRAME_RATE_HZ,
     overlapSeconds,
     refined,
-    refinedAgainstMix: best.mixDeltaSeconds !== null,
-    ...(best.mixDeltaSeconds !== null ? { mixRefinementSeconds: best.mixDeltaSeconds } : {}),
   };
 }

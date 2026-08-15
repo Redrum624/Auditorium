@@ -13,8 +13,6 @@ import {
   ALIGN_LAG_SPREAD_MARGIN,
   ALIGN_MAX_DRIFT_SPAN_SECONDS,
   ALIGN_MAX_LAG_SPREAD_SECONDS,
-  ALIGN_MIX_REFINE_MARGIN,
-  ALIGN_MIX_REFINE_SECONDS,
   ALIGN_PIECEWISE_MIN_WINDOWS,
   ALIGN_PIECEWISE_WINDOW_SECONDS,
   ALIGN_PROMINENCE_MARGIN,
@@ -1446,418 +1444,250 @@ describe('alignTakeToReference — the measured separation', () => {
 });
 
 /**
- * V3. WHERE THE MIX REFINEMENT COMES FROM, and what it is worth.
+ * V3 fix-round-2. WHY THE REFERENCE IS THE SEPARATED VOCAL AND NOT THE SONG.
  *
- * The two passes above both correlate the take against the SEPARATED VOCAL, and
- * a separated vocal is the one signal in the whole journey that has been through
- * a model. The ORIGINAL SONG has been through nothing — and it shares the stem's
- * timeline EXACTLY, because this repo's separation is a decomposition whose
- * parts sum back to the mix bit for bit. So a lag measured against the mix is
- * the same quantity, measured against a cleaner ruler.
+ * V3 shipped a third pass that refined the stem passes' answer against the
+ * ORIGINAL SONG, on the reasoning that the song has not been through a
+ * separation model and shares the stem's timeline bit for bit. The packaged
+ * smoke caught it: on the shared-onset fixture pair, a placement the stem path
+ * had exact to 0.06 ms came back 13.03 ms out — past the ±10 ms this module
+ * publishes.
  *
- * It is also the ruler that MATTERS, which is the argument this whole stage
- * rests on: the take is going to be heard against the instrumental, i.e. against
- * the song. If the stem's attacks sit late of the song's, a take aligned to the
- * stem is out of time with what will actually be playing — however accurate that
- * alignment is against the stem.
+ * This block is that measurement, kept. Sharing a TIMELINE is not sharing
+ * ONSETS: an onset envelope is spectral flux, and accompaniment under a vocal
+ * dilutes the flux at the vocal's own attacks, so the mix's onsets land late of
+ * the same vocal's by an amount that grows with the accompaniment. The stem does
+ * not have that problem, because the bed is not in it.
  *
- * The population is the journey's own shape: one performance rendered three ways
- * — the clean vocal, the MIX (vocal plus a band on its own schedule), and the
- * STEM a separator would return (attacks spread by `smearAttacks`, the band's
- * leakage the mask did not remove, and a noise floor) — with the take a second
- * performance of the same schedule at a known lag.
- *
- * BOTH halves are asserted, because only the pair is a reason to ship: the
- * degraded stem's error is recovered, and the CLEAN stem's answer is not made
- * worse.
+ * The fixture is the packaged smoke's own shape, built from this module's
+ * fixture machinery rather than a third copy of `make-test-cover.cjs`: one
+ * syllable schedule rendered as the song's vocal, a tilted-noise bed under it at
+ * a controlled level, and the SAME schedule rendered again as the take with its
+ * own pitches, dynamics and a known lead. The stem is the vocal exactly, which
+ * is what that fixture ships (its five stems sum to the mix, four of them
+ * silent).
  */
-describe('alignTakeToReference — the mix refinement', () => {
-  /** Twelve seconds: long enough for the piecewise arm to speak (four windows)
-   * and short enough that six pairs are affordable next to the derivations
-   * above. */
-  const MIX_SECONDS = 12;
-  const MIX_REF_LEAD = 0.9;
-  const MIX_TAKE_LEAD = 0.3;
-  /** The take's sample 0 on the reference's timeline — the quantity measured. */
-  const MIX_TRUTH = MIX_REF_LEAD - MIX_TAKE_LEAD;
-  const MIX_SEEDS = 6;
+describe('alignTakeToReference — the reference is the stem, and here is why', () => {
+  const MIX_RATE = 48000;
+  const MIX_SECONDS = 6;
+  /** The take's lead, and therefore MINUS the offset the aligner must report:
+   * a take carrying 0.75 s of extra silence has to start 0.75 s EARLIER for its
+   * syllables to land on the song's. The packaged fixture's own constant. */
+  const MIX_LEAD_SECONDS = 0.75;
+  const MIX_TRUTH = -MIX_LEAD_SECONDS;
+  /** The packaged fixture's own balance: a −18 dBFS vocal over a −32 dBFS bed. */
+  const SMOKE_BED_DB_UNDER_VOCAL = -14;
 
-  /**
-   * How far the stem's attacks are displaced. 30 ms is not a measurement of this
-   * repo's separator and is not claimed to be — see `smearAttacks`. It is the
-   * displacement this population is built AROUND, chosen because it is the
-   * regime that separates: below ~15 ms the stem path is already inside the
-   * mix's own answer and there is nothing to recover, and above ~50 ms the
-   * COARSE pass starts failing outright on the degraded stem (measured: one pair
-   * in six landed 8.3 s out), which a bounded refinement cannot and should not
-   * rescue. That ceiling is a real limit of this stage and it is stated rather
-   * than hidden: the mix pass fixes a displaced answer, never a wrong one.
-   */
-  const SMEAR_TAU_MS = 30;
-  /** …and what else the mask left behind: the band 12 dB down, under a floor. */
-  const LEAK_DB = -12;
-  const STEM_NOISE = 0.03;
-  /** How far under the vocal the band sits in the MIX. A vocal 6 dB over the
-   * backing is an ordinary pop balance, and deliberately not a flattering one:
-   * the mix pass has to win with the band's foreign onsets at full strength. */
-  const BAND_DB = -6;
+  const rmsOf = (x: Float32Array): number => {
+    let sum = 0;
+    for (let i = 0; i < x.length; i++) sum += x[i] * x[i];
+    return Math.sqrt(sum / x.length);
+  };
 
-  const floorOf = (seed: number, n: number, amplitude: number): Float32Array => {
+  /** `y[n] = x[n] + k·x[n−1]` over seeded white noise — the packaged fixture's
+   * own bed, a first-order tilt that darkens rather than a flat spectrum, so the
+   * dilution being measured is not an artefact of a uniform noise floor. */
+  const tiltedNoise = (seed: number, length: number, coefficient: number): Float32Array => {
     const rng = mulberry32(seed);
-    const out = new Float32Array(n);
-    for (let i = 0; i < n; i++) out[i] = amplitude * (rng() * 2 - 1);
+    const out = new Float32Array(length);
+    let previous = 0;
+    for (let i = 0; i < length; i++) {
+      const x = rng() * 2 - 1;
+      out[i] = x + coefficient * previous;
+      previous = x;
+    }
     return out;
   };
 
-  interface Trio {
-    /** The separated vocal, with the attacks displaced — what the journey
-     * aligns against today. */
-    stem: AlignmentEnvelopes;
-    /** The same vocal with nothing done to it — the no-regression control. */
-    clean: AlignmentEnvelopes;
-    /** The original song: vocal plus band, no model in between. */
-    mix: AlignmentEnvelopes;
-    take: AlignmentEnvelopes;
-  }
+  /**
+   * The packaged fixture's own variance seeds and pitch/dynamics knobs, so the
+   * signals below are the ones `make-test-cover.cjs` writes rather than
+   * something merely similar. Its renderer is a deliberate copy of this
+   * module's fixture machinery -- the script may not import app code, and says
+   * so -- which is why the same schedule, the same PRNG and the same three
+   * harmonics can be reached from here through `makeVocalLike` instead of a
+   * third copy. The one difference is the buffer: the script renders into a
+   * FIXED six seconds and drops what runs past the end, so the take is
+   * truncated below to match.
+   */
+  const SONG_VARIANCE_SEED = 0x1a2b3c;
+  const TAKE_VARIANCE_SEED = 0x4d5e6f;
+  const BED_SEED = 0x7c4e11;
 
-  const trioCache = new Map<number, Trio>();
-  afterAll(() => trioCache.clear());
+  const vocalOf = (seed: number) =>
+    makeVocalLike({
+      seed,
+      sampleRate: MIX_RATE,
+      seconds: MIX_SECONDS,
+      varianceSeed: SONG_VARIANCE_SEED,
+    })[0];
 
-  function trio(seed: number): Trio {
-    const hit = trioCache.get(seed);
+  /** The same schedule, sung again: other pitches, other dynamics, laid down
+   * `MIX_LEAD_SECONDS` later and truncated to the song's own length. */
+  const takeOf = (seed: number) => [
+    makeVocalLike({
+      seed,
+      sampleRate: MIX_RATE,
+      seconds: MIX_SECONDS,
+      leadSeconds: MIX_LEAD_SECONDS,
+      hzScale: 1.06,
+      amplitudeJitter: 0.25,
+      varianceSeed: TAKE_VARIANCE_SEED,
+    })[0].subarray(0, MIX_RATE * MIX_SECONDS),
+  ];
+
+  /** vocal + bed, with the bed set to `dbUnderVocal` of the vocal's own RMS. */
+  const mixOf = (vocal: Float32Array, dbUnderVocal: number): Float32Array[] => {
+    const bed = tiltedNoise(BED_SEED, vocal.length, 0.7);
+    const scale = (rmsOf(vocal) * Math.pow(10, dbUnderVocal / 20)) / rmsOf(bed);
+    return [Float32Array.from(vocal, (v, i) => v + bed[i] * scale)];
+  };
+
+  const envCache = new Map<string, AlignmentEnvelopes>();
+  afterAll(() => envCache.clear());
+  const env = (key: string, build: () => Float32Array[]): AlignmentEnvelopes => {
+    const hit = envCache.get(key);
     if (hit) return hit;
-    const vocal = makeVocalLike({
-      seed,
-      sampleRate: 44100,
-      seconds: MIX_SECONDS,
-      leadSeconds: MIX_REF_LEAD,
-    })[0];
-    // A different schedule: the band is not singing the vocal line, so its
-    // onsets are foreign to the mix as well as to the stem.
-    const band = makeVocalLike({
-      seed: seed * 31 + 7,
-      sampleRate: 44100,
-      seconds: MIX_SECONDS,
-      leadSeconds: MIX_REF_LEAD,
-    })[0];
-    const leak = Math.pow(10, LEAK_DB / 20);
-    const bandGain = Math.pow(10, BAND_DB / 20);
-    const floor = floorOf(seed * 5 + 1, vocal.length, STEM_NOISE);
-    const smeared = smearAttacks(vocal, 44100, SMEAR_TAU_MS);
-    const stem = Float32Array.from(smeared, (v, i) => v + leak * (band[i] ?? 0) + floor[i]);
-    const mixed = Float32Array.from(vocal, (v, i) => v + bandGain * (band[i] ?? 0));
-    const take = makeVocalLike({
-      seed,
-      sampleRate: 48000,
-      seconds: MIX_SECONDS,
-      leadSeconds: MIX_TAKE_LEAD,
-      hzScale: 1.26,
-      amplitudeJitter: 0.5,
-      noiseAmplitude: 0.012,
-      varianceSeed: seed * 7 + 3,
-      timingJitterSeconds: 0.02,
-      timingSeed: seed * 3 + 17,
-    });
-    const built: Trio = {
-      stem: alignmentOdf([stem], 44100)!,
-      clean: alignmentOdf([vocal], 44100)!,
-      mix: alignmentOdf([mixed], 44100)!,
-      take: alignmentOdf(take, 48000)!,
-    };
-    trioCache.set(seed, built);
+    const built = alignmentOdf(build(), MIX_RATE)!;
+    expect(built).not.toBeNull();
+    envCache.set(key, built);
     return built;
-  }
+  };
 
-  interface Row {
-    /** |offset − truth| with the stem as the only reference. */
-    stemOnly: number;
-    /** …and with the mix refinement on top of it. */
-    refined: number;
-    /** The control: the stem replaced by the undegraded vocal. */
-    cleanOnly: number;
-    cleanRefined: number;
-    /** How far the mix pass moved the winner — the distance the window has to
-     * span, which is what the window is derived against. */
-    moved: number;
-    /** How far apart the two REFINED answers are. The property the whole stage
-     * is for: the song decides the lag, whatever state the stem is in. */
-    agreement: number;
-  }
+  const SEED = 0x51d3a7;
+  const stemEnv = () => env('stem', () => [vocalOf(SEED)]);
+  const takeEnv = () => env('take', () => takeOf(SEED));
+  const mixEnv = (dbUnderVocal: number) =>
+    env(`mix/${dbUnderVocal}`, () => mixOf(vocalOf(SEED), dbUnderVocal));
 
-  let population: Row[] | null = null;
-  function rows(): Row[] {
-    if (population) return population;
-    population = [];
-    for (let s = 0; s < MIX_SEEDS; s++) {
-      const t = trio(900 + s);
-      const stemOnly = alignEnvelopes({ a: t.stem, b: t.take })!;
-      const refined = alignEnvelopes({ a: t.stem, b: t.take, mix: t.mix })!;
-      const cleanOnly = alignEnvelopes({ a: t.clean, b: t.take })!;
-      const cleanRefined = alignEnvelopes({ a: t.clean, b: t.take, mix: t.mix })!;
-      population.push({
-        stemOnly: Math.abs(stemOnly.offsetSeconds - MIX_TRUTH),
-        refined: Math.abs(refined.offsetSeconds - MIX_TRUTH),
-        cleanOnly: Math.abs(cleanOnly.offsetSeconds - MIX_TRUTH),
-        cleanRefined: Math.abs(cleanRefined.offsetSeconds - MIX_TRUTH),
-        moved: Math.abs(refined.mixRefinementSeconds!),
-        agreement: Math.abs(refined.offsetSeconds - cleanRefined.offsetSeconds),
-      });
-    }
-    return population;
-  }
+  /** Where the take lands, in seconds of error against the built-in truth. */
+  const errorAgainst = (reference: AlignmentEnvelopes): number =>
+    alignEnvelopes({ a: reference, b: takeEnv() })!.offsetSeconds - MIX_TRUTH;
+  /** Where the STEM's own sample 0 lands on the MIX's timeline. Zero if the two
+   * shared their onsets; it does not. */
+  const stemOnMix = (dbUnderVocal: number): number =>
+    alignEnvelopes({ a: mixEnv(dbUnderVocal), b: stemEnv() })!.offsetSeconds;
 
-  const worst = (v: number[]) => Number(Math.max(...v).toFixed(4));
-  const middle = (v: number[]) =>
-    Number([...v].sort((x, y) => x - y)[Math.floor(v.length / 2)].toFixed(4));
   const ms = (v: number) => `${(v * 1000).toFixed(2)} ms`;
+  /** The bed levels the derivation sweeps, relative to the vocal. Stops at 8 dB
+   * under: below that the accompaniment starts winning the correlation outright
+   * (measured on the packaged fixture at 2 dB under: −49 ms, and the stem-on-mix
+   * lag −44 ms), which is a different failure and not the one being derived. */
+  const BED_SWEEP = [-52, -42, -32, -22, -18, -14, -8];
 
   /**
-   * V3. WHERE `ALIGN_MIX_REFINE_SECONDS` COMES FROM.
-   *
-   * The window is not a taste: it is the distance the pass BEFORE it can be
-   * wrong by. The mix pass is handed the stem path's answer and may only look
-   * around it, so the half-width has to cover the distance it actually travels —
-   * with margin — and no more, because every further metre is a metre in which
-   * the mix's own strongest local rival can win instead.
+   * The regression the packaged smoke caught, pinned here where it costs seconds
+   * instead of a build. This is the fixture pair's own property: a take that is
+   * a second performance of the song's own schedule is placed on the SEPARATED
+   * VOCAL to well inside the published tolerance.
    */
-  it('derives the mix window from the distance the stem path actually leaves', () => {
-    const p = rows();
-    const travelled = p.map((r) => r.moved);
-    const errors = p.map((r) => r.stemOnly);
+  it('recovers the packaged smoke pair\'s offset to well inside the published ±10 ms', () => {
+    const error = errorAgainst(stemEnv());
     // eslint-disable-next-line no-console
-    console.log(
-      `mix pass travelled: median ${ms(middle(travelled))}, worst ${ms(worst(travelled))} over ${p.length} pairs\n` +
-        `  stem-path error:    median ${ms(middle(errors))}, worst ${ms(worst(errors))}\n` +
-        `  window ${ALIGN_MIX_REFINE_SECONDS} s, margin ${ALIGN_MIX_REFINE_MARGIN} s, guard ${ALIGN_GUARD_SECONDS} s`
-    );
-    // Wide enough to contain the travel it has to make, by the stated margin…
-    expect(ALIGN_MIX_REFINE_SECONDS).toBeGreaterThanOrEqual(
-      worst(travelled) + ALIGN_MIX_REFINE_MARGIN
-    );
-    // …and the stem path's own error against ground truth, on the same margin,
-    // because a window that only just holds the observed travel is a window the
-    // next noisier pair escapes from.
-    expect(ALIGN_MIX_REFINE_SECONDS).toBeGreaterThanOrEqual(
-      worst(errors) + ALIGN_MIX_REFINE_MARGIN
-    );
-    // …and narrow enough that it cannot reach a rival the coarse pass separated:
-    // candidates are a full guard apart, so a window of half a guard can never
-    // let one candidate's refinement land on another's lag.
-    expect(ALIGN_MIX_REFINE_SECONDS).toBeLessThanOrEqual(ALIGN_GUARD_SECONDS / 2);
-    // The travel is not being clipped BY the window, which would make the figure
-    // above a measurement of the constant rather than of the signal.
-    expect(worst(travelled)).toBeLessThan(ALIGN_MIX_REFINE_SECONDS);
+    console.log(`smoke-shape pair: truth ${MIX_TRUTH} s, error ${ms(error)}`);
+    expect(Math.abs(error)).toBeLessThan(TOLERANCE_SECONDS);
+    // …and with real teeth, because the measured figure is two orders under the
+    // published tolerance and a regression that merely stayed inside 10 ms would
+    // still be one. V3's third pass landed 13.03 ms here.
+    expect(Math.abs(error)).toBeLessThan(0.002);
   });
 
   /**
-   * V3. What the third pass is WORTH — the user's "still a little off", as a
-   * number.
-   *
-   * Note what is NOT claimed: neither arm meets the ±10 ms this module publishes
-   * elsewhere, and that is the population rather than the pass. These takes are
-   * a SECOND PERFORMANCE with ±20 ms of per-syllable timing of their own, so the
-   * lag that best matches two onset envelopes is not exactly the lag the fixture
-   * was built at. The claim is the DIFFERENCE between the two arms, measured on
-   * one population, in both the median and the worst case.
+   * The property that makes the stem the right reference: the accompaniment is
+   * not in it, so no amount of accompaniment moves the answer.
    */
-  it('recovers offset error that the displaced stem attacks leave behind', () => {
-    const p = rows();
-    // eslint-disable-next-line no-console
-    console.log(
-      `stem-only  median ${ms(middle(p.map((r) => r.stemOnly)))}  worst ${ms(worst(p.map((r) => r.stemOnly)))}\n` +
-        `  refined    median ${ms(middle(p.map((r) => r.refined)))}  worst ${ms(worst(p.map((r) => r.refined)))}`
-    );
-    // Both ends improve. A median that improves while one pair gets much worse
-    // would be a refinement nobody should ship, so the worst case is asserted
-    // too — and by a stated amount, not merely "less than".
-    expect(middle(p.map((r) => r.stemOnly)) - middle(p.map((r) => r.refined))).toBeGreaterThan(
-      0.004
-    );
-    expect(worst(p.map((r) => r.stemOnly)) - worst(p.map((r) => r.refined))).toBeGreaterThan(0.004);
-    // One pair of the six ends 4.0 ms FURTHER from the fixture's nominal truth,
-    // and that is the objective rather than a regression being tolerated: the
-    // refined lag is the SONG's optimum (see the agreement test below), so where
-    // a degraded stem happened to sit closer to the nominal 0.6 s than the
-    // song's own optimum does, moving to the song's answer moves away from that
-    // number. It is bounded at one fine frame and printed rather than hidden, so
-    // a change that started genuinely damaging pairs still fails here.
-    const regression = Math.max(...p.map((r) => r.refined - r.stemOnly));
-    // eslint-disable-next-line no-console
-    console.log(`  worst single-pair move away from nominal truth: ${ms(regression)}`);
-    expect(regression).toBeLessThanOrEqual(1 / ALIGN_FRAME_RATE_HZ);
-  });
-
-  /**
-   * V3. The other half, and the one a refinement usually fails: a reference that
-   * was ALREADY right must not be moved off it. The control is the same take
-   * against the undegraded vocal, with and without the mix pass.
-   *
-   * Three assertions, and the third is the one with teeth. Population summaries
-   * are the natural way to write this test and they are blind to precisely the
-   * failure it exists to catch — one good answer walked a long way while the
-   * others absorb it. See the comment on that line for the substitution that
-   * proves the blindness is real rather than theoretical.
-   */
-  it('does not move a clean reference off an answer that was already right', () => {
-    const p = rows();
-    // eslint-disable-next-line no-console
-    console.log(
-      `clean stem: unrefined median ${ms(middle(p.map((r) => r.cleanOnly)))} worst ${ms(worst(p.map((r) => r.cleanOnly)))}, ` +
-        `refined median ${ms(middle(p.map((r) => r.cleanRefined)))} worst ${ms(worst(p.map((r) => r.cleanRefined)))}`
-    );
-    const regression = Math.max(...p.map((r) => r.cleanRefined - r.cleanOnly));
-    // eslint-disable-next-line no-console
-    console.log(`  worst single clean pair moved: ${ms(regression)}`);
-    // The population's two summary figures do not regress at all…
-    expect(worst(p.map((r) => r.cleanRefined))).toBeLessThanOrEqual(worst(p.map((r) => r.cleanOnly)));
-    expect(middle(p.map((r) => r.cleanRefined))).toBeLessThanOrEqual(
-      middle(p.map((r) => r.cleanOnly))
-    );
-    // …and NO SINGLE PAIR is made worse by more than one frame of the grid these
-    // lags live on. This line is not decoration for the two above it: they
-    // cannot see a single pair being damaged, and the population says so in its
-    // own numbers. The six pairs run 1.69 → 4.20, 6.24 → 4.81, 7.37 → 10.62,
-    // 15.01 → 15.63, 17.81 → 18.13 and 20.24 → 12.04 ms, so the pair sitting at
-    // 1.69 ms could be walked to 12 ms — a 10.3 ms regression, twice this bound —
-    // and BOTH summary assertions stay green: the worst is still 18.13 ms
-    // against a 20.24 ms ceiling and the median is still 12.04 ms against
-    // 15.01 ms. That exact substitution was run and this assertion is the only
-    // one that failed (10.31 ms against 5 ms), which is the whole reason it is
-    // here. Measured, the real worst move is 3.25 ms.
-    expect(regression).toBeLessThanOrEqual(1 / ALIGN_COARSE_FRAME_RATE_HZ);
-  });
-
-  /**
-   * V3. The property the stage exists for, said directly: after the mix pass the
-   * lag is the SONG's, not the stem's. The same take refined against the same
-   * song lands in the same place whether the stem it started from was degraded
-   * or pristine — which is what "align to the original song" has to mean if it
-   * means anything.
-   */
-  it('makes the placed lag the song\'s answer rather than the stem\'s', () => {
-    const p = rows();
-    // eslint-disable-next-line no-console
-    console.log(
-      `degraded-vs-clean after refinement: worst ${ms(worst(p.map((r) => r.agreement)))}; ` +
-        `before it, the same pairs differed by up to ${ms(worst(p.map((r) => Math.abs(r.stemOnly - r.cleanOnly))))}`
-    );
-    // One fine frame is 5 ms; the two paths agree far inside it.
-    expect(worst(p.map((r) => r.agreement))).toBeLessThan(1 / ALIGN_FRAME_RATE_HZ);
-  });
-
-  /**
-   * V3. The reporting contract. A row that says −8.257 s while −8.243 s was
-   * placed is the defect this task exists to remove, so the refinement rides the
-   * measurement rather than being applied somewhere downstream: the offset IS
-   * the refined one, and how far the mix moved it is stated.
-   */
-  it('reports the refined offset and how far the mix pass moved it', () => {
-    const t = trio(900);
-    const without = alignEnvelopes({ a: t.stem, b: t.take })!;
-    const withMix = alignEnvelopes({ a: t.stem, b: t.take, mix: t.mix })!;
-
-    expect(without.refinedAgainstMix).toBe(false);
-    expect(without.mixRefinementSeconds).toBeUndefined();
-    expect(withMix.refinedAgainstMix).toBe(true);
-    // The delta is measured from the pass it corrects, not from the coarse lag:
-    // it is what the mix pass ADDED, so a caller can say "the separated vocal
-    // put it here, the song itself moved it that far".
-    expect(withMix.mixRefinementSeconds).toBeCloseTo(
-      withMix.offsetSeconds - without.offsetSeconds,
-      12
-    );
-    expect(withMix.mixRefinementSeconds).not.toBe(0);
-
-    // The mix REFINES; it never re-decides. Everything the confidence arm is
-    // made of is still the stem's, untouched, so no threshold in this file
-    // moves because this stage exists.
-    expect(withMix.coarseOffsetSeconds).toBe(without.coarseOffsetSeconds);
-    expect(withMix.peakCorrelation).toBe(without.peakCorrelation);
-    expect(withMix.prominence).toBe(without.prominence);
-    expect(withMix.outcome).toBe(without.outcome);
-    expect(withMix.windowsMeasured).toBe(without.windowsMeasured);
-  });
-
-  /**
-   * V3 (R3). ONE refinement entry point. Whatever the user ends up placing — the
-   * winner the pass auto-places, or a rival they click instead — has been
-   * through the same two refinement stages, so no arm can drift from another.
-   */
-  it('sends every candidate through the same refinement the winner got', () => {
-    const period = 6;
-    const chorus = (leadSeconds: number, jitterSeed: number) =>
-      makeVocalLike({
-        seed: 55,
-        sampleRate: RATE,
-        seconds: period * 3,
-        leadSeconds,
-        repeatPeriodSeconds: period,
-        timingJitterSeconds: 0.02,
-        timingSeed: jitterSeed,
-      });
-    const reference = chorus(0.9, 1);
-    const take = chorus(0.3, 2);
-    // The mix is that reference plus a band, on the reference's own timeline.
-    const band = makeVocalLike({
-      seed: 4242,
-      sampleRate: RATE,
-      seconds: period * 3,
-      leadSeconds: 0.9,
-    })[0];
-    const bandGain = Math.pow(10, BAND_DB / 20);
-    const mixed = [Float32Array.from(reference[0], (v, i) => v + bandGain * (band[i] ?? 0))];
-
-    const without = alignTakeToReference(reference, RATE, take, RATE)!;
-    const withMix = alignTakeToReference(reference, RATE, take, RATE, {
-      channels: mixed,
-      sampleRate: RATE,
-    })!;
-    // The outcome is the stem's verdict either way — this is the arm that lists
-    // rivals, which is what makes it the one worth checking.
-    expect(withMix.outcome).toBe(without.outcome);
-    expect(withMix.candidates).toBeDefined();
-    expect(withMix.candidates!.length).toBe(without.candidates!.length);
-    expect(withMix.candidates!.length).toBeGreaterThan(1);
-    // The list still leads with the answer the measurement reports…
-    expect(withMix.candidates![0].offsetSeconds).toBe(withMix.offsetSeconds);
-    // …every one of them moved, so none was left holding the unrefined lag the
-    // row beside it would then have been promising…
-    for (const [i, c] of withMix.candidates!.entries()) {
-      expect(c.offsetSeconds).not.toBe(without.candidates![i].offsetSeconds);
+  it('places identically whatever the accompaniment is doing, because it is not the reference', () => {
+    // The reference never changes across this sweep — that IS the point, and the
+    // assertion is that the answer does not either.
+    const error = errorAgainst(stemEnv());
+    for (const db of BED_SWEEP) {
+      // Building each mix proves the sweep is real rather than a loop over one
+      // cached number; the stem path simply never consults it.
+      expect(mixEnv(db).fine.length).toBeGreaterThan(0);
     }
-    // …and the guard separation survives the second refinement, which is the
-    // contract a picker offering three rows depends on.
-    const offsets = withMix.candidates!.map((c) => c.offsetSeconds);
-    for (let i = 0; i < offsets.length; i++) {
-      for (let j = i + 1; j < offsets.length; j++) {
-        expect(Math.abs(offsets[i] - offsets[j])).toBeGreaterThanOrEqual(ALIGN_GUARD_SECONDS);
-      }
+    expect(Math.abs(error)).toBeLessThan(0.002);
+  });
+
+  /**
+   * WHY THE THIRD PASS WAS REMOVED, as a table rather than an opinion.
+   *
+   * Refining against the song was measured, shipped, and caught by the packaged
+   * smoke. Two columns say everything: the error a mix-refined answer carries,
+   * and the lag between the stem's own onsets and the mix's. They are the SAME
+   * NUMBER at every bed level, because the pass's entire effect was to move the
+   * placement onto a ruler whose zero had moved — by exactly the amount the zero
+   * had moved. It recovered nothing about the take.
+   *
+   * That identity is also why no correction exists. The only way to measure the
+   * bias is the stem-on-mix lag, and subtracting it from the mix's answer
+   * returns the stem's answer, which is where the pass started.
+   */
+  it('rejects the original song as a ruler: the error it adds IS the accompaniment', () => {
+    const rows = BED_SWEEP.map((db) => ({
+      db,
+      mixError: errorAgainst(mixEnv(db)),
+      displacement: stemOnMix(db),
+    }));
+    // eslint-disable-next-line no-console
+    console.log(
+      ['bed vs vocal   mix-refined error   stem-on-mix lag']
+        .concat(
+          rows.map(
+            (r) =>
+              `${String(r.db).padStart(9)} dB   ${ms(r.mixError).padStart(16)}   ${ms(r.displacement).padStart(15)}`
+          )
+        )
+        .join('\n  ')
+    );
+
+    // 1. The bias is real at every level, and it GROWS with the accompaniment —
+    //    so it is the accompaniment, not a constant offset in the fixture.
+    const quietest = rows[0];
+    const loudest = rows[rows.length - 1];
+    expect(Math.abs(loudest.mixError)).toBeGreaterThan(Math.abs(quietest.mixError));
+    // 2. It does not conveniently vanish for a quiet bed: 52 dB under the vocal
+    //    still costs milliseconds.
+    expect(Math.abs(quietest.mixError)).toBeGreaterThan(0.002);
+    // 3. At the packaged fixture's own balance it exceeds the published
+    //    tolerance outright, which is the shipped defect the smoke caught.
+    const smoke = rows.find((r) => r.db === SMOKE_BED_DB_UNDER_VOCAL)!;
+    expect(Math.abs(smoke.mixError)).toBeGreaterThan(TOLERANCE_SECONDS);
+    // 4. THE MECHANISM: the error a mix ruler adds is the displacement between
+    //    the two rulers, to well inside one frame of the grid they are measured
+    //    on. This is the assertion that makes the table an explanation rather
+    //    than a coincidence, and the one that says no correction is possible.
+    for (const r of rows) {
+      expect(Math.abs(r.mixError - r.displacement)).toBeLessThan(1 / ALIGN_COARSE_FRAME_RATE_HZ);
     }
   });
 
   /**
-   * V3. The mix is OPTIONAL, and a caller that cannot supply one loses only the
-   * third pass. A mix with no onset in it (or too short to frame) is the same
-   * case: it must not take the whole measurement down with it.
+   * The case V3's third pass was BUILT for, measured against the thing it was
+   * built to beat — and losing.
+   *
+   * A stem whose attacks the model has spread is the whole motivation: its
+   * onsets are displaced, so the placement is displaced with them. That cost is
+   * real and this test states it as a number rather than implying it away. But
+   * the song is not the cure, and this is the sharpest form of the finding: even
+   * on a DEGRADED stem, the degraded stem beats the song. Swapping one for the
+   * other does not trade a large error for a small one; it trades a small error
+   * for a larger one.
    */
-  it('measures exactly as before when no usable mix is given', () => {
-    const t = trio(901);
-    const plain = alignEnvelopes({ a: t.stem, b: t.take })!;
-    const nulled = alignEnvelopes({ a: t.stem, b: t.take, mix: null })!;
-    expect(nulled.offsetSeconds).toBe(plain.offsetSeconds);
-    expect(nulled.refinedAgainstMix).toBe(false);
-    // …and through the top-level entry point, where the mix is a document that
-    // may simply have nothing in it.
-    const silent = alignTakeToReference(
-      makeVocalLike({ seed: 7, sampleRate: RATE, seconds: 6, leadSeconds: 1.4 }),
-      RATE,
-      makeVocalLike({ seed: 7, sampleRate: RATE, seconds: 6, leadSeconds: 0.2 }),
-      RATE,
-      { channels: [new Float32Array(RATE * 6)], sampleRate: RATE }
+  it('beats the song even from a DISPLACED stem, which is what removed the third pass', () => {
+    const displaced = env('smeared', () => [smearAttacks(vocalOf(SEED), MIX_RATE, 30)]);
+    const error = errorAgainst(displaced);
+    const mixError = errorAgainst(mixEnv(SMOKE_BED_DB_UNDER_VOCAL));
+    // eslint-disable-next-line no-console
+    console.log(
+      `a stem whose attacks are spread 30 ms places the take ${ms(error)} out; ` +
+        `the song, at this fixture's balance, is ${ms(mixError)} out on its own`
     );
-    expect(silent).not.toBeNull();
-    expect(silent!.refinedAgainstMix).toBe(false);
-    expect(Math.abs(silent!.offsetSeconds - 1.2)).toBeLessThan(TOLERANCE_SECONDS);
+    // The displacement costs real accuracy. It is a genuine limitation of taking
+    // the separated vocal as the ruler, and nothing here fixes it.
+    expect(Math.abs(error)).toBeGreaterThan(0.002);
+    // …and yet it is still the BETTER of the two rulers, by a stated factor. The
+    // third pass replaced this answer with the other one.
+    expect(Math.abs(mixError)).toBeGreaterThan(Math.abs(error) * 2);
   });
 });
 

@@ -191,11 +191,6 @@ const confidentAlignment = (offsetSeconds: number): coverAlign.AlignmentMeasurem
   unevaluatedLagSeconds: 0,
   overlapSeconds: 5,
   refined: true,
-  // V3: the third pass ran and moved this lag. Stated on the base fixture
-  // because the field is not optional — "was the original song used as the
-  // ruler" is a fact every measurement knows about itself.
-  refinedAgainstMix: true,
-  mixRefinementSeconds: 0.014,
 });
 
 /**
@@ -1288,39 +1283,6 @@ describe('runCoverJourney — alignment and placement arithmetic', () => {
     expect(report!.placement!.instrumentalStartSample).toBe(3);
   });
 
-  it('states the refinement in the row when the original song moved the lag', async () => {
-    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
-    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
-    const stage = report!.stages.find((s) => s.id === 'align')!;
-    const refined = stage.derived.find((d) => d.label === 'Refinement');
-    expect(refined).toBeDefined();
-    // The fixture's mix pass moved the lag by 14 ms, and the row says so rather
-    // than leaving the user to wonder which of two numbers was placed.
-    expect(refined!.value).toContain('14');
-    expect(refined!.from).toMatch(/original song/i);
-  });
-
-  it('says nothing about a refinement that did not run', async () => {
-    const base = confidentAlignment(1.25);
-    delete base.mixRefinementSeconds;
-    alignTakeToReference.mockReturnValue({ ...base, refinedAgainstMix: false });
-    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
-    const stage = report!.stages.find((s) => s.id === 'align')!;
-    expect(stage.derived.find((d) => d.label === 'Refinement')).toBeUndefined();
-  });
-
-  it('hands the ORIGINAL SONG to the aligner, so the lag can be refined against it', async () => {
-    alignTakeToReference.mockReturnValue(confidentAlignment(1.25));
-    await runCoverJourney({ songDocId: songId, takeDocId: takeId });
-    expect(alignTakeToReference).toHaveBeenCalledTimes(1);
-    const song = useAppStore.getState().documents.find((d) => d.id === songId)!;
-    const mix = alignTakeToReference.mock.calls[0][4];
-    // The SONG's own samples and rate — not the vocal stem's, and not a copy
-    // taken before the run, so a song the user edited mid-pass is not aligned
-    // against a ghost.
-    expect(mix.sampleRate).toBe(song.sampleRate);
-    expect(mix.channels).toBe(song.channels);
-  });
 });
 
 // ── CC3 fix round 1: one shift arithmetic, shared with the apply arm ────────
