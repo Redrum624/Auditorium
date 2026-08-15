@@ -39,6 +39,21 @@ const OFFSET_SECONDS = Number(arg('offset') ?? 0);
 const SLICE_SECONDS = Number(arg('seconds') ?? 30);
 const RATE = Number(arg('rate') ?? 44100);
 
+// T3 — a review read these two exits as fall-through ("`app.exit(2)` does not
+// stop the script; execution continues into the PAGE template with
+// `JSON.stringify(null)` and registers `whenReady`"). MEASURED, on this repo's
+// Electron 43.3.0, that is not what happens: a three-line probe
+// (`console.error('BEFORE'); app.exit(2); console.error('AFTER')`) run under
+// `npx electron` printed BEFORE and exited 2, with AFTER never reaching the
+// terminal — `app.exit` does not return, so nothing below runs. Running this
+// script with no arguments at all prints the usage line ALONE, never the
+// "input not present at null" line eight lines down, which is the same fact
+// from the shipped path.
+//
+// Left as it is rather than restructured on a premise that does not hold, and
+// the measurement is written here so the next reader does not have to redo it.
+// If Electron ever changes that, the second check is what fails first and
+// loudly (`fs.existsSync(null)` is `false`, so it prints and exits 2 again).
 if (!IN || !OUT || !Number.isFinite(OFFSET_SECONDS) || !(SLICE_SECONDS > 0) || !(RATE > 0)) {
   console.error('usage: --in=<media> --out=<f32> [--offset=<s>] [--seconds=<n>] [--rate=<hz>]');
   app.exit(2);
