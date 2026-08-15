@@ -299,9 +299,13 @@ export default function TempoDialog({ onClose }: { onClose: () => void }) {
       const result = await runTempoAnalysis(doc);
       // T6-3: an analysis that lands after the tool is gone is a warmed CACHE,
       // keyed by document — not an edit, not undoable, and correct for the
-      // document it measured. So the run is left alone and only the setState is
-      // guarded. What must not happen is this dialog's state being written after
-      // it is gone; what may happen is the next opening finding the answer ready.
+      // document it measured. So the run is deliberately left to finish, and
+      // only the setState below is guarded. That guard is HYGIENE, not a fix:
+      // as of React 19 a setState after unmount is a silent no-op, so deleting
+      // it changes nothing observable and no test pins it (proven by mutation —
+      // the suite stayed green). It stays because reading "return early once
+      // this component is gone" at every await is what makes the ONE guard that
+      // does matter, in `handleApply`, unremarkable rather than a special case.
       if (cancelledRef.current) return;
       setDocEntry(result);
       setRegionOverride(null);

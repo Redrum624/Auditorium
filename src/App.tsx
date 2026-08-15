@@ -173,24 +173,40 @@ export default function App() {
    * finished result. Unmounting one does not background it, it throws the pass
    * away — minutes of inference, silently.
    *
-   * TWO do the opposite, and blocking is if anything more necessary for them.
-   * `TempoDialog` guards only a DOM ref, and `AlignTimingDialog` has no
-   * unmount ref at all: their `applyTempoChange` / align calls resolve and
-   * write to the store whichever way the UI went. Unmounting those mid-pass
-   * does not lose the work — it ORPHANS it, committing an edit and an undo
-   * entry to a document the user has walked away from, with no surface left
-   * that says it happened. So the block is what keeps the commit attached to
-   * the tool that asked for it.
+   * TWO used to do the opposite, and blocking was if anything more necessary
+   * for them. `TempoDialog` guarded only a DOM ref, and `AlignTimingDialog` had
+   * no unmount ref at all: their `applyTempoChange` / align calls resolved and
+   * wrote to the store whichever way the UI went. Unmounting those mid-pass did
+   * not lose the work — it ORPHANED it, committing an edit and an undo entry to
+   * a document the user had walked away from, with no surface left that said it
+   * happened.
    *
-   * Either way the fix is the same and the fix is not here: reattaching (or
-   * cancelling honestly) would mean lifting run state out of nine dialogs,
-   * which is the one thing this change may not do — their internals are being
-   * rewritten concurrently. Blocking is the honest choice for both shapes, and
-   * it is also what the tools already do: `dismissable={!busy}` has always
-   * refused Escape and a backdrop click mid-run. The block is that same signal,
-   * applied to the two doors hosting newly opened — the module strip, and
-   * swapping one hosted tool for another. (Follow-up, recorded rather than
-   * attempted: give Tempo and AlignTiming real cancel refs.)
+   * **T6-3 closed that, and the lock still stands.** Both now carry the cancel
+   * ref the recorded follow-up asked for, read by `runEffectOnSelection` between
+   * the audio arriving and `applyEdit` writing it, so a cancelled pass commits
+   * nothing — no stretch, no marker correction, no beat grid — and says
+   * `'cancelled'` rather than reporting the user's own walk-away as a no-op.
+   * Every unmount-shaped exit is now genuinely safe: the strip, the ✕, another
+   * pipeline tool, `focusSpatialPanel`.
+   *
+   * Relaxing the lock for these two was considered and REFUSED, because
+   * `moduleLock` is one flag driving four things and only three of them are
+   * unmount-shaped. The fourth is the keyboard suspension below, and the hazard
+   * it guards happens with the tool STILL MOUNTED — so no cancel ref can see it.
+   * `Ctrl+O` mid-pass makes another document active; the pass is pinned to its
+   * own `docId` and commits to the right audio, but `applyEdit` writes the
+   * GLOBAL selection and cursor (`editOps.ts`), which now belong to the document
+   * the user moved to. `Ctrl+W` on the running document is worse: `applyEdit`
+   * throws and the user is shown an "Effect failed" they did not cause. Trading
+   * a lock for that race is exactly what the retrofit was not for. The two are
+   * separable in principle — a second seam distinguishing "hold the module
+   * column" from "hold the keyboard" — and that is a change of its own, with its
+   * own evidence, not a side effect of this one.
+   *
+   * Worth stating plainly: even relaxed, switching module mid-pass would now
+   * DISCARD the run rather than orphan it. The retrofit turned a silent wrong
+   * commit into a silent loss of minutes of work. Safe is not the same as free,
+   * and blocking is still the better answer to "the user is about to lose this".
    *
    * What "the app stays live" does and does not mean. MOUSE interaction is
    * untouched throughout: the waveform, the transport, the toolbar, selection,

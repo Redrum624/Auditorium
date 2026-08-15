@@ -808,8 +808,8 @@ describe('TempoDialog — a walk-away commits nothing (T6-3)', () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
-  it('does not write its own state from a detection that lands after it is gone', async () => {
-    seedDoc();
+  it('lets a detection that lands after it is gone finish, and commits nothing for it', async () => {
+    const doc = seedDoc();
     mockGetTempo.mockReturnValue(null);
     let settle: (v: TempoEntry | null) => void = () => {};
     mockRunTempoAnalysis.mockReturnValue(
@@ -821,19 +821,20 @@ describe('TempoDialog — a walk-away commits nothing (T6-3)', () => {
     fireEvent.click(screen.getByTestId('tempo-detect-button'));
 
     unmount();
-    // The analysis itself is left to finish — it warms a per-document CACHE, not
-    // an undo entry — so what must not happen is this component being written
-    // to afterwards. React logs an error for that, and the console is asserted
-    // on rather than trusted.
-    const errors: unknown[] = [];
-    const spy = jest.spyOn(console, 'error').mockImplementation((...a) => void errors.push(a));
-    try {
-      await act(async () => {
-        settle(makeEntry({ bpm: 128 }));
-      });
-    } finally {
-      spy.mockRestore();
-    }
-    expect(errors).toEqual([]);
+    await act(async () => {
+      settle(makeEntry({ bpm: 128 }));
+    });
+
+    // The analysis is deliberately NOT cancelled: it warms a per-document
+    // analysis cache, keyed to the document it measured, and throwing that away
+    // would cost the user the wait for nothing. What it must never do is commit
+    // — and this is the assertion that would notice if it ever started to.
+    const post = useAppStore.getState().documents.find((d) => d.id === doc.id)!;
+    expect(post.channels[0]).toBe(doc.channels[0]);
+    expect(useAppStore.getState().markers[doc.id] ?? []).toEqual([]);
+    // The guard on the setState that follows is hygiene rather than a fix — as
+    // of React 19 a setState after unmount is a silent no-op, so deleting it
+    // changes nothing observable. It is stated here rather than pinned, because
+    // a test that cannot fail is worse than a sentence that is true.
   });
 });
