@@ -5,6 +5,80 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.30.0] - 2026-08-15
+
+Six lanes from one day of real use: two rendering defects, the gate's real-recording
+lesson, the alignment placing itself, the journey managing its own levels, a full
+Audition-style clip-editing set, and a launch splash. Every lane reviewed, fix-looped,
+and re-checked; two user suggestions answered by measurement rather than opinion.
+
+### Fixed
+
+- **Clips no longer paint over the track header at high zoom** — and stop swallowing
+  its clicks. Cause: the lane never clipped its children, and the waveform canvas's
+  256-px band quantum let it start almost exactly one header-width left of the lane;
+  the invisible clip box also sat above the header for hit-testing, which is why
+  M/S/R and the faders sometimes felt dead at scrolled zooms. Fix: the lane clips
+  (`overflow: clip`, deliberately not `hidden` — no scroll container), and the band
+  bound is a whole number of quanta, restoring the one-reraster-per-quantum lockstep
+  a "perf" change had silently halved. Verified visually at 596% on the packaged app.
+  Affects: `components/Multitrack/TrackLane.tsx`, `ClipView`, `clipBeatTics.ts`.
+- **The noise gate searches the whole take for a pause** instead of judging only the
+  single quietest half-second. Cause of the reported "noise was not removed": a real
+  take's quietest window was a breath, and the derivation declined the whole stage.
+  Now the twelve quietest passages are walked in level order (bounded by a measured
+  2.5 dB climb so the search can never step up into quiet singing), a genuine
+  cancellation reading anywhere hard-declines with the polarity message, and when no
+  window anywhere reads as a pause, "Gate at a level I set instead" makes silence
+  reachable by explicit choice — the field appears only when asked for, so an empty
+  box never reads as a forgotten setting. Affects: `services/vocalChain.ts`,
+  `dsp/chainAnalysis.ts`, `components/Dialogs/VocalChainDialog.tsx`.
+- **The Cover Chain's session can no longer clip on Mix Down out of the box** — the
+  pass that built the overshoot takes it out, trimming both faders by the overshoot
+  plus 1 dB, re-measuring the trimmed sum rather than promising it, and recording one
+  undoable "Cover level trim" entry. Its progress bar also stops walking backwards
+  during the second measurement. Affects: `services/coverJourney.ts`.
+
+### Added
+
+- **The alignment places the tracks itself.** A weak or ambiguous measurement now
+  auto-places the best candidate — numbers stated, rivals one "Place at ±X s" press
+  away — instead of handing over three buttons; only "no relation found" still lands
+  at zero. Affects: `dsp/coverAlign.ts`, `services/coverPlacement.ts`,
+  `components/Dialogs/CoverChainDialog.tsx`.
+- **Audition-style clip editing in the multitrack**: `Ctrl+Left/Right` jump the
+  cursor between clip edges (inside a clip: its own start/end); `Ctrl+Click` builds a
+  multi-selection whose members drag as a group and delete together; `Shift+Delete`
+  is Ripple Delete — remove the selection and close the gaps, crossfades re-arming
+  through the same maintenance a drag uses, one undo restoring everything; `Escape`
+  clears; the Properties panel shows "N clips selected". A fade-corner grab is an
+  edit gesture and keeps the selection. Multi-selection is view state: session files
+  and undo history are unchanged. Affects: `multitrack/sessionStore.ts`,
+  `components/Multitrack/*`, `services/shortcuts.ts`, `KEYBOARD_SHORTCUTS.md`.
+- **A launch splash** in the app's own glass, with real init milestones (the ladder
+  the user actually sees: 40/60/80/90/100), a bar that only climbs, and a failsafe
+  that never leaves a red error over a healthy-but-slow launch. Measured across
+  before/after launches: no added latency — the editor's load is already in flight
+  before the splash window exists. The e2e rigs now select the editor window by the
+  URL it loaded, never by arrival order. Affects: `electron/splash.cjs`,
+  `electron/splash.html`, `electron/main.cjs`, `scripts/e2e-lib.cjs`.
+
+### Answered by measurement (no feature shipped, on purpose)
+
+- **"Why not compare against the original song?"** Measured: an onset envelope is
+  spectral flux, and accompaniment under a vocal dilutes the flux at that vocal's own
+  attacks — refining against the full song relocates the placement onto a ruler whose
+  zero has moved, by exactly the amount it moved, at every bed level tested. No
+  correction survives that identity, so the separated vocal stays the ruler; the
+  sweep lives on as a kept 8-second derivation test. (A prototype of that refinement
+  briefly regressed the smoke's ±10 ms contract to 13 ms during this cycle; the smoke
+  caught it and the prototype is gone — placements recover the planted offset to
+  0.07 ms again.)
+- **"Maybe a targeted second pass on what's left?"** (v1.28's measured NO-GO,
+  re-affirmed): the probe that produced it now derives its stem order from the
+  host's own exports and throws before writing any verdict if the exact-sum law is
+  violated — the answer stands on enforced foundations.
+
 ## [1.29.0] - 2026-08-14
 
 The fix wave — "fix what needs fixing": a controller triage of every finding
