@@ -403,9 +403,14 @@ describe('overlap drop hint — X5’s Ctrl affordance, surfaced', () => {
     firePointer(el, 'pointerdown', { clientX: grab });
     firePointer(el, 'pointermove', { clientX: grab + 800 }); // preview end = 100 000, exact abut
     expect(byTestId(el, 'overlap-drag-hint')).toBeNull();
-    firePointer(el, 'pointermove', { clientX: grab + 800.01 }); // start 80 001 → 1-sample overlap
+    // W2 — a 1-sample overlap now needs Alt: the neighbour's start is an edge
+    // target, so an unsuspended drag this close is snapped back to the exact
+    // butt join (that pull-back IS the feature — micro-overlaps became opt-in).
+    // The > 0 hint boundary this test protects is unchanged; Alt is simply how
+    // a deliberate micro-overlap is made now.
+    firePointer(el, 'pointermove', { clientX: grab + 800.01, altKey: true }); // start 80 001 → 1-sample overlap
     expect(byTestId(el, 'overlap-drag-hint')).not.toBeNull();
-    firePointer(el, 'pointerup', { clientX: grab + 800.01 });
+    firePointer(el, 'pointerup', { clientX: grab + 800.01, altKey: true });
   });
 
   it('flips to "pushes clear" while Ctrl is held — from the pointer or from the keyboard alone', () => {

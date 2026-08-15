@@ -1,7 +1,11 @@
 import {
-  buildSessionSnapTargets,
+  buildSessionSnapTiers,
   mapClipSourceSample,
   sessionSnapTargets,
+  sessionSnapTiers,
+  SNAP_TIER_EDGE,
+  SNAP_TIER_MARKER,
+  SNAP_TIER_BEAT,
   type ClipSnapSource,
 } from './sessionSnapTargets';
 import * as beatGridService from '../../services/beatGrid';
@@ -72,26 +76,77 @@ describe('mapClipSourceSample — plan ruling 1, reused for markers', () => {
   });
 });
 
-describe('buildSessionSnapTargets (pure)', () => {
-  it('maps one clip’s beats onto the session timeline', () => {
+describe('buildSessionSnapTiers (pure)', () => {
+  it('maps one clip’s beats onto the session timeline, in the BEAT tier', () => {
     const s = source({ clip: { startSample: 10_000, offsetSample: 0, lengthSample: 100_000 } });
-    expect(buildSessionSnapTargets([s], 44_100, null)).toEqual([10_000, 32_050, 54_100]);
+    const tiers = buildSessionSnapTiers([s], 44_100, []);
+    expect(tiers[SNAP_TIER_BEAT]).toEqual([10_000, 32_050, 54_100]);
   });
 
-  it('EXCLUDES the dragged clip — snapping a clip to its own grid is a no-op by construction', () => {
-    // Trap 27: the clip carries its grid with it, so every one of its own tics
-    // sits at the same offset from its start no matter where it is dragged.
+  it('offers every other clip’s START and END as EDGE-tier targets (W2)', () => {
+    const s = source({ clip: { startSample: 10_000, offsetSample: 0, lengthSample: 100_000 } });
+    expect(buildSessionSnapTiers([s], 44_100, [])[SNAP_TIER_EDGE]).toEqual([10_000, 110_000]);
+  });
+
+  it('a butt-joined pair contributes ONE boundary at the shared sample, not two', () => {
+    const a = source({ clipId: 'a', clip: { startSample: 0, offsetSample: 0, lengthSample: 50_000 }, grid: null });
+    const b = source({ clipId: 'b', clip: { startSample: 50_000, offsetSample: 0, lengthSample: 50_000 }, grid: null });
+    expect(buildSessionSnapTiers([a, b], 44_100, [])[SNAP_TIER_EDGE]).toEqual([0, 50_000, 100_000]);
+  });
+
+  it('still offers the edges of a clip whose source document has CLOSED', () => {
+    // startSample/lengthSample are session-sample facts of the clip itself; only
+    // the beats and markers conversions need a rate, so only they refuse.
+    const s = source({ docRate: null, grid: makeGrid([0, 22_050]), markers: [1_000] });
+    const tiers = buildSessionSnapTiers([s], 44_100, []);
+    expect(tiers[SNAP_TIER_EDGE]).toEqual([0, 100_000]);
+    expect(tiers[SNAP_TIER_MARKER]).toEqual([]);
+    expect(tiers[SNAP_TIER_BEAT]).toEqual([]);
+  });
+
+  it('EXCLUDES the dragged clip entirely — grid, markers and edges (trap 27)', () => {
+    // The clip carries its grid AND its edges with it: its own start IS the
+    // position being dragged, so its own contribution would pin the drag in
+    // place. Nothing of the excluded clip may appear in any tier.
     const dragged = source({
       clipId: 'dragged',
       clip: { startSample: 500_000, offsetSample: 0, lengthSample: 100_000 },
+      markers: [10],
     });
     const other = source({
       clipId: 'other',
       clip: { startSample: 0, offsetSample: 0, lengthSample: 100_000 },
     });
-    const out = buildSessionSnapTargets([dragged, other], 44_100, 'dragged');
-    expect(out).toEqual([0, 22_050, 44_100]);
-    expect(out).not.toContain(500_000);
+    const tiers = buildSessionSnapTiers([dragged, other], 44_100, ['dragged']);
+    expect(tiers[SNAP_TIER_BEAT]).toEqual([0, 22_050, 44_100]);
+    expect(tiers[SNAP_TIER_EDGE]).toEqual([0, 100_000]);
+    for (const tier of tiers) {
+      expect(tier).not.toContain(500_000);
+      expect(tier).not.toContain(600_000);
+    }
+  });
+
+  it('EXCLUDES every co-moving member of a group drag, not just the grabbed clip (W2)', () => {
+    // Targets are captured at pointerdown and the group moves rigidly: a
+    // member's captured edges/beats describe where it is about to NOT be.
+    const grabbed = source({
+      clipId: 'grabbed',
+      clip: { startSample: 500_000, offsetSample: 0, lengthSample: 100_000 },
+    });
+    const member = source({
+      clipId: 'member',
+      clip: { startSample: 200_000, offsetSample: 0, lengthSample: 100_000 },
+      markers: [50],
+    });
+    const bystander = source({
+      clipId: 'bystander',
+      clip: { startSample: 0, offsetSample: 0, lengthSample: 100_000 },
+      grid: null,
+    });
+    const tiers = buildSessionSnapTiers([grabbed, member, bystander], 44_100, ['grabbed', 'member']);
+    expect(tiers[SNAP_TIER_EDGE]).toEqual([0, 100_000]);
+    expect(tiers[SNAP_TIER_MARKER]).toEqual([]);
+    expect(tiers[SNAP_TIER_BEAT]).toEqual([]);
   });
 
   it('unions the grids of SEVERAL other clips, ascending and duplicate-free', () => {
@@ -100,62 +155,62 @@ describe('buildSessionSnapTargets (pure)', () => {
       clipId: 'b',
       clip: { startSample: 22_050, offsetSample: 0, lengthSample: 50_000 },
     });
-    const out = buildSessionSnapTargets([a, b], 44_100, null);
+    const tiers = buildSessionSnapTiers([a, b], 44_100, []);
     // a -> 0, 22 050, 44 100 ; b -> 22 050, 44 100 (b's own beat 0 lands on its
     // start). The shared positions appear once.
-    expect(out).toEqual([0, 22_050, 44_100, 66_150]);
+    expect(tiers[SNAP_TIER_BEAT]).toEqual([0, 22_050, 44_100, 66_150]);
   });
 
-  it('includes the extra targets (the multitrack cursor)', () => {
-    const out = buildSessionSnapTargets([source()], 44_100, null, [12_345]);
-    expect(out).toContain(12_345);
+  it('places the extra targets (the multitrack cursor) in the EDGE tier', () => {
+    // The cursor is hard geometry the user parked — it must never lose to a
+    // beat line that merely happens to be a pixel closer (the H3 hazard).
+    const tiers = buildSessionSnapTiers([source()], 44_100, [], [12_345]);
+    expect(tiers[SNAP_TIER_EDGE]).toContain(12_345);
+    expect(tiers[SNAP_TIER_BEAT]).not.toContain(12_345);
   });
 
-  it('maps a clip’s source MARKERS through the same conversion', () => {
+  it('maps a clip’s source MARKERS through the same conversion, in the MARKER tier', () => {
     const s = source({
       clip: { startSample: 1_000, offsetSample: 500, lengthSample: 10_000 },
       grid: null,
       markers: [2_500, 400 /* before the window — dropped */],
     });
-    expect(buildSessionSnapTargets([s], 44_100, null)).toEqual([3_000]);
+    expect(buildSessionSnapTiers([s], 44_100, [])[SNAP_TIER_MARKER]).toEqual([3_000]);
   });
 
-  it('produces nothing for a clip whose source document has closed', () => {
-    const s = source({ docRate: null, grid: makeGrid([0, 22_050]), markers: [1_000] });
-    expect(buildSessionSnapTargets([s], 44_100, null)).toEqual([]);
-  });
-
-  it('produces nothing for a clip with no grid and no markers', () => {
-    expect(buildSessionSnapTargets([source({ grid: null })], 44_100, null)).toEqual([]);
+  it('produces no beats or markers for a clip with no grid and no markers', () => {
+    const tiers = buildSessionSnapTiers([source({ grid: null })], 44_100, []);
+    expect(tiers[SNAP_TIER_MARKER]).toEqual([]);
+    expect(tiers[SNAP_TIER_BEAT]).toEqual([]);
   });
 
   it('refuses a grid expressed in a rate other than the clip source’s', () => {
     const s = source({ docRate: 48_000, grid: makeGrid([0, 22_050], { sampleRate: 44_100 }) });
-    expect(buildSessionSnapTargets([s], 44_100, null)).toEqual([]);
+    expect(buildSessionSnapTiers([s], 44_100, [])[SNAP_TIER_BEAT]).toEqual([]);
   });
 
-  it('never emits a target outside the clip that produced it', () => {
+  it('never emits a beat target outside the clip that produced it', () => {
     const s = source({
       clip: { startSample: 10_000, offsetSample: 30_000, lengthSample: 20_000 },
       grid: makeGrid([0, 22_050, 44_100, 66_150]),
     });
-    const out = buildSessionSnapTargets([s], 44_100, null);
-    for (const t of out) {
+    const beats = buildSessionSnapTiers([s], 44_100, [])[SNAP_TIER_BEAT];
+    for (const t of beats) {
       expect(t).toBeGreaterThanOrEqual(10_000);
       expect(t).toBeLessThanOrEqual(30_000);
     }
-    expect(out).toEqual([24_100]); // only beat 44 100 falls in [30 000, 50 000)
+    expect(beats).toEqual([24_100]); // only beat 44 100 falls in [30 000, 50 000)
   });
 
   it('does not mutate a grid’s shared beatSamples array', () => {
     const grid = makeGrid([0, 22_050, 44_100]);
     const before = Array.from(grid.beatSamples);
-    buildSessionSnapTargets([source({ grid })], 44_100, null);
+    buildSessionSnapTiers([source({ grid })], 44_100, []);
     expect(Array.from(grid.beatSamples)).toEqual(before);
   });
 });
 
-describe('sessionSnapTargets (store-resolving)', () => {
+describe('sessionSnapTiers / sessionSnapTargets (store-resolving)', () => {
   let gridSpy: jest.SpyInstance;
   let doc: AudioDocument;
 
@@ -178,7 +233,7 @@ describe('sessionSnapTargets (store-resolving)', () => {
     _resetSnapPreference();
   });
 
-  it('collects every track’s clips except the excluded one, plus the multitrack cursor', () => {
+  it('collects every track’s clips except the excluded ones, plus the multitrack cursor', () => {
     const s = useSessionStore.getState();
     const trackA = s.session.tracks[0].id;
     const trackB = s.session.tracks[1].id;
@@ -186,17 +241,28 @@ describe('sessionSnapTargets (store-resolving)', () => {
     s.addClip(trackB, clip('b', 1_000_000));
     useSessionStore.getState().setMtCursor(777);
 
-    const out = sessionSnapTargets('b');
-    expect(out).toContain(0);
-    expect(out).toContain(22_050);
-    expect(out).toContain(777); // the session cursor
-    expect(out).not.toContain(1_000_000); // the excluded clip's own start beat
+    const tiers = sessionSnapTiers(['b']);
+    expect(tiers[SNAP_TIER_BEAT]).toContain(0);
+    expect(tiers[SNAP_TIER_BEAT]).toContain(22_050);
+    expect(tiers[SNAP_TIER_EDGE]).toContain(777); // the session cursor
+    expect(tiers[SNAP_TIER_EDGE]).toContain(0); // a's start
+    expect(tiers[SNAP_TIER_EDGE]).toContain(100_000); // a's end
+    for (const tier of tiers) expect(tier).not.toContain(1_000_000); // the excluded clip
+  });
+
+  it('offers clip edges ACROSS tracks and on the SAME track alike', () => {
+    const s = useSessionStore.getState();
+    s.addClip(s.session.tracks[0].id, clip('same-track', 300_000));
+    s.addClip(s.session.tracks[1].id, clip('cross-track', 600_000));
+    const edges = sessionSnapTiers(['dragged-elsewhere'])[SNAP_TIER_EDGE];
+    expect(edges).toEqual(expect.arrayContaining([300_000, 400_000, 600_000, 700_000]));
   });
 
   it('is EMPTY when the magnet is switched off, and asks for no grid', () => {
     const s = useSessionStore.getState();
     s.addClip(s.session.tracks[0].id, clip('a', 0));
     setSnapEnabled(false);
+    expect(sessionSnapTiers([])).toEqual([[], [], []]);
     expect(sessionSnapTargets(null)).toEqual([]);
     expect(gridSpy).not.toHaveBeenCalled();
   });
@@ -210,7 +276,7 @@ describe('sessionSnapTargets (store-resolving)', () => {
       s.addClip(s.session.tracks[i].id, clip(`c${i}`, i * 200_000));
     }
     gridSpy.mockClear();
-    sessionSnapTargets(null);
+    sessionSnapTiers([]);
     expect(gridSpy).toHaveBeenCalledTimes(1);
   });
 
@@ -220,7 +286,17 @@ describe('sessionSnapTargets (store-resolving)', () => {
     gridSpy.mockReturnValue(null);
     const m: Marker = { id: 'mk', name: 'x', positionSample: 1_234 };
     useAppStore.getState().setMarkersForDoc(doc.id, [m]);
-    expect(sessionSnapTargets(null)).toContain(6_234);
+    expect(sessionSnapTiers([])[SNAP_TIER_MARKER]).toContain(6_234);
+  });
+
+  it('sessionSnapTargets stays the FLAT union for the point surfaces (ruler, envelope)', () => {
+    const s = useSessionStore.getState();
+    s.addClip(s.session.tracks[0].id, clip('a', 5_000));
+    useSessionStore.getState().setMtCursor(777);
+    const flat = sessionSnapTargets(null);
+    // Edges, cursor, and beats all present, one ascending duplicate-free array.
+    expect(flat).toEqual(expect.arrayContaining([777, 5_000, 105_000, 27_050]));
+    expect([...flat].sort((a, b) => a - b)).toEqual(flat);
   });
 
   it('is empty for an empty session', () => {
