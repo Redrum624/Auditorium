@@ -254,7 +254,12 @@ function rms(channels: readonly Float32Array[], start: number, end: number): num
  *   aspirated onset and release deleted. The FIX is upstream of the ladder:
  *   rung 1 asks `measureNoiseWindow` for the mostly-real search, the same one
  *   `deriveGate` and `deriveRemoveSilence` ask for and for the same reason —
- *   this threshold decides what is removed.
+ *   this threshold decides what is removed. Asking is a NO-OP when the bare
+ *   search's winner is already mostly real: pinned head to head, both searches
+ *   returning the same window and the same envelope peak on a take that still
+ *   carries 1.45 s of device zeros, trimming to the same sample count as the
+ *   same recording without them ("trims a take whose bare winner is ALREADY
+ *   real…"). Zeros do not make this stage keep more; a diluted WINNER does.
  *
  * The first two are one mistake: a SELF-RELATIVE threshold cannot tell
  * "uniformly loud" from "uniformly silent", and it refuses the wrong one. So

@@ -2,6 +2,7 @@ import { MIN_SEAM_MS, deriveSeamSamples, spliceWord, type WordSpliceRequest } fr
 import { DETECT_RELEASE_MS, SPLICE_XFADE_MS } from './silenceDetect';
 import { MAX_RATIO, MIN_RATIO } from './wsola';
 import { SILENCE_RMS, detectPitch } from './pitchDetect';
+import { measureNoiseWindow } from './chainAnalysis';
 
 const SR = 44100;
 
@@ -670,6 +671,76 @@ describe('spliceWord trimming', () => {
       // ...and the zeros changed nothing. The trim is a measurement of the
       // recording's floor, and a stretch of digital silence is not one.
       expect(Math.abs(withZeros - withoutZeros) / withoutZeros).toBeLessThan(0.05);
+    });
+
+    /** The same take with a LOUD settling stretch beside the zeros. 1.43 s of
+     * zeros followed by -50 dBFS dilutes a boundary window only to about
+     * -64 dBFS — well above the take's own -74 steady floor — so no boundary
+     * window wins the search and the bare winner is already a legitimately
+     * mostly-real one. The zeros are still there; they simply are not next to
+     * anything quiet enough to launder.
+     *
+     * The head is a whole number of 50 ms chunks, unlike the RED take's, and for
+     * a different reason: candidate windows start on chunk boundaries, so a head
+     * of whole chunks means DROPPING it shifts the grid by whole chunks and the
+     * twin's windows land on exactly the same material. That is what makes an
+     * exact sample-for-sample comparison mean anything. It does not remove the
+     * boundary windows — one straddling the end of the zeros is still half zeros
+     * and still diluted — it only removes the 96 %-zeros extreme the RED take is
+     * built around. Diluted-and-losing is the shape under test. */
+    function undilutedTake(head: (n: number) => Float32Array): Float32Array[] {
+      const headLen = 29 * CHUNK;
+      return [
+        concat(
+          head(headLen),
+          floorAt(Math.round(1.0 * SR), -50, 23),
+          floorAt(Math.round(0.7 * SR), -74, 7),
+          breathAt(ASPIRATE, -68, 31),
+          tone(VOWEL, 220, 0.1),
+          breathAt(ASPIRATE, -68, 37),
+          floorAt(Math.round(0.8 * SR), -74, 11)
+        ),
+      ];
+    }
+
+    it('trims a take whose bare winner is ALREADY real exactly as its zeros-free twin does', () => {
+      // The converse the fix owes, head to head. Rung 1 was moved from the bare
+      // search to the mostly-real one; on the take above that changed the
+      // threshold, which is the point. Here it must change NOTHING, and the
+      // reason is asserted rather than assumed: the two searches are asked
+      // separately and return the SAME window, so the fix is provably a no-op
+      // on this shape rather than merely appearing to be one.
+      const withZeros = undilutedTake(silence);
+
+      // It really is the shape: exact zeros are present...
+      let zeros = 0;
+      for (let i = 0; i < withZeros[0].length; i++) if (withZeros[0][i] === 0) zeros++;
+      expect(zeros).toBeGreaterThan(Math.round(1.4 * SR));
+
+      // ...and the bare search's winner is itself mostly real, so both searches
+      // land on the same window and the same envelope peak, to the bit.
+      const bare = measureNoiseWindow(withZeros, SR)!;
+      const real = measureNoiseWindow(withZeros, SR, { rejectMostlySilentWindows: true })!;
+      expect(bare.startSample).toBe(real.startSample);
+      expect(bare.envelopePeakDb).toBe(real.envelopePeakDb);
+      // The winner sits past the zeros entirely — it is the take's own steady
+      // floor, not a boundary window that got away with it.
+      expect(bare.startSample).toBeGreaterThanOrEqual(Math.round(1.4 * SR));
+
+      // The contrast that makes this a converse rather than a restatement: on
+      // the RED shape, whose settling stretch is 12 dB quieter, the same two
+      // calls disagree by more than a decibel.
+      const diluting = take(silence);
+      const dilutedBare = measureNoiseWindow(diluting, SR)!;
+      const dilutedReal = measureNoiseWindow(diluting, SR, { rejectMostlySilentWindows: true })!;
+      expect(Math.abs(dilutedBare.envelopePeakDb - dilutedReal.envelopePeakDb)).toBeGreaterThan(1);
+
+      // And the behaviour: the same recording from a device that writes no
+      // zeros at all keeps exactly the same number of samples. Not "within a
+      // few percent" — the same integer, because the threshold is the same
+      // number and the material either side of it is identical.
+      const zerosFreeTwin = undilutedTake(() => new Float32Array(0));
+      expect(keptSamples(withZeros)).toBe(keptSamples(zerosFreeTwin));
     });
 
     it('still trims: the settling floor is sound by the take own rule, the zeros are not', () => {
