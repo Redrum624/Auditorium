@@ -126,3 +126,88 @@ describe('no rig acquires a window by arrival order any more', () => {
     }
   });
 });
+
+/**
+ * T3 (v1.28 ledger) — `ensureFixtures` regenerated on ABSENCE alone, so a
+ * generator change left every fixture already on disk untouched.
+ *
+ * The failure that costs is the silent one: a generator's ground truth moves,
+ * `test-assets/` still holds the pair built by the OLD recipe, and the run goes
+ * green against a fixture nobody meant to keep — or fails somewhere downstream
+ * with a number that reads like a bug in the app. Nothing on disk said which
+ * generator made what.
+ *
+ * The DECISION is separated from the shelling-out so it can be driven over real
+ * files in a temp directory rather than over this repo's own `scripts/`. What
+ * is pinned here is when a fixture counts as stale, which is the whole of the
+ * defect; running the generator is the part that was never in question.
+ */
+describe('a fixture is stale when the generator that made it has moved', () => {
+  const os = require('node:os');
+  const { fixtureIsStale, stampFixture } = require('./e2e-lib.cjs');
+
+  let dir;
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'auditorium-fixture-stamp-'));
+  });
+  afterEach(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const write = (name, body) => {
+    const file = path.join(dir, name);
+    fs.writeFileSync(file, body);
+    return file;
+  };
+
+  it('is stale while the fixture is absent, whatever the generator says', () => {
+    const gen = write('gen.cjs', 'module.exports = 1;\n');
+    expect(fixtureIsStale(path.join(dir, 'out.wav'), gen)).toBe(true);
+  });
+
+  it('stops being stale once the fixture is there AND carries its generator', () => {
+    const gen = write('gen.cjs', 'module.exports = 1;\n');
+    const out = write('out.wav', 'audio');
+    // The fixture alone is not enough: an unstamped file is one whose recipe is
+    // unknown, which is the state every fixture on disk was in before this.
+    expect(fixtureIsStale(out, gen)).toBe(true);
+    stampFixture(out, gen);
+    expect(fixtureIsStale(out, gen)).toBe(false);
+  });
+
+  it('is stale again the moment the generator is edited, fixture still in place', () => {
+    const gen = write('gen.cjs', 'module.exports = 1;\n');
+    const out = write('out.wav', 'audio');
+    stampFixture(out, gen);
+    fs.writeFileSync(gen, 'module.exports = 2;\n');
+    expect(fs.existsSync(out)).toBe(true);
+    expect(fixtureIsStale(out, gen)).toBe(true);
+  });
+
+  it('follows the generator into the modules it requires', () => {
+    // Not hypothetical: `make-test-cover.cjs`'s planted offset now lives in
+    // `cover-fixture-manifest.cjs`, so a digest of the generator's own bytes
+    // alone would be watching the wrong file and would miss the ground truth
+    // moving.
+    const dep = write('dep.cjs', 'module.exports = { OFFSET_SECONDS: 0.75 };\n');
+    const gen = write(
+      'gen.cjs',
+      "const { OFFSET_SECONDS } = require('./dep.cjs');\nmodule.exports = OFFSET_SECONDS;\n"
+    );
+    const out = write('out.wav', 'audio');
+    stampFixture(out, gen);
+    expect(fixtureIsStale(out, gen)).toBe(false);
+    fs.writeFileSync(dep, 'module.exports = { OFFSET_SECONDS: 1.5 };\n');
+    expect(fixtureIsStale(out, gen)).toBe(true);
+  });
+
+  it('tells two generators apart by name, not only by their contents', () => {
+    // Two generators can hold identical bytes at some point in their lives; a
+    // fixture stamped by one must not be accepted as built by the other.
+    const body = 'module.exports = 1;\n';
+    const a = write('gen-a.cjs', body);
+    const b = write('gen-b.cjs', body);
+    const out = write('out.wav', 'audio');
+    stampFixture(out, a);
+    expect(fixtureIsStale(out, a)).toBe(false);
+    expect(fixtureIsStale(out, b)).toBe(true);
+  });
+});

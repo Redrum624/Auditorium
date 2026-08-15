@@ -21,6 +21,7 @@
 
 const path = require('node:path');
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const { execFileSync } = require('node:child_process');
 const { _electron: electron } = require('playwright');
 
@@ -300,18 +301,118 @@ async function pinWindowGeometry(app, want) {
 }
 
 /**
- * Generates any missing fixture from its own plain-Node generator.
+ * T3 — the generator's own source, plus the source of every module it reaches
+ * by a RELATIVE require, best-effort and transitive.
+ *
+ * A generator's output is a function of its whole local recipe, not of one
+ * file's bytes: `make-test-cover.cjs` reads its planted offset from
+ * `cover-fixture-manifest.cjs`, so a digest of the generator alone would watch
+ * the wrong file and call a fixture fresh while the ground truth in it had
+ * moved. Package requires are deliberately NOT followed — these generators are
+ * plain-Node by contract (standard library only), so there is nothing there to
+ * follow, and walking `node_modules` would make this cost more than the
+ * generation it is trying to skip.
+ *
+ * The regex is a reader, not a parser, and it does not have to be exact in
+ * either direction: a require it misses costs a stale fixture nobody notices
+ * (the state before this existed), and a string it matches that was never a
+ * require costs one unnecessary regeneration. Both are cheaper than a parser.
+ *
+ * The NAME is hashed beside the bytes so two generators that happen to hold
+ * identical source are still told apart.
+ */
+function generatorRecipe(scriptPath, seen = new Set()) {
+  const resolved = path.resolve(scriptPath);
+  if (seen.has(resolved)) return [];
+  seen.add(resolved);
+  let source;
+  try {
+    source = fs.readFileSync(resolved, 'utf8');
+  } catch {
+    // A require this reader resolved to a path that is not a readable file
+    // (an extensionless directory require, a name it mis-read). Skipping it
+    // loses one input to the digest; throwing would take the whole run down
+    // over a fixture-freshness check.
+    return [];
+  }
+  const parts = [`${path.basename(resolved)}\n${source}`];
+  for (const m of source.matchAll(/require\(\s*['"](\.[^'"]*)['"]\s*\)/g)) {
+    parts.push(...generatorRecipe(path.resolve(path.dirname(resolved), m[1]), seen));
+  }
+  return parts;
+}
+
+/** The digest of that recipe — what a fixture is stamped with. */
+function generatorStamp(scriptPath) {
+  return crypto
+    .createHash('sha256')
+    .update(generatorRecipe(scriptPath).join(' '))
+    .digest('hex');
+}
+
+/** Where a fixture records the generator it was built by. Beside the fixture,
+ * so it is deleted with it, and inside `test-assets/`, which is gitignored —
+ * nothing here is ever committed. */
+function stampPath(file) {
+  return `${file}.generator`;
+}
+
+/** Records that `file` was built by `scriptPath` as it stands right now. */
+function stampFixture(file, scriptPath) {
+  fs.writeFileSync(stampPath(file), generatorStamp(scriptPath));
+}
+
+/**
+ * T3 (v1.28 ledger) — whether `file` has to be built again.
+ *
+ * Absent, or built by a recipe that is not the one on disk now. An UNSTAMPED
+ * fixture counts as stale: it is a file whose recipe is unknown, which is the
+ * state every fixture was in while this only checked existence, and one
+ * regeneration is the cheapest way out of it.
+ */
+function fixtureIsStale(file, scriptPath) {
+  if (!fs.existsSync(file)) return true;
+  let stamped;
+  try {
+    stamped = fs.readFileSync(stampPath(file), 'utf8').trim();
+  } catch {
+    return true;
+  }
+  return stamped !== generatorStamp(scriptPath);
+}
+
+/**
+ * Generates any missing OR STALE fixture from its own plain-Node generator.
  *
  * `test-assets/` is gitignored, so no fixture is ever committed; each generator
  * uses a deterministic PRNG, so the file it writes is byte-identical on every
  * machine. `specs` is a list of `[absolutePath, generatorScriptName, label]`.
+ *
+ * T3: staleness, not absence. It used to regenerate only what was missing, so
+ * editing a generator left the fixture built by the previous recipe in place
+ * and every rig went on running against it — silently, because a fixture's file
+ * name says nothing about which version of the recipe wrote it.
+ *
+ * One generator writes several fixtures (`make-test-cover.cjs` writes ten), so
+ * each script is run AT MOST ONCE per call and every fixture it owns is stamped
+ * after it: running it per stale output would rebuild the same ten files ten
+ * times.
  */
 function ensureFixtures(specs) {
+  const ran = new Set();
   for (const [file, script, label] of specs) {
-    if (!fs.existsSync(file)) {
+    const scriptPath = path.join(ROOT, 'scripts', script);
+    if (!fixtureIsStale(file, scriptPath)) continue;
+    if (!ran.has(scriptPath)) {
       console.log(`Generating ${label}...`);
-      execFileSync(process.execPath, [path.join(ROOT, 'scripts', script)], { stdio: 'inherit' });
+      execFileSync(process.execPath, [scriptPath], { stdio: 'inherit' });
+      ran.add(scriptPath);
     }
+    // Stamped from the spec rather than from what the generator happened to
+    // write: these are the files the caller declared this generator owns, and
+    // an output it produced that nobody declared is not one any rig will look
+    // for.
+    if (fs.existsSync(file)) stampFixture(file, scriptPath);
   }
 }
 
@@ -373,6 +474,7 @@ module.exports = {
   canvasHash,
   closeApp,
   ensureFixtures,
+  fixtureIsStale,
   launchApp,
   openModuleCard,
   pinWindowGeometry,
@@ -380,5 +482,6 @@ module.exports = {
   realClick,
   realDrag,
   spectroHash,
+  stampFixture,
   waitNonUniform,
 };
