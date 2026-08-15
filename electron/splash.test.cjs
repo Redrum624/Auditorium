@@ -523,6 +523,78 @@ describe('the failsafe: a splash that outlives its renderer still ends', () => {
   });
 });
 
+describe('a splash that is gone stops holding the editor back', () => {
+  // Fix round 2, M-4. The pair-wait is only free because the user is looking at
+  // the splash for the whole of it. Take the splash away — its page failed to
+  // load, so it closed itself (the `loadFile` rejection path above) — and a slow
+  // or crashed renderer leaves the user with NO WINDOW AT ALL until the failsafe
+  // fires seconds later. That is strictly worse than the behaviour this feature
+  // replaced, which showed the editor on `ready-to-show` alone. So the moment
+  // the splash is gone the gate drops back to exactly that.
+
+  test('the editor is shown on ready-to-show alone once the splash has closed', () => {
+    const { splash, mainWin, splashWin } = launched({ failsafeMs: 5000 });
+    splashWin.close();
+
+    mainWin.emit('ready-to-show');
+    expect(mainWin.shown).toBe(true); // no timer advanced: not the failsafe
+  });
+
+  test('…including the case that motivates it: the page never loaded', () => {
+    // The compound edge, end to end. `loadFile` rejects, the splash closes
+    // itself, the renderer never reports ready at all.
+    const created = [];
+    function FakeBrowserWindow(options) {
+      const win = makeFakeWindow(options);
+      win.loadFile = () => Promise.reject(new Error('ENOENT'));
+      created.push(win);
+      return win;
+    }
+    const splash = createSplashController({
+      BrowserWindow: FakeBrowserWindow,
+      ipcMain: makeFakeIpcMain(),
+      splashFile: 'C:\\gone\\splash.html',
+      preloadFile: 'C:\\app\\electron\\splashPreload.cjs',
+      failsafeMs: 5000,
+    });
+    splash.open();
+    const mainWin = makeFakeWindow({});
+    splash.adoptMainWindow(mainWin);
+
+    return Promise.resolve()
+      .then(() => Promise.resolve())
+      .then(() => {
+        mainWin.emit('ready-to-show');
+        expect(mainWin.shown).toBe(true); // no timer advanced
+      });
+  });
+
+  test('but a closed splash still cannot show a window that has not painted', () => {
+    // Relaxing the gate must not turn into showing an unpainted window: the
+    // white flash is the thing this whole shape exists to prevent, and
+    // `ready-to-show` is the half that rules it out. Only the renderer's half
+    // is dropped.
+    const { mainWin, splashWin } = launched({ failsafeMs: 5000 });
+    splashWin.close();
+
+    jest.advanceTimersByTime(4999);
+    expect(mainWin.shown).toBe(false);
+  });
+
+  test('the splash closing AFTER a normal handoff changes nothing', () => {
+    // The handoff closes the splash itself, 300 ms later. That `closed` must not
+    // re-enter the handoff it was caused by.
+    const { splash, mainWin, splashWin } = launched();
+    mainWin.emit('ready-to-show');
+    splash.rendererIsReady();
+    mainWin.shown = false;
+
+    jest.advanceTimersByTime(300);
+    expect(splashWin.destroyed).toBe(true);
+    expect(mainWin.shown).toBe(false);
+  });
+});
+
 // main.cjs cannot be require()d outside a real Electron process (it calls
 // app.setName/app.whenReady at module scope), so its use of the controller is
 // guarded by asserting on its source -- the same approach prodGate.test.cjs and

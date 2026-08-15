@@ -37,6 +37,10 @@
  *     page shows the stage init has genuinely reached rather than a stage timed
  *     to arrive after a guess.
  *
+ * The pair is waited for only while there is a splash to wait behind. If the
+ * splash is gone before the handoff, the renderer's half is dropped and the
+ * editor is shown on `ready-to-show` alone (see `splashGone`).
+ *
  * And one failsafe, because a splash that outlives its renderer is worse than
  * no splash: if the renderer never reports ready, the editor is shown anyway
  * after `failsafeMs`, with the reason written on the splash's error line.
@@ -79,6 +83,17 @@ function createSplashController({
   let highWater = -1;
   let readyToShow = false;
   let rendererReady = false;
+  /** The splash is no longer on screen, and the handoff had not happened yet.
+   *
+   * Waiting for BOTH halves of "ready" is only free because the user spends the
+   * wait looking at the splash. With the splash gone — its page failed to load,
+   * so it closed itself — a slow or crashed renderer would leave the user with
+   * NO window at all until the failsafe, which is strictly worse than the
+   * `ready-to-show`-alone behaviour this feature replaced. So the gate drops
+   * back to exactly that. `ready-to-show` is never dropped: it is the half that
+   * rules out showing an unpainted window, which is the flash this shape exists
+   * to prevent. */
+  let splashGone = false;
   let handedOff = false;
   /** @type {any} */ let failsafeTimer = null;
 
@@ -133,7 +148,8 @@ function createSplashController({
   }
 
   function maybeHandOff() {
-    if (handedOff || !readyToShow || !rendererReady) return;
+    if (handedOff || !readyToShow) return;
+    if (!rendererReady && !splashGone) return;
     handOff();
   }
 
@@ -190,6 +206,14 @@ function createSplashController({
     splashWindow.on('closed', () => {
       splashWindow = null;
       splashLoaded = false;
+      // Only meaningful BEFORE the handoff: the handoff closes the splash
+      // itself 300 ms after showing the editor, and re-entering from that would
+      // be re-entering a handoff that has already happened (`handedOff` would
+      // stop it anyway — this keeps the intent visible).
+      if (!handedOff) {
+        splashGone = true;
+        maybeHandOff();
+      }
     });
 
     return splashWindow;
