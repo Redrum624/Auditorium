@@ -2006,6 +2006,11 @@ async function main() {
           `${clipSelects} with a clip`
       );
       assert(
+        propertiesDocumentSelects >= 0,
+        `the document-view control was actually measured (${propertiesDocumentSelects}) — without ` +
+          `it the differential below compares against a sentinel and passes on anything`
+      );
+      assert(
         clipSelects > propertiesDocumentSelects,
         `selecting a clip MOUNTED selects the document view has none of ` +
           `(${propertiesDocumentSelects} → ${clipSelects}) — the differential is what makes this ` +
