@@ -1035,6 +1035,20 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   setSelectedClip(id) {
     // K1: a single select IS the whole selection — the set follows the primary
     // rather than accumulating beside it.
+    //
+    // THE ASYMMETRY WITH `toggleSelectedClip`, named rather than closed.
+    // The toggle refuses an id no clip carries (`liveClipIds` below) because
+    // the group verbs read the set directly and a dangling member would be a
+    // silent partial delete. This setter has no such check, so it can seat a
+    // dangling id as both primary and sole member. That is an asymmetry, not a
+    // live bug: no production caller can supply one — `TrackLane` passes null,
+    // `ClipView` passes the clip it is rendering, `sessionInsert` the clip it
+    // has just placed, `menuActions` null — and the set is defended twice
+    // downstream anyway (`removeClips`/`moveClipsBy` skip unknown ids, and the
+    // next session write runs `reconcileSelection`). Closing it here would be a
+    // behaviour change rather than a tightening: this is the raw setter, and
+    // `sessionStore.test.ts`'s "update state directly" pins that it writes the
+    // id it is given against a session that holds no clips at all.
     set((s) => {
       // K1 no-op guard, in the spirit of the ones on the session writers above
       // and load-bearing for the same kind of reason rather than as an
