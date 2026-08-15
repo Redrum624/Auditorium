@@ -2921,7 +2921,11 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
   /** I1's shape at an arbitrary rate: an ordinary floor a decibel above a
    * quiet passage whose channels cancel. It belongs in THIS population because
    * of where it lands in it — see the test that consumes it. */
-  function cancellingUnderFloorTake(sr: number, seed: number): Float32Array[] {
+  function cancellingUnderFloorTake(
+    sr: number,
+    seed: number,
+    floorDb = -55
+  ): { channels: Float32Array[]; inverted: { start: number; end: number }; floor: { start: number; end: number } } {
     const phrase = Math.round(1.2 * sr);
     const gap = Math.round(0.9 * sr);
     const L = new Float32Array(3 * phrase + 2 * gap);
@@ -2934,6 +2938,7 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
     let at = 0;
     both(at, phrase);
     at += phrase;
+    const inverted = { start: at, end: at + gap };
     const w = whisperAt(gap, -56, seed + 61, sr);
     for (let i = 0; i < gap; i++) {
       L[at + i] = w[i];
@@ -2942,15 +2947,16 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
     at += gap;
     both(at, phrase);
     at += phrase;
-    const fa = gaussFloorDb(gap, -55, seed + 71);
-    const fb = gaussFloorDb(gap, -55, seed + 72);
+    const floor = { start: at, end: at + gap };
+    const fa = gaussFloorDb(gap, floorDb, seed + 71);
+    const fb = gaussFloorDb(gap, floorDb, seed + 72);
     for (let i = 0; i < gap; i++) {
       L[at + i] = fa[i];
       R[at + i] = fb[i];
     }
     at += gap;
     both(at, phrase);
-    return [L, R];
+    return { channels: [L, R], inverted, floor };
   }
 
   /** The climb from the quietest candidate to the quietest candidate lying
@@ -3027,38 +3033,103 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
    * populations above without reading them, this member still says the level
    * is the wrong instrument for this shape.
    */
-  it('a cancelling passage lands INSIDE the permissive band, which is why level cannot decide it', () => {
-    const climbs: number[] = [];
-    for (const sr of [8000, 22050, 44100, 48000]) {
-      for (const seed of [5, 17, 29]) {
-        const channels = cancellingUnderFloorTake(sr, seed);
-        const cands = measureNoiseWindows(channels, sr, {
-          rejectMostlySilentWindows: true,
-          maxCandidates: GATE_QUIET_WINDOWS,
-        });
-        // The cancelling window is the quietest, and the next candidate up is
-        // an ordinary floor: exactly the step the search would have taken.
-        const mono = new Float32Array(cands[0].lengthSamples);
-        for (let i = 0; i < mono.length; i++) {
-          mono[i] = (channels[0][cands[0].startSample + i] + channels[1][cands[0].startSample + i]) / 2;
-        }
-        let sq = 0;
-        for (let i = 0; i < mono.length; i++) sq += mono[i] * mono[i];
-        expect(cands[0].rmsDb - toDb(Math.sqrt(sq / mono.length))).toBeGreaterThan(GATE_CANCELLATION_DEPTH_DB);
-        climbs.push(cands[1].envelopePeakDb - cands[0].envelopePeakDb);
-      }
-    }
-    expect(climbs).toHaveLength(12);
-    // INSIDE the band the search is allowed to cross — the same half the
-    // breath population occupies, not the destructive one.
-    expect(Math.max(...climbs)).toBeLessThanOrEqual(GATE_SEARCH_CLIMB_DB);
+  /** True when `w` lies wholly inside `span` — the sibling idiom the I1 shape
+   * test uses, so "the next candidate is the ordinary floor" is a statement
+   * about WHERE the window is and not merely about its level. */
+  const inWindow = (
+    w: { startSample: number; lengthSamples: number },
+    span: { start: number; end: number }
+  ): boolean => w.startSample >= span.start && w.startSample + w.lengthSamples <= span.end;
 
-    // ...and the stage refuses anyway, on the diagnosis rather than the level.
+  /** How far the mono mix of `w` sits below its own per-channel RMS: the
+   * cancellation depth the diagnosis reads. */
+  function cancellationDepthDb(
+    channels: Float32Array[],
+    w: { startSample: number; lengthSamples: number; rmsDb: number }
+  ): number {
+    const mono = new Float32Array(w.lengthSamples);
+    for (let i = 0; i < mono.length; i++) {
+      mono[i] = (channels[0][w.startSample + i] + channels[1][w.startSample + i]) / 2;
+    }
+    let sq = 0;
+    for (let i = 0; i < mono.length; i++) sq += mono[i] * mono[i];
+    return w.rmsDb - toDb(Math.sqrt(sq / mono.length));
+  }
+
+  /** The step the search would have taken on this shape: cancelling window to
+   * next candidate, asserted to be the inverted passage and the ordinary floor
+   * respectively, in that order and by POSITION. */
+  function stepFromCancellingToFloor(sr: number, seed: number, floorDb?: number): number {
+    const { channels, inverted, floor } = cancellingUnderFloorTake(sr, seed, floorDb);
+    const cands = measureNoiseWindows(channels, sr, {
+      rejectMostlySilentWindows: true,
+      maxCandidates: GATE_QUIET_WINDOWS,
+    });
+    expect(inWindow(cands[0], inverted)).toBe(true);
+    expect(cancellationDepthDb(channels, cands[0])).toBeGreaterThan(GATE_CANCELLATION_DEPTH_DB);
+    // The step's DESTINATION, pinned by position rather than inferred. Without
+    // this the climb below is a difference between two windows that could both
+    // have drifted anywhere, and the sentence "the next candidate up is the
+    // ordinary floor" would be a claim about the fixture nobody checks.
+    expect(inWindow(cands[1], floor)).toBe(true);
+    return cands[1].envelopePeakDb - cands[0].envelopePeakDb;
+  }
+
+  it('a cancelling passage lands INSIDE the permissive band, which is why level cannot decide it', () => {
+    // ARM 1 — the shape as I1 found it. The floor is a decibel above the
+    // cancelling passage in RMS, but its envelope peak is BELOW it (a floor is
+    // flat where a whisper is modulated), so every step is a DESCENT: the climb
+    // bound is satisfied by a take going downhill.
+    const descents: number[] = [];
+    for (const sr of [8000, 22050, 44100, 48000]) {
+      for (const seed of [5, 17, 29]) descents.push(stepFromCancellingToFloor(sr, seed));
+    }
+    expect(descents).toHaveLength(12);
+    // Measured -3.49 … -1.10 dB. Stated as the descent it is, because a
+    // "≤ 2.5 dB" reading of a set of negative numbers says nothing about 2.5.
+    expect(Math.max(...descents)).toBeLessThan(0);
+
+    // ARM 2 — the same shape with the floor 3.5 dB louder, which is what makes
+    // the step a genuine CLIMB while leaving it legal. This arm is what gives
+    // the bound its bite here: the six members run 0.63 … 1.73 dB, so the
+    // "inside the band" assertion below now FAILS for any constant under
+    // 1.73 dB, where arm 1 alone would have passed with the constant at zero.
+    //
+    // Two rates rather than four, and the reason is a measurement: this shape's
+    // step spreads 2.39 dB across 4 rates x 3 seeds (its cancelling window's
+    // envelope peak is the modulated one), which is very nearly the whole 2.5 dB
+    // width of the band. At this floor level the 44.1/48 kHz members read 0.01
+    // and 2.40 dB — inside, but with no margin at either end to assert. The
+    // shape cannot be centred in the band at every rate at once, and saying so
+    // is more honest than picking a level that hides it.
+    const climbs: number[] = [];
+    for (const sr of [8000, 22050]) {
+      for (const seed of [5, 17, 29]) climbs.push(stepFromCancellingToFloor(sr, seed, -51.5));
+    }
+    expect(climbs).toHaveLength(6);
+    // A real climb, and one the search is allowed to make.
+    expect(Math.min(...climbs)).toBeGreaterThan(0);
+    expect(Math.max(...climbs)).toBeLessThanOrEqual(GATE_SEARCH_CLIMB_DB);
+    // Margins on the constant's own scale, both sides, so the arm stays useful
+    // if the constant moves and fails loudly if the fixture drifts into either
+    // wall: measured 0.25x and 0.69x of it.
+    expect(Math.min(...climbs) / GATE_SEARCH_CLIMB_DB).toBeGreaterThan(0.2);
+    expect(Math.max(...climbs) / GATE_SEARCH_CLIMB_DB).toBeLessThan(0.8);
+
+    // ...and the stage refuses BOTH arms anyway, on the diagnosis rather than
+    // the level — which is the whole point. Arm 2 is the sharper witness: the
+    // level positively permits that step, and the take still declines.
     for (const sr of [8000, 44100]) {
-      const res = deriveGate(cancellingUnderFloorTake(sr, 5), sr);
-      expect(res.run).toBe(false);
-      if (res.run) return;
-      expect(res.reason).toContain('cancel');
+      const descending = deriveGate(cancellingUnderFloorTake(sr, 5).channels, sr);
+      expect(descending.run).toBe(false);
+      if (descending.run) return;
+      expect(descending.reason).toContain('cancel');
+    }
+    for (const sr of [8000, 22050]) {
+      const climbing = deriveGate(cancellingUnderFloorTake(sr, 5, -51.5).channels, sr);
+      expect(climbing.run).toBe(false);
+      if (climbing.run) return;
+      expect(climbing.reason).toContain('cancel');
     }
   }, 600000);
 });
