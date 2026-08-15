@@ -969,6 +969,17 @@ export const GATE_SHAPED_RESIDUAL_DB = 2.5;
  * channels that are derived copies, for which the polarity diagnosis is the
  * right one — while shallower pairs keep a faithful, merely attenuated mix
  * and fall through to the ordinary checks.
+ *
+ * WHAT V2 CHANGED ABOUT IT (I1). The search made every other refusal
+ * per-window: a candidate that is not a pause is stepped past, and the next
+ * one is asked. This one is not a refusal of that kind and is never stepped
+ * past — see `cancellationDiagnosis`. The take that forced the distinction:
+ * only the QUIET passage is inverted, an ordinary floor sits a decibel above
+ * it, and the level bound the search is otherwise governed by
+ * (`GATE_SEARCH_CLIMB_DB`) puts that step squarely in its permissive half —
+ * measured, twelve members at 8/22.05/44.1/48 kHz x 3 seeds, all inside the
+ * band, kept beside that constant's own populations. Level cannot decide this
+ * shape, so the diagnosis decides it.
  */
 export const GATE_CANCELLATION_DEPTH_DB = 60;
 
@@ -988,21 +999,70 @@ export const GATE_CANCELLATION_DEPTH_DB = 60;
  * whose failure is the one the decline reports, is always judged in the order
  * these messages were derived in.
  */
-function classifyQuietWindow(
-  channels: Float32Array[],
-  sampleRate: number,
-  noise: NoiseWindow,
-  costOrder: boolean
-): string | null {
-  // Mixed over the WINDOW only, not the take: `monoMix` on a 142 s stereo take
-  // would allocate 25 MB to look at half a second of it, and the cost of this
-  // check should not scale with a length it never reads.
+/** The mono MIX of one candidate window — what the content checks read.
+ * Mixed over the WINDOW only, not the take: `monoMix` on a 142 s stereo take
+ * would allocate 25 MB to look at half a second of it, and the cost of these
+ * checks should not scale with a length they never read. */
+function mixQuietWindow(channels: Float32Array[], noise: NoiseWindow): Float32Array {
   const window = new Float32Array(noise.lengthSamples);
   for (let i = 0; i < window.length; i++) {
     let sum = 0;
     for (const c of channels) sum += c[noise.startSample + i];
     window[i] = sum / channels.length;
   }
+  return window;
+}
+
+/**
+ * The M9 CANCELLATION diagnosis for one candidate window, or `null`.
+ *
+ * Separated from the content checks (I1) because it is not one of them. Those
+ * answer "is THIS half-second a pause", and a `no` is a fact about that window
+ * which the search may act on by looking at the next one. This answers "can
+ * this half-second be judged AT ALL", and a `no` is a fact about the FILE: the
+ * mix of an exactly polarity-inverted pair is digital zero, so a whispered line
+ * and an empty room are the same measurement, and nothing downstream can tell
+ * anyone which was muted. V2's search made that verdict steppable for a while —
+ * a take whose quiet passage alone was inverted, with an ordinary floor a
+ * decibel up, gated over it and never showed the polarity warning — and
+ * `GATE_SEARCH_CLIMB_DB` cannot be the guard, because a cancelling passage
+ * lands in that constant's PERMISSIVE half (measured, twelve members, kept
+ * beside the population it belongs to). So it is asked of EVERY candidate the
+ * search returned and is never stepped past.
+ *
+ * Cancellation is detected by LEVEL, not by counting zeros in the mix: frame
+ * silence is a product where a mix zero is a sum, and for independent channels
+ * a few LSB wide the sum runs several times the product, so a zero count
+ * mistakes ordinary quiet quantised stereo for an inverted pair (N5). See
+ * `GATE_CANCELLATION_DEPTH_DB`.
+ */
+function cancellationDiagnosis(
+  channels: Float32Array[],
+  sampleRate: number,
+  noise: NoiseWindow,
+  isQuietest: boolean
+): string | null {
+  const window = mixQuietWindow(channels, noise);
+  let mixSumSq = 0;
+  for (let i = 0; i < window.length; i++) mixSumSq += window[i] * window[i];
+  const mixRmsDb = toDb(Math.sqrt(mixSumSq / Math.max(1, window.length)));
+  if (noise.rmsDb - mixRmsDb <= GATE_CANCELLATION_DEPTH_DB) return null;
+  // Named by POSITION when it is not the quietest window, because after V2 it
+  // need not be: a message claiming the quietest half-second cancelled would
+  // send the user to the wrong part of their take.
+  const where = isQuietest
+    ? `the quietest ${NOISE_WINDOW_MS} ms`
+    : `a quiet ${NOISE_WINDOW_MS} ms passage of this take (at ${(noise.startSample / sampleRate).toFixed(1)} s)`;
+  return `the channels of ${where} cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see this passage at all, and a threshold derived anywhere in this take could mute it without anything having been able to say what it was. Fix the inverted channel's polarity and run the chain again`;
+}
+
+function classifyQuietWindow(
+  channels: Float32Array[],
+  sampleRate: number,
+  noise: NoiseWindow,
+  costOrder: boolean
+): string | null {
+  const window = mixQuietWindow(channels, noise);
   // Both checks always run, and can: the search above never hands them a
   // mostly-silent window, so what they measure is real material — at least
   // three quarters of it — and a floor window carrying its share of scattered
@@ -1014,21 +1074,10 @@ function classifyQuietWindow(
   // peak, and the whisper was muted. Measurement first, then the checks — not
   // checks with an exemption.
   //
-  // One thing the mix CAN still hide (M9): the search counts a frame silent
-  // only when EVERY channel is exactly zero, but these checks read the MIX,
-  // and the mix of an exactly polarity-inverted pair (L = -R) is all zeros —
-  // both checks would read a silent window and wave through a take whose mono
-  // version declines. Cancellation is detected by LEVEL, not by counting
-  // zeros in the mix: frame silence is a product where a mix zero is a sum,
-  // and for independent channels a few LSB wide the sum runs several times
-  // the product, so a zero count mistakes ordinary quiet quantised stereo
-  // for an inverted pair (N5). See `GATE_CANCELLATION_DEPTH_DB`.
-  let mixSumSq = 0;
-  for (let i = 0; i < window.length; i++) mixSumSq += window[i] * window[i];
-  const mixRmsDb = toDb(Math.sqrt(mixSumSq / Math.max(1, window.length)));
-  if (noise.rmsDb - mixRmsDb > GATE_CANCELLATION_DEPTH_DB) {
-    return `the channels of the quietest ${NOISE_WINDOW_MS} ms cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see this passage at all. Fix the inverted channel's polarity and run the chain again`;
-  }
+  // The one thing the mix CAN hide — an exactly polarity-inverted pair, whose
+  // mix is all zeros, so both checks below would read silence and wave the
+  // window through — is answered before any candidate reaches here, by
+  // `cancellationDiagnosis` (M9/I1).
 
   // Is this a pause rather than SOFT SINGING? A take that never stops but
   // changes dynamic keeps plenty of material above the threshold — its loud
@@ -1250,6 +1299,21 @@ export function deriveGate(
   // looking in the wrong place. Only that window is judged in the canonical
   // order; the rest are judged cheap-first, which cannot change whether they
   // pass.
+  //
+  // First, though, the one verdict that is NOT a content check and may not be
+  // stepped past (M9/I1). A cancelling window is not a window that failed to
+  // be a pause; it is a window nothing can read, and what a threshold would
+  // mute there is unknowable by construction. It is therefore asked of EVERY
+  // candidate the search returned — including the ones the climb bound would
+  // skip, since the diagnosis is about the file rather than about this
+  // window's suitability — and the first one found ends the stage. Cheap: one
+  // mix and one sum over 500 ms per candidate, beside a pitch track that costs
+  // a hundred times more.
+  for (let i = 0; i < candidates.length; i++) {
+    const cancelling = cancellationDiagnosis(channels, sampleRate, candidates[i], i === 0);
+    if (cancelling !== null) return decline(cancelling);
+  }
+
   // A candidate that would raise the close by more than `GATE_SEARCH_CLIMB_DB`
   // is not a second reading of the same room, it is a different level regime,
   // and deriving there would mute the quieter passage the checks just called

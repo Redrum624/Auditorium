@@ -1728,6 +1728,145 @@ describe('deriveGate', () => {
     });
   });
 
+  /**
+   * I1 — the cancellation verdict is a DIAGNOSIS, not a failed pause test, and
+   * V2's search must not step past one.
+   *
+   * The whole-take inverted pair above declines because EVERY candidate
+   * cancels. The shape that V2 opened is the partial one: only the take's
+   * quietest passage is polarity-inverted — one channel flipped by an edit,
+   * a mis-wired DI, a stem summed the wrong way — while an ordinary floor a
+   * decibel up passes every check. The search would step from the one to the
+   * other, derive a threshold above the inverted passage, mute it, and never
+   * show the polarity warning. What is muted there is unknowable by
+   * construction: the mix the checks read is digital zero, so a whispered line
+   * and an empty room are the same measurement.
+   */
+  describe('a take whose quiet passage ALONE is polarity-inverted (I1)', () => {
+    /** `[phrase][inverted whisper][phrase][ordinary floor][phrase]`, stereo.
+     * The inverted passage is the quietest, the floor is the next candidate up,
+     * and the two sit inside the search's own climb bound. */
+    function takeWithOneInvertedPassage(
+      invertedDb = -56,
+      floorDb = -55
+    ): {
+      channels: Float32Array[];
+      inverted: { start: number; end: number };
+      floor: { start: number; end: number };
+    } {
+      const phrase = Math.round(1.2 * SR);
+      const gap = Math.round(0.9 * SR);
+      const L = new Float32Array(3 * phrase + 2 * gap);
+      const R = new Float32Array(L.length);
+      const sing = (from: number, n: number): void => {
+        let phase = 0;
+        for (let i = 0; i < n; i++) {
+          phase += (2 * Math.PI * 196) / SR;
+          const v = 0.2 * (Math.sin(phase) + 0.4 * Math.sin(2 * phase));
+          L[from + i] += v;
+          R[from + i] += v;
+        }
+      };
+      let at = 0;
+      sing(at, phrase);
+      at += phrase;
+      const inverted = { start: at, end: at + gap };
+      const w = whisper(gap, invertedDb, 61);
+      for (let i = 0; i < gap; i++) {
+        L[at + i] = w[i];
+        R[at + i] = -w[i];
+      }
+      at += gap;
+      sing(at, phrase);
+      at += phrase;
+      const floor = { start: at, end: at + gap };
+      const fa = gaussFloorDb(gap, floorDb, 71);
+      const fb = gaussFloorDb(gap, floorDb, 72);
+      for (let i = 0; i < gap; i++) {
+        L[at + i] = fa[i];
+        R[at + i] = fb[i];
+      }
+      at += gap;
+      sing(at, phrase);
+      return { channels: [L, R], inverted, floor };
+    }
+
+    it('is the shape it claims: a cancelling quietest window with a passing one INSIDE the climb bound', () => {
+      const { channels, inverted, floor } = takeWithOneInvertedPassage();
+      const cands = measureNoiseWindows(channels, SR, {
+        rejectMostlySilentWindows: true,
+        maxCandidates: GATE_QUIET_WINDOWS,
+      });
+      const inWindow = (w: { startSample: number; lengthSamples: number }, span: { start: number; end: number }) =>
+        w.startSample >= span.start && w.startSample + w.lengthSamples <= span.end;
+
+      // The quietest candidate is the inverted passage, and it really cancels:
+      // its mono mix is digital zero, so the two content checks see nothing.
+      expect(inWindow(cands[0], inverted)).toBe(true);
+      const mono = new Float32Array(cands[0].lengthSamples);
+      for (let i = 0; i < mono.length; i++) {
+        mono[i] = (channels[0][cands[0].startSample + i] + channels[1][cands[0].startSample + i]) / 2;
+      }
+      let sq = 0;
+      for (let i = 0; i < mono.length; i++) sq += mono[i] * mono[i];
+      expect(cands[0].rmsDb - toDb(Math.sqrt(sq / mono.length))).toBeGreaterThan(GATE_CANCELLATION_DEPTH_DB);
+
+      // ...and an ordinary floor sits within the climb bound of it, so the
+      // search would have stepped from the one to the other. This is the
+      // calibration gap: `GATE_SEARCH_CLIMB_DB` was derived on breath and
+      // whisper populations, and a cancelling window lands in its PERMISSIVE
+      // half.
+      const passing = cands.find((c) => inWindow(c, floor));
+      expect(passing).toBeDefined();
+      expect(passing!.envelopePeakDb - cands[0].envelopePeakDb).toBeLessThanOrEqual(GATE_SEARCH_CLIMB_DB);
+
+      // ...and a threshold taken there really would cover the inverted
+      // passage, which is the damage: it sits below the level the gate closes
+      // at, and nothing in the checks could have told anyone what it was.
+      expect(passing!.envelopePeakDb + GATE_HEADROOM_DB).toBeGreaterThan(cands[0].envelopePeakDb);
+    }, 120000);
+
+    it('declines on the polarity diagnosis instead of gating past it', () => {
+      const { channels } = takeWithOneInvertedPassage();
+      const res = deriveGate(channels, SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('cancel');
+      expect(res.reason).toContain('polarity');
+    }, 120000);
+
+    it('refuses even when the cancelling passage is NOT the quietest, and says which one it is', () => {
+      // The harder half of the same shape: an ordinary floor is the quietest
+      // window and passes every check, so the old walk would accept it and
+      // stop — the cancelling passage three decibels up would never be looked
+      // at, and the gate would close over it. The diagnosis is about the FILE,
+      // so it is asked of every candidate the search returned.
+      const { channels, inverted, floor } = takeWithOneInvertedPassage(-55, -58);
+      const cands = measureNoiseWindows(channels, SR, {
+        rejectMostlySilentWindows: true,
+        maxCandidates: GATE_QUIET_WINDOWS,
+      });
+      // The precondition: the quietest window is the honest floor, not the
+      // inverted passage.
+      expect(cands[0].startSample).toBeGreaterThanOrEqual(floor.start);
+      expect(cands[0].startSample + cands[0].lengthSamples).toBeLessThanOrEqual(floor.end);
+
+      const res = deriveGate(channels, SR);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('cancel');
+      expect(res.reason).toContain('polarity');
+      // ...and the message may not claim the QUIETEST half-second cancelled,
+      // because it did not — it names where the inversion actually is.
+      expect(res.reason).not.toContain(`the quietest ${NOISE_WINDOW_MS} ms cancel`);
+      const at = res.reason.match(/at ([\d.]+) s/);
+      expect(at).not.toBeNull();
+      const named = Number(at![1]) * SR;
+      expect(named).toBeGreaterThanOrEqual(inverted.start - SR * 0.05);
+      expect(named).toBeLessThan(inverted.end);
+    }, 120000);
+  });
+
   // N6 — the census's own blind spot, and the only destructive shape this
   // stage still had. A window may carry a quiet island BESIDE louder material
   // and still be accepted, because the acceptance bound constrains a window's
@@ -2723,6 +2862,41 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
     return { channel, floor: { start: 0, end: headLen } };
   }
 
+  /** I1's shape at an arbitrary rate: an ordinary floor a decibel above a
+   * quiet passage whose channels cancel. It belongs in THIS population because
+   * of where it lands in it — see the test that consumes it. */
+  function cancellingUnderFloorTake(sr: number, seed: number): Float32Array[] {
+    const phrase = Math.round(1.2 * sr);
+    const gap = Math.round(0.9 * sr);
+    const L = new Float32Array(3 * phrase + 2 * gap);
+    const R = new Float32Array(L.length);
+    const both = (from: number, n: number): void => {
+      const before = Float32Array.from(L.subarray(from, from + n));
+      sing(L, from, n, sr, 0.2);
+      for (let i = 0; i < n; i++) R[from + i] += L[from + i] - before[i];
+    };
+    let at = 0;
+    both(at, phrase);
+    at += phrase;
+    const w = whisperAt(gap, -56, seed + 61, sr);
+    for (let i = 0; i < gap; i++) {
+      L[at + i] = w[i];
+      R[at + i] = -w[i];
+    }
+    at += gap;
+    both(at, phrase);
+    at += phrase;
+    const fa = gaussFloorDb(gap, -55, seed + 71);
+    const fb = gaussFloorDb(gap, -55, seed + 72);
+    for (let i = 0; i < gap; i++) {
+      L[at + i] = fa[i];
+      R[at + i] = fb[i];
+    }
+    at += gap;
+    both(at, phrase);
+    return [L, R];
+  }
+
   /** The climb from the quietest candidate to the quietest candidate lying
    * wholly inside `span` — the passage that IS the take's honest floor. */
   function climb(channel: Float32Array, sr: number): number | null {
@@ -2786,6 +2960,50 @@ describe('GATE_SEARCH_CLIMB_DB', () => {
     // ...and it is under the headroom the stage already adds: the search may
     // not move the threshold by as much as the derivation itself does.
     expect(GATE_SEARCH_CLIMB_DB).toBeLessThan(GATE_HEADROOM_DB);
+  }, 600000);
+
+  /**
+   * I1 — the population's own boundary, stated: a CANCELLING quiet passage
+   * lands in the PERMISSIVE half of this constant, so the climb bound is not
+   * what protects it and never could be. That is why the cancellation verdict
+   * is a hard decline rather than a refusal the search may step past, and this
+   * test is here so the gap cannot silently reopen: if someone widens the
+   * populations above without reading them, this member still says the level
+   * is the wrong instrument for this shape.
+   */
+  it('a cancelling passage lands INSIDE the permissive band, which is why level cannot decide it', () => {
+    const climbs: number[] = [];
+    for (const sr of [8000, 22050, 44100, 48000]) {
+      for (const seed of [5, 17, 29]) {
+        const channels = cancellingUnderFloorTake(sr, seed);
+        const cands = measureNoiseWindows(channels, sr, {
+          rejectMostlySilentWindows: true,
+          maxCandidates: GATE_QUIET_WINDOWS,
+        });
+        // The cancelling window is the quietest, and the next candidate up is
+        // an ordinary floor: exactly the step the search would have taken.
+        const mono = new Float32Array(cands[0].lengthSamples);
+        for (let i = 0; i < mono.length; i++) {
+          mono[i] = (channels[0][cands[0].startSample + i] + channels[1][cands[0].startSample + i]) / 2;
+        }
+        let sq = 0;
+        for (let i = 0; i < mono.length; i++) sq += mono[i] * mono[i];
+        expect(cands[0].rmsDb - toDb(Math.sqrt(sq / mono.length))).toBeGreaterThan(GATE_CANCELLATION_DEPTH_DB);
+        climbs.push(cands[1].envelopePeakDb - cands[0].envelopePeakDb);
+      }
+    }
+    expect(climbs).toHaveLength(12);
+    // INSIDE the band the search is allowed to cross — the same half the
+    // breath population occupies, not the destructive one.
+    expect(Math.max(...climbs)).toBeLessThanOrEqual(GATE_SEARCH_CLIMB_DB);
+
+    // ...and the stage refuses anyway, on the diagnosis rather than the level.
+    for (const sr of [8000, 44100]) {
+      const res = deriveGate(cancellingUnderFloorTake(sr, 5), sr);
+      expect(res.run).toBe(false);
+      if (res.run) return;
+      expect(res.reason).toContain('cancel');
+    }
   }, 600000);
 });
 
