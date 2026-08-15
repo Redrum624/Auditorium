@@ -237,7 +237,9 @@ function addTransients(signal) {
 // The five stems sum EXACTLY to the mix (vocals + bed, with three silent), which
 // is separation's own hard guarantee — so the instrumental the journey builds by
 // summing the four non-vocal stems is the bed, to the last bit.
-const SYNC_OFFSET_SECONDS = 0.75;
+// T3: the plant and the smoke's assertion are one constant now — see
+// `cover-fixture-manifest.cjs` for why the recovered number is its negation.
+const { SYNC_OFFSET_SECONDS } = require('./cover-fixture-manifest.cjs');
 /** The schedule BOTH files share — the ground truth itself. */
 const SYNC_SCHEDULE_SEED = 0x51d3a7;
 const SYNC_SONG_VARIANCE_SEED = 0x1a2b3c;

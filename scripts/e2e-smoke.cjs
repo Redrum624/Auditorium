@@ -59,13 +59,15 @@ const COVER_SONG_SYNC_STEMS = ['Drums', 'Bass', 'Vocals', 'Other', 'Residual'].m
   path.join(ROOT, 'test-assets', `cover-song-sync.wav — ${label}`)
 );
 /**
- * The ground truth, built into the fixtures rather than measured off them.
- * NEGATIVE by the convention `coverAlign` documents and its unit suite pins:
- * the offset is the take's sample 0 on the song's timeline, and a take carrying
- * 0.75 s of leading silence has to start 0.75 s EARLIER for its syllables to
- * land on the song's. See scripts/make-test-cover.cjs.
+ * The ground truth, built into the fixtures rather than measured off them, and
+ * read from the manifest the PLANTER reads — T3, closing the drift class the
+ * v1.28 ledger recorded. It used to be a hand-typed `-0.75` beside
+ * `make-test-cover.cjs`'s `+0.75`, so a change to the plant would have left
+ * this step asserting the old truth and reporting it as an aligner fault.
+ * The negation, and the convention behind it, are explained once in
+ * `scripts/cover-fixture-manifest.cjs`.
  */
-const COVER_SYNC_OFFSET_SECONDS = -0.75;
+const { COVER_SYNC_OFFSET_SECONDS } = require('./cover-fixture-manifest.cjs');
 /** The DSP's proven accuracy — the tolerance `coverAlign.test.ts` holds its own
  * ground-truth cases to. Measured on this pair through the raw files (the
  * harshest path, with separation contributing nothing): 7.94 ms. */
