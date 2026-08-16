@@ -2365,7 +2365,7 @@ async function main() {
         null,
         { timeout: 5000 }
       );
-      record('Module: Spatial', 'opened from Pipeline, source dragged, closed from the card header', 'PASS');
+      record('Module: Spatial', 'opened from Effects, source dragged, closed from the card header', 'PASS');
       await openModuleCard(page, 'History');
       await page.waitForSelector('[data-testid="sidebar-panel"]', { timeout: 5000 });
     });

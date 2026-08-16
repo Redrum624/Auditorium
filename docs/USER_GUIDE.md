@@ -753,7 +753,7 @@ transpose or re-time, and why the two tools below stay yours to run.
 `Pipeline → Align Lyrics` replaces one word you pick with a fresh take of that word;
 nothing in the app judges which word is wrong, and a per-phone quality scorer was built,
 measured at 0.642 AUC against a 0.500 chance baseline, and cut. `Pipeline → Align Vocal
-Timing…` warps timing but needs you to confirm the beat grid first — see the note in that
+Timing` warps timing but needs you to confirm the beat grid first — see the note in that
 section about why nothing picks it for you. If you use Align Lyrics, run the journey
 again afterwards, so the replaced word is in the file before any stage measures a level or
 learns a noise print from it.
@@ -1062,7 +1062,7 @@ so the result can still go through Pitch Correct.
 
 You know which word came out wrong — you can hear it. What you want is to sing
 that one word again and drop it in, not to re-record the line. **Pipeline → Align
-Lyrics…** is that.
+Lyrics** is that.
 
 It works from lyrics *you already have*. The model is never asked what was sung;
 it is given the words and asked only where each one is.
