@@ -17,14 +17,20 @@
 // with nodeIntegration because this is a local dev tool operating on local
 // files, not app code; nothing here ships.
 //
-// Run: npx electron scripts/decode-stem-bench-slice.cjs
+// Run: npx electron scripts/decode-stem-bench-slice.cjs [--in=<path to a real track>]
 
 const { app, BrowserWindow, ipcMain } = require('electron');
 const fs = require('node:fs');
 const path = require('node:path');
 
 const REPO = path.resolve(__dirname, '..');
-const SONG = path.join(REPO, 'test-assets', 'DJ Tiësto - Adagio For Strings (Original Album Version).mp3');
+// The source track: any full real local track works; --in=<path> overrides
+// the neutral default. Copyrighted material stays user-local (test-assets/
+// is gitignored), so only a neutral path ever appears in this script.
+const IN_ARG = process.argv.find((a) => a.startsWith('--in='));
+const SONG = IN_ARG
+  ? path.resolve(REPO, IN_ARG.slice('--in='.length))
+  : path.join(REPO, 'test-assets', 'real-song.mp3');
 const OUT_JSON = path.join(REPO, 'test-assets', 'stem-bench-slice.json');
 const OUT_F32 = path.join(REPO, 'test-assets', 'stem-bench-slice.f32');
 

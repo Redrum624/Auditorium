@@ -87,13 +87,11 @@ const COVER_SYNC_TOLERANCE_SECONDS = 0.01;
 const ALIGN_MIN_CORRELATION = 0.731;
 const ALIGN_MIN_PROMINENCE = 0.12;
 // Optional real-material fixture: a full commercial track the user placed
-// locally. Copyrighted, so it is NEVER committed (test-assets/ is gitignored)
-// and NEVER required — the real-song step skips cleanly when it is absent.
-const REAL_SONG = path.join(
-  ROOT,
-  'test-assets',
-  'DJ Tiësto - Adagio For Strings (Original Album Version).mp3'
-);
+// locally under this NEUTRAL filename (test-assets/ is gitignored — the
+// track is copyrighted, so neither the audio nor its title is ever
+// committed). NEVER required — the real-song step skips cleanly when the
+// file is absent.
+const REAL_SONG = path.join(ROOT, 'test-assets', 'real-song.mp3');
 const ABAB = path.join(ROOT, 'test-assets', 'abab120.wav');
 // L7's effect-sweep fixture: four segments (detuned tone / digital silence /
 // noise / tone again) so that EVERY visible effect has material it can change.
@@ -5262,27 +5260,30 @@ async function main() {
       );
     } else {
       // The real sung take and its verbatim lyrics when the machine has them;
-      // otherwise the generated fixture with a short text. The material decides
-      // ONLY whether the lyrics-match verdict is asserted - every structural and
-      // every seam assertion below runs either way, because they are about the
-      // wiring and the splice, not about the accuracy the spike measured.
+      // otherwise the generated fixture with a short text. The lyrics are
+      // personal material, so they live in a gitignored sidecar next to the
+      // recording they describe (test-assets/align-bench-lyrics.txt, one
+      // lyric line per text line — the same sidecar the F6 benches read)
+      // rather than in this script. The material decides ONLY whether the
+      // lyrics-match verdict is asserted - every structural and every seam
+      // assertion below runs either way, because they are about the wiring
+      // and the splice, not about the accuracy the spike measured.
       const realTake = path.join(ROOT, 'test-assets', 'P1177605.wav');
-      const haveReal = fs.existsSync(realTake);
+      const lyricsSidecar = path.join(ROOT, 'test-assets', 'align-bench-lyrics.txt');
+      const haveReal = fs.existsSync(realTake) && fs.existsSync(lyricsSidecar);
       const alignSource = haveReal ? realTake : LONG70;
       const alignText = haveReal
-        ? [
-            'You, you stole my heart with grace',
-            "And I don't want you to give it back to me",
-            'Oh, I gotta see you dancing on the edge',
-            'Every time you try to run, I lose my breath',
-            "I don't wanna see you down and far",
-            'Scarlet paintings on the bathroom floor',
-          ].join('\n')
+        ? fs
+            .readFileSync(lyricsSidecar, 'utf8')
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter(Boolean)
+            .join('\n')
         : 'one two three four five six';
       console.log(
         haveReal
-          ? '  material: the real 142 s solo vocal with its verbatim lyrics'
-          : '  material: the generated fixture (test-assets/P1177605.wav absent) - the lyrics-match verdict is REPORTED, not asserted'
+          ? '  material: the real 142 s solo vocal with its verbatim lyrics (read from the local sidecar)'
+          : '  material: the generated fixture (the real take or its lyrics sidecar is absent) - the lyrics-match verdict is REPORTED, not asserted'
       );
 
       await page.evaluate(() => window.__test.setView('waveform'));

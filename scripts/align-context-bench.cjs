@@ -19,8 +19,10 @@
  * context lengths, and compares word ONSETS. If context helped, the
  * disagreement count would fall as context grows.
  *
- * Usage:  node scripts/align-context-bench.cjs
- * Requires: test-assets/models/align/* and the reference recordings.
+ * Usage:  node scripts/align-context-bench.cjs [--long=<wav>]
+ * Requires: test-assets/models/align/*, the reference recordings, and the
+ * lyrics sidecar (test-assets/align-bench-lyrics.txt — see
+ * align-bench-common.cjs). Skips with a message when material is absent.
  */
 
 const fs = require('node:fs');
@@ -28,6 +30,7 @@ const path = require('node:path');
 const {
   ASSETS,
   MODEL_PATHS,
+  LYRICS_SIDECAR,
   LYRIC_LINES,
   SPEECH_CLAUSES,
   loadDsp,
@@ -52,12 +55,27 @@ function main() {
   for (const p of Object.values(MODEL_PATHS)) {
     if (!fs.existsSync(p)) throw new Error(`missing pinned model file: ${p}`);
   }
+  if (!LYRIC_LINES) {
+    console.log(
+      `skipped: the ground-truth lyrics sidecar is absent (${LYRICS_SIDECAR}) — ` +
+        'both sweeps score known text against real recordings, so there is nothing to measure without it'
+    );
+    return;
+  }
   const dsp = loadDsp();
 
-  const longWav = path.join(ASSETS, 'P1177605.wav');
+  // The long reference take: any long real sung recording works; the default
+  // is the user-local take this bench was originally measured on.
+  const longArg = process.argv.find((a) => a.startsWith('--long='));
+  const longWav = longArg
+    ? path.resolve(longArg.slice('--long='.length))
+    : path.join(ASSETS, 'P1177605.wav');
   const shortWav = path.join(ASSETS, 'vocal-30s.wav');
   const speechWav = path.join(ASSETS, 'speech16k.wav');
-  if (!fs.existsSync(longWav)) throw new Error(`missing ${longWav}`);
+  if (!fs.existsSync(longWav)) {
+    console.log(`skipped: long reference take absent (${longWav}) — pass --long=<wav> to point at one`);
+    return;
+  }
   const long = decodeMono16k(dsp, longWav);
 
   // ── A. single-pass length -> memory and speed ─────────────────────────────
@@ -84,13 +102,13 @@ function main() {
   // ── B. does per-chunk context help? ───────────────────────────────────────
   //
   // The material has to be longer than one chunk AND fully described by its
-  // text. `P1177605.wav` is not: it is a whole performance containing the six
-  // lines more than once (vocal from ~17 s to ~137 s with two sections), so the
-  // 51-word lyric covers a fraction of it, the aligner is free to place those
-  // words almost anywhere among the rest, and what a sweep would measure is
-  // that freedom rather than the seam. It is excluded for that reason, and the
-  // long material is built by CONCATENATING passages whose text is known for
-  // every sample of them.
+  // text. The long reference take is not: it is a whole performance containing
+  // the lyric lines more than once (vocal from ~17 s to ~137 s with two
+  // sections), so the lyric covers a fraction of it, the aligner is free to
+  // place those words almost anywhere among the rest, and what a sweep would
+  // measure is that freedom rather than the seam. It is excluded for that
+  // reason, and the long material is built by CONCATENATING passages whose
+  // text is known for every sample of them.
   const shortSung = fs.existsSync(shortWav) ? decodeMono16k(dsp, shortWav) : null;
   const speech = fs.existsSync(speechWav) ? decodeMono16k(dsp, speechWav) : null;
   if (!shortSung || !speech) throw new Error('sweep B needs both vocal-30s.wav and speech16k.wav');

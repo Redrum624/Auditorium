@@ -16,14 +16,15 @@
 // The material is the pair `src/dsp/coverMatch.ts` already names as this app's
 // reference song — a vocal master and its OFFICIAL instrumental release, both
 // user-local under `test-assets/` and gitignored (plan ruling 9: copyrighted
-// audio never enters a committed artifact, so only the PATHS appear here).
+// audio never enters a committed artifact, so the example below uses
+// placeholder names — substitute the two local masters).
 // Decode a 30 s window of each at the model's rate, then measure:
 //
 //   npx electron scripts/decode-media-slice.cjs \
-//     --in="test-assets/Scarlet Paintings 48000 1.wav" \
+//     --in="test-assets/<the vocal master>.wav" \
 //     --out=test-output/sp-mix.f32 --offset=60 --seconds=30
 //   npx electron scripts/decode-media-slice.cjs \
-//     --in="test-assets/Scarlet Paintings [music].mp3" \
+//     --in="test-assets/<the official instrumental release>.mp3" \
 //     --out=test-output/sp-bed.f32 --offset=60 --seconds=30
 //   node scripts/stem-second-pass-probe.cjs \
 //     --model=test-assets/models/htdemucs_fp16weights.onnx \

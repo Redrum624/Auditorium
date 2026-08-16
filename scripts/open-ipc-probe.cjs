@@ -35,6 +35,7 @@
 // overhead from per-byte cost.
 //
 //   npm run build && node scripts/open-ipc-probe.cjs [--repeats=5] [--out=<path>]
+//     [--big1=<file>] [--big2=<file>]
 
 const path = require('node:path');
 const fs = require('node:fs');
@@ -53,13 +54,19 @@ function arg(name, dflt) {
 const REPEATS = Number(arg('repeats', '5'));
 const OUT = path.resolve(ROOT, arg('out', path.join('test-output', 'open-ipc-probe.json')));
 
-/** The files to read, largest first. The two big ones are the fixtures the O1
- * incident was reported against; `long70.wav` is the small control. */
+/** The files to read, largest first. The two big ones default to the two
+ * user-local recordings the O1 incident was reported against (test-assets/
+ * is gitignored; personal recordings never enter the committed tree) --
+ * --big1=/--big2= point the probe at any two large local files instead.
+ * `long70.wav` is the generated small control. */
 const TARGETS = [
-  { label: 'Scarlet Paintings 48000 1.wav', file: 'Scarlet Paintings 48000 1.wav' },
-  { label: 'P1177605.wav', file: 'P1177605.wav' },
-  { label: 'long70.wav (control)', file: 'long70.wav' },
-].map((t) => ({ ...t, path: path.join(ROOT, 'test-assets', t.file) }));
+  { file: arg('big1', 'Scarlet Paintings 48000 1.wav') },
+  { file: arg('big2', 'P1177605.wav') },
+  { file: 'long70.wav', control: true },
+].map((t) => {
+  const abs = path.isAbsolute(t.file) ? t.file : path.join(ROOT, 'test-assets', t.file);
+  return { ...t, path: abs, label: `${path.basename(abs)}${t.control ? ' (control)' : ''}` };
+});
 
 function median(values) {
   if (values.length === 0) return null;
@@ -176,11 +183,11 @@ async function selfTest(page, blockFor) {
 async function main() {
   const missing = TARGETS.filter((t) => !fs.existsSync(t.path));
   if (missing.length > 0) {
-    console.error(
-      `REFUSED: missing fixture(s): ${missing.map((m) => m.file).join(', ')}.\n` +
-        'This probe exists to measure those files; skipping them would produce a number about nothing.'
+    console.log(
+      `skipped: missing fixture(s): ${missing.map((m) => m.label).join(', ')} — ` +
+        'pass --big1=/--big2= to point the probe at two large local files'
     );
-    process.exit(1);
+    return;
   }
 
   const app = await electron.launch({

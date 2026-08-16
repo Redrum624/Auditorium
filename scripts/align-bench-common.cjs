@@ -29,15 +29,19 @@ const MODEL_PATHS = {
   vocab: path.join(MODEL_DIR, 'wav2vec2-base-960h-vocab.json'),
 };
 
-/** The user's verbatim ground-truth lyrics for `P1177605.wav` / `vocal-30s.wav`. */
-const LYRIC_LINES = [
-  'You, you stole my heart with grace',
-  "And I don't want you to give it back to me",
-  'Oh, I gotta see you dancing on the edge',
-  'Every time you try to run, I lose my breath',
-  "I don't wanna see you down and far",
-  'Scarlet paintings on the bathroom floor',
-];
+/** The verbatim ground-truth lyrics for the reference sung recordings — one
+ * lyric line per text line — live in a user-local sidecar, because they are
+ * personal material and stay out of the committed tree with the recordings
+ * they describe (test-assets/ is gitignored). `LYRIC_LINES` is null when the
+ * sidecar is absent; every bench that needs it must skip with a message. */
+const LYRICS_SIDECAR = path.join(ASSETS, 'align-bench-lyrics.txt');
+const LYRIC_LINES = fs.existsSync(LYRICS_SIDECAR)
+  ? fs
+      .readFileSync(LYRICS_SIDECAR, 'utf8')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean)
+  : null;
 
 /** The spoken control's verbatim text (`speech16k.wav`). */
 const SPEECH_CLAUSES = [
@@ -173,6 +177,7 @@ module.exports = {
   OUT,
   MODEL_DIR,
   MODEL_PATHS,
+  LYRICS_SIDECAR,
   LYRIC_LINES,
   SPEECH_CLAUSES,
   SHUFFLE_SEEDS,

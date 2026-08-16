@@ -38,7 +38,9 @@
  * takes the spoken control and the first half of the sung lines; the rest is
  * held out and is only ever REPORTED against, never fitted to.
  *
- * Usage:  node scripts/align-gate-bench.cjs
+ * Usage:  node scripts/align-gate-bench.cjs [--long=<wav>]
+ * Requires the lyrics sidecar (test-assets/align-bench-lyrics.txt — see
+ * align-bench-common.cjs); skips with a message when it is absent.
  */
 
 const fs = require('node:fs');
@@ -46,6 +48,7 @@ const path = require('node:path');
 const {
   ASSETS,
   MODEL_PATHS,
+  LYRICS_SIDECAR,
   LYRIC_LINES,
   SPEECH_CLAUSES,
   SHUFFLE_SEEDS,
@@ -68,6 +71,13 @@ function words(text) {
 function main() {
   for (const p of Object.values(MODEL_PATHS)) {
     if (!fs.existsSync(p)) throw new Error(`missing pinned model file: ${p}`);
+  }
+  if (!LYRIC_LINES) {
+    console.log(
+      `skipped: the ground-truth lyrics sidecar is absent (${LYRICS_SIDECAR}) — ` +
+        'the whole bank scores known text against real recordings, so there is nothing to measure without it'
+    );
+    return;
   }
   const dsp = loadDsp();
   const blank = (vocab) => vocab['<pad>'];
@@ -165,15 +175,23 @@ function main() {
     kind: 'sung',
   });
 
-  // Correct lyrics over a take that sings them TWICE — the hardest correct case.
-  if (fs.existsSync(wav('P1177605.wav'))) {
+  // Correct lyrics over a take that sings them TWICE — the hardest correct
+  // case. The default is the user-local long reference take; --long=<wav>
+  // points at another one.
+  const longArg = process.argv.find((a) => a.startsWith('--long='));
+  const longTake = longArg
+    ? path.resolve(longArg.slice('--long='.length))
+    : wav('P1177605.wav');
+  if (fs.existsSync(longTake)) {
     passages.push({
       name: 'sung-partial-coverage',
-      samples: decodeMono16k(dsp, wav('P1177605.wav')),
+      samples: decodeMono16k(dsp, longTake),
       text: LYRIC_LINES.join('\n'),
       split: 'held-out',
       kind: 'partial',
     });
+  } else {
+    console.log(`sung-partial-coverage: skipped (long reference take absent at ${longTake} — pass --long=<wav>)\n`);
   }
   // No voice at all — always wrong, whatever the text.
   for (const [name, file] of [
