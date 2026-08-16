@@ -1,11 +1,23 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import type { PointerEvent as ReactPointerEvent } from 'react';
 import { FileDown, FilePlus2, Plus } from 'lucide-react';
 import { GlassButton } from '../UI/glass';
 import { runCommand } from '../../services/menuActions';
 import { useAppStore } from '../../stores/appStore';
 import { publishSessionLaneWidth, useSessionStore } from '../../multitrack/sessionStore';
+import { sessionLaneWidth } from '../../multitrack/sessionViewport';
+import { snapSample } from '../../services/snap';
 import TimelineRuler from '../Editor/TimelineRuler';
-import { sampleToPixel } from '../Editor/waveformRender';
+import {
+  CURSOR_HANDLE,
+  CURSOR_HANDLE_H,
+  CURSOR_HANDLE_HALF_W,
+  CURSOR_HANDLE_HIT_H,
+  CURSOR_HANDLE_HIT_PX,
+  cursorHandleVisible,
+  pixelToSample,
+  sampleToPixel,
+} from '../Editor/waveformRender';
 import { sessionSnapTargets } from './sessionSnapTargets';
 import TrackHeader from './TrackHeader';
 import TrackLane from './TrackLane';
@@ -20,6 +32,18 @@ const LANE_H = 96; // Tailwind h-24
 function mtSnapTargets(): number[] {
   return sessionSnapTargets(null);
 }
+
+/** T7: the same Alt escape hatch every drag surface in this app keeps
+ * (`useEditorGestures`, `ClipView`, `EnvelopeLane`) — re-read per event, so
+ * pressing or releasing Alt mid-drag takes effect on the next move. */
+function snapSuspended(e: { altKey: boolean }): boolean {
+  return e.altKey;
+}
+
+/** T7: above EnvelopeLane's `z-10` capture surface — the only positive z under
+ * the overlay wrapper — so the handle both paints over and wins the press
+ * against everything in the lanes. */
+const CURSOR_HANDLE_Z = 20;
 
 /**
  * The multitrack editor. Left column of TrackHeaders aligned with a right lane
@@ -80,6 +104,74 @@ export default function MultitrackView() {
   const cursorX = HEADER_W + sampleToPixel(mtCursorSample, mtZoom.scrollSample, mtZoom.samplesPerPixel);
   const playheadX =
     HEADER_W + sampleToPixel(mtPlayheadSample, mtZoom.scrollSample, mtZoom.samplesPerPixel);
+
+  // T7 — the session cursor's grab handle, the multitrack sibling of F11-1.
+  // The editor's handle is canvas paint hit-tested by `isOnCursorHandle`; this
+  // overlay is DOM, so the hit band IS the element (± CURSOR_HANDLE_HIT_PX ×
+  // CURSOR_HANDLE_HIT_H) and the triangle a CSS-border child, both sized from
+  // the `waveformRender` constants so three views share one geometry.
+  //
+  // Same gesture contract as `useEditorGestures`' playhead arm: targets frozen
+  // at pointerdown (an analysis or edit completing mid-drag must not move the
+  // position under the user's hand), Alt re-read per event, whole samples,
+  // clamped at 0 (a session has no fixed end, so no upper clamp — the ruler's
+  // own rule), and NO transport call on release: nothing in `transportService`
+  // watches the cursor, it is where the NEXT play starts.
+  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const handleTargetsRef = useRef<number[] | null>(null);
+  const [handleGrabbed, setHandleGrabbed] = useState(false);
+
+  /** Lane-relative x for a client x — the overlay wrapper's rect minus the
+   * header column, the inverse of the `cursorX` arithmetic above. */
+  const laneXAtClientX = (clientX: number): number => {
+    const rect = overlayRef.current?.getBoundingClientRect() ?? { left: 0 };
+    return clientX - rect.left - HEADER_W;
+  };
+
+  /** The editor's `snapped()` shape with the session's pieces: round on both
+   * arms (PW1 — a fractional session fit must not park the cursor between two
+   * samples), clamp at 0 only. */
+  const snappedMt = (raw: number, targets: number[], e: { altKey: boolean }): number => {
+    const clamped = Math.max(0, raw);
+    if (snapSuspended(e) || targets.length === 0) return Math.round(clamped);
+    return Math.round(Math.max(0, snapSample(clamped, targets, mtZoom.samplesPerPixel).sample));
+  };
+
+  const onHandlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    handleTargetsRef.current = mtSnapTargets(); // captured once per gesture
+    const el = e.currentTarget;
+    if (typeof el.setPointerCapture === 'function') el.setPointerCapture(e.pointerId);
+    setHandleGrabbed(true);
+    // Deliberately no setMtCursor: grabbing a handle must not itself move it.
+  };
+
+  const onHandlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const targets = handleTargetsRef.current;
+    if (!targets) return; // hovering — the grab affordance is plain CSS here
+    const raw = pixelToSample(laneXAtClientX(e.clientX), mtZoom.scrollSample, mtZoom.samplesPerPixel);
+    setMtCursor(snappedMt(raw, targets, e));
+  };
+
+  const onHandlePointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    handleTargetsRef.current = null;
+    setHandleGrabbed(false);
+    const el = e.currentTarget;
+    if (typeof el.releasePointerCapture === 'function') {
+      try {
+        el.releasePointerCapture(e.pointerId);
+      } catch {
+        // Capture may already have been released (lost on blur); ignore.
+      }
+    }
+  };
+
+  // The canvas cull, verbatim: parked out of the viewport, the handle is not
+  // drawn at a clamped wrong position — it is not drawn at all. A GRABBED
+  // handle stays mounted regardless, because unlike the editor (where the
+  // canvas outlives its culled drawing) this element IS the gesture surface,
+  // and unmounting it mid-drag would drop the pointer capture.
+  const handleVisible =
+    handleGrabbed || cursorHandleVisible(cursorX - HEADER_W, sessionLaneWidth());
 
   // G6: the view sits on the radial stage (stage-inset root) with each track
   // row floating as a glass card. The horizontal geometry inside the relative
@@ -167,7 +259,7 @@ export default function MultitrackView() {
       </div>
 
       {/* Lanes + headers (relative wrapper carries the playhead/cursor overlays) */}
-      <div className="relative min-h-0 flex-1 overflow-hidden">
+      <div ref={overlayRef} className="relative min-h-0 flex-1 overflow-hidden">
         <div ref={scrollRef} className="h-full overflow-y-auto overflow-x-hidden">
           {session.tracks.map((track) => (
             <div
@@ -226,11 +318,47 @@ export default function MultitrackView() {
           )}
         </div>
 
-        {/* Multitrack cursor (white) — where playback will start. */}
+        {/* Multitrack cursor (white) — where playback will start. The LINE
+            stays inert; only the handle below is grabbable, the same split as
+            the editor's hit rule. */}
         <div
+          data-testid="mt-cursor-line"
           className="pointer-events-none absolute top-0 bottom-0 w-px bg-[#d4d4d8]/70"
           style={{ left: cursorX }}
         />
+        {/* T7: the cursor's red grab handle, riding the top of the lanes area
+            just as the editor's rides the canvas top. */}
+        {handleVisible && (
+          <div
+            data-testid="mt-cursor-handle"
+            onPointerDown={onHandlePointerDown}
+            onPointerMove={onHandlePointerMove}
+            onPointerUp={onHandlePointerUp}
+            onPointerCancel={onHandlePointerUp}
+            className="absolute"
+            style={{
+              left: cursorX - CURSOR_HANDLE_HIT_PX,
+              top: 0,
+              width: CURSOR_HANDLE_HIT_PX * 2,
+              height: CURSOR_HANDLE_HIT_H,
+              cursor: handleGrabbed ? 'grabbing' : 'grab',
+              zIndex: CURSOR_HANDLE_Z,
+            }}
+          >
+            <div
+              style={{
+                position: 'absolute',
+                left: CURSOR_HANDLE_HIT_PX - CURSOR_HANDLE_HALF_W,
+                top: 0,
+                width: 0,
+                height: 0,
+                borderLeft: `${CURSOR_HANDLE_HALF_W}px solid transparent`,
+                borderRight: `${CURSOR_HANDLE_HALF_W}px solid transparent`,
+                borderTop: `${CURSOR_HANDLE_H}px solid ${CURSOR_HANDLE}`,
+              }}
+            />
+          </div>
+        )}
         {/* Playhead (accent + soft glow, G6) while playing. */}
         {mtPlayState === 'playing' && (
           <div
