@@ -181,7 +181,9 @@ move it:
   the selection, so you can slide the line through a selected region without
   disturbing it. The red triangle is deliberately unlike the **orange** marker
   flags, which hang to the *right* of their own dashed lines — you can tell at
-  a glance which one you are about to grab.
+  a glance which one you are about to grab. The same handle rides the
+  multitrack view's session cursor, so all three views move their line the
+  same way.
 - **Click or drag the timeline ruler** above the canvas. The line jumps to
   that time the moment you press, and holding the button and moving scrubs it
   along. The ruler stops at the end of the track.
@@ -1423,7 +1425,12 @@ same limits as the buttons.
   editable gain in dB) appear in the **Properties** tab, along with its
   fade lengths and curves.
 - **Playback**: the multitrack view has its own transport, cursor, and
-  playhead, driven by the same toolbar-pill transport buttons. There is no pause in
+  playhead, driven by the same toolbar-pill transport buttons. The session
+  cursor wears the same **red triangle handle** as the editor views, at the
+  top of the lanes: grab it and drag to move the cursor live — grabbing alone
+  moves nothing, the drag obeys the session magnet (`Alt` suspends it), and
+  moving the cursor never interrupts a running playback, because the cursor is
+  where the *next* play starts. There is no pause in
   multitrack playback (v1) — Play/Pause toggles play↔stop. Volume, pan, and
   mute/solo changes apply **live while playing** — the realtime monitor uses the
   same pan law as Mix Down, so it matches the render. Clip moves, trims, and clip
