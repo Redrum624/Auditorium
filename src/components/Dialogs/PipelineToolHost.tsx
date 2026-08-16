@@ -10,7 +10,7 @@ import VocalChainDialog from './VocalChainDialog';
 import VoiceChangerDialog from './VoiceChangerDialog';
 import { DialogHostProvider } from './DialogHost';
 import { GlassCard } from '../UI/glass';
-import { MODULE_COLUMN_WIDTH } from '../Layout/ModuleStrip';
+import { MODULE_COLUMN_WIDTH, TOOL_HOST_WIDTH } from '../Layout/ModuleStrip';
 
 /**
  * U2-3 — the tool-host card: a pipeline tool rendered IN the module column
@@ -88,11 +88,18 @@ export function hostedToolIds(): string[] {
  * can still select and scrub in. See `PipelineToolHost.test`.
  *
  * The card grows LEFTWARD out of the 348px column rather than widening it, via
- * the negative left margin below — the column's width is shared with the strip
- * above it and the TempoCard beside it, and neither should move because a tool
- * is open.
+ * the negative left margin below. W1: the strip above FOLLOWS it now — the
+ * user ruled that the bar and the open module are never unequal, so ModuleStrip
+ * renders at this same width while a tool is hosted (right-anchored, so it
+ * grows leftward exactly as this card does). The TempoCard beside it keeps the
+ * column's own 348. Which is also why the constant is DEFINED in
+ * `ModuleStrip.tsx` and only re-exported here: the strip must render at
+ * exactly this number, and importing it from this file would drag the nine
+ * dialogs into the layout graph. The derivation above is still this host's
+ * story, and `PipelineToolHost.test` still pins the value to the widest stage
+ * any hosted dialog asks for.
  */
-export const TOOL_HOST_WIDTH = 640;
+export { TOOL_HOST_WIDTH };
 
 export default function PipelineToolHost({
   commandId,

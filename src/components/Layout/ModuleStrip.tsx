@@ -175,6 +175,26 @@ export function stripTabs(hasRemix: boolean): PanelEntry[] {
  * sits on, which is what makes the two read as one stacked surface. */
 export const MODULE_COLUMN_WIDTH = 348;
 
+/**
+ * W1: the tool-host card's width — the OTHER card the strip can sit on.
+ *
+ * The user's rule: "the module bar and the extended modules must always have
+ * the same width." So while a pipeline tool is hosted the strip renders at
+ * this width (see `toolHosted` below), and the two numbers a surface in the
+ * column can take live side by side in this file — one place to read, one
+ * place to change, and the strip structurally CANNOT be handed a width that
+ * is neither.
+ *
+ * The number itself is the host's story, not the strip's: 640 is derived from
+ * the widest `DialogShell` stage any hosted tool asks for, the full account
+ * (and the derivation test) live with `PipelineToolHost`, and that module
+ * re-exports this constant as its own. It is DEFINED here only because the
+ * import must run this way — the host already imports `MODULE_COLUMN_WIDTH`
+ * from this file, and the strip importing from the host instead would drag
+ * the nine dialog components into the layout graph to read one number.
+ */
+export const TOOL_HOST_WIDTH = 640;
+
 // Vitrine IconSidebar.tsx rail-button anatomy, verbatim except for the tile
 // size: eight 42px tiles do not fit across 348px, so the horizontal strip uses
 // 34px tiles (8 x 34 = 272, leaving 60px of gap inside the pill). Radius,
@@ -232,6 +252,14 @@ export interface ModuleStripProps {
    * unmounting discards it); the strip only carries the sentence.
    */
   lockedReason?: string | null;
+  /**
+   * W1: whether the column below currently hosts a pipeline tool. The strip
+   * follows the open surface's width — `TOOL_HOST_WIDTH` while this is true,
+   * `MODULE_COLUMN_WIDTH` otherwise — because the user ruled that the bar and
+   * the open module are never unequal. A boolean rather than a width: the
+   * caller states WHICH surface is open, and this file owns what that costs.
+   */
+  toolHosted?: boolean;
   /** Receives the clicked tab, or null when the click closed the open card. */
   onSelect(tab: PanelId | null): void;
 }
@@ -240,6 +268,7 @@ export default function ModuleStrip({
   activeTab,
   hasRemix,
   lockedReason = null,
+  toolHosted = false,
   onSelect,
 }: ModuleStripProps) {
   return (
@@ -249,7 +278,13 @@ export default function ModuleStrip({
       style={{
         top: 10,
         right: 14,
-        width: MODULE_COLUMN_WIDTH,
+        // W1: as wide as the surface below — the host card while a tool is
+        // hosted, the module column otherwise. `right` is pinned, so the wider
+        // strip grows LEFTWARD exactly as the host card does and their edges
+        // coincide on both sides. The tiles stay 34px and `justify-between`
+        // stays the layout at either width: the wider bar spreads its air
+        // between the entries, it does not stretch them.
+        width: toolHosted ? TOOL_HOST_WIDTH : MODULE_COLUMN_WIDTH,
         padding: '6px 8px',
       }}
     >

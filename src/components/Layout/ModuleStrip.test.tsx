@@ -4,6 +4,7 @@ import ModuleStrip, {
   MODULE_COLUMN_WIDTH,
   MODULE_PANELS,
   PERMANENT_TABS,
+  TOOL_HOST_WIDTH,
   stripTabs,
 } from './ModuleStrip';
 
@@ -156,6 +157,33 @@ describe('ModuleStrip', () => {
     expect(strip.style.width).toBe(`${MODULE_COLUMN_WIDTH}px`);
     expect(strip.style.top).toBe('10px');
     expect(strip.style.right).toBe('14px');
+  });
+
+  /**
+   * W1: the user's rule — "the module bar and the extended modules must always
+   * have the same width." The strip follows the open surface: the column's own
+   * width with a module card (or nothing) beneath it, the host's width while a
+   * pipeline tool is hosted. `right` is pinned either way, so the wider strip
+   * grows LEFTWARD exactly as the host card does and both of their edges
+   * coincide — never unequal, in either state.
+   */
+  it('widens to the tool host’s width while a tool is hosted, right edge pinned', () => {
+    const { rerender } = render(
+      <ModuleStrip activeTab="pipeline" hasRemix={false} toolHosted onSelect={() => {}} />
+    );
+    const strip = screen.getByTestId('sidebar-tabs');
+    expect(strip.style.width).toBe(`${TOOL_HOST_WIDTH}px`);
+    expect(strip.style.right).toBe('14px');
+    // The same alignment logic at either width: fixed 34px tiles with the air
+    // distributed BETWEEN them — the wider bar spreads its gaps, it does not
+    // stretch its buttons.
+    expect(strip.className).toContain('justify-between');
+    for (const button of within(strip).getAllByRole('button')) {
+      expect(button.style.width).toBe('34px');
+    }
+
+    rerender(<ModuleStrip activeTab="pipeline" hasRemix={false} onSelect={() => {}} />);
+    expect(screen.getByTestId('sidebar-tabs').style.width).toBe(`${MODULE_COLUMN_WIDTH}px`);
   });
 
   it('marks the active entry pressed and accent-tiled, and no other', () => {

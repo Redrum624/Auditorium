@@ -1,7 +1,8 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import App from './App';
 import DialogShell from './components/Dialogs/DialogShell';
-import { hostedToolIds } from './components/Dialogs/PipelineToolHost';
+import { TOOL_HOST_WIDTH, hostedToolIds } from './components/Dialogs/PipelineToolHost';
+import { MODULE_COLUMN_WIDTH } from './components/Layout/ModuleStrip';
 import { createDocument } from './audio/AudioDocument';
 import { _resetHostedToolRunning, hasOpenDialog } from './services/dialogBus';
 import { runCommand } from './services/menuActions';
@@ -154,6 +155,25 @@ describe('a pipeline tool opens in the module column, not over the stage', () =>
 
     fireEvent.click(screen.getByTestId('hosted-tool-close'));
     expect(stage.style.getPropertyValue('--stage-inset-right')).toBe('376px');
+  });
+
+  /**
+   * W1: the user's rule — "the module bar and the extended modules must always
+   * have the same width." The strip renders at the SAME constant the host
+   * renders at, so the two cannot drift apart: 348 with a module card open,
+   * 640 while a tool is hosted, and back the moment it closes.
+   */
+  it('keeps the strip exactly as wide as the surface below it — card or host', async () => {
+    addDoc();
+    render(<App />);
+    expect(strip().style.width).toBe(`${MODULE_COLUMN_WIDTH}px`);
+
+    await openTool('tempo.match');
+    expect(strip().style.width).toBe(`${TOOL_HOST_WIDTH}px`);
+    expect(screen.getByTestId('tool-host').style.width).toBe(`${TOOL_HOST_WIDTH}px`);
+
+    fireEvent.click(screen.getByTestId('hosted-tool-close'));
+    expect(strip().style.width).toBe(`${MODULE_COLUMN_WIDTH}px`);
   });
 
   it('returns to the Pipeline card when the tool closes', async () => {

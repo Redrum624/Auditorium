@@ -59,7 +59,9 @@ the same command.
 have a UI — Match Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal
 Chain, Cover Chain, Align Lyrics, Transcribe, Separate into Stems — opens it as
 a **wider card in the module column**, in place of whatever card was open, with
-the strip showing **Pipeline** as the active module. Nothing is dimmed and
+the strip showing **Pipeline** as the active module and **widening to the
+card's own width** — the bar and the open module are always exactly the same
+width, in every state. Nothing is dimmed and
 nothing is blocked: while the tool is open you can still select audio, move the
 playhead, zoom, switch view and use the transport, so a multi-stage pass can be
 watched stepping through beside the waveform it is working on. Close the tool

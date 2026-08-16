@@ -628,11 +628,16 @@ export default function App() {
 
             U2-3: `lockedReason` is set only while a hosted pass is RUNNING —
             switching module then would unmount the tool, and every one of the
-            nine discards its result on unmount (see `refuseWhileRunning`). */}
+            nine discards its result on unmount (see `refuseWhileRunning`).
+
+            W1: `toolHosted` widens the strip to the host card's own width
+            while a tool is open — the user's rule that the bar and the open
+            module are never unequal. */}
         <ModuleStrip
           activeTab={sidebarTab}
           hasRemix={hasRemix}
           lockedReason={toolRunning ? MODULE_SWITCH_LOCKED : null}
+          toolHosted={hostedTool !== null}
           onSelect={selectModule}
         />
 
