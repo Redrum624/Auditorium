@@ -5,6 +5,54 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.32.0] - 2026-08-15
+
+Three lanes from the morning's feedback: the gate stops asking how loud and starts
+asking where, the module bar and the open module become one width, and the magnet
+learns clip edges — with rank.
+
+### Changed
+
+- **The automatic noise gate asks WHERE, not how loud.** Two real sessions in a row
+  the level-threshold gate declined on the same take (its quietest 500 ms is a whisper
+  — an unvoiced performance no threshold can separate from noise), and the user named
+  the fix: "the vocals are well identified... so why can't we mute where there is no
+  lyrics?" The automatic path now decides per region: a stretch is muted only when no
+  word span maps there (lyrics alignment first, transcript segments as coarser
+  evidence, both freshness-checked), its voiced fraction stays under the measured
+  boundary, and its spectrum reads as floor rather than vocal tract — so a pause
+  louder than the singing's floor now mutes, and a whisper, hum, breath or held
+  consonant survives on the same evidence that used to veto the whole stage. The
+  polarity hard-decline stands guard per window (a review probe proved a region-level
+  statistic could be diluted into muting an inverted whisper unread — it cannot now,
+  and the probe is a permanent regression test). The manual "Gate at a level I set
+  instead" keeps its exact old semantics. Honest limit, measured and recorded: one
+  real room reads as vocal-tract-shaped wall to wall (every one of the take's 2833
+  half-seconds over the boundary), and there the automatic path still declines — now
+  with the run's own numbers in the message and the manual escape beside them; the
+  recorded path forward is a multi-room population, not a guessed constant. Affects:
+  `services/vocalChain.ts`, `effects/dynamics/NoiseGateEffect.ts` (mute-regions side
+  channel), `dsp/chainAnalysis.ts` (windowed tilt), docs.
+- **The module bar and the open module are always the same width.** The bar follows
+  the module: 348 px beside the panel list, 640 px while a pipeline tool is open,
+  growing leftward with the card, never unequal — pixel-verified at 0.00 px delta in
+  both states. Affects: `components/Layout/ModuleStrip.tsx`,
+  `components/Dialogs/PipelineToolHost.tsx`, `App.tsx`.
+
+### Added
+
+- **Snap to clip edges, with rank.** Every other clip's start and end are magnet
+  targets — cross-track and same-track, head and tail — landing sample-exact, so
+  aligning one clip to another is a drag instead of arithmetic. The magnet also
+  learned priority: geometry the user placed (clip edges, the cursor) outranks
+  markers, which outrank derived beat lines — a beat can no longer silently steal a
+  snap both were in reach of — and the drop ghost names its winner by tier. A trim
+  keeps co-selected neighbours as targets (only a rigid group move excludes its own
+  members). An exact butt join creates zero overlap, so the old design note fearing
+  accidental crossfades is superseded in place with its reasoning recorded. Affects:
+  `services/snap.ts`, `components/Multitrack/sessionSnapTargets.ts`,
+  `clipDropPosition.ts`, `ClipView.tsx`, `TrackLane.tsx`, docs.
+
 ## [1.31.1] - 2026-08-15
 
 ### Fixed
