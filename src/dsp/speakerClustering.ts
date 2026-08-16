@@ -1,9 +1,8 @@
 /**
  * Speaker clustering — the maths half of F4 diarization.
  *
- * This is a port of the reference project's clustering
- * (`D:/Dev/Perso/stt/src/transcription/diarization.py`, `SpeakerDiarizer._cluster_embeddings`),
- * NOT of its runtime. That project is Python (resemblyzer + scikit-learn) and
+ * This is a port of a private reference speech-to-text project's clustering
+ * (its `SpeakerDiarizer._cluster_embeddings`), NOT of its runtime. That project is Python (resemblyzer + scikit-learn) and
  * none of its runtimes load here, but the clustering itself is ~100 lines of
  * plain maths, so it ports directly.
  *

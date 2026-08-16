@@ -30,8 +30,8 @@ function fakeApp(frames) {
   };
 }
 
-const SPLASH = 'file:///D:/Dev/Perso/audition_app/electron/splash.html';
-const BUNDLE = 'file:///D:/Dev/Perso/audition_app/dist/index.html';
+const SPLASH = 'file:///D:/app/electron/splash.html';
+const BUNDLE = 'file:///D:/app/dist/index.html';
 const DEV = 'http://localhost:3005/';
 
 describe('acquireMainWindow', () => {
