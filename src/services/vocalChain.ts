@@ -1040,16 +1040,20 @@ export const GATE_SHAPED_RESIDUAL_DB = 2.5;
  * right one — while shallower pairs keep a faithful, merely attenuated mix
  * and fall through to the ordinary checks.
  *
- * WHAT SURVIVES EVERY REDESIGN ABOUT IT (I1/G2). Every other refusal is
+ * WHAT SURVIVES EVERY REDESIGN ABOUT IT (I1/G2/C1). Every other refusal is
  * per-candidate in the ordinary sense: a candidate that is not a pause is
  * kept, and the next one is asked. This one is not a refusal of that kind and
  * is never stepped past, because it is a fact about the FILE rather than about
  * one candidate's suitability: the mix of an exactly inverted pair is digital
  * zero, so a whispered line and an empty room are the same measurement, and
  * whatever a gate did there would be done to something nothing was able to
- * read. So it is asked of EVERY candidate region before any veto runs, and
- * the first one found ends the stage with the polarity diagnosis — the same
- * principle the V2 search already enforced window by window.
+ * read. So it is asked of every 500 ms WINDOW of every candidate region
+ * before any veto runs — per window and not per region, because the depth is
+ * a ratio of sums and a region-wide sum dilutes: an inverted stretch sharing
+ * its candidate with honest floor collapses far under this constant while its
+ * own windows still read ~200 dB (the C1 regression, demonstrated and pinned)
+ * — and the first window found ends the stage with the polarity diagnosis,
+ * the same granularity the V2 search's window-by-window diagnosis enforced.
  */
 export const GATE_CANCELLATION_DEPTH_DB = 60;
 
@@ -1135,29 +1139,79 @@ function mixSpan(channels: Float32Array[], start: number, end: number): Float32A
  * `no` is a fact about the FILE — the mix of an exactly polarity-inverted
  * pair is digital zero, so every mix-reading measurement here (the activity
  * windows, both vetoes) sees silence where there may be a whispered line.
+ *
+ * PER 500 ms WINDOW, never per region — the depth is a ratio of sums, and a
+ * sum over a MIXED region dilutes: an inverted stretch sharing its candidate
+ * with honest floor reads the floor's real mix in the denominator, the
+ * ~200 dB the inverted windows carry on their own collapses far under the
+ * 60 dB constant, and the whisper is muted with nothing having read it
+ * (demonstrated — the C1 regression, 9600 of 9600 whisper samples destroyed
+ * where base declined). So the statistic slides on the same 50 ms grid the
+ * vetoes read, depth = window channel-RMS − window mix-RMS, and the FIRST
+ * window crossing `GATE_CANCELLATION_DEPTH_DB` ends the stage — the old
+ * design's own window-by-window granularity, restored at region level.
+ *
+ * Windows whose FRAMES are mostly digital silence are skipped as the
+ * non-measurements they are (the `NOISE_WINDOW_MAX_SILENT_FRACTION` rule):
+ * true silence must not read as cancellation. The mask is on FRAME silence,
+ * never on mix silence — an inverted stretch's mix is all zeros while its
+ * frames are not, and a mix-silence mask would skip exactly the windows this
+ * diagnosis exists to catch (the same trap `maxWindowedTilt`'s mask note
+ * warns about, from the other side).
+ *
  * Detected by LEVEL, not by counting zeros in the mix: frame silence is a
  * product where a mix zero is a sum, and a zero count mistakes ordinary quiet
- * quantised stereo for an inverted pair (N5). See
- * `GATE_CANCELLATION_DEPTH_DB`. Asked of EVERY candidate region, before any
- * veto, and never stepped past (I1).
+ * quantised stereo for an inverted pair (N5) — the depth populations behind
+ * the constant were measured on 500 ms windows, so this statistic is the one
+ * they actually justify. Asked of EVERY candidate region, before any veto,
+ * and never stepped past (I1).
  */
 function regionCancellation(
   channels: Float32Array[],
   sampleRate: number,
   span: { start: number; end: number }
 ): string | null {
-  const length = Math.max(1, span.end - span.start);
-  let sumSq = 0;
-  for (const c of channels) {
-    for (let i = span.start; i < span.end; i++) sumSq += c[i] * c[i];
+  const length = span.end - span.start;
+  if (length <= 0) return null;
+  const nch = Math.max(1, channels.length);
+  const win = Math.min(length, Math.round((NOISE_WINDOW_MS / 1000) * sampleRate));
+  const step = Math.max(1, Math.round((NOISE_SEARCH_STEP_MS / 1000) * sampleRate));
+
+  // Prefix sums over the span: channel energy, mix energy, frame-silent count.
+  const chSq = new Float64Array(length + 1);
+  const mixSq = new Float64Array(length + 1);
+  const silent = new Float64Array(length + 1);
+  for (let i = 0; i < length; i++) {
+    let sum = 0;
+    let sq = 0;
+    let allZero = true;
+    for (const c of channels) {
+      const v = c[span.start + i];
+      sum += v;
+      sq += v * v;
+      if (v !== 0) allZero = false;
+    }
+    const mix = sum / nch;
+    chSq[i + 1] = chSq[i] + sq;
+    mixSq[i + 1] = mixSq[i] + mix * mix;
+    silent[i + 1] = silent[i] + (allZero ? 1 : 0);
   }
-  const rmsDb = toDb(Math.sqrt(sumSq / (length * Math.max(1, channels.length))));
-  const mix = mixSpan(channels, span.start, span.end);
-  let mixSumSq = 0;
-  for (let i = 0; i < mix.length; i++) mixSumSq += mix[i] * mix[i];
-  const mixRmsDb = toDb(Math.sqrt(mixSumSq / length));
-  if (rmsDb - mixRmsDb <= GATE_CANCELLATION_DEPTH_DB) return null;
-  return `the channels of the stretch at ${(span.start / sampleRate).toFixed(1)} s cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see it at all, and muting between activity could silence something nothing was able to read. Fix the inverted channel's polarity and run the chain again`;
+
+  // Window positions on the step grid, plus one anchored at the span's end so
+  // coverage reaches the final sample (the same coverage rule the vetoes use).
+  for (let s = 0; ; s += step) {
+    const at = s + win <= length ? s : length - win;
+    const end = at + win;
+    if ((silent[end] - silent[at]) / win <= NOISE_WINDOW_MAX_SILENT_FRACTION) {
+      const chRmsDb = toDb(Math.sqrt((chSq[end] - chSq[at]) / (win * nch)));
+      const mixRmsDb = toDb(Math.sqrt((mixSq[end] - mixSq[at]) / win));
+      if (chRmsDb - mixRmsDb > GATE_CANCELLATION_DEPTH_DB) {
+        return `the channels of the stretch at ${((span.start + at) / sampleRate).toFixed(1)} s cancel each other to digital silence when mixed — one is the other inverted — so the checks that tell a pause from a phrase cannot see it at all, and muting between activity could silence something nothing was able to read. Fix the inverted channel's polarity and run the chain again`;
+      }
+    }
+    if (s + win > length) break;
+  }
+  return null;
 }
 
 /**
@@ -1348,10 +1402,11 @@ export function deriveGate(
   //      silence, because silence is not evidence about what sits beside it
   //      (N6's principle, region form). A finished candidate is at least
   //      `GATE_MIN_REGION_MS` long.
-  //   3. VETOES — cancellation first, asked of EVERY candidate (a fact
-  //      about the file, never stepped past); then the voiced veto and the
-  //      vocal-tract veto per candidate, in the order the messages were
-  //      derived in. No stretch is muted on word-absence alone.
+  //   3. VETOES — cancellation first, asked of every 500 ms WINDOW of every
+  //      candidate (a fact about the file, never stepped past, and per
+  //      window because a region-wide depth dilutes — C1); then the voiced
+  //      veto and the vocal-tract veto per candidate, in the order the
+  //      messages were derived in. No stretch is muted on word-absence alone.
   //   4. SILENCE — a gap that is digital silence, or that holds real audio
   //      only as fragments inside digital silence, is skipped whole: zeros
   //      stay zeros, and fragments the search cannot measure must not be
@@ -1619,7 +1674,9 @@ export function deriveGate(
     }
   }
 
-  // 3a. Cancellation — every candidate, before any veto, never stepped past.
+  // 3a. Cancellation — every 500 ms window of every candidate, before any
+  // veto, never stepped past (C1: the depth dilutes over a mixed region, so
+  // the diagnosis slides window by window inside `regionCancellation`).
   for (const candidate of candidates) {
     const cancelling = regionCancellation(channels, sampleRate, candidate);
     if (cancelling !== null) return decline(cancelling);

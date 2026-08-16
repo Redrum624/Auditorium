@@ -2162,6 +2162,67 @@ describe('deriveGate', () => {
       expect(named).toBeGreaterThanOrEqual(inverted.start - SR * 0.05);
       expect(named).toBeLessThan(inverted.end);
     }, 120000);
+
+    it('refuses when the inverted stretch SHARES its candidate with honest floor — depth must not dilute (C1)', () => {
+      // The review's demonstrated regression. [phrase][floor 1.2 s][inverted
+      // whisper 1.2 s][phrase]: no phrase separates the floor from the
+      // inversion, so both land in ONE candidate region. A depth statistic
+      // taken over the whole region dilutes — the floor's real mix dominates
+      // the sum and the ~200 dB the inverted windows read on their own falls
+      // far under the 60 dB constant — and the vetoes cannot catch what the
+      // depth missed, because they read the same all-zero mix. Measured
+      // before this test's fix: 9600 of 9600 whisper samples faded to digital
+      // silence in every one of these three level configurations, where base
+      // aba53a4 declined. The diagnosis must therefore be asked of every
+      // 500 ms window of every candidate — the old design's own granularity —
+      // and decline on the first window that cancels.
+      for (const [floorDb, whisperDb] of [
+        [-55, -56],
+        [-52, -56],
+        [-55, -58],
+      ] as const) {
+        const phrase = Math.round(1.2 * SR);
+        const gapHalf = Math.round(1.2 * SR);
+        const L = new Float32Array(2 * phrase + 2 * gapHalf);
+        const R = new Float32Array(L.length);
+        const sing = (from: number): void => {
+          let ph = 0;
+          for (let i = 0; i < phrase; i++) {
+            ph += (2 * Math.PI * 196) / SR;
+            const v = 0.2 * (Math.sin(ph) + 0.4 * Math.sin(2 * ph));
+            L[from + i] += v;
+            R[from + i] += v;
+          }
+        };
+        sing(0);
+        const fa = gaussFloorDb(gapHalf, floorDb, 71);
+        const fb = gaussFloorDb(gapHalf, floorDb, 72);
+        for (let i = 0; i < gapHalf; i++) {
+          L[phrase + i] = fa[i];
+          R[phrase + i] = fb[i];
+        }
+        const w = whisper(gapHalf, whisperDb, 61);
+        const invertedAt = phrase + gapHalf;
+        for (let i = 0; i < gapHalf; i++) {
+          L[invertedAt + i] = w[i];
+          R[invertedAt + i] = -w[i];
+        }
+        sing(phrase + 2 * gapHalf);
+
+        const res = deriveGate([L, R], SR);
+        expect([floorDb, whisperDb, res.run]).toEqual([floorDb, whisperDb, false]);
+        if (res.run) return;
+        expect(res.reason).toContain('cancel');
+        expect(res.reason).toContain('polarity');
+        // ...and the named position is inside the inverted stretch, not the
+        // honest floor beside it.
+        const at = res.reason.match(/at ([\d.]+) s/);
+        expect(at).not.toBeNull();
+        const named = Number(at![1]) * SR;
+        expect(named).toBeGreaterThanOrEqual(invertedAt - Math.round(0.5 * SR));
+        expect(named).toBeLessThan(invertedAt + gapHalf);
+      }
+    }, 120000);
   });
 
   // N6 — the census's own blind spot, and the only destructive shape this
