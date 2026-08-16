@@ -1523,8 +1523,16 @@ export function deriveGate(
     }
   }
   if (gaps.length === 0) {
+    // The decline the shaped-room user actually reads, so it carries the
+    // run's own measured figures — every stage reports what it measured, and
+    // this refusal is a measurement like any other. No mostly-silent windows
+    // can be hiding here: a mostly-zero window reads a residual of ~0 and
+    // would have seeded a gap, so reaching this branch means every window
+    // read OVER the boundary and the minimum below is a real reading.
+    let minResidualDb = Infinity;
+    for (const row of tiltRows) if (row.residualDb < minResidualDb) minResidualDb = row.residualDb;
     return decline(
-      `the selection never pauses — every ${NOISE_WINDOW_MS} ms of it reads as vocal activity, and a stretch between activity is the only thing this stage may mute. A room whose own noise carries resonances (a fan, an air conditioner, a machine) reads the same way, and no measurement here can tell the two apart — if the gaps you hear are that room, set the level yourself below`
+      `the selection never pauses — every one of its ${tiltRows.length} half-seconds reads as vocal activity, the quietest at ${minResidualDb.toFixed(1)} dB of vocal-tract shape against the ${GATE_SHAPED_RESIDUAL_DB} dB boundary, and a stretch between activity is the only thing this stage may mute. A room whose own noise carries resonances (a fan, an air conditioner, a machine) reads the same way, and no measurement here can tell the two apart`
     );
   }
 
@@ -1770,7 +1778,7 @@ export function deriveGate(
           : 'the transcript’s segments, plus measured activity'
         : 'measured activity (no fresh lyrics alignment or transcript)',
       from: words
-        ? `${words.spans.length} word ${words.spans.length === 1 ? 'span' : 'spans'} placed for exactly this audio mark the singing, every ${NOISE_WINDOW_MS} ms reading vocal-tract shape is kept as well, and only the stretches between all of that are candidates`
+        ? `${words.spans.length} ${words.source === 'lyrics-alignment' ? 'word' : 'segment'} ${words.spans.length === 1 ? 'span' : 'spans'} placed for exactly this audio mark the singing, every ${NOISE_WINDOW_MS} ms reading vocal-tract shape is kept as well, and only the stretches between all of that are candidates`
         : `no word placement exists for this audio (run Pipeline → Align Lyrics… or Transcribe first for word-level evidence), so activity is what the vocal-tract measurement finds per ${NOISE_WINDOW_MS} ms, and only the stretches showing neither voice nor vocal shape are candidates`,
     },
     {

@@ -252,8 +252,8 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
   // nullable number would make "off" and "off, but I typed -42 earlier"
   // indistinguishable, and the engine would receive a threshold nobody asked
   // it to use. Untying them also means the box is gone entirely until asked
-  // for — an empty field beside a stage that derives its own threshold reads
-  // as a setting the user forgot to fill in.
+  // for — an empty field beside a stage that decides for itself reads as a
+  // setting the user forgot to fill in.
   //
   // The level is `number | null` rather than `number` because a person clears a
   // box to unsay a number, and `Number('')` is 0 — which is not "nothing", it is
@@ -544,7 +544,7 @@ export default function VocalChainDialog({ onClose }: { onClose: () => void }) {
                                 data-testid="vocal-chain-gate-threshold-missing"
                                 className="text-xs text-[#ffb74d]"
                               >
-                                Type a level, or untick this to let the stage measure one.
+                                Type a level, or untick this to let the stage decide for itself.
                               </span>
                             )}
                           </>

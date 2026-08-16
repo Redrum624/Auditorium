@@ -758,10 +758,13 @@ describe('windowedTiltResidualsDb', () => {
             sr
           );
           const delta = row.residualDb - direct;
-          // Never more floor-like than the single fit (beyond float noise)...
-          expect([name, sr, row.startSample, delta][3]).toBeGreaterThan(-0.1);
+          // Never more floor-like than the single fit (beyond float noise) —
+          // the toEqual-pair idiom, so a failure names WHICH member broke.
+          expect([name, sr, row.startSample, delta > -0.1]).toEqual([name, sr, row.startSample, true]);
           // ...and on floors, the same answer.
-          if (name === 'floor') expect([name, sr, row.startSample, Math.abs(delta)][3]).toBeLessThan(0.35);
+          if (name === 'floor') {
+            expect([name, sr, row.startSample, Math.abs(delta) < 0.35]).toEqual([name, sr, row.startSample, true]);
+          }
         }
       }
     }

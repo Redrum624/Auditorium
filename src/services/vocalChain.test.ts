@@ -1297,6 +1297,16 @@ describe('deriveGate', () => {
       expect(res.run).toBe(false);
       if (res.run) return;
       expect(res.reason).toContain('never pauses');
+      // The refusal is a measurement and reports itself as one (I1): how many
+      // half-seconds were read, and the quietest reading against the boundary.
+      expect(res.reason).toMatch(/every one of its \d+ half-seconds/);
+      expect(res.reason).toMatch(
+        new RegExp(`quietest at \\d+\\.\\d dB of vocal-tract shape against the ${GATE_SHAPED_RESIDUAL_DB} dB boundary`)
+      );
+      // ...and exactly ONE escape pointer: the decline closure's own sentence,
+      // not a second trailer inside the message (M3).
+      expect(res.reason.match(/set this stage's threshold yourself/g)!.length).toBe(1);
+      expect(res.reason).not.toContain('set the level yourself below');
     });
 
     it('declines on steady room tone with no voice in it — the quiet stretches ARE the material', () => {
