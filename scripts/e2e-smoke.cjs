@@ -2889,15 +2889,15 @@ async function main() {
       JSON.stringify(pipeline.labels) ===
         JSON.stringify([
           'Detect Tempo',
-          'Match Tempo…',
-          'Align Vocal Timing…',
-          'Auto-Remix…',
-          'Voice Changer…',
-          'Vocal Chain…',
-          'Cover Chain…',
-          'Align Lyrics…',
-          'Transcribe…',
-          'Separate into Stems…',
+          'Match Tempo',
+          'Align Vocal Timing',
+          'Auto-Remix',
+          'Voice Changer',
+          'Vocal Chain',
+          'Cover Chain',
+          'Align Lyrics',
+          'Transcribe',
+          'Separate into Stems',
           'Spatial Positioner',
         ]),
       `the Pipeline menu holds the eleven tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
@@ -2916,7 +2916,7 @@ async function main() {
       )
     );
     const strays = editLabels.filter((l) =>
-      ['Auto-Remix…', 'Separate into Stems…', 'Transcribe…', 'Voice Changer…'].includes(l)
+      ['Auto-Remix', 'Separate into Stems', 'Transcribe', 'Voice Changer'].includes(l)
     );
     assert(
       strays.length === 0,
@@ -3166,7 +3166,7 @@ async function main() {
         `Stem separation: SKIPPED (REPORTED) — the ${expectedModelMb} MB separation model ` +
           `is not on this machine and no valid repo-local copy exists at ` +
           `test-assets/models/htdemucs_fp16weights.onnx. Download it in-app ` +
-          `(Pipeline → Separate into Stems… → Download Model) to make this step run.`
+          `(Pipeline → Separate into Stems → Download Model) to make this step run.`
       );
     } else {
       await page.evaluate(() => window.__test.setView('waveform'));
@@ -4573,7 +4573,7 @@ async function main() {
     //       reserved would show up as a busy refusal or a hang, not as a
     //       failed cancel;
     //   (c) the renderer surface in the packaged app: the transcript reached
-    //       through Pipeline > Transcribe… (F11-8 retired the Transcript strip
+    //       through Pipeline > Transcribe (F11-8 retired the Transcript strip
     //       tab), a row per segment, the region ribbon over the waveform, a click
     //       moving the real playhead, the speaker-count control re-grouping
     //       with no second inference run, and an SRT written to disk whose
@@ -4620,7 +4620,7 @@ async function main() {
         `Transcription: SKIPPED (REPORTED) — the ${transcribeMb} MB transcription model set ` +
           `is not on this machine and no valid repo-local copy exists at ` +
           `test-assets/models/transcription/. Download it in-app ` +
-          `(Pipeline → Transcribe… → Download Models) to make this step run.`
+          `(Pipeline → Transcribe → Download Models) to make this step run.`
       );
     } else {
       // --- (a) real spawn + multi-slice transport -------------------------
@@ -4761,11 +4761,11 @@ async function main() {
           stripHasTranscript === null,
           'Transcript is not a module-strip entry any more — it is a tool result'
         );
-        assert(await openMenu('Pipeline'), 'the Pipeline menu opens for Transcribe…');
+        assert(await openMenu('Pipeline'), 'the Pipeline menu opens for Transcribe');
         await page.evaluate(() => {
           const row = [
             ...document.querySelectorAll('[data-testid="menu-dropdown"] button'),
-          ].find((b) => b.querySelector('span').textContent.trim() === 'Transcribe…');
+          ].find((b) => b.querySelector('span').textContent.trim() === 'Transcribe');
           row.click();
         });
         await page.waitForFunction(
@@ -4954,7 +4954,7 @@ async function main() {
       console.log(
         `Voice Changer: SKIPPED (REPORTED) — the ${voiceMb} MB voice model set is not on this ` +
           `machine and no valid repo-local copy exists at test-assets/models/voice/. Download it ` +
-          `in-app (Pipeline → Voice Changer… → Download Models) to make this step run.`
+          `in-app (Pipeline → Voice Changer → Download Models) to make this step run.`
       );
     } else {
       // The model's fixed rate and the chunk-plan law, restated here with
@@ -5234,7 +5234,7 @@ async function main() {
       console.log(
         `Align Lyrics: SKIPPED (REPORTED) - the ${alignMb} MB alignment model is not on this ` +
           `machine and no valid repo-local copy exists at test-assets/models/align/. Download it ` +
-          `in-app (Pipeline -> Align Lyrics... -> Download Model) to make this step run.`
+          `in-app (Pipeline -> Align Lyrics -> Download Model) to make this step run.`
       );
     } else {
       // The real sung take and its verbatim lyrics when the machine has them;

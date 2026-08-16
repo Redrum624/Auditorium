@@ -150,14 +150,15 @@ describe('EffectsPanel — the tool sections', () => {
     });
   });
 
-  it('labels every entry with the menu registry own label, ellipsis included', () => {
+  it('labels every entry with the menu registry own label, verbatim', () => {
     render(<EffectsPanel />);
     for (const id of ALL_TOOL_IDS) {
       expect([id, toolButton(id).textContent]).toEqual([id, commandFor(id).label]);
     }
-    // The ellipsis convention really is being carried, not merely matched by
-    // two identically-hardcoded strings.
-    expect(toolButton('tempo.match').textContent).toBe('Match Tempo…');
+    // The registry label really is being carried, not merely matched by two
+    // identically-hardcoded strings. T8 removed the dots from every Pipeline
+    // label at the user's direction, so the plain form is the one pinned.
+    expect(toolButton('tempo.match').textContent).toBe('Match Tempo');
     expect(toolButton('tempo.detect').textContent).toBe('Detect Tempo');
   });
 

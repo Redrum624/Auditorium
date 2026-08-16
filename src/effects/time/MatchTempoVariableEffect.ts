@@ -11,7 +11,7 @@
  * `TempoDialog` can produce — the user has to see the grid, correct its octave
  * if the detector picked the wrong one, and confirm it (RULING 1). Listing it in
  * the Effects menu would offer a control that opens a params-only dialog and
- * then refuses, because there would be no grid. `Pipeline → Match Tempo…` is
+ * then refuses, because there would be no grid. `Pipeline → Match Tempo` is
  * already registered separately as the command that opens the real dialog.
  *
  * The grid arrives REGION-RELATIVE through the `__effectExtra` side channel —
@@ -51,7 +51,7 @@ function readExtra(): MatchTempoVariableExtra {
     // applies no edit. Returning the input unchanged would push an undo entry
     // that did nothing and look like the feature silently failing.
     throw new Error(
-      'Variable-rate Match Tempo needs a confirmed beat grid. Open Pipeline → Match Tempo… rather than running this effect directly.'
+      'Variable-rate Match Tempo needs a confirmed beat grid. Open Pipeline → Match Tempo rather than running this effect directly.'
     );
   }
   return { beatSamples: beats, targetSpacing: targetSpacing as number };

@@ -277,7 +277,7 @@ describe('while a hosted pass is running', () => {
     expect(screen.getByTestId('tool-host')).toHaveAttribute('data-tool-id', 'tempo.match');
     expect(showMessageBox).toHaveBeenCalledTimes(1);
     const [opts] = showMessageBox.mock.calls[0];
-    expect(opts.message).toContain('Match Tempo…');
+    expect(opts.message).toContain('Match Tempo');
     expect(opts.message).toContain('discard the pass');
   });
 

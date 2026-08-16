@@ -1159,7 +1159,7 @@ function registerTempoCommands(): void {
     },
     {
       id: 'tempo.match',
-      label: 'Match Tempo…',
+      label: 'Match Tempo',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => openTempoDialog(),
     },
@@ -1171,7 +1171,7 @@ function registerTempoCommands(): void {
       // input is a confirmed anchor list, not scalar params (see
       // `EffectDefinition.hidden`).
       id: 'timing.align',
-      label: 'Align Vocal Timing…',
+      label: 'Align Vocal Timing',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => openAlignTimingDialog(),
     },
@@ -1192,7 +1192,7 @@ function registerRemixCommands(): void {
   registerCommands([
     {
       id: 'edit.remix',
-      label: 'Auto-Remix…',
+      label: 'Auto-Remix',
       enabled: (s) => {
         const d = activeDoc(s);
         return d !== null && docLength(d) > 0;
@@ -1216,7 +1216,7 @@ function registerStemCommands(): void {
   registerCommands([
     {
       id: 'edit.separateStems',
-      label: 'Separate into Stems…',
+      label: 'Separate into Stems',
       enabled: (s) => {
         const d = activeDoc(s);
         return d !== null && docLength(d) > 0;
@@ -1259,7 +1259,7 @@ function registerTranscribeCommands(): void {
   registerCommands([
     {
       id: 'edit.transcribe',
-      label: 'Transcribe…',
+      label: 'Transcribe',
       enabled: (s) => {
         const d = activeDoc(s);
         return d !== null && docLength(d) > 0;
@@ -1288,7 +1288,7 @@ function registerVoiceCommands(): void {
   registerCommands([
     {
       id: 'edit.voiceChanger',
-      label: 'Voice Changer…',
+      label: 'Voice Changer',
       enabled: (s) => {
         const d = activeDoc(s);
         return d !== null && docLength(d) > 0;
@@ -1314,7 +1314,7 @@ function registerVocalChainCommands(): void {
   registerCommands([
     {
       id: 'effects.vocalChain',
-      label: 'Vocal Chain…',
+      label: 'Vocal Chain',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => openVocalChainDialog(),
     },
@@ -1322,7 +1322,7 @@ function registerVocalChainCommands(): void {
 }
 
 /** F10 — the Cover Chain. F11-7: it sits in the PIPELINE menu's Voice group,
- * still immediately AFTER 'Vocal Chain…' — the one run-order adjacency the
+ * still immediately AFTER 'Vocal Chain' — the one run-order adjacency the
  * regrouping preserved, and the cover chain's own `clean` stage note is why it
  * has to be: the match is a correction to a CLEAN take, so the vocal chain runs
  * first. Like the vocal chain it is a command
@@ -1335,7 +1335,7 @@ function registerCoverChainCommands(): void {
   registerCommands([
     {
       id: 'effects.coverChain',
-      label: 'Cover Chain…',
+      label: 'Cover Chain',
       enabled: (s) => activeDoc(s) !== null,
       run: async () => openCoverChainDialog(),
     },
@@ -1362,7 +1362,7 @@ function registerAlignLyricsCommands(): void {
   registerCommands([
     {
       id: 'lyrics.align',
-      label: 'Align Lyrics…',
+      label: 'Align Lyrics',
       enabled: (s) => {
         const d = activeDoc(s);
         return d !== null && docLength(d) > 0;
@@ -1376,9 +1376,12 @@ function registerAlignLyricsCommands(): void {
  * group. The user ruled that "Spatial and Transcript are single tools, they
  * should not be a module", so the module strip no longer carries an icon for
  * the positioner and this command is the ONLY door it has: it opens no dialog
- * (hence no ellipsis in the label, the same convention `tempo.detect` follows)
  * — it puts the existing panel, untouched, into the module card through the
- * bus, exactly as `focusRemixPanel`/`focusTranscriptPanel` do.
+ * bus, exactly as `focusRemixPanel`/`focusTranscriptPanel` do. (This label
+ * originally had no ellipsis BECAUSE it opens no dialog, the convention
+ * `tempo.detect` followed too. T8 superseded that convention: the user had the
+ * dots removed from every Pipeline label, so a plain label no longer says
+ * anything about dialogs — in this menu the dots-mean-a-dialog rule is dead.)
  *
  * ALWAYS enabled, and it is the only Pipeline row that is. Every other row acts
  * on the active document; the positioner writes automation onto a multitrack

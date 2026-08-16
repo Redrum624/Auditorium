@@ -278,7 +278,7 @@ describe('VOCAL_CHAIN_STAGES', () => {
       // built from a literal section name, so a note left pointing at Effects
       // fails too. (`menuActions.test.ts` sweeps the whole of src/ for that
       // second failure mode across every command, not just these two.)
-      expect(stage.note).toContain(`Run Pipeline → ${stage.label}… FIRST, then this chain`);
+      expect(stage.note).toContain(`Run Pipeline → ${stage.label} FIRST, then this chain`);
       expect(stage.note).not.toContain('Effects →');
     }
   });

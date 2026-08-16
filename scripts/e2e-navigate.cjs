@@ -1054,11 +1054,11 @@ async function main() {
 
       assert(await openMenu(page, 'Pipeline'), 'the Pipeline menu opens on a real click');
       assert(
-        await clickMenuItem(page, 'Vocal Chain…'),
-        'Vocal Chain… is enabled in the Pipeline menu and takes a real click'
+        await clickMenuItem(page, 'Vocal Chain'),
+        'Vocal Chain is enabled in the Pipeline menu and takes a real click'
       );
       await page.waitForSelector('[data-testid="vocal-chain-dialog"]', { timeout: 5000 });
-      record('Pipeline > Vocal Chain…', 'opened from the real menu', 'PASS');
+      record('Pipeline > Vocal Chain', 'opened from the real menu', 'PASS');
 
       // Pitch Correct is 55 % of the pass and has nothing to correct on a click
       // train — switched off for runtime, exactly as the smoke's own chain step
@@ -2098,7 +2098,13 @@ async function main() {
       );
 
       // …and a tool really opens from it, hosted, replacing this very card.
-      const row = cardRows.find((r) => !r.disabled && r.label.endsWith('…'));
+      // Picked by id, not by label: T8 removed the trailing dots from every
+      // Pipeline label, so "ends in …" no longer distinguishes the rows that
+      // open a hosted tool from the two that do not (`tempo.detect` runs an
+      // analysis in place; `spatial.position` swaps the module card).
+      const row = cardRows.find(
+        (r) => !r.disabled && r.id !== 'tempo.detect' && r.id !== 'spatial.position'
+      );
       assert(row !== undefined, `at least one tool is runnable from the card with a document open`);
       await page.click(`[data-testid="pipeline-item"][data-command-id="${row.id}"] button`);
       await page.waitForSelector('[data-testid="tool-host"]', { timeout: 10000 });
@@ -2420,11 +2426,11 @@ async function main() {
       const hadTranscript = await page.evaluate(
         () => document.querySelector('[data-testid="transcript-panel"]') !== null
       );
-      assert(hadTranscript === false, 'no transcript exists yet, so Transcribe… must offer the dialog');
-      assert(await openMenu(page, 'Pipeline'), 'the Pipeline menu opens for Transcribe…');
-      assert(await clickMenuItem(page, 'Transcribe…'), 'Transcribe… takes a real click');
+      assert(hadTranscript === false, 'no transcript exists yet, so Transcribe must offer the dialog');
+      assert(await openMenu(page, 'Pipeline'), 'the Pipeline menu opens for Transcribe');
+      assert(await clickMenuItem(page, 'Transcribe'), 'Transcribe takes a real click');
       await page.waitForSelector('[data-testid="transcribe-dialog"]', { timeout: 10000 });
-      record('Module: Transcript', 'Transcribe… offered the dialog (no transcript to reveal)', 'PASS');
+      record('Module: Transcript', 'Transcribe offered the dialog (no transcript to reveal)', 'PASS');
       // M4: `dismissOpenTool`, not `cancelDialog`. Transcribe is one of the nine
       // that now open HOSTED in the module column, and a hosted tool installs no
       // Escape handler and draws no backdrop — so `cancelDialog` pressed Escape

@@ -12,7 +12,7 @@
  * beat grid, choose the subdivision and confirm the moves first (RULING 1, and
  * `timingWarp.ts`'s measured onset reliability). Listing it among the EFFECTS
  * would offer a control that opens a params-only dialog and then refuses,
- * because there would be no anchors. `Pipeline -> Align Vocal Timing…` is
+ * because there would be no anchors. `Pipeline -> Align Vocal Timing` is
  * registered separately as a command that opens the real dialog.
  *
  * Anchors arrive REGION-RELATIVE through the `__effectExtra` side channel (the
@@ -38,7 +38,7 @@ function readAnchors(): TimingAnchor[] {
     // applies no edit. Returning the input unchanged would push an undo entry
     // that did nothing and look like the feature silently failing.
     throw new Error(
-      'Align Vocal Timing needs confirmed anchors. Open Pipeline → Align Vocal Timing… rather than running this effect directly.'
+      'Align Vocal Timing needs confirmed anchors. Open Pipeline → Align Vocal Timing rather than running this effect directly.'
     );
   }
   return anchors;

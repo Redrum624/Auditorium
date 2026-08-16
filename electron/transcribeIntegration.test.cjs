@@ -93,7 +93,7 @@ function requireModels() {
   if (!modelsOnDisk) {
     throw new Error(
       `the pinned transcription model set is not in ${MODEL_DIR} — download it in-app ` +
-        `(Pipeline -> Transcribe... -> Download Models) and copy it there, or unset ` +
+        `(Pipeline -> Transcribe -> Download Models) and copy it there, or unset ` +
         `TRANSCRIBE_INTEGRATION to let this test skip`
     );
   }

@@ -39,9 +39,9 @@ Six menus: **File**, **Edit**, **Effects**, **Pipeline**, **View** and
 - **Effects** holds **Capture Noise Print** and then every effect, grouped by
   category — the things that transform the audio you have selected.
 - **Pipeline** holds the eleven long-running tools, grouped by subject:
-  **Detect Tempo · Match Tempo… · Align Vocal Timing… · Auto-Remix…**, then
-  **Voice Changer… · Vocal Chain… · Cover Chain… · Align Lyrics…**, then
-  **Transcribe… · Separate into Stems…**, then **Spatial Positioner**. These
+  **Detect Tempo · Match Tempo · Align Vocal Timing · Auto-Remix**, then
+  **Voice Changer · Vocal Chain · Cover Chain · Align Lyrics**, then
+  **Transcribe · Separate into Stems**, then **Spatial Positioner**. These
   used to be scattered between
   the Effects and Edit menus; they are in one place now, and each one is in
   exactly one place.
@@ -309,7 +309,7 @@ is always last, and anything added later goes between them.
   otherwise.
 - **Spatial** and **Transcript** are not modules. They are what a tool
   produces, so they have no icon at all: **Pipeline → Spatial Positioner**
-  opens the positioner, and **Pipeline → Transcribe…** shows the transcript of
+  opens the positioner, and **Pipeline → Transcribe** shows the transcript of
   a document that already has one (and offers to make one when it does not).
   Both still open as the same full card in the same column — nothing about
   either surface was trimmed.
@@ -399,7 +399,7 @@ Reduction dialog notices a capture or clear immediately, even while open.
 
 ### Vocal Chain (fixing a rough vocal in one pass)
 
-**Pipeline → Vocal Chain…** runs the corrections a vocal usually needs, in one
+**Pipeline → Vocal Chain** runs the corrections a vocal usually needs, in one
 pass that lands as a single undo entry. It contains no new processing — every
 stage is an effect you can also run on its own. What the chain adds is the
 order, settings worked out from your actual recording, and a report.
@@ -491,7 +491,7 @@ only when the evidence says no vocal activity lives in it — so pause noise
 reach. The evidence, in the order it is consulted:
 
 - **Your aligned lyrics or transcript place the words.** If you have run
-  **Pipeline → Align Lyrics…** or **Transcribe** on this audio and have not
+  **Pipeline → Align Lyrics** or **Transcribe** on this audio and have not
   edited it since, every word's span marks singing, and nothing inside a word
   span is ever muted — however quiet the word is. This is the strongest
   evidence there is, and the only kind that can protect singing too quiet to
@@ -639,7 +639,7 @@ whole chain took about 105 seconds on a 142-second stereo take).
 ### Cover Chain (the whole journey, from the song and your take to a session)
 
 <!-- CP1: the chain became the journey -->
-`Pipeline → Cover Chain…` takes **two documents** — the original song, and the vocal you
+`Pipeline → Cover Chain` takes **two documents** — the original song, and the vocal you
 recorded — and does the whole thing: separates the original, cleans your take, works out
 where your take belongs against it, matches your take's tone and level to the original
 singer's, builds a session with the original's music and your take on it, and smooths
@@ -747,7 +747,7 @@ automatic pick would have been a coin flip. That is why the journey aligns but d
 transpose or re-time, and why the two tools below stay yours to run.
 
 **Two tools stay manual, deliberately, and are worth running afterwards.**
-`Pipeline → Align Lyrics…` replaces one word you pick with a fresh take of that word;
+`Pipeline → Align Lyrics` replaces one word you pick with a fresh take of that word;
 nothing in the app judges which word is wrong, and a per-phone quality scorer was built,
 measured at 0.642 AUC against a 0.500 chance baseline, and cut. `Pipeline → Align Vocal
 Timing…` warps timing but needs you to confirm the beat grid first — see the note in that
@@ -818,7 +818,7 @@ spectral distance. Neither is in the journey report, and that is a decision rath
 oversight — the journey nests two whole chains inside six stages, and reproducing both chains'
 tables would put four tables and about ninety numbers on one screen, which is a report nobody
 reads. What the journey shows instead is every stage's own status, reason and derived settings,
-including each nested stage's. **The tables still exist**: run `Pipeline → Cover Chain…`'s
+including each nested stage's. **The tables still exist**: run `Pipeline → Cover Chain`'s
 matching stages on their own — or open the take and run the Vocal Chain — and each chain's own
 tool reports itself in full, exactly as before. Nothing was removed from the engines; the
 numbers are one tool away rather than in front of you.
@@ -967,7 +967,7 @@ To make a 128 BPM loop sit in a 124 BPM track:
 
 1. Select the region to retarget (or select nothing, to retarget the whole
    document).
-2. **Pipeline → Match Tempo…**. The tool prefills the source BPM from the
+2. **Pipeline → Match Tempo**. The tool prefills the source BPM from the
    detection; **Re-detect from selection** re-runs it against the region the
    ratio will be applied to. A selection of 30 seconds or less is analysed in
    full; a longer one is measured over a **centred 30-second excerpt** of it
@@ -1036,7 +1036,7 @@ It works from *anchors you confirm*, never from a detector's guess:
    solo vocal roughly one proposal in eight is not a syllable (it is a breath, a
    note ending, or a slide), and about a third of the syllables are missed, so
    this step is a starting point, not an answer.
-3. **Pipeline → Align Vocal Timing…**.
+3. **Pipeline → Align Vocal Timing**.
 4. Check the grid. The tool shows the BPM the tracked beats imply and the
    detector's confidence, with ×2 / ÷2 to re-track if the octave is wrong.
 5. Choose the subdivision. Each option is labelled with the median move it would
@@ -1064,7 +1064,7 @@ Lyrics…** is that.
 It works from lyrics *you already have*. The model is never asked what was sung;
 it is given the words and asked only where each one is.
 
-1. **Pipeline → Align Lyrics…**. The first run downloads a 378 MB acoustic model
+1. **Pipeline → Align Lyrics**. The first run downloads a 378 MB acoustic model
    (once, kept with the app's settings).
 2. Paste the lyrics, or press **Load from file…** for a `.txt` / `.lrc`. One line
    per line of the song — the words are laid out the way you wrote them.
@@ -1134,7 +1134,7 @@ a file" button; the take is recorded here, in your own voice.
 
 To make a song fit a 2-minute video without time-stretching it:
 
-1. Open the track and run **Pipeline → Auto-Remix…**.
+1. Open the track and run **Pipeline → Auto-Remix**.
 2. Confirm the tempo and the downbeat the tool reports (use ×2 / ÷2 if the
    octave is wrong — the arrangement is built on this grid).
 3. Set the target length, and adjust phrase length, crossfade, strictness or
@@ -1175,7 +1175,7 @@ longer describes the source.
 
 To split a song into drums, bass, vocals and everything else:
 
-1. Open the file and run **Pipeline → Separate into Stems…**.
+1. Open the file and run **Pipeline → Separate into Stems**.
 2. The first time only, the tool offers the **one-time 166 MB model
    download** with byte progress. It is fetched once and kept, so later
    separations start immediately.
@@ -1214,7 +1214,7 @@ written to disk, so closing one — or quitting — prompts you to save it.
 
 To turn speech into timestamped text with a speaker label per segment:
 
-1. Open the recording and run **Pipeline → Transcribe…**.
+1. Open the recording and run **Pipeline → Transcribe**.
 2. The first time only, the tool offers the **one-time ~323 MB model
    download** with byte progress (Whisper base, plus a speaker-embedding
    model). They are fetched once and kept.
@@ -1229,7 +1229,7 @@ To turn speech into timestamped text with a speaker label per segment:
    there. The same segments appear as coloured bars in a thin strip between
    the time ruler and the waveform — click one to jump to it.
 
-**To come back to a transcript later**, run **Pipeline → Transcribe…** again on
+**To come back to a transcript later**, run **Pipeline → Transcribe** again on
 the same document: when a transcript already exists the tool shows it rather
 than re-running the model, so it costs nothing to reach. The panel itself has
 the button to run a fresh one when you actually want that. (There is no
@@ -1270,7 +1270,7 @@ shows.
 
 ### Changing a voice
 
-`Pipeline → Voice Changer…` makes a recording sound like a different speaker while
+`Pipeline → Voice Changer` makes a recording sound like a different speaker while
 keeping the words and the delivery. Everything runs on your own CPU — no
 account, no upload.
 

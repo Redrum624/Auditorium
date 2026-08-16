@@ -127,7 +127,7 @@ describe('PipelinePanel — greying is the command’s own predicate', () => {
     addDoc(0);
     render(<PipelinePanel />);
     expect(button('edit.remix').title).toBe(
-      'Auto-Remix… — not available for this file right now'
+      'Auto-Remix — not available for this file right now'
     );
   });
 });

@@ -954,6 +954,19 @@ describe('the Pipeline section (F11-7)', () => {
     }
   });
 
+  // T8: the user had the trailing dots removed from every Pipeline label
+  // ("remove the '...' from the end of every pipeline"). This killed the
+  // dots-mean-a-dialog convention for this menu — a Pipeline label is a plain
+  // name now, whatever the row opens — and this pin is what keeps a relabelled
+  // or newly-added row from quietly bringing the dots back.
+  it('carries no ellipsis on any row label — Pipeline labels are plain names (T8)', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    for (const item of pipeline.items) {
+      if (item === 'separator') continue;
+      expect([item.id, item.label.includes('…')]).toEqual([item.id, false]);
+    }
+  });
+
   // Placement moved; the commands did not. Enablement is the observable half of
   // that, and it is the half a careless "move" breaks by re-registering a stub.
   it('every document-gated row is disabled with no document and enabled with one', () => {
@@ -993,7 +1006,7 @@ describe('spatial.position — the Mix group (F11-8)', () => {
     expect(ids[ids.length - 3]).toBe('edit.separateStems');
   });
 
-  it('resolves to a registered command named for what it opens, with no ellipsis (it opens no dialog)', () => {
+  it('resolves to a registered command named plainly for what it opens', () => {
     const cmd = pipelineCmd('spatial.position')!;
     expect(cmd).toBeDefined();
     expect(cmd.label).toBe('Spatial Positioner');
@@ -1271,14 +1284,14 @@ describe('effects.vocalChain (Task F7)', () => {
   });
 
   it('registers Align Lyrics with a real label, gated on a document with audio in it', () => {
-    expect(findPipelineCmd('lyrics.align')!.label).toBe('Align Lyrics…');
+    expect(findPipelineCmd('lyrics.align')!.label).toBe('Align Lyrics');
     expect(findPipelineCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(false);
     openDoc();
     expect(findPipelineCmd('lyrics.align')!.enabled(useAppStore.getState())).toBe(true);
   });
 
   it('is registered with a real label rather than falling back to its id', () => {
-    expect(findPipelineCmd('effects.vocalChain')!.label).toBe('Vocal Chain…');
+    expect(findPipelineCmd('effects.vocalChain')!.label).toBe('Vocal Chain');
   });
 
   it('is disabled with no active document and enabled with one', () => {
@@ -1327,7 +1340,7 @@ describe('effects.coverChain (Task F10)', () => {
   // match is a correction to a CLEAN take, so the vocal chain runs first.
   const IN_ORDER = ['timing.align', 'lyrics.align', 'effects.vocalChain', 'effects.coverChain'];
 
-  it('sits immediately after Vocal Chain…, both before and after the registry populates', () => {
+  it('sits immediately after Vocal Chain, both before and after the registry populates', () => {
     for (const populate of [false, true]) {
       if (populate) {
         registerAllEffects();
@@ -1344,7 +1357,7 @@ describe('effects.coverChain (Task F10)', () => {
   });
 
   it('is registered with a real label rather than falling back to its id', () => {
-    expect(findPipelineCmd('effects.coverChain')!.label).toBe('Cover Chain…');
+    expect(findPipelineCmd('effects.coverChain')!.label).toBe('Cover Chain');
   });
 
   it('is disabled with no active document and enabled with one', () => {
@@ -1414,7 +1427,7 @@ describe('edit.remix (Task T14)', () => {
 
     const remix = pipeline.items[alignIndex + 1];
     expect(remix !== 'separator' && remix.id).toBe('edit.remix');
-    expect(remix !== 'separator' && remix.label).toBe('Auto-Remix…');
+    expect(remix !== 'separator' && remix.label).toBe('Auto-Remix');
     expect(remix !== 'separator' && remix.shortcut).toBeUndefined();
     expect(pipeline.items[alignIndex + 2]).toBe('separator');
 
@@ -1538,7 +1551,7 @@ describe('edit.separateStems (Task S6)', () => {
 
     const separate = pipeline.items[transcribeIndex + 1];
     expect(separate !== 'separator' && separate.id).toBe('edit.separateStems');
-    expect(separate !== 'separator' && separate.label).toBe('Separate into Stems…');
+    expect(separate !== 'separator' && separate.label).toBe('Separate into Stems');
     expect(separate !== 'separator' && separate.shortcut).toBeUndefined();
     // Closes the GROUP, which is what this test is named for: the next thing
     // after it is the separator that opens the next group, never another
@@ -1646,7 +1659,7 @@ describe('edit.transcribe (Task F4b)', () => {
     );
     expect(items[transcribeIndex - 1]).toBe('separator');
     const transcribe = items[transcribeIndex];
-    expect(transcribe !== 'separator' && transcribe.label).toBe('Transcribe…');
+    expect(transcribe !== 'separator' && transcribe.label).toBe('Transcribe');
     // No shortcut: a multi-minute job must never be one keystroke away.
     expect(transcribe !== 'separator' && transcribe.shortcut).toBeUndefined();
 
@@ -1655,7 +1668,7 @@ describe('edit.transcribe (Task F4b)', () => {
     );
     expect(items[voiceIndex - 1]).toBe('separator');
     const voice = items[voiceIndex];
-    expect(voice !== 'separator' && voice.label).toBe('Voice Changer…');
+    expect(voice !== 'separator' && voice.label).toBe('Voice Changer');
     expect(voice !== 'separator' && voice.shortcut).toBeUndefined();
 
     const editIds = commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items);
