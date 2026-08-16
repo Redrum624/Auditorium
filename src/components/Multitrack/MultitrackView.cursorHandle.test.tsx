@@ -132,14 +132,17 @@ describe('the handle’s geometry (T7) — the editor’s constants, plus the he
 
 describe('dragging the multitrack cursor handle (T7)', () => {
   it('does NOT move the cursor merely by being grabbed', () => {
-    // Parked at lane x = 300 with no clip in the session, so the only magnet
-    // target is the cursor's own position — "unchanged" cannot be a snap
-    // landing on the same value.
+    // Parked at lane x = 300. The cursor's OWN position is always a tier-0
+    // magnet target (`sessionSnapTiers` passes `[mtCursorSample]` as `extra`),
+    // so the press must sit BEYOND its 8 px snap radius or a buggy pointerdown
+    // that commits the snapped position would snap straight back to 30 000 and
+    // pass anyway (T7 review F1 — proven by mutation).
     store().setMtCursor(30_000);
     const handle = mountHandle();
 
-    // 8 px right of the line — off-centre, but inside the hit band.
-    firePointer(handle, 'pointerdown', { clientX: atLaneX(308) });
+    // 12 px right — the hit band's far edge, beyond the 8 px snap radius, so
+    // neither a raw nor a snapped pointerdown commit can land back on 30 000.
+    firePointer(handle, 'pointerdown', { clientX: atLaneX(312) });
 
     expect(store().mtCursorSample).toBe(30_000);
   });
@@ -202,6 +205,21 @@ describe('dragging the multitrack cursor handle (T7)', () => {
     firePointer(handle, 'pointerdown', { clientX: atLaneX(300) });
     // clientX 0 is 224 px LEFT of the lane origin: raw sample −22 400.
     firePointer(handle, 'pointermove', { clientX: 0, altKey: true });
+
+    expect(store().mtCursorSample).toBe(0);
+  });
+
+  it('snaps the RAW position, then clamps — the editor’s order (T7 review F2)', () => {
+    // A clip edge 3 px inside the origin. The editor's `snapped()` snaps the
+    // raw value and clamps after; clamp-first would move a far-off-left raw
+    // (−22 400) to 0 and hand it to the magnet, which would pull it onto the
+    // 300-sample edge. Same drag as the clamp test above, magnet ON.
+    addEdgeClip(300, 200_000);
+    store().setMtCursor(30_000);
+    const handle = mountHandle();
+
+    firePointer(handle, 'pointerdown', { clientX: atLaneX(300) });
+    firePointer(handle, 'pointermove', { clientX: 0 });
 
     expect(store().mtCursorSample).toBe(0);
   });
@@ -275,6 +293,48 @@ describe('the handle beside the playhead and the viewport (T7)', () => {
     store().setMtCursor((laneW + CURSOR_HANDLE_HALF_W + 1) * SPP);
     render(<MultitrackView />);
     expect(screen.queryByTestId('mt-cursor-handle')).toBeNull();
+  });
+
+  it('re-evaluates the cull when a resize changes nothing else (T7 review F3)', () => {
+    // `publishSessionLaneWidth` has a load-bearing no-op guard: a resize that
+    // leaves the resolved zoom unchanged writes NOTHING to the store, so only
+    // the component's own width mirror can re-render the cull. The session is
+    // long enough (fit ≈ 145 spp > SPP) that the resize below re-resolves the
+    // zoom to exactly itself — the store stays silent on purpose.
+    const OriginalRO = globalThis.ResizeObserver;
+    const observers: { cb: ResizeObserverCallback; el: Element }[] = [];
+    class CapturingRO {
+      private readonly cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+      }
+      observe(el: Element): void {
+        observers.push({ cb: this.cb, el });
+      }
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    (globalThis as { ResizeObserver: unknown }).ResizeObserver = CapturingRO;
+    try {
+      addEdgeClip(0, 200_000);
+      const before = sessionLaneWidth(); // the unmeasured fallback
+      store().setMtCursor((before + CURSOR_HANDLE_HALF_W + 1) * SPP); // 1 px culled
+      render(<MultitrackView />);
+      expect(screen.queryByTestId('mt-cursor-handle')).toBeNull();
+
+      // The window widens by 20 px: the parked cursor is back in view.
+      act(() => {
+        for (const { cb, el } of observers) {
+          Object.defineProperty(el, 'clientWidth', { value: MT_HEADER_W + before + 20, configurable: true });
+          cb([], undefined as unknown as ResizeObserver); // both observers ignore their args
+        }
+      });
+
+      expect(screen.queryByTestId('mt-cursor-handle')).not.toBeNull();
+    } finally {
+      (globalThis as { ResizeObserver: unknown }).ResizeObserver = OriginalRO;
+      _resetSessionLaneWidth();
+    }
   });
 });
 

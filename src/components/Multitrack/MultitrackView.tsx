@@ -79,10 +79,21 @@ export default function MultitrackView() {
   // load paths now commit a fitted zoom (C1). While they wrote a hardcoded 512
   // this effect rescued nothing: `publishSessionLaneWidth` only re-fits a view
   // already AT its fit, and 512 is far zoomed in of it for any real session.
+  // T7 review F3 — the scroller width mirrored into state PURELY as a render
+  // trigger: `publishSessionLaneWidth` has a load-bearing no-op guard (a
+  // resize that leaves the resolved zoom unchanged writes nothing to the
+  // store), so without this mirror the handle's right-edge cull below would
+  // keep judging against a stale `sessionLaneWidth()` until the next
+  // unrelated store change. The value itself is never read — the cull keeps
+  // reading `sessionLaneWidth()`, the one copy of the header subtraction.
+  const [, setScrollerW] = useState(0);
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
-    const update = () => publishSessionLaneWidth(el.clientWidth);
+    const update = () => {
+      publishSessionLaneWidth(el.clientWidth); // first, so the width is fresh when the render lands
+      setScrollerW(el.clientWidth);
+    };
     update();
     const ro = new ResizeObserver(update);
     ro.observe(el);
@@ -128,13 +139,15 @@ export default function MultitrackView() {
     return clientX - rect.left - HEADER_W;
   };
 
-  /** The editor's `snapped()` shape with the session's pieces: round on both
-   * arms (PW1 — a fractional session fit must not park the cursor between two
-   * samples), clamp at 0 only. */
+  /** The editor's `snapped()` shape with the session's pieces: snap the RAW
+   * position FIRST, then clamp, then round — `useEditorGestures`' order, so a
+   * drag far off the left edge lands at 0 rather than being clamped to 0 and
+   * then magnet-pulled onto a target just inside it (T7 review F2). Round on
+   * both arms (PW1 — a fractional session fit must not park the cursor
+   * between two samples); clamp at 0 only, a session has no fixed end. */
   const snappedMt = (raw: number, targets: number[], e: { altKey: boolean }): number => {
-    const clamped = Math.max(0, raw);
-    if (snapSuspended(e) || targets.length === 0) return Math.round(clamped);
-    return Math.round(Math.max(0, snapSample(clamped, targets, mtZoom.samplesPerPixel).sample));
+    if (snapSuspended(e) || targets.length === 0) return Math.round(Math.max(0, raw));
+    return Math.round(Math.max(0, snapSample(raw, targets, mtZoom.samplesPerPixel).sample));
   };
 
   const onHandlePointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
