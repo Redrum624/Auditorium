@@ -7,6 +7,9 @@
   "license": "MIT",
   "type": "module",
   "main": "electron/main.cjs",
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
     "dev": "node scripts/dev.cjs",
     "dev-server-only": "vite --port 3005 --strictPort",
@@ -30,6 +33,7 @@
     },
     "files": [
       "dist/**",
+      "!dist/**/*.map",
       "electron/**",
       "!electron/**/*.test.cjs",
       "assets/icon.ico",
