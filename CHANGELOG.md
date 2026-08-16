@@ -5,6 +5,22 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.33.0] - 2026-08-16
+
+### Added
+
+- **The draggable red cursor handle rides the multitrack too.** The triangle the
+  Waveform and Spectral views already share — same geometry, same color, imported from
+  the same constants so the three views cannot drift — now sits on the session cursor
+  at the top of the multitrack lanes: grab it (grabbing alone moves nothing), drag it
+  with the magnet (Alt suspends, whole samples, snap before clamp — the editor's
+  order), release without touching the transport; during playback it stays parked at
+  the cursor while the playhead sweeps. A review-round mutation probe hardened the
+  grab test (the press point sat inside the cursor's own snap radius, hiding a
+  commit-on-grab bug class) and surfaced a real snap-order fix on the way. Affects:
+  `components/Multitrack/MultitrackView.tsx`, `components/Editor/waveformRender.ts`
+  (exports only), docs.
+
 ## [1.32.0] - 2026-08-15
 
 Three lanes from the morning's feedback: the gate stops asking how loud and starts
