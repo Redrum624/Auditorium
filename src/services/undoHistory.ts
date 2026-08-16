@@ -208,9 +208,15 @@ export function redo(docId: string): void {
  * exactly where a save clears `dirty` today (fileService, only after its
  * staleness check confirms nothing edited the doc during an async save). Any
  * later undo/redo recomputes `dirty` against this position instead of trusting
- * a stale snapshot flag (Task M2 / F9). */
+ * a stale snapshot flag (Task M2 / F9).
+ *
+ * No-op when the document's history no longer exists: a save whose async
+ * write resolves AFTER the document was closed (clearHistory already ran)
+ * must not re-create the histories entry — nothing would ever delete it
+ * again, and it would sit in the map for the rest of the session. */
 export function markSavePoint(docId: string): void {
-  const stacks = getStacks(docId);
+  const stacks = histories.get(docId);
+  if (!stacks) return;
   stacks.savePoint = stacks.position;
 }
 
@@ -220,9 +226,15 @@ export function markSavePoint(docId: string): void {
  * snapshot, so the old save point no longer corresponds to what's on disk;
  * without this, undoing back to that position would wrongly derive `dirty
  * = false` against bytes that were never actually written (Task M2 finding
- * 2). */
+ * 2).
+ *
+ * No-op when the document's history no longer exists (closed before the save
+ * resolved) — same reasoning as `markSavePoint`, with one extra hazard: the
+ * resurrected entry would park `savePoint = -1` on the closed id, poisoning
+ * the dirty derivation of any later document that reuses it. */
 export function invalidateSavePoint(docId: string): void {
-  const stacks = getStacks(docId);
+  const stacks = histories.get(docId);
+  if (!stacks) return;
   stacks.savePoint = -1;
 }
 
@@ -250,8 +262,9 @@ export function getHistory(docId: string): { done: string[]; undone: string[] } 
 }
 
 /** Drops both stacks for a document, and with them its `position`/`savePoint`
- * — the next `getStacks` call (via `pushUndo`/`markSavePoint`) starts a fresh
- * document at position 0, save point 0. Called when the document is closed. */
+ * — the next `getStacks` call (via `pushUndo`) starts a fresh document at
+ * position 0, save point 0. Called when the document is closed. The save-point
+ * functions above deliberately never re-create what this dropped. */
 export function clearHistory(docId: string): void {
   if (histories.delete(docId)) bumpVersion();
 }

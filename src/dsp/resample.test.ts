@@ -149,3 +149,44 @@ describe('resampleVariable', () => {
     expect(Array.from(out)).toEqual([0, 0, 0, 0]);
   });
 });
+
+describe('kernel table cache -- bounded LRU (public-repo L-04)', () => {
+  // The cache is keyed by fc = 0.5 * min(1, toRate/fromRate), so every distinct
+  // downsample target below yields a distinct entry (~262 KB each). The cap is
+  // MAX_KERNEL_ENTRIES = 8, enforced with the house delete+set re-insertion
+  // idiom (tempoAnalysis.writeCache): a hit re-inserts at the MRU end, an
+  // insert past the cap evicts oldest-first.
+  //
+  // Builds are observed through Math.cos: buildKernelTable evaluates the Hann
+  // window once per table entry, while the resampling inner loops only read the
+  // finished table -- so cos calls during a resampleChannel run mean the table
+  // was (re)built, and zero cos calls mean a cache hit.
+  const FROM = 96000;
+  /** 9 distinct downsample targets -> 9 distinct fc values, none colliding
+   * with the fc 0.25 / 0.5 entries earlier tests already cached. */
+  const rateAt = (i: number) => 8000 + i * 1000;
+
+  function builds(toRate: number): boolean {
+    const cos = jest.spyOn(Math, 'cos');
+    try {
+      resampleChannel(new Float32Array(64), FROM, toRate);
+      return cos.mock.calls.length > 0;
+    } finally {
+      cos.mockRestore();
+    }
+  }
+
+  it('holds 8 entries, evicts oldest-first on the 9th, and a hit refreshes recency', () => {
+    // Fill exactly to the cap with 8 fresh fc values (evicting anything older).
+    for (let i = 0; i < 8; i++) builds(rateAt(i));
+
+    // All 8 fit: re-reading the first is a hit, and the hit moves it to MRU.
+    expect(builds(rateAt(0))).toBe(false);
+
+    // A 9th distinct fc crosses the boundary: the oldest entry is now
+    // rateAt(1) (rateAt(0) was refreshed above), and only it gets evicted.
+    expect(builds(rateAt(8))).toBe(true); // fresh fc -> built
+    expect(builds(rateAt(0))).toBe(false); // survived: recency was refreshed
+    expect(builds(rateAt(1))).toBe(true); // evicted at the boundary -> rebuilt
+  });
+});

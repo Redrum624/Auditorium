@@ -1,3 +1,4 @@
+import { renderHook, act } from '@testing-library/react';
 import {
   pushUndo,
   undo,
@@ -7,6 +8,8 @@ import {
   getHistory,
   clearHistory,
   markSavePoint,
+  invalidateSavePoint,
+  useHistoryVersion,
   UNDO_LIMIT,
   MAX_UNDO_BYTES,
   type UndoEntry,
@@ -355,6 +358,49 @@ describe('save-point-derived dirty (Task M2 / F9)', () => {
     // since its undo closure was evicted, so dirty must stay true forever
     // relative to this savePoint instead of silently reporting clean.
     expect(liveDirty(docId)).toBe(true);
+  });
+
+  it('a save resolving AFTER the doc was closed does not resurrect its history entry (markSavePoint on a cleared docId)', () => {
+    // The race: fileService's async save awaits the disk write, and the user
+    // closes the document (clearHistory) before it resolves. The save's
+    // markSavePoint then lands on a docId with no stacks — it must be a no-op,
+    // not a getStacks that re-creates an entry nothing will ever delete again.
+    const docId = freshDocId();
+    const log: string[] = [];
+    pushUndo(makeEntry(docId, 'A', log));
+    clearHistory(docId); // the close wins the race
+
+    markSavePoint(docId); // the save resolves late, on the closed doc
+
+    // clearHistory bumps the shared version counter ONLY when an entry
+    // actually existed to delete — so a second clear observes whether the
+    // late markSavePoint resurrected one.
+    const { result } = renderHook(() => useHistoryVersion());
+    const before = result.current;
+    act(() => clearHistory(docId));
+    expect(result.current).toBe(before);
+  });
+
+  it('a STALE save resolving after the close does not resurrect the entry either, nor poison a document that later reuses the id (invalidateSavePoint on a cleared docId)', () => {
+    const docId = seedStoreDoc();
+    const log: string[] = [];
+    pushUndo(makeEntry(docId, 'A', log));
+    clearHistory(docId); // the close wins the race
+
+    invalidateSavePoint(docId); // the save's staleness-rejected branch, late
+
+    // No entry may have been re-created...
+    const { result } = renderHook(() => useHistoryVersion());
+    const before = result.current;
+    act(() => clearHistory(docId));
+    expect(result.current).toBe(before);
+
+    // ...and a fresh history under the same id must start pristine: its first
+    // edit's undo derives clean (position 0 === savePoint 0). A resurrected
+    // savePoint of -1 parked on the closed id would derive dirty forever.
+    pushUndo(makeEntry(docId, 'X', log));
+    undo(docId);
+    expect(liveDirty(docId)).toBe(false);
   });
 
   it('clearHistory resets position and savePoint so a later push/save starts clean again', () => {

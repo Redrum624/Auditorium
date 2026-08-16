@@ -28,8 +28,16 @@ function sinc(x: number): number {
   return Math.sin(px) / px;
 }
 
-/** Precomputed kernel tables keyed by cutoff fc (conversions reuse ratios/fc). */
+/** Precomputed kernel tables keyed by cutoff fc (conversions reuse ratios/fc).
+ * Bounded to `MAX_KERNEL_ENTRIES` — fc is a continuous value, so a session
+ * that resamples across many distinct rate pairs would otherwise accrete one
+ * ~262 KB table per pair forever. Bounded by delete+set re-insertion with
+ * oldest-first eviction, the same idiom as `tempoAnalysis.writeCache`: a hit
+ * re-inserts its entry at the most-recently-used end, an insert past the cap
+ * evicts from the oldest end. Eight tables cover far more simultaneous rate
+ * pairs than any real session uses while capping the cache at ~2 MB. */
 const kernelCache = new Map<number, Float64Array>();
+const MAX_KERNEL_ENTRIES = 8;
 
 /**
  * Returns the kernel table g(d) = 2fc·sinc(2fc·d)·hann(d) for the given cutoff,
@@ -52,9 +60,19 @@ function buildKernelTable(fc: number): Float64Array {
 
 function getKernelTable(fc: number): Float64Array {
   const cached = kernelCache.get(fc);
-  if (cached) return cached;
+  if (cached) {
+    // Refresh recency: delete+set re-insertion moves the entry to the MRU end.
+    kernelCache.delete(fc);
+    kernelCache.set(fc, cached);
+    return cached;
+  }
   const table = buildKernelTable(fc);
   kernelCache.set(fc, table);
+  while (kernelCache.size > MAX_KERNEL_ENTRIES) {
+    const oldest = kernelCache.keys().next().value as number | undefined;
+    if (oldest === undefined) break;
+    kernelCache.delete(oldest);
+  }
   return table;
 }
 

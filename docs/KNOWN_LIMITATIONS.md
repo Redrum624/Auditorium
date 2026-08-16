@@ -271,9 +271,19 @@ snapshots run roughly 200 MB each, so its effective undo depth is around 3-4
 steps, not 50; a very large document (e.g. long high-res multitrack sources)
 can be down to a single step.
 
+**The budget is per document, and nothing sums across documents.** Every open
+document carries its own independent 800 MB ceiling, so the aggregate undo
+retention is `MAX_UNDO_BYTES × (documents with history)` in the worst case —
+five heavily-edited large documents open at once can legitimately pin ~4 GB
+of undo snapshots between them, and no app-wide eviction exists to shed one
+document's history under another's pressure. In practice the worst case
+requires every open document to have been edited up to its own budget, which
+is unusual; closing a document releases its entire history at once.
+
 **Intended behavior:** No further work planned — this is the intended
 memory/depth trade-off for a browser-engine-hosted editor with no swap to
-disk.
+disk. A global cross-document budget would be feature work (a shared eviction
+policy deciding WHOSE history to shed), recorded here rather than planned.
 
 ## Session files are format v3 (binary); very large legacy sessions may not load
 
