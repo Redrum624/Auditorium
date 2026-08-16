@@ -137,7 +137,9 @@ const MARKER = '#ff8a65';
  * affordance added on top, not a restyle, which is also why every existing
  * cursor-line assertion still reads the same.
  */
-const CURSOR_HANDLE = '#e5484d';
+/** Exported (T7) because the multitrack's handle is a DOM triangle, not a
+ * canvas fill — same colour fact, third surface. */
+export const CURSOR_HANDLE = '#e5484d';
 /** Half-width of the triangle, CSS px: it spans 12 px and is 9 px deep. */
 export const CURSOR_HANDLE_HALF_W = 6;
 export const CURSOR_HANDLE_H = 9;
@@ -453,7 +455,7 @@ function drawSelection(
  * render tests drive has no `save`/`restore`.
  */
 export function drawCursorHandle(ctx: CanvasRenderingContext2D, x: number, width: number): void {
-  if (x < -CURSOR_HANDLE_HALF_W || x > width + CURSOR_HANDLE_HALF_W) return;
+  if (!cursorHandleVisible(x, width)) return;
   ctx.fillStyle = CURSOR_HANDLE;
   ctx.beginPath();
   ctx.moveTo(x - CURSOR_HANDLE_HALF_W, 0);
@@ -461,6 +463,16 @@ export function drawCursorHandle(ctx: CanvasRenderingContext2D, x: number, width
   ctx.lineTo(x, CURSOR_HANDLE_H);
   ctx.closePath();
   ctx.fill();
+}
+
+/**
+ * Whether a handle at lane-relative CSS-pixel `x` is in view for a lane
+ * `width` px wide — the cull {@link drawCursorHandle} has always applied,
+ * extracted (T7) so the multitrack's DOM handle hides on the SAME rule
+ * instead of a re-derived copy: any part of the triangle in view keeps it.
+ */
+export function cursorHandleVisible(x: number, width: number): boolean {
+  return x >= -CURSOR_HANDLE_HALF_W && x <= width + CURSOR_HANDLE_HALF_W;
 }
 
 /**
