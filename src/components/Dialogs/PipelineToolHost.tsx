@@ -18,11 +18,12 @@ import { MODULE_COLUMN_WIDTH, TOOL_HOST_WIDTH } from '../Layout/ModuleStrip';
  *
  * The registry below is the answer to "which Pipeline rows open a tool UI", and
  * it is the honest one: a row is hosted exactly when a component is mounted for
- * it here. The Pipeline menu has eleven rows and only nine are in this map —
- * `tempo.detect` runs an analysis and reports through its own channel, and
- * `spatial.position` puts an existing PANEL in the ordinary module card — so
+ * it here. The Pipeline menu has ten rows and only nine are in this map —
+ * `tempo.detect` runs an analysis and reports through its own channel — so
  * "every Pipeline tool" would have been wrong, and a written list of nine ids
  * somewhere else would have been a second place for it to go wrong.
+ * (`spatial.position`, which puts an existing PANEL in the ordinary module
+ * card, was the other unhosted row until T8 moved it to the Effects menu.)
  *
  * Every one of the nine is imported UNCHANGED. Each renders its body inside
  * `DialogShell`, and the provider below is what tells that shared shell to draw

@@ -861,21 +861,17 @@ describe('the Pipeline section (F11-7)', () => {
     'separator',
     'edit.transcribe',
     'edit.separateStems',
-    // F11-8: a fourth group, Mix. 'Spatial' was a module-strip entry until the
-    // user ruled that it is a single tool rather than a module; this is where
-    // it landed, and the strip icon is gone.
-    'separator',
-    'spatial.position',
+    // F11-8 closed this list with a fourth group, Mix, holding
+    // `spatial.position`; T8 moved that command to the Effects section on the
+    // user's direction — its own describe below pins where it lives now.
   ];
 
   const MOVED = PIPELINE_ITEMS.filter((id): id is string => id !== 'separator');
 
-  /** F11-8: every Pipeline row EXCEPT the positioner is gated on the active
-   * document. `spatial.position` is not — it addresses the multitrack
-   * SESSION's tracks, which exist with no document open at all — so the
-   * document law below is stated over the rows it actually governs, and the
-   * positioner's own enablement is pinned in its own describe. */
-  const DOC_GATED = MOVED.filter((id) => id !== 'spatial.position');
+  /** T8: with the positioner gone to the Effects menu, EVERY Pipeline row is
+   * gated on the active document, so the document law below is stated over
+   * all of them. */
+  const DOC_GATED = MOVED;
 
   function itemKeys(title: string): (string | 'separator')[] {
     const section = getMenuSections().find((s) => s.title === title)!;
@@ -887,7 +883,7 @@ describe('the Pipeline section (F11-7)', () => {
     expect(titles.indexOf('Pipeline')).toBe(titles.indexOf('Effects') + 1);
   });
 
-  it('holds the eleven tools in four separated groups, in order', () => {
+  it('holds the ten tools in three separated groups, in order', () => {
     expect(itemKeys('Pipeline')).toEqual(PIPELINE_ITEMS);
   });
 
@@ -899,7 +895,7 @@ describe('the Pipeline section (F11-7)', () => {
 
   // The whole point of the request was to MOVE them. A duplicate would leave
   // two rows running one command, and the old rows greying independently.
-  it('MOVED them: each of the eleven appears exactly once across the whole menu bar', () => {
+  it('MOVED them: each of the ten appears exactly once across the whole menu bar', () => {
     registerAllEffects();
     registerEffectCommands();
     const everywhere = getMenuSections().flatMap((s) => commandIds(s.items));
@@ -916,14 +912,17 @@ describe('the Pipeline section (F11-7)', () => {
     }
   });
 
-  it('leaves the Effects menu to Capture Noise Print plus the registry effects', () => {
+  it('leaves the Effects menu to Capture Noise Print, the registry effects, and the Mix tail', () => {
     registerAllEffects();
     registerEffectCommands();
     const ids = commandIds(getMenuSections().find((s) => s.title === 'Effects')!.items);
     for (const id of MOVED) expect(ids).not.toContain(id);
-    // Everything after the noise print is a category label or an effect.
+    // Everything between the noise print and the Mix tail is a category label
+    // or an effect. (T8 appended `spatial.position` as the tail — its own
+    // describe below pins that placement; this law is about everything else.)
     expect(ids[0]).toBe('noise.capture');
-    for (const id of ids.slice(1)) {
+    expect(ids[ids.length - 1]).toBe('spatial.position');
+    for (const id of ids.slice(1, -1)) {
       expect(id.startsWith('effects.cat.') || id.startsWith('effect.')).toBe(true);
     }
   });
@@ -946,7 +945,7 @@ describe('the Pipeline section (F11-7)', () => {
     );
   });
 
-  it('carries no keyboard shortcut on any row — every one of the eleven is a long pass', () => {
+  it('carries no keyboard shortcut on any row — every one of the ten is a long pass', () => {
     const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
     for (const item of pipeline.items) {
       if (item === 'separator') continue;
@@ -987,42 +986,60 @@ describe('the Pipeline section (F11-7)', () => {
 // should not be a module." Spatial's panel is untouched — it keeps its stage,
 // its track selector and its lane buttons — but the module strip no longer
 // carries an icon for it, so the command below is the door it is reached
-// through, and the Pipeline menu grew a fourth group to hold it.
-describe('spatial.position — the Mix group (F11-8)', () => {
-  function pipelineItems(): (string | 'separator')[] {
-    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
-    return pipeline.items.map((item) => (item === 'separator' ? 'separator' : item.id));
+// through. F11-8 put that door at the end of the Pipeline menu as a fourth
+// group; T8 moved it to the EFFECTS menu on the user's direction ("move the
+// Spacial tool to the effects module"), where it closes the list as its own
+// Mix group. Same command, same id, same run body — only the menu changed.
+describe('spatial.position — the Effects menu Mix group (F11-8, moved by T8)', () => {
+  function effectsItems(): (string | 'separator')[] {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    return effects.items.map((item) => (item === 'separator' ? 'separator' : item.id));
   }
 
-  function pipelineCmd(id: string): MenuCommand | undefined {
-    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
-    return pipeline.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
+  function effectsCmd(id: string): MenuCommand | undefined {
+    const effects = getMenuSections().find((s) => s.title === 'Effects')!;
+    return effects.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
   }
 
-  it('closes the Pipeline menu as a group of its own, after Analysis', () => {
-    const ids = pipelineItems();
+  it('closes the Effects menu as a group of its own, after the registry effects', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const ids = effectsItems();
     expect(ids[ids.length - 1]).toBe('spatial.position');
     expect(ids[ids.length - 2]).toBe('separator');
-    expect(ids[ids.length - 3]).toBe('edit.separateStems');
+    expect(ids[ids.length - 3]).toMatch(/^effect\./);
+  });
+
+  // The move must be a MOVE: a row in two menus would grey independently in
+  // each, and the Pipeline card would quietly regrow the group the user asked
+  // to empty.
+  it('appears exactly once across the whole menu bar, and not under Pipeline', () => {
+    registerAllEffects();
+    registerEffectCommands();
+    const everywhere = getMenuSections().flatMap((s) => commandIds(s.items));
+    expect(everywhere.filter((id) => id === 'spatial.position')).toEqual(['spatial.position']);
+    expect(
+      commandIds(getMenuSections().find((s) => s.title === 'Pipeline')!.items)
+    ).not.toContain('spatial.position');
   });
 
   it('resolves to a registered command named plainly for what it opens', () => {
-    const cmd = pipelineCmd('spatial.position')!;
+    const cmd = effectsCmd('spatial.position')!;
     expect(cmd).toBeDefined();
     expect(cmd.label).toBe('Spatial Positioner');
     expect(cmd.label).not.toMatch(/…$/);
   });
 
-  // The one Pipeline row that is not document-gated, and deliberately so: the
-  // positioner writes automation onto a multitrack TRACK, which exists with no
-  // document open, and the panel states an empty session in its own words
-  // rather than being replaced by a grey row that explains nothing. The strip
-  // icon it replaces was clickable in every state too, so gating here would
-  // remove a surface the user has today.
+  // The one row of its menu that is not document-gated, and deliberately so:
+  // the positioner writes automation onto a multitrack TRACK, which exists
+  // with no document open, and the panel states an empty session in its own
+  // words rather than being replaced by a grey row that explains nothing. The
+  // strip icon it replaces was clickable in every state too, so gating here
+  // would remove a surface the user has today.
   it('is enabled with no document open, and stays enabled with one', () => {
-    expect(pipelineCmd('spatial.position')!.enabled(useAppStore.getState())).toBe(true);
+    expect(effectsCmd('spatial.position')!.enabled(useAppStore.getState())).toBe(true);
     openDoc();
-    expect(pipelineCmd('spatial.position')!.enabled(useAppStore.getState())).toBe(true);
+    expect(effectsCmd('spatial.position')!.enabled(useAppStore.getState())).toBe(true);
   });
 
   it('runCommand("spatial.position") shows the positioner through the bus, opening no dialog', async () => {
@@ -1553,12 +1570,12 @@ describe('edit.separateStems (Task S6)', () => {
     expect(separate !== 'separator' && separate.id).toBe('edit.separateStems');
     expect(separate !== 'separator' && separate.label).toBe('Separate into Stems');
     expect(separate !== 'separator' && separate.shortcut).toBeUndefined();
-    // Closes the GROUP, which is what this test is named for: the next thing
-    // after it is the separator that opens the next group, never another
-    // Analysis row. It stopped being the last row of the menu in F11-8, when
-    // 'Mix' was added after it, so pinning `items.length` here would be pinning
-    // the menu's total size under the name of an adjacency.
-    expect(pipeline.items[transcribeIndex + 2]).toBe('separator');
+    // Closes the GROUP, which is what this test is named for: nothing follows
+    // it — never another Analysis row, and since T8 moved the Mix group to the
+    // Effects menu, no further group either. (F11-8 had made 'Mix' follow it
+    // behind a separator; the closing property is the same, its expression is
+    // "end of the list" again.)
+    expect(pipeline.items.length).toBe(transcribeIndex + 2);
 
     expect(commandIds(getMenuSections().find((s) => s.title === 'Edit')!.items)).not.toContain(
       'edit.separateStems'

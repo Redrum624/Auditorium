@@ -403,7 +403,8 @@ export default function App() {
         // U2-3: hand-offs from a tool that has just finished — never refused.
         focusRemixPanel: () => showPanel('remix'),
         focusTranscriptPanel: () => showPanel('transcript'),
-        // F11-8: the Pipeline > Mix command's only effect. Spatial is a single
+        // F11-8: the Mix command's only effect (Effects > Mix since T8,
+        // Pipeline > Mix before it). Spatial is a single
         // tool rather than a module (user ruling), so this is how its panel
         // reaches the card now that the strip draws no icon for it.
         // U2-3: a user COMMAND rather than a hand-off, so it is guarded.

@@ -195,7 +195,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
     // about the commands themselves changed: same ids, same predicates, same
     // run bodies, same (absent) shortcuts. Only where the user finds them.
     // F11-8 then ADDED an eleventh that was moved from nowhere — the Spatial
-    // Positioner is a new command — so count the list below, not this sentence.
+    // Positioner — and T8 moved that one OUT again, to the Effects menu, on
+    // the user's direction ("move the Spacial tool to the effects module").
+    // Ten rows again; count the list below, not this sentence.
     //
     // The groups are by SUBJECT, which is a deliberate change of basis.
     // The Effects head listed Align Vocal Timing → Align Lyrics → Vocal Chain
@@ -221,12 +223,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       // Analysis — whole-file model runs that produce new material.
       'edit.transcribe',
       'edit.separateStems',
-      'separator',
-      // F11-8: Mix — where a source SITS rather than what it says or when it
-      // plays. One entry, and a fourth group rather than a fifth row in
-      // Analysis: the positioner neither analyses nor transforms the active
-      // document, it writes automation onto a multitrack track.
-      'spatial.position',
+      // F11-8 closed this list with a fourth group, Mix, holding
+      // `spatial.position`. T8 moved that command to the Effects section (see
+      // `effectsSectionItemIds`), taking its separator with it — three groups.
     ],
   },
   {
@@ -256,7 +255,7 @@ function fallbackCommand(id: string): MenuCommand {
 function effectsSectionItemIds(): (string | 'separator')[] {
   const effects = getVisibleEffects();
   if (effects.length === 0) {
-    return ['noise.capture', 'separator', 'effects.none'];
+    return ['noise.capture', 'separator', 'effects.none', 'separator', 'spatial.position'];
   }
   // F11-7: the six analysis/transform commands that used to head this list
   // (Detect Tempo, Match Tempo…, Align Vocal Timing…, Align Lyrics…, Vocal
@@ -280,6 +279,14 @@ function effectsSectionItemIds(): (string | 'separator')[] {
     }
     ids.push(`effect.${e.id}`);
   }
+  // T8: the Spatial Positioner closes this menu as its own Mix group, moved
+  // here from the Pipeline section's fourth group on the user's direction
+  // ("move the Spacial tool to the effects module"). It is appended in BOTH
+  // branches so its door does not depend on the effect registry having
+  // populated. Not an `effect.<id>` row — it is a command that focuses the
+  // persistent SpatialPanel, and converting it would change what it does.
+  ids.push('separator');
+  ids.push('spatial.position');
   return ids;
 }
 
@@ -1372,8 +1379,11 @@ function registerAlignLyricsCommands(): void {
   ]);
 }
 
-/** F11-8 — the Spatial positioner, closing the Pipeline menu as its own 'Mix'
- * group. The user ruled that "Spatial and Transcript are single tools, they
+/** F11-8 — the Spatial positioner. It closed the Pipeline menu as its own
+ * 'Mix' group until T8, when the user moved it to the EFFECTS menu ("move the
+ * Spacial tool to the effects module") — it closes that menu as its own Mix
+ * group now, and the Effects card draws the matching Mix row.
+ * The user ruled that "Spatial and Transcript are single tools, they
  * should not be a module", so the module strip no longer carries an icon for
  * the positioner and this command is the ONLY door it has: it opens no dialog
  * — it puts the existing panel, untouched, into the module card through the
@@ -1383,8 +1393,9 @@ function registerAlignLyricsCommands(): void {
  * dots removed from every Pipeline label, so a plain label no longer says
  * anything about dialogs — in this menu the dots-mean-a-dialog rule is dead.)
  *
- * ALWAYS enabled, and it is the only Pipeline row that is. Every other row acts
- * on the active document; the positioner writes automation onto a multitrack
+ * ALWAYS enabled, and it is the only row in its menu that is (every Pipeline
+ * row and every effect row acts on the active document; the noise print needs
+ * a selection). The positioner writes automation onto a multitrack
  * TRACK, which exists with no document open at all — the multitrack view works
  * in an empty app. Gating it on `activeDoc(s) !== null` would grey it in the
  * one state the multitrack user is most likely to be in, and gating it on the

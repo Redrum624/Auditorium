@@ -17,7 +17,7 @@ import { SectionLabel } from '../UI/glass';
  * the same rows: the Effects card is an EFFECT browser with the tools appended
  * below a long scrolling list, so reaching Cover Chain there means scrolling
  * past every registered effect. A module is a place you go — one click on the
- * strip and the eleven tools are the whole card. The two doors stay in sync by
+ * strip and the ten tools are the whole card. The two doors stay in sync by
  * construction: both render `getPipelineGroups()`.
  *
  * The rows are a SINGLE click, matching the Effects card's tool rows and the

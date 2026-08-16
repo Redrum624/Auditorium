@@ -2872,7 +2872,9 @@ async function main() {
       `the dropdown is clamped to the window (bottom ${menuOpen.bottom.toFixed(0)} <= ${menuOpen.viewportH})`
     );
 
-    // The Pipeline menu: the eleven tools, in four separator-delimited groups.
+    // The Pipeline menu: the ten tools, in three separator-delimited groups.
+    // (T8 moved the Spatial Positioner to the Effects menu, taking the fourth
+    // group with it — asserted on the Effects side below.)
     await page.keyboard.press('Escape');
     assert(await openMenu('Pipeline'), 'the Pipeline menu opens on a real click');
     const pipeline = await page.evaluate(() => {
@@ -2898,13 +2900,33 @@ async function main() {
           'Align Lyrics',
           'Transcribe',
           'Separate into Stems',
-          'Spatial Positioner',
         ]),
-      `the Pipeline menu holds the eleven tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
+      `the Pipeline menu holds the ten tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
     );
     assert(
-      pipeline.separators === 3,
-      `four groups means three separators (actual ${pipeline.separators})`
+      pipeline.separators === 2,
+      `three groups means two separators (actual ${pipeline.separators})`
+    );
+
+    // T8: the Spatial Positioner MOVED to the Effects menu, closing it as its
+    // own Mix group — last row, behind its own separator.
+    await page.keyboard.press('Escape');
+    assert(await openMenu('Effects'), 'the Effects menu opens on a real click');
+    const effectsMenu = await page.evaluate(() => {
+      const d = document.querySelector('[data-testid="menu-dropdown"]');
+      return {
+        labels: [...d.querySelectorAll('button')].map((b) =>
+          b.querySelector('span').textContent.trim()
+        ),
+      };
+    });
+    assert(
+      effectsMenu.labels[effectsMenu.labels.length - 1] === 'Spatial Positioner',
+      `the Spatial Positioner closes the Effects menu (last row is "${effectsMenu.labels[effectsMenu.labels.length - 1]}")`
+    );
+    assert(
+      !pipeline.labels.includes('Spatial Positioner'),
+      'MOVED, not copied: the Pipeline menu no longer carries the Spatial Positioner'
     );
 
     // MOVED, not copied: none of the moved tools may still be reachable from Edit.
@@ -2934,7 +2956,7 @@ async function main() {
     // opened it — no `effects-list`, no `effects-item`, nothing. The tools
     // shipped menu-only for ten releases partly because nothing here would
     // have noticed.
-    console.log('Effects card: the eleven tools, and no layout growth (F11)...');
+    console.log('Effects card: the ten Pipeline tools plus the Mix positioner, and no layout growth (F11)...');
     await openModuleCard(page, 'Effects');
     await page.waitForSelector('[data-testid="effects-tool-section"]', { timeout: 5000 });
     const cardBefore = await page.evaluate(() => {
@@ -2961,11 +2983,12 @@ async function main() {
     assert(
       JSON.stringify(tools.sections) ===
         JSON.stringify(['Tempo & Timing', 'Voice', 'Analysis', 'Mix']),
-      `the card groups its tools the way the Pipeline menu does (actual ${JSON.stringify(tools.sections)})`
+      `the card groups the Pipeline menu's tools, then the Effects menu's own Mix tail (actual ${JSON.stringify(tools.sections)})`
     );
     assert(
       tools.ids.length === 11,
-      `every Pipeline tool has a row in the card (expected 11, actual ${tools.ids.length})`
+      `every Pipeline tool plus the Mix positioner has a row in the card ` +
+        `(expected 11, actual ${tools.ids.length})`
     );
     assert(
       tools.effects > 0,
@@ -4229,8 +4252,9 @@ async function main() {
     // gesture's effect is unambiguous).
     // F11-8: Spatial is a TOOL now, not a module — there is no strip icon to
     // click. Reached through its own command row in the Effects card, which is
-    // the surface the user reaches it from; the Pipeline menu's "Spatial
-    // Positioner" row is the identical command. The row is never greyed, so
+    // the surface the user reaches it from; the Effects menu's "Spatial
+    // Positioner" row is the identical command (T8 moved it there from the
+    // Pipeline menu). The row is never greyed, so
     // this works from the multitrack view this step runs in.
     await openModuleCard(page, 'Effects');
     await page.click(

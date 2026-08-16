@@ -114,8 +114,8 @@ export const MODULE_PANELS: PanelEntry[] = [
   { id: 'history', label: 'History', Icon: HistoryIcon, slot: 'trail' },
   // F5 — the spatial positioner (stereo projection; lucide line icon, never
   // emoji). F11: no strip icon any more — it is reached by the
-  // `spatial.position` command (Pipeline > Mix, and the Effects card's Mix
-  // section). The panel is unchanged, and it is still a CARD rather than a
+  // `spatial.position` command (Effects > Mix since T8, and the Effects
+  // card's Mix section). The panel is unchanged, and it is still a CARD rather than a
   // track-header popover for F5's own reason: the positioner is
   // playhead-scoped, not row-scoped, and the 348px card gives the stage room
   // the 96px track row never could.

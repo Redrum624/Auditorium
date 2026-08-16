@@ -49,12 +49,14 @@ function stripComments(source: string): string {
 describe('PipelineToolHost — which Pipeline rows it hosts', () => {
   /**
    * U2-3: hosting is a property of the COMMAND, and the property is "the host
-   * mounts something for it". Two of the Pipeline menu's eleven rows open no
+   * mounts something for it". One of the Pipeline menu's ten rows opens no
    * tool UI at all — `tempo.detect` runs an analysis and reports through its
-   * own channel, `spatial.position` puts an existing PANEL in the ordinary
-   * module card — so "every Pipeline row" would have been wrong.
+   * own channel — so "every Pipeline row" would have been wrong. (T8 moved
+   * `spatial.position`, the other unhosted command, to the Effects menu; it
+   * still puts an existing PANEL in the ordinary module card, and it still
+   * must not be hosted.)
    */
-  it('claims nine of the Pipeline menu’s eleven rows, and only rows that open a UI', () => {
+  it('claims nine of the Pipeline menu’s ten rows, and only rows that open a UI', () => {
     const ids = getPipelineGroups().flatMap((g) => g.commands.map((c) => c.id));
     expect(ids.filter(isPipelineTool)).toEqual([
       'tempo.match',

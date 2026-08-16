@@ -484,7 +484,8 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
   });
 
   // F11-8: 'Spatial' is a single tool, not a module (user ruling), so the
-  // Pipeline > Mix command is the door it is reached through. The card it lands
+  // Mix command is the door it is reached through (Effects > Mix since T8,
+  // Pipeline > Mix before it). The card it lands
   // in is the SAME card the strip drives — one card, two kinds of door.
   it('shows the Spatial positioner in the module card when the Mix tool runs', async () => {
     render(<App />);

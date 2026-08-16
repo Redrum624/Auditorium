@@ -38,8 +38,8 @@ describe('ModuleStrip', () => {
 
   // F11: the removal itself — the user's ruling at the surface it is about.
   // Neither is a module, so neither has an icon here. Their panels are
-  // untouched and reached by command instead (Pipeline > Mix for the
-  // positioner, Transcribe for the transcript).
+  // untouched and reached by command instead (Effects > Mix — T8 moved it out
+  // of Pipeline — for the positioner, Transcribe for the transcript).
   it('draws NO icon for Spatial or Transcript, in either remix state', () => {
     for (const hasRemix of [false, true]) {
       const { unmount } = render(

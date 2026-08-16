@@ -8,23 +8,25 @@
 //
 // So MEMBERSHIP and ORDER are read from `menuActions`' Pipeline section at call
 // time — a command added to that section appears on both cards with no edit
-// here, exactly as `getMenuSections()` resolves labels live. The four group
+// here, exactly as `getMenuSections()` resolves labels live. The group
 // NAMES are the one thing that cannot be derived: the menu marks its groups
 // with bare separators, which carry no name. They are written below, once.
 
 import { getMenuSections } from './menuActions';
 
 /**
- * The Pipeline menu's four separator-delimited groups, in menu order. Written,
+ * The Pipeline menu's three separator-delimited groups, in menu order. Written,
  * not derived — a separator has no name to read. Kept as a list rather than a
  * map so it pairs with the menu's runs positionally: the menu decides how many
  * groups there are and what is in them, this decides what they are called.
+ * (T8 removed the fourth, 'Mix': the user moved `spatial.position` to the
+ * Effects menu, and its group went with it — `EffectsPanel` writes the Mix
+ * name now, for its own card alone.)
  */
 export const PIPELINE_GROUP_TITLES: readonly string[] = [
   'Tempo & Timing',
   'Voice',
   'Analysis',
-  'Mix',
 ];
 
 export interface PipelineToolRow {

@@ -2304,7 +2304,9 @@ async function main() {
         !beforeIcons.includes('Spatial'),
         `the strip draws NO Spatial entry — it is a tool, not a module (${JSON.stringify(beforeIcons)})`
       );
-      assert(await openMenu(page, 'Pipeline'), 'the Pipeline menu opens for the Spatial Positioner');
+      // T8: the row moved to the Effects menu ("move the Spacial tool to the
+      // effects module"), where it closes the list as its own Mix group.
+      assert(await openMenu(page, 'Effects'), 'the Effects menu opens for the Spatial Positioner');
       assert(await clickMenuItem(page, 'Spatial Positioner'), 'Spatial Positioner takes a real click');
       await page.waitForSelector('[data-testid="sidebar-panel"][data-active-tab="spatial"]', {
         timeout: 5000,

@@ -10,6 +10,7 @@ import {
 } from '../../services/menuActions';
 import type { MenuCommand } from '../../services/menuActions';
 import { openEffectDialog } from '../../services/dialogBus';
+import { getPipelineGroups } from '../../services/pipelineTools';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 
@@ -43,11 +44,11 @@ const EXPECTED_SECTIONS: [string, string[]][] = [
   ['Tempo & Timing', ['tempo.detect', 'tempo.match', 'timing.align', 'edit.remix']],
   ['Voice', ['edit.voiceChanger', 'effects.vocalChain', 'effects.coverChain', 'lyrics.align']],
   ['Analysis', ['edit.transcribe', 'edit.separateStems']],
-  // F11-8: the fourth section the F11-6 header said it was leaving room for.
-  // The room was structural, not automatic — an unregistered id is DROPPED by
-  // `toolRows`, so the section stayed empty (and therefore unrendered) until a
-  // spatial command existed. It exists now, because 'Spatial' left the module
-  // strip: the user ruled it a single tool rather than a module.
+  // F11-8 filled this fourth section from the Pipeline menu's Mix group; T8
+  // moved `spatial.position` to the Effects MENU, so the card now draws this
+  // section from that menu's own tool tail (`effectsMenuTools`). What the
+  // card SHOWS is unchanged — same four sections, same rows, same order —
+  // which is exactly what this table is here to pin.
   ['Mix', ['spatial.position']],
 ];
 const ALL_TOOL_IDS = EXPECTED_SECTIONS.flatMap(([, ids]) => ids);
@@ -148,6 +149,22 @@ describe('EffectsPanel — the tool sections', () => {
         .map((row) => row.getAttribute('data-command-id'));
       expect(ids).toEqual(EXPECTED_SECTIONS[i][1]);
     });
+  });
+
+  // T8: the Mix row's protective pin. The user moved Spatial OUT of the
+  // Pipeline menu, so `getPipelineGroups()` — the source the other three
+  // sections render from — no longer carries it. If this card still drew Mix
+  // from the Pipeline groups, the row would have silently vanished from the
+  // one surface the user moved it TO; this is the assertion that catches that.
+  it('keeps the Mix row although spatial.position left the Pipeline menu (T8)', () => {
+    expect(getPipelineGroups().flatMap((g) => g.commands.map((c) => c.id))).not.toContain(
+      'spatial.position'
+    );
+    render(<EffectsPanel />);
+    expect(toolRow('spatial.position')).toBeInTheDocument();
+    expect(toolRow('spatial.position').closest('[data-section]')!.getAttribute('data-section')).toBe(
+      'Mix'
+    );
   });
 
   it('labels every entry with the menu registry own label, verbatim', () => {

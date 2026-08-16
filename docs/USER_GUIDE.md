@@ -37,11 +37,12 @@ Six menus: **File**, **Edit**, **Effects**, **Pipeline**, **View** and
 **Help**.
 
 - **Effects** holds **Capture Noise Print** and then every effect, grouped by
-  category — the things that transform the audio you have selected.
-- **Pipeline** holds the eleven long-running tools, grouped by subject:
+  category — the things that transform the audio you have selected — and closes
+  with the **Spatial Positioner** as its own Mix group.
+- **Pipeline** holds the ten long-running tools, grouped by subject:
   **Detect Tempo · Match Tempo · Align Vocal Timing · Auto-Remix**, then
   **Voice Changer · Vocal Chain · Cover Chain · Align Lyrics**, then
-  **Transcribe · Separate into Stems**, then **Spatial Positioner**. These
+  **Transcribe · Separate into Stems**. These
   used to be scattered between
   the Effects and Edit menus; they are in one place now, and each one is in
   exactly one place.
@@ -51,8 +52,9 @@ to be run in a particular sequence — the vocal and cover chains especially —
 the order is stated in the tool's own stage notes, not implied by the menu.
 
 Every one of these tools is also a single click in the **Pipeline** module card
-— the same eleven rows in the same four groups — and in the **Effects** module
-card below the effect list (see *The panel cards* below). All three doors run
+— the same ten rows in the same three groups — and in the **Effects** module
+card below the effect list, where the **Mix** row (the Spatial Positioner)
+sits after them (see *The panel cards* below). All three doors run
 the same command.
 
 **These tools do not open a centred dialog.** Selecting one of the nine that
@@ -65,9 +67,9 @@ width, in every state. Nothing is dimmed and
 nothing is blocked: while the tool is open you can still select audio, move the
 playhead, zoom, switch view and use the transport, so a multi-stage pass can be
 watched stepping through beside the waveform it is working on. Close the tool
-with the **✕** in its header. (Detect Tempo and Spatial Positioner have no UI
-of their own — the first rewrites the TEMPO card, the second opens the Spatial
-panel.)
+with the **✕** in its header. (Detect Tempo has no UI of its own — it rewrites
+the TEMPO card. The Spatial Positioner, now an Effects-menu row, likewise opens
+no tool card: it opens the Spatial panel.)
 
 **While a pass is actually running**, the module strip greys out and the tool's
 **✕** refuses, both saying why: a running pass keeps its progress inside the
@@ -293,8 +295,8 @@ The order is a rule rather than a list: **Files** is always first, **History**
 is always last, and anything added later goes between them.
 
 - **Files** / **Effects** — see their own sections in this guide.
-- **Pipeline** — the eleven Pipeline-menu tools, in the same four groups
-  (**Tempo & Timing**, **Voice**, **Analysis**, **Mix**), each a single click.
+- **Pipeline** — the ten Pipeline-menu tools, in the same three groups
+  (**Tempo & Timing**, **Voice**, **Analysis**), each a single click.
   Choosing one replaces this card with the tool itself (see *The menus* above);
   closing the tool brings this list back. Greyed rows are unavailable right now
   for exactly the reason the menu gives.
@@ -308,7 +310,7 @@ is always last, and anything added later goes between them.
   vanishes again when the last one is closed — it has nothing to show
   otherwise.
 - **Spatial** and **Transcript** are not modules. They are what a tool
-  produces, so they have no icon at all: **Pipeline → Spatial Positioner**
+  produces, so they have no icon at all: **Effects → Spatial Positioner**
   opens the positioner, and **Pipeline → Transcribe** shows the transcript of
   a document that already has one (and offers to make one when it does not).
   Both still open as the same full card in the same column — nothing about
@@ -343,9 +345,10 @@ processes the current selection, or the whole document when there's no
 selection.
 
 **Below the effects, the same card lists the Pipeline tools** — grouped as
-**Tempo & Timing**, **Voice**, **Analysis** and **Mix** — so the whole
-capability surface is in one panel. (The **Pipeline** module card lists exactly
-the same rows on their own, without scrolling past the effects.) A tool takes a
+**Tempo & Timing**, **Voice** and **Analysis** — and then the Effects menu's
+own **Mix** row, the **Spatial Positioner**, so the whole
+capability surface is in one panel. (The **Pipeline** module card lists the
+ten Pipeline rows on their own, without scrolling past the effects.) A tool takes a
 **single** click (it is a verb the menu already runs on one click; a second door
 slower than the first is not a door), while effect rows keep their double-click,
 because an effect row opens a parameter dialog rather than doing something. A
@@ -1704,7 +1707,7 @@ v1.9.2 — the lanes are simply not shown there and survive a re-save.
 
 ### Spatial placement (the Spatial panel)
 
-**Pipeline → Spatial Positioner** (or the **Mix** row in the Effects card)
+**Effects → Spatial Positioner** (or the **Mix** row in the Effects card)
 opens a positioner that
 places a track's sound around the listener: a top-down stage (front is up)
 where you drag the source, an elevation slider, and readouts for the three

@@ -59,8 +59,8 @@ export function registerDialogSetters(setters: {
   /** F11-8. Not a dialog either — and unlike the two above it is not a
    * follow-up to a job that just finished, it is the positioner's ONLY door:
    * the user ruled Spatial a single tool rather than a module, so the module
-   * strip carries no icon for it and `spatial.position` (Pipeline > Mix) calls
-   * this to put the panel in the card. */
+   * strip carries no icon for it and `spatial.position` (Effects > Mix since
+   * T8; Pipeline > Mix before it) calls this to put the panel in the card. */
   focusSpatialPanel: OpenSetter;
 }): () => void {
   openExport = setters.openExportDialog;
