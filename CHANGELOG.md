@@ -5,6 +5,24 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.34.0] - 2026-08-16
+
+### Changed
+
+- **The Spatial Positioner lives in the Effects module now.** Its own Mix group at the
+  end of the Effects menu and card — same command, same behavior (it focuses the
+  Spatial panel), gone from Pipeline everywhere, and Pipeline's emptied Mix group is
+  removed. Why: the user files it with effects, not pipelines. Affects:
+  `services/menuActions.ts`, `Panels/EffectsPanel.tsx`, `Panels/PipelinePanel.tsx`,
+  both e2e walkers, docs.
+- **The Pipeline labels drop their trailing "…".** All nine dotted entries (Match
+  Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal Chain, Cover Chain,
+  Align Lyrics, Transcribe, Separate into Stems) read plain; the old dots-mean-a-dialog
+  convention is superseded in place with the reasoning recorded, and a registry test
+  pins every Pipeline row ellipsis-free. File-menu dots keep their convention —
+  the change is scoped to the Pipeline module by the user's request. Affects:
+  `services/menuActions.ts` and a 27-file label sweep (tests, walkers, docs).
+
 ## [1.33.0] - 2026-08-16
 
 ### Added
