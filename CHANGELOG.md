@@ -996,7 +996,7 @@ Four lanes, four reviews, eleven fix rounds, one train, one assembly review.
   contradicted their own bodies, and the two Electron integration tests whose skip message told the
   user to download models from a menu that no longer offers them. The claim is now a sweep of the
   whole repo rather than of the app alone, and it is checkable: no `Effects →`/`Edit →` (or `>`, or
-  `->`) string outside `docs/superpowers/` — which is a historical record, deliberately left alone —
+  `->`) string outside the historical planning records — deliberately left alone —
   names a command that moved. Affects: `src/services/menuActions.ts`,
   `src/components/Dialogs/{AlignTimingDialog,CoverChainDialog}.tsx`,
   `src/effects/time/{AlignTimingEffect,MatchTempoVariableEffect}.ts`,
@@ -1162,7 +1162,7 @@ Four lanes, four reviews, eleven fix rounds, one train, one assembly review.
   `src/components/Layout/EditToolbar.tsx`.
 - **The window is laid out around the waveform now, not around the window.** Why: the user's rule for
   this pass was "we want the waveform as wide as possible, not like a photo", settled through five
-  mockup iterations (`docs/ui-feedback/2026-08-12/edit-toolbar-mockup.html`, option E2). How it
+  mockup iterations (option E2 of the layout mockups). How it
   works: the vertical icon rail at the right edge is gone — the same eight module icons are now a
   horizontal **module strip** sitting on top of the module column at the card's own width, so the two
   surfaces cost one width instead of two, and the column moved out to the window's 14 px margin. The
@@ -2394,7 +2394,7 @@ A patch release closing five small review follow-ups from the v1.9.x audit trail
 
 ### Documentation
 
-- **The outstanding-work audit (`docs/superpowers/plans/2026-08-07-outstanding-work.md`) now tells the truth as of v1.9.1.** It predated v1.7/v1.8/v1.9 and misled in four ways. The plan-verdict table gains the v1.7.0/v1.8.0/v1.9.0 rows (eleven plans, not eight); P1 (User Guide, beat-grid overlay, beat-grid-at-current-tempo, never-saved marker) and P3 (stems, beat grid + snapping, crossfades) are marked shipped with their releases and tags; P4-12 (legacy `.audm` salvage) is closed as **MOOT** — the legacy writer builds the identical single JS string the reader decodes, so an over-cap legacy file cannot have been produced by this app; and P4-13 records v1.9.1's security fix, noting the audit's "not exploitable" framing was disproven by measurement. Still-open items (P2-4, P2-5, P4-9/10/11, P4-14) were deliberately not re-scoped.
+- **The outstanding-work audit now tells the truth as of v1.9.1.** It predated v1.7/v1.8/v1.9 and misled in four ways. The plan-verdict table gains the v1.7.0/v1.8.0/v1.9.0 rows (eleven plans, not eight); P1 (User Guide, beat-grid overlay, beat-grid-at-current-tempo, never-saved marker) and P3 (stems, beat grid + snapping, crossfades) are marked shipped with their releases and tags; P4-12 (legacy `.audm` salvage) is closed as **MOOT** — the legacy writer builds the identical single JS string the reader decodes, so an over-cap legacy file cannot have been produced by this app; and P4-13 records v1.9.1's security fix, noting the audit's "not exploitable" framing was disproven by measurement. Still-open items (P2-4, P2-5, P4-9/10/11, P4-14) were deliberately not re-scoped.
 
 ## [1.9.1] - 2026-08-08
 

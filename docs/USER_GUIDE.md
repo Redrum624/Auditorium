@@ -391,9 +391,10 @@ Noise Reduction needs a noise *print* before it can run:
 2. **Effects → Capture Noise Print** (only enabled with a selection). This
    averages the STFT magnitude spectrum of the selected region, per channel,
    and stores it in memory.
-3. Open **Effects → Restoration → Noise Reduction**, adjust Reduction (dB),
-   Sensitivity, and Smoothing, and apply to the region you actually want
-   cleaned (the capture and the apply regions can differ).
+3. Open **Effects → Noise Reduction** (the Effects menu is a flat list —
+   Restoration is the category heading above the row, not a submenu), adjust
+   Reduction (dB), Sensitivity, and Smoothing, and apply to the region you
+   actually want cleaned (the capture and the apply regions can differ).
 
 The captured print is in-memory only: it is not saved with the document and
 is cleared when you capture a new one — or when you close the document it was

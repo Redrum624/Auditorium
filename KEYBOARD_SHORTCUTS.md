@@ -97,15 +97,36 @@ and mid-pass that ✕ refuses and says why.
 
 ## Menu-only commands (no bound key)
 
-These are reachable from the **Edit** menu but are not in the global keydown
-table above:
+These are reachable from the menus — File, Edit, Effects, Pipeline, View and
+Help — but appear in no row of the key table above: none of them binds a key.
+The list is derived from `src/services/menuActions.ts` (its `LAYOUT` plus the
+effect-registry loop): every menu command registered without a `shortcut` is
+here.
 
 | Command | Menu location |
 |---|---|
-| Next Marker | Edit → Next Marker |
-| Previous Marker | Edit → Previous Marker |
 | Record | File → Record, or the transport bar's record button |
-| Loop toggle | Transport bar loop button |
+| Save Session… / Open Session… | File menu |
+| Mix Down to New File | File menu, multitrack-only |
+| Ripple Delete Time Selection | Edit menu — permanently greyed and deliberately key-less; see above |
+| Trim to Selection / Silence Selection | Edit menu (also on the floating edit toolbar) |
 | Convert Sample Rate… / Convert Channels… | Edit menu |
-| Insert Active File at Cursor / Add Track / Mix Down to New File | Edit /
-File menus, multitrack-only |
+| Insert Active File at Cursor / Add Track | Edit menu, multitrack-only |
+| Next Marker / Previous Marker | Edit menu |
+| Capture Noise Print | Effects menu, top row (needs a selection) |
+| Every effect in the rack | Effects menu — one row per registered effect under its category heading, each opening that effect's parameter dialog; no effect has a key |
+| Spatial Positioner | Effects menu, the closing Mix group |
+| Detect Tempo / Match Tempo / Align Vocal Timing / Auto-Remix | Pipeline menu, Tempo & Timing group |
+| Voice Changer / Vocal Chain / Cover Chain / Align Lyrics | Pipeline menu, Voice group |
+| Transcribe / Separate into Stems | Pipeline menu, Analysis group |
+| Waveform / Spectral / Multitrack | View menu |
+| Spectral: Toggle Log/Linear Scale / Toggle Beat Grid / Toggle Snap to Grid | View menu |
+| About Auditorium | Help menu |
+
+Two transport commands are key-less AND menu-less — their only door is the
+transport bar itself:
+
+| Command | Where |
+|---|---|
+| Stop | Transport bar stop button |
+| Loop toggle | Transport bar loop button |

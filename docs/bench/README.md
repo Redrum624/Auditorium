@@ -30,7 +30,7 @@ settle a decision:
 1. **Write the bound down first, with its justification** — what magnitude would count as
    audible, or wrong, or worth changing code over, and why that magnitude.
 2. **Commit it here BEFORE the numbers land.** Not into a scratch directory, and not into
-   `.superpowers/` — that path is gitignored, so a document written there proves nothing about
+   any gitignored working path — a document written there proves nothing about
    its own ordering and rests on a file mtime. Committing the bound first puts the ordering in
    the git DAG, where it is checkable by anyone, forever. This rule exists because the
    `vocal-chain-uneven-floor-bias` probe did the first step and not the second, and its

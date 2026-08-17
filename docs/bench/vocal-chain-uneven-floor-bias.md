@@ -7,8 +7,8 @@ file for the discipline this document is both an instance of and the reason for.
 ## Provenance — read this before the numbers
 
 **This document was not committed before the measurement, and could not have been.** It was
-written into `.superpowers/sdd/task-T2-probe-preregistration.md`, a path this repo gitignores
-(`.gitignore:7`), so no commit of it exists or could exist. What is provable about its
+written into a gitignored internal working directory, so no commit of it exists or could
+exist. What is provable about its
 ordering is the file's mtime — **03:13**, between the lane's previous commit (03:11) and the
 probe commit (03:29) — which is consistent with the bound having been fixed before the numbers
 were produced but cannot exclude an earlier measurement run. The original said "written and
