@@ -2,7 +2,7 @@
 
 [![Downloads](.github/badges/downloads-badge.svg)](https://github.com/Redrum624/Auditorium/releases)
 [![Latest release](.github/badges/latest-badge.svg)](https://github.com/Redrum624/Auditorium/releases/latest)
-[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![License](https://img.shields.io/badge/license-PolyForm%20Noncommercial-blue)](LICENSE)
 
 ![Tests](https://img.shields.io/badge/Tests-6000+_passing-brightgreen)
 ![Local](https://img.shields.io/badge/AI-100%25_local-2e7d5b)
@@ -291,7 +291,8 @@ day forward.</sub>
 
 ## License
 
-[MIT](LICENSE) © 2026 Auditorium contributors.
+[PolyForm Noncommercial 1.0.0](LICENSE) © 2026 Redrum624 — free for any noncommercial
+purpose; commercial use requires a separate licence.
 
 ---
 
