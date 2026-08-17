@@ -5,6 +5,27 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.35.0] - 2026-08-17
+
+### Added
+
+- **A portable build.** Every release now ships `Auditorium X.Y.Z portable.exe`
+  beside the installer — one executable, runs from anywhere, no admin rights, and it
+  shares the installed app's profile (downloaded AI models and voice profiles),
+  verified empirically rather than assumed. Affects: `package.json` (portable target).
+- **SHA256SUMS.txt with every release**, generated at build time over all three
+  distributables in the standard two-space `sha256sum` format, CertUtil-verifiable;
+  the generator fails closed when an expected artifact is missing, and regenerating
+  the README.txt standalone now refreshes the sums beneath it instead of silently
+  staling them. Affects: `scripts/gen-checksums.cjs` (new), `gen-readme-txt.cjs`.
+- **The README got its gallery.** A deterministic capture rig
+  (`scripts/readme-shots.cjs`) drives the built app on generated fixtures and
+  produces eleven per-panel, effect and tool screenshots — the Vocal Chain card shown
+  after a real run with its measured settings, the Cover Chain card with its honest
+  caveats, the rack, two effect dialogs, the multitrack, and the side panels — laid
+  out as captioned tables. The Why bullets lost their emoji. Affects: `docs/shots/`
+  (new), `README.md`.
+
 ## [1.34.0] - 2026-08-16
 
 ### Changed
