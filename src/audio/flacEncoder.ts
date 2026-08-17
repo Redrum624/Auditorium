@@ -36,10 +36,13 @@ const BLOCK_SIZE = 4096;
 const VORBIS_VENDOR = 'audition_app';
 
 // --- MD5 ---------------------------------------------------------------------
-// Public-domain MD5 (RFC 1321), compact implementation adapted from the widely
-// mirrored reference by Joseph Myers / "blueimp" (public domain). Operates on a
-// Uint8Array and returns the 16 raw digest bytes (little-endian words), which is
-// exactly the byte order FLAC stores. Verified in tests against RFC 1321 vectors.
+// MD5 (RFC 1321), compact implementation adapted from blueimp/JavaScript-MD5
+// (MIT license — NOT public domain, as an earlier version of this comment
+// claimed), which itself derives from Joseph Myers' widely mirrored
+// implementation. Attribution retained in THIRD_PARTY_NOTICES.md at the repo
+// root. Operates on a Uint8Array and returns the 16 raw digest bytes
+// (little-endian words), which is exactly the byte order FLAC stores. Verified
+// in tests against RFC 1321 vectors.
 
 /**
  * Write RFC 1321's 64-bit little-endian message-bit-length field into

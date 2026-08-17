@@ -7,8 +7,10 @@
  * the REAL loop against a scripted decoder (the same DI discipline as
  * stemHost.cjs's injected `ort`).
  *
- * Ported from openai/whisper (MIT) `decoding.py` / `transcribe.py` /
- * `tokenizer.py`; where a rule below cites a name (ApplyTimestampRules,
+ * Ported from openai/whisper `decoding.py` / `transcribe.py` /
+ * `tokenizer.py` — Copyright (c) 2022 OpenAI, MIT license (retained for this
+ * port; see THIRD_PARTY_NOTICES.md at the repo root). Where a rule below
+ * cites a name (ApplyTimestampRules,
  * SuppressTokens, …) it is that class's logic, not an invention. Model- and
  * tokenizer-derived constants (token ids, suppress lists,
  * max_initial_timestamp_index) come from the DOWNLOADED, sha256-pinned

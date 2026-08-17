@@ -1,12 +1,14 @@
 /**
  * Speaker clustering — the maths half of F4 diarization.
  *
- * This is a port of a private reference speech-to-text project's clustering
- * (its `SpeakerDiarizer._cluster_embeddings`), NOT of its runtime. That project is Python (resemblyzer + scikit-learn) and
- * none of its runtimes load here, but the clustering itself is ~100 lines of
- * plain maths, so it ports directly.
+ * This reproduces the DOCUMENTED behaviour of scikit-learn's agglomerative
+ * clustering with silhouette-based model selection, as used by the standard
+ * Python diarization recipe (speaker embeddings fed to scikit-learn) — "the
+ * reference recipe" below. No Python runtime loads here: the clustering is
+ * ~100 lines of plain maths, so it is implemented directly against
+ * scikit-learn's documented semantics.
  *
- * What the reference does, and therefore what this reproduces:
+ * What the reference recipe does, and therefore what this reproduces:
  *   - `AgglomerativeClustering(n_clusters=n)` with scikit-learn's DEFAULTS,
  *     i.e. **Ward linkage on squared Euclidean distance** — not cosine. The
  *     embeddings are L2-normalised, so Euclidean and cosine are monotonically
@@ -34,10 +36,9 @@
 /**
  * Largest speaker count auto-detection will consider.
  *
- * Cited, not invented: the reference project's `SpeakerDiarizer.__init__`
- * default `max_speakers: int = 6`. It is a candidate-range bound rather than a
- * quality threshold — raising it only lets silhouette selection consider more
- * partitions, at O(k) more silhouette evaluations.
+ * The reference recipe's `max_speakers` default of 6. It is a candidate-range
+ * bound rather than a quality threshold — raising it only lets silhouette
+ * selection consider more partitions, at O(k) more silhouette evaluations.
  */
 export const MAX_SPEAKERS = 6;
 

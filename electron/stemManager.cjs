@@ -20,6 +20,12 @@
  *     quit leaves no orphan (main.cjs calls dispose() on 'will-quit'; a
  *     utilityProcess child also dies with its parent as a backstop).
  *
+ * License note: the downloaded weights are `StemSplitio/htdemucs-onnx`'s
+ * `htdemucs_fp16weights.onnx`, published under MIT (verified 2026-08-16
+ * against the model card), matching the upstream Meta AI HT-Demucs MIT
+ * release they are exported from. See THIRD_PARTY_NOTICES.md at the repo
+ * root.
+ *
  * Worker-choreography discipline follows tempoAnalysis.ts / effectRunner.ts
  * (T4/T13): a monotonic run id tags every message, replies for a settled run
  * are dropped (no double settle, no late callbacks), and the returned

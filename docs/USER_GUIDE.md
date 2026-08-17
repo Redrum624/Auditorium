@@ -1765,7 +1765,10 @@ without changing the open document's path or dirty state:
 
 - **WAV**: 16-bit, 24-bit, or 32-bit float.
 - **FLAC**: 16-bit, lossless (verbatim — no quality setting).
-- **MP3**: 128/192/256/320 kbps (constant bitrate only).
+- **MP3**: 128/192/256/320 kbps (constant bitrate only). MP3 encoding — here
+  and in the format-faithful MP3 Save below — is provided by the bundled
+  **lamejs** library (LGPL-3.0); see
+  [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) at the repository root.
 - **OGG (Opus)**: 96/128/192 kbps.
 
 **File → Save** (`Ctrl+S`) is **format-faithful**: for a document opened from

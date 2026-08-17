@@ -6,7 +6,9 @@ import type { ComponentPropsWithRef, ComponentPropsWithoutRef, CSSProperties } f
  * every component here is a single element (or element + presentational
  * siblings) whose anatomy is copied from Vitrine's components
  * (photo_app/src/components/{Controls,Layout,Dialogs}) per the plan's
- * ruling 1, with the accent already cyan via the tokens (ruling 2).
+ * ruling 1, with the accent already cyan via the tokens (ruling 2). Vitrine
+ * is the same author's photo-viewer project, so the copied anatomy is
+ * first-party code — self-licensed, no third-party attribution required.
  *
  * Anatomy quick-reference (Vitrine):
  *  - card: radius 20 (--radius-card) · blur 28 · --glass-shadow  → .glass-card

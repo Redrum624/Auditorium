@@ -222,6 +222,12 @@ provider runs stem separation at ~1.5x realtime and transcription at ~9x.
   is why the sha256 pins are load-bearing. The vocabulary (`vocab.json`) is
   taken from the official Apache-2.0 repository rather than from the mirror, so
   only the graph itself rides that derivation.
+- **MP3 encoding** — [**lamejs**](https://www.npmjs.com/package/@breezystack/lamejs)
+  (`@breezystack/lamejs`, LGPL-3.0), a JavaScript port of the LAME MP3 encoder,
+  statically bundled into the app — see
+  [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full LGPL-3.0 text
+  and the relink-from-source note, alongside every other third-party component,
+  model, and ported-code attribution.
 
 ## License
 
