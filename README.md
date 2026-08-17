@@ -30,24 +30,24 @@ feature is worth, because we measured that too.
 
 ### Why Auditorium
 
-- 🎚️ **Three editors, one cursor** — destructive waveform editing, a spectral
+- **Three editors, one cursor** — destructive waveform editing, a spectral
   frequency display, and a multitrack session view with automation, clip fades,
   crossfades and group editing, sharing selection, zoom and playhead.
-- 🎛️ **25 effects + a vocal chain that measures** — the chain runs the
+- **25 effects + a vocal chain that measures** — the chain runs the
   corrections a rough take needs in one pass, with every threshold derived from
   the recording itself and a report saying what each stage did or why it
   declined.
-- 🤖 **AI where it earns its keep, always local** — stem separation, speech
+- **AI where it earns its keep, always local** — stem separation, speech
   transcription with speaker labels, a voice changer, and word-level lyric
   alignment run on your CPU in isolated processes. Models download on first
   use, sha256-pinned; Cancel kills the process outright.
-- 🎤 **The cover-chain journey** — give it the original song and your vocal
+- **The cover-chain journey** — give it the original song and your vocal
   take: it separates, cleans, aligns, tone-matches and builds the session
   unattended, stating its measured caveats *before* you run it.
-- 📐 **Honesty as a feature** — placement accuracy, speaker-separation limits,
+- **Honesty as a feature** — placement accuracy, speaker-separation limits,
   voice-change quality: measured and printed in the UI and the docs. Where a
   measurement says a feature shouldn't act, it doesn't.
-- 🆓 **Free, MIT, no account** — download the installer and start editing.
+- **Free, MIT, no account** — download the installer and start editing.
 
 ## Install
 
@@ -59,8 +59,18 @@ feature is worth, because we measured that too.
 it — no other software required. The installer adds a desktop shortcut and a
 Start Menu entry; a plain-text `README.txt` ships beside it.
 
-The installer is not code-signed yet, so Windows SmartScreen may warn the first
-time — choose **More info → Run anyway**.
+**Prefer not to install anything?** Grab **`Auditorium X.Y.Z portable.exe`**
+instead — a single executable that runs from anywhere (Downloads folder, USB
+stick) with no installation and no admin rights, and shares the same profile —
+downloaded AI models and voice profiles — as the installed app.
+
+Neither download is code-signed yet, so Windows SmartScreen may warn the first
+time — choose **More info → Run anyway**. You can verify any download first
+against **`SHA256SUMS.txt`** (published with every release):
+
+```powershell
+CertUtil -hashfile "Auditorium Setup X.Y.Z.exe" SHA256   # compare with SHA256SUMS.txt
+```
 
 - **Windows 10 or 11** (64-bit)
 - AI features download their models on first use (166 MB stems · ~323 MB
@@ -77,7 +87,8 @@ git clone https://github.com/Redrum624/auditorium.git
 cd auditorium
 npm install
 npm run dev          # Vite dev server + Electron
-npm run build:win    # NSIS installer -> release/Auditorium Setup <version>.exe (+ README.txt)
+npm run build:win    # -> release/: Auditorium Setup <version>.exe + Auditorium <version> portable.exe
+                     #    (+ README.txt and SHA256SUMS.txt covering all three)
 ```
 
 ## A closer look
@@ -87,11 +98,43 @@ main thread, sharing the waveform's cursor, selection and playhead.
 
 ![Spectral view](docs/screenshot-spectral.png)
 
+**The multitrack editor** — clips with fades and a crossfade across the
+tracks, and a volume envelope open on the top lane, all at the same cursor
+the other two editors share.
+
+![Multitrack session](docs/shots/multitrack.png)
+
 **The pipeline tools open beside the waveform, not over it.** A multi-stage
 pass — Cover Chain, Vocal Chain, transcription — steps through its stages in
 the module column while you keep selecting audio and moving the playhead. Every
 stage row carries the note saying why it sits where it sits, and afterwards,
 what it measured.
+
+| | |
+|:--:|:--:|
+| ![Vocal Chain after a run](docs/shots/vocal-chain.png) | ![Cover Chain before a run](docs/shots/cover-chain.png) |
+| **Vocal Chain, after a run** — each stage reports the settings it derived, its measured delta, or the measurement that made it decline; the pass closes with a before/after table and lands as one undo entry. | **Cover Chain, before you run it** — the measured caveats are stated before anything runs, and every stage of the six-stage journey is written out on the card. |
+| ![Align Lyrics](docs/shots/align-lyrics.png) | ![Remix panel](docs/shots/remix-panel.png) |
+| **Align Lyrics** — paste the words you know are in the recording; click a word to hear exactly it, and re-record just the one that came out wrong. | **The Remix panel** — every splice of a re-arrangement, inspectable, pinnable, re-rollable and undoable. |
+
+**The effects, from rack to dialog.** Every registered effect lives in a
+categorized rack one click from the waveform; every dialog previews against
+the real document before Apply.
+
+| | |
+|:--:|:--:|
+| ![Effects rack](docs/shots/effects-rack.png) | ![Parametric EQ dialog](docs/shots/effect-parametric-eq.png) |
+| **The Effects rack** — 25 effects in ten categories, with the pipeline tools one click below them. | **Parametric EQ** — five bands plus high- and low-pass, previewed on the real audio before Apply. |
+| ![Reverb dialog](docs/shots/effect-reverb.png) | ![Spatial panel](docs/shots/spatial-panel.png) |
+| **Reverb** — room size, damping, mix and pre-delay; Preview plays the processed document, Apply is one undo entry. | **The Spatial positioner** — azimuth, elevation and distance as honest stereo projection, writing automation keys on release. |
+
+**The side panels** — the module column's cards, always the same width, never
+over the audio.
+
+| | |
+|:--:|:--:|
+| ![Properties panel](docs/shots/properties.png) | ![Markers panel](docs/shots/markers.png) |
+| **Properties** — the selected clip's geometry and gain, with both fade editors and the crossfade's own controls. | **Markers** — named positions that persist sample-accurately in every container and survive destructive edits. |
 
 ## Modules
 

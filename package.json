@@ -1,7 +1,7 @@
 {
   "name": "audition_app",
   "productName": "Auditorium",
-  "version": "1.34.0",
+  "version": "1.35.0",
   "description": "Audition-class audio editor: waveform and spectral editing, undoable multitrack with automation and spatial placement, 25 effects, a vocal chain that derives its settings from the recording, stem separation, local transcription with speaker separation, a local voice changer, local lyric alignment that places every word and lets you replace one by re-recording it, tempo detection, vocal timing alignment, a cover chain that matches a new vocal take to the separated original singer's tone and level, and auto-remix whose pinned splices are guaranteed to survive a re-plan.",
   "author": "Auditorium contributors",
   "license": "MIT",
@@ -23,7 +23,7 @@
     "make-test-abab": "node scripts/make-test-abab.cjs",
     "electron": "electron .",
     "gen-icon": "node scripts/gen-icon.cjs",
-    "build:win": "node scripts/clean-release.cjs && npm run build && node scripts/build-installer.cjs && node scripts/gen-readme-txt.cjs"
+    "build:win": "node scripts/clean-release.cjs && npm run build && node scripts/build-installer.cjs && node scripts/gen-readme-txt.cjs && node scripts/gen-checksums.cjs"
   },
   "build": {
     "appId": "com.auditorium.app",
@@ -55,10 +55,19 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico",
       "artifactName": "${productName} Setup ${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName} ${version} portable.${ext}"
     },
     "nsis": {
       "oneClick": false,
