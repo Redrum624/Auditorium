@@ -1,0 +1,15 @@
+node_modules/
+dist/
+release/
+installer/
+*.log
+logs/
+.superpowers/
+.claude/
+test-assets/
+test-output/
+.f10-work/
+.r7-work/
+src/__scratch__/
+
+public-repo/

@@ -1,0 +1,803 @@
+{
+  "bankVersion": "r4.1",
+  "sampleRate": 44100,
+  "seconds": 20,
+  "tolerancePct": 4,
+  "fixtureCount": 83,
+  "aggregate": {
+    "correct": 74,
+    "octave": 9,
+    "other": 0
+  },
+  "perFamily": {
+    "click": {
+      "correct": 8,
+      "octave": 2,
+      "other": 0
+    },
+    "rise": {
+      "correct": 4,
+      "octave": 0,
+      "other": 0
+    },
+    "drum": {
+      "correct": 18,
+      "octave": 2,
+      "other": 0
+    },
+    "backbeat": {
+      "correct": 4,
+      "octave": 2,
+      "other": 0
+    },
+    "ramp": {
+      "correct": 3,
+      "octave": 0,
+      "other": 0
+    },
+    "jitter-click": {
+      "correct": 26,
+      "octave": 2,
+      "other": 0
+    },
+    "jitter-drum": {
+      "correct": 8,
+      "octave": 1,
+      "other": 0
+    },
+    "atempo": {
+      "correct": 3,
+      "octave": 0,
+      "other": 0
+    }
+  },
+  "rows": [
+    {
+      "id": "click-65",
+      "family": "click",
+      "trueBpm": 65,
+      "reportedBpm": 65,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-75",
+      "family": "click",
+      "trueBpm": 75,
+      "reportedBpm": 75,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-85",
+      "family": "click",
+      "trueBpm": 85,
+      "reportedBpm": 85.001,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-100",
+      "family": "click",
+      "trueBpm": 100,
+      "reportedBpm": 100,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-120",
+      "family": "click",
+      "trueBpm": 120,
+      "reportedBpm": 120,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-140",
+      "family": "click",
+      "trueBpm": 140,
+      "reportedBpm": 140,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-150",
+      "family": "click",
+      "trueBpm": 150,
+      "reportedBpm": 150,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-165",
+      "family": "click",
+      "trueBpm": 165,
+      "reportedBpm": 165.004,
+      "confidence": 0.9844,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "click-180",
+      "family": "click",
+      "trueBpm": 180,
+      "reportedBpm": 90,
+      "confidence": 0.9035,
+      "verdict": "octave",
+      "ratio": 0.5
+    },
+    {
+      "id": "click-200",
+      "family": "click",
+      "trueBpm": 200,
+      "reportedBpm": 101.749,
+      "confidence": 0.8259,
+      "verdict": "octave",
+      "ratio": 0.5087
+    },
+    {
+      "id": "rise-80",
+      "family": "rise",
+      "trueBpm": 80,
+      "reportedBpm": 80,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "rise-110",
+      "family": "rise",
+      "trueBpm": 110,
+      "reportedBpm": 109.998,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "rise-130",
+      "family": "rise",
+      "trueBpm": 130,
+      "reportedBpm": 129.999,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "rise-160",
+      "family": "rise",
+      "trueBpm": 160,
+      "reportedBpm": 159.995,
+      "confidence": 1,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "drum-90-g0.15",
+      "family": "drum",
+      "trueBpm": 90,
+      "reportedBpm": 90.291,
+      "confidence": 0.74,
+      "verdict": "correct",
+      "ratio": 1.0032
+    },
+    {
+      "id": "drum-90-g0.3",
+      "family": "drum",
+      "trueBpm": 90,
+      "reportedBpm": 90.291,
+      "confidence": 0.7286,
+      "verdict": "correct",
+      "ratio": 1.0032
+    },
+    {
+      "id": "drum-90-g0.45",
+      "family": "drum",
+      "trueBpm": 90,
+      "reportedBpm": 91.046,
+      "confidence": 0.711,
+      "verdict": "correct",
+      "ratio": 1.0116
+    },
+    {
+      "id": "drum-90-g0.6",
+      "family": "drum",
+      "trueBpm": 90,
+      "reportedBpm": 91.046,
+      "confidence": 0.7098,
+      "verdict": "correct",
+      "ratio": 1.0116
+    },
+    {
+      "id": "drum-120-g0.15",
+      "family": "drum",
+      "trueBpm": 120,
+      "reportedBpm": 120.008,
+      "confidence": 0.9946,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "drum-120-g0.3",
+      "family": "drum",
+      "trueBpm": 120,
+      "reportedBpm": 120.017,
+      "confidence": 0.9825,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "drum-120-g0.45",
+      "family": "drum",
+      "trueBpm": 120,
+      "reportedBpm": 120.023,
+      "confidence": 0.9475,
+      "verdict": "correct",
+      "ratio": 1.0002
+    },
+    {
+      "id": "drum-120-g0.6",
+      "family": "drum",
+      "trueBpm": 120,
+      "reportedBpm": 120.049,
+      "confidence": 0.8793,
+      "verdict": "correct",
+      "ratio": 1.0004
+    },
+    {
+      "id": "drum-150-g0.15",
+      "family": "drum",
+      "trueBpm": 150,
+      "reportedBpm": 150.001,
+      "confidence": 0.6493,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "drum-150-g0.3",
+      "family": "drum",
+      "trueBpm": 150,
+      "reportedBpm": 150.001,
+      "confidence": 0.7003,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "drum-150-g0.45",
+      "family": "drum",
+      "trueBpm": 150,
+      "reportedBpm": 150.001,
+      "confidence": 0.7202,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "drum-150-g0.6",
+      "family": "drum",
+      "trueBpm": 150,
+      "reportedBpm": 150.001,
+      "confidence": 0.7298,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "drum-75-g0.3",
+      "family": "drum",
+      "trueBpm": 75,
+      "reportedBpm": 150,
+      "confidence": 1,
+      "verdict": "octave",
+      "ratio": 2
+    },
+    {
+      "id": "drum-75-g0.6",
+      "family": "drum",
+      "trueBpm": 75,
+      "reportedBpm": 150,
+      "confidence": 1,
+      "verdict": "octave",
+      "ratio": 2
+    },
+    {
+      "id": "drum-100-g0.3",
+      "family": "drum",
+      "trueBpm": 100,
+      "reportedBpm": 100.253,
+      "confidence": 0.8259,
+      "verdict": "correct",
+      "ratio": 1.0025
+    },
+    {
+      "id": "drum-100-g0.6",
+      "family": "drum",
+      "trueBpm": 100,
+      "reportedBpm": 100.253,
+      "confidence": 0.8259,
+      "verdict": "correct",
+      "ratio": 1.0025
+    },
+    {
+      "id": "drum-135-g0.3",
+      "family": "drum",
+      "trueBpm": 135,
+      "reportedBpm": 135.001,
+      "confidence": 0.9993,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "drum-135-g0.6",
+      "family": "drum",
+      "trueBpm": 135,
+      "reportedBpm": 135.188,
+      "confidence": 0.8509,
+      "verdict": "correct",
+      "ratio": 1.0014
+    },
+    {
+      "id": "drum-165-g0.3",
+      "family": "drum",
+      "trueBpm": 165,
+      "reportedBpm": 165.008,
+      "confidence": 0.5146,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "drum-165-g0.6",
+      "family": "drum",
+      "trueBpm": 165,
+      "reportedBpm": 165.008,
+      "confidence": 0.5386,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "backbeat-90",
+      "family": "backbeat",
+      "trueBpm": 90,
+      "reportedBpm": 90.292,
+      "confidence": 0.7506,
+      "verdict": "correct",
+      "ratio": 1.0032
+    },
+    {
+      "id": "backbeat-110",
+      "family": "backbeat",
+      "trueBpm": 110,
+      "reportedBpm": 109.998,
+      "confidence": 0.9987,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "backbeat-130",
+      "family": "backbeat",
+      "trueBpm": 130,
+      "reportedBpm": 129.999,
+      "confidence": 0.9984,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "backbeat-150",
+      "family": "backbeat",
+      "trueBpm": 150,
+      "reportedBpm": 150,
+      "confidence": 0.7093,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "backbeat-165",
+      "family": "backbeat",
+      "trueBpm": 165,
+      "reportedBpm": 82.502,
+      "confidence": 0.5665,
+      "verdict": "octave",
+      "ratio": 0.5
+    },
+    {
+      "id": "backbeat-180",
+      "family": "backbeat",
+      "trueBpm": 180,
+      "reportedBpm": 90,
+      "confidence": 0.6355,
+      "verdict": "octave",
+      "ratio": 0.5
+    },
+    {
+      "id": "ramp-90-96",
+      "family": "ramp",
+      "trueBpm": 93,
+      "reportedBpm": 92.99,
+      "confidence": 0.9639,
+      "verdict": "correct",
+      "ratio": 0.9999
+    },
+    {
+      "id": "ramp-110-116",
+      "family": "ramp",
+      "trueBpm": 113,
+      "reportedBpm": 112.991,
+      "confidence": 0.9701,
+      "verdict": "correct",
+      "ratio": 0.9999
+    },
+    {
+      "id": "ramp-120-126",
+      "family": "ramp",
+      "trueBpm": 123,
+      "reportedBpm": 122.992,
+      "confidence": 0.9725,
+      "verdict": "correct",
+      "ratio": 0.9999
+    },
+    {
+      "id": "jclick-75-j0.02",
+      "family": "jitter-click",
+      "trueBpm": 75,
+      "reportedBpm": 75.026,
+      "confidence": 0.9846,
+      "verdict": "correct",
+      "ratio": 1.0003
+    },
+    {
+      "id": "jclick-75-j0.04",
+      "family": "jitter-click",
+      "trueBpm": 75,
+      "reportedBpm": 74.981,
+      "confidence": 0.968,
+      "verdict": "correct",
+      "ratio": 0.9997
+    },
+    {
+      "id": "jclick-75-j0.07",
+      "family": "jitter-click",
+      "trueBpm": 75,
+      "reportedBpm": 75.01,
+      "confidence": 0.9428,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "jclick-75-j0.1",
+      "family": "jitter-click",
+      "trueBpm": 75,
+      "reportedBpm": 75.012,
+      "confidence": 0.8498,
+      "verdict": "correct",
+      "ratio": 1.0002
+    },
+    {
+      "id": "jclick-90-j0.02",
+      "family": "jitter-click",
+      "trueBpm": 90,
+      "reportedBpm": 90.012,
+      "confidence": 0.9816,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "jclick-90-j0.04",
+      "family": "jitter-click",
+      "trueBpm": 90,
+      "reportedBpm": 89.964,
+      "confidence": 0.9675,
+      "verdict": "correct",
+      "ratio": 0.9996
+    },
+    {
+      "id": "jclick-90-j0.07",
+      "family": "jitter-click",
+      "trueBpm": 90,
+      "reportedBpm": 89.962,
+      "confidence": 0.895,
+      "verdict": "correct",
+      "ratio": 0.9996
+    },
+    {
+      "id": "jclick-90-j0.1",
+      "family": "jitter-click",
+      "trueBpm": 90,
+      "reportedBpm": 90.039,
+      "confidence": 0.7317,
+      "verdict": "correct",
+      "ratio": 1.0004
+    },
+    {
+      "id": "jclick-100-j0.02",
+      "family": "jitter-click",
+      "trueBpm": 100,
+      "reportedBpm": 100.015,
+      "confidence": 0.9843,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "jclick-100-j0.04",
+      "family": "jitter-click",
+      "trueBpm": 100,
+      "reportedBpm": 99.997,
+      "confidence": 0.969,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-100-j0.07",
+      "family": "jitter-click",
+      "trueBpm": 100,
+      "reportedBpm": 100.09,
+      "confidence": 0.8561,
+      "verdict": "correct",
+      "ratio": 1.0009
+    },
+    {
+      "id": "jclick-100-j0.1",
+      "family": "jitter-click",
+      "trueBpm": 100,
+      "reportedBpm": 99.975,
+      "confidence": 0.8938,
+      "verdict": "correct",
+      "ratio": 0.9997
+    },
+    {
+      "id": "jclick-120-j0.02",
+      "family": "jitter-click",
+      "trueBpm": 120,
+      "reportedBpm": 120.002,
+      "confidence": 0.9814,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-120-j0.04",
+      "family": "jitter-click",
+      "trueBpm": 120,
+      "reportedBpm": 120.004,
+      "confidence": 0.9689,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-120-j0.07",
+      "family": "jitter-click",
+      "trueBpm": 120,
+      "reportedBpm": 120.04,
+      "confidence": 0.9283,
+      "verdict": "correct",
+      "ratio": 1.0003
+    },
+    {
+      "id": "jclick-120-j0.1",
+      "family": "jitter-click",
+      "trueBpm": 120,
+      "reportedBpm": 119.985,
+      "confidence": 0.836,
+      "verdict": "correct",
+      "ratio": 0.9999
+    },
+    {
+      "id": "jclick-140-j0.02",
+      "family": "jitter-click",
+      "trueBpm": 140,
+      "reportedBpm": 139.991,
+      "confidence": 0.9859,
+      "verdict": "correct",
+      "ratio": 0.9999
+    },
+    {
+      "id": "jclick-140-j0.04",
+      "family": "jitter-click",
+      "trueBpm": 140,
+      "reportedBpm": 139.996,
+      "confidence": 0.9681,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-140-j0.07",
+      "family": "jitter-click",
+      "trueBpm": 140,
+      "reportedBpm": 140.038,
+      "confidence": 0.8803,
+      "verdict": "correct",
+      "ratio": 1.0003
+    },
+    {
+      "id": "jclick-140-j0.1",
+      "family": "jitter-click",
+      "trueBpm": 140,
+      "reportedBpm": 140.062,
+      "confidence": 0.7282,
+      "verdict": "correct",
+      "ratio": 1.0004
+    },
+    {
+      "id": "jclick-160-j0.02",
+      "family": "jitter-click",
+      "trueBpm": 160,
+      "reportedBpm": 160.001,
+      "confidence": 0.9848,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-160-j0.04",
+      "family": "jitter-click",
+      "trueBpm": 160,
+      "reportedBpm": 159.983,
+      "confidence": 0.9636,
+      "verdict": "correct",
+      "ratio": 0.9999
+    },
+    {
+      "id": "jclick-160-j0.07",
+      "family": "jitter-click",
+      "trueBpm": 160,
+      "reportedBpm": 160.006,
+      "confidence": 0.8654,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-160-j0.1",
+      "family": "jitter-click",
+      "trueBpm": 160,
+      "reportedBpm": 159.998,
+      "confidence": 0.8673,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-180-j0.02",
+      "family": "jitter-click",
+      "trueBpm": 180,
+      "reportedBpm": 179.997,
+      "confidence": 0.8844,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "jclick-180-j0.04",
+      "family": "jitter-click",
+      "trueBpm": 180,
+      "reportedBpm": 90.024,
+      "confidence": 0.8803,
+      "verdict": "octave",
+      "ratio": 0.5001
+    },
+    {
+      "id": "jclick-180-j0.07",
+      "family": "jitter-click",
+      "trueBpm": 180,
+      "reportedBpm": 180.051,
+      "confidence": 0.8262,
+      "verdict": "correct",
+      "ratio": 1.0003
+    },
+    {
+      "id": "jclick-180-j0.1",
+      "family": "jitter-click",
+      "trueBpm": 180,
+      "reportedBpm": 89.994,
+      "confidence": 0.7153,
+      "verdict": "octave",
+      "ratio": 0.5
+    },
+    {
+      "id": "jdrum-90-g0.3-j0.03",
+      "family": "jitter-drum",
+      "trueBpm": 90,
+      "reportedBpm": 90.116,
+      "confidence": 0.6766,
+      "verdict": "correct",
+      "ratio": 1.0013
+    },
+    {
+      "id": "jdrum-90-g0.3-j0.06",
+      "family": "jitter-drum",
+      "trueBpm": 90,
+      "reportedBpm": 91.28,
+      "confidence": 0.3555,
+      "verdict": "correct",
+      "ratio": 1.0142
+    },
+    {
+      "id": "jdrum-90-g0.6-j0.03",
+      "family": "jitter-drum",
+      "trueBpm": 90,
+      "reportedBpm": 180.03,
+      "confidence": 0.6707,
+      "verdict": "octave",
+      "ratio": 2.0003
+    },
+    {
+      "id": "jdrum-120-g0.3-j0.03",
+      "family": "jitter-drum",
+      "trueBpm": 120,
+      "reportedBpm": 120.215,
+      "confidence": 0.8362,
+      "verdict": "correct",
+      "ratio": 1.0018
+    },
+    {
+      "id": "jdrum-120-g0.3-j0.06",
+      "family": "jitter-drum",
+      "trueBpm": 120,
+      "reportedBpm": 120.011,
+      "confidence": 0.6549,
+      "verdict": "correct",
+      "ratio": 1.0001
+    },
+    {
+      "id": "jdrum-120-g0.6-j0.03",
+      "family": "jitter-drum",
+      "trueBpm": 120,
+      "reportedBpm": 120.626,
+      "confidence": 0.5533,
+      "verdict": "correct",
+      "ratio": 1.0052
+    },
+    {
+      "id": "jdrum-150-g0.3-j0.03",
+      "family": "jitter-drum",
+      "trueBpm": 150,
+      "reportedBpm": 150.173,
+      "confidence": 0.4846,
+      "verdict": "correct",
+      "ratio": 1.0012
+    },
+    {
+      "id": "jdrum-150-g0.3-j0.06",
+      "family": "jitter-drum",
+      "trueBpm": 150,
+      "reportedBpm": 149.981,
+      "confidence": 0.4082,
+      "verdict": "correct",
+      "ratio": 0.9999
+    },
+    {
+      "id": "jdrum-150-g0.6-j0.03",
+      "family": "jitter-drum",
+      "trueBpm": 150,
+      "reportedBpm": 150.002,
+      "confidence": 0.6235,
+      "verdict": "correct",
+      "ratio": 1
+    },
+    {
+      "id": "atempo-pad",
+      "family": "atempo",
+      "trueBpm": null,
+      "reportedBpm": 101.951,
+      "confidence": 0.0566,
+      "verdict": "correct",
+      "ratio": null
+    },
+    {
+      "id": "atempo-speech",
+      "family": "atempo",
+      "trueBpm": null,
+      "reportedBpm": 193.958,
+      "confidence": 0.0261,
+      "verdict": "correct",
+      "ratio": null
+    },
+    {
+      "id": "atempo-noise",
+      "family": "atempo",
+      "trueBpm": null,
+      "reportedBpm": 126.587,
+      "confidence": 0.1895,
+      "verdict": "correct",
+      "ratio": null
+    }
+  ]
+}

@@ -1,0 +1,194 @@
+{
+  "what": "main→renderer file:read delivery cost, measured in the built app",
+  "when": "2026-08-15T07:18:32.851Z",
+  "repeats": 5,
+  "stallDetectorControl": {
+    "asked": 120,
+    "detected": 122.20000000298023,
+    "ticks": 16
+  },
+  "stallDetectorTrusted": true,
+  "heap": {
+    "usedMiB": 57.506561279296875,
+    "limitMiB": 3585.8154296875
+  },
+  "targets": [
+    {
+      "label": "real-song-48k.wav",
+      "bytes": 68352850,
+      "runs": [
+        {
+          "deliverMs": 244.5,
+          "blockMs": 260.5,
+          "copyMs": 20.899999998509884,
+          "ticksDuringRead": 27,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 264.3999999985099,
+          "blockMs": 155.60000000149012,
+          "copyMs": 14.699999995529652,
+          "ticksDuringRead": 33,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 206.30000000447035,
+          "blockMs": 137.5,
+          "copyMs": 14.800000004470348,
+          "ticksDuringRead": 23,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 202.30000000447035,
+          "blockMs": 133,
+          "copyMs": 15.899999998509884,
+          "ticksDuringRead": 24,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 200.20000000298023,
+          "blockMs": 137.39999999850988,
+          "copyMs": 13.100000001490116,
+          "ticksDuringRead": 22,
+          "ticksDuringCopy": 0,
+          "error": null
+        }
+      ],
+      "median": {
+        "deliverMs": 206.30000000447035,
+        "blockMs": 137.5,
+        "copyMs": 14.800000004470348
+      }
+    },
+    {
+      "label": "long-real-take.wav",
+      "bytes": 54589060,
+      "runs": [
+        {
+          "deliverMs": 173.5,
+          "blockMs": 113.10000000149012,
+          "copyMs": 13.600000001490116,
+          "ticksDuringRead": 20,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 180.80000000447035,
+          "blockMs": 115.19999999552965,
+          "copyMs": 13.599999994039536,
+          "ticksDuringRead": 22,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 175.89999999850988,
+          "blockMs": 120.10000000149012,
+          "copyMs": 13.299999997019768,
+          "ticksDuringRead": 20,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 167.5,
+          "blockMs": 111.5,
+          "copyMs": 12.5,
+          "ticksDuringRead": 20,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 161.10000000149012,
+          "blockMs": 114.19999999552965,
+          "copyMs": 15.199999995529652,
+          "ticksDuringRead": 18,
+          "ticksDuringCopy": 0,
+          "error": null
+        }
+      ],
+      "median": {
+        "deliverMs": 173.5,
+        "blockMs": 114.19999999552965,
+        "copyMs": 13.599999994039536
+      }
+    },
+    {
+      "label": "long70.wav (control)",
+      "bytes": 6174044,
+      "runs": [
+        {
+          "deliverMs": 18.799999997019768,
+          "blockMs": 13.700000002980232,
+          "copyMs": 1.3999999985098839,
+          "ticksDuringRead": 2,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 23.80000000447035,
+          "blockMs": 14.399999998509884,
+          "copyMs": 1.3999999985098839,
+          "ticksDuringRead": 4,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 20.200000002980232,
+          "blockMs": 14.700000002980232,
+          "copyMs": 1.7999999970197678,
+          "ticksDuringRead": 3,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 19,
+          "blockMs": 15.699999995529652,
+          "copyMs": 4.100000001490116,
+          "ticksDuringRead": 3,
+          "ticksDuringCopy": 0,
+          "error": null
+        },
+        {
+          "deliverMs": 20.100000001490116,
+          "blockMs": 14.200000002980232,
+          "copyMs": 1.8000000044703484,
+          "ticksDuringRead": 3,
+          "ticksDuringCopy": 0,
+          "error": null
+        }
+      ],
+      "median": {
+        "deliverMs": 20.100000001490116,
+        "blockMs": 14.399999998509884,
+        "copyMs": 1.7999999970197678
+      }
+    }
+  ],
+  "notes": [
+    "deliverMs = ipcRenderer.invoke round trip + structured-clone deserialisation + the contextBridge copy of the return value.",
+    "blockMs = longest gap between ticks of a 4 ms interval spanning the await; this is the part the user feels.",
+    "copyMs = an in-renderer slice() of the delivered buffer: what ONE copy of this many bytes costs on this machine."
+  ],
+  "task": "T4",
+  "bound": {
+    "statedBeforeMeasuring": true,
+    "rule": "Worth fixing if the RENDERER MAIN THREAD is blocked for more than 100 ms delivering one large file read, AND a cheap, safe, non-architectural change can remove a substantial fraction of it.",
+    "outcome": "Bound EXCEEDED (137.5 ms median for 65.2 MiB) but NOT fixed: every candidate that removes the block is an architecture change (MessagePort/MessageChannelMain transfer, or chunked delivery over several turns). Numbers recorded instead, per the measure-first instruction."
+  },
+  "mechanism": [
+    "The block scales with SIZE, not with call count: 2.11 ms/MiB (65.2 MiB), 2.19 ms/MiB (52.1 MiB), 2.44 ms/MiB (5.9 MiB control). It is per-byte work on the renderer main thread, not fixed IPC overhead.",
+    "One in-renderer memcpy of the same bytes costs 0.23 ms/MiB (14.8 ms for 65.2 MiB). The delivery therefore costs about 9x a single copy: structured-clone deserialisation plus the contextBridge deep copy of the return value, neither of which is a plain memcpy.",
+    "deliverMs minus blockMs (about 69 ms at 65 MiB) is the part that does NOT block: the main process reading the file and the transport. Only the tail is the stall.",
+    "The bridge-copy FLOOR is therefore measured at about 15 ms per 65 MiB. That is what one unavoidable copy costs on this machine, and it is the target any future fix should be compared against."
+  ],
+  "notFixedBecause": [
+    "ipcRenderer.invoke has no transfer list: an ArrayBuffer returned from ipcMain.handle is always structured-cloned, never transferred.",
+    "contextBridge copies every return value by design; there is no opt-out, and the isolated-world boundary is the security property the app rests on.",
+    "The real fix is a MessagePort (MessageChannelMain) carrying the buffer as a transferable, which is a new channel and a new protocol for every reader of file:read - an architecture change, explicitly out of scope for this pass.",
+    "Chunked delivery would break the block into slices without reducing total CPU, and would change the read protocol for every consumer."
+  ],
+  "probeCorrection": "The first run of this probe reported a 4.6 ms block. It was wrong: the interval and the read started in the same turn, so a stall landing before the FIRST tick was silence rather than a gap, and a loop starting at i=1 could not see it. The detector own 120 ms control passed throughout because that control happened to warm up first. A 40 ms warm-up before the measured read (and another after it) is what made the probe agree with a separate hand-run experiment that had measured 142.6 ms."
+}

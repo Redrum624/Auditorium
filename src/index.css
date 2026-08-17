@@ -1,0 +1,622 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: dark;
+}
+
+/* ------------------------------------------------------------------------- */
+/* v1.6 "Glass · Sectioned" tokens — ported VERBATIM from Vitrine            */
+/* (photo_app/src/index.css) per the 2026-07-28 plan's ruling 1. The ONE     */
+/* deliberate divergence (ruling 2): the accent trio is Auditorium cyan      */
+/* #26c6da (with its 14%/35% alpha derivatives), not Vitrine blue — flip     */
+/* those three tokens to --primary-500's family to adopt the Vitrine blue.   */
+/* Nothing below is consumed until tasks G2+ port each surface; adding       */
+/* tokens and class rules with no consumers is visually inert.               */
+/* ------------------------------------------------------------------------- */
+:root {
+  --black: #000000;
+  --gray-950: #0a0a0a;
+  --gray-900: #121212;
+  --gray-850: #1a1a1a;
+  --gray-800: #1e1e1e;
+  --gray-700: #2a2a2a;
+  --gray-600: #3a3a3a;
+  --gray-500: #4a4a4a;
+  --gray-400: #6a6a6a;
+  --gray-300: #8a8a8a;
+  --gray-200: #aaaaaa;
+  --gray-100: #cccccc;
+  --white: #ffffff;
+
+  /* Primary accent (blue) — kept for parity with Vitrine's token set so a
+     one-token flip of --accent to var(--primary-500) restores the family
+     accent. Auditorium's own accent is the cyan trio below. */
+  --primary-700: #1d4ed8;
+  --primary-600: #2563eb;
+  --primary-500: #3b82f6;
+  --primary-400: #60a5fa;
+  --primary-300: #93c5fd;
+
+  --border: #2a2a2a;
+  --border-light: #333333;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow-md: 0 4px 8px rgba(0, 0, 0, 0.6);
+  --shadow-lg: 0 8px 16px rgba(0, 0, 0, 0.7);
+
+  --transition-fast: all 0.15s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-slow: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Accent (ruling 2): Auditorium cyan; soft/ring are the accent at 14%/35%
+     alpha — the same derivation Vitrine applies to its blue. */
+  --accent: #26c6da;
+  --accent-soft: rgba(38, 198, 218, 0.14);
+  --accent-ring: rgba(38, 198, 218, 0.35);
+
+  /* Glass surfaces: cards (panel/dialog cards) vs. chrome (toolbar, icon
+     rail, status pill — smaller floating pills). */
+  --glass-bg: rgba(15, 15, 19, 0.78);
+  --glass-bg-chrome: rgba(16, 16, 20, 0.72);
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --glass-blur: 28px;
+  --glass-blur-chrome: 24px;
+  --glass-shadow: 0 32px 90px rgba(0, 0, 0, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  --glass-shadow-chrome: 0 16px 48px rgba(0, 0, 0, 0.5);
+  /* MT1-4: the OPAQUE field background, for controls that spawn a native popup
+     (`<select>`). Every other glass field tints the surface behind it with a few
+     percent of white, which is correct on the stage and wrong the moment the
+     widget is drawn somewhere else — see the `select` rule near the bottom of
+     this file. The value is not a new colour: it is `PropertiesPanel`'s
+     fade-curve select, the one control that was already opaque and the one
+     nobody reported, and it is within a shade of what `rgba(255,255,255,.04)`
+     over `--glass-bg` composites to, so the closed control does not move. */
+  --glass-field-bg: #1a1a1e;
+  --canvas-bg: radial-gradient(1400px 800px at 42% 45%, #121216, #08080a);
+
+  /* Glass text scale: title / control label / secondary / muted-subtitle,
+     plus the chrome idle/primary pair used by toolbar/rail text. */
+  --glass-text-title: #f0f0f2;
+  --glass-text-label: #c2c2ca;
+  --glass-text-secondary: #a8a8b0;
+  --glass-text-muted: #7a7a82;
+  --glass-text-chrome-idle: #8a8a92;
+  --glass-text-chrome-primary: #d8d8de;
+
+  /* Radii scale: 20 card · 16 dock/rail · 9-11 controls · 6-7 chips (the
+     control/chip ranges are applied per-component per the anatomy spec). */
+  --radius-card: 20px;
+  --radius-dock: 16px;
+}
+
+/* Vitrine scrollbars (ported verbatim). */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: var(--gray-900);
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--gray-700);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--gray-600);
+}
+
+/* Vitrine slider styles (ported verbatim; class-scoped, so inert until a
+   consumer opts in). */
+.slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  background: var(--gray-700);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  background: #e5e5e5;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: var(--transition-normal);
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.slider::-webkit-slider-thumb:hover {
+  background: #ffffff;
+  transform: scale(1.3);
+  box-shadow: 0 2px 6px rgba(255, 255, 255, 0.4);
+}
+
+.slider::-webkit-slider-thumb:active {
+  transform: scale(1.2);
+}
+
+.slider::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  background: #e5e5e5;
+  border-radius: 50%;
+  cursor: pointer;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  transition: var(--transition-normal);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.slider::-moz-range-thumb:hover {
+  background: #ffffff;
+  transform: scale(1.3);
+  box-shadow: 0 2px 6px rgba(255, 255, 255, 0.4);
+}
+
+.slider::-moz-range-thumb:active {
+  transform: scale(1.2);
+}
+
+/* Visible slider track styles */
+.visible-track {
+  -webkit-appearance: none;
+  appearance: none;
+  background: transparent;
+  cursor: pointer;
+}
+
+.visible-track::-webkit-slider-track {
+  background: var(--gray-800);
+  height: 8px;
+  border-radius: 4px;
+  border: 1px solid var(--gray-600);
+}
+
+.visible-track::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  background: #e5e5e5;
+  border-radius: 50%;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  border: 2px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.visible-track::-webkit-slider-thumb:hover {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.7);
+  transform: scale(1.1);
+  box-shadow: 0 2px 6px rgba(255, 255, 255, 0.4);
+}
+
+.visible-track::-webkit-slider-thumb:active {
+  background: #d4d4d8;
+  transform: scale(0.95);
+}
+
+.visible-track::-moz-range-track {
+  background: var(--gray-800);
+  height: 8px;
+  border-radius: 4px;
+  border: 1px solid var(--gray-600);
+}
+
+.visible-track::-moz-range-thumb {
+  background: #e5e5e5;
+  border: 2px solid rgba(0, 0, 0, 0.5);
+  border-radius: 50%;
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+}
+
+.visible-track::-moz-range-thumb:hover {
+  background: #ffffff;
+  border-color: rgba(0, 0, 0, 0.7);
+  transform: scale(1.1);
+  box-shadow: 0 2px 6px rgba(255, 255, 255, 0.4);
+}
+
+/* Glass surfaces (Vitrine verbatim) — the two backing classes for
+   GlassCard/ChromePill in src/components/UI/glass.tsx. */
+.glass-card {
+  background: var(--glass-bg);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-card);
+  backdrop-filter: blur(var(--glass-blur));
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  box-shadow: var(--glass-shadow);
+}
+
+/* Floating chrome surface. Unlike .glass-card (which bakes --radius-card),
+   this carries NO border-radius: each floating element sets its own per the
+   anatomy spec — toolbar pill 14, icon rail / status pill 16 (--radius-dock),
+   overflow menu 10. ChromePill supplies the 16px default. */
+.glass-chrome {
+  background: var(--glass-bg-chrome);
+  border: 1px solid var(--glass-border);
+  backdrop-filter: blur(var(--glass-blur-chrome));
+  -webkit-backdrop-filter: blur(var(--glass-blur-chrome));
+  box-shadow: var(--glass-shadow-chrome);
+}
+
+/* Glass slider (Vitrine verbatim): 14px white thumb over a transparent input;
+   hover scale(1.28) + 4px accent ring; drag scale(1.18); edited state
+   (.is-edited) carries a static 3px accent-ring glow. Backs GlassSlider. */
+.glass-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 5px;
+  background: transparent;
+  cursor: grab;
+  margin: 0;
+}
+
+.glass-slider-thumb:active {
+  cursor: grabbing;
+}
+
+.glass-slider-thumb::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  cursor: grab;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.glass-slider-thumb:hover::-webkit-slider-thumb {
+  transform: scale(1.28);
+  box-shadow: 0 0 0 4px var(--accent-ring);
+}
+
+.glass-slider-thumb:active::-webkit-slider-thumb {
+  cursor: grabbing;
+  transform: scale(1.18);
+}
+
+.glass-slider-thumb.is-edited::-webkit-slider-thumb {
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.glass-slider-thumb.is-edited:hover::-webkit-slider-thumb {
+  box-shadow: 0 0 0 4px var(--accent-ring);
+}
+
+.glass-slider-thumb::-moz-range-thumb {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: #ffffff;
+  border: 1px solid rgba(0, 0, 0, 0.5);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+  cursor: grab;
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+
+.glass-slider-thumb:hover::-moz-range-thumb {
+  transform: scale(1.28);
+  box-shadow: 0 0 0 4px var(--accent-ring);
+}
+
+.glass-slider-thumb:active::-moz-range-thumb {
+  cursor: grabbing;
+  transform: scale(1.18);
+}
+
+.glass-slider-thumb.is-edited::-moz-range-thumb {
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+
+.glass-slider-thumb.is-edited:hover::-moz-range-thumb {
+  box-shadow: 0 0 0 4px var(--accent-ring);
+}
+
+/* Dialog-card entrance (Vitrine verbatim; G5 consumer: DialogShell). */
+@keyframes dcRise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.dc-rise {
+  animation: dcRise 380ms cubic-bezier(0.2, 0.7, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dc-rise {
+    animation: none;
+  }
+}
+
+/* Button interaction states (Vitrine verbatim) — :hover/:disabled cannot be
+   expressed inline, so GlassButton's base layout stays inline and these two
+   classes carry the interactive states. Token-driven, so the glow is cyan
+   here where Vitrine's is blue. */
+
+/* Secondary (default) button: plain hover brighten, no active state. */
+.glass-modal-btn-secondary {
+  transition: background-color 150ms ease, color 150ms ease, border-color 150ms ease;
+}
+.glass-modal-btn-secondary:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--glass-text-title);
+}
+
+/* Primary button (Create Remix, Apply, Export, ...): solid accent with a
+   0 2px 18px glow. Base glow lives here (not inline) so :hover can widen it —
+   an inline box-shadow out-specifies a :hover selector and would freeze it. */
+.glass-modal-btn-primary {
+  background: var(--accent);
+  color: #0b0b0c;
+  border: 1px solid var(--accent-ring);
+  box-shadow: 0 2px 18px var(--accent-ring);
+  transition: transform 150ms ease, filter 150ms ease, box-shadow 150ms ease;
+}
+.glass-modal-btn-primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 22px var(--accent-ring);
+}
+.glass-modal-btn-primary:active:not(:disabled) {
+  transform: scale(0.98);
+}
+.glass-modal-btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* ------------------------------------------------------------------------- */
+/* G2 window chrome: menubar items, dropdown items, window buttons.          */
+/* Anatomy: mockup `.mi` (2px 9px, radius 6, white/6% hover) for the top-    */
+/* level menu items; Vitrine MenuBar.tsx dropdown (gray-800, --border,       */
+/* --shadow-lg, radius 0, 4px/6px item padding) for the menus themselves.    */
+/* ------------------------------------------------------------------------- */
+
+/* Top-level menubar item (File, Edit, ...): mockup `.menubar span.mi`. */
+.chrome-menu-btn {
+  padding: 2px 9px;
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--glass-text-chrome-idle);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+.chrome-menu-btn:hover,
+.chrome-menu-btn.is-open {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--glass-text-chrome-primary);
+}
+
+/* Dropdown panel: Vitrine's menu dropdown (gray-800 · --border · shadow-lg ·
+   radius 0). */
+.chrome-menu-dropdown {
+  background: var(--gray-800);
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  border-radius: 0;
+}
+
+/* Dropdown item: Vitrine's px-4 py-1.5 text-xs anatomy on the glass text
+   scale; disabled = muted at half opacity (Auditorium's existing disabled
+   contract). */
+.chrome-menu-item {
+  padding: 6px 16px;
+  font-size: 12px;
+  color: var(--glass-text-label);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+.chrome-menu-item:hover:not(:disabled) {
+  background: var(--gray-700);
+  color: var(--glass-text-title);
+}
+.chrome-menu-item:disabled {
+  color: var(--glass-text-muted);
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* ------------------------------------------------------------------------- */
+/* G3 toolbar pill: Vitrine's .glass-pill-btn interactions, ported verbatim.  */
+/* :hover/:disabled can't be expressed inline, so the layout stays inline on  */
+/* each button (Toolbar.tsx pillBtn) and the interactive states live here.    */
+/* ------------------------------------------------------------------------- */
+
+/* Toolbar pill buttons (idle text buttons + zoom cluster): 150ms ease hover
+   (bg → rgba(255,255,255,.07), text → white); press scale(.97). */
+.glass-pill-btn {
+  transition: background-color 150ms ease, color 150ms ease, transform 150ms ease;
+}
+.glass-pill-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--glass-text-title);
+}
+.glass-pill-btn:active:not(:disabled) {
+  transform: scale(0.97);
+}
+.glass-pill-btn:disabled {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* Frameless window button (minimize/maximize/close): Vitrine's w-11 h-full
+   subtle-hover anatomy. */
+.chrome-winbtn {
+  color: var(--glass-text-chrome-idle);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+.chrome-winbtn:hover {
+  background: rgba(255, 255, 255, 0.07);
+  color: var(--glass-text-title);
+}
+
+/* ------------------------------------------------------------------------- */
+/* G4 icon rail: Vitrine's .glass-rail-btn interactions, ported verbatim.    */
+/* Layout stays inline on each button (App.tsx railBtn); hover lift, idle    */
+/* hover fill and press scale live here. Active (.is-active) keeps its       */
+/* accent tile from the inline style — hover only lifts it.                  */
+/* ------------------------------------------------------------------------- */
+.glass-rail-btn {
+  transition: transform 150ms ease, background-color 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+.glass-rail-btn:hover {
+  transform: scale(1.06);
+}
+.glass-rail-btn:hover:not(.is-active) {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--glass-text-chrome-primary);
+}
+.glass-rail-btn:active {
+  transform: scale(0.98);
+}
+
+/* ------------------------------------------------------------------------- */
+/* MT1-4 native select popups: the one widget the glass tint cannot follow.   */
+/* ------------------------------------------------------------------------- */
+/*
+   Reported as "light gray text on white" on Cover Chain's Reference picker.
+   The `color-scheme: dark` at the top of this file is NOT the missing piece —
+   it has been there since G1. Chromium draws a select's dropdown listbox with
+   the AUTHOR's background whenever the author sets one, and it draws it as a
+   widget of its own rather than on the stage. So `rgba(255,255,255,.04)` —
+   which composites to a dark field over `--glass-bg`, and looks right on the
+   closed control — composites to near-WHITE in the popup, and the light-gray
+   `--glass-text-*` chosen to sit on near-black lands on it unreadable. An
+   author background beats the UA's dark base, so the root declaration only
+   ever governed the popups nobody had styled.
+
+   Both halves are needed. The element rules below catch any select added later
+   that leaves its background to the UA; the three inline `background` values
+   (GlassSelect, CoverChainDialog, SpatialPanel) had to become opaque in their
+   own files, because an inline style outranks anything written here.
+
+   `option` is styled explicitly rather than left to inherit: on Windows the
+   option rows are painted by the popup widget, which reads the option's own
+   computed colours and does not inherit the select's. Honest limit: how far a
+   platform honours option styling varies, and neither jsdom nor Playwright can
+   open a native popup to check — `src/components/UI/nativeSelect.test.tsx`
+   enforces the opacity law over the source and says so at length.
+*/
+select {
+  color-scheme: dark;
+  background-color: var(--glass-field-bg);
+  color: var(--glass-text-label);
+}
+select option {
+  background-color: var(--glass-field-bg);
+  color: var(--glass-text-title);
+}
+select option:checked {
+  /* MT1 fix round (C2): an OPAQUE literal, not `var(--accent-soft)`.
+     `--accent-soft` is `rgba(38,198,218,.14)`, and a translucent highlight is
+     the exact defect this whole block exists to fix — worse here than anywhere,
+     because the checked row is the one the user is looking at when the popup
+     opens. This is that accent composited over `--glass-field-bg` once, by
+     hand: .14·(38,198,218) + .86·(26,26,30) = (28,50,56). Same appearance on
+     the stage, correct appearance in the popup. If `--accent-soft` or
+     `--glass-field-bg` ever moves, this must be recomposited — hence the
+     arithmetic is written down rather than just its result. */
+  background-color: #1c3238;
+  color: var(--glass-text-title);
+}
+
+/* ------------------------------------------------------------------------- */
+/* G6 stage: the editor canvas becomes the radial stage and everything else   */
+/* floats over it (mockup `.stagewave` / `.lane`).                            */
+/* ------------------------------------------------------------------------- */
+
+/* Clearance that keeps the editor content out from under the floating chrome:
+   top = toolbar band (pill bottom ~54px + gap), right = the module column,
+   bottom = status pill band, left = stage margin. Lives on each editor view's
+   ROOT — never inside a lane, and never on anything that participates in the
+   clientX→sample canvas mapping.
+
+   U1 (layout E2): the horizontal inset is a TOKEN, not a constant, for two
+   reasons. The vertical icon rail is gone — its 72px of window edge folded
+   into the module column's own width — and the column itself is only there
+   while a panel card is open, so the right inset has two values App.tsx
+   switches between (`--stage-inset-right`). The left margin drops 24 -> 14:
+   the user's rule for this layout is "as wide as possible, not like a photo",
+   and 24px of empty gutter is picture-framing. The fallbacks here are the
+   open-card values, so a view rendered outside the stage (component tests)
+   still lays out against real chrome. */
+.stage-inset {
+  padding: 68px var(--stage-inset-right, 376px) 60px var(--stage-inset-left, 14px);
+}
+
+/* Floating editor lane (mockup `.lane`): rounded 12, subtle inset ring, deep
+   shadow, translucent near-black fill over the radial stage. Deliberately NO
+   padding and NO real border — the waveform/spectrogram canvas fills the
+   content box edge-to-edge, so selection dragging, cursor placement, zoom
+   anchoring and marker hit-testing (all canvas-rect based) are unaffected;
+   the ring is an inset box-shadow, which never moves the content box. */
+.glass-lane {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10, 10, 13, 0.55);
+  box-shadow:
+    0 20px 60px rgba(0, 0, 0, 0.45),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+/* G6 multitrack: one track row (header + lane) floats as a card — the lane
+   anatomy at track scale. Same no-padding rule: the lane's x-origin inside
+   the row must stay exactly HEADER_W for the playhead/cursor overlay math. */
+.glass-track-row {
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(10, 10, 13, 0.55);
+  box-shadow:
+    0 14px 40px rgba(0, 0, 0, 0.4),
+    inset 0 0 0 1px rgba(255, 255, 255, 0.05);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  background-color: #1a1a1e;
+  color: #d4d4d8;
+  user-select: none;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}

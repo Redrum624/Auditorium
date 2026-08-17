@@ -1,0 +1,264 @@
+{
+  "ok": true,
+  "go": false,
+  "gate": {
+    "improvementRequiredDb": 3,
+    "bedLevelToleranceDb": 1,
+    "damageBelowBedRequiredDb": 20,
+    "improvementDb": 0,
+    "bedLevelShiftDb": 0,
+    "damageBelowBedDb": 88.83,
+    "improved": false,
+    "harmless": true
+  },
+  "ghost": {
+    "bandLoHz": 250,
+    "bandHiHz": 4000,
+    "pass1BelowBedDb": -17.29,
+    "pass1BelowVocalDb": -16.73,
+    "pass2BelowBedDb": -17.29,
+    "pass2BelowVocalDb": -16.73,
+    "pass1BelowBedPerOctaveDb": [
+      -16.84,
+      -18.7,
+      -14.69,
+      -22.06
+    ],
+    "pass2BelowBedPerOctaveDb": [
+      -16.85,
+      -18.69,
+      -14.68,
+      -22.02
+    ],
+    "improvementPerOctaveDb": [
+      0.01,
+      -0.01,
+      -0.01,
+      -0.04
+    ]
+  },
+  "secondPassOutput": {
+    "vocals2BelowInstrumental1Db": -43.04,
+    "vocals2BelowInstrumental1BelowBandDb": -58.37,
+    "vocals2BelowInstrumental1AboveBandDb": -45.17,
+    "instrumentalBroadbandShiftDb": 1.78,
+    "instrumentalBelowBandShiftDb": 0,
+    "instrumentalAboveBandShiftDb": 0
+  },
+  "nullTest": {
+    "bedLevelShiftDb": 0,
+    "damageBelowBedDb": 88.83,
+    "damageBelowBedPerOctaveDb": [
+      -92.99,
+      -90,
+      -83.42,
+      -83.26
+    ],
+    "damageRmsDb": -63.89,
+    "bedRmsDb": -10.32
+  },
+  "checks": {
+    "pass2IdentityRmsDb": -153.83,
+    "nullIdentityRmsDb": -159.69,
+    "pass1IdentityRmsDb": -157.4,
+    "ghost1IsVocMinusVocals1RmsDb": -155.05
+  },
+  "exactSum": {
+    "passA": {
+      "worstAbs": 0,
+      "worstUlps": 0,
+      "exactFraction": 1
+    },
+    "pass1": {
+      "worstAbs": 0,
+      "worstUlps": 0,
+      "exactFraction": 1
+    },
+    "pass2": {
+      "worstAbs": 0,
+      "worstUlps": 0,
+      "exactFraction": 1
+    },
+    "nullPass": {
+      "worstAbs": 0,
+      "worstUlps": 0,
+      "exactFraction": 1
+    }
+  },
+  "levels": {
+    "bed": {
+      "frames": 2256,
+      "bandDb": 19.34,
+      "belowBandDb": 37.55,
+      "aboveBandDb": -3.25,
+      "octavesDb": [
+        27.61,
+        24,
+        15.37,
+        8.49
+      ],
+      "rmsDb": -10.32
+    },
+    "voc": {
+      "frames": 1401,
+      "bandDb": 18.78,
+      "belowBandDb": 18.37,
+      "aboveBandDb": -3.04,
+      "octavesDb": [
+        25.91,
+        24.4,
+        16.12,
+        3.97
+      ],
+      "rmsDb": -15.4
+    },
+    "mixStar": {
+      "frames": 2373,
+      "bandDb": 21.35,
+      "belowBandDb": 37.44,
+      "aboveBandDb": -1.1,
+      "octavesDb": [
+        29.33,
+        26.3,
+        17.9,
+        9.31
+      ],
+      "rmsDb": -9.02
+    },
+    "instrumental1": {
+      "frames": 2247,
+      "bandDb": 19.39,
+      "belowBandDb": 37.59,
+      "aboveBandDb": -3.28,
+      "octavesDb": [
+        27.62,
+        24.04,
+        15.67,
+        8.49
+      ],
+      "rmsDb": -9.35
+    },
+    "instrumental2": {
+      "frames": 2246,
+      "bandDb": 19.39,
+      "belowBandDb": 37.59,
+      "aboveBandDb": -3.28,
+      "octavesDb": [
+        27.62,
+        24.04,
+        15.67,
+        8.48
+      ],
+      "rmsDb": -7.57
+    },
+    "vocals1": {
+      "frames": 1312,
+      "bandDb": 19.15,
+      "belowBandDb": 17.95,
+      "aboveBandDb": -2.56,
+      "octavesDb": [
+        26.29,
+        24.78,
+        16.42,
+        4.49
+      ],
+      "rmsDb": -18.21
+    },
+    "vocals2": {
+      "frames": 2265,
+      "bandDb": -23.65,
+      "belowBandDb": -20.78,
+      "aboveBandDb": -48.45,
+      "octavesDb": [
+        -15.89,
+        -17.6,
+        -34.99,
+        -35.26
+      ],
+      "rmsDb": -10.91
+    },
+    "vocalsN": {
+      "frames": 2408,
+      "bandDb": -69.49,
+      "belowBandDb": -49.96,
+      "aboveBandDb": -74.28,
+      "octavesDb": [
+        -65.38,
+        -66,
+        -68.05,
+        -74.77
+      ],
+      "rmsDb": -63.89
+    },
+    "ghost1": {
+      "frames": 1620,
+      "bandDb": 2.05,
+      "belowBandDb": 9.11,
+      "aboveBandDb": -22.68,
+      "octavesDb": [
+        10.77,
+        5.3,
+        0.68,
+        -13.57
+      ],
+      "rmsDb": -16.39
+    },
+    "ghost2": {
+      "frames": 1618,
+      "bandDb": 2.05,
+      "belowBandDb": 9.12,
+      "aboveBandDb": -22.62,
+      "octavesDb": [
+        10.76,
+        5.31,
+        0.69,
+        -13.53
+      ],
+      "rmsDb": -10.89
+    },
+    "bedAfter": {
+      "frames": 2256,
+      "bandDb": 19.34,
+      "belowBandDb": 37.55,
+      "aboveBandDb": -3.25,
+      "octavesDb": [
+        27.61,
+        24,
+        15.37,
+        8.49
+      ],
+      "rmsDb": -10.32
+    },
+    "damage": {
+      "frames": 2408,
+      "bandDb": -69.49,
+      "belowBandDb": -49.96,
+      "aboveBandDb": -74.28,
+      "octavesDb": [
+        -65.38,
+        -66,
+        -68.05,
+        -74.77
+      ],
+      "rmsDb": -63.89
+    }
+  },
+  "material": {
+    "samples": 1234800,
+    "seconds": 28,
+    "sampleRate": 44100,
+    "bedGain": 1.2181550843498046,
+    "bedLagSamples": -1024,
+    "edgeTrimSamples": 44100
+  },
+  "cost": {
+    "passWallMs": [
+      21687,
+      20730,
+      18586,
+      23953
+    ],
+    "totalWallMs": 149854,
+    "peakRssMb": 5085
+  }
+}

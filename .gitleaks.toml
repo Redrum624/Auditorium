@@ -1,0 +1,13 @@
+# Gitleaks configuration — extends the default ruleset.
+#
+# One documented false positive: the fade-effect golden test names its pin
+# cases with a `key:` property (e.g. `key: 'defaults-mono5'`), which the
+# generic-api-key rule reads as a credential assignment. They are test-case
+# identifiers, not secrets — allowlisted by exact path, nothing broader.
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Golden-test pin-case names ('key: ...') are identifiers, not secrets"
+paths = ['''src/effects/basic/fadeEffect\.golden\.test\.ts''']

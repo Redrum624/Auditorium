@@ -1,0 +1,229 @@
+{
+  "ok": true,
+  "launches": 1,
+  "probesPerLaunch": 2,
+  "session": {
+    "content": "mixed",
+    "clips": 3,
+    "tracks": 3,
+    "rates": {
+      "requested": 44100,
+      "session": 44100,
+      "doc": 48000,
+      "device": 96000,
+      "adopted": false,
+      "mismatch": true
+    }
+  },
+  "processCold": {
+    "ctxCreateMs": {
+      "n": 1,
+      "min": 0,
+      "median": 0,
+      "max": 0
+    },
+    "playCallMs": {
+      "n": 1,
+      "min": 25.6,
+      "median": 25.6,
+      "max": 25.6
+    },
+    "timeToRunningMs": {
+      "n": 1,
+      "min": 0,
+      "median": 0,
+      "max": 0
+    },
+    "timeToClockAdvanceMs": {
+      "n": 1,
+      "min": 11,
+      "median": 11,
+      "max": 11
+    },
+    "timeToPositionAdvanceMs": {
+      "n": 1,
+      "min": 11,
+      "median": 11,
+      "max": 11
+    },
+    "outputLatencyMs": {
+      "n": 1,
+      "min": 42,
+      "median": 42,
+      "max": 42
+    },
+    "baseLatencyMs": {
+      "n": 1,
+      "min": 10,
+      "median": 10,
+      "max": 10
+    },
+    "audibleEstimateMs": {
+      "n": 1,
+      "min": 53,
+      "median": 53,
+      "max": 53
+    },
+    "timedOutCount": 0
+  },
+  "freshCtxWarmProcess": {
+    "ctxCreateMs": {
+      "n": 1,
+      "min": 0.1,
+      "median": 0.1,
+      "max": 0.1
+    },
+    "playCallMs": {
+      "n": 1,
+      "min": 25.2,
+      "median": 25.2,
+      "max": 25.2
+    },
+    "timeToRunningMs": {
+      "n": 1,
+      "min": 0,
+      "median": 0,
+      "max": 0
+    },
+    "timeToClockAdvanceMs": {
+      "n": 1,
+      "min": 10,
+      "median": 10,
+      "max": 10
+    },
+    "timeToPositionAdvanceMs": {
+      "n": 1,
+      "min": 10,
+      "median": 10,
+      "max": 10
+    },
+    "outputLatencyMs": {
+      "n": 1,
+      "min": 42,
+      "median": 42,
+      "max": 42
+    },
+    "baseLatencyMs": {
+      "n": 1,
+      "min": 10,
+      "median": 10,
+      "max": 10
+    },
+    "audibleEstimateMs": {
+      "n": 1,
+      "min": 52,
+      "median": 52,
+      "max": 52
+    },
+    "timedOutCount": 0
+  },
+  "warmReplays": {
+    "ctxCreateMs": null,
+    "playCallMs": {
+      "n": 2,
+      "min": 24.4,
+      "median": 24.7,
+      "max": 24.7
+    },
+    "timeToRunningMs": {
+      "n": 2,
+      "min": 0,
+      "median": 0,
+      "max": 0
+    },
+    "timeToClockAdvanceMs": {
+      "n": 2,
+      "min": 4.7,
+      "median": 4.8,
+      "max": 4.8
+    },
+    "timeToPositionAdvanceMs": {
+      "n": 2,
+      "min": 4.7,
+      "median": 4.8,
+      "max": 4.8
+    },
+    "outputLatencyMs": {
+      "n": 2,
+      "min": 41,
+      "median": 42,
+      "max": 42
+    },
+    "baseLatencyMs": {
+      "n": 2,
+      "min": 10,
+      "median": 10,
+      "max": 10
+    },
+    "audibleEstimateMs": {
+      "n": 2,
+      "min": 45.8,
+      "median": 46.7,
+      "max": 46.7
+    },
+    "timedOutCount": 0
+  },
+  "initialCtxStates": [
+    "running"
+  ],
+  "raw": [
+    [
+      {
+        "ok": true,
+        "reason": null,
+        "cold": {
+          "ctxCreateMs": 0,
+          "initialCtxState": "running",
+          "playCallMs": 25.599999994039536,
+          "timeToRunningMs": 0,
+          "timeToClockAdvanceMs": 11,
+          "timeToPositionAdvanceMs": 11,
+          "baseLatencyMs": 10,
+          "outputLatencyMs": 42,
+          "audibleEstimateMs": 53,
+          "timedOut": []
+        },
+        "warm": {
+          "ctxCreateMs": null,
+          "initialCtxState": null,
+          "playCallMs": 24.400000005960464,
+          "timeToRunningMs": 0,
+          "timeToClockAdvanceMs": 4.799999997019768,
+          "timeToPositionAdvanceMs": 4.799999997019768,
+          "baseLatencyMs": 10,
+          "outputLatencyMs": 41,
+          "audibleEstimateMs": 45.79999999701977,
+          "timedOut": []
+        }
+      },
+      {
+        "ok": true,
+        "reason": null,
+        "cold": {
+          "ctxCreateMs": 0.09999999403953552,
+          "initialCtxState": "running",
+          "playCallMs": 25.19999998807907,
+          "timeToRunningMs": 0,
+          "timeToClockAdvanceMs": 10,
+          "timeToPositionAdvanceMs": 10,
+          "baseLatencyMs": 10,
+          "outputLatencyMs": 42,
+          "audibleEstimateMs": 52,
+          "timedOut": []
+        },
+        "warm": {
+          "ctxCreateMs": null,
+          "initialCtxState": null,
+          "playCallMs": 24.700000002980232,
+          "timeToRunningMs": 0,
+          "timeToClockAdvanceMs": 4.699999988079071,
+          "timeToPositionAdvanceMs": 4.699999988079071,
+          "baseLatencyMs": 10,
+          "outputLatencyMs": 42,
+          "audibleEstimateMs": 46.69999998807907,
+          "timedOut": []
+        }
+      }
+    ]
+  ]
+}
