@@ -8,8 +8,11 @@
  * tool cards, the Remix/Markers/Properties/Spatial panels and a dressed
  * multitrack session. Every one is captured from the BUILT app (dist/) under
  * Playwright's Electron driver, on GENERATED fixtures only, at a pinned
- * 1600x1000 window and a forced 1x device scale — so the whole set
- * regenerates byte-comparably on any machine with:
+ * 1600x1000 window and a forced 1x device scale — so the set regenerates
+ * byte-comparably on the SAME machine and profile state (two shots depend on
+ * the environment: the Align Lyrics card renders its model line from whatever
+ * %APPDATA% model state exists, and the Vocal Chain card prints real
+ * wall-clock timings) with:
  *
  *   npm run build && node scripts/readme-shots.cjs
  *
@@ -19,8 +22,9 @@
  * the layout (the multitrack session).
  *
  * What the rig will NOT do: download a model. The Align Lyrics card is
- * captured PRE-run (its model state line says 378 MB not downloaded, which
- * is the honest first-open state), the Cover Chain card pre-run with its
+ * captured PRE-run (its model line reflects this machine's profile — a
+ * model-present state here; a fresh machine would show the 378 MB
+ * not-downloaded line instead), the Cover Chain card pre-run with its
  * caveats, and the Transcript panel is not captured at all — there is no
  * test hook that injects a transcript, and the real one costs a ~323 MB
  * model. The Vocal Chain IS run for real (pure DSP, no model), so its

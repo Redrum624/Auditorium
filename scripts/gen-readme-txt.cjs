@@ -151,6 +151,19 @@ function main() {
   const outPath = path.join(releaseDir, `Auditorium ${pkg.version} README.txt`);
   fs.writeFileSync(outPath, txt, 'utf8');
   console.log(`Wrote ${path.relative(REPO_ROOT, outPath)} (${txt.length} chars)`);
+
+  // A README.txt just changed under an existing SHA256SUMS.txt, which would
+  // otherwise silently stale it (a standalone run of this script did exactly
+  // that once — the sums file kept hashing the previous README). Refresh it
+  // whenever it exists; in the build chain this is a harmless double-run,
+  // standalone it is the guard.
+  if (fs.existsSync(path.join(releaseDir, 'SHA256SUMS.txt'))) {
+    const { spawnSync } = require('node:child_process');
+    const res = spawnSync(process.execPath, [path.join(__dirname, 'gen-checksums.cjs')], {
+      stdio: 'inherit',
+    });
+    if (res.status !== 0) process.exit(res.status ?? 1);
+  }
 }
 
 if (require.main === module) {

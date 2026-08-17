@@ -113,7 +113,7 @@ what it measured.
 | | |
 |:--:|:--:|
 | ![Vocal Chain after a run](docs/shots/vocal-chain.png) | ![Cover Chain before a run](docs/shots/cover-chain.png) |
-| **Vocal Chain, after a run** — each stage reports the settings it derived, its measured delta, or the measurement that made it decline; the pass closes with a before/after table and lands as one undo entry. | **Cover Chain, before you run it** — the measured caveats stand above the Run button, and the six-stage journey is written out before anything runs. |
+| **Vocal Chain, after a run** — each stage reports the settings it derived, its measured delta, or the measurement that made it decline; the pass closes with a before/after table and lands as one undo entry. | **Cover Chain, before you run it** — the measured caveats are stated before anything runs, and every stage of the six-stage journey is written out on the card. |
 | ![Align Lyrics](docs/shots/align-lyrics.png) | ![Remix panel](docs/shots/remix-panel.png) |
 | **Align Lyrics** — paste the words you know are in the recording; click a word to hear exactly it, and re-record just the one that came out wrong. | **The Remix panel** — every splice of a re-arrangement, inspectable, pinnable, re-rollable and undoable. |
 
@@ -124,7 +124,7 @@ the real document before Apply.
 | | |
 |:--:|:--:|
 | ![Effects rack](docs/shots/effects-rack.png) | ![Parametric EQ dialog](docs/shots/effect-parametric-eq.png) |
-| **The Effects rack** — 25 effects in eight categories, with the pipeline tools one click below them. | **Parametric EQ** — five bands plus high- and low-pass, previewed on the real audio before Apply. |
+| **The Effects rack** — 25 effects in ten categories, with the pipeline tools one click below them. | **Parametric EQ** — five bands plus high- and low-pass, previewed on the real audio before Apply. |
 | ![Reverb dialog](docs/shots/effect-reverb.png) | ![Spatial panel](docs/shots/spatial-panel.png) |
 | **Reverb** — room size, damping, mix and pre-delay; Preview plays the processed document, Apply is one undo entry. | **The Spatial positioner** — azimuth, elevation and distance as honest stereo projection, writing automation keys on release. |
 
