@@ -23,7 +23,7 @@
     "make-test-abab": "node scripts/make-test-abab.cjs",
     "electron": "electron .",
     "gen-icon": "node scripts/gen-icon.cjs",
-    "build:win": "node scripts/clean-release.cjs && npm run build && node scripts/build-installer.cjs && node scripts/gen-readme-txt.cjs"
+    "build:win": "node scripts/clean-release.cjs && npm run build && node scripts/build-installer.cjs && node scripts/gen-readme-txt.cjs && node scripts/gen-checksums.cjs"
   },
   "build": {
     "appId": "com.auditorium.app",
@@ -55,10 +55,19 @@
           "arch": [
             "x64"
           ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
         }
       ],
       "icon": "assets/icon.ico",
       "artifactName": "${productName} Setup ${version}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName} ${version} portable.${ext}"
     },
     "nsis": {
       "oneClick": false,
