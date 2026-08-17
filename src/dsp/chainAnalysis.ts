@@ -683,7 +683,7 @@ export const MAINS_BASE_FREQUENCIES = [50, 60] as const;
  * Decision threshold for "this recording has mains hum", in dB of excess over
  * the local spectral floor at the FUNDAMENTAL.
  *
- * Measured on `test-assets/P1177605.wav` (a clean take with no hum): the
+ * Measured on `test-assets/long-real-take.wav` (a clean take with no hum): the
  * fundamental excess is +0.52 dB at 50 Hz and -0.21 dB at 60 Hz. Injecting a
  * 50 Hz tone at -70 dBFS — quieter than any hum worth removing, and 33 dB below
  * that take's own noise floor — lifts the 50 Hz excess to +25.24 dB while

@@ -14,7 +14,7 @@
   },
   "targets": [
     {
-      "label": "Scarlet Paintings 48000 1.wav",
+      "label": "real-song-48k.wav",
       "bytes": 68352850,
       "runs": [
         {
@@ -65,7 +65,7 @@
       }
     },
     {
-      "label": "P1177605.wav",
+      "label": "long-real-take.wav",
       "bytes": 54589060,
       "runs": [
         {

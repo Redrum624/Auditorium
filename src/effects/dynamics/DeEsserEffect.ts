@@ -103,7 +103,7 @@ function sibilanceEnvelope(
  * in: nobody can judge a 3 dB reduction at 6 kHz in context.
  *
  * WHERE THE DEFAULTS COME FROM. Measured on a real 142 s solo vocal
- * (`test-assets/P1177605.wav`, 48 kHz stereo, program RMS -27.8 dBFS), frames
+ * (`test-assets/long-real-take.wav`, 48 kHz stereo, program RMS -27.8 dBFS), frames
  * classified as sibilant (5-12 kHz band energy above the 200-1500 Hz formant
  * band energy) vs vowel (25 dB below it):
  * - `freqHz` 5500. Sweeping the crossover across 3-11 kHz and comparing the

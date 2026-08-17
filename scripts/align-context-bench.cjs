@@ -69,7 +69,7 @@ function main() {
   const longArg = process.argv.find((a) => a.startsWith('--long='));
   const longWav = longArg
     ? path.resolve(longArg.slice('--long='.length))
-    : path.join(ASSETS, 'P1177605.wav');
+    : path.join(ASSETS, 'long-real-take.wav');
   const shortWav = path.join(ASSETS, 'vocal-30s.wav');
   const speechWav = path.join(ASSETS, 'speech16k.wav');
   if (!fs.existsSync(longWav)) {

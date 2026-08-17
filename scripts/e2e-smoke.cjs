@@ -5268,7 +5268,7 @@ async function main() {
       // lyrics-match verdict is asserted - every structural and every seam
       // assertion below runs either way, because they are about the wiring
       // and the splice, not about the accuracy the spike measured.
-      const realTake = path.join(ROOT, 'test-assets', 'P1177605.wav');
+      const realTake = path.join(ROOT, 'test-assets', 'long-real-take.wav');
       const lyricsSidecar = path.join(ROOT, 'test-assets', 'align-bench-lyrics.txt');
       const haveReal = fs.existsSync(realTake) && fs.existsSync(lyricsSidecar);
       const alignSource = haveReal ? realTake : LONG70;

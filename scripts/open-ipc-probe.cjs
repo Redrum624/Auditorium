@@ -60,8 +60,8 @@ const OUT = path.resolve(ROOT, arg('out', path.join('test-output', 'open-ipc-pro
  * --big1=/--big2= point the probe at any two large local files instead.
  * `long70.wav` is the generated small control. */
 const TARGETS = [
-  { file: arg('big1', 'Scarlet Paintings 48000 1.wav') },
-  { file: arg('big2', 'P1177605.wav') },
+  { file: arg('big1', 'real-song-48k.wav') },
+  { file: arg('big2', 'long-real-take.wav') },
   { file: 'long70.wav', control: true },
 ].map((t) => {
   const abs = path.isAbsolute(t.file) ? t.file : path.join(ROOT, 'test-assets', t.file);

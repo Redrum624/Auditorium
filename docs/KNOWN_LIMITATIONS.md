@@ -2007,8 +2007,8 @@ real.
 
 | File | Size | `await readFile()` | Main thread BLOCKED | One in-renderer copy of the same bytes |
 |---|---|---|---|---|
-| Scarlet Paintings 48000 1.wav | 65.2 MiB | 206.3 ms | **137.5 ms** | 14.8 ms |
-| P1177605.wav | 52.1 MiB | 173.5 ms | **114.2 ms** | 13.6 ms |
+| real-song-48k.wav | 65.2 MiB | 206.3 ms | **137.5 ms** | 14.8 ms |
+| long-real-take.wav | 52.1 MiB | 173.5 ms | **114.2 ms** | 13.6 ms |
 | long70.wav (control) | 5.9 MiB | 20.1 ms | 14.4 ms | 1.8 ms |
 
 The block is measured rather than inferred: a 4 ms interval runs across the read

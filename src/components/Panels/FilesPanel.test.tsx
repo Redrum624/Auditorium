@@ -119,12 +119,12 @@ describe('FilesPanel', () => {
     });
 
     it('shows a row for a file being opened, before any document exists', () => {
-      beginOpen('D:\\audio\\Scarlet Paintings 48000 1.wav', 'Scarlet Paintings 48000 1.wav');
+      beginOpen('D:\\audio\\real-song-48k.wav', 'real-song-48k.wav');
       render(<FilesPanel />);
 
       const rows = screen.getAllByTestId('files-opening');
       expect(rows).toHaveLength(1);
-      expect(rows[0]).toHaveTextContent('Scarlet Paintings 48000 1.wav');
+      expect(rows[0]).toHaveTextContent('real-song-48k.wav');
       expect(rows[0]).toHaveTextContent('Opening…');
       // Not "No files open." — something IS happening.
       expect(screen.queryByText('No files open.')).not.toBeInTheDocument();

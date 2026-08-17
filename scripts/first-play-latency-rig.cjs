@@ -45,7 +45,7 @@
 //                    historical numbers stay comparable.
 //   --content=songs  the REPORTED flow: a session created at 44 100 and then
 //                    given two ~3-minute stereo 48 kHz files, one per track.
-//                    This is the shape the user's P1177605 + Scarlet session
+//                    This is the shape the user's long-real-take + real-song session
 //                    had.
 //   --content=mixed  a GENUINELY rate-mismatched session — the 44.1 kHz tone
 //                    lands first, so the session is no longer empty when the

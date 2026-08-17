@@ -34,7 +34,7 @@
  * ---------------------------------------------------------------------------
  * `onsetEnvelope`'s tempo-detection parameters were measured against 23
  * hand-marked note attacks in an 8 s excerpt (17.4–25.4 s) of a real 142 s solo
- * cover vocal, `test-assets/P1177605.wav`. Peak-picking swept over its
+ * cover vocal, `test-assets/long-real-take.wav`. Peak-picking swept over its
  * threshold, scored at the two tolerances that matter for timing work:
  *
  * | analysis parameters                    | best F1 @±50 ms | precision | recall | median \|error\| |

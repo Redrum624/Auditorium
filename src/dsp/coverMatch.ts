@@ -9,8 +9,8 @@
  * said were worth having.
  *
  * Every constant below traces to a measurement on the reference material
- * (`test-assets/P1177605.wav` as the take, the separated vocal of
- * `Scarlet Paintings` as the reference), reported in
+ * (`test-assets/long-real-take.wav` as the take, the separated vocal of
+ * the reference song as the reference), reported in
  * `.superpowers/sdd/task-F10-analysis-report.md`. Those measurements had a
  * ground truth available that a user will not have: the official instrumental
  * release of the same song is on disk, so `mix - g * instrumental` IS the

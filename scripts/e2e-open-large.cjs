@@ -33,8 +33,8 @@ function fixtureArg(name, defaultFile) {
   const hit = process.argv.find((a) => a.startsWith(`--${name}=`));
   return hit ? path.resolve(hit.slice(name.length + 3)) : path.join(ROOT, 'test-assets', defaultFile);
 }
-const FIRST = fixtureArg('first', 'P1177605.wav');
-const SECOND = fixtureArg('second', 'Scarlet Paintings 48000 1.wav');
+const FIRST = fixtureArg('first', 'long-real-take.wav');
+const SECOND = fixtureArg('second', 'real-song-48k.wav');
 
 // Same pinned geometry as the smoke, for the same reason: the waveform
 // assertion below reads pixels out of a canvas whose size follows the window.

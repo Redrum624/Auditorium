@@ -181,7 +181,7 @@ function main() {
   const longArg = process.argv.find((a) => a.startsWith('--long='));
   const longTake = longArg
     ? path.resolve(longArg.slice('--long='.length))
-    : wav('P1177605.wav');
+    : wav('long-real-take.wav');
   if (fs.existsSync(longTake)) {
     passages.push({
       name: 'sung-partial-coverage',
