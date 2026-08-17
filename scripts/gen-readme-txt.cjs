@@ -96,6 +96,24 @@ function markdownToText(md) {
       continue;
     }
 
+    // Pipe-table rows (the README's screenshot gallery, Task S2). The table
+    // exists FOR its images, so most of it vanishes with them: the `| | |`
+    // header and `|:--:|` alignment rows carry nothing, an image-only row
+    // strips to empty cells, and what survives is the caption cells — each
+    // emitted as its own wrapped line, since a plain-text file has no columns
+    // to keep them side by side in.
+    if (/^\s*\|/.test(withoutImages)) {
+      flushPara();
+      if (!/^\s*\|[\s:|-]*\|?\s*$/.test(withoutImages)) {
+        const cells = withoutImages
+          .split('|')
+          .map((c) => transformInline(c).trim())
+          .filter(Boolean);
+        for (const cell of cells) out.push(...wrapText(cell, WRAP_WIDTH));
+      }
+      continue;
+    }
+
     const heading = /^(#{1,6})\s+(.*)$/.exec(withoutImages);
     if (heading) {
       flushPara();

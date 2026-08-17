@@ -87,6 +87,28 @@ describe('markdownToText', () => {
     // Two blank lines are left alone.
     expect(markdownToText('A.\n\n\nB.')).toBe('A.\n\n\nB.');
   });
+
+  // The screenshot-gallery tables (Task S2): the table exists FOR its images,
+  // so the flattened text keeps only the caption cells, one per line.
+  test('drops table chrome and image cells, keeps caption cells per-line', () => {
+    const md = [
+      '| | |',
+      '|:--:|:--:|',
+      '| ![A](docs/shots/a.png) | ![B](docs/shots/b.png) |',
+      '| **Panel A** — what it does. | **Panel B** — what it shows. |',
+    ].join('\n');
+    expect(markdownToText(md)).toBe(
+      ['Panel A — what it does.', 'Panel B — what it shows.'].join('\n')
+    );
+  });
+
+  test('wraps a long caption cell at 80 columns', () => {
+    const long =
+      '| **Vocal Chain, after a run** — each stage reports the settings it derived, its measured delta, or the measurement that made it decline. |';
+    for (const line of markdownToText(long).split('\n')) {
+      expect(line.length).toBeLessThanOrEqual(80);
+    }
+  });
 });
 
 describe('transformInline', () => {
