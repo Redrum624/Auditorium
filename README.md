@@ -1,5 +1,9 @@
 # Auditorium
 
+[![Downloads](https://img.shields.io/github/downloads/Redrum624/auditorium/total?label=downloads)](https://github.com/Redrum624/auditorium/releases)
+[![Latest release](https://img.shields.io/github/v/release/Redrum624/auditorium)](https://github.com/Redrum624/auditorium/releases/latest)
+[![License](https://img.shields.io/github/license/Redrum624/auditorium)](LICENSE)
+
 ![Auditorium](docs/screenshot.png)
 
 ![Spectral view](docs/screenshot-spectral.png)
@@ -228,6 +232,10 @@ provider runs stem separation at ~1.5x realtime and transcription at ~9x.
   [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) for the full LGPL-3.0 text
   and the relink-from-source note, alongside every other third-party component,
   model, and ported-code attribution.
+
+## Downloads
+
+![Downloads over time](.github/badges/downloads.svg)
 
 ## License
 

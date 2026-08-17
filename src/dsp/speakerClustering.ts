@@ -46,7 +46,7 @@ export const MAX_SPEAKERS = 6;
  * Average-linkage cosine similarity at or above which two clusters are judged
  * to be the SAME person and merged.
  *
- * MEASURED, not chosen — F4 diarization bench, `.superpowers/sdd/task-F4-report.md`.
+ * MEASURED, not chosen — F4 diarization bench (gitignored working note, not published).
  * Real speech, 2 s chunks, CAM++ embeddings, ground truth known by construction
  * (every chunk is cut from a single-speaker recording). The quantity below is
  * the average-linkage cosine between the two clusters of the best 2-way split:
