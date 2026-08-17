@@ -59,8 +59,18 @@ feature is worth, because we measured that too.
 it — no other software required. The installer adds a desktop shortcut and a
 Start Menu entry; a plain-text `README.txt` ships beside it.
 
-The installer is not code-signed yet, so Windows SmartScreen may warn the first
-time — choose **More info → Run anyway**.
+**Prefer not to install anything?** Grab **`Auditorium X.Y.Z portable.exe`**
+instead — a single executable that runs from anywhere (Downloads folder, USB
+stick) with no installation and no admin rights, and shares the same profile —
+downloaded AI models and voice profiles — as the installed app.
+
+Neither download is code-signed yet, so Windows SmartScreen may warn the first
+time — choose **More info → Run anyway**. You can verify any download first
+against **`SHA256SUMS.txt`** (published with every release):
+
+```powershell
+CertUtil -hashfile "Auditorium Setup X.Y.Z.exe" SHA256   # compare with SHA256SUMS.txt
+```
 
 - **Windows 10 or 11** (64-bit)
 - AI features download their models on first use (166 MB stems · ~323 MB
@@ -77,7 +87,8 @@ git clone https://github.com/Redrum624/auditorium.git
 cd auditorium
 npm install
 npm run dev          # Vite dev server + Electron
-npm run build:win    # NSIS installer -> release/Auditorium Setup <version>.exe (+ README.txt)
+npm run build:win    # -> release/: Auditorium Setup <version>.exe + Auditorium <version> portable.exe
+                     #    (+ README.txt and SHA256SUMS.txt covering all three)
 ```
 
 ## A closer look
