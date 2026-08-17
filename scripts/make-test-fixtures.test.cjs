@@ -210,4 +210,29 @@ describe('make-test-long.cjs', () => {
     }
     expect(peak).toBeGreaterThan(0.2 * 32767);
   });
+
+  it('writes a stereo twin whose every frame duplicates the mono sample', () => {
+    // The align+splice smoke step's degraded path opens the twin (the fake-mic
+    // replacement take is stereo and the splice refuses a channel-count
+    // mismatch). What it depends on is that the twin's mono downmix IS the
+    // mono fixture's signal — so the aligner places words identically on both.
+    const mono = generate('make-test-long.cjs', 'long70.wav');
+    const st = generate('make-test-long.cjs', 'long70-stereo.wav');
+    expect(st.audioFormat).toBe(1);
+    expect(st.channels).toBe(2);
+    expect(st.sampleRate).toBe(SAMPLE_RATE);
+    expect(st.bitsPerSample).toBe(16);
+    expect(st.riffSize).toBe(st.buf.length - 8);
+    expect(st.dataSize).toBe(st.buf.length - 44);
+    const monoFrames = mono.dataSize / 2;
+    expect(st.dataSize).toBe(monoFrames * 4);
+    let mismatches = 0;
+    for (let i = 0; i < monoFrames; i++) {
+      const m = mono.buf.readInt16LE(44 + i * 2);
+      if (st.buf.readInt16LE(44 + i * 4) !== m || st.buf.readInt16LE(44 + i * 4 + 2) !== m) {
+        mismatches++;
+      }
+    }
+    expect(mismatches).toBe(0);
+  });
 });

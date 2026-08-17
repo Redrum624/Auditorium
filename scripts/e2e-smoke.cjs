@@ -107,6 +107,11 @@ const SWEEP_NOISE_END = 141120;
 // F4b transport fixture: 70 s, deliberately longer than one IPC audio slice
 // (see scripts/make-test-long.cjs for the arithmetic).
 const LONG70 = path.join(ROOT, 'test-assets', 'long70.wav');
+// LONG70's stereo twin (same samples in both channels, same generator): the
+// align+splice step's degraded path opens THIS one, because the fake-mic
+// replacement take arrives stereo and the splice is designed to refuse a
+// channel-count mismatch — see the step for the full why.
+const LONG70_STEREO = path.join(ROOT, 'test-assets', 'long70-stereo.wav');
 // Optional real-speech fixture the user may drop in. test-assets/ is
 // gitignored and this is NEVER required — the transcript-surface half of the
 // transcription step falls back to whatever the synthetic fixture produced,
@@ -237,6 +242,7 @@ async function main() {
     [ABAB, 'make-test-abab.cjs', 'ABAB structure fixture'],
     [SWEEP, 'make-test-sweep.cjs', 'effect-sweep fixture'],
     [LONG70, 'make-test-long.cjs', '70 s multi-slice transcription fixture'],
+    [LONG70_STEREO, 'make-test-long.cjs', '70 s stereo align/splice fixture'],
     [COVER_REFERENCE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_TAKE, 'make-test-cover.cjs', 'Cover Chain reference/take pair'],
     [COVER_REFERENCE_ROOM, 'make-test-cover.cjs', 'Cover Chain reverberant reference'],
@@ -5270,8 +5276,22 @@ async function main() {
       // and the splice, not about the accuracy the spike measured.
       const realTake = path.join(ROOT, 'test-assets', 'long-real-take.wav');
       const lyricsSidecar = path.join(ROOT, 'test-assets', 'align-bench-lyrics.txt');
-      const haveReal = fs.existsSync(realTake) && fs.existsSync(lyricsSidecar);
-      const alignSource = haveReal ? realTake : LONG70;
+      // SMOKE_FORCE_DEGRADED=1 pretends the gitignored real material is
+      // absent: the clean-clone gate runs the degraded path, so it must be
+      // testable on machines that HAVE the assets.
+      const haveReal =
+        !process.env.SMOKE_FORCE_DEGRADED &&
+        fs.existsSync(realTake) &&
+        fs.existsSync(lyricsSidecar);
+      // The degraded document must be STEREO like the real take is, because
+      // `recordReplacementSeconds` below delivers a stereo take regardless of
+      // what it asks for (Chromium's fake device treats `channelCount` as
+      // ideal, not exact — RecordingEngine's channel count follows the
+      // DEVICE), and `replaceAlignedWord` is DESIGNED to refuse a
+      // channel-count mismatch. LONG70's stereo twin keeps the splice on the
+      // same 2-channel path the with-assets run exercises; its mono downmix is
+      // the identical signal, so the aligner places the words the same way.
+      const alignSource = haveReal ? realTake : LONG70_STEREO;
       const alignText = haveReal
         ? fs
             .readFileSync(lyricsSidecar, 'utf8')
@@ -5354,8 +5374,21 @@ async function main() {
 
       // A word in the middle, so both seams have a real neighbour on the far
       // side of them rather than the start or the end of the file.
+      //
+      // On the synthetic fixture the splice runs with the request's own
+      // `matchPitch` option OFF (the dialog's default is on, and the real
+      // material leaves it that way): median-F0 arithmetic between the
+      // fixture's sweep tone and the fake device's beep demands a stretch far
+      // outside the 0.25x-4x window the time-fit is DESIGNED to refuse —
+      // measured at every interior word, at 1.5 s and 3 s takes alike. What
+      // this path asserts is the wiring, the commit and the seams, and those
+      // run identically either way.
+      const spliceOpts = haveReal ? null : { matchPitch: false };
       const targetIndex = Math.floor(aligned.words.length / 2);
-      const spliced = await page.evaluate((i) => window.__test.replaceAlignedWord(i), targetIndex);
+      const spliced = await page.evaluate(
+        ([i, o]) => window.__test.replaceAlignedWord(i, o),
+        [targetIndex, spliceOpts]
+      );
       console.log(
         `  replaceAlignedWord(${targetIndex}): status=${spliced.status} word="${spliced.wordText}" ` +
           `region ${spliced.regionStart}..${spliced.regionEnd}, seams ${spliced.headSeamSamples}/${spliced.tailSeamSamples}, ` +
@@ -5437,7 +5470,10 @@ async function main() {
       // The alignment survives its own edit: the splice moved no position, so a
       // SECOND word replaces without re-running a 378 MB model in between.
       await page.evaluate(() => window.__test.recordReplacementSeconds(1.2));
-      const second = await page.evaluate((i) => window.__test.replaceAlignedWord(i), targetIndex + 1);
+      const second = await page.evaluate(
+        ([i, o]) => window.__test.replaceAlignedWord(i, o),
+        [targetIndex + 1, spliceOpts]
+      );
       assert(
         second.ok === true,
         `a second word replaces without re-aligning - the spans still describe the audio (status ${second.status}${second.message ? `: ${second.message}` : ''})`

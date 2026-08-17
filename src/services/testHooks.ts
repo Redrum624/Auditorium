@@ -571,8 +571,13 @@ export interface TestApi {
    * be testing a different flow. */
   recordReplacementSeconds(seconds: number): Promise<{ length: number; sampleRate: number; rms: number }>;
   /** Splices the buffer `recordReplacementSeconds` captured over the aligned
-   * span of `wordIndex`. */
-  replaceAlignedWord(wordIndex: number): Promise<ReplaceWordSummary>;
+   * span of `wordIndex`. `opts.matchPitch` is the splice request's own option
+   * (`replaceWord` forwards it, wordSplice defaults it ON like the dialog):
+   * the smoke's degraded path turns it off, because median-F0 arithmetic
+   * between a synthetic fixture and the fake device's beep demands stretches
+   * the time-fit is designed to refuse. Left unset, the call is byte-for-byte
+   * what it always was. */
+  replaceAlignedWord(wordIndex: number, opts?: { matchPitch?: boolean } | null): Promise<ReplaceWordSummary>;
   /** Re-clusters the active document's stored transcript. Returns the new
    * speaker assignment, or null when there is no transcript. */
   setTranscriptSpeakers(count: number | null): {
@@ -2038,7 +2043,7 @@ export function installTestHooks(): void {
       };
     },
 
-    replaceAlignedWord: async (wordIndex) => {
+    replaceAlignedWord: async (wordIndex, opts) => {
       const empty: ReplaceWordSummary = {
         ok: false,
         status: 'no-document',
@@ -2065,6 +2070,7 @@ export function installTestHooks(): void {
         wordIndex,
         replacement: pendingReplacement.channels,
         replacementSampleRate: pendingReplacement.sampleRate,
+        matchPitch: opts?.matchPitch,
       });
       if (!result.ok) return { ...empty, status: result.status, message: result.message };
       pendingReplacement = null;
