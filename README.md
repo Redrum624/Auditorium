@@ -1,8 +1,8 @@
 # Auditorium
 
-[![Downloads](https://img.shields.io/github/downloads/Redrum624/Auditorium/total?label=downloads)](https://github.com/Redrum624/Auditorium/releases)
-[![Latest release](https://img.shields.io/github/v/release/Redrum624/Auditorium)](https://github.com/Redrum624/Auditorium/releases/latest)
-[![License](https://img.shields.io/github/license/Redrum624/Auditorium)](LICENSE)
+[![Downloads](.github/badges/downloads-badge.svg)](https://github.com/Redrum624/Auditorium/releases)
+[![Latest release](.github/badges/latest-badge.svg)](https://github.com/Redrum624/Auditorium/releases/latest)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ![Tests](https://img.shields.io/badge/Tests-6000+_passing-brightgreen)
 ![Local](https://img.shields.io/badge/AI-100%25_local-2e7d5b)
