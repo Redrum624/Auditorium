@@ -1,8 +1,8 @@
 # Auditorium
 
-[![Downloads](https://img.shields.io/github/downloads/Redrum624/auditorium/total?label=downloads)](https://github.com/Redrum624/auditorium/releases)
-[![Latest release](https://img.shields.io/github/v/release/Redrum624/auditorium)](https://github.com/Redrum624/auditorium/releases/latest)
-[![License](https://img.shields.io/github/license/Redrum624/auditorium)](LICENSE)
+[![Downloads](https://img.shields.io/github/downloads/Redrum624/Auditorium/total?label=downloads)](https://github.com/Redrum624/Auditorium/releases)
+[![Latest release](https://img.shields.io/github/v/release/Redrum624/Auditorium)](https://github.com/Redrum624/Auditorium/releases/latest)
+[![License](https://img.shields.io/github/license/Redrum624/Auditorium)](LICENSE)
 
 ![Tests](https://img.shields.io/badge/Tests-6000+_passing-brightgreen)
 ![Local](https://img.shields.io/badge/AI-100%25_local-2e7d5b)
@@ -55,7 +55,7 @@ feature is worth, because we measured that too.
 
 **Just want to use Auditorium?** Download the latest
 **`Auditorium Setup X.Y.Z.exe`** from the
-[**Releases**](https://github.com/Redrum624/auditorium/releases) page and run
+[**Releases**](https://github.com/Redrum624/Auditorium/releases) page and run
 it — no other software required. The installer adds a desktop shortcut and a
 Start Menu entry; a plain-text `README.txt` ships beside it.
 
@@ -83,7 +83,7 @@ Requires [Node.js](https://nodejs.org/) **20.19+ (or 22.12+)** and Git, on
 Windows x64:
 
 ```bash
-git clone https://github.com/Redrum624/auditorium.git
+git clone https://github.com/Redrum624/Auditorium.git
 cd auditorium
 npm install
 npm run dev          # Vite dev server + Electron
