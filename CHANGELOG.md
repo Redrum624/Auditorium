@@ -5,6 +5,20 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.35.1] - 2026-08-18
+
+### Fixed
+
+- **Blank desktop and start-menu icons after install.** Cause: electron-builder's
+  NSIS template passes `package.json`'s `description` verbatim as the shortcut
+  comment, and ours had grown to 574 characters — past the ~260-character
+  shell-link comment limit, which corrupts the `.lnk`'s icon-location field
+  (the v1.35.0 shortcuts carried a slice of the description where the icon path
+  belongs). Fix: the description is now a 183-character ASCII one-liner, with a
+  regression test pinning the limit; the full pitch lives in the README, where
+  it always belonged. Affects: `package.json`,
+  `electron/packageMetadata.test.cjs` (new).
+
 ## [1.35.0] - 2026-08-17
 
 ### Added
