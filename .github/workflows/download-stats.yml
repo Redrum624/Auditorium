@@ -3,6 +3,8 @@ name: Download stats
 on:
   schedule:
     - cron: "17 4 * * *"   # daily, off the top of the hour
+  release:
+    types: [published, deleted]   # refresh the Latest badge the moment releases change
   workflow_dispatch: {}
 
 permissions:
