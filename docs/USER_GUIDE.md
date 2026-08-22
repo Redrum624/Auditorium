@@ -1343,6 +1343,14 @@ Switch between views from the toolbar pill's view segment or **View** menu:
   note appears in the view (details go to the developer console); the next
   successful recompute — e.g. after zooming — clears it.
 
+Leaving **Multitrack** for Waveform or Spectral with a clip selected opens
+that clip's source document with the clip's span selected, the cursor at its
+start and the view fitted to it. With several clips selected the primary (the
+one the **Properties** tab shows) is used; with no clip selected, or a clip
+whose source file has been closed, the editor shows the document you left as
+before. The carry is one-way — the editor selection does not flow back into
+the session.
+
 Both views share the same selection, cursor, playhead, marker and beat-grid
 overlays, and the same zoom/scroll gestures.
 
@@ -1427,7 +1435,8 @@ same limits as the buttons.
   neighbour instead (see **Clip fades and crossfades** below). Click a clip
   to select it — its facts (source document, start/offset/length, and an
   editable gain in dB) appear in the **Properties** tab, along with its
-  fade lengths and curves.
+  fade lengths and curves; switch to Waveform or Spectral to open that clip's
+  source span in the editor (see **Views**).
 - **Playback**: the multitrack view has its own transport, cursor, and
   playhead, driven by the same toolbar-pill transport buttons. The session
   cursor wears the same **red triangle handle** as the editor views, at the

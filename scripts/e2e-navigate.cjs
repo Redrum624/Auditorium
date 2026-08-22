@@ -807,6 +807,11 @@ let panelSelectsSwept = 0;
  * clip view, so this is the number that arm has to beat for its sweep to be
  * about anything. */
 let propertiesDocumentSelects = -1;
+/** Lot E: the name of the document the P0-2 external drop landed. Its clip
+ * stays the selected primary through the rest of the walk, so the toolbar's
+ * `waveform view` click out of the multitrack (the "Every editor view" step)
+ * must activate THIS document — the clip carry made observable. */
+let droppedDocName = null;
 /**
  * MT1 — every `<select>` currently on screen must have an OPAQUE background.
  *
@@ -1278,6 +1283,9 @@ async function main() {
         after === before + 1,
         `the dropped file decoded and landed as exactly one new document (${before} → ${after})`
       );
+      // `addDocument` activates the landed document, so the active name IS the
+      // dropped document's — remembered for the clip-carry pin later on.
+      droppedDocName = await page.evaluate(() => window.__test.getStateSummary().activeName);
       const clips = await page.evaluate(
         () => document.querySelectorAll('[data-testid="clip"]').length
       );
@@ -2520,6 +2528,15 @@ async function main() {
       // Transport, in the waveform view, driven from the toolbar's real buttons.
       await page.click('[data-testid="view-toggle"] button[aria-label="waveform view"]');
       await page.waitForSelector('[data-testid="waveform-view"]', { timeout: 10000 });
+      // Lot E: the P0-2 clip is still the selected primary (the Properties
+      // walk left it selected), so this click out of the multitrack carries
+      // it — the dropped document is the one the editor now shows.
+      const carried = await page.evaluate(() => window.__test.getStateSummary().activeName);
+      assert(
+        carried === droppedDocName,
+        `leaving Multitrack with a clip selected activated its source document (${carried})`
+      );
+      record('View: clip carry', "Waveform opened the selected clip's source document", 'PASS');
       const timeBefore = await page.evaluate(
         () => document.querySelector('[data-testid="transport-time"]').textContent.trim()
       );
