@@ -3,8 +3,11 @@ import App from './App';
 import DialogShell from './components/Dialogs/DialogShell';
 import { DEFAULT_PANEL, MODULE_COLUMN_WIDTH } from './components/Layout/ModuleStrip';
 import { createDocument } from './audio/AudioDocument';
+import { playbackEngine } from './audio/PlaybackEngine';
+import { installTranscribeBackend, seedTranscript, voiceVector } from './__mocks__/transcribeBackend';
+import { _resetTranscriptsForTest } from './services/transcribeService';
 import { defaultParamsFor, getEffect, getVisibleEffects } from './effects/EffectRegistry';
-import { _resetHostedToolRunning, hasOpenDialog } from './services/dialogBus';
+import { _resetHostedToolRunning, focusTranscriptPanel, hasOpenDialog } from './services/dialogBus';
 import { runEffectOnSelection } from './services/effectRunner';
 import { runCommand } from './services/menuActions';
 import { getHistory } from './services/undoHistory';
@@ -571,5 +574,164 @@ describe('the mouse stays live during Apply: a document that moved is never writ
     });
     expect(showMessageBox).not.toHaveBeenCalled();
     expect(hasOpenDialog()).toBe(false);
+  });
+});
+
+/**
+ * Final round (finding 1): `showPanel`'s hand-off arm force-clears the module
+ * lock. It was written for a hosted TOOL handing over its own finished result
+ * (`RemixDialog` / `TranscribeDialog` calling the bus from inside the handler
+ * that just completed), and that caller always owned the lock it cleared. The
+ * effect card publishes the SAME lock through the same seam while its Apply
+ * runs, and it is never that caller — a hosted effect and a hosted tool never
+ * coexist (W1). What reaches the arm mid-Apply is a mouse-driven command
+ * instead, whose reveal path calls the bus; clearing the lock for it un-greys
+ * the strip, resumes every global shortcut and lets `openTool` / `openEffect`
+ * unmount the card while its worker still runs.
+ */
+describe('a hand-off command mid-Apply never releases the effect card (final round)', () => {
+  /** A real transcript for `docId`, through the real service — that is what
+   * makes `Pipeline > Transcribe` take its REVEAL arm (`menuActions.ts`,
+   * `getTranscript(id) !== null` -> `focusTranscriptPanel()`) instead of
+   * opening the tool. The backend replaces `window.electronAPI` wholesale, so
+   * the harness's own surface is put back before the app renders. */
+  async function seedTranscriptFor(docId: string) {
+    const harnessApi = (window as unknown as { electronAPI: unknown }).electronAPI;
+    const backend = installTranscribeBackend();
+    await seedTranscript(backend, docId, [
+      { index: 0, startSample: 0, endSample: 8000, text: 'hello', vector: voiceVector(8, 0, 1) },
+    ]);
+    (window as unknown as { electronAPI: unknown }).electronAPI = harnessApi;
+  }
+
+  afterEach(() => {
+    _resetTranscriptsForTest();
+  });
+
+  it('Pipeline > Transcribe, revealing an existing transcript, is refused while an effect applies', async () => {
+    const doc = addDoc();
+    await seedTranscriptFor(doc.id);
+    render(<App />);
+    await openTool('effect.amplify');
+
+    let finish!: (v: 'committed') => void;
+    mockRun.mockReturnValueOnce(new Promise<'committed'>((resolve) => (finish = resolve)));
+    await act(async () => {
+      fireEvent.click(within(host()).getByRole('button', { name: 'Apply' }));
+    });
+    expect(hasOpenDialog()).toBe(true);
+
+    // The command's own predicate is satisfied (a document with audio), so
+    // `runCommand` runs it and it takes the reveal arm.
+    await openTool('edit.transcribe');
+
+    expect(showMessageBox).toHaveBeenCalledTimes(1);
+    expect(showMessageBox.mock.calls[0][0].message).toContain(getEffect('amplify')!.name);
+    // Nothing was released: the keys, the strip, the ✕ and the card itself.
+    expect(hasOpenDialog()).toBe(true);
+    for (const button of within(strip()).getAllByRole('button')) {
+      expect(button).toBeDisabled();
+      expect(button.title).toBe(MODULE_SWITCH_LOCKED_EFFECT);
+    }
+    expect(host()).toHaveAttribute('data-effect-id', 'amplify');
+    expect(within(host()).getByTestId('hosted-tool-close')).toBeDisabled();
+    // And the doors that were re-opened by the release stay shut.
+    await openTool('effect.reverb');
+    expect(showMessageBox).toHaveBeenCalledTimes(2);
+    expect(host()).toHaveAttribute('data-effect-id', 'amplify');
+    await openTool('tempo.match');
+    expect(showMessageBox).toHaveBeenCalledTimes(3);
+    expect(screen.queryByTestId('tool-host')).toBeNull();
+    expect(host()).toHaveAttribute('data-effect-id', 'amplify');
+
+    await act(async () => {
+      finish('committed');
+    });
+    expect(screen.queryByTestId('effect-host')).toBeNull();
+    expect(hasOpenDialog()).toBe(false);
+  });
+
+  it('the hand-off itself is untouched: a hosted TOOL still hands over while it holds the lock', async () => {
+    addDoc();
+    render(<App />);
+    await openTool('tempo.match');
+    fireEvent.click(screen.getByRole('button', { name: 'start pass' }));
+    expect(hasOpenDialog()).toBe(true);
+
+    // What TranscribeDialog does from inside its own completion handler.
+    await act(async () => {
+      focusTranscriptPanel();
+    });
+
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('tool-host')).toBeNull();
+    expect(hasOpenDialog()).toBe(false);
+    for (const button of within(strip()).getAllByRole('button')) expect(button).not.toBeDisabled();
+  });
+});
+
+/**
+ * Final round (finding 2): the card is not modal, so a Preview can be taken
+ * off the shared engine by a plain mouse click. The transport's own load
+ * effect answers a document switch by loading the new document, which stops
+ * and replaces the preview — after which the card must stop offering 'Stop
+ * Preview', or the button the user presses stops the transport they just
+ * started instead.
+ */
+describe('a Preview the mouse took away (final round)', () => {
+  function addSaved(name: string) {
+    const doc = createDocument({
+      name,
+      sampleRate: 44100,
+      channels: [new Float32Array(44100)],
+      filePath: `C:/takes/${name}`,
+      neverSaved: false,
+    });
+    act(() => {
+      useAppStore.getState().addDocument(doc);
+    });
+    return doc;
+  }
+
+  function previewButton(): HTMLButtonElement {
+    const stop = within(host()).queryByRole('button', { name: 'Stop Preview' });
+    return (stop ?? within(host()).getByRole('button', { name: 'Preview' })) as HTMLButtonElement;
+  }
+
+  it('a Files-panel switch ends the preview; the button says Preview and starts a new one', async () => {
+    const a = addSaved('take.wav');
+    const b = addSaved('other.wav');
+    act(() => {
+      useAppStore.getState().setActiveDocument(a.id);
+    });
+    render(<App />);
+    await openTool('effect.amplify');
+    fireEvent.click(stripButton('Files'));
+
+    act(() => {
+      fireEvent.click(within(host()).getByRole('button', { name: 'Preview' }));
+    });
+    expect(previewButton().textContent).toBe('Stop Preview');
+    // The throwaway preview document, not the take.
+    expect(playbackEngine.loadedDocumentId).not.toBe(a.id);
+
+    act(() => {
+      fireEvent.click(
+        within(screen.getByTestId('files-list')).getByText('other.wav').closest('button')!
+      );
+    });
+    expect(useAppStore.getState().activeDocumentId).toBe(b.id);
+
+    // The transport owns the engine now, and the card says so.
+    expect(playbackEngine.loadedDocumentId).toBe(b.id);
+    expect(previewButton().textContent).toBe('Preview');
+
+    // Pressing it starts a preview of the document the user moved to — the
+    // stale label would have stopped that document's playback instead.
+    act(() => {
+      fireEvent.click(previewButton());
+    });
+    expect(previewButton().textContent).toBe('Stop Preview');
+    expect(playbackEngine.loadedDocumentId).not.toBe(b.id);
   });
 });

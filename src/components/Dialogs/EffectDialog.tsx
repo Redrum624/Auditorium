@@ -33,7 +33,9 @@ const STALE_TARGET_HINT =
  * button that runs the effect through the DSP worker (with a progress bar), and a
  * best-effort Preview that auditions the effect on a throwaway document.
  * Apply commits only to the document as the user left it when they clicked
- * (fix round 2): one that moved under the worker is never written.
+ * (fix round 2): one that moved under the worker is never written. A Preview
+ * is given up the moment the document moves under it (final round): the
+ * transport owns the engine again, and the card must stop saying otherwise.
  */
 export default function EffectDialog({
   effectId,
@@ -64,6 +66,14 @@ export default function EffectDialog({
   const activeSampleRate = useAppStore(
     (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.sampleRate ?? null
   );
+  // Final round (finding 2): the third leg of the transport's own engine-load
+  // key (`Toolbar.tsx`, `[doc?.id, doc?.channels, doc?.sampleRate]`) — the
+  // `channels` REFERENCE, which changes on an audio edit and on nothing else.
+  // Subscribed so the preview-ownership effect below sees exactly the events
+  // that hand the shared engine to somebody else.
+  const activeDocChannels = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.channels ?? null
+  );
   const [params, setParams] = useState<Record<string, EffectParamValue>>(() =>
     def ? initialParams(def.params) : {}
   );
@@ -77,6 +87,10 @@ export default function EffectDialog({
   // the CURRENT value at cleanup time, not the value captured when the effect
   // was installed (mount, when previewing was still false).
   const previewingRef = useRef(false);
+  // The id of the throwaway document Preview loaded. `previewing` claims
+  // OWNERSHIP of the shared engine, and this is how that claim is checked:
+  // the engine still holds our preview only while it reports this id.
+  const previewDocIdRef = useRef<string | null>(null);
 
   // F11: Escape/backdrop/Cancel all unmount this dialog without going through
   // the explicit "Stop Preview" button. If a preview was left running, restore
@@ -95,6 +109,39 @@ export default function EffectDialog({
       if (doc) engine.load(doc);
     };
   }, [engine]);
+
+  // Final round (finding 2): hosted, the card is not modal, so while a preview
+  // plays the user can still switch document with the Files panel, ripple the
+  // audio with the edit pill, or close the file. Any of those hands the SHARED
+  // engine to the new document — the transport's own load effect
+  // (`Toolbar.tsx`, keyed on `[doc?.id, doc?.channels, doc?.sampleRate]`)
+  // answers them by calling `playbackEngine.load(doc)`, which stops and
+  // replaces the preview. Nothing told the card, so `previewing` stayed true:
+  // the button went on reading 'Stop Preview' with no preview running, and
+  // pressing it — or Apply, which stops a preview first — fired an
+  // `engine.stop()` that killed the playback the user had just started on the
+  // document they moved to. Under the modal none of those clicks was
+  // reachable; the card's lock holds the strip and the keys, never the mouse.
+  //
+  // Keyed exactly like the transport's load so the two see the same events.
+  // The engine is only touched when it still holds OUR preview document —
+  // unwrapped (modal, or a test with no transport above) nobody else answers,
+  // so the card restores the real document itself, exactly as `stopPreview`
+  // does; hosted, the transport got there first and a second stop would be
+  // the very playback kill this fixes.
+  useEffect(() => {
+    if (!previewingRef.current) return;
+    if (engine.loadedDocumentId === previewDocIdRef.current) {
+      engine.stop();
+      const doc = activeDoc();
+      if (doc) engine.load(doc);
+    }
+    previewDocIdRef.current = null;
+    previewingRef.current = false;
+    setPreviewing(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the key IS the
+    // subject: the transport's own load key, not this effect's closure.
+  }, [activeDocumentId, activeDocChannels, activeSampleRate]);
 
   // Noise Reduction needs a captured noise print, delivered to the worker via the
   // `extra` side channel; without one, Apply is disabled and a hint is shown.
@@ -182,6 +229,7 @@ export default function EffectDialog({
     engine.load(temp);
     engine.play(0);
     previewingRef.current = true;
+    previewDocIdRef.current = temp.id;
     setPreviewing(true);
   };
 
@@ -190,6 +238,7 @@ export default function EffectDialog({
     const doc = activeDoc();
     if (doc) engine.load(doc);
     previewingRef.current = false;
+    previewDocIdRef.current = null;
     setPreviewing(false);
   };
 

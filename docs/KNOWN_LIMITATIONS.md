@@ -2057,11 +2057,26 @@ end and locking the strip for it would be worse than the key landing on the
 preview. **Stop Preview**, the **✕**, **Cancel** and **Apply** all restore the
 real document to the engine, exactly as the modal's Escape did.
 
+**A Preview the mouse takes away.** Because the card is not modal, a preview
+can also be ended by something other than the card: switch document in the
+Files panel, ripple the audio with the edit pill, or convert the sample rate,
+and the transport loads that document into the shared engine, which stops and
+replaces the preview. The card watches the same change and gives the preview
+up with it — the button goes back to reading **Preview**, and pressing it
+starts a fresh preview of the document you moved to instead of stopping the
+playback you just started there.
+
 **Mouse edits during Apply.** The same non-modal design holds while an effect
 is being **applied**: the module strip, the card's ✕ and Cancel are held and
 the global keys are suspended for the duration, but the mouse is never
 suspended — the edit pill, the Edit menu, File › Close and the Files panel
-stay live, exactly as they do during a running pipeline pass. The runner
+stay live, exactly as they do during a running pipeline pass — with one
+exception, added in the final round: a menu command that would UNMOUNT the
+card mid-Apply is refused rather than obeyed, with the same "A pass is
+running" message a pipeline pass gives (it names the effect). That covers
+`Pipeline › Transcribe` on a take you have already transcribed, whose reveal
+path used to clear the module lock on its way to the Analysis panel. The
+runner
 resolves the target region when Apply starts and commits the processed audio
 to that same span when the worker returns (`src/services/effectRunner.ts`,
 `runEffectOnSelection`), so the card hands it a `shouldCancel` (T6-3's seam,

@@ -345,7 +345,10 @@ module column, between the module strip and the module card**, the same
 348 px wide as both; the module card beneath it switches to Effects so the
 other effects stay one click away. Adjust, **Preview**, **Apply**; close it
 with the **✕** in its header or **Cancel**. Nothing is dimmed: the waveform,
-selection, transport and keys stay live while the card is open. While an
+selection, transport and keys stay live while the card is open — and if you
+switch, edit or close the document while a **Preview** plays, the transport
+takes the engine back and the card gives the preview up with it, so the button
+reads **Preview** again rather than stopping what you just started. While an
 effect is being **applied**, the module strip greys out and the ✕ and Cancel
 refuse until it finishes — the same rule as a running pipeline pass. The mouse
 stays live, so you can still edit, switch or close the document while it runs;

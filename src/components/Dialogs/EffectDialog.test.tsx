@@ -38,7 +38,14 @@ function seedActiveDoc() {
 // FakeEngine) exposing just the surface EffectDialog touches, so preview
 // tests never need a real Web Audio graph in jsdom.
 class FakePlaybackEngine {
-  load = jest.fn();
+  /** Final round: the real engine reports which document it holds
+   * (`PlaybackEngine.loadedDocumentId`), and the dialog now reads it to know
+   * whether its preview is still the resident one. Mirrored here so the fake
+   * answers the same question the real one does. */
+  loadedDocumentId: string | null = null;
+  load = jest.fn((doc: { id: string }) => {
+    this.loadedDocumentId = doc.id;
+  });
   play = jest.fn();
   stop = jest.fn();
 }
@@ -490,5 +497,159 @@ describe('G5 glass header', () => {
     seedActiveDoc();
     render(<EffectDialog effectId="amplify" onClose={() => {}} />);
     expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
+  });
+});
+
+/**
+ * Final round (finding 2): hosted, the card is not modal, so a preview can be
+ * taken off the shared engine by a plain mouse click — a Files-panel row, a
+ * Delete on the edit pill, a File › Close. The transport answers those by
+ * loading the new document (`Toolbar.tsx`, keyed on
+ * `[doc?.id, doc?.channels, doc?.sampleRate]`), which stops and replaces the
+ * preview; nothing told the card, so its button went on offering 'Stop
+ * Preview' with nothing previewing, and pressing it — or Apply, which stops a
+ * preview first — fired an `engine.stop()` on the transport the user had just
+ * started. The dialog now watches the same key.
+ */
+describe('a document that moves under a running Preview (final round)', () => {
+  function seedSecondDoc(name: string) {
+    const doc = createDocument({
+      name,
+      sampleRate: 44100,
+      channels: [new Float32Array(8192)],
+    });
+    act(() => {
+      useAppStore.getState().addDocument(doc);
+    });
+    return doc;
+  }
+
+  function previewButton(): HTMLButtonElement {
+    const stop = screen.queryByRole('button', { name: 'Stop Preview' });
+    return (stop ?? screen.getByRole('button', { name: 'Preview' })) as HTMLButtonElement;
+  }
+
+  it('a document switch ends the preview: the button says Preview again and the engine holds the real document', () => {
+    const a = seedActiveDoc();
+    const b = seedSecondDoc('other.wav');
+    act(() => {
+      useAppStore.getState().setActiveDocument(a.id);
+    });
+    const fake = new FakePlaybackEngine();
+    render(<Hosted engine={asEngine(fake)} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    expect(previewButton().textContent).toBe('Stop Preview');
+    fake.stop.mockClear();
+    fake.load.mockClear();
+
+    act(() => {
+      useAppStore.getState().setActiveDocument(b.id);
+    });
+
+    // Unwrapped, nobody else answers the switch, so the card hands the engine
+    // back itself — exactly `stopPreview`'s logic — and stops claiming it.
+    expect(fake.stop).toHaveBeenCalledTimes(1);
+    expect(fake.load).toHaveBeenCalledWith(expect.objectContaining({ id: b.id }));
+    expect(previewButton().textContent).toBe('Preview');
+  });
+
+  it('an audio edit under the preview ends it too — the transport\u2019s own key, not just the id', () => {
+    const doc = seedActiveDoc();
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 4096 });
+    });
+    const fake = new FakePlaybackEngine();
+    render(<Hosted engine={asEngine(fake)} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    expect(previewButton().textContent).toBe('Stop Preview');
+    fake.stop.mockClear();
+    fake.load.mockClear();
+
+    // The body of `edit.delete` — the edit pill's Delete and the Edit menu row.
+    act(() => {
+      deleteSelection();
+    });
+
+    expect(previewButton().textContent).toBe('Preview');
+    expect(fake.stop).toHaveBeenCalledTimes(1);
+    expect(fake.load).toHaveBeenCalledWith(expect.objectContaining({ id: doc.id }));
+  });
+
+  it('the released preview leaves no stray stop behind it: a later Apply never touches the engine', async () => {
+    const a = seedActiveDoc();
+    const b = seedSecondDoc('other.wav');
+    act(() => {
+      useAppStore.getState().setActiveDocument(a.id);
+    });
+    const fake = new FakePlaybackEngine();
+    render(<Hosted engine={asEngine(fake)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+
+    act(() => {
+      useAppStore.getState().setActiveDocument(b.id);
+    });
+    fake.stop.mockClear();
+    fake.load.mockClear();
+    mockRun.mockResolvedValueOnce('committed');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+
+    // `apply` stops a preview before running; with none claimed there is
+    // nothing to stop, and the transport keeps whatever it was playing.
+    expect(fake.stop).not.toHaveBeenCalled();
+    expect(fake.load).not.toHaveBeenCalled();
+    expect(mockRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('when the transport already re-loaded the engine, the card releases the preview without touching it', () => {
+    const a = seedActiveDoc();
+    const b = seedSecondDoc('other.wav');
+    act(() => {
+      useAppStore.getState().setActiveDocument(a.id);
+    });
+    const fake = new FakePlaybackEngine();
+    render(<Hosted engine={asEngine(fake)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+
+    act(() => {
+      // What App has above the card: the transport's load effect, which runs
+      // first (it is the earlier sibling) and takes the engine for `b`.
+      asEngine(fake).load(b);
+      fake.stop.mockClear();
+      fake.load.mockClear();
+      useAppStore.getState().setActiveDocument(b.id);
+    });
+
+    expect(fake.stop).not.toHaveBeenCalled();
+    expect(fake.load).not.toHaveBeenCalled();
+    expect(fake.loadedDocumentId).toBe(b.id);
+    expect(previewButton().textContent).toBe('Preview');
+  });
+
+  it('unmounting after the preview was released touches nothing', () => {
+    const a = seedActiveDoc();
+    const b = seedSecondDoc('other.wav');
+    act(() => {
+      useAppStore.getState().setActiveDocument(a.id);
+    });
+    const fake = new FakePlaybackEngine();
+    const { unmount } = render(<Hosted engine={asEngine(fake)} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+
+    act(() => {
+      useAppStore.getState().setActiveDocument(b.id);
+    });
+    fake.stop.mockClear();
+    fake.load.mockClear();
+
+    unmount();
+
+    // The unmount restore is keyed on the same claim; released means released.
+    expect(fake.stop).not.toHaveBeenCalled();
+    expect(fake.load).not.toHaveBeenCalled();
   });
 });

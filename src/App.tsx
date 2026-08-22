@@ -302,6 +302,10 @@ export default function App() {
    * `spatial.position` COMMAND, i.e. the user picking a menu row, which mid-run
    * would unmount a running tool and discard the pass exactly as switching
    * module would. So that one is guarded, and the two hand-offs are not.
+   *
+   * Item 6 adds a third case, ruled by WHO HOLDS THE LOCK rather than by who
+   * called: while the effect card's Apply holds it, no caller here owns it —
+   * see the guard below.
    */
   const showPanel = useCallback(
     (panel: PanelId, guard: 'guard-while-running' | 'tool-handover' = 'tool-handover') => {
@@ -309,6 +313,24 @@ export default function App() {
         refuseWhileRunning();
         return;
       }
+      // ---- lot B ----
+      // Item 6: the hand-off arm below rests on ONE invariant — the only
+      // caller is the hosted tool that has just finished, so the lock it
+      // clears is that tool's own. The effect card breaks it. It publishes
+      // the same lock through the same seam (`handleToolModuleLock`) while
+      // its Apply runs, but it is never the caller: a hosted effect and a
+      // hosted tool never coexist (W1), so RemixDialog and TranscribeDialog —
+      // the only two hand-off callers — are not even mounted. What reaches
+      // here while an effect applies is a MOUSE-driven command instead
+      // (`Pipeline > Transcribe`'s reveal arm, `menuActions.ts`), and
+      // clearing the lock for it would un-grey the strip, resume every global
+      // shortcut and let `openTool` / `openEffect` unmount the card
+      // mid-Apply. So it is refused, exactly as `focusSpatialPanel` is.
+      if (toolRunningRef.current && hostedEffectRef.current !== null) {
+        refuseWhileRunning();
+        return;
+      }
+      // ---- /lot B ----
       // The tool is going; nothing it reports after this can be trusted, and a
       // stale `true` would lock the strip for the session.
       toolRunningRef.current = false;
