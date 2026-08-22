@@ -1144,8 +1144,7 @@ function registerMarkerCommands(): void {
       id: 'marker.add',
       label: 'Add Marker',
       shortcut: 'M',
-      // N10: editor views only — in Multitrack the key would mark a document
-      // the view does not show.
+      // N10: editor views only — Multitrack shows no document for M to mark.
       enabled: (s) => s.view !== 'multitrack' && activeDoc(s) !== null,
       run: async () => {
         const { activeDocumentId, cursorSample, markers, addMarker } = useAppStore.getState();
