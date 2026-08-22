@@ -208,6 +208,16 @@ export interface TestApi {
     trackIndex: number,
     startSample: number
   ): { clipId: string; lengthSample: number; startSample: number } | null;
+  /** Lot D: the MULTITRACK edit cursor (`mtCursorSample`, never the running
+   * playhead), written through `setMtCursor` — no snap and no clamp, which is
+   * the store's own contract — and echoed back. */
+  setMtCursor(sample: number): number;
+  /** Reads it back (`getStateSummary` carries no session cursor). */
+  getMtCursor(): number;
+  /** Lot D: names the clip selection through `setSelectedClips`, so the store's
+   * own rules apply (dangling ids dropped, duplicates collapsed), and echoes
+   * what was stored. */
+  selectClips(ids: string[]): { selectedClipId: string | null; selectedClipIds: string[] };
   mixdownSession(): { name: string; length: number; sampleRate: number; rms: number } | null;
   // --- v1.1 flows -------------------------------------------------------------
   pasteResampleFlow(): {
@@ -1322,6 +1332,19 @@ export function installTestHooks(): void {
       if (!track) return null;
       const [placed] = placeDocumentsOnTrack([doc], track.id, startSample, { select: false });
       return placed ?? null;
+    },
+
+    setMtCursor: (sample) => {
+      useSessionStore.getState().setMtCursor(sample);
+      return useSessionStore.getState().mtCursorSample;
+    },
+
+    getMtCursor: () => useSessionStore.getState().mtCursorSample,
+
+    selectClips: (ids) => {
+      useSessionStore.getState().setSelectedClips(ids);
+      const { selectedClipId, selectedClipIds } = useSessionStore.getState();
+      return { selectedClipId, selectedClipIds: [...selectedClipIds] };
     },
 
     // Renders the session offline, adds the resulting stereo doc, switches to
