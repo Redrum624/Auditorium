@@ -4,6 +4,7 @@ import EffectDialog from './EffectDialog';
 import { DialogHostProvider } from './DialogHost';
 import { registerAllEffects } from '../../effects/registerAll';
 import { runEffectOnSelection } from '../../services/effectRunner';
+import { deleteSelection } from '../../services/editOps';
 import { captureNoiseProfile, clearNoiseProfile } from '../../services/noiseProfile';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument } from '../../audio/AudioDocument';
@@ -283,6 +284,156 @@ describe('hosted in the module column (item 6)', () => {
       finish('committed');
     });
     expect(screen.queryByTestId('effect-dialog')).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Fix round 2 (round-1 finding 2): the card is not modal, so the mouse stays
+ * live while Apply runs — the edit pill, the Edit menu, File › Close and the
+ * Files panel can all change the document the runner resolved its region
+ * against before the worker returns. The runner asks `shouldCancel` ONCE,
+ * between the audio arriving and `applyEdit` writing it (T6-3's seam), and a
+ * `true` commits nothing. The dialog answers for the document as the user
+ * left it when they clicked Apply: same id, same audio, still the active one.
+ */
+describe('Apply against a document that moved under the worker (fix round 2)', () => {
+  // Written out rather than imported, so the sentence the user reads is pinned.
+  const STALE_HINT =
+    'The document changed while the effect was running, so nothing was applied. Apply again to run it on the document as it is now.';
+
+  /** Clicks Apply with the runner held open and returns the predicate it was
+   * handed, plus the resolver that lets the run finish. */
+  async function applyHeld() {
+    let finish!: (v: 'committed' | 'cancelled') => void;
+    mockRun.mockReturnValueOnce(
+      new Promise<'committed' | 'cancelled'>((resolve) => (finish = resolve))
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+    const opts = mockRun.mock.calls[0][2];
+    expect(opts?.shouldCancel).toBeDefined();
+    return { shouldCancel: opts!.shouldCancel!, finish };
+  }
+
+  it('hands the runner a shouldCancel that is false while the document stands as it was — a metadata write does not trip it', async () => {
+    const doc = seedActiveDoc();
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+    const { shouldCancel, finish } = await applyHeld();
+
+    expect(shouldCancel()).toBe(false);
+    // A rename or a dirty flag swaps the store's doc object but keeps its
+    // audio — the `channels` reference, the same key Toolbar's engine load
+    // uses to tell an audio edit from a metadata write.
+    act(() => {
+      useAppStore.getState().updateDocument({ ...doc, name: 'renamed.wav', dirty: true });
+    });
+    expect(shouldCancel()).toBe(false);
+
+    await act(async () => {
+      finish('committed');
+    });
+    expect(screen.queryByTestId('effect-dialog')).not.toBeInTheDocument();
+  });
+
+  it('answers true once the audio changed under it — a Delete, as the pill and the Edit menu run it', async () => {
+    seedActiveDoc();
+    useAppStore.getState().setSelection({ start: 0, end: 4096 });
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+    const { shouldCancel, finish } = await applyHeld();
+
+    act(() => {
+      deleteSelection();
+    });
+    expect(shouldCancel()).toBe(true);
+    await act(async () => {
+      finish('cancelled');
+    });
+  });
+
+  it('answers true when another document became the active one', async () => {
+    seedActiveDoc();
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+    const { shouldCancel, finish } = await applyHeld();
+
+    act(() => {
+      useAppStore.getState().addDocument(
+        createDocument({ name: 'other.wav', sampleRate: 44100, channels: [new Float32Array(1024)] })
+      );
+    });
+    expect(shouldCancel()).toBe(true);
+    await act(async () => {
+      finish('cancelled');
+    });
+  });
+
+  it('answers true when the document was closed', async () => {
+    const doc = seedActiveDoc();
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+    const { shouldCancel, finish } = await applyHeld();
+
+    act(() => {
+      useAppStore.getState().closeDocument(doc.id);
+    });
+    expect(shouldCancel()).toBe(true);
+    await act(async () => {
+      finish('cancelled');
+    });
+  });
+
+  it('a cancelled Apply keeps the card open, releases the lock, and says nothing was applied', async () => {
+    seedActiveDoc();
+    const onModuleLockChange = jest.fn();
+    render(
+      <Hosted engine={asEngine(new FakePlaybackEngine())} onModuleLockChange={onModuleLockChange} />
+    );
+    onModuleLockChange.mockClear();
+    mockRun.mockResolvedValueOnce('cancelled');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+
+    expect(screen.getByTestId('effect-dialog')).toBeInTheDocument();
+    expect(screen.getByTestId('effect-stale-hint')).toHaveTextContent(STALE_HINT);
+    expect(screen.getByRole('button', { name: 'Apply' })).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    expect(screen.getByTestId('hosted-tool-close')).toBeEnabled();
+    // The shell publishes from a `useEffect` keyed on the lock: with the card
+    // still mounted, the busy -> idle transition runs that effect's cleanup
+    // AND its next run, both saying `false`. What matters is that the `true`
+    // is followed by nothing but `false` — the lock is released, not held.
+    const calls = onModuleLockChange.mock.calls.map(([v]) => v);
+    const up = calls.indexOf(true);
+    expect(up).toBeGreaterThanOrEqual(0);
+    expect(calls.slice(up + 1).length).toBeGreaterThan(0);
+    expect(calls.slice(up + 1).every((v) => v === false)).toBe(true);
+
+    // Apply again: the hint clears while the run is held open, and a commit
+    // closes the card exactly as it always did.
+    let finish!: (v: 'committed') => void;
+    mockRun.mockReturnValueOnce(new Promise<'committed'>((resolve) => (finish = resolve)));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+    expect(screen.queryByTestId('effect-stale-hint')).toBeNull();
+    await act(async () => {
+      finish('committed');
+    });
+    expect(screen.queryByTestId('effect-dialog')).not.toBeInTheDocument();
+  });
+
+  it('a refused Apply still closes the card — its failure dialog has already been shown', async () => {
+    seedActiveDoc();
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+    mockRun.mockResolvedValueOnce('refused');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+
+    expect(screen.queryByTestId('effect-dialog')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('effect-stale-hint')).toBeNull();
   });
 });
 

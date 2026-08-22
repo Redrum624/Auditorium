@@ -20,11 +20,20 @@ function activeDoc() {
   return s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
 }
 
+/** Item 6, fix round 2: shown in the card after an Apply the runner cancelled
+ * because the document moved under the worker (see `apply`). The runner is
+ * silent by design; the card is where the user is looking. Worded like
+ * TempoDialog's own `'cancelled'` arm ("Nothing was changed."). */
+const STALE_TARGET_HINT =
+  'The document changed while the effect was running, so nothing was applied. Apply again to run it on the document as it is now.';
+
 /**
  * Parameter dialog for a single effect. Renders one control per param (number ->
  * slider + numeric input, select -> dropdown, boolean -> checkbox), an Apply
  * button that runs the effect through the DSP worker (with a progress bar), and a
  * best-effort Preview that auditions the effect on a throwaway document.
+ * Apply commits only to the document as the user left it when they clicked
+ * (fix round 2): one that moved under the worker is never written.
  */
 export default function EffectDialog({
   effectId,
@@ -61,6 +70,9 @@ export default function EffectDialog({
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
   const [previewing, setPreviewing] = useState(false);
+  // Fix round 2: the last Apply was cancelled because the document moved
+  // under the worker; the card stays and says so until the next Apply.
+  const [staleTarget, setStaleTarget] = useState(false);
   // Mirrors `previewing` for the unmount-cleanup effect below, which must read
   // the CURRENT value at cleanup time, not the value captured when the effect
   // was installed (mount, when previewing was still false).
@@ -110,11 +122,44 @@ export default function EffectDialog({
     if (previewing) stopPreview();
     setBusy(true);
     setProgress(0);
+    setStaleTarget(false);
+    // Item 6, fix round 2: the card is not modal, so the mouse stays live
+    // while the worker runs — the edit pill, the Edit menu, File › Close and
+    // the Files panel can all change the document the runner resolved its
+    // region against before the audio comes back. The runner asks this ONCE,
+    // between the audio arriving and `applyEdit` writing it (T6-3's seam),
+    // and a `true` commits nothing. The target is the document as the user
+    // left it when they clicked Apply: same id; same audio — the `channels`
+    // reference changes only on an audio edit, a rename or a dirty flag
+    // keeps it (the key Toolbar's engine load uses); and still the active
+    // one, because `applyEdit` sets the selection and the cursor GLOBALLY and
+    // would move the caret in whatever document the user moved on to. The
+    // modal's backdrop used to make all of this impossible; the card's lock
+    // holds the strip and the keys, never the mouse.
+    const target = activeDoc();
+    const targetId = target?.id ?? null;
+    const targetChannels = target?.channels ?? null;
+    const shouldCancel = () => {
+      const s = useAppStore.getState();
+      const d = s.documents.find((x) => x.id === targetId);
+      return !d || d.channels !== targetChannels || s.activeDocumentId !== targetId;
+    };
     try {
       const extra = isNoiseReduction
         ? { spectra: (getNoiseProfile()?.spectra ?? []).map((s) => Array.from(s)) }
         : undefined;
-      await runEffectOnSelection(def.id, params, { onProgress: setProgress, extra });
+      const outcome = await runEffectOnSelection(def.id, params, {
+        onProgress: setProgress,
+        extra,
+        shouldCancel,
+      });
+      if (outcome === 'cancelled') {
+        // Nothing was written; the card stays for a second Apply against the
+        // document as it now stands. `'refused'` has shown its own dialog and
+        // `'committed'` is done: both close the card as they always did.
+        setStaleTarget(true);
+        return;
+      }
       onClose();
     } finally {
       setBusy(false);
@@ -217,6 +262,12 @@ export default function EffectDialog({
               }}
             />
           </div>
+        )}
+
+        {staleTarget && (
+          <p data-testid="effect-stale-hint" className="text-xs text-[#e0a458]">
+            {STALE_TARGET_HINT}
+          </p>
         )}
 
         <div className="mt-2 flex items-center justify-between gap-2">

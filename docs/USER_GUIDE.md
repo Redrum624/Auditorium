@@ -347,8 +347,12 @@ other effects stay one click away. Adjust, **Preview**, **Apply**; close it
 with the **✕** in its header or **Cancel**. Nothing is dimmed: the waveform,
 selection, transport and keys stay live while the card is open. While an
 effect is being **applied**, the module strip greys out and the ✕ and Cancel
-refuse until it finishes — the same rule as a running pipeline pass. Closing
-the last document closes the card. Every effect processes the current
+refuse until it finishes — the same rule as a running pipeline pass. The mouse
+stays live, so you can still edit, switch or close the document while it runs;
+do that and the effect is **not** applied — it commits only to the document as
+you left it when you clicked Apply — the card says so and stays, and **Apply**
+runs it again on the document as it is now. Closing the last document closes
+the card. Every effect processes the current
 selection, or the whole document when there's no selection.
 
 Below the effects, the same card lists the Effects menu's own **Mix** row, the

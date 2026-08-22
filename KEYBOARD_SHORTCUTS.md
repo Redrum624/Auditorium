@@ -18,7 +18,9 @@ result on a file you had just replaced. A pipeline tool or an effect card that
 is merely OPEN and idle suspends nothing — the whole point of hosting it beside
 the waveform is that you can keep working — and the keys come back by
 themselves when the pass finishes. Mouse interaction is never suspended by
-either.
+either; an effect Apply guards itself instead — it commits only to the document
+as you left it when you clicked Apply, and says so in the card if that changed
+(see the User Guide).
 
 | Shortcut | Action |
 |---|---|

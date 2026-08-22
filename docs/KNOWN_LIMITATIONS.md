@@ -2060,22 +2060,26 @@ real document to the engine, exactly as the modal's Escape did.
 **Mouse edits during Apply.** The same non-modal design holds while an effect
 is being **applied**: the module strip, the card's ✕ and Cancel are held and
 the global keys are suspended for the duration, but the mouse is never
-suspended — the edit pill and the Edit menu stay live, exactly as they do
-during a running pipeline pass. The runner resolves the target region when
-Apply starts and commits the processed audio to that same span when the worker
-returns (`src/services/effectRunner.ts`, `runEffectOnSelection`), so an edit
-that changes the document in between — a Trim, a Paste, a Ripple Delete from
-the Edit menu — lands the result over a document that has moved under it (the
-pipeline tools that commit after a worker pass, such as the Vocal Chain, carry
-the same window). The effect's modal overlay used to make that edit
-impossible; Undo restores both steps in order. Let the progress bar finish
+suspended — the edit pill, the Edit menu, File › Close and the Files panel
+stay live, exactly as they do during a running pipeline pass. The runner
+resolves the target region when Apply starts and commits the processed audio
+to that same span when the worker returns (`src/services/effectRunner.ts`,
+`runEffectOnSelection`), so the card hands it a `shouldCancel` (T6-3's seam,
+asked once between the audio arriving and the commit): an Apply commits only
+to the document as you left it when you clicked — same document, same audio,
+still the active one. Edit it, switch to another document or close it in
+between and nothing is written; the card stays and says so, and Apply runs
+the effect again on the document as it is now. What remains: the pipeline
+tools that commit after a worker pass from their own services (the Vocal
+Chain, Align Lyrics) still carry that window — let their progress finish
 before editing.
 
 **Intended behavior:** a narrower seam than the module lock — "hold the
 keyboard" without "hold the module column" — could route transport keys to the
 real document during a preview, or end the preview first. It is the same
 second seam the pipeline tools' lock already wants (see `App.tsx`,
-`refuseWhileRunning`) and is a change of its own. For the Apply-time window, a
-commit guard in the runner — refuse, or re-resolve, when the document changed
-under a running pass — would close the race for effects and pipeline tools
-alike; that is the runner's change, not the card's.
+`refuseWhileRunning`) and is a change of its own. The Apply-time window is
+closed for effects at the card (`EffectDialog`'s `shouldCancel`); the pipeline
+services that commit after their own worker pass (`vocalChain.ts`,
+`alignLyricsService.ts`) want the same guard, and that is their change, not
+the card's.

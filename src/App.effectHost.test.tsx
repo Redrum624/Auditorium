@@ -7,6 +7,7 @@ import { defaultParamsFor, getEffect, getVisibleEffects } from './effects/Effect
 import { _resetHostedToolRunning, hasOpenDialog } from './services/dialogBus';
 import { runEffectOnSelection } from './services/effectRunner';
 import { runCommand } from './services/menuActions';
+import { getHistory } from './services/undoHistory';
 import { makeInitialState, useAppStore } from './stores/appStore';
 
 /**
@@ -49,6 +50,9 @@ jest.mock('./services/effectRunner', () => {
   return { ...actual, runEffectOnSelection: jest.fn(async () => 'committed') };
 });
 const mockRun = runEffectOnSelection as jest.MockedFunction<typeof runEffectOnSelection>;
+const realRun = jest.requireActual<typeof import('./services/effectRunner')>(
+  './services/effectRunner'
+).runEffectOnSelection;
 
 /** The strip's tooltip while an effect Apply runs — written out here rather
  * than imported, so the sentence the user reads is pinned, not echoed. */
@@ -402,5 +406,170 @@ describe('swapping the hosted effect starts the new one from its own defaults', 
     expect(mockRun).toHaveBeenCalledTimes(1);
     expect(mockRun.mock.calls[0][0]).toBe('reverb');
     expect(mockRun.mock.calls[0][1]).toEqual(defaultParamsFor('reverb'));
+  });
+});
+
+/**
+ * Fix round 2 (round-1 finding 2): the lock during Apply holds the strip, the
+ * ✕, Cancel and the global keys — never the mouse ("Mouse interaction is
+ * never suspended"). The modal's backdrop used to make every click below
+ * impossible; as a card, the edit pill, the Files panel and the File menu
+ * stay live while the worker runs, and the runner commits its result to the
+ * region it resolved BEFORE the worker started. The dialog now hands the
+ * runner `shouldCancel` (T6-3's seam, asked once between the audio arriving
+ * and `applyEdit`): a document that moved — edited, swapped, closed — is
+ * never written, the card stays and says so.
+ *
+ * These run the REAL runner over the synchronous worker mock, which answers
+ * behind one microtask: Apply, then the mouse door, then the flush — the
+ * exact window the hazard lands in.
+ */
+describe('the mouse stays live during Apply: a document that moved is never written (fix round 2)', () => {
+  const STALE_HINT =
+    'The document changed while the effect was running, so nothing was applied. Apply again to run it on the document as it is now.';
+
+  function docById(id: string) {
+    return useAppStore.getState().documents.find((d) => d.id === id) ?? null;
+  }
+
+  /** A document File > Close can close without a Save prompt (clean, on disk). */
+  function addSavedDoc(name: string) {
+    const doc = createDocument({
+      name,
+      sampleRate: 44100,
+      channels: [new Float32Array(44100)],
+      filePath: `C:/takes/${name}`,
+      neverSaved: false,
+    });
+    act(() => {
+      useAppStore.getState().addDocument(doc);
+    });
+    return doc;
+  }
+
+  /** Selects the first half of the active document and clicks Apply on the
+   * open Amplify card with the real runner: the worker is now pending behind
+   * a microtask and the lock is up. */
+  function applyOnFirstHalf() {
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 22050 });
+    });
+    mockRun.mockImplementation(realRun);
+    fireEvent.click(within(host()).getByRole('button', { name: 'Apply' }));
+    expect(hasOpenDialog()).toBe(true);
+  }
+
+  /** Lets the worker answer and the runner settle. */
+  function flush() {
+    return act(async () => {});
+  }
+
+  it('a Delete on the edit pill ripples the document; the returning worker writes nothing over it', async () => {
+    const doc = addDoc();
+    render(<App />);
+    await openTool('effect.amplify');
+    applyOnFirstHalf();
+
+    // The lock holds the strip, not the pill: this is the door.
+    const del = within(screen.getByTestId('edit-pill')).getByRole('button', { name: 'Delete' });
+    expect(del).toBeEnabled();
+    fireEvent.click(del);
+    const rippled = docById(doc.id)!.channels;
+    expect(rippled[0]).toHaveLength(22050);
+    expect(getHistory(doc.id).done).toEqual(['Delete']);
+
+    await flush();
+    // Identity, not equality: a commit allocates fresh arrays.
+    expect(docById(doc.id)!.channels).toBe(rippled);
+    expect(getHistory(doc.id).done).toEqual(['Delete']);
+    expect(host()).toHaveAttribute('data-effect-id', 'amplify');
+    expect(within(host()).getByTestId('effect-stale-hint')).toHaveTextContent(STALE_HINT);
+    expect(hasOpenDialog()).toBe(false);
+    for (const button of within(strip()).getAllByRole('button')) expect(button).not.toBeDisabled();
+    expect(showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('a row click in the Files panel switches documents; the effect lands in neither and the caret stays put', async () => {
+    const a = addSavedDoc('take.wav');
+    const b = addSavedDoc('other.wav');
+    act(() => {
+      useAppStore.getState().setActiveDocument(a.id);
+    });
+    render(<App />);
+    await openTool('effect.amplify');
+    // Idle, the strip is free and the card survives the switch (B5); the
+    // Files panel is now the module card beneath the effect.
+    fireEvent.click(stripButton('Files'));
+    applyOnFirstHalf();
+    const aChannels = docById(a.id)!.channels;
+    const bChannels = docById(b.id)!.channels;
+
+    fireEvent.click(within(screen.getByTestId('files-list')).getByText('other.wav').closest('button')!);
+    expect(useAppStore.getState().activeDocumentId).toBe(b.id);
+
+    await flush();
+    expect(docById(a.id)!.channels).toBe(aChannels);
+    expect(docById(b.id)!.channels).toBe(bChannels);
+    expect(getHistory(a.id).done).toEqual([]);
+    expect(getHistory(b.id).done).toEqual([]);
+    // `applyEdit` writes the selection and the cursor GLOBALLY: a commit here
+    // would have put [0, 22050] back on the document the user moved on to.
+    expect(useAppStore.getState().selection).toBeNull();
+    expect(host()).toBeInTheDocument();
+    expect(within(host()).getByTestId('effect-stale-hint')).toHaveTextContent(STALE_HINT);
+    expect(hasOpenDialog()).toBe(false);
+    expect(showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('File > Close on the document raises no "document not found" failure; the card stays for the document now active', async () => {
+    const a = addSavedDoc('take.wav');
+    const b = addSavedDoc('other.wav');
+    act(() => {
+      useAppStore.getState().setActiveDocument(a.id);
+    });
+    render(<App />);
+    await openTool('effect.amplify');
+    applyOnFirstHalf();
+    const bChannels = docById(b.id)!.channels;
+
+    // The menu's own command; a clean document closes without a prompt.
+    let closing!: Promise<void>;
+    act(() => {
+      closing = runCommand('file.close');
+    });
+    expect(docById(a.id)).toBeNull();
+    expect(useAppStore.getState().activeDocumentId).toBe(b.id);
+
+    await flush();
+    await act(async () => {
+      await closing;
+    });
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(docById(b.id)!.channels).toBe(bChannels);
+    expect(getHistory(b.id).done).toEqual([]);
+    expect(host()).toBeInTheDocument();
+    expect(within(host()).getByTestId('effect-stale-hint')).toHaveTextContent(STALE_HINT);
+    expect(hasOpenDialog()).toBe(false);
+  });
+
+  it('closing the LAST document mid-Apply: the orphan rule drops the card and the returning worker raises no failure dialog', async () => {
+    addSavedDoc('take.wav');
+    render(<App />);
+    await openTool('effect.amplify');
+    applyOnFirstHalf();
+
+    let closing!: Promise<void>;
+    act(() => {
+      closing = runCommand('file.close');
+    });
+    expect(useAppStore.getState().documents).toHaveLength(0);
+    expect(screen.queryByTestId('effect-host')).toBeNull();
+
+    await flush();
+    await act(async () => {
+      await closing;
+    });
+    expect(showMessageBox).not.toHaveBeenCalled();
+    expect(hasOpenDialog()).toBe(false);
   });
 });
