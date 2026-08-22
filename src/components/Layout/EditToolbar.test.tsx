@@ -170,8 +170,11 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
   // could not undo it. All five region verbs are now gated on the COMMAND, so
   // this pill inherits the rule instead of restating a subset of it.
   // Item 8: Cut left the pill (the Scissors button is Split now), so the
-  // region verbs it draws are the four below.
-  it('greys the four region verbs in Multitrack even with a document selection, and says why', () => {
+  // region verbs it draws are the four below. Item 10 (M7): each of the four
+  // now says its OWN reason instead of sharing one paragraph, because the two
+  // pairs are blocked for different reasons and only one of them could ever be
+  // lifted by selecting something.
+  it('4a greys Copy / Paste / Trim / Silence in Multitrack, each with its own reason', () => {
     lastDocId = addDoc().id;
     act(() => {
       useAppStore.getState().setSelection({ start: 0, end: 1000 });
@@ -187,9 +190,20 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
       // Honest about the remedy, not just the refusal.
       expect(title).toContain('waveform or spectral');
     }
+    expect(btn('Copy').title).toContain('needs a clip clipboard');
+    expect(btn('Paste').title).toContain('needs a clip clipboard');
+    expect(btn('Trim').title).toContain('needs a time selection');
+    expect(btn('Silence').title).toContain('needs a time selection');
+
+    // The three that are NOT blocked by the view say nothing of the sort —
+    // Delete and Split route to a session act there, Undo/Redo to the session's
+    // history.
+    for (const label of ['Delete', 'Undo', 'Redo']) {
+      expect(btn(label).title).not.toContain('not available');
+    }
   });
 
-  it('lights the same four again on the way back to Waveform, so the gate is the VIEW', () => {
+  it('4b lights the same four again on the way back to Waveform, so the gate is the VIEW', () => {
     lastDocId = addDoc().id;
     act(() => {
       useAppStore.getState().setSelection({ start: 0, end: 1000 });
@@ -204,6 +218,73 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
     for (const label of ['Copy', 'Paste', 'Trim', 'Silence']) {
       expect(btn(label)).toBeEnabled();
     }
+  });
+
+  /** Seeds one clip `[1000, 3000)` (end 4000) on a fresh track and selects it. */
+  function seedSelectedClip(): void {
+    act(() => {
+      useSessionStore.getState().addTrack();
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      const clip = createClip({
+        documentId: 'x',
+        startSample: 1000,
+        offsetSample: 0,
+        lengthSample: 3000,
+      });
+      useSessionStore.getState().addClip(trackId, clip);
+      useSessionStore.getState().setSelectedClip(clip.id);
+    });
+  }
+
+  // Item 10: `edit.split`'s multitrack predicate reads the SESSION store, whose
+  // cursor and selection writers record nothing and touch no appStore field.
+  // Without this pill's own session subscriptions the button would grey and
+  // un-grey one unrelated render late — so every assertion below is made
+  // straight after the session write that should have changed it, with no app
+  // store touch in between.
+  it('4c lights Split in Multitrack exactly when a selected clip is cut, and follows the SESSION store', () => {
+    lastDocId = addDoc().id;
+    act(() => useAppStore.getState().setView('multitrack'));
+    render(<EditToolbar />);
+    expect(btn('Split')).toBeDisabled();
+
+    seedSelectedClip();
+    act(() => useSessionStore.getState().setMtCursor(3000));
+    expect(btn('Split')).toBeEnabled();
+    expect(btn('Split').title).toContain('Split at Cursor');
+    expect(btn('Split').title).toContain('selected clips’ tracks');
+
+    act(() => useSessionStore.getState().setMtCursor(1000)); // the clip's edge
+    expect(btn('Split')).toBeDisabled();
+
+    act(() => useSessionStore.getState().setMtCursor(3000));
+    expect(btn('Split')).toBeEnabled();
+    act(() => useSessionStore.getState().setSelectedClip(null));
+    expect(btn('Split')).toBeDisabled();
+  });
+
+  it('4c tells the editors apart: back in Waveform the Split tooltip is the marker one', () => {
+    lastDocId = addDoc().id;
+    act(() => useAppStore.getState().setView('multitrack'));
+    render(<EditToolbar />);
+    expect(btn('Split').title).toContain('selected clips’ tracks');
+
+    act(() => useAppStore.getState().setView('waveform'));
+    expect(btn('Split').title).toContain('a marker at the cursor');
+    expect(btn('Split').title).not.toContain('selected clips’ tracks');
+  });
+
+  it('4d sends a Multitrack Split click through edit.split', async () => {
+    lastDocId = addDoc().id;
+    act(() => useAppStore.getState().setView('multitrack'));
+    render(<EditToolbar />);
+    seedSelectedClip();
+    act(() => useSessionStore.getState().setMtCursor(3000));
+    expect(btn('Split')).toBeEnabled();
+
+    await click('Split');
+
+    expect(mockRunCommand).toHaveBeenCalledWith('edit.split');
   });
 
   it('routes Delete to the clip selection in Multitrack (both ways)', () => {
