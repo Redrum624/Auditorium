@@ -653,3 +653,79 @@ describe('a document that moves under a running Preview (final round)', () => {
     expect(fake.load).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Final round 3 (finding 1) — the card names the span Apply will write.
+ *
+ * The card is not modal, so the region the runner resolves can change while
+ * the card sits open and untouched: `Escape` runs `edit.deselect`
+ * (`shortcuts.ts` `{ combo: 'escape', commandId: 'edit.deselect' }`,
+ * `menuActions.ts`'s editor branch `setSelection(null)`), Edit > Deselect does,
+ * and a plain click on the waveform does. `runEffectOnSelection` resolves the
+ * LIVE selection through `resolveRegion`, whose null case is the whole
+ * document — so losing a selection widens Apply from the span the user
+ * auditioned to the entire file. These pin that the card says which it is, and
+ * that it says it through the runner's OWN resolver rather than a second copy
+ * of the arithmetic.
+ */
+describe('the card names the region Apply will write (final round 3)', () => {
+  function scope(): HTMLElement {
+    return screen.getByTestId('effect-scope');
+  }
+
+  it('reads the selection while there is one', () => {
+    seedActiveDoc();
+    act(() => {
+      useAppStore.getState().setSelection({ start: 2205, end: 6615 });
+    });
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+
+    expect(scope()).toHaveTextContent('Selection — 0:00.050 → 0:00.150 (0.10 s)');
+  });
+
+  it('switches to the whole file the moment the selection is cleared — what Escape does', () => {
+    const doc = seedActiveDoc();
+    act(() => {
+      useAppStore.getState().setSelection({ start: 2205, end: 6615 });
+    });
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+    expect(scope()).toHaveTextContent('Selection —');
+
+    // Exactly `edit.deselect`'s editor branch. Nothing else in the card moves:
+    // this is the whole reason the widening was invisible before.
+    act(() => {
+      useAppStore.getState().setSelection(null);
+    });
+
+    expect(scope()).toHaveTextContent('Whole file — 0:00.186');
+    expect(scope()).not.toHaveTextContent('Selection');
+    // The card itself is untouched by the key: still open, still this effect.
+    expect(screen.getByTestId('effect-dialog')).toBeInTheDocument();
+    expect(useAppStore.getState().documents.find((d) => d.id === doc.id)).toBeDefined();
+
+    // And back again when a new span is dragged.
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 4410 });
+    });
+    expect(scope()).toHaveTextContent('Selection — 0:00.000 → 0:00.100 (0.10 s)');
+  });
+
+  it('reports the region the RUNNER will use, not the raw selection: an overhanging end is clamped', () => {
+    seedActiveDoc();
+    act(() => {
+      // 8192 samples long; the selection runs past the end. `resolveRegion` —
+      // the function `effectRunner` itself calls — clamps to the document, and
+      // the card must say what will actually be written.
+      useAppStore.getState().setSelection({ start: 6000, end: 99999 });
+    });
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+
+    expect(scope()).toHaveTextContent('Selection — 0:00.136 → 0:00.186 (0.05 s)');
+  });
+
+  it('says nothing when there is no document to write to', () => {
+    render(<Hosted engine={asEngine(new FakePlaybackEngine())} />);
+
+    expect(screen.queryByTestId('effect-scope')).toBeNull();
+  });
+});

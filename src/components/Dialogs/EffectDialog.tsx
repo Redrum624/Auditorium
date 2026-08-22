@@ -5,7 +5,9 @@ import { getEffect } from '../../effects/EffectRegistry';
 import type { EffectParamDef, EffectParamValue } from '../../effects/types';
 import { runEffectOnSelection } from '../../services/effectRunner';
 import { getNoiseProfile, useNoiseProfileVersion } from '../../services/noiseProfile';
+import { resolveRegion } from '../../services/selectionRegion';
 import { useAppStore } from '../../stores/appStore';
+import { formatTime } from '../../utils/timeFormat';
 import { Sparkles } from 'lucide-react';
 import { FieldLabel, GlassButton, GlassField, GlassSelect, GlassSlider, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
@@ -73,6 +75,15 @@ export default function EffectDialog({
   // that hand the shared engine to somebody else.
   const activeDocChannels = useAppStore(
     (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.channels ?? null
+  );
+  // Final round 3 (finding 1): the document itself, so the scope line below can
+  // ask `resolveRegion` — the function `runEffectOnSelection` itself calls —
+  // what Apply will write, rather than keeping a second copy of that arithmetic
+  // here (the defect family T6-1 collapsed into one import). Same lookup as the
+  // four selectors above; zustand hands back the same object reference until
+  // the document changes, so this adds a read, not a render.
+  const activeDocument = useAppStore(
+    (s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null
   );
   const [params, setParams] = useState<Record<string, EffectParamValue>>(() =>
     def ? initialParams(def.params) : {}
@@ -161,6 +172,34 @@ export default function EffectDialog({
 
   const setParam = (id: string, value: EffectParamValue) =>
     setParams((prev) => ({ ...prev, [id]: value }));
+
+  // Final round 3 (finding 1): what Apply will write, named on the card.
+  //
+  // Hosted, the card is not modal, so the region the runner resolves can change
+  // while the card sits open and untouched — and the likeliest way is the key
+  // that CLOSED this dialog until item 6 made it a card. Escape takes no path
+  // through the card (it joins no dialog stack, and a hosted surface installs
+  // no Escape handler by design — see KEYBOARD_SHORTCUTS.md); it falls through
+  // to the global table and runs `edit.deselect`. Edit > Deselect and a plain
+  // click on the waveform clear the selection the same way. Because
+  // `runEffectOnSelection` resolves the LIVE selection and `resolveRegion`
+  // reads null as the whole document, an Apply after any of those widens from
+  // the span the user auditioned with Preview to the entire file — one undo
+  // entry, and nothing in the card had moved to say so.
+  //
+  // The lock is not the answer (the ruling: shortcuts stay live beside a card,
+  // and Preview greys nothing). Visibility is: the sibling hosted card has
+  // named its own scope since the Pipeline module (`TempoDialog`'s
+  // `tempo-scope`), and this is that line for effects. Display only — it
+  // reads the store the param readouts already subscribe to, and asks the
+  // runner's own resolver so what it says cannot drift from what is written.
+  const scope = activeDocument ? resolveRegion(activeDocument, selection) : null;
+  const scopeText =
+    scope === null || activeSampleRate === null
+      ? null
+      : selection
+        ? `Selection — ${formatTime(scope.start, activeSampleRate)} → ${formatTime(scope.end, activeSampleRate)} (${((scope.end - scope.start) / activeSampleRate).toFixed(2)} s)`
+        : `Whole file — ${formatTime(scope.end, activeSampleRate)}`;
 
   const apply = async () => {
     if (!canApply) return;
@@ -259,6 +298,16 @@ export default function EffectDialog({
       moduleLock={busy}
     >
       <div className="flex flex-col gap-3" data-testid="effect-dialog">
+        {scopeText !== null && (
+          <div
+            data-testid="effect-scope"
+            className="text-xs"
+            style={{ color: 'var(--glass-text-muted)' }}
+          >
+            {scopeText}
+          </div>
+        )}
+
         {def.params.length > 0 && <SectionLabel>Parameters</SectionLabel>}
 
         {def.params.map((p) => (

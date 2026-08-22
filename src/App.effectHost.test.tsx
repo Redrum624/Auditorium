@@ -735,3 +735,88 @@ describe('a Preview the mouse took away (final round)', () => {
     expect(playbackEngine.loadedDocumentId).not.toBe(b.id);
   });
 });
+
+/**
+ * Final round 3 (finding 1) — `Escape`, with the card open and idle.
+ *
+ * Until item 6 the effect dialog was modal and `Escape` closed it. Hosted, the
+ * card joins no dialog stack (`hasOpenDialog()` is false), installs no Escape
+ * handler of its own by design, and the global table stays live — so the key
+ * the user presses to dismiss the card reaches `edit.deselect` instead. The
+ * runner resolves the LIVE selection and falls back to the whole document, so
+ * the next Apply writes a different edit from the one Preview auditioned.
+ *
+ * The keystroke is dispatched from a button INSIDE the card — where focus sits
+ * after a Preview click — so it travels the real path: not an editable target,
+ * bubbles to the window listener `App` installs, no dialog on the stack.
+ *
+ * The behaviour is the accepted design (lot-level ruling: shortcuts stay live
+ * beside a card). What these pin is that it is not SILENT: the card names the
+ * span it will write, and the widening is on screen before Apply is pressed.
+ */
+describe('Escape beside an open effect card (final round 3)', () => {
+  function scope(): HTMLElement {
+    return within(host()).getByTestId('effect-scope');
+  }
+
+  /** The real global path: a keydown on a plain BUTTON inside the card. */
+  async function pressEscapeInsideTheCard() {
+    const target = within(host()).getByRole('button', { name: 'Preview' });
+    await act(async () => {
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+      );
+    });
+  }
+
+  /** Apply through the REAL runner, then let the worker answer. */
+  async function applyForReal() {
+    mockRun.mockImplementation(realRun);
+    fireEvent.click(within(host()).getByRole('button', { name: 'Apply' }));
+    await act(async () => {});
+  }
+
+  it('does not close the card: it deselects, and the card says the target just widened', async () => {
+    const doc = addDoc();
+    render(<App />);
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 22050 });
+    });
+    await openTool('effect.amplify');
+    expect(scope()).toHaveTextContent('Selection — 0:00.000 → 0:00.500 (0.50 s)');
+
+    await pressEscapeInsideTheCard();
+
+    // The card is not a dialog: Escape never reached it, and the documented
+    // dismissals (the ✕, Cancel) are still the only ones.
+    expect(host()).toHaveAttribute('data-effect-id', 'amplify');
+    expect(within(host()).getByTestId('effect-dialog')).toBeInTheDocument();
+    expect(hasOpenDialog()).toBe(false);
+    // What it DID reach: `edit.deselect`.
+    expect(useAppStore.getState().selection).toBeNull();
+    // ...and that is now visible in the card, before Apply is pressed.
+    expect(scope()).toHaveTextContent('Whole file — 0:01.000');
+
+    await applyForReal();
+
+    // `applyEdit`'s post-edit selection is the span the runner wrote
+    // (`effectRunner`: `{ selection: { start, end: start + resultLen } }`), so
+    // this is the region the file actually received: the whole document.
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 44100 });
+    expect(getHistory(doc.id).done).toEqual([`Effect: ${getEffect('amplify')!.name}`]);
+  });
+
+  it('control: with the selection left alone, the same Apply writes only the selection', async () => {
+    const doc = addDoc();
+    render(<App />);
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 22050 });
+    });
+    await openTool('effect.amplify');
+
+    await applyForReal();
+
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 22050 });
+    expect(getHistory(doc.id).done).toEqual([`Effect: ${getEffect('amplify')!.name}`]);
+  });
+});

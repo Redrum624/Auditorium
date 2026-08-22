@@ -91,13 +91,24 @@ and since the Pipeline module it means nothing at all over a hosted tool:
 | The **multitrack** view | Clears the clip selection — the document selection behind it is not on screen there, so clearing that instead would be an edit with no feedback anywhere |
 | A modal dialog (New File, Export, Convert, Record) | Closes the topmost one — unless it is mid-run, when it refuses |
 | A **pipeline tool** in the module column (Match Tempo, Vocal Chain, Cover Chain, Transcribe, …) | Nothing. Close it with the **✕** in its header |
-| An **effect card** in the module column | Nothing. Close it with the **✕** or **Cancel** |
+| An **effect card** in the module column | Nothing *to the card* — the key falls through to **Deselect** in the row above, and the card's scope line changes to say so. Close the card with the **✕** or **Cancel** |
 
-The last row is deliberate. A hosted tool is not modal — the stage behind it
-stays live — so it installs no `Escape` handler of its own; taking the key would
-make it a focus trap wearing a different shape, and would silently steal
+The last two rows are deliberate. A hosted card is not modal — the stage behind
+it stays live — so it installs no `Escape` handler of its own; taking the key
+would make it a focus trap wearing a different shape, and would silently steal
 Deselect from the waveform you are still working in. The **✕** is its dismissal,
 and mid-pass that ✕ refuses and says why.
+
+Know what falls through before you press it. `Escape` beside an open card is
+not inert: it reaches the table above and runs **Deselect**, and both kinds of
+card resolve the region they act on from the **live** selection when they run,
+reading "no selection" as the whole file. So an `Escape` pressed to dismiss an
+effect card widens its next **Apply** from the span you just previewed to the
+entire document — one undo entry. The card names the span it will write on its
+first line ("Selection — 0:01.500 → 0:03.500 (2.00 s)" / "Whole file — 5:00.000"),
+so the change is on screen the moment it happens; **Match Tempo** has shown the
+same line since the Pipeline module. Mid-**Apply** the question does not arise:
+the keys are suspended for the duration, `Escape` included.
 
 ## Menu-only commands (no bound key)
 
