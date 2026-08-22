@@ -156,6 +156,10 @@ describe('view.waveform / view.spectral from the multitrack with a clip selected
     expect(s.view).toBe('waveform');
   });
 
+  // A guard, not a fail-first case: N14 makes the orphan path exactly the raw
+  // `setView` it was, so this is green against the pre-lot code by design.
+  // It goes red the moment the helper substitutes another document for the
+  // missing source (e.g. `?? app.documents[0]`) — that is what it pins.
   it('2g. an orphan clip (source closed) falls through to a plain setView', async () => {
     const clip = createClip({ documentId: 'doc-gone', startSample: 0, offsetSample: 0, lengthSample: 1000 });
     seedSession([clip]);
