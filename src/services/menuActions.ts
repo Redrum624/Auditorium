@@ -876,14 +876,6 @@ export function registerEffectCommands(): void {
   registerCommands(cmds);
 }
 
-/** Registers the Task 19 restoration + view commands: `noise.capture` (top of
- * the Effects menu, enabled only when a selection exists — it profiles the
- * selected region), the real `view.waveform` / `view.spectral` toggles
- * (enabled when an active doc exists and that view isn't already current), and
- * `view.spectralScale` (Task F4 — flips the module-level spectral scale
- * setting; enabled only while the spectral view is active) and `view.beatGrid`
- * (Task B2 — flips the module-level beat-tic visibility; enabled in either
- * editor view). `view.multitrack` stays a disabled stub until Phase D. */
 // ---- lot E ----
 /**
  * Item 4 (N14) — leaving the MULTITRACK view for an editor view with a clip
@@ -932,6 +924,15 @@ export function showEditorView(v: 'waveform' | 'spectral'): void {
   useAppStore.getState().setView(v);
 }
 // ---- end lot E ----
+
+/** Registers the Task 19 restoration + view commands: `noise.capture` (top of
+ * the Effects menu, enabled only when a selection exists — it profiles the
+ * selected region), the real `view.waveform` / `view.spectral` toggles
+ * (enabled when an active doc exists and that view isn't already current), and
+ * `view.spectralScale` (Task F4 — flips the module-level spectral scale
+ * setting; enabled only while the spectral view is active) and `view.beatGrid`
+ * (Task B2 — flips the module-level beat-tic visibility; enabled in either
+ * editor view). `view.multitrack` stays a disabled stub until Phase D. */
 function registerNoiseAndViewCommands(): void {
   registerCommands([
     {
