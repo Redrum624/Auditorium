@@ -1595,7 +1595,7 @@ itself.
   steps — undo is for edits, not navigation. Undoing an edit does restore
   the selection to the affected clip so you can see what changed.
 - **Limits**: like documents, the session keeps up to 50 steps, in memory
-  only. **Open Session** and stem landing start a fresh history (undo does
+  only. **Open Project…** and stem landing start a fresh history (undo does
   not reach across a load); **New Session** is itself undoable.
 
 ### Clip fades and crossfades

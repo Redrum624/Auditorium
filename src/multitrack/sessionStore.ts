@@ -723,7 +723,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   newSession(sampleRate) {
     // R3: recorded — File > New Session is a store mutation of the current
     // timeline (undo restores the discarded session), unlike the load-shaped
-    // replacements (Open Session, stem landing) which CLEAR the history.
+    // replacements (Open Project, stem landing) which CLEAR the history.
     recordSessionMutation('New session', () => {
       set({
         ...freshSessionState(sampleRate),

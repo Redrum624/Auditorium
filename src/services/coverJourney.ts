@@ -55,7 +55,7 @@
  * Each sub-pass keeps its OWN undo entry, the chains' own precedent: "Vocal
  * Chain" and "Cover Chain" are two entries on the take, the stem documents are
  * creations rather than edits (nothing to undo), and the session replacement is
- * load-shaped and clears session history exactly as Open Session and stem
+ * load-shaped and clears session history exactly as Open Project and stem
  * landing do. The report lists every entry the pass left.
  *
  * ONE undo entry across all of it is NOT attempted, and that is a decision

@@ -156,12 +156,14 @@ containers** plus sessions, sample-accurately:
   `CHAPTERxxx`/`CHAPTERxxxNAME` tags plus the same sample-accurate private tag.
 - **OGG (Opus)** — the same chapter comments in the OpusTags header (at the
   file's 48 kHz clock).
-- **`.audm` sessions** (v3, still reads v1/v2) — a `markers` map per
-  referenced document; v1 session files still load with zero markers.
+- **`.audm` projects** (v4, still reads v1–v3) — a `markers` map per
+  embedded document (every open document since v4; v3 carried only the
+  clip-referenced ones); v1 session files still load with zero markers.
 
-Opening any of these seeds the store with fresh marker ids; in-place Save,
-Save As, and Export all write markers back. Files saved with **no** markers are
-byte-identical to pre-v1.3 output for every format.
+Opening any of these seeds the store with fresh marker ids; Export and the
+project save (File → Save / Save As…, which carries every open document's
+markers in the `.audm`) write markers back. Files exported with **no** markers
+are byte-identical to pre-v1.3 output for every format.
 
 **v1.4 additions:** adding, renaming, or deleting a marker now dirties the
 owning document (Files-panel `*`, close/quit prompts, the async-save
@@ -321,20 +323,21 @@ old format); a save surfaces both success and failure explicitly instead of
 failing quietly.
 
 **Remaining limitation:** a **legacy v1/v2** session file whose JSON already
-exceeds the JS string cap still cannot be loaded — Open Session reports a
+exceeds the JS string cap still cannot be loaded — Open Project reports a
 clear error instead of crashing, but the file itself is unreadable either way.
-Resaving as v3 (once it can be opened at all) avoids the ceiling entirely,
-since v3 never builds that string.
+Resaving it (File → Save As… writes v4, once it can be opened at all) avoids
+the ceiling entirely, since neither binary layout — v3 or v4 — builds that
+string.
 
-**Intended behavior:** No further work planned for v3 itself. A v1/v2-specific
-recovery tool (partial-parse salvage) is **moot, not merely unplanned**
-(closed 2026-08-08, R2-4): the legacy *writer* built the very same single JS
-string the reader decodes — `serializeSession` base64-encoded each document
-and `JSON.stringify`-ed the result into one string of the same length — so
-writer and reader hit the identical V8 string cap. Any legacy `.audm` this
-app successfully wrote is by construction readable; an over-cap legacy file
-can only have come from another tool, and there is nothing of Auditorium's to
-salvage. (The over-cap error path is pinned by test.)
+**Intended behavior:** No further work planned for the binary layout itself.
+A v1/v2-specific recovery tool (partial-parse salvage) is **moot, not merely
+unplanned** (closed 2026-08-08, R2-4): the legacy *writer* built the very same
+single JS string the reader decodes — `serializeSession` base64-encoded each
+document and `JSON.stringify`-ed the result into one string of the same
+length — so writer and reader hit the identical V8 string cap. Any legacy
+`.audm` this app successfully wrote is by construction readable; an over-cap
+legacy file can only have come from another tool, and there is nothing of
+Auditorium's to salvage. (The over-cap error path is pinned by test.)
 
 ## Export length vs playback length in multitrack
 
