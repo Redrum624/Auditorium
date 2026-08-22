@@ -9,7 +9,7 @@ import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore
 import type { Session } from '../../multitrack/session';
 import { defaultSessionZoom, sessionTimelineLength } from '../../multitrack/sessionZoom';
 import { hasUnsavedWork } from '../../services/fileService';
-import { runCommand } from '../../services/menuActions';
+import { runCommand, showEditorView } from '../../services/menuActions';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
 import { canRecord } from '../../services/transportService';
 // F11-9: the zoom limits are the store's now, so the toolbar imports the one
@@ -478,7 +478,7 @@ export default function Toolbar() {
               aria-label={`${v} view`}
               aria-pressed={view === v}
               disabled={v !== 'multitrack' && !hasDoc}
-              onClick={() => useAppStore.getState().setView(v)}
+              onClick={() => (v === 'multitrack' ? useAppStore.getState().setView(v) : showEditorView(v))}
               className="glass-pill-btn capitalize"
               style={{ ...pillBtn, padding: '0 12px', ...(view === v ? toggleActive : null) }}
             >

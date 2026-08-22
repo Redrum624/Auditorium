@@ -4,6 +4,7 @@ import { createDocument, docLength, type AudioDocument } from '../../audio/Audio
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { useAppStore, makeInitialState, defaultZoom } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { createClip, createTrack, type Session } from '../../multitrack/session';
 import { setSessionLaneWidth } from '../../multitrack/sessionViewport';
 import { defaultSessionZoom } from '../../multitrack/sessionZoom';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
@@ -369,6 +370,59 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
         'aria-pressed',
         'false'
       );
+    });
+
+    // Lot E (item 4, N14): the segment's editor arms go through
+    // `showEditorView`, so a click out of the multitrack with a clip selected
+    // carries that clip's source span; the multitrack arm stays the raw setter.
+    it('leaving multitrack with a clip selected opens that clip’s source span', () => {
+      const A = makeDoc();
+      const B = createDocument({
+        name: 'other.wav',
+        sampleRate: 44100,
+        channels: [new Float32Array(10000)],
+      });
+      useAppStore.getState().addDocument(A);
+      useAppStore.getState().addDocument(B);
+      useAppStore.getState().setActiveDocument(A.id);
+      const clip = createClip({ documentId: B.id, startSample: 0, offsetSample: 2000, lengthSample: 3000 });
+      const track = createTrack('Track 1');
+      track.clips = [clip];
+      const session: Session = { name: 'Carry', sampleRate: 44100, tracks: [track] };
+      useSessionStore.setState({
+        session,
+        selectedClipId: clip.id,
+        selectedClipIds: [clip.id],
+        mtCursorSample: 0,
+        mtPlayState: 'stopped',
+        mtPlayheadSample: 0,
+        mtEnvelope: null,
+      });
+      useAppStore.setState({ view: 'multitrack' });
+      render(<Toolbar />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'waveform view' }));
+
+      const s = useAppStore.getState();
+      expect(s.activeDocumentId).toBe(B.id);
+      expect(s.selection).toEqual({ start: 2000, end: 5000 });
+      expect(s.view).toBe('waveform');
+      expect(screen.getByRole('button', { name: 'waveform view' })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      );
+    });
+
+    it('entering multitrack is the raw setter: the document selection survives', () => {
+      useAppStore.getState().addDocument(makeDoc());
+      useAppStore.getState().setSelection({ start: 10, end: 20 });
+      expect(useAppStore.getState().view).toBe('waveform');
+      render(<Toolbar />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'multitrack view' }));
+
+      expect(useAppStore.getState().view).toBe('multitrack');
+      expect(useAppStore.getState().selection).toEqual({ start: 10, end: 20 });
     });
   });
 
