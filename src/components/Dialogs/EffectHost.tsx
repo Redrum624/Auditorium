@@ -30,6 +30,17 @@ import EffectDialog from './EffectDialog';
  * Effects when an effect opens (N16), and afterwards the strip may swap or
  * close it while the effect stays. Only another host (`openTool`), the ✕ /
  * Cancel / Apply, and the orphan rule (no document left) close this one.
+ *
+ * One effect id, one dialog instance. `PipelineToolHost` swaps the component
+ * TYPE per command id, so React remounts on a swap for free; this host renders
+ * the same `EffectDialog` for every id, and React would keep the mounted
+ * instance — with the previous effect's `params`, `previewing` and `busy`
+ * state — under the new name (every control of the new effect NaN, Apply
+ * sending values the card never showed, a preview of the first effect still
+ * playing under the second's name). The key on the dialog is what makes a
+ * click on a second row a fresh card: the old dialog unmounts (its
+ * unmount-restore hands the engine the real document back) and the new one
+ * starts from its own declared defaults.
  */
 export default function EffectHost({
   effectId,
@@ -60,7 +71,7 @@ export default function EffectHost({
       style={{ flex: '0 1 auto', overflow: 'hidden', width: MODULE_COLUMN_WIDTH }}
     >
       <DialogHostProvider onModuleLockChange={report}>
-        <EffectDialog effectId={effectId} onClose={onClose} />
+        <EffectDialog key={effectId} effectId={effectId} onClose={onClose} />
       </DialogHostProvider>
     </GlassCard>
   );

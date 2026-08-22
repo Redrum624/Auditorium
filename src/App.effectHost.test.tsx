@@ -3,7 +3,7 @@ import App from './App';
 import DialogShell from './components/Dialogs/DialogShell';
 import { DEFAULT_PANEL, MODULE_COLUMN_WIDTH } from './components/Layout/ModuleStrip';
 import { createDocument } from './audio/AudioDocument';
-import { getEffect, getVisibleEffects } from './effects/EffectRegistry';
+import { defaultParamsFor, getEffect, getVisibleEffects } from './effects/EffectRegistry';
 import { _resetHostedToolRunning, hasOpenDialog } from './services/dialogBus';
 import { runEffectOnSelection } from './services/effectRunner';
 import { runCommand } from './services/menuActions';
@@ -357,5 +357,50 @@ describe('the orphan rule (N16)', () => {
       useAppStore.getState().closeDocument(doc.id);
     });
     expect(screen.queryByTestId('effect-host')).toBeNull();
+  });
+});
+
+/**
+ * Fix round 1 (finding 1): the user's scenario — edit Amplify's gain, then
+ * click Reverb in the Effects card beneath. The card that now names Reverb
+ * must show Reverb's own defaults and Apply must send exactly those, never
+ * the `{ gainDb: 7 }` the previous card held (which would have run Reverb on
+ * fallbacks the user never saw). The row swap at 'a second row swaps the
+ * card' above only pins `data-effect-id`; this pins the state behind it.
+ */
+describe('swapping the hosted effect starts the new one from its own defaults', () => {
+  function paramInput(id: string): HTMLInputElement {
+    const el = document.getElementById(`effect-param-${id}`);
+    if (!(el instanceof HTMLInputElement)) throw new Error(`no parameter input for ${id}`);
+    return el;
+  }
+
+  it('Reverb, opened over an edited Amplify card, shows and applies its own defaults', async () => {
+    addDoc();
+    render(<App />);
+    await openTool('effect.amplify');
+    fireEvent.change(paramInput('gainDb'), { target: { value: '7' } });
+    expect(paramInput('gainDb').value).toBe('7');
+
+    const reverb = getEffect('reverb')!;
+    await act(async () => {
+      fireEvent.click(
+        within(screen.getByTestId('effects-list')).getByRole('button', { name: reverb.name })
+      );
+    });
+    expect(screen.getAllByTestId('effect-host')).toHaveLength(1);
+    expect(host()).toHaveAttribute('data-effect-id', 'reverb');
+    expect(document.getElementById('effect-param-gainDb')).toBeNull();
+    for (const p of reverb.params) {
+      if (p.type === 'boolean') expect(paramInput(p.id).checked).toBe(Boolean(p.default));
+      else expect(paramInput(p.id).value).toBe(String(p.default));
+    }
+
+    await act(async () => {
+      fireEvent.click(within(host()).getByRole('button', { name: 'Apply' }));
+    });
+    expect(mockRun).toHaveBeenCalledTimes(1);
+    expect(mockRun.mock.calls[0][0]).toBe('reverb');
+    expect(mockRun.mock.calls[0][1]).toEqual(defaultParamsFor('reverb'));
   });
 });
