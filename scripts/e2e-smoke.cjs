@@ -3912,6 +3912,13 @@ async function main() {
     // must equal the Mixdown document just produced (the active document),
     // sample for sample, on both channels — the session is still the armed
     // crossfade session at this point, so the two renders see the same fades.
+    //
+    // Placement: lot A's brief asks for this leg "next to :390". At :385-395
+    // of the base file that is step 3 of the single-DOCUMENT walk (an
+    // `exportActive` MP3 on the tone WAV) — no session exists there, so
+    // `exportSession` would have nothing to render and nothing to compare
+    // against. The automation/fade session with a per-sample reference is the
+    // `mixdownSession()` call immediately above, so the leg lives here.
     console.log(`  exporting the session mixdown to ${OUT_SESSION_EXPORT_WAV} ...`);
     const sessionExportOk = await page.evaluate(
       (out) => window.__test.exportSession({ format: 'wav', wavBitDepth: 32, mp3Kbps: 192 }, out),

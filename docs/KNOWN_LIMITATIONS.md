@@ -372,10 +372,24 @@ the session untouched and the path set — so the Save pill stays grey and the
 chip shows no star, while the next Save silently writes a file without that
 document.
 
-**Intended behavior:** Recorded, not planned. The file on disk is not wrong
-(it holds what was saved); what is missing is a "the working set changed"
-signal. Counting a closed document as dirt would need a per-project record of
-what the last save contained, which is feature work beyond M4's definition.
+**The same blind spot, the other direction — opening a document into an
+already-saved project.** `openFilePath` (`src/services/fileService.ts:281`)
+builds the document through `createDocument`, which starts it `dirty: false`
+(`src/audio/AudioDocument.ts:87`), and passes `neverSaved: false` because the
+audio came off disk. Reading a file therefore touches none of the three
+clauses either: no document is dirty, the session history never moved, and
+the path is still set — so **Save stays grey and the newly opened file is
+absent from the `.audm`** until something else dirties the project. The
+symptom is worse than the closing case (a file the user can see in the Files
+panel is silently missing from the next save rather than silently dropped),
+but the cause is identical: adding to or removing from the working set is not
+part of M4's dirty definition.
+
+**Intended behavior:** Recorded, not planned, for both directions. The file
+on disk is not wrong (it holds what was saved); what is missing is a "the
+working set changed" signal. Counting a closed or newly opened document as
+dirt would need a per-project record of what the last save contained, which
+is feature work beyond M4's definition.
 
 ## Closing while busy asks instead of force-quitting
 
