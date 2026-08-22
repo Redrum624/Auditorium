@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import EffectsPanel from './EffectsPanel';
+import { getVisibleEffects } from '../../effects/EffectRegistry';
 import { registerAllEffects } from '../../effects/registerAll';
 import {
   getMenuSections,
@@ -24,8 +25,8 @@ jest.mock('../../services/menuActions', () => {
 });
 const mockRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
 
-// The effect rows above the tools open their dialog through the bus; spy on
-// that one opener so the single-click / double-click difference is observable.
+// The effect rows above the Mix row open their card through the bus; spy on
+// that one opener so the click is observable without mounting App's column.
 jest.mock('../../services/dialogBus', () => {
   const actual = jest.requireActual('../../services/dialogBus');
   return { ...actual, openEffectDialog: jest.fn() };
@@ -111,16 +112,27 @@ describe('EffectsPanel — the effect list stays first and untouched', () => {
     }
   });
 
-  it('keeps the effect rows on double-click: one click opens nothing', () => {
+  // Item 6 (2026-08-18): "all effects open with a single click". The row used
+  // to demand a double-click (a parameter set the user was about to fill in);
+  // an effect now opens as a card in the module column, one click like a tool
+  // row, and the registry id is what reaches the bus.
+  it('opens an effect on a SINGLE click, never on a row without a document', () => {
     addDoc();
     render(<EffectsPanel />);
     const first = within(screen.getAllByTestId('effects-item')[0]).getByRole('button');
 
     fireEvent.click(first);
-    expect(mockOpenEffectDialog).not.toHaveBeenCalled();
-
-    fireEvent.doubleClick(first);
     expect(mockOpenEffectDialog).toHaveBeenCalledTimes(1);
+    expect(mockOpenEffectDialog).toHaveBeenCalledWith(getVisibleEffects()[0].id);
+  });
+
+  it('keeps every effect row disabled with no document, so a click opens nothing', () => {
+    render(<EffectsPanel />);
+    const first = within(screen.getAllByTestId('effects-item')[0]).getByRole('button');
+    expect(first).toBeDisabled();
+
+    fireEvent.click(first);
+    expect(mockOpenEffectDialog).not.toHaveBeenCalled();
   });
 });
 
@@ -225,12 +237,13 @@ describe('EffectsPanel — a tool row is a single click on the menu command', ()
     }
   });
 
-  it('says single click in the tooltip, where the effect rows say double-click', () => {
+  it('says single click in both tooltips — run for a tool row, open for an effect row', () => {
     addDoc();
     render(<EffectsPanel />);
     expect(toolButton('spatial.position').title).toMatch(/^Click to run /);
     const effect = within(screen.getAllByTestId('effects-item')[0]).getByRole('button');
-    expect(effect.title).toMatch(/^Double-click/);
+    expect(effect.title).toMatch(/^Click to open /);
+    expect(effect.title).not.toMatch(/Double-click/);
   });
 });
 

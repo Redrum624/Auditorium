@@ -1,11 +1,25 @@
 import { useState } from 'react';
 import { act, render, screen, fireEvent } from '@testing-library/react';
 import EffectDialog from './EffectDialog';
+import { DialogHostProvider } from './DialogHost';
 import { registerAllEffects } from '../../effects/registerAll';
+import { runEffectOnSelection } from '../../services/effectRunner';
 import { captureNoiseProfile, clearNoiseProfile } from '../../services/noiseProfile';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument } from '../../audio/AudioDocument';
 import type { PlaybackEngine } from '../../audio/PlaybackEngine';
+
+// Item 6: the hosted variants need Apply's promise held open to observe the
+// lock around it. The runner is a spy over the REAL implementation, so every
+// pre-existing test in this file still runs the effect it always ran.
+jest.mock('../../services/effectRunner', () => {
+  const actual = jest.requireActual('../../services/effectRunner');
+  return { ...actual, runEffectOnSelection: jest.fn(actual.runEffectOnSelection) };
+});
+const mockRun = runEffectOnSelection as jest.MockedFunction<typeof runEffectOnSelection>;
+const realRun = jest.requireActual<typeof import('../../services/effectRunner')>(
+  '../../services/effectRunner'
+).runEffectOnSelection;
 
 registerAllEffects();
 
@@ -41,9 +55,29 @@ function Harness({ engine }: { engine: PlaybackEngine }) {
   ) : null;
 }
 
+/** Item 6: the same dialog mounted as a CARD — the presentation App's module
+ * column gives it. Copied from `DialogHost.test`'s `Hosted` harness: the
+ * provider's presence is the whole instruction, the dialog is unchanged. */
+function Hosted({
+  engine,
+  onModuleLockChange = () => {},
+}: {
+  engine: PlaybackEngine;
+  onModuleLockChange?: (locked: boolean) => void;
+}) {
+  const [open, setOpen] = useState(true);
+  return open ? (
+    <DialogHostProvider onModuleLockChange={onModuleLockChange}>
+      <EffectDialog effectId="amplify" onClose={() => setOpen(false)} engine={engine} />
+    </DialogHostProvider>
+  ) : null;
+}
+
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   clearNoiseProfile();
+  mockRun.mockReset();
+  mockRun.mockImplementation(realRun);
 });
 
 afterEach(() => {
@@ -110,7 +144,7 @@ describe('effect preview lifecycle (Task M7/F11)', () => {
     expect(screen.getByRole('button', { name: 'Preview' })).toBeInTheDocument();
   });
 
-  it('Escape while previewing stops the engine and reloads the real active document instead of leaving the preview loaded', () => {
+  it('Escape — modal branch, kept as the unwrapped contract — while previewing stops the engine and reloads the real active document', () => {
     const doc = seedActiveDoc();
     const fake = new FakePlaybackEngine();
     render(<Harness engine={asEngine(fake)} />);
@@ -161,6 +195,94 @@ describe('effect preview lifecycle (Task M7/F11)', () => {
 
     expect(fake.stop).not.toHaveBeenCalled();
     expect(fake.load).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * Item 6 (2026-08-18): hosted in the module column. The card installs no
+ * Escape handler (Escape belongs to the stage), so its ✕ is the dismissal and
+ * has to carry the same engine restore Escape carried; and the module lock —
+ * the strip greyed, the shortcuts suspended — is published during Apply only
+ * (N16): Preview locks nothing, and a Cancel that could unmount the dialog
+ * mid-apply would release the lock while the runner still commits.
+ */
+describe('hosted in the module column (item 6)', () => {
+  it('hosted: ✕ while previewing restores the engine', () => {
+    const doc = seedActiveDoc();
+    const fake = new FakePlaybackEngine();
+    render(<Hosted engine={asEngine(fake)} />);
+    expect(screen.queryByTestId('dialog-overlay')).toBeNull();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+    fake.load.mockClear();
+
+    fireEvent.click(screen.getByTestId('hosted-tool-close'));
+
+    expect(fake.stop).toHaveBeenCalled();
+    expect(fake.load).toHaveBeenCalledWith(expect.objectContaining({ id: doc.id }));
+    expect(screen.queryByTestId('effect-dialog')).not.toBeInTheDocument();
+  });
+
+  it('hosted: Preview publishes no lock', () => {
+    seedActiveDoc();
+    const fake = new FakePlaybackEngine();
+    const onModuleLockChange = jest.fn();
+    render(<Hosted engine={asEngine(fake)} onModuleLockChange={onModuleLockChange} />);
+    onModuleLockChange.mockClear();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+
+    expect(onModuleLockChange).not.toHaveBeenCalledWith(true);
+    expect(screen.getByTestId('hosted-tool-close')).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled();
+  });
+
+  it('hosted: Apply publishes lock true then false', async () => {
+    seedActiveDoc();
+    const fake = new FakePlaybackEngine();
+    const onModuleLockChange = jest.fn();
+    render(<Hosted engine={asEngine(fake)} onModuleLockChange={onModuleLockChange} />);
+    onModuleLockChange.mockClear();
+    mockRun.mockResolvedValueOnce('committed');
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+
+    // The shell publishes from a `useEffect` keyed on the lock, so React runs
+    // the idle effect's cleanup (`false`) before the busy effect (`true`) —
+    // a re-statement of the value already held. What matters is the
+    // transition: from the moment Apply starts, exactly `true` then `false`,
+    // and nothing before it ever said `true`.
+    const calls = onModuleLockChange.mock.calls.map(([v]) => v);
+    const up = calls.indexOf(true);
+    expect(up).toBeGreaterThanOrEqual(0);
+    expect(calls.slice(0, up).every((v) => v === false)).toBe(true);
+    expect(calls.slice(up)).toEqual([true, false]);
+    expect(screen.queryByTestId('effect-dialog')).not.toBeInTheDocument();
+  });
+
+  it('Cancel and ✕ refuse while busy', async () => {
+    seedActiveDoc();
+    const fake = new FakePlaybackEngine();
+    let finish!: (v: 'committed') => void;
+    mockRun.mockReturnValueOnce(new Promise<'committed'>((resolve) => (finish = resolve)));
+    render(<Hosted engine={asEngine(fake)} />);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    expect(screen.getByTestId('hosted-tool-close')).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    fireEvent.click(screen.getByTestId('hosted-tool-close'));
+    expect(screen.getByTestId('effect-dialog')).toBeInTheDocument();
+
+    await act(async () => {
+      finish('committed');
+    });
+    expect(screen.queryByTestId('effect-dialog')).not.toBeInTheDocument();
   });
 });
 

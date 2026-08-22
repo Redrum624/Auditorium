@@ -2036,3 +2036,29 @@ would break the freeze into slices without reducing the total work.
 **Not this:** the decode. The 308 ms decode freeze this app used to have was
 fixed along with three redundant copies (~205 → ~65 MiB per open). What remains
 is the hand-off itself.
+
+## Transport keys during a hosted effect Preview
+
+**Area:** the effect card in the module column (`src/components/Dialogs/EffectHost.tsx`,
+`src/components/Dialogs/EffectDialog.tsx`), global shortcuts
+(`src/services/shortcuts.ts`)
+
+**Current behavior:** since the 2026-08-18 program (item 6) an effect opens as
+a **card in the module column** rather than a modal. A card is not modal by
+design: it joins no dialog stack, so every global shortcut stays live while it
+is open — that is what lets you select, scrub and play beside it. **Preview**
+auditions the effect by loading a throwaway preview document into the
+playback engine, and during that preview the global keys still act on the
+engine: `Space` pauses or resumes the **preview**, and the transport keys act
+on the document the engine is holding, which is the preview copy, not the
+real document. The card publishes its module lock during **Apply only**
+(N16): Preview greys nothing and suspends nothing, because it is one click to
+end and locking the strip for it would be worse than the key landing on the
+preview. **Stop Preview**, the **✕**, **Cancel** and **Apply** all restore the
+real document to the engine, exactly as the modal's Escape did.
+
+**Intended behavior:** a narrower seam than the module lock — "hold the
+keyboard" without "hold the module column" — could route transport keys to the
+real document during a preview, or end the preview first. It is the same
+second seam the pipeline tools' lock already wants (see `App.tsx`,
+`refuseWhileRunning`) and is a change of its own.

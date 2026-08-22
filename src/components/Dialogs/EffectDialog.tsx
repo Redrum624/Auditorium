@@ -149,12 +149,20 @@ export default function EffectDialog({
   };
 
   return (
+    // Item 6 / N16: hosted in the module column (see `EffectHost`), the
+    // module LOCK is published during Apply only — `runEffectOnSelection`
+    // commits to the live document after its await, and a strip switch or a
+    // ✕ mid-apply would release the lock while it still does. Preview locks
+    // nothing: it is one click to end. `width` is ignored while hosted; the
+    // unwrapped (modal) presentation keeps it.
     <DialogShell
       title={def.name}
       subtitle={activeDocName}
       icon={<Sparkles size={15} />}
       width={460}
       onClose={onClose}
+      dismissable={!busy}
+      moduleLock={busy}
     >
       <div className="flex flex-col gap-3" data-testid="effect-dialog">
         {def.params.length > 0 && <SectionLabel>Parameters</SectionLabel>}
@@ -219,7 +227,12 @@ export default function EffectDialog({
             {previewing ? 'Stop Preview' : 'Preview'}
           </GlassButton>
           <div className="flex gap-2">
-            <GlassButton onClick={onClose}>Cancel</GlassButton>
+            {/* Item 6: a Cancel that unmounted mid-apply would release the
+                module lock while the runner still commits to the live document
+                (the F10 hazard) — it refuses exactly as the ✕ does. */}
+            <GlassButton onClick={onClose} disabled={busy}>
+              Cancel
+            </GlassButton>
             <GlassButton variant="primary" onClick={apply} disabled={!canApply}>
               Apply
             </GlassButton>

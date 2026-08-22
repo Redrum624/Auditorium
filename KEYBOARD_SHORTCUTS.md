@@ -10,14 +10,15 @@ a `contenteditable` element, so they never hijack normal typing (e.g. renaming
 a track or a marker).
 
 They are also suspended while a **modal dialog** is open (New File, Export,
-Convert, Record, an effect's parameter dialog), and — new in the Pipeline
-module — while a **pipeline pass is actually running** in the module column.
+Convert, Record), and — in the module column — while a **pipeline pass** or an
+**effect Apply** is actually running.
 Both suspensions exist for the same reason: those surfaces resolve the document
 they act on at the moment you confirm, so a `Ctrl+O` behind one would land the
-result on a file you had just replaced. A pipeline tool that is merely OPEN and
-idle suspends nothing — the whole point of hosting it beside the waveform is
-that you can keep working — and the keys come back by themselves when the pass
-finishes. Mouse interaction is never suspended by either.
+result on a file you had just replaced. A pipeline tool or an effect card that
+is merely OPEN and idle suspends nothing — the whole point of hosting it beside
+the waveform is that you can keep working — and the keys come back by
+themselves when the pass finishes. Mouse interaction is never suspended by
+either.
 
 | Shortcut | Action |
 |---|---|
@@ -86,8 +87,9 @@ and since the Pipeline module it means nothing at all over a hosted tool:
 |---|---|
 | The editor (nothing open) | Deselect, as above |
 | The **multitrack** view | Clears the clip selection — the document selection behind it is not on screen there, so clearing that instead would be an edit with no feedback anywhere |
-| A modal dialog (New File, Export, Convert, Record, an effect's parameters) | Closes the topmost one — unless it is mid-run, when it refuses |
+| A modal dialog (New File, Export, Convert, Record) | Closes the topmost one — unless it is mid-run, when it refuses |
 | A **pipeline tool** in the module column (Match Tempo, Vocal Chain, Cover Chain, Transcribe, …) | Nothing. Close it with the **✕** in its header |
+| An **effect card** in the module column | Nothing. Close it with the **✕** or **Cancel** |
 
 The last row is deliberate. A hosted tool is not modal — the stage behind it
 stays live — so it installs no `Escape` handler of its own; taking the key would
@@ -114,7 +116,7 @@ here.
 | Insert Active File at Cursor / Add Track | Edit menu, multitrack-only |
 | Next Marker / Previous Marker | Edit menu |
 | Capture Noise Print | Effects menu, top row (needs a selection) |
-| Every effect in the rack | Effects menu — one row per registered effect under its category heading, each opening that effect's parameter dialog; no effect has a key |
+| Every effect in the rack | Effects menu — one row per registered effect under its category heading, each opening that effect's card in the module column; no effect has a key |
 | Spatial Positioner | Effects menu, the closing Mix group |
 | Detect Tempo / Match Tempo / Align Vocal Timing / Auto-Remix | Pipeline menu, Tempo & Timing group |
 | Voice Changer / Vocal Chain / Cover Chain / Align Lyrics | Pipeline menu, Voice group |

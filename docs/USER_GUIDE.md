@@ -20,7 +20,8 @@ and everything is anchored on the **waveform**, not on the window:
   once a remix document exists, and then **History**, which is always last. It
   sits on top of the module column. Click an icon to open its card below the
   strip; click the **open** icon again to close the card, and the waveform takes
-  the whole column's width. **Files** is the card the app opens with.
+  the whole column's width. An open **effect card** sits between the strip and
+  the module card. **Files** is the card the app opens with.
 - **Bottom, centred on the waveform** — the status pill: the active file's
   `name · duration · rate · channels`, the big time readout, the cursor and
   selection times, the `♩ BPM` readout, the zoom in samples-per-pixel, and the
@@ -337,11 +338,18 @@ is always last, and anything added later goes between them.
 
 ## Effects
 
-Effects live in the **Effects** panel (opened from the module strip), grouped by category, and
-mirrored in the **Effects** menu. Double-click an effect (with a document
-open) to open its parameter dialog, adjust settings, and apply. Every effect
-processes the current selection, or the whole document when there's no
-selection.
+Effects live in the **Effects** panel (opened from the module strip), grouped
+by category, and mirrored in the **Effects** menu. **Click** an effect (with a
+document open) — from the card or the menu — and it opens as a **card in the
+module column, between the module strip and the module card**, the same
+348 px wide as both; the module card beneath it switches to Effects so the
+other effects stay one click away. Adjust, **Preview**, **Apply**; close it
+with the **✕** in its header or **Cancel**. Nothing is dimmed: the waveform,
+selection, transport and keys stay live while the card is open. While an
+effect is being **applied**, the module strip greys out and the ✕ and Cancel
+refuse until it finishes — the same rule as a running pipeline pass. Closing
+the last document closes the card. Every effect processes the current
+selection, or the whole document when there's no selection.
 
 Below the effects, the same card lists the Effects menu's own **Mix** row, the
 **Spatial Positioner**. A tool row takes a **single** click (it is a verb

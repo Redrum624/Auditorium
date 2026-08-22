@@ -70,16 +70,17 @@ function effectsMenuTools(): { id: string; label: string }[] {
 }
 
 /**
- * Left-sidebar effects browser: every registered effect grouped by category,
- * then the advanced tools grouped by what they do.
+ * Effects browser: every registered effect grouped by category, then the
+ * Effects menu's own Mix row.
  *
- * Double-clicking an effect opens its parameter dialog (only when a document is
- * active, mirroring the menu's enablement). A TOOL row is a SINGLE click, and
- * that difference is deliberate: an effect row names a parameter set the user
- * is about to fill in, so a click selects it and the second click commits to
- * the dialog; a tool row names a verb the menu also fires on one click, and
- * making the panel demand two would make the second door slower than the
- * first. Each row's tooltip says which it is.
+ * Item 6 (2026-08-18): an effect row and a tool row are both ONE click. An
+ * effect used to demand a double-click — the row named a parameter set the
+ * user was about to fill in, so the first click selected and the second
+ * committed to a modal. An effect now opens as a CARD in the module column
+ * (between the module strip and this card, the same width as both), which is
+ * not a commitment: nothing is dimmed, the stage stays live, and the card is
+ * one ✕ from gone. The row is enabled only with a document active, mirroring
+ * the menu's enablement; the tooltip says what a click does.
  */
 export default function EffectsPanel() {
   // Subscribe to the whole store so every command predicate is recomputed on
@@ -109,8 +110,8 @@ export default function EffectsPanel() {
                     <button
                       type="button"
                       disabled={!hasDoc}
-                      onDoubleClick={() => hasDoc && openEffectDialog(e.id)}
-                      title={hasDoc ? `Double-click to open ${e.name}` : 'Open a file first'}
+                      onClick={() => hasDoc && openEffectDialog(e.id)}
+                      title={hasDoc ? `Click to open ${e.name}` : 'Open a file first'}
                       className={ROW_BUTTON_CLASS}
                     >
                       {e.name}

@@ -248,12 +248,14 @@ async function main() {
       rowSelectors: ['[data-testid="effects-panel"] li'],
     });
 
-    // Two representative effect dialogs, with their Preview/Apply row. A row
-    // is double-clicked exactly as a user commits to one. A modal caps itself
-    // at 86vh and the Parametric EQ's three band blocks outgrow even the tall
-    // pin's version of that — so the dialogs alone borrow the display's whole
-    // height, and the fits-check below keeps this honest: a dialog whose
-    // Apply row still fell below the fold is a failed capture, not a crop.
+    // Two representative effect cards, opened with one click as a user does
+    // (item 6: an effect is a card in the module column, between the strip and
+    // the module card, not a modal). The column's bounded height is shared
+    // with the module card beneath, and the Parametric EQ's three band blocks
+    // outgrow the panel scenes' height — so the cards alone borrow the
+    // display's whole height, and the fits-check below keeps this honest: a
+    // card whose Apply row still fell below the fold is a failed capture, not
+    // a crop.
     await pinWindowGeometry(app, {
       width: SMOKE_WINDOW.width,
       height: geo.workArea.height - 24,
@@ -263,27 +265,25 @@ async function main() {
       ['Parametric EQ', 'effect-parametric-eq.png'],
       ['Reverb', 'effect-reverb.png'],
     ]) {
-      console.log(`Effect dialog: ${label}...`);
-      await page.dblclick(`[data-testid="effects-list"] button:text-is("${label}")`);
-      await page.waitForSelector('[data-testid="dialog-overlay"] [role="dialog"]', {
-        timeout: 5000,
-      });
+      console.log(`Effect card: ${label}...`);
+      await page.click(`[data-testid="effects-list"] button:text-is("${label}")`);
+      await page.waitForSelector('[data-testid="effect-host"]', { timeout: 5000 });
       await sleep(SETTLE_MS); // dc-rise
-      // The dialog's whole point in the gallery is its Preview/Apply row — a
+      // The card's whole point in the gallery is its Preview/Apply row — a
       // capture that scrolled it below the fold is a defect, not a crop.
       const fits = await page.evaluate(() => {
-        const d = document.querySelector('[data-testid="dialog-overlay"] [role="dialog"]');
+        const d = document.querySelector('[data-testid="effect-host"]');
         const apply = [...d.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Apply');
         if (!apply) return false;
         const db = d.getBoundingClientRect();
         const ab = apply.getBoundingClientRect();
         return ab.bottom <= db.bottom + 1;
       });
-      if (!fits) throw new Error(`${label}: the Apply row is below the dialog's fold at this window height`);
-      await shoot(page, file, '[data-testid="dialog-overlay"] [role="dialog"]');
-      await page.click('[data-testid="dialog-overlay"] [role="dialog"] button:text-is("Cancel")');
+      if (!fits) throw new Error(`${label}: the Apply row is below the card's fold at this window height`);
+      await shoot(page, file, '[data-testid="effect-host"]');
+      await page.click('[data-testid="effect-host"] [data-testid="hosted-tool-close"]');
       await page.waitForFunction(
-        () => document.querySelector('[data-testid="dialog-overlay"]') === null,
+        () => document.querySelector('[data-testid="effect-host"]') === null,
         null,
         { timeout: 5000 }
       );

@@ -22,10 +22,9 @@ import { SectionLabel } from '../UI/glass';
  * longer appears in the Effects card at all ("if it is in Pipeline, remove it
  * from Effects"), and this card renders `getPipelineGroups()` alone.
  *
- * The rows are a SINGLE click, matching the Effects card's tool rows and the
- * menu, and unlike the effect rows' double-click. EffectsPanel states the
- * reason: an effect row names a parameter set the user is about to fill in, a
- * tool row names a verb.
+ * The rows are a SINGLE click, matching the menu and the Effects card's rows
+ * — since item 6 an effect row is one click too, opening its card in the
+ * module column.
  */
 const ROW_BUTTON_CLASS =
   'mx-1 w-[calc(100%-0.5rem)] truncate rounded-lg px-2 py-1 text-left text-[#d4d4d8] enabled:hover:bg-white/5 disabled:cursor-default disabled:text-[#8b8b92] disabled:opacity-50';

@@ -4,7 +4,10 @@ import WaveformView from './components/Editor/WaveformView';
 import SpectrogramView from './components/Editor/SpectrogramView';
 import MultitrackView from './components/Multitrack/MultitrackView';
 import ConvertDialog from './components/Dialogs/ConvertDialog';
-import EffectDialog from './components/Dialogs/EffectDialog';
+// ---- lot B ----
+// Item 6: an effect is hosted in the module column, not mounted as a modal.
+import EffectHost from './components/Dialogs/EffectHost';
+// ---- /lot B ----
 import ExportDialog from './components/Dialogs/ExportDialog';
 import NewFileDialog from './components/Dialogs/NewFileDialog';
 import RecordDialog from './components/Dialogs/RecordDialog';
@@ -35,6 +38,10 @@ import TempoCard from './components/Layout/TempoCard';
 import TitleBar from './components/Layout/TitleBar';
 import Toolbar from './components/Layout/Toolbar';
 import { GlassCard, IconTile } from './components/UI/glass';
+// ---- lot B ----
+// Item 6: the hosted effect's own name, for the refusal message.
+import { getEffect } from './effects/EffectRegistry';
+// ---- /lot B ----
 import { registerAllEffects } from './effects/registerAll';
 import {
   registerDialogSetters,
@@ -90,6 +97,13 @@ const STAGE_INSET_RIGHT_HOSTED = COLUMN_MARGIN + TOOL_HOST_WIDTH + COLUMN_MARGIN
  * sentence the user reads and the rule the code enforces are the same fact. */
 const MODULE_SWITCH_LOCKED =
   'A pipeline pass is running — switching module would discard it. The waveform and transport stay usable.';
+// ---- lot B ----
+/** Item 6 / N16: the same tooltip while a hosted EFFECT's Apply is running.
+ * A second constant rather than a reworded first: the pipeline sentence is
+ * pinned by test, and the two locks name different things. */
+const MODULE_SWITCH_LOCKED_EFFECT =
+  'An effect is being applied — wait for it to finish. The waveform and transport stay usable.';
+// ---- /lot B ----
 
 // Populate the effect registry and its menu commands once at module load — before
 // the first render — so the Effects menu and panel are fully built on first paint.
@@ -104,7 +118,13 @@ export default function App() {
 
   const [exportOpen, setExportOpen] = useState(false);
   const [newFileOpen, setNewFileOpen] = useState(false);
-  const [effectDialogId, setEffectDialogId] = useState<string | null>(null);
+  // ---- lot B ----
+  // Item 6 / M6: the effect the module column hosts, or null. One at a time,
+  // and mutually exclusive with `hostedTool` — the 640 tool host and the 348
+  // effect card never share the column (W1). Used to be `effectDialogId`, a
+  // modal flag.
+  const [hostedEffect, setHostedEffect] = useState<string | null>(null);
+  // ---- /lot B ----
   const [convertMode, setConvertMode] = useState<ConvertMode | null>(null);
   const [recordOpen, setRecordOpen] = useState(false);
   // U2-3: the nine `useState` flags that used to mount nine modals became ONE
@@ -221,12 +241,20 @@ export default function App() {
   const toolRunningRef = useRef(false);
   const hostedToolRef = useRef<string | null>(null);
   hostedToolRef.current = hostedTool;
+  // ---- lot B ----
+  const hostedEffectRef = useRef<string | null>(null);
+  hostedEffectRef.current = hostedEffect;
+  // ---- /lot B ----
 
   const refuseWhileRunning = useCallback(() => {
+    const pipelineLabel = getPipelineGroups()
+      .flatMap((g) => g.commands)
+      .find((c) => c.id === hostedToolRef.current)?.label;
+    // Item 6: the running pass may be a hosted effect's Apply (N16) — name it.
     const label =
-      getPipelineGroups()
-        .flatMap((g) => g.commands)
-        .find((c) => c.id === hostedToolRef.current)?.label ?? 'A pipeline pass';
+      pipelineLabel ??
+      (hostedEffectRef.current ? getEffect(hostedEffectRef.current)?.name : undefined) ??
+      'A pipeline pass';
     void window.electronAPI?.showMessageBox({
       type: 'info',
       title: 'A pass is running',
@@ -247,6 +275,8 @@ export default function App() {
         refuseWhileRunning();
         return;
       }
+      // Item 6: the 640 host and the 348 effect card never coexist (W1).
+      setHostedEffect(null);
       setSidebarTab('pipeline');
       setHostedTool(commandId);
     },
@@ -323,6 +353,38 @@ export default function App() {
     setHostedToolRunning(running);
   }, []);
 
+  // ---- lot B ----
+  /**
+   * Item 6 / M6 / N16: host an effect in the module column, as a card between
+   * the strip and the module card, with that card forced to Effects so the
+   * other effects stay one click away. The effect shares the pipeline tools'
+   * lock (`handleToolModuleLock`, through `EffectHost`'s provider): a running
+   * pass — a tool's OR an effect's Apply — is never discarded, so the same
+   * refusal guards both doors. The lock is released by `DialogShell`'s own
+   * cleanup on unmount, which is why `closeEffect` touches no ref.
+   */
+  const openEffect = useCallback(
+    (effectId: string) => {
+      if (toolRunningRef.current) {
+        refuseWhileRunning();
+        return;
+      }
+      setHostedTool(null); // the 640 host and the 348 effect card never coexist (W1)
+      setSidebarTab('effects'); // N16 / M6: the module card is forced to Effects
+      setHostedEffect(effectId);
+    },
+    [refuseWhileRunning]
+  );
+  const closeEffect = useCallback(() => setHostedEffect(null), []);
+  // Orphan rule (N16), the twin of the Remix rule above: no document left
+  // means nothing for the card to apply to, so it closes. One document closing
+  // while another becomes active keeps it — the dialog resolves the live
+  // active document at Apply, exactly as the modal did.
+  useEffect(() => {
+    if (hostedEffect !== null && activeDocumentId === null) setHostedEffect(null);
+  }, [hostedEffect, activeDocumentId]);
+  // ---- /lot B ----
+
   // Global keyboard shortcuts (Task 8): mounted once for the app's lifetime.
   useEffect(() => installShortcuts(window), []);
 
@@ -379,16 +441,18 @@ export default function App() {
   //
   // U2-3: the nine pipeline openers no longer raise a modal flag. They name the
   // command whose tool the module column should HOST, and every door the user
-  // has — the Pipeline card, the Pipeline menu, the Effects card's tool rows —
-  // arrives here, because all three go through `runCommand` and every one of
-  // those commands' `run()` bodies calls one of these openers. Routing at the
-  // bus is what made "from every door" one change rather than three.
+  // has — the Pipeline card and the Pipeline menu — arrives here, because both
+  // go through `runCommand` and every one of those commands' `run()` bodies
+  // calls one of these openers. Routing at the bus is what made "from every
+  // door" one change rather than several. Item 6 gives `openEffectDialog` the
+  // same shape: the Effects card's rows and the Effects menu both land on
+  // `openEffect`, which hosts the effect in the column.
   useEffect(
     () =>
       registerDialogSetters({
         openNewFileDialog: () => setNewFileOpen(true),
         openExportDialog: () => setExportOpen(true),
-        openEffectDialog: (effectId) => setEffectDialogId(effectId),
+        openEffectDialog: openEffect,
         openConvertDialog: (mode) => setConvertMode(mode),
         openRecordDialog: () => setRecordOpen(true),
         openTempoDialog: () => openTool('tempo.match'),
@@ -410,7 +474,7 @@ export default function App() {
         // U2-3: a user COMMAND rather than a hand-off, so it is guarded.
         focusSpatialPanel: () => showPanel('spatial', 'guard-while-running'),
       }),
-    [openTool, showPanel]
+    [openTool, showPanel, openEffect]
   );
 
   // Scripted-smoke test hooks — only when the preload flagged test mode.
@@ -484,12 +548,15 @@ export default function App() {
             // toolbar, status and edit pills) rather than holding 362px of
             // width hostage for a 90px card.
             '--stage-inset-left': `${COLUMN_MARGIN}px`,
-            // U2-3: three states now — no card, a module card, and the wider
-            // tool host.
+            // U2-3: four states now — no card, a module card, the wider tool
+            // host, and (item 6 / M6) an effect card with or without a module
+            // card beneath it. The effect card is the column's own width, so
+            // it asks for a module card's clearance; it can outlive the module
+            // card, which is why it is its own clause.
             '--stage-inset-right': `${
               hostedTool !== null
                 ? STAGE_INSET_RIGHT_HOSTED
-                : sidebarTab === null
+                : sidebarTab === null && hostedEffect === null
                   ? COLUMN_MARGIN
                   : STAGE_INSET_RIGHT_OPEN
             }px`,
@@ -542,6 +609,20 @@ export default function App() {
           }}
         >
           <TempoCard />
+          {/* ---- lot B ----
+              Item 6 / M6: the effect card sits between the strip (and the
+              TempoCard) and the module card — same width as both, so the
+              strip never learns a third width (W1). It does not replace the
+              module card: that card is forced to Effects when the effect
+              opens (N16) and then lives its own life beneath. */}
+          {hostedEffect !== null && (
+            <EffectHost
+              effectId={hostedEffect}
+              onClose={closeEffect}
+              onModuleLockChange={handleToolModuleLock}
+            />
+          )}
+          {/* ---- /lot B ---- */}
           {/* U2-3: the tool host REPLACES the module card while a pipeline tool
               is open — same anchor, same glass language, wider. No backdrop and
               no focus trap: the stage behind it stays live, which is the whole
@@ -630,6 +711,8 @@ export default function App() {
             U2-3: `lockedReason` is set only while a hosted pass is RUNNING —
             switching module then would unmount the tool, and every one of the
             nine discards its result on unmount (see `refuseWhileRunning`).
+            Item 6: a hosted effect's Apply is the same lock with its own
+            sentence.
 
             W1: `toolHosted` widens the strip to the host card's own width
             while a tool is open — the user's rule that the bar and the open
@@ -637,7 +720,13 @@ export default function App() {
         <ModuleStrip
           activeTab={sidebarTab}
           hasRemix={hasRemix}
-          lockedReason={toolRunning ? MODULE_SWITCH_LOCKED : null}
+          lockedReason={
+            toolRunning
+              ? hostedEffect !== null
+                ? MODULE_SWITCH_LOCKED_EFFECT
+                : MODULE_SWITCH_LOCKED
+              : null
+          }
           toolHosted={hostedTool !== null}
           onSelect={selectModule}
         />
@@ -666,20 +755,18 @@ export default function App() {
 
       {newFileOpen && <NewFileDialog onClose={() => setNewFileOpen(false)} />}
       {exportOpen && <ExportDialog onClose={() => setExportOpen(false)} />}
-      {effectDialogId && (
-        <EffectDialog effectId={effectDialogId} onClose={() => setEffectDialogId(null)} />
-      )}
       {convertMode && (
         <ConvertDialog mode={convertMode} onClose={() => setConvertMode(null)} />
       )}
       {recordOpen && <RecordDialog onClose={() => setRecordOpen(false)} />}
       {/* U2-3: the nine pipeline tools used to be mounted here, each behind its
           own `useState` flag, each raising a full-screen backdrop. They are in
-          the module column now (see the card column above). What stays modal is
-          the set that is a QUESTION rather than a workspace: New File, Export,
-          Convert, Record and the per-effect parameter dialogs each take one
-          answer and close, and none of them has anything to watch on the stage
-          while it is open. */}
+          the module column now (see the card column above). Item 6 moved the
+          per-effect parameter dialog there too (`EffectHost`): an effect is
+          previewed against the stage, which is something to watch. What stays
+          modal is the set that is a QUESTION rather than a workspace: New
+          File, Export, Convert and Record each take one answer and close, and
+          none of them has anything to watch on the stage while it is open. */}
     </div>
   );
 }
