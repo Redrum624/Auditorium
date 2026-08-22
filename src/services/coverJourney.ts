@@ -1400,6 +1400,8 @@ export async function runCoverJourney(
       mtZoom: defaultSessionZoom(session),
       mtPlayState: 'stopped',
       mtPlayheadSample: 0,
+      // Lot A (M4): a cover session is a new, unsaved project.
+      projectPath: null,
     });
     // MT1 (I7) deleted `clipWaveformCache` and its eight call sites: clips now
     // draw straight to the on-screen canvas, so nothing produces an entry and

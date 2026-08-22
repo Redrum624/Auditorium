@@ -1,5 +1,7 @@
 import { createClip } from './session';
 import { useSessionStore } from './sessionStore';
+import { SESSION_UNDO_KEY, _resetSessionUndo, canUndoSession, undoSession } from './sessionUndo';
+import { getHistory } from '../services/undoHistory';
 import { sessionLaneWidth } from './sessionViewport';
 
 function findClip(clipId: string) {
@@ -750,5 +752,68 @@ describe('trimClip keeps fades coherent', () => {
     expect(clip.startSample).toBe(2000);
     expect(clip.fadeInSample).toBe(250);
     expect(clip.fadeOutSample).toBe(100);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4 / N11) — `projectPath` lives on SessionState, outside the session
+// and outside undo; `renameSession` is the one recorded way the name changes.
+// ---------------------------------------------------------------------------
+describe('projectPath and renameSession (lot A)', () => {
+  beforeEach(() => {
+    useSessionStore.getState().newSession(44100);
+    useSessionStore.getState().setProjectPath(null);
+    _resetSessionUndo();
+  });
+
+  it('starts null', () => {
+    expect(useSessionStore.getInitialState().projectPath).toBeNull();
+  });
+
+  it('newSession resets it to null, and undoing that New Session leaves it null (N11: not in the snapshot)', () => {
+    useSessionStore.getState().setProjectPath('D:\p.audm');
+    expect(useSessionStore.getState().projectPath).toBe('D:\p.audm');
+
+    useSessionStore.getState().newSession(44100);
+    expect(useSessionStore.getState().projectPath).toBeNull();
+
+    undoSession();
+    expect(useSessionStore.getState().projectPath).toBeNull();
+  });
+
+  it('setProjectPath is unrecorded and leaves the session reference alone — a path is not session content', () => {
+    const before = useSessionStore.getState().session;
+    useSessionStore.getState().setProjectPath('D:\p.audm');
+    expect(canUndoSession()).toBe(false);
+    expect(useSessionStore.getState().session).toBe(before);
+  });
+
+  it('renameSession records exactly one entry and undoSession restores the old name', () => {
+    useSessionStore.getState().renameSession('x');
+    expect(useSessionStore.getState().session.name).toBe('x');
+    expect(getHistory(SESSION_UNDO_KEY)).toEqual({ done: ['Rename project'], undone: [] });
+
+    undoSession();
+    expect(useSessionStore.getState().session.name).toBe('Untitled Session');
+  });
+
+  it('renameSession with the CURRENT name records nothing and keeps the same session reference', () => {
+    const before = useSessionStore.getState().session;
+    useSessionStore.getState().renameSession(before.name);
+    expect(useSessionStore.getState().session).toBe(before);
+    expect(canUndoSession()).toBe(false);
+  });
+
+  it('a recorded clip mutation and its undo leave projectPath untouched', () => {
+    useSessionStore.getState().setProjectPath('D:\p.audm');
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: 'doc-lotA', startSample: 0, offsetSample: 0, lengthSample: 100 }));
+    expect(useSessionStore.getState().projectPath).toBe('D:\p.audm');
+
+    undoSession();
+    expect(useSessionStore.getState().session.tracks[0].clips).toHaveLength(0);
+    expect(useSessionStore.getState().projectPath).toBe('D:\p.audm');
   });
 });

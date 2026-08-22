@@ -318,6 +318,9 @@ export function buildStemSession(
     mtZoom: defaultSessionZoom(session),
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
+    // Lot A (M4): a landed stem session is a new, unsaved project — the
+    // `.audm` that was open before is not where these tracks live.
+    projectPath: null,
   });
   // R3: stem landing is a LOAD-shaped replacement (this module deliberately
   // follows openSessionViaDialog's apply block) — it starts a new editing

@@ -44,7 +44,7 @@ import {
 } from './coverJourney';
 // V4: the session stack the trim lands on — a DIFFERENT stack from the take's
 // document history the rest of this suite reads through `getHistory(takeId)`.
-import { SESSION_UNDO_KEY, canUndoSession, undoSession } from '../multitrack/sessionUndo';
+import { SESSION_UNDO_KEY, canUndoSession, isSessionDirty, undoSession } from '../multitrack/sessionUndo';
 import { MONO_PAN_COMPENSATION_DB, STEM_TRACK_LABELS } from './stemLanding';
 import { clearHistory, getHistory, pushUndo, redo, undo } from './undoHistory';
 import { applyEdit, pushMarkerUndo } from './editOps';
@@ -1950,5 +1950,23 @@ describe('the stage table', () => {
 
   it('names the session after the song', () => {
     expect(coverSessionName('My Song')).toBe('My Song — Cover');
+  });
+});
+
+// ── Lot A (M4): the built cover session is a new, unsaved project ───────────
+
+describe('lot A (M4): the cover session replaces the project', () => {
+  it('clears projectPath, and the load itself leaves the session history clean', async () => {
+    useSessionStore.getState().setProjectPath('D:\p.audm');
+
+    const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
+
+    expect(report!.completed).toBe(true);
+    expect(useSessionStore.getState().projectPath).toBeNull();
+    // Stage 5 clears the session stack; the only thing that can push onto it
+    // afterwards is the level trim (one entry, `JOURNEY_TRIM_UNDO_LABEL`), so
+    // the session is dirty exactly when that entry exists and never because of
+    // the landing itself.
+    expect(isSessionDirty()).toBe(canUndoSession());
   });
 });

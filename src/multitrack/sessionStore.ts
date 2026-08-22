@@ -90,6 +90,17 @@ export interface SessionState {
    * asked for.
    */
   groupDragPreview: { clipIds: string[]; deltaSample: number } | null;
+  /**
+   * Lot A (M4 / N11) — the `.audm` this project was opened from or last saved
+   * to, or `null` for a project that has never been written. Plain Save writes
+   * here without a dialog; Save As and Open Project set it; `newSession`, a
+   * stem landing and a cover session reset it to `null`.
+   *
+   * Deliberately NOT on `Session`, so `serializeSession*` never writes it into
+   * the file header, and NOT in `SessionSnapshot`, so an undo never restores
+   * it — undoing past a Save As must not move where the next Save lands.
+   */
+  projectPath: string | null;
 }
 
 export interface SessionActions {
@@ -247,6 +258,16 @@ export interface SessionActions {
   setMtZoom(z: SessionState['mtZoom']): void;
   setMtPlayState(state: SessionState['mtPlayState']): void;
   setMtPlayheadSample(s: number): void;
+  /** Lot A (M4): unrecorded — the path is not session content (see
+   * `SessionState.projectPath`). Set by Save / Save As / Open Project, reset
+   * to `null` by `newSession` and the load-shaped replacements. */
+  setProjectPath(path: string | null): void;
+  /** Lot A (N13): Save As renames the project to the file's basename. A
+   * RECORDED mutation ('Rename project') because `session.name` lives on the
+   * session object, and an unrecorded `session` replacement would break the
+   * recording invariant in `sessionUndo.ts`. No-op when the name is unchanged
+   * (same session reference, nothing recorded). */
+  renameSession(name: string): void;
 }
 
 /** MT1-1 — the state a fresh session starts in, session and zoom together.
@@ -697,6 +718,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   mtPlayheadSample: 0,
   mtEnvelope: null,
   groupDragPreview: null, // T5
+  projectPath: null, // lot A (M4)
 
   newSession(sampleRate) {
     // R3: recorded — File > New Session is a store mutation of the current
@@ -711,6 +733,10 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         mtPlayState: 'stopped',
         mtPlayheadSample: 0,
         mtEnvelope: null,
+        // Lot A (M4 / N11): a new project has no file. Reset by the mutation,
+        // but NOT in the snapshot — undoing this New Session restores the old
+        // session and leaves the path `null`.
+        projectPath: null,
       });
     });
   },
@@ -1245,6 +1271,18 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   setMtPlayheadSample(sample) {
     set({ mtPlayheadSample: sample });
   },
+
+  // ---- lot A (M4) ----
+  setProjectPath(path) {
+    set({ projectPath: path });
+  },
+
+  renameSession(name) {
+    recordSessionMutation('Rename project', () => {
+      set((s) => (s.session.name === name ? s : { session: { ...s.session, name } }));
+    });
+  },
+  // ---- end lot A ----
 }));
 
 // ---------------------------------------------------------------------------

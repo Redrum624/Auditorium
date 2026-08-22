@@ -18,6 +18,7 @@ import { partitionStems } from '../dsp/stemPartition';
 import { mixdownSession } from '../multitrack/mixdown';
 import { createClip, createTrack } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
+import { isSessionDirty } from '../multitrack/sessionUndo';
 import { defaultSessionZoom, sessionEndSample } from '../multitrack/sessionZoom';
 import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from '../multitrack/sessionViewport';
 import { useAppStore, makeInitialState } from '../stores/appStore';
@@ -727,5 +728,21 @@ describe('over-unity sources — the ±1 master clamp', () => {
     // The stems still land — they are valid audio regardless.
     expect(useAppStore.getState().documents).toHaveLength(5);
     expect(useSessionStore.getState().session.tracks).toHaveLength(5);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — a landed stem session is a NEW, unsaved project: whatever
+// `.audm` was open before is not where these tracks live.
+// ---------------------------------------------------------------------------
+describe('lot A (M4): a landed stem session is a new, unsaved project', () => {
+  it('clears projectPath and starts with a clean session history', () => {
+    useSessionStore.getState().setProjectPath('D:\p.audm');
+    const source = addSourceDocument(2, 44100);
+
+    landStems(makeOutput(source));
+
+    expect(useSessionStore.getState().projectPath).toBeNull();
+    expect(isSessionDirty()).toBe(false);
   });
 });
