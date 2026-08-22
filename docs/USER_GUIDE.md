@@ -52,10 +52,9 @@ to be run in a particular sequence — the vocal and cover chains especially —
 the order is stated in the tool's own stage notes, not implied by the menu.
 
 Every one of these tools is also a single click in the **Pipeline** module card
-— the same ten rows in the same three groups — and in the **Effects** module
-card below the effect list, where the **Mix** row (the Spatial Positioner)
-sits after them (see *The panel cards* below). All three doors run
-the same command.
+— the same ten rows in the same three groups. Both doors run the same command.
+(The **Effects** card lists only the effects and the Effects menu's own **Mix**
+row.)
 
 **These tools do not open a centred dialog.** Selecting one of the nine that
 have a UI — Match Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal
@@ -344,20 +343,13 @@ open) to open its parameter dialog, adjust settings, and apply. Every effect
 processes the current selection, or the whole document when there's no
 selection.
 
-**Below the effects, the same card lists the Pipeline tools** — grouped as
-**Tempo & Timing**, **Voice** and **Analysis** — and then the Effects menu's
-own **Mix** row, the **Spatial Positioner**, so the whole
-capability surface is in one panel. (The **Pipeline** module card lists the
-ten Pipeline rows on their own, without scrolling past the effects.) A tool takes a
-**single** click (it is a verb the menu already runs on one click; a second door
-slower than the first is not a door), while effect rows keep their double-click,
-because an effect row opens a parameter dialog rather than doing something. A
-greyed tool row means that command is unavailable right now, for exactly the
-reason the menu gives — the panel asks the command itself rather than keeping
-its own copy of the rule.
-
-Clicking a tool row here replaces this card with the tool, exactly as the
-Pipeline card and the Pipeline menu do.
+Below the effects, the same card lists the Effects menu's own **Mix** row, the
+**Spatial Positioner**. A tool row takes a **single** click (it is a verb
+the menu already runs on one click). A greyed tool row means that command is
+unavailable right now, for exactly the reason the menu gives — the panel asks
+the command itself rather than keeping its own copy of the rule. The ten
+Pipeline tools are not listed here: they live in the **Pipeline** module card
+and menu.
 
 - **Amplitude** — Amplify (gain in dB), Fade (in/out; Linear, Ducked, Cosine
   or Equal power curve; ramp length as a % of the selection — 100 % shapes the

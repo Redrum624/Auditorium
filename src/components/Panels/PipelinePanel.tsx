@@ -13,12 +13,14 @@ import { SectionLabel } from '../UI/glass';
  * predicate — and the click is `runCommand`. Nothing here can drift from the
  * menu, because nothing here restates it.
  *
- * Why a module and not just the Effects card's tool list (F11-6), which shows
- * the same rows: the Effects card is an EFFECT browser with the tools appended
- * below a long scrolling list, so reaching Cover Chain there means scrolling
- * past every registered effect. A module is a place you go — one click on the
- * strip and the ten tools are the whole card. The two doors stay in sync by
- * construction: both render `getPipelineGroups()`.
+ * Why a module and not the Effects card's tool list (F11-6), which used to
+ * show the same rows: the Effects card is an EFFECT browser with the tools
+ * appended below a long scrolling list, so reaching Cover Chain there meant
+ * scrolling past every registered effect. A module is a place you go — one
+ * click on the strip and the ten tools are the whole card. Item 5 of the
+ * 2026-08-18 program then made this card the ONLY one: a Pipeline tool no
+ * longer appears in the Effects card at all ("if it is in Pipeline, remove it
+ * from Effects"), and this card renders `getPipelineGroups()` alone.
  *
  * The rows are a SINGLE click, matching the Effects card's tool rows and the
  * menu, and unlike the effect rows' double-click. EffectsPanel states the

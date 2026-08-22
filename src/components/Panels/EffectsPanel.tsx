@@ -2,9 +2,6 @@ import { getVisibleEffects } from '../../effects/EffectRegistry';
 import type { EffectDefinition } from '../../effects/types';
 import { openEffectDialog } from '../../services/dialogBus';
 import { getMenuSections, isCommandEnabled, runCommand } from '../../services/menuActions';
-// U2: the Pipeline menu's rows and groups, derived once and shared with the
-// Pipeline module's card.
-import { getPipelineGroups } from '../../services/pipelineTools';
 import { useAppStore } from '../../stores/appStore';
 import { SectionLabel } from '../UI/glass';
 
@@ -20,35 +17,24 @@ function groupByCategory(effects: EffectDefinition[]): [string, EffectDefinition
 }
 
 /**
- * F11-6: the advanced tools, below the effect list.
+ * What this card lists, and what it deliberately does not.
  *
- * Ten tools shipped menu-only across ten releases while this card kept listing
- * the plain effect registry alone — so the surface the user reaches for first
- * was the one surface that never learned about them. Each row is a SECOND DOOR
- * to a command that already exists: the id is handed to `runCommand`, the label
- * is read off the registry, and the greying is `isCommandEnabled` — the
- * command's own predicate. No behaviour is added here, and none can be: a row
- * that looks live but is stale still cannot fire, because `runCommand`
- * re-checks enablement before running.
+ * The card is the registry's effects, grouped by category, followed by the
+ * Effects MENU's own tool tail — today `spatial.position` alone, drawn as a
+ * 'Mix' section (`effectsMenuTools`). A tool row is a door to a command that
+ * already exists: the id is handed to `runCommand`, the label is read off the
+ * registry, and the greying is `isCommandEnabled` — the command's own
+ * predicate. No behaviour is added here, and none can be: a row that looks
+ * live but is stale still cannot fire, because `runCommand` re-checks
+ * enablement before running.
  *
- * The sections are the questions the tools answer, in the order a cover is
- * actually made. F11-8 filled the fourth, 'Mix', once `spatial.position`
- * existed.
- *
- * U2: the roster and its groups MOVED to `services/pipelineTools.ts`,
- * where they are derived from the Pipeline menu's own separator-delimited
- * section instead of being restated. F11-6 wrote the id list here because this
- * was the only card that showed the tools; U2 adds a second (the Pipeline
- * module), and two hand-maintained copies of the same ids would have
- * disagreed with the menu — and with each other — the first time a tool moved
- * group. What changed is that they can no longer drift apart.
- *
- * T8: the Mix section stopped being one of those Pipeline groups. The user
- * moved `spatial.position` to the Effects MENU ("move the Spacial tool to the
- * effects module"), so `getPipelineGroups()` no longer carries it — this card
- * now draws the Effects menu's own tool tail (`effectsMenuTools`) as the Mix
- * section, after the Pipeline groups, in the same visual language. The card
- * looks exactly as it did; what moved is which menu the row is read from.
+ * A PIPELINE-menu command appears in the Pipeline module only. F11-6 listed
+ * the ten Pipeline tools here as a second door, and U2 kept them when the
+ * Pipeline module arrived; item 5 of the 2026-08-18 program removed them at
+ * the user's ruling ("if it is in Pipeline, remove it from Effects"). The Mix
+ * row stays because it is not a Pipeline tool: T8 moved `spatial.position` to
+ * the Effects MENU, the strip draws no icon for Spatial, and this row is the
+ * positioner's only door outside that menu.
  */
 
 // Shared by the effect rows and the tool rows: `truncate` plus the fixed
@@ -98,8 +84,8 @@ function effectsMenuTools(): { id: string; label: string }[] {
 export default function EffectsPanel() {
   // Subscribe to the whole store so every command predicate is recomputed on
   // any state change — MenuBar's and EditToolbar's own subscription, for the
-  // same reason: the advanced tools are gated on more than the active doc id
-  // (Auto-Remix, Transcribe, Separate and Align Lyrics also need audio in it).
+  // same reason: `spatial.position`'s predicate is session-scoped, not a
+  // function of the active document id alone.
   useAppStore((s) => s);
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
   const groups = groupByCategory(getVisibleEffects());
@@ -137,26 +123,11 @@ export default function EffectsPanel() {
         </div>
       )}
 
-      {getPipelineGroups().map(({ title, commands }, i) => {
-        if (commands.length === 0) return null;
-        return (
-          <div
-            key={title ?? `group-${i}`}
-            data-testid="effects-tool-section"
-            data-section={title ?? ''}
-          >
-            {title !== null && <SectionLabel className="px-2 pb-1 pt-2">{title}</SectionLabel>}
-            <ul>
-              {commands.map(({ id, label }) => toolRow(id, label, hasDoc))}
-            </ul>
-          </div>
-        );
-      })}
-
       {/* T8: the Effects menu's own Mix group — see `effectsMenuTools`. Drawn
-          after the Pipeline groups, where F11-8's Mix section always sat, and
-          in the identical visual language: same testids, same row, same
-          registry-resolved label and command-owned greying. */}
+          below the effect list, where F11-8's Mix section always sat, with the
+          same testids, same row, same registry-resolved label and
+          command-owned greying. The Pipeline groups that used to sit between
+          the list and this section live in the Pipeline module only (item 5). */}
       {mixTools.length > 0 && (
         <div data-testid="effects-tool-section" data-section="Mix">
           <SectionLabel className="px-2 pb-1 pt-2">Mix</SectionLabel>
@@ -168,8 +139,8 @@ export default function EffectsPanel() {
 }
 
 /** One tool row: the id goes to `runCommand`, the label is the registry's,
- * the greying is `isCommandEnabled` — the command's own predicate. Shared by
- * the Pipeline groups and the Mix section so the two cannot diverge. */
+ * the greying is `isCommandEnabled` — the command's own predicate. The same
+ * row shape the Pipeline card draws, so a command row reads alike on both. */
 function toolRow(id: string, label: string, hasDoc: boolean) {
   const enabled = isCommandEnabled(id);
   return (

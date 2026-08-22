@@ -124,7 +124,7 @@ the real document before Apply.
 | | |
 |:--:|:--:|
 | ![Effects rack](docs/shots/effects-rack.png) | ![Parametric EQ dialog](docs/shots/effect-parametric-eq.png) |
-| **The Effects rack** — 25 effects in ten categories, with the pipeline tools one click below them. | **Parametric EQ** — five bands plus high- and low-pass, previewed on the real audio before Apply. |
+| **The Effects rack** — 25 effects in ten categories; the Pipeline tools have their own module. | **Parametric EQ** — five bands plus high- and low-pass, previewed on the real audio before Apply. |
 | ![Reverb dialog](docs/shots/effect-reverb.png) | ![Spatial panel](docs/shots/spatial-panel.png) |
 | **Reverb** — room size, damping, mix and pre-delay; Preview plays the processed document, Apply is one undo entry. | **The Spatial positioner** — azimuth, elevation and distance as honest stereo projection, writing automation keys on release. |
 
@@ -143,7 +143,7 @@ over the audio.
 - **Multitrack Editor** — tracks and clips with volume/pan/mute/solo/arm, non-destructive fades and crossfades, multi-clip selection with cross-track group drag, ripple delete, per-track automation envelopes, and one-step-per-gesture session undo.
 - **Spatial Panel** — places a track's sound around the listener (azimuth/elevation/distance, honest stereo projection — not binaural), writing automation keys on release.
 - **Recorder** — input-device selection, channel/rate choice, live level meter; multitrack punch-in on armed tracks.
-- **Effects Rack** — categorized effects with preview dialogs, plus the pipeline tools one click away.
+- **Effects Rack** — categorized effects, each opening as a card in the module column (see item 6 below).
 - **Pipeline Module & Menu** — the ten long-running tools in three groups (Tempo & Timing, Voice, Analysis); each opens as a wide card in the module column.
 - **Files / History / Markers / Properties Panels** — open documents, browsable undo history, the marker list, and read-only facts about the active document or clip.
 - **Module Strip** — the icon strip over the module column; the bar and the open module are always the same width.

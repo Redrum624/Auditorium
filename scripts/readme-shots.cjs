@@ -239,7 +239,7 @@ async function main() {
     await waitNonUniform(page, 'waveform-canvas');
 
     // The Effects rack: the module card with the categorised registry and the
-    // pipeline tools below it.
+    // Mix row below it.
     console.log('Effects rack...');
     await openModuleCard(page, 'Effects');
     await page.waitForSelector('[data-testid="effects-panel"]', { timeout: 5000 });

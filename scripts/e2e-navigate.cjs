@@ -361,7 +361,7 @@ async function clickMenuItem(page, label) {
 /**
  * The surface a command can actually be fired from, searched in the order a
  * user would find one: the menu bar first, then the toolbar pill, then the
- * Effects card's tool rows. Returns null when none of the three carries it —
+ * Effects card's Mix row. Returns null when none of the three carries it —
  * which for a dialog-opening command is a real finding, not a harness gap.
  */
 async function resolveOpener(page, commandId, label, menuLabelIndex) {
@@ -1442,7 +1442,7 @@ async function main() {
     // The dialogs whose command id is fixed are walked through the MENU. The
     // command's label is read out of the open dropdown, so the walk clicks the
     // very row a user would; a command that is in no menu is walked through the
-    // Effects card's tool rows instead, and one that is in neither is a finding.
+    // Effects card's Mix row instead, and one that is in neither is a finding.
     const menuLabelIndex = await (async () => {
       const index = new Map();
       for (const title of derivedMenus) {
@@ -2133,7 +2133,7 @@ async function main() {
       );
     });
 
-    await step(page, 'Module: Effects — run one real effect, and open one tool from every group', async () => {
+    await step(page, 'Module: Effects — run one real effect, open it as a card, and prove the Pipeline rows are gone', async () => {
       await openModuleCard(page, 'Effects');
       await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
       const groups = await page.evaluate(() => ({
@@ -2157,9 +2157,26 @@ async function main() {
         groups.effects === registry.length,
         `the card lists every visible registry effect (card ${groups.effects}, registry ${registry.length})`
       );
+      // Item 5 (2026-08-18): "if it is in Pipeline, remove it from Effects".
+      // The card keeps exactly one tool section — the Effects menu's own Mix
+      // row — and none of its rows may be a Pipeline-menu row. The Pipeline
+      // card's step makes the same comparison against the live menu in the
+      // other direction (every menu row present); this is that check inverted.
       assert(
-        groups.sections.length >= 4,
-        `the card carries the tool groups (${groups.sections.map((s) => s.title).join(', ')})`
+        groups.sections.length === 1 && groups.sections[0].title === 'Mix',
+        `the card carries the Mix section alone (${groups.sections.map((s) => s.title).join(', ') || 'none'})`
+      );
+      assert(await openMenu(page, 'Pipeline'), 'the Pipeline menu opens for the comparison');
+      const pipelineMenuLabels = (await readOpenMenu(page)).items.map((r) => r.label);
+      await closeMenu(page);
+      await openModuleCard(page, 'Effects');
+      await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
+      const effectsCardLabels = groups.sections.flatMap((s) => s.rows).map((r) => r.label);
+      const leaked = effectsCardLabels.filter((l) => pipelineMenuLabels.includes(l));
+      assert(
+        pipelineMenuLabels.length > 0 && leaked.length === 0,
+        `no Effects-card tool row is a Pipeline-menu row (card ${JSON.stringify(effectsCardLabels)}, ` +
+          `menu ${JSON.stringify(pipelineMenuLabels)}, leaked ${JSON.stringify(leaked)})`
       );
 
       // Run one CHEAP effect for real, through the card's own double-click.
@@ -2203,7 +2220,10 @@ async function main() {
       );
       await page.evaluate(() => window.__test.undoActive());
 
-      // One tool from EVERY group, opened and cancelled.
+      // One tool from every remaining group, opened and dismissed. Since item 5
+      // that is the Mix group alone (Spatial Positioner → the Spatial panel);
+      // the loop is kept generic so a row added to the Effects menu's tail is
+      // walked without an edit here.
       for (const section of groups.sections) {
         const row = section.rows.find((r) => !r.disabled);
         assert(

@@ -2955,12 +2955,12 @@ async function main() {
       { timeout: 5000 }
     );
 
-    // F11: 16c-bis) the Effects module card carries the same tools ----------
+    // F11: 16c-bis) the Effects module card lists effects, plus the Mix row ---
     // The card is the surface this user works from, and the smoke had never
-    // opened it — no `effects-list`, no `effects-item`, nothing. The tools
-    // shipped menu-only for ten releases partly because nothing here would
-    // have noticed.
-    console.log('Effects card: the ten Pipeline tools plus the Mix positioner, and no layout growth (F11)...');
+    // opened it — no `effects-list`, no `effects-item`, nothing. Item 5 of the
+    // 2026-08-18 program took the ten Pipeline rows OUT of this card (they live
+    // in the Pipeline module only); the Effects menu's own Mix row stays.
+    console.log('Effects card: the effect list plus the Mix positioner only, and no layout growth (F11, item 5)...');
     await openModuleCard(page, 'Effects');
     await page.waitForSelector('[data-testid="effects-tool-section"]', { timeout: 5000 });
     const cardBefore = await page.evaluate(() => {
@@ -2985,14 +2985,13 @@ async function main() {
         `(${tools.greyed} greyed), ${tools.effects} effect rows; card ${cardBefore.width.toFixed(0)}px`
     );
     assert(
-      JSON.stringify(tools.sections) ===
-        JSON.stringify(['Tempo & Timing', 'Voice', 'Analysis', 'Mix']),
-      `the card groups the Pipeline menu's tools, then the Effects menu's own Mix tail (actual ${JSON.stringify(tools.sections)})`
+      JSON.stringify(tools.sections) === JSON.stringify(['Mix']),
+      `the card draws the Effects menu's own Mix tail and no Pipeline group (actual ${JSON.stringify(tools.sections)})`
     );
     assert(
-      tools.ids.length === 11,
-      `every Pipeline tool plus the Mix positioner has a row in the card ` +
-        `(expected 11, actual ${tools.ids.length})`
+      tools.ids.length === 1,
+      `only the Effects menu's own Mix row has a tool row in the card ` +
+        `(expected 1, actual ${tools.ids.length})`
     );
     assert(
       tools.effects > 0,

@@ -210,17 +210,18 @@ describe('every door reaches the same host', () => {
     expect(screen.getByTestId('tool-host')).toHaveAttribute('data-tool-id', 'edit.voiceChanger');
   });
 
-  it('the Effects card’s tool row', async () => {
+  // Item 5 (2026-08-18): the Effects card's Pipeline rows were a second door
+  // (F11-6, kept at U2); the user rules one — a Pipeline tool lives in the
+  // Pipeline module only. What the card keeps is the Effects MENU's own Mix
+  // row (N15), which is not a Pipeline tool and has no strip icon of its own.
+  it('the Effects card carries no Pipeline door — only the Mix row', async () => {
     addDoc();
     render(<App />);
     fireEvent.click(stripButton('Effects'));
-    const row = screen
-      .getAllByTestId('effects-tool-item')
-      .find((r) => r.getAttribute('data-command-id') === 'effects.vocalChain')!;
-    await act(async () => {
-      fireEvent.click(within(row).getByRole('button'));
-    });
-    expect(screen.getByTestId('tool-host')).toHaveAttribute('data-tool-id', 'effects.vocalChain');
+    expect(
+      screen.getAllByTestId('effects-tool-item').map((r) => r.getAttribute('data-command-id'))
+    ).toEqual(['spatial.position']);
+    expect(screen.queryByTestId('tool-host')).toBeNull();
   });
 
   // The menu's door is `runCommand(id)` — the same call MenuBar makes on a
