@@ -13,7 +13,9 @@ import { getSpectralScale, toggleSpectralScale } from './spectralScale';
 import { isBeatGridVisible, setBeatGridVisible } from './beatGridDisplay';
 import { _resetSnapPreference, isSnapEnabled } from './snapPreference';
 import * as sessionFileModule from '../multitrack/sessionFile';
+import * as fileServiceModule from './fileService';
 import { useSessionStore } from '../multitrack/sessionStore';
+import { _resetSessionUndo } from '../multitrack/sessionUndo';
 import { runTempoAnalysis } from './tempoAnalysis';
 import { registerDialogSetters } from './dialogBus';
 import { SHORTCUT_TABLE } from './shortcuts';
@@ -31,6 +33,11 @@ const mockRunTempoAnalysis = runTempoAnalysis as jest.MockedFunction<typeof runT
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  // Lot A: file.save / file.export read the project (session store + its
+  // history + its path), which is module-global — start every test clean.
+  useSessionStore.getState().newSession(44100);
+  useSessionStore.getState().setProjectPath(null);
+  _resetSessionUndo();
   mockRunTempoAnalysis.mockClear();
 });
 
@@ -321,7 +328,7 @@ describe('getMenuSections', () => {
       'file.save',
       'file.saveAs',
       'file.export',
-      'session.save',
+      // lot A (M4): `session.save` is folded into Save As — no duplicate rows.
       'session.open',
       'multitrack.mixdown',
       'file.close',
@@ -354,16 +361,18 @@ describe('getMenuSections', () => {
     expect(record.shortcut).toBeUndefined();
   });
 
-  it('session.save is only enabled in the multitrack view; session.open is always enabled', () => {
+  it('session.save is gone from the File section; session.open is always enabled and reads "Open Project…" (lot A, M4)', () => {
     const file = getMenuSections().find((s) => s.title === 'File')!;
     const findCmd = (id: string) =>
-      file.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+      file.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id);
 
-    expect(findCmd('session.save').enabled(useAppStore.getState())).toBe(false);
-    expect(findCmd('session.open').enabled(useAppStore.getState())).toBe(true);
-
+    expect(findCmd('session.save')).toBeUndefined();
+    expect(isCommandEnabled('session.save')).toBe(false);
+    const open = findCmd('session.open')!;
+    expect(open.label).toBe('Open Project…');
+    expect(open.enabled(useAppStore.getState())).toBe(true);
     useAppStore.setState({ view: 'multitrack' });
-    expect(findCmd('session.save').enabled(useAppStore.getState())).toBe(true);
+    expect(open.enabled(useAppStore.getState())).toBe(true);
   });
 
   // F11-7 rewrote this list. The M1 round pinned it with the four
@@ -438,16 +447,18 @@ describe('getMenuSections', () => {
       return doc;
     }
 
-    it('is DISABLED for a document with nothing to save', () => {
-      // Save re-encodes and overwrites the source file. With nothing behind it
-      // that is a destructive no-op, and it was one keystroke (Ctrl+S) or one
-      // stray click away at any moment.
+    it('is DISABLED for a saved project whose one document has nothing to save', () => {
+      // Lot A (M4): Save writes the project. With a project path and nothing
+      // behind it, a Save would rewrite the same bytes — greyed, exactly as
+      // the in-place document Save was for a clean document (O1-2).
       openSavedDoc();
+      useSessionStore.getState().setProjectPath('D:\\p.audm');
       expect(fileCmd('file.save').enabled(useAppStore.getState())).toBe(false);
     });
 
     it('is ENABLED once the document is dirty', () => {
       const doc = openSavedDoc();
+      useSessionStore.getState().setProjectPath('D:\\p.audm');
       useAppStore.getState().updateDocument({ ...doc, dirty: true });
       expect(fileCmd('file.save').enabled(useAppStore.getState())).toBe(true);
     });
@@ -457,6 +468,13 @@ describe('getMenuSections', () => {
       // from birth and exists nowhere on disk. Same predicate the close guard
       // prompts on.
       openDoc();
+      useSessionStore.getState().setProjectPath('D:\\p.audm');
+      expect(fileCmd('file.save').enabled(useAppStore.getState())).toBe(true);
+    });
+
+    it('is ENABLED for a never-written project with a clean document (M4: content exists, the project has no file)', () => {
+      openSavedDoc();
+      expect(useSessionStore.getState().projectPath).toBeNull();
       expect(fileCmd('file.save').enabled(useAppStore.getState())).toBe(true);
     });
 
@@ -804,21 +822,33 @@ describe('view.snapToGrid (Task B4)', () => {
   });
 });
 
-describe('session.save / session.open error surfacing (F3 defense-in-depth)', () => {
-  it('session.save shows an error message box when saveSessionViaDialog rejects, instead of an uncaught rejection', async () => {
-    const showMessageBox = installShowMessageBox();
-    (sessionFileModule.saveSessionViaDialog as jest.MockedFunction<typeof sessionFileModule.saveSessionViaDialog>)
-      .mockRejectedValueOnce(new Error('serialize failed: payload too large'));
-    useAppStore.setState({ view: 'multitrack' });
+describe('file.save / file.saveAs / session.open error surfacing (F3 defense-in-depth, lot A)', () => {
+  const mockSaveProject = sessionFileModule.saveProject as jest.MockedFunction<typeof sessionFileModule.saveProject>;
 
-    await expect(runCommand('session.save')).resolves.toBeUndefined();
+  it('file.save shows an error message box when saveProject rejects, instead of an uncaught rejection', async () => {
+    const showMessageBox = installShowMessageBox();
+    mockSaveProject.mockRejectedValueOnce(new Error('serialize failed: payload too large'));
+    openDoc(); // never-written project with content => Save enabled
+
+    await expect(runCommand('file.save')).resolves.toBeUndefined();
 
     expect(showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
-        title: 'Save Session failed',
+        title: 'Save Project failed',
         message: 'serialize failed: payload too large',
       })
+    );
+  });
+
+  it('file.saveAs shows the same box when saveProject rejects', async () => {
+    const showMessageBox = installShowMessageBox();
+    mockSaveProject.mockRejectedValueOnce(new Error('disk on fire'));
+
+    await expect(runCommand('file.saveAs')).resolves.toBeUndefined();
+
+    expect(showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Save Project failed', message: 'disk on fire' })
     );
   });
 
@@ -830,8 +860,99 @@ describe('session.save / session.open error surfacing (F3 defense-in-depth)', ()
     await expect(runCommand('session.open')).resolves.toBeUndefined();
 
     expect(showMessageBox).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'error', title: 'Open Session failed', message: 'parse failed: corrupt file' })
+      expect.objectContaining({ type: 'error', title: 'Open Project failed', message: 'parse failed: corrupt file' })
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4 / M5) — Save writes the project in every view; Export in the
+// multitrack view renders the session.
+// ---------------------------------------------------------------------------
+describe('file.save / file.saveAs / file.export under M4 and M5 (lot A — acceptance 13)', () => {
+  const mockSaveProject = sessionFileModule.saveProject as jest.MockedFunction<typeof sessionFileModule.saveProject>;
+
+  function addClipToTrack0(docId: string) {
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: docId, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+  }
+
+  beforeEach(() => {
+    mockSaveProject.mockReset();
+    mockSaveProject.mockResolvedValue(true);
+  });
+
+  it('(a) file.save is enabled iff projectHasUnsavedWork() — in the waveform view and in multitrack with no document', () => {
+    // waveform, empty untitled project: clean
+    expect(fileServiceModule.projectHasUnsavedWork()).toBe(false);
+    expect(isCommandEnabled('file.save')).toBe(false);
+    // waveform, a document in a never-written project: dirty
+    openDoc();
+    expect(fileServiceModule.projectHasUnsavedWork()).toBe(true);
+    expect(isCommandEnabled('file.save')).toBe(true);
+
+    // multitrack, no document at all: follows the session
+    useAppStore.setState(makeInitialState());
+    useAppStore.setState({ view: 'multitrack' });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    expect(fileServiceModule.projectHasUnsavedWork()).toBe(false);
+    expect(isCommandEnabled('file.save')).toBe(false);
+    useSessionStore.getState().addTrack();
+    expect(fileServiceModule.projectHasUnsavedWork()).toBe(true);
+    expect(isCommandEnabled('file.save')).toBe(true);
+  });
+
+  it('(b) runCommand(file.save) calls saveProject({ as: false }) and never saveDocument', async () => {
+    const saveDocSpy = jest.spyOn(fileServiceModule, 'saveDocument');
+    openDoc();
+
+    await runCommand('file.save');
+
+    expect(mockSaveProject).toHaveBeenCalledTimes(1);
+    expect(mockSaveProject).toHaveBeenCalledWith({ as: false });
+    expect(saveDocSpy).not.toHaveBeenCalled();
+    saveDocSpy.mockRestore();
+  });
+
+  it('(c) file.saveAs is enabled with nothing open and calls saveProject({ as: true })', async () => {
+    expect(useAppStore.getState().documents).toHaveLength(0);
+    expect(isCommandEnabled('file.saveAs')).toBe(true);
+
+    await runCommand('file.saveAs');
+
+    expect(mockSaveProject).toHaveBeenCalledWith({ as: true });
+  });
+
+  it('(c) file.save and file.saveAs carry their accelerators and labels', () => {
+    const file = getMenuSections().find((s) => s.title === 'File')!;
+    const cmd = (id: string) => file.items.find((i): i is MenuCommand => i !== 'separator' && i.id === id)!;
+    expect(cmd('file.save').label).toBe('Save');
+    expect(cmd('file.save').shortcut).toBe('Ctrl+S');
+    expect(cmd('file.saveAs').label).toBe('Save As…');
+    expect(cmd('file.saveAs').shortcut).toBe('Ctrl+Shift+S');
+  });
+
+  it('(f) file.export in multitrack follows the session: enabled with clips and no active doc, disabled with an empty session and an active doc', () => {
+    useAppStore.setState({ view: 'multitrack' });
+    expect(isCommandEnabled('file.export')).toBe(false);
+
+    addClipToTrack0('doc-elsewhere');
+    expect(useAppStore.getState().activeDocumentId).toBeNull();
+    expect(isCommandEnabled('file.export')).toBe(true);
+
+    useSessionStore.getState().newSession(44100);
+    openDoc();
+    useAppStore.setState({ view: 'multitrack' });
+    expect(useAppStore.getState().activeDocumentId).not.toBeNull();
+    expect(isCommandEnabled('file.export')).toBe(false);
+  });
+
+  it('(f) file.export in the waveform view still needs an active document', () => {
+    expect(isCommandEnabled('file.export')).toBe(false);
+    openDoc();
+    expect(isCommandEnabled('file.export')).toBe(true);
   });
 });
 

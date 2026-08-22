@@ -31,6 +31,12 @@ import { invalidateRemixSession } from './remixService';
 import { invalidateStemRun } from './stemService';
 import { invalidateTranscript } from './transcribeService';
 import { invalidateLyricsAlignment } from './alignLyricsService';
+// Lot A (M4): Save is a PROJECT save. No cycle — sessionFile imports the
+// stores, sessionUndo, undoHistory, wavCodec and AudioDocument; none of those
+// import this module.
+import { useSessionStore } from '../multitrack/sessionStore';
+import { isSessionDirty } from '../multitrack/sessionUndo';
+import { saveProject } from '../multitrack/sessionFile';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -415,6 +421,14 @@ export async function openFilesViaDialog(): Promise<void> {
  * on the doc during an in-flight save's encode/write, the save's post-write
  * bookkeeping never clobbers it: the live doc keeps its newer channels and
  * stays dirty, and the save point is NOT marked (Task H1, Task M2).
+ *
+ * Lot A (M4): NO UI command reaches this any more. File → Save / Save As
+ * write the `.audm` project (`sessionFile.saveProject`), and Export is the
+ * only way audio leaves the app. `saveDocument`, `saveDocumentLocked`,
+ * `saveAsWav`, `encodeInPlace` and `getInFlightSaveCount` are kept, unchanged,
+ * as the engine behind the headless `saveActiveInPlace` test hook and the
+ * format-faithful round-trip suites (`fileService.test.ts`); deleting them is
+ * a follow-up, not this lot.
  */
 export async function saveDocument(docId: string, as = false): Promise<void> {
   if (inFlightSaves.has(docId)) {
@@ -720,6 +734,43 @@ export function hasUnsavedWork(doc: AudioDocument): boolean {
   return doc.dirty || doc.neverSaved;
 }
 
+// ---- lot A (M4) — the project predicates -----------------------------------
+
+/** True when there is anything to put in a project file: an open document,
+ * or a clip on any track. */
+export function projectHasContent(): boolean {
+  return (
+    store().documents.length > 0 ||
+    useSessionStore.getState().session.tracks.some((t) => t.clips.length > 0)
+  );
+}
+
+/**
+ * M4's definition, VERBATIM: any document dirty || session dirty || (never
+ * written && has content). The third clause is N12's "an empty untitled
+ * project is clean" and nothing more — a SAVED project whose session is
+ * dirty with no clip and no document (a track added or removed) is dirty,
+ * so the content test is not folded around the whole expression. This is
+ * what `file.save`, the Save pill, the StatusBar chip and the close guard
+ * all read.
+ */
+export function projectHasUnsavedWork(): boolean {
+  const docsDirty = store().documents.some(hasUnsavedWork);
+  const neverWritten = useSessionStore.getState().projectPath === null;
+  return docsDirty || isSessionDirty() || (neverWritten && projectHasContent());
+}
+
+/** The "N item(s)" the close guard reports: each document with unsaved work
+ * plus one for a dirty session, and never 0 for a project that has unsaved
+ * work (a never-written project with only clean documents counts as 1). */
+export function projectDirtyCount(): number {
+  if (!projectHasUnsavedWork()) return 0;
+  const docs = store().documents.filter(hasUnsavedWork).length;
+  return Math.max(1, docs + (isSessionDirty() ? 1 : 0));
+}
+
+// ---- end lot A ---------------------------------------------------------------
+
 /**
  * Close a document, prompting to save first when closing would lose work —
  * unsaved edits (`dirty`) OR a document that has never been written to a file
@@ -735,24 +786,26 @@ export async function closeDocumentFlow(docId: string): Promise<void> {
   if (!doc) return;
 
   if (hasUnsavedWork(doc)) {
-    // A never-saved document isn't "changed", it's absent from disk entirely —
-    // and "Save changes to X" would imply there is a file to save them back
-    // into. Word it for what it is; the dirty wording is unchanged.
+    // Lot A (M4): the offer is a PROJECT save — the document has no file of
+    // its own through Save any more (Export is how audio leaves the app). A
+    // never-saved document isn't "changed", it exists only in this project;
+    // word each case for what it is.
     const neverSaved = doc.neverSaved;
     const choice = await api().showMessageBox({
       type: 'question',
       title: neverSaved ? 'Unsaved document' : 'Unsaved changes',
       message: neverSaved
-        ? `${doc.name} has never been saved to a file. Save it before closing?`
-        : `Save changes to ${doc.name} before closing?`,
-      buttons: ['Save', "Don't Save", 'Cancel'],
+        ? `${doc.name} exists only in this project and the project has not been saved. Save the project before closing it?`
+        : `${doc.name} has unsaved changes. Save the project before closing it?`,
+      buttons: ['Save Project', "Don't Save", 'Cancel'],
     });
     if (choice === 2) return; // Cancel
     if (choice === 0) {
-      // Save, then close — but abort the close if the save didn't actually
-      // land (a cancelled save-as dialog, a failed write): the document would
-      // still be dirty, or still have no file of its own.
-      await saveDocument(docId);
+      // Save the project, then close — but abort the close if the save didn't
+      // actually land (a cancelled Save As dialog, a failed write): a
+      // successful project save clears this document's flags; anything else
+      // leaves them set.
+      await saveProject({ as: false });
       const afterSave = findDoc(docId);
       if (afterSave && hasUnsavedWork(afterSave)) return;
     }

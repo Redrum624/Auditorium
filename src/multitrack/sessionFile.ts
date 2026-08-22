@@ -6,8 +6,9 @@ import { clampFadePair } from './session';
 import { sanitizeAutomationLanes } from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import { useSessionStore } from './sessionStore';
-import { clearSessionHistory } from './sessionUndo';
+import { clearSessionHistory, invalidateSessionSavePoint, markSessionSavePoint } from './sessionUndo';
 import { defaultSessionZoom } from './sessionZoom';
+import { invalidateSavePoint, markSavePoint } from '../services/undoHistory';
 
 /** .audm format version. v1: no markers. v2: adds an optional `markers` map,
  * audio embedded as base64 WAV inside the JSON text. v3: audio moves out of
@@ -199,8 +200,8 @@ function computeReferenced(
 
 /**
  * Serializes a session to the legacy .audm v2 JSON format (base64-embedded
- * 32-bit-float WAV per document). No longer used by `saveSessionViaDialog`
- * (which writes v3 — see `serializeSessionV3`); retained as the writer for
+ * 32-bit-float WAV per document). No production save calls this (the write
+ * default is v4 — see `serializeSessionV4`); retained as the writer for
  * v1/v2 fixtures so the loader's back-compat path (`parseSessionFile`) stays
  * covered by real round-trip tests instead of hand-maintained JSON literals.
  *
@@ -247,10 +248,11 @@ export function serializeSession(
  *
  * The returned `bytes` is always a *fresh* zero-offset `Uint8Array` sized to
  * exactly its own content (`bytes.byteLength === bytes.buffer.byteLength`) —
- * `saveSessionViaDialog` relies on this to hand `bytes.buffer` straight to
- * `writeFile` with no defensive copy (see its comment for why that copy would
- * matter). Don't change this function to return a subarray/view over some
- * larger buffer without updating that call site too.
+ * the v4 writer keeps the same guarantee and `writeProject` relies on it to
+ * hand `bytes.buffer` straight to `writeFile` with no defensive copy (see its
+ * comment for why that copy would matter). Lot A: no production save calls
+ * this any more (v4 is the write default); it stays as the legacy fixture
+ * writer behind the v3 compat tests.
  */
 export function serializeSessionV3(
   session: Session,
@@ -793,109 +795,190 @@ export function parseSessionFileBytes(buf: ArrayBuffer): ParsedSessionFile {
   return parseSessionFile(text);
 }
 
-/** Prompts for a save location and writes the current session (with only its
- * referenced documents) as .audm v3. A cancelled dialog is a no-op. Both
- * serialization and the write are wrapped so any failure — including one
- * `serializeSessionV3` itself throws — surfaces as an error message box
- * instead of an unhandled rejection (F3: previously the base64 serializer
- * could throw past ~402MB of embedded audio with no try/catch anywhere on
- * the call path, so Save Session failed with zero visible feedback). On
- * success, an info box always confirms the save (extended with the
- * dropped-clip count when any clips referenced closed source documents) —
- * success is never silent either.
- *
- * Deliberately does NOT clear any document's `neverSaved` flag (Task S4). A
- * session save is not a document save: it embeds only CLIP-REFERENCED
- * documents (`computeReferenced`), so most open documents aren't in the file
- * at all; what it embeds is a point-in-time COPY under a foreign id, which
- * later edits don't reach and which reopening restores as a NEW document; and
- * the document itself still has no path, so File > Save still prompts a
- * save-as. Clearing the flag here would silently un-guard documents this file
- * never contained. */
-export async function saveSessionViaDialog(): Promise<void> {
-  const session = useSessionStore.getState().session;
-  const docs = useAppStore.getState().documents;
+// ---------------------------------------------------------------------------
+// Lot A (M4) — the project flows: Save / Save As / Open Project.
+// ---------------------------------------------------------------------------
 
-  const defaultName = /\.audm$/i.test(session.name) ? session.name : `${session.name}.audm`;
-  const targetPath = await api().showSaveDialog({
-    defaultPath: defaultName,
-    filters: [{ name: 'Auditorium Session', extensions: ['audm'] }],
-  });
-  if (!targetPath) return; // cancelled
+/** True while a project save is between its dialog and its write landing.
+ * The close guard (App.tsx) counts it as in-flight work, and `saveProject`
+ * refuses to start a second one — two writes to the same `.audm` racing
+ * each other would be worse than a "Save in progress" box. */
+let projectSaveInFlight = false;
+
+export function isProjectSaveInFlight(): boolean {
+  return projectSaveInFlight;
+}
+
+/** `session.name` with a trailing `.audm` stripped — the default file name a
+ * Save As dialog offers, and the name a Save As assigns from the file. */
+function projectBaseName(name: string): string {
+  return name.replace(/\.audm$/i, '');
+}
+
+/**
+ * The dialog-free core of a project save (lot A, M4) — also what the
+ * headless `saveSessionAs` hook calls, so the smoke proves the real writer.
+ *
+ * Captures the session, EVERY open document and the markers, serializes them
+ * as .audm v4 and writes the file. On success, the bookkeeping follows the
+ * same staleness discipline as a document save (`fileService.saveDocument`):
+ * the session is renamed (when `opts.rename`) and its save point marked only
+ * if nothing replaced `session` during the write await — otherwise the mark
+ * is invalidated, because the bytes on disk no longer match the live
+ * session; every captured document is marked clean (`dirty: false`,
+ * `neverSaved: false` — it IS in the file now, which inverts the S4 reasoning
+ * that kept the flag when a session save embedded only clip-referenced
+ * documents) if its store object is still the captured one, otherwise its
+ * save point is invalidated. Then `projectPath` is remembered.
+ *
+ * Message policy (N13): plain Save is silent; a dropped-clip count is always
+ * reported (it is information the user does not otherwise have); a Save As
+ * confirms with 'Project saved.' — `confirmSuccess` is how `saveProject`
+ * asks for that on its dialog path. Every failure (serialize throw, write
+ * rejection, `{ ok: false }`) surfaces as a 'Save Project failed' error box
+ * and returns `false` with nothing marked.
+ */
+async function writeProjectCore(
+  targetPath: string,
+  opts: { rename: boolean; confirmSuccess: boolean }
+): Promise<boolean> {
+  const sessionState = useSessionStore.getState();
+  const session = sessionState.session;
+  const appState = useAppStore.getState();
+  const docs = appState.documents;
+  const markers = appState.markers;
+  const name = opts.rename ? projectBaseName(api().pathBasename(targetPath)) : session.name;
 
   let bytes: Uint8Array<ArrayBuffer>;
   let droppedClipCount: number;
   try {
-    ({ bytes, droppedClipCount } = serializeSessionV3(session, docs, useAppStore.getState().markers));
+    ({ bytes, droppedClipCount } = serializeSessionV4({ ...session, name }, docs, markers));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await api().showMessageBox({ type: 'error', title: 'Save Session failed', message });
-    return;
+    await api().showMessageBox({ type: 'error', title: 'Save Project failed', message });
+    return false;
   }
 
   let result: { ok: true } | { ok: false; error: string };
   try {
-    // `bytes` is `serializeSessionV3`'s freshly-allocated Uint8Array — byteOffset
+    // `bytes` is `serializeSessionV4`'s freshly-allocated Uint8Array — byteOffset
     // 0, byteLength === bytes.buffer.byteLength, and dead after this call — so
     // `bytes.buffer` IS the whole file with nothing to trim. Passing it directly
     // (no `toArrayBuffer` copy) matters here specifically: `writeFile` is a plain
     // `ipcRenderer.invoke` (preload.cjs), which structured-clones its argument
     // rather than transferring/detaching it, so an extra defensive copy would
-    // hold 3 live copies of the session's audio at once instead of 2 — halving
-    // the largest session save() can handle before OOM, i.e. re-introducing the
-    // very ceiling this task exists to raise.
+    // hold 3 live copies of the project's audio at once instead of 2 — halving
+    // the largest project save() can handle before OOM.
     result = await api().writeFile(targetPath, bytes.buffer);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await api().showMessageBox({ type: 'error', title: 'Save Session failed', message });
-    return;
+    await api().showMessageBox({ type: 'error', title: 'Save Project failed', message });
+    return false;
   }
   if (!result.ok) {
-    await api().showMessageBox({ type: 'error', title: 'Save Session failed', message: result.error });
-    return;
+    await api().showMessageBox({ type: 'error', title: 'Save Project failed', message: result.error });
+    return false;
   }
 
-  await api().showMessageBox({
-    type: 'info',
-    title: 'Save Session',
-    message:
-      droppedClipCount > 0
-        ? `Session saved. ${droppedClipCount} clip(s) referenced closed files and were not saved.`
-        : 'Session saved.',
-  });
+  // Session bookkeeping — only against the session the bytes were made from.
+  const after = useSessionStore.getState();
+  if (after.session === session) {
+    if (name !== session.name) after.renameSession(name);
+    markSessionSavePoint();
+  } else {
+    invalidateSessionSavePoint();
+  }
+
+  // Document bookkeeping — per captured document, same reference test.
+  for (const doc of docs) {
+    const live = useAppStore.getState().documents.find((d) => d.id === doc.id);
+    if (live === doc) {
+      useAppStore.getState().updateDocument({ ...doc, dirty: false, neverSaved: false });
+      markSavePoint(doc.id);
+    } else {
+      invalidateSavePoint(doc.id);
+    }
+  }
+
+  useSessionStore.getState().setProjectPath(targetPath);
+
+  if (droppedClipCount > 0) {
+    await api().showMessageBox({
+      type: 'info',
+      title: 'Save Project',
+      message: `Project saved. ${droppedClipCount} clip(s) referenced closed files and were not saved.`,
+    });
+  } else if (opts.confirmSuccess) {
+    await api().showMessageBox({ type: 'info', title: 'Save Project', message: 'Project saved.' });
+  }
+  return true;
 }
 
-/** Prompts for a .audm file, recreates its embedded documents (fresh ids,
- * added to the Files panel via addDocument), replaces the session store's
- * session, and switches the view to 'multitrack'. A cancelled dialog is a
- * no-op; an unsupported/corrupt/truncated file (v1/v2/v3 alike) surfaces an
- * error message box and leaves the current session untouched. If any clips
- * referenced audio that couldn't be recreated (a stale/missing document id),
- * they're dropped and an info message box reports how many. */
-export async function openSessionViaDialog(): Promise<void> {
-  const paths = await api().showOpenDialog({
-    filters: [{ name: 'Auditorium Session', extensions: ['audm'] }],
-  });
-  if (!paths || paths.length === 0) return; // cancelled
+/** The dialog-free project write (see `writeProjectCore`): v4 bytes to
+ * `targetPath`, save points, `projectPath`, and the rename when asked — with
+ * no success box. Production's Save / Save As go through `saveProject`; the
+ * headless `saveSessionAs` hook calls this directly. */
+export async function writeProject(targetPath: string, opts: { rename: boolean }): Promise<boolean> {
+  return writeProjectCore(targetPath, { rename: opts.rename, confirmSuccess: false });
+}
 
-  // readFile and parsing are both inside the try so an IO failure (unapproved
-  // path, fs error), a corrupt/truncated v3 file, or a legacy file too large
-  // to decode as one JS string all surface the same error box instead of
-  // rejecting unhandled.
-  let result: {
-    session: Session;
-    documents: AudioDocument[];
-    droppedClipCount: number;
-    markers: Record<string, Marker[]>;
-  };
-  try {
-    const buf = await api().readFile(paths[0]);
-    result = parseSessionFileBytes(buf);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await api().showMessageBox({ type: 'error', title: 'Open Session failed', message });
-    return;
+/**
+ * File → Save (`as: false`) and Save As (`as: true`) — the project, in every
+ * view (M4). Plain Save with a remembered `projectPath` writes there with no
+ * dialog and no box on success (N13); with none it IS a Save As. Save As
+ * always prompts (default name = the project name, `.audm` enforced on the
+ * picked path — `electron/ipc.cjs` approves the appended variant), renames
+ * the project to the file's basename when the target differs from the
+ * remembered path (a Save As onto the same file keeps the name), and
+ * confirms with 'Project saved.'. A cancelled dialog returns `false` with
+ * nothing changed. A second call while one is in flight shows 'Save in
+ * progress' and returns `false`.
+ */
+export async function saveProject(opts: { as: boolean }): Promise<boolean> {
+  if (projectSaveInFlight) {
+    await api().showMessageBox({
+      type: 'warning',
+      title: 'Save in progress',
+      message: 'A project save is already in progress.',
+    });
+    return false;
   }
+  projectSaveInFlight = true;
+  try {
+    const { session, projectPath } = useSessionStore.getState();
+    const viaDialog = opts.as || projectPath === null;
+    let target: string;
+    if (!viaDialog) {
+      target = projectPath as string;
+    } else {
+      const picked = await api().showSaveDialog({
+        defaultPath: `${projectBaseName(session.name)}.audm`,
+        filters: [{ name: 'Auditorium Project', extensions: ['audm'] }],
+      });
+      if (!picked) return false; // cancelled
+      target = /\.audm$/i.test(picked) ? picked : `${picked}.audm`;
+    }
+    return await writeProjectCore(target, { rename: target !== projectPath, confirmSuccess: viaDialog });
+  } finally {
+    projectSaveInFlight = false;
+  }
+}
+
+/**
+ * Reads and parses a `.audm` (any version) and makes it THE project: every
+ * embedded document is added to the Files panel (referenced or not — M4),
+ * markers are set, the session replaces the current one with its transients
+ * reset and its zoom fitted, the history is cleared (R3: a load starts a new
+ * editing timeline), `projectPath` is remembered, and the view switches to
+ * multitrack. Throws on a read or parse failure and applies NOTHING in that
+ * case — `openSessionViaDialog` turns the throw into an error box; the
+ * headless `openSessionFrom` hook lets it propagate.
+ */
+export async function loadProjectFrom(
+  path: string
+): Promise<{ droppedClipCount: number; docCount: number; trackCount: number }> {
+  const buf = await api().readFile(path);
+  const result = parseSessionFileBytes(buf);
 
   for (const doc of result.documents) {
     useAppStore.getState().addDocument(doc);
@@ -919,22 +1002,54 @@ export async function openSessionViaDialog(): Promise<void> {
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
     mtEnvelope: null, // F0: a stale open-envelope target must not outlive its session
+    projectPath: path, // lot A (M4): this file is where plain Save writes from now on
   });
-  // Every clip in the just-replaced session is either new or a stale id from a
-  // previous session — either way no bitmap in the cache belongs to it (F9).
-  // R3: opening a session starts a new editing timeline — the previous
+  // R3: opening a project starts a new editing timeline — the previous
   // session's undo history is dropped, exactly as opening a document starts
   // that document's history fresh. (An unrecorded, un-cleared replacement
   // would be silently reverted by the next undo of an older entry — the
-  // recording invariant in sessionUndo.ts.)
+  // recording invariant in sessionUndo.ts.) The cleared stack also reads as
+  // "at the save point": a freshly opened project is clean.
   clearSessionHistory();
   useAppStore.getState().setView('multitrack');
 
-  if (result.droppedClipCount > 0) {
+  return {
+    droppedClipCount: result.droppedClipCount,
+    docCount: result.documents.length,
+    trackCount: result.session.tracks.length,
+  };
+}
+
+/** File → Open Project…: prompts for a .audm file and hands it to
+ * `loadProjectFrom`. A cancelled dialog is a no-op; an unsupported/corrupt/
+ * truncated file (v1–v4 alike) or a read failure surfaces an error message
+ * box and leaves the current project untouched. If any clips referenced
+ * audio that couldn't be recreated (a stale/missing document id), they're
+ * dropped and an info message box reports how many. */
+export async function openSessionViaDialog(): Promise<void> {
+  const paths = await api().showOpenDialog({
+    filters: [{ name: 'Auditorium Project', extensions: ['audm'] }],
+  });
+  if (!paths || paths.length === 0) return; // cancelled
+
+  // readFile and parsing are both inside the try so an IO failure (unapproved
+  // path, fs error), a corrupt/truncated binary file, or a legacy file too
+  // large to decode as one JS string all surface the same error box instead
+  // of rejecting unhandled — and nothing is applied in any of those cases.
+  let droppedClipCount: number;
+  try {
+    ({ droppedClipCount } = await loadProjectFrom(paths[0]));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await api().showMessageBox({ type: 'error', title: 'Open Project failed', message });
+    return;
+  }
+
+  if (droppedClipCount > 0) {
     await api().showMessageBox({
       type: 'info',
-      title: 'Open Session',
-      message: `${result.droppedClipCount} clip(s) referenced missing audio and were removed.`,
+      title: 'Open Project',
+      message: `${droppedClipCount} clip(s) referenced missing audio and were removed.`,
     });
   }
 }

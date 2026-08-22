@@ -25,8 +25,8 @@ import {
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { canRedoSession, canUndoSession, redoSession, undoSession } from '../multitrack/sessionUndo';
 import { getClipboard } from './clipboard';
-import { closeDocumentFlow, hasUnsavedWork, openFilesViaDialog, saveDocument } from './fileService';
-import { openSessionViaDialog, saveSessionViaDialog } from '../multitrack/sessionFile';
+import { closeDocumentFlow, openFilesViaDialog, projectHasUnsavedWork } from './fileService';
+import { openSessionViaDialog, saveProject } from '../multitrack/sessionFile';
 import {
   openConvertDialog,
   openEffectDialog,
@@ -130,7 +130,7 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'file.save',
       'file.saveAs',
       'file.export',
-      'session.save',
+      // lot A (M4): `session.save` is folded into Save As — no duplicate rows.
       'session.open',
       'multitrack.mixdown',
       'separator',
@@ -731,16 +731,27 @@ function registerEditCommands(): void {
 }
 
 /** Registers the real File > * commands (Task 11), overwriting the disabled
- * stubs. New/Open are always available; Save/Save As/Export/Close require an
- * active document. New and Export open React dialogs via the dialog bus; the
- * rest drive the fileService flows. run() is async so awaits propagate. */
+ * stubs. New/Open are always available. Lot A (M4): Save / Save As write the
+ * `.audm` PROJECT in every view — Save is gated on the project's unsaved
+ * work, Save As is always available; Export and Close require an active
+ * document (Export in the multitrack view follows the session instead — M5).
+ * New and Export open React dialogs via the dialog bus; the rest drive the
+ * fileService / sessionFile flows. run() is async so awaits propagate. */
 function registerFileCommands(): void {
   const hasDoc = (s: AppState) => activeDoc(s) !== null;
-  const hasUnsavedActiveDoc = (s: AppState) => {
-    const doc = activeDoc(s);
-    return doc !== null && hasUnsavedWork(doc);
-  };
   const activeId = () => useAppStore.getState().activeDocumentId;
+  // F3 defense-in-depth (moved here from the former `session.save` row):
+  // `runCommand` has no try/catch of its own, and `saveProject` already
+  // catches its own known failure points, but this keeps ANY escaping error
+  // in front of the user instead of vanishing through MenuBar's onClick.
+  const runProjectSave = async (as: boolean) => {
+    try {
+      await saveProject({ as });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      await window.electronAPI?.showMessageBox({ type: 'error', title: 'Save Project failed', message });
+    }
+  };
   registerCommands([
     {
       id: 'file.new',
@@ -762,34 +773,40 @@ function registerFileCommands(): void {
       id: 'file.save',
       label: 'Save',
       shortcut: 'Ctrl+S',
-      // Not `hasDoc`: Save re-encodes the whole document and overwrites its
-      // source file, so on a document with nothing to save it is a destructive
-      // no-op — and it was reachable by a stray click on a pill 3 px from
-      // Open, and by Ctrl+S at any moment. Gated on the SAME predicate the
-      // close guard prompts on (`hasUnsavedWork` = dirty or never written), so
-      // "the app would warn me about losing this" and "Save does something"
-      // are one condition rather than two that can disagree.
-      enabled: hasUnsavedActiveDoc,
+      // Lot A (M4): Save writes the PROJECT — the session plus every open
+      // document — in every view. Gated on the SAME predicate the close guard
+      // counts (`projectHasUnsavedWork`: any document dirty, the session
+      // dirty, or a never-written project with content), so "the app would
+      // warn me about losing this" and "Save does something" stay one
+      // condition rather than two that can disagree (O1-2's rule, lifted from
+      // the document to the project).
+      enabled: () => projectHasUnsavedWork(),
       run: async () => {
-        const id = activeId();
-        if (id) await saveDocument(id);
+        await runProjectSave(false);
       },
     },
     {
       id: 'file.saveAs',
       label: 'Save As…',
       shortcut: 'Ctrl+Shift+S',
-      enabled: hasDoc,
+      // An explicit "write this project to a file I am about to name"
+      // gesture — meaningful with nothing open and nothing dirty, the same
+      // reasoning the document Save As had.
+      enabled: () => true,
       run: async () => {
-        const id = activeId();
-        if (id) await saveDocument(id, true);
+        await runProjectSave(true);
       },
     },
     {
       id: 'file.export',
       label: 'Export…',
       shortcut: 'Ctrl+E',
-      enabled: hasDoc,
+      // Lot A (M5): in the multitrack view Export renders the session mixdown,
+      // so it follows the session (clips exist) rather than the active
+      // document. Known, accepted staleness: MenuBar does not subscribe to the
+      // session store, so an OPEN File menu re-greys this on the next
+      // appStore/history change — the same as `multitrack.mixdown` today.
+      enabled: (s) => (s.view === 'multitrack' ? sessionHasClips() : hasDoc(s)),
       run: async () => openExportDialog(),
     },
     {
@@ -805,42 +822,35 @@ function registerFileCommands(): void {
   ]);
 }
 
-/** Registers the multitrack session commands (Task 21): `session.save` writes
- * the current session as .audm and is only enabled while the multitrack view
- * is active (there's nothing meaningful to save otherwise); `session.open` is
- * always available and switches the view to 'multitrack' on success.
+// ---- lot A ----
+// (No new helper needed: `saveProject` / `projectHasUnsavedWork` are imported
+// from sessionFile / fileService, and `sessionHasClips` is the hoisted
+// declaration below. Region kept so lots C/D/E merge mechanically.)
+// ---- end lot A ----
+
+/** Registers the project command that is not a `file.*` row (Task 21, lot A):
+ * `session.open` — File → Open Project… — is always available, restores every
+ * embedded document into the Files panel and switches the view to
+ * 'multitrack' on success. The former `session.save` row is folded into
+ * File → Save As… (M4: Save is the project in every view).
  *
  * F3 defense-in-depth: `runCommand` has no try/catch of its own, and before
- * this a thrown/rejected save or open propagated straight out through
- * MenuBar's onClick with nothing visible to the user (no .audm written, no
- * error). `saveSessionViaDialog`/`openSessionViaDialog` already catch their
- * own known failure points, but this wrapper ensures ANY escaping error —
- * known or not — still ends up in front of the user instead of vanishing. */
+ * this a thrown/rejected open propagated straight out through MenuBar's
+ * onClick with nothing visible to the user. `openSessionViaDialog` already
+ * catches its own known failure points, but this wrapper ensures ANY
+ * escaping error — known or not — still ends up in front of the user. */
 function registerSessionCommands(): void {
   registerCommands([
     {
-      id: 'session.save',
-      label: 'Save Session…',
-      enabled: (s) => s.view === 'multitrack',
-      run: async () => {
-        try {
-          await saveSessionViaDialog();
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Save Session failed', message });
-        }
-      },
-    },
-    {
       id: 'session.open',
-      label: 'Open Session…',
+      label: 'Open Project…',
       enabled: () => true,
       run: async () => {
         try {
           await openSessionViaDialog();
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Open Session failed', message });
+          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Open Project failed', message });
         }
       },
     },

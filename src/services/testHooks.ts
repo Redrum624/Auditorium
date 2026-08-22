@@ -20,7 +20,7 @@ import { useSessionStore } from '../multitrack/sessionStore';
 import { withSessionGesture } from '../multitrack/sessionUndo';
 import type { AutomationLane, AutomationParam } from '../multitrack/automation';
 import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
-import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
+import { loadProjectFrom, writeProject } from '../multitrack/sessionFile';
 import { getEffectFailureCount, runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import {
@@ -1532,60 +1532,18 @@ export function installTestHooks(): void {
 
     // --- v1.4 flows -----------------------------------------------------
 
-    // Serializes the current session to .audm v3 (Task M5/F3) and writes it
-    // directly, bypassing saveSessionViaDialog's native showSaveDialog +
-    // success showMessageBox (neither of which can be driven headlessly).
-    // Mirrors production's serializeSessionV3 call exactly (same session,
-    // docs, and markers sources) so the smoke proves the real writer.
-    saveSessionAs: async (outPath) => {
-      const session = useSessionStore.getState().session;
-      const docs = useAppStore.getState().documents;
-      const markers = useAppStore.getState().markers;
-      let bytes: Uint8Array<ArrayBuffer>;
-      try {
-        ({ bytes } = serializeSessionV3(session, docs, markers));
-      } catch {
-        return false;
-      }
-      const result = await window.electronAPI.writeFile(outPath, bytes.buffer);
-      return result.ok;
-    },
+    // Lot A (M4): IS File → Save As…, minus the dialog — `writeProject` is the
+    // dialog-free core production's `saveProject` calls (v4 bytes, save
+    // points, `projectPath`, the rename to the basename). The smoke therefore
+    // proves the real writer, not a parallel serializer call.
+    saveSessionAs: async (outPath) => writeProject(outPath, { rename: true }),
 
-    // Reads and parses a .audm file via the real dispatcher (parseSessionFileBytes,
-    // which sniffs the v3 AUDM3 magic vs. legacy JSON) and applies it to the
-    // store the same way openSessionViaDialog does, bypassing its native
-    // showOpenDialog + info showMessageBox. Returns a small summary so the
-    // smoke harness can assert the round trip without a separate "list all
-    // docs" hook — the reopened document(s) are also addDocument'd, so the
-    // last one is active and getStateSummary()/getActiveMarkers() read it back.
-    openSessionFrom: async (path) => {
-      const buf = await window.electronAPI.readFile(path);
-      const result = parseSessionFileBytes(buf);
-      for (const doc of result.documents) {
-        useAppStore.getState().addDocument(doc);
-      }
-      for (const [docId, markerList] of Object.entries(result.markers)) {
-        useAppStore.getState().setMarkersForDoc(docId, markerList);
-      }
-      useSessionStore.setState({
-        session: result.session,
-        selectedClipId: null,
-        mtCursorSample: 0,
-        // MT1 (C1): fitted, not the hardcoded 512 — see sessionFile's twin. This
-        // hook is how the smoke and the walker open a session, so while it wrote
-        // 512 every rig assertion about the multitrack was made against a zoom
-        // no user would ever see.
-        mtZoom: defaultSessionZoom(result.session),
-        mtPlayState: 'stopped',
-        mtPlayheadSample: 0,
-      });
-      useAppStore.getState().setView('multitrack');
-      return {
-        docCount: result.documents.length,
-        trackCount: result.session.tracks.length,
-        droppedClipCount: result.droppedClipCount,
-      };
-    },
+    // Lot A (M4): IS File → Open Project…, minus the dialog — `loadProjectFrom`
+    // is what `openSessionViaDialog` calls (real dispatcher, every embedded
+    // document addDocument'd so the last one is active, markers set, fitted
+    // zoom — MT1 C1 — history cleared, `projectPath` remembered, multitrack
+    // view). Same summary shape as before.
+    openSessionFrom: async (path) => loadProjectFrom(path),
 
     // --- v1.5 flows -------------------------------------------------------
     //

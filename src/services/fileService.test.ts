@@ -6,8 +6,14 @@ import {
   newDocument,
   closeDocumentFlow,
   getInFlightSaveCount,
+  projectDirtyCount,
+  projectHasContent,
+  projectHasUnsavedWork,
 } from './fileService';
 import { useAppStore, makeInitialState } from '../stores/appStore';
+import { useSessionStore } from '../multitrack/sessionStore';
+import { _resetSessionUndo } from '../multitrack/sessionUndo';
+import { createClip } from '../multitrack/session';
 import { docLength, createDocument } from '../audio/AudioDocument';
 import { decodeArrayBuffer, type DecodedAudio } from '../audio/decodeAudio';
 import { encodeMp3 } from '../audio/mp3Encoder';
@@ -133,6 +139,12 @@ function buildFakeOggWithMarkers(markers: { positionSample: number; name: string
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   jest.clearAllMocks();
+  // Lot A: the project (session store + its history + its path) is module-
+  // global too; Save is a project save now, so every test starts from an
+  // empty, never-written, clean project.
+  useSessionStore.getState().newSession(44100);
+  useSessionStore.getState().setProjectPath(null);
+  _resetSessionUndo();
   // Module-level state: a test that resizes the lane must not leave it resized
   // for the next one, whose zoom expectations are written for the 1600 px
   // fallback.
@@ -2081,13 +2093,19 @@ describe('closeDocumentFlow', () => {
     expect(useAppStore.getState().documents).toHaveLength(0);
   });
 
-  it('saves then closes when the user picks Save', async () => {
-    const api = installApi({ showMessageBox: jest.fn(async () => 0) }); // Save
+  it('saves the PROJECT then closes when the user picks Save (lot A, M4 — acceptance 12)', async () => {
+    const api = installApi({
+      showMessageBox: jest.fn(async () => 0), // Save Project
+      showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'), // no project path yet => Save As
+    });
     const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: true, name: 'a.wav' });
 
     await closeDocumentFlow(doc.id);
 
     expect(api.writeFile).toHaveBeenCalledTimes(1);
+    const [path, data] = api.writeFile.mock.calls[0];
+    expect(path).toBe('D:\\out\\p.audm'); // the .audm, never the source audio file
+    expect(new TextDecoder().decode(new Uint8Array(data as ArrayBuffer).subarray(0, 6))).toBe('AUDM4\n');
     expect(useAppStore.getState().documents).toHaveLength(0);
   });
 
@@ -2224,8 +2242,10 @@ describe('closeDocumentFlow', () => {
         expect.objectContaining({
           type: 'question',
           title: 'Unsaved document',
-          message: 'Remix 1 has never been saved to a file. Save it before closing?',
-          buttons: ['Save', "Don't Save", 'Cancel'],
+          // Lot A (M4): the offer is a PROJECT save — the document has no file
+          // of its own and never will through Save.
+          message: 'Remix 1 exists only in this project and the project has not been saved. Save the project before closing it?',
+          buttons: ['Save Project', "Don't Save", 'Cancel'],
         })
       );
       expect(useAppStore.getState().documents).toHaveLength(1); // Cancel kept it open
@@ -2241,16 +2261,17 @@ describe('closeDocumentFlow', () => {
       expect(useAppStore.getState().documents).toHaveLength(0);
     });
 
-    it('saves then closes when the user picks Save', async () => {
+    it('saves the project then closes when the user picks Save Project', async () => {
       const api = installApi({
-        showMessageBox: jest.fn(async () => 0), // Save
-        showSaveDialog: jest.fn(async () => 'D:\\out\\Remix 1.wav'),
+        showMessageBox: jest.fn(async () => 0), // Save Project
+        showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'),
       });
       const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
 
       await closeDocumentFlow(doc.id);
 
       expect(api.writeFile).toHaveBeenCalledTimes(1);
+      expect(api.writeFile.mock.calls[0][0]).toBe('D:\\out\\p.audm');
       expect(useAppStore.getState().documents).toHaveLength(0);
     });
 
@@ -2299,7 +2320,8 @@ describe('closeDocumentFlow', () => {
       expect(api.showMessageBox).toHaveBeenCalledWith(
         expect.objectContaining({
           title: 'Unsaved changes',
-          message: 'Save changes to a.wav before closing?',
+          message: 'a.wav has unsaved changes. Save the project before closing it?',
+          buttons: ['Save Project', "Don't Save", 'Cancel'],
         })
       );
     });
@@ -2423,5 +2445,73 @@ describe('neverSaved provenance across open/save/export (Task S4)', () => {
     expect(written).toBe('D:\\out\\remix.wav');
     expect(live(doc.id)!.neverSaved).toBe(true);
     expect(live(doc.id)!.filePath).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — the project predicates the Save pill, the StatusBar chip and
+// the close guard all read. M4 verbatim: any document dirty || session dirty
+// || (never written && has content); N12's "an empty untitled project is
+// clean" is the third clause only.
+// ---------------------------------------------------------------------------
+describe('project predicates (lot A — acceptance 11)', () => {
+  function addClipToTrack0(docId: string) {
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: docId, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+  }
+
+  it('an empty untitled project is clean (N12): no docs, no clips, no path', () => {
+    expect(projectHasContent()).toBe(false);
+    expect(projectHasUnsavedWork()).toBe(false);
+    expect(projectDirtyCount()).toBe(0);
+  });
+
+  it('one CLEAN document and no path: never written with content => dirty, count 1', () => {
+    seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    expect(projectHasContent()).toBe(true);
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1); // max(1, 0 dirty docs + 0)
+  });
+
+  it('one clean document and a path: clean, count 0', () => {
+    seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    expect(projectHasUnsavedWork()).toBe(false);
+    expect(projectDirtyCount()).toBe(0);
+  });
+
+  it('a dirty document with a path: dirty, count 1', () => {
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    useAppStore.getState().updateDocument({ ...doc, dirty: true });
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1);
+  });
+
+  it('a session addClip with a path: dirty, count 1', () => {
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    addClipToTrack0(doc.id);
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1);
+  });
+
+  it('a dirty document AND a dirty session: count 2', () => {
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    addClipToTrack0(doc.id);
+    useAppStore.getState().updateDocument({ ...useAppStore.getState().documents[0], dirty: true });
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(2);
+  });
+
+  it('TRUE with a path, no document and no clip after addTrack — session dirty, no content (M4 verbatim)', () => {
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    useSessionStore.getState().addTrack();
+    expect(projectHasContent()).toBe(false);
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1);
   });
 });

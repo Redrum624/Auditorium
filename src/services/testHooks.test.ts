@@ -26,7 +26,8 @@ import { _resetSnapPreference, isSnapEnabled } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
-import { serializeSession } from '../multitrack/sessionFile';
+import { serializeSession, serializeSessionV4 } from '../multitrack/sessionFile';
+import { _resetSessionUndo, isSessionDirty } from '../multitrack/sessionUndo';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import {
   FALLBACK_SESSION_LANE_WIDTH,
@@ -584,5 +585,67 @@ describe('MT1 C1: openSessionFrom opens the session fitted', () => {
     expect(loaded.mtZoom).toEqual(defaultSessionZoom(loaded.session));
     expect(loaded.mtZoom.samplesPerPixel).toBe(LEN / FALLBACK_SESSION_LANE_WIDTH);
     expect(loaded.mtZoom.scrollSample).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A — the project hooks the smoke drives headlessly. `saveSessionAs` IS
+// Save As (v4 bytes, path, save points, rename); `openSessionFrom` IS Open
+// Project. Lots C, D and E append their own describes below; never edit
+// another lot's.
+// ---------------------------------------------------------------------------
+describe('lot A project hooks', () => {
+  function installProjectApi(overrides: Record<string, unknown> = {}) {
+    const electronAPI = {
+      readFile: jest.fn(async () => new ArrayBuffer(0)),
+      writeFile: jest.fn(async () => ({ ok: true })),
+      showMessageBox: jest.fn(async () => 0),
+      pathBasename: (p: string) => p.split(/[\\/]/).pop() ?? p,
+      ...overrides,
+    };
+    (window as unknown as { electronAPI: unknown }).electronAPI = electronAPI;
+    return electronAPI;
+  }
+
+  beforeEach(() => {
+    useSessionStore.getState().newSession(44100);
+    useSessionStore.getState().setProjectPath(null);
+    _resetSessionUndo();
+  });
+
+  it('saveSessionAs writes AUDM4 bytes, remembers the path, renames the project to the basename and leaves it clean', async () => {
+    const electronAPI = installProjectApi();
+    addDoc('a.wav');
+
+    const ok = await api().saveSessionAs('D:\\out\\take 3.audm');
+
+    expect(ok).toBe(true);
+    const [path, data] = electronAPI.writeFile.mock.calls[0] as unknown as [string, ArrayBuffer];
+    expect(path).toBe('D:\\out\\take 3.audm');
+    expect(new TextDecoder().decode(new Uint8Array(data).subarray(0, 6))).toBe('AUDM4\n');
+    expect(useSessionStore.getState().projectPath).toBe('D:\\out\\take 3.audm');
+    expect(useSessionStore.getState().session.name).toBe('take 3');
+    expect(isSessionDirty()).toBe(false);
+    expect(useAppStore.getState().documents[0].neverSaved).toBe(false);
+    expect(electronAPI.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('openSessionFrom restores a v4 project, sets projectPath and returns the same summary shape', async () => {
+    const doc = createDocument({ name: 'song.wav', sampleRate: 44100, channels: [new Float32Array(64)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 64 })];
+    const session: Session = { name: 'Proj', sampleRate: 44100, tracks: [track] };
+    const { bytes } = serializeSessionV4(session, [doc]);
+    installProjectApi({ readFile: jest.fn(async () => bytes.buffer) });
+
+    const summary = await api().openSessionFrom('D:\\in\\proj.audm');
+
+    expectPlainJson(summary);
+    expect(summary).toEqual({ docCount: 1, trackCount: 1, droppedClipCount: 0 });
+    expect(useSessionStore.getState().projectPath).toBe('D:\\in\\proj.audm');
+    expect(useSessionStore.getState().session.name).toBe('Proj');
+    expect(useSessionStore.getState().mtZoom).toEqual(defaultSessionZoom(useSessionStore.getState().session));
+    expect(isSessionDirty()).toBe(false);
+    expect(useAppStore.getState().view).toBe('multitrack');
   });
 });
