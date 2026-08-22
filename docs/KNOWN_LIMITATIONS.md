@@ -2057,8 +2057,25 @@ end and locking the strip for it would be worse than the key landing on the
 preview. **Stop Preview**, the **✕**, **Cancel** and **Apply** all restore the
 real document to the engine, exactly as the modal's Escape did.
 
+**Mouse edits during Apply.** The same non-modal design holds while an effect
+is being **applied**: the module strip, the card's ✕ and Cancel are held and
+the global keys are suspended for the duration, but the mouse is never
+suspended — the edit pill and the Edit menu stay live, exactly as they do
+during a running pipeline pass. The runner resolves the target region when
+Apply starts and commits the processed audio to that same span when the worker
+returns (`src/services/effectRunner.ts`, `runEffectOnSelection`), so an edit
+that changes the document in between — a Trim, a Paste, a Ripple Delete from
+the Edit menu — lands the result over a document that has moved under it (the
+pipeline tools that commit after a worker pass, such as the Vocal Chain, carry
+the same window). The effect's modal overlay used to make that edit
+impossible; Undo restores both steps in order. Let the progress bar finish
+before editing.
+
 **Intended behavior:** a narrower seam than the module lock — "hold the
 keyboard" without "hold the module column" — could route transport keys to the
 real document during a preview, or end the preview first. It is the same
 second seam the pipeline tools' lock already wants (see `App.tsx`,
-`refuseWhileRunning`) and is a change of its own.
+`refuseWhileRunning`) and is a change of its own. For the Apply-time window, a
+commit guard in the runner — refuse, or re-resolve, when the document changed
+under a running pass — would close the race for effects and pipeline tools
+alike; that is the runner's change, not the card's.
