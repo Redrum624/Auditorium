@@ -12,6 +12,7 @@ import {
   isSessionDirty,
   markSessionSavePoint,
   recordSessionMutation,
+  sessionTimelineEpoch,
   redoSession,
   undoSession,
   withSessionGesture,
@@ -371,6 +372,28 @@ describe('canUndoSession / canRedoSession / clearSessionHistory', () => {
     clearSessionHistory();
     endSessionGesture();
     expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+  });
+});
+
+describe('the timeline epoch (lot A, fix round 1)', () => {
+  it('advances on clearSessionHistory and on nothing else — edits, gestures, undo and both save-point verbs leave it alone', () => {
+    // `sessionFile.writeProjectCore` uses this to tell "the session was edited
+    // while the bytes were in flight" (path still remembered) from "another
+    // project took over" (path must NOT be re-bound to this save's target).
+    const start = sessionTimelineEpoch();
+
+    mutate('Add track', 'S1');
+    withSessionGesture('Trim clip', () => writeSession('S2'));
+    undoSession();
+    markSessionSavePoint();
+    invalidateSessionSavePoint();
+    expect(sessionTimelineEpoch()).toBe(start);
+
+    clearSessionHistory(); // the one call every load-shaped replacement makes
+    expect(sessionTimelineEpoch()).toBe(start + 1);
+
+    clearSessionHistory();
+    expect(sessionTimelineEpoch()).toBe(start + 2);
   });
 });
 

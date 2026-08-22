@@ -302,6 +302,32 @@ export function isSessionDirty(): boolean {
 }
 
 /**
+ * Lot A (fix round 1) — how many times the project's editing timeline has been
+ * REPLACED, as opposed to edited. Every load-shaped flow (Open Project, a stem
+ * landing, a cover session) swaps `SessionState.session` wholesale, rewrites
+ * `projectPath` and calls `clearSessionHistory()`; the recording invariant
+ * above is what makes that call the one thing they all share. A recorded
+ * in-place edit never touches it.
+ *
+ * `sessionFile`'s `writeProjectCore` reads this either side of its `writeFile`
+ * await: a save that finishes AFTER such a replacement must not stamp its
+ * target path onto the project that took over. The bytes on disk belong to the
+ * project that was serialized, so re-binding would point the next plain Ctrl+S
+ * at that file with the new session's content and no dialog in front of it.
+ *
+ * Neither cheaper test can see it: comparing `projectPath` before and after
+ * misses a landing that writes the same `null` a never-saved project started
+ * from, and comparing session identity flags an ordinary mid-write clip edit,
+ * which must still remember the path (`sessionFile.test.ts` — "a clip edit
+ * during the write ... while the path is still remembered").
+ */
+let timelineEpoch = 0;
+
+export function sessionTimelineEpoch(): number {
+  return timelineEpoch;
+}
+
+/**
  * Drops the session's stacks and this module's gesture/coalescing state.
  * Called by the load-shaped session replacements (Open Project, stem
  * landing): a load starts a new editing timeline, exactly as opening a
@@ -312,6 +338,7 @@ export function isSessionDirty(): boolean {
 export function clearSessionHistory(): void {
   lastCoalescible = null;
   openGesture = null;
+  timelineEpoch += 1; // a new editing timeline — see `sessionTimelineEpoch`
   clearHistory(SESSION_UNDO_KEY);
 }
 

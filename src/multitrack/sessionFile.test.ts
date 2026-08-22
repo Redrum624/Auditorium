@@ -20,6 +20,7 @@ import {
   SESSION_COALESCE_WINDOW_MS,
   _resetSessionUndo,
   canUndoSession,
+  clearSessionHistory,
   isSessionDirty,
   undoSession,
 } from './sessionUndo';
@@ -1040,7 +1041,7 @@ describe('saveProject / writeProject / loadProjectFrom (lot A — M4: Save = pro
   function pendingWrite() {
     let resolve!: (r: { ok: true } | { ok: false; error: string }) => void;
     const writeFile = jest.fn(
-      () =>
+      (_path: string, _data: ArrayBuffer) =>
         new Promise<{ ok: true } | { ok: false; error: string }>((r) => {
           resolve = r;
         })
@@ -1344,6 +1345,87 @@ describe('saveProject / writeProject / loadProjectFrom (lot A — M4: Save = pro
     expect(useSessionStore.getState().projectPath).toBe('D:\\out\\take 3.audm');
     expect(useSessionStore.getState().session.name).toBe('take 3');
     expect(isSessionDirty()).toBe(false);
+  });
+
+  it('a load-shaped replacement during the write does not adopt the finished save target (fix round 1 — finding 1)', async () => {
+    // `stemLanding.ts:311-331` (and `coverJourney.ts:1395-1410`) replace the
+    // whole session, set `projectPath: null` — M4: a landed stem session is a
+    // NEW, unsaved project — and clear the session history. Separation runs for
+    // minutes in the background, so it can perfectly well resolve inside a
+    // save's `writeFile` await. When it does, the finished save must not stamp
+    // its target over the new project: the bytes on disk are the PREVIOUS
+    // project, and re-binding would make the next plain Ctrl+S (the pill is lit
+    // — the stem documents are `neverSaved`) overwrite that file with the stem
+    // session, with no dialog in front of it.
+    const { writeFile, resolve } = pendingWrite();
+    installApi({ writeFile });
+    seedProjectDoc();
+    useSessionStore.getState().setProjectPath('D:\\old.audm');
+
+    const save = saveProject({ as: false });
+    await tick();
+    expect(writeFile.mock.calls[0][0]).toBe('D:\\old.audm');
+
+    const landed: Session = { name: 'Stems', sampleRate: 44100, tracks: [createTrack('Vocals')] };
+    useSessionStore.setState({ session: landed, selectedClipId: null, projectPath: null });
+    clearSessionHistory();
+
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(useSessionStore.getState().session).toBe(landed);
+    expect(useSessionStore.getState().projectPath).toBeNull();
+    expect(writeFile).toHaveBeenCalledTimes(1); // the old project got its bytes; the new one is unsaved
+  });
+
+  it('the same interleave on a NEVER-saved project does not adopt the Save As target either', async () => {
+    // The null -> null case: comparing `projectPath` before and after the await
+    // would miss it, because the landing writes the same `null` the save
+    // started from. What separates them is the replacement itself.
+    const { writeFile, resolve } = pendingWrite();
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\new.audm'), writeFile });
+    seedProjectDoc();
+    expect(useSessionStore.getState().projectPath).toBeNull();
+
+    const save = saveProject({ as: false }); // no remembered path -> this IS a Save As
+    await tick();
+
+    const landed: Session = { name: 'Stems', sampleRate: 44100, tracks: [createTrack('Vocals')] };
+    useSessionStore.setState({ session: landed, selectedClipId: null, projectPath: null });
+    clearSessionHistory();
+
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(writeFile.mock.calls[0][0]).toBe('D:\\out\\new.audm');
+    expect(useSessionStore.getState().projectPath).toBeNull();
+  });
+
+  it('an Open Project that lands mid-write keeps ITS path and stays clean', async () => {
+    const { writeFile, resolve } = pendingWrite();
+    const openedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
+    const openedTrack = createTrack('T');
+    openedTrack.clips = [
+      createClip({ documentId: openedDoc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }),
+    ];
+    const { bytes } = serializeSessionV4(
+      { name: 'B', sampleRate: 44100, tracks: [openedTrack] },
+      [openedDoc]
+    );
+    installApi({ writeFile, readFile: jest.fn(async () => bytes.buffer) });
+    seedProjectDoc();
+    useSessionStore.getState().setProjectPath('D:\\a.audm');
+
+    const save = saveProject({ as: false });
+    await tick();
+    await loadProjectFrom('D:\\b.audm'); // File -> Open Project, additive, clears the history
+
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(useSessionStore.getState().projectPath).toBe('D:\\b.audm');
+    expect(useSessionStore.getState().session.name).toBe('B');
+    expect(isSessionDirty()).toBe(false); // and the close guard sees a clean, correctly-bound project
   });
 
   it('loadProjectFrom throws on a corrupt buffer and applies nothing', async () => {

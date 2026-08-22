@@ -6,7 +6,12 @@ import { clampFadePair } from './session';
 import { sanitizeAutomationLanes } from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import { useSessionStore } from './sessionStore';
-import { clearSessionHistory, invalidateSessionSavePoint, markSessionSavePoint } from './sessionUndo';
+import {
+  clearSessionHistory,
+  invalidateSessionSavePoint,
+  markSessionSavePoint,
+  sessionTimelineEpoch,
+} from './sessionUndo';
 import { defaultSessionZoom } from './sessionZoom';
 import { invalidateSavePoint, markSavePoint } from '../services/undoHistory';
 
@@ -844,6 +849,8 @@ async function writeProjectCore(
 ): Promise<boolean> {
   const sessionState = useSessionStore.getState();
   const session = sessionState.session;
+  // Which editing timeline these bytes belong to (see `sessionTimelineEpoch`).
+  const timelineAtStart = sessionTimelineEpoch();
   const appState = useAppStore.getState();
   const docs = appState.documents;
   const markers = appState.markers;
@@ -900,7 +907,19 @@ async function writeProjectCore(
     }
   }
 
-  useSessionStore.getState().setProjectPath(targetPath);
+  // Remember where the project lives — but only if it is still the SAME
+  // project. A load-shaped replacement (Open Project, a stem landing, a cover
+  // session) can land inside the await above: separation runs for minutes, and
+  // each of those flows sets `projectPath` itself (null for a landing, its own
+  // file for an open) on a brand-new timeline. Stamping this save's target over
+  // that would bind someone else's content to the file just written, while the
+  // stale-branch `invalidateSessionSavePoint()` above reads as clean on the
+  // freshly cleared stack: the next plain Ctrl+S would overwrite the project on
+  // disk with no dialog. The write itself still happened, and the file it
+  // produced is intact.
+  if (sessionTimelineEpoch() === timelineAtStart) {
+    useSessionStore.getState().setProjectPath(targetPath);
+  }
 
   if (droppedClipCount > 0) {
     await api().showMessageBox({
