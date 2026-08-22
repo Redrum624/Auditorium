@@ -2607,6 +2607,42 @@ describe('exportSessionMixdown (lot A — acceptance 20)', () => {
     encodeWavSpy.mockRestore();
   });
 
+  it('the mixdown.fades.test.ts fade-in fixture, rebuilt through the store, exports exactly what mixdownSession renders (fixture reuse, fix round 1)', async () => {
+    // `mixdown.fades.test.ts` 'applies a fade-in with the default equal-power
+    // curve, exact ramp values': a constant 0.5 mono document, one clip of
+    // 100 samples with `fadeInSample: 8`, `pan: -1` so the left channel is
+    // the bare envelope and the right is exactly 0. A test module cannot be
+    // imported without re-registering its suites here, so the fixture is
+    // rebuilt value for value through the store's own actions; its pinned
+    // literals (silence at 0, the bare constant past the ramp, a silent right
+    // channel) are re-checked so a drift between the two copies is visible,
+    // and the export is then held to `mixdownSession` rather than to a
+    // re-derived ramp.
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\fade.wav') });
+    const encodeWavSpy = jest.spyOn(wavCodec, 'encodeWav');
+    const d = createDocument({ name: 'd', sampleRate: 44100, channels: [new Float32Array(100).fill(0.5)] });
+    useAppStore.getState().addDocument(d);
+    const s = useSessionStore.getState();
+    const t = s.session.tracks[0];
+    const c = createClip({ documentId: d.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    s.addClip(t.id, c);
+    s.setClipFade(c.id, 'in', { lengthSample: 8 });
+    s.setTrackParam(t.id, { pan: -1 });
+    const expected = mixdownSession(useSessionStore.getState().session, docsMap());
+    expect(expected.channels[0][0]).toBe(0); // sin(0) = 0: the ramp starts in silence
+    expect(expected.channels[0][50]).toBe(0.5); // untouched past the fade
+    expect(expected.channels[1][50]).toBe(0); // pan -1
+
+    const path = await exportSessionMixdown(opts);
+
+    expect(path).toBe('D:\\out\\fade.wav');
+    const [channels, sampleRate] = encodeWavSpy.mock.calls[0];
+    expect(sampleRate).toBe(44100);
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(channels[1]).toEqual(expected.channels[1]);
+    encodeWavSpy.mockRestore();
+  });
+
   it('solo on B silences A — the render is still exactly mixdownSession', async () => {
     installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.wav') });
     const encodeWavSpy = jest.spyOn(wavCodec, 'encodeWav');
