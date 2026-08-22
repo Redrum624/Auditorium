@@ -18,7 +18,7 @@ import { partitionStems } from '../dsp/stemPartition';
 import { mixdownSession } from '../multitrack/mixdown';
 import { createClip, createTrack } from '../multitrack/session';
 import { useSessionStore } from '../multitrack/sessionStore';
-import { isSessionDirty } from '../multitrack/sessionUndo';
+import { canUndoSession, isSessionDirty } from '../multitrack/sessionUndo';
 import { defaultSessionZoom, sessionEndSample } from '../multitrack/sessionZoom';
 import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from '../multitrack/sessionViewport';
 import { useAppStore, makeInitialState } from '../stores/appStore';
@@ -737,12 +737,17 @@ describe('over-unity sources — the ±1 master clamp', () => {
 // ---------------------------------------------------------------------------
 describe('lot A (M4): a landed stem session is a new, unsaved project', () => {
   it('clears projectPath and starts with a clean session history', () => {
-    useSessionStore.getState().setProjectPath('D:\p.audm');
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    // A recorded session edit BEFORE the landing: the landing must DROP the
+    // stack, so nothing is left to undo and the session sits at the mark.
+    useSessionStore.getState().renameSession('edited before landing');
+    expect(isSessionDirty()).toBe(true);
     const source = addSourceDocument(2, 44100);
 
     landStems(makeOutput(source));
 
     expect(useSessionStore.getState().projectPath).toBeNull();
+    expect(canUndoSession()).toBe(false);
     expect(isSessionDirty()).toBe(false);
   });
 });

@@ -644,7 +644,7 @@ describe('runCoverJourney — a second pass on the same song', () => {
     );
     for (const d of [song, ...stems]) useAppStore.getState().addDocument(d);
 
-    // Open Session: the real parser, applied the way `openSessionViaDialog` does.
+    // Open Project: the real parser, applied the way `openSessionViaDialog` does.
     const parsed = parseSessionFileBytes(
       bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer
     );
@@ -1957,16 +1957,28 @@ describe('the stage table', () => {
 
 describe('lot A (M4): the cover session replaces the project', () => {
   it('clears projectPath, and the load itself leaves the session history clean', async () => {
-    useSessionStore.getState().setProjectPath('D:\p.audm');
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    // A recorded session edit BEFORE the journey. The landing must DROP the
+    // stack (`clearSessionHistory`), not merely mark it: if this entry
+    // survived, undoing the trim below would not reach a clean session.
+    useSessionStore.getState().renameSession('edited before the journey');
+    expect(isSessionDirty()).toBe(true);
 
     const report = await runCoverJourney({ songDocId: songId, takeDocId: takeId });
 
     expect(report!.completed).toBe(true);
     expect(useSessionStore.getState().projectPath).toBeNull();
     // Stage 5 clears the session stack; the only thing that can push onto it
-    // afterwards is the level trim (one entry, `JOURNEY_TRIM_UNDO_LABEL`), so
-    // the session is dirty exactly when that entry exists and never because of
-    // the landing itself.
-    expect(isSessionDirty()).toBe(canUndoSession());
+    // afterwards is the level trim (one entry, `JOURNEY_TRIM_UNDO_LABEL`).
+    // Nothing from before the landing survives, and undoing that trim (when
+    // it happened) lands exactly on the clean, just-landed session — the
+    // brief's `isSessionDirty() === false`, asserted on the landing itself
+    // rather than on the journey's last stage.
+    const done = getHistory(SESSION_UNDO_KEY).done;
+    expect(done.length).toBeLessThanOrEqual(1);
+    expect(done.every((label) => label === JOURNEY_TRIM_UNDO_LABEL)).toBe(true);
+    if (canUndoSession()) undoSession();
+    expect(canUndoSession()).toBe(false);
+    expect(isSessionDirty()).toBe(false);
   });
 });
