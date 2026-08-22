@@ -329,8 +329,8 @@ is always last, and anything added later goes between them.
 - **Remix** — a remix document's per-splice adjustment rows (quality dot,
   Go To, Reject, Pin, Nudge, Re-roll, Revert to auto).
 - **History** — the undo history of whatever is active: the **session's** in
-  the multitrack view, the **active document's** elsewhere (see *Cut / Copy /
-  Paste / Delete* above and *Undo in the multitrack* below).
+  the multitrack view, the **active document's** elsewhere (see *Split / Cut /
+  Copy / Paste / Delete* above and *Undo in the multitrack* below).
 - **Markers** — the active document's marker list (see *Markers* above).
 - **Remix** appears in the strip only while a remix document is open, and
   vanishes again when the last one is closed — it has nothing to show
