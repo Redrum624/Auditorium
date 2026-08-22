@@ -8,6 +8,9 @@ import {
   canUndoSession,
   clearSessionHistory,
   endSessionGesture,
+  invalidateSessionSavePoint,
+  isSessionDirty,
+  markSessionSavePoint,
   recordSessionMutation,
   redoSession,
   undoSession,
@@ -334,5 +337,33 @@ describe('canUndoSession / canRedoSession / clearSessionHistory', () => {
     clearSessionHistory();
     endSessionGesture();
     expect(getHistory(SESSION_UNDO_KEY).done).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — the session's own save point, the half of "project dirty" that
+// no document flag can carry.
+// ---------------------------------------------------------------------------
+describe('session save point (lot A)', () => {
+  it('isSessionDirty follows the stack: clean fresh, dirty after a mutation, clean at the mark, dirty again, clean after undo to the mark, dirty after invalidate, clean after clear', () => {
+    expect(isSessionDirty()).toBe(false);
+
+    mutate('Add clip', 'S1');
+    expect(isSessionDirty()).toBe(true);
+
+    markSessionSavePoint();
+    expect(isSessionDirty()).toBe(false);
+
+    mutate('Move clip', 'S2');
+    expect(isSessionDirty()).toBe(true);
+
+    undoSession();
+    expect(isSessionDirty()).toBe(false);
+
+    invalidateSessionSavePoint();
+    expect(isSessionDirty()).toBe(true);
+
+    clearSessionHistory();
+    expect(isSessionDirty()).toBe(false);
   });
 });

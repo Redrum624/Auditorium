@@ -213,11 +213,19 @@ export function redo(docId: string): void {
  * No-op when the document's history no longer exists: a save whose async
  * write resolves AFTER the document was closed (clearHistory already ran)
  * must not re-create the histories entry — nothing would ever delete it
- * again, and it would sit in the map for the rest of the session. */
+ * again, and it would sit in the map for the rest of the session.
+ *
+ * Lot A (M4): bumps the version counter when the mark actually moves. Project
+ * dirtiness (`fileService.projectHasUnsavedWork`) is DERIVED from these save
+ * points, and a project save changes no store state a subscriber could
+ * otherwise notice — the Save pill and the StatusBar chip re-evaluate through
+ * `useHistoryVersion`, so a save that never bumped would leave them lit. */
 export function markSavePoint(docId: string): void {
   const stacks = histories.get(docId);
   if (!stacks) return;
+  if (stacks.savePoint === stacks.position) return;
   stacks.savePoint = stacks.position;
+  bumpVersion();
 }
 
 /** Makes the current save point permanently unreachable — call from the
@@ -231,11 +239,25 @@ export function markSavePoint(docId: string): void {
  * No-op when the document's history no longer exists (closed before the save
  * resolved) — same reasoning as `markSavePoint`, with one extra hazard: the
  * resurrected entry would park `savePoint = -1` on the closed id, poisoning
- * the dirty derivation of any later document that reuses it. */
+ * the dirty derivation of any later document that reuses it.
+ *
+ * Bumps the version when the mark was still reachable (same reasoning as
+ * `markSavePoint` — a stale project save must re-light the dirty surfaces). */
 export function invalidateSavePoint(docId: string): void {
   const stacks = histories.get(docId);
   if (!stacks) return;
+  if (stacks.savePoint === -1) return;
   stacks.savePoint = -1;
+  bumpVersion();
+}
+
+/** Lot A (M4): whether `docId`'s history sits at its save point — the same
+ * derivation `applyDerivedDirty` writes into a document's `dirty`, readable
+ * for keys that have no document flag (the session's `SESSION_UNDO_KEY`). No
+ * stacks means nothing was ever edited, i.e. clean. */
+export function isAtSavePoint(docId: string): boolean {
+  const stacks = histories.get(docId);
+  return !stacks || stacks.position === stacks.savePoint;
 }
 
 export function canUndo(docId: string): boolean {

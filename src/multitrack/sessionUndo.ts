@@ -3,6 +3,9 @@ import {
   canRedo,
   canUndo,
   clearHistory,
+  invalidateSavePoint,
+  isAtSavePoint,
+  markSavePoint,
   pushUndo,
   redo,
   undo,
@@ -265,6 +268,27 @@ export function canUndoSession(): boolean {
 
 export function canRedoSession(): boolean {
   return canRedo(SESSION_UNDO_KEY);
+}
+
+/**
+ * Lot A (M4) — the session's save point, the same three verbs `fileService`
+ * applies to a document's history after a write: mark on a successful save
+ * that passed the staleness check, invalidate when the session was edited
+ * while the bytes were in flight, and read back whether the live session
+ * matches what the last project save wrote. `clearSessionHistory` (a load)
+ * drops the stacks, which `isAtSavePoint` reads as clean — a freshly opened
+ * project is not dirty.
+ */
+export function markSessionSavePoint(): void {
+  markSavePoint(SESSION_UNDO_KEY);
+}
+
+export function invalidateSessionSavePoint(): void {
+  invalidateSavePoint(SESSION_UNDO_KEY);
+}
+
+export function isSessionDirty(): boolean {
+  return !isAtSavePoint(SESSION_UNDO_KEY);
 }
 
 /**
