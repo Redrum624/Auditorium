@@ -33,8 +33,8 @@ function docBytes(doc: AudioDocument): number {
  * region args it passes to the AudioDocument mutator. `applyEdit` turns this
  * into a full before/after marker-list remap that rides inside the SAME undo
  * entry as the document swap. Omit entirely for equal-length transforms
- * (effects, reverse, in-place silence, ...) — markers stay untouched and no
- * marker snapshot is taken.
+ * (effects, reverse, in-place silence, delete, cut, ...) — markers stay
+ * untouched and no marker snapshot is taken.
  *
  * Rules (all in PRE-edit sample coordinates, region args are [start, end)):
  * - delete [s,e): < s keep; in [s,e) drop; >= e shift left by (e-s).
@@ -336,20 +336,29 @@ function resolveSelection(doc: AudioDocument, selection: SelectionRange): { star
   return resolveRegion(doc, selection);
 }
 
-/** Copies the selection to the clipboard, then removes it. Requires a selection. */
+/** Zero-fills [start, end) in place — length unchanged, no marker remap. N7:
+ * Delete, Cut and Silence all go through here so they cannot drift. */
+function zeroFillRegion(doc: AudioDocument, start: number, end: number): AudioDocument {
+  const zeros = doc.channels.map(() => new Float32Array(end - start));
+  return replaceRegion(doc, start, end, zeros);
+}
+
+/**
+ * Copies the selection to the clipboard, then leaves that span EMPTY at the
+ * same length (item 7 / M1): the document never ripples, so markers inside and
+ * after the span stay where they are and no remap is passed. The selection
+ * collapses to a cursor at the span's start. Requires a selection.
+ */
 export function cutSelection(): void {
   const doc = activeDoc();
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
   const { start, end } = resolveSelection(doc, selection);
   setClipboard({ channels: cloneRegion(doc, start, end), sampleRate: doc.sampleRate });
-  applyEdit(
-    'Cut',
-    doc.id,
-    (d) => deleteRegion(d, start, end),
-    { selection: null, cursorSample: start },
-    { type: 'delete', start, end }
-  );
+  applyEdit('Cut', doc.id, (d) => zeroFillRegion(d, start, end), {
+    selection: null,
+    cursorSample: start,
+  });
 }
 
 /** Copies the selection to the clipboard without changing the document. */
@@ -408,14 +417,35 @@ export function pasteAtCursor(): void {
   }
 }
 
-/** Removes the selection without touching the clipboard. Requires a selection. */
+/**
+ * Silences the selection in place at the same length and collapses it to a
+ * cursor at its start, without touching the clipboard (item 7 / N6). No remap:
+ * the timeline did not move, so every marker — including one inside the span —
+ * stays exactly where it was. Requires a selection.
+ */
 export function deleteSelection(): void {
   const doc = activeDoc();
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
   const { start, end } = resolveSelection(doc, selection);
+  applyEdit('Delete', doc.id, (d) => zeroFillRegion(d, start, end), {
+    selection: null,
+    cursorSample: start,
+  });
+}
+
+/**
+ * The pre-item-7 Delete, verbatim (N8): removes the selection and closes the
+ * gap, shortening the document, with the 'delete' marker remap riding in the
+ * same undo entry. Behind Shift+Del in the editor views. Requires a selection.
+ */
+export function rippleDeleteSelection(): void {
+  const doc = activeDoc();
+  const selection = useAppStore.getState().selection;
+  if (!doc || !selection) return;
+  const { start, end } = resolveSelection(doc, selection);
   applyEdit(
-    'Delete',
+    'Ripple Delete',
     doc.id,
     (d) => deleteRegion(d, start, end),
     { selection: null, cursorSample: start },
@@ -447,7 +477,6 @@ export function silenceSelection(): void {
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
   const { start, end } = resolveSelection(doc, selection);
-  const zeros = doc.channels.map(() => new Float32Array(end - start));
   // No `after`: leaving selection/cursor as-is preserves them (and redo restores them).
-  applyEdit('Silence', doc.id, (d) => replaceRegion(d, start, end, zeros));
+  applyEdit('Silence', doc.id, (d) => zeroFillRegion(d, start, end));
 }

@@ -200,8 +200,13 @@ not an edit, and `Ctrl+Z` will not bring it back.
 
 ### Cut / Copy / Paste / Delete
 
-Standard editing acts on the current selection: `Ctrl+X` cut, `Ctrl+C` copy,
-`Ctrl+V` paste at the cursor, `Delete` removes the selection. Undo/redo
+Standard editing acts on the current selection: `Ctrl+X` cuts the selection to
+the clipboard and leaves that span **silent at the same length**; `Ctrl+C`
+copies; `Ctrl+V` pastes at the cursor; `Delete` silences the selection in
+place at the same length and collapses it to a cursor at its start. None of
+these moves anything that comes after the selection. `Shift+Delete` is
+**Ripple Delete**: it removes the selection and closes the gap — the only
+editor edit that shortens the file besides Trim. Undo/redo
 (`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) keeps up to 50 steps per document,
 within an 800 MB per-document memory budget — whichever limit is hit first
 evicts the oldest step (a large document's effective depth can be well under
@@ -209,10 +214,11 @@ evicts the oldest step (a large document's effective depth can be well under
 module strip) lists every applied edit; click any entry to jump the document's state to
 that point. Marker add/rename/delete are undoable too (labelled `Add Marker`
 / `Rename Marker` / `Delete Marker` in the History panel), and destructive
-edits that change the timeline (delete, paste, trim, replace, sample-rate
-conversion, and length-changing effects like Time Stretch/Pitch Shift) remap
-or drop affected markers in the same undo step, so undo restores their exact
-pre-edit positions.
+edits that change the timeline (ripple delete, paste, trim, replace,
+sample-rate conversion, and length-changing effects like Time Stretch/Pitch
+Shift) remap or drop affected markers in the same undo step, so undo restores
+their exact pre-edit positions. Equal-length edits — Delete, Cut, Silence —
+leave every marker where it was.
 
 ### The edit toolbar
 
@@ -261,11 +267,12 @@ Export, and read back sample-accurately the next time the file is opened; a
 multitrack session's markers are embedded in the `.audm` file. Adding,
 renaming, or deleting a marker marks the document dirty (the Files-panel `*`,
 the close/quit prompts) and is undoable from the History panel. Destructive
-edits that change the timeline — delete, paste, trim, replace, sample-rate
-conversion, and length-changing effects like Time Stretch/Pitch Shift — remap
-marker positions along with the audio rather than leaving them stranded;
-positions are always clamped to the document length, so a marker can never be
-saved past the end of the file.
+edits that change the timeline — ripple delete, paste, trim, replace,
+sample-rate conversion, and length-changing effects like Time Stretch/Pitch
+Shift — remap marker positions along with the audio rather than leaving them
+stranded; equal-length edits (Delete, Cut, Silence) leave markers in place,
+including markers inside the silenced span. Positions are always clamped to
+the document length, so a marker can never be saved past the end of the file.
 
 ### Convert Sample Rate / Convert Channels
 

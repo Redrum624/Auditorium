@@ -20,6 +20,7 @@ import { SHORTCUT_TABLE } from './shortcuts';
 import { setClipboard } from './clipboard';
 import { createClip } from '../multitrack/session';
 import { _resetTranscriptsForTest, getTranscript } from './transcribeService';
+import { getHistory } from './undoHistory';
 import { installTranscribeBackend, seedTranscript, voiceVector } from '../__mocks__/transcribeBackend';
 
 jest.mock('../multitrack/sessionFile');
@@ -633,11 +634,49 @@ describe('marker commands (Task 23)', () => {
   });
 });
 
+describe('edit.delete / edit.rippleDelete in the editor views (item 7)', () => {
+  function nonZeroDoc() {
+    const doc = createDocument({
+      name: 'ramp.wav',
+      sampleRate: 44100,
+      channels: [Float32Array.from({ length: 1000 }, (_, i) => i + 1)],
+    });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('edit.rippleDelete is enabled in the waveform view with a selection, disabled without, and shrinks the document 1000 -> 990 with History label Ripple Delete', async () => {
+    const doc = nonZeroDoc();
+    expect(isCommandEnabled('edit.rippleDelete')).toBe(false);
+
+    useAppStore.getState().setSelection({ start: 0, end: 10 });
+    expect(isCommandEnabled('edit.rippleDelete')).toBe(true);
+
+    await runCommand('edit.rippleDelete');
+    expect(docLength(useAppStore.getState().documents[0])).toBe(990);
+    expect(getHistory(doc.id).done).toEqual(['Ripple Delete']);
+  });
+
+  it('edit.delete in the waveform view keeps the length at 1000 and zeroes [0,10)', async () => {
+    const doc = nonZeroDoc();
+    useAppStore.getState().setSelection({ start: 0, end: 10 });
+
+    await runCommand('edit.delete');
+
+    const after = useAppStore.getState().documents[0];
+    expect(docLength(after)).toBe(1000);
+    expect(Array.from(after.channels[0].subarray(0, 12))).toEqual([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 11, 12]);
+    expect(getHistory(doc.id).done).toEqual(['Delete']);
+    expect(useAppStore.getState().selection).toBeNull();
+    expect(useAppStore.getState().cursorSample).toBe(0);
+  });
+});
+
 describe('marker.add undo (Task M2 / F5)', () => {
   it('Ctrl+Z after marker.add removes the marker, not a prior audio edit', async () => {
     const doc = openDoc(); // length 1000
     useAppStore.getState().setSelection({ start: 0, end: 10 });
-    await runCommand('edit.delete'); // audio edit: length 1000 -> 990
+    await runCommand('edit.rippleDelete'); // audio edit: length 1000 -> 990 (item 7: plain Delete is equal-length)
     expect(docLength(useAppStore.getState().documents[0])).toBe(990);
 
     useAppStore.getState().setCursor(500);

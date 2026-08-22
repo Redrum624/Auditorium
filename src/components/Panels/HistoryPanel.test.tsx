@@ -1,6 +1,11 @@
 import { render, screen, fireEvent } from '@testing-library/react';
 import HistoryPanel from './HistoryPanel';
-import { deleteSelection, silenceSelection, pushMarkerUndo } from '../../services/editOps';
+import {
+  deleteSelection,
+  rippleDeleteSelection,
+  silenceSelection,
+  pushMarkerUndo,
+} from '../../services/editOps';
 import { clearHistory } from '../../services/undoHistory';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, docLength, type AudioDocument } from '../../audio/AudioDocument';
@@ -46,7 +51,9 @@ describe('HistoryPanel', () => {
     clearHistory(doc.id);
     useAppStore.getState().setSelection({ start: 2, end: 5 });
     silenceSelection(); // length stays 10
-    deleteSelection(); // removes 3 samples -> length 7
+    // Item 7: plain Delete is equal-length now; the length-changing step this
+    // test needs is the ripple (Shift+Del).
+    rippleDeleteSelection(); // removes 3 samples -> length 7
 
     render(<HistoryPanel />);
     expect(docLength(useAppStore.getState().documents[0])).toBe(7);
@@ -55,8 +62,8 @@ describe('HistoryPanel', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Silence' }));
     expect(docLength(useAppStore.getState().documents[0])).toBe(10);
 
-    // 'Delete' is now an undone (grayed) entry; clicking it redoes.
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    // 'Ripple Delete' is now an undone (grayed) entry; clicking it redoes.
+    fireEvent.click(screen.getByRole('button', { name: 'Ripple Delete' }));
     expect(docLength(useAppStore.getState().documents[0])).toBe(7);
   });
 

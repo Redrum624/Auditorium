@@ -5672,9 +5672,10 @@ async function main() {
     console.log('Cut / Delete / Trim / Silence over [20000, 50000)...');
     const EDIT_LEN = REGION_E - REGION_S;
 
-    // Cut: the join is the assertion. After removing [s,e) the sample sitting at
-    // index s must be the one that used to sit at index e — a seam that dropped
-    // or duplicated a sample still has the right LENGTH.
+    // Cut (item 7 / M1): the span is left EMPTY at the same length. Three
+    // observations make that claim: the length did not change, the 32 samples
+    // at the span's start are now zero, and the 32 at the span's END are the
+    // bytes that were there before — nothing moved up to fill a gap.
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const cutBefore = await stateOf();
     const cutAtStart = await samplesOf(0, REGION_S, 32);
@@ -5682,17 +5683,22 @@ async function main() {
     await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
     await page.evaluate(() => window.__test.editOp('cut'));
     const cutAfter = await stateOf();
-    const cutJoin = await samplesOf(0, REGION_S, 32);
+    const cutHole = await samplesOf(0, REGION_S, 32);
+    const cutTail = await samplesOf(0, REGION_E, 32);
     const cutClip = await page.evaluate(() => window.__test.getClipboardInfo());
     console.log(`  cut: ${cutBefore.length} -> ${cutAfter.length}, clipboard ${JSON.stringify(cutClip)}`);
     assert(
-      cutAfter.length === cutBefore.length - EDIT_LEN,
-      `Cut removed exactly the selection (expected ${cutBefore.length - EDIT_LEN}, actual ${cutAfter.length})`
+      cutAfter.length === cutBefore.length,
+      `Cut keeps the length — the span is emptied, not removed (expected ${cutBefore.length}, actual ${cutAfter.length})`
     );
     assert(
-      diffCount(cutJoin, cutAtEnd) === 0,
-      `the join is seamless: what now sits at ${REGION_S} is what used to sit at ${REGION_E} ` +
-        `(${diffCount(cutJoin, cutAtEnd)} of 32 differ)`
+      cutHole.every((v) => v === 0),
+      `the 32 samples at ${REGION_S} are silent (${cutHole.filter((v) => v !== 0).length} of 32 non-zero)`
+    );
+    assert(
+      diffCount(cutTail, cutAtEnd) === 0,
+      `and what sits at ${REGION_E} is what sat there before — nothing rippled ` +
+        `(${diffCount(cutTail, cutAtEnd)} of 32 differ)`
     );
     assert(
       cutClip !== null &&
@@ -5705,13 +5711,13 @@ async function main() {
     const cutRestored = await samplesOf(0, REGION_S, 32);
     assert(
       cutUndone.length === cutBefore.length && diffCount(cutRestored, cutAtStart) === 0,
-      `one undo restores the length AND the bytes (${cutUndone.length} samples, ${diffCount(cutRestored, cutAtStart)} of 32 differ)`
+      `one undo restores the bytes at ${REGION_S} (${cutUndone.length} samples, ${diffCount(cutRestored, cutAtStart)} of 32 differ)`
     );
     await page.evaluate(() => window.__test.closeActive());
 
-    // Delete: same removal, and the clipboard is NOT touched. A distinctive
-    // 1000-sample copy is put on the clipboard first, so "unchanged" is a real
-    // observation rather than the absence of one.
+    // Delete (item 7 / N6): the same constant-length silence, and the clipboard
+    // is NOT touched. A distinctive 1000-sample copy is put on the clipboard
+    // first, so "unchanged" is a real observation rather than the absence of one.
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const delBefore = await stateOf();
     const delAtEnd = await samplesOf(0, REGION_E, 32);
@@ -5720,11 +5726,15 @@ async function main() {
     await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
     await page.evaluate(() => window.__test.editOp('delete'));
     const delAfter = await stateOf();
-    const delJoin = await samplesOf(0, REGION_S, 32);
+    const delHole = await samplesOf(0, REGION_S, 32);
+    const delTail = await samplesOf(0, REGION_E, 32);
     const delClip = await page.evaluate(() => window.__test.getClipboardInfo());
     assert(
-      delAfter.length === delBefore.length - EDIT_LEN && diffCount(delJoin, delAtEnd) === 0,
-      `Delete removes the selection and joins it seamlessly (${delAfter.length} samples, ${diffCount(delJoin, delAtEnd)} of 32 differ at the join)`
+      delAfter.length === delBefore.length &&
+        delHole.every((v) => v === 0) &&
+        diffCount(delTail, delAtEnd) === 0,
+      `Delete silences the selection in place at the same length (${delAfter.length} samples, ` +
+        `${delHole.filter((v) => v !== 0).length} of 32 non-zero at ${REGION_S}, ${diffCount(delTail, delAtEnd)} of 32 differ at ${REGION_E})`
     );
     assert(
       delClip !== null && delClip.length === 1000,
@@ -5788,10 +5798,12 @@ async function main() {
 
     // L7-4) An edit moves the markers -----------------------------------------
     // Markers had only ever round-tripped through FILE FORMATS in this file,
-    // never through an EDIT. Deleting [s,e): a marker before it stays put, one
-    // inside it is dropped (editOps' 'delete' rule), and one after it lands at
-    // exactly P - (e - s) — an exact integer, so no tolerance is warranted.
-    console.log('An edit moves the markers: delete a region under three of them...');
+    // never through an EDIT. Ripple-deleting [s,e) (Shift+Del — since item 7
+    // the only Delete that moves the timeline): a marker before it stays put,
+    // one inside it is dropped (editOps' 'delete' rule), and one after it
+    // lands at exactly P - (e - s) — an exact integer, so no tolerance is
+    // warranted.
+    console.log('An edit moves the markers: ripple-delete a region under three of them...');
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const MARK_BEFORE = 10000;
     const MARK_INSIDE = 30000;
@@ -5808,9 +5820,9 @@ async function main() {
       assert(id !== null, `marker '${name}' placed at ${at}`);
     }
     await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
-    await page.evaluate(() => window.__test.editOp('delete'));
+    await page.evaluate(() => window.__test.editOp('rippleDelete'));
     const markersAfterEdit = await page.evaluate(() => window.__test.getActiveMarkers());
-    console.log(`  markers after deleting [${REGION_S}, ${REGION_E}): ${JSON.stringify(markersAfterEdit)}`);
+    console.log(`  markers after ripple-deleting [${REGION_S}, ${REGION_E}): ${JSON.stringify(markersAfterEdit)}`);
     const markIntro = markersAfterEdit.filter((m) => m.name === 'Intro')[0];
     const markChorus = markersAfterEdit.filter((m) => m.name === 'Chorus')[0];
     assert(

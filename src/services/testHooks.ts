@@ -36,6 +36,7 @@ import {
   cutSelection,
   deleteSelection,
   pasteAtCursor,
+  rippleDeleteSelection,
   silenceSelection,
   trimToSelection,
 } from './editOps';
@@ -177,9 +178,9 @@ export interface TestApi {
   redoActive(): { length: number };
   /** The active document's history, as the History panel renders it. */
   getHistoryState(): { done: string[]; undone: string[] };
-  /** The four selection edits behind Ctrl+X / Del / Trim / Silence, plus the
-   * clipboard's other two ends, dispatched by name. */
-  editOp(op: 'cut' | 'copy' | 'paste' | 'delete' | 'trim' | 'silence'): void;
+  /** The selection edits behind Ctrl+X / Del / Shift+Del / Trim / Silence,
+   * plus the clipboard's other two ends, dispatched by name. */
+  editOp(op: 'cut' | 'copy' | 'paste' | 'delete' | 'rippleDelete' | 'trim' | 'silence'): void;
   /** What the clipboard is holding, so a Cut's promise can be checked. */
   getClipboardInfo(): { length: number; sampleRate: number; channels: number } | null;
   /** Edit > Convert Channels (`documentTools.convertChannels`). */
@@ -1210,6 +1211,9 @@ export function installTestHooks(): void {
           return;
         case 'delete':
           deleteSelection();
+          return;
+        case 'rippleDelete':
+          rippleDeleteSelection();
           return;
         case 'trim':
           trimToSelection();

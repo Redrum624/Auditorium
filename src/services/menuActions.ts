@@ -19,6 +19,7 @@ import {
   pasteAtCursor,
   deleteSelection,
   pushMarkerUndo,
+  rippleDeleteSelection,
   silenceSelection,
   trimToSelection,
 } from './editOps';
@@ -623,7 +624,8 @@ function registerEditCommands(): void {
     },
     {
       // In the multitrack view, Delete removes the selected clip; elsewhere it
-      // deletes the active document's selected region (Task 22 view routing).
+      // silences the selected region in place at constant length (item 7;
+      // Task 22 view routing).
       //
       // K1: "the selected clip" is now "the selection", which may hold several
       // clips across several tracks. The predicate is unchanged — the set is
@@ -652,16 +654,24 @@ function registerEditCommands(): void {
       // a bad take out of the middle of an arrangement is the reason it exists;
       // plain Delete leaves the hole.
       //
-      // Multitrack-only, with no editor counterpart: a ripple over a document
-      // REGION is a different feature (it would rewrite the audio), and it is
-      // out of K1's scope. The command reports disabled in the editor views
-      // rather than quietly doing the wrong thing there.
+      // Item 7 (N8): view-routed like Delete. In the editor views it is the
+      // pre-item-7 Delete — remove the selection and close the gap, the one
+      // editor edit besides Trim that shortens the file — now that plain
+      // Delete silences the span in place at constant length.
       id: 'edit.rippleDelete',
       label: 'Ripple Delete',
       shortcut: 'Shift+Del',
       enabled: (s) =>
-        s.view === 'multitrack' && useSessionStore.getState().selectedClipId !== null,
-      run: async () => rippleDeleteClips(useSessionStore.getState().selectedClipIds),
+        s.view === 'multitrack'
+          ? useSessionStore.getState().selectedClipId !== null
+          : hasSelection(s),
+      run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          rippleDeleteClips(useSessionStore.getState().selectedClipIds);
+          return;
+        }
+        rippleDeleteSelection();
+      },
     },
     {
       /**
