@@ -740,18 +740,6 @@ function registerEditCommands(): void {
 function registerFileCommands(): void {
   const hasDoc = (s: AppState) => activeDoc(s) !== null;
   const activeId = () => useAppStore.getState().activeDocumentId;
-  // F3 defense-in-depth (moved here from the former `session.save` row):
-  // `runCommand` has no try/catch of its own, and `saveProject` already
-  // catches its own known failure points, but this keeps ANY escaping error
-  // in front of the user instead of vanishing through MenuBar's onClick.
-  const runProjectSave = async (as: boolean) => {
-    try {
-      await saveProject({ as });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      await window.electronAPI?.showMessageBox({ type: 'error', title: 'Save Project failed', message });
-    }
-  };
   registerCommands([
     {
       id: 'file.new',
@@ -823,9 +811,20 @@ function registerFileCommands(): void {
 }
 
 // ---- lot A ----
-// (No new helper needed: `saveProject` / `projectHasUnsavedWork` are imported
-// from sessionFile / fileService, and `sessionHasClips` is the hoisted
-// declaration below. Region kept so lots C/D/E merge mechanically.)
+/** File → Save / Save As… (M4): F3 defense-in-depth, moved here from the
+ * former `session.save` row. `runCommand` has no try/catch of its own, and
+ * `saveProject` already catches its own known failure points, but this keeps
+ * ANY escaping error in front of the user instead of vanishing through
+ * MenuBar's onClick. A hoisted declaration, so `registerFileCommands` above
+ * reaches it the way it reaches `sessionHasClips` below. */
+async function runProjectSave(as: boolean): Promise<void> {
+  try {
+    await saveProject({ as });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await window.electronAPI?.showMessageBox({ type: 'error', title: 'Save Project failed', message });
+  }
+}
 // ---- end lot A ----
 
 /** Registers the project command that is not a `file.*` row (Task 21, lot A):
