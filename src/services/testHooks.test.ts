@@ -651,6 +651,29 @@ describe('lot A project hooks', () => {
     expect(useAppStore.getState().view).toBe('multitrack');
   });
 
+  // `getStateSummary` is how the navigate walk reads project state back
+  // (`scripts/e2e-navigate.cjs:2807` asserts the Save As cancel left the path
+  // null). It is the one field of the summary no unit test covered, so a
+  // dropped line there would only ever surface in lot F's packaged run.
+  it('getStateSummary reports projectPath — null while the project was never written, the path after a save and after an open', async () => {
+    installProjectApi();
+    addDoc('a.wav');
+
+    expect(api().getStateSummary().projectPath).toBeNull();
+    expectPlainJson(api().getStateSummary());
+
+    await api().saveSessionAs('D:\\out\\take 3.audm');
+    expect(api().getStateSummary().projectPath).toBe('D:\\out\\take 3.audm');
+
+    const doc = createDocument({ name: 'song.wav', sampleRate: 44100, channels: [new Float32Array(64)] });
+    const session: Session = { name: 'Proj', sampleRate: 44100, tracks: [createTrack('T')] };
+    const { bytes } = serializeSessionV4(session, [doc]);
+    installProjectApi({ readFile: jest.fn(async () => bytes.buffer) });
+    await api().openSessionFrom('D:\\in\\proj.audm');
+
+    expect(api().getStateSummary().projectPath).toBe('D:\\in\\proj.audm');
+  });
+
   it('exportSession writes bytes whose decoded channels equal mixdownSession, and returns false with an info box on an all-muted session', async () => {
     const electronAPI = installProjectApi();
     const doc = addDoc('a.wav');

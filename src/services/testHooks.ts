@@ -99,7 +99,6 @@ import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/fi
 import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import type { FadeCurve } from '../dsp/fades';
-import { defaultSessionZoom } from '../multitrack/sessionZoom';
 
 export interface TestStateSummary {
   docCount: number;
