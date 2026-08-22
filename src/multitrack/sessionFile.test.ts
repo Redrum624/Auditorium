@@ -16,7 +16,13 @@ import {
   writeProject,
 } from './sessionFile';
 import { useSessionStore } from './sessionStore';
-import { _resetSessionUndo, canUndoSession, isSessionDirty, undoSession } from './sessionUndo';
+import {
+  SESSION_COALESCE_WINDOW_MS,
+  _resetSessionUndo,
+  canUndoSession,
+  isSessionDirty,
+  undoSession,
+} from './sessionUndo';
 import * as undoHistory from '../services/undoHistory';
 import { defaultSessionZoom } from './sessionZoom';
 import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from './sessionViewport';
@@ -1072,6 +1078,39 @@ describe('saveProject / writeProject / loadProjectFrom (lot A — M4: Save = pro
     expect(useSessionStore.getState().projectPath).toBe('D:\\a.audm');
   });
 
+  it('a fader nudge within a second of a plain Save dirties the project again — the save breaks the keyboard-repeat coalescing run (fix round 1)', async () => {
+    // Reviewer finding 1: `setTrackParam` on volume/pan names a coalesceKey,
+    // so two nudges within SESSION_COALESCE_WINDOW_MS merge into one entry.
+    // Before the fix a Save between them did not reset that memory: the
+    // post-save nudge merged into the PRE-save entry, the stack position
+    // stayed at the save point, and the Save pill / chip / close guard all
+    // read clean while the live volume differed from the file.
+    const now = jest.spyOn(Date, 'now').mockReturnValue(100_000);
+    try {
+      const api = installApi();
+      seedProjectDoc();
+      useSessionStore.getState().setProjectPath('D:\\a.audm');
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      useSessionStore.getState().setTrackParam(trackId, { volumeDb: -1 });
+      expect(isSessionDirty()).toBe(true);
+
+      expect(await saveProject({ as: false })).toBe(true);
+      expect(api.writeFile).toHaveBeenCalledTimes(1);
+      expect(isSessionDirty()).toBe(false);
+
+      now.mockReturnValue(100_000 + SESSION_COALESCE_WINDOW_MS - 1);
+      useSessionStore.getState().setTrackParam(trackId, { volumeDb: -2 });
+
+      expect(useSessionStore.getState().session.tracks[0].volumeDb).toBe(-2);
+      expect(isSessionDirty()).toBe(true);
+      undoSession();
+      expect(useSessionStore.getState().session.tracks[0].volumeDb).toBe(-1); // what the file holds
+      expect(isSessionDirty()).toBe(false);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
   it('with no path, plain Save is a Save As: prompts with the project name, writes v4, remembers, renames (recorded), cleans every document, confirms (acceptance 7)', async () => {
     const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix v2.audm') });
     const doc = seedProjectDoc('a.wav', false); // open, NOT clip-referenced — it goes in the file regardless
@@ -1331,7 +1370,7 @@ describe('openSessionViaDialog', () => {
   // `applySessionZoom` entirely. Nothing downstream rescues it: the lane-width
   // republish only re-fits a session that is ALREADY at its fit, and 512 is far
   // zoomed IN of the fit for anything longer than about sixteen seconds, so the
-  // re-fit arm is never taken. File → Open Session on the user's own file
+  // re-fit arm is never taken. File → Open Project on the user's own file
   // reproduced the exact symptom the ticket describes.
   it('C1: opens a long session FITTED, not at the hardcoded 512 samples/px', async () => {
     _resetSessionLaneWidth();

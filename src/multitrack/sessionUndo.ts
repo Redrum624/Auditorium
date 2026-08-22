@@ -37,7 +37,7 @@ import {
  * THE RECORDING INVARIANT: every write that replaces `SessionState.session`
  * must either go through a recorded store action (`recordSessionMutation`,
  * wired inside every `sessionStore` mutation) or be followed by
- * `clearSessionHistory()` (the load-shaped flows: Open Session, stem landing).
+ * `clearSessionHistory()` (the load-shaped flows: Open Project, stem landing).
  * An unrecorded session write would not itself be undoable AND would be
  * silently reverted by the next undo of an OLDER entry, because entries are
  * whole-state snapshots — worse than either recording or clearing.
@@ -128,8 +128,8 @@ export const SESSION_COALESCE_WINDOW_MS = 1000;
  * coalesceKey, its key, its clock time, and the mutable post-snapshot ref its
  * `redo()` closure reads (merging = overwriting `post.current`, so the entry
  * object already sitting in the `done` stack needs no replacement). Any
- * non-mergeable push, undo, redo or clear resets this to null — that is
- * clause (b) of the rule. */
+ * non-mergeable push, undo, redo, clear or save-point move (mark /
+ * invalidate) resets this to null — that is clause (b) of the rule. */
 let lastCoalescible: {
   key: string;
   at: number;
@@ -278,12 +278,22 @@ export function canRedoSession(): boolean {
  * matches what the last project save wrote. `clearSessionHistory` (a load)
  * drops the stacks, which `isAtSavePoint` reads as clean — a freshly opened
  * project is not dirty.
+ *
+ * Both verbs also reset the coalescing memory — a save is clause (b) of the
+ * rule above, something that touched the history. Without that, a keyboard
+ * nudge landing within the window of the nudge that preceded the save would
+ * MERGE into the entry the file already holds: the stack position would not
+ * move off the mark, and `isSessionDirty()` would read false while the live
+ * session differed from disk (Save pill grey, chip unstarred, close guard
+ * silent).
  */
 export function markSessionSavePoint(): void {
+  lastCoalescible = null;
   markSavePoint(SESSION_UNDO_KEY);
 }
 
 export function invalidateSessionSavePoint(): void {
+  lastCoalescible = null;
   invalidateSavePoint(SESSION_UNDO_KEY);
 }
 
@@ -293,7 +303,7 @@ export function isSessionDirty(): boolean {
 
 /**
  * Drops the session's stacks and this module's gesture/coalescing state.
- * Called by the load-shaped session replacements (Open Session, stem
+ * Called by the load-shaped session replacements (Open Project, stem
  * landing): a load starts a new editing timeline, exactly as opening a
  * document starts that document's history fresh — undo must not reach across
  * a load back into content that came from somewhere else. (`newSession`, by

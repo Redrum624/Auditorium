@@ -246,6 +246,40 @@ describe('coalescing (ruling 2 — keyboard-repeat clause)', () => {
     expect(state).toBe(preAfterUndo);
   });
 
+  it('a project save breaks the run (lot A, fix round 1): the first same-key commit after markSessionSavePoint is a NEW entry, so the project reads dirty again', () => {
+    // The scenario: nudge a fader (coalescible), Save, nudge the same fader
+    // again within the window. Before the fix the second nudge MERGED into
+    // the pre-save entry — position unchanged, still === savePoint — and
+    // `isSessionDirty()` read false while the live session differed from the
+    // file on disk. A save is clause (b) of the rule: something touched the
+    // history.
+    mutate('Set track volume', 'S1', 'trackParam:track-1:volumeDb');
+    markSessionSavePoint(); // the write landed on S1
+    expect(isSessionDirty()).toBe(false);
+
+    now.mockReturnValue(100_000 + SESSION_COALESCE_WINDOW_MS - 1);
+    mutate('Set track volume', 'S2', 'trackParam:track-1:volumeDb');
+
+    expect(getHistory(SESSION_UNDO_KEY).done).toEqual(['Set track volume', 'Set track volume']);
+    expect(isSessionDirty()).toBe(true);
+    undoSession();
+    expect(state.session.name).toBe('S1'); // exactly what the file holds
+    expect(isSessionDirty()).toBe(false);
+  });
+
+  it('invalidateSessionSavePoint resets the merge memory the same way (a stale save is still a save)', () => {
+    mutate('Set track volume', 'S1', 'trackParam:track-1:volumeDb');
+    invalidateSessionSavePoint();
+    now.mockReturnValue(100_000 + SESSION_COALESCE_WINDOW_MS - 1);
+    mutate('Set track volume', 'S2', 'trackParam:track-1:volumeDb');
+
+    expect(getHistory(SESSION_UNDO_KEY).done).toEqual(['Set track volume', 'Set track volume']);
+    expect(isSessionDirty()).toBe(true);
+    undoSession();
+    expect(state.session.name).toBe('S1');
+    expect(isSessionDirty()).toBe(true); // the mark is gone for good; only a new save cleans it
+  });
+
   it('a gesture-committed entry can carry a coalesceKey (elevation keyups merge across gestures)', () => {
     const pre = state;
     withSessionGesture('Set elevation', () => writeSession('S1'), { coalesceKey: 'elev:track-1' });
