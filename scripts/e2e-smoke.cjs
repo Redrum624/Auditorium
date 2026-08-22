@@ -904,7 +904,7 @@ async function main() {
     // it (via the real `loadProjectFrom` / `parseSessionFileBytes`) and confirm
     // the document AND its markers survive. This is the flow whose silent
     // failure past ~17 minutes of audio was the critical bug M5 fixed.
-    console.log('Session v3 round-trip: build session, save, reopen...');
+    console.log('Project round-trip (.audm v4): build session, save, reopen...');
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const sessM1 = await page.evaluate(() =>
       window.__test.addMarkerToActive(15000, 'Session Verse')
