@@ -48,10 +48,9 @@ export const SHORTCUT_TABLE: Shortcut[] = [
   // T4 — the third of the same drift, and the one the Ctrl+W fix left behind.
   // `file.saveAs` has advertised `Ctrl+Shift+S` on its File menu row since the
   // row existed, with no combo here: the label named a key that did nothing.
-  // It routes to the same `saveProject({ as: true })` the row runs — lot A
-  // (M4): Save As writes the whole `.audm` project, not the active document
-  // — so the accelerator does exactly what clicking the row does, including
-  // the save dialog, so it can never overwrite anything without being asked.
+  // It routes to the same `saveDocument(id, true)` the row runs, so the
+  // accelerator does exactly what clicking the row does — including the save
+  // dialog, so it can never overwrite anything without being asked.
   //
   // `ctrl+shift+s` was free: checked against every row above and below, and
   // `comboFromEvent` emits modifiers in a fixed `ctrl+shift+alt` order, so
