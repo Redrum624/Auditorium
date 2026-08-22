@@ -10,25 +10,31 @@ import { clearSessionHistory } from './sessionUndo';
 import { defaultSessionZoom } from './sessionZoom';
 
 /** .audm format version. v1: no markers. v2: adds an optional `markers` map,
- * audio embedded as base64 WAV inside the JSON text. v3 (current, write
- * default — see `serializeSessionV3`): audio moves out of the JSON entirely
- * into a raw binary payload, so no monolithic JS string is ever built for the
- * audio content (the V8 string-length cap made v2 throw a RangeError once
- * embedded audio crossed ~402MB — see F3). The loader accepts all three; only
- * v3 is ever written by `saveSessionViaDialog`.
+ * audio embedded as base64 WAV inside the JSON text. v3: audio moves out of
+ * the JSON entirely into a raw binary payload, so no monolithic JS string is
+ * ever built for the audio content (the V8 string-length cap made v2 throw a
+ * RangeError once embedded audio crossed ~402MB — see F3). v4 (current, write
+ * default — see `serializeSessionV4`; lot A, ruling M4): v3's byte layout
+ * under an `AUDM4\n` magic, plus an `unreferenced` section so EVERY open
+ * document is in the file (v3 embedded only clip-referenced ones), `markers`
+ * for every embedded document, and an optional per-document `origin` — the
+ * path the document was opened from. The loader accepts all four; only v4 is
+ * written by a project save (`writeProject`).
  *
  * v1.9 (X2): clips may additionally carry OPTIONAL fade keys (`fadeInSample`,
  * `fadeOutSample`, `fadeInCurve`, `fadeOutCurve` — see `session.ts`). These
- * ride inside the existing JSON clip records with `formatVersion` STAYING 3:
- * absent keys mean "no fade", so every pre-fade `.audm` still loads, a
- * session saved without fades is byte-identical to what v1.8.0 wrote, and a
- * fade-carrying file still opens in a v1.8.0 build (its parser spreads clip
- * records through untouched, so unknown keys are simply carried). Bumping the
- * version instead would be a data-loss-class change: `parseSessionFileV3`
- * hard-rejects any `formatVersion !== 3` (an equality, not a floor), so a v4
- * file would be unreadable by every shipped build. Fade keys from disk are
- * UNTRUSTED and normalized in `finalizeParsedSession` (see
- * `sanitizeClipFades`). */
+ * ride inside the existing JSON clip records: absent keys mean "no fade", so
+ * every pre-fade `.audm` still loads, and the parsers spread clip records
+ * through untouched, so unknown keys are simply carried. Fade keys from disk
+ * are UNTRUSTED and normalized in `finalizeParsedSession` (see
+ * `sanitizeClipFades`).
+ *
+ * Compatibility (lot A): X2 argued that bumping the version would be a
+ * data-loss-class change, because `parseSessionFileV3` hard-rejects any
+ * `formatVersion !== 3`. That consequence is now ACCEPTED by ruling M4 — a
+ * project save must drop nothing, which v3's shape cannot express — so v4
+ * files are unreadable by builds ≤ v1.35. v3, v2 and v1 files still load
+ * (`parseSessionFileBytes` sniffs the magic). */
 const FORMAT_VERSION = 2;
 const SUPPORTED_VERSIONS = new Set([1, 2]);
 
@@ -89,6 +95,34 @@ interface SessionFileShapeV3 {
   session: Session;
   markers?: Record<string, Marker[]>;
   audio: AudioDocMeta[];
+}
+
+/** v4 (lot A, M4) on-disk layout = v3's with a different magic and two JSON
+ * additions: header = magic(6) `'AUDM4\n'` + u32 LE jsonByteLength, then the
+ * UTF-8 JSON (`SessionFileShapeV4`), then the raw audio payload — the
+ * channels of every `audio` entry, then of every `unreferenced` entry,
+ * back-to-back, offsets relative to the payload start exactly as v3. */
+const V4_MAGIC = new Uint8Array([0x41, 0x55, 0x44, 0x4d, 0x34, 0x0a]); // 'AUDM4\n'
+/** Shared by v3 and v4: magic(6) + u32 jsonByteLength(4). */
+const BINARY_HEADER_BYTES = V3_HEADER_BYTES;
+
+interface AudioDocMetaV4 extends AudioDocMeta {
+  /** The document's `filePath` at save time, when it had one — restored as
+   * the recreated document's `filePath` so the project remembers where each
+   * file came from. Absent for computed / never-written documents. */
+  origin?: string;
+}
+
+interface SessionFileShapeV4 {
+  formatVersion: 4;
+  session: Session; // tracks filtered exactly as v3 (clips of closed docs dropped)
+  /** EVERY embedded document with >= 1 marker — referenced or not. */
+  markers?: Record<string, Marker[]>;
+  /** Clip-referenced documents (the v3 meaning, the v3 order). */
+  audio: AudioDocMetaV4[];
+  /** M4's section: every OTHER open document, same meta shape, audio in the
+   * same payload. The parser treats a missing array as `[]`. */
+  unreferenced: AudioDocMetaV4[];
 }
 
 function api() {
@@ -264,6 +298,103 @@ export function serializeSessionV3(
   out.set(jsonBytes, V3_HEADER_BYTES);
 
   let pos = V3_HEADER_BYTES + jsonBytes.byteLength;
+  for (const chunk of channelChunks) {
+    out.set(chunk, pos);
+    pos += chunk.byteLength;
+  }
+
+  return { bytes: out, droppedClipCount };
+}
+
+/** Lot A (v4): packs one document's channels into `chunks` at the running
+ * payload offset and returns its index entry plus the advanced offset. The
+ * per-document equal-channel-length throw is the same invariant check
+ * `serializeSessionV3` performs inline (the reader validates every channel
+ * against one declared `length`). */
+function packDocumentV4(
+  d: AudioDocument,
+  chunks: Uint8Array[],
+  payloadLength: number
+): { meta: AudioDocMetaV4; payloadLength: number } {
+  const length = docLength(d);
+  const channels: AudioChannelMeta[] = [];
+  for (const channel of d.channels) {
+    if (channel.length !== length) {
+      throw new Error(
+        `Cannot save project: document "${d.name}" (${d.id}) has channels of differing length (${length} vs ${channel.length}), which should never happen`
+      );
+    }
+    const bytes = new Uint8Array(channel.buffer, channel.byteOffset, channel.byteLength);
+    channels.push({ offset: payloadLength, byteLength: bytes.byteLength });
+    chunks.push(bytes);
+    payloadLength += bytes.byteLength;
+  }
+  const meta: AudioDocMetaV4 = { docId: d.id, name: d.name, sampleRate: d.sampleRate, length, channels };
+  if (d.filePath) meta.origin = d.filePath;
+  return { meta, payloadLength };
+}
+
+/**
+ * Serializes the PROJECT to the .audm v4 binary format (write default — lot
+ * A, ruling M4): the session plus EVERY open document. Clip-referenced
+ * documents go in `audio` (v3's meaning and order); every other open document
+ * goes in `unreferenced`; both sections' channels share one raw payload, so
+ * nothing is dropped and no JS string is ever built from audio (v3's F3
+ * guarantee). Clips whose source document is closed are still filtered out
+ * (`computeReferenced`) and counted in `droppedClipCount` — there is no audio
+ * to embed for them. Markers are written for every embedded document that
+ * has any, referenced or not.
+ *
+ * Same fresh zero-offset `Uint8Array` guarantee as `serializeSessionV3`
+ * (`bytes.byteLength === bytes.buffer.byteLength`) — `writeProject` hands
+ * `bytes.buffer` straight to `writeFile` with no defensive copy; see the v3
+ * comment for why that copy would matter.
+ */
+export function serializeSessionV4(
+  session: Session,
+  docs: AudioDocument[],
+  markersByDoc: Record<string, Marker[]> = {}
+): { bytes: Uint8Array<ArrayBuffer>; droppedClipCount: number } {
+  const { tracks, referencedIds, droppedClipCount } = computeReferenced(session, docs, markersByDoc);
+
+  const audio: AudioDocMetaV4[] = [];
+  const unreferenced: AudioDocMetaV4[] = [];
+  const channelChunks: Uint8Array[] = [];
+  let payloadLength = 0;
+  // Payload order: every referenced document's channels first, then every
+  // unreferenced one's — each section in `docs` (Files panel) order.
+  for (const d of docs.filter((doc) => referencedIds.has(doc.id))) {
+    const packed = packDocumentV4(d, channelChunks, payloadLength);
+    payloadLength = packed.payloadLength;
+    audio.push(packed.meta);
+  }
+  for (const d of docs.filter((doc) => !referencedIds.has(doc.id))) {
+    const packed = packDocumentV4(d, channelChunks, payloadLength);
+    payloadLength = packed.payloadLength;
+    unreferenced.push(packed.meta);
+  }
+
+  const markers: Record<string, Marker[]> = {};
+  for (const d of docs) {
+    const list = markersByDoc[d.id];
+    if (list && list.length > 0) markers[d.id] = list;
+  }
+
+  const fileShape: SessionFileShapeV4 = {
+    formatVersion: 4,
+    session: { ...session, tracks },
+    ...(Object.keys(markers).length > 0 ? { markers } : {}),
+    audio,
+    unreferenced,
+  };
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(fileShape));
+
+  const out = new Uint8Array(BINARY_HEADER_BYTES + jsonBytes.byteLength + payloadLength);
+  out.set(V4_MAGIC, 0);
+  new DataView(out.buffer).setUint32(6, jsonBytes.byteLength, true);
+  out.set(jsonBytes, BINARY_HEADER_BYTES);
+
+  let pos = BINARY_HEADER_BYTES + jsonBytes.byteLength;
   for (const chunk of channelChunks) {
     out.set(chunk, pos);
     pos += chunk.byteLength;
@@ -486,18 +617,27 @@ export function parseSessionFile(text: string): {
   return { session, documents, droppedClipCount, markers };
 }
 
-/** True when `bytes` starts with the v3 magic `AUDM3\n`. */
-function hasV3Magic(bytes: Uint8Array): boolean {
-  if (bytes.length < V3_MAGIC.length) return false;
-  for (let i = 0; i < V3_MAGIC.length; i++) {
-    if (bytes[i] !== V3_MAGIC[i]) return false;
+/** True when `bytes` starts with `magic` (`AUDM3\n` or `AUDM4\n`). */
+function hasMagic(bytes: Uint8Array, magic: Uint8Array): boolean {
+  if (bytes.length < magic.length) return false;
+  for (let i = 0; i < magic.length; i++) {
+    if (bytes[i] !== magic[i]) return false;
   }
   return true;
 }
 
+interface ParsedSessionFile {
+  session: Session;
+  documents: AudioDocument[];
+  droppedClipCount: number;
+  markers: Record<string, Marker[]>;
+}
+
 /**
- * Parses a .audm v3 binary buffer (see the byte-layout comment above
- * `V3_MAGIC`). Every document's channels are copied (not merely wrapped) out
+ * The body shared by `parseSessionFileV3` and `parseSessionFileV4` (lot A):
+ * the two formats differ only in their magic, the `formatVersion` they accept
+ * and v4's extra `unreferenced` section, which is read with the same guards
+ * as `audio`. Every document's channels are copied (not merely wrapped) out
  * of the payload slice into their own `Float32Array` — the payload's start
  * offset (10 + jsonByteLength) isn't guaranteed to be 4-byte aligned, so a
  * `Float32Array` can't be constructed as a view directly over the original
@@ -507,44 +647,49 @@ function hasV3Magic(bytes: Uint8Array): boolean {
  * Throws a descriptive error (never lets a `RangeError`/`TypeError` from a
  * malformed/truncated buffer propagate as something opaque) for: a header
  * that's cut short, a JSON slice that runs past the end of the file, JSON
- * that doesn't parse, a formatVersion other than 3, a missing/malformed
- * `audio` index, a non-integer/negative declared sample `length`, a missing
- * per-doc channel list, a channel whose declared byteLength disagrees with
- * its declared sample count, or a channel offset/length that runs past the
- * end of the payload — i.e. any corrupt-or-truncated v3 file (or a hostile
- * hand-built one) yields a clean error instead of a crash. A missing `name`
- * on an otherwise-valid entry falls back to 'Untitled' rather than crashing
- * or leaving the Files panel showing `undefined`.
+ * that doesn't parse, a formatVersion other than the one expected, a
+ * missing/malformed `audio` (or, v4, a non-array `unreferenced`) index, a
+ * non-integer/negative declared sample `length`, a missing per-doc channel
+ * list, a channel whose declared byteLength disagrees with its declared
+ * sample count, or a channel offset/length that runs past the end of the
+ * payload — i.e. any corrupt-or-truncated file (or a hostile hand-built one)
+ * yields a clean error instead of a crash. A missing `name` on an
+ * otherwise-valid entry falls back to 'Untitled' rather than crashing or
+ * leaving the Files panel showing `undefined`; a missing v4 `unreferenced`
+ * array is `[]`, not corrupt.
  */
-export function parseSessionFileV3(buf: ArrayBuffer): {
-  session: Session;
-  documents: AudioDocument[];
-  droppedClipCount: number;
-  markers: Record<string, Marker[]>;
-} {
+function parseBinarySessionFile(buf: ArrayBuffer, version: 3 | 4): ParsedSessionFile {
+  const magic = version === 4 ? V4_MAGIC : V3_MAGIC;
   const bytes = new Uint8Array(buf);
-  if (bytes.length < V3_HEADER_BYTES || !hasV3Magic(bytes)) {
-    throw new Error('Corrupt .audm file: not a valid v3 session (missing AUDM3 header)');
+  if (bytes.length < BINARY_HEADER_BYTES || !hasMagic(bytes, magic)) {
+    throw new Error(`Corrupt .audm file: not a valid v${version} session (missing AUDM${version} header)`);
   }
 
   const jsonByteLength = new DataView(buf).getUint32(6, true);
-  const jsonStart = V3_HEADER_BYTES;
+  const jsonStart = BINARY_HEADER_BYTES;
   const jsonEnd = jsonStart + jsonByteLength;
   if (jsonEnd > bytes.length) {
     throw new Error('Corrupt .audm file: truncated (JSON metadata runs past end of file)');
   }
 
-  let parsed: SessionFileShapeV3;
+  let parsed: SessionFileShapeV3 | SessionFileShapeV4;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(bytes.subarray(jsonStart, jsonEnd))) as SessionFileShapeV3;
+    parsed = JSON.parse(new TextDecoder().decode(bytes.subarray(jsonStart, jsonEnd))) as
+      | SessionFileShapeV3
+      | SessionFileShapeV4;
   } catch {
     throw new Error('Corrupt .audm file: invalid JSON metadata');
   }
-  if (parsed.formatVersion !== 3) {
-    throw new Error(`Unsupported session file version: ${parsed.formatVersion} (expected 3)`);
+  if (parsed.formatVersion !== version) {
+    throw new Error(`Unsupported session file version: ${parsed.formatVersion} (expected ${version})`);
   }
   if (!Array.isArray(parsed.audio)) {
     throw new Error('Corrupt .audm file: missing audio index');
+  }
+  const unreferenced: AudioDocMetaV4[] =
+    version === 4 ? ((parsed as SessionFileShapeV4).unreferenced ?? []) : [];
+  if (!Array.isArray(unreferenced)) {
+    throw new Error('Corrupt .audm file: malformed unreferenced index');
   }
 
   const payloadStart = jsonEnd;
@@ -553,7 +698,7 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
   seedDocCounterFromRawClips(parsed.session);
 
   const idMap = new Map<string, string>();
-  const documents: AudioDocument[] = parsed.audio.map((meta) => {
+  const recreate = (meta: AudioDocMetaV4): AudioDocument => {
     if (!Number.isInteger(meta.length) || meta.length < 0) {
       throw new Error('Corrupt .audm file: audio index has an invalid sample length');
     }
@@ -582,18 +727,21 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
       // Copy into a fresh, zero-offset buffer — see doc comment above.
       return new Float32Array(buf.slice(payloadStart + start, payloadStart + end));
     });
-    // Fall back to a generic label rather than `undefined` for a v3 file
-    // whose audio index entry lacks a `name` (e.g. hand-built/foreign writer).
+    // Fall back to a generic label rather than `undefined` for a file whose
+    // audio index entry lacks a `name` (e.g. hand-built/foreign writer).
     // `neverSaved: false` — see the legacy parser's note above (Task S4).
+    // `filePath` from v4's `origin` (lot A) — a v3 entry never carries one.
     const doc = createDocument({
       name: meta.name ?? 'Untitled',
       sampleRate: meta.sampleRate,
       channels,
       neverSaved: false,
+      filePath: typeof meta.origin === 'string' && meta.origin.length > 0 ? meta.origin : null,
     });
     idMap.set(meta.docId, doc.id);
     return doc;
-  });
+  };
+  const documents: AudioDocument[] = [...parsed.audio.map(recreate), ...unreferenced.map(recreate)];
 
   const recreatedIds = new Set(documents.map((d) => d.id));
   const { session, droppedClipCount, markers } = finalizeParsedSession(
@@ -607,18 +755,32 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
   return { session, documents, droppedClipCount, markers };
 }
 
-/** Dispatches a raw .audm file buffer to the v3 binary parser or the legacy
- * v1/v2 JSON parser, based on sniffing the first 6 bytes for the v3 magic.
- * This is what `openSessionViaDialog` calls — callers never need to know
- * which on-disk version they're loading. */
-export function parseSessionFileBytes(buf: ArrayBuffer): {
-  session: Session;
-  documents: AudioDocument[];
-  droppedClipCount: number;
-  markers: Record<string, Marker[]>;
-} {
+/** Parses a .audm v3 binary buffer (see the byte-layout comment above
+ * `V3_MAGIC`) — `parseBinarySessionFile` with the v3 magic and `(expected 3)`
+ * rejection. Kept by name and signature: the legacy fixture round trips and
+ * the compat tests pin it. */
+export function parseSessionFileV3(buf: ArrayBuffer): ParsedSessionFile {
+  return parseBinarySessionFile(buf, 3);
+}
+
+/** Parses a .audm v4 binary buffer (lot A): the v3 body plus the
+ * `unreferenced` section, every document recreated with `neverSaved: false`
+ * and its `origin` (when present) as `filePath`; `documents` = the `audio`
+ * entries then the `unreferenced` ones; markers remapped for all of them. */
+export function parseSessionFileV4(buf: ArrayBuffer): ParsedSessionFile {
+  return parseBinarySessionFile(buf, 4);
+}
+
+/** Dispatches a raw .audm file buffer to the v4 or v3 binary parser or the
+ * legacy v1/v2 JSON parser, based on sniffing the first 6 bytes for a magic.
+ * This is what `loadProjectFrom` calls — callers never need to know which
+ * on-disk version they're loading (M4: v3 load compatibility). */
+export function parseSessionFileBytes(buf: ArrayBuffer): ParsedSessionFile {
   const bytes = new Uint8Array(buf);
-  if (hasV3Magic(bytes)) {
+  if (hasMagic(bytes, V4_MAGIC)) {
+    return parseSessionFileV4(buf);
+  }
+  if (hasMagic(bytes, V3_MAGIC)) {
     return parseSessionFileV3(buf);
   }
   // Legacy path: decoding the whole buffer as one JS string is exactly the

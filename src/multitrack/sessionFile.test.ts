@@ -6,9 +6,11 @@ import {
   parseSessionFile,
   parseSessionFileBytes,
   parseSessionFileV3,
+  parseSessionFileV4,
   saveSessionViaDialog,
   serializeSession,
   serializeSessionV3,
+  serializeSessionV4,
 } from './sessionFile';
 import { useSessionStore } from './sessionStore';
 import { defaultSessionZoom } from './sessionZoom';
@@ -52,13 +54,28 @@ function trackJson(id: string, clips: object[] = []) {
  * `serializeSessionV3` entirely — used to exercise corrupt/truncated inputs
  * that a well-formed writer would never produce. */
 function buildV3Buffer(meta: object, payload: Uint8Array = new Uint8Array(0)): ArrayBuffer {
+  return buildBinaryBuffer('AUDM3\n', meta, payload);
+}
+
+/** Lot A: the v4 twin of `buildV3Buffer` — same header, `AUDM4\n` magic. */
+function buildV4Buffer(meta: object, payload: Uint8Array = new Uint8Array(0)): ArrayBuffer {
+  return buildBinaryBuffer('AUDM4\n', meta, payload);
+}
+
+function buildBinaryBuffer(magic: string, meta: object, payload: Uint8Array): ArrayBuffer {
   const jsonBytes = new TextEncoder().encode(JSON.stringify(meta));
   const out = new Uint8Array(10 + jsonBytes.byteLength + payload.byteLength);
-  out.set(new TextEncoder().encode('AUDM3\n'), 0);
+  out.set(new TextEncoder().encode(magic), 0);
   new DataView(out.buffer).setUint32(6, jsonBytes.byteLength, true);
   out.set(jsonBytes, 10);
   out.set(payload, 10 + jsonBytes.byteLength);
   return out.buffer;
+}
+
+/** Lot A: the JSON metadata block of a v3/v4 buffer, for shape assertions. */
+function readBinaryJson(bytes: Uint8Array): Record<string, unknown> {
+  const jsonLen = new DataView(bytes.buffer, bytes.byteOffset).getUint32(6, true);
+  return JSON.parse(new TextDecoder().decode(bytes.subarray(10, 10 + jsonLen)));
 }
 
 beforeEach(() => {
@@ -1457,5 +1474,186 @@ describe('neverSaved provenance and sessions (Task S4)', () => {
     // embeds only CLIP-REFERENCED documents — so clearing the flag here would
     // silently un-guard every open document the session never contained.
     expect(useAppStore.getState().documents[0].neverSaved).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — .audm v4: the project is the session plus EVERY open document.
+// ---------------------------------------------------------------------------
+describe('serializeSessionV4 -> parseSessionFileV4 round trip (lot A — nothing dropped)', () => {
+  it('writes AUDM4, splits audio / unreferenced, and the parse restores both documents with markers, origin and neverSaved=false', () => {
+    const referenced = createDocument({
+      name: 'a.wav',
+      sampleRate: 44100,
+      channels: [sine(100)],
+      filePath: 'D:\\src\\a.wav',
+    });
+    const unreferenced = createDocument({
+      name: 'b.wav',
+      sampleRate: 48000,
+      channels: [sine(50), sine(50, 880)],
+    });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: referenced.id, startSample: 0, offsetSample: 0, lengthSample: 100 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const markersByDoc: Record<string, Marker[]> = {
+      [referenced.id]: [{ id: 'm-1', name: 'A1', positionSample: 10 }],
+      [unreferenced.id]: [{ id: 'm-2', name: 'B1', positionSample: 20 }],
+    };
+
+    const { bytes, droppedClipCount } = serializeSessionV4(session, [referenced, unreferenced], markersByDoc);
+
+    expect(droppedClipCount).toBe(0);
+    expect(bytes.byteOffset).toBe(0);
+    expect(bytes.byteLength).toBe(bytes.buffer.byteLength); // the fresh zero-offset guarantee v3 gives
+    expect(new TextDecoder().decode(bytes.subarray(0, 6))).toBe('AUDM4\n');
+    const json = readBinaryJson(bytes) as {
+      formatVersion: number;
+      audio: { docId: string; origin?: string }[];
+      unreferenced: { docId: string; origin?: string }[];
+      markers: Record<string, unknown>;
+    };
+    expect(json.formatVersion).toBe(4);
+    expect(json.audio).toHaveLength(1);
+    expect(json.audio[0].docId).toBe(referenced.id);
+    expect(json.audio[0].origin).toBe('D:\\src\\a.wav');
+    expect(json.unreferenced).toHaveLength(1);
+    expect(json.unreferenced[0].docId).toBe(unreferenced.id);
+    expect(json.unreferenced[0].origin).toBeUndefined();
+    // EVERY embedded document with markers — referenced or not (v3 narrowed to referenced).
+    expect(Object.keys(json.markers).sort()).toEqual([referenced.id, unreferenced.id].sort());
+
+    const parsed = parseSessionFileV4(bytes.buffer);
+    expect(parsed.documents).toHaveLength(2);
+    const [a, b] = parsed.documents; // audio docs first, then unreferenced
+    expect(a.name).toBe('a.wav');
+    expect(b.name).toBe('b.wav');
+    expect(a.channels[0]).toEqual(referenced.channels[0]);
+    expect(b.channels).toHaveLength(2);
+    expect(b.channels[0]).toEqual(unreferenced.channels[0]);
+    expect(b.channels[1]).toEqual(unreferenced.channels[1]);
+    expect(b.sampleRate).toBe(48000);
+    expect(a.filePath).toBe('D:\\src\\a.wav');
+    expect(b.filePath).toBeNull();
+    expect(a.neverSaved).toBe(false);
+    expect(b.neverSaved).toBe(false);
+    expect(parsed.markers[a.id]).toEqual([expect.objectContaining({ name: 'A1', positionSample: 10 })]);
+    expect(parsed.markers[b.id]).toEqual([expect.objectContaining({ name: 'B1', positionSample: 20 })]);
+    expect(parsed.session.tracks[0].clips[0].documentId).toBe(a.id);
+    expect(parsed.droppedClipCount).toBe(0);
+  });
+
+  it('drops a clip of a CLOSED document and reports it, while still embedding every OPEN document', () => {
+    const openDoc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const otherOpen = createDocument({ name: 'c.wav', sampleRate: 44100, channels: [sine(10)] });
+    const closedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [
+      createClip({ documentId: openDoc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }),
+      createClip({ documentId: closedDoc.id, startSample: 100, offsetSample: 0, lengthSample: 10 }),
+    ];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes, droppedClipCount } = serializeSessionV4(session, [openDoc, otherOpen]);
+
+    expect(droppedClipCount).toBe(1);
+    const parsed = parseSessionFileV4(bytes.buffer);
+    expect(parsed.session.tracks[0].clips).toHaveLength(1);
+    expect(parsed.documents.map((d) => d.name)).toEqual(['a.wav', 'c.wav']);
+  });
+
+  it('keeps the per-document equal-channel-length throw', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10), sine(9)] });
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [createTrack('T')] };
+    expect(() => serializeSessionV4(session, [doc])).toThrow(/differing length/);
+  });
+});
+
+describe('parseSessionFileBytes dispatch (lot A — v4 joins v3 and the legacy JSON path)', () => {
+  function fixture() {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(40)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 40 })];
+    const session: Session = { name: 'Compat', sampleRate: 44100, tracks: [track] };
+    return { doc, session };
+  }
+
+  it('still loads a v3 buffer exactly as parseSessionFileV3 does', () => {
+    const { doc, session } = fixture();
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    const viaDispatch = parseSessionFileBytes(bytes.buffer);
+
+    expect(viaDispatch.session.name).toBe('Compat');
+    expect(viaDispatch.documents).toHaveLength(1);
+    expect(viaDispatch.documents[0].channels[0]).toEqual(doc.channels[0]);
+    expect(viaDispatch.documents[0].filePath).toBeNull();
+    expect(viaDispatch.session.tracks[0].clips[0].documentId).toBe(viaDispatch.documents[0].id);
+  });
+
+  it('still loads a legacy v2 JSON buffer exactly as parseSessionFile does', () => {
+    const { doc, session } = fixture();
+    const { json } = serializeSession(session, [doc]);
+
+    const viaDispatch = parseSessionFileBytes(new TextEncoder().encode(json).buffer);
+
+    expect(viaDispatch.session.name).toBe('Compat');
+    expect(viaDispatch.documents).toHaveLength(1);
+    expect(viaDispatch.documents[0].channels[0]).toEqual(doc.channels[0]);
+  });
+
+  it('routes a v4 buffer to the v4 parser', () => {
+    const { doc, session } = fixture();
+    const { bytes } = serializeSessionV4(session, [doc]);
+
+    const viaDispatch = parseSessionFileBytes(bytes.buffer);
+
+    expect(viaDispatch.documents[0].channels[0]).toEqual(doc.channels[0]);
+  });
+
+  it('a v4 buffer whose JSON claims formatVersion 3 is rejected with "expected 4"', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [],
+      unreferenced: [],
+    });
+    expect(() => parseSessionFileBytes(buf)).toThrow('Unsupported session file version: 3 (expected 4)');
+  });
+
+  it('a v4 buffer missing its unreferenced array loads it as [] rather than as corrupt', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 4,
+      session: { name: 'x', sampleRate: 44100, tracks: [trackJson('track-1')] },
+      audio: [],
+    });
+    const parsed = parseSessionFileBytes(buf);
+    expect(parsed.documents).toEqual([]);
+    expect(parsed.session.name).toBe('x');
+  });
+
+  it('a v4 buffer with a non-array unreferenced section is corrupt', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 4,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [],
+      unreferenced: 'nope',
+    });
+    expect(() => parseSessionFileBytes(buf)).toThrow(/Corrupt \.audm file/);
+  });
+
+  it('applies the v3 corrupt-file guards to the unreferenced section too', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 4,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [],
+      unreferenced: [{ docId: 'doc-1', name: 'u', sampleRate: 44100, length: 4, channels: [{ offset: 0, byteLength: 16 }] }],
+    }); // declares 16 payload bytes, provides none
+    expect(() => parseSessionFileBytes(buf)).toThrow('Corrupt .audm file: audio payload offset/length out of range');
+  });
+
+  it('parseSessionFileV3 keeps its own (expected 3) rejection text', () => {
+    const buf = buildV3Buffer({ formatVersion: 4, session: { name: 'x', sampleRate: 44100, tracks: [] }, audio: [] });
+    expect(() => parseSessionFileV3(buf)).toThrow('Unsupported session file version: 4 (expected 3)');
   });
 });
