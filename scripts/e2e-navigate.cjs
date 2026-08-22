@@ -846,6 +846,25 @@ async function sweepSelects(page, where) {
   return found.length;
 }
 
+/** Waits for the pill's Split button to reach `want` for `.disabled`, and says
+ * whether it got there. Item 10's enablement is driven by SESSION-store writes
+ * that reach React outside any browser event, so reading `.disabled` on the
+ * very next round trip races the re-render in BOTH directions — a stale read
+ * would report the previous answer and pass or fail for the wrong reason. */
+async function splitDisabledReaches(page, want) {
+  return page
+    .waitForFunction(
+      (expected) => {
+        const b = document.querySelector('[data-testid="edit-pill"] button[aria-label="Split"]');
+        return b !== null && (b.disabled === true) === expected;
+      },
+      want,
+      { timeout: 8000 }
+    )
+    .then(() => true)
+    .catch(() => false);
+}
+
 function record(surface, stepName, verdict) {
   coverage.push({ surface, step: stepName, verdict });
 }
@@ -2508,6 +2527,57 @@ async function main() {
           assert(
             copy !== undefined && copy.disabled === true,
             'Copy is greyed in the multitrack view — it acts on a selection this view does not have'
+          );
+          // Item 10: Split is the one first-group button that is LIVE here, and
+          // its liveness follows the SESSION store (the clip selection and the
+          // edit cursor), which no app-store change touches. The pill therefore
+          // has to be subscribed to the session for these two reads to differ;
+          // before that subscription landed both answered the same stale value.
+          //
+          // Nothing is actually split: the cursor and the selection are saved,
+          // driven, asserted and put back, so the rest of the walk sees exactly
+          // the session it saw before this arm.
+          const saved = await page.evaluate(() => ({
+            cursor: window.__test.getMtCursor(),
+            fade: window.__test.getClipFadeState(),
+          }));
+          // The only clip on its own track, and long enough to have an
+          // interior: a split point has to clear both edges by 32 samples and
+          // sit outside every overlap with a track-mate, so a lone clip is the
+          // one target whose midpoint is legal without this step re-deriving
+          // the store's rule.
+          const alone = saved.fade.clips.filter(
+            (c) =>
+              c.lengthSample >= 128 &&
+              saved.fade.clips.filter((o) => o.trackIndex === c.trackIndex).length === 1
+          );
+          const target = alone[0];
+          assert(
+            target !== undefined,
+            `the multitrack arm has a lone clip to aim at (clips ${JSON.stringify(saved.fade.clips)})`
+          );
+          await page.evaluate((id) => window.__test.selectClips([id]), target.clipId);
+          await page.evaluate(
+            (sample) => window.__test.setMtCursor(sample),
+            target.startSample + Math.floor(target.lengthSample / 2)
+          );
+          const splitLive = await splitDisabledReaches(page, false);
+          assert(
+            splitLive === true,
+            'Split is LIVE in the multitrack view with a selected clip under the cursor'
+          );
+
+          await page.evaluate((sample) => window.__test.setMtCursor(sample), target.startSample);
+          const splitAtEdge = await splitDisabledReaches(page, true);
+          assert(
+            splitAtEdge === true,
+            'Split greys with the cursor on a clip edge — there is nothing to cut there'
+          );
+
+          await page.evaluate((sample) => window.__test.setMtCursor(sample), saved.cursor);
+          await page.evaluate(
+            (id) => window.__test.selectClips(id === null ? [] : [id]),
+            saved.fade.selectedClipId
           );
         } else {
           assert(
