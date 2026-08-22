@@ -1046,6 +1046,14 @@ export async function loadProjectFrom(
  * audio that couldn't be recreated (a stale/missing document id), they're
  * dropped and an info message box reports how many. */
 export async function openSessionViaDialog(): Promise<void> {
+  // The filter name follows M4's rename, as the save dialog's does (:975):
+  // under M4 a .audm IS the project, and every other surface says so (the
+  // 'Open Project…' row, both error box titles, the StatusBar chip), so this
+  // label would otherwise be the last place calling one a session. A4 briefs
+  // only the SAVE filter, so the open one is recorded here as a deliberate
+  // un-briefed detail rather than left to be re-derived. It is inert beyond
+  // the dialog's own chrome: `cleanFilters` (`electron/ipc.cjs:134-146`)
+  // validates shape only, and .audm write approval is by extension (:43).
   const paths = await api().showOpenDialog({
     filters: [{ name: 'Auditorium Project', extensions: ['audm'] }],
   });
