@@ -77,7 +77,7 @@ describe('closeGuard (Task F8 native close guard)', () => {
     expect(dialog.showMessageBox).toHaveBeenCalledWith(
       win,
       expect.objectContaining({
-        message: '2 file(s) have unsaved changes.',
+        message: '2 item(s) have unsaved changes.',
         buttons: ['Quit', 'Cancel'],
       })
     );

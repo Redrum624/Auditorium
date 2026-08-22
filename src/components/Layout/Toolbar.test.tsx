@@ -4,6 +4,8 @@ import { createDocument, docLength, type AudioDocument } from '../../audio/Audio
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { useAppStore, makeInitialState, defaultZoom } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { _resetSessionUndo } from '../../multitrack/sessionUndo';
+import { createClip } from '../../multitrack/session';
 import { setSessionLaneWidth } from '../../multitrack/sessionViewport';
 import { defaultSessionZoom } from '../../multitrack/sessionZoom';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
@@ -222,8 +224,22 @@ describe('Toolbar (transport pill — previously TransportBar)', () => {
 describe('Toolbar — G3 floating pill (file ops · transport · view segment · zoom)', () => {
   beforeEach(() => {
     useAppStore.setState(makeInitialState());
+    // Lot A: the Save / Export pills read the PROJECT (session store + history
+    // + path), which is module-global — start every test from an empty,
+    // never-written, clean project.
+    useSessionStore.getState().newSession(44100);
+    useSessionStore.getState().setProjectPath(null);
+    _resetSessionUndo();
     registerSetters();
   });
+
+  /** A clip on track 0 — a session edit that changes NO appStore state. */
+  function addClipToTrack0(docId = 'doc-elsewhere') {
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: docId, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+  }
 
   it('renders the pill on the chrome surface with all four groups', () => {
     render(<Toolbar />);
@@ -241,10 +257,12 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
     expect(screen.getByRole('button', { name: 'Fit' })).toBeInTheDocument();
   });
 
-  it('greys the Save pill for a document with nothing to save (O1-2)', () => {
+  it('greys the Save pill for a SAVED project whose document has nothing to save, and lights it for a never-written one (O1-2 lifted to the project — lot A)', () => {
     // The pill has to state the same condition as the `file.save` command it
     // runs; a lit control that runCommand then refuses is a lie about what a
-    // click will do.
+    // click will do. Under M4 that command saves the PROJECT: a clean document
+    // in a project that has a file is nothing to save; the same document in a
+    // project that has never been written IS (the file does not exist yet).
     const doc = createDocument({
       name: 'song.wav',
       sampleRate: 44100,
@@ -253,6 +271,7 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
       neverSaved: false,
     });
     useAppStore.getState().addDocument(doc);
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
 
     const { rerender } = render(<Toolbar />);
     expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
@@ -262,6 +281,40 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
     useAppStore.getState().updateDocument({ ...doc, dirty: true });
     rerender(<Toolbar />);
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+
+    // Never-written project, clean document: content exists and no file does.
+    useAppStore.getState().updateDocument({ ...doc, dirty: false });
+    act(() => useSessionStore.getState().setProjectPath(null));
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
+  it('lights the Save pill after a session edit that changes no appStore state (history version — lot A)', () => {
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    render(<Toolbar />);
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+
+    act(() => addClipToTrack0());
+
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
+  });
+
+  it('titles the Save pill "Save Project (Ctrl+S)" (lot A)', () => {
+    render(<Toolbar />);
+    expect(screen.getByRole('button', { name: 'Save' })).toHaveAttribute('title', 'Save Project (Ctrl+S)');
+    expect(screen.getByRole('button', { name: 'Export' })).toHaveAttribute('title', 'Export (Ctrl+E)');
+  });
+
+  it('the Export pill follows the session in the multitrack view: enabled with clips and no document, disabled with no clips (lot A, M5)', () => {
+    useAppStore.setState({ view: 'multitrack' });
+    render(<Toolbar />);
+    expect(useAppStore.getState().documents).toHaveLength(0);
+    expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
+
+    act(() => addClipToTrack0());
+    expect(screen.getByRole('button', { name: 'Export' })).toBeEnabled();
+
+    act(() => useSessionStore.getState().newSession(44100));
+    expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();
   });
 
   it('separates Open from Save with a divider', () => {
@@ -289,6 +342,10 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
     // which since O1-2 is what enables Save. Using it here would let this test
     // pass while measuring "the document has unsaved work" instead of "there
     // is an active document", and the two stopped being the same condition.
+    // Lot A: Save is the PROJECT's gate now, so the project has a file too —
+    // otherwise "content exists, never written" would light Save and the
+    // assertion at the end would measure M4 instead of document presence.
+    useSessionStore.getState().setProjectPath('D:\p.audm');
     render(<Toolbar />);
     expect(screen.getByRole('button', { name: 'Open' })).toBeEnabled();
     expect(screen.getByRole('button', { name: 'Export' })).toBeDisabled();

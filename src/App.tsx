@@ -41,7 +41,8 @@ import {
   setHostedToolRunning,
   type ConvertMode,
 } from './services/dialogBus';
-import { getInFlightSaveCount, hasUnsavedWork } from './services/fileService';
+import { getInFlightSaveCount, projectDirtyCount } from './services/fileService';
+import { isProjectSaveInFlight } from './multitrack/sessionFile';
 import { getRemixSession, useRemixVersion } from './services/remixService';
 import { getStemBusyCount } from './services/stemService';
 import { getTranscribeBusyCount } from './services/transcribeService';
@@ -430,21 +431,21 @@ export default function App() {
   // (Task S3, ruling 7): a separation is minutes of inference the user cannot
   // get back, so quitting mid-run must warn rather than discard it silently.
   //
-  // The count is `dirty || neverSaved`, matching closeDocumentFlow (Task S4):
-  // a computed document (Mix Down, Remix N, a recording, a stem) is CLEAN from
-  // birth, so counting `dirty` alone let Quit discard the whole thing without
-  // asking — the same silent loss the per-document close prompt exists to
-  // prevent, one level up.
+  // The count is the PROJECT's (lot A, M4/N12 — `projectDirtyCount`): each
+  // document with `dirty || neverSaved` (Task S4: a computed document — Mix
+  // Down, Remix N, a recording, a stem — is CLEAN from birth, so counting
+  // `dirty` alone let Quit discard the whole thing without asking), plus one
+  // for a dirty session, and at least one for a project that has content but
+  // has never been written; an empty untitled project is clean. The busy
+  // count also carries an in-flight PROJECT save.
   useEffect(() => {
     const api = window.electronAPI;
     if (!api?.onCloseRequested) return; // jsdom / older preload
     return api.onCloseRequested(() => {
-      const unsaved = useAppStore
-        .getState()
-        .documents.filter(hasUnsavedWork).length;
       api.respondCloseRequest(
-        unsaved,
+        projectDirtyCount(),
         getInFlightSaveCount() +
+          (isProjectSaveInFlight() ? 1 : 0) +
           getStemBusyCount() +
           getTranscribeBusyCount() +
           getVoiceBusyCount() +
