@@ -5,6 +5,8 @@ import {
   applySessionZoom,
   removeClips,
   rippleDeleteClips,
+  splitClipsAt,
+  splitTargets,
   useSessionStore,
 } from '../multitrack/sessionStore';
 import { clipBoundaries, nextClipEdge } from '../multitrack/clipEdges'; // K1
@@ -610,11 +612,15 @@ function registerEditCommands(): void {
       id: 'edit.split',
       label: 'Split at Cursor',
       shortcut: 'Ctrl+K',
-      // M1: one view-routed command. The multitrack arm (M2/N2-N5) is lot D's;
-      // until it lands the command reports disabled there.
-      enabled: (s) => (s.view === 'multitrack' ? false : activeDoc(s) !== null),
+      // M1: one view-routed command - a marker at the cursor in the editors,
+      // a clip split at the edit cursor in the multitrack (M2/N1-N5, see the
+      // `canSplitAtMtCursor` region below).
+      enabled: (s) => (s.view === 'multitrack' ? canSplitAtMtCursor() : activeDoc(s) !== null),
       run: async () => {
-        if (useAppStore.getState().view === 'multitrack') return; // lot D
+        if (useAppStore.getState().view === 'multitrack') {
+          splitSelectedTracksAtMtCursor();
+          return;
+        }
         splitAtCursor();
       },
     },
@@ -1053,6 +1059,39 @@ async function mixdownToNewFile(): Promise<void> {
   useAppStore.getState().addDocument(doc);
   useAppStore.getState().setView('waveform');
 }
+
+// ---- lot D ----
+/** M2 - "the selected tracks": the owners of `selectedClipIds`. `SessionState`
+ * has no track selection, and the clip set is exactly what Delete, Ripple
+ * Delete and the group drag already act on, so a split reads the selection the
+ * user can already see rather than inventing a second one. */
+function selectedTrackIds(): string[] {
+  const { session, selectedClipIds } = useSessionStore.getState();
+  const member = new Set(selectedClipIds);
+  return session.tracks.filter((t) => t.clips.some((c) => member.has(c.id))).map((t) => t.id);
+}
+
+/** `edit.split`'s multitrack predicate: some clip on a selected track would be
+ * cut at `mtCursorSample` - the EDIT cursor, never `mtPlayheadSample` (N5).
+ * Reads the session store directly, exactly as `edit.delete` does, and asks
+ * `splitTargets` so the row greys for precisely the cases the store would
+ * refuse (an edge, the 32-sample margin, a point in an overlap). */
+export function canSplitAtMtCursor(): boolean {
+  const { session, mtCursorSample } = useSessionStore.getState();
+  return splitTargets(session, selectedTrackIds(), mtCursorSample).length > 0;
+}
+
+/** `edit.split`'s multitrack run: the cursor VERBATIM (N1 - it was snapped, or
+ * deliberately not, when it was placed; `moveCursorToClipEdge` below records
+ * the same ruling), plus the document rates from the app store so a
+ * mixed-rate clip's right half reads the right source sample (N3). Returns the
+ * right-half ids. */
+export function splitSelectedTracksAtMtCursor(): string[] {
+  const { mtCursorSample } = useSessionStore.getState();
+  const rates = new Map(useAppStore.getState().documents.map((d) => [d.id, d.sampleRate]));
+  return splitClipsAt(selectedTrackIds(), mtCursorSample, (id) => rates.get(id));
+}
+// ---- end lot D ----
 
 /** Registers the Task 22 multitrack commands: the real `view.multitrack`
  * toggle (always available — the multitrack view works with no open document),
