@@ -112,6 +112,13 @@ written to `.ogg`: the OpusTags header carries de-facto-standard
 plus a sample-accurate private `AUDITORIUM_MARKERS` tag, and reopening the
 file restores them exactly.
 
+**2026-08-22 (ten-item program, lot A — M4):** since this change **no command
+performs an in-place audio save**. File → Save / Save As write the `.audm`
+project, and Export is the only way audio leaves the app. The in-place Opus
+re-encode described above (and the MP3/FLAC/WAV ones) survives only behind
+the headless `saveActiveInPlace` test hook (`src/services/testHooks.ts`) and
+the format-faithful round-trip suites in `fileService.test.ts`.
+
 **Intended behavior:** No further work planned — Opus-in-Ogg is the correct
 modern default. A native Vorbis encoder (to keep Vorbis sources as Vorbis) was
 **dropped 2026-08-09 (R5), on measurement, not preference**: the shipped
@@ -246,7 +253,7 @@ exceeds parity here.
 **Area:** File writes (`electron/ipc.cjs`, `electron/atomicWrite.cjs`)
 
 **v1.4 behavior:** Every `file:write` (in-place Save, format-faithful
-re-encode, Save Session) writes to a sibling temp file
+re-encode, the project save) writes to a sibling temp file
 (`<target>.<pid>.<seq>.<random>.tmp` — the random suffix on top of pid+seq makes
 the name unguessable, so there is nothing for an attacker to pre-plant a symlink
 at; same directory as the target, so the follow-up rename stays on one volume),
@@ -254,6 +261,12 @@ fsyncs it, closes it, then renames it over the target. A failure at any step
 (encode error, disk full, permission denied) unlinks the temp file and leaves
 the original untouched — an interrupted or failed save can no longer destroy
 or truncate the file that was already on disk.
+
+**2026-08-22 (lot A — M4):** no command performs an in-place audio save any
+more (Save writes the `.audm` project; Export is the only audio write). The
+atomic `file:write` above still covers every write the app makes — every
+Export, the project save, and the headless `saveActiveInPlace` hook, which is
+the only remaining caller of the in-place engine.
 
 **Intended behavior:** No further work planned — this is complete.
 
@@ -285,19 +298,27 @@ memory/depth trade-off for a browser-engine-hosted editor with no swap to
 disk. A global cross-document budget would be feature work (a shared eviction
 policy deciding WHOSE history to shed), recorded here rather than planned.
 
-## Session files are format v3 (binary); very large legacy sessions may not load
+## Project files are format v4 (binary); very large legacy sessions may not load
 
-**Area:** Multitrack sessions (`src/multitrack/sessionFile.ts`)
+**Area:** Projects (`src/multitrack/sessionFile.ts`)
 
-**v1.4 behavior:** `.audm` sessions are now written in **format v3**: an
-`AUDM3\n` magic, a JSON header, and the embedded audio as raw Float32 bytes
-assembled into one buffer — no monolithic JSON string and no base64 payload
-are ever built. This removes the v1/v2 format's silent failure once embedded
-audio's base64 encoding pushed the session's JSON past the JS engine's string
-length cap (roughly 17 minutes of embedded audio in the old format); Save
-Session now surfaces both success and failure explicitly instead of failing
-quietly. v3 sessions load exactly like v1/v2 wrote them; v1/v2 files still
-open normally.
+**2026-08-22 behavior (ten-item program, lot A — M4):** `.audm` files are
+written in **format v4**: an `AUDM4\n` magic, a JSON header and the embedded
+audio as raw Float32 bytes, exactly v3's layout, plus an `unreferenced`
+section so that **every open document** is in the file (v3 embedded only the
+documents a clip referenced), `markers` for every embedded document, and a
+per-document `origin` — the path the document was opened from, restored as
+its `filePath` on open. Nothing is dropped from a project save, which is why
+the version had to move. **A v4 file is unreadable by builds ≤ v1.35** (their
+reader hard-rejects any other `formatVersion`); v3, v2 and v1 files still open
+normally. File → Save / Save As write v4; File → Open Project… reads all four.
+
+**v1.4 behavior (v3):** the binary layout itself — no monolithic JSON string
+and no base64 payload are ever built. This removed the v1/v2 format's silent
+failure once embedded audio's base64 encoding pushed the session's JSON past
+the JS engine's string length cap (roughly 17 minutes of embedded audio in the
+old format); a save surfaces both success and failure explicitly instead of
+failing quietly.
 
 **Remaining limitation:** a **legacy v1/v2** session file whose JSON already
 exceeds the JS string cap still cannot be loaded — Open Session reports a
@@ -314,6 +335,44 @@ writer and reader hit the identical V8 string cap. Any legacy `.audm` this
 app successfully wrote is by construction readable; an over-cap legacy file
 can only have come from another tool, and there is nothing of Auditorium's to
 salvage. (The over-cap error path is pinned by test.)
+
+## Export length vs playback length in multitrack
+
+**Area:** File → Export… in the multitrack view (`src/services/fileService.ts`
+`exportSessionMixdown`, `src/multitrack/mixdown.ts`)
+
+**2026-08-22 behavior (lot A — M5):** Export in the multitrack view is
+**byte-identical to Mix Down to New File**: it writes what `mixdownSession`
+renders, and that render stops at the last **audible** clip end
+(`mixdown.ts`, `sessionLength` over the audible tracks). The transport
+(`MultitrackPlayer.ts`) and the timeline (`sessionZoom.ts`) run to the last
+clip end over **all** tracks, muted included — so a session whose longest clip
+sits on a muted track exports **shorter** than the transport's end position.
+
+**Intended behavior:** Unchanged by design. M5 fixes Export to the mixdown,
+and the mixdown is playback ground truth for what is heard; the tail past the
+last audible clip is silence the player merely counts through. Padding the
+export to the transport length would write silence nobody asked for, and
+trimming the player would change playback behaviour for an export concern.
+
+## Closing a document after a project save does not dirty the project
+
+**Area:** Project dirtiness (`src/services/fileService.ts`
+`projectHasUnsavedWork`)
+
+**2026-08-22 behavior (lot A — M4):** the project is dirty when any document
+has unsaved work, the session history is off its save point, or the project
+has content and has never been written. **Removing a document from the
+working set is none of those**: after a project save, closing a clean
+document (its audio is in the `.audm`) leaves every remaining document clean,
+the session untouched and the path set — so the Save pill stays grey and the
+chip shows no star, while the next Save silently writes a file without that
+document.
+
+**Intended behavior:** Recorded, not planned. The file on disk is not wrong
+(it holds what was saved); what is missing is a "the working set changed"
+signal. Counting a closed document as dirt would need a per-project record of
+what the last save contained, which is feature work beyond M4's definition.
 
 ## Closing while busy asks instead of force-quitting
 

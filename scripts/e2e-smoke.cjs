@@ -130,6 +130,8 @@ const OUT_MARKERS_FLAC = path.join(OUT_DIR, 'markers.flac');
 const OUT_MARKERS_OGG = path.join(OUT_DIR, 'markers.ogg');
 const OUT_SESSION = path.join(OUT_DIR, 'session.audm');
 const OUT_FADES_SESSION = path.join(OUT_DIR, 'fades-session.audm');
+// Lot A (M5): the multitrack Export, written by its headless twin.
+const OUT_SESSION_EXPORT_WAV = path.join(OUT_DIR, 'session-export.wav');
 const OUT_FADES_REFERENCE = path.join(OUT_DIR, 'fades-v18-reference.json');
 const OUT_AUTOMATION_SESSION = path.join(OUT_DIR, 'automation-session.audm');
 const OUT_SPATIAL_SESSION = path.join(OUT_DIR, 'spatial-session.audm');
@@ -145,6 +147,50 @@ const OUT_TAKE_MP3 = path.join(OUT_DIR, 'take.mp3');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 /** 20 ms RMS frames of a mono buffer — the smoke's own envelope arithmetic. */
+/**
+ * Lot A (M5): decodes a 32-bit-float RIFF/WAVE buffer (what `exportSession`
+ * writes at `wavBitDepth: 32`) by walking its chunks — `fmt ` for the layout,
+ * `data` for the interleaved samples — into per-channel Float64 arrays of the
+ * exact float32 values, so the per-sample comparison against the renderer's
+ * own mixdown is equality, not a tolerance.
+ */
+function readFloat32Wav(buf) {
+  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') {
+    throw new Error('readFloat32Wav: not a RIFF/WAVE buffer');
+  }
+  let pos = 12;
+  let fmt = null;
+  let data = null;
+  while (pos + 8 <= buf.length) {
+    const id = buf.toString('ascii', pos, pos + 4);
+    const size = buf.readUInt32LE(pos + 4);
+    const body = pos + 8;
+    if (id === 'fmt ') {
+      fmt = {
+        audioFormat: buf.readUInt16LE(body),
+        channels: buf.readUInt16LE(body + 2),
+        sampleRate: buf.readUInt32LE(body + 4),
+        bitsPerSample: buf.readUInt16LE(body + 14),
+      };
+    } else if (id === 'data') {
+      data = { start: body, size: Math.min(size, buf.length - body) };
+    }
+    pos = body + size + (size & 1);
+  }
+  if (!fmt || !data) throw new Error('readFloat32Wav: missing fmt or data chunk');
+  if (fmt.bitsPerSample !== 32 || fmt.audioFormat !== 3) {
+    throw new Error(`readFloat32Wav: expected 32-bit float, got format ${fmt.audioFormat} / ${fmt.bitsPerSample}-bit`);
+  }
+  const frames = Math.floor(data.size / (4 * fmt.channels));
+  const samples = Array.from({ length: fmt.channels }, () => new Float64Array(frames));
+  for (let i = 0; i < frames; i++) {
+    for (let c = 0; c < fmt.channels; c++) {
+      samples[c][i] = buf.readFloatLE(data.start + (i * fmt.channels + c) * 4);
+    }
+  }
+  return { channels: fmt.channels, sampleRate: fmt.sampleRate, frames, samples };
+}
+
 function rmsFrames20ms(x, sampleRate) {
   const size = Math.round(0.02 * sampleRate);
   const n = Math.floor(x.length / size);
@@ -850,12 +896,12 @@ async function main() {
         `(expected ${expectedOggPos2}, got ${JSON.stringify(oggMarkersAfter[1])})`
     );
 
-    // 8) Session v3 round-trip (Task M5/F3 acceptance): build a multitrack
-    // session containing one document with markers, Save Session to a .audm
-    // path (via a headless-safe test hook that drives the real
-    // serializeSessionV3 writer, bypassing the native save dialog), confirm
-    // the file begins with the v3 binary magic (not the old base64 JSON), then
-    // reopen it (via the real parseSessionFileBytes dispatcher) and confirm
+    // 8) Project round-trip (Task M5/F3 acceptance; lot A / M4 — v4): build a
+    // multitrack session containing one document with markers, Save the
+    // project to a .audm path (via a headless-safe test hook that IS Save As
+    // minus the dialog — the real `writeProject` core), confirm the file
+    // begins with the v4 binary magic (not the old base64 JSON), then reopen
+    // it (via the real `loadProjectFrom` / `parseSessionFileBytes`) and confirm
     // the document AND its markers survive. This is the flow whose silent
     // failure past ~17 minutes of audio was the critical bug M5 fixed.
     console.log('Session v3 round-trip: build session, save, reopen...');
@@ -881,8 +927,8 @@ async function main() {
     assert(fs.existsSync(OUT_SESSION), 'session.audm exists on disk');
     const sessionHead = fs.readFileSync(OUT_SESSION).subarray(0, 6);
     assert(
-      sessionHead.toString('latin1') === 'AUDM3\n',
-      `session.audm begins with the v3 binary magic AUDM3\\n (got ${JSON.stringify(sessionHead.toString('latin1'))})`
+      sessionHead.toString('latin1') === 'AUDM4\n',
+      `session.audm begins with the v4 binary magic AUDM4\\n (got ${JSON.stringify(sessionHead.toString('latin1'))})`
     );
 
     const sessionOpen = await page.evaluate(
@@ -3860,6 +3906,41 @@ async function main() {
     // literally unchanged v1.8.0 loop), then re-arming through the hook.
     const armedMix = await page.evaluate(() => window.__test.mixdownSession());
     const armedPeak = await page.evaluate(() => window.__test.getPeak());
+
+    // Lot A (M5): File → Export in the multitrack view IS this mixdown. The
+    // headless twin writes the same render to a 32-bit-float WAV; decoded, it
+    // must equal the Mixdown document just produced (the active document),
+    // sample for sample, on both channels — the session is still the armed
+    // crossfade session at this point, so the two renders see the same fades.
+    console.log(`  exporting the session mixdown to ${OUT_SESSION_EXPORT_WAV} ...`);
+    const sessionExportOk = await page.evaluate(
+      (out) => window.__test.exportSession({ format: 'wav', wavBitDepth: 32, mp3Kbps: 192 }, out),
+      OUT_SESSION_EXPORT_WAV
+    );
+    assert(sessionExportOk === true, 'exportSession(wav) reported success on the fade session');
+    const sessionExport = readFloat32Wav(fs.readFileSync(OUT_SESSION_EXPORT_WAV));
+    assert(
+      sessionExport.channels === 2 && sessionExport.sampleRate === armedMix.sampleRate,
+      `the session export is stereo at the session rate (${sessionExport.channels} ch, ${sessionExport.sampleRate} Hz)`
+    );
+    assert(
+      sessionExport.frames === armedMix.length,
+      `the session export has the mixdown's length (${sessionExport.frames} vs ${armedMix.length})`
+    );
+    for (let ch = 0; ch < 2; ch++) {
+      const reference = await page.evaluate(
+        ([c, n]) => window.__test.getChannelSamples(c, 0, n),
+        [ch, armedMix.length]
+      );
+      let mismatches = 0;
+      for (let i = 0; i < armedMix.length; i++) {
+        if (reference[i] !== sessionExport.samples[ch][i]) mismatches++;
+      }
+      assert(
+        mismatches === 0,
+        `session export channel ${ch} equals mixdownSession per sample (${mismatches} mismatches over ${armedMix.length})`
+      );
+    }
     const released = await page.evaluate(
       (id) => window.__test.releaseCrossfade(id, 'in'),
       xfB.clipId

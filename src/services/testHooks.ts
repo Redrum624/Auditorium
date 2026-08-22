@@ -125,6 +125,8 @@ export interface TestStateSummary {
    * infers the state it is measuring reports the inference, not the state.
    */
   sessionSampleRate: number;
+  /** Lot A (M4): the `.audm` plain Save writes to; null for a never-written project. */
+  projectPath: string | null;
 }
 
 /** F10's four before/after numbers, as plain JSON scalars. `null` is a real
@@ -1106,6 +1108,8 @@ export function installTestHooks(): void {
         dirty: doc?.dirty ?? null,
         neverSaved: doc?.neverSaved ?? null,
         sessionSampleRate: useSessionStore.getState().session.sampleRate,
+        // Lot A (M4): where plain Save writes, or null for a never-written project.
+        projectPath: useSessionStore.getState().projectPath,
       };
     },
 

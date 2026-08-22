@@ -145,21 +145,23 @@ open document is listed with its name (a trailing `*` means unsaved
 changes), duration, and sample rate. Click a row to make it active; hover and
 click the ✕ to close it (you'll be prompted to save if it's dirty).
 
-**Where unsaved state is visible:** that trailing `*` is the only place the app
-shows it, and since the module card can now be closed (click the active strip
-entry), it can be off screen. Nothing is lost if it is — closing a dirty
-document still prompts, and quitting with unsaved work still counts your dirty
-documents and asks — but if you want unsaved state in view while you work,
-leave the Files card open.
+**Where unsaved state is visible:** that trailing `*` marks the document. The
+**status pill** at the bottom shows the **project** — `<project> *` whenever
+anything in it is unsaved (a document with changes, a session edit, or a
+project that has content but has never been saved) — in every view, so the
+module card can be closed (click the active strip entry) without losing sight
+of it. Nothing is lost either way: closing a dirty document still prompts, and
+quitting with unsaved work still counts and asks.
 
-Closing the **app window** with unsaved changes is guarded natively: the app
-counts your dirty documents and shows a confirmation ("N file(s) have unsaved
-changes.") with **Quit** (discard everything and exit) and **Cancel** (keep
-the app open). With no unsaved changes the window closes immediately. If the
-app is still busy with a save or export when you try to close, it no longer
-force-closes after a short timeout — it asks instead ("The editor is busy (a
-save or export may be running). Quit anyway?"), so an in-progress write is
-never killed silently.
+Closing the **app window** with unsaved work is guarded natively: the app
+counts the project's unsaved items — each document with unsaved changes, plus
+one for session edits, and at least one for a project that has content but was
+never saved — and shows a confirmation ("N item(s) have unsaved changes.") with
+**Quit** (discard everything and exit) and **Cancel** (keep the app open). An
+empty, untitled project closes immediately. If the app is still busy with a
+save or export when you try to close, it no longer force-closes after a short
+timeout — it asks instead ("The editor is busy (a save or export may be
+running). Quit anyway?"), so an in-progress write is never killed silently.
 
 ## Editing
 
@@ -1453,13 +1455,16 @@ same limits as the buttons.
 - **Mix Down**: **File → Mix Down to New File** renders the whole session
   offline to a new stereo document (added to the Files panel), respecting
   mute/solo/volume/pan/gain.
-- **Sessions**: **File → Save Session…** / **Open Session…** persist the
-  session (tracks, clips, their source document references, embedded audio,
-  and markers) to a `.audm` file. Sessions are written in format v3, a binary
-  layout (JSON header + raw audio payload, no base64) that removes the old
-  v1/v2 format's silent failure on large embedded audio; Save Session now
-  reports success or failure explicitly instead of failing quietly. Older
-  `.audm` files (v1/v2) still open normally.
+- **Projects**: **File → Save** / **Save As…** (`Ctrl+S` / `Ctrl+Shift+S`)
+  write the **project** to a `.audm` file — in every view, not only this one.
+  The project is the session (tracks, clips, automation, fades) plus **every
+  open document** with its audio, markers, name and origin path, whether or
+  not a clip references it — nothing is dropped. **File → Open Project…**
+  restores all of them into the Files panel and switches to the multitrack
+  view. Project files are format v4, a binary layout (JSON header + raw audio
+  payload, no base64); v1–v3 `.audm` files still open normally, but a v4 file
+  does not open in older builds (v1.35 and earlier). The status pill shows the
+  project's name, starred while anything in it is unsaved.
 
 <!-- K1: clip selection, edge navigation, ripple delete -->
 ### Selecting clips, walking the edges, and ripple delete
@@ -1771,22 +1776,24 @@ without changing the open document's path or dirty state:
   [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) at the repository root.
 - **OGG (Opus)**: 96/128/192 kbps.
 
-**File → Save** (`Ctrl+S`) is **format-faithful**: for a document opened from
-`.wav`, `.mp3`, `.flac`, or `.ogg` it re-encodes in place into that same
-container — WAV as 32-bit float (Properties updates to reflect this), MP3 at
-192 kbps, FLAC at 16-bit or 24-bit (rounded up from the source depth — a
-20-bit source saves as 24-bit, never truncated to 16), OGG as Opus-in-Ogg at
-128 kbps (if the host has no WebCodecs Opus encoder, an in-place OGG Save
-falls back to the Save As… dialog instead). Documents opened from other
-exotic containers (M4A, AAC, WebM, or anything unrecognized), and brand-new
-untitled documents, always use a **Save As…** dialog that writes WAV (32-bit
-float, replacing the source extension in the suggested name — `song.mp3`
-defaults to `song.wav`). **Save As…** always writes WAV.
+In the **multitrack view**, Export renders the **session mixdown** — the same
+render as **File → Mix Down to New File** (mute/solo, volume/pan, automation,
+fades, hard-clamped; length = the last audible clip end) — to the chosen
+format, without adding a document to the Files panel and without markers. The
+default file name is the project name. If nothing is audible (an empty or
+all-muted session) Export reports "Nothing audible to export." and writes no
+file.
 
-Every in-place save (Save, and the format-faithful re-encodes above) writes
-to a temporary file next to the target and only replaces it once the write is
-complete, so an interrupted or failed save can no longer corrupt or truncate
-the original file on disk.
+Every export writes to a temporary file next to the target and only replaces
+it once the write is complete, so an interrupted or failed export can no
+longer corrupt or truncate a file already on disk.
+
+**File → Save** (`Ctrl+S`) and **Save As…** (`Ctrl+Shift+S`) write the
+**project** (`.audm`) — never an audio file. Export is the only way audio
+leaves the app. Save with a project path writes there silently; Save with no
+path opens the Save As dialog; Save As always asks, and renames the project to
+the file's name. See **Projects** under the multitrack section for what the
+file contains.
 
 ## Shortcuts reference
 

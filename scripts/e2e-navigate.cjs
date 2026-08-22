@@ -743,7 +743,7 @@ async function step(page, name, fn) {
  * Why this is necessary: `dialog.showSaveDialog` and friends are modal on the
  * main process. A real one opened by this walk would block Electron with an OS
  * window no harness can reach, and the run would hang until its timeout. Every
- * command that ends in one — Open…, Save As…, Save Session…, Open Session…,
+ * command that ends in one — Open…, Save As…, Open Project…,
  * About, Capture Noise Print — would therefore be unwalkable.
  *
  * Why it is honest: `electron/ipc.cjs` destructures `dialog` from the electron
@@ -2748,10 +2748,12 @@ async function main() {
       record('Recovery: undecodable file', 'refused, reported, no document created', 'PASS');
     });
 
-    await step(page, 'Recovery — Save on a clean document is not offered (O1)', async () => {
-      // A freshly opened, unedited document has nothing to save. O1's rule is
-      // that Save is a destructive no-op there, so the command is DISABLED
-      // rather than silently re-encoding the file.
+    await step(page, 'Recovery — Save on a never-saved project is offered; Save As reaches the picker', async () => {
+      // Lot A (M4): Save writes the PROJECT. A freshly opened, unedited
+      // document is clean — but the project that now contains it has never
+      // been written, so there IS something to save: the `.audm` that does not
+      // exist yet. Save is therefore ENABLED here (it opens the Save As picker
+      // on first use), where O1's per-document rule used to grey it.
       await page.evaluate(() => {
         while (window.__test.getStateSummary().docCount > 0) window.__test.closeActive();
       });
@@ -2768,12 +2770,12 @@ async function main() {
       const saveAs = fileMenu.items.find((i) => i.label === 'Save As…');
       console.log(`  File menu: Save disabled=${save && save.disabled}, Save As… disabled=${saveAs && saveAs.disabled}`);
       assert(
-        save !== undefined && save.disabled === true,
-        'Save is GREYED on a clean document — a destructive no-op the user cannot fire by accident'
+        save !== undefined && save.disabled === false,
+        'Save is OFFERED: the document is clean, but the project holding it has content and has never been written (M4)'
       );
       assert(
         saveAs !== undefined && saveAs.disabled === false,
-        'Save As… stays available on the same document, so the greying is Save’s own rule and not "no document"'
+        'Save As… is available too — it always is'
       );
 
       // …and the Save As path itself, to its cancel. The native picker is a
@@ -2801,7 +2803,11 @@ async function main() {
         stillClean.filePath === clean.filePath,
         `and did not repoint the document at a new path (${JSON.stringify(stillClean.filePath)})`
       );
-      record('Recovery: Save / Save As', 'Save greyed per O1; Save As reached the picker and cancelled cleanly', 'PASS');
+      assert(
+        stillClean.projectPath === null,
+        `and the project still has no path after the cancel (${JSON.stringify(stillClean.projectPath)})`
+      );
+      record('Recovery: Save / Save As', 'Save offered per M4 (never-written project); Save As reached the picker and cancelled cleanly', 'PASS');
     });
 
     await step(page, 'Recovery — Open… reaches the OS picker and survives a cancel', async () => {

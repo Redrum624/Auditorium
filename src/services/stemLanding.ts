@@ -158,7 +158,7 @@ export interface StemDocumentsResult {
 export interface StemSessionResult {
   /** The five created track ids, in document order. */
   trackIds: string[];
-  /** `<source> — Stems`, also the default filename for Save Session. */
+  /** `<source> — Stems`, also the default filename for the project save. */
   sessionName: string;
 }
 
@@ -167,7 +167,7 @@ export interface StemLandingResult {
   documentIds: string[];
   /** The five created track ids, in the same order. */
   trackIds: string[];
-  /** `<source> — Stems`, also the default filename for Save Session. */
+  /** `<source> — Stems`, also the default filename for the project save. */
   sessionName: string;
   /**
    * True when the source was MONO and its stems were laid down as dual-mono

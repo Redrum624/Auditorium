@@ -615,7 +615,7 @@ describe('runCoverJourney — a second pass on the same song', () => {
     }));
     const mine = useAppStore.getState().documents.find((d) => d.id === theirs)!.channels[0][1000];
 
-    // Save Session: the real writer, over the session the journey just built.
+    // Save the project: the real writer, over the session the journey just built.
     const { bytes } = serializeSessionV3(
       useSessionStore.getState().session,
       useAppStore.getState().documents

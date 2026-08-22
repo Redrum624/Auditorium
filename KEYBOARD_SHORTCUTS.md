@@ -36,8 +36,8 @@ finishes. Mouse interaction is never suspended by either.
 | `Home` | Go to Start — the file's, or the **session's** in the multitrack view |
 | `End` | Go to End — the file's, or the **end of the last clip** in the multitrack view |
 | `Ctrl+O` | Open… |
-| `Ctrl+S` | Save |
-| `Ctrl+Shift+S` | Save As… |
+| `Ctrl+S` | Save project (`.audm`, every view) |
+| `Ctrl+Shift+S` | Save project As… |
 | `Ctrl+N` | New… |
 | `Ctrl+W` | Close |
 | `M` | Add Marker at the cursor |
@@ -106,7 +106,7 @@ here.
 | Command | Menu location |
 |---|---|
 | Record | File → Record, or the transport bar's record button |
-| Save Session… / Open Session… | File menu |
+| Open Project… | File menu |
 | Mix Down to New File | File menu, multitrack-only |
 | Ripple Delete Time Selection | Edit menu — permanently greyed and deliberately key-less; see above |
 | Trim to Selection / Silence Selection | Edit menu (also on the floating edit toolbar) |

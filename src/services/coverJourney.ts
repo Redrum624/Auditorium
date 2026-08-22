@@ -905,7 +905,7 @@ export async function runCoverJourney(
     // adopted only when `holdsExactly` proves it already IS the sum this pass
     // computed, which makes reuse a no-op that cannot destroy anything — see
     // that function for why a content test rather than a provenance one is the
-    // only thing that survives a Save Session and reopen. Anything else — the
+    // only thing that survives a project save and reopen. Anything else — the
     // user's edit, a stale sum, another song's — is left exactly where it is and
     // this pass creates its own document beside it.
     //
