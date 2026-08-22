@@ -5,12 +5,14 @@ import {
   replaceRegion,
   insertAt,
   docLength,
+  nextId,
 } from '../audio/AudioDocument';
 import type { Marker, SelectionRange } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 import { pushUndo } from './undoHistory';
 import { getClipboard, setClipboard } from './clipboard';
 import { resolveRegion } from './selectionRegion';
+import { cursorSegment } from './segments';
 import { resampleChannel } from '../dsp/resample';
 
 interface AfterState {
@@ -344,21 +346,59 @@ function zeroFillRegion(doc: AudioDocument, start: number, end: number): AudioDo
 }
 
 /**
- * Copies the selection to the clipboard, then leaves that span EMPTY at the
- * same length (item 7 / M1): the document never ripples, so markers inside and
- * after the span stay where they are and no remap is passed. The selection
- * collapses to a cursor at the span's start. Requires a selection.
+ * Copies the selection — or, with none, the SEGMENT the cursor is in (item 8 /
+ * M3: the span between the two nearest markers, 0 and the document end
+ * counting as boundaries; `cursorSegment`) — to the clipboard, then leaves
+ * that span EMPTY at the same length (item 7 / M1): the document never
+ * ripples, so markers inside and after the span stay where they are and no
+ * remap is passed. The selection collapses to a cursor at the span's start.
+ * A no-op with neither a selection nor an interior marker (N9).
  */
 export function cutSelection(): void {
   const doc = activeDoc();
-  const selection = useAppStore.getState().selection;
-  if (!doc || !selection) return;
-  const { start, end } = resolveSelection(doc, selection);
+  if (!doc) return;
+  const s = useAppStore.getState();
+  const region = s.selection ? resolveSelection(doc, s.selection) : cursorSegment(s);
+  if (!region) return;
+  const { start, end } = region;
   setClipboard({ channels: cloneRegion(doc, start, end), sampleRate: doc.sampleRate });
   applyEdit('Cut', doc.id, (d) => zeroFillRegion(d, start, end), {
     selection: null,
     cursorSample: start,
   });
+}
+
+/**
+ * Split at Cursor (item 8 / M1): drops a marker at the cursor — or one at each
+ * edge of the selection — named `Split N` (N9, the `marker.add` naming scheme),
+ * as ONE History entry. Positions are consumed verbatim, never snapped (N1);
+ * the resolved selection edges are used, not the raw pair. A position at 0 or
+ * at the document end is implicit (M3) and a position that already carries a
+ * marker is skipped; when nothing is left nothing is recorded. Selection and
+ * cursor are not touched.
+ */
+export function splitAtCursor(): void {
+  const doc = activeDoc();
+  if (!doc) return;
+  const s = useAppStore.getState();
+  const length = docLength(doc);
+  let positions: number[];
+  if (s.selection) {
+    const { start, end } = resolveSelection(doc, s.selection);
+    positions = [start, end];
+  } else {
+    positions = [Math.min(Math.max(s.cursorSample, 0), length)];
+  }
+  const before = s.markers[doc.id] ?? [];
+  const taken = new Set(before.map((m) => m.positionSample));
+  const fresh = [...new Set(positions)].filter((p) => p !== 0 && p !== length && !taken.has(p));
+  if (fresh.length === 0) return;
+  for (const positionSample of fresh) {
+    const id = nextId('marker');
+    s.addMarker(doc.id, { id, name: `Split ${id.split('-')[1]}`, positionSample });
+  }
+  const after = useAppStore.getState().markers[doc.id] ?? [];
+  pushMarkerUndo('Split', doc.id, before, after);
 }
 
 /** Copies the selection to the clipboard without changing the document. */

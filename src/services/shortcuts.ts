@@ -13,6 +13,9 @@ export const SHORTCUT_TABLE: Shortcut[] = [
   { combo: 'ctrl+z', commandId: 'edit.undo' },
   { combo: 'ctrl+shift+z', commandId: 'edit.redo' },
   { combo: 'ctrl+y', commandId: 'edit.redo' },
+  // Item 8 (M1) — Split at Cursor. `ctrl+k` was free (checked against every
+  // row here); the command is view-routed, so the one row serves every view.
+  { combo: 'ctrl+k', commandId: 'edit.split' },
   { combo: 'ctrl+x', commandId: 'edit.cut' },
   { combo: 'ctrl+c', commandId: 'edit.copy' },
   { combo: 'ctrl+v', commandId: 'edit.paste' },

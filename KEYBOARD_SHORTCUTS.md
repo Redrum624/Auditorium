@@ -25,7 +25,8 @@ finishes. Mouse interaction is never suspended by either.
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` | Redo |
 | `Ctrl+Y` | Redo |
-| `Ctrl+X` | Cut the selection to the clipboard, leaving the span silent at the same length |
+| `Ctrl+K` | Split at Cursor — a marker at the cursor, or at both edges of the selection |
+| `Ctrl+X` | Cut the selection (or the cursor's segment) to the clipboard, leaving the span silent at the same length |
 | `Ctrl+C` | Copy |
 | `Ctrl+V` | Paste |
 | `Delete` | Silence the selection in place at the same length (or remove every selected multitrack clip, leaving the gap) |
@@ -40,7 +41,7 @@ finishes. Mouse interaction is never suspended by either.
 | `Ctrl+Shift+S` | Save As… |
 | `Ctrl+N` | New… |
 | `Ctrl+W` | Close |
-| `M` | Add Marker at the cursor |
+| `M` | Add Marker at the cursor (editor views only) |
 | `Ctrl+E` | Export… |
 | `Escape` | Deselect |
 

@@ -167,8 +167,10 @@ never killed silently.
 
 Click-drag on the waveform/spectral canvas to select a region (samples are
 the underlying unit; the UI always displays formatted time). Double-click
-selects the entire document. Shift+click extends the selection from the
-current cursor. `Ctrl+A` selects all; `Escape` clears the selection.
+selects the segment under the pointer (the span between the two nearest
+markers; the whole document when there are none). Shift+click extends the
+selection from the current cursor. `Ctrl+A` selects all; `Escape` clears the
+selection.
 
 ### The position line and the timeline
 
@@ -198,13 +200,21 @@ playing does not interrupt playback — the line is where the *next* play starts
 The position line is not part of the undo history: moving it is a view change,
 not an edit, and `Ctrl+Z` will not bring it back.
 
-### Cut / Copy / Paste / Delete
+### Split / Cut / Copy / Paste / Delete
 
-Standard editing acts on the current selection: `Ctrl+X` cuts the selection to
-the clipboard and leaves that span **silent at the same length**; `Ctrl+C`
-copies; `Ctrl+V` pastes at the cursor; `Delete` silences the selection in
-place at the same length and collapses it to a cursor at its start. None of
-these moves anything that comes after the selection. `Shift+Delete` is
+`Ctrl+K` (**Edit → Split at Cursor**, or the scissors button on the edit
+toolbar) drops a marker at the cursor — or one at each edge of the selection —
+named `Split N`, as one undo step. Markers are the document's segment
+boundaries: the spans between them (and between the file's start, the first
+marker, the last marker and the file's end) are its **segments**, which a
+double-click selects and `Ctrl+X` can cut without a selection.
+
+Standard editing acts on the current selection: `Ctrl+X` cuts the selection —
+or, with none, the segment the cursor is in — to the clipboard and leaves that
+span **silent at the same length**; `Ctrl+C` copies; `Ctrl+V` pastes at the
+cursor; `Delete` silences the selection in place at the same length and
+collapses it to a cursor at its start. None of these moves anything that comes
+after the selection, and none of them moves a marker. `Shift+Delete` is
 **Ripple Delete**: it removes the selection and closes the gap — the only
 editor edit that shortens the file besides Trim. Undo/redo
 (`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) keeps up to 50 steps per document,
@@ -227,15 +237,18 @@ waveform's axis, whenever **at least one file is open** — in the Waveform,
 Spectral and Multitrack views alike. It is only ever a shortcut to commands
 you already have: nothing here does anything the menu and the keyboard do not.
 
-`Cut · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
+`Split · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
 
+- **Split** is `Ctrl+K` — a marker at the cursor, or one at each edge of the
+  selection. It needs only an open file, so it is the one button in the first
+  group that stays lit with nothing selected.
 - **Trim** keeps the selected region and drops everything else;
   **Silence** zeroes the selected region in place, leaving the length alone.
   Both are undoable History steps like any other edit, and both are also in
   **Edit → Trim to Selection / Silence Selection**, directly under Delete.
   Neither has a keyboard shortcut, so neither menu row advertises one.
 - Buttons grey out individually rather than disappearing. With no selection,
-  Cut / Copy / Delete / Trim / Silence are greyed; with nothing on the
+  Copy / Delete / Trim / Silence are greyed; with nothing on the
   clipboard, Paste is greyed; Undo and Redo follow whichever history is
   active — the **document's** in Waveform and Spectral, the **session's** in
   Multitrack.
@@ -250,7 +263,13 @@ you already have: nothing here does anything the menu and the keyboard do not.
 ### Markers
 
 Press `M` (or **Edit → Add Marker**) to drop a marker named `Marker N` at the
-current cursor position. The **Markers** panel (opened from the module strip) lists every
+current cursor position; `Ctrl+K` (**Split at Cursor**) drops one named
+`Split N` at the cursor or at both edges of the selection. Both are editor
+commands: in the Multitrack view `M` does nothing, since the document it
+would mark is not on screen there. Every marker — whichever command, panel
+or analysis wrote it — is a **segment boundary**: a double-click on the
+canvas selects the span between the two nearest markers, and `Ctrl+X` with
+no selection cuts that span. The **Markers** panel (opened from the module strip) lists every
 marker on the active document: click a marker's **time** to move the cursor
 there and re-center the view around it; double-click a marker's name to
 rename it inline (`Enter` or clicking away commits, `Escape` cancels); the ✕

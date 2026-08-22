@@ -5,6 +5,7 @@ import {
   pasteAtCursor,
   deleteSelection,
   rippleDeleteSelection,
+  splitAtCursor,
   trimToSelection,
   silenceSelection,
   pushMarkerUndo,
@@ -252,11 +253,157 @@ describe('cutSelection', () => {
     expect(useAppStore.getState().selection).toEqual({ start: 2, end: 5 });
   });
 
-  it('does nothing without a selection', () => {
+  // Item 8 (M1/M3/N9): with no selection, Ctrl+X cuts the SEGMENT the cursor
+  // is in — the span between the two nearest markers (0 and the document end
+  // count as boundaries). Markers are never touched: the cut is equal-length.
+  function setMarkers(docId: string, positions: number[]): void {
+    const list = positions.map((p, i) => ({ id: `m${i}`, name: `M${i}`, positionSample: p }));
+    useAppStore.getState().setMarkersForDoc(docId, list);
+  }
+
+  function markerPositions(docId: string): number[] {
+    return (useAppStore.getState().markers[docId] ?? []).map((m) => m.positionSample);
+  }
+
+  it('no selection, marker at 5, cursor 7: cuts the segment [5,10)', () => {
     const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [5]);
+    useAppStore.getState().setCursor(7);
+
+    cutSelection();
+
+    expect(getClipboard()!.channels[0].length).toBe(5);
+    expect(chan()).toEqual([1, 2, 3, 4, 5, 0, 0, 0, 0, 0]);
+    expect(useAppStore.getState().cursorSample).toBe(5);
+    expect(markerPositions(doc.id)).toEqual([5]);
+  });
+
+  it('no selection, markers [3,6], cursor 4: cuts the segment [3,6) and leaves the markers', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [3, 6]);
+    useAppStore.getState().setCursor(4);
+
+    cutSelection();
+
+    expect(getClipboard()!.channels[0]).toEqual(new Float32Array([4, 5, 6]));
+    expect(chan()).toEqual([1, 2, 3, 0, 0, 0, 7, 8, 9, 10]);
+    expect(markerPositions(doc.id)).toEqual([3, 6]);
+    expect(useAppStore.getState().selection).toBeNull();
+    expect(useAppStore.getState().cursorSample).toBe(3);
+  });
+
+  it('does nothing without a selection and without markers', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setCursor(4);
     cutSelection();
     expect(getClipboard()).toBeNull();
     expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('a marker inside a selection cut stays where it was', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [3]);
+    const before = useAppStore.getState().markers[doc.id];
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    cutSelection();
+
+    expect(markerPositions(doc.id)).toEqual([3]);
+    expect(useAppStore.getState().markers[doc.id]).toBe(before);
+  });
+});
+
+describe('splitAtCursor', () => {
+  function setMarkers(docId: string, positions: number[]): void {
+    const list = positions.map((p, i) => ({ id: `m${i}`, name: `M${i}`, positionSample: p }));
+    useAppStore.getState().setMarkersForDoc(docId, list);
+  }
+
+  function markers(docId: string) {
+    return useAppStore.getState().markers[docId] ?? [];
+  }
+
+  it('with no selection: one marker at the cursor, named "Split N", one History entry, doc dirty; undo removes it', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setCursor(4);
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([4]);
+    expect(markers(doc.id)[0].name).toMatch(/^Split \d+$/);
+    expect(getHistory(doc.id).done).toEqual(['Split']);
+    expect(activeDoc().dirty).toBe(true);
+    // The cursor and the (absent) selection are not touched.
+    expect(useAppStore.getState().cursorSample).toBe(4);
+    expect(useAppStore.getState().selection).toBeNull();
+
+    undo(doc.id);
+    expect(markers(doc.id)).toEqual([]);
+  });
+
+  it('with a selection: a marker at each edge, in ONE History entry', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setSelection({ start: 2, end: 7 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([2, 7]);
+    expect(getHistory(doc.id).done).toEqual(['Split']);
+    expect(useAppStore.getState().selection).toEqual({ start: 2, end: 7 });
+
+    undo(doc.id);
+    expect(markers(doc.id)).toEqual([]);
+  });
+
+  it('adds nothing at 0, at the document end, or on an existing marker — and records no undo entry', () => {
+    const doc = addDoc([ramp(10)]);
+
+    useAppStore.getState().setCursor(0);
+    splitAtCursor();
+    expect(markers(doc.id)).toEqual([]);
+
+    useAppStore.getState().setCursor(10);
+    splitAtCursor();
+    expect(markers(doc.id)).toEqual([]);
+
+    setMarkers(doc.id, [4]);
+    const before = markers(doc.id);
+    useAppStore.getState().setCursor(4);
+    splitAtCursor();
+    expect(markers(doc.id)).toBe(before);
+
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('a whole-document selection adds nothing', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setSelection({ start: 0, end: 10 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id)).toEqual([]);
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('a selection starting below zero splits at the RESOLVED edge only', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setSelection({ start: -5, end: 3 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([3]);
+  });
+
+  it('skips an edge that already has a marker and adds the other', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [2]);
+    useAppStore.getState().setSelection({ start: 2, end: 7 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([2, 7]);
+    expect(markers(doc.id).filter((m) => m.positionSample === 2)).toHaveLength(1);
+    expect(getHistory(doc.id).done).toEqual(['Split']);
   });
 });
 

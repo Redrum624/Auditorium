@@ -378,6 +378,7 @@ describe('getMenuSections', () => {
     expect(commandIds(edit.items)).toEqual([
       'edit.undo',
       'edit.redo',
+      'edit.split', // item 8 (M1): the row before Cut
       'edit.cut',
       'edit.copy',
       'edit.paste',
@@ -669,6 +670,72 @@ describe('edit.delete / edit.rippleDelete in the editor views (item 7)', () => {
     expect(getHistory(doc.id).done).toEqual(['Delete']);
     expect(useAppStore.getState().selection).toBeNull();
     expect(useAppStore.getState().cursorSample).toBe(0);
+  });
+});
+
+describe('edit.split / edit.cut / marker.add in the editor views (item 8)', () => {
+  function findEditCmd(id: string): MenuCommand {
+    const edit = getMenuSections().find((s) => s.title === 'Edit')!;
+    return edit.items.find((item): item is MenuCommand => item !== 'separator' && item.id === id)!;
+  }
+
+  it('edit.split is registered as "Split at Cursor" on Ctrl+K', () => {
+    const cmd = findEditCmd('edit.split');
+    expect(cmd.label).toBe('Split at Cursor');
+    expect(cmd.shortcut).toBe('Ctrl+K');
+  });
+
+  it('edit.split is enabled with an active document in waveform and spectral, disabled with none and in multitrack', () => {
+    expect(isCommandEnabled('edit.split')).toBe(false);
+    openDoc();
+    for (const view of ['waveform', 'spectral'] as const) {
+      useAppStore.getState().setView(view);
+      expect(isCommandEnabled('edit.split')).toBe(true);
+    }
+    useAppStore.getState().setView('multitrack');
+    expect(isCommandEnabled('edit.split')).toBe(false);
+  });
+
+  it('runCommand(edit.split) in the waveform view adds one marker at the cursor', async () => {
+    const doc = openDoc();
+    useAppStore.getState().setCursor(250);
+
+    await runCommand('edit.split');
+
+    const markers = useAppStore.getState().markers[doc.id];
+    expect(markers).toHaveLength(1);
+    expect(markers[0].positionSample).toBe(250);
+    expect(markers[0].name).toMatch(/^Split \d+$/);
+  });
+
+  it('edit.cut is enabled with no selection when the cursor sits in a marker-bounded segment, disabled with no selection and no markers (N9)', async () => {
+    const doc = openDoc();
+    useAppStore.getState().setCursor(600);
+    expect(isCommandEnabled('edit.cut')).toBe(false);
+
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-x', name: 'X', positionSample: 500 });
+    expect(isCommandEnabled('edit.cut')).toBe(true);
+
+    await runCommand('edit.cut');
+    expect(useAppStore.getState().cursorSample).toBe(500);
+    expect(docLength(useAppStore.getState().documents[0])).toBe(1000);
+  });
+
+  it('edit.cut stays disabled in multitrack even with a selection and a segment (M1/M7)', () => {
+    const doc = openDoc();
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-y', name: 'Y', positionSample: 500 });
+    useAppStore.getState().setSelection({ start: 100, end: 400 });
+    useAppStore.getState().setView('multitrack');
+    expect(isCommandEnabled('edit.cut')).toBe(false);
+  });
+
+  it('marker.add is disabled in multitrack with an active document, enabled in waveform (N10)', () => {
+    openDoc();
+    expect(isCommandEnabled('marker.add')).toBe(true);
+    useAppStore.getState().setView('multitrack');
+    expect(isCommandEnabled('marker.add')).toBe(false);
+    useAppStore.getState().setView('spectral');
+    expect(isCommandEnabled('marker.add')).toBe(true);
   });
 });
 

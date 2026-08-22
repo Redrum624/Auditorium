@@ -2263,13 +2263,17 @@ async function main() {
     );
     console.log(`  edit pill buttons: ${JSON.stringify(editButtons)}`);
     assert(
-      editButtons.map((b) => b.label).join(',') === 'Cut,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
+      editButtons.map((b) => b.label).join(',') === 'Split,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
       `the edit pill carries the eight commands in the mockup's order (actual ${editButtons.map((b) => b.label).join(',')})`
     );
     assert(
-      editButtons.filter((b) => ['Cut', 'Copy', 'Delete', 'Trim', 'Silence'].includes(b.label))
+      editButtons.filter((b) => ['Copy', 'Delete', 'Trim', 'Silence'].includes(b.label))
         .every((b) => b.disabled),
       `with no selection the region verbs are greyed, not hidden (actual ${JSON.stringify(editButtons)})`
+    );
+    assert(
+      editButtons.some((b) => b.label === 'Split' && b.disabled === false),
+      `Split needs only an open file, so it is lit with no selection (actual ${JSON.stringify(editButtons)})`
     );
     // Closing the card really hands its width to the waveform — the claim the
     // whole strip rearrangement exists for.
@@ -5847,6 +5851,67 @@ async function main() {
         markersAfterUndo[2].positionSample === MARK_AFTER,
       `one undo brings all three back to their own samples — the marker remap rides ` +
         `inside the SAME history entry as the audio (${JSON.stringify(markersAfterUndo)})`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-4b) Split, then cut the cursor's segment ------------------------------
+    // Item 8: Split at Cursor with a selection drops a marker at each edge, in
+    // one undo step; Ctrl+X with NO selection then cuts the segment the cursor
+    // is in — the span between those two markers — leaving it silent at the
+    // same length, the markers where they were, and the cursor at its start.
+    console.log('Split at the selection edges, then cut the segment under the cursor...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const segBefore = await stateOf();
+    const segAtStart = await samplesOf(0, REGION_S, 32);
+    const segAtEnd = await samplesOf(0, REGION_E, 32);
+    await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
+    await page.evaluate(() => window.__test.editOp('split'));
+    const splitMarkers = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  markers after split: ${JSON.stringify(splitMarkers)}`);
+    assert(
+      splitMarkers.length === 2 &&
+        splitMarkers[0].positionSample === REGION_S &&
+        splitMarkers[1].positionSample === REGION_E &&
+        splitMarkers.every((m) => m.name.startsWith('Split ')),
+      `Split dropped exactly two markers, one at each selection edge, named "Split N" (${JSON.stringify(splitMarkers)})`
+    );
+    await page.evaluate(() => window.__test.clearSelection());
+    await page.evaluate((c) => window.__test.setCursor(c), REGION_S + 1000);
+    await page.evaluate(() => window.__test.editOp('cut'));
+    const segAfter = await stateOf();
+    const segHole = await samplesOf(0, REGION_S, 32);
+    const segTail = await samplesOf(0, REGION_E, 32);
+    const segClip = await page.evaluate(() => window.__test.getClipboardInfo());
+    const segMarkers = await page.evaluate(() => window.__test.getActiveMarkers());
+    const segCursor = await page.evaluate(() => window.__test.getCursor());
+    assert(
+      segAfter.length === segBefore.length,
+      `cutting the cursor's segment keeps the length (expected ${segBefore.length}, actual ${segAfter.length})`
+    );
+    assert(
+      segClip !== null && segClip.length === EDIT_LEN,
+      `and the clipboard holds exactly the segment, ${EDIT_LEN} samples (${JSON.stringify(segClip)})`
+    );
+    assert(
+      segHole.every((v) => v === 0) && diffCount(segTail, segAtEnd) === 0,
+      `the segment is silent at ${REGION_S} and what follows it at ${REGION_E} is untouched ` +
+        `(${segHole.filter((v) => v !== 0).length} of 32 non-zero, ${diffCount(segTail, segAtEnd)} of 32 differ)`
+    );
+    assert(
+      segMarkers.length === 2 &&
+        segMarkers[0].positionSample === REGION_S &&
+        segMarkers[1].positionSample === REGION_E,
+      `the two markers did not move (${JSON.stringify(segMarkers)})`
+    );
+    assert(
+      segCursor === REGION_S,
+      `and the cursor sits at the segment's start (expected ${REGION_S}, actual ${segCursor})`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+    const segRestored = await samplesOf(0, REGION_S, 32);
+    assert(
+      diffCount(segRestored, segAtStart) === 0,
+      `one undo brings the bytes back (${diffCount(segRestored, segAtStart)} of 32 differ)`
     );
     await page.evaluate(() => window.__test.closeActive());
 

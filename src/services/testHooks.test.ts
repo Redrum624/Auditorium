@@ -586,3 +586,39 @@ describe('MT1 C1: openSessionFrom opens the session fitted', () => {
     expect(loaded.mtZoom.scrollSample).toBe(0);
   });
 });
+
+describe('lot C editor hooks', () => {
+  function openRamp(): AudioDocument {
+    const doc = createDocument({
+      name: 'lot-c.wav',
+      sampleRate: 44100,
+      channels: [Float32Array.from({ length: 1000 }, (_, i) => i + 1)],
+    });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('setCursor / getCursor address the document cursor', () => {
+    const t = api();
+    openRamp();
+    expect(t.setCursor(123)).toBe(123);
+    expect(t.getCursor()).toBe(123);
+    expect(useAppStore.getState().cursorSample).toBe(123);
+  });
+
+  it("editOp('split') with a selection drops a marker at each edge", () => {
+    const t = api();
+    openRamp();
+    t.setSelection(200, 300);
+    t.editOp('split');
+    expect(t.getActiveMarkers().map((m) => m.positionSample)).toEqual([200, 300]);
+  });
+
+  it("editOp('rippleDelete') shortens the document", () => {
+    const t = api();
+    openRamp();
+    t.setSelection(0, 10);
+    t.editOp('rippleDelete');
+    expect(t.getStateSummary().length).toBe(990);
+  });
+});

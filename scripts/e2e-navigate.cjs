@@ -2489,19 +2489,30 @@ async function main() {
           state.editButtons.length > 0,
           `the edit bar rendered its verbs in the ${view} view (${state.editButtons.length})`
         );
+        // Item 8: the Scissors button is Split at Cursor now, present in every
+        // view and lit in the editors whenever a file is open (its multitrack
+        // state is item 10's, not asserted here).
+        const split = state.editButtons.find((b) => b.label === 'Split');
+        assert(split !== undefined, `Split is present in the ${view} view`);
+        if (view !== 'multitrack') {
+          assert(
+            split.disabled === false,
+            `Split is lit in the ${view} view — it needs only an open file`
+          );
+        }
         // The per-view greying rule: the region verbs are the multitrack view's
         // greyed set, because they act on a waveform selection that view has no
         // notion of.
-        const cut = state.editButtons.find((b) => b.label === 'Cut');
+        const copy = state.editButtons.find((b) => b.label === 'Copy');
         if (view === 'multitrack') {
           assert(
-            cut !== undefined && cut.disabled === true,
-            'Cut is greyed in the multitrack view — it acts on a selection this view does not have'
+            copy !== undefined && copy.disabled === true,
+            'Copy is greyed in the multitrack view — it acts on a selection this view does not have'
           );
         } else {
           assert(
-            cut !== undefined,
-            `Cut is present in the ${view} view (its enablement follows the selection)`
+            copy !== undefined,
+            `Copy is present in the ${view} view (its enablement follows the selection)`
           );
         }
 

@@ -92,7 +92,7 @@ describe('EditToolbar — the eight icon buttons', () => {
       container.querySelectorAll<HTMLButtonElement>('[data-testid="edit-pill"] button')
     );
     expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
-      'Cut',
+      'Split', // item 8 (M1): the Scissors button is Split at Cursor
       'Copy',
       'Paste',
       'Delete',
@@ -117,18 +117,20 @@ describe('EditToolbar — the eight icon buttons', () => {
 });
 
 describe('EditToolbar — per-button enablement, each predicate both ways', () => {
-  it('greys Cut / Copy / Delete / Trim / Silence without a selection, and lights them with one', () => {
+  it('greys Copy / Delete / Trim / Silence without a selection, and lights them with one; Split needs only a document', () => {
     const doc = addDoc();
     lastDocId = doc.id;
     render(<EditToolbar />);
-    for (const label of ['Cut', 'Copy', 'Delete', 'Trim', 'Silence']) {
+    for (const label of ['Copy', 'Delete', 'Trim', 'Silence']) {
       expect(btn(label)).toBeDisabled();
     }
+    expect(btn('Split')).toBeEnabled();
 
     act(() => useAppStore.getState().setSelection({ start: 0, end: 1000 }));
-    for (const label of ['Cut', 'Copy', 'Delete', 'Trim', 'Silence']) {
+    for (const label of ['Copy', 'Delete', 'Trim', 'Silence']) {
       expect(btn(label)).toBeEnabled();
     }
+    expect(btn('Split')).toBeEnabled();
   });
 
   it('greys Paste on an empty clipboard and lights it once something is on it', () => {
@@ -167,7 +169,9 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
   // while the Undo button one divider away routed to the session's history and
   // could not undo it. All five region verbs are now gated on the COMMAND, so
   // this pill inherits the rule instead of restating a subset of it.
-  it('greys ALL five region verbs in Multitrack even with a document selection, and says why', () => {
+  // Item 8: Cut left the pill (the Scissors button is Split now), so the
+  // region verbs it draws are the four below.
+  it('greys the four region verbs in Multitrack even with a document selection, and says why', () => {
     lastDocId = addDoc().id;
     act(() => {
       useAppStore.getState().setSelection({ start: 0, end: 1000 });
@@ -176,7 +180,7 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
     setClipboard({ channels: [new Float32Array(100)], sampleRate: 44100 });
     render(<EditToolbar />);
 
-    for (const label of ['Cut', 'Copy', 'Paste', 'Trim', 'Silence']) {
+    for (const label of ['Copy', 'Paste', 'Trim', 'Silence']) {
       expect(btn(label)).toBeDisabled();
       const title = btn(label).title.toLowerCase();
       expect(title).toContain('multitrack');
@@ -185,7 +189,7 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
     }
   });
 
-  it('lights the same five again on the way back to Waveform, so the gate is the VIEW', () => {
+  it('lights the same four again on the way back to Waveform, so the gate is the VIEW', () => {
     lastDocId = addDoc().id;
     act(() => {
       useAppStore.getState().setSelection({ start: 0, end: 1000 });
@@ -197,7 +201,7 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
 
     act(() => useAppStore.getState().setView('waveform'));
 
-    for (const label of ['Cut', 'Copy', 'Paste', 'Trim', 'Silence']) {
+    for (const label of ['Copy', 'Paste', 'Trim', 'Silence']) {
       expect(btn(label)).toBeEnabled();
     }
   });
@@ -244,16 +248,16 @@ describe('EditToolbar — click-through to the real commands', () => {
     }
     // The loop is only meaningful if it exercised both arms.
     expect(btn('Redo').disabled).toBe(true);
-    expect(btn('Cut').disabled).toBe(false);
+    expect(btn('Split').disabled).toBe(false);
   });
 
-  it('sends Cut through edit.cut and Trim through edit.trim', async () => {
+  it('sends Split through edit.split and Trim through edit.trim', async () => {
     lastDocId = addDoc().id;
     act(() => useAppStore.getState().setSelection({ start: 0, end: 1000 }));
     render(<EditToolbar />);
 
-    await click('Cut');
-    expect(mockRunCommand).toHaveBeenCalledWith('edit.cut');
+    await click('Split');
+    expect(mockRunCommand).toHaveBeenCalledWith('edit.split');
 
     await click('Trim');
     expect(mockRunCommand).toHaveBeenCalledWith('edit.trim');

@@ -8,6 +8,7 @@ import type { RenderOpts } from './waveformRender';
 import * as beatGridService from '../../services/beatGrid';
 import type { BeatGrid } from '../../services/beatGrid';
 import { setBeatGridVisible, toggleBeatGrid } from '../../services/beatGridDisplay';
+import { _resetSnapPreference, setSnapEnabled } from '../../services/snapPreference';
 
 function makeDoc(): AudioDocument {
   const ch = new Float32Array(4096);
@@ -127,6 +128,53 @@ describe('WaveformView', () => {
       firePointer(canvas, 'pointerdown', { clientX: 5, pointerId: 1, detail: 2 });
 
       expect(useAppStore.getState().selection).toEqual({ start: 0, end: docLength(doc) });
+    });
+
+    // Item 8 (M3/N9): markers are segment boundaries, and a double-click
+    // selects the segment under the pointer rather than the whole document.
+    describe('double-click on a document with a marker at 1000', () => {
+      afterEach(() => _resetSnapPreference());
+
+      // Active, the way the app always renders it: the gesture reads the
+      // markers (and the snap targets) of the ACTIVE document.
+      function withMarker(): AudioDocument {
+        const doc = makeDoc();
+        useAppStore.setState({
+          activeDocumentId: doc.id,
+          markers: { [doc.id]: [{ id: 'm1', name: 'M1', positionSample: 1000 }] },
+        });
+        return doc;
+      }
+
+      it('selects the segment under the pointer', () => {
+        setSnapEnabled(false);
+        const doc = withMarker();
+        renderView(doc);
+        const canvas = screen.getByTestId('waveform-canvas');
+        const spp = useAppStore.getState().zoom.samplesPerPixel;
+        expect(1 * spp).toBeLessThan(1000); // the premise: the pointer lands before the marker
+
+        firePointer(canvas, 'pointerdown', { clientX: 1, pointerId: 1, detail: 2 });
+
+        expect(useAppStore.getState().selection).toEqual({ start: 0, end: 1000 });
+      });
+
+      it('picks the segment from the RAW pointer, not the snapped cursor', () => {
+        setSnapEnabled(true);
+        const doc = withMarker();
+        renderView(doc);
+        const canvas = screen.getByTestId('waveform-canvas');
+        const spp = useAppStore.getState().zoom.samplesPerPixel;
+        // A few pixels AFTER the marker: the raw sample is past 1000, but the
+        // magnet (8 px tolerance) pulls the cursor back onto the marker.
+        const clientX = Math.ceil(1000 / spp) + 1;
+        expect(clientX * spp).toBeGreaterThan(1000);
+
+        firePointer(canvas, 'pointerdown', { clientX, pointerId: 1, detail: 2 });
+
+        expect(useAppStore.getState().cursorSample).toBe(1000);
+        expect(useAppStore.getState().selection).toEqual({ start: 1000, end: docLength(doc) });
+      });
     });
 
     it('shift+click extends the selection from the cursor when there is none yet', () => {

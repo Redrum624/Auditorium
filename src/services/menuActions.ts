@@ -21,8 +21,10 @@ import {
   pushMarkerUndo,
   rippleDeleteSelection,
   silenceSelection,
+  splitAtCursor,
   trimToSelection,
 } from './editOps';
+import { cursorSegment } from './segments';
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { canRedoSession, canUndoSession, redoSession, undoSession } from '../multitrack/sessionUndo';
 import { getClipboard } from './clipboard';
@@ -144,6 +146,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.undo',
       'edit.redo',
       'separator',
+      // Item 8 (M1): Split at Cursor is the row before Cut — the verb that
+      // makes the segments Ctrl+X then cuts.
+      'edit.split',
       'edit.cut',
       'edit.copy',
       'edit.paste',
@@ -602,10 +607,28 @@ function registerEditCommands(): void {
       },
     },
     {
+      id: 'edit.split',
+      label: 'Split at Cursor',
+      shortcut: 'Ctrl+K',
+      // M1: one view-routed command. The multitrack arm (M2/N2-N5) is lot D's;
+      // until it lands the command reports disabled there.
+      enabled: (s) => (s.view === 'multitrack' ? false : activeDoc(s) !== null),
+      run: async () => {
+        if (useAppStore.getState().view === 'multitrack') return; // lot D
+        splitAtCursor();
+      },
+    },
+    {
       id: 'edit.cut',
       label: 'Cut',
       shortcut: 'Ctrl+X',
-      enabled: canEditRegion,
+      // Item 8 (M1/N9): with no selection, Ctrl+X cuts the segment the cursor
+      // is in, so it is live whenever there is a selection OR an interior
+      // marker to bound one. Still never in multitrack (M7).
+      enabled: (s) =>
+        isDocumentEditView(s) &&
+        activeDoc(s) !== null &&
+        (s.selection !== null || cursorSegment(s) !== null),
       run: async () => cutSelection(),
     },
     {
@@ -739,6 +762,12 @@ function registerEditCommands(): void {
     },
   ]);
 }
+
+// ---- lot C ----
+// Items 7 and 8 (editor edit verbs). The segment model the `edit.cut`
+// predicate and `cutSelection` share lives in `./segments` (`cursorSegment`);
+// no helper of this lot lives in this file.
+// ---- end lot C ----
 
 /** Registers the real File > * commands (Task 11), overwriting the disabled
  * stubs. New/Open are always available; Save/Save As/Export/Close require an
@@ -1115,7 +1144,9 @@ function registerMarkerCommands(): void {
       id: 'marker.add',
       label: 'Add Marker',
       shortcut: 'M',
-      enabled: (s) => activeDoc(s) !== null,
+      // N10: editor views only — in Multitrack the key would mark a document
+      // the view does not show.
+      enabled: (s) => s.view !== 'multitrack' && activeDoc(s) !== null,
       run: async () => {
         const { activeDocumentId, cursorSample, markers, addMarker } = useAppStore.getState();
         if (!activeDocumentId) return;
