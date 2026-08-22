@@ -28,6 +28,8 @@ import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
 import { serializeSession, serializeSessionV4 } from '../multitrack/sessionFile';
 import { _resetSessionUndo, isSessionDirty } from '../multitrack/sessionUndo';
+import { mixdownSession } from '../multitrack/mixdown';
+import { decodeWav } from '../audio/wavCodec';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import {
   FALLBACK_SESSION_LANE_WIDTH,
@@ -647,5 +649,41 @@ describe('lot A project hooks', () => {
     expect(useSessionStore.getState().mtZoom).toEqual(defaultSessionZoom(useSessionStore.getState().session));
     expect(isSessionDirty()).toBe(false);
     expect(useAppStore.getState().view).toBe('multitrack');
+  });
+
+  it('exportSession writes bytes whose decoded channels equal mixdownSession, and returns false with an info box on an all-muted session', async () => {
+    const electronAPI = installProjectApi();
+    const doc = addDoc('a.wav');
+    doc.channels[0].set(Float32Array.from({ length: 4410 }, (_, i) => Math.sin(i / 7) * 0.5));
+    const s = useSessionStore.getState();
+    const [tA, tB] = s.session.tracks;
+    const clip = createClip({ documentId: doc.id, startSample: 10, offsetSample: 0, lengthSample: 4000 });
+    s.addClip(tA.id, clip);
+    s.setClipFade(clip.id, 'out', { lengthSample: 100 });
+    s.setTrackParam(tB.id, { muted: true });
+    const expected = mixdownSession(
+      useSessionStore.getState().session,
+      new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const))
+    );
+
+    const ok = await api().exportSession({ format: 'wav', wavBitDepth: 32, mp3Kbps: 192 }, 'D:\\out\\mix.wav');
+
+    expect(ok).toBe(true);
+    const [path, data] = electronAPI.writeFile.mock.calls[0] as unknown as [string, ArrayBuffer];
+    expect(path).toBe('D:\\out\\mix.wav');
+    const decoded = decodeWav(data);
+    expect(decoded.sampleRate).toBe(44100);
+    expect(decoded.channels[0]).toEqual(expected.channels[0]);
+    expect(decoded.channels[1]).toEqual(expected.channels[1]);
+    expect(decoded.channels[0].length).toBe(4010);
+
+    useSessionStore.getState().setTrackParam(tA.id, { muted: true });
+    const silent = await api().exportSession({ format: 'wav', wavBitDepth: 32, mp3Kbps: 192 }, 'D:\\out\\none.wav');
+
+    expect(silent).toBe(false);
+    expect(electronAPI.writeFile).toHaveBeenCalledTimes(1);
+    expect(electronAPI.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', message: 'Nothing audible to export.' })
+    );
   });
 });

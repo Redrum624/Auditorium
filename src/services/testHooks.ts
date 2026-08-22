@@ -24,6 +24,7 @@ import { loadProjectFrom, writeProject } from '../multitrack/sessionFile';
 import { getEffectFailureCount, runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import {
+  encodeAudio,
   encodeExport,
   newDocument as newBlankDocument,
   openFilePath,
@@ -244,6 +245,11 @@ export interface TestApi {
     trackCount: number;
     droppedClipCount: number;
   }>;
+  // --- lot A (M5) -----------------------------------------------------------
+  /** Export in the multitrack view, minus the dialog: renders `mixdownSession`
+   * and writes `encodeAudio` bytes to `outPath`. `false` (with the production
+   * info box) when nothing is audible. */
+  exportSession(opts: ExportOptions, outPath: string): Promise<boolean>;
   // --- beat grid (Task B2) ------------------------------------------------
   /** Flips the beat-tic display preference; returns the NEW visibility. */
   toggleBeatGrid(): boolean;
@@ -1544,6 +1550,23 @@ export function installTestHooks(): void {
     // zoom — MT1 C1 — history cleared, `projectPath` remembered, multitrack
     // view). Same summary shape as before.
     openSessionFrom: async (path) => loadProjectFrom(path),
+
+    // Lot A (M5): IS File → Export… in the multitrack view, minus the dialog —
+    // the same `mixdownSession` render and the same `encodeAudio` switch
+    // `exportSessionMixdown` uses, so the smoke can compare the decoded file
+    // per sample against `mixdownSession()` above.
+    exportSession: async (opts, outPath) => {
+      const session = useSessionStore.getState().session;
+      const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+      const { channels, sampleRate } = renderMixdown(session, docs);
+      if (channels[0].length === 0) {
+        await window.electronAPI.showMessageBox({ type: 'info', title: 'Export', message: 'Nothing audible to export.' });
+        return false;
+      }
+      const data = encodeAudio([channels[0], channels[1]], sampleRate, undefined, opts);
+      const result = await window.electronAPI.writeFile(outPath, data);
+      return result.ok;
+    },
 
     // --- v1.5 flows -------------------------------------------------------
     //

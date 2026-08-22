@@ -9,11 +9,14 @@ import {
   projectDirtyCount,
   projectHasContent,
   projectHasUnsavedWork,
+  exportSessionMixdown,
 } from './fileService';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { _resetSessionUndo } from '../multitrack/sessionUndo';
 import { createClip } from '../multitrack/session';
+import { mixdownSession } from '../multitrack/mixdown';
+import * as wavCodec from '../audio/wavCodec';
 import { docLength, createDocument } from '../audio/AudioDocument';
 import { decodeArrayBuffer, type DecodedAudio } from '../audio/decodeAudio';
 import { encodeMp3 } from '../audio/mp3Encoder';
@@ -2513,5 +2516,155 @@ describe('project predicates (lot A — acceptance 11)', () => {
     expect(projectHasContent()).toBe(false);
     expect(projectHasUnsavedWork()).toBe(true);
     expect(projectDirtyCount()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M5) — Export in the multitrack view IS Mix Down: byte-identical to
+// `mixdownSession` (mute/solo, automation, fades honoured; length = last
+// audible clip end), to the chosen format, without adding a document.
+// ---------------------------------------------------------------------------
+describe('exportSessionMixdown (lot A — acceptance 20)', () => {
+  /** A ramp, so a wrong fade/gain/length shows up sample by sample. */
+  function ramp(n: number): Float32Array {
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = ((i % 50) / 50) * 0.8 - 0.4;
+    return out;
+  }
+
+  /**
+   * Two documents on two tracks, the `mixdown.fades.test.ts` fixture shape
+   * (mono material, a fade-in on the first clip, `pan: -1` on the second so
+   * its right channel is exactly 0) plus one volume lane — enough that a
+   * render which skipped fades, automation or the pan law would differ from
+   * `mixdownSession`. Track B starts muted.
+   */
+  function seedSession() {
+    const a = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [ramp(100)] });
+    const b = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [new Float32Array(100).fill(0.5)] });
+    useAppStore.getState().addDocument(a);
+    useAppStore.getState().addDocument(b);
+    const s = useSessionStore.getState();
+    const [tA, tB] = s.session.tracks;
+    const clipA = createClip({ documentId: a.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    const clipB = createClip({ documentId: b.id, startSample: 50, offsetSample: 0, lengthSample: 100 });
+    s.addClip(tA.id, clipA);
+    s.addClip(tB.id, clipB);
+    s.setClipFade(clipA.id, 'in', { lengthSample: 8 });
+    s.upsertAutomationKeys(tA.id, [
+      { param: 'volumeDb', key: { positionSample: 0, value: -6 } },
+      { param: 'volumeDb', key: { positionSample: 100, value: 0 } },
+    ]);
+    s.setTrackParam(tB.id, { pan: -1, muted: true });
+    return { a, b, tA, tB };
+  }
+
+  const docsMap = () => new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const));
+  const opts = { format: 'wav' as const, wavBitDepth: 32 as const, mp3Kbps: 192 as const };
+
+  it('encodes exactly the mixdown — channels sample-equal to mixdownSession, the session rate, no markers — and a muted track is left out', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.wav') });
+    const encodeWavSpy = jest.spyOn(wavCodec, 'encodeWav');
+    const { a, b } = seedSession();
+    const session = useSessionStore.getState().session;
+    const expected = mixdownSession(session, docsMap());
+    expect(expected.channels[0].length).toBe(100); // B (muted, ending at 150) does not extend the render
+    const docsBefore = useAppStore.getState().documents;
+
+    const path = await exportSessionMixdown(opts);
+
+    expect(path).toBe('D:\\out\\mix.wav');
+    expect(api.showSaveDialog).toHaveBeenCalledWith({
+      defaultPath: 'Untitled Session.wav',
+      filters: [{ name: 'Waveform Audio', extensions: ['wav'] }],
+    });
+    expect(encodeWavSpy).toHaveBeenCalledTimes(1);
+    const [channels, sampleRate, bitDepth, markers] = encodeWavSpy.mock.calls[0];
+    expect(sampleRate).toBe(session.sampleRate);
+    expect(bitDepth).toBe(32);
+    expect(markers).toBeUndefined();
+    expect(channels).toHaveLength(2);
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(channels[1]).toEqual(expected.channels[1]);
+    // The written bytes decode back to the same render.
+    const [, data] = api.writeFile.mock.calls[0];
+    const decoded = decodeWav(data as ArrayBuffer);
+    expect(decoded.sampleRate).toBe(session.sampleRate);
+    expect(decoded.channels[0]).toEqual(expected.channels[0]);
+    expect(decoded.channels[1]).toEqual(expected.channels[1]);
+    // The fixture can express a skipped fade / lane: the render is not the raw document.
+    expect(expected.channels[0][0]).toBe(0); // fade-in starts in silence
+    expect(expected.channels[0][60]).not.toBe(a.channels[0][60]);
+    // No document side effects: nothing added, nothing retagged.
+    expect(useAppStore.getState().documents).toBe(docsBefore);
+    for (const id of [a.id, b.id]) {
+      const live = useAppStore.getState().documents.find((d) => d.id === id)!;
+      expect(live.filePath).toBeNull();
+      expect(live.dirty).toBe(false);
+      expect(live.neverSaved).toBe(true);
+    }
+    expect(api.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ title: 'Export complete' }));
+    encodeWavSpy.mockRestore();
+  });
+
+  it('solo on B silences A — the render is still exactly mixdownSession', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.wav') });
+    const encodeWavSpy = jest.spyOn(wavCodec, 'encodeWav');
+    const { tB } = seedSession();
+    useSessionStore.getState().setTrackParam(tB.id, { muted: false, solo: true });
+    const expected = mixdownSession(useSessionStore.getState().session, docsMap());
+    expect(expected.channels[0].length).toBe(150); // B alone now sets the length
+
+    await exportSessionMixdown(opts);
+
+    const [channels] = encodeWavSpy.mock.calls[0];
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(channels[1]).toEqual(expected.channels[1]);
+    // A is silenced: before B starts there is nothing, and B is hard-left.
+    expect(Array.from(channels[0].subarray(0, 50)).every((v) => v === 0)).toBe(true);
+    expect(channels[0][60]).not.toBe(0);
+    expect(Array.from(channels[1]).every((v) => v === 0)).toBe(true);
+    encodeWavSpy.mockRestore();
+  });
+
+  it('nothing audible (every track muted): no dialog, an info box, null', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.wav') });
+    const { tA } = seedSession();
+    useSessionStore.getState().setTrackParam(tA.id, { muted: true });
+
+    const path = await exportSessionMixdown(opts);
+
+    expect(path).toBeNull();
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', title: 'Export', message: 'Nothing audible to export.' })
+    );
+  });
+
+  it('defaults the file name to the project name with a .audm suffix stripped', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => null) });
+    seedSession();
+    useSessionStore.getState().renameSession('Take.audm');
+
+    await exportSessionMixdown(opts);
+
+    expect(api.showSaveDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: 'Take.wav' }));
+  });
+
+  it('routes MP3 through the same encoder arguments as a document export (channels, rate, kbps, no markers)', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.mp3') });
+    seedSession();
+    const expected = mixdownSession(useSessionStore.getState().session, docsMap());
+
+    const path = await exportSessionMixdown({ format: 'mp3', wavBitDepth: 24, mp3Kbps: 320 });
+
+    expect(path).toBe('D:\\out\\mix.mp3');
+    expect(mockEncodeMp3).toHaveBeenCalledTimes(1);
+    const [channels, sampleRate, kbps, markers] = mockEncodeMp3.mock.calls[0];
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(sampleRate).toBe(44100);
+    expect(kbps).toBe(320);
+    expect(markers).toBeUndefined();
   });
 });

@@ -1,8 +1,9 @@
 import { useState } from 'react';
 import { Download } from 'lucide-react';
 import type { WavBitDepth } from '../../audio/wavCodec';
-import { exportDocument } from '../../services/fileService';
+import { exportDocument, exportSessionMixdown } from '../../services/fileService';
 import { useAppStore } from '../../stores/appStore';
+import { useSessionStore } from '../../multitrack/sessionStore';
 import { FieldLabel, GlassButton, GlassSelect } from '../UI/glass';
 import DialogShell from './DialogShell';
 
@@ -11,13 +12,18 @@ const MP3_BITRATES: (128 | 192 | 256 | 320)[] = [128, 192, 256, 320];
 const OGG_BITRATES: (96_000 | 128_000 | 192_000)[] = [96_000, 128_000, 192_000];
 
 /** Export dialog: pick a container format and its quality setting, then export
- * the active document. On success `exportDocument` shows the confirmation and we
+ * the active document — or, in the multitrack view (lot A, M5), the session
+ * mixdown (`exportSessionMixdown`: the same render as Mix Down to New File,
+ * no document added). On success the export shows the confirmation and we
  * close; a cancelled save-dialog leaves this open. */
 export default function ExportDialog({ onClose }: { onClose: () => void }) {
   const activeDocumentId = useAppStore((s) => s.activeDocumentId);
   const activeDocName = useAppStore(
     (s) => s.documents.find((d) => d.id === s.activeDocumentId)?.name
   );
+  const view = useAppStore((s) => s.view);
+  const sessionName = useSessionStore((s) => s.session.name);
+  const isMultitrack = view === 'multitrack';
   const [format, setFormat] = useState<'wav' | 'mp3' | 'flac' | 'ogg'>('wav');
   const [wavBitDepth, setWavBitDepth] = useState<WavBitDepth>(24);
   const [mp3Kbps, setMp3Kbps] = useState<128 | 192 | 256 | 320>(192);
@@ -25,15 +31,14 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
 
   const doExport = async () => {
-    if (!activeDocumentId || busy) return;
+    if (busy) return;
+    if (!isMultitrack && !activeDocumentId) return;
     setBusy(true);
     try {
-      const path = await exportDocument(activeDocumentId, {
-        format,
-        wavBitDepth,
-        mp3Kbps,
-        oggBitrate,
-      });
+      const opts = { format, wavBitDepth, mp3Kbps, oggBitrate };
+      const path = isMultitrack
+        ? await exportSessionMixdown(opts)
+        : await exportDocument(activeDocumentId as string, opts);
       if (path) onClose();
     } finally {
       setBusy(false);
@@ -43,7 +48,7 @@ export default function ExportDialog({ onClose }: { onClose: () => void }) {
   return (
     <DialogShell
       title="Export"
-      subtitle={activeDocName}
+      subtitle={isMultitrack ? sessionName : activeDocName}
       icon={<Download size={15} />}
       width={400}
       onClose={onClose}

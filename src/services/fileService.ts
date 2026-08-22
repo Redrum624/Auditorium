@@ -37,6 +37,9 @@ import { invalidateLyricsAlignment } from './alignLyricsService';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { isSessionDirty } from '../multitrack/sessionUndo';
 import { saveProject } from '../multitrack/sessionFile';
+// Lot A (M5): Export in the multitrack view renders the session — the offline
+// mixdown is playback ground truth and is never diverged from here.
+import { mixdownSession } from '../multitrack/mixdown';
 
 export interface ExportOptions {
   format: 'wav' | 'mp3' | 'flac' | 'ogg';
@@ -117,21 +120,34 @@ export function getInFlightSaveCount(): number {
   return inFlightSaves.size;
 }
 
+/** Lot A (M5): the synchronous encode switch over explicit arguments — what
+ * `encodeExport` (a document) and `exportSessionMixdown` / the `exportSession`
+ * hook (a render) share, so the two export doors cannot drift in how they
+ * encode. `markers` may be `undefined` (a session render carries none). */
+export function encodeAudio(
+  channels: Float32Array[],
+  sampleRate: number,
+  markers: Marker[] | undefined,
+  opts: ExportOptions
+): ArrayBuffer {
+  switch (opts.format) {
+    case 'wav':
+      return encodeWav(channels, sampleRate, opts.wavBitDepth, markers);
+    case 'mp3':
+      return encodeMp3(channels, sampleRate, opts.mp3Kbps, markers);
+    case 'flac':
+      return encodeFlac(channels, sampleRate, 16, markers);
+    case 'ogg':
+      // Opus encoding is async (WebCodecs); exportAudio routes 'ogg' through
+      // encodeOggOpus directly, so this synchronous path is never reached.
+      throw new Error('OGG export must go through exportAudio (async encodeOggOpus)');
+  }
+}
+
 /** Encode a document to bytes for the given export options. Exported so the
  * (test-only) test hooks can reuse the exact same encoding path. */
 export function encodeExport(doc: AudioDocument, opts: ExportOptions): ArrayBuffer {
-  switch (opts.format) {
-    case 'wav':
-      return encodeWav(doc.channels, doc.sampleRate, opts.wavBitDepth, store().markers[doc.id]);
-    case 'mp3':
-      return encodeMp3(doc.channels, doc.sampleRate, opts.mp3Kbps, store().markers[doc.id]);
-    case 'flac':
-      return encodeFlac(doc.channels, doc.sampleRate, 16, store().markers[doc.id]);
-    case 'ogg':
-      // Opus encoding is async (WebCodecs); exportDocument routes 'ogg' through
-      // encodeOggOpus directly, so this synchronous path is never reached.
-      throw new Error('OGG export must go through exportDocument (async encodeOggOpus)');
-  }
+  return encodeAudio(doc.channels, doc.sampleRate, store().markers[doc.id], opts);
 }
 
 /** Re-encode a document into its ORIGINAL container for an in-place Save.
@@ -643,16 +659,58 @@ async function saveAsWav(docId: string): Promise<void> {
 }
 
 /**
- * Export a document to WAV or MP3 via a save dialog. Unlike Save, export never
- * changes the document's filePath/dirty state. Returns the written path, or null
- * if the dialog was cancelled or the write failed.
+ * Export a document to WAV / FLAC / MP3 / OGG via a save dialog. Unlike Save,
+ * export never changes the document's filePath/dirty state. Returns the
+ * written path, or null if the dialog was cancelled or the write failed.
+ * Lot A: the body is `exportAudio`, shared with the session export (M5).
  */
 export async function exportDocument(docId: string, opts: ExportOptions): Promise<string | null> {
   const doc = findDoc(docId);
   if (!doc) return null;
+  return exportAudio(
+    { name: doc.name, sampleRate: doc.sampleRate, channels: doc.channels, markers: store().markers[doc.id] },
+    opts
+  );
+}
 
+/**
+ * Lot A (M5): Export in the multitrack view — the session rendered by
+ * `mixdownSession` (mute/solo, automation, fades honoured, hard-clamped;
+ * length = the last AUDIBLE clip end), byte-identical to Mix Down to New
+ * File, written to the chosen format through `exportAudio`. No document is
+ * added, no markers are written, and no document's `filePath` / `dirty` /
+ * `neverSaved` changes. Nothing audible (an empty or all-muted session) shows
+ * an info box and returns null without opening a dialog. Default file name =
+ * the project name with a `.audm` suffix stripped.
+ */
+export async function exportSessionMixdown(opts: ExportOptions): Promise<string | null> {
+  const session = useSessionStore.getState().session;
+  const docs = new Map(store().documents.map((d) => [d.id, d]));
+  const { channels, sampleRate } = mixdownSession(session, docs);
+  if (channels[0].length === 0) {
+    await api().showMessageBox({ type: 'info', title: 'Export', message: 'Nothing audible to export.' });
+    return null;
+  }
+  return exportAudio(
+    { name: session.name.replace(/\.audm$/i, ''), sampleRate, channels: [channels[0], channels[1]] },
+    opts
+  );
+}
+
+/**
+ * The export flow proper (lot A — extracted from `exportDocument` so the
+ * session export shares it byte for byte): the save dialog with the format's
+ * filter and the display name's extension replaced, the format extension
+ * enforced on the picked path, the ogg-vs-synchronous encode fed from `src`,
+ * the write, and the 'Export complete' box. `src.markers` is what the encoder
+ * embeds (a document's markers; nothing for a session render).
+ */
+export async function exportAudio(
+  src: { name: string; sampleRate: number; channels: Float32Array[]; markers?: Marker[] },
+  opts: ExportOptions
+): Promise<string | null> {
   const ext = opts.format; // 'wav' | 'mp3' | 'flac' | 'ogg'
-  const baseName = doc.name.replace(/\.[^.]+$/, '');
+  const baseName = src.name.replace(/\.[^.]+$/, '');
   const filterName =
     opts.format === 'wav'
       ? 'Waveform Audio'
@@ -675,10 +733,8 @@ export async function exportDocument(docId: string, opts: ExportOptions): Promis
   try {
     data =
       opts.format === 'ogg'
-        ? toArrayBuffer(
-            await encodeOggOpus(doc.channels, doc.sampleRate, opts.oggBitrate, store().markers[doc.id])
-          )
-        : encodeExport(doc, opts);
+        ? toArrayBuffer(await encodeOggOpus(src.channels, src.sampleRate, opts.oggBitrate, src.markers))
+        : encodeAudio(src.channels, src.sampleRate, src.markers, opts);
   } catch (err) {
     if (err instanceof OggEncoderUnavailableError) {
       await api().showMessageBox({ type: 'error', title: 'Export failed', message: err.message });
