@@ -586,3 +586,37 @@ describe('MT1 C1: openSessionFrom opens the session fitted', () => {
     expect(loaded.mtZoom.scrollSample).toBe(0);
   });
 });
+
+/**
+ * Lot E (item 4, N14) — `__test.setView` stays the RAW setter. The navigate
+ * walk calls it right after a real click selected a clip; routing it through
+ * `showEditorView` would activate that clip's document mid-walk.
+ */
+describe('lot E view entry', () => {
+  test('__test.setView leaves the active document and selection alone', () => {
+    const a = addDoc('A');
+    const b = addDoc('B');
+    useAppStore.getState().setActiveDocument(a.id);
+    const clip = createClip({ documentId: b.id, startSample: 0, offsetSample: 0, lengthSample: 1000 });
+    const track = createTrack('Track 1');
+    track.clips = [clip];
+    const session: Session = { name: 'Pin', sampleRate: 44100, tracks: [track] };
+    useSessionStore.setState({
+      session,
+      selectedClipId: clip.id,
+      selectedClipIds: [clip.id],
+      mtCursorSample: 0,
+      mtPlayState: 'stopped',
+      mtPlayheadSample: 0,
+      mtEnvelope: null,
+    });
+    useAppStore.setState({ view: 'multitrack' });
+
+    api().setView('waveform');
+
+    const s = useAppStore.getState();
+    expect(s.view).toBe('waveform');
+    expect(s.activeDocumentId).toBe(a.id);
+    expect(s.selection).toBeNull();
+  });
+});

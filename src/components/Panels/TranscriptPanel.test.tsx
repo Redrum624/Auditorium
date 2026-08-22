@@ -12,6 +12,8 @@ import { formatSrt } from '../../services/subtitleFormat';
 import { registerDialogSetters } from '../../services/dialogBus';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
+import { createClip, createTrack, type Session } from '../../multitrack/session';
+import { useSessionStore } from '../../multitrack/sessionStore';
 import { SPEAKER_COLORS } from '../Editor/transcriptLayout';
 
 const EMBED_DIM = 8;
@@ -169,6 +171,41 @@ describe('TranscriptPanel — the transcript', () => {
     render(<TranscriptPanel />);
     fireEvent.click(screen.getAllByTestId('transcript-goto')[1]);
     expect(useAppStore.getState().view).toBe('waveform');
+  });
+
+  // Lot E (item 4, N14) regression pin: the panel's leaver stays the RAW
+  // `setView` — it jumps inside the transcript's document, so a foreign clip
+  // selected in the session must not drag the active document along.
+  it('keeps the transcript’s document active even with a foreign clip selected in the session', () => {
+    const other = createDocument({
+      name: 'Other.wav',
+      sampleRate: 48000,
+      channels: [new Float32Array(1000)],
+    });
+    act(() => {
+      useAppStore.getState().addDocument(other);
+      useAppStore.getState().setActiveDocument(doc.id);
+    });
+    const clip = createClip({ documentId: other.id, startSample: 0, offsetSample: 0, lengthSample: 500 });
+    const track = createTrack('Track 1');
+    track.clips = [clip];
+    const session: Session = { name: 'Pin', sampleRate: 48000, tracks: [track] };
+    useSessionStore.setState({
+      session,
+      selectedClipId: clip.id,
+      selectedClipIds: [clip.id],
+      mtCursorSample: 0,
+      mtPlayState: 'stopped',
+      mtPlayheadSample: 0,
+      mtEnvelope: null,
+    });
+    act(() => {
+      useAppStore.getState().setView('multitrack');
+    });
+    render(<TranscriptPanel />);
+    fireEvent.click(screen.getAllByTestId('transcript-goto')[1]);
+    expect(useAppStore.getState().view).toBe('waveform');
+    expect(useAppStore.getState().activeDocumentId).toBe(doc.id);
   });
 
   it('re-centres the viewport on the clicked segment', () => {
