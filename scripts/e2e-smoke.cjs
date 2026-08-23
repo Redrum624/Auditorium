@@ -967,13 +967,17 @@ async function main() {
     // documents share its name; the one this step marked is the one whose two
     // markers came back. Exactly one copy must carry them.
     const toneName = path.basename(TONE);
+    // Other steps leave their own pairs on other copies (the MP3 round trip,
+    // for one); only THIS step's marker names identify the copy it marked.
+    const isSessionMarked = (m) =>
+      m.length === 2 && m.some((x) => x.name === 'Session Verse') && m.some((x) => x.name === 'Session Chorus');
     const toneCopies = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneName);
     assert(toneCopies >= 1, `the reopened project holds the tone by name (${toneName}; got ${toneCopies} copies)`);
     let markedCopies = 0;
     for (let i = 0; i < toneCopies; i++) {
       await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneName, i]);
       const m = await page.evaluate(() => window.__test.getActiveMarkers());
-      if (m.length === 2) markedCopies++;
+      if (isSessionMarked(m)) markedCopies++;
     }
     assert(markedCopies === 1, `exactly one restored tone carries the two session markers (got ${markedCopies} of ${toneCopies})`);
     for (let i = 0; i < toneCopies; i++) {
