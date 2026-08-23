@@ -5,6 +5,62 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.36.0] - 2026-08-23
+
+Ten items of editor feedback, in five lanes.
+
+### Changed
+
+- **Save writes the project, in every view.** `Ctrl+S` / Save / Save As write the
+  `.audm` project — the session plus *every* open document, referenced by a clip or
+  not — to a remembered path (Save with no path is Save As). It never overwrites
+  an audio file any more: to get audio out, you Export. The project file moves to
+  v4 (v3 still opens); Open Project restores every embedded document into the
+  Files panel; the StatusBar shows `<project> *` while unsaved and the close guard
+  counts it. Affects: `src/multitrack/sessionFile.ts` (v4), `sessionStore.ts`
+  (`projectPath`), `src/services/menuActions.ts`, `fileService.ts`,
+  `electron/closeGuard.cjs`.
+- **Delete and Ctrl+X keep the length.** Delete zero-fills the selection in place
+  (markers stay put); `Ctrl+X` cuts the selection — or, with no selection, the
+  segment under the cursor — to the clipboard and leaves the span empty. Ripple
+  delete moved to `Shift+Del` in the editors. Affects: `src/services/editOps.ts`,
+  `menuActions.ts`, `shortcuts.ts`.
+- **Cut is now Split.** The Scissors button and `Ctrl+K` (**Split at Cursor**) drop
+  a marker at the cursor (or one at each selection edge); every marker is a
+  segment boundary — double-click selects the segment under the pointer. The
+  split point is the cursor verbatim, already snapped by its placement. `M`
+  (Add Marker) is now editor-only like the other region verbs. Affects:
+  `src/services/segments.ts` (new), `useEditorGestures.ts`, `EditToolbar.tsx`.
+- **The Effects module lists effects only.** The ten Pipeline tools no longer
+  appear a second time under the effect list; the Mix row (Spatial) stays.
+  Affects: `src/components/Panels/EffectsPanel.tsx`.
+- **Effects open on one click, as a card — not a modal.** An effect now opens
+  between the module bar and the module card, same width as the module column;
+  the waveform, transport and edit pill stay usable while it previews. Apply
+  commits only to the document as it was when clicked — an edit, a document
+  switch or a close mid-run writes nothing and says so. Escape closes the card.
+  Affects: `src/components/Dialogs/EffectHost.tsx` (new), `EffectDialog.tsx`,
+  `src/App.tsx`.
+
+### Added
+
+- **Split in the Multitrack view.** `Ctrl+K` / the pill's Split button splits every
+  clip under the edit cursor on the tracks that own a selected clip — several
+  selected tracks split at the same time — in one undo step, with fades kept on
+  the outer edges, the seam clean, and the right halves joining the selection.
+  A split inside a crossfade overlap or within 32 samples of an edge is skipped.
+  Delete keeps removing the selected clips; Copy / Paste / Trim / Silence stay
+  greyed there and each tooltip now says why. Affects: `src/multitrack/sessionStore.ts`
+  (`splitClipsAt`), `menuActions.ts`, `EditToolbar.tsx`.
+- **Export in the Multitrack view renders the mixdown.** Export writes the
+  session as played — muted tracks out, solo, automation and fades honored,
+  byte-identical to Mix Down — instead of the editor's hidden document; nothing
+  audible means no file and a note. Affects: `src/components/Dialogs/ExportDialog.tsx`,
+  `src/services/fileService.ts` (`exportSessionMixdown`).
+- **Leaving Multitrack with a clip selected shows that clip.** Switching to
+  Waveform or Spectral activates the clip's source document and selects and
+  fits its span, cursor at its start. Affects: `src/services/menuActions.ts`
+  (`showEditorView`), `src/multitrack/session.ts` (`clipSourceWindow`).
 ## [1.35.1] - 2026-08-18
 
 ### Fixed
