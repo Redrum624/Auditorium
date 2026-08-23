@@ -467,7 +467,7 @@ describe('the mouse stays live during Apply: a document that moved is never writ
     return act(async () => {});
   }
 
-  it('a Delete on the edit pill ripples the document; the returning worker writes nothing over it', async () => {
+  it('a Delete on the edit pill zero-fills the document; the returning worker writes nothing over it', async () => {
     const doc = addDoc();
     render(<App />);
     await openTool('effect.amplify');
@@ -477,13 +477,17 @@ describe('the mouse stays live during Apply: a document that moved is never writ
     const del = within(screen.getByTestId('edit-pill')).getByRole('button', { name: 'Delete' });
     expect(del).toBeEnabled();
     fireEvent.click(del);
-    const rippled = docById(doc.id)!.channels;
-    expect(rippled[0]).toHaveLength(22050);
+    // Since lot C, Delete keeps the length (the span is zero-filled, N6): the
+    // document's `channels` identity still changes, which is the signal the
+    // Apply-time guard keys on — the length no longer does.
+    const edited = docById(doc.id)!.channels;
+    expect(edited[0]).toHaveLength(44100);
+    expect(Array.from(edited[0].subarray(0, 22050)).every((v) => v === 0)).toBe(true);
     expect(getHistory(doc.id).done).toEqual(['Delete']);
 
     await flush();
     // Identity, not equality: a commit allocates fresh arrays.
-    expect(docById(doc.id)!.channels).toBe(rippled);
+    expect(docById(doc.id)!.channels).toBe(edited);
     expect(getHistory(doc.id).done).toEqual(['Delete']);
     expect(host()).toHaveAttribute('data-effect-id', 'amplify');
     expect(within(host()).getByTestId('effect-stale-hint')).toHaveTextContent(STALE_HINT);
