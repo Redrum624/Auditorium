@@ -824,15 +824,21 @@ describe('lot D session hooks', () => {
 });
 
 describe('lot F integration hooks', () => {
-  it('activateDocumentByName activates the first document with that exact name and reports a miss', () => {
+  it('activateDocumentByName activates the index-th document with that exact name and counts the matches', () => {
     const a = addDoc('take.wav');
     const b = addDoc('other.wav');
     expect(useAppStore.getState().activeDocumentId).toBe(b.id);
 
-    expect(api().activateDocumentByName('take.wav')).toBe(true);
+    expect(api().activateDocumentByName('take.wav')).toBe(1);
     expect(useAppStore.getState().activeDocumentId).toBe(a.id);
 
-    expect(api().activateDocumentByName('missing.wav')).toBe(false);
-    expect(useAppStore.getState().activeDocumentId).toBe(a.id);
+    const a2 = addDoc('take.wav');
+    expect(api().activateDocumentByName('take.wav', 1)).toBe(2);
+    expect(useAppStore.getState().activeDocumentId).toBe(a2.id);
+    expect(api().activateDocumentByName('take.wav', 5)).toBe(2);
+    expect(useAppStore.getState().activeDocumentId).toBe(a2.id);
+
+    expect(api().activateDocumentByName('missing.wav')).toBe(0);
+    expect(useAppStore.getState().activeDocumentId).toBe(a2.id);
   });
 });

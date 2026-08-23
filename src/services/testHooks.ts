@@ -255,8 +255,10 @@ export interface TestApi {
   addMarkerToActive(positionSample: number, name: string): string | null;
   getActiveMarkers(): { name: string; positionSample: number }[];
   closeActive(): void;
-  /** Activates the first open document with this exact name; false if none. */
-  activateDocumentByName(name: string): boolean;
+  /** Activates the `index`-th open document with this exact name (the walk
+   * opens the same fixture many times) and returns how many share the name;
+   * 0 means none and nothing was activated. */
+  activateDocumentByName(name: string, index?: number): number;
   exportActiveOgg(outPath: string, bitrate?: number): Promise<boolean>;
   saveActiveInPlace(): Promise<{ ok: boolean; dirty: boolean | null; filePath: string | null }>;
   // --- v1.4 flows ---------------------------------------------------------
@@ -1548,11 +1550,11 @@ export function installTestHooks(): void {
 
     // A project reopen (M4) restores EVERY embedded document, so the walk can
     // no longer assume the one it cares about ended up active; it names it.
-    activateDocumentByName: (name) => {
-      const doc = useAppStore.getState().documents.find((d) => d.name === name);
-      if (!doc) return false;
-      useAppStore.getState().setActiveDocument(doc.id);
-      return true;
+    activateDocumentByName: (name, index = 0) => {
+      const matches = useAppStore.getState().documents.filter((d) => d.name === name);
+      const doc = matches[index];
+      if (doc) useAppStore.getState().setActiveDocument(doc.id);
+      return matches.length;
     },
 
     // Encodes the active document to Ogg Opus via the real async encoder

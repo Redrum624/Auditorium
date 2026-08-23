@@ -963,11 +963,23 @@ async function main() {
     // The reopen restored every embedded document (M4), so the tone is not
     // necessarily the active one — activate it by name, then confirm its audio
     // AND its markers came back from disk.
-    const toneActivated = await page.evaluate(
-      (n) => window.__test.activateDocumentByName(n),
-      path.basename(TONE)
-    );
-    assert(toneActivated === true, `the reopened project holds the tone by name (${path.basename(TONE)})`);
+    // The walk has opened the tone many times by now, so several restored
+    // documents share its name; the one this step marked is the one whose two
+    // markers came back. Exactly one copy must carry them.
+    const toneName = path.basename(TONE);
+    const toneCopies = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneName);
+    assert(toneCopies >= 1, `the reopened project holds the tone by name (${toneName}; got ${toneCopies} copies)`);
+    let markedCopies = 0;
+    for (let i = 0; i < toneCopies; i++) {
+      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneName, i]);
+      const m = await page.evaluate(() => window.__test.getActiveMarkers());
+      if (m.length === 2) markedCopies++;
+    }
+    assert(markedCopies === 1, `exactly one restored tone carries the two session markers (got ${markedCopies} of ${toneCopies})`);
+    for (let i = 0; i < toneCopies; i++) {
+      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneName, i]);
+      if ((await page.evaluate(() => window.__test.getActiveMarkers())).length === 2) break;
+    }
     const sessionDocSummary = await page.evaluate(() => window.__test.getStateSummary());
     console.log(`  reopened document: ${JSON.stringify(sessionDocSummary)}`);
     assert(
