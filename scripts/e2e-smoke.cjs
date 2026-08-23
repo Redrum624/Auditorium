@@ -978,7 +978,7 @@ async function main() {
     assert(markedCopies === 1, `exactly one restored tone carries the two session markers (got ${markedCopies} of ${toneCopies})`);
     for (let i = 0; i < toneCopies; i++) {
       await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneName, i]);
-      if ((await page.evaluate(() => window.__test.getActiveMarkers())).length === 2) break;
+      if (isSessionMarked(await page.evaluate(() => window.__test.getActiveMarkers()))) break;
     }
     const sessionDocSummary = await page.evaluate(() => window.__test.getStateSummary());
     console.log(`  reopened document: ${JSON.stringify(sessionDocSummary)}`);
