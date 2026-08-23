@@ -4412,6 +4412,21 @@ async function main() {
           : -3; // hold after the last key
     const autoPanAt = (s) =>
       s < 22050 ? -0.8 : s < 154350 ? -0.8 + 1.6 * ((s - 22050) / 132300) : 0.8;
+    // The anchors compare the render against the clip's RAW source, read from
+    // the active document. Since lot A (M4), reopening a project restores every
+    // embedded document additively and leaves the LAST one active — no longer
+    // the clip's tone. Activate a pure-tone copy (dual-mono, |sample| ~ 0.5 off
+    // the zero crossings) so the raw-source read is the tone the clips play,
+    // not a mixdown twin sitting near zero.
+    const toneNameAuto = path.basename(TONE);
+    const toneCopiesAuto = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneNameAuto);
+    let tonePicked = false;
+    for (let i = 0; i < toneCopiesAuto; i++) {
+      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneNameAuto, i]);
+      const probe = await page.evaluate(() => window.__test.getChannelSamples(0, 44125, 1)[0]);
+      if (Math.abs(probe) > 0.4) { tonePicked = true; break; }
+    }
+    assert(tonePicked, `a pure-tone source is active for the automation anchors (scanned ${toneCopiesAuto} copies)`);
     const autoSrc = await page.evaluate(
       (idxs) => idxs.map((i) => window.__test.getChannelSamples(0, i % 88200, 1)[0]),
       autoProbeIdxs
@@ -4605,6 +4620,18 @@ async function main() {
     };
     const spElAt = (s) => (s <= 44100 ? -45 : s >= 132300 ? 60 : -45 + 105 * ((s - 44100) / 88200));
     const spDistAt = (s) => 0.5 + 3.5 * (s / 176400);
+    // Same as the automation anchors: after a project reopen (M4) the active
+    // document is a restored twin near zero, not the clip's tone — activate a
+    // pure-tone copy so the raw-source read is the audio the clips play.
+    const toneNameSpat = path.basename(TONE);
+    const toneCopiesSpat = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneNameSpat);
+    let tonePickedSpat = false;
+    for (let i = 0; i < toneCopiesSpat; i++) {
+      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneNameSpat, i]);
+      const probe = await page.evaluate(() => window.__test.getChannelSamples(0, 44125, 1)[0]);
+      if (Math.abs(probe) > 0.4) { tonePickedSpat = true; break; }
+    }
+    assert(tonePickedSpat, `a pure-tone source is active for the spatial anchors (scanned ${toneCopiesSpat} copies)`);
     const spatSrc = await page.evaluate(
       (idxs) => idxs.map((i) => window.__test.getChannelSamples(0, i % 88200, 1)[0]),
       spatProbeIdxs
