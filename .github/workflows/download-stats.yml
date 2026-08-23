@@ -15,6 +15,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}   # release events check out the tag (detached HEAD); pin to the branch so the badge commit can push
 
       - name: Sample release download counts
         env:
@@ -32,4 +34,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github/badges/
-          git diff --cached --quiet || { git commit -m "chore: update download stats [skip ci]"; git push; }
+          git diff --cached --quiet || { git commit -m "chore: update download stats [skip ci]"; git push origin HEAD:${{ github.event.repository.default_branch }}; }
