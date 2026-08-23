@@ -8,7 +8,7 @@ import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore';
 import type { Session } from '../../multitrack/session';
 import { defaultSessionZoom, sessionTimelineLength } from '../../multitrack/sessionZoom';
-import { isCommandEnabled, runCommand } from '../../services/menuActions';
+import { isCommandEnabled, runCommand, showEditorView } from '../../services/menuActions';
 import { useHistoryVersion } from '../../services/undoHistory';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
 import { canRecord } from '../../services/transportService';
@@ -490,7 +490,7 @@ export default function Toolbar() {
               aria-label={`${v} view`}
               aria-pressed={view === v}
               disabled={v !== 'multitrack' && !hasDoc}
-              onClick={() => useAppStore.getState().setView(v)}
+              onClick={() => (v === 'multitrack' ? useAppStore.getState().setView(v) : showEditorView(v))}
               className="glass-pill-btn capitalize"
               style={{ ...pillBtn, padding: '0 12px', ...(view === v ? toggleActive : null) }}
             >

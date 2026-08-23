@@ -10,6 +10,9 @@ import {
 import { clipBoundaries, nextClipEdge } from '../multitrack/clipEdges'; // K1
 import { sessionEndSample } from '../multitrack/sessionZoom'; // T5
 import { sessionLaneWidth } from '../multitrack/sessionViewport'; // T5
+import { clipSourceWindow } from '../multitrack/session'; // lot E
+import { resolveRegion } from './selectionRegion'; // lot E
+import { editorLaneWidth } from './editorViewport'; // lot E
 import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { mixdownSession } from '../multitrack/mixdown';
 import { canRecord, transportPlayPause, transportRecord, transportStop } from './transportService';
@@ -921,6 +924,55 @@ export function registerEffectCommands(): void {
   registerCommands(cmds);
 }
 
+// ---- lot E ----
+/**
+ * Item 4 (N14) — leaving the MULTITRACK view for an editor view with a clip
+ * selected shows that clip: its source document becomes active, its source
+ * window is selected, the cursor sits at the window's start and the zoom is
+ * fitted to the window. Lives here and not in `appStore.setView` because (a)
+ * appStore cannot import sessionStore (cycle through undoHistory.ts) and (b)
+ * the other multitrack leavers — the panels' "go to" and the producers that
+ * `addDocument` then `setView('waveform')` — need the active document left
+ * alone. Only the PRIMARY `selectedClipId` counts (a set may span documents;
+ * the Properties panel shows the primary too). An orphan clip (source closed)
+ * falls through to a plain `setView`.
+ */
+export function showEditorView(v: 'waveform' | 'spectral'): void {
+  const app = useAppStore.getState();
+  if (app.view === 'multitrack') {
+    const { session, selectedClipId } = useSessionStore.getState();
+    const clip =
+      selectedClipId === null
+        ? null
+        : (session.tracks.flatMap((t) => t.clips).find((c) => c.id === selectedClipId) ?? null);
+    const doc = clip ? (app.documents.find((d) => d.id === clip.documentId) ?? null) : null;
+    if (clip && doc) {
+      // Activate FIRST: setActiveDocument applies activationReset (selection
+      // null, cursor 0, defaultZoom, playback stopped). Skipped for the doc
+      // that is already active — no reset, playback state untouched.
+      if (app.activeDocumentId !== doc.id) app.setActiveDocument(doc.id);
+      const { start, end } = resolveRegion(
+        doc,
+        clipSourceWindow(clip, doc.sampleRate, session.sampleRate)
+      );
+      const s = useAppStore.getState();
+      // A window clamped to nothing (clip entirely past its source) selects
+      // nothing — a zero-width selection would light Cut/Copy on no audio.
+      s.setSelection(end > start ? { start, end } : null);
+      s.setCursor(start);
+      // Fit the window across the measured lane: resolveZoom clamps spp into
+      // [MIN_SPP, fit] and the scroll into [0, length - laneWidth*spp], which
+      // for a clamped window is exactly [start, end).
+      applyEditorZoom({
+        samplesPerPixel: Math.max(1, end - start) / editorLaneWidth(),
+        scrollSample: start,
+      });
+    }
+  }
+  useAppStore.getState().setView(v);
+}
+// ---- end lot E ----
+
 /** Registers the Task 19 restoration + view commands: `noise.capture` (top of
  * the Effects menu, enabled only when a selection exists — it profiles the
  * selected region), the real `view.waveform` / `view.spectral` toggles
@@ -949,13 +1001,13 @@ function registerNoiseAndViewCommands(): void {
       id: 'view.waveform',
       label: 'Waveform',
       enabled: (s) => activeDoc(s) !== null && s.view !== 'waveform',
-      run: async () => useAppStore.getState().setView('waveform'),
+      run: async () => showEditorView('waveform'),
     },
     {
       id: 'view.spectral',
       label: 'Spectral',
       enabled: (s) => activeDoc(s) !== null && s.view !== 'spectral',
-      run: async () => useAppStore.getState().setView('spectral'),
+      run: async () => showEditorView('spectral'),
     },
     {
       id: 'view.spectralScale',

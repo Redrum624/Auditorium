@@ -91,8 +91,8 @@ export const SNAP_TIER_BEAT = 2; // beat-grid lines, mapped
 export type SessionSnapTiers = [number[], number[], number[]];
 
 /** Source samples spanned by `lengthSample` session samples — `readClipSlice`'s
- * own conversion, kept identical on purpose (also in `ClipView` and
- * `clipBeatTics`). */
+ * own conversion, kept identical on purpose (the exported statement is
+ * `clipSourceWindow` in `multitrack/session`; `clipBeatTics` has its own copy). */
 function docSpan(lengthSample: number, docRate: number, sessionRate: number): number {
   return docRate === sessionRate ? lengthSample : Math.round((lengthSample * docRate) / sessionRate);
 }

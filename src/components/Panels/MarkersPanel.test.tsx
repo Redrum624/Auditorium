@@ -4,6 +4,8 @@ import MarkersPanel from './MarkersPanel';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { undo, getHistory } from '../../services/undoHistory';
+import { createClip, createTrack, type Session } from '../../multitrack/session';
+import { useSessionStore } from '../../multitrack/sessionStore';
 
 function addDoc(): AudioDocument {
   const doc = createDocument({
@@ -222,6 +224,38 @@ describe('MarkersPanel', () => {
 
       expect(useAppStore.getState().view).toBe('waveform');
       expect(useAppStore.getState().cursorSample).toBe(50000);
+    });
+
+    // Lot E (item 4, N14) regression pin: the panel's leaver stays the RAW
+    // `setView` — it jumps inside the marker's document, so a foreign clip
+    // selected in the session must not drag the active document along.
+    it('stays on the marker’s document even with a foreign clip selected in the session', () => {
+      const doc = addDoc();
+      const other = addDoc();
+      useAppStore.getState().setActiveDocument(doc.id);
+      useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Intro', positionSample: 50000 });
+      const clip = createClip({ documentId: other.id, startSample: 0, offsetSample: 0, lengthSample: 1000 });
+      const track = createTrack('Track 1');
+      track.clips = [clip];
+      const session: Session = { name: 'Pin', sampleRate: 44100, tracks: [track] };
+      useSessionStore.setState({
+        session,
+        selectedClipId: clip.id,
+        selectedClipIds: [clip.id],
+        mtCursorSample: 0,
+        mtPlayState: 'stopped',
+        mtPlayheadSample: 0,
+        mtEnvelope: null,
+      });
+      useAppStore.setState({ view: 'multitrack' });
+
+      render(<MarkersPanel />);
+      fireEvent.click(screen.getByRole('button', { name: /go to intro/i }));
+
+      const state = useAppStore.getState();
+      expect(state.activeDocumentId).toBe(doc.id);
+      expect(state.cursorSample).toBe(50000);
+      expect(state.view).toBe('waveform');
     });
   });
 
