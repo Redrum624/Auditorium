@@ -754,14 +754,14 @@ describe('a Preview the mouse took away (final round)', () => {
  * beside a card). What these pin is that it is not SILENT: the card names the
  * span it will write, and the widening is on screen before Apply is pressed.
  */
-describe('Escape beside an open effect card (final round 3)', () => {
+describe('Escape with an effect card open (N18)', () => {
   function scope(): HTMLElement {
     return within(host()).getByTestId('effect-scope');
   }
 
-  /** The real global path: a keydown on a plain BUTTON inside the card. */
-  async function pressEscapeInsideTheCard() {
-    const target = within(host()).getByRole('button', { name: 'Preview' });
+  /** A real keydown, bubbling from `target` up through the document to the
+   * window — the path `installShortcuts`' listener sits on. */
+  async function pressEscapeOn(target: Element | Document) {
     await act(async () => {
       target.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
@@ -776,8 +776,8 @@ describe('Escape beside an open effect card (final round 3)', () => {
     await act(async () => {});
   }
 
-  it('does not close the card: it deselects, and the card says the target just widened', async () => {
-    const doc = addDoc();
+  it('closes an idle card — what Escape did when the effect was a modal — and the selection survives', async () => {
+    addDoc();
     render(<App />);
     act(() => {
       useAppStore.getState().setSelection({ start: 0, end: 22050 });
@@ -785,28 +785,119 @@ describe('Escape beside an open effect card (final round 3)', () => {
     await openTool('effect.amplify');
     expect(scope()).toHaveTextContent('Selection — 0:00.000 → 0:00.500 (0.50 s)');
 
-    await pressEscapeInsideTheCard();
+    // From a plain BUTTON inside the card: the target `shortcuts.ts` would
+    // otherwise have matched to `edit.deselect`.
+    await pressEscapeOn(within(host()).getByRole('button', { name: 'Preview' }));
 
-    // The card is not a dialog: Escape never reached it, and the documented
-    // dismissals (the ✕, Cancel) are still the only ones.
-    expect(host()).toHaveAttribute('data-effect-id', 'amplify');
-    expect(within(host()).getByTestId('effect-dialog')).toBeInTheDocument();
+    expect(screen.queryByTestId('effect-host')).toBeNull();
+    // The key never reached `edit.deselect`: the span Apply would have written
+    // is still the user's.
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 22050 });
     expect(hasOpenDialog()).toBe(false);
-    // What it DID reach: `edit.deselect`.
-    expect(useAppStore.getState().selection).toBeNull();
-    // ...and that is now visible in the card, before Apply is pressed.
-    expect(scope()).toHaveTextContent('Whole file — 0:01.000');
-
-    await applyForReal();
-
-    // `applyEdit`'s post-edit selection is the span the runner wrote
-    // (`effectRunner`: `{ selection: { start, end: start + resultLen } }`), so
-    // this is the region the file actually received: the whole document.
-    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 44100 });
-    expect(getHistory(doc.id).done).toEqual([`Effect: ${getEffect('amplify')!.name}`]);
+    // The ✕'s own aftermath: the module card beneath stays on Effects.
+    expect(screen.getByTestId('sidebar-panel')).toHaveAttribute('data-active-tab', 'effects');
   });
 
-  it('control: with the selection left alone, the same Apply writes only the selection', async () => {
+  it('closes the card from the stage too: Escape pressed on the body with the card open', async () => {
+    addDoc();
+    render(<App />);
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 22050 });
+    });
+    await openTool('effect.amplify');
+
+    await pressEscapeOn(document.body);
+
+    expect(screen.queryByTestId('effect-host')).toBeNull();
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 22050 });
+  });
+
+  it('restores the real document to the engine when a Preview was running — the ✕ path, not a new one', async () => {
+    const doc = addDoc();
+    render(<App />);
+    await openTool('effect.amplify');
+    const stop = jest.spyOn(playbackEngine, 'stop');
+    const load = jest.spyOn(playbackEngine, 'load');
+    try {
+      fireEvent.click(within(host()).getByRole('button', { name: 'Preview' }));
+      expect(within(host()).getByRole('button', { name: 'Stop Preview' })).toBeInTheDocument();
+      stop.mockClear();
+      load.mockClear();
+
+      await pressEscapeOn(document.body);
+
+      expect(screen.queryByTestId('effect-host')).toBeNull();
+      expect(stop).toHaveBeenCalled();
+      expect(load).toHaveBeenCalledWith(expect.objectContaining({ id: doc.id }));
+      expect(playbackEngine.loadedDocumentId).toBe(doc.id);
+    } finally {
+      stop.mockRestore();
+      load.mockRestore();
+    }
+  });
+
+  it('does nothing while Apply runs: the card, its lock and the selection all stay', async () => {
+    addDoc();
+    render(<App />);
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 22050 });
+    });
+    await openTool('effect.amplify');
+
+    let finish!: (v: 'committed') => void;
+    mockRun.mockReturnValueOnce(new Promise<'committed'>((resolve) => (finish = resolve)));
+    await act(async () => {
+      fireEvent.click(within(host()).getByRole('button', { name: 'Apply' }));
+    });
+    expect(hasOpenDialog()).toBe(true);
+
+    await pressEscapeOn(within(host()).getByRole('button', { name: 'Preview' }));
+    await pressEscapeOn(document.body);
+
+    expect(host()).toHaveAttribute('data-effect-id', 'amplify');
+    expect(hasOpenDialog()).toBe(true);
+    expect(within(host()).getByTestId('hosted-tool-close')).toBeDisabled();
+    for (const button of within(strip()).getAllByRole('button')) expect(button).toBeDisabled();
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 22050 });
+
+    // The pass finishes as before: the card unmounts with nothing left locked.
+    await act(async () => {
+      finish('committed');
+    });
+    expect(screen.queryByTestId('effect-host')).toBeNull();
+    expect(hasOpenDialog()).toBe(false);
+  });
+
+  it('with no card open, Escape keeps its meaning: Deselect', async () => {
+    addDoc();
+    render(<App />);
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 22050 });
+    });
+    expect(screen.queryByTestId('effect-host')).toBeNull();
+
+    await pressEscapeOn(document.body);
+
+    expect(useAppStore.getState().selection).toBeNull();
+  });
+
+  it('after the card is closed by Escape, the next Escape deselects as before', async () => {
+    addDoc();
+    render(<App />);
+    act(() => {
+      useAppStore.getState().setSelection({ start: 0, end: 22050 });
+    });
+    await openTool('effect.amplify');
+
+    await pressEscapeOn(document.body);
+    expect(screen.queryByTestId('effect-host')).toBeNull();
+    expect(useAppStore.getState().selection).toEqual({ start: 0, end: 22050 });
+
+    await pressEscapeOn(document.body);
+    expect(useAppStore.getState().selection).toBeNull();
+  });
+
+  it('control: with the selection left alone, Apply writes only the selection', async () => {
     const doc = addDoc();
     render(<App />);
     act(() => {

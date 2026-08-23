@@ -207,9 +207,10 @@ describe('effect preview lifecycle (Task M7/F11)', () => {
 });
 
 /**
- * Item 6 (2026-08-18): hosted in the module column. The card installs no
- * Escape handler (Escape belongs to the stage), so its ✕ is the dismissal and
- * has to carry the same engine restore Escape carried; and the module lock —
+ * Item 6 (2026-08-18): hosted in the module column. The SHELL installs no
+ * Escape handler while hosted (N18's Escape is `EffectHost`'s, one level up,
+ * and reaches the same `onClose`), so the ✕ is the dismissal this harness can
+ * drive and has to carry the same engine restore Escape carried; and the module lock —
  * the strip greyed, the shortcuts suspended — is published during Apply only
  * (N16): Preview locks nothing, and a Cancel that could unmount the dialog
  * mid-apply would release the lock while the runner still commits.
@@ -658,10 +659,10 @@ describe('a document that moves under a running Preview (final round)', () => {
  * Final round 3 (finding 1) — the card names the span Apply will write.
  *
  * The card is not modal, so the region the runner resolves can change while
- * the card sits open and untouched: `Escape` runs `edit.deselect`
- * (`shortcuts.ts` `{ combo: 'escape', commandId: 'edit.deselect' }`,
- * `menuActions.ts`'s editor branch `setSelection(null)`), Edit > Deselect does,
- * and a plain click on the waveform does. `runEffectOnSelection` resolves the
+ * the card sits open and untouched: Edit > Deselect runs `edit.deselect`
+ * (`menuActions.ts`'s editor branch `setSelection(null)`) and a plain click on
+ * the waveform clears it the same way (`Escape` no longer does — N18 makes it
+ * close the card, see `EffectHost.test`). `runEffectOnSelection` resolves the
  * LIVE selection through `resolveRegion`, whose null case is the whole
  * document — so losing a selection widens Apply from the span the user
  * auditioned to the entire file. These pin that the card says which it is, and
@@ -683,7 +684,7 @@ describe('the card names the region Apply will write (final round 3)', () => {
     expect(scope()).toHaveTextContent('Selection — 0:00.050 → 0:00.150 (0.10 s)');
   });
 
-  it('switches to the whole file the moment the selection is cleared — what Escape does', () => {
+  it('switches to the whole file the moment the selection is cleared — what Edit > Deselect does', () => {
     const doc = seedActiveDoc();
     act(() => {
       useAppStore.getState().setSelection({ start: 2205, end: 6615 });

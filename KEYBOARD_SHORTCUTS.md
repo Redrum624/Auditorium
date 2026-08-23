@@ -45,7 +45,7 @@ as you left it when you clicked Apply, and says so in the card if that changed
 | `Ctrl+W` | Close |
 | `M` | Add Marker at the cursor |
 | `Ctrl+E` | Export… |
-| `Escape` | Deselect |
+| `Escape` | Deselect — or, with an effect card open, closes the card (see below) |
 
 ## The multitrack-only rows
 
@@ -83,7 +83,8 @@ every view and give nothing back.
 ## `Escape` and the two kinds of surface
 
 `Escape` means one thing in the table above and another over a **modal dialog**,
-and since the Pipeline module it means nothing at all over a hosted tool:
+since the Pipeline module it means nothing at all over a hosted pipeline tool,
+and over an effect card it means what it meant when the effect was a dialog:
 
 | Surface | What `Escape` does |
 |---|---|
@@ -91,24 +92,29 @@ and since the Pipeline module it means nothing at all over a hosted tool:
 | The **multitrack** view | Clears the clip selection — the document selection behind it is not on screen there, so clearing that instead would be an edit with no feedback anywhere |
 | A modal dialog (New File, Export, Convert, Record) | Closes the topmost one — unless it is mid-run, when it refuses |
 | A **pipeline tool** in the module column (Match Tempo, Vocal Chain, Cover Chain, Transcribe, …) | Nothing. Close it with the **✕** in its header |
-| An **effect card** in the module column | Nothing *to the card* — the key falls through to **Deselect** in the row above, and the card's scope line changes to say so. Close the card with the **✕** or **Cancel** |
+| An **effect card** in the module column, idle | **Closes the card** — the same as its **✕** or **Cancel**: a running **Preview** is stopped and the real document goes back to the engine. The selection is kept: the key does *not* fall through to Deselect |
+| An **effect card** while **Apply** is running | Nothing, like the ✕ — the pass is never discarded. The key comes back when it finishes |
+| A modal dialog opened over an effect card | The modal's: it closes, the card stays |
 
-The last two rows are deliberate. A hosted card is not modal — the stage behind
-it stays live — so it installs no `Escape` handler of its own; taking the key
-would make it a focus trap wearing a different shape, and would silently steal
-Deselect from the waveform you are still working in. The **✕** is its dismissal,
-and mid-pass that ✕ refuses and says why.
+The pipeline-tool row is deliberate. A hosted tool is not modal — the stage
+behind it stays live — so it installs no `Escape` handler of its own; taking
+the key would make it a focus trap wearing a different shape. The **✕** is its
+dismissal, and mid-pass that ✕ refuses and says why.
 
-Know what falls through before you press it. `Escape` beside an open card is
-not inert: it reaches the table above and runs **Deselect**, and both kinds of
-card resolve the region they act on from the **live** selection when they run,
-reading "no selection" as the whole file. So an `Escape` pressed to dismiss an
-effect card widens its next **Apply** from the span you just previewed to the
-entire document — one undo entry. The card names the span it will write on its
-first line ("Selection — 0:01.500 → 0:03.500 (2.00 s)" / "Whole file — 5:00.000"),
-so the change is on screen the moment it happens; **Match Tempo** has shown the
-same line since the Pipeline module. Mid-**Apply** the question does not arise:
-the keys are suspended for the duration, `Escape` included.
+The effect card is the one hosted surface that does take the key, and it takes
+only that key: an effect was a dialog until the 2026-08-18 program moved it
+into the column, and `Escape` closed that dialog. Closing the card is what the
+key means there — and not clearing the selection is the
+point, because the card resolves the region it writes from the **live**
+selection when Apply runs, reading "no selection" as the whole file; an
+`Escape` that deselected instead would have quietly widened the next **Apply**
+from the span you just previewed to the entire document. (Edit › Deselect and a
+click on the waveform still do clear it beside an open card, and the card's
+first line — "Selection — 0:01.500 → 0:03.500 (2.00 s)" / "Whole file —
+5:00.000" — says so before you press Apply.) Two small rules keep the key
+honest: `Escape` typed in a text field *outside* the card — a marker's inline
+rename, say — belongs to that field, as every global key does; and with a
+modal open over the card, the modal has it.
 
 ## Menu-only commands (no bound key)
 

@@ -1,5 +1,6 @@
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { getEffect } from '../../effects/EffectRegistry';
+import { hasOpenDialog } from '../../services/dialogBus';
 import { MODULE_COLUMN_WIDTH } from '../Layout/ModuleStrip';
 import { GlassCard } from '../UI/glass';
 import { DialogHostProvider } from './DialogHost';
@@ -29,7 +30,24 @@ import EffectDialog from './EffectDialog';
  * The card is independent of the module card below it: App forces that card to
  * Effects when an effect opens (N16), and afterwards the strip may swap or
  * close it while the effect stays. Only another host (`openTool`), the ✕ /
- * Cancel / Apply, and the orphan rule (no document left) close this one.
+ * Cancel / Apply / `Escape`, and the orphan rule (no document left) close this
+ * one.
+ *
+ * `Escape` (N18, 2026-08-23). While the card is mounted and idle, `Escape`
+ * closes it — exactly what the key did when the effect was a modal — through
+ * `onClose`, the ✕'s own path, so the dialog's unmount-restore hands the engine
+ * the real document back if a Preview was running. It is claimed here, on the
+ * document, BEFORE it can reach the window listener `installShortcuts` sits on
+ * (`shortcuts.ts` maps `escape` to `edit.deselect`): the selection survives,
+ * so the next Apply still writes the span the user auditioned. While Apply
+ * runs the key does nothing (the ✕ refuses then; `hasOpenDialog()` is true
+ * and the global table is suspended anyway). With a modal stacked over the
+ * card (`hasOpenDialog()` from the stack), the key is the modal's. A key typed
+ * in a field OUTSIDE the card stays that field's — a marker rename's own
+ * `Escape` — as every global key does; inside the card it closes it, as the
+ * modal's did. `DialogShell`'s hosted branch still installs nothing: the nine
+ * pipeline tools keep their "Escape does nothing" rule, and this one is the
+ * effect card's alone.
  *
  * One effect id, one dialog instance. `PipelineToolHost` swaps the component
  * TYPE per command id, so React remounts on a swap for free; this host renders
@@ -56,12 +74,41 @@ export default function EffectHost({
    * cleanup on unmount. */
   onModuleLockChange(locked: boolean): void;
 }) {
+  // The lock as the shell last published it — `true` while Apply runs. A ref,
+  // because the Escape listener below is installed once and must read the
+  // CURRENT value, not the one it closed over.
+  const lockedRef = useRef(false);
   // Stable identity, so the provider's memo does not re-publish per paint.
   const report = useCallback(
-    (locked: boolean) => onModuleLockChange(locked),
+    (locked: boolean) => {
+      lockedRef.current = locked;
+      onModuleLockChange(locked);
+    },
     [onModuleLockChange]
   );
-  if (!getEffect(effectId)) return null;
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  const known = getEffect(effectId) !== undefined;
+
+  // N18 — see the docblock. On `document` in the bubble phase so the target's
+  // own handlers and the other document listeners (a modal's, the menu bar's)
+  // still run, and `stopPropagation` stops exactly one thing: the window
+  // listener that would have run `edit.deselect`.
+  useEffect(() => {
+    if (!known) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      if (lockedRef.current || hasOpenDialog()) return;
+      if (isEditableTargetOutsideTheCard(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      onCloseRef.current();
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [known]);
+
+  if (!known) return null;
 
   return (
     <GlassCard
@@ -75,4 +122,17 @@ export default function EffectHost({
       </DialogHostProvider>
     </GlassCard>
   );
+}
+
+/** A form control or contentEditable being typed in, somewhere other than in
+ * this card — `shortcuts.ts`'s own editable-target rule, narrowed to outside
+ * the card so a parameter field inside it still closes the card on Escape, as
+ * the modal did. */
+function isEditableTargetOutsideTheCard(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = target.tagName;
+  const editable =
+    tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || target.isContentEditable;
+  if (!editable) return false;
+  return target.closest('[data-testid="effect-host"]') === null;
 }

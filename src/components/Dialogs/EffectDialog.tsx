@@ -104,7 +104,9 @@ export default function EffectDialog({
   const previewDocIdRef = useRef<string | null>(null);
 
   // F11: Escape/backdrop/Cancel all unmount this dialog without going through
-  // the explicit "Stop Preview" button. If a preview was left running, restore
+  // the explicit "Stop Preview" button (hosted, Escape reaches `onClose`
+  // through `EffectHost`'s own listener — N18 — and lands here the same way).
+  // If a preview was left running, restore
   // the engine to the real active document on unmount — exactly stopPreview's
   // logic — instead of leaving it holding the throwaway preview document
   // (silently playing, in Escape's case). Declared before the `if (!def)
@@ -176,16 +178,14 @@ export default function EffectDialog({
   // Final round 3 (finding 1): what Apply will write, named on the card.
   //
   // Hosted, the card is not modal, so the region the runner resolves can change
-  // while the card sits open and untouched — and the likeliest way is the key
-  // that CLOSED this dialog until item 6 made it a card. Escape takes no path
-  // through the card (it joins no dialog stack, and a hosted surface installs
-  // no Escape handler by design — see KEYBOARD_SHORTCUTS.md); it falls through
-  // to the global table and runs `edit.deselect`. Edit > Deselect and a plain
-  // click on the waveform clear the selection the same way. Because
-  // `runEffectOnSelection` resolves the LIVE selection and `resolveRegion`
-  // reads null as the whole document, an Apply after any of those widens from
-  // the span the user auditioned with Preview to the entire file — one undo
-  // entry, and nothing in the card had moved to say so.
+  // while the card sits open and untouched: Edit > Deselect and a plain click
+  // on the waveform clear the selection with the card still there (Escape no
+  // longer does — under N18 it closes the card, claimed by `EffectHost` before
+  // the global table can run `edit.deselect`). Because `runEffectOnSelection`
+  // resolves the LIVE selection and `resolveRegion` reads null as the whole
+  // document, an Apply after either of those widens from the span the user
+  // auditioned with Preview to the entire file — one undo entry, and nothing
+  // in the card had moved to say so.
   //
   // The lock is not the answer (the ruling: shortcuts stay live beside a card,
   // and Preview greys nothing). Visibility is: the sibling hosted card has

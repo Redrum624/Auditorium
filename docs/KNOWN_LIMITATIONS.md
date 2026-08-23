@@ -2054,22 +2054,23 @@ on the document the engine is holding, which is the preview copy, not the
 real document. The card publishes its module lock during **Apply only**
 (N16): Preview greys nothing and suspends nothing, because it is one click to
 end and locking the strip for it would be worse than the key landing on the
-preview. **Stop Preview**, the **✕**, **Cancel** and **Apply** all restore the
-real document to the engine, exactly as the modal's Escape did.
+preview. **Stop Preview**, the **✕**, **Cancel**, **Apply** and `Escape` all restore
+the real document to the engine, exactly as the modal's Escape did.
 
-**`Escape` does not close the card — it deselects.** A card joins no dialog
-stack and installs no `Escape` handler of its own (that is what keeps Deselect
-working in the waveform beside it), so the key that dismissed the effect
-**dialog** before item 6 now falls through to the global table and runs
-**Deselect**. The card stays open, and because an effect resolves its region
-from the live selection when Apply runs — reading "no selection" as the whole
-file — the next **Apply** writes the entire document rather than the span you
-previewed, as one undo entry. The same fall-through has always applied to the
-hosted pipeline tools (Match Tempo, the Vocal Chain and the Cover Chain resolve
-the same way). It is not silenced: the card's first line names the span Apply
-will write and switches to "Whole file" the moment the selection goes, so the
-widening is visible before Apply is pressed, and `Ctrl+Z` undoes it in one
-step. Closing the card is the **✕** or **Cancel**.
+**`Escape` closes the card; a selection lost some other way still widens
+Apply.** Since N18 (2026-08-23) `Escape` with an idle effect card open closes
+the card — the ✕'s own path — and the key is claimed before the global table
+can run **Deselect**, so the selection survives (see `KEYBOARD_SHORTCUTS.md`).
+What remains is the rest of the class: Edit › Deselect and a plain click on
+the waveform still clear the selection with the card open, and because an
+effect resolves its region from the live selection when Apply runs — reading
+"no selection" as the whole file — the next **Apply** then writes the entire
+document rather than the span you previewed, as one undo entry. The hosted
+pipeline tools resolve the same way (Match Tempo, the Vocal Chain and the Cover
+Chain), and for them `Escape` still does nothing. It is not silenced: the
+card's first line names the span Apply will write and switches to "Whole file"
+the moment the selection goes, so the widening is visible before Apply is
+pressed, and `Ctrl+Z` undoes it in one step.
 
 **A Preview the mouse takes away.** Because the card is not modal, a preview
 can also be ended by something other than the card: switch document in the
@@ -2105,10 +2106,10 @@ before editing.
 
 **Intended behavior:** a narrower seam than the module lock — "hold the
 keyboard" without "hold the module column" — could route transport keys to the
-real document during a preview, or end the preview first. The same seam is what
-`Escape` wants: a card could answer the key with its own dismissal without
-taking any other key from the waveform, which is a keymap change of its own
-rather than the card's. It is the same
+real document during a preview, or end the preview first. (`Escape` is the
+one key the effect card does answer, with its own dismissal and without taking
+any other key from the waveform — N18 — which is the shape that seam would
+take for the rest.) It is the same
 second seam the pipeline tools' lock already wants (see `App.tsx`,
 `refuseWhileRunning`) and is a change of its own. The Apply-time window is
 closed for effects at the card (`EffectDialog`'s `shouldCancel`); the pipeline

@@ -344,13 +344,14 @@ document open) — from the card or the menu — and it opens as a **card in the
 module column, between the module strip and the module card**, the same
 348 px wide as both; the module card beneath it switches to Effects so the
 other effects stay one click away. Adjust, **Preview**, **Apply**; close it
-with the **✕** in its header or **Cancel** — `Escape` does not close it, and
-because the keys stay live it clears the selection instead (see below). The
-card's first line names the span **Apply** will write — the selection, or the
-whole file when there is none — so a selection lost to `Escape`, to
-Edit › Deselect or to a click on the waveform is visible in the card before you
-press Apply. Nothing else is dimmed: the waveform, selection, transport and
-keys stay live while the card is open — and if you
+with the **✕** in its header, **Cancel** or `Escape` — the key closes the card
+exactly as it closed the effect dialog before, stopping a running Preview and
+keeping your selection (while **Apply** runs, `Escape` does nothing, like the
+✕). The card's first line names the span **Apply** will write — the selection,
+or the whole file when there is none — so a selection lost to Edit › Deselect
+or to a click on the waveform is visible in the card before you press Apply.
+Nothing else is dimmed: the waveform, selection, transport and keys stay live
+while the card is open — and if you
 switch, edit or close the document while a **Preview** plays, the transport
 takes the engine back and the card gives the preview up with it, so the button
 reads **Preview** again rather than stopping what you just started. While an

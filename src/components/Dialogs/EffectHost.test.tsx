@@ -1,12 +1,22 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { useState } from 'react';
 import EffectHost from './EffectHost';
+import DialogShell from './DialogShell';
 import { MODULE_COLUMN_WIDTH } from '../Layout/ModuleStrip';
 import { getEffect } from '../../effects/EffectRegistry';
 import { registerAllEffects } from '../../effects/registerAll';
 import { createDocument } from '../../audio/AudioDocument';
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { hasOpenDialog } from '../../services/dialogBus';
+import { runEffectOnSelection } from '../../services/effectRunner';
 import { makeInitialState, useAppStore } from '../../stores/appStore';
+
+/** N18: Apply's promise is the test's to resolve, so "busy" can be observed. */
+jest.mock('../../services/effectRunner', () => {
+  const actual = jest.requireActual('../../services/effectRunner');
+  return { ...actual, runEffectOnSelection: jest.fn(async () => 'committed') };
+});
+const mockRun = runEffectOnSelection as jest.MockedFunction<typeof runEffectOnSelection>;
 
 /**
  * Item 6 (2026-08-18) / M6 — the card that hosts ONE effect in the module
@@ -22,6 +32,8 @@ import { makeInitialState, useAppStore } from '../../stores/appStore';
 registerAllEffects();
 
 beforeEach(() => {
+  mockRun.mockReset();
+  mockRun.mockImplementation(async () => 'committed');
   useAppStore.setState(makeInitialState());
   useAppStore.getState().addDocument(
     createDocument({ name: 'take.wav', sampleRate: 44100, channels: [new Float32Array(4410)] })
@@ -149,5 +161,180 @@ describe('EffectHost — swapping the effect id mounts a fresh dialog', () => {
       play.mockRestore();
       stop.mockRestore();
     }
+  });
+});
+
+/**
+ * N18 (2026-08-23) — `Escape` with an effect card open CLOSES THE CARD, exactly
+ * what the key did when the effect was a modal: the same path as the ✕ and
+ * Cancel (so a running Preview is restored by the dialog's unmount), and the
+ * key is claimed before the global table can run `edit.deselect` — the
+ * selection survives. While Apply runs the key does nothing (the ✕ refuses
+ * then, and so does this). With a modal dialog stacked over the card, the key
+ * is the modal's. The rule is the card's own, so it holds for every consumer
+ * of `EffectHost`, not only App's mount.
+ */
+describe('EffectHost — Escape closes the card (N18)', () => {
+  function pressEscapeOn(target: Element | Document) {
+    const handledByWindow = jest.fn();
+    window.addEventListener('keydown', handledByWindow);
+    try {
+      act(() => {
+        target.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true })
+        );
+      });
+    } finally {
+      window.removeEventListener('keydown', handledByWindow);
+    }
+    return { reachedWindow: handledByWindow.mock.calls.length > 0 };
+  }
+
+  /** The card behind a toggle, so `onClose` really unmounts it — the only way
+   * the dialog's unmount-restore (the ✕'s own engine restore) can be seen. */
+  function Toggle({ effectId }: { effectId: string }) {
+    const [open, setOpen] = useState(true);
+    return open ? (
+      <EffectHost effectId={effectId} onClose={() => setOpen(false)} onModuleLockChange={() => {}} />
+    ) : (
+      <span data-testid="card-gone" />
+    );
+  }
+
+  it('an idle card: Escape on the body closes it, and the key never reaches the window (no Deselect)', () => {
+    const onClose = jest.fn();
+    render(<EffectHost effectId="amplify" onClose={onClose} onModuleLockChange={() => {}} />);
+
+    const { reachedWindow } = pressEscapeOn(document.body);
+
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(reachedWindow).toBe(false);
+  });
+
+  it('Escape from a control INSIDE the card closes it too — a parameter field included, as in the modal', () => {
+    const onClose = jest.fn();
+    render(<EffectHost effectId="amplify" onClose={onClose} onModuleLockChange={() => {}} />);
+    const input = document.getElementById('effect-param-gainDb');
+    if (!(input instanceof HTMLInputElement)) throw new Error('no gain input');
+
+    pressEscapeOn(input);
+    expect(onClose).toHaveBeenCalledTimes(1);
+
+    pressEscapeOn(screen.getByRole('button', { name: 'Preview' }));
+    expect(onClose).toHaveBeenCalledTimes(2);
+  });
+
+  it('Escape typed in a field OUTSIDE the card is that field’s key: the card stays', () => {
+    const onClose = jest.fn();
+    render(
+      <>
+        <input data-testid="marker-name" defaultValue="verse" />
+        <EffectHost effectId="amplify" onClose={onClose} onModuleLockChange={() => {}} />
+      </>
+    );
+
+    const { reachedWindow } = pressEscapeOn(screen.getByTestId('marker-name'));
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(reachedWindow).toBe(true);
+  });
+
+  it('closing by Escape restores the real document to the engine when a Preview was running', () => {
+    const doc = useAppStore.getState().documents[0];
+    const load = jest.spyOn(playbackEngine, 'load').mockImplementation(() => {});
+    const play = jest.spyOn(playbackEngine, 'play').mockImplementation(() => {});
+    const stop = jest.spyOn(playbackEngine, 'stop').mockImplementation(() => {});
+    try {
+      render(<Toggle effectId="amplify" />);
+      fireEvent.click(screen.getByRole('button', { name: 'Preview' }));
+      expect(screen.getByRole('button', { name: 'Stop Preview' })).toBeInTheDocument();
+      load.mockClear();
+      stop.mockClear();
+
+      pressEscapeOn(document.body);
+
+      expect(screen.getByTestId('card-gone')).toBeInTheDocument();
+      expect(screen.queryByTestId('effect-host')).toBeNull();
+      expect(stop).toHaveBeenCalled();
+      expect(load).toHaveBeenCalledWith(expect.objectContaining({ id: doc.id }));
+    } finally {
+      load.mockRestore();
+      play.mockRestore();
+      stop.mockRestore();
+    }
+  });
+
+  it('while Apply runs, Escape does nothing', async () => {
+    const onClose = jest.fn();
+    const onModuleLockChange = jest.fn();
+    render(
+      <EffectHost effectId="amplify" onClose={onClose} onModuleLockChange={onModuleLockChange} />
+    );
+    let finish!: (v: 'committed') => void;
+    mockRun.mockReturnValueOnce(new Promise<'committed'>((resolve) => (finish = resolve)));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(true);
+    expect(screen.getByTestId('hosted-tool-close')).toBeDisabled();
+
+    pressEscapeOn(document.body);
+    pressEscapeOn(screen.getByRole('button', { name: 'Preview' }));
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByTestId('effect-host')).toBeInTheDocument();
+
+    // The pass ends as before: a committed Apply closes the card itself, once.
+    await act(async () => {
+      finish('committed');
+    });
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onModuleLockChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('a cancelled Apply leaves the card open and idle: Escape closes it again', async () => {
+    const onClose = jest.fn();
+    render(<EffectHost effectId="amplify" onClose={onClose} onModuleLockChange={() => {}} />);
+    mockRun.mockResolvedValueOnce('cancelled');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Apply' }));
+    });
+    expect(screen.getByTestId('effect-stale-hint')).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    pressEscapeOn(document.body);
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('with a modal dialog stacked over the card, Escape is the modal’s: the card stays', () => {
+    const onClose = jest.fn();
+    const closeModal = jest.fn();
+    render(
+      <>
+        <EffectHost effectId="amplify" onClose={onClose} onModuleLockChange={() => {}} />
+        <DialogShell title="Export" onClose={closeModal}>
+          <span>modal body</span>
+        </DialogShell>
+      </>
+    );
+    expect(hasOpenDialog()).toBe(true);
+
+    pressEscapeOn(document.body);
+
+    expect(closeModal).toHaveBeenCalledTimes(1);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('uninstalls its listener on unmount: an Escape after the card is gone closes nothing', () => {
+    const onClose = jest.fn();
+    const { unmount } = render(
+      <EffectHost effectId="amplify" onClose={onClose} onModuleLockChange={() => {}} />
+    );
+    unmount();
+
+    const { reachedWindow } = pressEscapeOn(document.body);
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(reachedWindow).toBe(true);
   });
 });
