@@ -165,13 +165,13 @@ over the audio.
 
 **Editing & formats**
 
-- Sample-accurate cut/copy/paste/delete/trim/silence with per-document undo (50 steps / 800 MB budget) and full session undo in the multitrack.
-- Open and save WAV, MP3, FLAC and OGG (Opus) with format-faithful in-place saves, atomic writes, and native-rate import across container variants (including surround WAV with selectable ITU-R downmix).
-- Export WAV 16/24/32-float, FLAC, MP3 CBR, OGG Opus.
+- Sample-accurate copy/paste/trim/silence, a Delete and a `Ctrl+X` cut that keep the length (the span is zero-filled, markers stay put; `Shift+Del` ripples), and **Split at Cursor** (`Ctrl+K`): every marker is a segment boundary and a double-click selects the segment under the pointer — with per-document undo (50 steps / 800 MB budget) and full session undo in the multitrack, where Split cuts every clip under the cursor on the selected tracks in one step.
+- Open WAV, MP3, FLAC and OGG (Opus) with native-rate import across container variants (including surround WAV with selectable ITU-R downmix); **Save writes the project** (`.audm`, atomic) in every view and never overwrites an audio file — audio leaves through Export.
+- Export WAV 16/24/32-float, FLAC, MP3 CBR, OGG Opus — the active document in the editors, the session mixdown (muted tracks out, automation and fades in) in the multitrack.
 - Markers persist sample-accurately in every container (WAV cue, ID3 chapters, FLAC/OGG chapter tags) and survive destructive edits by remapping.
 - Snapping ("the magnet"): cursor, selections, clip drags and trims quantise to clip edges, beats, markers and the session cursor — placed geometry outranks derived; Alt suspends.
 - The draggable red cursor handle rides all three views, snap-aware, transport-neutral.
-- Sessions save as `.audm` (binary v3) carrying clips, fades, crossfades, automation and spatial lanes; Mix Down renders bit-identically to live playback.
+- Projects save as `.audm` (binary v4, v3 still opens) carrying every open document plus the session's clips, fades, crossfades, automation and spatial lanes; Mix Down renders bit-identically to live playback.
 
 **The vocal chain, in one paragraph**
 
