@@ -37,7 +37,9 @@ import {
   cutSelection,
   deleteSelection,
   pasteAtCursor,
+  rippleDeleteSelection,
   silenceSelection,
+  splitAtCursor,
   trimToSelection,
 } from './editOps';
 import { getClipboard } from './clipboard';
@@ -175,13 +177,19 @@ export interface TestApi {
   setSelection(start: number, end: number): { start: number; end: number } | null;
   /** Clears it, the way a click without a drag does. */
   clearSelection(): void;
+  /** Places the document cursor (lot C); returns what was stored. */
+  setCursor(sample: number): number;
+  /** Reads the document cursor back (`getStateSummary` carries no cursor). */
+  getCursor(): number;
   /** One step FORWARD through the same history Ctrl+Y drives. */
   redoActive(): { length: number };
   /** The active document's history, as the History panel renders it. */
   getHistoryState(): { done: string[]; undone: string[] };
-  /** The four selection edits behind Ctrl+X / Del / Trim / Silence, plus the
-   * clipboard's other two ends, dispatched by name. */
-  editOp(op: 'cut' | 'copy' | 'paste' | 'delete' | 'trim' | 'silence'): void;
+  /** The selection edits behind Ctrl+X / Del / Shift+Del / Trim / Silence,
+   * plus the clipboard's other two ends, dispatched by name. */
+  editOp(
+    op: 'cut' | 'copy' | 'paste' | 'delete' | 'rippleDelete' | 'split' | 'trim' | 'silence'
+  ): void;
   /** What the clipboard is holding, so a Cut's promise can be checked. */
   getClipboardInfo(): { length: number; sampleRate: number; channels: number } | null;
   /** Edit > Convert Channels (`documentTools.convertChannels`). */
@@ -1189,6 +1197,13 @@ export function installTestHooks(): void {
 
     clearSelection: () => useAppStore.getState().setSelection(null),
 
+    setCursor: (sample) => {
+      useAppStore.getState().setCursor(sample);
+      return useAppStore.getState().cursorSample;
+    },
+
+    getCursor: () => useAppStore.getState().cursorSample,
+
     redoActive: () => {
       const doc = activeDoc();
       if (doc) undoHistoryRedo(doc.id);
@@ -1219,6 +1234,12 @@ export function installTestHooks(): void {
           return;
         case 'delete':
           deleteSelection();
+          return;
+        case 'rippleDelete':
+          rippleDeleteSelection();
+          return;
+        case 'split':
+          splitAtCursor();
           return;
         case 'trim':
           trimToSelection();

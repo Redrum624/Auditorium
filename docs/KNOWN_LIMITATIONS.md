@@ -169,12 +169,14 @@ are byte-identical to pre-v1.3 output for every format.
 owning document (Files-panel `*`, close/quit prompts, the async-save
 staleness check) and is undoable from the History panel (`Add Marker` /
 `Rename Marker` / `Delete Marker`). Destructive edits that change the
-timeline — delete, insert/paste, trim, replace, sample-rate conversion, and
-length-changing effects (Time Stretch, Pitch Shift) — remap or drop marker
-positions atomically with the audio, in the same undo step; interior markers
-under a length-changing effect map proportionally rather than being dropped.
-Positions are always clamped to `[0, document length]`, so a marker can never
-be written to disk past the end of the file.
+timeline — ripple delete (`Shift+Delete`), insert/paste, trim, replace,
+sample-rate conversion, and length-changing effects (Time Stretch, Pitch
+Shift) — remap or drop marker positions atomically with the audio, in the same
+undo step; interior markers under a length-changing effect map proportionally
+rather than being dropped. Delete, Cut and Silence are equal-length since the
+item-7 change and leave every marker where it was, including markers inside
+the silenced span. Positions are always clamped to `[0, document length]`, so
+a marker can never be written to disk past the end of the file.
 
 **v1.10 refinement (F2):** the proportional rule above is right for effects
 that TRANSFORM the whole region but wrong for Remove Silence, which deletes

@@ -29,7 +29,7 @@ import { muxOpusStream } from '../audio/oggPage';
 import * as undoHistory from './undoHistory';
 import { setEditorLaneWidth, _resetEditorLaneWidth } from './editorViewport';
 import { _resetPendingOpens, getPendingOpens } from './openProgress';
-import { pushMarkerUndo, deleteSelection } from './editOps';
+import { pushMarkerUndo, deleteSelection, rippleDeleteSelection } from './editOps';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
@@ -1182,13 +1182,28 @@ describe('saveDocument', () => {
     useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 8 });
     useAppStore.getState().setSelection({ start: 2, end: 5 }); // delete 3 samples
 
-    deleteSelection(); // marker at 8 (>= e=5) shifts left by (e-s)=3 -> 5
+    rippleDeleteSelection(); // marker at 8 (>= e=5) shifts left by (e-s)=3 -> 5
 
     await saveDocument(doc.id);
 
     const [, data] = api.writeFile.mock.calls[0];
     const decodedBack = decodeWav(data as ArrayBuffer);
     expect(decodedBack.markers).toEqual([{ name: 'Chorus', positionSample: 5 }]);
+  });
+
+  it('writes the cue where it was after an equal-length Delete (item 7 / N6)', async () => {
+    const api = installApi();
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 8 });
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    deleteSelection(); // zero-fills [2,5) in place: the timeline did not move
+
+    await saveDocument(doc.id);
+
+    const [, data] = api.writeFile.mock.calls[0];
+    const decodedBack = decodeWav(data as ArrayBuffer);
+    expect(decodedBack.markers).toEqual([{ name: 'Chorus', positionSample: 8 }]);
   });
 
   it('retags sourceBitDepth to 32 after an in-place WAV save of a 16-bit source (F14)', async () => {

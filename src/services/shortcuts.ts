@@ -13,16 +13,20 @@ export const SHORTCUT_TABLE: Shortcut[] = [
   { combo: 'ctrl+z', commandId: 'edit.undo' },
   { combo: 'ctrl+shift+z', commandId: 'edit.redo' },
   { combo: 'ctrl+y', commandId: 'edit.redo' },
+  // Item 8 (M1) — Split at Cursor. `ctrl+k` was free (checked against every
+  // row here); the command is view-routed, so the one row serves every view.
+  { combo: 'ctrl+k', commandId: 'edit.split' },
   { combo: 'ctrl+x', commandId: 'edit.cut' },
   { combo: 'ctrl+c', commandId: 'edit.copy' },
   { combo: 'ctrl+v', commandId: 'edit.paste' },
   { combo: 'delete', commandId: 'edit.delete' },
   // K1 — Ripple Delete. `Shift+Delete` was free in this table (checked against
   // every row above and below), and it is the combo the verb carries in the
-  // NLEs this feature was asked to match. Its command is multitrack-only, so
-  // in the editor views the key reaches a disabled command and does nothing —
-  // `runCommand` re-checks `enabled` before running, which is what keeps a
-  // global table from needing a per-view table beside it.
+  // NLEs this feature was asked to match. Item 7 gave the command an editor
+  // branch (remove the selection and close the gap — the pre-item-7 Delete),
+  // so the one row now serves every view; `runCommand` re-checks `enabled`
+  // before running, which is what keeps a global table from needing a
+  // per-view table beside it.
   { combo: 'shift+delete', commandId: 'edit.rippleDelete' },
   { combo: 'ctrl+a', commandId: 'edit.selectAll' },
   // K1 — clip-edge navigation. `e.key` for the arrows is 'ArrowLeft'/
@@ -124,8 +128,9 @@ export function installShortcuts(target: Window): () => void {
     // A MATCHED combo is claimed here, before `runCommand` consults the
     // command's own `enabled` predicate — so a row whose command is disabled in
     // the current view still swallows the platform default. K1's
-    // `ctrl+arrowleft`/`ctrl+arrowright` and `shift+delete` are multitrack-only
-    // commands, so that is now observable in the waveform and spectral views.
+    // `ctrl+arrowleft`/`ctrl+arrowright` are multitrack-only commands, so that
+    // is observable in the waveform and spectral views (`shift+delete` has an
+    // editor branch since item 7, but is still claimed with no selection).
     //
     // Kept deliberately rather than gated on `isCommandEnabled`, and recorded
     // here so it is not rediscovered as a defect: enablement-gating would hand

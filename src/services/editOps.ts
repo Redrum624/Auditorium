@@ -5,12 +5,14 @@ import {
   replaceRegion,
   insertAt,
   docLength,
+  nextId,
 } from '../audio/AudioDocument';
 import type { Marker, SelectionRange } from '../stores/appStore';
 import { useAppStore } from '../stores/appStore';
 import { pushUndo } from './undoHistory';
 import { getClipboard, setClipboard } from './clipboard';
 import { resolveRegion } from './selectionRegion';
+import { cursorSegment } from './segments';
 import { resampleChannel } from '../dsp/resample';
 
 interface AfterState {
@@ -33,8 +35,8 @@ function docBytes(doc: AudioDocument): number {
  * region args it passes to the AudioDocument mutator. `applyEdit` turns this
  * into a full before/after marker-list remap that rides inside the SAME undo
  * entry as the document swap. Omit entirely for equal-length transforms
- * (effects, reverse, in-place silence, ...) — markers stay untouched and no
- * marker snapshot is taken.
+ * (effects, reverse, in-place silence, delete, cut, ...) — markers stay
+ * untouched and no marker snapshot is taken.
  *
  * Rules (all in PRE-edit sample coordinates, region args are [start, end)):
  * - delete [s,e): < s keep; in [s,e) drop; >= e shift left by (e-s).
@@ -336,20 +338,67 @@ function resolveSelection(doc: AudioDocument, selection: SelectionRange): { star
   return resolveRegion(doc, selection);
 }
 
-/** Copies the selection to the clipboard, then removes it. Requires a selection. */
+/** Zero-fills [start, end) in place — length unchanged, no marker remap. N7:
+ * Delete, Cut and Silence all go through here so they cannot drift. */
+function zeroFillRegion(doc: AudioDocument, start: number, end: number): AudioDocument {
+  const zeros = doc.channels.map(() => new Float32Array(end - start));
+  return replaceRegion(doc, start, end, zeros);
+}
+
+/**
+ * Copies the selection — or, with none, the SEGMENT the cursor is in (item 8 /
+ * M3: the span between the two nearest markers, 0 and the document end
+ * counting as boundaries; `cursorSegment`) — to the clipboard, then leaves
+ * that span EMPTY at the same length (item 7 / M1): the document never
+ * ripples, so markers inside and after the span stay where they are and no
+ * remap is passed. The selection collapses to a cursor at the span's start.
+ * A no-op with neither a selection nor an interior marker (N9).
+ */
 export function cutSelection(): void {
   const doc = activeDoc();
-  const selection = useAppStore.getState().selection;
-  if (!doc || !selection) return;
-  const { start, end } = resolveSelection(doc, selection);
+  if (!doc) return;
+  const s = useAppStore.getState();
+  const region = s.selection ? resolveSelection(doc, s.selection) : cursorSegment(s);
+  if (!region) return;
+  const { start, end } = region;
   setClipboard({ channels: cloneRegion(doc, start, end), sampleRate: doc.sampleRate });
-  applyEdit(
-    'Cut',
-    doc.id,
-    (d) => deleteRegion(d, start, end),
-    { selection: null, cursorSample: start },
-    { type: 'delete', start, end }
-  );
+  applyEdit('Cut', doc.id, (d) => zeroFillRegion(d, start, end), {
+    selection: null,
+    cursorSample: start,
+  });
+}
+
+/**
+ * Split at Cursor (item 8 / M1): drops a marker at the cursor — or one at each
+ * edge of the selection — named `Split N` (N9, the `marker.add` naming scheme),
+ * as ONE History entry. Positions are consumed verbatim, never snapped (N1);
+ * the resolved selection edges are used, not the raw pair. A position at 0 or
+ * at the document end is implicit (M3) and a position that already carries a
+ * marker is skipped; when nothing is left nothing is recorded. Selection and
+ * cursor are not touched.
+ */
+export function splitAtCursor(): void {
+  const doc = activeDoc();
+  if (!doc) return;
+  const s = useAppStore.getState();
+  const length = docLength(doc);
+  let positions: number[];
+  if (s.selection) {
+    const { start, end } = resolveSelection(doc, s.selection);
+    positions = [start, end];
+  } else {
+    positions = [Math.min(Math.max(s.cursorSample, 0), length)];
+  }
+  const before = s.markers[doc.id] ?? [];
+  const taken = new Set(before.map((m) => m.positionSample));
+  const fresh = [...new Set(positions)].filter((p) => p !== 0 && p !== length && !taken.has(p));
+  if (fresh.length === 0) return;
+  for (const positionSample of fresh) {
+    const id = nextId('marker');
+    s.addMarker(doc.id, { id, name: `Split ${id.split('-')[1]}`, positionSample });
+  }
+  const after = useAppStore.getState().markers[doc.id] ?? [];
+  pushMarkerUndo('Split', doc.id, before, after);
 }
 
 /** Copies the selection to the clipboard without changing the document. */
@@ -408,14 +457,35 @@ export function pasteAtCursor(): void {
   }
 }
 
-/** Removes the selection without touching the clipboard. Requires a selection. */
+/**
+ * Silences the selection in place at the same length and collapses it to a
+ * cursor at its start, without touching the clipboard (item 7 / N6). No remap:
+ * the timeline did not move, so every marker — including one inside the span —
+ * stays exactly where it was. Requires a selection.
+ */
 export function deleteSelection(): void {
   const doc = activeDoc();
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
   const { start, end } = resolveSelection(doc, selection);
+  applyEdit('Delete', doc.id, (d) => zeroFillRegion(d, start, end), {
+    selection: null,
+    cursorSample: start,
+  });
+}
+
+/**
+ * The pre-item-7 Delete, verbatim (N8): removes the selection and closes the
+ * gap, shortening the document, with the 'delete' marker remap riding in the
+ * same undo entry. Behind Shift+Del in the editor views. Requires a selection.
+ */
+export function rippleDeleteSelection(): void {
+  const doc = activeDoc();
+  const selection = useAppStore.getState().selection;
+  if (!doc || !selection) return;
+  const { start, end } = resolveSelection(doc, selection);
   applyEdit(
-    'Delete',
+    'Ripple Delete',
     doc.id,
     (d) => deleteRegion(d, start, end),
     { selection: null, cursorSample: start },
@@ -447,7 +517,6 @@ export function silenceSelection(): void {
   const selection = useAppStore.getState().selection;
   if (!doc || !selection) return;
   const { start, end } = resolveSelection(doc, selection);
-  const zeros = doc.channels.map(() => new Float32Array(end - start));
   // No `after`: leaving selection/cursor as-is preserves them (and redo restores them).
-  applyEdit('Silence', doc.id, (d) => replaceRegion(d, start, end, zeros));
+  applyEdit('Silence', doc.id, (d) => zeroFillRegion(d, start, end));
 }

@@ -29,12 +29,12 @@ import { ChromePill } from '../UI/glass';
  * Visibility (the user's rule, final): present in Waveform, Spectral AND
  * Multitrack whenever at least one sound file is loaded; hidden only in the
  * empty app. Per-button greying does the rest — no selection greys
- * Cut/Copy/Delete/Trim/Silence, an empty clipboard greys Paste, and Undo/Redo
+ * Copy/Delete/Trim/Silence, an empty clipboard greys Paste, and Undo/Redo
  * follow whichever history is active (`edit.undo`'s predicate already routes
  * to the SESSION's history in the multitrack view and the document's
  * elsewhere, which is exactly the rule wanted here).
  *
- * F1: the five REGION verbs — Cut, Copy, Paste, Trim, Silence — are greyed in
+ * F1: the four REGION verbs — Copy, Paste, Trim, Silence — are greyed in
  * the Multitrack view because their COMMANDS are disabled there, not because
  * this pill says so. Each edits a region of the active document, which that
  * view does not show; Trim and Silence used to stay lit and would destroy the
@@ -57,11 +57,16 @@ export interface EditToolbarItem {
   title: string;
 }
 
-/** Cut · Copy · Paste · Delete │ Trim · Silence │ Undo · Redo — the mockup's
+/** Split · Copy · Paste · Delete │ Trim · Silence │ Undo · Redo — the mockup's
  * three groups, in its order, on lucide line icons (the app's rule: never
  * emoji). Exported so the tests name the same eight the pill draws. */
 export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
-  { label: 'Cut', commandId: 'edit.cut', Icon: Scissors, regionVerb: true, title: 'Cut (Ctrl+X)' },
+  {
+    label: 'Split',
+    commandId: 'edit.split',
+    Icon: Scissors,
+    title: 'Split at Cursor (Ctrl+K) — a marker at the cursor, or at both edges of the selection',
+  },
   { label: 'Copy', commandId: 'edit.copy', Icon: Copy, regionVerb: true, title: 'Copy (Ctrl+C)' },
   {
     label: 'Paste',

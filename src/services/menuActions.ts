@@ -19,9 +19,12 @@ import {
   pasteAtCursor,
   deleteSelection,
   pushMarkerUndo,
+  rippleDeleteSelection,
   silenceSelection,
+  splitAtCursor,
   trimToSelection,
 } from './editOps';
+import { cursorSegment } from './segments';
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { canRedoSession, canUndoSession, redoSession, undoSession } from '../multitrack/sessionUndo';
 import { getClipboard } from './clipboard';
@@ -143,6 +146,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.undo',
       'edit.redo',
       'separator',
+      // Item 8 (M1): Split at Cursor is the row before Cut — the verb that
+      // makes the segments Ctrl+X then cuts.
+      'edit.split',
       'edit.cut',
       'edit.copy',
       'edit.paste',
@@ -601,10 +607,28 @@ function registerEditCommands(): void {
       },
     },
     {
+      id: 'edit.split',
+      label: 'Split at Cursor',
+      shortcut: 'Ctrl+K',
+      // M1: one view-routed command. The multitrack arm (M2/N2-N5) is lot D's;
+      // until it lands the command reports disabled there.
+      enabled: (s) => (s.view === 'multitrack' ? false : activeDoc(s) !== null),
+      run: async () => {
+        if (useAppStore.getState().view === 'multitrack') return; // lot D
+        splitAtCursor();
+      },
+    },
+    {
       id: 'edit.cut',
       label: 'Cut',
       shortcut: 'Ctrl+X',
-      enabled: canEditRegion,
+      // Item 8 (M1/N9): with no selection, Ctrl+X cuts the segment the cursor
+      // is in, so it is live whenever there is a selection OR an interior
+      // marker to bound one. Still never in multitrack (M7).
+      enabled: (s) =>
+        isDocumentEditView(s) &&
+        activeDoc(s) !== null &&
+        (s.selection !== null || cursorSegment(s) !== null),
       run: async () => cutSelection(),
     },
     {
@@ -623,7 +647,8 @@ function registerEditCommands(): void {
     },
     {
       // In the multitrack view, Delete removes the selected clip; elsewhere it
-      // deletes the active document's selected region (Task 22 view routing).
+      // silences the selected region in place at constant length (item 7;
+      // Task 22 view routing).
       //
       // K1: "the selected clip" is now "the selection", which may hold several
       // clips across several tracks. The predicate is unchanged — the set is
@@ -652,16 +677,24 @@ function registerEditCommands(): void {
       // a bad take out of the middle of an arrangement is the reason it exists;
       // plain Delete leaves the hole.
       //
-      // Multitrack-only, with no editor counterpart: a ripple over a document
-      // REGION is a different feature (it would rewrite the audio), and it is
-      // out of K1's scope. The command reports disabled in the editor views
-      // rather than quietly doing the wrong thing there.
+      // Item 7 (N8): view-routed like Delete. In the editor views it is the
+      // pre-item-7 Delete — remove the selection and close the gap, the one
+      // editor edit besides Trim that shortens the file — now that plain
+      // Delete silences the span in place at constant length.
       id: 'edit.rippleDelete',
       label: 'Ripple Delete',
       shortcut: 'Shift+Del',
       enabled: (s) =>
-        s.view === 'multitrack' && useSessionStore.getState().selectedClipId !== null,
-      run: async () => rippleDeleteClips(useSessionStore.getState().selectedClipIds),
+        s.view === 'multitrack'
+          ? useSessionStore.getState().selectedClipId !== null
+          : hasSelection(s),
+      run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          rippleDeleteClips(useSessionStore.getState().selectedClipIds);
+          return;
+        }
+        rippleDeleteSelection();
+      },
     },
     {
       /**
@@ -729,6 +762,12 @@ function registerEditCommands(): void {
     },
   ]);
 }
+
+// ---- lot C ----
+// Items 7 and 8 (editor edit verbs). The segment model the `edit.cut`
+// predicate and `cutSelection` share lives in `./segments` (`cursorSegment`);
+// no helper of this lot lives in this file.
+// ---- end lot C ----
 
 /** Registers the real File > * commands (Task 11), overwriting the disabled
  * stubs. New/Open are always available. Lot A (M4): Save / Save As write the
@@ -1114,7 +1153,8 @@ function registerMarkerCommands(): void {
       id: 'marker.add',
       label: 'Add Marker',
       shortcut: 'M',
-      enabled: (s) => activeDoc(s) !== null,
+      // N10: editor views only — Multitrack shows no document for M to mark.
+      enabled: (s) => s.view !== 'multitrack' && activeDoc(s) !== null,
       run: async () => {
         const { activeDocumentId, cursorSample, markers, addMarker } = useAppStore.getState();
         if (!activeDocumentId) return;

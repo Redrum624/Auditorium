@@ -25,11 +25,12 @@ finishes. Mouse interaction is never suspended by either.
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` | Redo |
 | `Ctrl+Y` | Redo |
-| `Ctrl+X` | Cut |
+| `Ctrl+K` | Split at Cursor — a marker at the cursor, or at both edges of the selection |
+| `Ctrl+X` | Cut the selection (or the cursor's segment) to the clipboard, leaving the span silent at the same length |
 | `Ctrl+C` | Copy |
 | `Ctrl+V` | Paste |
-| `Delete` | Delete selection (or every selected multitrack clip) |
-| `Shift+Delete` | Ripple Delete — multitrack only: remove the selected clip(s) and close the gap |
+| `Delete` | Silence the selection in place at the same length (or remove every selected multitrack clip, leaving the gap) |
+| `Shift+Delete` | Ripple Delete — editor: remove the selection and close the gap; multitrack: remove the selected clip(s) and close the gap |
 | `Ctrl+A` | Select All — the whole file in the editor; **every clip on every track** in the multitrack view |
 | `Ctrl+Left` | Previous clip edge — multitrack only |
 | `Ctrl+Right` | Next clip edge — multitrack only |
@@ -40,18 +41,20 @@ finishes. Mouse interaction is never suspended by either.
 | `Ctrl+Shift+S` | Save project As… |
 | `Ctrl+N` | New… |
 | `Ctrl+W` | Close |
-| `M` | Add Marker at the cursor |
+| `M` | Add Marker at the cursor (editor views only) |
 | `Ctrl+E` | Export… |
 | `Escape` | Deselect |
 
 ## The multitrack-only rows
 
-`Shift+Delete`, `Ctrl+Left` and `Ctrl+Right` address the **session timeline**,
-and their commands report disabled anywhere else — pressed in the waveform or
-spectral editor they do nothing at all, rather than doing something to a
-document you cannot see. There is one global key table and no per-view table
-beside it: every key runs a command, and a command re-checks its own predicate
-before it runs, which is what makes a view-scoped key inert outside its view.
+`Ctrl+Left` and `Ctrl+Right` address the **session timeline**, and their
+commands report disabled anywhere else — pressed in the waveform or spectral
+editor they do nothing at all, rather than doing something to a document you
+cannot see. There is one global key table and no per-view table beside it:
+every key runs a command, and a command re-checks its own predicate before it
+runs, which is what makes a view-scoped key inert outside its view.
+(`Shift+Delete` used to be in this list; it now ripples the editor's selection
+too — see the table above.)
 
 The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 
