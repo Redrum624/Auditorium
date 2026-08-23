@@ -242,8 +242,9 @@ you already have: nothing here does anything the menu and the keyboard do not.
 `Split · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
 
 - **Split** is `Ctrl+K` — a marker at the cursor, or one at each edge of the
-  selection. It needs only an open file, so it is the one button in the first
-  group that stays lit with nothing selected.
+  selection. In Waveform and Spectral it needs only an open file, so it is the
+  one button in the first group that stays lit with nothing selected; in
+  Multitrack it needs a selected clip (see below).
 - **Trim** keeps the selected region and drops everything else;
   **Silence** zeroes the selected region in place, leaving the length alone.
   Both are undoable History steps like any other edit, and both are also in
@@ -271,9 +272,10 @@ you already have: nothing here does anything the menu and the keyboard do not.
 
 Press `M` (or **Edit → Add Marker**) to drop a marker named `Marker N` at the
 current cursor position; `Ctrl+K` (**Split at Cursor**) drops one named
-`Split N` at the cursor or at both edges of the selection. Both are editor
-commands: in the Multitrack view `M` does nothing, since the document it
-would mark is not on screen there. Every marker — whichever command, panel
+`Split N` at the cursor or at both edges of the selection. `M` is an editor
+command: in the Multitrack view it does nothing, since the document it
+would mark is not on screen there. `Ctrl+K` is routed by view: in Multitrack
+it splits clips instead (see *Splitting clips*). Every marker — whichever command, panel
 or analysis wrote it — is a **segment boundary**: a double-click on the
 canvas selects the span between the two nearest markers, and `Ctrl+X` with
 no selection cuts that span. The **Markers** panel (opened from the module strip) lists every
