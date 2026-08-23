@@ -4,6 +4,8 @@ import {
   copySelection,
   pasteAtCursor,
   deleteSelection,
+  rippleDeleteSelection,
+  splitAtCursor,
   trimToSelection,
   silenceSelection,
   pushMarkerUndo,
@@ -228,7 +230,10 @@ describe('applyEdit — undo entry bytes accounting (Task M9 fix round 1 + round
 });
 
 describe('cutSelection', () => {
-  it('copies the region to the clipboard, removes it, and collapses selection to the cut start', () => {
+  // Item 7 (M1): Cut leaves the span EMPTY at identical length — the document
+  // never ripples. What used to be `[1,2,6,7,8,9,10]` (length 7) is now the
+  // same ten samples with the cut ones zeroed.
+  it('with a selection: copies the region to the clipboard, zero-fills it in place, and collapses selection to the cut start', () => {
     const doc = addDoc([ramp(10)]);
     const originalChannel = doc.channels[0];
     useAppStore.getState().setSelection({ start: 2, end: 5 });
@@ -237,20 +242,168 @@ describe('cutSelection', () => {
 
     expect(getClipboard()!.channels[0]).toEqual(new Float32Array([3, 4, 5]));
     expect(getClipboard()!.sampleRate).toBe(44100);
-    expect(chan()).toEqual([1, 2, 6, 7, 8, 9, 10]);
+    expect(chan()).toEqual([1, 2, 0, 0, 0, 6, 7, 8, 9, 10]);
+    expect(docLength(activeDoc())).toBe(10);
     expect(useAppStore.getState().selection).toBeNull();
     expect(useAppStore.getState().cursorSample).toBe(2);
+    expect(getHistory(doc.id).done).toEqual(['Cut']);
 
     undo(doc.id);
     expect(activeDoc().channels[0]).toBe(originalChannel);
     expect(useAppStore.getState().selection).toEqual({ start: 2, end: 5 });
   });
 
-  it('does nothing without a selection', () => {
+  // Item 8 (M1/M3/N9): with no selection, Ctrl+X cuts the SEGMENT the cursor
+  // is in — the span between the two nearest markers (0 and the document end
+  // count as boundaries). Markers are never touched: the cut is equal-length.
+  function setMarkers(docId: string, positions: number[]): void {
+    const list = positions.map((p, i) => ({ id: `m${i}`, name: `M${i}`, positionSample: p }));
+    useAppStore.getState().setMarkersForDoc(docId, list);
+  }
+
+  function markerPositions(docId: string): number[] {
+    return (useAppStore.getState().markers[docId] ?? []).map((m) => m.positionSample);
+  }
+
+  it('no selection, marker at 5, cursor 7: cuts the segment [5,10)', () => {
     const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [5]);
+    useAppStore.getState().setCursor(7);
+
+    cutSelection();
+
+    expect(getClipboard()!.channels[0].length).toBe(5);
+    expect(chan()).toEqual([1, 2, 3, 4, 5, 0, 0, 0, 0, 0]);
+    expect(useAppStore.getState().cursorSample).toBe(5);
+    expect(markerPositions(doc.id)).toEqual([5]);
+  });
+
+  it('no selection, markers [3,6], cursor 4: cuts the segment [3,6) and leaves the markers', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [3, 6]);
+    useAppStore.getState().setCursor(4);
+
+    cutSelection();
+
+    expect(getClipboard()!.channels[0]).toEqual(new Float32Array([4, 5, 6]));
+    expect(chan()).toEqual([1, 2, 3, 0, 0, 0, 7, 8, 9, 10]);
+    expect(markerPositions(doc.id)).toEqual([3, 6]);
+    expect(useAppStore.getState().selection).toBeNull();
+    expect(useAppStore.getState().cursorSample).toBe(3);
+  });
+
+  it('does nothing without a selection and without markers', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setCursor(4);
     cutSelection();
     expect(getClipboard()).toBeNull();
     expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('a marker inside a selection cut stays where it was', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [3]);
+    const before = useAppStore.getState().markers[doc.id];
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    cutSelection();
+
+    expect(markerPositions(doc.id)).toEqual([3]);
+    expect(useAppStore.getState().markers[doc.id]).toBe(before);
+  });
+});
+
+describe('splitAtCursor', () => {
+  function setMarkers(docId: string, positions: number[]): void {
+    const list = positions.map((p, i) => ({ id: `m${i}`, name: `M${i}`, positionSample: p }));
+    useAppStore.getState().setMarkersForDoc(docId, list);
+  }
+
+  function markers(docId: string) {
+    return useAppStore.getState().markers[docId] ?? [];
+  }
+
+  it('with no selection: one marker at the cursor, named "Split N", one History entry, doc dirty; undo removes it', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setCursor(4);
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([4]);
+    expect(markers(doc.id)[0].name).toMatch(/^Split \d+$/);
+    expect(getHistory(doc.id).done).toEqual(['Split']);
+    expect(activeDoc().dirty).toBe(true);
+    // The cursor and the (absent) selection are not touched.
+    expect(useAppStore.getState().cursorSample).toBe(4);
+    expect(useAppStore.getState().selection).toBeNull();
+
+    undo(doc.id);
+    expect(markers(doc.id)).toEqual([]);
+  });
+
+  it('with a selection: a marker at each edge, in ONE History entry', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setSelection({ start: 2, end: 7 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([2, 7]);
+    expect(getHistory(doc.id).done).toEqual(['Split']);
+    expect(useAppStore.getState().selection).toEqual({ start: 2, end: 7 });
+
+    undo(doc.id);
+    expect(markers(doc.id)).toEqual([]);
+  });
+
+  it('adds nothing at 0, at the document end, or on an existing marker — and records no undo entry', () => {
+    const doc = addDoc([ramp(10)]);
+
+    useAppStore.getState().setCursor(0);
+    splitAtCursor();
+    expect(markers(doc.id)).toEqual([]);
+
+    useAppStore.getState().setCursor(10);
+    splitAtCursor();
+    expect(markers(doc.id)).toEqual([]);
+
+    setMarkers(doc.id, [4]);
+    const before = markers(doc.id);
+    useAppStore.getState().setCursor(4);
+    splitAtCursor();
+    expect(markers(doc.id)).toBe(before);
+
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('a whole-document selection adds nothing', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setSelection({ start: 0, end: 10 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id)).toEqual([]);
+    expect(getHistory(doc.id).done).toEqual([]);
+  });
+
+  it('a selection starting below zero splits at the RESOLVED edge only', () => {
+    const doc = addDoc([ramp(10)]);
+    useAppStore.getState().setSelection({ start: -5, end: 3 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([3]);
+  });
+
+  it('skips an edge that already has a marker and adds the other', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [2]);
+    useAppStore.getState().setSelection({ start: 2, end: 7 });
+
+    splitAtCursor();
+
+    expect(markers(doc.id).map((m) => m.positionSample)).toEqual([2, 7]);
+    expect(markers(doc.id).filter((m) => m.positionSample === 2)).toHaveLength(1);
+    expect(getHistory(doc.id).done).toEqual(['Split']);
   });
 });
 
@@ -378,17 +531,48 @@ describe('pasteAtCursor', () => {
 });
 
 describe('deleteSelection', () => {
-  it('removes the selection like cut but leaves the clipboard alone', () => {
-    const doc = addDoc([ramp(10)]);
+  // Item 7 (N6): Delete zero-fills the span in place — the length never
+  // changes — and collapses the selection to a cursor at the span's start.
+  // The clipboard is not touched (that is what separates it from Cut).
+  it('zero-fills the span in place', () => {
+    const doc = addDoc([ramp(10), ramp(10, 10)]);
     const originalChannel = doc.channels[0];
     useAppStore.getState().setSelection({ start: 2, end: 5 });
 
     deleteSelection();
 
+    expect(chan(0)).toEqual([1, 2, 0, 0, 0, 6, 7, 8, 9, 10]);
+    expect(chan(1)).toEqual([11, 12, 0, 0, 0, 16, 17, 18, 19, 20]);
+    expect(docLength(activeDoc())).toBe(10);
+    expect(getClipboard()).toBeNull();
+    expect(useAppStore.getState().selection).toBeNull();
+    expect(useAppStore.getState().cursorSample).toBe(2);
+    expect(getHistory(doc.id).done).toEqual(['Delete']);
+
+    undo(doc.id);
+    expect(activeDoc().channels[0]).toBe(originalChannel);
+    expect(useAppStore.getState().selection).toEqual({ start: 2, end: 5 });
+
+    redo(doc.id);
+    expect(chan(0)).toEqual([1, 2, 0, 0, 0, 6, 7, 8, 9, 10]);
+  });
+});
+
+describe('rippleDeleteSelection', () => {
+  // N8: the pre-item-7 Delete, verbatim, behind Shift+Del — the ONLY editor
+  // verb besides Trim that shortens the document.
+  it('removes the selection like the old Delete did, leaves the clipboard alone, labelled Ripple Delete', () => {
+    const doc = addDoc([ramp(10)]);
+    const originalChannel = doc.channels[0];
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    rippleDeleteSelection();
+
     expect(chan()).toEqual([1, 2, 6, 7, 8, 9, 10]);
     expect(getClipboard()).toBeNull();
     expect(useAppStore.getState().selection).toBeNull();
     expect(useAppStore.getState().cursorSample).toBe(2);
+    expect(getHistory(doc.id).done).toEqual(['Ripple Delete']);
 
     undo(doc.id);
     expect(activeDoc().channels[0]).toBe(originalChannel);
@@ -523,7 +707,7 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
     const before = useAppStore.getState().markers[doc.id];
     useAppStore.getState().setSelection({ start: 2, end: 5 });
 
-    deleteSelection();
+    rippleDeleteSelection(); // item 7: the 'delete' remap now rides the ripple verb
 
     // 0,1 kept as-is; 2,4 dropped (inside [2,5)); 5->2 and 8->5 (>= e shift by -3).
     expect(markerPositions(doc.id)).toEqual([0, 1, 2, 5]);
@@ -648,7 +832,7 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
     expect(useAppStore.getState().markers[doc.id]).toBeUndefined();
     useAppStore.getState().setSelection({ start: 2, end: 5 });
 
-    deleteSelection();
+    deleteSelection(); // item 7: equal-length and remap-less, so this must still hold
 
     expect(useAppStore.getState().markers[doc.id]).toBeUndefined();
 
@@ -664,7 +848,7 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
     setMarkers(doc.id, [10]); // edge marker at docLength (e.g. from a clamped-on-read import)
     useAppStore.getState().setSelection({ start: 2, end: 5 }); // delete 3 samples -> newLength 7
 
-    deleteSelection();
+    rippleDeleteSelection();
 
     expect(markerPositions(doc.id)).toEqual([7]); // 10 - 3 = 7 = newLength exactly
   });
@@ -772,13 +956,31 @@ describe('marker remap on destructive edits (Task M3 / F4)', () => {
     expect(useAppStore.getState().markers[doc.id]).toEqual(before);
   });
 
+  it('Delete is equal-length: markers inside and after the span stay (item 7 / N6)', () => {
+    const doc = addDoc([ramp(10)]);
+    setMarkers(doc.id, [1, 4, 8]);
+    const before = useAppStore.getState().markers[doc.id];
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    deleteSelection();
+
+    expect(markerPositions(doc.id)).toEqual([1, 4, 8]);
+    // No remap, no marker snapshot, no store write: the SAME array reference.
+    expect(useAppStore.getState().markers[doc.id]).toBe(before);
+
+    undo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toBe(before);
+    redo(doc.id);
+    expect(useAppStore.getState().markers[doc.id]).toBe(before);
+  });
+
   it('a delete that drops ALL markers still writes the empty list (and undo restores it) — pins the OR guard, not AND (Minor 1 pin)', () => {
     const doc = addDoc([ramp(10)]);
     setMarkers(doc.id, [2, 3, 4]); // all inside the region about to be deleted
     const before = useAppStore.getState().markers[doc.id];
     useAppStore.getState().setSelection({ start: 0, end: 10 }); // whole doc: every marker drops
 
-    deleteSelection();
+    rippleDeleteSelection();
 
     // pre non-empty, post empty: the guard (currentMarkers.length>0 || remapped.length>0)
     // must still fire on the `currentMarkers` side alone, so the empty result is
@@ -946,32 +1148,57 @@ describe('out-of-bounds selections resolve ONCE (clamp family, fifth application
     expect(out[LEN - 1]).toBe(0); // zeroed to the true end of the document
   });
 
-  it('Cut with a start below zero remaps markers and the cursor against the region the audio used', () => {
+  it('Cut with a start below zero keeps the length and places the cursor from the resolved start', () => {
     const doc = addDoc([ramp(LEN)]);
     setMarkers(doc.id, [500]);
     useAppStore.getState().setSelection({ start: -5000, end: 100 });
 
     cutSelection();
 
-    // Audio removes [0,100); the marker at 500 therefore lands at 400. Against
-    // the raw pair the 'delete' remap shifted it by 5100, into the floor at 0.
-    expect(docLength(activeDoc())).toBe(LEN - 100);
-    expect(markerPositions(doc.id)).toEqual([400]);
+    // Item 7: the audio zeroes [0,100) in place — nothing moves, so the marker
+    // at 500 stays at 500; the cursor and the clipboard still read the RESOLVED
+    // region, not the raw pair.
+    expect(docLength(activeDoc())).toBe(LEN);
+    expect(markerPositions(doc.id)).toEqual([500]);
     expect(useAppStore.getState().cursorSample).toBe(0); // not -5000
     expect(getClipboard()!.channels[0].length).toBe(100);
+    const out = activeDoc().channels[0];
+    for (let i = 0; i < 100; i++) expect(out[i]).toBe(0);
+    expect(out[100]).toBe(101);
   });
 
-  it('Delete with a start below zero shifts by what was removed, not by the raw span', () => {
+  it('Delete with a start below zero keeps the length', () => {
     const doc = addDoc([ramp(LEN)]);
     setMarkers(doc.id, [1000]);
     useAppStore.getState().setSelection({ start: -100, end: 200 });
 
     deleteSelection();
 
-    // Removed [0,200) -> 1000 lands at 800. The raw span (300) gave 700.
-    expect(docLength(activeDoc())).toBe(LEN - 200);
-    expect(markerPositions(doc.id)).toEqual([800]);
+    // Item 7: zeroes [0,200) in place; the marker at 1000 does not move.
+    expect(docLength(activeDoc())).toBe(LEN);
+    const out = activeDoc().channels[0];
+    for (let i = 0; i < 200; i++) expect(out[i]).toBe(0);
+    expect(out[200]).toBe(201);
+    expect(markerPositions(doc.id)).toEqual([1000]);
     expect(useAppStore.getState().cursorSample).toBe(0); // not -100
+  });
+
+  it('Delete with an end past the document keeps the length', () => {
+    const doc = addDoc([ramp(LEN)]);
+    setMarkers(doc.id, [500]);
+    useAppStore.getState().setSelection({ start: 1000, end: 9000 });
+
+    deleteSelection();
+
+    // The mirror of the Silence case above: the zeros allocation must be sized
+    // by the RESOLVED region, or the document would grow 4000 -> 12000.
+    expect(docLength(activeDoc())).toBe(LEN);
+    const out = activeDoc().channels[0];
+    expect(out[999]).toBe(1000);
+    expect(out[1000]).toBe(0);
+    expect(out[LEN - 1]).toBe(0);
+    expect(markerPositions(doc.id)).toEqual([500]);
+    expect(useAppStore.getState().cursorSample).toBe(1000);
   });
 
   it('Trim with a start below zero shifts markers by the kept region start, not by the raw one', () => {

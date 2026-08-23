@@ -55,7 +55,7 @@
  * Each sub-pass keeps its OWN undo entry, the chains' own precedent: "Vocal
  * Chain" and "Cover Chain" are two entries on the take, the stem documents are
  * creations rather than edits (nothing to undo), and the session replacement is
- * load-shaped and clears session history exactly as Open Session and stem
+ * load-shaped and clears session history exactly as Open Project and stem
  * landing do. The report lists every entry the pass left.
  *
  * ONE undo entry across all of it is NOT attempted, and that is a decision
@@ -905,7 +905,7 @@ export async function runCoverJourney(
     // adopted only when `holdsExactly` proves it already IS the sum this pass
     // computed, which makes reuse a no-op that cannot destroy anything — see
     // that function for why a content test rather than a provenance one is the
-    // only thing that survives a Save Session and reopen. Anything else — the
+    // only thing that survives a project save and reopen. Anything else — the
     // user's edit, a stale sum, another song's — is left exactly where it is and
     // this pass creates its own document beside it.
     //
@@ -1400,6 +1400,8 @@ export async function runCoverJourney(
       mtZoom: defaultSessionZoom(session),
       mtPlayState: 'stopped',
       mtPlayheadSample: 0,
+      // Lot A (M4): a cover session is a new, unsaved project.
+      projectPath: null,
     });
     // MT1 (I7) deleted `clipWaveformCache` and its eight call sites: clips now
     // draw straight to the on-screen canvas, so nothing produces an entry and

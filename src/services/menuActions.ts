@@ -5,11 +5,16 @@ import {
   applySessionZoom,
   removeClips,
   rippleDeleteClips,
+  splitClipsAt,
+  splitTargets,
   useSessionStore,
 } from '../multitrack/sessionStore';
 import { clipBoundaries, nextClipEdge } from '../multitrack/clipEdges'; // K1
 import { sessionEndSample } from '../multitrack/sessionZoom'; // T5
 import { sessionLaneWidth } from '../multitrack/sessionViewport'; // T5
+import { clipSourceWindow } from '../multitrack/session'; // lot E
+import { resolveRegion } from './selectionRegion'; // lot E
+import { editorLaneWidth } from './editorViewport'; // lot E
 import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { mixdownSession } from '../multitrack/mixdown';
 import { canRecord, transportPlayPause, transportRecord, transportStop } from './transportService';
@@ -19,14 +24,17 @@ import {
   pasteAtCursor,
   deleteSelection,
   pushMarkerUndo,
+  rippleDeleteSelection,
   silenceSelection,
+  splitAtCursor,
   trimToSelection,
 } from './editOps';
+import { cursorSegment } from './segments';
 import { canRedo, canUndo, redo, undo } from './undoHistory';
 import { canRedoSession, canUndoSession, redoSession, undoSession } from '../multitrack/sessionUndo';
 import { getClipboard } from './clipboard';
-import { closeDocumentFlow, hasUnsavedWork, openFilesViaDialog, saveDocument } from './fileService';
-import { openSessionViaDialog, saveSessionViaDialog } from '../multitrack/sessionFile';
+import { closeDocumentFlow, openFilesViaDialog, projectHasUnsavedWork } from './fileService';
+import { openSessionViaDialog, saveProject } from '../multitrack/sessionFile';
 import {
   openConvertDialog,
   openEffectDialog,
@@ -130,7 +138,7 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'file.save',
       'file.saveAs',
       'file.export',
-      'session.save',
+      // lot A (M4): `session.save` is folded into Save As — no duplicate rows.
       'session.open',
       'multitrack.mixdown',
       'separator',
@@ -143,6 +151,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.undo',
       'edit.redo',
       'separator',
+      // Item 8 (M1): Split at Cursor is the row before Cut — the verb that
+      // makes the segments Ctrl+X then cuts.
+      'edit.split',
       'edit.cut',
       'edit.copy',
       'edit.paste',
@@ -601,10 +612,32 @@ function registerEditCommands(): void {
       },
     },
     {
+      id: 'edit.split',
+      label: 'Split at Cursor',
+      shortcut: 'Ctrl+K',
+      // M1: one view-routed command - a marker at the cursor in the editors,
+      // a clip split at the edit cursor in the multitrack (M2/N1-N5, see the
+      // `canSplitAtMtCursor` region below).
+      enabled: (s) => (s.view === 'multitrack' ? canSplitAtMtCursor() : activeDoc(s) !== null),
+      run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          splitSelectedTracksAtMtCursor();
+          return;
+        }
+        splitAtCursor();
+      },
+    },
+    {
       id: 'edit.cut',
       label: 'Cut',
       shortcut: 'Ctrl+X',
-      enabled: canEditRegion,
+      // Item 8 (M1/N9): with no selection, Ctrl+X cuts the segment the cursor
+      // is in, so it is live whenever there is a selection OR an interior
+      // marker to bound one. Still never in multitrack (M7).
+      enabled: (s) =>
+        isDocumentEditView(s) &&
+        activeDoc(s) !== null &&
+        (s.selection !== null || cursorSegment(s) !== null),
       run: async () => cutSelection(),
     },
     {
@@ -623,7 +656,8 @@ function registerEditCommands(): void {
     },
     {
       // In the multitrack view, Delete removes the selected clip; elsewhere it
-      // deletes the active document's selected region (Task 22 view routing).
+      // silences the selected region in place at constant length (item 7;
+      // Task 22 view routing).
       //
       // K1: "the selected clip" is now "the selection", which may hold several
       // clips across several tracks. The predicate is unchanged — the set is
@@ -652,16 +686,24 @@ function registerEditCommands(): void {
       // a bad take out of the middle of an arrangement is the reason it exists;
       // plain Delete leaves the hole.
       //
-      // Multitrack-only, with no editor counterpart: a ripple over a document
-      // REGION is a different feature (it would rewrite the audio), and it is
-      // out of K1's scope. The command reports disabled in the editor views
-      // rather than quietly doing the wrong thing there.
+      // Item 7 (N8): view-routed like Delete. In the editor views it is the
+      // pre-item-7 Delete — remove the selection and close the gap, the one
+      // editor edit besides Trim that shortens the file — now that plain
+      // Delete silences the span in place at constant length.
       id: 'edit.rippleDelete',
       label: 'Ripple Delete',
       shortcut: 'Shift+Del',
       enabled: (s) =>
-        s.view === 'multitrack' && useSessionStore.getState().selectedClipId !== null,
-      run: async () => rippleDeleteClips(useSessionStore.getState().selectedClipIds),
+        s.view === 'multitrack'
+          ? useSessionStore.getState().selectedClipId !== null
+          : hasSelection(s),
+      run: async () => {
+        if (useAppStore.getState().view === 'multitrack') {
+          rippleDeleteClips(useSessionStore.getState().selectedClipIds);
+          return;
+        }
+        rippleDeleteSelection();
+      },
     },
     {
       /**
@@ -730,16 +772,21 @@ function registerEditCommands(): void {
   ]);
 }
 
+// ---- lot C ----
+// Items 7 and 8 (editor edit verbs). The segment model the `edit.cut`
+// predicate and `cutSelection` share lives in `./segments` (`cursorSegment`);
+// no helper of this lot lives in this file.
+// ---- end lot C ----
+
 /** Registers the real File > * commands (Task 11), overwriting the disabled
- * stubs. New/Open are always available; Save/Save As/Export/Close require an
- * active document. New and Export open React dialogs via the dialog bus; the
- * rest drive the fileService flows. run() is async so awaits propagate. */
+ * stubs. New/Open are always available. Lot A (M4): Save / Save As write the
+ * `.audm` PROJECT in every view — Save is gated on the project's unsaved
+ * work, Save As is always available; Export and Close require an active
+ * document (Export in the multitrack view follows the session instead — M5).
+ * New and Export open React dialogs via the dialog bus; the rest drive the
+ * fileService / sessionFile flows. run() is async so awaits propagate. */
 function registerFileCommands(): void {
   const hasDoc = (s: AppState) => activeDoc(s) !== null;
-  const hasUnsavedActiveDoc = (s: AppState) => {
-    const doc = activeDoc(s);
-    return doc !== null && hasUnsavedWork(doc);
-  };
   const activeId = () => useAppStore.getState().activeDocumentId;
   registerCommands([
     {
@@ -762,34 +809,40 @@ function registerFileCommands(): void {
       id: 'file.save',
       label: 'Save',
       shortcut: 'Ctrl+S',
-      // Not `hasDoc`: Save re-encodes the whole document and overwrites its
-      // source file, so on a document with nothing to save it is a destructive
-      // no-op — and it was reachable by a stray click on a pill 3 px from
-      // Open, and by Ctrl+S at any moment. Gated on the SAME predicate the
-      // close guard prompts on (`hasUnsavedWork` = dirty or never written), so
-      // "the app would warn me about losing this" and "Save does something"
-      // are one condition rather than two that can disagree.
-      enabled: hasUnsavedActiveDoc,
+      // Lot A (M4): Save writes the PROJECT — the session plus every open
+      // document — in every view. Gated on the SAME predicate the close guard
+      // counts (`projectHasUnsavedWork`: any document dirty, the session
+      // dirty, or a never-written project with content), so "the app would
+      // warn me about losing this" and "Save does something" stay one
+      // condition rather than two that can disagree (O1-2's rule, lifted from
+      // the document to the project).
+      enabled: () => projectHasUnsavedWork(),
       run: async () => {
-        const id = activeId();
-        if (id) await saveDocument(id);
+        await runProjectSave(false);
       },
     },
     {
       id: 'file.saveAs',
       label: 'Save As…',
       shortcut: 'Ctrl+Shift+S',
-      enabled: hasDoc,
+      // An explicit "write this project to a file I am about to name"
+      // gesture — meaningful with nothing open and nothing dirty, the same
+      // reasoning the document Save As had.
+      enabled: () => true,
       run: async () => {
-        const id = activeId();
-        if (id) await saveDocument(id, true);
+        await runProjectSave(true);
       },
     },
     {
       id: 'file.export',
       label: 'Export…',
       shortcut: 'Ctrl+E',
-      enabled: hasDoc,
+      // Lot A (M5): in the multitrack view Export renders the session mixdown,
+      // so it follows the session (clips exist) rather than the active
+      // document. Known, accepted staleness: MenuBar does not subscribe to the
+      // session store, so an OPEN File menu re-greys this on the next
+      // appStore/history change — the same as `multitrack.mixdown` today.
+      enabled: (s) => (s.view === 'multitrack' ? sessionHasClips() : hasDoc(s)),
       run: async () => openExportDialog(),
     },
     {
@@ -805,42 +858,46 @@ function registerFileCommands(): void {
   ]);
 }
 
-/** Registers the multitrack session commands (Task 21): `session.save` writes
- * the current session as .audm and is only enabled while the multitrack view
- * is active (there's nothing meaningful to save otherwise); `session.open` is
- * always available and switches the view to 'multitrack' on success.
+// ---- lot A ----
+/** File → Save / Save As… (M4): F3 defense-in-depth, moved here from the
+ * former `session.save` row. `runCommand` has no try/catch of its own, and
+ * `saveProject` already catches its own known failure points, but this keeps
+ * ANY escaping error in front of the user instead of vanishing through
+ * MenuBar's onClick. A hoisted declaration, so `registerFileCommands` above
+ * reaches it the way it reaches `sessionHasClips` below. */
+async function runProjectSave(as: boolean): Promise<void> {
+  try {
+    await saveProject({ as });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await window.electronAPI?.showMessageBox({ type: 'error', title: 'Save Project failed', message });
+  }
+}
+// ---- end lot A ----
+
+/** Registers the project command that is not a `file.*` row (Task 21, lot A):
+ * `session.open` — File → Open Project… — is always available, restores every
+ * embedded document into the Files panel and switches the view to
+ * 'multitrack' on success. The former `session.save` row is folded into
+ * File → Save As… (M4: Save is the project in every view).
  *
  * F3 defense-in-depth: `runCommand` has no try/catch of its own, and before
- * this a thrown/rejected save or open propagated straight out through
- * MenuBar's onClick with nothing visible to the user (no .audm written, no
- * error). `saveSessionViaDialog`/`openSessionViaDialog` already catch their
- * own known failure points, but this wrapper ensures ANY escaping error —
- * known or not — still ends up in front of the user instead of vanishing. */
+ * this a thrown/rejected open propagated straight out through MenuBar's
+ * onClick with nothing visible to the user. `openSessionViaDialog` already
+ * catches its own known failure points, but this wrapper ensures ANY
+ * escaping error — known or not — still ends up in front of the user. */
 function registerSessionCommands(): void {
   registerCommands([
     {
-      id: 'session.save',
-      label: 'Save Session…',
-      enabled: (s) => s.view === 'multitrack',
-      run: async () => {
-        try {
-          await saveSessionViaDialog();
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Save Session failed', message });
-        }
-      },
-    },
-    {
       id: 'session.open',
-      label: 'Open Session…',
+      label: 'Open Project…',
       enabled: () => true,
       run: async () => {
         try {
           await openSessionViaDialog();
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Open Session failed', message });
+          await window.electronAPI?.showMessageBox({ type: 'error', title: 'Open Project failed', message });
         }
       },
     },
@@ -873,6 +930,55 @@ export function registerEffectCommands(): void {
   registerCommands(cmds);
 }
 
+// ---- lot E ----
+/**
+ * Item 4 (N14) — leaving the MULTITRACK view for an editor view with a clip
+ * selected shows that clip: its source document becomes active, its source
+ * window is selected, the cursor sits at the window's start and the zoom is
+ * fitted to the window. Lives here and not in `appStore.setView` because (a)
+ * appStore cannot import sessionStore (cycle through undoHistory.ts) and (b)
+ * the other multitrack leavers — the panels' "go to" and the producers that
+ * `addDocument` then `setView('waveform')` — need the active document left
+ * alone. Only the PRIMARY `selectedClipId` counts (a set may span documents;
+ * the Properties panel shows the primary too). An orphan clip (source closed)
+ * falls through to a plain `setView`.
+ */
+export function showEditorView(v: 'waveform' | 'spectral'): void {
+  const app = useAppStore.getState();
+  if (app.view === 'multitrack') {
+    const { session, selectedClipId } = useSessionStore.getState();
+    const clip =
+      selectedClipId === null
+        ? null
+        : (session.tracks.flatMap((t) => t.clips).find((c) => c.id === selectedClipId) ?? null);
+    const doc = clip ? (app.documents.find((d) => d.id === clip.documentId) ?? null) : null;
+    if (clip && doc) {
+      // Activate FIRST: setActiveDocument applies activationReset (selection
+      // null, cursor 0, defaultZoom, playback stopped). Skipped for the doc
+      // that is already active — no reset, playback state untouched.
+      if (app.activeDocumentId !== doc.id) app.setActiveDocument(doc.id);
+      const { start, end } = resolveRegion(
+        doc,
+        clipSourceWindow(clip, doc.sampleRate, session.sampleRate)
+      );
+      const s = useAppStore.getState();
+      // A window clamped to nothing (clip entirely past its source) selects
+      // nothing — a zero-width selection would light Cut/Copy on no audio.
+      s.setSelection(end > start ? { start, end } : null);
+      s.setCursor(start);
+      // Fit the window across the measured lane: resolveZoom clamps spp into
+      // [MIN_SPP, fit] and the scroll into [0, length - laneWidth*spp], which
+      // for a clamped window is exactly [start, end).
+      applyEditorZoom({
+        samplesPerPixel: Math.max(1, end - start) / editorLaneWidth(),
+        scrollSample: start,
+      });
+    }
+  }
+  useAppStore.getState().setView(v);
+}
+// ---- end lot E ----
+
 /** Registers the Task 19 restoration + view commands: `noise.capture` (top of
  * the Effects menu, enabled only when a selection exists — it profiles the
  * selected region), the real `view.waveform` / `view.spectral` toggles
@@ -901,13 +1007,13 @@ function registerNoiseAndViewCommands(): void {
       id: 'view.waveform',
       label: 'Waveform',
       enabled: (s) => activeDoc(s) !== null && s.view !== 'waveform',
-      run: async () => useAppStore.getState().setView('waveform'),
+      run: async () => showEditorView('waveform'),
     },
     {
       id: 'view.spectral',
       label: 'Spectral',
       enabled: (s) => activeDoc(s) !== null && s.view !== 'spectral',
-      run: async () => useAppStore.getState().setView('spectral'),
+      run: async () => showEditorView('spectral'),
     },
     {
       id: 'view.spectralScale',
@@ -1015,6 +1121,39 @@ async function mixdownToNewFile(): Promise<void> {
   useAppStore.getState().setView('waveform');
 }
 
+// ---- lot D ----
+/** M2 - "the selected tracks": the owners of `selectedClipIds`. `SessionState`
+ * has no track selection, and the clip set is exactly what Delete, Ripple
+ * Delete and the group drag already act on, so a split reads the selection the
+ * user can already see rather than inventing a second one. */
+function selectedTrackIds(): string[] {
+  const { session, selectedClipIds } = useSessionStore.getState();
+  const member = new Set(selectedClipIds);
+  return session.tracks.filter((t) => t.clips.some((c) => member.has(c.id))).map((t) => t.id);
+}
+
+/** `edit.split`'s multitrack predicate: some clip on a selected track would be
+ * cut at `mtCursorSample` - the EDIT cursor, never `mtPlayheadSample` (N5).
+ * Reads the session store directly, exactly as `edit.delete` does, and asks
+ * `splitTargets` so the row greys for precisely the cases the store would
+ * refuse (an edge, the 32-sample margin, a point in an overlap). */
+export function canSplitAtMtCursor(): boolean {
+  const { session, mtCursorSample } = useSessionStore.getState();
+  return splitTargets(session, selectedTrackIds(), mtCursorSample).length > 0;
+}
+
+/** `edit.split`'s multitrack run: the cursor VERBATIM (N1 - it was snapped, or
+ * deliberately not, when it was placed; `moveCursorToClipEdge` below records
+ * the same ruling), plus the document rates from the app store so a
+ * mixed-rate clip's right half reads the right source sample (N3). Returns the
+ * right-half ids. */
+export function splitSelectedTracksAtMtCursor(): string[] {
+  const { mtCursorSample } = useSessionStore.getState();
+  const rates = new Map(useAppStore.getState().documents.map((d) => [d.id, d.sampleRate]));
+  return splitClipsAt(selectedTrackIds(), mtCursorSample, (id) => rates.get(id));
+}
+// ---- end lot D ----
+
 /** Registers the Task 22 multitrack commands: the real `view.multitrack`
  * toggle (always available — the multitrack view works with no open document),
  * `multitrack.addTrack`, `multitrack.insertDoc`, and `multitrack.mixdown`. The
@@ -1105,7 +1244,8 @@ function registerMarkerCommands(): void {
       id: 'marker.add',
       label: 'Add Marker',
       shortcut: 'M',
-      enabled: (s) => activeDoc(s) !== null,
+      // N10: editor views only — Multitrack shows no document for M to mark.
+      enabled: (s) => s.view !== 'multitrack' && activeDoc(s) !== null,
       run: async () => {
         const { activeDocumentId, cursorSample, markers, addMarker } = useAppStore.getState();
         if (!activeDocumentId) return;

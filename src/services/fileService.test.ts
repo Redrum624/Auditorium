@@ -6,8 +6,17 @@ import {
   newDocument,
   closeDocumentFlow,
   getInFlightSaveCount,
+  projectDirtyCount,
+  projectHasContent,
+  projectHasUnsavedWork,
+  exportSessionMixdown,
 } from './fileService';
 import { useAppStore, makeInitialState } from '../stores/appStore';
+import { useSessionStore } from '../multitrack/sessionStore';
+import { _resetSessionUndo } from '../multitrack/sessionUndo';
+import { createClip } from '../multitrack/session';
+import { mixdownSession } from '../multitrack/mixdown';
+import * as wavCodec from '../audio/wavCodec';
 import { docLength, createDocument } from '../audio/AudioDocument';
 import { decodeArrayBuffer, type DecodedAudio } from '../audio/decodeAudio';
 import { encodeMp3 } from '../audio/mp3Encoder';
@@ -20,7 +29,7 @@ import { muxOpusStream } from '../audio/oggPage';
 import * as undoHistory from './undoHistory';
 import { setEditorLaneWidth, _resetEditorLaneWidth } from './editorViewport';
 import { _resetPendingOpens, getPendingOpens } from './openProgress';
-import { pushMarkerUndo, deleteSelection } from './editOps';
+import { pushMarkerUndo, deleteSelection, rippleDeleteSelection } from './editOps';
 import * as peaksCache from './peaksCache';
 import { playbackEngine } from '../audio/PlaybackEngine';
 import { captureNoiseProfile, clearNoiseProfile, getNoiseProfile } from './noiseProfile';
@@ -133,6 +142,12 @@ function buildFakeOggWithMarkers(markers: { positionSample: number; name: string
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   jest.clearAllMocks();
+  // Lot A: the project (session store + its history + its path) is module-
+  // global too; Save is a project save now, so every test starts from an
+  // empty, never-written, clean project.
+  useSessionStore.getState().newSession(44100);
+  useSessionStore.getState().setProjectPath(null);
+  _resetSessionUndo();
   // Module-level state: a test that resizes the lane must not leave it resized
   // for the next one, whose zoom expectations are written for the 1600 px
   // fallback.
@@ -1167,13 +1182,28 @@ describe('saveDocument', () => {
     useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 8 });
     useAppStore.getState().setSelection({ start: 2, end: 5 }); // delete 3 samples
 
-    deleteSelection(); // marker at 8 (>= e=5) shifts left by (e-s)=3 -> 5
+    rippleDeleteSelection(); // marker at 8 (>= e=5) shifts left by (e-s)=3 -> 5
 
     await saveDocument(doc.id);
 
     const [, data] = api.writeFile.mock.calls[0];
     const decodedBack = decodeWav(data as ArrayBuffer);
     expect(decodedBack.markers).toEqual([{ name: 'Chorus', positionSample: 5 }]);
+  });
+
+  it('writes the cue where it was after an equal-length Delete (item 7 / N6)', async () => {
+    const api = installApi();
+    const doc = seedDoc({ filePath: 'D:\\audio\\song.wav', dirty: true, name: 'song.wav' });
+    useAppStore.getState().addMarker(doc.id, { id: 'marker-1', name: 'Chorus', positionSample: 8 });
+    useAppStore.getState().setSelection({ start: 2, end: 5 });
+
+    deleteSelection(); // zero-fills [2,5) in place: the timeline did not move
+
+    await saveDocument(doc.id);
+
+    const [, data] = api.writeFile.mock.calls[0];
+    const decodedBack = decodeWav(data as ArrayBuffer);
+    expect(decodedBack.markers).toEqual([{ name: 'Chorus', positionSample: 8 }]);
   });
 
   it('retags sourceBitDepth to 32 after an in-place WAV save of a 16-bit source (F14)', async () => {
@@ -2081,13 +2111,19 @@ describe('closeDocumentFlow', () => {
     expect(useAppStore.getState().documents).toHaveLength(0);
   });
 
-  it('saves then closes when the user picks Save', async () => {
-    const api = installApi({ showMessageBox: jest.fn(async () => 0) }); // Save
+  it('saves the PROJECT then closes when the user picks Save (lot A, M4 — acceptance 12)', async () => {
+    const api = installApi({
+      showMessageBox: jest.fn(async () => 0), // Save Project
+      showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'), // no project path yet => Save As
+    });
     const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: true, name: 'a.wav' });
 
     await closeDocumentFlow(doc.id);
 
     expect(api.writeFile).toHaveBeenCalledTimes(1);
+    const [path, data] = api.writeFile.mock.calls[0];
+    expect(path).toBe('D:\\out\\p.audm'); // the .audm, never the source audio file
+    expect(new TextDecoder().decode(new Uint8Array(data as ArrayBuffer).subarray(0, 6))).toBe('AUDM4\n');
     expect(useAppStore.getState().documents).toHaveLength(0);
   });
 
@@ -2224,8 +2260,10 @@ describe('closeDocumentFlow', () => {
         expect.objectContaining({
           type: 'question',
           title: 'Unsaved document',
-          message: 'Remix 1 has never been saved to a file. Save it before closing?',
-          buttons: ['Save', "Don't Save", 'Cancel'],
+          // Lot A (M4): the offer is a PROJECT save — the document has no file
+          // of its own and never will through Save.
+          message: 'Remix 1 exists only in this project and the project has not been saved. Save the project before closing it?',
+          buttons: ['Save Project', "Don't Save", 'Cancel'],
         })
       );
       expect(useAppStore.getState().documents).toHaveLength(1); // Cancel kept it open
@@ -2241,16 +2279,17 @@ describe('closeDocumentFlow', () => {
       expect(useAppStore.getState().documents).toHaveLength(0);
     });
 
-    it('saves then closes when the user picks Save', async () => {
+    it('saves the project then closes when the user picks Save Project', async () => {
       const api = installApi({
-        showMessageBox: jest.fn(async () => 0), // Save
-        showSaveDialog: jest.fn(async () => 'D:\\out\\Remix 1.wav'),
+        showMessageBox: jest.fn(async () => 0), // Save Project
+        showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'),
       });
       const doc = seedDoc({ filePath: null, dirty: false, name: 'Remix 1' });
 
       await closeDocumentFlow(doc.id);
 
       expect(api.writeFile).toHaveBeenCalledTimes(1);
+      expect(api.writeFile.mock.calls[0][0]).toBe('D:\\out\\p.audm');
       expect(useAppStore.getState().documents).toHaveLength(0);
     });
 
@@ -2299,7 +2338,8 @@ describe('closeDocumentFlow', () => {
       expect(api.showMessageBox).toHaveBeenCalledWith(
         expect.objectContaining({
           title: 'Unsaved changes',
-          message: 'Save changes to a.wav before closing?',
+          message: 'a.wav has unsaved changes. Save the project before closing it?',
+          buttons: ['Save Project', "Don't Save", 'Cancel'],
         })
       );
     });
@@ -2423,5 +2463,259 @@ describe('neverSaved provenance across open/save/export (Task S4)', () => {
     expect(written).toBe('D:\\out\\remix.wav');
     expect(live(doc.id)!.neverSaved).toBe(true);
     expect(live(doc.id)!.filePath).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — the project predicates the Save pill, the StatusBar chip and
+// the close guard all read. M4 verbatim: any document dirty || session dirty
+// || (never written && has content); N12's "an empty untitled project is
+// clean" is the third clause only.
+// ---------------------------------------------------------------------------
+describe('project predicates (lot A — acceptance 11)', () => {
+  function addClipToTrack0(docId: string) {
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: docId, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+  }
+
+  it('an empty untitled project is clean (N12): no docs, no clips, no path', () => {
+    expect(projectHasContent()).toBe(false);
+    expect(projectHasUnsavedWork()).toBe(false);
+    expect(projectDirtyCount()).toBe(0);
+  });
+
+  it('one CLEAN document and no path: never written with content => dirty, count 1', () => {
+    seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    expect(projectHasContent()).toBe(true);
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1); // max(1, 0 dirty docs + 0)
+  });
+
+  it('one clean document and a path: clean, count 0', () => {
+    seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    expect(projectHasUnsavedWork()).toBe(false);
+    expect(projectDirtyCount()).toBe(0);
+  });
+
+  it('a dirty document with a path: dirty, count 1', () => {
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    useAppStore.getState().updateDocument({ ...doc, dirty: true });
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1);
+  });
+
+  it('a session addClip with a path: dirty, count 1', () => {
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    addClipToTrack0(doc.id);
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1);
+  });
+
+  it('a dirty document AND a dirty session: count 2', () => {
+    const doc = seedDoc({ filePath: 'D:\\a.wav', dirty: false });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    addClipToTrack0(doc.id);
+    useAppStore.getState().updateDocument({ ...useAppStore.getState().documents[0], dirty: true });
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(2);
+  });
+
+  it('TRUE with a path, no document and no clip after addTrack — session dirty, no content (M4 verbatim)', () => {
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    useSessionStore.getState().addTrack();
+    expect(projectHasContent()).toBe(false);
+    expect(projectHasUnsavedWork()).toBe(true);
+    expect(projectDirtyCount()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M5) — Export in the multitrack view IS Mix Down: byte-identical to
+// `mixdownSession` (mute/solo, automation, fades honoured; length = last
+// audible clip end), to the chosen format, without adding a document.
+// ---------------------------------------------------------------------------
+describe('exportSessionMixdown (lot A — acceptance 20)', () => {
+  /** A ramp, so a wrong fade/gain/length shows up sample by sample. */
+  function ramp(n: number): Float32Array {
+    const out = new Float32Array(n);
+    for (let i = 0; i < n; i++) out[i] = ((i % 50) / 50) * 0.8 - 0.4;
+    return out;
+  }
+
+  /**
+   * Two documents on two tracks, the `mixdown.fades.test.ts` fixture shape
+   * (mono material, a fade-in on the first clip, `pan: -1` on the second so
+   * its right channel is exactly 0) plus one volume lane — enough that a
+   * render which skipped fades, automation or the pan law would differ from
+   * `mixdownSession`. Track B starts muted.
+   */
+  function seedSession() {
+    const a = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [ramp(100)] });
+    const b = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [new Float32Array(100).fill(0.5)] });
+    useAppStore.getState().addDocument(a);
+    useAppStore.getState().addDocument(b);
+    const s = useSessionStore.getState();
+    const [tA, tB] = s.session.tracks;
+    const clipA = createClip({ documentId: a.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    const clipB = createClip({ documentId: b.id, startSample: 50, offsetSample: 0, lengthSample: 100 });
+    s.addClip(tA.id, clipA);
+    s.addClip(tB.id, clipB);
+    s.setClipFade(clipA.id, 'in', { lengthSample: 8 });
+    s.upsertAutomationKeys(tA.id, [
+      { param: 'volumeDb', key: { positionSample: 0, value: -6 } },
+      { param: 'volumeDb', key: { positionSample: 100, value: 0 } },
+    ]);
+    s.setTrackParam(tB.id, { pan: -1, muted: true });
+    return { a, b, tA, tB };
+  }
+
+  const docsMap = () => new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const));
+  const opts = { format: 'wav' as const, wavBitDepth: 32 as const, mp3Kbps: 192 as const };
+
+  it('encodes exactly the mixdown — channels sample-equal to mixdownSession, the session rate, no markers — and a muted track is left out', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.wav') });
+    const encodeWavSpy = jest.spyOn(wavCodec, 'encodeWav');
+    const { a, b } = seedSession();
+    const session = useSessionStore.getState().session;
+    const expected = mixdownSession(session, docsMap());
+    expect(expected.channels[0].length).toBe(100); // B (muted, ending at 150) does not extend the render
+    const docsBefore = useAppStore.getState().documents;
+
+    const path = await exportSessionMixdown(opts);
+
+    expect(path).toBe('D:\\out\\mix.wav');
+    expect(api.showSaveDialog).toHaveBeenCalledWith({
+      defaultPath: 'Untitled Session.wav',
+      filters: [{ name: 'Waveform Audio', extensions: ['wav'] }],
+    });
+    expect(encodeWavSpy).toHaveBeenCalledTimes(1);
+    const [channels, sampleRate, bitDepth, markers] = encodeWavSpy.mock.calls[0];
+    expect(sampleRate).toBe(session.sampleRate);
+    expect(bitDepth).toBe(32);
+    expect(markers).toBeUndefined();
+    expect(channels).toHaveLength(2);
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(channels[1]).toEqual(expected.channels[1]);
+    // The written bytes decode back to the same render.
+    const [, data] = api.writeFile.mock.calls[0];
+    const decoded = decodeWav(data as ArrayBuffer);
+    expect(decoded.sampleRate).toBe(session.sampleRate);
+    expect(decoded.channels[0]).toEqual(expected.channels[0]);
+    expect(decoded.channels[1]).toEqual(expected.channels[1]);
+    // The fixture can express a skipped fade / lane: the render is not the raw document.
+    expect(expected.channels[0][0]).toBe(0); // fade-in starts in silence
+    expect(expected.channels[0][60]).not.toBe(a.channels[0][60]);
+    // No document side effects: nothing added, nothing retagged.
+    expect(useAppStore.getState().documents).toBe(docsBefore);
+    for (const id of [a.id, b.id]) {
+      const live = useAppStore.getState().documents.find((d) => d.id === id)!;
+      expect(live.filePath).toBeNull();
+      expect(live.dirty).toBe(false);
+      expect(live.neverSaved).toBe(true);
+    }
+    expect(api.showMessageBox).toHaveBeenCalledWith(expect.objectContaining({ title: 'Export complete' }));
+    encodeWavSpy.mockRestore();
+  });
+
+  it('the mixdown.fades.test.ts fade-in fixture, rebuilt through the store, exports exactly what mixdownSession renders (fixture reuse, fix round 1)', async () => {
+    // `mixdown.fades.test.ts` 'applies a fade-in with the default equal-power
+    // curve, exact ramp values': a constant 0.5 mono document, one clip of
+    // 100 samples with `fadeInSample: 8`, `pan: -1` so the left channel is
+    // the bare envelope and the right is exactly 0. A test module cannot be
+    // imported without re-registering its suites here, so the fixture is
+    // rebuilt value for value through the store's own actions; its pinned
+    // literals (silence at 0, the bare constant past the ramp, a silent right
+    // channel) are re-checked so a drift between the two copies is visible,
+    // and the export is then held to `mixdownSession` rather than to a
+    // re-derived ramp.
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\fade.wav') });
+    const encodeWavSpy = jest.spyOn(wavCodec, 'encodeWav');
+    const d = createDocument({ name: 'd', sampleRate: 44100, channels: [new Float32Array(100).fill(0.5)] });
+    useAppStore.getState().addDocument(d);
+    const s = useSessionStore.getState();
+    const t = s.session.tracks[0];
+    const c = createClip({ documentId: d.id, startSample: 0, offsetSample: 0, lengthSample: 100 });
+    s.addClip(t.id, c);
+    s.setClipFade(c.id, 'in', { lengthSample: 8 });
+    s.setTrackParam(t.id, { pan: -1 });
+    const expected = mixdownSession(useSessionStore.getState().session, docsMap());
+    expect(expected.channels[0][0]).toBe(0); // sin(0) = 0: the ramp starts in silence
+    expect(expected.channels[0][50]).toBe(0.5); // untouched past the fade
+    expect(expected.channels[1][50]).toBe(0); // pan -1
+
+    const path = await exportSessionMixdown(opts);
+
+    expect(path).toBe('D:\\out\\fade.wav');
+    const [channels, sampleRate] = encodeWavSpy.mock.calls[0];
+    expect(sampleRate).toBe(44100);
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(channels[1]).toEqual(expected.channels[1]);
+    encodeWavSpy.mockRestore();
+  });
+
+  it('solo on B silences A — the render is still exactly mixdownSession', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.wav') });
+    const encodeWavSpy = jest.spyOn(wavCodec, 'encodeWav');
+    const { tB } = seedSession();
+    useSessionStore.getState().setTrackParam(tB.id, { muted: false, solo: true });
+    const expected = mixdownSession(useSessionStore.getState().session, docsMap());
+    expect(expected.channels[0].length).toBe(150); // B alone now sets the length
+
+    await exportSessionMixdown(opts);
+
+    const [channels] = encodeWavSpy.mock.calls[0];
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(channels[1]).toEqual(expected.channels[1]);
+    // A is silenced: before B starts there is nothing, and B is hard-left.
+    expect(Array.from(channels[0].subarray(0, 50)).every((v) => v === 0)).toBe(true);
+    expect(channels[0][60]).not.toBe(0);
+    expect(Array.from(channels[1]).every((v) => v === 0)).toBe(true);
+    encodeWavSpy.mockRestore();
+  });
+
+  it('nothing audible (every track muted): no dialog, an info box, null', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.wav') });
+    const { tA } = seedSession();
+    useSessionStore.getState().setTrackParam(tA.id, { muted: true });
+
+    const path = await exportSessionMixdown(opts);
+
+    expect(path).toBeNull();
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', title: 'Export', message: 'Nothing audible to export.' })
+    );
+  });
+
+  it('defaults the file name to the project name with a .audm suffix stripped', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => null) });
+    seedSession();
+    useSessionStore.getState().renameSession('Take.audm');
+
+    await exportSessionMixdown(opts);
+
+    expect(api.showSaveDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: 'Take.wav' }));
+  });
+
+  it('routes MP3 through the same encoder arguments as a document export (channels, rate, kbps, no markers)', async () => {
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix.mp3') });
+    seedSession();
+    const expected = mixdownSession(useSessionStore.getState().session, docsMap());
+
+    const path = await exportSessionMixdown({ format: 'mp3', wavBitDepth: 24, mp3Kbps: 320 });
+
+    expect(path).toBe('D:\\out\\mix.mp3');
+    expect(mockEncodeMp3).toHaveBeenCalledTimes(1);
+    const [channels, sampleRate, kbps, markers] = mockEncodeMp3.mock.calls[0];
+    expect(channels[0]).toEqual(expected.channels[0]);
+    expect(sampleRate).toBe(44100);
+    expect(kbps).toBe(320);
+    expect(markers).toBeUndefined();
   });
 });

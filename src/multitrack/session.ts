@@ -176,3 +176,22 @@ export function createClip(opts: {
     gainDb: opts.gainDb ?? 0,
   };
 }
+
+/** The source-document window a clip reads, in the DOCUMENT's own samples:
+ * `[offsetSample, offsetSample + span)` where `span` is `lengthSample`
+ * session samples converted at `docRate / sessionRate` — `readClipSlice`'s
+ * own conversion (mixdown.ts), kept identical on purpose. UNCLAMPED: a clip
+ * trimmed past its source yields an end beyond `docLength`; clamp through
+ * `resolveRegion` (services/selectionRegion.ts) when a view needs real
+ * sample positions. */
+export function clipSourceWindow(
+  clip: Pick<Clip, 'offsetSample' | 'lengthSample'>,
+  docRate: number,
+  sessionRate: number
+): { start: number; end: number } {
+  const span =
+    docRate === sessionRate
+      ? clip.lengthSample
+      : Math.round((clip.lengthSample * docRate) / sessionRate);
+  return { start: clip.offsetSample, end: clip.offsetSample + span };
+}

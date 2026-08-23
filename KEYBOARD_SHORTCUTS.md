@@ -10,14 +10,17 @@ a `contenteditable` element, so they never hijack normal typing (e.g. renaming
 a track or a marker).
 
 They are also suspended while a **modal dialog** is open (New File, Export,
-Convert, Record, an effect's parameter dialog), and — new in the Pipeline
-module — while a **pipeline pass is actually running** in the module column.
+Convert, Record), and — in the module column — while a **pipeline pass** or an
+**effect Apply** is actually running.
 Both suspensions exist for the same reason: those surfaces resolve the document
 they act on at the moment you confirm, so a `Ctrl+O` behind one would land the
-result on a file you had just replaced. A pipeline tool that is merely OPEN and
-idle suspends nothing — the whole point of hosting it beside the waveform is
-that you can keep working — and the keys come back by themselves when the pass
-finishes. Mouse interaction is never suspended by either.
+result on a file you had just replaced. A pipeline tool or an effect card that
+is merely OPEN and idle suspends nothing — the whole point of hosting it beside
+the waveform is that you can keep working — and the keys come back by
+themselves when the pass finishes. Mouse interaction is never suspended by
+either; an effect Apply guards itself instead — it commits only to the document
+as you left it when you clicked Apply, and says so in the card if that changed
+(see the User Guide).
 
 | Shortcut | Action |
 |---|---|
@@ -25,33 +28,38 @@ finishes. Mouse interaction is never suspended by either.
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` | Redo |
 | `Ctrl+Y` | Redo |
-| `Ctrl+X` | Cut |
+| `Ctrl+K` | Split at Cursor — a marker at the cursor, or at both edges of the selection |
+| `Ctrl+X` | Cut the selection (or the cursor's segment) to the clipboard, leaving the span silent at the same length |
 | `Ctrl+C` | Copy |
 | `Ctrl+V` | Paste |
-| `Delete` | Delete selection (or every selected multitrack clip) |
-| `Shift+Delete` | Ripple Delete — multitrack only: remove the selected clip(s) and close the gap |
+| `Delete` | Silence the selection in place at the same length (or remove every selected multitrack clip, leaving the gap) |
+| `Shift+Delete` | Ripple Delete — editor: remove the selection and close the gap; multitrack: remove the selected clip(s) and close the gap |
 | `Ctrl+A` | Select All — the whole file in the editor; **every clip on every track** in the multitrack view |
 | `Ctrl+Left` | Previous clip edge — multitrack only |
 | `Ctrl+Right` | Next clip edge — multitrack only |
 | `Home` | Go to Start — the file's, or the **session's** in the multitrack view |
 | `End` | Go to End — the file's, or the **end of the last clip** in the multitrack view |
 | `Ctrl+O` | Open… |
-| `Ctrl+S` | Save |
-| `Ctrl+Shift+S` | Save As… |
+| `Ctrl+S` | Save project (`.audm`, every view) |
+| `Ctrl+Shift+S` | Save project As… |
 | `Ctrl+N` | New… |
 | `Ctrl+W` | Close |
-| `M` | Add Marker at the cursor |
+| `M` | Add Marker at the cursor (editor views only) |
 | `Ctrl+E` | Export… |
-| `Escape` | Deselect |
+| `Escape` | Deselect — or, with an effect card open, closes the card (see below) |
 
 ## The multitrack-only rows
 
-`Shift+Delete`, `Ctrl+Left` and `Ctrl+Right` address the **session timeline**,
-and their commands report disabled anywhere else — pressed in the waveform or
-spectral editor they do nothing at all, rather than doing something to a
-document you cannot see. There is one global key table and no per-view table
-beside it: every key runs a command, and a command re-checks its own predicate
-before it runs, which is what makes a view-scoped key inert outside its view.
+`Ctrl+Left` and `Ctrl+Right` address the **session timeline**, and their
+commands report disabled anywhere else — pressed in the waveform or spectral
+editor they do nothing at all, rather than doing something to a document you
+cannot see. There is one global key table and no per-view table beside it:
+every key runs a command, and a command re-checks its own predicate before it
+runs, which is what makes a view-scoped key inert outside its view.
+(`Shift+Delete` used to be in this list; it now ripples the editor's selection
+too — see the table above.) `Ctrl+K` is the one view-ROUTED edit key: it drops
+a marker in the editors and splits clips at the edit cursor in the multitrack,
+where it is greyed with nothing selected.
 
 The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 
@@ -80,20 +88,38 @@ every view and give nothing back.
 ## `Escape` and the two kinds of surface
 
 `Escape` means one thing in the table above and another over a **modal dialog**,
-and since the Pipeline module it means nothing at all over a hosted tool:
+since the Pipeline module it means nothing at all over a hosted pipeline tool,
+and over an effect card it means what it meant when the effect was a dialog:
 
 | Surface | What `Escape` does |
 |---|---|
 | The editor (nothing open) | Deselect, as above |
 | The **multitrack** view | Clears the clip selection — the document selection behind it is not on screen there, so clearing that instead would be an edit with no feedback anywhere |
-| A modal dialog (New File, Export, Convert, Record, an effect's parameters) | Closes the topmost one — unless it is mid-run, when it refuses |
+| A modal dialog (New File, Export, Convert, Record) | Closes the topmost one — unless it is mid-run, when it refuses |
 | A **pipeline tool** in the module column (Match Tempo, Vocal Chain, Cover Chain, Transcribe, …) | Nothing. Close it with the **✕** in its header |
+| An **effect card** in the module column, idle | **Closes the card** — the same as its **✕** or **Cancel**: a running **Preview** is stopped and the real document goes back to the engine. The selection is kept: the key does *not* fall through to Deselect |
+| An **effect card** while **Apply** is running | Nothing, like the ✕ — the pass is never discarded. The key comes back when it finishes |
+| A modal dialog opened over an effect card | The modal's: it closes, the card stays |
 
-The last row is deliberate. A hosted tool is not modal — the stage behind it
-stays live — so it installs no `Escape` handler of its own; taking the key would
-make it a focus trap wearing a different shape, and would silently steal
-Deselect from the waveform you are still working in. The **✕** is its dismissal,
-and mid-pass that ✕ refuses and says why.
+The pipeline-tool row is deliberate. A hosted tool is not modal — the stage
+behind it stays live — so it installs no `Escape` handler of its own; taking
+the key would make it a focus trap wearing a different shape. The **✕** is its
+dismissal, and mid-pass that ✕ refuses and says why.
+
+The effect card is the one hosted surface that does take the key, and it takes
+only that key: an effect was a dialog until the 2026-08-18 program moved it
+into the column, and `Escape` closed that dialog. Closing the card is what the
+key means there — and not clearing the selection is the
+point, because the card resolves the region it writes from the **live**
+selection when Apply runs, reading "no selection" as the whole file; an
+`Escape` that deselected instead would have quietly widened the next **Apply**
+from the span you just previewed to the entire document. (Edit › Deselect and a
+click on the waveform still do clear it beside an open card, and the card's
+first line — "Selection — 0:01.500 → 0:03.500 (2.00 s)" / "Whole file —
+5:00.000" — says so before you press Apply.) Two small rules keep the key
+honest: `Escape` typed in a text field *outside* the card — a marker's inline
+rename, say — belongs to that field, as every global key does; and with a
+modal open over the card, the modal has it.
 
 ## Menu-only commands (no bound key)
 
@@ -106,7 +132,7 @@ here.
 | Command | Menu location |
 |---|---|
 | Record | File → Record, or the transport bar's record button |
-| Save Session… / Open Session… | File menu |
+| Open Project… | File menu |
 | Mix Down to New File | File menu, multitrack-only |
 | Ripple Delete Time Selection | Edit menu — permanently greyed and deliberately key-less; see above |
 | Trim to Selection / Silence Selection | Edit menu (also on the floating edit toolbar) |
@@ -114,7 +140,7 @@ here.
 | Insert Active File at Cursor / Add Track | Edit menu, multitrack-only |
 | Next Marker / Previous Marker | Edit menu |
 | Capture Noise Print | Effects menu, top row (needs a selection) |
-| Every effect in the rack | Effects menu — one row per registered effect under its category heading, each opening that effect's parameter dialog; no effect has a key |
+| Every effect in the rack | Effects menu — one row per registered effect under its category heading, each opening that effect's card in the module column; no effect has a key |
 | Spatial Positioner | Effects menu, the closing Mix group |
 | Detect Tempo / Match Tempo / Align Vocal Timing / Auto-Remix | Pipeline menu, Tempo & Timing group |
 | Voice Changer / Vocal Chain / Cover Chain / Align Lyrics | Pipeline menu, Voice group |

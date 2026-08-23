@@ -2,6 +2,8 @@ import type { CSSProperties } from 'react';
 import { docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { projectHasUnsavedWork } from '../../services/fileService';
+import { useHistoryVersion } from '../../services/undoHistory';
 import { formatTime } from '../../utils/timeFormat';
 import { getTempo, useTempoVersion } from '../../services/tempoAnalysis';
 import { CONFIDENCE_LOW } from '../../dsp/tempoCore';
@@ -95,6 +97,15 @@ export default function StatusBar() {
   const mtPlayState = useSessionStore((s) => s.mtPlayState);
   const mtPlayheadSample = useSessionStore((s) => s.mtPlayheadSample);
 
+  // Lot A (N13): the project chip — `<project> *` in every view. Dirtiness is
+  // derived from the documents (subscribed above), the session's history and
+  // the project path, so the chip subscribes to the name, the path and the
+  // history version; a clip move changes no appStore state.
+  const sessionName = useSessionStore((s) => s.session.name);
+  const projectPath = useSessionStore((s) => s.projectPath);
+  useHistoryVersion();
+  const projectDirty = projectHasUnsavedWork();
+
   const doc = documents.find((d) => d.id === activeDocumentId) ?? null;
   const tempo = tempoReadout(doc);
 
@@ -122,6 +133,24 @@ export default function StatusBar() {
         minWidth: 0,
       }}
     >
+      {/* Lot A (N13): the project FIRST — its name, starred while anything in
+            it is unsaved (a dirty document, a session edit, or a project that
+            has content and no file yet). The title carries the `.audm` path so
+            a hover answers "where does Save write?". */}
+        <span
+          data-testid="project-chip"
+          title={projectPath ?? 'Project not saved yet'}
+          style={{
+            color: 'var(--glass-text-title)',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {sessionName}
+          {projectDirty ? ' *' : ''}
+        </span>
+        <Divider />
       {/* U1: the file identity the top-left chip used to carry, folded in
             here — name first, then the compact `duration · rate · channels`
             the mockup abbreviates. It keeps the chip's `file-chip` testid:

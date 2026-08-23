@@ -1,5 +1,6 @@
 import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import EffectsPanel from './EffectsPanel';
+import { getVisibleEffects } from '../../effects/EffectRegistry';
 import { registerAllEffects } from '../../effects/registerAll';
 import {
   getMenuSections,
@@ -24,8 +25,8 @@ jest.mock('../../services/menuActions', () => {
 });
 const mockRunCommand = runCommand as jest.MockedFunction<typeof runCommand>;
 
-// The effect rows above the tools open their dialog through the bus; spy on
-// that one opener so the single-click / double-click difference is observable.
+// The effect rows above the Mix row open their card through the bus; spy on
+// that one opener so the click is observable without mounting App's column.
 jest.mock('../../services/dialogBus', () => {
   const actual = jest.requireActual('../../services/dialogBus');
   return { ...actual, openEffectDialog: jest.fn() };
@@ -41,25 +42,13 @@ registerEffectCommands();
 /** The spec's table, written out here rather than imported from the component:
  * a test that reads its expectation out of the thing under test cannot fail. */
 const EXPECTED_SECTIONS: [string, string[]][] = [
-  ['Tempo & Timing', ['tempo.detect', 'tempo.match', 'timing.align', 'edit.remix']],
-  ['Voice', ['edit.voiceChanger', 'effects.vocalChain', 'effects.coverChain', 'lyrics.align']],
-  ['Analysis', ['edit.transcribe', 'edit.separateStems']],
-  // F11-8 filled this fourth section from the Pipeline menu's Mix group; T8
-  // moved `spatial.position` to the Effects MENU, so the card now draws this
-  // section from that menu's own tool tail (`effectsMenuTools`). What the
-  // card SHOWS is unchanged — same four sections, same rows, same order —
-  // which is exactly what this table is here to pin.
+  // T8 moved `spatial.position` to the Effects MENU, so the card draws this
+  // section from that menu's own tool tail (`effectsMenuTools`). Item 5 of the
+  // 2026-08-18 program then removed the three Pipeline groups: a Pipeline tool
+  // lives in the Pipeline module only, and Mix is the one section left.
   ['Mix', ['spatial.position']],
 ];
 const ALL_TOOL_IDS = EXPECTED_SECTIONS.flatMap(([, ids]) => ids);
-
-/** Every tool whose command is gated on the active document. The positioner is
- * not one: it addresses the multitrack session's tracks, which exist with no
- * document open, so the document laws below are stated over these. */
-const DOC_GATED_TOOL_IDS = ALL_TOOL_IDS.filter((id) => id !== 'spatial.position');
-
-/** Length-gated tools: `enabled` is an active document AND `docLength > 0`. */
-const NEEDS_AUDIO = ['edit.remix', 'edit.voiceChanger', 'lyrics.align', 'edit.transcribe', 'edit.separateStems'];
 
 function addDoc(sampleCount = 44100): AudioDocument {
   const doc = createDocument({
@@ -123,21 +112,32 @@ describe('EffectsPanel — the effect list stays first and untouched', () => {
     }
   });
 
-  it('keeps the effect rows on double-click: one click opens nothing', () => {
+  // Item 6 (2026-08-18): "all effects open with a single click". The row used
+  // to demand a double-click (a parameter set the user was about to fill in);
+  // an effect now opens as a card in the module column, one click like a tool
+  // row, and the registry id is what reaches the bus.
+  it('opens an effect on a SINGLE click, never on a row without a document', () => {
     addDoc();
     render(<EffectsPanel />);
     const first = within(screen.getAllByTestId('effects-item')[0]).getByRole('button');
 
     fireEvent.click(first);
-    expect(mockOpenEffectDialog).not.toHaveBeenCalled();
-
-    fireEvent.doubleClick(first);
     expect(mockOpenEffectDialog).toHaveBeenCalledTimes(1);
+    expect(mockOpenEffectDialog).toHaveBeenCalledWith(getVisibleEffects()[0].id);
+  });
+
+  it('keeps every effect row disabled with no document, so a click opens nothing', () => {
+    render(<EffectsPanel />);
+    const first = within(screen.getAllByTestId('effects-item')[0]).getByRole('button');
+    expect(first).toBeDisabled();
+
+    fireEvent.click(first);
+    expect(mockOpenEffectDialog).not.toHaveBeenCalled();
   });
 });
 
 describe('EffectsPanel — the tool sections', () => {
-  it('ships exactly four sections, in order, each holding its entries in order', () => {
+  it('ships exactly one section, Mix, holding spatial.position', () => {
     render(<EffectsPanel />);
     expect(sections().map((s) => s.getAttribute('data-section'))).toEqual(
       EXPECTED_SECTIONS.map(([title]) => title)
@@ -149,6 +149,23 @@ describe('EffectsPanel — the tool sections', () => {
         .map((row) => row.getAttribute('data-command-id'));
       expect(ids).toEqual(EXPECTED_SECTIONS[i][1]);
     });
+  });
+
+  // Item 5 (2026-08-18): "if it is in Pipeline, remove it from Effects". The
+  // ten Pipeline-menu commands were a deliberate second door here (F11-6),
+  // kept when the Pipeline module arrived (U2); the user rules one door. The
+  // ids are read off `getPipelineGroups()` — the Pipeline card's own source —
+  // so a tool added to that menu can never reappear here unnoticed.
+  it('lists no Pipeline-menu command — the Pipeline module is their only card', () => {
+    addDoc();
+    render(<EffectsPanel />);
+    const pipelineIds = getPipelineGroups().flatMap((g) => g.commands.map((c) => c.id));
+    expect(pipelineIds.length).toBeGreaterThan(0);
+    const cardIds = screen
+      .queryAllByTestId('effects-tool-item')
+      .map((r) => r.getAttribute('data-command-id'));
+    for (const id of pipelineIds) expect(cardIds).not.toContain(id);
+    expect(sections().map((s) => s.getAttribute('data-section'))).toEqual(['Mix']);
   });
 
   // T8: the Mix row's protective pin. The user moved Spatial OUT of the
@@ -173,18 +190,16 @@ describe('EffectsPanel — the tool sections', () => {
       expect([id, toolButton(id).textContent]).toEqual([id, commandFor(id).label]);
     }
     // The registry label really is being carried, not merely matched by two
-    // identically-hardcoded strings. T8 removed the dots from every Pipeline
-    // label at the user's direction, so the plain form is the one pinned.
-    expect(toolButton('tempo.match').textContent).toBe('Match Tempo');
-    expect(toolButton('tempo.detect').textContent).toBe('Detect Tempo');
+    // identically-hardcoded strings.
+    expect(toolButton('spatial.position').textContent).toBe(commandFor('spatial.position').label);
   });
 
   it('follows the registry when a label changes, so the label is read not copied', () => {
-    const original = commandFor('tempo.detect');
+    const original = commandFor('spatial.position');
     try {
-      registerCommands([{ ...original, label: 'Detect Tempo (renamed)' }]);
+      registerCommands([{ ...original, label: 'Spatial Positioner (renamed)' }]);
       render(<EffectsPanel />);
-      expect(toolButton('tempo.detect').textContent).toBe('Detect Tempo (renamed)');
+      expect(toolButton('spatial.position').textContent).toBe('Spatial Positioner (renamed)');
     } finally {
       registerCommands([original]);
     }
@@ -192,12 +207,6 @@ describe('EffectsPanel — the tool sections', () => {
 });
 
 describe('EffectsPanel — greying is the command own predicate', () => {
-  it('greys every document-gated tool with no document open', () => {
-    render(<EffectsPanel />);
-    for (const id of DOC_GATED_TOOL_IDS) expect(toolButton(id)).toBeDisabled();
-    expectRowsMirrorTheRegistry();
-  });
-
   // F11-8: the Mix row is the exception, and it has to be. Its command is the
   // only door the Spatial positioner has left now that the strip carries no
   // icon for it, and the positioner acts on the multitrack session — greying
@@ -215,28 +224,6 @@ describe('EffectsPanel — greying is the command own predicate', () => {
     for (const id of ALL_TOOL_IDS) expect(toolButton(id)).toBeEnabled();
     expectRowsMirrorTheRegistry();
   });
-
-  it('keeps the length-gated tools grey on an EMPTY document while Detect Tempo lights', () => {
-    addDoc(0);
-    render(<EffectsPanel />);
-    // `tempo.detect` / `tempo.match` / `timing.align` / the chains ask only for
-    // a document; Auto-Remix, Voice Changer, Align Lyrics, Transcribe and
-    // Separate into Stems ask for one with audio in it.
-    expect(toolButton('tempo.detect')).toBeEnabled();
-    expect(toolButton('effects.vocalChain')).toBeEnabled();
-    for (const id of NEEDS_AUDIO) expect([id, toolButton(id).disabled]).toEqual([id, true]);
-    expectRowsMirrorTheRegistry();
-  });
-
-  it('re-greys the tools live when the last document closes', () => {
-    const doc = addDoc();
-    render(<EffectsPanel />);
-    expect(toolButton('edit.remix')).toBeEnabled();
-
-    act(() => useAppStore.getState().closeDocument(doc.id));
-    expect(toolButton('edit.remix')).toBeDisabled();
-    expectRowsMirrorTheRegistry();
-  });
 });
 
 describe('EffectsPanel — a tool row is a single click on the menu command', () => {
@@ -250,18 +237,13 @@ describe('EffectsPanel — a tool row is a single click on the menu command', ()
     }
   });
 
-  it('fires nothing from a greyed row', () => {
-    render(<EffectsPanel />);
-    fireEvent.click(toolButton('edit.separateStems'));
-    expect(mockRunCommand).not.toHaveBeenCalled();
-  });
-
-  it('says single click in the tooltip, where the effect rows say double-click', () => {
+  it('says single click in both tooltips — run for a tool row, open for an effect row', () => {
     addDoc();
     render(<EffectsPanel />);
-    expect(toolButton('tempo.detect').title).toMatch(/^Click to run /);
+    expect(toolButton('spatial.position').title).toMatch(/^Click to run /);
     const effect = within(screen.getAllByTestId('effects-item')[0]).getByRole('button');
-    expect(effect.title).toMatch(/^Double-click/);
+    expect(effect.title).toMatch(/^Click to open /);
+    expect(effect.title).not.toMatch(/Double-click/);
   });
 });
 

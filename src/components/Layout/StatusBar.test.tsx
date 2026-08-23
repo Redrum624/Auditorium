@@ -3,6 +3,9 @@ import StatusBar, { formatSpp } from './StatusBar';
 import LevelMeter from './LevelMeter';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { useSessionStore } from '../../multitrack/sessionStore';
+import { _resetSessionUndo, markSessionSavePoint } from '../../multitrack/sessionUndo';
+import { createClip } from '../../multitrack/session';
+import { markSavePoint } from '../../services/undoHistory';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
 import { getTempo, runTempoAnalysis, useTempoVersion } from '../../services/tempoAnalysis';
 import type { TempoEntry } from '../../services/tempoAnalysis';
@@ -47,6 +50,11 @@ function addDoc(): AudioDocument {
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  // Lot A: the project chip reads the session store, its history and its
+  // path — all module-global.
+  useSessionStore.getState().newSession(44100);
+  useSessionStore.getState().setProjectPath(null);
+  _resetSessionUndo();
   mockGetTempo.mockReset().mockReturnValue(null);
   mockRunTempoAnalysis.mockReset().mockResolvedValue(null);
 });
@@ -286,5 +294,74 @@ describe('formatSpp (F11)', () => {
 
   it('passes a non-finite value through rather than printing NaN arithmetic', () => {
     expect(formatSpp(Number.POSITIVE_INFINITY)).toBe('Infinity');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (N13) — the project chip: "<project> *" at the head of the pill, in
+// every view.
+// ---------------------------------------------------------------------------
+describe('StatusBar — the project chip (lot A, acceptance 16)', () => {
+  function addClipToTrack0(docId: string) {
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: docId, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+  }
+
+  it('renders the project name with no star for an empty untitled project', () => {
+    render(<StatusBar />);
+    const chip = screen.getByTestId('project-chip');
+    expect(chip).toHaveTextContent(/^Untitled Session$/);
+    expect(chip).toHaveAttribute('title', 'Project not saved yet');
+  });
+
+  it('sits FIRST in the pill, ahead of the file chip', () => {
+    render(<StatusBar />);
+    const pill = screen.getByTestId('status-pill');
+    const children = Array.from(pill.children);
+    const project = children.indexOf(screen.getByTestId('project-chip'));
+    const file = children.indexOf(screen.getByTestId('file-chip'));
+    expect(project).toBe(0);
+    expect(file).toBeGreaterThan(project);
+  });
+
+  it('gains the star once a document is added to a never-written project', () => {
+    render(<StatusBar />);
+    act(() => {
+      addDoc();
+    });
+    expect(screen.getByTestId('project-chip')).toHaveTextContent(/^Untitled Session \*$/);
+  });
+
+  it('shows the new name without a star after a Save As (path + rename + save points), and the star returns after a session edit', () => {
+    const doc = addDoc();
+    render(<StatusBar />);
+    expect(screen.getByTestId('project-chip')).toHaveTextContent(/^Untitled Session \*$/);
+
+    act(() => {
+      // What writeProject does on success, in order.
+      useSessionStore.getState().renameSession('mix v2');
+      markSessionSavePoint();
+      useAppStore.getState().updateDocument({ ...doc, dirty: false, neverSaved: false });
+      markSavePoint(doc.id);
+      useSessionStore.getState().setProjectPath('D:\\out\\mix v2.audm');
+    });
+    const chip = screen.getByTestId('project-chip');
+    expect(chip).toHaveTextContent(/^mix v2$/);
+    expect(chip).toHaveAttribute('title', 'D:\\out\\mix v2.audm');
+
+    act(() => addClipToTrack0(doc.id)); // a session edit — no appStore change
+    expect(screen.getByTestId('project-chip')).toHaveTextContent(/^mix v2 \*$/);
+  });
+
+  it('is rendered in the waveform and the multitrack view alike', () => {
+    addDoc();
+    const { rerender } = render(<StatusBar />);
+    expect(screen.getByTestId('project-chip')).toBeInTheDocument();
+
+    act(() => useAppStore.getState().setView('multitrack'));
+    rerender(<StatusBar />);
+    expect(screen.getByTestId('project-chip')).toHaveTextContent(/^Untitled Session \*$/);
   });
 });

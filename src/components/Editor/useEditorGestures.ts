@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 import type { PointerEvent as ReactPointerEvent, RefObject } from 'react';
 import { applyEditorZoom, useAppStore } from '../../stores/appStore';
 import { snapSample } from '../../services/snap';
+import { segmentAt } from '../../services/segments';
 import { isOnCursorHandle, pixelToSample, sampleToPixel } from './waveformRender';
 import { editorSnapTargets } from './editorSnapTargets';
 import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selectionGestures';
@@ -10,9 +11,10 @@ import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selec
  * Shared editor pointer/wheel gestures for the waveform and spectrogram views:
  * plain/ctrl wheel zooms centered on the mouse, shift-wheel scrolls; click sets
  * the cursor, drag past 3px makes a selection, shift-click extends, double-click
- * selects all. All state lives in the app store; the only transient (the active
- * drag) is a ref. Reuses the pure helpers in selectionGestures/waveformRender so
- * both views behave identically.
+ * selects the segment under the pointer (item 8 / M3: the span between the two
+ * nearest markers; the whole document when there are none). All state lives in
+ * the app store; the only transient (the active drag) is a ref. Reuses the pure
+ * helpers in selectionGestures/waveformRender so both views behave identically.
  *
  * ---------------------------------------------------------------------------
  * TASK B4 — THE MAGNET
@@ -244,7 +246,14 @@ export function useEditorGestures(
     setCursor(sample);
 
     if (e.detail >= 2) {
-      setSelection(length > 0 ? { start: 0, end: length } : null);
+      // The segment is picked from the RAW pointer sample, not the snapped one:
+      // with the magnet pulling the cursor onto a marker, the segment the user
+      // double-clicked is still the one under the pointer.
+      const positions = (useAppStore.getState().markers[activeDocumentId ?? ''] ?? []).map(
+        (m) => m.positionSample
+      );
+      const segment = segmentAt(positions, length, Math.round(raw));
+      setSelection(segment ?? (length > 0 ? { start: 0, end: length } : null));
       dragRef.current = null;
       return;
     }

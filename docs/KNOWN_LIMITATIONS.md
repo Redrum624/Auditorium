@@ -112,6 +112,13 @@ written to `.ogg`: the OpusTags header carries de-facto-standard
 plus a sample-accurate private `AUDITORIUM_MARKERS` tag, and reopening the
 file restores them exactly.
 
+**2026-08-22 (ten-item program, lot A — M4):** since this change **no command
+performs an in-place audio save**. File → Save / Save As write the `.audm`
+project, and Export is the only way audio leaves the app. The in-place Opus
+re-encode described above (and the MP3/FLAC/WAV ones) survives only behind
+the headless `saveActiveInPlace` test hook (`src/services/testHooks.ts`) and
+the format-faithful round-trip suites in `fileService.test.ts`.
+
 **Intended behavior:** No further work planned — Opus-in-Ogg is the correct
 modern default. A native Vorbis encoder (to keep Vorbis sources as Vorbis) was
 **dropped 2026-08-09 (R5), on measurement, not preference**: the shipped
@@ -149,23 +156,27 @@ containers** plus sessions, sample-accurately:
   `CHAPTERxxx`/`CHAPTERxxxNAME` tags plus the same sample-accurate private tag.
 - **OGG (Opus)** — the same chapter comments in the OpusTags header (at the
   file's 48 kHz clock).
-- **`.audm` sessions** (v3, still reads v1/v2) — a `markers` map per
-  referenced document; v1 session files still load with zero markers.
+- **`.audm` projects** (v4, still reads v1–v3) — a `markers` map per
+  embedded document (every open document since v4; v3 carried only the
+  clip-referenced ones); v1 session files still load with zero markers.
 
-Opening any of these seeds the store with fresh marker ids; in-place Save,
-Save As, and Export all write markers back. Files saved with **no** markers are
-byte-identical to pre-v1.3 output for every format.
+Opening any of these seeds the store with fresh marker ids; Export and the
+project save (File → Save / Save As…, which carries every open document's
+markers in the `.audm`) write markers back. Files exported with **no** markers
+are byte-identical to pre-v1.3 output for every format.
 
 **v1.4 additions:** adding, renaming, or deleting a marker now dirties the
 owning document (Files-panel `*`, close/quit prompts, the async-save
 staleness check) and is undoable from the History panel (`Add Marker` /
 `Rename Marker` / `Delete Marker`). Destructive edits that change the
-timeline — delete, insert/paste, trim, replace, sample-rate conversion, and
-length-changing effects (Time Stretch, Pitch Shift) — remap or drop marker
-positions atomically with the audio, in the same undo step; interior markers
-under a length-changing effect map proportionally rather than being dropped.
-Positions are always clamped to `[0, document length]`, so a marker can never
-be written to disk past the end of the file.
+timeline — ripple delete (`Shift+Delete`), insert/paste, trim, replace,
+sample-rate conversion, and length-changing effects (Time Stretch, Pitch
+Shift) — remap or drop marker positions atomically with the audio, in the same
+undo step; interior markers under a length-changing effect map proportionally
+rather than being dropped. Delete, Cut and Silence are equal-length since the
+item-7 change and leave every marker where it was, including markers inside
+the silenced span. Positions are always clamped to `[0, document length]`, so
+a marker can never be written to disk past the end of the file.
 
 **v1.10 refinement (F2):** the proportional rule above is right for effects
 that TRANSFORM the whole region but wrong for Remove Silence, which deletes
@@ -246,7 +257,7 @@ exceeds parity here.
 **Area:** File writes (`electron/ipc.cjs`, `electron/atomicWrite.cjs`)
 
 **v1.4 behavior:** Every `file:write` (in-place Save, format-faithful
-re-encode, Save Session) writes to a sibling temp file
+re-encode, the project save) writes to a sibling temp file
 (`<target>.<pid>.<seq>.<random>.tmp` — the random suffix on top of pid+seq makes
 the name unguessable, so there is nothing for an attacker to pre-plant a symlink
 at; same directory as the target, so the follow-up rename stays on one volume),
@@ -254,6 +265,12 @@ fsyncs it, closes it, then renames it over the target. A failure at any step
 (encode error, disk full, permission denied) unlinks the temp file and leaves
 the original untouched — an interrupted or failed save can no longer destroy
 or truncate the file that was already on disk.
+
+**2026-08-22 (lot A — M4):** no command performs an in-place audio save any
+more (Save writes the `.audm` project; Export is the only audio write). The
+atomic `file:write` above still covers every write the app makes — every
+Export, the project save, and the headless `saveActiveInPlace` hook, which is
+the only remaining caller of the in-place engine.
 
 **Intended behavior:** No further work planned — this is complete.
 
@@ -285,35 +302,96 @@ memory/depth trade-off for a browser-engine-hosted editor with no swap to
 disk. A global cross-document budget would be feature work (a shared eviction
 policy deciding WHOSE history to shed), recorded here rather than planned.
 
-## Session files are format v3 (binary); very large legacy sessions may not load
+## Project files are format v4 (binary); very large legacy sessions may not load
 
-**Area:** Multitrack sessions (`src/multitrack/sessionFile.ts`)
+**Area:** Projects (`src/multitrack/sessionFile.ts`)
 
-**v1.4 behavior:** `.audm` sessions are now written in **format v3**: an
-`AUDM3\n` magic, a JSON header, and the embedded audio as raw Float32 bytes
-assembled into one buffer — no monolithic JSON string and no base64 payload
-are ever built. This removes the v1/v2 format's silent failure once embedded
-audio's base64 encoding pushed the session's JSON past the JS engine's string
-length cap (roughly 17 minutes of embedded audio in the old format); Save
-Session now surfaces both success and failure explicitly instead of failing
-quietly. v3 sessions load exactly like v1/v2 wrote them; v1/v2 files still
-open normally.
+**2026-08-22 behavior (ten-item program, lot A — M4):** `.audm` files are
+written in **format v4**: an `AUDM4\n` magic, a JSON header and the embedded
+audio as raw Float32 bytes, exactly v3's layout, plus an `unreferenced`
+section so that **every open document** is in the file (v3 embedded only the
+documents a clip referenced), `markers` for every embedded document, and a
+per-document `origin` — the path the document was opened from, restored as
+its `filePath` on open. Nothing is dropped from a project save, which is why
+the version had to move. **A v4 file is unreadable by builds ≤ v1.35** (their
+reader hard-rejects any other `formatVersion`); v3, v2 and v1 files still open
+normally. File → Save / Save As write v4; File → Open Project… reads all four.
+
+**v1.4 behavior (v3):** the binary layout itself — no monolithic JSON string
+and no base64 payload are ever built. This removed the v1/v2 format's silent
+failure once embedded audio's base64 encoding pushed the session's JSON past
+the JS engine's string length cap (roughly 17 minutes of embedded audio in the
+old format); a save surfaces both success and failure explicitly instead of
+failing quietly.
 
 **Remaining limitation:** a **legacy v1/v2** session file whose JSON already
-exceeds the JS string cap still cannot be loaded — Open Session reports a
+exceeds the JS string cap still cannot be loaded — Open Project reports a
 clear error instead of crashing, but the file itself is unreadable either way.
-Resaving as v3 (once it can be opened at all) avoids the ceiling entirely,
-since v3 never builds that string.
+Resaving it (File → Save As… writes v4, once it can be opened at all) avoids
+the ceiling entirely, since neither binary layout — v3 or v4 — builds that
+string.
 
-**Intended behavior:** No further work planned for v3 itself. A v1/v2-specific
-recovery tool (partial-parse salvage) is **moot, not merely unplanned**
-(closed 2026-08-08, R2-4): the legacy *writer* built the very same single JS
-string the reader decodes — `serializeSession` base64-encoded each document
-and `JSON.stringify`-ed the result into one string of the same length — so
-writer and reader hit the identical V8 string cap. Any legacy `.audm` this
-app successfully wrote is by construction readable; an over-cap legacy file
-can only have come from another tool, and there is nothing of Auditorium's to
-salvage. (The over-cap error path is pinned by test.)
+**Intended behavior:** No further work planned for the binary layout itself.
+A v1/v2-specific recovery tool (partial-parse salvage) is **moot, not merely
+unplanned** (closed 2026-08-08, R2-4): the legacy *writer* built the very same
+single JS string the reader decodes — `serializeSession` base64-encoded each
+document and `JSON.stringify`-ed the result into one string of the same
+length — so writer and reader hit the identical V8 string cap. Any legacy
+`.audm` this app successfully wrote is by construction readable; an over-cap
+legacy file can only have come from another tool, and there is nothing of
+Auditorium's to salvage. (The over-cap error path is pinned by test.)
+
+## Export length vs playback length in multitrack
+
+**Area:** File → Export… in the multitrack view (`src/services/fileService.ts`
+`exportSessionMixdown`, `src/multitrack/mixdown.ts`)
+
+**2026-08-22 behavior (lot A — M5):** Export in the multitrack view is
+**byte-identical to Mix Down to New File**: it writes what `mixdownSession`
+renders, and that render stops at the last **audible** clip end
+(`mixdown.ts`, `sessionLength` over the audible tracks). The transport
+(`MultitrackPlayer.ts`) and the timeline (`sessionZoom.ts`) run to the last
+clip end over **all** tracks, muted included — so a session whose longest clip
+sits on a muted track exports **shorter** than the transport's end position.
+
+**Intended behavior:** Unchanged by design. M5 fixes Export to the mixdown,
+and the mixdown is playback ground truth for what is heard; the tail past the
+last audible clip is silence the player merely counts through. Padding the
+export to the transport length would write silence nobody asked for, and
+trimming the player would change playback behaviour for an export concern.
+
+## Closing a document after a project save does not dirty the project
+
+**Area:** Project dirtiness (`src/services/fileService.ts`
+`projectHasUnsavedWork`)
+
+**2026-08-22 behavior (lot A — M4):** the project is dirty when any document
+has unsaved work, the session history is off its save point, or the project
+has content and has never been written. **Removing a document from the
+working set is none of those**: after a project save, closing a clean
+document (its audio is in the `.audm`) leaves every remaining document clean,
+the session untouched and the path set — so the Save pill stays grey and the
+chip shows no star, while the next Save silently writes a file without that
+document.
+
+**The same blind spot, the other direction — opening a document into an
+already-saved project.** `openFilePath` (`src/services/fileService.ts:281`)
+builds the document through `createDocument`, which starts it `dirty: false`
+(`src/audio/AudioDocument.ts:87`), and passes `neverSaved: false` because the
+audio came off disk. Reading a file therefore touches none of the three
+clauses either: no document is dirty, the session history never moved, and
+the path is still set — so **Save stays grey and the newly opened file is
+absent from the `.audm`** until something else dirties the project. The
+symptom is worse than the closing case (a file the user can see in the Files
+panel is silently missing from the next save rather than silently dropped),
+but the cause is identical: adding to or removing from the working set is not
+part of M4's dirty definition.
+
+**Intended behavior:** Recorded, not planned, for both directions. The file
+on disk is not wrong (it holds what was saved); what is missing is a "the
+working set changed" signal. Counting a closed or newly opened document as
+dirt would need a per-project record of what the last save contained, which
+is feature work beyond M4's definition.
 
 ## Closing while busy asks instead of force-quitting
 
@@ -1237,7 +1315,12 @@ they exist, and that is arithmetic rather than an omission: every bar line
 already *is* one of the beats. The editor's own set is still beats plus
 markers, flat; the multitrack ruler's seek and envelope keys snap against the
 flat union of the session set (a seeked cursor aims no clip edge, and its own
-old position as a dominant target would pin it in place).
+old position as a dominant target would pin it in place). Split at Cursor is a
+point CONSUMER of the cursor rather than a gesture of its own, and so never
+re-snaps it: in the multitrack the session cursor is itself a tier-0 target, so
+a re-snap would be a guaranteed no-op, and in the editors the set has no cursor
+target at all, so a re-snap could only move the cut off the line the user is
+looking at.
 
 **5. The Ctrl-drag nudge commits somewhere the preview does not show.** v1.8's
 "overlap nudge outranks the magnet" limitation resolved exactly as predicted:
@@ -2036,3 +2119,83 @@ would break the freeze into slices without reducing the total work.
 **Not this:** the decode. The 308 ms decode freeze this app used to have was
 fixed along with three redundant copies (~205 → ~65 MiB per open). What remains
 is the hand-off itself.
+
+## Transport keys during a hosted effect Preview
+
+**Area:** the effect card in the module column (`src/components/Dialogs/EffectHost.tsx`,
+`src/components/Dialogs/EffectDialog.tsx`), global shortcuts
+(`src/services/shortcuts.ts`)
+
+**Current behavior:** since the 2026-08-18 program (item 6) an effect opens as
+a **card in the module column** rather than a modal. A card is not modal by
+design: it joins no dialog stack, so every global shortcut stays live while it
+is open — that is what lets you select, scrub and play beside it. **Preview**
+auditions the effect by loading a throwaway preview document into the
+playback engine, and during that preview the global keys still act on the
+engine: `Space` pauses or resumes the **preview**, and the transport keys act
+on the document the engine is holding, which is the preview copy, not the
+real document. The card publishes its module lock during **Apply only**
+(N16): Preview greys nothing and suspends nothing, because it is one click to
+end and locking the strip for it would be worse than the key landing on the
+preview. **Stop Preview**, the **✕**, **Cancel**, **Apply** and `Escape` all restore
+the real document to the engine, exactly as the modal's Escape did.
+
+**`Escape` closes the card; a selection lost some other way still widens
+Apply.** Since N18 (2026-08-23) `Escape` with an idle effect card open closes
+the card — the ✕'s own path — and the key is claimed before the global table
+can run **Deselect**, so the selection survives (see `KEYBOARD_SHORTCUTS.md`).
+What remains is the rest of the class: Edit › Deselect and a plain click on
+the waveform still clear the selection with the card open, and because an
+effect resolves its region from the live selection when Apply runs — reading
+"no selection" as the whole file — the next **Apply** then writes the entire
+document rather than the span you previewed, as one undo entry. The hosted
+pipeline tools resolve the same way (Match Tempo, the Vocal Chain and the Cover
+Chain), and for them `Escape` still does nothing. It is not silenced: the
+card's first line names the span Apply will write and switches to "Whole file"
+the moment the selection goes, so the widening is visible before Apply is
+pressed, and `Ctrl+Z` undoes it in one step.
+
+**A Preview the mouse takes away.** Because the card is not modal, a preview
+can also be ended by something other than the card: switch document in the
+Files panel, ripple the audio with the edit pill, or convert the sample rate,
+and the transport loads that document into the shared engine, which stops and
+replaces the preview. The card watches the same change and gives the preview
+up with it — the button goes back to reading **Preview**, and pressing it
+starts a fresh preview of the document you moved to instead of stopping the
+playback you just started there.
+
+**Mouse edits during Apply.** The same non-modal design holds while an effect
+is being **applied**: the module strip, the card's ✕ and Cancel are held and
+the global keys are suspended for the duration, but the mouse is never
+suspended — the edit pill, the Edit menu, File › Close and the Files panel
+stay live, exactly as they do during a running pipeline pass — with one
+exception, added in the final round: a menu command that would UNMOUNT the
+card mid-Apply is refused rather than obeyed, with the same "A pass is
+running" message a pipeline pass gives (it names the effect). That covers
+`Pipeline › Transcribe` on a take you have already transcribed, whose reveal
+path used to clear the module lock on its way to the Analysis panel. The
+runner
+resolves the target region when Apply starts and commits the processed audio
+to that same span when the worker returns (`src/services/effectRunner.ts`,
+`runEffectOnSelection`), so the card hands it a `shouldCancel` (T6-3's seam,
+asked once between the audio arriving and the commit): an Apply commits only
+to the document as you left it when you clicked — same document, same audio,
+still the active one. Edit it, switch to another document or close it in
+between and nothing is written; the card stays and says so, and Apply runs
+the effect again on the document as it is now. What remains: the pipeline
+tools that commit after a worker pass from their own services (the Vocal
+Chain, Align Lyrics) still carry that window — let their progress finish
+before editing.
+
+**Intended behavior:** a narrower seam than the module lock — "hold the
+keyboard" without "hold the module column" — could route transport keys to the
+real document during a preview, or end the preview first. (`Escape` is the
+one key the effect card does answer, with its own dismissal and without taking
+any other key from the waveform — N18 — which is the shape that seam would
+take for the rest.) It is the same
+second seam the pipeline tools' lock already wants (see `App.tsx`,
+`refuseWhileRunning`) and is a change of its own. The Apply-time window is
+closed for effects at the card (`EffectDialog`'s `shouldCancel`); the pipeline
+services that commit after their own worker pass (`vocalChain.ts`,
+`alignLyricsService.ts`) want the same guard, and that is their change, not
+the card's.

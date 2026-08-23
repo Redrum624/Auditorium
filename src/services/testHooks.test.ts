@@ -26,7 +26,10 @@ import { _resetSnapPreference, isSnapEnabled } from './snapPreference';
 import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
-import { serializeSession } from '../multitrack/sessionFile';
+import { serializeSession, serializeSessionV4 } from '../multitrack/sessionFile';
+import { _resetSessionUndo, isSessionDirty } from '../multitrack/sessionUndo';
+import { mixdownSession } from '../multitrack/mixdown';
+import { decodeWav } from '../audio/wavCodec';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
 import {
   FALLBACK_SESSION_LANE_WIDTH,
@@ -584,5 +587,258 @@ describe('MT1 C1: openSessionFrom opens the session fitted', () => {
     expect(loaded.mtZoom).toEqual(defaultSessionZoom(loaded.session));
     expect(loaded.mtZoom.samplesPerPixel).toBe(LEN / FALLBACK_SESSION_LANE_WIDTH);
     expect(loaded.mtZoom.scrollSample).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A — the project hooks the smoke drives headlessly. `saveSessionAs` IS
+// Save As (v4 bytes, path, save points, rename); `openSessionFrom` IS Open
+// Project. Lots C, D and E append their own describes below; never edit
+// another lot's.
+// ---------------------------------------------------------------------------
+describe('lot A project hooks', () => {
+  function installProjectApi(overrides: Record<string, unknown> = {}) {
+    const electronAPI = {
+      readFile: jest.fn(async () => new ArrayBuffer(0)),
+      writeFile: jest.fn(async () => ({ ok: true })),
+      showMessageBox: jest.fn(async () => 0),
+      pathBasename: (p: string) => p.split(/[\\/]/).pop() ?? p,
+      ...overrides,
+    };
+    (window as unknown as { electronAPI: unknown }).electronAPI = electronAPI;
+    return electronAPI;
+  }
+
+  beforeEach(() => {
+    useSessionStore.getState().newSession(44100);
+    useSessionStore.getState().setProjectPath(null);
+    _resetSessionUndo();
+  });
+
+  it('saveSessionAs writes AUDM4 bytes, remembers the path, renames the project to the basename and leaves it clean', async () => {
+    const electronAPI = installProjectApi();
+    addDoc('a.wav');
+
+    const ok = await api().saveSessionAs('D:\\out\\take 3.audm');
+
+    expect(ok).toBe(true);
+    const [path, data] = electronAPI.writeFile.mock.calls[0] as unknown as [string, ArrayBuffer];
+    expect(path).toBe('D:\\out\\take 3.audm');
+    expect(new TextDecoder().decode(new Uint8Array(data).subarray(0, 6))).toBe('AUDM4\n');
+    expect(useSessionStore.getState().projectPath).toBe('D:\\out\\take 3.audm');
+    expect(useSessionStore.getState().session.name).toBe('take 3');
+    expect(isSessionDirty()).toBe(false);
+    expect(useAppStore.getState().documents[0].neverSaved).toBe(false);
+    expect(electronAPI.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('openSessionFrom restores a v4 project, sets projectPath and returns the same summary shape', async () => {
+    const doc = createDocument({ name: 'song.wav', sampleRate: 44100, channels: [new Float32Array(64)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 64 })];
+    const session: Session = { name: 'Proj', sampleRate: 44100, tracks: [track] };
+    const { bytes } = serializeSessionV4(session, [doc]);
+    installProjectApi({ readFile: jest.fn(async () => bytes.buffer) });
+
+    const summary = await api().openSessionFrom('D:\\in\\proj.audm');
+
+    expectPlainJson(summary);
+    expect(summary).toEqual({ docCount: 1, trackCount: 1, droppedClipCount: 0 });
+    expect(useSessionStore.getState().projectPath).toBe('D:\\in\\proj.audm');
+    expect(useSessionStore.getState().session.name).toBe('Proj');
+    expect(useSessionStore.getState().mtZoom).toEqual(defaultSessionZoom(useSessionStore.getState().session));
+    expect(isSessionDirty()).toBe(false);
+    expect(useAppStore.getState().view).toBe('multitrack');
+  });
+
+  // `getStateSummary` is how the navigate walk reads project state back
+  // (`scripts/e2e-navigate.cjs:2807` asserts the Save As cancel left the path
+  // null). It is the one field of the summary no unit test covered, so a
+  // dropped line there would only ever surface in lot F's packaged run.
+  it('getStateSummary reports projectPath — null while the project was never written, the path after a save and after an open', async () => {
+    installProjectApi();
+    addDoc('a.wav');
+
+    expect(api().getStateSummary().projectPath).toBeNull();
+    expectPlainJson(api().getStateSummary());
+
+    await api().saveSessionAs('D:\\out\\take 3.audm');
+    expect(api().getStateSummary().projectPath).toBe('D:\\out\\take 3.audm');
+
+    const doc = createDocument({ name: 'song.wav', sampleRate: 44100, channels: [new Float32Array(64)] });
+    const session: Session = { name: 'Proj', sampleRate: 44100, tracks: [createTrack('T')] };
+    const { bytes } = serializeSessionV4(session, [doc]);
+    installProjectApi({ readFile: jest.fn(async () => bytes.buffer) });
+    await api().openSessionFrom('D:\\in\\proj.audm');
+
+    expect(api().getStateSummary().projectPath).toBe('D:\\in\\proj.audm');
+  });
+
+  it('exportSession writes bytes whose decoded channels equal mixdownSession, and returns false with an info box on an all-muted session', async () => {
+    const electronAPI = installProjectApi();
+    const doc = addDoc('a.wav');
+    doc.channels[0].set(Float32Array.from({ length: 4410 }, (_, i) => Math.sin(i / 7) * 0.5));
+    const s = useSessionStore.getState();
+    const [tA, tB] = s.session.tracks;
+    const clip = createClip({ documentId: doc.id, startSample: 10, offsetSample: 0, lengthSample: 4000 });
+    s.addClip(tA.id, clip);
+    s.setClipFade(clip.id, 'out', { lengthSample: 100 });
+    s.setTrackParam(tB.id, { muted: true });
+    const expected = mixdownSession(
+      useSessionStore.getState().session,
+      new Map(useAppStore.getState().documents.map((d) => [d.id, d] as const))
+    );
+
+    const ok = await api().exportSession({ format: 'wav', wavBitDepth: 32, mp3Kbps: 192 }, 'D:\\out\\mix.wav');
+
+    expect(ok).toBe(true);
+    const [path, data] = electronAPI.writeFile.mock.calls[0] as unknown as [string, ArrayBuffer];
+    expect(path).toBe('D:\\out\\mix.wav');
+    const decoded = decodeWav(data);
+    expect(decoded.sampleRate).toBe(44100);
+    expect(decoded.channels[0]).toEqual(expected.channels[0]);
+    expect(decoded.channels[1]).toEqual(expected.channels[1]);
+    expect(decoded.channels[0].length).toBe(4010);
+
+    useSessionStore.getState().setTrackParam(tA.id, { muted: true });
+    const silent = await api().exportSession({ format: 'wav', wavBitDepth: 32, mp3Kbps: 192 }, 'D:\\out\\none.wav');
+
+    expect(silent).toBe(false);
+    expect(electronAPI.writeFile).toHaveBeenCalledTimes(1);
+    expect(electronAPI.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', message: 'Nothing audible to export.' })
+    );
+  });
+});
+
+describe('lot C editor hooks', () => {
+  function openRamp(): AudioDocument {
+    const doc = createDocument({
+      name: 'lot-c.wav',
+      sampleRate: 44100,
+      channels: [Float32Array.from({ length: 1000 }, (_, i) => i + 1)],
+    });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('setCursor / getCursor address the document cursor', () => {
+    const t = api();
+    openRamp();
+    expect(t.setCursor(123)).toBe(123);
+    expect(t.getCursor()).toBe(123);
+    expect(useAppStore.getState().cursorSample).toBe(123);
+  });
+
+  it("editOp('split') with a selection drops a marker at each edge", () => {
+    const t = api();
+    openRamp();
+    t.setSelection(200, 300);
+    t.editOp('split');
+    expect(t.getActiveMarkers().map((m) => m.positionSample)).toEqual([200, 300]);
+  });
+
+  it("editOp('rippleDelete') shortens the document", () => {
+    const t = api();
+    openRamp();
+    t.setSelection(0, 10);
+    t.editOp('rippleDelete');
+    expect(t.getStateSummary().length).toBe(990);
+  });
+});
+
+/**
+ * Lot E (item 4, N14) — `__test.setView` stays the RAW setter. The navigate
+ * walk calls it right after a real click selected a clip; routing it through
+ * `showEditorView` would activate that clip's document mid-walk.
+ */
+describe('lot E view entry', () => {
+  test('__test.setView leaves the active document and selection alone', () => {
+    const a = addDoc('A');
+    const b = addDoc('B');
+    useAppStore.getState().setActiveDocument(a.id);
+    const clip = createClip({ documentId: b.id, startSample: 0, offsetSample: 0, lengthSample: 1000 });
+    const track = createTrack('Track 1');
+    track.clips = [clip];
+    const session: Session = { name: 'Pin', sampleRate: 44100, tracks: [track] };
+    useSessionStore.setState({
+      session,
+      selectedClipId: clip.id,
+      selectedClipIds: [clip.id],
+      mtCursorSample: 0,
+      mtPlayState: 'stopped',
+      mtPlayheadSample: 0,
+      mtEnvelope: null,
+    });
+    useAppStore.setState({ view: 'multitrack' });
+
+    api().setView('waveform');
+
+    const s = useAppStore.getState();
+    expect(s.view).toBe('waveform');
+    expect(s.activeDocumentId).toBe(a.id);
+    expect(s.selection).toBeNull();
+  });
+});
+
+describe('lot D session hooks', () => {
+  /** One track carrying `[0, 1000)` and `[2000, 1000)`, installed raw. */
+  function seedClips(): string[] {
+    const t = createTrack('Track 1');
+    t.clips = [
+      createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000 }),
+      createClip({ documentId: 'doc-1', startSample: 2000, offsetSample: 0, lengthSample: 1000 }),
+    ];
+    useSessionStore.setState({
+      session: { name: 'Hook Fixture', sampleRate: 44100, tracks: [t] },
+      selectedClipId: null,
+      selectedClipIds: [],
+      mtCursorSample: 0,
+    });
+    return t.clips.map((c) => c.id);
+  }
+
+  it('setMtCursor / getMtCursor address the MULTITRACK edit cursor', () => {
+    const t = api();
+    expect(t.setMtCursor(1234)).toBe(1234);
+    expect(t.getMtCursor()).toBe(1234);
+    expect(useSessionStore.getState().mtCursorSample).toBe(1234);
+  });
+
+  it('selectClips names the clip selection, dropping dangling ids and duplicates', () => {
+    const t = api();
+    const [a] = seedClips();
+    expect(t.selectClips([a, 'clip-none', a])).toEqual({
+      selectedClipId: a,
+      selectedClipIds: [a],
+    });
+    expect(useSessionStore.getState().selectedClipIds).toEqual([a]);
+  });
+
+  it('selectClips([]) clears it', () => {
+    const t = api();
+    const [a, b] = seedClips();
+    t.selectClips([a, b]);
+    expect(t.selectClips([])).toEqual({ selectedClipId: null, selectedClipIds: [] });
+  });
+});
+
+describe('lot F integration hooks', () => {
+  it('activateDocumentByName activates the index-th document with that exact name and counts the matches', () => {
+    const a = addDoc('take.wav');
+    const b = addDoc('other.wav');
+    expect(useAppStore.getState().activeDocumentId).toBe(b.id);
+
+    expect(api().activateDocumentByName('take.wav')).toBe(1);
+    expect(useAppStore.getState().activeDocumentId).toBe(a.id);
+
+    const a2 = addDoc('take.wav');
+    expect(api().activateDocumentByName('take.wav', 1)).toBe(2);
+    expect(useAppStore.getState().activeDocumentId).toBe(a2.id);
+    expect(api().activateDocumentByName('take.wav', 5)).toBe(2);
+    expect(useAppStore.getState().activeDocumentId).toBe(a2.id);
+
+    expect(api().activateDocumentByName('missing.wav')).toBe(0);
+    expect(useAppStore.getState().activeDocumentId).toBe(a2.id);
   });
 });

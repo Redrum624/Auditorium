@@ -20,7 +20,8 @@ and everything is anchored on the **waveform**, not on the window:
   once a remix document exists, and then **History**, which is always last. It
   sits on top of the module column. Click an icon to open its card below the
   strip; click the **open** icon again to close the card, and the waveform takes
-  the whole column's width. **Files** is the card the app opens with.
+  the whole column's width. An open **effect card** sits between the strip and
+  the module card. **Files** is the card the app opens with.
 - **Bottom, centred on the waveform** — the status pill: the active file's
   `name · duration · rate · channels`, the big time readout, the cursor and
   selection times, the `♩ BPM` readout, the zoom in samples-per-pixel, and the
@@ -52,10 +53,9 @@ to be run in a particular sequence — the vocal and cover chains especially —
 the order is stated in the tool's own stage notes, not implied by the menu.
 
 Every one of these tools is also a single click in the **Pipeline** module card
-— the same ten rows in the same three groups — and in the **Effects** module
-card below the effect list, where the **Mix** row (the Spatial Positioner)
-sits after them (see *The panel cards* below). All three doors run
-the same command.
+— the same ten rows in the same three groups. Both doors run the same command.
+(The **Effects** card lists only the effects and the Effects menu's own **Mix**
+row.)
 
 **These tools do not open a centred dialog.** Selecting one of the nine that
 have a UI — Match Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal
@@ -145,21 +145,23 @@ open document is listed with its name (a trailing `*` means unsaved
 changes), duration, and sample rate. Click a row to make it active; hover and
 click the ✕ to close it (you'll be prompted to save if it's dirty).
 
-**Where unsaved state is visible:** that trailing `*` is the only place the app
-shows it, and since the module card can now be closed (click the active strip
-entry), it can be off screen. Nothing is lost if it is — closing a dirty
-document still prompts, and quitting with unsaved work still counts your dirty
-documents and asks — but if you want unsaved state in view while you work,
-leave the Files card open.
+**Where unsaved state is visible:** that trailing `*` marks the document. The
+**status pill** at the bottom shows the **project** — `<project> *` whenever
+anything in it is unsaved (a document with changes, a session edit, or a
+project that has content but has never been saved) — in every view, so the
+module card can be closed (click the active strip entry) without losing sight
+of it. Nothing is lost either way: closing a dirty document still prompts, and
+quitting with unsaved work still counts and asks.
 
-Closing the **app window** with unsaved changes is guarded natively: the app
-counts your dirty documents and shows a confirmation ("N file(s) have unsaved
-changes.") with **Quit** (discard everything and exit) and **Cancel** (keep
-the app open). With no unsaved changes the window closes immediately. If the
-app is still busy with a save or export when you try to close, it no longer
-force-closes after a short timeout — it asks instead ("The editor is busy (a
-save or export may be running). Quit anyway?"), so an in-progress write is
-never killed silently.
+Closing the **app window** with unsaved work is guarded natively: the app
+counts the project's unsaved items — each document with unsaved changes, plus
+one for session edits, and at least one for a project that has content but was
+never saved — and shows a confirmation ("N item(s) have unsaved changes.") with
+**Quit** (discard everything and exit) and **Cancel** (keep the app open). An
+empty, untitled project closes immediately. If the app is still busy with a
+save or export when you try to close, it no longer force-closes after a short
+timeout — it asks instead ("The editor is busy (a save or export may be
+running). Quit anyway?"), so an in-progress write is never killed silently.
 
 ## Editing
 
@@ -167,8 +169,10 @@ never killed silently.
 
 Click-drag on the waveform/spectral canvas to select a region (samples are
 the underlying unit; the UI always displays formatted time). Double-click
-selects the entire document. Shift+click extends the selection from the
-current cursor. `Ctrl+A` selects all; `Escape` clears the selection.
+selects the segment under the pointer (the span between the two nearest
+markers; the whole document when there are none). Shift+click extends the
+selection from the current cursor. `Ctrl+A` selects all; `Escape` clears the
+selection.
 
 ### The position line and the timeline
 
@@ -198,10 +202,23 @@ playing does not interrupt playback — the line is where the *next* play starts
 The position line is not part of the undo history: moving it is a view change,
 not an edit, and `Ctrl+Z` will not bring it back.
 
-### Cut / Copy / Paste / Delete
+### Split / Cut / Copy / Paste / Delete
 
-Standard editing acts on the current selection: `Ctrl+X` cut, `Ctrl+C` copy,
-`Ctrl+V` paste at the cursor, `Delete` removes the selection. Undo/redo
+`Ctrl+K` (**Edit → Split at Cursor**, or the scissors button on the edit
+toolbar) drops a marker at the cursor — or one at each edge of the selection —
+named `Split N`, as one undo step. Markers are the document's segment
+boundaries: the spans between them (and between the file's start, the first
+marker, the last marker and the file's end) are its **segments**, which a
+double-click selects and `Ctrl+X` can cut without a selection.
+
+Standard editing acts on the current selection: `Ctrl+X` cuts the selection —
+or, with none, the segment the cursor is in — to the clipboard and leaves that
+span **silent at the same length**; `Ctrl+C` copies; `Ctrl+V` pastes at the
+cursor; `Delete` silences the selection in place at the same length and
+collapses it to a cursor at its start. None of these moves anything that comes
+after the selection, and none of them moves a marker. `Shift+Delete` is
+**Ripple Delete**: it removes the selection and closes the gap — the only
+editor edit that shortens the file besides Trim. Undo/redo
 (`Ctrl+Z` / `Ctrl+Y` or `Ctrl+Shift+Z`) keeps up to 50 steps per document,
 within an 800 MB per-document memory budget — whichever limit is hit first
 evicts the oldest step (a large document's effective depth can be well under
@@ -209,10 +226,11 @@ evicts the oldest step (a large document's effective depth can be well under
 module strip) lists every applied edit; click any entry to jump the document's state to
 that point. Marker add/rename/delete are undoable too (labelled `Add Marker`
 / `Rename Marker` / `Delete Marker` in the History panel), and destructive
-edits that change the timeline (delete, paste, trim, replace, sample-rate
-conversion, and length-changing effects like Time Stretch/Pitch Shift) remap
-or drop affected markers in the same undo step, so undo restores their exact
-pre-edit positions.
+edits that change the timeline (ripple delete, paste, trim, replace,
+sample-rate conversion, and length-changing effects like Time Stretch/Pitch
+Shift) remap or drop affected markers in the same undo step, so undo restores
+their exact pre-edit positions. Equal-length edits — Delete, Cut, Silence —
+leave every marker where it was.
 
 ### The edit toolbar
 
@@ -221,30 +239,46 @@ waveform's axis, whenever **at least one file is open** — in the Waveform,
 Spectral and Multitrack views alike. It is only ever a shortcut to commands
 you already have: nothing here does anything the menu and the keyboard do not.
 
-`Cut · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
+`Split · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
 
+- **Split** is `Ctrl+K` — a marker at the cursor, or one at each edge of the
+  selection. In Waveform and Spectral it needs only an open file, so it is the
+  one button in the first group that stays lit with nothing selected; in
+  Multitrack it needs a selected clip (see below).
 - **Trim** keeps the selected region and drops everything else;
   **Silence** zeroes the selected region in place, leaving the length alone.
   Both are undoable History steps like any other edit, and both are also in
   **Edit → Trim to Selection / Silence Selection**, directly under Delete.
   Neither has a keyboard shortcut, so neither menu row advertises one.
 - Buttons grey out individually rather than disappearing. With no selection,
-  Cut / Copy / Delete / Trim / Silence are greyed; with nothing on the
+  Copy / Delete / Trim / Silence are greyed; with nothing on the
   clipboard, Paste is greyed; Undo and Redo follow whichever history is
   active — the **document's** in Waveform and Spectral, the **session's** in
   Multitrack.
-- In the **Multitrack** view, Cut / Copy / Paste / Trim / Silence are always
-  greyed, and their keyboard shortcuts do nothing there either. All five edit a
-  region of the **active document**, which that view does not show — and since
-  switching views keeps your selection, they would otherwise change a file you
-  cannot see, with the Undo button beside them pointing at the session's
-  history instead. Hover one for the reason; switch to Waveform or Spectral to
-  use it. **Delete** does work there — it removes the selected clip.
+- In the **Multitrack** view, **Split** and **Delete** work: Split cuts clips
+  at the cursor (see *Splitting clips*) and Delete removes the selected clips.
+  Copy / Paste / Trim / Silence are greyed there, and their keyboard shortcuts
+  do nothing either — Copy and Paste because there is no clip clipboard yet,
+  Trim and Silence because that view has no way to select a stretch of time.
+  Each button's tooltip says which of the two it is. All four edit a region of
+  the **active document**, which the view does not show — and since switching
+  views keeps your document selection (unless you leave Multitrack with a clip
+  selected, which selects that clip's span instead — see **Views**), they would
+  otherwise change a file you cannot see, with the Undo button beside them
+  pointing at the session's history instead. Switch to Waveform or Spectral to
+  use one.
 
 ### Markers
 
 Press `M` (or **Edit → Add Marker**) to drop a marker named `Marker N` at the
-current cursor position. The **Markers** panel (opened from the module strip) lists every
+current cursor position; `Ctrl+K` (**Split at Cursor**) drops one named
+`Split N` at the cursor or at both edges of the selection. `M` is an editor
+command: in the Multitrack view it does nothing, since the document it
+would mark is not on screen there. `Ctrl+K` is routed by view: in Multitrack
+it splits clips instead (see *Splitting clips*). Every marker — whichever command, panel
+or analysis wrote it — is a **segment boundary**: a double-click on the
+canvas selects the span between the two nearest markers, and `Ctrl+X` with
+no selection cuts that span. The **Markers** panel (opened from the module strip) lists every
 marker on the active document: click a marker's **time** to move the cursor
 there and re-center the view around it; double-click a marker's name to
 rename it inline (`Enter` or clicking away commits, `Escape` cancels); the ✕
@@ -261,11 +295,12 @@ Export, and read back sample-accurately the next time the file is opened; a
 multitrack session's markers are embedded in the `.audm` file. Adding,
 renaming, or deleting a marker marks the document dirty (the Files-panel `*`,
 the close/quit prompts) and is undoable from the History panel. Destructive
-edits that change the timeline — delete, paste, trim, replace, sample-rate
-conversion, and length-changing effects like Time Stretch/Pitch Shift — remap
-marker positions along with the audio rather than leaving them stranded;
-positions are always clamped to the document length, so a marker can never be
-saved past the end of the file.
+edits that change the timeline — ripple delete, paste, trim, replace,
+sample-rate conversion, and length-changing effects like Time Stretch/Pitch
+Shift — remap marker positions along with the audio rather than leaving them
+stranded; equal-length edits (Delete, Cut, Silence) leave markers in place,
+including markers inside the silenced span. Positions are always clamped to
+the document length, so a marker can never be saved past the end of the file.
 
 ### Convert Sample Rate / Convert Channels
 
@@ -303,8 +338,8 @@ is always last, and anything added later goes between them.
 - **Remix** — a remix document's per-splice adjustment rows (quality dot,
   Go To, Reject, Pin, Nudge, Re-roll, Revert to auto).
 - **History** — the undo history of whatever is active: the **session's** in
-  the multitrack view, the **active document's** elsewhere (see *Cut / Copy /
-  Paste / Delete* above and *Undo in the multitrack* below).
+  the multitrack view, the **active document's** elsewhere (see *Split / Cut /
+  Copy / Paste / Delete* above and *Undo in the multitrack* below).
 - **Markers** — the active document's marker list (see *Markers* above).
 - **Remix** appears in the strip only while a remix document is open, and
   vanishes again when the last one is closed — it has nothing to show
@@ -338,26 +373,39 @@ is always last, and anything added later goes between them.
 
 ## Effects
 
-Effects live in the **Effects** panel (opened from the module strip), grouped by category, and
-mirrored in the **Effects** menu. Double-click an effect (with a document
-open) to open its parameter dialog, adjust settings, and apply. Every effect
-processes the current selection, or the whole document when there's no
-selection.
+Effects live in the **Effects** panel (opened from the module strip), grouped
+by category, and mirrored in the **Effects** menu. **Click** an effect (with a
+document open) — from the card or the menu — and it opens as a **card in the
+module column, between the module strip and the module card**, the same
+348 px wide as both; the module card beneath it switches to Effects so the
+other effects stay one click away. Adjust, **Preview**, **Apply**; close it
+with the **✕** in its header, **Cancel** or `Escape` — the key closes the card
+exactly as it closed the effect dialog before, stopping a running Preview and
+keeping your selection (while **Apply** runs, `Escape` does nothing, like the
+✕). The card's first line names the span **Apply** will write — the selection,
+or the whole file when there is none — so a selection lost to Edit › Deselect
+or to a click on the waveform is visible in the card before you press Apply.
+Nothing else is dimmed: the waveform, selection, transport and keys stay live
+while the card is open — and if you
+switch, edit or close the document while a **Preview** plays, the transport
+takes the engine back and the card gives the preview up with it, so the button
+reads **Preview** again rather than stopping what you just started. While an
+effect is being **applied**, the module strip greys out and the ✕ and Cancel
+refuse until it finishes — the same rule as a running pipeline pass. The mouse
+stays live, so you can still edit, switch or close the document while it runs;
+do that and the effect is **not** applied — it commits only to the document as
+you left it when you clicked Apply — the card says so and stays, and **Apply**
+runs it again on the document as it is now. Closing the last document closes
+the card. Every effect processes the current
+selection, or the whole document when there's no selection.
 
-**Below the effects, the same card lists the Pipeline tools** — grouped as
-**Tempo & Timing**, **Voice** and **Analysis** — and then the Effects menu's
-own **Mix** row, the **Spatial Positioner**, so the whole
-capability surface is in one panel. (The **Pipeline** module card lists the
-ten Pipeline rows on their own, without scrolling past the effects.) A tool takes a
-**single** click (it is a verb the menu already runs on one click; a second door
-slower than the first is not a door), while effect rows keep their double-click,
-because an effect row opens a parameter dialog rather than doing something. A
-greyed tool row means that command is unavailable right now, for exactly the
-reason the menu gives — the panel asks the command itself rather than keeping
-its own copy of the rule.
-
-Clicking a tool row here replaces this card with the tool, exactly as the
-Pipeline card and the Pipeline menu do.
+Below the effects, the same card lists the Effects menu's own **Mix** row, the
+**Spatial Positioner**. A tool row takes a **single** click (it is a verb
+the menu already runs on one click). A greyed tool row means that command is
+unavailable right now, for exactly the reason the menu gives — the panel asks
+the command itself rather than keeping its own copy of the rule. The ten
+Pipeline tools are not listed here: they live in the **Pipeline** module card
+and menu.
 
 - **Amplitude** — Amplify (gain in dB), Fade (in/out; Linear, Ducked, Cosine
   or Equal power curve; ramp length as a % of the selection — 100 % shapes the
@@ -938,7 +986,10 @@ cursor on the nearest **beat or marker** within 8 screen pixels; dragging a
 selection snaps the edge you are dragging (the anchor never moves); and in the
 multitrack, dragging or trimming a clip snaps it to the **edges** (start and
 end) of the *other* clips — on any track — to their beats and markers, and to
-the session cursor.
+the session cursor. **Split at Cursor** cuts exactly where the cursor sits:
+place it with a click, a drag or a ruler scrub and it is already on the beat,
+marker or clip edge the magnet chose (hold `Alt` while placing it to cut
+off-grid); the split itself never snaps.
 
 When two kinds of target are both within reach, the magnet prefers what you
 **placed** over what was **derived**: a clip edge or the session cursor beats a
@@ -1343,6 +1394,14 @@ Switch between views from the toolbar pill's view segment or **View** menu:
   note appears in the view (details go to the developer console); the next
   successful recompute — e.g. after zooming — clears it.
 
+Leaving **Multitrack** for Waveform or Spectral with a clip selected opens
+that clip's source document with the clip's span selected, the cursor at its
+start and the view fitted to it. With several clips selected the primary (the
+one the **Properties** tab shows) is used; with no clip selected, or a clip
+whose source file has been closed, the editor shows the document you left as
+before. The carry is one-way — the editor selection does not flow back into
+the session.
+
 Both views share the same selection, cursor, playhead, marker and beat-grid
 overlays, and the same zoom/scroll gestures.
 
@@ -1427,7 +1486,8 @@ same limits as the buttons.
   neighbour instead (see **Clip fades and crossfades** below). Click a clip
   to select it — its facts (source document, start/offset/length, and an
   editable gain in dB) appear in the **Properties** tab, along with its
-  fade lengths and curves.
+  fade lengths and curves; switch to Waveform or Spectral to open that clip's
+  source span in the editor (see **Views**).
 - **Playback**: the multitrack view has its own transport, cursor, and
   playhead, driven by the same toolbar-pill transport buttons. The session
   cursor wears the same **red triangle handle** as the editor views, at the
@@ -1453,13 +1513,16 @@ same limits as the buttons.
 - **Mix Down**: **File → Mix Down to New File** renders the whole session
   offline to a new stereo document (added to the Files panel), respecting
   mute/solo/volume/pan/gain.
-- **Sessions**: **File → Save Session…** / **Open Session…** persist the
-  session (tracks, clips, their source document references, embedded audio,
-  and markers) to a `.audm` file. Sessions are written in format v3, a binary
-  layout (JSON header + raw audio payload, no base64) that removes the old
-  v1/v2 format's silent failure on large embedded audio; Save Session now
-  reports success or failure explicitly instead of failing quietly. Older
-  `.audm` files (v1/v2) still open normally.
+- **Projects**: **File → Save** / **Save As…** (`Ctrl+S` / `Ctrl+Shift+S`)
+  write the **project** to a `.audm` file — in every view, not only this one.
+  The project is the session (tracks, clips, automation, fades) plus **every
+  open document** with its audio, markers, name and origin path, whether or
+  not a clip references it — nothing is dropped. **File → Open Project…**
+  restores all of them into the Files panel and switches to the multitrack
+  view. Project files are format v4, a binary layout (JSON header + raw audio
+  payload, no base64); v1–v3 `.audm` files still open normally, but a v4 file
+  does not open in older builds (v1.35 and earlier). The status pill shows the
+  project's name, starred while anything in it is unsaved.
 
 <!-- K1: clip selection, edge navigation, ripple delete -->
 ### Selecting clips, walking the edges, and ripple delete
@@ -1566,13 +1629,39 @@ something else. Ripple Delete of the **selected clips** (above) is the form that
 works today, and selecting the clips that cover the stretch you want gone is the
 way to get the same result.
 
+### Splitting clips
+
+`Ctrl+K`, **Edit → Split at Cursor**, or the edit pill's **Split** button cuts,
+at the **cursor**, every clip under it on every track that owns a selected clip.
+One selected clip splits its own track; clips selected across several tracks
+split all of those tracks; with nothing selected the command is greyed, because
+"which tracks" has no answer.
+
+That is deliberately track-scoped rather than clip-scoped: an unselected clip
+sitting under the cursor on a selected clip's track is cut too, so a cut across
+a stack of tracks is one act rather than one per clip.
+
+The left piece keeps the clip's fade-in, the right piece its fade-out, and the
+new seam has none — the two halves butt together, so nothing is heard at the
+cut. A crossfade with a neighbour survives untouched.
+
+The cursor has to sit **inside** a clip, at least 32 samples from either edge,
+and outside any overlap with another clip on the same track. A clip that fails
+any of those is simply left alone; when no clip on the selected tracks
+qualifies, the row and the button are greyed rather than doing nothing quietly.
+
+The whole act is **one undo step**, however many clips it cut. Afterwards the
+right-hand pieces of the clips you had selected join the selection (the
+left-hand pieces keep the original clips' identity), so a second `Ctrl+K`
+further along the timeline acts on the same tracks.
+
 ### Undo in the multitrack (session history)
 
-Every session edit is undoable: clip moves, trims, deletes and gain changes,
-fade and crossfade edits (arm/release included), automation-key adds, moves,
-deletes and curve changes, track add/remove/rename, the fader and pan sliders,
-the M/S/R toggles, spatial placements, recorded takes, and **New Session**
-itself.
+Every session edit is undoable: clip moves, trims, deletes, gain changes and
+splits, fade and crossfade edits (arm/release included), automation-key adds,
+moves, deletes and curve changes, track add/remove/rename, the fader and pan
+sliders, the M/S/R toggles, spatial placements, recorded takes, and **New
+Session** itself.
 
 - **Where Ctrl+Z goes**: the session has its own undo history, separate from
   every document's — the same per-document model the editor already follows.
@@ -1590,7 +1679,7 @@ itself.
   steps — undo is for edits, not navigation. Undoing an edit does restore
   the selection to the affected clip so you can see what changed.
 - **Limits**: like documents, the session keeps up to 50 steps, in memory
-  only. **Open Session** and stem landing start a fresh history (undo does
+  only. **Open Project…** and stem landing start a fresh history (undo does
   not reach across a load); **New Session** is itself undoable.
 
 ### Clip fades and crossfades
@@ -1771,22 +1860,24 @@ without changing the open document's path or dirty state:
   [`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md) at the repository root.
 - **OGG (Opus)**: 96/128/192 kbps.
 
-**File → Save** (`Ctrl+S`) is **format-faithful**: for a document opened from
-`.wav`, `.mp3`, `.flac`, or `.ogg` it re-encodes in place into that same
-container — WAV as 32-bit float (Properties updates to reflect this), MP3 at
-192 kbps, FLAC at 16-bit or 24-bit (rounded up from the source depth — a
-20-bit source saves as 24-bit, never truncated to 16), OGG as Opus-in-Ogg at
-128 kbps (if the host has no WebCodecs Opus encoder, an in-place OGG Save
-falls back to the Save As… dialog instead). Documents opened from other
-exotic containers (M4A, AAC, WebM, or anything unrecognized), and brand-new
-untitled documents, always use a **Save As…** dialog that writes WAV (32-bit
-float, replacing the source extension in the suggested name — `song.mp3`
-defaults to `song.wav`). **Save As…** always writes WAV.
+In the **multitrack view**, Export renders the **session mixdown** — the same
+render as **File → Mix Down to New File** (mute/solo, volume/pan, automation,
+fades, hard-clamped; length = the last audible clip end) — to the chosen
+format, without adding a document to the Files panel and without markers. The
+default file name is the project name. If nothing is audible (an empty or
+all-muted session) Export reports "Nothing audible to export." and writes no
+file.
 
-Every in-place save (Save, and the format-faithful re-encodes above) writes
-to a temporary file next to the target and only replaces it once the write is
-complete, so an interrupted or failed save can no longer corrupt or truncate
-the original file on disk.
+Every export writes to a temporary file next to the target and only replaces
+it once the write is complete, so an interrupted or failed export can no
+longer corrupt or truncate a file already on disk.
+
+**File → Save** (`Ctrl+S`) and **Save As…** (`Ctrl+Shift+S`) write the
+**project** (`.audm`) — never an audio file. Export is the only way audio
+leaves the app. Save with a project path writes there silently; Save with no
+path opens the Save As dialog; Save As always asks, and renames the project to
+the file's name. See **Projects** under the multitrack section for what the
+file contains.
 
 ## Shortcuts reference
 

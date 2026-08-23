@@ -5,6 +5,10 @@ import { createDocument } from './audio/AudioDocument';
 import { playbackEngine } from './audio/PlaybackEngine';
 import { multitrackPlayer } from './multitrack/MultitrackPlayer';
 import { getInFlightSaveCount } from './services/fileService';
+import { isProjectSaveInFlight } from './multitrack/sessionFile';
+import { useSessionStore } from './multitrack/sessionStore';
+import { _resetSessionUndo } from './multitrack/sessionUndo';
+import { createClip } from './multitrack/session';
 import { runCommand } from './services/menuActions';
 import { getRemixSession } from './services/remixService';
 import { focusTranscriptPanel } from './services/dialogBus';
@@ -22,6 +26,13 @@ jest.mock('./services/fileService', () => ({
 const mockGetInFlightSaveCount = getInFlightSaveCount as jest.MockedFunction<
   typeof getInFlightSaveCount
 >;
+
+// Lot A: the project save's in-flight flag joins the busy count the same way.
+jest.mock('./multitrack/sessionFile', () => ({
+  ...jest.requireActual('./multitrack/sessionFile'),
+  isProjectSaveInFlight: jest.fn(() => false),
+}));
+const mockIsProjectSaveInFlight = isProjectSaveInFlight as jest.MockedFunction<typeof isProjectSaveInFlight>;
 
 // F11-8: the strip's Remix entry appears exactly while a remix DOCUMENT exists,
 // which the app answers with `getRemixSession(docId) !== null` — remixService's
@@ -45,8 +56,15 @@ function haveRemixSessionFor(docIds: string[]) {
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  // Lot A: the close guard counts the PROJECT (session store + history +
+  // path), which is module-global — every test starts from an empty,
+  // never-written, clean project.
+  useSessionStore.getState().newSession(44100);
+  useSessionStore.getState().setProjectPath(null);
+  _resetSessionUndo();
   delete (window as { electronAPI?: unknown }).electronAPI;
   mockGetInFlightSaveCount.mockReturnValue(0);
+  mockIsProjectSaveInFlight.mockReturnValue(false);
   mockGetRemixSession.mockReset();
   mockGetRemixSession.mockReturnValue(null);
 });
@@ -126,14 +144,73 @@ describe('native close guard renderer side (Task F8)', () => {
     expect(api.respondCloseRequest).toHaveBeenCalledWith(2, 0);
   });
 
-  it('responds 0 when nothing is dirty', () => {
+  it('responds 0 when nothing is dirty (a SAVED project with a clean document — lot A)', () => {
     const api = installCloseApi();
     addDoc(false);
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
 
     render(<App />);
     act(() => api.fireCloseRequest());
 
     expect(api.respondCloseRequest).toHaveBeenCalledWith(0, 0);
+  });
+
+  it('responds 0 for an empty untitled project (N12 — lot A)', () => {
+    const api = installCloseApi();
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(0, 0);
+  });
+
+  it('counts a clean document in a NEVER-WRITTEN project as 1 — the file it would be saved into does not exist (M4 — lot A)', () => {
+    const api = installCloseApi();
+    addDoc(false);
+    expect(useSessionStore.getState().projectPath).toBeNull();
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(1, 0);
+  });
+
+  it('counts a dirty session with clips and no documents as 1 (lot A)', () => {
+    const api = installCloseApi();
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    const trackId = useSessionStore.getState().session.tracks[0].id;
+    useSessionStore
+      .getState()
+      .addClip(trackId, createClip({ documentId: 'doc-gone', startSample: 0, offsetSample: 0, lengthSample: 10 }));
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(1, 0);
+  });
+
+  it('counts a dirty document PLUS a dirty session as 2 (lot A)', () => {
+    const api = installCloseApi();
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    addDoc(true);
+    useSessionStore.getState().addTrack();
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(2, 0);
+  });
+
+  it('reports an in-flight PROJECT save in the busy count (lot A)', () => {
+    const api = installCloseApi();
+    addDoc(false);
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    mockIsProjectSaveInFlight.mockReturnValue(true);
+
+    render(<App />);
+    act(() => api.fireCloseRequest());
+
+    expect(api.respondCloseRequest).toHaveBeenCalledWith(0, 1);
   });
 
   it('reads the dirty count at request time, not mount time', () => {
@@ -153,6 +230,7 @@ describe('native close guard renderer side (Task F8)', () => {
   it('also reports a nonzero in-flight-save count alongside the dirty count (Task M4/F7)', () => {
     const api = installCloseApi();
     addDoc(false); // nothing dirty ...
+    useSessionStore.getState().setProjectPath('D:\\p.audm'); // ... in a saved project (lot A) ...
     mockGetInFlightSaveCount.mockReturnValue(1); // ... but a save is mid-flight
 
     render(<App />);
@@ -459,7 +537,7 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
     expect(screen.queryByTestId('effects-list')).not.toBeInTheDocument();
   });
 
-  it('double-clicking an effect in the Effects card still routes through the dialog bus (disabled without a doc)', () => {
+  it('an effect row in the Effects card is disabled without a document', () => {
     render(<App />);
     const rail = screen.getByTestId('sidebar-tabs');
     fireEvent.click(within(rail).getByRole('button', { name: 'Effects' }));

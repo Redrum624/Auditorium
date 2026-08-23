@@ -13,17 +13,18 @@ import { SectionLabel } from '../UI/glass';
  * predicate — and the click is `runCommand`. Nothing here can drift from the
  * menu, because nothing here restates it.
  *
- * Why a module and not just the Effects card's tool list (F11-6), which shows
- * the same rows: the Effects card is an EFFECT browser with the tools appended
- * below a long scrolling list, so reaching Cover Chain there means scrolling
- * past every registered effect. A module is a place you go — one click on the
- * strip and the ten tools are the whole card. The two doors stay in sync by
- * construction: both render `getPipelineGroups()`.
+ * Why a module and not the Effects card's tool list (F11-6), which used to
+ * show the same rows: the Effects card is an EFFECT browser with the tools
+ * appended below a long scrolling list, so reaching Cover Chain there meant
+ * scrolling past every registered effect. A module is a place you go — one
+ * click on the strip and the ten tools are the whole card. Item 5 of the
+ * 2026-08-18 program then made this card the ONLY one: a Pipeline tool no
+ * longer appears in the Effects card at all ("if it is in Pipeline, remove it
+ * from Effects"), and this card renders `getPipelineGroups()` alone.
  *
- * The rows are a SINGLE click, matching the Effects card's tool rows and the
- * menu, and unlike the effect rows' double-click. EffectsPanel states the
- * reason: an effect row names a parameter set the user is about to fill in, a
- * tool row names a verb.
+ * The rows are a SINGLE click, matching the menu and the Effects card's rows
+ * — since item 6 an effect row is one click too, opening its card in the
+ * module column.
  */
 const ROW_BUTTON_CLASS =
   'mx-1 w-[calc(100%-0.5rem)] truncate rounded-lg px-2 py-1 text-left text-[#d4d4d8] enabled:hover:bg-white/5 disabled:cursor-default disabled:text-[#8b8b92] disabled:opacity-50';

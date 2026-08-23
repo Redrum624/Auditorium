@@ -20,10 +20,11 @@ import { useSessionStore } from '../multitrack/sessionStore';
 import { withSessionGesture } from '../multitrack/sessionUndo';
 import type { AutomationLane, AutomationParam } from '../multitrack/automation';
 import { mixdownSession as renderMixdown, resolveClipFadeSpecs } from '../multitrack/mixdown';
-import { parseSessionFileBytes, serializeSessionV3 } from '../multitrack/sessionFile';
+import { loadProjectFrom, writeProject } from '../multitrack/sessionFile';
 import { getEffectFailureCount, runEffectOnSelection } from './effectRunner';
 import { captureNoiseProfile, getNoiseProfile } from './noiseProfile';
 import {
+  encodeAudio,
   encodeExport,
   newDocument as newBlankDocument,
   openFilePath,
@@ -36,7 +37,9 @@ import {
   cutSelection,
   deleteSelection,
   pasteAtCursor,
+  rippleDeleteSelection,
   silenceSelection,
+  splitAtCursor,
   trimToSelection,
 } from './editOps';
 import { getClipboard } from './clipboard';
@@ -98,7 +101,6 @@ import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/fi
 import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import type { FadeCurve } from '../dsp/fades';
-import { defaultSessionZoom } from '../multitrack/sessionZoom';
 
 export interface TestStateSummary {
   docCount: number;
@@ -124,6 +126,8 @@ export interface TestStateSummary {
    * infers the state it is measuring reports the inference, not the state.
    */
   sessionSampleRate: number;
+  /** Lot A (M4): the `.audm` plain Save writes to; null for a never-written project. */
+  projectPath: string | null;
 }
 
 /** F10's four before/after numbers, as plain JSON scalars. `null` is a real
@@ -173,13 +177,19 @@ export interface TestApi {
   setSelection(start: number, end: number): { start: number; end: number } | null;
   /** Clears it, the way a click without a drag does. */
   clearSelection(): void;
+  /** Places the document cursor (lot C); returns what was stored. */
+  setCursor(sample: number): number;
+  /** Reads the document cursor back (`getStateSummary` carries no cursor). */
+  getCursor(): number;
   /** One step FORWARD through the same history Ctrl+Y drives. */
   redoActive(): { length: number };
   /** The active document's history, as the History panel renders it. */
   getHistoryState(): { done: string[]; undone: string[] };
-  /** The four selection edits behind Ctrl+X / Del / Trim / Silence, plus the
-   * clipboard's other two ends, dispatched by name. */
-  editOp(op: 'cut' | 'copy' | 'paste' | 'delete' | 'trim' | 'silence'): void;
+  /** The selection edits behind Ctrl+X / Del / Shift+Del / Trim / Silence,
+   * plus the clipboard's other two ends, dispatched by name. */
+  editOp(
+    op: 'cut' | 'copy' | 'paste' | 'delete' | 'rippleDelete' | 'split' | 'trim' | 'silence'
+  ): void;
   /** What the clipboard is holding, so a Cut's promise can be checked. */
   getClipboardInfo(): { length: number; sampleRate: number; channels: number } | null;
   /** Edit > Convert Channels (`documentTools.convertChannels`). */
@@ -200,6 +210,16 @@ export interface TestApi {
     trackIndex: number,
     startSample: number
   ): { clipId: string; lengthSample: number; startSample: number } | null;
+  /** Lot D: the MULTITRACK edit cursor (`mtCursorSample`, never the running
+   * playhead), written through `setMtCursor` — no snap and no clamp, which is
+   * the store's own contract — and echoed back. */
+  setMtCursor(sample: number): number;
+  /** Reads it back (`getStateSummary` carries no session cursor). */
+  getMtCursor(): number;
+  /** Lot D: names the clip selection through `setSelectedClips`, so the store's
+   * own rules apply (dangling ids dropped, duplicates collapsed), and echoes
+   * what was stored. */
+  selectClips(ids: string[]): { selectedClipId: string | null; selectedClipIds: string[] };
   mixdownSession(): { name: string; length: number; sampleRate: number; rms: number } | null;
   // --- v1.1 flows -------------------------------------------------------------
   pasteResampleFlow(): {
@@ -235,6 +255,10 @@ export interface TestApi {
   addMarkerToActive(positionSample: number, name: string): string | null;
   getActiveMarkers(): { name: string; positionSample: number }[];
   closeActive(): void;
+  /** Activates the `index`-th open document with this exact name (the walk
+   * opens the same fixture many times) and returns how many share the name;
+   * 0 means none and nothing was activated. */
+  activateDocumentByName(name: string, index?: number): number;
   exportActiveOgg(outPath: string, bitrate?: number): Promise<boolean>;
   saveActiveInPlace(): Promise<{ ok: boolean; dirty: boolean | null; filePath: string | null }>;
   // --- v1.4 flows ---------------------------------------------------------
@@ -244,6 +268,11 @@ export interface TestApi {
     trackCount: number;
     droppedClipCount: number;
   }>;
+  // --- lot A (M5) -----------------------------------------------------------
+  /** Export in the multitrack view, minus the dialog: renders `mixdownSession`
+   * and writes `encodeAudio` bytes to `outPath`. `false` (with the production
+   * info box) when nothing is audible. */
+  exportSession(opts: ExportOptions, outPath: string): Promise<boolean>;
   // --- beat grid (Task B2) ------------------------------------------------
   /** Flips the beat-tic display preference; returns the NEW visibility. */
   toggleBeatGrid(): boolean;
@@ -1100,6 +1129,8 @@ export function installTestHooks(): void {
         dirty: doc?.dirty ?? null,
         neverSaved: doc?.neverSaved ?? null,
         sessionSampleRate: useSessionStore.getState().session.sampleRate,
+        // Lot A (M4): where plain Save writes, or null for a never-written project.
+        projectPath: useSessionStore.getState().projectPath,
       };
     },
 
@@ -1180,6 +1211,13 @@ export function installTestHooks(): void {
 
     clearSelection: () => useAppStore.getState().setSelection(null),
 
+    setCursor: (sample) => {
+      useAppStore.getState().setCursor(sample);
+      return useAppStore.getState().cursorSample;
+    },
+
+    getCursor: () => useAppStore.getState().cursorSample,
+
     redoActive: () => {
       const doc = activeDoc();
       if (doc) undoHistoryRedo(doc.id);
@@ -1210,6 +1248,12 @@ export function installTestHooks(): void {
           return;
         case 'delete':
           deleteSelection();
+          return;
+        case 'rippleDelete':
+          rippleDeleteSelection();
+          return;
+        case 'split':
+          splitAtCursor();
           return;
         case 'trim':
           trimToSelection();
@@ -1301,6 +1345,19 @@ export function installTestHooks(): void {
       if (!track) return null;
       const [placed] = placeDocumentsOnTrack([doc], track.id, startSample, { select: false });
       return placed ?? null;
+    },
+
+    setMtCursor: (sample) => {
+      useSessionStore.getState().setMtCursor(sample);
+      return useSessionStore.getState().mtCursorSample;
+    },
+
+    getMtCursor: () => useSessionStore.getState().mtCursorSample,
+
+    selectClips: (ids) => {
+      useSessionStore.getState().setSelectedClips(ids);
+      const { selectedClipId, selectedClipIds } = useSessionStore.getState();
+      return { selectedClipId, selectedClipIds: [...selectedClipIds] };
     },
 
     // Renders the session offline, adds the resulting stereo doc, switches to
@@ -1491,6 +1548,15 @@ export function installTestHooks(): void {
       useAppStore.getState().closeDocument(doc.id);
     },
 
+    // A project reopen (M4) restores EVERY embedded document, so the walk can
+    // no longer assume the one it cares about ended up active; it names it.
+    activateDocumentByName: (name, index = 0) => {
+      const matches = useAppStore.getState().documents.filter((d) => d.name === name);
+      const doc = matches[index];
+      if (doc) useAppStore.getState().setActiveDocument(doc.id);
+      return matches.length;
+    },
+
     // Encodes the active document to Ogg Opus via the real async encoder
     // (WebCodecs AudioEncoder + the pure-TS Ogg muxer, Task G2) and writes it
     // directly — bypassing exportDocument's native save dialog, which cannot be
@@ -1532,59 +1598,34 @@ export function installTestHooks(): void {
 
     // --- v1.4 flows -----------------------------------------------------
 
-    // Serializes the current session to .audm v3 (Task M5/F3) and writes it
-    // directly, bypassing saveSessionViaDialog's native showSaveDialog +
-    // success showMessageBox (neither of which can be driven headlessly).
-    // Mirrors production's serializeSessionV3 call exactly (same session,
-    // docs, and markers sources) so the smoke proves the real writer.
-    saveSessionAs: async (outPath) => {
+    // Lot A (M4): IS File → Save As…, minus the dialog — `writeProject` is the
+    // dialog-free core production's `saveProject` calls (v4 bytes, save
+    // points, `projectPath`, the rename to the basename). The smoke therefore
+    // proves the real writer, not a parallel serializer call.
+    saveSessionAs: async (outPath) => writeProject(outPath, { rename: true }),
+
+    // Lot A (M4): IS File → Open Project…, minus the dialog — `loadProjectFrom`
+    // is what `openSessionViaDialog` calls (real dispatcher, every embedded
+    // document addDocument'd so the last one is active, markers set, fitted
+    // zoom — MT1 C1 — history cleared, `projectPath` remembered, multitrack
+    // view). Same summary shape as before.
+    openSessionFrom: async (path) => loadProjectFrom(path),
+
+    // Lot A (M5): IS File → Export… in the multitrack view, minus the dialog —
+    // the same `mixdownSession` render and the same `encodeAudio` switch
+    // `exportSessionMixdown` uses, so the smoke can compare the decoded file
+    // per sample against `mixdownSession()` above.
+    exportSession: async (opts, outPath) => {
       const session = useSessionStore.getState().session;
-      const docs = useAppStore.getState().documents;
-      const markers = useAppStore.getState().markers;
-      let bytes: Uint8Array<ArrayBuffer>;
-      try {
-        ({ bytes } = serializeSessionV3(session, docs, markers));
-      } catch {
+      const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+      const { channels, sampleRate } = renderMixdown(session, docs);
+      if (channels[0].length === 0) {
+        await window.electronAPI.showMessageBox({ type: 'info', title: 'Export', message: 'Nothing audible to export.' });
         return false;
       }
-      const result = await window.electronAPI.writeFile(outPath, bytes.buffer);
+      const data = encodeAudio([channels[0], channels[1]], sampleRate, undefined, opts);
+      const result = await window.electronAPI.writeFile(outPath, data);
       return result.ok;
-    },
-
-    // Reads and parses a .audm file via the real dispatcher (parseSessionFileBytes,
-    // which sniffs the v3 AUDM3 magic vs. legacy JSON) and applies it to the
-    // store the same way openSessionViaDialog does, bypassing its native
-    // showOpenDialog + info showMessageBox. Returns a small summary so the
-    // smoke harness can assert the round trip without a separate "list all
-    // docs" hook — the reopened document(s) are also addDocument'd, so the
-    // last one is active and getStateSummary()/getActiveMarkers() read it back.
-    openSessionFrom: async (path) => {
-      const buf = await window.electronAPI.readFile(path);
-      const result = parseSessionFileBytes(buf);
-      for (const doc of result.documents) {
-        useAppStore.getState().addDocument(doc);
-      }
-      for (const [docId, markerList] of Object.entries(result.markers)) {
-        useAppStore.getState().setMarkersForDoc(docId, markerList);
-      }
-      useSessionStore.setState({
-        session: result.session,
-        selectedClipId: null,
-        mtCursorSample: 0,
-        // MT1 (C1): fitted, not the hardcoded 512 — see sessionFile's twin. This
-        // hook is how the smoke and the walker open a session, so while it wrote
-        // 512 every rig assertion about the multitrack was made against a zoom
-        // no user would ever see.
-        mtZoom: defaultSessionZoom(result.session),
-        mtPlayState: 'stopped',
-        mtPlayheadSample: 0,
-      });
-      useAppStore.getState().setView('multitrack');
-      return {
-        docCount: result.documents.length,
-        trackCount: result.session.tracks.length,
-        droppedClipCount: result.droppedClipCount,
-      };
     },
 
     // --- v1.5 flows -------------------------------------------------------

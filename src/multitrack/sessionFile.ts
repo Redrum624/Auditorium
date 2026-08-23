@@ -6,29 +6,41 @@ import { clampFadePair } from './session';
 import { sanitizeAutomationLanes } from './automation';
 import { FADE_CURVES, type FadeCurve } from '../dsp/fades';
 import { useSessionStore } from './sessionStore';
-import { clearSessionHistory } from './sessionUndo';
+import {
+  clearSessionHistory,
+  invalidateSessionSavePoint,
+  markSessionSavePoint,
+  sessionTimelineEpoch,
+} from './sessionUndo';
 import { defaultSessionZoom } from './sessionZoom';
+import { invalidateSavePoint, markSavePoint } from '../services/undoHistory';
 
 /** .audm format version. v1: no markers. v2: adds an optional `markers` map,
- * audio embedded as base64 WAV inside the JSON text. v3 (current, write
- * default — see `serializeSessionV3`): audio moves out of the JSON entirely
- * into a raw binary payload, so no monolithic JS string is ever built for the
- * audio content (the V8 string-length cap made v2 throw a RangeError once
- * embedded audio crossed ~402MB — see F3). The loader accepts all three; only
- * v3 is ever written by `saveSessionViaDialog`.
+ * audio embedded as base64 WAV inside the JSON text. v3: audio moves out of
+ * the JSON entirely into a raw binary payload, so no monolithic JS string is
+ * ever built for the audio content (the V8 string-length cap made v2 throw a
+ * RangeError once embedded audio crossed ~402MB — see F3). v4 (current, write
+ * default — see `serializeSessionV4`; lot A, ruling M4): v3's byte layout
+ * under an `AUDM4\n` magic, plus an `unreferenced` section so EVERY open
+ * document is in the file (v3 embedded only clip-referenced ones), `markers`
+ * for every embedded document, and an optional per-document `origin` — the
+ * path the document was opened from. The loader accepts all four; only v4 is
+ * written by a project save (`writeProject`).
  *
  * v1.9 (X2): clips may additionally carry OPTIONAL fade keys (`fadeInSample`,
  * `fadeOutSample`, `fadeInCurve`, `fadeOutCurve` — see `session.ts`). These
- * ride inside the existing JSON clip records with `formatVersion` STAYING 3:
- * absent keys mean "no fade", so every pre-fade `.audm` still loads, a
- * session saved without fades is byte-identical to what v1.8.0 wrote, and a
- * fade-carrying file still opens in a v1.8.0 build (its parser spreads clip
- * records through untouched, so unknown keys are simply carried). Bumping the
- * version instead would be a data-loss-class change: `parseSessionFileV3`
- * hard-rejects any `formatVersion !== 3` (an equality, not a floor), so a v4
- * file would be unreadable by every shipped build. Fade keys from disk are
- * UNTRUSTED and normalized in `finalizeParsedSession` (see
- * `sanitizeClipFades`). */
+ * ride inside the existing JSON clip records: absent keys mean "no fade", so
+ * every pre-fade `.audm` still loads, and the parsers spread clip records
+ * through untouched, so unknown keys are simply carried. Fade keys from disk
+ * are UNTRUSTED and normalized in `finalizeParsedSession` (see
+ * `sanitizeClipFades`).
+ *
+ * Compatibility (lot A): X2 argued that bumping the version would be a
+ * data-loss-class change, because `parseSessionFileV3` hard-rejects any
+ * `formatVersion !== 3`. That consequence is now ACCEPTED by ruling M4 — a
+ * project save must drop nothing, which v3's shape cannot express — so v4
+ * files are unreadable by builds ≤ v1.35. v3, v2 and v1 files still load
+ * (`parseSessionFileBytes` sniffs the magic). */
 const FORMAT_VERSION = 2;
 const SUPPORTED_VERSIONS = new Set([1, 2]);
 
@@ -89,6 +101,34 @@ interface SessionFileShapeV3 {
   session: Session;
   markers?: Record<string, Marker[]>;
   audio: AudioDocMeta[];
+}
+
+/** v4 (lot A, M4) on-disk layout = v3's with a different magic and two JSON
+ * additions: header = magic(6) `'AUDM4\n'` + u32 LE jsonByteLength, then the
+ * UTF-8 JSON (`SessionFileShapeV4`), then the raw audio payload — the
+ * channels of every `audio` entry, then of every `unreferenced` entry,
+ * back-to-back, offsets relative to the payload start exactly as v3. */
+const V4_MAGIC = new Uint8Array([0x41, 0x55, 0x44, 0x4d, 0x34, 0x0a]); // 'AUDM4\n'
+/** Shared by v3 and v4: magic(6) + u32 jsonByteLength(4). */
+const BINARY_HEADER_BYTES = V3_HEADER_BYTES;
+
+interface AudioDocMetaV4 extends AudioDocMeta {
+  /** The document's `filePath` at save time, when it had one — restored as
+   * the recreated document's `filePath` so the project remembers where each
+   * file came from. Absent for computed / never-written documents. */
+  origin?: string;
+}
+
+interface SessionFileShapeV4 {
+  formatVersion: 4;
+  session: Session; // tracks filtered exactly as v3 (clips of closed docs dropped)
+  /** EVERY embedded document with >= 1 marker — referenced or not. */
+  markers?: Record<string, Marker[]>;
+  /** Clip-referenced documents (the v3 meaning, the v3 order). */
+  audio: AudioDocMetaV4[];
+  /** M4's section: every OTHER open document, same meta shape, audio in the
+   * same payload. The parser treats a missing array as `[]`. */
+  unreferenced: AudioDocMetaV4[];
 }
 
 function api() {
@@ -165,8 +205,8 @@ function computeReferenced(
 
 /**
  * Serializes a session to the legacy .audm v2 JSON format (base64-embedded
- * 32-bit-float WAV per document). No longer used by `saveSessionViaDialog`
- * (which writes v3 — see `serializeSessionV3`); retained as the writer for
+ * 32-bit-float WAV per document). No production save calls this (the write
+ * default is v4 — see `serializeSessionV4`); retained as the writer for
  * v1/v2 fixtures so the loader's back-compat path (`parseSessionFile`) stays
  * covered by real round-trip tests instead of hand-maintained JSON literals.
  *
@@ -213,10 +253,11 @@ export function serializeSession(
  *
  * The returned `bytes` is always a *fresh* zero-offset `Uint8Array` sized to
  * exactly its own content (`bytes.byteLength === bytes.buffer.byteLength`) —
- * `saveSessionViaDialog` relies on this to hand `bytes.buffer` straight to
- * `writeFile` with no defensive copy (see its comment for why that copy would
- * matter). Don't change this function to return a subarray/view over some
- * larger buffer without updating that call site too.
+ * the v4 writer keeps the same guarantee and `writeProject` relies on it to
+ * hand `bytes.buffer` straight to `writeFile` with no defensive copy (see its
+ * comment for why that copy would matter). Lot A: no production save calls
+ * this any more (v4 is the write default); it stays as the legacy fixture
+ * writer behind the v3 compat tests.
  */
 export function serializeSessionV3(
   session: Session,
@@ -264,6 +305,103 @@ export function serializeSessionV3(
   out.set(jsonBytes, V3_HEADER_BYTES);
 
   let pos = V3_HEADER_BYTES + jsonBytes.byteLength;
+  for (const chunk of channelChunks) {
+    out.set(chunk, pos);
+    pos += chunk.byteLength;
+  }
+
+  return { bytes: out, droppedClipCount };
+}
+
+/** Lot A (v4): packs one document's channels into `chunks` at the running
+ * payload offset and returns its index entry plus the advanced offset. The
+ * per-document equal-channel-length throw is the same invariant check
+ * `serializeSessionV3` performs inline (the reader validates every channel
+ * against one declared `length`). */
+function packDocumentV4(
+  d: AudioDocument,
+  chunks: Uint8Array[],
+  payloadLength: number
+): { meta: AudioDocMetaV4; payloadLength: number } {
+  const length = docLength(d);
+  const channels: AudioChannelMeta[] = [];
+  for (const channel of d.channels) {
+    if (channel.length !== length) {
+      throw new Error(
+        `Cannot save project: document "${d.name}" (${d.id}) has channels of differing length (${length} vs ${channel.length}), which should never happen`
+      );
+    }
+    const bytes = new Uint8Array(channel.buffer, channel.byteOffset, channel.byteLength);
+    channels.push({ offset: payloadLength, byteLength: bytes.byteLength });
+    chunks.push(bytes);
+    payloadLength += bytes.byteLength;
+  }
+  const meta: AudioDocMetaV4 = { docId: d.id, name: d.name, sampleRate: d.sampleRate, length, channels };
+  if (d.filePath) meta.origin = d.filePath;
+  return { meta, payloadLength };
+}
+
+/**
+ * Serializes the PROJECT to the .audm v4 binary format (write default — lot
+ * A, ruling M4): the session plus EVERY open document. Clip-referenced
+ * documents go in `audio` (v3's meaning and order); every other open document
+ * goes in `unreferenced`; both sections' channels share one raw payload, so
+ * nothing is dropped and no JS string is ever built from audio (v3's F3
+ * guarantee). Clips whose source document is closed are still filtered out
+ * (`computeReferenced`) and counted in `droppedClipCount` — there is no audio
+ * to embed for them. Markers are written for every embedded document that
+ * has any, referenced or not.
+ *
+ * Same fresh zero-offset `Uint8Array` guarantee as `serializeSessionV3`
+ * (`bytes.byteLength === bytes.buffer.byteLength`) — `writeProject` hands
+ * `bytes.buffer` straight to `writeFile` with no defensive copy; see the v3
+ * comment for why that copy would matter.
+ */
+export function serializeSessionV4(
+  session: Session,
+  docs: AudioDocument[],
+  markersByDoc: Record<string, Marker[]> = {}
+): { bytes: Uint8Array<ArrayBuffer>; droppedClipCount: number } {
+  const { tracks, referencedIds, droppedClipCount } = computeReferenced(session, docs, markersByDoc);
+
+  const audio: AudioDocMetaV4[] = [];
+  const unreferenced: AudioDocMetaV4[] = [];
+  const channelChunks: Uint8Array[] = [];
+  let payloadLength = 0;
+  // Payload order: every referenced document's channels first, then every
+  // unreferenced one's — each section in `docs` (Files panel) order.
+  for (const d of docs.filter((doc) => referencedIds.has(doc.id))) {
+    const packed = packDocumentV4(d, channelChunks, payloadLength);
+    payloadLength = packed.payloadLength;
+    audio.push(packed.meta);
+  }
+  for (const d of docs.filter((doc) => !referencedIds.has(doc.id))) {
+    const packed = packDocumentV4(d, channelChunks, payloadLength);
+    payloadLength = packed.payloadLength;
+    unreferenced.push(packed.meta);
+  }
+
+  const markers: Record<string, Marker[]> = {};
+  for (const d of docs) {
+    const list = markersByDoc[d.id];
+    if (list && list.length > 0) markers[d.id] = list;
+  }
+
+  const fileShape: SessionFileShapeV4 = {
+    formatVersion: 4,
+    session: { ...session, tracks },
+    ...(Object.keys(markers).length > 0 ? { markers } : {}),
+    audio,
+    unreferenced,
+  };
+  const jsonBytes = new TextEncoder().encode(JSON.stringify(fileShape));
+
+  const out = new Uint8Array(BINARY_HEADER_BYTES + jsonBytes.byteLength + payloadLength);
+  out.set(V4_MAGIC, 0);
+  new DataView(out.buffer).setUint32(6, jsonBytes.byteLength, true);
+  out.set(jsonBytes, BINARY_HEADER_BYTES);
+
+  let pos = BINARY_HEADER_BYTES + jsonBytes.byteLength;
   for (const chunk of channelChunks) {
     out.set(chunk, pos);
     pos += chunk.byteLength;
@@ -486,18 +624,27 @@ export function parseSessionFile(text: string): {
   return { session, documents, droppedClipCount, markers };
 }
 
-/** True when `bytes` starts with the v3 magic `AUDM3\n`. */
-function hasV3Magic(bytes: Uint8Array): boolean {
-  if (bytes.length < V3_MAGIC.length) return false;
-  for (let i = 0; i < V3_MAGIC.length; i++) {
-    if (bytes[i] !== V3_MAGIC[i]) return false;
+/** True when `bytes` starts with `magic` (`AUDM3\n` or `AUDM4\n`). */
+function hasMagic(bytes: Uint8Array, magic: Uint8Array): boolean {
+  if (bytes.length < magic.length) return false;
+  for (let i = 0; i < magic.length; i++) {
+    if (bytes[i] !== magic[i]) return false;
   }
   return true;
 }
 
+interface ParsedSessionFile {
+  session: Session;
+  documents: AudioDocument[];
+  droppedClipCount: number;
+  markers: Record<string, Marker[]>;
+}
+
 /**
- * Parses a .audm v3 binary buffer (see the byte-layout comment above
- * `V3_MAGIC`). Every document's channels are copied (not merely wrapped) out
+ * The body shared by `parseSessionFileV3` and `parseSessionFileV4` (lot A):
+ * the two formats differ only in their magic, the `formatVersion` they accept
+ * and v4's extra `unreferenced` section, which is read with the same guards
+ * as `audio`. Every document's channels are copied (not merely wrapped) out
  * of the payload slice into their own `Float32Array` — the payload's start
  * offset (10 + jsonByteLength) isn't guaranteed to be 4-byte aligned, so a
  * `Float32Array` can't be constructed as a view directly over the original
@@ -507,44 +654,49 @@ function hasV3Magic(bytes: Uint8Array): boolean {
  * Throws a descriptive error (never lets a `RangeError`/`TypeError` from a
  * malformed/truncated buffer propagate as something opaque) for: a header
  * that's cut short, a JSON slice that runs past the end of the file, JSON
- * that doesn't parse, a formatVersion other than 3, a missing/malformed
- * `audio` index, a non-integer/negative declared sample `length`, a missing
- * per-doc channel list, a channel whose declared byteLength disagrees with
- * its declared sample count, or a channel offset/length that runs past the
- * end of the payload — i.e. any corrupt-or-truncated v3 file (or a hostile
- * hand-built one) yields a clean error instead of a crash. A missing `name`
- * on an otherwise-valid entry falls back to 'Untitled' rather than crashing
- * or leaving the Files panel showing `undefined`.
+ * that doesn't parse, a formatVersion other than the one expected, a
+ * missing/malformed `audio` (or, v4, a non-array `unreferenced`) index, a
+ * non-integer/negative declared sample `length`, a missing per-doc channel
+ * list, a channel whose declared byteLength disagrees with its declared
+ * sample count, or a channel offset/length that runs past the end of the
+ * payload — i.e. any corrupt-or-truncated file (or a hostile hand-built one)
+ * yields a clean error instead of a crash. A missing `name` on an
+ * otherwise-valid entry falls back to 'Untitled' rather than crashing or
+ * leaving the Files panel showing `undefined`; a missing v4 `unreferenced`
+ * array is `[]`, not corrupt.
  */
-export function parseSessionFileV3(buf: ArrayBuffer): {
-  session: Session;
-  documents: AudioDocument[];
-  droppedClipCount: number;
-  markers: Record<string, Marker[]>;
-} {
+function parseBinarySessionFile(buf: ArrayBuffer, version: 3 | 4): ParsedSessionFile {
+  const magic = version === 4 ? V4_MAGIC : V3_MAGIC;
   const bytes = new Uint8Array(buf);
-  if (bytes.length < V3_HEADER_BYTES || !hasV3Magic(bytes)) {
-    throw new Error('Corrupt .audm file: not a valid v3 session (missing AUDM3 header)');
+  if (bytes.length < BINARY_HEADER_BYTES || !hasMagic(bytes, magic)) {
+    throw new Error(`Corrupt .audm file: not a valid v${version} session (missing AUDM${version} header)`);
   }
 
   const jsonByteLength = new DataView(buf).getUint32(6, true);
-  const jsonStart = V3_HEADER_BYTES;
+  const jsonStart = BINARY_HEADER_BYTES;
   const jsonEnd = jsonStart + jsonByteLength;
   if (jsonEnd > bytes.length) {
     throw new Error('Corrupt .audm file: truncated (JSON metadata runs past end of file)');
   }
 
-  let parsed: SessionFileShapeV3;
+  let parsed: SessionFileShapeV3 | SessionFileShapeV4;
   try {
-    parsed = JSON.parse(new TextDecoder().decode(bytes.subarray(jsonStart, jsonEnd))) as SessionFileShapeV3;
+    parsed = JSON.parse(new TextDecoder().decode(bytes.subarray(jsonStart, jsonEnd))) as
+      | SessionFileShapeV3
+      | SessionFileShapeV4;
   } catch {
     throw new Error('Corrupt .audm file: invalid JSON metadata');
   }
-  if (parsed.formatVersion !== 3) {
-    throw new Error(`Unsupported session file version: ${parsed.formatVersion} (expected 3)`);
+  if (parsed.formatVersion !== version) {
+    throw new Error(`Unsupported session file version: ${parsed.formatVersion} (expected ${version})`);
   }
   if (!Array.isArray(parsed.audio)) {
     throw new Error('Corrupt .audm file: missing audio index');
+  }
+  const unreferenced: AudioDocMetaV4[] =
+    version === 4 ? ((parsed as SessionFileShapeV4).unreferenced ?? []) : [];
+  if (!Array.isArray(unreferenced)) {
+    throw new Error('Corrupt .audm file: malformed unreferenced index');
   }
 
   const payloadStart = jsonEnd;
@@ -553,7 +705,7 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
   seedDocCounterFromRawClips(parsed.session);
 
   const idMap = new Map<string, string>();
-  const documents: AudioDocument[] = parsed.audio.map((meta) => {
+  const recreate = (meta: AudioDocMetaV4): AudioDocument => {
     if (!Number.isInteger(meta.length) || meta.length < 0) {
       throw new Error('Corrupt .audm file: audio index has an invalid sample length');
     }
@@ -582,18 +734,21 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
       // Copy into a fresh, zero-offset buffer — see doc comment above.
       return new Float32Array(buf.slice(payloadStart + start, payloadStart + end));
     });
-    // Fall back to a generic label rather than `undefined` for a v3 file
-    // whose audio index entry lacks a `name` (e.g. hand-built/foreign writer).
+    // Fall back to a generic label rather than `undefined` for a file whose
+    // audio index entry lacks a `name` (e.g. hand-built/foreign writer).
     // `neverSaved: false` — see the legacy parser's note above (Task S4).
+    // `filePath` from v4's `origin` (lot A) — a v3 entry never carries one.
     const doc = createDocument({
       name: meta.name ?? 'Untitled',
       sampleRate: meta.sampleRate,
       channels,
       neverSaved: false,
+      filePath: typeof meta.origin === 'string' && meta.origin.length > 0 ? meta.origin : null,
     });
     idMap.set(meta.docId, doc.id);
     return doc;
-  });
+  };
+  const documents: AudioDocument[] = [...parsed.audio.map(recreate), ...unreferenced.map(recreate)];
 
   const recreatedIds = new Set(documents.map((d) => d.id));
   const { session, droppedClipCount, markers } = finalizeParsedSession(
@@ -607,18 +762,32 @@ export function parseSessionFileV3(buf: ArrayBuffer): {
   return { session, documents, droppedClipCount, markers };
 }
 
-/** Dispatches a raw .audm file buffer to the v3 binary parser or the legacy
- * v1/v2 JSON parser, based on sniffing the first 6 bytes for the v3 magic.
- * This is what `openSessionViaDialog` calls — callers never need to know
- * which on-disk version they're loading. */
-export function parseSessionFileBytes(buf: ArrayBuffer): {
-  session: Session;
-  documents: AudioDocument[];
-  droppedClipCount: number;
-  markers: Record<string, Marker[]>;
-} {
+/** Parses a .audm v3 binary buffer (see the byte-layout comment above
+ * `V3_MAGIC`) — `parseBinarySessionFile` with the v3 magic and `(expected 3)`
+ * rejection. Kept by name and signature: the legacy fixture round trips and
+ * the compat tests pin it. */
+export function parseSessionFileV3(buf: ArrayBuffer): ParsedSessionFile {
+  return parseBinarySessionFile(buf, 3);
+}
+
+/** Parses a .audm v4 binary buffer (lot A): the v3 body plus the
+ * `unreferenced` section, every document recreated with `neverSaved: false`
+ * and its `origin` (when present) as `filePath`; `documents` = the `audio`
+ * entries then the `unreferenced` ones; markers remapped for all of them. */
+export function parseSessionFileV4(buf: ArrayBuffer): ParsedSessionFile {
+  return parseBinarySessionFile(buf, 4);
+}
+
+/** Dispatches a raw .audm file buffer to the v4 or v3 binary parser or the
+ * legacy v1/v2 JSON parser, based on sniffing the first 6 bytes for a magic.
+ * This is what `loadProjectFrom` calls — callers never need to know which
+ * on-disk version they're loading (M4: v3 load compatibility). */
+export function parseSessionFileBytes(buf: ArrayBuffer): ParsedSessionFile {
   const bytes = new Uint8Array(buf);
-  if (hasV3Magic(bytes)) {
+  if (hasMagic(bytes, V4_MAGIC)) {
+    return parseSessionFileV4(buf);
+  }
+  if (hasMagic(bytes, V3_MAGIC)) {
     return parseSessionFileV3(buf);
   }
   // Legacy path: decoding the whole buffer as one JS string is exactly the
@@ -631,109 +800,204 @@ export function parseSessionFileBytes(buf: ArrayBuffer): {
   return parseSessionFile(text);
 }
 
-/** Prompts for a save location and writes the current session (with only its
- * referenced documents) as .audm v3. A cancelled dialog is a no-op. Both
- * serialization and the write are wrapped so any failure — including one
- * `serializeSessionV3` itself throws — surfaces as an error message box
- * instead of an unhandled rejection (F3: previously the base64 serializer
- * could throw past ~402MB of embedded audio with no try/catch anywhere on
- * the call path, so Save Session failed with zero visible feedback). On
- * success, an info box always confirms the save (extended with the
- * dropped-clip count when any clips referenced closed source documents) —
- * success is never silent either.
- *
- * Deliberately does NOT clear any document's `neverSaved` flag (Task S4). A
- * session save is not a document save: it embeds only CLIP-REFERENCED
- * documents (`computeReferenced`), so most open documents aren't in the file
- * at all; what it embeds is a point-in-time COPY under a foreign id, which
- * later edits don't reach and which reopening restores as a NEW document; and
- * the document itself still has no path, so File > Save still prompts a
- * save-as. Clearing the flag here would silently un-guard documents this file
- * never contained. */
-export async function saveSessionViaDialog(): Promise<void> {
-  const session = useSessionStore.getState().session;
-  const docs = useAppStore.getState().documents;
+// ---------------------------------------------------------------------------
+// Lot A (M4) — the project flows: Save / Save As / Open Project.
+// ---------------------------------------------------------------------------
 
-  const defaultName = /\.audm$/i.test(session.name) ? session.name : `${session.name}.audm`;
-  const targetPath = await api().showSaveDialog({
-    defaultPath: defaultName,
-    filters: [{ name: 'Auditorium Session', extensions: ['audm'] }],
-  });
-  if (!targetPath) return; // cancelled
+/** True while a project save is between its dialog and its write landing.
+ * The close guard (App.tsx) counts it as in-flight work, and `saveProject`
+ * refuses to start a second one — two writes to the same `.audm` racing
+ * each other would be worse than a "Save in progress" box. */
+let projectSaveInFlight = false;
+
+export function isProjectSaveInFlight(): boolean {
+  return projectSaveInFlight;
+}
+
+/** `session.name` with a trailing `.audm` stripped — the default file name a
+ * Save As dialog offers, and the name a Save As assigns from the file. */
+function projectBaseName(name: string): string {
+  return name.replace(/\.audm$/i, '');
+}
+
+/**
+ * The dialog-free core of a project save (lot A, M4) — also what the
+ * headless `saveSessionAs` hook calls, so the smoke proves the real writer.
+ *
+ * Captures the session, EVERY open document and the markers, serializes them
+ * as .audm v4 and writes the file. On success, the bookkeeping follows the
+ * same staleness discipline as a document save (`fileService.saveDocument`):
+ * the session is renamed (when `opts.rename`) and its save point marked only
+ * if nothing replaced `session` during the write await — otherwise the mark
+ * is invalidated, because the bytes on disk no longer match the live
+ * session; every captured document is marked clean (`dirty: false`,
+ * `neverSaved: false` — it IS in the file now, which inverts the S4 reasoning
+ * that kept the flag when a session save embedded only clip-referenced
+ * documents) if its store object is still the captured one, otherwise its
+ * save point is invalidated. Then `projectPath` is remembered.
+ *
+ * Message policy (N13): plain Save is silent; a dropped-clip count is always
+ * reported (it is information the user does not otherwise have); a Save As
+ * confirms with 'Project saved.' — `confirmSuccess` is how `saveProject`
+ * asks for that on its dialog path. Every failure (serialize throw, write
+ * rejection, `{ ok: false }`) surfaces as a 'Save Project failed' error box
+ * and returns `false` with nothing marked.
+ */
+async function writeProjectCore(
+  targetPath: string,
+  opts: { rename: boolean; confirmSuccess: boolean }
+): Promise<boolean> {
+  const sessionState = useSessionStore.getState();
+  const session = sessionState.session;
+  // Which editing timeline these bytes belong to (see `sessionTimelineEpoch`).
+  const timelineAtStart = sessionTimelineEpoch();
+  const appState = useAppStore.getState();
+  const docs = appState.documents;
+  const markers = appState.markers;
+  const name = opts.rename ? projectBaseName(api().pathBasename(targetPath)) : session.name;
 
   let bytes: Uint8Array<ArrayBuffer>;
   let droppedClipCount: number;
   try {
-    ({ bytes, droppedClipCount } = serializeSessionV3(session, docs, useAppStore.getState().markers));
+    ({ bytes, droppedClipCount } = serializeSessionV4({ ...session, name }, docs, markers));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await api().showMessageBox({ type: 'error', title: 'Save Session failed', message });
-    return;
+    await api().showMessageBox({ type: 'error', title: 'Save Project failed', message });
+    return false;
   }
 
   let result: { ok: true } | { ok: false; error: string };
   try {
-    // `bytes` is `serializeSessionV3`'s freshly-allocated Uint8Array — byteOffset
+    // `bytes` is `serializeSessionV4`'s freshly-allocated Uint8Array — byteOffset
     // 0, byteLength === bytes.buffer.byteLength, and dead after this call — so
     // `bytes.buffer` IS the whole file with nothing to trim. Passing it directly
     // (no `toArrayBuffer` copy) matters here specifically: `writeFile` is a plain
     // `ipcRenderer.invoke` (preload.cjs), which structured-clones its argument
     // rather than transferring/detaching it, so an extra defensive copy would
-    // hold 3 live copies of the session's audio at once instead of 2 — halving
-    // the largest session save() can handle before OOM, i.e. re-introducing the
-    // very ceiling this task exists to raise.
+    // hold 3 live copies of the project's audio at once instead of 2 — halving
+    // the largest project save() can handle before OOM.
     result = await api().writeFile(targetPath, bytes.buffer);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await api().showMessageBox({ type: 'error', title: 'Save Session failed', message });
-    return;
+    await api().showMessageBox({ type: 'error', title: 'Save Project failed', message });
+    return false;
   }
   if (!result.ok) {
-    await api().showMessageBox({ type: 'error', title: 'Save Session failed', message: result.error });
-    return;
+    await api().showMessageBox({ type: 'error', title: 'Save Project failed', message: result.error });
+    return false;
   }
 
-  await api().showMessageBox({
-    type: 'info',
-    title: 'Save Session',
-    message:
-      droppedClipCount > 0
-        ? `Session saved. ${droppedClipCount} clip(s) referenced closed files and were not saved.`
-        : 'Session saved.',
-  });
+  // Session bookkeeping — only against the session the bytes were made from.
+  const after = useSessionStore.getState();
+  if (after.session === session) {
+    if (name !== session.name) after.renameSession(name);
+    markSessionSavePoint();
+  } else {
+    invalidateSessionSavePoint();
+  }
+
+  // Document bookkeeping — per captured document, same reference test.
+  for (const doc of docs) {
+    const live = useAppStore.getState().documents.find((d) => d.id === doc.id);
+    if (live === doc) {
+      useAppStore.getState().updateDocument({ ...doc, dirty: false, neverSaved: false });
+      markSavePoint(doc.id);
+    } else {
+      invalidateSavePoint(doc.id);
+    }
+  }
+
+  // Remember where the project lives — but only if it is still the SAME
+  // project. A load-shaped replacement (Open Project, a stem landing, a cover
+  // session) can land inside the await above: separation runs for minutes, and
+  // each of those flows sets `projectPath` itself (null for a landing, its own
+  // file for an open) on a brand-new timeline. Stamping this save's target over
+  // that would bind someone else's content to the file just written, while the
+  // stale-branch `invalidateSessionSavePoint()` above reads as clean on the
+  // freshly cleared stack: the next plain Ctrl+S would overwrite the project on
+  // disk with no dialog. The write itself still happened, and the file it
+  // produced is intact.
+  if (sessionTimelineEpoch() === timelineAtStart) {
+    useSessionStore.getState().setProjectPath(targetPath);
+  }
+
+  if (droppedClipCount > 0) {
+    await api().showMessageBox({
+      type: 'info',
+      title: 'Save Project',
+      message: `Project saved. ${droppedClipCount} clip(s) referenced closed files and were not saved.`,
+    });
+  } else if (opts.confirmSuccess) {
+    await api().showMessageBox({ type: 'info', title: 'Save Project', message: 'Project saved.' });
+  }
+  return true;
 }
 
-/** Prompts for a .audm file, recreates its embedded documents (fresh ids,
- * added to the Files panel via addDocument), replaces the session store's
- * session, and switches the view to 'multitrack'. A cancelled dialog is a
- * no-op; an unsupported/corrupt/truncated file (v1/v2/v3 alike) surfaces an
- * error message box and leaves the current session untouched. If any clips
- * referenced audio that couldn't be recreated (a stale/missing document id),
- * they're dropped and an info message box reports how many. */
-export async function openSessionViaDialog(): Promise<void> {
-  const paths = await api().showOpenDialog({
-    filters: [{ name: 'Auditorium Session', extensions: ['audm'] }],
-  });
-  if (!paths || paths.length === 0) return; // cancelled
+/** The dialog-free project write (see `writeProjectCore`): v4 bytes to
+ * `targetPath`, save points, `projectPath`, and the rename when asked — with
+ * no success box. Production's Save / Save As go through `saveProject`; the
+ * headless `saveSessionAs` hook calls this directly. */
+export async function writeProject(targetPath: string, opts: { rename: boolean }): Promise<boolean> {
+  return writeProjectCore(targetPath, { rename: opts.rename, confirmSuccess: false });
+}
 
-  // readFile and parsing are both inside the try so an IO failure (unapproved
-  // path, fs error), a corrupt/truncated v3 file, or a legacy file too large
-  // to decode as one JS string all surface the same error box instead of
-  // rejecting unhandled.
-  let result: {
-    session: Session;
-    documents: AudioDocument[];
-    droppedClipCount: number;
-    markers: Record<string, Marker[]>;
-  };
-  try {
-    const buf = await api().readFile(paths[0]);
-    result = parseSessionFileBytes(buf);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    await api().showMessageBox({ type: 'error', title: 'Open Session failed', message });
-    return;
+/**
+ * File → Save (`as: false`) and Save As (`as: true`) — the project, in every
+ * view (M4). Plain Save with a remembered `projectPath` writes there with no
+ * dialog and no box on success (N13); with none it IS a Save As. Save As
+ * always prompts (default name = the project name, `.audm` enforced on the
+ * picked path — `electron/ipc.cjs` approves the appended variant), renames
+ * the project to the file's basename when the target differs from the
+ * remembered path (a Save As onto the same file keeps the name), and
+ * confirms with 'Project saved.'. A cancelled dialog returns `false` with
+ * nothing changed. A second call while one is in flight shows 'Save in
+ * progress' and returns `false`.
+ */
+export async function saveProject(opts: { as: boolean }): Promise<boolean> {
+  if (projectSaveInFlight) {
+    await api().showMessageBox({
+      type: 'warning',
+      title: 'Save in progress',
+      message: 'A project save is already in progress.',
+    });
+    return false;
   }
+  projectSaveInFlight = true;
+  try {
+    const { session, projectPath } = useSessionStore.getState();
+    const viaDialog = opts.as || projectPath === null;
+    let target: string;
+    if (!viaDialog) {
+      target = projectPath as string;
+    } else {
+      const picked = await api().showSaveDialog({
+        defaultPath: `${projectBaseName(session.name)}.audm`,
+        filters: [{ name: 'Auditorium Project', extensions: ['audm'] }],
+      });
+      if (!picked) return false; // cancelled
+      target = /\.audm$/i.test(picked) ? picked : `${picked}.audm`;
+    }
+    return await writeProjectCore(target, { rename: target !== projectPath, confirmSuccess: viaDialog });
+  } finally {
+    projectSaveInFlight = false;
+  }
+}
+
+/**
+ * Reads and parses a `.audm` (any version) and makes it THE project: every
+ * embedded document is added to the Files panel (referenced or not — M4),
+ * markers are set, the session replaces the current one with its transients
+ * reset and its zoom fitted, the history is cleared (R3: a load starts a new
+ * editing timeline), `projectPath` is remembered, and the view switches to
+ * multitrack. Throws on a read or parse failure and applies NOTHING in that
+ * case — `openSessionViaDialog` turns the throw into an error box; the
+ * headless `openSessionFrom` hook lets it propagate.
+ */
+export async function loadProjectFrom(
+  path: string
+): Promise<{ droppedClipCount: number; docCount: number; trackCount: number }> {
+  const buf = await api().readFile(path);
+  const result = parseSessionFileBytes(buf);
 
   for (const doc of result.documents) {
     useAppStore.getState().addDocument(doc);
@@ -757,22 +1021,62 @@ export async function openSessionViaDialog(): Promise<void> {
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
     mtEnvelope: null, // F0: a stale open-envelope target must not outlive its session
+    projectPath: path, // lot A (M4): this file is where plain Save writes from now on
   });
-  // Every clip in the just-replaced session is either new or a stale id from a
-  // previous session — either way no bitmap in the cache belongs to it (F9).
-  // R3: opening a session starts a new editing timeline — the previous
+  // R3: opening a project starts a new editing timeline — the previous
   // session's undo history is dropped, exactly as opening a document starts
   // that document's history fresh. (An unrecorded, un-cleared replacement
   // would be silently reverted by the next undo of an older entry — the
-  // recording invariant in sessionUndo.ts.)
+  // recording invariant in sessionUndo.ts.) The cleared stack also reads as
+  // "at the save point": a freshly opened project is clean.
   clearSessionHistory();
   useAppStore.getState().setView('multitrack');
 
-  if (result.droppedClipCount > 0) {
+  return {
+    droppedClipCount: result.droppedClipCount,
+    docCount: result.documents.length,
+    trackCount: result.session.tracks.length,
+  };
+}
+
+/** File → Open Project…: prompts for a .audm file and hands it to
+ * `loadProjectFrom`. A cancelled dialog is a no-op; an unsupported/corrupt/
+ * truncated file (v1–v4 alike) or a read failure surfaces an error message
+ * box and leaves the current project untouched. If any clips referenced
+ * audio that couldn't be recreated (a stale/missing document id), they're
+ * dropped and an info message box reports how many. */
+export async function openSessionViaDialog(): Promise<void> {
+  // The filter name follows M4's rename, as the save dialog's does (:975):
+  // under M4 a .audm IS the project, and every other surface says so (the
+  // 'Open Project…' row, both error box titles, the StatusBar chip), so this
+  // label would otherwise be the last place calling one a session. A4 briefs
+  // only the SAVE filter, so the open one is recorded here as a deliberate
+  // un-briefed detail rather than left to be re-derived. It is inert beyond
+  // the dialog's own chrome: `cleanFilters` (`electron/ipc.cjs:134-146`)
+  // validates shape only, and .audm write approval is by extension (:43).
+  const paths = await api().showOpenDialog({
+    filters: [{ name: 'Auditorium Project', extensions: ['audm'] }],
+  });
+  if (!paths || paths.length === 0) return; // cancelled
+
+  // readFile and parsing are both inside the try so an IO failure (unapproved
+  // path, fs error), a corrupt/truncated binary file, or a legacy file too
+  // large to decode as one JS string all surface the same error box instead
+  // of rejecting unhandled — and nothing is applied in any of those cases.
+  let droppedClipCount: number;
+  try {
+    ({ droppedClipCount } = await loadProjectFrom(paths[0]));
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await api().showMessageBox({ type: 'error', title: 'Open Project failed', message });
+    return;
+  }
+
+  if (droppedClipCount > 0) {
     await api().showMessageBox({
       type: 'info',
-      title: 'Open Session',
-      message: `${result.droppedClipCount} clip(s) referenced missing audio and were removed.`,
+      title: 'Open Project',
+      message: `${droppedClipCount} clip(s) referenced missing audio and were removed.`,
     });
   }
 }

@@ -1,14 +1,17 @@
 import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import ExportDialog from './ExportDialog';
-import { exportDocument } from '../../services/fileService';
+import { exportDocument, exportSessionMixdown } from '../../services/fileService';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
+import { useSessionStore } from '../../multitrack/sessionStore';
 import { createDocument } from '../../audio/AudioDocument';
 
 jest.mock('../../services/fileService', () => ({
   exportDocument: jest.fn(async () => 'D:\\out\\track.wav'),
+  exportSessionMixdown: jest.fn(async () => 'D:\\out\\mix.wav'),
 }));
 
 const mockExport = exportDocument as jest.MockedFunction<typeof exportDocument>;
+const mockExportSession = exportSessionMixdown as jest.MockedFunction<typeof exportSessionMixdown>;
 
 function seedActiveDoc() {
   const doc = createDocument({
@@ -22,8 +25,10 @@ function seedActiveDoc() {
 
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
+  useSessionStore.getState().newSession(44100);
   jest.clearAllMocks();
   mockExport.mockResolvedValue('D:\\out\\track.wav');
+  mockExportSession.mockResolvedValue('D:\\out\\mix.wav');
 });
 
 describe('ExportDialog', () => {
@@ -157,5 +162,74 @@ describe('G5 glass header', () => {
     render(<ExportDialog onClose={() => {}} />);
     expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
     expect(screen.getByText('song.wav')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M5) — in the multitrack view the dialog exports the session mixdown.
+// ---------------------------------------------------------------------------
+describe('ExportDialog in the multitrack view (lot A — acceptance 21)', () => {
+  it('clicking Export calls exportSessionMixdown with the chosen options, not exportDocument, and closes on success', async () => {
+    seedActiveDoc(); // a document IS open — and is still not what gets exported
+    useAppStore.setState({ view: 'multitrack' });
+    const onClose = jest.fn();
+    render(<ExportDialog onClose={onClose} />);
+
+    fireEvent.change(screen.getByTestId('export-bitdepth'), { target: { value: '32' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+
+    await waitFor(() => expect(mockExportSession).toHaveBeenCalled());
+    expect(mockExportSession).toHaveBeenCalledWith({
+      format: 'wav',
+      wavBitDepth: 32,
+      mp3Kbps: 192,
+      oggBitrate: 128_000,
+    });
+    expect(mockExport).not.toHaveBeenCalled();
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it('exports with NO active document at all', async () => {
+    useAppStore.setState({ view: 'multitrack' });
+    expect(useAppStore.getState().activeDocumentId).toBeNull();
+    render(<ExportDialog onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+
+    await waitFor(() => expect(mockExportSession).toHaveBeenCalledTimes(1));
+    expect(mockExport).not.toHaveBeenCalled();
+  });
+
+  it('shows the session name as the subtitle', () => {
+    seedActiveDoc();
+    useSessionStore.getState().renameSession('Night Take');
+    useAppStore.setState({ view: 'multitrack' });
+    render(<ExportDialog onClose={() => {}} />);
+
+    expect(screen.getByText('Night Take')).toBeInTheDocument();
+    expect(screen.queryByText('song.wav')).not.toBeInTheDocument();
+  });
+
+  it('stays open when the session export returns null', async () => {
+    useAppStore.setState({ view: 'multitrack' });
+    mockExportSession.mockResolvedValue(null);
+    const onClose = jest.fn();
+    render(<ExportDialog onClose={onClose} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+
+    await waitFor(() => expect(mockExportSession).toHaveBeenCalled());
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('the waveform view still exports the active document', async () => {
+    const doc = seedActiveDoc();
+    render(<ExportDialog onClose={() => {}} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Export' }));
+
+    await waitFor(() => expect(mockExport).toHaveBeenCalled());
+    expect(mockExport.mock.calls[0][0]).toBe(doc.id);
+    expect(mockExportSession).not.toHaveBeenCalled();
   });
 });

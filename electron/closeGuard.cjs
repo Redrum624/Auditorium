@@ -106,7 +106,7 @@ function createCloseGuard({ ipcMain, dialog, timeoutMs = DEFAULT_TIMEOUT_MS, aut
 
     const message =
       dirtyN > 0
-        ? `${dirtyN} file(s) have unsaved changes.`
+        ? `${dirtyN} item(s) have unsaved changes.`
         : 'A save or stem separation is still in progress.';
     // ipcMain.on doesn't await (or catch a rejection from) this listener's
     // returned promise, so an uncaught confirmQuit failure here would become

@@ -24,8 +24,8 @@
  * 1 and the expression collapses to `startSample + (b − offsetSample)`; on a
  * mismatched one (a 48 kHz file in a 44.1 kHz session — the realistic case)
  * dropping the factor drifts the tics ~8.8 % out of the audio, which looks
- * plausible and is wrong. `ClipView.docSpan` already applies the same
- * conversion to the clip's length for the waveform.
+ * plausible and is wrong. `clipSourceWindow` (`multitrack/session`) applies
+ * the same conversion to the clip's length.
  *
  * The clip's source window is **half-open**, `[offsetSample, offsetSample +
  * span)`, exactly as `readClipSlice` reads it. A beat exactly at the end
@@ -227,8 +227,8 @@ function firstBeatAtOrAfter(beats: ArrayLike<number>, value: number): number {
   return lo;
 }
 
-/** Source samples spanned by `lengthSample` session samples — `ClipView.docSpan`
- * and `readClipSlice`'s own conversion, kept identical on purpose. */
+/** Source samples spanned by `lengthSample` session samples — `clipSourceWindow`
+ * (`multitrack/session`) and `readClipSlice`'s own conversion, kept identical on purpose. */
 function docSpan(lengthSample: number, docRate: number, sessionRate: number): number {
   return docRate === sessionRate ? lengthSample : Math.round((lengthSample * docRate) / sessionRate);
 }

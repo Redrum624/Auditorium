@@ -13,6 +13,7 @@ import type { LucideIcon } from 'lucide-react';
 import { isCommandEnabled, runCommand } from '../../services/menuActions';
 import { useHistoryVersion } from '../../services/undoHistory';
 import { useAppStore } from '../../stores/appStore';
+import { useSessionStore } from '../../multitrack/sessionStore';
 import { ChromePill } from '../UI/glass';
 
 /**
@@ -29,20 +30,29 @@ import { ChromePill } from '../UI/glass';
  * Visibility (the user's rule, final): present in Waveform, Spectral AND
  * Multitrack whenever at least one sound file is loaded; hidden only in the
  * empty app. Per-button greying does the rest — no selection greys
- * Cut/Copy/Delete/Trim/Silence, an empty clipboard greys Paste, and Undo/Redo
+ * Copy/Delete/Trim/Silence, an empty clipboard greys Paste, and Undo/Redo
  * follow whichever history is active (`edit.undo`'s predicate already routes
  * to the SESSION's history in the multitrack view and the document's
  * elsewhere, which is exactly the rule wanted here).
  *
- * F1: the five REGION verbs — Cut, Copy, Paste, Trim, Silence — are greyed in
- * the Multitrack view because their COMMANDS are disabled there, not because
- * this pill says so. Each edits a region of the active document, which that
- * view does not show; Trim and Silence used to stay lit and would destroy the
- * hidden document with the neighbouring Undo unable to reverse it (that Undo
- * routes to the SESSION's history there). The gate lives in the registry so
- * the menu and the keyboard obey it too — this component only chooses the
- * tooltip that explains the greying, because a missing button teaches nothing.
- * Delete is excluded: it already routes to clip removal in that view.
+ * F1 / M1 / M7 — what the Multitrack view does to these eight:
+ *  - Split is ROUTED by view, not blocked: a marker at the cursor in the
+ *    editors, a clip split at the edit cursor in the Multitrack (M1). Its
+ *    tooltip follows the route, since the same button does two different
+ *    things.
+ *  - Delete is routed too, and always was: it removes the selected clips there.
+ *  - Copy, Paste, Trim and Silence stay greyed, because their COMMANDS are
+ *    disabled there and not because this pill says so. Each edits a region of
+ *    the active document, which that view does not show; Trim and Silence used
+ *    to stay lit and would destroy the hidden document with the neighbouring
+ *    Undo unable to reverse it (that Undo routes to the SESSION's history
+ *    there). The prerequisites they lack are DIFFERENT — Copy and Paste want a
+ *    clip clipboard the app does not have, Trim and Silence a time selection
+ *    the view has no gesture for — so each says its own reason (M7) rather
+ *    than sharing one paragraph that fits neither pair exactly.
+ * The gate itself lives in the registry so the menu and the keyboard obey it
+ * too; this component only chooses the tooltip that explains a greying the
+ * predicate has already decided, because a missing button teaches nothing.
  */
 
 export interface EditToolbarItem {
@@ -51,23 +61,39 @@ export interface EditToolbarItem {
   Icon: LucideIcon;
   /** Starts a new group in the pill (renders a divider before it). */
   startsGroup?: boolean;
-  /** Acts on a REGION of the active document — see the Multitrack note above.
+  /** Why this button is greyed in the Multitrack view — see the note above.
    * Drives the explanatory tooltip ONLY; enablement comes from the command. */
-  regionVerb?: boolean;
+  multitrackReason?: string;
+  /** The tooltip in the Multitrack view for a button whose command means
+   * something ELSE there (Split), rather than nothing. */
+  multitrackTitle?: string;
   title: string;
 }
 
-/** Cut · Copy · Paste · Delete │ Trim · Silence │ Undo · Redo — the mockup's
+/** Split · Copy · Paste · Delete │ Trim · Silence │ Undo · Redo — the mockup's
  * three groups, in its order, on lucide line icons (the app's rule: never
  * emoji). Exported so the tests name the same eight the pill draws. */
 export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
-  { label: 'Cut', commandId: 'edit.cut', Icon: Scissors, regionVerb: true, title: 'Cut (Ctrl+X)' },
-  { label: 'Copy', commandId: 'edit.copy', Icon: Copy, regionVerb: true, title: 'Copy (Ctrl+C)' },
+  {
+    label: 'Split',
+    commandId: 'edit.split',
+    Icon: Scissors,
+    title: 'Split at Cursor (Ctrl+K) — a marker at the cursor, or at both edges of the selection',
+    multitrackTitle:
+      'Split at Cursor (Ctrl+K) — cuts every clip under the cursor on the selected clips’ tracks',
+  },
+  {
+    label: 'Copy',
+    commandId: 'edit.copy',
+    Icon: Copy,
+    multitrackReason: 'needs a clip clipboard',
+    title: 'Copy (Ctrl+C)',
+  },
   {
     label: 'Paste',
     commandId: 'edit.paste',
     Icon: ClipboardPaste,
-    regionVerb: true,
+    multitrackReason: 'needs a clip clipboard',
     title: 'Paste (Ctrl+V)',
   },
   { label: 'Delete', commandId: 'edit.delete', Icon: Trash2, title: 'Delete (Del)' },
@@ -76,22 +102,26 @@ export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
     commandId: 'edit.trim',
     Icon: Crop,
     startsGroup: true,
-    regionVerb: true,
+    multitrackReason: 'needs a time selection',
     title: 'Trim to Selection — keeps the selected region, drops the rest',
   },
   {
     label: 'Silence',
     commandId: 'edit.silence',
     Icon: VolumeX,
-    regionVerb: true,
+    multitrackReason: 'needs a time selection',
     title: 'Silence Selection — zeroes the selected region in place',
   },
   { label: 'Undo', commandId: 'edit.undo', Icon: Undo2, startsGroup: true, title: 'Undo (Ctrl+Z)' },
   { label: 'Redo', commandId: 'edit.redo', Icon: Redo2, title: 'Redo (Ctrl+Y)' },
 ];
 
-const MULTITRACK_REGION_TITLE =
-  'Not available in the Multitrack view — it edits a region of the active document, which this view does not show. Switch to Waveform or Spectral to edit the document.';
+/** M7 — one blocked tooltip, with this button's own reason inside it. The
+ * words "Multitrack" and "Waveform or Spectral" stay in every one of them: the
+ * refusal is only half the message, and naming the view that CAN do it is the
+ * other half. */
+const blockedTitle = (label: string, reason: string) =>
+  `${label} — not available in the Multitrack view: ${reason}. Switch to Waveform or Spectral to edit the document.`;
 
 // Toolbar.tsx `pillIconBtn`, verbatim: the interactive hover/press/disabled
 // states come from .glass-pill-btn in index.css, which inline styles cannot
@@ -126,6 +156,16 @@ export default function EditToolbar() {
   // Undo/Redo enablement in the multitrack view also needs the history's
   // version counter (MenuBar carries the identical pair).
   useHistoryVersion();
+  // Item 10: `edit.split`'s multitrack predicate reads the SESSION store — the
+  // clips, the clip selection and the edit cursor — and every one of those
+  // writers (`setMtCursor`, the selection setters) records nothing and touches
+  // no appStore field. Without these three the Split button would grey and
+  // un-grey one unrelated render LATE. Three narrow selectors rather than the
+  // whole store on purpose: `mtPlayheadSample` ticks at pump rate during
+  // playback and would repaint the pill with it.
+  useSessionStore((s) => s.session);
+  useSessionStore((s) => s.selectedClipIds);
+  useSessionStore((s) => s.mtCursorSample);
   const documentCount = useAppStore((s) => s.documents.length);
   const isMultitrack = useAppStore((s) => s.view) === 'multitrack';
 
@@ -149,20 +189,27 @@ export default function EditToolbar() {
       className="pointer-events-auto flex items-center"
       style={{ borderRadius: 14, padding: '6px 8px', gap: 3 }}
     >
-      {EDIT_TOOLBAR_ITEMS.map(({ label, commandId, Icon, startsGroup, regionVerb, title }) => {
+      {EDIT_TOOLBAR_ITEMS.map((item) => {
+        const { label, commandId, Icon, startsGroup, multitrackReason, multitrackTitle, title } =
+          item;
         // F1: enablement is the COMMAND's, with nothing added here — the view
         // gate lives in the registry so this pill, the Edit menu and the
-        // keyboard cannot disagree. `blockedByView` only chooses the tooltip
-        // that explains a greying the predicate has already decided.
+        // keyboard cannot disagree. The two multitrack fields only choose the
+        // tooltip: why this button is dark (`multitrackReason`), or what it
+        // does INSTEAD in that view (`multitrackTitle`).
         const disabled = !isCommandEnabled(commandId);
-        const blockedByView = isMultitrack && regionVerb === true;
+        const multitrackHint = isMultitrack
+          ? multitrackReason !== undefined
+            ? blockedTitle(label, multitrackReason)
+            : (multitrackTitle ?? title)
+          : title;
         return (
           <span key={commandId} className="flex items-center">
             {startsGroup && <span aria-hidden="true" style={divider} />}
             <button
               type="button"
               aria-label={label}
-              title={blockedByView ? `${label} — ${MULTITRACK_REGION_TITLE}` : title}
+              title={multitrackHint}
               disabled={disabled}
               onClick={() => void run(commandId)}
               className="glass-pill-btn"

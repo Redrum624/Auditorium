@@ -9,6 +9,7 @@ import {
   clearHistory,
   markSavePoint,
   invalidateSavePoint,
+  isAtSavePoint,
   useHistoryVersion,
   UNDO_LIMIT,
   MAX_UNDO_BYTES,
@@ -418,5 +419,68 @@ describe('save-point-derived dirty (Task M2 / F9)', () => {
     expect(liveDirty(docId)).toBe(true);
     redo(docId); // position 1, back at the (fresh) save point
     expect(liveDirty(docId)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — project dirtiness is DERIVED from the save points, so the
+// derivation has to be readable from outside, and a save has to wake the
+// subscribers that re-evaluate it.
+// ---------------------------------------------------------------------------
+describe('isAtSavePoint and the save-point version bumps (lot A)', () => {
+  it('is true for an unknown key, false after a push, true at the mark, false after another push, true after undo back to the mark', () => {
+    const docId = freshDocId();
+    const log: string[] = [];
+    expect(isAtSavePoint(docId)).toBe(true); // no stacks => clean
+
+    pushUndo(makeEntry(docId, 'A', log));
+    expect(isAtSavePoint(docId)).toBe(false);
+
+    markSavePoint(docId);
+    expect(isAtSavePoint(docId)).toBe(true);
+
+    pushUndo(makeEntry(docId, 'B', log));
+    expect(isAtSavePoint(docId)).toBe(false);
+
+    undo(docId);
+    expect(isAtSavePoint(docId)).toBe(true);
+  });
+
+  it('markSavePoint bumps useHistoryVersion when stacks exist and the mark moves — and not when it does not move', () => {
+    const docId = freshDocId();
+    pushUndo(makeEntry(docId, 'A', []));
+    const { result } = renderHook(() => useHistoryVersion());
+    const before = result.current;
+
+    act(() => markSavePoint(docId));
+    expect(result.current).toBe(before + 1);
+
+    act(() => markSavePoint(docId)); // already at the mark: nothing changed
+    expect(result.current).toBe(before + 1);
+  });
+
+  it('markSavePoint on a key with no stacks bumps nothing (the closed-document no-op is unchanged)', () => {
+    const docId = freshDocId();
+    const { result } = renderHook(() => useHistoryVersion());
+    const before = result.current;
+
+    act(() => markSavePoint(docId));
+    expect(result.current).toBe(before);
+    expect(isAtSavePoint(docId)).toBe(true);
+  });
+
+  it('invalidateSavePoint bumps useHistoryVersion once when it actually unreaches the mark', () => {
+    const docId = freshDocId();
+    pushUndo(makeEntry(docId, 'A', []));
+    markSavePoint(docId);
+    const { result } = renderHook(() => useHistoryVersion());
+    const before = result.current;
+
+    act(() => invalidateSavePoint(docId));
+    expect(result.current).toBe(before + 1);
+    expect(isAtSavePoint(docId)).toBe(false);
+
+    act(() => invalidateSavePoint(docId)); // already -1
+    expect(result.current).toBe(before + 1);
   });
 });

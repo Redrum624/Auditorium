@@ -155,9 +155,9 @@ function CrashCard({
 
         <p style={{ margin: 0, fontSize: 12, lineHeight: 1.5 }}>
           {ORIGIN_TEXT[info.origin]} Save your work if possible — use{' '}
-          <strong>File → Save As…</strong> on anything you cannot lose
-          {fatal ? ' — then reload' : ''}. Nothing has been sent anywhere; this message exists only
-          on this screen.
+          <strong>File → Save As…</strong> to write the whole project (every open file and the
+          session) somewhere safe{fatal ? ' — then reload' : ''}. Nothing has been sent anywhere;
+          this message exists only on this screen.
         </p>
 
         <pre

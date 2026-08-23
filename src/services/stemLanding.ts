@@ -158,7 +158,7 @@ export interface StemDocumentsResult {
 export interface StemSessionResult {
   /** The five created track ids, in document order. */
   trackIds: string[];
-  /** `<source> — Stems`, also the default filename for Save Session. */
+  /** `<source> — Stems`, also the default filename for the project save. */
   sessionName: string;
 }
 
@@ -167,7 +167,7 @@ export interface StemLandingResult {
   documentIds: string[];
   /** The five created track ids, in the same order. */
   trackIds: string[];
-  /** `<source> — Stems`, also the default filename for Save Session. */
+  /** `<source> — Stems`, also the default filename for the project save. */
   sessionName: string;
   /**
    * True when the source was MONO and its stems were laid down as dual-mono
@@ -318,6 +318,9 @@ export function buildStemSession(
     mtZoom: defaultSessionZoom(session),
     mtPlayState: 'stopped',
     mtPlayheadSample: 0,
+    // Lot A (M4): a landed stem session is a new, unsaved project — the
+    // `.audm` that was open before is not where these tracks live.
+    projectPath: null,
   });
   // R3: stem landing is a LOAD-shaped replacement (this module deliberately
   // follows openSessionViaDialog's apply block) — it starts a new editing

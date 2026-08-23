@@ -130,6 +130,8 @@ const OUT_MARKERS_FLAC = path.join(OUT_DIR, 'markers.flac');
 const OUT_MARKERS_OGG = path.join(OUT_DIR, 'markers.ogg');
 const OUT_SESSION = path.join(OUT_DIR, 'session.audm');
 const OUT_FADES_SESSION = path.join(OUT_DIR, 'fades-session.audm');
+// Lot A (M5): the multitrack Export, written by its headless twin.
+const OUT_SESSION_EXPORT_WAV = path.join(OUT_DIR, 'session-export.wav');
 const OUT_FADES_REFERENCE = path.join(OUT_DIR, 'fades-v18-reference.json');
 const OUT_AUTOMATION_SESSION = path.join(OUT_DIR, 'automation-session.audm');
 const OUT_SPATIAL_SESSION = path.join(OUT_DIR, 'spatial-session.audm');
@@ -145,6 +147,50 @@ const OUT_TAKE_MP3 = path.join(OUT_DIR, 'take.mp3');
 const SHOT = path.join(OUT_DIR, 'smoke.png');
 
 /** 20 ms RMS frames of a mono buffer — the smoke's own envelope arithmetic. */
+/**
+ * Lot A (M5): decodes a 32-bit-float RIFF/WAVE buffer (what `exportSession`
+ * writes at `wavBitDepth: 32`) by walking its chunks — `fmt ` for the layout,
+ * `data` for the interleaved samples — into per-channel Float64 arrays of the
+ * exact float32 values, so the per-sample comparison against the renderer's
+ * own mixdown is equality, not a tolerance.
+ */
+function readFloat32Wav(buf) {
+  if (buf.toString('ascii', 0, 4) !== 'RIFF' || buf.toString('ascii', 8, 12) !== 'WAVE') {
+    throw new Error('readFloat32Wav: not a RIFF/WAVE buffer');
+  }
+  let pos = 12;
+  let fmt = null;
+  let data = null;
+  while (pos + 8 <= buf.length) {
+    const id = buf.toString('ascii', pos, pos + 4);
+    const size = buf.readUInt32LE(pos + 4);
+    const body = pos + 8;
+    if (id === 'fmt ') {
+      fmt = {
+        audioFormat: buf.readUInt16LE(body),
+        channels: buf.readUInt16LE(body + 2),
+        sampleRate: buf.readUInt32LE(body + 4),
+        bitsPerSample: buf.readUInt16LE(body + 14),
+      };
+    } else if (id === 'data') {
+      data = { start: body, size: Math.min(size, buf.length - body) };
+    }
+    pos = body + size + (size & 1);
+  }
+  if (!fmt || !data) throw new Error('readFloat32Wav: missing fmt or data chunk');
+  if (fmt.bitsPerSample !== 32 || fmt.audioFormat !== 3) {
+    throw new Error(`readFloat32Wav: expected 32-bit float, got format ${fmt.audioFormat} / ${fmt.bitsPerSample}-bit`);
+  }
+  const frames = Math.floor(data.size / (4 * fmt.channels));
+  const samples = Array.from({ length: fmt.channels }, () => new Float64Array(frames));
+  for (let i = 0; i < frames; i++) {
+    for (let c = 0; c < fmt.channels; c++) {
+      samples[c][i] = buf.readFloatLE(data.start + (i * fmt.channels + c) * 4);
+    }
+  }
+  return { channels: fmt.channels, sampleRate: fmt.sampleRate, frames, samples };
+}
+
 function rmsFrames20ms(x, sampleRate) {
   const size = Math.round(0.02 * sampleRate);
   const n = Math.floor(x.length / size);
@@ -850,15 +896,15 @@ async function main() {
         `(expected ${expectedOggPos2}, got ${JSON.stringify(oggMarkersAfter[1])})`
     );
 
-    // 8) Session v3 round-trip (Task M5/F3 acceptance): build a multitrack
-    // session containing one document with markers, Save Session to a .audm
-    // path (via a headless-safe test hook that drives the real
-    // serializeSessionV3 writer, bypassing the native save dialog), confirm
-    // the file begins with the v3 binary magic (not the old base64 JSON), then
-    // reopen it (via the real parseSessionFileBytes dispatcher) and confirm
+    // 8) Project round-trip (Task M5/F3 acceptance; lot A / M4 — v4): build a
+    // multitrack session containing one document with markers, Save the
+    // project to a .audm path (via a headless-safe test hook that IS Save As
+    // minus the dialog — the real `writeProject` core), confirm the file
+    // begins with the v4 binary magic (not the old base64 JSON), then reopen
+    // it (via the real `loadProjectFrom` / `parseSessionFileBytes`) and confirm
     // the document AND its markers survive. This is the flow whose silent
     // failure past ~17 minutes of audio was the critical bug M5 fixed.
-    console.log('Session v3 round-trip: build session, save, reopen...');
+    console.log('Project round-trip (.audm v4): build session, save, reopen...');
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const sessM1 = await page.evaluate(() =>
       window.__test.addMarkerToActive(15000, 'Session Verse')
@@ -873,6 +919,12 @@ async function main() {
     const sessClip = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
     assert(sessClip !== null, 'session clip inserted onto track 0');
 
+    // M4: the project carries EVERY open document, referenced by a clip or not
+    // — so the count the reopen must reproduce is what the walk has open now
+    // (every earlier step's document is still in the Files panel), not the one
+    // clip's source.
+    const openBeforeSave = (await page.evaluate(() => window.__test.getStateSummary())).docCount;
+    assert(openBeforeSave >= 1, `at least the clip's document is open before the project save (got ${openBeforeSave})`);
     const sessionSaveOk = await page.evaluate(
       (out) => window.__test.saveSessionAs(out),
       OUT_SESSION
@@ -881,8 +933,8 @@ async function main() {
     assert(fs.existsSync(OUT_SESSION), 'session.audm exists on disk');
     const sessionHead = fs.readFileSync(OUT_SESSION).subarray(0, 6);
     assert(
-      sessionHead.toString('latin1') === 'AUDM3\n',
-      `session.audm begins with the v3 binary magic AUDM3\\n (got ${JSON.stringify(sessionHead.toString('latin1'))})`
+      sessionHead.toString('latin1') === 'AUDM4\n',
+      `session.audm begins with the v4 binary magic AUDM4\\n (got ${JSON.stringify(sessionHead.toString('latin1'))})`
     );
 
     const sessionOpen = await page.evaluate(
@@ -890,7 +942,10 @@ async function main() {
       OUT_SESSION
     );
     console.log(`  reopened session: ${JSON.stringify(sessionOpen)}`);
-    assert(sessionOpen.docCount === 1, `reopened session recreated 1 document (got ${sessionOpen.docCount})`);
+    assert(
+      sessionOpen.docCount === openBeforeSave,
+      `reopened project recreated every document that was open at save time (${openBeforeSave}; got ${sessionOpen.docCount})`
+    );
     // `>= 1` could not fail: `newSession()` seeds FOUR tracks (sessionStore.ts),
     // so the old bound passed just as happily on a round trip that restored one
     // track, or on none at all with the default session still standing. Step 19
@@ -905,8 +960,38 @@ async function main() {
       `reopened session dropped no clips (got ${sessionOpen.droppedClipCount})`
     );
 
-    // The just-reopened document (addDocument'd inside openSessionFrom) is
-    // the active one — confirm its audio AND its markers came back from disk.
+    // The reopen restored every embedded document (M4), so the tone is not
+    // necessarily the active one — activate it by name, then confirm its audio
+    // AND its markers came back from disk.
+    // The walk has opened the tone many times by now, so several restored
+    // documents share its name; the one this step marked is the one whose two
+    // markers came back. Exactly one copy must carry them.
+    const toneName = path.basename(TONE);
+    // Other steps leave their own pairs on other copies (the MP3 round trip,
+    // for one); only THIS step's marker names identify the copy it marked.
+    const isSessionMarked = (m) =>
+      m.length === 2 && m.some((x) => x.name === 'Session Verse') && m.some((x) => x.name === 'Session Chorus');
+    const toneCopies = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneName);
+    assert(toneCopies >= 1, `the reopened project holds the tone by name (${toneName}; got ${toneCopies} copies)`);
+    // Open Project is additive (lot A ruling): the document this step marked
+    // is still open beside its restored twin, so exactly TWO copies carry the
+    // pair — and the restored one is the later of them, since the loader
+    // appends. Activate that one: its audio and markers must have come from
+    // disk, not from the original still sitting in the Files panel.
+    const markedIndexes = [];
+    for (let i = 0; i < toneCopies; i++) {
+      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneName, i]);
+      const m = await page.evaluate(() => window.__test.getActiveMarkers());
+      if (isSessionMarked(m)) markedIndexes.push(i);
+    }
+    assert(
+      markedIndexes.length === 2,
+      `the marked tone and its restored twin both carry the pair (got ${markedIndexes.length} of ${toneCopies})`
+    );
+    await page.evaluate(
+      ([n, idx]) => window.__test.activateDocumentByName(n, idx),
+      [toneName, markedIndexes[1]]
+    );
     const sessionDocSummary = await page.evaluate(() => window.__test.getStateSummary());
     console.log(`  reopened document: ${JSON.stringify(sessionDocSummary)}`);
     assert(
@@ -2263,13 +2348,17 @@ async function main() {
     );
     console.log(`  edit pill buttons: ${JSON.stringify(editButtons)}`);
     assert(
-      editButtons.map((b) => b.label).join(',') === 'Cut,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
+      editButtons.map((b) => b.label).join(',') === 'Split,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
       `the edit pill carries the eight commands in the mockup's order (actual ${editButtons.map((b) => b.label).join(',')})`
     );
     assert(
-      editButtons.filter((b) => ['Cut', 'Copy', 'Delete', 'Trim', 'Silence'].includes(b.label))
+      editButtons.filter((b) => ['Copy', 'Delete', 'Trim', 'Silence'].includes(b.label))
         .every((b) => b.disabled),
       `with no selection the region verbs are greyed, not hidden (actual ${JSON.stringify(editButtons)})`
+    );
+    assert(
+      editButtons.some((b) => b.label === 'Split' && b.disabled === false),
+      `Split needs only an open file, so it is lit with no selection (actual ${JSON.stringify(editButtons)})`
     );
     // Closing the card really hands its width to the waveform — the claim the
     // whole strip rearrangement exists for.
@@ -2955,12 +3044,12 @@ async function main() {
       { timeout: 5000 }
     );
 
-    // F11: 16c-bis) the Effects module card carries the same tools ----------
+    // F11: 16c-bis) the Effects module card lists effects, plus the Mix row ---
     // The card is the surface this user works from, and the smoke had never
-    // opened it — no `effects-list`, no `effects-item`, nothing. The tools
-    // shipped menu-only for ten releases partly because nothing here would
-    // have noticed.
-    console.log('Effects card: the ten Pipeline tools plus the Mix positioner, and no layout growth (F11)...');
+    // opened it — no `effects-list`, no `effects-item`, nothing. Item 5 of the
+    // 2026-08-18 program took the ten Pipeline rows OUT of this card (they live
+    // in the Pipeline module only); the Effects menu's own Mix row stays.
+    console.log('Effects card: the effect list plus the Mix positioner only, and no layout growth (F11, item 5)...');
     await openModuleCard(page, 'Effects');
     await page.waitForSelector('[data-testid="effects-tool-section"]', { timeout: 5000 });
     const cardBefore = await page.evaluate(() => {
@@ -2985,14 +3074,13 @@ async function main() {
         `(${tools.greyed} greyed), ${tools.effects} effect rows; card ${cardBefore.width.toFixed(0)}px`
     );
     assert(
-      JSON.stringify(tools.sections) ===
-        JSON.stringify(['Tempo & Timing', 'Voice', 'Analysis', 'Mix']),
-      `the card groups the Pipeline menu's tools, then the Effects menu's own Mix tail (actual ${JSON.stringify(tools.sections)})`
+      JSON.stringify(tools.sections) === JSON.stringify(['Mix']),
+      `the card draws the Effects menu's own Mix tail and no Pipeline group (actual ${JSON.stringify(tools.sections)})`
     );
     assert(
-      tools.ids.length === 11,
-      `every Pipeline tool plus the Mix positioner has a row in the card ` +
-        `(expected 11, actual ${tools.ids.length})`
+      tools.ids.length === 1,
+      `only the Effects menu's own Mix row has a tool row in the card ` +
+        `(expected 1, actual ${tools.ids.length})`
     );
     assert(
       tools.effects > 0,
@@ -3006,6 +3094,108 @@ async function main() {
       Math.abs(cardBefore.width - 348) <= 2,
       `the card is still the module column's width (expected 348 +/-2, actual ${cardBefore.width.toFixed(1)})`
     );
+
+    // Item 6 (2026-08-18): one click on an effect row opens the effect as a
+    // CARD in the module column — below the strip, above the module card, the
+    // same 348 as both (W1), no backdrop — and the module card beneath is
+    // forced to Effects (N16). The card outlives the module card (M6's new
+    // stage-inset case) and closes from its own ✕.
+    console.log('Effects card: one click opens an effect as a card between the strip and the card (item 6)...');
+    const enabledEffectRows = await page.evaluate(
+      () =>
+        [...document.querySelectorAll('[data-testid="effects-item"] button')].filter((b) => !b.disabled)
+          .length
+    );
+    assert(
+      enabledEffectRows > 0,
+      `a document is active here, so at least one effect row is enabled (actual ${enabledEffectRows})`
+    );
+    await page.locator('[data-testid="effects-item"] button:enabled').first().click();
+    await page.waitForSelector('[data-testid="effect-host"]', { timeout: 5000 });
+    const hostedEffect = await page.evaluate(() => {
+      const box = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { y: r.y, bottom: r.bottom, width: r.width };
+      };
+      return {
+        overlay: document.querySelector('[data-testid="dialog-overlay"]') !== null,
+        strip: box('[data-testid="sidebar-tabs"]'),
+        host: box('[data-testid="effect-host"]'),
+        panel: box('[data-testid="sidebar-panel"]'),
+        tab: document.querySelector('[data-testid="sidebar-panel"]')?.dataset.activeTab ?? null,
+        inset: document
+          .querySelector('[data-testid="editor-stage"]')
+          .style.getPropertyValue('--stage-inset-right'),
+      };
+    });
+    assert(!hostedEffect.overlay, 'an effect raises no backdrop — it is a card, not a modal');
+    assert(
+      hostedEffect.strip && hostedEffect.host && hostedEffect.panel,
+      `the strip, the effect card and the module card are all on screen ` +
+        `(${JSON.stringify({ strip: !!hostedEffect.strip, host: !!hostedEffect.host, panel: !!hostedEffect.panel })})`
+    );
+    for (const [name, b] of [
+      ['strip', hostedEffect.strip],
+      ['effect card', hostedEffect.host],
+      ['module card', hostedEffect.panel],
+    ]) {
+      assert(
+        Math.abs(b.width - 348) <= 1,
+        `the ${name} is the column's 348 with an effect open (W1; actual ${b.width.toFixed(1)})`
+      );
+    }
+    assert(
+      hostedEffect.strip.bottom <= hostedEffect.host.y &&
+        hostedEffect.host.bottom <= hostedEffect.panel.y,
+      `the effect card sits between the strip and the module card ` +
+        `(strip.bottom ${hostedEffect.strip.bottom.toFixed(1)}, host ${hostedEffect.host.y.toFixed(1)}–` +
+        `${hostedEffect.host.bottom.toFixed(1)}, panel.y ${hostedEffect.panel.y.toFixed(1)})`
+    );
+    assert(
+      hostedEffect.tab === 'effects',
+      `opening an effect forces the module card to Effects (N16; actual ${JSON.stringify(hostedEffect.tab)})`
+    );
+    assert(
+      hostedEffect.inset === '376px',
+      `the stage keeps a module card's clearance with an effect open (expected 376px, actual ${hostedEffect.inset})`
+    );
+    // The module card closes from its own ✕; the effect card stays and the
+    // stage keeps its clearance for it (M6's new switch case).
+    await page.click('[data-testid="sidebar-panel-close"]');
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="sidebar-panel"]') === null,
+      null,
+      { timeout: 5000 }
+    );
+    const cardClosedUnderEffect = await page.evaluate(() => ({
+      host: document.querySelector('[data-testid="effect-host"]') !== null,
+      inset: document
+        .querySelector('[data-testid="editor-stage"]')
+        .style.getPropertyValue('--stage-inset-right'),
+    }));
+    assert(cardClosedUnderEffect.host, 'closing the module card leaves the effect card in the column');
+    assert(
+      cardClosedUnderEffect.inset === '376px',
+      `the stage keeps the clearance for the effect card alone (expected 376px, actual ${cardClosedUnderEffect.inset})`
+    );
+    await page.click('[data-testid="effect-host"] [data-testid="hosted-tool-close"]');
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="effect-host"]') === null,
+      null,
+      { timeout: 5000 }
+    );
+    const effectClosed = await page.evaluate(() =>
+      document.querySelector('[data-testid="editor-stage"]').style.getPropertyValue('--stage-inset-right')
+    );
+    assert(
+      effectClosed === '14px',
+      `with nothing in the column the stage takes it back (expected 14px, actual ${effectClosed})`
+    );
+    // The steps below expect the Effects card open, as it was before this block.
+    await openModuleCard(page, 'Effects');
+    await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
 
     // F11: 16d) drag a document from the Files panel onto a track lane -------
     // The user's report was "we can't drag a file on a track in multitrack,
@@ -3860,6 +4050,48 @@ async function main() {
     // literally unchanged v1.8.0 loop), then re-arming through the hook.
     const armedMix = await page.evaluate(() => window.__test.mixdownSession());
     const armedPeak = await page.evaluate(() => window.__test.getPeak());
+
+    // Lot A (M5): File → Export in the multitrack view IS this mixdown. The
+    // headless twin writes the same render to a 32-bit-float WAV; decoded, it
+    // must equal the Mixdown document just produced (the active document),
+    // sample for sample, on both channels — the session is still the armed
+    // crossfade session at this point, so the two renders see the same fades.
+    //
+    // Placement: lot A's brief asks for this leg "next to :390". At :385-395
+    // of the base file that is step 3 of the single-DOCUMENT walk (an
+    // `exportActive` MP3 on the tone WAV) — no session exists there, so
+    // `exportSession` would have nothing to render and nothing to compare
+    // against. The automation/fade session with a per-sample reference is the
+    // `mixdownSession()` call immediately above, so the leg lives here.
+    console.log(`  exporting the session mixdown to ${OUT_SESSION_EXPORT_WAV} ...`);
+    const sessionExportOk = await page.evaluate(
+      (out) => window.__test.exportSession({ format: 'wav', wavBitDepth: 32, mp3Kbps: 192 }, out),
+      OUT_SESSION_EXPORT_WAV
+    );
+    assert(sessionExportOk === true, 'exportSession(wav) reported success on the fade session');
+    const sessionExport = readFloat32Wav(fs.readFileSync(OUT_SESSION_EXPORT_WAV));
+    assert(
+      sessionExport.channels === 2 && sessionExport.sampleRate === armedMix.sampleRate,
+      `the session export is stereo at the session rate (${sessionExport.channels} ch, ${sessionExport.sampleRate} Hz)`
+    );
+    assert(
+      sessionExport.frames === armedMix.length,
+      `the session export has the mixdown's length (${sessionExport.frames} vs ${armedMix.length})`
+    );
+    for (let ch = 0; ch < 2; ch++) {
+      const reference = await page.evaluate(
+        ([c, n]) => window.__test.getChannelSamples(c, 0, n),
+        [ch, armedMix.length]
+      );
+      let mismatches = 0;
+      for (let i = 0; i < armedMix.length; i++) {
+        if (reference[i] !== sessionExport.samples[ch][i]) mismatches++;
+      }
+      assert(
+        mismatches === 0,
+        `session export channel ${ch} equals mixdownSession per sample (${mismatches} mismatches over ${armedMix.length})`
+      );
+    }
     const released = await page.evaluate(
       (id) => window.__test.releaseCrossfade(id, 'in'),
       xfB.clipId
@@ -4180,6 +4412,21 @@ async function main() {
           : -3; // hold after the last key
     const autoPanAt = (s) =>
       s < 22050 ? -0.8 : s < 154350 ? -0.8 + 1.6 * ((s - 22050) / 132300) : 0.8;
+    // The anchors compare the render against the clip's RAW source, read from
+    // the active document. Since lot A (M4), reopening a project restores every
+    // embedded document additively and leaves the LAST one active — no longer
+    // the clip's tone. Activate a pure-tone copy (dual-mono, |sample| ~ 0.5 off
+    // the zero crossings) so the raw-source read is the tone the clips play,
+    // not a mixdown twin sitting near zero.
+    const toneNameAuto = path.basename(TONE);
+    const toneCopiesAuto = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneNameAuto);
+    let tonePicked = false;
+    for (let i = 0; i < toneCopiesAuto; i++) {
+      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneNameAuto, i]);
+      const probe = await page.evaluate(() => window.__test.getChannelSamples(0, 44125, 1)[0]);
+      if (Math.abs(probe) > 0.4) { tonePicked = true; break; }
+    }
+    assert(tonePicked, `a pure-tone source is active for the automation anchors (scanned ${toneCopiesAuto} copies)`);
     const autoSrc = await page.evaluate(
       (idxs) => idxs.map((i) => window.__test.getChannelSamples(0, i % 88200, 1)[0]),
       autoProbeIdxs
@@ -4373,6 +4620,18 @@ async function main() {
     };
     const spElAt = (s) => (s <= 44100 ? -45 : s >= 132300 ? 60 : -45 + 105 * ((s - 44100) / 88200));
     const spDistAt = (s) => 0.5 + 3.5 * (s / 176400);
+    // Same as the automation anchors: after a project reopen (M4) the active
+    // document is a restored twin near zero, not the clip's tone — activate a
+    // pure-tone copy so the raw-source read is the audio the clips play.
+    const toneNameSpat = path.basename(TONE);
+    const toneCopiesSpat = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneNameSpat);
+    let tonePickedSpat = false;
+    for (let i = 0; i < toneCopiesSpat; i++) {
+      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneNameSpat, i]);
+      const probe = await page.evaluate(() => window.__test.getChannelSamples(0, 44125, 1)[0]);
+      if (Math.abs(probe) > 0.4) { tonePickedSpat = true; break; }
+    }
+    assert(tonePickedSpat, `a pure-tone source is active for the spatial anchors (scanned ${toneCopiesSpat} copies)`);
     const spatSrc = await page.evaluate(
       (idxs) => idxs.map((i) => window.__test.getChannelSamples(0, i % 88200, 1)[0]),
       spatProbeIdxs
@@ -4580,6 +4839,91 @@ async function main() {
     assert(
       undoAfterZ2.clips[0].startSample === 0 && undoAfterZ2.clips[0].lengthSample === 88200,
       'the next Ctrl+Z reverted the earlier move (start back to 0, length untouched)'
+    );
+
+    // (d) Item 10 — Split at Cursor, through BOTH surfaces, one undo step each.
+    // The clip is back where (c) left it (start 0, length 88200), and this
+    // sub-step puts it back the same way, so nothing downstream shifts.
+    //
+    // The pill click is the load-bearing half: the Split button's enablement
+    // reads the SESSION store (the clip selection and the edit cursor), and
+    // neither writer touches the app store, so a pill that is not subscribed to
+    // the session renders it disabled and the click does nothing at all. Only
+    // the packaged app can prove that subscription — a unit test renders the
+    // component in isolation with no other subscribers to hide behind.
+    console.log('Split at cursor (item 10): pill, Ctrl+K, one undo step each...');
+    const splitIds0 = (await page.evaluate(() => window.__test.getClipFadeState())).clips.map(
+      (c) => c.clipId
+    );
+    await page.evaluate((id) => window.__test.selectClips([id]), splitIds0[0]);
+    await page.evaluate(() => window.__test.setMtCursor(44100));
+    const splitBtn = '[data-testid="edit-pill"] button[aria-label="Split"]';
+    const splitState = await page.evaluate((sel) => {
+      const b = document.querySelector(sel);
+      return { present: b !== null, disabled: b !== null && b.disabled === true };
+    }, splitBtn);
+    assert(
+      splitState.present && splitState.disabled === false,
+      `the pill's Split button is present and LIVE with a clip selected under the cursor (${JSON.stringify(splitState)})`
+    );
+    await page.click(splitBtn);
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 2,
+      null,
+      { timeout: 10000 }
+    );
+    const afterSplit = await page.evaluate(() => window.__test.getClipFadeState());
+    const splitLeft = afterSplit.clips.find((c) => c.clipId === splitIds0[0]);
+    const splitRight = afterSplit.clips.find((c) => c.clipId !== splitIds0[0]);
+    assert(
+      afterSplit.clips.length === 2 &&
+        splitLeft !== undefined &&
+        splitLeft.startSample === 0 &&
+        splitLeft.lengthSample === 44100 &&
+        splitRight !== undefined &&
+        splitRight.startSample === 44100 &&
+        splitRight.lengthSample === 44100,
+      `the pill split the clip in place at the cursor (${JSON.stringify(afterSplit.clips)})`
+    );
+    assert(
+      afterSplit.selectedClipId === splitIds0[0],
+      `the left half kept the clip's identity, so the primary selection did not move (${afterSplit.selectedClipId})`
+    );
+
+    await page.keyboard.press('Control+z');
+    const afterSplitZ = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterSplitZ.clips.length === 1 && afterSplitZ.clips[0].lengthSample === 88200,
+      `ONE Ctrl+Z undid the whole split (${afterSplitZ.clips.length} clip(s), length ${afterSplitZ.clips[0].lengthSample})`
+    );
+    await page.keyboard.press('Control+y');
+    const afterSplitY = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(afterSplitY.clips.length === 2, `Ctrl+Y re-applied it (${afterSplitY.clips.length} clips)`);
+
+    // The keyboard path, on the left half this time.
+    await page.evaluate(() => window.__test.setMtCursor(22050));
+    await page.keyboard.press('Control+k');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 3,
+      null,
+      { timeout: 10000 }
+    );
+    const afterCtrlK = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterCtrlK.clips.length === 3,
+      `Ctrl+K split again at the cursor (${afterCtrlK.clips.length} clips)`
+    );
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+z');
+    const afterSplitUndone = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterSplitUndone.clips.length === 1 &&
+        afterSplitUndone.clips[0].startSample === 0 &&
+        afterSplitUndone.clips[0].lengthSample === 88200,
+      `both splits undone, the session exactly as (c) left it (${JSON.stringify(afterSplitUndone.clips)})`
+    );
+    console.log(
+      '  split at cursor: the pill and Ctrl+K both cut the clip in place; one Ctrl+Z each'
     );
 
     // 22) F4b (v1.16) — transcription with speaker separation, end to end ---
@@ -5672,9 +6016,10 @@ async function main() {
     console.log('Cut / Delete / Trim / Silence over [20000, 50000)...');
     const EDIT_LEN = REGION_E - REGION_S;
 
-    // Cut: the join is the assertion. After removing [s,e) the sample sitting at
-    // index s must be the one that used to sit at index e — a seam that dropped
-    // or duplicated a sample still has the right LENGTH.
+    // Cut (item 7 / M1): the span is left EMPTY at the same length. Three
+    // observations make that claim: the length did not change, the 32 samples
+    // at the span's start are now zero, and the 32 at the span's END are the
+    // bytes that were there before — nothing moved up to fill a gap.
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const cutBefore = await stateOf();
     const cutAtStart = await samplesOf(0, REGION_S, 32);
@@ -5682,17 +6027,22 @@ async function main() {
     await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
     await page.evaluate(() => window.__test.editOp('cut'));
     const cutAfter = await stateOf();
-    const cutJoin = await samplesOf(0, REGION_S, 32);
+    const cutHole = await samplesOf(0, REGION_S, 32);
+    const cutTail = await samplesOf(0, REGION_E, 32);
     const cutClip = await page.evaluate(() => window.__test.getClipboardInfo());
     console.log(`  cut: ${cutBefore.length} -> ${cutAfter.length}, clipboard ${JSON.stringify(cutClip)}`);
     assert(
-      cutAfter.length === cutBefore.length - EDIT_LEN,
-      `Cut removed exactly the selection (expected ${cutBefore.length - EDIT_LEN}, actual ${cutAfter.length})`
+      cutAfter.length === cutBefore.length,
+      `Cut keeps the length — the span is emptied, not removed (expected ${cutBefore.length}, actual ${cutAfter.length})`
     );
     assert(
-      diffCount(cutJoin, cutAtEnd) === 0,
-      `the join is seamless: what now sits at ${REGION_S} is what used to sit at ${REGION_E} ` +
-        `(${diffCount(cutJoin, cutAtEnd)} of 32 differ)`
+      cutHole.every((v) => v === 0),
+      `the 32 samples at ${REGION_S} are silent (${cutHole.filter((v) => v !== 0).length} of 32 non-zero)`
+    );
+    assert(
+      diffCount(cutTail, cutAtEnd) === 0,
+      `and what sits at ${REGION_E} is what sat there before — nothing rippled ` +
+        `(${diffCount(cutTail, cutAtEnd)} of 32 differ)`
     );
     assert(
       cutClip !== null &&
@@ -5705,13 +6055,13 @@ async function main() {
     const cutRestored = await samplesOf(0, REGION_S, 32);
     assert(
       cutUndone.length === cutBefore.length && diffCount(cutRestored, cutAtStart) === 0,
-      `one undo restores the length AND the bytes (${cutUndone.length} samples, ${diffCount(cutRestored, cutAtStart)} of 32 differ)`
+      `one undo restores the bytes at ${REGION_S} (${cutUndone.length} samples, ${diffCount(cutRestored, cutAtStart)} of 32 differ)`
     );
     await page.evaluate(() => window.__test.closeActive());
 
-    // Delete: same removal, and the clipboard is NOT touched. A distinctive
-    // 1000-sample copy is put on the clipboard first, so "unchanged" is a real
-    // observation rather than the absence of one.
+    // Delete (item 7 / N6): the same constant-length silence, and the clipboard
+    // is NOT touched. A distinctive 1000-sample copy is put on the clipboard
+    // first, so "unchanged" is a real observation rather than the absence of one.
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const delBefore = await stateOf();
     const delAtEnd = await samplesOf(0, REGION_E, 32);
@@ -5720,11 +6070,15 @@ async function main() {
     await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
     await page.evaluate(() => window.__test.editOp('delete'));
     const delAfter = await stateOf();
-    const delJoin = await samplesOf(0, REGION_S, 32);
+    const delHole = await samplesOf(0, REGION_S, 32);
+    const delTail = await samplesOf(0, REGION_E, 32);
     const delClip = await page.evaluate(() => window.__test.getClipboardInfo());
     assert(
-      delAfter.length === delBefore.length - EDIT_LEN && diffCount(delJoin, delAtEnd) === 0,
-      `Delete removes the selection and joins it seamlessly (${delAfter.length} samples, ${diffCount(delJoin, delAtEnd)} of 32 differ at the join)`
+      delAfter.length === delBefore.length &&
+        delHole.every((v) => v === 0) &&
+        diffCount(delTail, delAtEnd) === 0,
+      `Delete silences the selection in place at the same length (${delAfter.length} samples, ` +
+        `${delHole.filter((v) => v !== 0).length} of 32 non-zero at ${REGION_S}, ${diffCount(delTail, delAtEnd)} of 32 differ at ${REGION_E})`
     );
     assert(
       delClip !== null && delClip.length === 1000,
@@ -5788,10 +6142,12 @@ async function main() {
 
     // L7-4) An edit moves the markers -----------------------------------------
     // Markers had only ever round-tripped through FILE FORMATS in this file,
-    // never through an EDIT. Deleting [s,e): a marker before it stays put, one
-    // inside it is dropped (editOps' 'delete' rule), and one after it lands at
-    // exactly P - (e - s) — an exact integer, so no tolerance is warranted.
-    console.log('An edit moves the markers: delete a region under three of them...');
+    // never through an EDIT. Ripple-deleting [s,e) (Shift+Del — since item 7
+    // the only Delete that moves the timeline): a marker before it stays put,
+    // one inside it is dropped (editOps' 'delete' rule), and one after it
+    // lands at exactly P - (e - s) — an exact integer, so no tolerance is
+    // warranted.
+    console.log('An edit moves the markers: ripple-delete a region under three of them...');
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const MARK_BEFORE = 10000;
     const MARK_INSIDE = 30000;
@@ -5808,9 +6164,9 @@ async function main() {
       assert(id !== null, `marker '${name}' placed at ${at}`);
     }
     await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
-    await page.evaluate(() => window.__test.editOp('delete'));
+    await page.evaluate(() => window.__test.editOp('rippleDelete'));
     const markersAfterEdit = await page.evaluate(() => window.__test.getActiveMarkers());
-    console.log(`  markers after deleting [${REGION_S}, ${REGION_E}): ${JSON.stringify(markersAfterEdit)}`);
+    console.log(`  markers after ripple-deleting [${REGION_S}, ${REGION_E}): ${JSON.stringify(markersAfterEdit)}`);
     const markIntro = markersAfterEdit.filter((m) => m.name === 'Intro')[0];
     const markChorus = markersAfterEdit.filter((m) => m.name === 'Chorus')[0];
     assert(
@@ -5835,6 +6191,67 @@ async function main() {
         markersAfterUndo[2].positionSample === MARK_AFTER,
       `one undo brings all three back to their own samples — the marker remap rides ` +
         `inside the SAME history entry as the audio (${JSON.stringify(markersAfterUndo)})`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-4b) Split, then cut the cursor's segment ------------------------------
+    // Item 8: Split at Cursor with a selection drops a marker at each edge, in
+    // one undo step; Ctrl+X with NO selection then cuts the segment the cursor
+    // is in — the span between those two markers — leaving it silent at the
+    // same length, the markers where they were, and the cursor at its start.
+    console.log('Split at the selection edges, then cut the segment under the cursor...');
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const segBefore = await stateOf();
+    const segAtStart = await samplesOf(0, REGION_S, 32);
+    const segAtEnd = await samplesOf(0, REGION_E, 32);
+    await page.evaluate(([s, e]) => window.__test.setSelection(s, e), [REGION_S, REGION_E]);
+    await page.evaluate(() => window.__test.editOp('split'));
+    const splitMarkers = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(`  markers after split: ${JSON.stringify(splitMarkers)}`);
+    assert(
+      splitMarkers.length === 2 &&
+        splitMarkers[0].positionSample === REGION_S &&
+        splitMarkers[1].positionSample === REGION_E &&
+        splitMarkers.every((m) => m.name.startsWith('Split ')),
+      `Split dropped exactly two markers, one at each selection edge, named "Split N" (${JSON.stringify(splitMarkers)})`
+    );
+    await page.evaluate(() => window.__test.clearSelection());
+    await page.evaluate((c) => window.__test.setCursor(c), REGION_S + 1000);
+    await page.evaluate(() => window.__test.editOp('cut'));
+    const segAfter = await stateOf();
+    const segHole = await samplesOf(0, REGION_S, 32);
+    const segTail = await samplesOf(0, REGION_E, 32);
+    const segClip = await page.evaluate(() => window.__test.getClipboardInfo());
+    const segMarkers = await page.evaluate(() => window.__test.getActiveMarkers());
+    const segCursor = await page.evaluate(() => window.__test.getCursor());
+    assert(
+      segAfter.length === segBefore.length,
+      `cutting the cursor's segment keeps the length (expected ${segBefore.length}, actual ${segAfter.length})`
+    );
+    assert(
+      segClip !== null && segClip.length === EDIT_LEN,
+      `and the clipboard holds exactly the segment, ${EDIT_LEN} samples (${JSON.stringify(segClip)})`
+    );
+    assert(
+      segHole.every((v) => v === 0) && diffCount(segTail, segAtEnd) === 0,
+      `the segment is silent at ${REGION_S} and what follows it at ${REGION_E} is untouched ` +
+        `(${segHole.filter((v) => v !== 0).length} of 32 non-zero, ${diffCount(segTail, segAtEnd)} of 32 differ)`
+    );
+    assert(
+      segMarkers.length === 2 &&
+        segMarkers[0].positionSample === REGION_S &&
+        segMarkers[1].positionSample === REGION_E,
+      `the two markers did not move (${JSON.stringify(segMarkers)})`
+    );
+    assert(
+      segCursor === REGION_S,
+      `and the cursor sits at the segment's start (expected ${REGION_S}, actual ${segCursor})`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+    const segRestored = await samplesOf(0, REGION_S, 32);
+    assert(
+      diffCount(segRestored, segAtStart) === 0,
+      `one undo brings the bytes back (${diffCount(segRestored, segAtStart)} of 32 differ)`
     );
     await page.evaluate(() => window.__test.closeActive());
 

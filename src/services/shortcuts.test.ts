@@ -56,6 +56,7 @@ describe('SHORTCUT_TABLE', () => {
       { combo: 'ctrl+z', commandId: 'edit.undo' },
       { combo: 'ctrl+shift+z', commandId: 'edit.redo' },
       { combo: 'ctrl+y', commandId: 'edit.redo' },
+      { combo: 'ctrl+k', commandId: 'edit.split' }, // item 8 (M1)
       { combo: 'ctrl+x', commandId: 'edit.cut' },
       { combo: 'ctrl+c', commandId: 'edit.copy' },
       { combo: 'ctrl+v', commandId: 'edit.paste' },

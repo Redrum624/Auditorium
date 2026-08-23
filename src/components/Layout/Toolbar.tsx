@@ -8,8 +8,8 @@ import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore';
 import type { Session } from '../../multitrack/session';
 import { defaultSessionZoom, sessionTimelineLength } from '../../multitrack/sessionZoom';
-import { hasUnsavedWork } from '../../services/fileService';
-import { runCommand } from '../../services/menuActions';
+import { isCommandEnabled, runCommand, showEditorView } from '../../services/menuActions';
+import { useHistoryVersion } from '../../services/undoHistory';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
 import { canRecord } from '../../services/transportService';
 // F11-9: the zoom limits are the store's now, so the toolbar imports the one
@@ -225,12 +225,21 @@ export default function Toolbar() {
   // re-evaluated whenever a track is armed/disarmed.
   useSessionStore((s) => s.session.tracks.some((t) => t.armed));
 
+  // Lot A: Save / Export read the PROJECT through the commands' own
+  // predicates. A clip move changes no appStore state — it writes the SESSION
+  // store and pushes a history entry — so the pills also subscribe to the
+  // history's version counter (MenuBar does the same), or the Save pill would
+  // never light after a session edit and never dim after a save.
+  useHistoryVersion();
+
   const hasDoc = doc !== null;
   // The Save pill's own enablement has to state the SAME condition as the
   // `file.save` command it runs, or the pill lights up for a command
   // `runCommand` will then refuse — a control that looks live and does
-  // nothing. Dirty-or-never-written, the close guard's predicate.
-  const canSave = doc !== null && hasUnsavedWork(doc);
+  // nothing. Under M4 that is the project's predicate (any document dirty,
+  // the session dirty, or a never-written project with content) — asked of
+  // the command itself rather than restated here.
+  const canSave = isCommandEnabled('file.save');
   const isMultitrack = view === 'multitrack';
   // MT1-1: the zoom cluster is live whenever the ACTIVE surface has something to
   // zoom. In multitrack that is the session itself, which always has a timeline
@@ -399,7 +408,7 @@ export default function Toolbar() {
 
         <PillButton
           label="Save"
-          title="Save (Ctrl+S)"
+          title="Save Project (Ctrl+S)"
           disabled={!canSave}
           onClick={() => void runCommand('file.save')}
         >
@@ -408,7 +417,10 @@ export default function Toolbar() {
         <PillButton
           label="Export"
           title="Export (Ctrl+E)"
-          disabled={!hasDoc}
+          // Lot A (M5): in the multitrack view Export renders the session, so
+          // the pill follows `file.export`'s own predicate (the session
+          // subscription above keeps it fresh as clips come and go).
+          disabled={!isCommandEnabled('file.export')}
           onClick={() => void runCommand('file.export')}
         >
           Export
@@ -478,7 +490,7 @@ export default function Toolbar() {
               aria-label={`${v} view`}
               aria-pressed={view === v}
               disabled={v !== 'multitrack' && !hasDoc}
-              onClick={() => useAppStore.getState().setView(v)}
+              onClick={() => (v === 'multitrack' ? useAppStore.getState().setView(v) : showEditorView(v))}
               className="glass-pill-btn capitalize"
               style={{ ...pillBtn, padding: '0 12px', ...(view === v ? toggleActive : null) }}
             >

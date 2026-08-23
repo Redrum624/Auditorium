@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import { nextId } from '../audio/AudioDocument';
 import type { Clip, Session, Track } from './session';
 import { clampFadePair, createTrack, crossfadableOverlap } from './session';
 import {
@@ -90,6 +91,17 @@ export interface SessionState {
    * asked for.
    */
   groupDragPreview: { clipIds: string[]; deltaSample: number } | null;
+  /**
+   * Lot A (M4 / N11) — the `.audm` this project was opened from or last saved
+   * to, or `null` for a project that has never been written. Plain Save writes
+   * here without a dialog; Save As and Open Project set it; `newSession`, a
+   * stem landing and a cover session reset it to `null`.
+   *
+   * Deliberately NOT on `Session`, so `serializeSession*` never writes it into
+   * the file header, and NOT in `SessionSnapshot`, so an undo never restores
+   * it — undoing past a Save As must not move where the next Save lands.
+   */
+  projectPath: string | null;
 }
 
 export interface SessionActions {
@@ -126,6 +138,28 @@ export interface SessionActions {
   addClip(trackId: string, clip: Clip): void; // inserts sorted; accepts overlap verbatim; never writes fades
   moveClip(clipId: string, toTrackId: string, newStartSample: number, opts?: { clearOverlap?: boolean }): void; // clamps >=0; commits verbatim + maintains facing fades; opts.clearOverlap = v1.8 nudge; H1 no-op guard: same track + same RESOLVED sample records nothing
   trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour; re-clamps fades (X2 — see setClipFade) and maintains facing fades on the overlap it reshapes (X5)
+  /** Item 1 (M2/N1-N4) - splits one clip at `sample` (session samples, consumed
+   * VERBATIM: the cursor was snapped, or deliberately not, when it was placed,
+   * and this action never re-snaps or rounds it). The LEFT half keeps the
+   * clip's id, documentId, gainDb and fadeIn(+curve); the RIGHT half is a fresh
+   * `nextId('clip')` at `sample` keeping documentId, gainDb and
+   * fadeOut(+curve), its `offsetSample` advanced by the left length converted
+   * to the SOURCE rate (`opts.docRate`; a session-rate delta when absent or
+   * equal) - the same `doc.sampleRate / sessionRate` conversion `readClipSlice`
+   * applies when it reads the slice back (`mixdown.ts`). The seam gets no fade;
+   * both halves pass through `reconcileTrimmedFades`.
+   *
+   * The clip is replaced IN PLACE in ONE `set()` and `maintainFacingFades` is
+   * deliberately NOT run (N2): `isLegalSplitPoint` has already refused every
+   * point inside or on the boundary of an overlap with a track-mate, so outside
+   * those the two halves partition the span and each overlap pair's geometry is
+   * carried unchanged by whichever half holds it. A remove+add split would
+   * instead run `removeClip`'s maintenance and DISARM a crossfade partner's
+   * facing fade, silently dropping the crossfade.
+   *
+   * No-op - same state object, nothing recorded - for an unknown id or an
+   * illegal point. Returns the right half's id, or null for a no-op. */
+  splitClip(clipId: string, sample: number, opts?: { docRate?: number }): string | null;
   removeClip(clipId: string): void;
   /** Sets a clip's gain trim in dB, clamped to [-24, 24]. No-op for an unknown
    * clip id. Additive (Task 23): wired to the PropertiesPanel's clip gain input. */
@@ -247,6 +281,16 @@ export interface SessionActions {
   setMtZoom(z: SessionState['mtZoom']): void;
   setMtPlayState(state: SessionState['mtPlayState']): void;
   setMtPlayheadSample(s: number): void;
+  /** Lot A (M4): unrecorded — the path is not session content (see
+   * `SessionState.projectPath`). Set by Save / Save As / Open Project, reset
+   * to `null` by `newSession` and the load-shaped replacements. */
+  setProjectPath(path: string | null): void;
+  /** Lot A (N13): Save As renames the project to the file's basename. A
+   * RECORDED mutation ('Rename project') because `session.name` lives on the
+   * session object, and an unrecorded `session` replacement would break the
+   * recording invariant in `sessionUndo.ts`. No-op when the name is unchanged
+   * (same session reference, nothing recorded). */
+  renameSession(name: string): void;
 }
 
 /** MT1-1 — the state a fresh session starts in, session and zoom together.
@@ -640,6 +684,31 @@ function reconcileTrimmedFades(clip: Clip, trimmedEdge: 'start' | 'end'): Clip {
   };
 }
 
+/** N2 - whether `sample` is a legal split point for `clip` among its
+ * track-mates `clips`: an INTEGER (every cursor writer rounds; nothing here
+ * rounds or snaps - N1) at least 32 samples inside BOTH edges (`trimClip`'s
+ * own minimum length), and not inside any raw overlap with a track-mate.
+ *
+ * The overlap interval is CLOSED at both ends: a split exactly at a mate's
+ * start would mint an equal-start pair and one exactly at a mate's end an
+ * equal-end pair, and `crossfadableOverlap` refuses both (rules 1 and 2), so
+ * an armed crossfade there would silently degrade into two solo fades. Outside
+ * every overlap the halves partition the clip's span and every pair's geometry
+ * rides unchanged on whichever half holds it - which is exactly what lets
+ * `splitClip` skip `maintainFacingFades`. */
+function isLegalSplitPoint(clips: readonly Clip[], clip: Clip, sample: number): boolean {
+  if (!Number.isInteger(sample)) return false;
+  const end = clip.startSample + clip.lengthSample;
+  if (sample - clip.startSample < 32 || end - sample < 32) return false;
+  for (const m of clips) {
+    if (m.id === clip.id || rawOverlapWidth(clip, m) === 0) continue;
+    const lo = Math.max(clip.startSample, m.startSample);
+    const hi = Math.min(end, m.startSample + m.lengthSample);
+    if (sample >= lo && sample <= hi) return false;
+  }
+  return true;
+}
+
 function findClipLocation(
   tracks: Track[],
   clipId: string
@@ -697,11 +766,12 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   mtPlayheadSample: 0,
   mtEnvelope: null,
   groupDragPreview: null, // T5
+  projectPath: null, // lot A (M4)
 
   newSession(sampleRate) {
     // R3: recorded — File > New Session is a store mutation of the current
     // timeline (undo restores the discarded session), unlike the load-shaped
-    // replacements (Open Session, stem landing) which CLEAR the history.
+    // replacements (Open Project, stem landing) which CLEAR the history.
     recordSessionMutation('New session', () => {
       set({
         ...freshSessionState(sampleRate),
@@ -711,6 +781,10 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         mtPlayState: 'stopped',
         mtPlayheadSample: 0,
         mtEnvelope: null,
+        // Lot A (M4 / N11): a new project has no file. Reset by the mutation,
+        // but NOT in the snapshot — undoing this New Session restores the old
+        // session and leaves the path `null`.
+        projectPath: null,
       });
     });
   },
@@ -916,6 +990,71 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         return { session: { ...s.session, tracks } };
       });
     });
+  },
+
+  splitClip(clipId, sample, opts) {
+    let rightId: string | null = null;
+    recordSessionMutation('Split clip', () => {
+      set((s) => {
+        const loc = findClipLocation(s.session.tracks, clipId);
+        if (!loc) return s;
+        const clips = s.session.tracks[loc.trackIdx].clips;
+        const clip = clips[loc.clipIdx];
+        if (!isLegalSplitPoint(clips, clip, sample)) return s;
+
+        const leftLen = sample - clip.startSample;
+        const rightLen = clip.startSample + clip.lengthSample - sample;
+        // N3: the offset indexes the SOURCE document, at the DOCUMENT's rate -
+        // `readClipSlice` (mixdown.ts) converts lengths by
+        // `doc.sampleRate / sessionRate` with the same rounding, so the right
+        // half of a mixed-rate clip must advance by the CONVERTED left length
+        // or it reads the wrong source samples. `trimClip`'s own advance is
+        // session-rate only (its edge moves in session samples on a clip whose
+        // offset it re-derives) and is deliberately not copied here.
+        const sessionRate = s.session.sampleRate;
+        const docRate = opts?.docRate;
+        const advance =
+          docRate !== undefined && docRate !== sessionRate
+            ? Math.round((leftLen * docRate) / sessionRate)
+            : leftLen;
+
+        const left = reconcileTrimmedFades(
+          { ...clip, lengthSample: leftLen, fadeOutSample: undefined, fadeOutCurve: undefined },
+          'end'
+        );
+        const right = reconcileTrimmedFades(
+          {
+            ...clip,
+            id: nextId('clip'),
+            startSample: sample,
+            offsetSample: clip.offsetSample + advance,
+            lengthSample: rightLen,
+            fadeInSample: undefined,
+            fadeInCurve: undefined,
+          },
+          'start'
+        );
+        rightId = right.id;
+
+        // The left half is written at `clipIdx` (index-stable, exactly as
+        // `trimClip` writes), the right half through `insertSorted`. The
+        // track's `automation` rides the spread untouched: it is per-track and
+        // timeline-keyed, so a clip split says nothing about it.
+        const tracks = s.session.tracks.map((t, i) =>
+          i === loc.trackIdx
+            ? {
+                ...t,
+                clips: insertSorted(
+                  t.clips.map((c, j) => (j === loc.clipIdx ? left : c)),
+                  right
+                ),
+              }
+            : t
+        );
+        return { session: { ...s.session, tracks } };
+      });
+    });
+    return rightId;
   },
 
   removeClip(clipId) {
@@ -1245,6 +1384,18 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   setMtPlayheadSample(sample) {
     set({ mtPlayheadSample: sample });
   },
+
+  // ---- lot A (M4) ----
+  setProjectPath(path) {
+    set({ projectPath: path });
+  },
+
+  renameSession(name) {
+    recordSessionMutation('Rename project', () => {
+      set((s) => (s.session.name === name ? s : { session: { ...s.session, name } }));
+    });
+  },
+  // ---- end lot A ----
 }));
 
 // ---------------------------------------------------------------------------
@@ -1482,6 +1633,64 @@ export function removeClips(clipIds: readonly string[]): void {
   withSessionGesture(present.length === 1 ? 'Remove clip' : 'Remove clips', () => {
     for (const id of present) useSessionStore.getState().removeClip(id);
   });
+}
+
+/** M2/N2 - the clips a split at `sample` would cut on `trackIds`: every clip on
+ * those tracks for which `isLegalSplitPoint` holds. Pure, and shared by the
+ * group verb below and by `edit.split`'s multitrack enablement, so the row
+ * greys for exactly the cases the store would refuse.
+ *
+ * Two clips on ONE track can never both qualify - both containing `sample`
+ * means they overlap there, which N2 excludes - so at most one clip per track
+ * comes back. */
+export function splitTargets(
+  session: Session,
+  trackIds: readonly string[],
+  sample: number
+): { trackId: string; clip: Clip }[] {
+  const wanted = new Set(trackIds);
+  const out: { trackId: string; clip: Clip }[] = [];
+  for (const t of session.tracks) {
+    if (!wanted.has(t.id)) continue;
+    for (const c of t.clips) {
+      if (isLegalSplitPoint(t.clips, c, sample)) out.push({ trackId: t.id, clip: c });
+    }
+  }
+  return out;
+}
+
+/** Item 1 - splits every target of `splitTargets` in ONE undo entry ('Split
+ * clip' / 'Split clips'), then, per N4, adds the right half of every original
+ * that WAS a selection member to `selectedClipIds` (the primary is unchanged:
+ * the left half keeps the id). The right half of an unselected track-mate - one
+ * cut only because its track owns some other selected clip (M2) - stays
+ * unselected, so the selection after the act still names what the user picked.
+ *
+ * `docRateOf` answers the source document's sample rate for a clip (N3); this
+ * store holds document ids and never the documents, so the caller supplies it.
+ * Returns the new right-half ids in track order, or `[]` - with no gesture at
+ * all - when nothing qualifies. */
+export function splitClipsAt(
+  trackIds: readonly string[],
+  sample: number,
+  docRateOf?: (documentId: string) => number | undefined
+): string[] {
+  const targets = splitTargets(useSessionStore.getState().session, trackIds, sample);
+  if (targets.length === 0) return [];
+  const made: { leftId: string; rightId: string }[] = [];
+  withSessionGesture(targets.length === 1 ? 'Split clip' : 'Split clips', () => {
+    for (const { clip } of targets) {
+      const rightId = useSessionStore
+        .getState()
+        .splitClip(clip.id, sample, { docRate: docRateOf?.(clip.documentId) });
+      if (rightId !== null) made.push({ leftId: clip.id, rightId });
+    }
+  });
+  const { selectedClipIds, setSelectedClips } = useSessionStore.getState();
+  const member = new Set(selectedClipIds);
+  const joining = made.filter((m) => member.has(m.leftId)).map((m) => m.rightId);
+  if (joining.length > 0) setSelectedClips([...selectedClipIds, ...joining]);
+  return made.map((m) => m.rightId);
 }
 
 /** The merged, ascending, non-overlapping union of the given spans. Ripple

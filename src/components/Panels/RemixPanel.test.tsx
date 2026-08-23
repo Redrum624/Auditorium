@@ -3,6 +3,8 @@ import { render, screen, fireEvent, act, within } from '@testing-library/react';
 import RemixPanel from './RemixPanel';
 import { useAppStore, makeInitialState } from '../../stores/appStore';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
+import { createClip, createTrack, type Session } from '../../multitrack/session';
+import { useSessionStore } from '../../multitrack/sessionStore';
 import {
   MAX_LOCKED_JOINS,
   clearAllRemix,
@@ -342,6 +344,38 @@ describe('RemixPanel — Go To (acceptance 5)', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /go to edit/i })[1]);
 
     const state = useAppStore.getState();
+    expect(state.view).toBe('waveform');
+    expect(state.cursorSample).toBe(20 * SR);
+  });
+
+  // Lot E (item 4, N14) regression pin: Go To's leaver stays the RAW `setView`
+  // — it jumps inside the remix document, so a foreign clip selected in the
+  // session must not drag the active document along.
+  it('keeps the remix document active even with a foreign clip selected in the session', () => {
+    const doc = addRemixDoc();
+    const other = addRemixDoc('Other', 1000);
+    useAppStore.getState().setActiveDocument(doc.id);
+    mockGetSession.mockReturnValue(makeSession(doc.id, SIX_JOINS));
+    const clip = createClip({ documentId: other.id, startSample: 0, offsetSample: 0, lengthSample: 500 });
+    const track = createTrack('Track 1');
+    track.clips = [clip];
+    const session: Session = { name: 'Pin', sampleRate: SR, tracks: [track] };
+    useSessionStore.setState({
+      session,
+      selectedClipId: clip.id,
+      selectedClipIds: [clip.id],
+      mtCursorSample: 0,
+      mtPlayState: 'stopped',
+      mtPlayheadSample: 0,
+      mtEnvelope: null,
+    });
+    useAppStore.setState({ view: 'multitrack' });
+
+    render(<RemixPanel />);
+    fireEvent.click(screen.getAllByRole('button', { name: /go to edit/i })[1]);
+
+    const state = useAppStore.getState();
+    expect(state.activeDocumentId).toBe(doc.id);
     expect(state.view).toBe('waveform');
     expect(state.cursorSample).toBe(20 * SR);
   });

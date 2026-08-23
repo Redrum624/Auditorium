@@ -38,7 +38,7 @@ describe('edit.undo / edit.redo view routing (ruling 1)', () => {
     const doc = openDoc();
     // A document edit (doc history) ...
     useAppStore.getState().setSelection({ start: 0, end: 10 });
-    await runCommand('edit.delete'); // waveform view -> deletes the selection
+    await runCommand('edit.rippleDelete'); // waveform view -> removes the selection (item 7: plain Delete is equal-length)
     expect(docLength(useAppStore.getState().documents[0])).toBe(990);
     // ... then a session edit (session history).
     const preSession = sessionRef();
@@ -60,7 +60,7 @@ describe('edit.undo / edit.redo view routing (ruling 1)', () => {
   it('waveform view: Ctrl+Z undoes the DOCUMENT edit and leaves the session edit alone', async () => {
     openDoc();
     useAppStore.getState().setSelection({ start: 0, end: 10 });
-    await runCommand('edit.delete');
+    await runCommand('edit.rippleDelete');
     useSessionStore.getState().addTrack();
     const postSession = sessionRef();
 
@@ -75,7 +75,7 @@ describe('edit.undo / edit.redo view routing (ruling 1)', () => {
   it('multitrack view with an empty session history: edit.undo is disabled even when a doc could undo', async () => {
     openDoc();
     useAppStore.getState().setSelection({ start: 0, end: 10 });
-    await runCommand('edit.delete'); // doc history now has one entry
+    await runCommand('edit.rippleDelete'); // doc history now has one entry
     useAppStore.getState().setView('multitrack');
 
     await runCommand('edit.undo'); // enabled() is false for the session -> skipped

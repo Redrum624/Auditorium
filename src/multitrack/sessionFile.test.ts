@@ -2,15 +2,29 @@ import { createDocument, nextId, type AudioDocument } from '../audio/AudioDocume
 import { useAppStore, makeInitialState, type Marker } from '../stores/appStore';
 import { createClip, createTrack, type Session } from './session';
 import {
+  isProjectSaveInFlight,
+  loadProjectFrom,
   openSessionViaDialog,
   parseSessionFile,
   parseSessionFileBytes,
   parseSessionFileV3,
-  saveSessionViaDialog,
+  parseSessionFileV4,
+  saveProject,
   serializeSession,
   serializeSessionV3,
+  serializeSessionV4,
+  writeProject,
 } from './sessionFile';
 import { useSessionStore } from './sessionStore';
+import {
+  SESSION_COALESCE_WINDOW_MS,
+  _resetSessionUndo,
+  canUndoSession,
+  clearSessionHistory,
+  isSessionDirty,
+  undoSession,
+} from './sessionUndo';
+import * as undoHistory from '../services/undoHistory';
 import { defaultSessionZoom } from './sessionZoom';
 import { FALLBACK_SESSION_LANE_WIDTH, _resetSessionLaneWidth } from './sessionViewport';
 
@@ -52,19 +66,41 @@ function trackJson(id: string, clips: object[] = []) {
  * `serializeSessionV3` entirely — used to exercise corrupt/truncated inputs
  * that a well-formed writer would never produce. */
 function buildV3Buffer(meta: object, payload: Uint8Array = new Uint8Array(0)): ArrayBuffer {
+  return buildBinaryBuffer('AUDM3\n', meta, payload);
+}
+
+/** Lot A: the v4 twin of `buildV3Buffer` — same header, `AUDM4\n` magic. */
+function buildV4Buffer(meta: object, payload: Uint8Array = new Uint8Array(0)): ArrayBuffer {
+  return buildBinaryBuffer('AUDM4\n', meta, payload);
+}
+
+function buildBinaryBuffer(magic: string, meta: object, payload: Uint8Array): ArrayBuffer {
   const jsonBytes = new TextEncoder().encode(JSON.stringify(meta));
   const out = new Uint8Array(10 + jsonBytes.byteLength + payload.byteLength);
-  out.set(new TextEncoder().encode('AUDM3\n'), 0);
+  out.set(new TextEncoder().encode(magic), 0);
   new DataView(out.buffer).setUint32(6, jsonBytes.byteLength, true);
   out.set(jsonBytes, 10);
   out.set(payload, 10 + jsonBytes.byteLength);
   return out.buffer;
 }
 
+/** Lot A: the JSON metadata block of a v3/v4 buffer, for shape assertions. */
+function readBinaryJson(bytes: Uint8Array): Record<string, unknown> {
+  const jsonLen = new DataView(bytes.buffer, bytes.byteOffset).getUint32(6, true);
+  return JSON.parse(new TextDecoder().decode(bytes.subarray(10, 10 + jsonLen)));
+}
+
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   useSessionStore.getState().newSession(44100);
+  // Lot A: the project's path and the session stack are module-global too.
+  useSessionStore.getState().setProjectPath(null);
+  _resetSessionUndo();
 });
+
+/** Lets a pending async flow advance past its dialog/serialize steps to its
+ * `writeFile` await (a macrotask turn drains every microtask in between). */
+const tick = () => new Promise((r) => setTimeout(r, 0));
 
 describe('serializeSession', () => {
   it('embeds only documents actually referenced by a clip', () => {
@@ -961,169 +997,448 @@ describe('markers (.audm)', () => {
     expect(markers[newDocId][0].positionSample).toBe(10); // clamped to the recreated doc's length
   });
 
-  it('saveSessionViaDialog (v3) includes the current appStore markers for referenced docs', async () => {
+  it('saveProject (v4) includes the current appStore markers for every open document, referenced or not (lot A)', async () => {
     const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
     const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
     useAppStore.getState().addDocument(doc);
     useAppStore.getState().addMarker(doc.id, { id: 'm-1', name: 'Peak', positionSample: 2 });
+    const loose = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
+    useAppStore.getState().addDocument(loose);
+    useAppStore.getState().addMarker(loose.id, { id: 'm-2', name: 'Loose', positionSample: 4 });
     const trackId = useSessionStore.getState().session.tracks[0].id;
     useSessionStore
       .getState()
       .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
 
-    await saveSessionViaDialog();
+    await saveProject({ as: true });
 
     const [, data] = api.writeFile.mock.calls[0];
-    const { documents, markers } = parseSessionFileV3(data as ArrayBuffer);
-    const newDocId = documents[0].id;
-    expect(markers[newDocId]).toEqual([expect.objectContaining({ name: 'Peak', positionSample: 2 })]);
+    const { documents, markers } = parseSessionFileV4(data as ArrayBuffer);
+    expect(documents.map((d) => d.name)).toEqual(['a.wav', 'b.wav']);
+    expect(markers[documents[0].id]).toEqual([expect.objectContaining({ name: 'Peak', positionSample: 2 })]);
+    expect(markers[documents[1].id]).toEqual([expect.objectContaining({ name: 'Loose', positionSample: 4 })]);
   });
 });
 
-describe('saveSessionViaDialog', () => {
-  it('writes a v3 binary .audm file (only referenced docs) to the picked path', async () => {
-    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
-    const doc: AudioDocument = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+describe('saveProject / writeProject / loadProjectFrom (lot A — M4: Save = project, always)', () => {
+  /** The live document, re-read from the store. */
+  const live = (id: string) => useAppStore.getState().documents.find((d) => d.id === id)!;
+
+  /** An open document, optionally placed on track 0 as a clip. */
+  function seedProjectDoc(name = 'a.wav', withClip = true): AudioDocument {
+    const doc = createDocument({ name, sampleRate: 44100, channels: [sine(10)] });
     useAppStore.getState().addDocument(doc);
-    const trackId = useSessionStore.getState().session.tracks[0].id;
-    const clip = createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 });
-    useSessionStore.getState().addClip(trackId, clip);
+    if (withClip) {
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      useSessionStore
+        .getState()
+        .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+    }
+    return live(doc.id);
+  }
 
-    await saveSessionViaDialog();
-
-    expect(api.showSaveDialog).toHaveBeenCalledWith(
-      expect.objectContaining({ filters: [{ name: 'Auditorium Session', extensions: ['audm'] }] })
+  /** A `writeFile` mock that stays pending until `resolve` is called. */
+  function pendingWrite() {
+    let resolve!: (r: { ok: true } | { ok: false; error: string }) => void;
+    const writeFile = jest.fn(
+      (_path: string, _data: ArrayBuffer) =>
+        new Promise<{ ok: true } | { ok: false; error: string }>((r) => {
+          resolve = r;
+        })
     );
-    expect(api.writeFile).toHaveBeenCalledTimes(1);
-    const [path, data] = api.writeFile.mock.calls[0];
-    expect(path).toBe('D:\\out\\session.audm');
-    const bytes = new Uint8Array(data as ArrayBuffer);
-    expect(new TextDecoder().decode(bytes.subarray(0, 6))).toBe('AUDM3\n');
+    return { writeFile, resolve: (r: { ok: true } | { ok: false; error: string }) => resolve(r) };
+  }
 
-    const { session, documents } = parseSessionFileV3(data as ArrayBuffer);
-    expect(session.tracks[0].clips[0].lengthSample).toBe(10);
-    expect(documents).toHaveLength(1);
-    expect(documents[0].channels[0]).toEqual(doc.channels[0]);
+  it('after loadProjectFrom, plain Save writes to the remembered path — no dialog, no box — and the project is clean afterwards (acceptance 6)', async () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const { bytes } = serializeSessionV4({ name: 'Loaded', sampleRate: 44100, tracks: [track] }, [doc]);
+    const api = installApi({ readFile: jest.fn(async () => bytes.buffer) });
+
+    const summary = await loadProjectFrom('D:\\a.audm');
+
+    expect(summary).toEqual({ droppedClipCount: 0, docCount: 1, trackCount: 1 });
+    expect(api.readFile).toHaveBeenCalledWith('D:\\a.audm');
+    expect(useSessionStore.getState().projectPath).toBe('D:\\a.audm');
+    expect(isSessionDirty()).toBe(false);
+    expect(useAppStore.getState().view).toBe('multitrack');
+
+    const loadedTrack = useSessionStore.getState().session.tracks[0];
+    useSessionStore.getState().moveClip(loadedTrack.clips[0].id, loadedTrack.id, 500);
+    expect(isSessionDirty()).toBe(true);
+
+    const ok = await saveProject({ as: false });
+
+    expect(ok).toBe(true);
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+    expect(api.writeFile.mock.calls[0][0]).toBe('D:\\a.audm');
+    expect(api.showMessageBox).not.toHaveBeenCalled();
+    expect(isSessionDirty()).toBe(false);
+    expect(useSessionStore.getState().projectPath).toBe('D:\\a.audm');
   });
 
-  it('hands writeFile the buffer straight from serialization with no defensive full-buffer copy (IMPORTANT 1: a reintroduced copy would double peak renderer memory)', async () => {
-    // ipcRenderer.invoke (preload.cjs) structured-clones its argument rather
-    // than detaching it, so an extra `new ArrayBuffer(n); .set(bytes)` copy
-    // before writeFile would hold 3 live copies of the session's audio at
-    // once instead of 2 — halving the largest session save() can handle
-    // before OOM, i.e. reintroducing exactly the ceiling this task exists to
-    // raise. There is no external handle on serializeSessionV3's internal
-    // `bytes` to compare by reference, so this pins the property indirectly:
-    // `serializeSessionV3` assembles its output with exactly one
-    // `Uint8Array#set` call per part (magic header, JSON metadata, one call
-    // per channel chunk — 3 total for this single-mono-channel session). A
-    // `toArrayBuffer`-style defensive copy would add exactly one more,
-    // full-buffer `.set()` call before the write.
-    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
-    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
-    useAppStore.getState().addDocument(doc);
-    const trackId = useSessionStore.getState().session.tracks[0].id;
-    useSessionStore
-      .getState()
-      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
+  it('a fader nudge within a second of a plain Save dirties the project again — the save breaks the keyboard-repeat coalescing run (fix round 1)', async () => {
+    // Reviewer finding 1: `setTrackParam` on volume/pan names a coalesceKey,
+    // so two nudges within SESSION_COALESCE_WINDOW_MS merge into one entry.
+    // Before the fix a Save between them did not reset that memory: the
+    // post-save nudge merged into the PRE-save entry, the stack position
+    // stayed at the save point, and the Save pill / chip / close guard all
+    // read clean while the live volume differed from the file.
+    const now = jest.spyOn(Date, 'now').mockReturnValue(100_000);
+    try {
+      const api = installApi();
+      seedProjectDoc();
+      useSessionStore.getState().setProjectPath('D:\\a.audm');
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      useSessionStore.getState().setTrackParam(trackId, { volumeDb: -1 });
+      expect(isSessionDirty()).toBe(true);
+
+      expect(await saveProject({ as: false })).toBe(true);
+      expect(api.writeFile).toHaveBeenCalledTimes(1);
+      expect(isSessionDirty()).toBe(false);
+
+      now.mockReturnValue(100_000 + SESSION_COALESCE_WINDOW_MS - 1);
+      useSessionStore.getState().setTrackParam(trackId, { volumeDb: -2 });
+
+      expect(useSessionStore.getState().session.tracks[0].volumeDb).toBe(-2);
+      expect(isSessionDirty()).toBe(true);
+      undoSession();
+      expect(useSessionStore.getState().session.tracks[0].volumeDb).toBe(-1); // what the file holds
+      expect(isSessionDirty()).toBe(false);
+    } finally {
+      now.mockRestore();
+    }
+  });
+
+  it('with no path, plain Save is a Save As: prompts with the project name, writes v4, remembers, renames (recorded), cleans every document, confirms (acceptance 7)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\mix v2.audm') });
+    const doc = seedProjectDoc('a.wav', false); // open, NOT clip-referenced — it goes in the file regardless
+    expect(doc.neverSaved).toBe(true);
+    const markSpy = jest.spyOn(undoHistory, 'markSavePoint');
+
+    const ok = await saveProject({ as: false });
+
+    expect(ok).toBe(true);
+    expect(api.showSaveDialog).toHaveBeenCalledWith({
+      defaultPath: 'Untitled Session.audm',
+      filters: [{ name: 'Auditorium Project', extensions: ['audm'] }],
+    });
+    expect(api.writeFile).toHaveBeenCalledTimes(1);
+    const [path, data] = api.writeFile.mock.calls[0];
+    expect(path).toBe('D:\\out\\mix v2.audm');
+    expect(new TextDecoder().decode(new Uint8Array(data as ArrayBuffer).subarray(0, 6))).toBe('AUDM4\n');
+    expect(useSessionStore.getState().projectPath).toBe('D:\\out\\mix v2.audm');
+    expect(useSessionStore.getState().session.name).toBe('mix v2');
+    expect(live(doc.id).dirty).toBe(false);
+    expect(live(doc.id).neverSaved).toBe(false);
+    expect(markSpy).toHaveBeenCalledWith(doc.id);
+    expect(api.showMessageBox).toHaveBeenCalledTimes(1);
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', title: 'Save Project', message: 'Project saved.' })
+    );
+    expect(isSessionDirty()).toBe(false);
+
+    // The rename is a recorded mutation: undoing it restores the old name and
+    // leaves the project dirty relative to the file that carries the new one.
+    expect(canUndoSession()).toBe(true);
+    undoSession();
+    expect(useSessionStore.getState().session.name).toBe('Untitled Session');
+    expect(isSessionDirty()).toBe(true);
+    markSpy.mockRestore();
+  });
+
+  it('appends .audm when the picked name has no extension, and strips a .audm suffix from the default name', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\noext') });
+    seedProjectDoc();
+    useSessionStore.getState().renameSession('Take.AUDM');
+
+    await saveProject({ as: false });
+
+    expect(api.showSaveDialog).toHaveBeenCalledWith(expect.objectContaining({ defaultPath: 'Take.audm' }));
+    expect(api.writeFile.mock.calls[0][0]).toBe('D:\\out\\noext.audm');
+    expect(useSessionStore.getState().projectPath).toBe('D:\\out\\noext.audm');
+    expect(useSessionStore.getState().session.name).toBe('noext');
+  });
+
+  it('Save As always prompts, even with a remembered path; a cancel writes nothing and changes nothing (acceptance 8)', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => null) });
+    const doc = seedProjectDoc();
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    expect(isSessionDirty()).toBe(true); // the addClip above
+
+    const ok = await saveProject({ as: true });
+
+    expect(ok).toBe(false);
+    expect(api.showSaveDialog).toHaveBeenCalledTimes(1);
+    expect(api.writeFile).not.toHaveBeenCalled();
+    expect(api.showMessageBox).not.toHaveBeenCalled();
+    expect(useSessionStore.getState().projectPath).toBe('D:\\p.audm');
+    expect(isSessionDirty()).toBe(true);
+    expect(live(doc.id).neverSaved).toBe(true);
+  });
+
+  it('a Save As that lands on the remembered path does not rename the project', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\p.audm') });
+    seedProjectDoc();
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+
+    await saveProject({ as: true });
+
+    expect(api.writeFile.mock.calls[0][0]).toBe('D:\\p.audm');
+    expect(useSessionStore.getState().session.name).toBe('Untitled Session');
+    expect(isSessionDirty()).toBe(false);
+  });
+
+  it('hands writeFile the buffer straight from serialization with no defensive full-buffer copy (the v3 IMPORTANT-1 pin, kept for v4)', async () => {
+    // See the former saveSessionViaDialog pin: `serializeSessionV4` assembles
+    // its output with exactly one `Uint8Array#set` per part (magic, JSON, one
+    // per channel chunk — 3 for this single-mono-channel project). A
+    // `toArrayBuffer`-style copy before the write would add a fourth.
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
+    seedProjectDoc();
     const setSpy = jest.spyOn(Uint8Array.prototype, 'set');
 
-    await saveSessionViaDialog();
+    await saveProject({ as: false });
 
     expect(setSpy).toHaveBeenCalledTimes(3);
     setSpy.mockRestore();
   });
 
-  it('is a no-op when the save dialog is cancelled', async () => {
-    const api = installApi({ showSaveDialog: jest.fn(async () => null) });
-
-    await saveSessionViaDialog();
-
-    expect(api.writeFile).not.toHaveBeenCalled();
-  });
-
-  it('shows a success message box when the save succeeds and no clips were dropped (F3: success is never silent)', async () => {
-    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
-    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
-    useAppStore.getState().addDocument(doc);
-    const trackId = useSessionStore.getState().session.tracks[0].id;
-    useSessionStore
-      .getState()
-      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
-
-    await saveSessionViaDialog();
-
-    expect(api.showMessageBox).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'info', title: 'Save Session', message: 'Session saved.' })
-    );
-  });
-
-  it('shows an error message box when the write fails', async () => {
+  it('a failed write shows "Save Project failed", leaves projectPath unchanged and the project dirty (acceptance 9)', async () => {
     const api = installApi({
-      showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm'),
+      showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'),
       writeFile: jest.fn(async () => ({ ok: false, error: 'disk full' })),
     });
+    const doc = seedProjectDoc();
 
-    await saveSessionViaDialog();
+    const ok = await saveProject({ as: false });
 
+    expect(ok).toBe(false);
     expect(api.showMessageBox).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'error', title: 'Save Session failed', message: 'disk full' })
+      expect.objectContaining({ type: 'error', title: 'Save Project failed', message: 'disk full' })
     );
+    expect(useSessionStore.getState().projectPath).toBeNull();
+    expect(isSessionDirty()).toBe(true);
+    expect(live(doc.id).neverSaved).toBe(true);
   });
 
-  it('shows an error message box when serialization itself throws, and never calls writeFile (F3 defense-in-depth)', async () => {
-    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
-    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
-    useAppStore.getState().addDocument(doc);
-    const trackId = useSessionStore.getState().session.tracks[0].id;
-    useSessionStore
-      .getState()
-      .addClip(trackId, createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
-    // Simulate any unexpected serialize-time failure (the old base64 path
-    // could throw a RangeError here past ~402MB of embedded audio with
-    // nothing on the call path catching it — this proves the new try/catch
-    // surfaces ANY such failure instead of an uncaught rejection).
+  it('a serialize throw shows the same box and never calls writeFile', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm') });
+    const doc = seedProjectDoc();
     useAppStore.setState((s) => ({
       documents: s.documents.map((d) => (d.id === doc.id ? { ...d, channels: [null as unknown as Float32Array] } : d)),
     }));
 
-    await saveSessionViaDialog();
+    const ok = await saveProject({ as: false });
 
+    expect(ok).toBe(false);
     expect(api.writeFile).not.toHaveBeenCalled();
     expect(api.showMessageBox).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'error', title: 'Save Session failed' })
+      expect.objectContaining({ type: 'error', title: 'Save Project failed' })
     );
+    expect(useSessionStore.getState().projectPath).toBeNull();
   });
 
-  it('warns via an info message box (extended with the success confirmation) when saved clips referenced closed source files', async () => {
-    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
-    const openDoc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+  it('a second saveProject while one is awaiting its write shows "Save in progress" and writes nothing', async () => {
+    const { writeFile, resolve } = pendingWrite();
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'), writeFile });
+    seedProjectDoc();
+
+    const first = saveProject({ as: false });
+    await tick();
+    expect(isProjectSaveInFlight()).toBe(true);
+
+    const second = await saveProject({ as: false });
+
+    expect(second).toBe(false);
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'warning', title: 'Save in progress' })
+    );
+    expect(writeFile).toHaveBeenCalledTimes(1);
+
+    resolve({ ok: true });
+    await expect(first).resolves.toBe(true);
+    expect(isProjectSaveInFlight()).toBe(false);
+  });
+
+  it('a clip edit during the write invalidates the session save point (dirty stays true) while the path is still remembered', async () => {
+    const { writeFile, resolve } = pendingWrite();
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'), writeFile });
+    seedProjectDoc();
+
+    const save = saveProject({ as: false });
+    await tick();
+    useSessionStore.getState().addTrack(); // a recorded session edit lands mid-write
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(isSessionDirty()).toBe(true);
+    expect(useSessionStore.getState().projectPath).toBe('D:\\out\\p.audm');
+    // The mark is permanently unreachable: undoing the mid-write edit does not
+    // make the project read clean against bytes that predate it.
+    undoSession();
+    expect(isSessionDirty()).toBe(true);
+  });
+
+  it('a document edited during the write keeps its dirty flag and gets invalidateSavePoint; the untouched document is marked clean', async () => {
+    const { writeFile, resolve } = pendingWrite();
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm'), writeFile });
+    const a = seedProjectDoc('a.wav');
+    const b = seedProjectDoc('b.wav', false);
+    const invalidateSpy = jest.spyOn(undoHistory, 'invalidateSavePoint');
+
+    const save = saveProject({ as: false });
+    await tick();
+    useAppStore.getState().updateDocument({ ...live(b.id), dirty: true }); // replaces the object mid-await
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(live(a.id).dirty).toBe(false);
+    expect(live(a.id).neverSaved).toBe(false);
+    expect(live(b.id).dirty).toBe(true);
+    expect(invalidateSpy).toHaveBeenCalledWith(b.id);
+    expect(invalidateSpy).not.toHaveBeenCalledWith(a.id);
+    invalidateSpy.mockRestore();
+  });
+
+  it('a session holding a clip of a CLOSED document saves, reports the dropped clip in one box, and is clean afterwards', async () => {
+    const api = installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\p.audm') });
+    seedProjectDoc('a.wav');
     const closedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
-    useAppStore.getState().addDocument(openDoc);
     useAppStore.getState().addDocument(closedDoc);
     useAppStore.getState().closeDocument(closedDoc.id);
-
     const trackId = useSessionStore.getState().session.tracks[0].id;
-    useSessionStore
-      .getState()
-      .addClip(trackId, createClip({ documentId: openDoc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
     useSessionStore
       .getState()
       .addClip(trackId, createClip({ documentId: closedDoc.id, startSample: 100, offsetSample: 0, lengthSample: 10 }));
 
-    await saveSessionViaDialog();
+    const ok = await saveProject({ as: false });
 
+    expect(ok).toBe(true);
     expect(api.writeFile).toHaveBeenCalledTimes(1);
     const [, data] = api.writeFile.mock.calls[0];
-    const { session } = parseSessionFileV3(data as ArrayBuffer);
+    const { session } = parseSessionFileV4(data as ArrayBuffer);
     expect(session.tracks[0].clips).toHaveLength(1);
-
+    expect(api.showMessageBox).toHaveBeenCalledTimes(1);
     expect(api.showMessageBox).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'info',
-        message: 'Session saved. 1 clip(s) referenced closed files and were not saved.',
+        title: 'Save Project',
+        message: expect.stringMatching(/^Project saved\. 1 clip\(s\) referenced closed files/),
       })
     );
+    expect(isSessionDirty()).toBe(false);
+  });
+
+  it('writeProject (the headless core) writes v4 silently, renames on request, and remembers the path', async () => {
+    const api = installApi();
+    seedProjectDoc();
+
+    const ok = await writeProject('D:\\out\\take 3.audm', { rename: true });
+
+    expect(ok).toBe(true);
+    expect(api.showSaveDialog).not.toHaveBeenCalled();
+    expect(api.showMessageBox).not.toHaveBeenCalled();
+    expect(api.writeFile.mock.calls[0][0]).toBe('D:\\out\\take 3.audm');
+    expect(useSessionStore.getState().projectPath).toBe('D:\\out\\take 3.audm');
+    expect(useSessionStore.getState().session.name).toBe('take 3');
+    expect(isSessionDirty()).toBe(false);
+  });
+
+  it('a load-shaped replacement during the write does not adopt the finished save target (fix round 1 — finding 1)', async () => {
+    // `stemLanding.ts:311-331` (and `coverJourney.ts:1395-1410`) replace the
+    // whole session, set `projectPath: null` — M4: a landed stem session is a
+    // NEW, unsaved project — and clear the session history. Separation runs for
+    // minutes in the background, so it can perfectly well resolve inside a
+    // save's `writeFile` await. When it does, the finished save must not stamp
+    // its target over the new project: the bytes on disk are the PREVIOUS
+    // project, and re-binding would make the next plain Ctrl+S (the pill is lit
+    // — the stem documents are `neverSaved`) overwrite that file with the stem
+    // session, with no dialog in front of it.
+    const { writeFile, resolve } = pendingWrite();
+    installApi({ writeFile });
+    seedProjectDoc();
+    useSessionStore.getState().setProjectPath('D:\\old.audm');
+
+    const save = saveProject({ as: false });
+    await tick();
+    expect(writeFile.mock.calls[0][0]).toBe('D:\\old.audm');
+
+    const landed: Session = { name: 'Stems', sampleRate: 44100, tracks: [createTrack('Vocals')] };
+    useSessionStore.setState({ session: landed, selectedClipId: null, projectPath: null });
+    clearSessionHistory();
+
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(useSessionStore.getState().session).toBe(landed);
+    expect(useSessionStore.getState().projectPath).toBeNull();
+    expect(writeFile).toHaveBeenCalledTimes(1); // the old project got its bytes; the new one is unsaved
+  });
+
+  it('the same interleave on a NEVER-saved project does not adopt the Save As target either', async () => {
+    // The null -> null case: comparing `projectPath` before and after the await
+    // would miss it, because the landing writes the same `null` the save
+    // started from. What separates them is the replacement itself.
+    const { writeFile, resolve } = pendingWrite();
+    installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\new.audm'), writeFile });
+    seedProjectDoc();
+    expect(useSessionStore.getState().projectPath).toBeNull();
+
+    const save = saveProject({ as: false }); // no remembered path -> this IS a Save As
+    await tick();
+
+    const landed: Session = { name: 'Stems', sampleRate: 44100, tracks: [createTrack('Vocals')] };
+    useSessionStore.setState({ session: landed, selectedClipId: null, projectPath: null });
+    clearSessionHistory();
+
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(writeFile.mock.calls[0][0]).toBe('D:\\out\\new.audm');
+    expect(useSessionStore.getState().projectPath).toBeNull();
+  });
+
+  it('an Open Project that lands mid-write keeps ITS path and stays clean', async () => {
+    const { writeFile, resolve } = pendingWrite();
+    const openedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
+    const openedTrack = createTrack('T');
+    openedTrack.clips = [
+      createClip({ documentId: openedDoc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }),
+    ];
+    const { bytes } = serializeSessionV4(
+      { name: 'B', sampleRate: 44100, tracks: [openedTrack] },
+      [openedDoc]
+    );
+    installApi({ writeFile, readFile: jest.fn(async () => bytes.buffer) });
+    seedProjectDoc();
+    useSessionStore.getState().setProjectPath('D:\\a.audm');
+
+    const save = saveProject({ as: false });
+    await tick();
+    await loadProjectFrom('D:\\b.audm'); // File -> Open Project, additive, clears the history
+
+    resolve({ ok: true });
+    await expect(save).resolves.toBe(true);
+
+    expect(useSessionStore.getState().projectPath).toBe('D:\\b.audm');
+    expect(useSessionStore.getState().session.name).toBe('B');
+    expect(isSessionDirty()).toBe(false); // and the close guard sees a clean, correctly-bound project
+  });
+
+  it('loadProjectFrom throws on a corrupt buffer and applies nothing', async () => {
+    installApi({ readFile: jest.fn(async () => buildV4Buffer({ formatVersion: 4, session: { name: 'x', sampleRate: 44100, tracks: [] }, audio: 'x' })) });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    const before = useSessionStore.getState().session;
+
+    await expect(loadProjectFrom('D:\\in\\bad.audm')).rejects.toThrow(/Corrupt \.audm file/);
+
+    expect(useSessionStore.getState().session).toBe(before);
+    expect(useSessionStore.getState().projectPath).toBe('D:\\p.audm');
+    expect(useAppStore.getState().documents).toEqual([]);
+    expect(useAppStore.getState().view).not.toBe('multitrack');
   });
 });
 
@@ -1137,7 +1452,7 @@ describe('openSessionViaDialog', () => {
   // `applySessionZoom` entirely. Nothing downstream rescues it: the lane-width
   // republish only re-fits a session that is ALREADY at its fit, and 512 is far
   // zoomed IN of the fit for anything longer than about sixteen seconds, so the
-  // re-fit arm is never taken. File → Open Session on the user's own file
+  // re-fit arm is never taken. File → Open Project on the user's own file
   // reproduced the exact symptom the ticket describes.
   it('C1: opens a long session FITTED, not at the hardcoded 512 samples/px', async () => {
     _resetSessionLaneWidth();
@@ -1439,23 +1754,293 @@ describe('neverSaved provenance and sessions (Task S4)', () => {
     expect(legacy.documents[0].neverSaved).toBe(false);
   });
 
-  it('saving a SESSION does not clear neverSaved on the documents it embeds', async () => {
+  it('saving the PROJECT clears neverSaved on every open document — they are all in the file now (lot A, M4)', async () => {
     installApi({ showSaveDialog: jest.fn(async () => 'D:\\out\\session.audm') });
-    // A computed document (a Mix Down / Remix / recording) dropped onto a track.
+    // A computed document (a Mix Down / Remix / recording) dropped onto a track,
+    // and another one that no clip references.
     const derived = createDocument({ name: 'Mixdown 1', sampleRate: 44100, channels: [sine(10)] });
+    const loose = createDocument({ name: 'Remix 1', sampleRate: 44100, channels: [sine(10)] });
     useAppStore.getState().addDocument(derived);
+    useAppStore.getState().addDocument(loose);
     const trackId = useSessionStore.getState().session.tracks[0].id;
     useSessionStore
       .getState()
       .addClip(trackId, createClip({ documentId: derived.id, startSample: 0, offsetSample: 0, lengthSample: 10 }));
-    expect(useAppStore.getState().documents[0].neverSaved).toBe(true);
+    expect(useAppStore.getState().documents.map((d) => d.neverSaved)).toEqual([true, true]);
 
-    await saveSessionViaDialog();
+    await saveProject({ as: true });
 
-    // The .audm holds a COPY under a foreign id; the document itself still has
-    // no file of its own, later edits are not in that copy, and a session save
-    // embeds only CLIP-REFERENCED documents — so clearing the flag here would
-    // silently un-guard every open document the session never contained.
-    expect(useAppStore.getState().documents[0].neverSaved).toBe(true);
+    // The S4 reasoning that kept the flag ("a session save embeds only
+    // clip-referenced documents") no longer applies: a v4 project save writes
+    // EVERY open document, so each one's audio is now on disk inside the
+    // project, and closing it discards nothing that reopening would not restore.
+    expect(useAppStore.getState().documents.map((d) => d.neverSaved)).toEqual([false, false]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — .audm v4: the project is the session plus EVERY open document.
+// ---------------------------------------------------------------------------
+describe('serializeSessionV4 -> parseSessionFileV4 round trip (lot A — nothing dropped)', () => {
+  it('writes AUDM4, splits audio / unreferenced, and the parse restores both documents with markers, origin and neverSaved=false', () => {
+    const referenced = createDocument({
+      name: 'a.wav',
+      sampleRate: 44100,
+      channels: [sine(100)],
+      filePath: 'D:\\src\\a.wav',
+    });
+    const unreferenced = createDocument({
+      name: 'b.wav',
+      sampleRate: 48000,
+      channels: [sine(50), sine(50, 880)],
+    });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: referenced.id, startSample: 0, offsetSample: 0, lengthSample: 100 })];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+    const markersByDoc: Record<string, Marker[]> = {
+      [referenced.id]: [{ id: 'm-1', name: 'A1', positionSample: 10 }],
+      [unreferenced.id]: [{ id: 'm-2', name: 'B1', positionSample: 20 }],
+    };
+
+    const { bytes, droppedClipCount } = serializeSessionV4(session, [referenced, unreferenced], markersByDoc);
+
+    expect(droppedClipCount).toBe(0);
+    expect(bytes.byteOffset).toBe(0);
+    expect(bytes.byteLength).toBe(bytes.buffer.byteLength); // the fresh zero-offset guarantee v3 gives
+    expect(new TextDecoder().decode(bytes.subarray(0, 6))).toBe('AUDM4\n');
+    const json = readBinaryJson(bytes) as {
+      formatVersion: number;
+      audio: { docId: string; origin?: string }[];
+      unreferenced: { docId: string; origin?: string }[];
+      markers: Record<string, unknown>;
+    };
+    expect(json.formatVersion).toBe(4);
+    expect(json.audio).toHaveLength(1);
+    expect(json.audio[0].docId).toBe(referenced.id);
+    expect(json.audio[0].origin).toBe('D:\\src\\a.wav');
+    expect(json.unreferenced).toHaveLength(1);
+    expect(json.unreferenced[0].docId).toBe(unreferenced.id);
+    expect(json.unreferenced[0].origin).toBeUndefined();
+    // EVERY embedded document with markers — referenced or not (v3 narrowed to referenced).
+    expect(Object.keys(json.markers).sort()).toEqual([referenced.id, unreferenced.id].sort());
+
+    const parsed = parseSessionFileV4(bytes.buffer);
+    expect(parsed.documents).toHaveLength(2);
+    const [a, b] = parsed.documents; // audio docs first, then unreferenced
+    expect(a.name).toBe('a.wav');
+    expect(b.name).toBe('b.wav');
+    expect(a.channels[0]).toEqual(referenced.channels[0]);
+    expect(b.channels).toHaveLength(2);
+    expect(b.channels[0]).toEqual(unreferenced.channels[0]);
+    expect(b.channels[1]).toEqual(unreferenced.channels[1]);
+    expect(b.sampleRate).toBe(48000);
+    expect(a.filePath).toBe('D:\\src\\a.wav');
+    expect(b.filePath).toBeNull();
+    expect(a.neverSaved).toBe(false);
+    expect(b.neverSaved).toBe(false);
+    expect(parsed.markers[a.id]).toEqual([expect.objectContaining({ name: 'A1', positionSample: 10 })]);
+    expect(parsed.markers[b.id]).toEqual([expect.objectContaining({ name: 'B1', positionSample: 20 })]);
+    expect(parsed.session.tracks[0].clips[0].documentId).toBe(a.id);
+    expect(parsed.droppedClipCount).toBe(0);
+  });
+
+  it('drops a clip of a CLOSED document and reports it, while still embedding every OPEN document', () => {
+    const openDoc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const otherOpen = createDocument({ name: 'c.wav', sampleRate: 44100, channels: [sine(10)] });
+    const closedDoc = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [
+      createClip({ documentId: openDoc.id, startSample: 0, offsetSample: 0, lengthSample: 10 }),
+      createClip({ documentId: closedDoc.id, startSample: 100, offsetSample: 0, lengthSample: 10 }),
+    ];
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [track] };
+
+    const { bytes, droppedClipCount } = serializeSessionV4(session, [openDoc, otherOpen]);
+
+    expect(droppedClipCount).toBe(1);
+    const parsed = parseSessionFileV4(bytes.buffer);
+    expect(parsed.session.tracks[0].clips).toHaveLength(1);
+    expect(parsed.documents.map((d) => d.name)).toEqual(['a.wav', 'c.wav']);
+  });
+
+  it('keeps the per-document equal-channel-length throw', () => {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10), sine(9)] });
+    const session: Session = { name: 'S', sampleRate: 44100, tracks: [createTrack('T')] };
+    expect(() => serializeSessionV4(session, [doc])).toThrow(/differing length/);
+  });
+});
+
+describe('parseSessionFileBytes dispatch (lot A — v4 joins v3 and the legacy JSON path)', () => {
+  function fixture() {
+    const doc = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(40)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 40 })];
+    const session: Session = { name: 'Compat', sampleRate: 44100, tracks: [track] };
+    return { doc, session };
+  }
+
+  it('still loads a v3 buffer exactly as parseSessionFileV3 does', () => {
+    const { doc, session } = fixture();
+    const { bytes } = serializeSessionV3(session, [doc]);
+
+    const viaDispatch = parseSessionFileBytes(bytes.buffer);
+
+    expect(viaDispatch.session.name).toBe('Compat');
+    expect(viaDispatch.documents).toHaveLength(1);
+    expect(viaDispatch.documents[0].channels[0]).toEqual(doc.channels[0]);
+    expect(viaDispatch.documents[0].filePath).toBeNull();
+    expect(viaDispatch.session.tracks[0].clips[0].documentId).toBe(viaDispatch.documents[0].id);
+  });
+
+  it('still loads a legacy v2 JSON buffer exactly as parseSessionFile does', () => {
+    const { doc, session } = fixture();
+    const { json } = serializeSession(session, [doc]);
+
+    const viaDispatch = parseSessionFileBytes(new TextEncoder().encode(json).buffer);
+
+    expect(viaDispatch.session.name).toBe('Compat');
+    expect(viaDispatch.documents).toHaveLength(1);
+    expect(viaDispatch.documents[0].channels[0]).toEqual(doc.channels[0]);
+  });
+
+  it('routes a v4 buffer to the v4 parser', () => {
+    const { doc, session } = fixture();
+    const { bytes } = serializeSessionV4(session, [doc]);
+
+    const viaDispatch = parseSessionFileBytes(bytes.buffer);
+
+    expect(viaDispatch.documents[0].channels[0]).toEqual(doc.channels[0]);
+  });
+
+  it('a v4 buffer whose JSON claims formatVersion 3 is rejected with "expected 4"', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 3,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [],
+      unreferenced: [],
+    });
+    expect(() => parseSessionFileBytes(buf)).toThrow('Unsupported session file version: 3 (expected 4)');
+  });
+
+  it('a v4 buffer missing its unreferenced array loads it as [] rather than as corrupt', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 4,
+      session: { name: 'x', sampleRate: 44100, tracks: [trackJson('track-1')] },
+      audio: [],
+    });
+    const parsed = parseSessionFileBytes(buf);
+    expect(parsed.documents).toEqual([]);
+    expect(parsed.session.name).toBe('x');
+  });
+
+  it('a v4 buffer with a non-array unreferenced section is corrupt', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 4,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [],
+      unreferenced: 'nope',
+    });
+    expect(() => parseSessionFileBytes(buf)).toThrow(/Corrupt \.audm file/);
+  });
+
+  it('applies the v3 corrupt-file guards to the unreferenced section too', () => {
+    const buf = buildV4Buffer({
+      formatVersion: 4,
+      session: { name: 'x', sampleRate: 44100, tracks: [] },
+      audio: [],
+      unreferenced: [{ docId: 'doc-1', name: 'u', sampleRate: 44100, length: 4, channels: [{ offset: 0, byteLength: 16 }] }],
+    }); // declares 16 payload bytes, provides none
+    expect(() => parseSessionFileBytes(buf)).toThrow('Corrupt .audm file: audio payload offset/length out of range');
+  });
+
+  it('parseSessionFileV3 keeps its own (expected 3) rejection text', () => {
+    const buf = buildV3Buffer({ formatVersion: 4, session: { name: 'x', sampleRate: 44100, tracks: [] }, audio: [] });
+    expect(() => parseSessionFileV3(buf)).toThrow('Unsupported session file version: 4 (expected 3)');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Lot A (M4) — Open Project restores EVERYTHING the v4 file holds.
+// ---------------------------------------------------------------------------
+describe('openSessionViaDialog with a v4 project (lot A — acceptance 10)', () => {
+  it('restores referenced and unreferenced documents with markers, remembers the path, clears the history, switches to multitrack', async () => {
+    const a = createDocument({ name: 'a.wav', sampleRate: 44100, channels: [sine(10)] });
+    const b = createDocument({ name: 'b.wav', sampleRate: 44100, channels: [sine(10)] });
+    const track = createTrack('T');
+    track.clips = [createClip({ documentId: a.id, startSample: 0, offsetSample: 0, lengthSample: 10 })];
+    const markersByDoc: Record<string, Marker[]> = { [b.id]: [{ id: 'm-1', name: 'B1', positionSample: 3 }] };
+    const { bytes } = serializeSessionV4({ name: 'Proj', sampleRate: 44100, tracks: [track] }, [a, b], markersByDoc);
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\proj.audm']),
+      readFile: jest.fn(async () => bytes.buffer),
+    });
+    useSessionStore.getState().addTrack(); // a history entry the load must drop
+    expect(canUndoSession()).toBe(true);
+
+    await openSessionViaDialog();
+
+    expect(api.showOpenDialog).toHaveBeenCalledWith(
+      expect.objectContaining({ filters: [{ name: 'Auditorium Project', extensions: ['audm'] }] })
+    );
+    const docs = useAppStore.getState().documents;
+    expect(docs.map((d) => d.name)).toEqual(['a.wav', 'b.wav']);
+    expect(useAppStore.getState().markers[docs[1].id]).toEqual([
+      expect.objectContaining({ name: 'B1', positionSample: 3 }),
+    ]);
+    expect(useAppStore.getState().view).toBe('multitrack');
+    expect(useSessionStore.getState().projectPath).toBe('D:\\in\\proj.audm');
+    expect(useSessionStore.getState().session.name).toBe('Proj');
+    expect(useSessionStore.getState().session.tracks[0].clips[0].documentId).toBe(docs[0].id);
+    expect(canUndoSession()).toBe(false);
+    expect(isSessionDirty()).toBe(false);
+    expect(api.showMessageBox).not.toHaveBeenCalled();
+  });
+
+  it('a corrupt buffer shows "Open Project failed" and changes nothing — not even the remembered path', async () => {
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\bad.audm']),
+      readFile: jest.fn(async () =>
+        buildV4Buffer({ formatVersion: 4, session: { name: 'x', sampleRate: 44100, tracks: [] }, audio: 'x' })
+      ),
+    });
+    useSessionStore.getState().setProjectPath('D:\\p.audm');
+    const before = useSessionStore.getState().session;
+    const docsBefore = useAppStore.getState().documents;
+
+    await openSessionViaDialog();
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'error', title: 'Open Project failed' })
+    );
+    expect(useSessionStore.getState().session).toBe(before);
+    expect(useSessionStore.getState().projectPath).toBe('D:\\p.audm');
+    expect(useAppStore.getState().documents).toBe(docsBefore);
+    expect(useAppStore.getState().view).not.toBe('multitrack');
+  });
+
+  it('reports dropped clips under the Open Project title', async () => {
+    const json = JSON.stringify({
+      formatVersion: 1,
+      session: {
+        name: 'Stale',
+        sampleRate: 44100,
+        tracks: [
+          trackJson('track-1', [
+            { id: 'clip-1', documentId: 'doc-77', startSample: 0, offsetSample: 0, lengthSample: 100, gainDb: 0 },
+          ]),
+        ],
+      },
+      documents: [],
+    });
+    const api = installApi({
+      showOpenDialog: jest.fn(async () => ['D:\\in\\stale.audm']),
+      readFile: jest.fn(async () => new TextEncoder().encode(json).buffer),
+    });
+
+    await openSessionViaDialog();
+
+    expect(api.showMessageBox).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'info', title: 'Open Project', message: '1 clip(s) referenced missing audio and were removed.' })
+    );
   });
 });

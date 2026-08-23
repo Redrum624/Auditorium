@@ -117,15 +117,16 @@ what it measured.
 | ![Align Lyrics](docs/shots/align-lyrics.png) | ![Remix panel](docs/shots/remix-panel.png) |
 | **Align Lyrics** — paste the words you know are in the recording; click a word to hear exactly it, and re-record just the one that came out wrong. | **The Remix panel** — every splice of a re-arrangement, inspectable, pinnable, re-rollable and undoable. |
 
-**The effects, from rack to dialog.** Every registered effect lives in a
-categorized rack one click from the waveform; every dialog previews against
-the real document before Apply.
+**The effects, from rack to card.** Every registered effect lives in a
+categorized rack one click from the waveform; one click opens it as a card in
+the module column, and every card previews against the real document before
+Apply.
 
 | | |
 |:--:|:--:|
-| ![Effects rack](docs/shots/effects-rack.png) | ![Parametric EQ dialog](docs/shots/effect-parametric-eq.png) |
-| **The Effects rack** — 25 effects in ten categories, with the pipeline tools one click below them. | **Parametric EQ** — five bands plus high- and low-pass, previewed on the real audio before Apply. |
-| ![Reverb dialog](docs/shots/effect-reverb.png) | ![Spatial panel](docs/shots/spatial-panel.png) |
+| ![Effects rack](docs/shots/effects-rack.png) | ![Parametric EQ card](docs/shots/effect-parametric-eq.png) |
+| **The Effects rack** — 25 effects in ten categories; the Pipeline tools have their own module. | **Parametric EQ** — five bands plus high- and low-pass, previewed on the real audio before Apply. |
+| ![Reverb card](docs/shots/effect-reverb.png) | ![Spatial panel](docs/shots/spatial-panel.png) |
 | **Reverb** — room size, damping, mix and pre-delay; Preview plays the processed document, Apply is one undo entry. | **The Spatial positioner** — azimuth, elevation and distance as honest stereo projection, writing automation keys on release. |
 
 **The side panels** — the module column's cards, always the same width, never
@@ -143,11 +144,11 @@ over the audio.
 - **Multitrack Editor** — tracks and clips with volume/pan/mute/solo/arm, non-destructive fades and crossfades, multi-clip selection with cross-track group drag, ripple delete, per-track automation envelopes, and one-step-per-gesture session undo.
 - **Spatial Panel** — places a track's sound around the listener (azimuth/elevation/distance, honest stereo projection — not binaural), writing automation keys on release.
 - **Recorder** — input-device selection, channel/rate choice, live level meter; multitrack punch-in on armed tracks.
-- **Effects Rack** — categorized effects with preview dialogs, plus the pipeline tools one click away.
+- **Effects Rack** — categorized effects, each opening on one click as a card in the module column; the Pipeline tools have their own module.
 - **Pipeline Module & Menu** — the ten long-running tools in three groups (Tempo & Timing, Voice, Analysis); each opens as a wide card in the module column.
 - **Files / History / Markers / Properties Panels** — open documents, browsable undo history, the marker list, and read-only facts about the active document or clip.
 - **Module Strip** — the icon strip over the module column; the bar and the open module are always the same width.
-- **Edit Toolbar** — floating Cut/Copy/Paste/Delete, Trim/Silence, Undo/Redo pill, greyed by the same rules as the menu.
+- **Edit Toolbar** — floating Split/Copy/Paste/Delete, Trim/Silence, Undo/Redo pill, greyed by the same rules as the menu (Split at Cursor is `Ctrl+K`; Cut keeps `Ctrl+X` in the Edit menu).
 - **Transport & Level Meters** — play/stop/record/loop, view toggle, zoom cluster, time readout and output meters, centred on the waveform rather than the window.
 - **Tempo Readout & Beat Grid** — detected BPM with confidence everywhere it matters, and the tracked beats drawn under all three editors (dimmed and dashed when stale rather than presented as fact).
 - **Match Tempo Tool** — one ratio or a per-beat tempo map from the confirmed grid; measured on accelerandi: worst interior beat 526 ms → 4.6 ms at 0.83 BPM/s drift.
@@ -164,13 +165,13 @@ over the audio.
 
 **Editing & formats**
 
-- Sample-accurate cut/copy/paste/delete/trim/silence with per-document undo (50 steps / 800 MB budget) and full session undo in the multitrack.
-- Open and save WAV, MP3, FLAC and OGG (Opus) with format-faithful in-place saves, atomic writes, and native-rate import across container variants (including surround WAV with selectable ITU-R downmix).
-- Export WAV 16/24/32-float, FLAC, MP3 CBR, OGG Opus.
+- Sample-accurate copy/paste/trim/silence, a Delete and a `Ctrl+X` cut that keep the length (the span is zero-filled, markers stay put; `Shift+Del` ripples), and **Split at Cursor** (`Ctrl+K`): every marker is a segment boundary and a double-click selects the segment under the pointer — with per-document undo (50 steps / 800 MB budget) and full session undo in the multitrack, where Split cuts every clip under the cursor on the selected tracks in one step.
+- Open WAV, MP3, FLAC and OGG (Opus) with native-rate import across container variants (including surround WAV with selectable ITU-R downmix); **Save writes the project** (`.audm`, atomic) in every view and never overwrites an audio file — audio leaves through Export.
+- Export WAV 16/24/32-float, FLAC, MP3 CBR, OGG Opus — the active document in the editors, the session mixdown (muted tracks out, automation and fades in) in the multitrack.
 - Markers persist sample-accurately in every container (WAV cue, ID3 chapters, FLAC/OGG chapter tags) and survive destructive edits by remapping.
 - Snapping ("the magnet"): cursor, selections, clip drags and trims quantise to clip edges, beats, markers and the session cursor — placed geometry outranks derived; Alt suspends.
 - The draggable red cursor handle rides all three views, snap-aware, transport-neutral.
-- Sessions save as `.audm` (binary v3) carrying clips, fades, crossfades, automation and spatial lanes; Mix Down renders bit-identically to live playback.
+- Projects save as `.audm` (binary v4, v3 still opens) carrying every open document plus the session's clips, fades, crossfades, automation and spatial lanes; Mix Down renders bit-identically to live playback.
 
 **The vocal chain, in one paragraph**
 
