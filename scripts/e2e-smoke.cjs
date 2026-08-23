@@ -973,17 +973,25 @@ async function main() {
       m.length === 2 && m.some((x) => x.name === 'Session Verse') && m.some((x) => x.name === 'Session Chorus');
     const toneCopies = await page.evaluate((n) => window.__test.activateDocumentByName(n), toneName);
     assert(toneCopies >= 1, `the reopened project holds the tone by name (${toneName}; got ${toneCopies} copies)`);
-    let markedCopies = 0;
+    // Open Project is additive (lot A ruling): the document this step marked
+    // is still open beside its restored twin, so exactly TWO copies carry the
+    // pair — and the restored one is the later of them, since the loader
+    // appends. Activate that one: its audio and markers must have come from
+    // disk, not from the original still sitting in the Files panel.
+    const markedIndexes = [];
     for (let i = 0; i < toneCopies; i++) {
       await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneName, i]);
       const m = await page.evaluate(() => window.__test.getActiveMarkers());
-      if (isSessionMarked(m)) markedCopies++;
+      if (isSessionMarked(m)) markedIndexes.push(i);
     }
-    assert(markedCopies === 1, `exactly one restored tone carries the two session markers (got ${markedCopies} of ${toneCopies})`);
-    for (let i = 0; i < toneCopies; i++) {
-      await page.evaluate(([n, idx]) => window.__test.activateDocumentByName(n, idx), [toneName, i]);
-      if (isSessionMarked(await page.evaluate(() => window.__test.getActiveMarkers()))) break;
-    }
+    assert(
+      markedIndexes.length === 2,
+      `the marked tone and its restored twin both carry the pair (got ${markedIndexes.length} of ${toneCopies})`
+    );
+    await page.evaluate(
+      ([n, idx]) => window.__test.activateDocumentByName(n, idx),
+      [toneName, markedIndexes[1]]
+    );
     const sessionDocSummary = await page.evaluate(() => window.__test.getStateSummary());
     console.log(`  reopened document: ${JSON.stringify(sessionDocSummary)}`);
     assert(
