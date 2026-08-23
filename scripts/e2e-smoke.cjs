@@ -919,6 +919,12 @@ async function main() {
     const sessClip = await page.evaluate(() => window.__test.insertActiveDocAsClip(0, 0));
     assert(sessClip !== null, 'session clip inserted onto track 0');
 
+    // M4: the project carries EVERY open document, referenced by a clip or not
+    // — so the count the reopen must reproduce is what the walk has open now
+    // (every earlier step's document is still in the Files panel), not the one
+    // clip's source.
+    const openBeforeSave = (await page.evaluate(() => window.__test.getStateSummary())).docCount;
+    assert(openBeforeSave >= 1, `at least the clip's document is open before the project save (got ${openBeforeSave})`);
     const sessionSaveOk = await page.evaluate(
       (out) => window.__test.saveSessionAs(out),
       OUT_SESSION
@@ -936,7 +942,10 @@ async function main() {
       OUT_SESSION
     );
     console.log(`  reopened session: ${JSON.stringify(sessionOpen)}`);
-    assert(sessionOpen.docCount === 1, `reopened session recreated 1 document (got ${sessionOpen.docCount})`);
+    assert(
+      sessionOpen.docCount === openBeforeSave,
+      `reopened project recreated every document that was open at save time (${openBeforeSave}; got ${sessionOpen.docCount})`
+    );
     // `>= 1` could not fail: `newSession()` seeds FOUR tracks (sessionStore.ts),
     // so the old bound passed just as happily on a round trip that restored one
     // track, or on none at all with the default session still standing. Step 19
@@ -951,8 +960,14 @@ async function main() {
       `reopened session dropped no clips (got ${sessionOpen.droppedClipCount})`
     );
 
-    // The just-reopened document (addDocument'd inside openSessionFrom) is
-    // the active one — confirm its audio AND its markers came back from disk.
+    // The reopen restored every embedded document (M4), so the tone is not
+    // necessarily the active one — activate it by name, then confirm its audio
+    // AND its markers came back from disk.
+    const toneActivated = await page.evaluate(
+      (n) => window.__test.activateDocumentByName(n),
+      path.basename(TONE)
+    );
+    assert(toneActivated === true, `the reopened project holds the tone by name (${path.basename(TONE)})`);
     const sessionDocSummary = await page.evaluate(() => window.__test.getStateSummary());
     console.log(`  reopened document: ${JSON.stringify(sessionDocSummary)}`);
     assert(

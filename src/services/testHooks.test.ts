@@ -822,3 +822,17 @@ describe('lot D session hooks', () => {
     expect(t.selectClips([])).toEqual({ selectedClipId: null, selectedClipIds: [] });
   });
 });
+
+describe('lot F integration hooks', () => {
+  it('activateDocumentByName activates the first document with that exact name and reports a miss', () => {
+    const a = addDoc('take.wav');
+    const b = addDoc('other.wav');
+    expect(useAppStore.getState().activeDocumentId).toBe(b.id);
+
+    expect(api().activateDocumentByName('take.wav')).toBe(true);
+    expect(useAppStore.getState().activeDocumentId).toBe(a.id);
+
+    expect(api().activateDocumentByName('missing.wav')).toBe(false);
+    expect(useAppStore.getState().activeDocumentId).toBe(a.id);
+  });
+});
