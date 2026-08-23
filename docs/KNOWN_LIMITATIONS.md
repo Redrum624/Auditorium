@@ -1315,7 +1315,12 @@ they exist, and that is arithmetic rather than an omission: every bar line
 already *is* one of the beats. The editor's own set is still beats plus
 markers, flat; the multitrack ruler's seek and envelope keys snap against the
 flat union of the session set (a seeked cursor aims no clip edge, and its own
-old position as a dominant target would pin it in place).
+old position as a dominant target would pin it in place). Split at Cursor is a
+point CONSUMER of the cursor rather than a gesture of its own, and so never
+re-snaps it: in the multitrack the session cursor is itself a tier-0 target, so
+a re-snap would be a guaranteed no-op, and in the editors the set has no cursor
+target at all, so a re-snap could only move the cut off the line the user is
+looking at.
 
 **5. The Ctrl-drag nudge commits somewhere the preview does not show.** v1.8's
 "overlap nudge outranks the magnet" limitation resolved exactly as predicted:

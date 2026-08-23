@@ -780,3 +780,45 @@ describe('lot E view entry', () => {
     expect(s.selection).toBeNull();
   });
 });
+
+describe('lot D session hooks', () => {
+  /** One track carrying `[0, 1000)` and `[2000, 1000)`, installed raw. */
+  function seedClips(): string[] {
+    const t = createTrack('Track 1');
+    t.clips = [
+      createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample: 1000 }),
+      createClip({ documentId: 'doc-1', startSample: 2000, offsetSample: 0, lengthSample: 1000 }),
+    ];
+    useSessionStore.setState({
+      session: { name: 'Hook Fixture', sampleRate: 44100, tracks: [t] },
+      selectedClipId: null,
+      selectedClipIds: [],
+      mtCursorSample: 0,
+    });
+    return t.clips.map((c) => c.id);
+  }
+
+  it('setMtCursor / getMtCursor address the MULTITRACK edit cursor', () => {
+    const t = api();
+    expect(t.setMtCursor(1234)).toBe(1234);
+    expect(t.getMtCursor()).toBe(1234);
+    expect(useSessionStore.getState().mtCursorSample).toBe(1234);
+  });
+
+  it('selectClips names the clip selection, dropping dangling ids and duplicates', () => {
+    const t = api();
+    const [a] = seedClips();
+    expect(t.selectClips([a, 'clip-none', a])).toEqual({
+      selectedClipId: a,
+      selectedClipIds: [a],
+    });
+    expect(useSessionStore.getState().selectedClipIds).toEqual([a]);
+  });
+
+  it('selectClips([]) clears it', () => {
+    const t = api();
+    const [a, b] = seedClips();
+    t.selectClips([a, b]);
+    expect(t.selectClips([])).toEqual({ selectedClipId: null, selectedClipIds: [] });
+  });
+});

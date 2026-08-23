@@ -132,6 +132,15 @@ describe('every listed mutation records one labeled, reversible entry', () => {
     );
   });
 
+  // Lot D (item 1): `splitClip` writes one clip in place and inserts its right
+  // half in the SAME `set()`, so the whole split is one entry — and undo
+  // restores the exact pre-split session object, right half and all.
+  it('splitClip -> "Split clip"', () => {
+    expectRecordedCycle('Split clip', () =>
+      store().splitClip(seeded.tracks[1].clips[0].id, 1500)
+    );
+  });
+
   it('removeClip -> "Remove clip"', () => {
     expectRecordedCycle('Remove clip', () => store().removeClip(seeded.tracks[0].clips[0].id));
   });
@@ -201,6 +210,7 @@ describe('no-op mutations record nothing (reference-stable guards)', () => {
     store().moveClip('clip-none', seeded.tracks[0].id, 0);
     store().trimClip('clip-none', 'end', 100);
     store().removeClip('clip-none');
+    store().splitClip('clip-none', 100);
     store().setClipGain('clip-none', -3);
     store().setClipFade('clip-none', 'in', { lengthSample: 10 });
     store().upsertAutomationKey('track-none', 'volumeDb', { positionSample: 0, value: 0 });

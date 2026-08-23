@@ -4674,6 +4674,91 @@ async function main() {
       'the next Ctrl+Z reverted the earlier move (start back to 0, length untouched)'
     );
 
+    // (d) Item 10 — Split at Cursor, through BOTH surfaces, one undo step each.
+    // The clip is back where (c) left it (start 0, length 88200), and this
+    // sub-step puts it back the same way, so nothing downstream shifts.
+    //
+    // The pill click is the load-bearing half: the Split button's enablement
+    // reads the SESSION store (the clip selection and the edit cursor), and
+    // neither writer touches the app store, so a pill that is not subscribed to
+    // the session renders it disabled and the click does nothing at all. Only
+    // the packaged app can prove that subscription — a unit test renders the
+    // component in isolation with no other subscribers to hide behind.
+    console.log('Split at cursor (item 10): pill, Ctrl+K, one undo step each...');
+    const splitIds0 = (await page.evaluate(() => window.__test.getClipFadeState())).clips.map(
+      (c) => c.clipId
+    );
+    await page.evaluate((id) => window.__test.selectClips([id]), splitIds0[0]);
+    await page.evaluate(() => window.__test.setMtCursor(44100));
+    const splitBtn = '[data-testid="edit-pill"] button[aria-label="Split"]';
+    const splitState = await page.evaluate((sel) => {
+      const b = document.querySelector(sel);
+      return { present: b !== null, disabled: b !== null && b.disabled === true };
+    }, splitBtn);
+    assert(
+      splitState.present && splitState.disabled === false,
+      `the pill's Split button is present and LIVE with a clip selected under the cursor (${JSON.stringify(splitState)})`
+    );
+    await page.click(splitBtn);
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 2,
+      null,
+      { timeout: 10000 }
+    );
+    const afterSplit = await page.evaluate(() => window.__test.getClipFadeState());
+    const splitLeft = afterSplit.clips.find((c) => c.clipId === splitIds0[0]);
+    const splitRight = afterSplit.clips.find((c) => c.clipId !== splitIds0[0]);
+    assert(
+      afterSplit.clips.length === 2 &&
+        splitLeft !== undefined &&
+        splitLeft.startSample === 0 &&
+        splitLeft.lengthSample === 44100 &&
+        splitRight !== undefined &&
+        splitRight.startSample === 44100 &&
+        splitRight.lengthSample === 44100,
+      `the pill split the clip in place at the cursor (${JSON.stringify(afterSplit.clips)})`
+    );
+    assert(
+      afterSplit.selectedClipId === splitIds0[0],
+      `the left half kept the clip's identity, so the primary selection did not move (${afterSplit.selectedClipId})`
+    );
+
+    await page.keyboard.press('Control+z');
+    const afterSplitZ = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterSplitZ.clips.length === 1 && afterSplitZ.clips[0].lengthSample === 88200,
+      `ONE Ctrl+Z undid the whole split (${afterSplitZ.clips.length} clip(s), length ${afterSplitZ.clips[0].lengthSample})`
+    );
+    await page.keyboard.press('Control+y');
+    const afterSplitY = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(afterSplitY.clips.length === 2, `Ctrl+Y re-applied it (${afterSplitY.clips.length} clips)`);
+
+    // The keyboard path, on the left half this time.
+    await page.evaluate(() => window.__test.setMtCursor(22050));
+    await page.keyboard.press('Control+k');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 3,
+      null,
+      { timeout: 10000 }
+    );
+    const afterCtrlK = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterCtrlK.clips.length === 3,
+      `Ctrl+K split again at the cursor (${afterCtrlK.clips.length} clips)`
+    );
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+z');
+    const afterSplitUndone = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterSplitUndone.clips.length === 1 &&
+        afterSplitUndone.clips[0].startSample === 0 &&
+        afterSplitUndone.clips[0].lengthSample === 88200,
+      `both splits undone, the session exactly as (c) left it (${JSON.stringify(afterSplitUndone.clips)})`
+    );
+    console.log(
+      '  split at cursor: the pill and Ctrl+K both cut the clip in place; one Ctrl+Z each'
+    );
+
     // 22) F4b (v1.16) — transcription with speaker separation, end to end ---
     //
     // Nothing in this feature had ever run through a real `utilityProcess`

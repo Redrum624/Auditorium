@@ -254,13 +254,18 @@ you already have: nothing here does anything the menu and the keyboard do not.
   clipboard, Paste is greyed; Undo and Redo follow whichever history is
   active — the **document's** in Waveform and Spectral, the **session's** in
   Multitrack.
-- In the **Multitrack** view, Cut / Copy / Paste / Trim / Silence are always
-  greyed, and their keyboard shortcuts do nothing there either. All five edit a
-  region of the **active document**, which that view does not show — and since
-  switching views keeps your selection, they would otherwise change a file you
-  cannot see, with the Undo button beside them pointing at the session's
-  history instead. Hover one for the reason; switch to Waveform or Spectral to
-  use it. **Delete** does work there — it removes the selected clip.
+- In the **Multitrack** view, **Split** and **Delete** work: Split cuts clips
+  at the cursor (see *Splitting clips*) and Delete removes the selected clips.
+  Copy / Paste / Trim / Silence are greyed there, and their keyboard shortcuts
+  do nothing either — Copy and Paste because there is no clip clipboard yet,
+  Trim and Silence because that view has no way to select a stretch of time.
+  Each button's tooltip says which of the two it is. All four edit a region of
+  the **active document**, which the view does not show — and since switching
+  views keeps your document selection (unless you leave Multitrack with a clip
+  selected, which selects that clip's span instead — see **Views**), they would
+  otherwise change a file you cannot see, with the Undo button beside them
+  pointing at the session's history instead. Switch to Waveform or Spectral to
+  use one.
 
 ### Markers
 
@@ -966,7 +971,10 @@ cursor on the nearest **beat or marker** within 8 screen pixels; dragging a
 selection snaps the edge you are dragging (the anchor never moves); and in the
 multitrack, dragging or trimming a clip snaps it to the **edges** (start and
 end) of the *other* clips — on any track — to their beats and markers, and to
-the session cursor.
+the session cursor. **Split at Cursor** cuts exactly where the cursor sits:
+place it with a click, a drag or a ruler scrub and it is already on the beat,
+marker or clip edge the magnet chose (hold `Alt` while placing it to cut
+off-grid); the split itself never snaps.
 
 When two kinds of target are both within reach, the magnet prefers what you
 **placed** over what was **derived**: a clip edge or the session cursor beats a
@@ -1606,13 +1614,39 @@ something else. Ripple Delete of the **selected clips** (above) is the form that
 works today, and selecting the clips that cover the stretch you want gone is the
 way to get the same result.
 
+### Splitting clips
+
+`Ctrl+K`, **Edit → Split at Cursor**, or the edit pill's **Split** button cuts,
+at the **cursor**, every clip under it on every track that owns a selected clip.
+One selected clip splits its own track; clips selected across several tracks
+split all of those tracks; with nothing selected the command is greyed, because
+"which tracks" has no answer.
+
+That is deliberately track-scoped rather than clip-scoped: an unselected clip
+sitting under the cursor on a selected clip's track is cut too, so a cut across
+a stack of tracks is one act rather than one per clip.
+
+The left piece keeps the clip's fade-in, the right piece its fade-out, and the
+new seam has none — the two halves butt together, so nothing is heard at the
+cut. A crossfade with a neighbour survives untouched.
+
+The cursor has to sit **inside** a clip, at least 32 samples from either edge,
+and outside any overlap with another clip on the same track. A clip that fails
+any of those is simply left alone; when no clip on the selected tracks
+qualifies, the row and the button are greyed rather than doing nothing quietly.
+
+The whole act is **one undo step**, however many clips it cut. Afterwards the
+right-hand pieces of the clips you had selected join the selection (the
+left-hand pieces keep the original clips' identity), so a second `Ctrl+K`
+further along the timeline acts on the same tracks.
+
 ### Undo in the multitrack (session history)
 
-Every session edit is undoable: clip moves, trims, deletes and gain changes,
-fade and crossfade edits (arm/release included), automation-key adds, moves,
-deletes and curve changes, track add/remove/rename, the fader and pan sliders,
-the M/S/R toggles, spatial placements, recorded takes, and **New Session**
-itself.
+Every session edit is undoable: clip moves, trims, deletes, gain changes and
+splits, fade and crossfade edits (arm/release included), automation-key adds,
+moves, deletes and curve changes, track add/remove/rename, the fader and pan
+sliders, the M/S/R toggles, spatial placements, recorded takes, and **New
+Session** itself.
 
 - **Where Ctrl+Z goes**: the session has its own undo history, separate from
   every document's — the same per-document model the editor already follows.

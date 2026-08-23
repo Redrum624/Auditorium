@@ -54,7 +54,9 @@ cannot see. There is one global key table and no per-view table beside it:
 every key runs a command, and a command re-checks its own predicate before it
 runs, which is what makes a view-scoped key inert outside its view.
 (`Shift+Delete` used to be in this list; it now ripples the editor's selection
-too — see the table above.)
+too — see the table above.) `Ctrl+K` is the one view-ROUTED edit key: it drops
+a marker in the editors and splits clips at the edit cursor in the multitrack,
+where it is greyed with nothing selected.
 
 The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 
