@@ -20,7 +20,8 @@ and everything is anchored on the **waveform**, not on the window:
   once a remix document exists, and then **History**, which is always last. It
   sits on top of the module column. Click an icon to open its card below the
   strip; click the **open** icon again to close the card, and the waveform takes
-  the whole column's width. **Files** is the card the app opens with.
+  the whole column's width. An open **effect card** sits between the strip and
+  the module card. **Files** is the card the app opens with.
 - **Bottom, centred on the waveform** — the status pill: the active file's
   `name · duration · rate · channels`, the big time readout, the cursor and
   selection times, the `♩ BPM` readout, the zoom in samples-per-pixel, and the
@@ -52,10 +53,9 @@ to be run in a particular sequence — the vocal and cover chains especially —
 the order is stated in the tool's own stage notes, not implied by the menu.
 
 Every one of these tools is also a single click in the **Pipeline** module card
-— the same ten rows in the same three groups — and in the **Effects** module
-card below the effect list, where the **Mix** row (the Spatial Positioner)
-sits after them (see *The panel cards* below). All three doors run
-the same command.
+— the same ten rows in the same three groups. Both doors run the same command.
+(The **Effects** card lists only the effects and the Effects menu's own **Mix**
+row.)
 
 **These tools do not open a centred dialog.** Selecting one of the nine that
 have a UI — Match Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal
@@ -373,26 +373,39 @@ is always last, and anything added later goes between them.
 
 ## Effects
 
-Effects live in the **Effects** panel (opened from the module strip), grouped by category, and
-mirrored in the **Effects** menu. Double-click an effect (with a document
-open) to open its parameter dialog, adjust settings, and apply. Every effect
-processes the current selection, or the whole document when there's no
-selection.
+Effects live in the **Effects** panel (opened from the module strip), grouped
+by category, and mirrored in the **Effects** menu. **Click** an effect (with a
+document open) — from the card or the menu — and it opens as a **card in the
+module column, between the module strip and the module card**, the same
+348 px wide as both; the module card beneath it switches to Effects so the
+other effects stay one click away. Adjust, **Preview**, **Apply**; close it
+with the **✕** in its header, **Cancel** or `Escape` — the key closes the card
+exactly as it closed the effect dialog before, stopping a running Preview and
+keeping your selection (while **Apply** runs, `Escape` does nothing, like the
+✕). The card's first line names the span **Apply** will write — the selection,
+or the whole file when there is none — so a selection lost to Edit › Deselect
+or to a click on the waveform is visible in the card before you press Apply.
+Nothing else is dimmed: the waveform, selection, transport and keys stay live
+while the card is open — and if you
+switch, edit or close the document while a **Preview** plays, the transport
+takes the engine back and the card gives the preview up with it, so the button
+reads **Preview** again rather than stopping what you just started. While an
+effect is being **applied**, the module strip greys out and the ✕ and Cancel
+refuse until it finishes — the same rule as a running pipeline pass. The mouse
+stays live, so you can still edit, switch or close the document while it runs;
+do that and the effect is **not** applied — it commits only to the document as
+you left it when you clicked Apply — the card says so and stays, and **Apply**
+runs it again on the document as it is now. Closing the last document closes
+the card. Every effect processes the current
+selection, or the whole document when there's no selection.
 
-**Below the effects, the same card lists the Pipeline tools** — grouped as
-**Tempo & Timing**, **Voice** and **Analysis** — and then the Effects menu's
-own **Mix** row, the **Spatial Positioner**, so the whole
-capability surface is in one panel. (The **Pipeline** module card lists the
-ten Pipeline rows on their own, without scrolling past the effects.) A tool takes a
-**single** click (it is a verb the menu already runs on one click; a second door
-slower than the first is not a door), while effect rows keep their double-click,
-because an effect row opens a parameter dialog rather than doing something. A
-greyed tool row means that command is unavailable right now, for exactly the
-reason the menu gives — the panel asks the command itself rather than keeping
-its own copy of the rule.
-
-Clicking a tool row here replaces this card with the tool, exactly as the
-Pipeline card and the Pipeline menu do.
+Below the effects, the same card lists the Effects menu's own **Mix** row, the
+**Spatial Positioner**. A tool row takes a **single** click (it is a verb
+the menu already runs on one click). A greyed tool row means that command is
+unavailable right now, for exactly the reason the menu gives — the panel asks
+the command itself rather than keeping its own copy of the rule. The ten
+Pipeline tools are not listed here: they live in the **Pipeline** module card
+and menu.
 
 - **Amplitude** — Amplify (gain in dB), Fade (in/out; Linear, Ducked, Cosine
   or Equal power curve; ramp length as a % of the selection — 100 % shapes the

@@ -361,7 +361,7 @@ async function clickMenuItem(page, label) {
 /**
  * The surface a command can actually be fired from, searched in the order a
  * user would find one: the menu bar first, then the toolbar pill, then the
- * Effects card's tool rows. Returns null when none of the three carries it —
+ * Effects card's Mix row. Returns null when none of the three carries it —
  * which for a dialog-opening command is a real finding, not a harness gap.
  */
 async function resolveOpener(page, commandId, label, menuLabelIndex) {
@@ -429,12 +429,14 @@ async function cancelDialog(page, timeoutMs = 120000) {
     () => document.querySelector('[data-testid="dialog-overlay"]') !== null
   );
   if (!present) {
-    const hosted = await page.evaluate(
-      () => document.querySelector('[data-testid="tool-host"]') !== null
-    );
+    const hosted = await page.evaluate(() => ({
+      tool: document.querySelector('[data-testid="tool-host"]') !== null,
+      effect: document.querySelector('[data-testid="effect-host"]') !== null,
+    }));
     throw new Error(
       'cancelDialog: no dialog-overlay is open, so Escape would report success having closed ' +
-        `nothing${hosted ? ' — a hosted tool IS open; use dismissOpenTool, which closes both presentations' : ''}`
+        `nothing${hosted.tool ? ' — a hosted tool IS open; use dismissOpenTool, which closes both presentations' : ''}` +
+        `${hosted.effect ? ' — an effect card IS open; use closeEffectHost' : ''}`
     );
   }
   const started = Date.now();
@@ -487,6 +489,36 @@ async function closeHostedTool(page, timeoutMs = 120000) {
     if (closed) return { presses, ms: Date.now() - started };
   }
   throw new Error(`the hosted tool refused its ✕ for ${timeoutMs} ms (${presses} clicks)`);
+}
+
+/**
+ * Item 6 (2026-08-18): the effect card's equivalent. An effect opens as a card
+ * in the module column (between the strip and the module card) through the
+ * SAME hosted shell a pipeline tool uses, so it closes the same way — the ✕
+ * in its header, which refuses while Apply runs — and never through Escape.
+ */
+async function closeEffectHost(page, timeoutMs = 15000) {
+  const started = Date.now();
+  let presses = 0;
+  while (Date.now() - started < timeoutMs) {
+    const clicked = await page.evaluate(() => {
+      const b = document.querySelector(
+        '[data-testid="effect-host"] [data-testid="hosted-tool-close"]'
+      );
+      if (!b || b.disabled) return false;
+      b.click();
+      return true;
+    });
+    if (clicked) presses += 1;
+    const closed = await page
+      .waitForFunction(() => document.querySelector('[data-testid="effect-host"]') === null, null, {
+        timeout: 1500,
+      })
+      .then(() => true)
+      .catch(() => false);
+    if (closed) return { presses, ms: Date.now() - started };
+  }
+  throw new Error(`the effect card refused its ✕ for ${timeoutMs} ms (${presses} clicks)`);
 }
 
 /** U2: closes whichever presentation is open — a modal or a hosted tool. */
@@ -1469,7 +1501,7 @@ async function main() {
     // The dialogs whose command id is fixed are walked through the MENU. The
     // command's label is read out of the open dropdown, so the walk clicks the
     // very row a user would; a command that is in no menu is walked through the
-    // Effects card's tool rows instead, and one that is in neither is a finding.
+    // Effects card's Mix row instead, and one that is in neither is a finding.
     const menuLabelIndex = await (async () => {
       const index = new Map();
       for (const title of derivedMenus) {
@@ -1646,8 +1678,10 @@ async function main() {
     });
 
     // The one dialog with no fixed command: EffectDialog is built per registry
-    // entry, so it is walked through an EFFECT row of the Effects menu.
-    await step(page, 'Dialog: EffectDialog — opened per-effect from the Effects menu', async () => {
+    // entry, so it is walked through an EFFECT row of the Effects menu. Item 6
+    // (2026-08-18): it opens as a CARD in the module column, between the strip
+    // and the module card, never as a modal over the stage.
+    await step(page, 'Dialog: EffectDialog — opened per-effect from the Effects menu, as a card in the column', async () => {
       const effects = await page.evaluate(() => window.__test.listEffects());
       assert(effects.length > 0, `the effect registry is populated (${effects.length} visible effects)`);
       const before = await storeSnapshot(page);
@@ -1658,16 +1692,38 @@ async function main() {
         await clickMenuItem(page, first.name),
         `the “${first.name}” effect row takes a real click (id ${first.id})`
       );
-      await page.waitForSelector('[data-testid="effect-dialog"]', { timeout: 10000 });
-      const info = await openDialogInfo(page);
+      await page.waitForSelector('[data-testid="effect-host"]', { timeout: 10000 });
+      const card = await page.evaluate(() => {
+        const host = document.querySelector('[data-testid="effect-host"]');
+        return {
+          overlay: document.querySelector('[data-testid="dialog-overlay"]') !== null,
+          effectId: host?.getAttribute('data-effect-id') ?? null,
+          label:
+            host?.querySelector('[data-testid="hosted-tool"]')?.getAttribute('aria-label') ?? null,
+          body: host?.querySelector('[data-testid="effect-dialog"]') !== null,
+          tab:
+            document.querySelector('[data-testid="sidebar-panel"]')?.getAttribute('data-active-tab') ??
+            null,
+        };
+      });
+      assert(!card.overlay, 'an effect raises no backdrop — it is a card in the column, not a modal');
       assert(
-        info.label === first.name,
-        `the dialog announces the effect it is for (aria-label ${JSON.stringify(info.label)} vs ${JSON.stringify(first.name)})`
+        card.effectId === first.id,
+        `the card hosts the effect it was opened for (data-effect-id ${JSON.stringify(card.effectId)} vs ${JSON.stringify(first.id)})`
       );
-      record('Dialog: EffectDialog', `opened via Effects > ${first.name}`, 'PASS');
-      await cancelDialog(page);
+      assert(
+        card.label === first.name,
+        `the card announces the effect it is for (aria-label ${JSON.stringify(card.label)} vs ${JSON.stringify(first.name)})`
+      );
+      assert(card.body, 'the effect dialog body renders inside the card');
+      assert(
+        card.tab === 'effects',
+        `opening an effect forces the module card beneath to Effects (N16; actual ${JSON.stringify(card.tab)})`
+      );
+      record('Dialog: EffectDialog', `opened via Effects > ${first.name}, as a card in the column`, 'PASS');
+      await closeEffectHost(page);
       const after = await storeSnapshot(page);
-      assert(after === before, 'cancelling the effect dialog left the store byte-identical');
+      assert(after === before, 'closing the effect card left the store byte-identical');
     });
 
     // =====================================================================
@@ -2160,7 +2216,7 @@ async function main() {
       );
     });
 
-    await step(page, 'Module: Effects — run one real effect, and open one tool from every group', async () => {
+    await step(page, 'Module: Effects — run one real effect, open it as a card, and prove the Pipeline rows are gone', async () => {
       await openModuleCard(page, 'Effects');
       await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
       const groups = await page.evaluate(() => ({
@@ -2184,12 +2240,30 @@ async function main() {
         groups.effects === registry.length,
         `the card lists every visible registry effect (card ${groups.effects}, registry ${registry.length})`
       );
+      // Item 5 (2026-08-18): "if it is in Pipeline, remove it from Effects".
+      // The card keeps exactly one tool section — the Effects menu's own Mix
+      // row — and none of its rows may be a Pipeline-menu row. The Pipeline
+      // card's step makes the same comparison against the live menu in the
+      // other direction (every menu row present); this is that check inverted.
       assert(
-        groups.sections.length >= 4,
-        `the card carries the tool groups (${groups.sections.map((s) => s.title).join(', ')})`
+        groups.sections.length === 1 && groups.sections[0].title === 'Mix',
+        `the card carries the Mix section alone (${groups.sections.map((s) => s.title).join(', ') || 'none'})`
+      );
+      assert(await openMenu(page, 'Pipeline'), 'the Pipeline menu opens for the comparison');
+      const pipelineMenuLabels = (await readOpenMenu(page)).items.map((r) => r.label);
+      await closeMenu(page);
+      await openModuleCard(page, 'Effects');
+      await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
+      const effectsCardLabels = groups.sections.flatMap((s) => s.rows).map((r) => r.label);
+      const leaked = effectsCardLabels.filter((l) => pipelineMenuLabels.includes(l));
+      assert(
+        pipelineMenuLabels.length > 0 && leaked.length === 0,
+        `no Effects-card tool row is a Pipeline-menu row (card ${JSON.stringify(effectsCardLabels)}, ` +
+          `menu ${JSON.stringify(pipelineMenuLabels)}, leaked ${JSON.stringify(leaked)})`
       );
 
-      // Run one CHEAP effect for real, through the card's own double-click.
+      // Run one CHEAP effect for real, after proving the card's own one-click
+      // door opens it as a card in the column (item 6).
       const rmsBefore = await page.evaluate(() => window.__test.getRms());
       // Resolved out of the registry rather than typed here: the effect whose
       // id is `amplify` is the one that applies a constant dB gain, and its
@@ -2209,16 +2283,54 @@ async function main() {
         gain.name
       );
       assert(gainIndex >= 0, `“${gain.name}” (id ${gain.id}) has a row in the card (index ${gainIndex})`);
-      await page.evaluate((i) => {
-        const b = [...document.querySelectorAll('[data-testid="effects-item"] button')][i];
-        b.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
-      }, gainIndex);
-      await page.waitForSelector('[data-testid="effect-dialog"]', { timeout: 5000 });
+      // Item 6: ONE real click, and the effect opens as a card in the module
+      // column — below the strip, above the module card, the same width as
+      // both (W1) — with no backdrop over the stage.
+      await page.locator('[data-testid="effects-item"] button').nth(gainIndex).click();
+      await page.waitForSelector(`[data-testid="effect-host"][data-effect-id="${gain.id}"]`, {
+        timeout: 5000,
+      });
+      const placed = await page.evaluate(() => {
+        const box = (sel) => {
+          const el = document.querySelector(sel);
+          if (!el) return null;
+          const r = el.getBoundingClientRect();
+          return { y: r.y, bottom: r.bottom, width: r.width };
+        };
+        return {
+          overlay: document.querySelector('[data-testid="dialog-overlay"]') !== null,
+          label:
+            document
+              .querySelector('[data-testid="effect-host"] [data-testid="hosted-tool"]')
+              ?.getAttribute('aria-label') ?? null,
+          strip: box('[data-testid="sidebar-tabs"]'),
+          host: box('[data-testid="effect-host"]'),
+          panel: box('[data-testid="sidebar-panel"]'),
+        };
+      });
+      assert(!placed.overlay, `clicking the “${gain.name}” row raised no backdrop`);
       assert(
-        (await openDialogInfo(page)).label === gain.name,
-        `double-clicking the “${gain.name}” row opened that effect's dialog`
+        placed.label === gain.name,
+        `clicking the “${gain.name}” row opened that effect's card (aria-label ${JSON.stringify(placed.label)})`
       );
-      await cancelDialog(page);
+      assert(
+        placed.strip && placed.host && placed.panel,
+        `the strip, the effect card and the module card are all on screen ` +
+          `(${JSON.stringify({ strip: !!placed.strip, host: !!placed.host, panel: !!placed.panel })})`
+      );
+      assert(
+        placed.strip.bottom <= placed.host.y && placed.host.bottom <= placed.panel.y,
+        `the effect card sits between the strip and the module card ` +
+          `(strip.bottom ${placed.strip.bottom.toFixed(1)}, host ${placed.host.y.toFixed(1)}–${placed.host.bottom.toFixed(1)}, ` +
+          `panel.y ${placed.panel.y.toFixed(1)})`
+      );
+      assert(
+        Math.abs(placed.strip.width - placed.host.width) <= 1 &&
+          Math.abs(placed.host.width - placed.panel.width) <= 1,
+        `the strip, the effect card and the module card share one width (W1) ` +
+          `(${placed.strip.width.toFixed(1)} / ${placed.host.width.toFixed(1)} / ${placed.panel.width.toFixed(1)})`
+      );
+      await closeEffectHost(page);
       // …and the effect itself, applied for real so the card's list is proved
       // to name things that actually run.
       await page.evaluate(() => window.__test.applyEffect('amplify', { gainDb: -6 }));
@@ -2230,7 +2342,10 @@ async function main() {
       );
       await page.evaluate(() => window.__test.undoActive());
 
-      // One tool from EVERY group, opened and cancelled.
+      // One tool from every remaining group, opened and dismissed. Since item 5
+      // that is the Mix group alone (Spatial Positioner → the Spatial panel);
+      // the loop is kept generic so a row added to the Effects menu's tail is
+      // walked without an edit here.
       for (const section of groups.sections) {
         const row = section.rows.find((r) => !r.disabled);
         assert(

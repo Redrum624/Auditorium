@@ -2119,3 +2119,83 @@ would break the freeze into slices without reducing the total work.
 **Not this:** the decode. The 308 ms decode freeze this app used to have was
 fixed along with three redundant copies (~205 → ~65 MiB per open). What remains
 is the hand-off itself.
+
+## Transport keys during a hosted effect Preview
+
+**Area:** the effect card in the module column (`src/components/Dialogs/EffectHost.tsx`,
+`src/components/Dialogs/EffectDialog.tsx`), global shortcuts
+(`src/services/shortcuts.ts`)
+
+**Current behavior:** since the 2026-08-18 program (item 6) an effect opens as
+a **card in the module column** rather than a modal. A card is not modal by
+design: it joins no dialog stack, so every global shortcut stays live while it
+is open — that is what lets you select, scrub and play beside it. **Preview**
+auditions the effect by loading a throwaway preview document into the
+playback engine, and during that preview the global keys still act on the
+engine: `Space` pauses or resumes the **preview**, and the transport keys act
+on the document the engine is holding, which is the preview copy, not the
+real document. The card publishes its module lock during **Apply only**
+(N16): Preview greys nothing and suspends nothing, because it is one click to
+end and locking the strip for it would be worse than the key landing on the
+preview. **Stop Preview**, the **✕**, **Cancel**, **Apply** and `Escape` all restore
+the real document to the engine, exactly as the modal's Escape did.
+
+**`Escape` closes the card; a selection lost some other way still widens
+Apply.** Since N18 (2026-08-23) `Escape` with an idle effect card open closes
+the card — the ✕'s own path — and the key is claimed before the global table
+can run **Deselect**, so the selection survives (see `KEYBOARD_SHORTCUTS.md`).
+What remains is the rest of the class: Edit › Deselect and a plain click on
+the waveform still clear the selection with the card open, and because an
+effect resolves its region from the live selection when Apply runs — reading
+"no selection" as the whole file — the next **Apply** then writes the entire
+document rather than the span you previewed, as one undo entry. The hosted
+pipeline tools resolve the same way (Match Tempo, the Vocal Chain and the Cover
+Chain), and for them `Escape` still does nothing. It is not silenced: the
+card's first line names the span Apply will write and switches to "Whole file"
+the moment the selection goes, so the widening is visible before Apply is
+pressed, and `Ctrl+Z` undoes it in one step.
+
+**A Preview the mouse takes away.** Because the card is not modal, a preview
+can also be ended by something other than the card: switch document in the
+Files panel, ripple the audio with the edit pill, or convert the sample rate,
+and the transport loads that document into the shared engine, which stops and
+replaces the preview. The card watches the same change and gives the preview
+up with it — the button goes back to reading **Preview**, and pressing it
+starts a fresh preview of the document you moved to instead of stopping the
+playback you just started there.
+
+**Mouse edits during Apply.** The same non-modal design holds while an effect
+is being **applied**: the module strip, the card's ✕ and Cancel are held and
+the global keys are suspended for the duration, but the mouse is never
+suspended — the edit pill, the Edit menu, File › Close and the Files panel
+stay live, exactly as they do during a running pipeline pass — with one
+exception, added in the final round: a menu command that would UNMOUNT the
+card mid-Apply is refused rather than obeyed, with the same "A pass is
+running" message a pipeline pass gives (it names the effect). That covers
+`Pipeline › Transcribe` on a take you have already transcribed, whose reveal
+path used to clear the module lock on its way to the Analysis panel. The
+runner
+resolves the target region when Apply starts and commits the processed audio
+to that same span when the worker returns (`src/services/effectRunner.ts`,
+`runEffectOnSelection`), so the card hands it a `shouldCancel` (T6-3's seam,
+asked once between the audio arriving and the commit): an Apply commits only
+to the document as you left it when you clicked — same document, same audio,
+still the active one. Edit it, switch to another document or close it in
+between and nothing is written; the card stays and says so, and Apply runs
+the effect again on the document as it is now. What remains: the pipeline
+tools that commit after a worker pass from their own services (the Vocal
+Chain, Align Lyrics) still carry that window — let their progress finish
+before editing.
+
+**Intended behavior:** a narrower seam than the module lock — "hold the
+keyboard" without "hold the module column" — could route transport keys to the
+real document during a preview, or end the preview first. (`Escape` is the
+one key the effect card does answer, with its own dismissal and without taking
+any other key from the waveform — N18 — which is the shape that seam would
+take for the rest.) It is the same
+second seam the pipeline tools' lock already wants (see `App.tsx`,
+`refuseWhileRunning`) and is a change of its own. The Apply-time window is
+closed for effects at the card (`EffectDialog`'s `shouldCancel`); the pipeline
+services that commit after their own worker pass (`vocalChain.ts`,
+`alignLyricsService.ts`) want the same guard, and that is their change, not
+the card's.

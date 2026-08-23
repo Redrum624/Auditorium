@@ -3005,12 +3005,12 @@ async function main() {
       { timeout: 5000 }
     );
 
-    // F11: 16c-bis) the Effects module card carries the same tools ----------
+    // F11: 16c-bis) the Effects module card lists effects, plus the Mix row ---
     // The card is the surface this user works from, and the smoke had never
-    // opened it — no `effects-list`, no `effects-item`, nothing. The tools
-    // shipped menu-only for ten releases partly because nothing here would
-    // have noticed.
-    console.log('Effects card: the ten Pipeline tools plus the Mix positioner, and no layout growth (F11)...');
+    // opened it — no `effects-list`, no `effects-item`, nothing. Item 5 of the
+    // 2026-08-18 program took the ten Pipeline rows OUT of this card (they live
+    // in the Pipeline module only); the Effects menu's own Mix row stays.
+    console.log('Effects card: the effect list plus the Mix positioner only, and no layout growth (F11, item 5)...');
     await openModuleCard(page, 'Effects');
     await page.waitForSelector('[data-testid="effects-tool-section"]', { timeout: 5000 });
     const cardBefore = await page.evaluate(() => {
@@ -3035,14 +3035,13 @@ async function main() {
         `(${tools.greyed} greyed), ${tools.effects} effect rows; card ${cardBefore.width.toFixed(0)}px`
     );
     assert(
-      JSON.stringify(tools.sections) ===
-        JSON.stringify(['Tempo & Timing', 'Voice', 'Analysis', 'Mix']),
-      `the card groups the Pipeline menu's tools, then the Effects menu's own Mix tail (actual ${JSON.stringify(tools.sections)})`
+      JSON.stringify(tools.sections) === JSON.stringify(['Mix']),
+      `the card draws the Effects menu's own Mix tail and no Pipeline group (actual ${JSON.stringify(tools.sections)})`
     );
     assert(
-      tools.ids.length === 11,
-      `every Pipeline tool plus the Mix positioner has a row in the card ` +
-        `(expected 11, actual ${tools.ids.length})`
+      tools.ids.length === 1,
+      `only the Effects menu's own Mix row has a tool row in the card ` +
+        `(expected 1, actual ${tools.ids.length})`
     );
     assert(
       tools.effects > 0,
@@ -3056,6 +3055,108 @@ async function main() {
       Math.abs(cardBefore.width - 348) <= 2,
       `the card is still the module column's width (expected 348 +/-2, actual ${cardBefore.width.toFixed(1)})`
     );
+
+    // Item 6 (2026-08-18): one click on an effect row opens the effect as a
+    // CARD in the module column — below the strip, above the module card, the
+    // same 348 as both (W1), no backdrop — and the module card beneath is
+    // forced to Effects (N16). The card outlives the module card (M6's new
+    // stage-inset case) and closes from its own ✕.
+    console.log('Effects card: one click opens an effect as a card between the strip and the card (item 6)...');
+    const enabledEffectRows = await page.evaluate(
+      () =>
+        [...document.querySelectorAll('[data-testid="effects-item"] button')].filter((b) => !b.disabled)
+          .length
+    );
+    assert(
+      enabledEffectRows > 0,
+      `a document is active here, so at least one effect row is enabled (actual ${enabledEffectRows})`
+    );
+    await page.locator('[data-testid="effects-item"] button:enabled').first().click();
+    await page.waitForSelector('[data-testid="effect-host"]', { timeout: 5000 });
+    const hostedEffect = await page.evaluate(() => {
+      const box = (sel) => {
+        const el = document.querySelector(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return { y: r.y, bottom: r.bottom, width: r.width };
+      };
+      return {
+        overlay: document.querySelector('[data-testid="dialog-overlay"]') !== null,
+        strip: box('[data-testid="sidebar-tabs"]'),
+        host: box('[data-testid="effect-host"]'),
+        panel: box('[data-testid="sidebar-panel"]'),
+        tab: document.querySelector('[data-testid="sidebar-panel"]')?.dataset.activeTab ?? null,
+        inset: document
+          .querySelector('[data-testid="editor-stage"]')
+          .style.getPropertyValue('--stage-inset-right'),
+      };
+    });
+    assert(!hostedEffect.overlay, 'an effect raises no backdrop — it is a card, not a modal');
+    assert(
+      hostedEffect.strip && hostedEffect.host && hostedEffect.panel,
+      `the strip, the effect card and the module card are all on screen ` +
+        `(${JSON.stringify({ strip: !!hostedEffect.strip, host: !!hostedEffect.host, panel: !!hostedEffect.panel })})`
+    );
+    for (const [name, b] of [
+      ['strip', hostedEffect.strip],
+      ['effect card', hostedEffect.host],
+      ['module card', hostedEffect.panel],
+    ]) {
+      assert(
+        Math.abs(b.width - 348) <= 1,
+        `the ${name} is the column's 348 with an effect open (W1; actual ${b.width.toFixed(1)})`
+      );
+    }
+    assert(
+      hostedEffect.strip.bottom <= hostedEffect.host.y &&
+        hostedEffect.host.bottom <= hostedEffect.panel.y,
+      `the effect card sits between the strip and the module card ` +
+        `(strip.bottom ${hostedEffect.strip.bottom.toFixed(1)}, host ${hostedEffect.host.y.toFixed(1)}–` +
+        `${hostedEffect.host.bottom.toFixed(1)}, panel.y ${hostedEffect.panel.y.toFixed(1)})`
+    );
+    assert(
+      hostedEffect.tab === 'effects',
+      `opening an effect forces the module card to Effects (N16; actual ${JSON.stringify(hostedEffect.tab)})`
+    );
+    assert(
+      hostedEffect.inset === '376px',
+      `the stage keeps a module card's clearance with an effect open (expected 376px, actual ${hostedEffect.inset})`
+    );
+    // The module card closes from its own ✕; the effect card stays and the
+    // stage keeps its clearance for it (M6's new switch case).
+    await page.click('[data-testid="sidebar-panel-close"]');
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="sidebar-panel"]') === null,
+      null,
+      { timeout: 5000 }
+    );
+    const cardClosedUnderEffect = await page.evaluate(() => ({
+      host: document.querySelector('[data-testid="effect-host"]') !== null,
+      inset: document
+        .querySelector('[data-testid="editor-stage"]')
+        .style.getPropertyValue('--stage-inset-right'),
+    }));
+    assert(cardClosedUnderEffect.host, 'closing the module card leaves the effect card in the column');
+    assert(
+      cardClosedUnderEffect.inset === '376px',
+      `the stage keeps the clearance for the effect card alone (expected 376px, actual ${cardClosedUnderEffect.inset})`
+    );
+    await page.click('[data-testid="effect-host"] [data-testid="hosted-tool-close"]');
+    await page.waitForFunction(
+      () => document.querySelector('[data-testid="effect-host"]') === null,
+      null,
+      { timeout: 5000 }
+    );
+    const effectClosed = await page.evaluate(() =>
+      document.querySelector('[data-testid="editor-stage"]').style.getPropertyValue('--stage-inset-right')
+    );
+    assert(
+      effectClosed === '14px',
+      `with nothing in the column the stage takes it back (expected 14px, actual ${effectClosed})`
+    );
+    // The steps below expect the Effects card open, as it was before this block.
+    await openModuleCard(page, 'Effects');
+    await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
 
     // F11: 16d) drag a document from the Files panel onto a track lane -------
     // The user's report was "we can't drag a file on a track in multitrack,

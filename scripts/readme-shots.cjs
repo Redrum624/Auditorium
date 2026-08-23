@@ -239,7 +239,7 @@ async function main() {
     await waitNonUniform(page, 'waveform-canvas');
 
     // The Effects rack: the module card with the categorised registry and the
-    // pipeline tools below it.
+    // Mix row below it.
     console.log('Effects rack...');
     await openModuleCard(page, 'Effects');
     await page.waitForSelector('[data-testid="effects-panel"]', { timeout: 5000 });
@@ -248,12 +248,28 @@ async function main() {
       rowSelectors: ['[data-testid="effects-panel"] li'],
     });
 
-    // Two representative effect dialogs, with their Preview/Apply row. A row
-    // is double-clicked exactly as a user commits to one. A modal caps itself
-    // at 86vh and the Parametric EQ's three band blocks outgrow even the tall
-    // pin's version of that — so the dialogs alone borrow the display's whole
-    // height, and the fits-check below keeps this honest: a dialog whose
-    // Apply row still fell below the fold is a failed capture, not a crop.
+    // Two representative effect cards, opened with one click as a user does
+    // (item 6: an effect is a card in the module column, between the strip and
+    // the module card, not a modal).
+    //
+    // The column's bounded height (`top 68` / `bottom 58`) is SHARED: the
+    // effect card and the module card beneath it are both `flex: 0 1 auto`
+    // with `min-h-0`, so two overflowing cards shrink PROPORTIONALLY to their
+    // natural heights. `openEffect` forces the module card to Effects (N16),
+    // and that card is the effects registry — over 1200px of rows. The
+    // Parametric EQ's own controls are 1616px (the height this scene's modal
+    // capture used to be, and 348 wide is no shorter than 460 was: no readout
+    // spans, no label wraps), so sharing hands the card barely two thirds of
+    // what it needs and Apply scrolls out of the shell's `overflow-y-auto`
+    // body. The module card is not in this crop — the clip is `effect-host`
+    // alone — and the effect card outlives it by design, so it is closed
+    // before each capture and the card gets the whole column.
+    //
+    // The cards then borrow the display's whole height, and the fits-check
+    // below keeps this honest: a card whose Apply row still fell below the
+    // fold is a failed capture, not a crop. It reports the heights it MEASURED
+    // rather than guessing a cap — the card deliberately has no `max-height`,
+    // so a display too short for the whole card is the only thing left to say.
     await pinWindowGeometry(app, {
       width: SMOKE_WINDOW.width,
       height: geo.workArea.height - 24,
@@ -263,27 +279,51 @@ async function main() {
       ['Parametric EQ', 'effect-parametric-eq.png'],
       ['Reverb', 'effect-reverb.png'],
     ]) {
-      console.log(`Effect dialog: ${label}...`);
-      await page.dblclick(`[data-testid="effects-list"] button:text-is("${label}")`);
-      await page.waitForSelector('[data-testid="dialog-overlay"] [role="dialog"]', {
-        timeout: 5000,
-      });
+      console.log(`Effect card: ${label}...`);
+      // The rows live in the Effects card, so it has to be open to click one —
+      // and `openEffect` re-forces it open anyway. Closing it is the step
+      // after the card mounts, never before.
+      await openModuleCard(page, 'Effects');
+      await page.waitForSelector('[data-testid="effects-list"]', { timeout: 5000 });
+      await page.click(`[data-testid="effects-list"] button:text-is("${label}")`);
+      await page.waitForSelector('[data-testid="effect-host"]', { timeout: 5000 });
+      await closeModuleCard(page);
       await sleep(SETTLE_MS); // dc-rise
-      // The dialog's whole point in the gallery is its Preview/Apply row — a
+      // The card's whole point in the gallery is its Preview/Apply row — a
       // capture that scrolled it below the fold is a defect, not a crop.
-      const fits = await page.evaluate(() => {
-        const d = document.querySelector('[data-testid="dialog-overlay"] [role="dialog"]');
+      const fit = await page.evaluate(() => {
+        const d = document.querySelector('[data-testid="effect-host"]');
         const apply = [...d.querySelectorAll('button')].find((b) => b.textContent.trim() === 'Apply');
-        if (!apply) return false;
+        if (!apply) return null;
+        // The hosted shell is a fixed header plus a scrolled body
+        // (`DialogShell`), and the body is where a squeezed card hides Apply.
+        const body = document.querySelector(
+          '[data-testid="effect-host"] [data-testid="hosted-tool"]'
+        )?.children[1];
         const db = d.getBoundingClientRect();
         const ab = apply.getBoundingClientRect();
-        return ab.bottom <= db.bottom + 1;
+        return {
+          fits: ab.bottom <= db.bottom + 1,
+          below: Math.round(ab.bottom - db.bottom),
+          card: Math.round(db.height),
+          bodyVisible: body ? body.clientHeight : -1,
+          bodyContent: body ? body.scrollHeight : -1,
+          viewport: window.innerHeight,
+        };
       });
-      if (!fits) throw new Error(`${label}: the Apply row is below the dialog's fold at this window height`);
-      await shoot(page, file, '[data-testid="dialog-overlay"] [role="dialog"]');
-      await page.click('[data-testid="dialog-overlay"] [role="dialog"] button:text-is("Cancel")');
+      if (fit === null) throw new Error(`${label}: the card renders no Apply button`);
+      if (!fit.fits) {
+        throw new Error(
+          `${label}: the Apply row is ${fit.below}px below the card's fold — card ${fit.card}px ` +
+            `in a ${fit.viewport}px viewport, its body showing ${fit.bodyVisible}px of ` +
+            `${fit.bodyContent}px. The column (top 68 / bottom 58) is the only cap the card ` +
+            `has; this scene needs a display tall enough to hold the whole card.`
+        );
+      }
+      await shoot(page, file, '[data-testid="effect-host"]');
+      await page.click('[data-testid="effect-host"] [data-testid="hosted-tool-close"]');
       await page.waitForFunction(
-        () => document.querySelector('[data-testid="dialog-overlay"]') === null,
+        () => document.querySelector('[data-testid="effect-host"]') === null,
         null,
         { timeout: 5000 }
       );

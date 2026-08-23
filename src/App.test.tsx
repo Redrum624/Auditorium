@@ -537,7 +537,7 @@ describe('G4 module column, U1 module strip (the rail rotated horizontal)', () =
     expect(screen.queryByTestId('effects-list')).not.toBeInTheDocument();
   });
 
-  it('double-clicking an effect in the Effects card still routes through the dialog bus (disabled without a doc)', () => {
+  it('an effect row in the Effects card is disabled without a document', () => {
     render(<App />);
     const rail = screen.getByTestId('sidebar-tabs');
     fireEvent.click(within(rail).getByRole('button', { name: 'Effects' }));
