@@ -883,19 +883,22 @@ async function sweepSelects(page, where) {
   return found.length;
 }
 
-/** Waits for the pill's Split button to reach `want` for `.disabled`, and says
- * whether it got there. Item 10's enablement is driven by SESSION-store writes
- * that reach React outside any browser event, so reading `.disabled` on the
- * very next round trip races the re-render in BOTH directions — a stale read
- * would report the previous answer and pass or fail for the wrong reason. */
-async function splitDisabledReaches(page, want) {
+/** Waits for the pill button labelled `label` to reach `want` for `.disabled`,
+ * and says whether it got there. The multitrack enablement of Split (item 10)
+ * and of Merge (D6) is driven by SESSION-store writes that reach React outside
+ * any browser event, so reading `.disabled` on the very next round trip races
+ * the re-render in BOTH directions — a stale read would report the previous
+ * answer and pass or fail for the wrong reason. */
+async function pillDisabledReaches(page, label, want) {
   return page
     .waitForFunction(
-      (expected) => {
-        const b = document.querySelector('[data-testid="edit-pill"] button[aria-label="Split"]');
+      ({ label: name, expected }) => {
+        const b = document.querySelector(
+          `[data-testid="edit-pill"] button[aria-label="${name}"]`
+        );
         return b !== null && (b.disabled === true) === expected;
       },
-      want,
+      { label, expected: want },
       { timeout: 8000 }
     )
     .then(() => true)
@@ -2606,6 +2609,7 @@ async function main() {
             editButtons: [...document.querySelectorAll('[data-testid="edit-pill"] button')].map((b) => ({
               label: b.getAttribute('aria-label'),
               disabled: b.disabled === true,
+              title: b.getAttribute('title'),
             })),
           }),
           roots
@@ -2636,6 +2640,16 @@ async function main() {
         // state is item 10's, not asserted here).
         const split = state.editButtons.find((b) => b.label === 'Split');
         assert(split !== undefined, `Split is present in the ${view} view`);
+        // D6: Merge Clips sits directly after Split — the verb it undoes, read
+        // beside it. One static list draws the pill, so the order is the same
+        // nine in every view.
+        assert(
+          state.editButtons.map((b) => b.label).join(',') ===
+            'Split,Merge,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
+          `the ${view} view's pill carries the nine verbs with Merge second (${state.editButtons
+            .map((b) => b.label)
+            .join(',')})`
+        );
         if (view !== 'multitrack') {
           assert(
             split.disabled === false,
@@ -2684,17 +2698,27 @@ async function main() {
             (sample) => window.__test.setMtCursor(sample),
             target.startSample + Math.floor(target.lengthSample / 2)
           );
-          const splitLive = await splitDisabledReaches(page, false);
+          const splitLive = await pillDisabledReaches(page, 'Split', false);
           assert(
             splitLive === true,
             'Split is LIVE in the multitrack view with a selected clip under the cursor'
           );
 
           await page.evaluate((sample) => window.__test.setMtCursor(sample), target.startSample);
-          const splitAtEdge = await splitDisabledReaches(page, true);
+          const splitAtEdge = await pillDisabledReaches(page, 'Split', true);
           assert(
             splitAtEdge === true,
             'Split greys with the cursor on a clip edge — there is nothing to cut there'
+          );
+
+          // D1: a merge needs two or more selected clips on one track, and the
+          // clip above is alone on its own. Merge therefore greys here for a
+          // reason the cursor cannot change — the same selection that lights
+          // Split leaves it dark, which is why this pair is read together.
+          const mergeAlone = await pillDisabledReaches(page, 'Merge', true);
+          assert(
+            mergeAlone === true,
+            'Merge greys in the multitrack view with a single clip selected — one clip is not a merge'
           );
 
           await page.evaluate((sample) => window.__test.setMtCursor(sample), saved.cursor);
@@ -2706,6 +2730,19 @@ async function main() {
           assert(
             copy !== undefined,
             `Copy is present in the ${view} view (its enablement follows the selection)`
+          );
+          // The M7 rule pointing the other way: Merge is the one first-group
+          // button the EDITORS cannot run, so it is greyed here with a tooltip
+          // that names Multitrack rather than left silently dead.
+          const merge = state.editButtons.find((b) => b.label === 'Merge');
+          assert(
+            merge !== undefined && merge.disabled === true,
+            `Merge is greyed in the ${view} view — it joins clips, which this view has none of`
+          );
+          assert(
+            typeof merge.title === 'string' &&
+              merge.title.startsWith('Merge Clips — not available'),
+            `and its tooltip says so, naming the view that can (${JSON.stringify(merge.title)})`
           );
         }
 
