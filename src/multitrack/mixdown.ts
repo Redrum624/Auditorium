@@ -59,7 +59,14 @@ export interface MixdownResult {
   peakBeforeClamp: number;
 }
 
-function dbToLinear(db: number): number {
+/**
+ * THE dB-to-linear conversion, `10^(dB/20)`. Exported for the same reason the
+ * pan laws below are: `mergeClips.ts` bakes a clip's `gainDb` into new audio
+ * and must apply the number this renderer applies, not a second copy of the
+ * formula that could drift from it. Additive export; every internal caller is
+ * unchanged.
+ */
+export function dbToLinear(db: number): number {
   return Math.pow(10, db / 20);
 }
 
