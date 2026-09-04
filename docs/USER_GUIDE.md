@@ -234,17 +234,28 @@ leave every marker where it was.
 
 ### The edit toolbar
 
-A pill of eight icon buttons floats just above the status pill, on the
+A pill of nine icon buttons floats just above the status pill, on the
 waveform's axis, whenever **at least one file is open** — in the Waveform,
 Spectral and Multitrack views alike. It is only ever a shortcut to commands
 you already have: nothing here does anything the menu and the keyboard do not.
 
-`Split · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
+`Split · Merge · Copy · Paste · Delete` │ `Trim · Silence` │ `Undo · Redo`
 
 - **Split** is `Ctrl+K` — a marker at the cursor, or one at each edge of the
   selection. In Waveform and Spectral it needs only an open file, so it is the
   one button in the first group that stays lit with nothing selected; in
   Multitrack it needs a selected clip (see below).
+- **Merge** is Split's inverse and has **no keyboard shortcut** — it is this
+  button and **Edit → Merge Clips**, nothing else. It is the one first-group
+  button that works *only* in Multitrack: on every track that has two or more
+  clips selected, those clips become a single clip running from the earliest
+  start to the latest end, with silence wherever no member covered the span.
+  The audio is rendered into a **new `Merge N` file** that appears in the
+  Files panel and becomes the active document, so each member's clip gain and
+  its fades are baked in — the merged clip itself shows gain 0 and no fades.
+  A track with only one clip selected is left alone, so with a single clip
+  selected the button stays grey (see *Merging clips*). In Waveform and
+  Spectral the tooltip says which view can do it.
 - **Trim** keeps the selected region and drops everything else;
   **Silence** zeroes the selected region in place, leaving the length alone.
   Both are undoable History steps like any other edit, and both are also in
@@ -255,8 +266,10 @@ you already have: nothing here does anything the menu and the keyboard do not.
   clipboard, Paste is greyed; Undo and Redo follow whichever history is
   active — the **document's** in Waveform and Spectral, the **session's** in
   Multitrack.
-- In the **Multitrack** view, **Split** and **Delete** work: Split cuts clips
-  at the cursor (see *Splitting clips*) and Delete removes the selected clips.
+- In the **Multitrack** view, **Split**, **Merge** and **Delete** work: Split
+  cuts clips at the cursor (see *Splitting clips*), Merge joins the selected
+  clips of a track into one (see *Merging clips*), and Delete removes the
+  selected clips.
   Copy / Paste / Trim / Silence are greyed there, and their keyboard shortcuts
   do nothing either — Copy and Paste because there is no clip clipboard yet,
   Trim and Silence because that view has no way to select a stretch of time.
@@ -1654,6 +1667,41 @@ The whole act is **one undo step**, however many clips it cut. Afterwards the
 right-hand pieces of the clips you had selected join the selection (the
 left-hand pieces keep the original clips' identity), so a second `Ctrl+K`
 further along the timeline acts on the same tracks.
+
+### Merging clips
+
+**Edit → Merge Clips**, or the edit pill's **Merge** button, does the opposite:
+it takes the clips you have selected on a track and gives you **one** clip in
+their place. There is no keyboard shortcut, and the command is greyed outside
+the multitrack view.
+
+Selection decides everything. Every track that has **two or more** of its clips
+selected is merged, all of them in the same act; a track with only one selected
+clip is left exactly as it was, which is why the button is grey when a single
+clip is selected. The new clip runs from the **earliest start** to the **latest
+end** of its members, and every part of that span no member covered comes back
+as **silence** — merging two clips with a gap between them gives you one clip
+with the gap still audible as nothing, not a clip with the gap closed up.
+
+The audio is rendered, not referenced. Each merge writes a new file named
+`Merge N` into the Files panel — the same kind of computed document Mix Down
+and the stem separator produce — and makes it the active one. What goes into it
+is exactly what you were hearing from those clips: each member's **clip gain**
+and its **fades** (including a crossfade armed between two members) are
+rendered into the samples. What stays outside is everything that belongs to the
+**track** rather than the clip — volume, pan, mute, solo and automation still
+apply to the merged clip as they did to its members. So the merged clip itself
+reads gain 0 dB with no fades in the Properties panel: those are inside the
+audio now, and re-editing them means undoing the merge.
+
+Clips you did **not** select are not touched. One sitting inside the merged
+span is neither absorbed nor moved — the merged clip simply overlaps it, the
+same way a clip dropped on top of another does.
+
+The whole thing is **one undo step** however many tracks merged, and undo puts
+the original clips back exactly as they were. It does not remove the `Merge N`
+file, though: like every computed document it stays open in the Files panel,
+and it will ask before closing because its audio has never been on disk.
 
 ### Undo in the multitrack (session history)
 

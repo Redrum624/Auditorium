@@ -141,14 +141,14 @@ over the audio.
 
 - **Waveform Editor** — per-sample amplitude view with zoom, scroll, selection, cursor and playhead.
 - **Spectral Frequency Display** — off-main-thread spectrogram, log or linear axis, HiDPI-rendered.
-- **Multitrack Editor** — tracks and clips with volume/pan/mute/solo/arm, non-destructive fades and crossfades, multi-clip selection with cross-track group drag, ripple delete, per-track automation envelopes, and one-step-per-gesture session undo.
+- **Multitrack Editor** — tracks and clips with volume/pan/mute/solo/arm, non-destructive fades and crossfades, multi-clip selection with cross-track group drag, ripple delete, merge selected clips into one (silence in the gaps), per-track automation envelopes, and one-step-per-gesture session undo.
 - **Spatial Panel** — places a track's sound around the listener (azimuth/elevation/distance, honest stereo projection — not binaural), writing automation keys on release.
 - **Recorder** — input-device selection, channel/rate choice, live level meter; multitrack punch-in on armed tracks.
 - **Effects Rack** — categorized effects, each opening on one click as a card in the module column; the Pipeline tools have their own module.
 - **Pipeline Module & Menu** — the ten long-running tools in three groups (Tempo & Timing, Voice, Analysis); each opens as a wide card in the module column.
 - **Files / History / Markers / Properties Panels** — open documents, browsable undo history, the marker list, and read-only facts about the active document or clip.
 - **Module Strip** — the icon strip over the module column; the bar and the open module are always the same width.
-- **Edit Toolbar** — floating Split/Copy/Paste/Delete, Trim/Silence, Undo/Redo pill, greyed by the same rules as the menu (Split at Cursor is `Ctrl+K`; Cut keeps `Ctrl+X` in the Edit menu).
+- **Edit Toolbar** — floating Split/Merge/Copy/Paste/Delete, Trim/Silence, Undo/Redo pill, greyed by the same rules as the menu (Split at Cursor is `Ctrl+K`; Merge Clips has no key and lights only in the Multitrack view; Cut keeps `Ctrl+X` in the Edit menu).
 - **Transport & Level Meters** — play/stop/record/loop, view toggle, zoom cluster, time readout and output meters, centred on the waveform rather than the window.
 - **Tempo Readout & Beat Grid** — detected BPM with confidence everywhere it matters, and the tracked beats drawn under all three editors (dimmed and dashed when stale rather than presented as fact).
 - **Match Tempo Tool** — one ratio or a per-beat tempo map from the confirmed grid; measured on accelerandi: worst interior beat 526 ms → 4.6 ms at 0.83 BPM/s drift.
@@ -165,7 +165,7 @@ over the audio.
 
 **Editing & formats**
 
-- Sample-accurate copy/paste/trim/silence, a Delete and a `Ctrl+X` cut that keep the length (the span is zero-filled, markers stay put; `Shift+Del` ripples), and **Split at Cursor** (`Ctrl+K`): every marker is a segment boundary and a double-click selects the segment under the pointer — with per-document undo (50 steps / 800 MB budget) and full session undo in the multitrack, where Split cuts every clip under the cursor on the selected tracks in one step.
+- Sample-accurate copy/paste/trim/silence, a Delete and a `Ctrl+X` cut that keep the length (the span is zero-filled, markers stay put; `Shift+Del` ripples), and **Split at Cursor** (`Ctrl+K`): every marker is a segment boundary and a double-click selects the segment under the pointer — with per-document undo (50 steps / 800 MB budget) and full session undo in the multitrack, where Split cuts every clip under the cursor on the selected tracks in one step. **Merge Clips** is Split's inverse there: on every track with two or more clips selected they become one clip spanning from the first start to the last end, silence in the gaps, over a new `Merge N` file that has the members' gain and fades rendered into it — one undo step for the whole gesture, no shortcut, Multitrack only.
 - Open WAV, MP3, FLAC and OGG (Opus) with native-rate import across container variants (including surround WAV with selectable ITU-R downmix); **Save writes the project** (`.audm`, atomic) in every view and never overwrites an audio file — audio leaves through Export.
 - Export WAV 16/24/32-float, FLAC, MP3 CBR, OGG Opus — the active document in the editors, the session mixdown (muted tracks out, automation and fades in) in the multitrack.
 - Markers persist sample-accurately in every container (WAV cue, ID3 chapters, FLAC/OGG chapter tags) and survive destructive edits by remapping.
