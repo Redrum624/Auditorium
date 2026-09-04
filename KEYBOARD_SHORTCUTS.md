@@ -61,6 +61,11 @@ too — see the table above.) `Ctrl+K` is the one view-ROUTED edit key: it drops
 a marker in the editors and splits clips at the edit cursor in the multitrack,
 where it is greyed with nothing selected.
 
+**Merge Clips** — Split's inverse — has **no key at all**, and no row above
+because there is nothing to put in one. You reach it through the edit pill's
+**Merge** button or **Edit → Merge Clips**; both are multitrack-only and both
+stay greyed until some track has two or more of its clips selected.
+
 The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 
 | Gesture | What it does |

@@ -84,8 +84,8 @@ describe('EditToolbar — the E2 visibility rule', () => {
   });
 });
 
-describe('EditToolbar — the eight icon buttons', () => {
-  it('renders exactly the eight commands, in the mockup order, icons only', () => {
+describe('EditToolbar — the nine icon buttons', () => {
+  it('renders exactly the nine commands, in the mockup order, icons only', () => {
     lastDocId = addDoc().id;
     const { container } = render(<EditToolbar />);
     const buttons = Array.from(
@@ -93,6 +93,7 @@ describe('EditToolbar — the eight icon buttons', () => {
     );
     expect(buttons.map((b) => b.getAttribute('aria-label'))).toEqual([
       'Split', // item 8 (M1): the Scissors button is Split at Cursor
+      'Merge', // D6: Split's inverse, directly after it
       'Copy',
       'Paste',
       'Delete',
@@ -101,7 +102,7 @@ describe('EditToolbar — the eight icon buttons', () => {
       'Undo',
       'Redo',
     ]);
-    expect(EDIT_TOOLBAR_ITEMS).toHaveLength(8);
+    expect(EDIT_TOOLBAR_ITEMS).toHaveLength(9);
     // Icons only: every button's visible content is an SVG glyph, no text.
     for (const b of buttons) {
       expect(b.querySelector('svg')).not.toBeNull();
@@ -285,6 +286,63 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
     await click('Split');
 
     expect(mockRunCommand).toHaveBeenCalledWith('edit.split');
+  });
+
+  /** Two clips on one track — `[1000, 3000)` and `[5000, 8000)` — both
+   * selected: the smallest selection `multitrack.mergeClips` accepts. */
+  function seedTwoSelectedClips(): string[] {
+    const ids: string[] = [];
+    act(() => {
+      useSessionStore.getState().addTrack();
+      const trackId = useSessionStore.getState().session.tracks[0].id;
+      for (const [startSample, lengthSample] of [
+        [1000, 2000],
+        [5000, 3000],
+      ]) {
+        const clip = createClip({ documentId: 'x', startSample, offsetSample: 0, lengthSample });
+        useSessionStore.getState().addClip(trackId, clip);
+        ids.push(clip.id);
+      }
+      useSessionStore.getState().setSelectedClips(ids);
+    });
+    return ids;
+  }
+
+  // D6 — Merge is the M7 rule pointing the other way: it exists ONLY in the
+  // Multitrack view, so the tooltip that names the view that CAN do it is the
+  // EDITOR one. Its predicate reads the same session store Split's does, which
+  // is why the last act below is a session write with no app-store touch after
+  // it: without this pill's session subscriptions the button would grey one
+  // unrelated render late.
+  it('4e greys Merge in the editors, lights it for two clips on one track, and greys it again at one', () => {
+    lastDocId = addDoc().id;
+    render(<EditToolbar />);
+    expect(btn('Merge')).toBeDisabled();
+    expect(btn('Merge').title).toContain('not available in the Waveform and Spectral views');
+    expect(btn('Merge').title).toContain('Switch to Multitrack');
+
+    act(() => useAppStore.getState().setView('multitrack'));
+    expect(btn('Merge')).toBeDisabled(); // in the right view, nothing selected
+
+    const ids = seedTwoSelectedClips();
+    expect(btn('Merge')).toBeEnabled();
+    expect(btn('Merge').title).toContain('joins the selected clips');
+    expect(btn('Merge').title).not.toContain('not available');
+
+    act(() => useSessionStore.getState().setSelectedClip(ids[0]));
+    expect(btn('Merge')).toBeDisabled();
+  });
+
+  it('4f sends a Merge click through multitrack.mergeClips', async () => {
+    lastDocId = addDoc().id;
+    act(() => useAppStore.getState().setView('multitrack'));
+    render(<EditToolbar />);
+    seedTwoSelectedClips();
+    expect(btn('Merge')).toBeEnabled();
+
+    await click('Merge');
+
+    expect(mockRunCommand).toHaveBeenCalledWith('multitrack.mergeClips');
   });
 
   it('routes Delete to the clip selection in Multitrack (both ways)', () => {

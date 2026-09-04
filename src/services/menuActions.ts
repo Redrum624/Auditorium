@@ -17,6 +17,7 @@ import { resolveRegion } from './selectionRegion'; // lot E
 import { editorLaneWidth } from './editorViewport'; // lot E
 import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { mixdownSession } from '../multitrack/mixdown';
+import { bakeMergedClip, commitMergedClips, mergeTargets } from '../multitrack/mergeClips';
 import { canRecord, transportPlayPause, transportRecord, transportStop } from './transportService';
 import {
   cutSelection,
@@ -154,6 +155,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       // Item 8 (M1): Split at Cursor is the row before Cut — the verb that
       // makes the segments Ctrl+X then cuts.
       'edit.split',
+      // D6: Split's inverse, the row directly after it — the verb that cuts a
+      // clip in two and the verb that makes two clips one read together.
+      'multitrack.mergeClips',
       'edit.cut',
       'edit.copy',
       'edit.paste',
@@ -1154,10 +1158,60 @@ export function splitSelectedTracksAtMtCursor(): string[] {
 }
 // ---- end lot D ----
 
+// ---- merge clips ----
+/** `multitrack.mergeClips`' predicate (D1): the clip selection holds TWO OR
+ * MORE clips on at least one track. Asks `mergeTargets` — the same question the
+ * verb itself answers — so the row greys for precisely the selections the merge
+ * would refuse, and reads the session store directly, exactly as
+ * `canSplitAtMtCursor` above does. */
+export function canMergeSelectedClips(): boolean {
+  const { session, selectedClipIds } = useSessionStore.getState();
+  return mergeTargets(session, selectedClipIds).length > 0;
+}
+
+/**
+ * D2/D7 — the merge: one baked document per merged track, then ONE session
+ * gesture. Returns the merged clip ids (`[]` when nothing qualifies).
+ *
+ * The document half is `mixdownToNewFile`'s pattern verbatim — `createDocument`
+ * + `addDocument`, so the audio is minted OUTSIDE the undo gesture (a document
+ * is never an undo entry here) and the last one added becomes active, which is
+ * what every computed document in this app does (D7). The bake is handed the
+ * SESSION rate, not the members' document rate: the merged clip lives on the
+ * timeline, and `readClipSlice` is what reconciles a mixed-rate member.
+ *
+ * `commitMergedClips` owns the session write and the selection afterwards; this
+ * function never touches the session store's clip actions itself.
+ */
+export function mergeSelectedClips(): string[] {
+  const { session, selectedClipIds } = useSessionStore.getState();
+  const targets = mergeTargets(session, selectedClipIds);
+  if (targets.length === 0) return [];
+
+  const docs = new Map(useAppStore.getState().documents.map((d) => [d.id, d]));
+  const entries = targets.map((target) => {
+    // `mergeTargets` derived every `trackId` from this same session, so the
+    // lookup cannot miss.
+    const track = session.tracks.find((t) => t.id === target.trackId)!;
+    const { channels, sampleRate } = bakeMergedClip(track, target, docs, session.sampleRate);
+    // D2 — `Merge N`, numbered off its own counter like `Mixdown N`. No
+    // `filePath`, so `createDocument` stamps `neverSaved` itself (S4's default);
+    // passing the flag would restate a rule that already holds.
+    const n = nextId('merge').split('-')[1];
+    const doc = createDocument({ name: `Merge ${n}`, sampleRate, channels });
+    useAppStore.getState().addDocument(doc);
+    return { target, documentId: doc.id };
+  });
+
+  return commitMergedClips(entries);
+}
+// ---- end merge clips ----
+
 /** Registers the Task 22 multitrack commands: the real `view.multitrack`
  * toggle (always available — the multitrack view works with no open document),
- * `multitrack.addTrack`, `multitrack.insertDoc`, and `multitrack.mixdown`. The
- * three action commands are enabled only while the multitrack view is active. */
+ * `multitrack.addTrack`, `multitrack.insertDoc`, `multitrack.mixdown` and
+ * `multitrack.mergeClips`. The action commands are enabled only while the
+ * multitrack view is active. */
 function registerMultitrackCommands(): void {
   registerCommands([
     {
@@ -1183,6 +1237,19 @@ function registerMultitrackCommands(): void {
       label: 'Mix Down to New File',
       enabled: (s) => s.view === 'multitrack' && sessionHasClips(),
       run: async () => mixdownToNewFile(),
+    },
+    {
+      // D6 — Split's inverse, and the second command here that mints a
+      // document. No shortcut: nothing in `SHORTCUT_TABLE` claims a combo for
+      // it, and this repo has already paid for menu labels naming keys that do
+      // nothing. The predicate is the verb's own question (D1), so the row
+      // greys for exactly the selections `mergeSelectedClips` would refuse.
+      id: 'multitrack.mergeClips',
+      label: 'Merge Clips',
+      enabled: (s) => s.view === 'multitrack' && canMergeSelectedClips(),
+      run: async () => {
+        mergeSelectedClips();
+      },
     },
     // K1 R1 — the two halves of clip-edge navigation. Both are the same
     // two-line adapter over `clipEdges`: read the session's boundaries, ask

@@ -43,6 +43,7 @@ import {
   trimToSelection,
 } from './editOps';
 import { getClipboard } from './clipboard';
+import { mergeSelectedClips as runMergeClips } from './menuActions';
 import { getSpectralScale, toggleSpectralScale, type SpectralScale } from './spectralScale';
 import { getBeatGrid, isDownbeat } from './beatGrid';
 import { isBeatGridVisible, toggleBeatGrid } from './beatGridDisplay';
@@ -220,6 +221,13 @@ export interface TestApi {
    * own rules apply (dangling ids dropped, duplicates collapsed), and echoes
    * what was stored. */
   selectClips(ids: string[]): { selectedClipId: string | null; selectedClipIds: string[] };
+  /** Merge Clips (`multitrack.mergeClips`) on the current clip selection,
+   * through the menu action itself — so the harness sees the SAME baked
+   * document and the same single undo entry the menu row writes. Reports the
+   * merged clip ids (one per merged track, `[]` when nothing qualifies) and
+   * `documents.length` afterwards, since the merge mints one document per
+   * merged track. */
+  mergeSelectedClips(): { clipIds: string[]; docCount: number };
   mixdownSession(): { name: string; length: number; sampleRate: number; rms: number } | null;
   // --- v1.1 flows -------------------------------------------------------------
   pasteResampleFlow(): {
@@ -1358,6 +1366,15 @@ export function installTestHooks(): void {
       useSessionStore.getState().setSelectedClips(ids);
       const { selectedClipId, selectedClipIds } = useSessionStore.getState();
       return { selectedClipId, selectedClipIds: [...selectedClipIds] };
+    },
+
+    // The menu action verbatim (not a re-implementation): one `Merge N`
+    // document per merged track plus one undo entry, so the smoke asserts the
+    // shipped path. `docCount` is read AFTER, which is how the harness sees
+    // the minting without being handed the documents themselves.
+    mergeSelectedClips: () => {
+      const clipIds = runMergeClips();
+      return { clipIds, docCount: useAppStore.getState().documents.length };
     },
 
     // Renders the session offline, adds the resulting stereo doc, switches to

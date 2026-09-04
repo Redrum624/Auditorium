@@ -2199,3 +2199,71 @@ closed for effects at the card (`EffectDialog`'s `shouldCancel`); the pipeline
 services that commit after their own worker pass (`vocalChain.ts`,
 `alignLyricsService.ts`) want the same guard, and that is their change, not
 the card's.
+
+## Merge Clips bakes the members into a new document
+
+**Area:** Merge Clips (`src/multitrack/mergeClips.ts`, `src/services/menuActions.ts`
+`mergeSelectedClips` / `canMergeSelectedClips`, the edit pill's **Merge** button)
+
+**Current behavior:** a merge is a **render**, not a re-labelling. Every track
+with two or more selected clips gets one new clip spanning
+`[min(start), max(start + length))`, and the audio behind it is a new
+`Merge N` document — `createDocument` + `addDocument`, the same computed
+document Mix Down and the stem separator produce. Five consequences follow from
+that, all of them by design and all of them visible to the user:
+
+- **Clip gain and fades are inside the audio now.** Each member is written
+  through the renderer's own path — `readClipSlice` × `dbToLinear(gainDb)` ×
+  the resolved fade gain — so the merged clip is created at gain 0 dB with no
+  fade keys at all. The Properties panel therefore shows a clip that looks
+  untouched over audio that is anything but, and a member's -6 dB or its
+  fade-in can no longer be dialled back: the only way to reach them again is
+  to undo the merge.
+- **Undo restores the clips; it does not un-mint the document.** The document
+  is created outside the session gesture (the Mixdown pattern), so one
+  `Ctrl+Z` puts every member back with its original id while `Merge N` stays
+  open in the Files panel. It is `neverSaved`, so closing it asks first — an
+  undone merge leaves a file behind that you have to dismiss by hand. If the
+  user closes `Merge N` anyway and then REDOES the merge, the merged clip
+  comes back referencing a document that no longer exists: it plays silent
+  and is dropped from the next project save. `Ctrl+Z` recovers the members
+  again.
+- **A mono member in a stereo merge lands at -3.01 dB per side.** The merged
+  document is mono only when *every* member's document is mono; otherwise a
+  mono member is written into both channels scaled by `Math.SQRT1_2`. That is
+  the level the mono pan law gives a **centred** clip (`monoPanGains(0)` =
+  `cos(π/4)`), so a mono clip on a centred track merges at exactly the level it
+  played at. A hard-panned track does not: pan is a track property and is never
+  baked, so after the merge that track pans a **stereo** document and switches
+  laws — `stereoBalanceGains(-1)` passes the left channel at 1.0 where
+  `monoPanGains(-1)` gave the mono source 1.0 — and the member comes back up to
+  3.01 dB quieter than it played. The same law switch also shifts the
+  **stereo image** at any non-centre pan, not only at the hard extreme: a mono
+  clip panned to +0.5 renders at `monoPanGains(0.5)` ≈ {0.383, 0.924} (L/R)
+  before the merge and at `Math.SQRT1_2 × stereoBalanceGains(0.5)` ≈ {0.500,
+  0.707} after it — the image audibly narrows even though the pan value
+  itself never changed. This is not limited to a static pan: `autoPanGainsAt`
+  and `autoSpatialGainsAt` both pick their gain law from the same `mono` flag,
+  so an automated pan or spatial sweep through a merged track shifts the same
+  way.
+- **A crossfade with a clip outside the selection is torn in half.** Fade specs
+  are resolved over the whole track — the renderer's own view — so the member's
+  side of a crossfade with an unselected neighbour is baked into the merged
+  audio as a fade. Removing that member then disarms the neighbour's facing
+  fade, and the neighbour is left playing at full level under the merged clip's
+  baked fade. The overlap stops being equal-power; select both sides of a
+  crossfade, or expect to re-arm it afterwards.
+- **Unselected clips inside the span are overlapped, not merged.** A clip that
+  sits inside `[min(start), max(start + length))` but was not selected is
+  neither absorbed nor pushed aside. The merged clip simply lands on top of it,
+  exactly as a drop would — overlap is first-class in this session model — so
+  both are heard.
+
+**Intended behavior:** unchanged by design for all five. The whole point of the
+verb is to turn several clips into one piece of audio, which means committing
+the per-clip level and shape that made them sound the way they did; a merge
+that kept gain and fades editable would be a group, not a merge. The mono
+scaling is a deliberate choice of *which* level to preserve (centre) rather
+than a rounding error, and the crossfade and overlap cases follow from merging
+a **selection** rather than a region — widening either would silently change
+clips the user did not choose.

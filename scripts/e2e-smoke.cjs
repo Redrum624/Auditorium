@@ -2348,8 +2348,9 @@ async function main() {
     );
     console.log(`  edit pill buttons: ${JSON.stringify(editButtons)}`);
     assert(
-      editButtons.map((b) => b.label).join(',') === 'Split,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
-      `the edit pill carries the eight commands in the mockup's order (actual ${editButtons.map((b) => b.label).join(',')})`
+      editButtons.map((b) => b.label).join(',') ===
+        'Split,Merge,Copy,Paste,Delete,Trim,Silence,Undo,Redo',
+      `the edit pill carries the nine commands in the mockup's order (actual ${editButtons.map((b) => b.label).join(',')})`
     );
     assert(
       editButtons.filter((b) => ['Copy', 'Delete', 'Trim', 'Silence'].includes(b.label))
@@ -4924,6 +4925,120 @@ async function main() {
     );
     console.log(
       '  split at cursor: the pill and Ctrl+K both cut the clip in place; one Ctrl+Z each'
+    );
+
+    // (e) Merge Clips — Split's inverse, through the pill.
+    //
+    // A merge is the one clip verb that writes BOTH stores in one act: it
+    // mints a document (`Merge N`, the Mixdown pattern — no undo entry of its
+    // own) and, in a single session gesture, adds the merged clip and removes
+    // its members. Nothing but the packaged app can show the two moving
+    // together: the core's unit tests hand `mergeClips` a plain session and
+    // never see the Files panel gain a file, and a component test renders the
+    // pill with no session under it, so the button it draws is enabled by a
+    // mock rather than by `canMergeSelectedClips`.
+    //
+    // The step splits the lone clip in two, merges the halves back, then puts
+    // everything back the way it found it — both undos, the `Merge N`
+    // document closed and the previous active file re-activated — because
+    // every later step reads the one-clip session (d) left.
+    console.log('Merge clips: pill, one minted document, one undo step...');
+    const mergeBefore = await page.evaluate(() => window.__test.getStateSummary());
+    const mergeWhole = (await page.evaluate(() => window.__test.getClipFadeState())).clips[0];
+    await page.evaluate((id) => window.__test.selectClips([id]), mergeWhole.clipId);
+    await page.evaluate(() => window.__test.setMtCursor(44100));
+    await page.keyboard.press('Control+k');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 2,
+      null,
+      { timeout: 10000 }
+    );
+    const mergeHalves = (await page.evaluate(() => window.__test.getClipFadeState())).clips;
+    assert(
+      mergeHalves.length === 2,
+      `two halves on one track to merge back (${JSON.stringify(mergeHalves)})`
+    );
+    await page.evaluate(
+      (ids) => window.__test.selectClips(ids),
+      mergeHalves.map((c) => c.clipId)
+    );
+    const mergeBtn = '[data-testid="edit-pill"] button[aria-label="Merge"]';
+    const mergeState = await page.evaluate((sel) => {
+      const b = document.querySelector(sel);
+      return { present: b !== null, disabled: b !== null && b.disabled === true };
+    }, mergeBtn);
+    assert(
+      mergeState.present && mergeState.disabled === false,
+      `the pill's Merge button is present and LIVE with two clips of one track selected (${JSON.stringify(mergeState)})`
+    );
+    await page.click(mergeBtn);
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 1,
+      null,
+      { timeout: 10000 }
+    );
+    const merged = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      merged.clips.length === 1 &&
+        merged.clips[0].startSample === 0 &&
+        merged.clips[0].lengthSample === 88200,
+      `the pill joined both halves into one clip over their whole span (${JSON.stringify(merged.clips)})`
+    );
+    assert(
+      mergeHalves.every((h) => h.clipId !== merged.clips[0].clipId),
+      `the merged clip is a NEW clip over the minted document, not either half re-used (${merged.clips[0].clipId} vs ${JSON.stringify(mergeHalves.map((h) => h.clipId))})`
+    );
+    const mergeAfter = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      mergeAfter.docCount === mergeBefore.docCount + 1,
+      `the merge minted exactly one document (docCount ${mergeBefore.docCount} -> ${mergeAfter.docCount})`
+    );
+    assert(
+      mergeAfter.activeName !== null && /^Merge \d+$/.test(mergeAfter.activeName),
+      `and it is the active one, named like every other computed document (activeName ${mergeAfter.activeName})`
+    );
+
+    await page.keyboard.press('Control+z');
+    const afterMergeZ = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterMergeZ.clips.length === 2,
+      `ONE Ctrl+Z undid the whole merge — the add and both removes (${afterMergeZ.clips.length} clips)`
+    );
+    await page.keyboard.press('Control+y');
+    const afterMergeY = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterMergeY.clips.length === 1,
+      `Ctrl+Y re-applied it (${afterMergeY.clips.length} clip)`
+    );
+
+    // Back to what this step found: undo the merge, then the split above it.
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+z');
+    const afterMergeUndone = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterMergeUndone.clips.length === 1 &&
+        afterMergeUndone.clips[0].startSample === 0 &&
+        afterMergeUndone.clips[0].lengthSample === 88200,
+      `merge and split both undone, the session exactly as (d) left it (${JSON.stringify(afterMergeUndone.clips)})`
+    );
+    // Undo restores the members but never un-mints the document, and it does
+    // not move the active one either (D7), so `Merge N` is still open and
+    // still active here. Closing it through the test-mode close path — the
+    // plain store action, no save prompt to block headless — is what returns
+    // the Files panel to its pre-step count.
+    await page.evaluate(() => window.__test.closeActive());
+    await page.evaluate(
+      (name) => window.__test.activateDocumentByName(name),
+      mergeBefore.activeName
+    );
+    const mergeRestored = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      mergeRestored.docCount === mergeBefore.docCount &&
+        mergeRestored.activeName === mergeBefore.activeName,
+      `the Files panel and the active document are back where the step found them (${JSON.stringify({ docCount: mergeRestored.docCount, activeName: mergeRestored.activeName })} vs ${JSON.stringify({ docCount: mergeBefore.docCount, activeName: mergeBefore.activeName })})`
+    );
+    console.log(
+      '  merge clips: the pill joined both halves over a new Merge document; one Ctrl+Z each, session restored'
     );
 
     // 22) F4b (v1.16) — transcription with speaker separation, end to end ---

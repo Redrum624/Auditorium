@@ -5,6 +5,24 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.37.0] - 2026-09-04
+
+One multitrack verb: Merge Clips.
+
+### Added
+
+- **Merge Clips in the Multitrack view.** **Edit → Merge Clips** or the pill's new
+  **Merge** button (no shortcut, directly after Split) turns the clips you have
+  selected on a track into one clip running from the earliest start to the latest
+  end, with silence in the gaps — every track with two or more selected clips at
+  once, in a single undo step. The audio is rendered into a new `Merge N` document
+  in the Files panel, the Mix Down pattern: each member's clip gain and fades
+  (an armed crossfade between two members included) are baked in, while track
+  volume, pan, mute, solo and automation stay on the track. Unselected clips
+  inside the span are overlapped, not absorbed. Affects:
+  `src/multitrack/mergeClips.ts` (new), `src/services/menuActions.ts`,
+  `src/components/Layout/EditToolbar.tsx`.
+
 ## [1.36.0] - 2026-08-23
 
 Ten items of editor feedback, in five lanes.

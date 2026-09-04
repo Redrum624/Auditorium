@@ -388,6 +388,7 @@ describe('getMenuSections', () => {
       'edit.undo',
       'edit.redo',
       'edit.split', // item 8 (M1): the row before Cut
+      'multitrack.mergeClips', // D6: Split's inverse, directly after it
       'edit.cut',
       'edit.copy',
       'edit.paste',

@@ -842,3 +842,70 @@ describe('lot F integration hooks', () => {
     expect(useAppStore.getState().activeDocumentId).toBe(a2.id);
   });
 });
+
+describe('merge clips hooks', () => {
+  /** The lot D fixture — one track carrying `[0, 1000)` and `[2000, 1000)` —
+   * pointed at a REAL document, so the merge has audio to bake rather than the
+   * silence a dangling `documentId` would contribute. The second clip reads
+   * from a non-zero offset, so a merge that ignored `offsetSample` would not
+   * quietly produce the same bytes. */
+  function seedClips(): { ids: string[]; doc: AudioDocument } {
+    const doc = createDocument({
+      name: 'ramp.wav',
+      sampleRate: 44100,
+      channels: [Float32Array.from({ length: 4410 }, (_, i) => (i % 71) / 71 + 0.05)],
+    });
+    useAppStore.getState().addDocument(doc);
+    const t = createTrack('Track 1');
+    t.clips = [
+      createClip({ documentId: doc.id, startSample: 0, offsetSample: 0, lengthSample: 1000 }),
+      createClip({ documentId: doc.id, startSample: 2000, offsetSample: 700, lengthSample: 1000 }),
+    ];
+    useSessionStore.setState({
+      session: { name: 'Merge Hook Fixture', sampleRate: 44100, tracks: [t] },
+      selectedClipId: null,
+      selectedClipIds: [],
+      mtCursorSample: 0,
+    });
+    return { ids: t.clips.map((c) => c.id), doc };
+  }
+
+  it('mergeSelectedClips joins the selected pair into one clip and mints one document', () => {
+    const t = api();
+    const { ids } = seedClips();
+    t.selectClips(ids);
+    const before = useAppStore.getState().documents.length;
+
+    const result = t.mergeSelectedClips();
+
+    expect(result.clipIds).toHaveLength(1);
+    expect(result.docCount).toBe(before + 1);
+    expectPlainJson(result);
+
+    const clips = useSessionStore.getState().session.tracks[0].clips;
+    expect(clips).toHaveLength(1);
+    expect(clips[0].id).toBe(result.clipIds[0]);
+    expect(clips[0].startSample).toBe(0);
+    expect(clips[0].lengthSample).toBe(3000); // [0, 1000) + [2000, 3000)
+
+    const merged = useAppStore.getState().documents[before];
+    expect(clips[0].documentId).toBe(merged.id);
+    expect(merged.name).toMatch(/^Merge \d+$/);
+    expect(merged.sampleRate).toBe(44100);
+    expect(merged.channels[0]).toHaveLength(3000);
+    // The gap between the members is silence; the members themselves are not.
+    expect(merged.channels[0].slice(0, 1000).some((v) => v !== 0)).toBe(true);
+    expect(merged.channels[0].slice(1000, 2000).every((v) => v === 0)).toBe(true);
+    expect(merged.channels[0].slice(2000, 3000).some((v) => v !== 0)).toBe(true);
+  });
+
+  it('mergeSelectedClips is a no-op with a single clip selected — nothing merges, nothing is minted', () => {
+    const t = api();
+    const { ids } = seedClips();
+    t.selectClips([ids[0]]);
+    const before = useAppStore.getState().documents.length;
+
+    expect(t.mergeSelectedClips()).toEqual({ clipIds: [], docCount: before });
+    expect(useSessionStore.getState().session.tracks[0].clips).toHaveLength(2);
+  });
+});
