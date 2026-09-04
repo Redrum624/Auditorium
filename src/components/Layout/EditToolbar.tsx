@@ -3,6 +3,7 @@ import {
   ClipboardPaste,
   Copy,
   Crop,
+  Merge,
   Redo2,
   Scissors,
   Trash2,
@@ -35,11 +36,15 @@ import { ChromePill } from '../UI/glass';
  * to the SESSION's history in the multitrack view and the document's
  * elsewhere, which is exactly the rule wanted here).
  *
- * F1 / M1 / M7 — what the Multitrack view does to these eight:
+ * F1 / M1 / M7 / D6 — what the Multitrack view does to these nine:
  *  - Split is ROUTED by view, not blocked: a marker at the cursor in the
  *    editors, a clip split at the edit cursor in the Multitrack (M1). Its
  *    tooltip follows the route, since the same button does two different
  *    things.
+ *  - Merge (D6) is the M7 rule pointing the OTHER way: it is the one button
+ *    that exists only in the Multitrack view, so the tooltip naming the view
+ *    that CAN do it is its `title` — the EDITOR one — and `multitrackTitle`
+ *    describes the verb. No new field: `title` already serves that side.
  *  - Delete is routed too, and always was: it removes the selected clips there.
  *  - Copy, Paste, Trim and Silence stay greyed, because their COMMANDS are
  *    disabled there and not because this pill says so. Each edits a region of
@@ -70,9 +75,9 @@ export interface EditToolbarItem {
   title: string;
 }
 
-/** Split · Copy · Paste · Delete │ Trim · Silence │ Undo · Redo — the mockup's
- * three groups, in its order, on lucide line icons (the app's rule: never
- * emoji). Exported so the tests name the same eight the pill draws. */
+/** Split · Merge · Copy · Paste · Delete │ Trim · Silence │ Undo · Redo — the
+ * mockup's three groups, in its order, on lucide line icons (the app's rule:
+ * never emoji). Exported so the tests name the same nine the pill draws. */
 export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
   {
     label: 'Split',
@@ -81,6 +86,17 @@ export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
     title: 'Split at Cursor (Ctrl+K) — a marker at the cursor, or at both edges of the selection',
     multitrackTitle:
       'Split at Cursor (Ctrl+K) — cuts every clip under the cursor on the selected clips’ tracks',
+  },
+  {
+    // D6 — directly after Split, the verb it undoes. Blocked in the editors
+    // rather than in Multitrack, so its `title` carries the M7 sentence.
+    label: 'Merge',
+    commandId: 'multitrack.mergeClips',
+    Icon: Merge,
+    title:
+      'Merge Clips — not available in the Waveform and Spectral views: it joins the selected clips of a multitrack track into one. Switch to Multitrack to use it.',
+    multitrackTitle:
+      'Merge Clips — joins the selected clips on each track into one clip, silence in the gaps',
   },
   {
     label: 'Copy',
