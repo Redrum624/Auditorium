@@ -172,10 +172,15 @@ function trackIdOfClip(session: Session, clipId: string): string | null {
  * first also never lengthens the timeline (the merged clip ends where the last
  * member does), so the shrink-watcher that re-resolves the zoom never fires
  * either. The maintenance semantics are unchanged by the order: the merged clip
- * carries no fades and CONTAINS every member, so `crossfadableOverlap` rules 1
- * and 2 (equal start / containment) refuse to pair it with any of them, and an
- * outsider armed against a member is still disarmed by that member's own
- * `removeClip`.
+ * carries no fade keys at all — `createClip` never sets one (D4) — so
+ * `preOverlapStates` can never read a pair involving it as armed
+ * (`(fade ?? 0) === width` fails for every `width > 0`). That covers the LAST
+ * member too, whose end TIES the merged clip's own: `crossfadableOverlap`
+ * rule 2 is strict (`aEnd > bEnd`), so a tie is not even excluded by geometry
+ * — it is the missing fade keys, not the containment rule, that keeps that
+ * pair inert. Which is why `removeClip`'s maintenance neither arms nor
+ * disarms anything against the merged clip; an outsider armed against a
+ * member is still disarmed by that member's own `removeClip`.
  *
  * Entries whose members are no longer all present are skipped: the targets were
  * resolved against a session that may have moved on (an undo between the resolve

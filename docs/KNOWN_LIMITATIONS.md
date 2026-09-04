@@ -2223,7 +2223,11 @@ that, all of them by design and all of them visible to the user:
   is created outside the session gesture (the Mixdown pattern), so one
   `Ctrl+Z` puts every member back with its original id while `Merge N` stays
   open in the Files panel. It is `neverSaved`, so closing it asks first — an
-  undone merge leaves a file behind that you have to dismiss by hand.
+  undone merge leaves a file behind that you have to dismiss by hand. If the
+  user closes `Merge N` anyway and then REDOES the merge, the merged clip
+  comes back referencing a document that no longer exists: it plays silent
+  and is dropped from the next project save. `Ctrl+Z` recovers the members
+  again.
 - **A mono member in a stereo merge lands at -3.01 dB per side.** The merged
   document is mono only when *every* member's document is mono; otherwise a
   mono member is written into both channels scaled by `Math.SQRT1_2`. That is
@@ -2233,7 +2237,15 @@ that, all of them by design and all of them visible to the user:
   baked, so after the merge that track pans a **stereo** document and switches
   laws — `stereoBalanceGains(-1)` passes the left channel at 1.0 where
   `monoPanGains(-1)` gave the mono source 1.0 — and the member comes back up to
-  3.01 dB quieter than it played.
+  3.01 dB quieter than it played. The same law switch also shifts the
+  **stereo image** at any non-centre pan, not only at the hard extreme: a mono
+  clip panned to +0.5 renders at `monoPanGains(0.5)` ≈ {0.383, 0.924} (L/R)
+  before the merge and at `Math.SQRT1_2 × stereoBalanceGains(0.5)` ≈ {0.500,
+  0.707} after it — the image audibly narrows even though the pan value
+  itself never changed. This is not limited to a static pan: `autoPanGainsAt`
+  and `autoSpatialGainsAt` both pick their gain law from the same `mono` flag,
+  so an automated pan or spatial sweep through a merged track shifts the same
+  way.
 - **A crossfade with a clip outside the selection is torn in half.** Fade specs
   are resolved over the whole track — the renderer's own view — so the member's
   side of a crossfade with an unselected neighbour is baked into the merged

@@ -389,6 +389,56 @@ describe('bakeMergedClip — D2/D3', () => {
     expect(maxDiff(mixed.channels[1], expected, 400, 0)).toBeLessThanOrEqual(1e-7);
   });
 
+  it('reads only channels 0 and 1 of a member document that carries a third channel', () => {
+    // D3 — "a document with more than two channels contributes channels 0 and
+    // 1 only". Channel 2 gets its OWN distinct, non-zero ramp (a constant
+    // 0.9) so a bake that leaked it in anywhere would be caught either by the
+    // channel-1 equality below or by the forbidden-value scan.
+    const N = 2000;
+    const threeCh = makeDoc([
+      ramp(N, (i) => (i + 1) / 10000),
+      ramp(N, (i) => -(i + 1) / 8000 + 0.05),
+      ramp(N, () => 0.9),
+    ]);
+    const stereo = makeDoc([
+      ramp(N, (i) => 0.1 * Math.sin(i / 19)),
+      ramp(N, (i) => -0.08 * Math.cos(i / 13)),
+    ]);
+    // Off-identity geometry and gain on both members, per the file's own
+    // convention (identity fixtures hide indexing bugs).
+    const threeChMember = makeClip({
+      documentId: threeCh.id, startSample: 1000, offsetSample: 300, lengthSample: 500, gainDb: -4,
+    });
+    const stereoMember = makeClip({
+      documentId: stereo.id, startSample: 2000, offsetSample: 700, lengthSample: 500, gainDb: 3,
+    });
+    const track = makeTrack('Track 1', [threeChMember, stereoMember]);
+    const [target] = mergeTargets(makeSession([track]), [threeChMember.id, stereoMember.id]);
+
+    const baked = bakeMergedClip(track, target, docMap(threeCh, stereo), SR);
+
+    expect(baked.channels).toHaveLength(2);
+
+    const g3 = dbToLinear(-4);
+    const g2 = dbToLinear(3);
+    const expected0a = ramp(500, (i) => threeCh.channels[0][300 + i] * g3);
+    const expected1a = ramp(500, (i) => threeCh.channels[1][300 + i] * g3);
+    expect(maxDiff(baked.channels[0], expected0a, 500, 0)).toBeLessThanOrEqual(1e-7);
+    expect(maxDiff(baked.channels[1], expected1a, 500, 0)).toBeLessThanOrEqual(1e-7);
+
+    const expected0b = ramp(500, (i) => stereo.channels[0][700 + i] * g2);
+    const expected1b = ramp(500, (i) => stereo.channels[1][700 + i] * g2);
+    expect(maxDiff(baked.channels[0], expected0b, 500, 1000)).toBeLessThanOrEqual(1e-7);
+    expect(maxDiff(baked.channels[1], expected1b, 500, 1000)).toBeLessThanOrEqual(1e-7);
+
+    // Channel 2's constant 0.9, scaled by the member's own gain, never shows
+    // up anywhere in the bake — the third channel leaked nowhere.
+    const forbidden = 0.9 * g3;
+    for (const ch of baked.channels) {
+      for (let i = 0; i < ch.length; i++) expect(Math.abs(ch[i] - forbidden)).toBeGreaterThan(0.01);
+    }
+  });
+
   it('resamples a member whose document runs at another rate, exactly as readClipSlice does', () => {
     const fast = makeDoc([ramp(3000, (i) => 0.22 * Math.sin(i / 41))], 48000);
     const local = makeDoc([ramp(3000, (i) => 0.19 * Math.cos(i / 23))], SR);
