@@ -11,7 +11,8 @@ import {
   stereoBalanceGains,
 } from './mixdown';
 import { createClip, createTrack, type Clip, type Session, type Track } from './session';
-import { useSessionStore } from './sessionStore';
+import { applySessionZoom, useSessionStore } from './sessionStore';
+import { fitSessionSamplesPerPixel } from './sessionZoom';
 import {
   SESSION_UNDO_KEY,
   _resetSessionUndo,
@@ -121,10 +122,14 @@ describe('mergeTargets — D1', () => {
     const a = makeClip({ documentId: 'doc-1', startSample: 2400, offsetSample: 90, lengthSample: 600 });
     const b = makeClip({ documentId: 'doc-1', startSample: 800, offsetSample: 40, lengthSample: 500 });
     const lonely = makeClip({ documentId: 'doc-2', startSample: 1700, offsetSample: 10, lengthSample: 300 });
-    const session = makeSession([makeTrack('Track 1', [b, a]), makeTrack('Track 2', [lonely])]);
+    // The TRACK ARRAY is descending by start too — not a contrived state:
+    // `trimClip('start')` writes in place without re-sorting, so clip order is
+    // explicitly not an invariant (trap T40). Members come from a `filter` over
+    // this array, so only the sort can put the span origin at 800.
+    const session = makeSession([makeTrack('Track 1', [a, b]), makeTrack('Track 2', [lonely])]);
 
-    // Selected in REVERSE order: the target must sort by startSample, not by
-    // the order the user clicked.
+    // Selected in REVERSE order too: the target must sort by startSample, not
+    // by the order the user clicked nor by the track's array order.
     const targets = mergeTargets(session, [lonely.id, a.id, b.id]);
 
     expect(targets).toHaveLength(1);
@@ -193,7 +198,10 @@ describe('bakeMergedClip — D2/D3', () => {
     const doc = makeDoc([ramp(2000, (i) => (i + 1) / 10000)]);
     const m1 = makeClip({ documentId: doc.id, startSample: 1000, offsetSample: 300, lengthSample: 500 });
     const m2 = makeClip({ documentId: doc.id, startSample: 2000, offsetSample: 700, lengthSample: 500 });
-    const track = makeTrack('Track 1', [m1, m2]);
+    // Out of start order on the track (trap T40 again): an unsorted target
+    // would take 2000 as the span origin and drive `local` negative for m1,
+    // whose writes would then vanish into out-of-range TypedArray indices.
+    const track = makeTrack('Track 1', [m2, m1]);
     const [target] = mergeTargets(makeSession([track]), [m1.id, m2.id]);
 
     const baked = bakeMergedClip(track, target, docMap(doc), SR);
@@ -232,7 +240,9 @@ describe('bakeMergedClip — D2/D3', () => {
       documentId: doc.id,
       startSample: 1400,
       offsetSample: 250,
-      lengthSample: 500,
+      // 200 + 300 < 700, so the brief's eight probe indices are eight DISTINCT
+      // samples and the un-faded plateau between the two ramps is measured too.
+      lengthSample: 700,
       gainDb: -2,
       fadeInSample: 200,
       fadeInCurve: 'smooth',
@@ -608,6 +618,28 @@ describe('commitMergedClips — D4/D5', () => {
     expect(ids).toHaveLength(2);
     expect(store().selectedClipId).toBe(ids[1]);
     expect(store().selectedClipIds).toEqual(ids);
+  });
+
+  it('leaves a chosen timeline zoom alone when the merge takes every clip in the session', () => {
+    // The whole session's clips: a remove-then-add order would run `addClip`
+    // against a transiently EMPTY session, whose `wasEmpty` arm re-fits the
+    // view — the exact yank that arm exists to avoid.
+    const a = makeClip({ documentId: 'doc-a', startSample: 44100, offsetSample: 1200, lengthSample: 441000 });
+    const b = makeClip({ documentId: 'doc-a', startSample: 882000, offsetSample: 300, lengthSample: 441000 });
+    install([makeTrack('Track 1', [a, b])]);
+    // Zoomed strictly IN of the fit — a zoom the user CHOSE, which no edit may
+    // throw away (`addClip`'s own rule: anything but empty-or-fitted is left alone).
+    const fit = fitSessionSamplesPerPixel(sessionRef());
+    applySessionZoom({ samplesPerPixel: fit / 4, scrollSample: 120000 });
+    const zoom = store().mtZoom;
+    expect(zoom.samplesPerPixel).toBeLessThan(fit);
+    expect(zoom.scrollSample).toBeGreaterThan(0);
+    const [target] = mergeTargets(sessionRef(), [a.id, b.id]);
+
+    commitMergedClips([{ target, documentId: 'doc-merged' }]);
+
+    expect(trackClips()).toHaveLength(1);
+    expect(store().mtZoom).toBe(zoom);
   });
 
   it('does nothing at all — no gesture, no write — when the members are gone', () => {

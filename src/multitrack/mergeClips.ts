@@ -157,12 +157,25 @@ function trackIdOfClip(session: Session, clipId: string): string | null {
  * D4/D5 — writes every entry in ONE undo entry and returns the merged clip ids
  * in track order (`[]`, with no gesture at all, when nothing qualifies).
  *
- * The bracket wraps the store's OWN `removeClip`/`addClip` — the K1 group-verb
+ * The bracket wraps the store's OWN `addClip`/`removeClip` — the K1 group-verb
  * shape — rather than a bespoke session write, so overlap maintenance comes for
  * free and has no second opinion: removing a member disarms an outsider's now
  * stale facing fade through `maintainFacingFades`, and `addClip` places the
  * merged clip verbatim without inventing any fade of its own. The merged clip
  * carries `gainDb: 0` and NO fade keys because both are inside the audio now.
+ *
+ * THE MERGED CLIP IS ADDED FIRST, THEN THE MEMBERS ARE REMOVED. Removing first
+ * would leave the session TRANSIENTLY EMPTY whenever the merge takes every clip
+ * in it, and `addClip` decides "did this insert change what Fit means?" from the
+ * state it finds: an empty session takes its `wasEmpty` arm and re-fits, throwing
+ * away a zoom the user chose — the exact yank that arm exists to avoid. Adding
+ * first also never lengthens the timeline (the merged clip ends where the last
+ * member does), so the shrink-watcher that re-resolves the zoom never fires
+ * either. The maintenance semantics are unchanged by the order: the merged clip
+ * carries no fades and CONTAINS every member, so `crossfadableOverlap` rules 1
+ * and 2 (equal start / containment) refuse to pair it with any of them, and an
+ * outsider armed against a member is still disarmed by that member's own
+ * `removeClip`.
  *
  * Entries whose members are no longer all present are skipped: the targets were
  * resolved against a session that may have moved on (an undo between the resolve
@@ -185,7 +198,6 @@ export function commitMergedClips(
   const made: { trackId: string; clipId: string }[] = [];
   withSessionGesture('Merge clips', () => {
     for (const { target, documentId } of doable) {
-      for (const member of target.members) useSessionStore.getState().removeClip(member.id);
       const merged = createClip({
         documentId,
         startSample: target.startSample,
@@ -193,6 +205,7 @@ export function commitMergedClips(
         lengthSample: target.lengthSample,
       });
       useSessionStore.getState().addClip(target.trackId, merged);
+      for (const member of target.members) useSessionStore.getState().removeClip(member.id);
       made.push({ trackId: target.trackId, clipId: merged.id });
     }
   });
