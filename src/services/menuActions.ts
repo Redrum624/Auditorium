@@ -427,10 +427,11 @@ function registerSelectionAndTransportCommands(): void {
       label: 'Deselect',
       shortcut: 'Esc',
       // D3: the multitrack's selection is now a clip selection OR a gap, so
-      // Escape answers for both — it is the ONLY way to put a selected gap
-      // away without selecting something else, since a press on empty lane
-      // space deliberately leaves the band up (the double-click that made it
-      // is two presses).
+      // Escape answers for both. It is not the only way out — since review
+      // round 1 (I3) a plain press on empty lane space clears the band too,
+      // except a press INSIDE the band's own span on its own lane, which is
+      // the first half of the double-click that would re-select it. Escape is
+      // the way out that works from anywhere, including from inside that span.
       enabled: (s) =>
         s.view === 'multitrack'
           ? useSessionStore.getState().selectedClipId !== null ||

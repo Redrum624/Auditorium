@@ -158,6 +158,30 @@ export interface SessionActions {
   addClip(trackId: string, clip: Clip): void; // inserts sorted; accepts overlap verbatim; never writes fades
   moveClip(clipId: string, toTrackId: string, newStartSample: number, opts?: { clearOverlap?: boolean }): void; // clamps >=0; commits verbatim + maintains facing fades; opts.clearOverlap = v1.8 nudge; H1 no-op guard: same track + same RESOLVED sample records nothing
   trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour; re-clamps fades (X2 — see setClipFade) and maintains facing fades on the overlap it reshapes (X5)
+  /** D3 — RIGID TRANSLATION of a set of clips on ONE track by ONE delta, in ONE
+   * `set()`: every named clip keeps its length, its offset, its gain AND both
+   * fade fields verbatim, and only `startSample` moves. No `maintainFacingFades`
+   * pass runs (the reason this action exists at all — see `closeGap`): a uniform
+   * delta cannot change the geometry BETWEEN the movers, so there is no overlap
+   * among them for the maintenance to re-read, and applying the same shift one
+   * clip at a time WOULD invent one — the first mover leaves, which the second
+   * mover's per-move snapshot reads as "this overlap is new", arming a crossfade
+   * the gesture never asked for over a pair that was overlapping all along.
+   *
+   * Whatever geometry the movers form with the clips that STAY is committed
+   * verbatim, the same way `moveClip` commits a requested position verbatim: a
+   * translation that lands a mover on a stationary neighbour makes an honest raw
+   * sum, not a synthesised crossfade (v1.9 ruling 10). `closeGap`'s only new
+   * adjacency is a butt-join at the gap's start — width 0, which is not an
+   * overlap and arms nothing either way.
+   *
+   * RIGID OR NOTHING (`moveClipsBy`'s rule): if any named clip would land before
+   * sample 0 the whole call is a no-op, because a per-clip clamp would silently
+   * deform the arrangement it was asked to carry across. A zero delta, an
+   * unknown track and an empty/unmatched id set are no-ops too — same state
+   * object back, so nothing is recorded. Array order is preserved in place
+   * (`Track.clips` is insertion-ordered — trap T40). */
+  translateClips(trackId: string, clipIds: readonly string[], deltaSample: number): void;
   /** Item 1 (M2/N1-N4) - splits one clip at `sample` (session samples, consumed
    * VERBATIM: the cursor was snapped, or deliberately not, when it was placed,
    * and this action never re-snaps or rounds it). The LEFT half keeps the
@@ -968,6 +992,36 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         tracks[targetTrackIdx].clips = insertSorted(tracks[targetTrackIdx].clips, movedClip);
 
         maintainFacingFades(tracks, targetTrackIdx, loc.trackIdx, clipId, pre);
+        return { session: { ...s.session, tracks } };
+      });
+    });
+  },
+
+  translateClips(trackId, clipIds, deltaSample) {
+    recordSessionMutation('Move clips', () => {
+      set((s) => {
+        const trackIdx = s.session.tracks.findIndex((t) => t.id === trackId);
+        if (trackIdx === -1 || deltaSample === 0) return s;
+        const ids = new Set(clipIds);
+        const movers = s.session.tracks[trackIdx].clips.filter((c) => ids.has(c.id));
+        if (movers.length === 0) return s;
+        // Rigid or nothing (moveClipsBy's rule): asked of every mover BEFORE
+        // anything is written, because a per-clip clamp would deform the
+        // arrangement this call was asked to carry across intact.
+        if (movers.some((c) => c.startSample + deltaSample < 0)) return s;
+        const tracks = s.session.tracks.map((t, i) =>
+          i === trackIdx
+            ? {
+                ...t,
+                // In place, not re-sorted: a uniform delta cannot reorder the
+                // movers among themselves, and `Track.clips` is insertion-
+                // ordered anyway (trap T40).
+                clips: t.clips.map((c) =>
+                  ids.has(c.id) ? { ...c, startSample: c.startSample + deltaSample } : c
+                ),
+              }
+            : t // untouched tracks keep their object identity
+        );
         return { session: { ...s.session, tracks } };
       });
     });
@@ -1851,12 +1905,23 @@ export function rippleDeleteClips(clipIds: readonly string[]): void {
  * in ONE undo entry. No other track moves, which is the whole request: the
  * silence the user pointed at goes, and the arrangement around it does not.
  *
- * The same shape as `rippleDeleteClips` above and through the same door: the
- * shifts are resolved against the timeline the user is looking at, applied
- * leftmost first through the store's own `moveClip`, so the overlap and
- * facing-fade maintenance a drag gets is the maintenance this gets. There is
- * deliberately no removal step — a gap is empty by definition, so closing it
- * is the ripple's second half alone.
+ * The same shape as `rippleDeleteClips` above — the shifts are resolved against
+ * the timeline the user is looking at, before anything moves — but NOT through
+ * the same door: the whole set is carried by ONE `translateClips` write instead
+ * of one `moveClip` per clip. There is deliberately no removal step either — a
+ * gap is empty by definition, so closing it is the ripple's second half alone.
+ *
+ * ONE WRITE, BECAUSE PER-CLIP MOVES INVENT CROSSFADES (final review, C3).
+ * `moveClip` runs `maintainFacingFades` on every commit against a snapshot taken
+ * at that commit, so two movers that OVERLAP EACH OTHER are pulled apart by the
+ * first move and re-joined by the second — and the second move's snapshot, which
+ * cannot see that the pair was overlapping before the gesture started, reads
+ * width 0 and arms a full-width crossfade over a legitimate raw sum (or over the
+ * user's own partial facing fade, which it overwrites; clip mutations have no
+ * undo of their own). Translating the whole set by one delta preserves the
+ * movers' relative geometry exactly, so no pair among them is ever "new"; the
+ * only new adjacency the close creates is the butt-join at the gap's start,
+ * width 0 — not an overlap, and nothing to arm.
  *
  * STALE GAPS ARE A NO-OP WITH NO GESTURE. The selection is reconciled on every
  * session change, but a caller can hold a `TrackGap` across one (the Edit menu
@@ -1875,7 +1940,11 @@ export function closeGap(gap: TrackGap): void {
   const shifts = closeGapShifts(track, live);
   if (shifts.length === 0) return; // unreachable — a gap is bounded on its right by a clip
   withSessionGesture('Close gap', () => {
-    for (const s of shifts) useSessionStore.getState().moveClip(s.clipId, gap.trackId, s.toSample);
+    useSessionStore.getState().translateClips(
+      gap.trackId,
+      shifts.map((s) => s.clipId),
+      -(live.endSample - live.startSample)
+    );
   });
   useSessionStore.getState().setSelectedGap(null);
 }
@@ -2068,6 +2137,17 @@ bindSessionUndo({
     useSessionStore.setState({
       session: snapshot.session,
       selectedClipId: snapshot.selectedClipId,
+      // D3 — this restore is a clip-selection writer too, so it owes the same
+      // "one selection on screen at a time" clearing every other one does
+      // (final review, C1). Without it an undo could put a clip selection back
+      // UNDER a gap band standing on another track (the reconcile subscriber
+      // deliberately keeps a gap whose own track did not change), leaving both
+      // highlighted — and `edit.delete` reads the gap first, so Delete would
+      // close the gap instead of removing the clip the user can see selected.
+      // Only a NON-NULL restored selection clears it: an undo whose snapshot
+      // carried no clip selection restores no selection either, and must leave
+      // a standing gap exactly as it was (the ruling-3 pin).
+      ...(snapshot.selectedClipId !== null ? { selectedGap: null } : null),
       ...redenominate,
     });
   },

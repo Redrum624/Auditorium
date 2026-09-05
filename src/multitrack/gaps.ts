@@ -63,11 +63,15 @@ export function gapAt(track: Track, sample: number): TrackGap | null {
  * defensive: nothing can start inside a gap, since a clip starting there would
  * have bounded the gap at its own start.
  *
- * Leftmost first for the same reason the ripple orders its shifts that way —
- * the caller applies them one at a time through `moveClip`, and processing left
- * to right means each clip moves into space that has already been vacated, so
- * no intermediate state collides and arms a crossfade the gesture never asked
- * for.
+ * Leftmost first so the list names the moves in timeline order, which is how
+ * the fixture reads and how `rippleDeleteClips` orders its own shifts. It is no
+ * longer load-bearing: `closeGap` commits the whole set as ONE `translateClips`
+ * write, precisely because NO application order is safe one clip at a time.
+ * Ordering fixes the mover-vs-stationary collisions and cannot fix the
+ * mover-vs-mover ones — two clips that already overlap each other are pulled
+ * apart by the first move and re-joined by the second, whichever end you start
+ * from, and the facing-fade maintenance reads that re-join as a brand-new
+ * overlap and arms a crossfade the gesture never asked for (final review, C3).
  *
  * Pure: it names the moves and commits nothing.
  */

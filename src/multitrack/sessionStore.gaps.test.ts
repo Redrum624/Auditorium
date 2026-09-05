@@ -9,10 +9,10 @@
  * gap the user is still pointing at.
  */
 import { serializeSession } from './sessionFile';
-import { createClip, createTrack, type Session } from './session';
+import { createClip, createTrack, type Clip, type Session } from './session';
 import { gapAt } from './gaps';
 import { closeGap, useSessionStore } from './sessionStore';
-import { SESSION_UNDO_KEY, _resetSessionUndo, undoSession } from './sessionUndo';
+import { SESSION_UNDO_KEY, _resetSessionUndo, redoSession, undoSession } from './sessionUndo';
 import { getHistory } from '../services/undoHistory';
 
 const store = () => useSessionStore.getState();
@@ -54,6 +54,40 @@ function seed(): { session: Session; a: string; b: string; c: string; d: string 
     c: t1.clips[2].id,
     d: t2.clips[0].id,
   };
+}
+
+/**
+ * C3 — the OVERLAPPING-MOVERS fixture: A(0..1000) · gap [1000, 2000) ·
+ * B(2000..3000) · C(2800..3800), so the two clips right of the gap already
+ * overlap EACH OTHER by 200 samples before anything moves. `mutate` seeds the
+ * fade state of that overlap (none / armed / partial) before the store sees it.
+ *
+ * The close translates both by -1000: B butt-joins A at 1000 and the B/C
+ * overlap is still exactly 200. Nothing about the pair changed, so nothing
+ * about its fades may change either.
+ */
+function seedOverlappingMovers(mutate?: (b: Clip, c: Clip) => void): {
+  a: string;
+  b: string;
+  c: string;
+} {
+  const t1 = createTrack('Track 1');
+  const a = createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 128, lengthSample: 1000, gainDb: -3 });
+  const b = createClip({ documentId: 'doc-1', startSample: 2000, offsetSample: 256, lengthSample: 1000, gainDb: 2 });
+  const c = createClip({ documentId: 'doc-2', startSample: 2800, offsetSample: 64, lengthSample: 1000, gainDb: -1 });
+  mutate?.(b, c);
+  t1.clips = [a, b, c];
+  useSessionStore.setState({
+    session: { name: 'Overlap Fixture', sampleRate: 44100, tracks: [t1] },
+    selectedClipId: null,
+    selectedClipIds: [],
+    selectedGap: null,
+    mtCursorSample: 0,
+    mtPlayState: 'stopped',
+    mtPlayheadSample: 0,
+    mtEnvelope: null,
+  });
+  return { a: a.id, b: b.id, c: c.id };
 }
 
 let fx: ReturnType<typeof seed>;
@@ -157,16 +191,12 @@ describe('closeGap', () => {
     // — "localized" measured by reference, not by deep equality.
     expect(clipById(fx.a)).toBe(beforeA);
     expect(clipById(fx.d)).toBe(beforeD);
-    // The other track's clip LIST is deep-equal too — `moveClip` rebuilds every
-    // track's array on every commit, so the reference is expected to change
-    // while nothing in it does.
-    expect(clipsOf(1)).toEqual(beforeTrack2);
-    // The leftmost-first order, measured. Every shift goes through `moveClip`,
-    // which runs `maintainFacingFades` on each commit — so a shift that passed
-    // THROUGH a clip that had not moved yet would arm a crossfade the gesture
-    // never asked for. Left to right, each clip moves into space already
-    // vacated, and the closed gap leaves B butt-joined to A rather than over
-    // it, so no edge fade may exist anywhere on the track afterwards.
+    // The other track's clip LIST is the SAME object: the close is one
+    // `translateClips` write that rebuilds the gap's track alone, so a track it
+    // did not touch is untouched by reference as well as by value.
+    expect(clipsOf(1)).toBe(beforeTrack2);
+    // The closed gap leaves B butt-joined to A — width 0, which is not an
+    // overlap — so no edge fade may exist anywhere on the track afterwards.
     for (const clip of clipsOf(0)) {
       expect(clip.fadeInSample).toBeUndefined();
       expect(clip.fadeOutSample).toBeUndefined();
@@ -225,6 +255,62 @@ describe('closeGap', () => {
   });
 });
 
+/**
+ * C3 — the close is ONE session write, so the clips it carries arrive with the
+ * geometry they left with. Moving them one at a time through `moveClip` ran the
+ * facing-fade maintenance per commit: two movers that overlapped each other were
+ * pulled apart by the first move and re-joined by the second, and the second
+ * move's snapshot read the re-join as a BRAND-NEW overlap and armed a crossfade
+ * over it (destroying whatever the user had set there).
+ */
+describe('closeGap carries the movers rigidly — their own overlaps are not re-armed', () => {
+  const theOverlapGap = () => gapAt(store().session.tracks[0], 1500)!;
+
+  it('an UN-ARMED overlap between two movers stays un-armed (a raw sum is a legitimate state)', () => {
+    const ov = seedOverlappingMovers();
+
+    closeGap(theOverlapGap());
+
+    expect(clipById(ov.b).startSample).toBe(1000); // butt-joined to A, which ends at 1000
+    expect(clipById(ov.c).startSample).toBe(1800); // the B/C overlap is still exactly 200
+    for (const clip of clipsOf(0)) {
+      expect(clip.fadeInSample).toBeUndefined();
+      expect(clip.fadeOutSample).toBeUndefined();
+    }
+    expect(doneLabels()).toEqual(['Close gap']);
+  });
+
+  it('an ARMED crossfade between two movers survives byte-identical, curves included', () => {
+    const ov = seedOverlappingMovers((b, c) => {
+      b.fadeOutSample = 200; // facing fades == the overlap: X3's canonical pair
+      b.fadeOutCurve = 'exponential'; // off the default ('equal-power')
+      c.fadeInSample = 200;
+      c.fadeInCurve = 'exponential';
+    });
+
+    closeGap(theOverlapGap());
+
+    expect(clipById(ov.b).fadeOutSample).toBe(200);
+    expect(clipById(ov.b).fadeOutCurve).toBe('exponential');
+    expect(clipById(ov.b).fadeInSample).toBeUndefined();
+    expect(clipById(ov.c).fadeInSample).toBe(200);
+    expect(clipById(ov.c).fadeInCurve).toBe('exponential');
+    expect(clipById(ov.c).fadeOutSample).toBeUndefined();
+  });
+
+  it('a PARTIAL facing fade between two movers is not overwritten', () => {
+    const ov = seedOverlappingMovers((b) => {
+      b.fadeOutSample = 50; // a 50-sample fade over a 200-sample overlap: the
+      // user's own choice, and clip fades have no undo of their own
+    });
+
+    closeGap(theOverlapGap());
+
+    expect(clipById(ov.b).fadeOutSample).toBe(50);
+    expect(clipById(ov.c).fadeInSample).toBeUndefined();
+  });
+});
+
 describe('the gap selection is reconciled against the session', () => {
   it('a removeClip that redraws the span clears it', () => {
     store().setSelectedGap(theGap());
@@ -267,6 +353,33 @@ describe('ruling 3 — the gap is view state, on disk and in the snapshot', () =
 
     expect(doneLabels()).toEqual([]);
     expect(store().selectedGap).toEqual(gap); // the undo restored no gap, and stole none
+  });
+
+  /**
+ * C1 — the other half of ruling 3: the snapshot carries no gap, but it DOES
+ * carry a clip selection, and restoring one is a clip-selection writer like any
+ * other. If it did not clear the gap, an undo would leave the clip highlighted
+ * AND the band standing, and Delete (which reads the gap first) would close the
+ * gap instead of removing the clip the user can see selected.
+ */
+  it('an undo that RESTORES a clip selection puts a standing gap away', () => {
+    const standing = () =>
+      [store().selectedClipId !== null, store().selectedGap !== null].filter(Boolean).length;
+    store().setSelectedClip(fx.d); // clip D on track 2 — in the snapshot
+    store().moveClip(fx.d, store().session.tracks[1].id, 5000); // one recorded entry
+    store().setSelectedGap(theGap()); // a gap on track 1 — clears the clip selection
+
+    undoSession();
+
+    expect(store().selectedClipId).toBe(fx.d);
+    expect(standing()).toBe(1);
+
+    store().setSelectedGap(theGap()); // put the band back up, then redo
+
+    redoSession();
+
+    expect(store().selectedClipId).toBe(fx.d);
+    expect(standing()).toBe(1);
   });
 
   it('serializeSession writes the same bytes with and without a selected gap', () => {
