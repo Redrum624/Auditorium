@@ -231,6 +231,12 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.remix',
       'separator',
       // Voice — everything that reshapes a vocal take.
+      // D7: Separate Voice OPENS the group. Isolating the voice precedes
+      // reshaping it, so every row below operates on what it produced — the
+      // one place this menu still says anything about order, and it says it
+      // by subject ("first you get the voice on its own") rather than by run
+      // sequence.
+      'voice.separate',
       'edit.voiceChanger',
       'effects.vocalChain',
       'effects.coverChain',
@@ -1465,6 +1471,22 @@ function registerStemCommands(): void {
       },
       run: async () => openSeparateDialog('stems'),
     },
+    // D4 — Separate Voice. The SAME separation run as the row above, landed as
+    // two tracks (Voice + Backing) instead of five, so it is registered here
+    // beside it rather than in a module of its own: one service, one dialog,
+    // one model download, two landings. Hence also the identical predicate —
+    // it is gated by what the RUN needs, not by which menu group it sits in —
+    // and no shortcut, for the same reason (minutes of inference). D7 puts it
+    // in the Pipeline menu's Voice group, at its head.
+    {
+      id: 'voice.separate',
+      label: 'Separate Voice',
+      enabled: (s) => {
+        const d = activeDoc(s);
+        return d !== null && docLength(d) > 0;
+      },
+      run: async () => openSeparateDialog('voice'),
+    },
   ]);
 }
 
@@ -1518,9 +1540,12 @@ function registerTranscribeCommands(): void {
   ]);
 }
 
-/** F3 — Voice Changer. F11-7: it OPENS the Pipeline menu's Voice group, ahead
- * of the two chains — it is the one tool there that replaces the voice rather
- * than cleaning it, so everything after it operates on whatever it produced.
+/** F3 — Voice Changer. F11-7 put it at the head of the Pipeline menu's Voice
+ * group, ahead of the two chains — it is the one tool there that replaces the
+ * voice rather than cleaning it, so everything after it operates on whatever it
+ * produced. D4/D7 moved it one row down: `voice.separate` opens the group now,
+ * because isolating the voice comes before replacing it. The rest of that
+ * argument stands, and this is still the first row that RESHAPES a take.
  * It is not an `effect.<id>` for the structural reason F3 gave: a long
  * CPU-inference job producing a NEW document, which the Effects menu's pure,
  * synchronous `EffectDefinition.process` (same-document channels in, channels

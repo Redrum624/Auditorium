@@ -71,6 +71,19 @@ describe('PipelinePanel — the card is the Pipeline menu', () => {
     expect(screen.getAllByTestId('pipeline-item')).toHaveLength(ALL_IDS().length);
   });
 
+  // D7: the card is where the user meets the Voice group, and the ruling is
+  // about what they see FIRST in it. Derived from the live groups like
+  // everything else here — the claim is the position, not the roster.
+  it('heads the Voice section with the Separate Voice row (D7)', () => {
+    render(<PipelinePanel />);
+    const voiceSection = sections().find((s) => s.getAttribute('data-section') === 'Voice')!;
+    const ids = within(voiceSection)
+      .getAllByTestId('pipeline-item')
+      .map((r) => r.getAttribute('data-command-id'));
+    expect(ids[0]).toBe('voice.separate');
+    expect(button('voice.separate').textContent).toBe('Separate Voice');
+  });
+
   it('reads every label off the registry rather than restating it', () => {
     render(<PipelinePanel />);
     for (const group of getPipelineGroups()) {

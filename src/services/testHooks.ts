@@ -75,7 +75,11 @@ import {
 } from './coverChain';
 import { COVER_JOURNEY_STAGES, runCoverJourney } from './coverJourney';
 import { createRemixDocument, getRemixSession } from './remixService';
-import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
+import {
+  STEM_LABELS,
+  getStemModelState as readStemModelState,
+  separateStems as runStemSeparation,
+} from './stemService';
 import {
   cancelTranscription,
   getTranscribeModelState as readTranscribeModelState,
@@ -97,7 +101,7 @@ import {
   type VoiceProgress,
 } from './voiceService';
 import { formatSrt, formatWebVtt } from './subtitleFormat';
-import { landStems } from './stemLanding';
+import { landStems, landVoice } from './stemLanding';
 import { MultitrackPlayer, multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/firstPlayLatency';
 import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
@@ -582,6 +586,10 @@ export interface TestApi {
   // --- v1.7 flows ---------------------------------------------------------
   getStemModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   separateStems(): Promise<StemSeparationSummary>;
+  /** D4: lands a SYNTHETIC separation of the ACTIVE document through the
+   * shipped `landVoice` — two documents, a two-track session, the multitrack
+   * view — without the model. Synchronous, because nothing is inferred. */
+  separateVoiceLand(): VoiceLandingSummary;
   // --- F4b flows (transcription) -----------------------------------------
   getTranscribeModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   /** Transcribes the ACTIVE document, bypassing TranscribeDialog. Pass a
@@ -770,6 +778,25 @@ export interface TranscriptionSummary {
   transcribeTotal: number;
   /** Distinct phases the service passed through, in first-seen order. */
   phasesSeen: string[];
+}
+
+/** D4 — plain-JSON result of the `separateVoiceLand` hook. */
+export interface VoiceLandingSummary {
+  /** False when there was no active document, or it held no audio. */
+  ok: boolean;
+  /** `['<source> — Voice', '<source> — Backing']`, in track order. */
+  documentNames: string[];
+  /** The landed session's track names, in order. */
+  trackNames: string[];
+  sessionName: string | null;
+  sampleRate: number;
+  lengthSamples: number;
+  /** Channel count of each landed document (a mono source lands dual-mono). */
+  channelCounts: number[];
+  monoRoutedAsDualMono: boolean;
+  /** Worst |(Voice + Backing) − source| over every channel and sample; null
+   * when the source is no longer open and the check could not be made. */
+  worstAbsError: number | null;
 }
 
 /** Plain-JSON result of the `separateStems` hook (see its implementation). */
@@ -2211,6 +2238,102 @@ export function installTestHooks(): void {
       new Uint8Array(buffer).set(bytes);
       const result = await window.electronAPI.writeFile(outPath, buffer);
       return result.ok;
+    },
+
+    // D4. Lands Separate Voice WITHOUT the model: the smoke must be able to
+    // assert the two-track landing without 166 MB and minutes of CPU, and the
+    // model is `separateStems`' business — already covered by the hook below.
+    //
+    // The synthetic output is an EXACT partition of the active document, built
+    // the way `partitionStems` builds a real one: four stems at four DIFFERENT
+    // weights (so a landing that grabbed the wrong stem index is visible — the
+    // Voice would be 0.37x rather than 0.19x), then a residual that is the
+    // float32 complement accumulated in the ruling-6 order the five-track
+    // landing replays. Everything after that is the shipped code path.
+    separateVoiceLand: () => {
+      const empty: VoiceLandingSummary = {
+        ok: false,
+        documentNames: [],
+        trackNames: [],
+        sessionName: null,
+        sampleRate: 0,
+        lengthSamples: 0,
+        channelCounts: [],
+        monoRoutedAsDualMono: false,
+        worstAbsError: null,
+      };
+      const source = activeDoc();
+      const length = source ? docLength(source) : 0;
+      if (!source || length === 0) return empty;
+
+      // Four DIFFERENT weights, summing to 0.90 so the residual is real audio
+      // rather than zeros: a fixture whose stems were all the same fraction
+      // would land identically with any two of them swapped.
+      const weights = [0.37, 0.23, 0.19, 0.11]; // Drums, Bass, Vocals, Other
+      const stems = weights.map((w) =>
+        source.channels.map((ch) => {
+          const out = new Float32Array(length);
+          for (let i = 0; i < length; i++) out[i] = w * ch[i];
+          return out;
+        })
+      );
+      const residual = source.channels.map((ch, c) => {
+        const out = new Float32Array(length);
+        for (let i = 0; i < length; i++) {
+          // `Math.fround` per step: the float32 accumulation in ruling-6 order
+          // that the real residual is the complement of, so this fixture has
+          // the partition's exact-sum property rather than merely resembling
+          // it.
+          let sum = 0;
+          for (const stem of stems) sum = Math.fround(sum + stem[c][i]);
+          out[i] = Math.fround(ch[i] - sum);
+        }
+        return out;
+      });
+
+      const landing = landVoice({
+        sourceDocId: source.id,
+        sourceName: source.name,
+        sampleRate: source.sampleRate,
+        channelCount: source.channels.length,
+        lengthSamples: length,
+        stems: STEM_LABELS.map((label, i) => ({ label, channels: stems[i] })),
+        residual,
+        sanitisedEstimateSamples: 0,
+      });
+
+      const store = useAppStore.getState();
+      const byId = new Map(store.documents.map((d) => [d.id, d]));
+      const landed = landing.documentIds.map((id) => byId.get(id) ?? null);
+      const live = byId.get(source.id) ?? null;
+      let worstAbsError: number | null = null;
+      if (live && landed[0] && landed[1]) {
+        let worst = 0;
+        for (let c = 0; c < live.channels.length; c++) {
+          const want = live.channels[c];
+          // A mono source landed dual-mono: both sides carry the same copy, so
+          // channel 0 of each document is the one to compare against it.
+          const voice = landed[0]!.channels[c] ?? landed[0]!.channels[0];
+          const backing = landed[1]!.channels[c] ?? landed[1]!.channels[0];
+          for (let i = 0; i < length; i++) {
+            const err = Math.abs(voice[i] + backing[i] - want[i]);
+            if (err > worst) worst = err;
+          }
+        }
+        worstAbsError = worst;
+      }
+
+      return {
+        ok: true,
+        documentNames: landed.map((d) => d?.name ?? '(missing)'),
+        trackNames: useSessionStore.getState().session.tracks.map((t) => t.name),
+        sessionName: landing.sessionName,
+        sampleRate: source.sampleRate,
+        lengthSamples: length,
+        channelCounts: landed.map((d) => d?.channels.length ?? 0),
+        monoRoutedAsDualMono: landing.monoRoutedAsDualMono,
+        worstAbsError,
+      };
     },
 
     // Separates the ACTIVE document into stems and lands them, bypassing

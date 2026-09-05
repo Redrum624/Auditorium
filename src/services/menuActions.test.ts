@@ -1082,6 +1082,9 @@ describe('the Pipeline section (F11-7)', () => {
     'timing.align',
     'edit.remix',
     'separator',
+    // D7: Separate Voice OPENS the Voice group — isolating the voice precedes
+    // reshaping it, and every row after this one operates on what it produced.
+    'voice.separate',
     'edit.voiceChanger',
     'effects.vocalChain',
     'effects.coverChain',
@@ -1111,7 +1114,7 @@ describe('the Pipeline section (F11-7)', () => {
     expect(titles.indexOf('Pipeline')).toBe(titles.indexOf('Effects') + 1);
   });
 
-  it('holds the ten tools in three separated groups, in order', () => {
+  it('holds the eleven tools in three separated groups, in order', () => {
     expect(itemKeys('Pipeline')).toEqual(PIPELINE_ITEMS);
   });
 
@@ -1123,7 +1126,7 @@ describe('the Pipeline section (F11-7)', () => {
 
   // The whole point of the request was to MOVE them. A duplicate would leave
   // two rows running one command, and the old rows greying independently.
-  it('MOVED them: each of the ten appears exactly once across the whole menu bar', () => {
+  it('each row appears exactly once across the whole menu bar', () => {
     registerAllEffects();
     registerEffectCommands();
     const everywhere = getMenuSections().flatMap((s) => commandIds(s.items));
@@ -1173,7 +1176,7 @@ describe('the Pipeline section (F11-7)', () => {
     );
   });
 
-  it('carries no keyboard shortcut on any row — every one of the ten is a long pass', () => {
+  it('carries no keyboard shortcut on any row — every one of them is a long pass', () => {
     const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
     for (const item of pipeline.items) {
       if (item === 'separator') continue;
@@ -1830,6 +1833,8 @@ describe('edit.separateStems (Task S6)', () => {
     await runCommand('edit.separateStems');
 
     expect(openSeparate).toHaveBeenCalledTimes(1);
+    // D4: one dialog, two landings — this row asks for the five-stem one.
+    expect(openSeparate).toHaveBeenCalledWith('stems');
   });
 
   it('runCommand("edit.separateStems") with no document never reaches the bus', async () => {
@@ -1837,6 +1842,100 @@ describe('edit.separateStems (Task S6)', () => {
     installSetters(openSeparate);
 
     await runCommand('edit.separateStems');
+
+    expect(openSeparate).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * D4/D7 — Separate Voice. The SAME command shape as `edit.separateStems` (same
+ * predicate, same bus, no shortcut) pointed at the other landing, and D7's
+ * placement: FIRST row of the Voice group.
+ */
+describe('voice.separate (D4)', () => {
+  function findPipelineCmd(id: string): MenuCommand {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    return pipeline.items.find(
+      (item): item is MenuCommand => item !== 'separator' && item.id === id
+    )!;
+  }
+
+  function installSetters(openSeparate: jest.Mock) {
+    registerDialogSetters({
+      openExportDialog: () => {},
+      openNewFileDialog: () => {},
+      openEffectDialog: () => {},
+      openConvertDialog: () => {},
+      openRecordDialog: () => {},
+      openTempoDialog: () => {},
+      openRemixDialog: () => {},
+      openSeparateDialog: openSeparate,
+      openTranscribeDialog: () => {},
+      openVoiceChangerDialog: () => {},
+      openAlignTimingDialog: () => {},
+      openVocalChainDialog: () => {},
+      openCoverChainDialog: () => {},
+      openAlignLyricsDialog: () => {},
+      focusRemixPanel: () => {},
+      focusTranscriptPanel: () => {},
+      focusSpatialPanel: () => {},
+    });
+  }
+
+  it('OPENS the Pipeline Voice group, labelled Separate Voice, with no shortcut', () => {
+    const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
+    const firstSeparator = pipeline.items.indexOf('separator');
+    const head = pipeline.items[firstSeparator + 1];
+
+    expect(head !== 'separator' && head.id).toBe('voice.separate');
+    expect(head !== 'separator' && head.label).toBe('Separate Voice');
+    expect(head !== 'separator' && head.shortcut).toBeUndefined();
+    // …and the row it displaced still follows it, so opening the group did not
+    // reorder the rest (D7's Voice order, top to bottom).
+    const voiceGroup = pipeline.items
+      .slice(firstSeparator + 1, pipeline.items.indexOf('separator', firstSeparator + 1))
+      .map((item) => (item === 'separator' ? 'separator' : item.id));
+    expect(voiceGroup).toEqual([
+      'voice.separate',
+      'edit.voiceChanger',
+      'effects.vocalChain',
+      'effects.coverChain',
+      'lyrics.align',
+    ]);
+  });
+
+  it('is enabled exactly when edit.separateStems is — the same run, gated the same', () => {
+    const both = () => [
+      findPipelineCmd('voice.separate').enabled(useAppStore.getState()),
+      findPipelineCmd('edit.separateStems').enabled(useAppStore.getState()),
+    ];
+    expect(both()).toEqual([false, false]);
+
+    const empty = createDocument({ name: 'empty', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    expect(docLength(empty)).toBe(0);
+    expect(both()).toEqual([false, false]);
+
+    openDoc();
+    expect(both()).toEqual([true, true]);
+  });
+
+  it('runCommand("voice.separate") opens the SAME dialog through the bus, in voice mode', async () => {
+    openDoc();
+    const openSeparate = jest.fn();
+    installSetters(openSeparate);
+
+    await runCommand('voice.separate');
+
+    expect(openSeparate).toHaveBeenCalledTimes(1);
+    expect(openSeparate).toHaveBeenCalledWith('voice');
+  });
+
+  it('runCommand("voice.separate") with no document never reaches the bus', async () => {
+    const openSeparate = jest.fn();
+    installSetters(openSeparate);
+
+    await runCommand('voice.separate');
 
     expect(openSeparate).not.toHaveBeenCalled();
   });
@@ -1895,7 +1994,7 @@ describe('edit.transcribe (Task F4b)', () => {
   // Analysis, Voice Changer opens Voice — so the three-in-a-row this used to
   // pin no longer exists. Both labels, both missing shortcuts and both group
   // positions are still pinned, from the new places.
-  it('opens the Pipeline Analysis group, with Voice Changer opening the Voice group', () => {
+  it('opens the Pipeline Analysis group, with Voice Changer second in the Voice group', () => {
     const pipeline = getMenuSections().find((s) => s.title === 'Pipeline')!;
     const items = pipeline.items;
 
@@ -1911,7 +2010,12 @@ describe('edit.transcribe (Task F4b)', () => {
     const voiceIndex = items.findIndex(
       (item) => item !== 'separator' && item.id === 'edit.voiceChanger'
     );
-    expect(items[voiceIndex - 1]).toBe('separator');
+    // D7: `voice.separate` OPENS the Voice group now, so Voice Changer is the
+    // SECOND row — still the first that reshapes a take rather than isolating
+    // one. The separator is one place further back than it was.
+    const above = items[voiceIndex - 1];
+    expect(above !== 'separator' && above.id).toBe('voice.separate');
+    expect(items[voiceIndex - 2]).toBe('separator');
     const voice = items[voiceIndex];
     expect(voice !== 'separator' && voice.label).toBe('Voice Changer');
     expect(voice !== 'separator' && voice.shortcut).toBeUndefined();

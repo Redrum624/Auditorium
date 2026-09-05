@@ -1033,3 +1033,90 @@ describe('gap hooks', () => {
     expect(t.getSelectedGap()).toBeNull();
   });
 });
+
+/**
+ * D4 — `separateVoiceLand`, the Separate Voice landing WITHOUT the model.
+ *
+ * The smoke cannot run HT-Demucs (166 MB, minutes of CPU) just to see two
+ * tracks land, and it must not have to: the model is `separateStems`' business
+ * and is already exercised by its own hook. So this one synthesises the output
+ * the model would have produced — four distinct stems plus the float32
+ * complement residual, an exact partition of the ACTIVE document — and hands it
+ * to the shipped `landVoice`. What the smoke asserts is therefore the landing,
+ * which is the part D4 added.
+ */
+describe('separateVoiceLand (D4)', () => {
+  /** Distinct, non-trivial content per channel — a landing measured on silence
+   *  would pass with every stem index swapped. */
+  function addVoiceDoc(name = 'song.wav', channelCount = 2): AudioDocument {
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < channelCount; c++) {
+      const ch = new Float32Array(2048);
+      for (let i = 0; i < ch.length; i++) {
+        ch[i] = 0.4 * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / 44100) + (c === 0 ? 0.05 : -0.03);
+      }
+      channels.push(ch);
+    }
+    const doc = createDocument({ name, sampleRate: 44100, channels });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('lands two named documents and a two-track session, with no model run', () => {
+    const t = api();
+    addVoiceDoc('song.wav');
+
+    const summary = t.separateVoiceLand();
+
+    expect(summary.ok).toBe(true);
+    expect(summary.documentNames).toEqual(['song.wav — Voice', 'song.wav — Backing']);
+    expect(summary.trackNames).toEqual(['Voice', 'Backing']);
+    expect(summary.sessionName).toBe('song.wav — Voice + Backing');
+    expect(summary.sampleRate).toBe(44100);
+    expect(summary.lengthSamples).toBe(2048);
+    expect(useSessionStore.getState().session.tracks).toHaveLength(2);
+    expect(useAppStore.getState().view).toBe('multitrack');
+  });
+
+  it('reports the measured Voice + Backing error against the source it started from', () => {
+    const t = api();
+    addVoiceDoc();
+
+    const summary = t.separateVoiceLand();
+
+    // The synthetic stems are an exact partition, so the two tracks add back up
+    // to within float32 re-association — the same claim `landVoice` makes.
+    expect(summary.worstAbsError).not.toBeNull();
+    expect(summary.worstAbsError!).toBeLessThan(1e-6);
+  });
+
+  it('routes a MONO source as dual-mono, and says so', () => {
+    const t = api();
+    addVoiceDoc('mono.wav', 1);
+
+    const summary = t.separateVoiceLand();
+
+    expect(summary.monoRoutedAsDualMono).toBe(true);
+    expect(summary.channelCounts).toEqual([2, 2]);
+  });
+
+  it('refuses an empty document and a bare app, landing nothing', () => {
+    const t = api();
+    expect(t.separateVoiceLand().ok).toBe(false);
+
+    const empty = createDocument({ name: 'empty.wav', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    const summary = t.separateVoiceLand();
+
+    expect(summary.ok).toBe(false);
+    expect(summary.documentNames).toEqual([]);
+    expect(useAppStore.getState().documents).toHaveLength(1);
+  });
+
+  it('hands back plain JSON (T16)', () => {
+    const t = api();
+    addVoiceDoc();
+    const summary = t.separateVoiceLand();
+    expect(JSON.parse(JSON.stringify(summary))).toStrictEqual(summary);
+  });
+});

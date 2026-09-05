@@ -480,7 +480,10 @@ export default function App() {
         openRecordDialog: () => setRecordOpen(true),
         openTempoDialog: () => openTool('tempo.match'),
         openRemixDialog: () => openTool('edit.remix'),
-        openSeparateDialog: () => openTool('edit.separateStems'),
+        // D4: one bus entry, two rows — the mode picks which of them the host
+        // mounts, and the dialog reads its own mode off that id.
+        openSeparateDialog: (mode) =>
+          openTool(mode === 'voice' ? 'voice.separate' : 'edit.separateStems'),
         openTranscribeDialog: () => openTool('edit.transcribe'),
         openVoiceChangerDialog: () => openTool('edit.voiceChanger'),
         openAlignTimingDialog: () => openTool('timing.align'),
