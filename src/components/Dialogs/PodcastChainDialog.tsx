@@ -4,8 +4,10 @@ import { docLength } from '../../audio/AudioDocument';
 import type { StageDelta } from '../../dsp/chainAnalysis';
 import { useAppStore } from '../../stores/appStore';
 import {
+  PODCAST_CHAIN_MAX_CHANNELS,
   PODCAST_CHAIN_STAGES,
   PODCAST_CHAIN_UNDO_LABEL,
+  PODCAST_CHANNEL_REFUSAL,
   PODCAST_TARGET_LUFS_MONO,
   PODCAST_TARGET_LUFS_STEREO,
   defaultPodcastStageSelection,
@@ -286,10 +288,17 @@ export default function PodcastChainDialog({ onClose }: { onClose: () => void })
     ? `Selection — ${secs(regionSamples, rate)}`
     : `Whole file — ${secs(regionSamples, rate)}`;
   // Which target this document will be held to, from the same channel count the
-  // engine reads. Stated before the run as well as after it, because it is the
-  // one number the whole pass is steered by.
-  const mono = doc.channels.length === 1;
+  // engine reads — INCLUDING the engine's own >2-channel branch (final review,
+  // C2). Stated before the run as well as after it, because it is the one number
+  // the whole pass is steered by; a document the engine will refuse has no
+  // target at all, and calling it "stereo" was a false description of a 6-channel
+  // file on the very path D6 exists for.
+  const channelCount = doc.channels.length;
+  const tooManyChannels = channelCount > PODCAST_CHAIN_MAX_CHANNELS;
+  const mono = channelCount === 1;
   const targetLufs = mono ? PODCAST_TARGET_LUFS_MONO : PODCAST_TARGET_LUFS_STEREO;
+  /** Only a document with EXACTLY two channels is stereo (minor M21). */
+  const channelWord = mono ? 'mono' : 'stereo';
 
   // The finished report wins the moment it exists, and a run that FAILED shows
   // nothing: `runPodcastChain` resolves null after rolling the document back,
@@ -301,6 +310,12 @@ export default function PodcastChainDialog({ onClose }: { onClose: () => void })
   const anyEnabled = PODCAST_CHAIN_STAGES.some((s) => enabled[s.id]);
   const refused = report !== null && report.refusal !== null;
   const done = report !== null && report.applied;
+  // Whether the LIMITER actually ran (final review, C10). Every stage has a
+  // checkbox, so the delivery sentence below may not claim the limiter held the
+  // peak: with the stage switched off the loudness gain leaves the peak wherever
+  // it lands, and the loudness row's own warning says so a few lines above.
+  const limiterApplied =
+    report !== null && report.stages.find((r) => r.id === 'limiter')?.status === 'applied';
   // A refused document is as finished as an applied one: nothing the user can
   // do inside this dialog changes the channel count, so re-running could only
   // refuse a second time.
@@ -381,12 +396,27 @@ export default function PodcastChainDialog({ onClose }: { onClose: () => void })
 
         <SectionLabel>Stages</SectionLabel>
 
-        <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
-          The stages run top to bottom over the region above, each one on settings worked out from
-          the audio that reaches it. This document is {mono ? 'mono' : 'stereo'}, so the pass targets{' '}
-          <span className="font-mono">{lufs(targetLufs)}</span>. The whole pass lands as a single
-          undo entry.
-        </p>
+        {tooManyChannels ? (
+          /* D6 — a document the engine will refuse says so HERE, before Apply,
+             instead of claiming a target it will never be held to. The engine's
+             own sentence verbatim (it names the fix), prefixed with the count
+             this document actually has: a paraphrase would be a second place
+             for that instruction to go wrong. */
+          <p
+            data-testid="podcast-chain-channel-refusal"
+            className="text-xs"
+            style={{ color: 'var(--glass-text-muted)' }}
+          >
+            This document has {channelCount} channels. {PODCAST_CHANNEL_REFUSAL}
+          </p>
+        ) : (
+          <p className="text-xs" style={{ color: 'var(--glass-text-muted)' }}>
+            The stages run top to bottom over the region above, each one on settings worked out
+            from the audio that reaches it. This document is {channelWord}, so the pass targets{' '}
+            <span className="font-mono">{lufs(targetLufs)}</span>. The whole pass lands as a single
+            undo entry.
+          </p>
+        )}
 
         <div className="flex flex-col gap-2">
           {PODCAST_CHAIN_STAGES.map((stage) => {
@@ -564,9 +594,11 @@ export default function PodcastChainDialog({ onClose }: { onClose: () => void })
               className="text-xs"
               style={{ color: 'var(--glass-text-label)' }}
             >
-              Delivery target for this {mono ? 'mono' : 'stereo'} document:{' '}
-              <span className="font-mono">{lufs(targetLufs)}</span>, with the limiter holding the
-              sample peak at or under its ceiling.
+              Delivery target for this {channelWord} document:{' '}
+              <span className="font-mono">{lufs(targetLufs)}</span>
+              {limiterApplied
+                ? ', with the limiter holding the sample peak at or under its ceiling.'
+                : '. The Limiter did not run, so nothing held the sample peak — read it off the row above.'}
             </p>
 
             <p
@@ -642,7 +674,7 @@ export default function PodcastChainDialog({ onClose }: { onClose: () => void })
                 variant="primary"
                 data-testid="podcast-chain-apply"
                 onClick={() => void handleApply()}
-                disabled={busy || !anyEnabled}
+                disabled={busy || !anyEnabled || tooManyChannels}
               >
                 Apply
               </GlassButton>

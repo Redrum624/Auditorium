@@ -88,6 +88,49 @@ const APPLIED_LOUDNESS: PodcastChainStageResult = {
   elapsedMs: 180,
 };
 
+/** The same stage on a MONO document: the target it aimed at is -19.0, the
+ * figure `PODCAST_TARGET_LUFS_MONO` names and the only one a 1-channel run can
+ * report. Its gain differs from the stereo fixture's for the same reason. */
+const APPLIED_LOUDNESS_MONO: PodcastChainStageResult = {
+  id: 'loudness',
+  label: 'Loudness',
+  status: 'applied',
+  derived: [
+    {
+      label: 'Gain',
+      value: '+10.8 dB',
+      from: 'measured -29.8 LUFS against the -19.0 LUFS mono podcast target',
+    },
+  ],
+  loudness: { beforeLufs: -29.8, afterLufs: -19.0, targetLufs: -19.0, gainDb: 10.8 },
+  delta: {
+    rmsBeforeDb: -35.3,
+    rmsAfterDb: -24.5,
+    peakBeforeDb: -13.2,
+    peakAfterDb: -2.4,
+    identicalFraction: 0.037,
+    differenceRmsDb: -23.9,
+  },
+  elapsedMs: 180,
+};
+
+/** A Limiter that RAN — the stage the delivery sentence's claim depends on. */
+const APPLIED_LIMITER: PodcastChainStageResult = {
+  id: 'limiter',
+  label: 'Limiter',
+  status: 'applied',
+  derived: [{ label: 'Ceiling', value: '-1.0 dBFS', from: 'the delivery ceiling D6 names' }],
+  delta: {
+    rmsBeforeDb: -21.5,
+    rmsAfterDb: -21.9,
+    peakBeforeDb: 0.6,
+    peakAfterDb: -1.0,
+    identicalFraction: 0.94,
+    differenceRmsDb: -41.2,
+  },
+  elapsedMs: 90,
+};
+
 /**
  * The loudness stage with the Limiter switched off — a stage that RAN and still
  * needs reading.
@@ -431,10 +474,39 @@ describe('PodcastChainDialog — the report', () => {
 
   it('states the target that applies to THIS document — mono', async () => {
     seedDoc(1);
-    await apply(makeReport({ stages: stagesWith(APPLIED_LOUDNESS) }));
+    // The loudness stage's own report has to be the MONO one (minor M6): seeding
+    // a 1-channel document and then feeding a report whose loudness stage says
+    // it aimed at -16.0 described a run that cannot happen, and the line under
+    // test would have read the same with the fixture disagreeing.
+    await apply(makeReport({ stages: stagesWith(APPLIED_LOUDNESS_MONO, APPLIED_LIMITER) }));
     const target = await screen.findByTestId('podcast-chain-target');
     expect(target).toHaveTextContent(`${PODCAST_TARGET_LUFS_MONO.toFixed(1)} LUFS`);
     expect(target).toHaveTextContent(/mono/i);
+    expect(target).toHaveTextContent(/limiter holding the sample peak/i);
+  });
+
+  /**
+   * C10 — the delivery sentence may only claim the limiter held the peak when
+   * the Limiter actually RAN. Every stage has a checkbox, and with that one off
+   * the loudness gain leaves the peak wherever it lands — the amber warning a
+   * few lines above says exactly that, and the two must not contradict each
+   * other on one screen.
+   */
+  it('does NOT claim the limiter held the peak when the Limiter did not run', async () => {
+    seedDoc(2);
+    await apply(makeReport({ stages: stagesWith(WARNED_LOUDNESS) })); // limiter: 'off'
+    const target = await screen.findByTestId('podcast-chain-target');
+    expect(target).toHaveTextContent(`${PODCAST_TARGET_LUFS_STEREO.toFixed(1)} LUFS`);
+    expect(target).not.toHaveTextContent(/limiter holding/i);
+    expect(target).toHaveTextContent(/Limiter did not run/i);
+  });
+
+  it('claims it again as soon as the Limiter reports applied', async () => {
+    seedDoc(2);
+    await apply(makeReport({ stages: stagesWith(APPLIED_LOUDNESS, APPLIED_LIMITER) }));
+    expect(await screen.findByTestId('podcast-chain-target')).toHaveTextContent(
+      /limiter holding the sample peak/i
+    );
   });
 
   it('shows a declined stage as “Did not run”, with the measurement that decided it', async () => {
@@ -541,8 +613,50 @@ describe('PodcastChainDialog — the report', () => {
 // ── The refusal ─────────────────────────────────────────────────────────────
 
 describe('PodcastChainDialog — the >2-channel refusal', () => {
+  /**
+   * C2 — the refusal is stated BEFORE Apply, not after it. The pre-run sentence
+   * used to call a 6-channel document "stereo" and promise it -16.0 LUFS, with
+   * Apply enabled, for a document `runPodcastChain` refuses outright: a false
+   * description of the file and a target it would never be held to, on the one
+   * path D6 exists for.
+   */
+  it('names the refusal pre-run and disables Apply for a document over two channels', () => {
+    seedDoc(3);
+    open();
+
+    const refusal = screen.getByTestId('podcast-chain-channel-refusal');
+    expect(refusal).toHaveTextContent('This document has 3 channels');
+    // The engine's own sentence, so the instruction lives in exactly one place.
+    expect(refusal).toHaveTextContent(PODCAST_CHANNEL_REFUSAL);
+    expect(refusal).toHaveTextContent('Convert Channels');
+    // ...and none of the copy that only makes sense for a document it will run.
+    // (The refusal itself says "Convert to stereo first", which is the fix, not
+    // a description of this file.)
+    expect(refusal).not.toHaveTextContent(/This document is stereo/i);
+    expect(screen.queryByText(/so the pass targets/i)).toBeNull();
+
+    expect(screen.getByTestId('podcast-chain-apply')).toBeDisabled();
+    expect(mockRun).not.toHaveBeenCalled();
+  });
+
+  it('says "stereo" only for a document with exactly two channels', () => {
+    seedDoc(2);
+    open();
+    expect(screen.getByText(/This document is stereo/i)).toBeInTheDocument();
+    expect(screen.queryByTestId('podcast-chain-channel-refusal')).toBeNull();
+    expect(screen.getByTestId('podcast-chain-apply')).not.toBeDisabled();
+  });
+
+  /**
+   * The ENGINE is the authority on this rule; the guard above is a copy of it
+   * that keeps the shipped path from reaching a refusal at all. This pins what
+   * the user sees if the engine ever refuses a document the dialog let through
+   * — the terminal render, driven by a refusal report the way the engine
+   * delivers one. Seeded at two channels deliberately: the guard would
+   * otherwise disable the Apply this test has to click.
+   */
   it('renders the refusal text, leaves no progress bar behind, and offers only Close', async () => {
-    seedDoc(6);
+    seedDoc(2);
     mockRun.mockResolvedValue(
       makeReport({
         before: { rmsDb: -30.5, peakDb: -19.9, crestDb: 10.6, lufs: null },
