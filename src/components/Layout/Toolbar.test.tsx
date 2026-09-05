@@ -1,8 +1,11 @@
+import { useRef, type RefObject } from 'react';
 import { render, screen, fireEvent, act } from '@testing-library/react';
 import Toolbar from './Toolbar';
+import { useMultitrackZoom } from '../Multitrack/useMultitrackZoom';
 import { createDocument, docLength, type AudioDocument } from '../../audio/AudioDocument';
 import { playbackEngine } from '../../audio/PlaybackEngine';
-import { useAppStore, makeInitialState, defaultZoom } from '../../stores/appStore';
+import { useAppStore, makeInitialState, defaultZoom, applyEditorZoom } from '../../stores/appStore';
+import { anchoredZoom } from '../../services/zoomAnchor';
 import { useSessionStore } from '../../multitrack/sessionStore';
 import { _resetSessionUndo } from '../../multitrack/sessionUndo';
 import { createClip, createTrack, type Session } from '../../multitrack/session';
@@ -610,6 +613,55 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
       expect((cursor - scrollSample) / samplesPerPixel).toBeCloseTo(300, 3);
     });
 
+    /**
+     * D1, review round 1 — the editor twin of the multitrack tail case.
+     *
+     * `zoomEditorBy` used to clamp its anchor to `docLength`; it uses the raw
+     * bar now, so both controls name the same sample.
+     *
+     * HONEST LIMIT OF THIS PIN: unlike the multitrack twin, this one passes
+     * with or without the clamp, and it is worth writing down why rather than
+     * leaving a reader to assume it is load-bearing. A cursor past `docLength`
+     * is necessarily off screen (`resolveZoom` never lets the window run past
+     * the end), so both anchors take the centre arm, and the centred scroll —
+     * `cursor − (lane/2)·spp` for any `cursor > docLength` — always exceeds
+     * `maxScroll = docLength − lane·spp` and is clamped to it either way. The
+     * store's own ceiling masks the difference. It is kept as a parity guard:
+     * it fails if the two paths are ever made to differ in a way the ceiling
+     * does NOT absorb.
+     */
+    it('D1: with the cursor past the document end, − / + and the wheel agree', () => {
+      _resetEditorLaneWidth();
+      const doc = makeLongDoc();
+      useAppStore.getState().addDocument(doc);
+      const past = docLength(doc) + 500_000;
+      const start = { samplesPerPixel: 200, scrollSample: 1_000_000 };
+
+      act(() => {
+        useAppStore.getState().setCursor(past);
+        useAppStore.getState().setZoom(start);
+      });
+      render(<Toolbar />);
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+      const viaButton = useAppStore.getState().zoom;
+
+      act(() => {
+        useAppStore.getState().setCursor(past);
+        useAppStore.getState().setZoom(start);
+      });
+      applyEditorZoom(
+        anchoredZoom({
+          zoom: start,
+          laneWidth: FALLBACK_EDITOR_LANE_WIDTH,
+          anchorSample: past,
+          factor: 1 / 1.25,
+        })
+      );
+      const viaWheelRule = useAppStore.getState().zoom;
+
+      expect(viaButton).toEqual(viaWheelRule);
+    });
+
     it('F11: Fit is idempotent and is the state a freshly opened document is already in', () => {
       const doc = makeDoc();
       useAppStore.getState().addDocument(doc);
@@ -739,6 +791,30 @@ describe('Toolbar — the snap magnet (Task B4)', () => {
  * looking at, or none at all, in which case the whole cluster was dead. There
  * was no control anywhere in the app that could fit the session.
  */
+/**
+ * D1 (review round 1) — the multitrack WHEEL, mounted next to the toolbar so
+ * one test can compare what the two controls actually do to the store.
+ *
+ * A stable `useRef`, matching `MultitrackView`'s own lane ref: `createRef()` in
+ * a render body mints a new object per render and would re-install the hook's
+ * listener behind the test's back.
+ */
+function WheelLane() {
+  const ref = useRef<HTMLDivElement | null>(null);
+  useMultitrackZoom(ref as RefObject<HTMLElement | null>);
+  return <div ref={ref} data-testid="wheel-lane" />;
+}
+
+/** One Ctrl+wheel notch toward the user — the zoom-IN half of the gesture, the
+ * same direction the `+` button takes. No rect stub: the handler reads none. */
+function ctrlWheelIn(el: HTMLElement): void {
+  act(() => {
+    el.dispatchEvent(
+      new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100, ctrlKey: true })
+    );
+  });
+}
+
 describe('MT1-1: the zoom cluster in the multitrack view', () => {
   const CLIP_LEN = 44100 * 178; // 2:58, the reported length
   const LANE = 1000;
@@ -852,6 +928,50 @@ describe('MT1-1: the zoom cluster in the multitrack view', () => {
     const { mtZoom } = useSessionStore.getState();
     expect(mtZoom.samplesPerPixel).toBeCloseTo(200 / 1.25, 6);
     expect((cursor - mtZoom.scrollSample) / mtZoom.samplesPerPixel).toBeCloseTo(LANE / 2, 3);
+  });
+
+  /**
+   * D1, review round 1 — THE TWO CONTROLS MUST LAND ON THE SAME ZOOM.
+   *
+   * The multitrack timeline is scrollable 60 s PAST the last clip
+   * (`MT_TIMELINE_TAIL_SEC`) and `setMtCursor` does not clamp, so the bar can
+   * legitimately sit in that tail. The wheel anchored on the raw
+   * `mtCursorSample` while this button clamped its anchor to
+   * `sessionTimelineLength` — one rule, two anchor VALUES, and the divergence
+   * was invisible anywhere the bar sat over a clip.
+   *
+   * Asserted on the resolved store state rather than on the request, because
+   * "same request" is not the claim — "same place on screen" is.
+   */
+  it('D1: with the bar in the 60 s tail, the wheel and + land on the SAME zoom', () => {
+    seedSession();
+    const bar = CLIP_LEN + 30 * 44100; // 30 s past the last clip
+    // A start where the bar is ON screen, so the on-screen arm is the one under
+    // test; the clamped anchor would have been off screen and centred instead.
+    const start = { samplesPerPixel: 200, scrollSample: bar - 300 * 200 };
+
+    act(() => {
+      useSessionStore.getState().setMtCursor(bar);
+      useSessionStore.getState().setMtZoom(start);
+    });
+    const toolbar = render(<Toolbar />);
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+    const viaButton = useSessionStore.getState().mtZoom;
+    toolbar.unmount();
+
+    act(() => {
+      useSessionStore.getState().setMtCursor(bar);
+      useSessionStore.getState().setMtZoom(start);
+    });
+    const lane = render(<WheelLane />);
+    ctrlWheelIn(lane.getByTestId('wheel-lane'));
+    const viaWheel = useSessionStore.getState().mtZoom;
+    lane.unmount();
+
+    expect(viaWheel).toEqual(viaButton);
+    // ...and both actually held the bar where it was, rather than agreeing on
+    // some third thing (two broken controls agreeing is not the property).
+    expect((bar - viaWheel.scrollSample) / viaWheel.samplesPerPixel).toBeCloseTo(300, 3);
   });
 
   it('the % readout reads the session, and 100% is its fit', () => {

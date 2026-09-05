@@ -35,13 +35,12 @@ import { _resetSessionLaneWidth, setSessionLaneWidth } from '../../multitrack/se
 
 const SR = 44_100;
 const LANE = 1000;
-/** jsdom gives every element a zero rect, so the hook's `getBoundingClientRect`
- * has to be stubbed for the pointer anchor to mean anything. Left edge 0 keeps
- * `clientX` equal to the lane-local x. */
-function stubRect(el: HTMLElement): void {
-  el.getBoundingClientRect = () =>
-    ({ left: 0, top: 0, right: LANE, bottom: 96, width: LANE, height: 96, x: 0, y: 0 }) as DOMRect;
-}
+/* The `getBoundingClientRect` stub that used to live here is GONE, and its
+ * absence is part of the pin. It existed so `e.clientX` could be turned into a
+ * lane-local x; under D1 the hook reads no rect at all. Leaving jsdom's zero
+ * rect in place also keeps the anchor cases sharp — a regression to pointer
+ * anchoring would read `clientX - 0`, i.e. exactly the pointer x each case
+ * passes, and would still be caught. */
 
 function Harness() {
   const ref = createRef<HTMLDivElement>();
@@ -61,9 +60,7 @@ function mountOverSession(lengthSample: number): HTMLElement {
     createClip({ documentId: 'doc-1', startSample: 0, offsetSample: 0, lengthSample })
   );
   const { getByTestId } = render(<Harness />);
-  const lane = getByTestId('lane');
-  stubRect(lane);
-  return lane;
+  return getByTestId('lane');
 }
 
 /** A real wheel event with the modifier keys the hook branches on. */
@@ -182,7 +179,6 @@ describe('useMultitrackZoom', () => {
     );
     const { getByTestId, unmount } = render(<Harness />);
     const lane = getByTestId('lane');
-    stubRect(lane);
     act(() => store().setMtZoom({ samplesPerPixel: 200, scrollSample: 0 }));
     unmount();
     const after = zoom();

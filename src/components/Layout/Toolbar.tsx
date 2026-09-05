@@ -1,13 +1,12 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { Circle, Magnet, Minus, Pause, Play, Plus, Repeat, SkipBack, Square } from 'lucide-react';
-import { docLength } from '../../audio/AudioDocument';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore';
 import type { Session } from '../../multitrack/session';
-import { defaultSessionZoom, sessionTimelineLength } from '../../multitrack/sessionZoom';
+import { defaultSessionZoom } from '../../multitrack/sessionZoom';
 import { isCommandEnabled, runCommand, showEditorView } from '../../services/menuActions';
 import { useHistoryVersion } from '../../services/undoHistory';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
@@ -136,11 +135,6 @@ function zoomPercent(doc: AudioDocument, samplesPerPixel: number): number {
   return Math.round((defaultZoom(doc).samplesPerPixel / samplesPerPixel) * 100);
 }
 
-// F11-9: still used for the cursor anchor below; the ZOOM clamps are gone.
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(Math.max(v, lo), hi);
-}
-
 /** Zoom the single-document editor by `factor`, anchored on the cursor.
  *
  * D1 — the anchor rule lives in `services/zoomAnchor` now, and the wheel
@@ -164,7 +158,12 @@ function zoomEditorBy(factor: number): void {
     anchoredZoom({
       zoom: s.zoom,
       laneWidth: editorLaneWidth(),
-      anchorSample: clamp(s.cursorSample, 0, docLength(doc)),
+      // D1 — the RAW bar, unclamped. This used to clamp to `docLength`, which
+      // made the buttons anchor on a different sample than the wheel does the
+      // moment the two disagree about where the bar is. One anchor on every
+      // path means one anchor VALUE too; `resolveZoom` still bounds the scroll
+      // that comes out, through the resolved-spp callback.
+      anchorSample: s.cursorSample,
       factor,
     })
   );
@@ -206,7 +205,13 @@ function zoomSessionBy(factor: number): void {
     anchoredZoom({
       zoom: s.mtZoom,
       laneWidth: sessionLaneWidth(),
-      anchorSample: clamp(s.mtCursorSample, 0, sessionTimelineLength(s.session)),
+      // D1 — the RAW bar. The clamp to `sessionTimelineLength` that used to be
+      // here was the one place the two controls genuinely diverged: the session
+      // timeline scrolls 60 s PAST the last clip (`MT_TIMELINE_TAIL_SEC`) and
+      // `setMtCursor` does not clamp, so a bar parked in that tail was anchored
+      // at the last clip's end by the buttons and at its real position by the
+      // wheel. Same bar, same notch, two destinations.
+      anchorSample: s.mtCursorSample,
       factor,
     })
   );

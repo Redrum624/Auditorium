@@ -1,4 +1,4 @@
-import { createRef } from 'react';
+import { useRef } from 'react';
 import { act, render } from '@testing-library/react';
 import { useEditorGestures } from './useEditorGestures';
 import { createDocument, type AudioDocument } from '../../audio/AudioDocument';
@@ -22,10 +22,12 @@ const SR = 44_100;
 const LENGTH = 178 * SR;
 const LANE = 1000;
 
-function stubRect(el: HTMLElement): void {
-  el.getBoundingClientRect = () =>
-    ({ left: 0, top: 0, right: LANE, bottom: 150, width: LANE, height: 150, x: 0, y: 0 }) as DOMRect;
-}
+/* No `getBoundingClientRect` stub here, deliberately. The wheel handler read one
+ * to turn `e.clientX` into a lane x; under D1 it reads no rect at all, so a stub
+ * would only be scenery. Leaving jsdom's zero rect in place also keeps these
+ * cases sharp: a regression to pointer anchoring would compute `mouseX =
+ * clientX - 0`, i.e. exactly the `clientX` each case passes, and every
+ * assertion below would still catch it. */
 
 function makeDoc(): AudioDocument {
   // Off-identity: a real (if quiet) signal rather than a silent buffer, and a
@@ -35,8 +37,23 @@ function makeDoc(): AudioDocument {
   return createDocument({ name: 'take.wav', sampleRate: SR, channels: [ch] });
 }
 
+/**
+ * `useRef`, NOT `createRef` — and the distinction is what makes the "reads the
+ * cursor LIVE" case below able to fail at all.
+ *
+ * `createRef()` called in a render body mints a NEW ref object on every render.
+ * The wheel effect's dependency list is `[canvasRef]`, so a fresh ref would tear
+ * the listener down and re-install it after every render — and since the hook
+ * subscribes to `cursorSample`, moving the cursor re-renders this harness and
+ * would hand even a closed-over implementation the current value. The guard
+ * would pass against the bug it exists to catch.
+ *
+ * A stable ref is also what the real callers hold (`WaveformView.tsx:40`,
+ * `SpectrogramView.tsx:137`), so this harness now models them rather than a
+ * shape no view has.
+ */
 function Harness() {
-  const ref = createRef<HTMLCanvasElement>();
+  const ref = useRef<HTMLCanvasElement | null>(null);
   useEditorGestures(ref, LENGTH);
   return <canvas ref={ref} data-testid="lane" />;
 }
@@ -49,9 +66,7 @@ function mount(): HTMLElement {
   useAppStore.setState(makeInitialState());
   useAppStore.getState().addDocument(makeDoc());
   const { getByTestId } = render(<Harness />);
-  const canvas = getByTestId('lane');
-  stubRect(canvas);
-  return canvas;
+  return getByTestId('lane');
 }
 
 function wheel(

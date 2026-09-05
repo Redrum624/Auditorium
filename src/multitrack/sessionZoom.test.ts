@@ -113,8 +113,8 @@ describe('resolveSessionZoom — the ONE clamp', () => {
   });
 
   it('resolves the scroll against the RESOLVED spp, never the requested one', () => {
-    // The anchored gestures (wheel-zoom on the pointer, the -/+ buttons on the
-    // cursor) pass a scroll FUNCTION so the anchor stays under the same x. At a
+    // The anchored gestures (since D1: Ctrl+wheel and the -/+ buttons, both on
+    // the cursor) pass a scroll FUNCTION so the anchor stays under the same x. At a
     // limit the requested and resolved spp differ, and feeding the request to
     // that function is exactly how an anchor drifts at the edge of the range.
     // Requesting an absurd zoom-out resolves to `fit`, so the function must be
@@ -181,7 +181,7 @@ describe('resolveSessionZoom — the ONE clamp', () => {
   });
 
   it('feeds the RESOLVED samplesPerPixel to a functional scroll request', () => {
-    // The anchored paths (wheel-zoom on the pointer, the −/+ buttons on the
+    // The anchored paths (since D1: Ctrl+wheel and the −/+ buttons, both on the
     // cursor) need the CLAMPED spp to keep their anchor under the same x.
     const seen: number[] = [];
     resolveSessionZoom(

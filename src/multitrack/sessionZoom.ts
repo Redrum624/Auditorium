@@ -64,10 +64,10 @@ export interface SessionZoomRequest {
   samplesPerPixel: number;
   /**
    * Either an absolute scroll position, or a function of the RESOLVED
-   * samples-per-pixel. The anchored paths (wheel-zoom on the pointer, the −/+
-   * buttons on the multitrack cursor) need the CLAMPED spp to keep their anchor
-   * under the same x: computing the scroll from the REQUESTED spp and then
-   * clamping it separately is how an anchor drifts at the limit.
+   * samples-per-pixel. The anchored paths (since D1: Ctrl+wheel AND the −/+
+   * buttons, both on the multitrack cursor) need the CLAMPED spp to keep their
+   * anchor under the same x: computing the scroll from the REQUESTED spp and
+   * then clamping it separately is how an anchor drifts at the limit.
    */
   scrollSample: number | ((resolvedSamplesPerPixel: number) => number);
 }

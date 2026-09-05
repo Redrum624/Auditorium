@@ -37,10 +37,15 @@ function anchorX(scroll: number, spp: number): number {
 }
 
 describe('anchoredZoom — an on-screen bar keeps its x', () => {
+  // Three DISTINCT doubles. `1 / 1.25` and `0.8` are the same number, so listing
+  // both would have bought a third case that tests nothing; `2` and `0.5` are a
+  // coarser pair than one wheel notch, which is where a factor applied twice or
+  // inverted shows up most clearly.
   it.each([
-    ['in', 1 / 1.25],
-    ['out', 1.25],
-    ['a fractional factor', 0.8],
+    ['in one notch', 1 / 1.25],
+    ['out one notch', 1.25],
+    ['out hard', 2],
+    ['in hard', 0.5],
   ])('zooming %s scales spp by the factor and holds the bar at x = 200', (_label, factor) => {
     const req = anchoredZoom({ zoom: ZOOM, laneWidth: LANE, anchorSample: ANCHOR, factor });
 
