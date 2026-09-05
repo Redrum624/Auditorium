@@ -33,8 +33,14 @@ import {
   MONO_PAN_COMPENSATION_DB,
   STEM_TRACK_LABELS,
   VOICE_TRACK_LABELS,
+  landSpeakers,
+  speakerTrackLabels,
+  speakersSessionName,
+  speakerDocumentBytes,
+  SPEAKER_LANDING_BUDGET_BYTES,
 } from './stemLanding';
 import { clearBeatGridLinks, _getBeatGridLinkForTest } from './beatGrid';
+import { keepSpans } from '../dsp/spanMask';
 
 // ---------------------------------------------------------------------------
 // Fixtures — a local generator per file, this repo's convention
@@ -1054,5 +1060,276 @@ describe('D4 landVoice — the two-track session', () => {
       // route (unrouted, this reads 0.196).
       expect([channelCount, report.worstAbs < 1e-6]).toEqual([channelCount, true]);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D4 — Separate Speakers: one document per speaker, plus the Backing
+// ---------------------------------------------------------------------------
+/**
+ * `landSpeakers` is `landVoice` with the Voice track split N ways: each speaker
+ * gets the FULL Vocals stem with everything outside their own turns taken to
+ * silence by `keepSpans` (D4), and the Backing is the same sum `landVoice`
+ * lands. The assertions below compare the landed documents against
+ * `keepSpans`' own output rather than against a mask re-implemented here, and
+ * against `landVoice`'s Backing rather than a hand-written sum — so a change to
+ * either shared piece shows up as a failure here instead of a silent drift.
+ *
+ * There is deliberately NO exact-sum assertion for the speaker tracks: the edge
+ * fades remove audio and an overlapping turn is carried twice, which D4 states
+ * and the dialog's copy repeats.
+ */
+
+/**
+ * Speaker 1 owns the first half PLUS a turn that sits inside speaker 2's half;
+ * speaker 2 owns the second half. `[8000, 9000)` is therefore held by BOTH, and
+ * it is 1000 samples — wider than two 441-sample ramps, so it has a unity
+ * interior to compare.
+ */
+const SPEAKER_SPANS = [
+  [
+    { startSample: 0, endSample: 6000 },
+    { startSample: 8000, endSample: 9000 },
+  ],
+  [{ startSample: 6000, endSample: 12000 }],
+];
+
+function docById(id: string): AudioDocument {
+  return useAppStore.getState().documents.find((d) => d.id === id)!;
+}
+
+describe('D4 landSpeakers — one document per speaker plus the Backing', () => {
+  it('creates N + 1 documents, named `<source> — Speaker k` and `<source> — Backing`', () => {
+    const source = addSourceDocument(2, 44100, 'My Song');
+    const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
+
+    const docs = useAppStore.getState().documents;
+    expect(docs).toHaveLength(4); // the source + two speakers + Backing
+    expect(docs.slice(1).map((d) => d.name)).toEqual([
+      'My Song — Speaker 1',
+      'My Song — Speaker 2',
+      'My Song — Backing',
+    ]);
+    expect(result.documentIds).toEqual(docs.slice(1).map((d) => d.id));
+  });
+
+  it('lands each speaker as the Vocals stem masked to that speaker’s spans', () => {
+    const source = addSourceDocument(2, 44100);
+    const output = makeOutput(source);
+    const result = landSpeakers(output, SPEAKER_SPANS);
+
+    for (let k = 0; k < SPEAKER_SPANS.length; k++) {
+      const doc = docById(result.documentIds[k]);
+      expect(doc.channels).toEqual(keepSpans(vocalsOf(output), SPEAKER_SPANS[k], output.sampleRate));
+      // Not vacuous: masking really removed audio the Voice document keeps.
+      expect(doc.channels[0]).not.toEqual(vocalsOf(output)[0]);
+      expect(docLength(doc)).toBe(FIXTURE_LENGTH);
+    }
+    // …and the two speakers are different audio from each other.
+    expect(docById(result.documentIds[0]).channels[0]).not.toEqual(
+      docById(result.documentIds[1]).channels[0]
+    );
+  });
+
+  it('carries an overlapping turn on BOTH speakers, and each speaker’s own half on one', () => {
+    const source = addSourceDocument(2, 44100);
+    const output = makeOutput(source);
+    const result = landSpeakers(output, SPEAKER_SPANS);
+    const vocals = vocalsOf(output);
+    const first = docById(result.documentIds[0]).channels;
+    const second = docById(result.documentIds[1]).channels;
+
+    // Interior of [8000, 9000), clear of both 441-sample ramps.
+    let bothCarry = 0;
+    let audible = 0;
+    for (let i = 8441; i < 8559; i++) {
+      for (let c = 0; c < 2; c++) {
+        if (first[c][i] === vocals[c][i] && second[c][i] === vocals[c][i]) bothCarry++;
+        if (vocals[c][i] !== 0) audible++;
+      }
+    }
+    expect([bothCarry, audible]).toEqual([236, 236]);
+
+    // Away from the overlap each speaker holds their own half alone.
+    expect(first[0][3000]).toBe(vocals[0][3000]);
+    expect(second[0][3000]).toBe(0);
+    expect(second[0][11000]).toBe(vocals[0][11000]);
+    expect(first[0][11000]).toBe(0);
+  });
+
+  it('lands the same Backing as landVoice, sample for sample', () => {
+    const source = addSourceDocument(2, 44100);
+    const output = makeOutput(source);
+
+    const speakers = landSpeakers(output, SPEAKER_SPANS);
+    const viaSpeakers = docById(speakers.documentIds[2]).channels.map((c) => Float32Array.from(c));
+
+    // The SAME output landed the other way: the Backing is the one thing the
+    // two landings must agree on exactly (D4 — "plus `<source> — Backing`
+    // unchanged"), so it is compared against the shipped path, not a local sum.
+    const voice = landVoice(output);
+    const viaVoice = docById(voice.documentIds[1]).channels;
+
+    expect(viaSpeakers).toEqual([...viaVoice]);
+    expect(viaSpeakers[0]).not.toEqual(vocalsOf(output)[0]);
+  });
+
+  it('orders the tracks Speaker 1 … Speaker N then Backing, in a `— Speakers` session', () => {
+    const source = addSourceDocument(2, 48000, 'Track A');
+    const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
+
+    const state = useSessionStore.getState();
+    expect(state.session.name).toBe('Track A — Speakers');
+    expect(speakersSessionName('Track A')).toBe('Track A — Speakers');
+    expect(state.session.sampleRate).toBe(48000);
+    expect(state.session.tracks.map((t) => t.name)).toEqual(['Speaker 1', 'Speaker 2', 'Backing']);
+    expect(result.trackIds).toEqual(state.session.tracks.map((t) => t.id));
+    expect(result.sessionName).toBe('Track A — Speakers');
+  });
+
+  it('gives each track exactly one full-length clip at offset 0', () => {
+    const source = addSourceDocument(2, 44100);
+    const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
+
+    const tracks = useSessionStore.getState().session.tracks;
+    expect(tracks).toHaveLength(3);
+    tracks.forEach((t, i) => {
+      expect(t.clips).toHaveLength(1);
+      expect(t.clips[0].documentId).toBe(result.documentIds[i]);
+      expect(t.clips[0].startSample).toBe(0);
+      expect(t.clips[0].offsetSample).toBe(0);
+      expect(t.clips[0].lengthSample).toBe(FIXTURE_LENGTH);
+    });
+    expect(useAppStore.getState().view).toBe('multitrack');
+  });
+
+  it('activates Speaker 1, not the Backing', () => {
+    const source = addSourceDocument(2, 44100);
+    const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
+    expect(useAppStore.getState().activeDocumentId).toBe(result.documentIds[0]);
+  });
+
+  it('links every document to the source and leaves them unsaved and clean', () => {
+    const source = addSourceDocument(2, 44100);
+    const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
+
+    for (const id of result.documentIds) {
+      expect(_getBeatGridLinkForTest(id)?.parentDocId).toBe(source.id);
+      const doc = docById(id);
+      expect(doc.sampleRate).toBe(44100);
+      expect(doc.neverSaved).toBe(true);
+      expect(doc.filePath).toBeNull();
+      expect(doc.dirty).toBe(false);
+    }
+  });
+
+  it('widens a MONO source to dual-mono on every speaker track', () => {
+    const source = addSourceDocument(1, 44100);
+    const output = makeOutput(source);
+    const result = landSpeakers(output, SPEAKER_SPANS);
+
+    expect(result.monoRoutedAsDualMono).toBe(true);
+    for (const id of result.documentIds) {
+      const doc = docById(id);
+      expect(doc.channels).toHaveLength(2);
+      expect(doc.channels[0]).toEqual(doc.channels[1]);
+      // Independent copies, never one array aliased twice (S5's rule).
+      expect(doc.channels[0]).not.toBe(doc.channels[1]);
+    }
+    // …and the copies are the MASKED mono material, not the whole stem.
+    const masked = keepSpans(vocalsOf(output), SPEAKER_SPANS[0], output.sampleRate);
+    expect(docById(result.documentIds[0]).channels[0]).toEqual(masked[0]);
+  });
+
+  it('reports the source peak and the exactness verdict as the other landings do', () => {
+    const source = addSourceDocument(2, 44100);
+    const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
+    expect(result.sourcePeak).toBeGreaterThan(0);
+    expect(result.exactSumHolds).toBe(true);
+  });
+});
+
+describe('D4 landSpeakers — one speaker, or none, is landVoice', () => {
+  it('delegates a single span array to landVoice, which lands the WHOLE stem', () => {
+    const source = addSourceDocument(2, 44100, 'My Song');
+    const output = makeOutput(source);
+    const result = landSpeakers(output, [SPEAKER_SPANS[0]]);
+
+    expect(useAppStore.getState().documents.slice(1).map((d) => d.name)).toEqual([
+      'My Song — Voice',
+      'My Song — Backing',
+    ]);
+    expect(useSessionStore.getState().session.tracks.map((t) => t.name)).toEqual([
+      'Voice',
+      'Backing',
+    ]);
+    expect(result.sessionName).toBe(voiceSessionName('My Song'));
+    // The Voice document is the stem itself — handed through by reference, NOT
+    // masked to the one speaker's spans (D4: a confirmed count of 1 delegates).
+    expect(docById(result.documentIds[0]).channels[0]).toBe(vocalsOf(output)[0]);
+  });
+
+  it('delegates zero span arrays to landVoice too — the D5 no-speakers case', () => {
+    const source = addSourceDocument(2, 44100, 'My Song');
+    const output = makeOutput(source);
+    const result = landSpeakers(output, []);
+
+    expect(useSessionStore.getState().session.tracks.map((t) => t.name)).toEqual([
+      'Voice',
+      'Backing',
+    ]);
+    expect(docById(result.documentIds[0]).channels[0]).toBe(vocalsOf(output)[0]);
+  });
+});
+
+describe('D4 the speaker landing’s memory budget', () => {
+  it('speakerTrackLabels names the speakers in order and puts Backing last', () => {
+    expect(speakerTrackLabels(1)).toEqual(['Speaker 1', 'Backing']);
+    expect(speakerTrackLabels(2)).toEqual(['Speaker 1', 'Speaker 2', 'Backing']);
+    expect(speakerTrackLabels(3)).toEqual(['Speaker 1', 'Speaker 2', 'Speaker 3', 'Backing']);
+    // The labels ARE the document suffixes, so the two can never disagree.
+    const source = addSourceDocument(2, 44100, 'My Song');
+    landSpeakers(makeOutput(source), SPEAKER_SPANS);
+    expect(useAppStore.getState().documents.slice(1).map((d) => d.name)).toEqual(
+      speakerTrackLabels(2).map((l) => `My Song — ${l}`)
+    );
+  });
+
+  it('speakerDocumentBytes is the document’s own footprint: samples × channels × 4', () => {
+    const stereo = addSourceDocument(2, 44100, 'Stereo');
+    expect(speakerDocumentBytes(makeOutput(stereo))).toBe(FIXTURE_LENGTH * 2 * 4);
+
+    // A MONO source lands DUAL-MONO (this module's header), so its documents
+    // cost two channels too — the budget must count what is allocated, not the
+    // source's channel count.
+    const mono = addSourceDocument(1, 44100, 'Mono');
+    expect(speakerDocumentBytes(makeOutput(mono))).toBe(FIXTURE_LENGTH * 2 * 4);
+  });
+
+  it('reproduces D4’s stated figure for a 15-minute 44.1 kHz stereo source', () => {
+    const fifteenMinutes = {
+      lengthSamples: 15 * 60 * 44100,
+      channelCount: 2,
+    } as StemSeparationOutput;
+    const bytes = speakerDocumentBytes(fifteenMinutes);
+    expect(bytes).toBe(317_520_000);
+    // D4: "317 MB each; 1.9 GB at N = 6" — and six of them are over budget.
+    expect(Math.round(bytes / 1e6)).toBe(318);
+    expect(Math.round((6 * bytes) / 1e8) / 10).toBe(1.9);
+    expect(6 * bytes).toBeGreaterThan(SPEAKER_LANDING_BUDGET_BYTES);
+    // …while three still fit, so the budget is a real boundary, not a floor.
+    expect(3 * bytes).toBeLessThan(SPEAKER_LANDING_BUDGET_BYTES);
+  });
+
+  it('SPEAKER_LANDING_BUDGET_BYTES is the D4 constant, and lands nothing on its own', () => {
+    expect(SPEAKER_LANDING_BUDGET_BYTES).toBe(1_200_000_000);
+    // The budget is the DIALOG's gate (D4/D5): the landing itself never
+    // truncates, drops a speaker, or refuses — a document over budget still
+    // lands in full if a caller asks for it.
+    const source = addSourceDocument(2, 44100);
+    const output = makeOutput(source);
+    const result = landSpeakers(output, SPEAKER_SPANS);
+    expect(result.documentIds).toHaveLength(3);
+    expect(docLength(docById(result.documentIds[0]))).toBe(FIXTURE_LENGTH);
   });
 });
