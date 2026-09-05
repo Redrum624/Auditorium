@@ -27,7 +27,9 @@ import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
 import { serializeSession, serializeSessionV4 } from '../multitrack/sessionFile';
-import { _resetSessionUndo, isSessionDirty } from '../multitrack/sessionUndo';
+import { SESSION_UNDO_KEY, _resetSessionUndo, isSessionDirty } from '../multitrack/sessionUndo';
+import { closeGap } from '../multitrack/sessionStore'; // D3
+import { getHistory } from './undoHistory';
 import { mixdownSession } from '../multitrack/mixdown';
 import { decodeWav } from '../audio/wavCodec';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
@@ -944,6 +946,48 @@ describe('gap hooks', () => {
     expectPlainJson(gap);
     expect(t.getSelectedGap()).toEqual(gap);
     expectPlainJson(t.getSelectedGap());
+  });
+
+  it('a ONE-SAMPLE gap selected through the hook still closes', () => {
+    // Review round 1, I1. `gapAt` refuses both edges, so only a FRACTIONAL
+    // sample is strictly inside a one-sample span — which the hook allows and
+    // the lane (which rounds) does not. The floored probe used to land on the
+    // start edge here, so `closeGap` refused its own selection and Delete did
+    // nothing at all.
+    const t = api();
+    const track = createTrack('Tight');
+    track.clips = [
+      createClip({ documentId: 'doc-1', startSample: 100, offsetSample: 16, lengthSample: 400 }),
+      createClip({ documentId: 'doc-1', startSample: 501, offsetSample: 32, lengthSample: 400 }),
+    ];
+    useSessionStore.setState({
+      session: { name: 'One Sample Gap', sampleRate: 44100, tracks: [track] },
+      selectedClipId: null,
+      selectedClipIds: [],
+      selectedGap: null,
+      mtCursorSample: 0,
+    });
+    _resetSessionUndo();
+
+    const gap = t.selectGapAt(0, 500.5);
+    expect(gap).toEqual({ trackId: track.id, startSample: 500, endSample: 501 });
+
+    closeGap(gap!);
+
+    const clips = useSessionStore.getState().session.tracks[0].clips;
+    expect(clips.map((c) => c.startSample).sort((a, b) => a - b)).toEqual([100, 500]);
+    expect(getHistory(SESSION_UNDO_KEY).done).toEqual(['Close gap']);
+    expect(t.getSelectedGap()).toBeNull();
+  });
+
+  it('selectGapAt hands out a COPY too', () => {
+    const t = api();
+    seedGapTrack();
+
+    const gap = t.selectGapAt(0, 1700)!;
+    gap.endSample = -1;
+
+    expect(useSessionStore.getState().selectedGap!.endSample).toBe(2000);
   });
 
   it('getSelectedGap hands out a COPY — a harness-side mutation cannot reach the store', () => {

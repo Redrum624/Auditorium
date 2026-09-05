@@ -29,9 +29,7 @@ export interface TrackGap {
  *  - `sample` must be STRICTLY inside — `start < sample < end`. The boundary
  *    samples belong to the clips that define them, and a double-click on the
  *    seam between a clip and the space beside it is ambiguous; refusing it
- *    means the user has to be inside the span they mean to close. (A corollary
- *    the reconcile below leans on: no gap narrower than 2 samples can ever be
- *    resolved, so every gap this returns has a sample strictly inside it.)
+ *    means the user has to be inside the span they mean to close.
  *
  * DERIVED FROM THE COVERAGE, NOT FROM ADJACENT PAIRS. Walking `clips` in start
  * order and pairing neighbours gives the same answer for a tidy track and the
@@ -85,16 +83,18 @@ export function closeGapShifts(
 }
 
 /**
- * D3 — the one sample guaranteed to be strictly inside a gap that `gapAt`
- * actually returned, so a standing selection can be re-resolved through the
- * SAME resolver it came from instead of a second definition of "still there".
+ * D3 — a sample strictly inside `gap`, so a standing selection can be
+ * re-resolved through the SAME resolver it came from instead of a second
+ * definition of "still there".
  *
- * `gapAt` refuses both edges, which means the narrowest gap it can ever return
- * is 2 samples wide — and the midpoint of a span at least 2 wide is strictly
- * inside it. A hand-built `TrackGap` narrower than that re-resolves to `null`
- * and the selection clears, which is the honest answer for a span the resolver
- * would never have named.
+ * The exact midpoint, NOT floored (review round 1, I1). Flooring made the probe
+ * land on the gap's own start edge for a one-sample gap — a span `gapAt` can
+ * still name when the caller's sample is fractional, which the test hooks allow
+ * and a 32-px-per-sample zoom used to allow from the lane too. `gapAt` then
+ * refused its own edge and `closeGap` became a silent no-op: Delete did
+ * nothing. `(start + end) / 2` is strictly between the two for EVERY span with
+ * `end > start`, integer or not, which is every span this module produces.
  */
 export function gapProbeSample(gap: TrackGap): number {
-  return gap.startSample + Math.floor((gap.endSample - gap.startSample) / 2);
+  return (gap.startSample + gap.endSample) / 2;
 }

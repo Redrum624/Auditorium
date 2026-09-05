@@ -1387,7 +1387,9 @@ export function installTestHooks(): void {
       const track = useSessionStore.getState().session.tracks[trackIndex];
       const gap = track === undefined ? null : gapAt(track, sample);
       useSessionStore.getState().setSelectedGap(gap);
-      return gap;
+      // A COPY, for `getSelectedGap`'s reason: the store now holds this object,
+      // and a harness-side mutation of what came back would reach into it.
+      return gap === null ? null : { ...gap };
     },
 
     getSelectedGap: () => {

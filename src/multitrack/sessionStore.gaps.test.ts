@@ -161,6 +161,16 @@ describe('closeGap', () => {
     // track's array on every commit, so the reference is expected to change
     // while nothing in it does.
     expect(clipsOf(1)).toEqual(beforeTrack2);
+    // The leftmost-first order, measured. Every shift goes through `moveClip`,
+    // which runs `maintainFacingFades` on each commit — so a shift that passed
+    // THROUGH a clip that had not moved yet would arm a crossfade the gesture
+    // never asked for. Left to right, each clip moves into space already
+    // vacated, and the closed gap leaves B butt-joined to A rather than over
+    // it, so no edge fade may exist anywhere on the track afterwards.
+    for (const clip of clipsOf(0)) {
+      expect(clip.fadeInSample).toBeUndefined();
+      expect(clip.fadeOutSample).toBeUndefined();
+    }
   });
 
   it('is ONE undo entry labeled Close gap, and undo puts the timeline back', () => {

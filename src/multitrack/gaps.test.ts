@@ -124,7 +124,7 @@ describe('gapProbeSample', () => {
     }
   });
 
-  it('the narrowest resolvable gap is 2 samples wide, and its midpoint is inside it', () => {
+  it('is strictly inside a TWO-sample gap', () => {
     const track = createTrack('Tight');
     track.clips = [
       createClip({ documentId: 'doc-5', startSample: 100, offsetSample: 8, lengthSample: 400 }),
@@ -133,13 +133,41 @@ describe('gapProbeSample', () => {
     const gap = gapAt(track, 501)!;
     expect(gap).toEqual({ trackId: track.id, startSample: 500, endSample: 502 });
     expect(gapProbeSample(gap)).toBe(501);
-    // One sample apart there is nothing strictly inside, so nothing resolves —
-    // which is why a probe at the midpoint is exact for everything that does.
-    const tighter = createTrack('Tighter');
-    tighter.clips = [
+    expect(gapAt(track, gapProbeSample(gap))).toEqual(gap);
+  });
+
+  it('is strictly inside a ONE-sample gap too — the probe is not floored', () => {
+    // Review round 1, I1. `gapAt` refuses both edges, so the only samples
+    // strictly inside a one-sample span are FRACTIONAL — and a caller can hand
+    // one in (`selectGapAt`, and the lane could too before its own rounding).
+    // A floored midpoint landed on the start edge, `gapAt` refused it, and
+    // `closeGap` became a silent no-op.
+    const track = createTrack('Tighter');
+    track.clips = [
       createClip({ documentId: 'doc-5', startSample: 100, offsetSample: 8, lengthSample: 400 }),
       createClip({ documentId: 'doc-5', startSample: 501, offsetSample: 8, lengthSample: 400 }),
     ];
-    expect(gapAt(tighter, 500)).toBeNull();
+    const gap = gapAt(track, 500.5)!;
+    expect(gap).toEqual({ trackId: track.id, startSample: 500, endSample: 501 });
+    expect(gapProbeSample(gap)).toBe(500.5);
+    expect(gapAt(track, gapProbeSample(gap))).toEqual(gap);
+    // No INTEGER sample is strictly inside it, which is why the lane rounds:
+    // a one-sample gap is unreachable by double-click, by construction.
+    expect(gapAt(track, 500)).toBeNull();
+    expect(gapAt(track, 501)).toBeNull();
+  });
+
+  it('is strictly inside every span, whatever its width', () => {
+    for (const [start, end] of [
+      [0, 1],
+      [500, 501],
+      [500, 502],
+      [0, 44_100],
+      [1, 1_000_001],
+    ] as const) {
+      const probe = gapProbeSample({ trackId: 't', startSample: start, endSample: end });
+      expect(probe).toBeGreaterThan(start);
+      expect(probe).toBeLessThan(end);
+    }
   });
 });

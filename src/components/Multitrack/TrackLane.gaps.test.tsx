@@ -21,8 +21,19 @@ const SPP = 100;
 
 const store = () => useSessionStore.getState();
 
-function fire(element: Element, type: 'pointerdown' | 'dblclick', clientX: number): void {
-  const event = new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 10 });
+function fire(
+  element: Element,
+  type: 'pointerdown' | 'dblclick',
+  clientX: number,
+  button = 0
+): void {
+  const event = new MouseEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    clientX,
+    clientY: 10,
+    button,
+  });
   Object.defineProperty(event, 'pointerId', { value: 1 });
   act(() => {
     element.dispatchEvent(event);
@@ -79,6 +90,29 @@ function renderLane(): { lane: HTMLElement; clip: HTMLElement; band: () => HTMLE
     clip: container.querySelector('[data-testid="clip"]') as HTMLElement,
     band: () => container.querySelector('[data-testid="gap-selection"]') as HTMLElement | null,
   };
+}
+
+/** A SECOND lane, for another track in the same session — the press rule has
+ * to answer for a gap that belongs to a lane other than the one pressed. */
+function renderOtherLane(): HTMLElement {
+  const other = createTrack('Track 2');
+  useSessionStore.setState({
+    session: { ...store().session, tracks: [...store().session.tracks, other] },
+  });
+  const { container } = render(
+    <TrackLane
+      track={other}
+      docs={new Map([[doc.id, doc]])}
+      zoom={{ samplesPerPixel: SPP, scrollSample: 0 }}
+      sessionRate={SR}
+      laneHeight={96}
+      selectedClipId={null}
+      isDragTarget={false}
+      resolveTrackAt={() => other.id}
+      onDragOverTrack={() => {}}
+    />
+  );
+  return container.querySelector('[data-testid="track-lane"]') as HTMLElement;
 }
 
 describe('double-clicking empty lane space', () => {
@@ -166,14 +200,55 @@ describe('the single-click gesture is unchanged', () => {
     expect(store().selectedClipIds).toEqual([]);
   });
 
-  it('a press does NOT clear a selected gap — the two presses of a double-click come first', () => {
+  /**
+   * Controller ruling (review round 1, I3): a plain press on empty lane space
+   * PUTS THE BAND AWAY — except a press inside the standing band's own span on
+   * its own lane, which is the first half of the double-click that would
+   * re-select it and must not make it flicker.
+   *
+   * Each arm fires ONE lone `pointerdown`, deliberately: the earlier version of
+   * this test fired two presses and then a dblclick, and since the dblclick
+   * runs LAST it re-selected the gap whatever the press handler did — the test
+   * could not fail.
+   */
+  it('a lone press INSIDE the standing gap, on its own lane, leaves it up', () => {
     const { lane, band } = renderLane();
-
-    fire(lane, 'pointerdown', 500);
-    fire(lane, 'pointerdown', 500);
     fire(lane, 'dblclick', 500);
+    expect(store().selectedGap).not.toBeNull();
+
+    fire(lane, 'pointerdown', 450); // sample 45 000 — inside [40 000, 60 000)
 
     expect(store().selectedGap).not.toBeNull();
     expect(band()).not.toBeNull();
+  });
+
+  it('a lone press OUTSIDE the standing gap clears it', () => {
+    const { lane, band } = renderLane();
+    fire(lane, 'dblclick', 500);
+    expect(store().selectedGap).not.toBeNull();
+
+    fire(lane, 'pointerdown', 900); // sample 90 000 — past the last clip
+
+    expect(store().selectedGap).toBeNull();
+    expect(band()).toBeNull();
+  });
+
+  it('a lone press on ANOTHER lane clears it, even at the same x', () => {
+    const { lane } = renderLane();
+    fire(lane, 'dblclick', 500);
+    expect(store().selectedGap).not.toBeNull();
+
+    fire(renderOtherLane(), 'pointerdown', 500);
+
+    expect(store().selectedGap).toBeNull();
+  });
+
+  it('a non-left press leaves the gap alone — a context-menu press is not a deselect', () => {
+    const { lane } = renderLane();
+    fire(lane, 'dblclick', 500);
+
+    fire(lane, 'pointerdown', 900, 2);
+
+    expect(store().selectedGap).not.toBeNull();
   });
 });
