@@ -5095,6 +5095,13 @@ async function main() {
     console.log('Gaps (D3): split, delete a half, select the gap, Delete closes it...');
     const gapBefore = await page.evaluate(() => window.__test.getStateSummary());
     const gapCursor0 = await page.evaluate(() => window.__test.getMtCursor());
+    // Ground truth for (g)'s closing restore assertion (M17): the zoom this
+    // whole step actually found (f) in, inherited from the Fit clicked back
+    // in (d) — untouched by (d)/(e), since neither changes session duration.
+    // Read here, BEFORE the close-gap shrink below re-resolves it, so the
+    // comparison at the end of (g) is against a value Fit never touched in
+    // this sub-step — not against another Fit call made inside it.
+    const gapZoom0 = await page.evaluate(() => window.__test.getMtZoom());
     const gapWhole = (await page.evaluate(() => window.__test.getClipFadeState())).clips[0];
     await page.evaluate((id) => window.__test.selectClips([id]), gapWhole.clipId);
     await page.evaluate(() => window.__test.setMtCursor(44100));
@@ -5307,12 +5314,16 @@ async function main() {
     // (`resolveSessionZoom`); the three undos put the clips back but not the
     // zoom, deliberately — only shrinking re-fits. The session therefore
     // arrives here at half the fit it started (d) with, which put the bar at
-    // x = 1477 on a 985 px lane and skipped the arm under test. Fit is also
-    // exactly what this whole step found, so pressing it here is the restore
-    // as well as the setup.
-    // Captured BEFORE the fit as well as after it: the restore assertion below
-    // compares against the FITTED state, and reading `zoomBefore` after the
-    // click left no record of what the step actually arrived at (minor M17).
+    // x = 1477 on a 985 px lane and skipped the arm under test.
+    // `zoomBefore` below is only the LOCAL fitted baseline the D1 anchor math
+    // in this sub-step is relative to (fitted -> zoomed in -> anchor held).
+    // It is NOT what the closing restore assertion checks against — comparing
+    // a value this sub-step got by clicking Fit against another value the
+    // SAME sub-step got by clicking Fit again would be a Fit-vs-Fit
+    // tautology, true for any pure Fit implementation regardless of whether
+    // the click at the end actually recomputed anything (M17). That
+    // assertion instead uses `gapZoom0`, captured at the top of (f) before
+    // the shrink ever happened — ground truth this sub-step did not produce.
     const zoomEntry = await page.evaluate(() => window.__test.getMtZoom());
     await clickFit();
     const zoomBefore = await page.evaluate(() => window.__test.getMtZoom());
@@ -5375,18 +5386,24 @@ async function main() {
       `…and the sample under the POINTER moved, so the pointer is not the anchor ` +
         `(${pointerSampleBefore.toFixed(0)} -> ${pointerSampleAfter.toFixed(0)})`
     );
-    // Fit is the app's own control for exactly this, and fitted is the state
-    // the sub-step established above.
+    // Fit is the app's own control for exactly this. The restore below checks
+    // against `gapZoom0` — the zoom this whole step actually found (f) in,
+    // captured before the close-gap shrink ever ran — not against
+    // `zoomBefore` above, which this SAME sub-step produced by clicking Fit
+    // a moment ago; comparing to that would only prove Fit agrees with
+    // itself on an unchanged session, true of any pure Fit regardless of
+    // whether the click at the end recomputed anything at all (M17).
     await clickFit();
     await page.evaluate((s) => window.__test.setMtCursor(s), gapCursor0);
     const zoomRestored = await page.evaluate(() => window.__test.getMtZoom());
     assert(
-      Math.abs(zoomRestored.samplesPerPixel - zoomBefore.samplesPerPixel) <=
-        1e-6 * zoomBefore.samplesPerPixel &&
-        zoomRestored.scrollSample === zoomBefore.scrollSample,
-      `Fit put the viewport back to the FITTED state this arm was set up in — not to the zoom ` +
-        `the step arrived at (${JSON.stringify(zoomEntry)}), which Fit deliberately does not ` +
-        `restore (${JSON.stringify(zoomRestored)} vs ${JSON.stringify(zoomBefore)})`
+      Math.abs(zoomRestored.samplesPerPixel - gapZoom0.samplesPerPixel) <=
+        1e-6 * gapZoom0.samplesPerPixel &&
+        zoomRestored.scrollSample === gapZoom0.scrollSample,
+      `Fit put the viewport back to the zoom this whole step actually found (f) in — not to the ` +
+        `stale post-shrink zoom (${JSON.stringify(zoomEntry)}) the three undos in (f) left behind ` +
+        `and which Fit does not restore on its own ` +
+        `(${JSON.stringify(zoomRestored)} vs the (f) entry ${JSON.stringify(gapZoom0)})`
     );
     console.log("  zoom anchor: the bar held its pixel while the pointer's sample moved under it");
 
@@ -7220,7 +7237,11 @@ async function main() {
     // a value that is neither 0 (where a transport ignoring the cursor
     // altogether would start, which every arm of this step used to allow) nor
     // the paused position the engine still remembers. Half a second of slack
-    // above it, because the read happens while the engine is running.
+    // above it, because the read happens while the engine is running. Both
+    // conjuncts below are required: the window alone kills "starts at 0" but
+    // is satisfied by "resumes from the pause" too, since the pause (~44 500)
+    // falls inside [30000, 52050); the strict `<` against barPaused kills
+    // that resume regression instead.
     const BAR_REPLAY = 30000;
     await page.evaluate((s) => window.__test.setCursor(s), BAR_REPLAY);
     await page.keyboard.press('Space');
@@ -7232,9 +7253,12 @@ async function main() {
     const barReplay = await page.evaluate(() => window.__test.getPlaybackState());
     console.log(`  replay from the bar at ${BAR_REPLAY}: ${JSON.stringify(barReplay)}`);
     assert(
-      barReplay.positionSample >= BAR_REPLAY && barReplay.positionSample < BAR_REPLAY + 22050,
-      `Play started at the BAR (${BAR_REPLAY}) — not at 0, and not resuming the engine's ` +
-        `paused position ${barPaused.positionSample} (${barReplay.positionSample})`
+      barReplay.positionSample >= BAR_REPLAY &&
+        barReplay.positionSample < BAR_REPLAY + 22050 &&
+        barReplay.positionSample < barPaused.positionSample,
+      `Play started within half a second after the BAR (${BAR_REPLAY}) — not at 0 — and ` +
+        `strictly before the engine's paused position ${barPaused.positionSample}, so it did ` +
+        `not resume the pause (${barReplay.positionSample})`
     );
 
     // (c) The one exception, and it is deterministic: a selection the bar is
@@ -7348,7 +7372,11 @@ async function main() {
       specPaused.cursorSample === specPaused.positionSample && specPaused.positionSample > 44100,
       `the spectral view's Pause moves the bar too (${JSON.stringify(specPaused)})`
     );
-    // The same non-zero bar as arm (b), and for the same reason.
+    // The same non-zero bar as arm (b), and for the same reason. Both
+    // conjuncts below are required: the window alone kills "starts at 0" but
+    // is satisfied by "resumes from the pause" too, since the pause
+    // (~44 500) falls inside [30000, 52050); the strict `<` against
+    // specPaused kills that resume regression instead.
     await page.evaluate((s) => window.__test.setCursor(s), BAR_REPLAY);
     await page.keyboard.press('Space');
     await page.waitForFunction(
@@ -7362,9 +7390,12 @@ async function main() {
         `${BAR_REPLAY} -> ${specReplay.positionSample}`
     );
     assert(
-      specReplay.positionSample >= BAR_REPLAY && specReplay.positionSample < BAR_REPLAY + 22050,
-      `and its Play starts AT the bar (${BAR_REPLAY}), not at 0 and not at the engine's ` +
-        `paused position ${specPaused.positionSample} (${specReplay.positionSample})`
+      specReplay.positionSample >= BAR_REPLAY &&
+        specReplay.positionSample < BAR_REPLAY + 22050 &&
+        specReplay.positionSample < specPaused.positionSample,
+      `and its Play starts within half a second after the bar (${BAR_REPLAY}), not at 0, and ` +
+        `strictly before the engine's paused position ${specPaused.positionSample}, so it did ` +
+        `not resume the pause (${specReplay.positionSample})`
     );
 
     await page.evaluate(() => {
