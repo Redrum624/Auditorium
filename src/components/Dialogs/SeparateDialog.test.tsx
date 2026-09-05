@@ -13,7 +13,7 @@ import {
   type StemSeparationResult,
   type StemSeparationStatus,
 } from '../../services/stemService';
-import { landStems, type StemLandingResult } from '../../services/stemLanding';
+import { landStems, landVoice, type StemLandingResult } from '../../services/stemLanding';
 
 // The RemixDialog.test.tsx / ConvertDialog.test.tsx pattern: everything pure
 // (the label lists, the constants, the formatting) stays REAL via requireActual;
@@ -30,6 +30,7 @@ jest.mock('../../services/stemService', () => ({
 jest.mock('../../services/stemLanding', () => ({
   ...jest.requireActual('../../services/stemLanding'),
   landStems: jest.fn(),
+  landVoice: jest.fn(),
 }));
 
 const mockModelState = getStemModelState as jest.MockedFunction<typeof getStemModelState>;
@@ -37,6 +38,7 @@ const mockEnsureModel = ensureStemModel as jest.MockedFunction<typeof ensureStem
 const mockSeparate = separateStems as jest.MockedFunction<typeof separateStems>;
 const mockCancel = cancelStemSeparation as jest.MockedFunction<typeof cancelStemSeparation>;
 const mockLandStems = landStems as jest.MockedFunction<typeof landStems>;
+const mockLandVoice = landVoice as jest.MockedFunction<typeof landVoice>;
 
 const SR = 44100;
 /** `stemManager.cjs` MODEL_BYTES — the real pinned size, 166 MB when rounded. */
@@ -484,5 +486,140 @@ describe('G5 glass header', () => {
     await renderSettled();
     expect(screen.getByTestId('dialog-icon')).toBeInTheDocument();
     expect(screen.getByText(/^song\.wav · \d+:\d{2}$/)).toBeInTheDocument();
+  });
+});
+
+/**
+ * D4 — the SAME dialog in voice mode. `mode` changes four things and nothing
+ * else: the title, the two sentences describing what lands, the landing call,
+ * and which track the sanitised-samples note names. Model state, download,
+ * progress, cancel and every refusal are shared code and are NOT re-tested
+ * here — the tests above already cover them, and duplicating them per mode
+ * would only pin that a prop was threaded twice.
+ */
+describe('SeparateDialog — voice mode (D4)', () => {
+  function makeVoiceLanding(overrides: Partial<StemLandingResult> = {}): StemLandingResult {
+    return makeLanding({
+      documentIds: ['v1', 'v2'],
+      trackIds: ['vt1', 'vt2'],
+      sessionName: 'song.wav — Voice + Backing',
+      ...overrides,
+    });
+  }
+
+  async function renderVoice(onClose = jest.fn()) {
+    const view = render(<SeparateDialog mode="voice" onClose={onClose} />);
+    await act(async () => {});
+    return { ...view, onClose };
+  }
+
+  beforeEach(() => {
+    mockLandVoice.mockReturnValue(makeVoiceLanding());
+  });
+
+  it('V1. is titled Separate Voice and names the two tracks it produces', async () => {
+    seedDoc();
+    await renderVoice();
+
+    expect(screen.getByText('Separate Voice')).toBeInTheDocument();
+    expect(screen.queryByText('Separate into Stems')).not.toBeInTheDocument();
+    const produces = screen.getByTestId('separate-produces');
+    expect(produces).toHaveTextContent('Two tracks');
+    expect(produces).toHaveTextContent('Voice');
+    expect(produces).toHaveTextContent('Backing');
+    // The five-stem sentence must not survive into voice mode.
+    expect(produces).not.toHaveTextContent('Residual');
+  });
+
+  it('V2. states what the two-track sum really is — no audio lost, not bit-identical', async () => {
+    seedDoc();
+    await renderVoice();
+
+    const text = screen.getByTestId('separate-guarantees').textContent ?? '';
+    expect(text).toMatch(/add back up to your original/i);
+    expect(text).toMatch(/no audio is lost/i);
+    // The honest half: five tracks are exact, two are not (measured — see
+    // `stemLanding.ts`'s `landVoice`). The dialog must not promise otherwise.
+    expect(text).not.toMatch(/sample for sample/i);
+    expect(text).toMatch(/bit-for-bit/i);
+    expect(text).toMatch(/bounded by the model/i);
+    expect(text).toMatch(/not a bug/i);
+  });
+
+  it('V3. lands through landVoice — never landStems — and closes', async () => {
+    seedDoc();
+    const output = makeOutput();
+    mockSeparate.mockResolvedValue({ ok: true, output });
+    const { onClose } = await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    expect(mockLandVoice).toHaveBeenCalledTimes(1);
+    expect(mockLandVoice).toHaveBeenCalledWith(output);
+    expect(mockLandStems).not.toHaveBeenCalled();
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('V4. runs the very same separation call as stems mode', async () => {
+    const doc = seedDoc();
+    await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    // One run, one model, one source — the mode decides only what is DONE with
+    // the output, never what is computed.
+    expect(mockSeparate).toHaveBeenCalledTimes(1);
+    expect(mockSeparate.mock.calls[0][0].sourceDocId).toBe(doc.id);
+  });
+
+  it('V5. tells an over-unity source that the TWO tracks will not add back', async () => {
+    seedDoc();
+    mockLandVoice.mockReturnValue(makeVoiceLanding({ sourcePeak: 2.4, exactSumHolds: false }));
+    const { onClose } = await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    const note = screen.getByTestId('separate-note-exactness');
+    expect(note).toHaveTextContent(/peaks above full scale/i);
+    expect(note).toHaveTextContent('2.40');
+    expect(note).toHaveTextContent(/two tracks/i);
+    expect(note).not.toHaveTextContent(/five tracks/i);
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('V6. sends the sanitised energy to the Backing, which is where it lands', async () => {
+    seedDoc();
+    mockSeparate.mockResolvedValue({ ok: true, output: makeOutput({ sanitisedEstimateSamples: 7 }) });
+    await renderVoice();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    const note = screen.getByTestId('separate-note-sanitised');
+    expect(note).toHaveTextContent('7');
+    expect(note).toHaveTextContent(/Backing/);
+    // The Residual is inside the Backing now; naming it would send the user
+    // looking for a track that does not exist in this session.
+    expect(note).not.toHaveTextContent(/Residual track/);
+  });
+
+  it('V7. the DEFAULT is stems — an unspecified mode still lands five', async () => {
+    seedDoc();
+    await renderSettled();
+
+    expect(screen.getByText('Separate into Stems')).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Separate' }));
+    });
+
+    expect(mockLandStems).toHaveBeenCalledTimes(1);
+    expect(mockLandVoice).not.toHaveBeenCalled();
   });
 });

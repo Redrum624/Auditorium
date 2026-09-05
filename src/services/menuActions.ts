@@ -1463,7 +1463,7 @@ function registerStemCommands(): void {
         const d = activeDoc(s);
         return d !== null && docLength(d) > 0;
       },
-      run: async () => openSeparateDialog(),
+      run: async () => openSeparateDialog('stems'),
     },
   ]);
 }

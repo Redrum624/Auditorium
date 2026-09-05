@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Layers } from 'lucide-react';
+import { Layers, Mic } from 'lucide-react';
 import { docLength } from '../../audio/AudioDocument';
 import { useAppStore } from '../../stores/appStore';
 import {
@@ -12,15 +12,27 @@ import {
   type StemSeparationOutput,
   type StemSeparationProgress,
 } from '../../services/stemService';
-import { STEM_TRACK_LABELS, landStems, type StemLandingResult } from '../../services/stemLanding';
+import {
+  STEM_TRACK_LABELS,
+  VOICE_TRACK_LABELS,
+  landStems,
+  landVoice,
+  type StemLandingResult,
+} from '../../services/stemLanding';
+import type { SeparateMode } from '../../services/dialogBus';
 import { GlassButton, SectionLabel } from '../UI/glass';
 import DialogShell from './DialogShell';
 
-/** `Drums, Bass, Vocals, Other and Residual` — derived from the ruling-6 order
- *  so a track-list change can never leave this sentence stale. */
-const TRACK_LIST = `${STEM_TRACK_LABELS.slice(0, -1).join(', ')} and ${
-  STEM_TRACK_LABELS[STEM_TRACK_LABELS.length - 1]
-}`;
+/** `A, B and C` — the labels themselves, so a track-list change can never
+ *  leave one of these sentences stale. */
+function trackList(labels: readonly string[]): string {
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
+
+/** `Drums, Bass, Vocals, Other and Residual` — the ruling-6 order. */
+const TRACK_LIST = trackList(STEM_TRACK_LABELS);
+/** D4: `Voice and Backing`. */
+const VOICE_TRACK_LIST = trackList(VOICE_TRACK_LABELS);
 
 /** `m:ss` — the grain every duration in this dialog is expressed in
  *  (RemixDialog.tsx's own formatter; seconds are already finer than the
@@ -67,6 +79,15 @@ function formatMb(bytes: number): string {
  *    service's own messages are used verbatim, because they are already
  *    user-facing and duplicating them here would let the two drift.
  *
+ * D4 — TWO commands, one dialog. `mode` picks which landing the finished run
+ * gets: `stems` (the five tracks, `edit.separateStems`) or `voice` (the same
+ * output as Voice + Backing, `voice.separate`). It changes the title, the two
+ * sentences describing what lands, the landing call and which track the
+ * sanitised-samples note names — nothing else, because nothing else DIFFERS:
+ * the model, the download, the progress, the cancel and every refusal are one
+ * run either way. A second dialog would have been a second copy of all of that,
+ * free to drift the first time one of them was fixed.
+ *
  * Lifetime: `dismissable={!busy}` so neither Escape nor a backdrop click can
  * discard a running download or separation; the unmount cleanup CANCELS an
  * in-flight run (EffectDialog/RemixDialog's busyRef pattern, extended with the
@@ -74,7 +95,16 @@ function formatMb(bytes: number): string {
  * the dialog that started it); and the target document is resolved from LIVE
  * store state at confirm time, never captured at open.
  */
-export default function SeparateDialog({ onClose }: { onClose: () => void }) {
+export default function SeparateDialog({
+  onClose,
+  mode = 'stems',
+}: {
+  onClose: () => void;
+  /** D4. Defaults to the five-stem landing this dialog has always done, so
+   *  `edit.separateStems` and every existing caller are unchanged. */
+  mode?: SeparateMode;
+}) {
+  const voice = mode === 'voice';
   const doc = useAppStore((s) => s.documents.find((d) => d.id === s.activeDocumentId) ?? null);
   const length = doc ? docLength(doc) : 0;
 
@@ -178,10 +208,11 @@ export default function SeparateDialog({ onClose }: { onClose: () => void }) {
       return;
     }
 
-    // S5 does the landing: five documents, one session, the multitrack view.
-    const landing = landStems(result.output);
+    // S5 does the landing: five documents (D4: two, in voice mode), one
+    // session, the multitrack view.
+    const landing = voice ? landVoice(result.output) : landStems(result.output);
     if (unmountedRef.current) return;
-    const advisories = buildNotes(landing, result.output);
+    const advisories = buildNotes(landing, result.output, mode);
     if (!advisories.exactness && !advisories.sanitised) {
       onClose();
       return;
@@ -199,9 +230,9 @@ export default function SeparateDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <DialogShell
-      title="Separate into Stems"
+      title={voice ? 'Separate Voice' : 'Separate into Stems'}
       subtitle={doc ? `${doc.name} · ${formatMmss(length, doc.sampleRate)}` : undefined}
-      icon={<Layers size={15} />}
+      icon={voice ? <Mic size={15} /> : <Layers size={15} />}
       width={480}
       onClose={onClose}
       dismissable={!busy}
@@ -210,14 +241,33 @@ export default function SeparateDialog({ onClose }: { onClose: () => void }) {
         <SectionLabel>What you get</SectionLabel>
 
         <p data-testid="separate-produces" className="text-xs" style={{ color: 'var(--glass-text-label)' }}>
-          {`Five tracks in a new multitrack session: ${TRACK_LIST} — the Residual holding everything the model could not place.`}
+          {voice
+            ? `Two tracks in a new multitrack session: ${VOICE_TRACK_LIST} — the Backing holding the drums, the bass, everything else and whatever the model could not place.`
+            : `Five tracks in a new multitrack session: ${TRACK_LIST} — the Residual holding everything the model could not place.`}
         </p>
 
-        <p data-testid="separate-guarantees" className="text-xs" style={{ color: 'var(--glass-text-secondary)' }}>
-          The five tracks always add back up to your original, sample for sample — no audio is lost. How
-          cleanly the instruments are told apart is bounded by the model, so expect some bleed between them;
-          that is a limit of the separation, not a bug.
-        </p>
+        {voice ? (
+          <p
+            data-testid="separate-guarantees"
+            className="text-xs"
+            style={{ color: 'var(--glass-text-secondary)' }}
+          >
+            The two tracks add back up to your original — no audio is lost. Summing two tracks rounds
+            where summing all five does not, so the match is to a fraction of the smallest step a 16-bit
+            file can hold rather than bit-for-bit. How cleanly the voice is told apart from the rest is
+            bounded by the model, so expect some bleed; that is a limit of the separation, not a bug.
+          </p>
+        ) : (
+          <p
+            data-testid="separate-guarantees"
+            className="text-xs"
+            style={{ color: 'var(--glass-text-secondary)' }}
+          >
+            The five tracks always add back up to your original, sample for sample — no audio is lost.
+            How cleanly the instruments are told apart is bounded by the model, so expect some bleed
+            between them; that is a limit of the separation, not a bug.
+          </p>
+        )}
 
         {modelMissing && (
           <div data-testid="separate-model-missing" className="flex flex-col gap-2">
@@ -356,19 +406,31 @@ function runLabel(progress: StemSeparationProgress | null, remainingMs: number |
  */
 function buildNotes(
   landing: StemLandingResult,
-  output: StemSeparationOutput
+  output: StemSeparationOutput,
+  mode: SeparateMode
 ): { exactness: string | null; sanitised: string | null } {
+  const voice = mode === 'voice';
   // `exactSumHolds === null` means the check could not be made (S5's contract).
   // Silence is the honest rendering of that — not a claim in either direction.
+  const clamped = `This document peaks above full scale (${(landing.sourcePeak ?? 0).toFixed(
+    2
+  )}), so the multitrack master clamps at ±1 and the ${
+    voice ? 'two' : 'five'
+  } tracks will not add back to it exactly.`;
   const exactness =
     landing.exactSumHolds === false
-      ? `This document peaks above full scale (${(landing.sourcePeak ?? 0).toFixed(
-          2
-        )}), so the multitrack master clamps at ±1 and the five tracks will not add back to it exactly. The stems themselves are complete — reduce the source level and separate again if you need the exact sum.`
+      ? voice
+        ? `${clamped} The Voice and the Backing themselves are complete — reduce the source level and separate again if you need them to add back up.`
+        : `${clamped} The stems themselves are complete — reduce the source level and separate again if you need the exact sum.`
       : null;
+  // D4: the Residual is not a track of its own in voice mode — it is summed
+  // into the Backing — so naming it would send the user looking for a lane
+  // that is not in the session.
   const sanitised =
     output.sanitisedEstimateSamples > 0
-      ? `The model returned ${output.sanitisedEstimateSamples} non-finite value(s), which were zeroed; that energy went to the Residual track. The sum is still exact — only the separation around those samples is less clean.`
+      ? voice
+        ? `The model returned ${output.sanitisedEstimateSamples} non-finite value(s), which were zeroed; that energy went to the Backing. The two tracks still add back up — only the separation around those samples is less clean.`
+        : `The model returned ${output.sanitisedEstimateSamples} non-finite value(s), which were zeroed; that energy went to the Residual track. The sum is still exact — only the separation around those samples is less clean.`
       : null;
   return { exactness, sanitised };
 }

@@ -5,7 +5,17 @@
 
 export type ConvertMode = 'sampleRate' | 'channels';
 
+/**
+ * D4 — which landing the Separate dialog opens on. ONE dialog and ONE
+ * separation run: `stems` lands the five tracks `edit.separateStems` has always
+ * produced, `voice` lands the same output as Voice + Backing (`voice.separate`).
+ * It rides the bus as a parameter for the reason `ConvertMode` does — the menu
+ * command must not import React to say which face of the dialog it wants.
+ */
+export type SeparateMode = 'stems' | 'voice';
+
 type OpenSetter = () => void;
+type OpenSeparateSetter = (mode: SeparateMode) => void;
 type OpenEffectSetter = (effectId: string) => void;
 type OpenConvertSetter = (mode: ConvertMode) => void;
 
@@ -16,7 +26,7 @@ let openConvert: OpenConvertSetter | null = null;
 let openRecord: OpenSetter | null = null;
 let openTempo: OpenSetter | null = null;
 let openRemix: OpenSetter | null = null;
-let openSeparate: OpenSetter | null = null;
+let openSeparate: OpenSeparateSetter | null = null;
 let openTranscribe: OpenSetter | null = null;
 let openVoiceChanger: OpenSetter | null = null;
 let openAlignTiming: OpenSetter | null = null;
@@ -35,7 +45,7 @@ export function registerDialogSetters(setters: {
   openRecordDialog: OpenSetter;
   openTempoDialog: OpenSetter;
   openRemixDialog: OpenSetter;
-  openSeparateDialog: OpenSetter;
+  openSeparateDialog: OpenSeparateSetter;
   openTranscribeDialog: OpenSetter;
   openVoiceChangerDialog: OpenSetter;
   /** F9's Align Vocal Timing dialog. */
@@ -129,8 +139,8 @@ export function openRemixDialog(): void {
   openRemix?.();
 }
 
-export function openSeparateDialog(): void {
-  openSeparate?.();
+export function openSeparateDialog(mode: SeparateMode): void {
+  openSeparate?.(mode);
 }
 
 export function openTranscribeDialog(): void {
