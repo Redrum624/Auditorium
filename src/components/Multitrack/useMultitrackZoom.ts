@@ -1,18 +1,19 @@
 import { useEffect } from 'react';
 import type { RefObject } from 'react';
-import { pixelToSample } from '../Editor/waveformRender';
 import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore';
+import { sessionLaneWidth } from '../../multitrack/sessionViewport';
+import { anchoredZoom } from '../../services/zoomAnchor';
 
 /**
  * Wheel zoom/scroll for the multitrack lanes, driven by the session store's
  * `mtZoom` (its own zoom source, independent of the single-document editor's
  * app-store zoom). Deliberately NOT the waveform's `useEditorGestures`: that
  * hook is bound to the app store and to selection-drag semantics that the lanes
- * don't have. This shares only the pure `pixelToSample` helper.
+ * don't have. Since D1 it shares the pure `anchoredZoom` helper instead.
  *
  * Bindings (the timeline is open-ended, and plain wheel is left for native
  * vertical track scrolling):
- *   - Ctrl + wheel  → horizontal zoom centered on the pointer
+ *   - Ctrl + wheel  → horizontal zoom anchored on the multitrack cursor (D1)
  *   - Shift + wheel → horizontal scroll
  *   - plain wheel   → native vertical scroll (not intercepted)
  *
@@ -39,7 +40,7 @@ export function useMultitrackZoom(laneRef: RefObject<HTMLElement | null>): void 
       if (!e.ctrlKey && !e.shiftKey) return;
       e.preventDefault();
 
-      const { mtZoom } = useSessionStore.getState();
+      const { mtZoom, mtCursorSample } = useSessionStore.getState();
 
       if (e.shiftKey && !e.ctrlKey) {
         applySessionZoom({
@@ -49,19 +50,19 @@ export function useMultitrackZoom(laneRef: RefObject<HTMLElement | null>): void 
         return;
       }
 
-      // Ctrl+wheel → zoom centered on the pointer. The scroll is a FUNCTION of
-      // the resolved samples-per-pixel, not of the requested one: at the
-      // zoom-out limit the two differ, and computing the anchor from a request
-      // that was then clamped is exactly how the sample under the cursor drifts
-      // out from under it.
-      const rect = el.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const anchorSample = pixelToSample(mouseX, mtZoom.scrollSample, mtZoom.samplesPerPixel);
-      const factor = e.deltaY < 0 ? 1 / ZOOM_FACTOR : ZOOM_FACTOR;
-      applySessionZoom({
-        samplesPerPixel: mtZoom.samplesPerPixel * factor,
-        scrollSample: (spp) => anchorSample - mouseX * spp,
-      });
+      // D1 — Ctrl+wheel zooms toward the BAR, not toward the pointer. It used
+      // to read `e.clientX` off the lane rect; the user asked for "focus on
+      // where the line was put", and one rule on every zoom path means this
+      // gesture and the toolbar's −/+ can no longer land in different places.
+      // `anchoredZoom` also owns the resolved-spp contract (see its docblock).
+      applySessionZoom(
+        anchoredZoom({
+          zoom: mtZoom,
+          laneWidth: sessionLaneWidth(),
+          anchorSample: mtCursorSample,
+          factor: e.deltaY < 0 ? 1 / ZOOM_FACTOR : ZOOM_FACTOR,
+        })
+      );
     };
 
     el.addEventListener('wheel', onWheel, { passive: false });

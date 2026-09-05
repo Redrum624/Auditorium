@@ -7,6 +7,10 @@ import { useSessionStore } from '../../multitrack/sessionStore';
 import { _resetSessionUndo } from '../../multitrack/sessionUndo';
 import { createClip, createTrack, type Session } from '../../multitrack/session';
 import { setSessionLaneWidth } from '../../multitrack/sessionViewport';
+import {
+  FALLBACK_EDITOR_LANE_WIDTH,
+  _resetEditorLaneWidth,
+} from '../../services/editorViewport';
 import { defaultSessionZoom } from '../../multitrack/sessionZoom';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { registerDialogSetters } from '../../services/dialogBus';
@@ -19,6 +23,16 @@ function makeDoc(): AudioDocument {
     sampleRate: 44100,
     channels: [new Float32Array(4096), new Float32Array(4096)],
   });
+}
+
+/** D1: a document long enough to be scrolled INTO, so "the bar is off screen"
+ * is a state the store can actually hold. `makeDoc`'s 4096 samples fit the lane
+ * whole at every zoom, which makes every scroll clamp to 0 and every cursor on
+ * screen — a fixture that cannot express the case under test. */
+function makeLongDoc(): AudioDocument {
+  const ch = new Float32Array(2_000_000);
+  for (let i = 0; i < ch.length; i += 512) ch[i] = 0.25;
+  return createDocument({ name: 'long.wav', sampleRate: 44100, channels: [ch] });
 }
 
 /** A document that came off disk and has no unsaved work — the shape that
@@ -554,6 +568,48 @@ describe('Toolbar — G3 floating pill (file ops · transport · view segment ·
       expect(useAppStore.getState().zoom).toBe(before);
     });
 
+    // D1 — the buttons already anchored on the bar; what is new is the second
+    // half of the rule, for a bar the current window does not contain.
+    it('D1: − / + centre a cursor that is off screen', () => {
+      _resetEditorLaneWidth(); // nothing here mounts a lane, so the fallback applies
+      const doc = makeLongDoc();
+      useAppStore.getState().addDocument(doc);
+      // A window well inside a long document, with the bar 200 px to the LEFT
+      // of it. Holding the bar's negative x would zoom toward something the
+      // user cannot see.
+      act(() =>
+        useAppStore.getState().setZoom({ samplesPerPixel: 200, scrollSample: 500_000 })
+      );
+      act(() => useAppStore.getState().setCursor(500_000 - 200 * 200));
+      render(<Toolbar />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+
+      const { samplesPerPixel, scrollSample } = useAppStore.getState().zoom;
+      expect(samplesPerPixel).toBeCloseTo(200 / 1.25, 6);
+      expect((460_000 - scrollSample) / samplesPerPixel).toBeCloseTo(
+        FALLBACK_EDITOR_LANE_WIDTH / 2,
+        3
+      );
+    });
+
+    it('D1: − / + keep an on-screen cursor at its x', () => {
+      _resetEditorLaneWidth();
+      const doc = makeLongDoc();
+      useAppStore.getState().addDocument(doc);
+      act(() =>
+        useAppStore.getState().setZoom({ samplesPerPixel: 200, scrollSample: 500_000 })
+      );
+      const cursor = 500_000 + 300 * 200; // x = 300, comfortably on screen
+      act(() => useAppStore.getState().setCursor(cursor));
+      render(<Toolbar />);
+
+      fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+
+      const { samplesPerPixel, scrollSample } = useAppStore.getState().zoom;
+      expect((cursor - scrollSample) / samplesPerPixel).toBeCloseTo(300, 3);
+    });
+
     it('F11: Fit is idempotent and is the state a freshly opened document is already in', () => {
       const doc = makeDoc();
       useAppStore.getState().addDocument(doc);
@@ -761,6 +817,41 @@ describe('MT1-1: the zoom cluster in the multitrack view', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
     expect(useSessionStore.getState().mtZoom.samplesPerPixel).toBeCloseTo(spp0 / 1.25, 6);
+  });
+
+  // D1 — the session twin of the editor's two cases above. Both surfaces obey
+  // one rule now, so both have to be pinned: a bug that only ever reached one
+  // of `zoomEditorBy` / `zoomSessionBy` is exactly the drift D1 removes.
+  it('D1: − / + keep an on-screen multitrack cursor at its x', () => {
+    seedSession();
+    act(() =>
+      useSessionStore.getState().setMtZoom({ samplesPerPixel: 200, scrollSample: 500_000 })
+    );
+    const cursor = 500_000 + 300 * 200; // x = 300
+    act(() => useSessionStore.getState().setMtCursor(cursor));
+    render(<Toolbar />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+
+    const { mtZoom } = useSessionStore.getState();
+    expect(mtZoom.samplesPerPixel).toBeCloseTo(200 / 1.25, 6);
+    expect((cursor - mtZoom.scrollSample) / mtZoom.samplesPerPixel).toBeCloseTo(300, 3);
+  });
+
+  it('D1: − / + centre an off-screen multitrack cursor', () => {
+    seedSession();
+    act(() =>
+      useSessionStore.getState().setMtZoom({ samplesPerPixel: 200, scrollSample: 500_000 })
+    );
+    const cursor = 500_000 - 200 * 200; // x = −200, off the left edge
+    act(() => useSessionStore.getState().setMtCursor(cursor));
+    render(<Toolbar />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom In' }));
+
+    const { mtZoom } = useSessionStore.getState();
+    expect(mtZoom.samplesPerPixel).toBeCloseTo(200 / 1.25, 6);
+    expect((cursor - mtZoom.scrollSample) / mtZoom.samplesPerPixel).toBeCloseTo(LANE / 2, 3);
   });
 
   it('the % readout reads the session, and 100% is its fit', () => {
