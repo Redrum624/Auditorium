@@ -119,6 +119,13 @@ describe('a pipeline tool opens in the module column, not over the stage', () =>
    * Derived over the host's own registry rather than a list typed here: a tool
    * added to the host must arrive already hosted, and a test that named nine
    * ids would go on passing while a tenth quietly opened a modal.
+   *
+   * The explicit timeout is the price of that derivation: this is a full `App`
+   * render PER HOSTED ID, so its cost grows with the roster — D4's tenth id
+   * (`voice.separate`) took it close enough to jest's 5 s default that a loaded
+   * machine tipped it over in a full-suite run while passing in isolation. The
+   * sweep is worth keeping and the roster will only grow, so the budget is
+   * stated rather than inherited (the `dsp/remix*` suites' convention).
    */
   it('routes every hosted tool into the column, with no backdrop anywhere', async () => {
     for (const id of hostedToolIds()) {
@@ -132,7 +139,7 @@ describe('a pipeline tool opens in the module column, not over the stage', () =>
       view.unmount();
       useAppStore.setState(makeInitialState());
     }
-  });
+  }, 30000);
 
   it('shows Pipeline as the active module while a tool is hosted', async () => {
     addDoc();
