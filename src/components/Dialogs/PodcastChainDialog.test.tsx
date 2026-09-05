@@ -88,6 +88,60 @@ const APPLIED_LOUDNESS: PodcastChainStageResult = {
   elapsedMs: 180,
 };
 
+/**
+ * The loudness stage with the Limiter switched off — a stage that RAN and still
+ * needs reading.
+ *
+ * The text is `loudnessWarning`'s own sentence with its own measured figure
+ * (+0.6 dBFS is what the service suite records on its fixture), not invented
+ * copy: a paraphrase here would let the two drift and this dialog would still
+ * look right. It is the one path 6a added purely for safety — with the Limiter
+ * off, this amber line is the ONLY place the user learns the take is over full
+ * scale.
+ */
+const WARNED_LOUDNESS: PodcastChainStageResult = {
+  id: 'loudness',
+  label: 'Loudness',
+  status: 'applied',
+  warning:
+    'this stage set the loudness, which says nothing about the peak, and the output now peaks at +0.6 dBFS — above full scale. The Limiter, the only stage that runs after this one and the one that would have caught it, is switched off, and both the WAV writer and the MP3 encoder hard-clip anything over full scale. Switch the Limiter on, or bring the level down before you export.',
+  derived: [
+    {
+      label: 'Gain',
+      value: '+13.8 dB',
+      from: 'measured -29.8 LUFS against the -16.0 LUFS stereo podcast target',
+    },
+  ],
+  loudness: { beforeLufs: -29.8, afterLufs: -16.0, targetLufs: -16.0, gainDb: 13.8 },
+  delta: {
+    rmsBeforeDb: -35.3,
+    rmsAfterDb: -21.5,
+    peakBeforeDb: -13.2,
+    peakAfterDb: 0.6,
+    identicalFraction: 0.037,
+    differenceRmsDb: -20.9,
+  },
+  elapsedMs: 180,
+};
+
+/** An applied stage with nothing to warn about — the negative half of the pin
+ * below, so "renders a warning" cannot pass by rendering one everywhere. */
+const APPLIED_DC: PodcastChainStageResult = {
+  id: 'dc',
+  label: 'Remove DC Offset',
+  status: 'applied',
+  derived: [],
+  delta: {
+    rmsBeforeDb: -30.5,
+    rmsAfterDb: -30.5,
+    peakBeforeDb: -19.9,
+    peakAfterDb: -19.9,
+    identicalFraction: 0,
+    differenceRmsDb: -58.2,
+  },
+  elapsedMs: 20,
+};
+
 /** The engine's own decline sentence, abbreviated but not invented. */
 const DECLINED_HUM: PodcastChainStageResult = {
   id: 'hum',
@@ -284,6 +338,43 @@ describe('PodcastChainDialog — the live measuring line', () => {
     });
   });
 
+  it('disables Apply, Cancel and every switch until the run resolves, then locks the finished pass', async () => {
+    seedDoc();
+    let resolveRun: (value: PodcastChainReport | null) => void = () => {};
+    mockRun.mockImplementation(
+      () =>
+        new Promise<PodcastChainReport | null>((resolve) => {
+          resolveRun = resolve;
+        })
+    );
+    open();
+
+    const apply = screen.getByTestId('podcast-chain-apply');
+    expect(apply).not.toBeDisabled();
+    fireEvent.click(apply);
+
+    await waitFor(() => expect(apply).toBeDisabled());
+    expect(screen.getByTestId('podcast-chain-cancel')).toBeDisabled();
+    // Every stage, not a named one: `locked` is passed to all ten checkboxes,
+    // and a pin on one would not see nine of them left live.
+    for (const stage of PODCAST_CHAIN_STAGES) {
+      expect(screen.getByTestId(`podcast-chain-toggle-${stage.id}`)).toBeDisabled();
+    }
+
+    await act(async () => {
+      resolveRun(makeReport());
+    });
+
+    // ...and an APPLIED pass stays locked. Without that, a second click re-runs
+    // a destructive chain over audio the first run already changed — the run
+    // whose whole design is that it lands as ONE undo entry.
+    expect(screen.getByTestId('podcast-chain-close')).toBeInTheDocument();
+    expect(screen.queryByTestId('podcast-chain-apply')).toBeNull();
+    for (const stage of PODCAST_CHAIN_STAGES) {
+      expect(screen.getByTestId(`podcast-chain-toggle-${stage.id}`)).toBeDisabled();
+    }
+  });
+
   it('moves the whole-pass bar from the engine’s own fraction', async () => {
     seedDoc();
     const run = await startRun();
@@ -395,6 +486,40 @@ describe('PodcastChainDialog — the report', () => {
     expect(screen.queryByTestId('podcast-chain-progress')).toBeNull();
     // Recoverable: the run failed, so Apply is still there to try again.
     expect(screen.getByTestId('podcast-chain-apply')).toBeInTheDocument();
+  });
+
+  it('renders a warning on a stage that DID run, distinct from a refusal and from a blank', async () => {
+    seedDoc();
+    await apply(makeReport({ stages: stagesWith(APPLIED_DC, WARNED_LOUDNESS) }));
+
+    const warning = await screen.findByTestId('podcast-chain-warning-loudness');
+    // The number and the consequence, both — this line exists to say the take
+    // is over full scale, and either half alone does not say it.
+    expect(warning).toHaveTextContent('+0.6 dBFS');
+    expect(warning).toHaveTextContent('above full scale');
+    expect(warning).toHaveTextContent('Limiter');
+
+    // A warning is NOT a refusal: the stage ran, and it does not replace what
+    // the stage reported.
+    expect(screen.getByTestId('podcast-chain-status-loudness')).toHaveTextContent('Ran');
+    expect(screen.getByTestId('podcast-chain-delta-loudness')).toBeInTheDocument();
+    expect(screen.getByTestId('podcast-chain-derived-loudness')).toBeInTheDocument();
+    expect(screen.getByTestId('podcast-chain-loudness-loudness')).toBeInTheDocument();
+    expect(screen.queryByTestId('podcast-chain-reason-loudness')).toBeNull();
+
+    // ...and it is rendered for THAT stage only. An applied stage with nothing
+    // to warn about renders no warning line at all.
+    expect(screen.queryByTestId('podcast-chain-warning-dc')).toBeNull();
+    expect(screen.getByTestId('podcast-chain-status-dc')).toHaveTextContent('Ran');
+    expect(screen.getAllByTestId(/^podcast-chain-warning-/)).toHaveLength(1);
+  });
+
+  it('renders no warning line anywhere when no stage carries one', async () => {
+    seedDoc();
+    await apply(makeReport({ stages: stagesWith(APPLIED_DC, APPLIED_LOUDNESS) }));
+
+    expect(await screen.findByTestId('podcast-chain-status-loudness')).toHaveTextContent('Ran');
+    expect(screen.queryAllByTestId(/^podcast-chain-warning-/)).toHaveLength(0);
   });
 
   it('replaces Apply with Close once the run has landed', async () => {
