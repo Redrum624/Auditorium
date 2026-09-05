@@ -14,7 +14,6 @@ import {
   CURSOR_HANDLE_HALF_W,
   CURSOR_HANDLE_HIT_H,
   CURSOR_HANDLE_HIT_PX,
-  cursorHandleVisible,
   pixelToSample,
   sampleToPixel,
 } from '../Editor/waveformRender';
@@ -121,9 +120,11 @@ export default function MultitrackView() {
   // it, so nothing hid an x below HEADER_W; and nothing hid a sample scrolled
   // past the right edge either. Exact-edge cull, the DOM twin of the canvas's
   // own `cx >= 0 && cx <= width` for its cursor/playhead lines (`waveformRender`
-  // renderWaveform, ~:257/266) — the handle keeps its OWN wider cull below
-  // (`cursorHandleVisible`, matching the canvas's `drawCursorHandle`), so this
-  // is deliberately a second, stricter rule rather than a shared one.
+  // renderWaveform, ~:257/266). Review round 1: the handle uses this SAME rule
+  // below (not the canvas's wider `cursorHandleVisible`) — "no handle without
+  // a line" is a real constraint for this DOM overlay, unlike the canvas
+  // where the triangle is independently drawn and licensed to outlive the
+  // line by its own half-width.
   //
   // `sessionLaneWidth()` never actually returns <= 0 (it falls back to
   // `FALLBACK_SESSION_LANE_WIDTH` before the first measurement) — the `<= 0`
@@ -197,13 +198,19 @@ export default function MultitrackView() {
     }
   };
 
-  // The canvas cull, verbatim: parked out of the viewport, the handle is not
-  // drawn at a clamped wrong position — it is not drawn at all. A GRABBED
-  // handle stays mounted regardless, because unlike the editor (where the
-  // canvas outlives its culled drawing) this element IS the gesture surface,
-  // and unmounting it mid-drag would drop the pointer capture.
-  const handleVisible =
-    handleGrabbed || cursorHandleVisible(cursorX - HEADER_W, sessionLaneWidth());
+  // Task 8 review (round 1) — unified onto `laneVisible`, the SAME rule as
+  // the line: "the handle's hit band follows the line (no handle without a
+  // line)" is a real requirement here, not the canvas's. The canvas keeps its
+  // own wider `cursorHandleVisible` (±CURSOR_HANDLE_HALF_W) because there the
+  // triangle is drawn independently of the line and is allowed to outlive it
+  // by half its own width; this DOM overlay has no such license — a lone
+  // triangle with no line under it reads as a rendering bug, not a feature.
+  // Parked out of the lane, the handle is not drawn at a clamped wrong
+  // position — it is not drawn at all. A GRABBED handle stays mounted
+  // regardless, because unlike the editor (where the canvas outlives its
+  // culled drawing) this element IS the gesture surface, and unmounting it
+  // mid-drag would drop the pointer capture.
+  const handleVisible = handleGrabbed || laneVisible(cursorX);
 
   // G6: the view sits on the radial stage (stage-inset root) with each track
   // row floating as a glass card. The horizontal geometry inside the relative

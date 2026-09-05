@@ -9,10 +9,12 @@
  * This pins the fix: an exact-edge cull (`laneVisible`) applied to the line
  * and the playhead, the same rule `renderWaveform` already applies to the
  * editor's own canvas cursor/playhead lines (`cx >= 0 && cx <= width` in
- * `waveformRender.ts`). The handle keeps its OWN (wider, tolerant) cull —
- * `cursorHandleVisible`, matching the canvas's `drawCursorHandle` — which
- * `MultitrackView.cursorHandle.test.tsx` already pins; this file does not
- * re-derive that boundary.
+ * `waveformRender.ts`). Review round 1: the handle shares this SAME rule
+ * (`handleGrabbed || laneVisible(cursorX)`) rather than the canvas's own
+ * wider, tolerant `cursorHandleVisible` — "no handle without a line" is a
+ * real constraint for this DOM overlay, so the handle's exact-edge boundary
+ * is pinned here too (the 3px-band tests below); the wider canvas boundary
+ * itself is untouched and stays pinned in `MultitrackView.cursorHandle.test.tsx`.
  */
 import { act, render, screen } from '@testing-library/react';
 import MultitrackView from './MultitrackView';
@@ -85,6 +87,30 @@ describe('the cursor line hides off-lane (Task 8)', () => {
   it('hides the line and the handle when the cursor is 10px past the right edge', () => {
     const laneW = sessionLaneWidth();
     store().setMtCursor((laneW + 10) * SPP);
+    render(<MultitrackView />);
+
+    expect(screen.queryByTestId('mt-cursor-line')).toBeNull();
+    expect(screen.queryByTestId('mt-cursor-handle')).toBeNull();
+  });
+
+  it('hides BOTH the line and the handle 3px left of HEADER_W (Task 8 review round 1)', () => {
+    // Inside what used to be the handle's OWN ±CURSOR_HANDLE_HALF_W (6px)
+    // tolerance band — before the fix a lone triangle drew here with no line
+    // under it. The handle now shares the line's exact-edge `laneVisible`
+    // rule, so this band is empty on both.
+    useSessionStore.setState({ mtZoom: { samplesPerPixel: SPP, scrollSample: 3 * SPP } });
+    store().setMtCursor(0);
+    render(<MultitrackView />);
+
+    expect(screen.queryByTestId('mt-cursor-line')).toBeNull();
+    expect(screen.queryByTestId('mt-cursor-handle')).toBeNull();
+  });
+
+  it('hides BOTH the line and the handle 3px past the right edge (Task 8 review round 1)', () => {
+    // The mirror band on the right — also inside the old ±6px handle
+    // tolerance, also empty now.
+    const laneW = sessionLaneWidth();
+    store().setMtCursor((laneW + 3) * SPP);
     render(<MultitrackView />);
 
     expect(screen.queryByTestId('mt-cursor-line')).toBeNull();
