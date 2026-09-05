@@ -19,17 +19,20 @@ import {
   podcastStageById,
   resolvePodcastStage,
   runPodcastChain,
+  type PodcastChainReport,
   type PodcastChainStageId,
 } from './podcastChain';
 import { registerAllEffects } from '../effects/registerAll';
-import { createDocument } from '../audio/AudioDocument';
+import { createDocument, docLength } from '../audio/AudioDocument';
 import { useAppStore, makeInitialState } from '../stores/appStore';
 import { getHistory, undo } from './undoHistory';
 import { gatedLevelDb } from '../dsp/coverMatch';
 import { integratedLoudness, samplePeakDb } from '../dsp/loudness';
 import { detectSilentRuns } from '../dsp/silenceDetect';
-import { GATE_MIN_REGION_MS } from './vocalChain';
+import { GATE_HEADROOM_DB, GATE_MIN_REGION_MS, deriveRemoveSilence } from './vocalChain';
 import { _resetDspWorkerTestState } from '../__mocks__/createDspWorkerMock';
+import { readFileSync } from 'fs';
+import { join } from 'path';
 
 registerAllEffects();
 
@@ -145,6 +148,26 @@ function totalRunSamples(runs: { start: number; end: number }[]): number {
   return runs.reduce((sum, r) => sum + (r.end - r.start), 0);
 }
 
+/**
+ * Index of the first sample where `after[i - shift]` differs from `before[i]`
+ * over `[from, to)`, or -1 when the span is identical.
+ *
+ * A byte-identity claim over 441000 samples is 441000 `expect` calls otherwise,
+ * which is most of what a test like that costs. This asserts once and names the
+ * offending sample when it fails, which is strictly more than a bare pass/fail
+ * per index gave.
+ */
+function firstDifference(
+  after: Float32Array,
+  before: Float32Array,
+  from = 0,
+  to = before.length,
+  shift = 0
+): number {
+  for (let i = from; i < to; i++) if (after[i - shift] !== before[i]) return i;
+  return -1;
+}
+
 beforeEach(() => {
   useAppStore.setState(makeInitialState());
   _resetDspWorkerTestState();
@@ -215,7 +238,6 @@ describe('the podcast settings resolution', () => {
   it('sets the compressor to 3:1 with the threshold 6 dB under the GATED programme level', () => {
     const channels = stereoTake();
     const level = gatedLevelDb(channels, SR)!;
-    expect(level).not.toBeNull();
 
     const resolved = resolvePodcastStage(podcastStageById('compressor'), channels, SR);
 
@@ -247,10 +269,36 @@ describe('the podcast settings resolution', () => {
     // cannot support. Saying "this is NOT a true-peak reading" is the disclosure
     // that rule exists for, so the pin is on the claim, not on the word.
     expect(podcastStageById('limiter').note).toMatch(/sample peak/i);
-    const sentences = PODCAST_CHAIN_STAGES.flatMap((s) => s.note.split(/(?<=[.:;])\s+/));
-    for (const sentence of sentences) {
-      if (!/dBTP|true[- ]peak/i.test(sentence)) continue;
-      expect(sentence).toMatch(/\b(not|never|nothing|no)\b/i);
+
+    // Every string this module can put in front of a user: the stage notes, the
+    // refusal, and every derived label/value/from the stages produce — the
+    // limiter's `from` says "not a true-peak figure" and is only reachable this
+    // way.
+    const channels = stereoTake();
+    const derivedText = PODCAST_CHAIN_STAGES.filter((st) => st.effectId !== null)
+      .map((st) => resolvePodcastStage(st, channels, SR))
+      .flatMap((r) => (r.run ? r.derived : [{ label: '', value: '', from: r.reason }]))
+      .map((d) => `${d.label} ${d.value} ${d.from}`);
+    const facing = [
+      ...PODCAST_CHAIN_STAGES.map((st) => `${st.label} ${st.note}`),
+      PODCAST_CHANNEL_REFUSAL,
+      ...derivedText,
+    ];
+    expect(facing.some((t) => /sample peak/i.test(t))).toBe(true);
+
+    // ...and the source file itself, comments included, so the docblock cannot
+    // drift into claiming a reading the DSP does not take. Context rather than
+    // sentence-splitting: a denial can sit either side of the phrase.
+    const source = readFileSync(join(__dirname, 'podcastChain.ts'), 'utf8');
+    const scanned = [...facing, source];
+    for (const text of scanned) {
+      const re = /dBTP|true[- ]peak/gi;
+      let match: RegExpExecArray | null;
+      while ((match = re.exec(text)) !== null) {
+        const context = text.slice(Math.max(0, match.index - 140), match.index + 140);
+        // Mentioned only to deny it — never as a label for what is measured.
+        expect(context).toMatch(/\b(not|never|nothing|no)\b/i);
+      }
     }
   });
 
@@ -261,6 +309,26 @@ describe('the podcast settings resolution', () => {
     expect(resolved.params.mode).toBe('shorten');
     expect(Number(resolved.params.targetMs)).toBe(PODCAST_SILENCE_TARGET_MS);
     expect(PODCAST_SILENCE_TARGET_MS).toBe(400);
+  });
+
+  it('clears the vocal chain’s silence threshold by the gate’s own measured headroom', () => {
+    // Measured on this fixture after Noise Reduction: the settled floor grazes
+    // the bare threshold by 0.32 dB, 59-85 % of each pause sits below it and the
+    // longest continuous run below is 0.048-0.352 s — so against the 500 ms
+    // minimum NOTHING is detected and no pause is shortened. GATE_HEADROOM_DB is
+    // the vocal chain's own measurement of that graze, reused rather than
+    // re-derived.
+    const channels = stereoTake();
+    const bare = deriveRemoveSilence(channels, SR);
+    const resolved = resolvePodcastStage(podcastStageById('silence'), channels, SR);
+
+    expect(bare.run).toBe(true);
+    expect(resolved.run).toBe(true);
+    if (!bare.run || !resolved.run) return;
+    expect(Number(resolved.params.thresholdDb)).toBeCloseTo(
+      Number(bare.params.thresholdDb) + GATE_HEADROOM_DB,
+      6
+    );
   });
 
   it('shapes the EQ for speech: 80 Hz high-pass, -2 dB at 250 Hz, +2 dB at 3 kHz', () => {
@@ -301,7 +369,6 @@ describe('deriveLoudness', () => {
   it('targets -16 LUFS on stereo and asks for exactly the gain that lands it', () => {
     const channels = stereoTake();
     const measured = integratedLoudness(channels, SR)!;
-    expect(measured).not.toBeNull();
 
     const resolved = deriveLoudness(channels, SR);
 
@@ -371,24 +438,118 @@ describe('runPodcastChain', () => {
       expect(restored.length).toBe(2);
       for (let c = 0; c < 2; c++) {
         expect(restored[c].length).toBe(original[c].length);
-        for (let i = 0; i < original[c].length; i++) expect(restored[c][i]).toBe(original[c][i]);
+        expect(firstDifference(restored[c], original[c])).toBe(-1);
       }
     },
     RUN_TIMEOUT_MS
   );
 
-  it(
-    'shortens the pauses to about 400 ms — same number of low-level runs, less total length',
-    async () => {
-      const before = stereoTake();
-      const runsBefore = lowLevelRuns(before);
-      seedDoc(stereoTake());
+  // ── One resolved region, every consumer ──────────────────────────────────
+  // Both of these run `only('silence')` — seconds, not a ten-stage pass — and
+  // both exist because a test file whose every run starts at sample 0 cannot
+  // tell `start + x` from `x`. The sibling chains pin exactly this
+  // (`vocalChain.test.ts` L11, `coverChain.test.ts` L11), and until these two
+  // landed `start` could have been deleted from the cuts remap, from the
+  // post-edit selection and from the cursor with the whole file still green.
 
-      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
+  it(
+    'edits the SELECTED region only, and offsets the new selection and cursor from its start',
+    async () => {
+      const original = stereoTake().map((c) => Float32Array.from(c));
+      seedDoc(stereoTake());
+      // 1.0 s -> 6.0 s: opens inside the first pause and closes inside the third
+      // burst, so neither edge sits on a fixture boundary and neither is 0.
+      const start = SR;
+      const end = 6 * SR;
+      useAppStore.getState().setSelection({ start, end });
+
+      const report = await runPodcastChain({ enabled: only('silence') });
+
+      expect(report!.regionSamples).toBe(end - start);
+      expect(report!.outputSamples).toBeLessThan(report!.regionSamples);
+      const removed = report!.regionSamples - report!.outputSamples;
+      expect(docLength(activeDoc())).toBe(TAKE_SAMPLES - removed);
+
+      const after = activeDoc().channels;
+      for (let c = 0; c < 2; c++) {
+        // Everything ahead of the region came through untouched...
+        expect(firstDifference(after[c], original[c], 0, start)).toBe(-1);
+        // ...and everything behind it is the same audio, moved left by the cut.
+        expect(firstDifference(after[c], original[c], end, TAKE_SAMPLES, removed)).toBe(-1);
+      }
+
+      // START-relative, both of them. Drop `start` from either expression and
+      // this is the assertion that says so.
+      expect(useAppStore.getState().selection).toEqual({
+        start,
+        end: start + report!.outputSamples,
+      });
+      expect(useAppStore.getState().cursorSample).toBe(start);
+    },
+    RUN_TIMEOUT_MS
+  );
+
+  it(
+    'remaps markers around the removed pauses in DOCUMENT coordinates, not region ones',
+    async () => {
+      const docId = seedDoc(stereoTake());
+      // 5.0 s -> 8.8 s. Every cut this makes therefore lands in the SECOND half
+      // of the document, which is what turns the marker ahead of the region into
+      // a test of the OFFSET rather than of the remap in general: offset the
+      // cuts by anything other than `start` and they slide down the document
+      // until they sit in front of that marker, which then moves.
+      const start = 5 * SR;
+      const end = Math.round(8.8 * SR);
+      useAppStore.getState().setMarkersForDoc(docId, [
+        { id: 'before', positionSample: 200000, name: 'before the region' },
+        { id: 'after', positionSample: 420000, name: 'after the region' },
+      ]);
+      useAppStore.getState().setSelection({ start, end });
+
+      const report = await runPodcastChain({ enabled: only('silence') });
 
       expect(report!.applied).toBe(true);
-      const after = activeDoc().channels;
-      const runsAfter = lowLevelRuns(after);
+      const removed = report!.regionSamples - report!.outputSamples;
+      expect(removed).toBeGreaterThan(0);
+
+      const markers = useAppStore.getState().markers[docId];
+      // Ahead of every cut: it does not move at all.
+      expect(markers.find((m) => m.id === 'before')!.positionSample).toBe(200000);
+      // Behind every cut: moved left by exactly what came out.
+      expect(markers.find((m) => m.id === 'after')!.positionSample).toBe(420000 - removed);
+    },
+    RUN_TIMEOUT_MS
+  );
+
+  // ── One default run, read by seven tests ─────────────────────────────────
+  // Seven tests asserted different facets of the SAME byte-identical default run
+  // over the SAME byte-identical take, and each paid for its own ten-stage pass.
+  // The run is hoisted here and shared. Nothing is weakened: every assertion
+  // still reads a real default-chain output. What is shared is the captured
+  // RESULT — the outer `beforeEach` still wipes the store before each test, so
+  // no test in here may read live store state, and none does.
+  describe('one default run over the speech take', () => {
+    let report: PodcastChainReport;
+    let output: Float32Array[];
+
+    beforeAll(async () => {
+      useAppStore.setState(makeInitialState());
+      _resetDspWorkerTestState();
+      seedDoc(stereoTake());
+      report = (await runPodcastChain({ enabled: defaultPodcastStageSelection() }))!;
+      output = activeDoc().channels.map((c) => Float32Array.from(c));
+    }, RUN_TIMEOUT_MS);
+
+    it('applies, on a two-channel document, with no refusal', () => {
+      expect(report).toBeDefined();
+      expect(report.applied).toBe(true);
+      expect(report.refusal).toBeNull();
+      expect(output.length).toBe(2);
+    });
+
+    it('shortens the pauses to about 400 ms — same number of low-level runs, less total length', () => {
+      const runsBefore = lowLevelRuns(stereoTake());
+      const runsAfter = lowLevelRuns(output);
       expect(runsBefore.length).toBe(BURSTS + 1);
       expect(runsAfter.length).toBe(runsBefore.length);
       expect(totalRunSamples(runsAfter)).toBeLessThan(totalRunSamples(runsBefore));
@@ -403,30 +564,85 @@ describe('runPodcastChain', () => {
         expect(run.end - run.start).toBeLessThan(targetSamples * 1.6);
       }
       // Five 1.09 s gaps down to 0.40 s each: about 3.45 s comes out.
-      const removedSeconds = (TAKE_SAMPLES - report!.outputSamples) / SR;
+      const removedSeconds = (TAKE_SAMPLES - report.outputSamples) / SR;
       expect(removedSeconds).toBeGreaterThan(3);
       expect(removedSeconds).toBeLessThan(4);
-    },
-    RUN_TIMEOUT_MS
-  );
+    });
 
-  it(
-    'lands -16.0 LUFS on stereo with the sample peak under -1.0 dBFS',
-    async () => {
-      seedDoc(stereoTake());
-
-      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
-
-      const after = activeDoc().channels;
-      expect(integratedLoudness(after, SR)!).toBeCloseTo(PODCAST_TARGET_LUFS_STEREO, 0);
-      expect(Math.abs(integratedLoudness(after, SR)! - PODCAST_TARGET_LUFS_STEREO)).toBeLessThan(0.5);
-      expect(samplePeakDb(after)).toBeLessThanOrEqual(PODCAST_LIMITER_CEILING_DB);
+    it('lands -16.0 LUFS on stereo with the sample peak under -1.0 dBFS', () => {
+      const measured = integratedLoudness(output, SR)!;
+      expect(measured).toBeCloseTo(PODCAST_TARGET_LUFS_STEREO, 0);
+      expect(Math.abs(measured - PODCAST_TARGET_LUFS_STEREO)).toBeLessThan(0.5);
+      expect(samplePeakDb(output)).toBeLessThanOrEqual(PODCAST_LIMITER_CEILING_DB);
       // The report says the same thing the audio does.
-      expect(report!.after.lufs!).toBeCloseTo(integratedLoudness(after, SR)!, 4);
-      expect(report!.before.lufs).not.toBeNull();
-    },
-    RUN_TIMEOUT_MS
-  );
+      expect(report.after.lufs!).toBeCloseTo(measured, 4);
+      expect(report.before.lufs).not.toBeNull();
+    });
+
+    it('reports the measured before AND after LUFS on the loudness stage', () => {
+      const loudness = report.stages.find((s) => s.id === 'loudness')!;
+      expect(loudness.status).toBe('applied');
+      const measured = loudness.loudness!;
+      expect(measured.targetLufs).toBe(PODCAST_TARGET_LUFS_STEREO);
+      expect(measured.gainDb).toBeCloseTo(measured.targetLufs - measured.beforeLufs, 6);
+      // `afterLufs` is MEASURED on the result, not asserted from the arithmetic.
+      expect(measured.afterLufs).not.toBeNull();
+      expect(Math.abs(measured.afterLufs! - measured.targetLufs)).toBeLessThan(0.1);
+      expect(measured.afterLufs).not.toBe(measured.beforeLufs);
+    });
+
+    it('still gates the pauses after Shorten Pauses has cut them, and says how much it silenced', () => {
+      // The interaction the two stages have BY CONSTRUCTION, pinned on the
+      // measurement rather than on the arithmetic: Shorten Pauses leaves every
+      // gap at PODCAST_SILENCE_TARGET_MS, which is UNDER the gate's own
+      // GATE_MIN_REGION_MS minimum, and the gate applies anyway — the stretch it
+      // sees is the gap plus the margins its region edges walk out to. The first
+      // version of this file asserted the opposite from the constants alone and
+      // was wrong; this is what the fixture actually does.
+      expect(PODCAST_SILENCE_TARGET_MS).toBeLessThan(GATE_MIN_REGION_MS);
+      const gate = report.stages.find((s) => s.id === 'gate')!;
+      expect(gate.status).toBe('applied');
+      // It muted something, and not everything.
+      expect(gate.delta!.identicalFraction!).toBeLessThan(1);
+      expect(gate.delta!.identicalFraction!).toBeGreaterThan(0.5);
+      expect(gate.detail).toMatch(/digital silence/);
+    });
+
+    it('earns its limiter: the loudness gain takes the peak over full scale and the limiter brings it to the ceiling', () => {
+      // Measured on this fixture: Noise Reduction raises the peak to
+      // -12.4 dBFS, the loudness gain takes it to +0.6, and the limiter lands
+      // -1.0. So the ceiling is doing real work here rather than being a
+      // decoration that never catches anything.
+      const limiter = report.stages.find((s) => s.id === 'limiter')!;
+      expect(limiter.status).toBe('applied');
+      expect(limiter.delta!.peakBeforeDb).toBeGreaterThan(PODCAST_LIMITER_CEILING_DB);
+      expect(limiter.delta!.peakAfterDb).toBeCloseTo(PODCAST_LIMITER_CEILING_DB, 1);
+    });
+
+    it('says nothing about the peak when the limiter is ON to catch it', () => {
+      expect(report.stages.find((s) => s.id === 'loudness')!.warning).toBeUndefined();
+    });
+
+    it(
+      'leaves the level where the earlier stages put it when the loudness stage is off',
+      async () => {
+        const measured = report.stages.find((s) => s.id === 'loudness')!.loudness!;
+        seedDoc(stereoTake());
+
+        const without = await runPodcastChain({ enabled: defaultsWithout('loudness') });
+
+        expect(without!.applied).toBe(true);
+        expect(without!.stages.find((s) => s.id === 'loudness')!.status).toBe('off');
+        // The level the EARLIER stages left is exactly what the loudness stage
+        // measured at its own input on the other run — non-circular, because the
+        // two numbers come from two different runs.
+        expect(without!.after.lufs!).toBeCloseTo(measured.beforeLufs, 1);
+        // And it is NOT the target: the stage was doing real work.
+        expect(Math.abs(without!.after.lufs! - PODCAST_TARGET_LUFS_STEREO)).toBeGreaterThan(1);
+      },
+      RUN_TIMEOUT_MS
+    );
+  });
 
   it(
     'lands -19.0 LUFS on mono',
@@ -442,49 +658,6 @@ describe('runPodcastChain', () => {
       expect(loudness.status).toBe('applied');
       expect(loudness.loudness!.targetLufs).toBe(PODCAST_TARGET_LUFS_MONO);
       expect(samplePeakDb(after)).toBeLessThanOrEqual(PODCAST_LIMITER_CEILING_DB);
-    },
-    RUN_TIMEOUT_MS
-  );
-
-  it(
-    'reports the measured before AND after LUFS on the loudness stage',
-    async () => {
-      seedDoc(stereoTake());
-
-      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
-
-      const loudness = report!.stages.find((s) => s.id === 'loudness')!;
-      expect(loudness.status).toBe('applied');
-      const measured = loudness.loudness!;
-      expect(measured.targetLufs).toBe(PODCAST_TARGET_LUFS_STEREO);
-      expect(measured.gainDb).toBeCloseTo(measured.targetLufs - measured.beforeLufs, 6);
-      // `afterLufs` is MEASURED on the result, not asserted from the arithmetic.
-      expect(measured.afterLufs).not.toBeNull();
-      expect(Math.abs(measured.afterLufs! - measured.targetLufs)).toBeLessThan(0.1);
-      expect(measured.afterLufs).not.toBe(measured.beforeLufs);
-    },
-    RUN_TIMEOUT_MS
-  );
-
-  it(
-    'leaves the level where the earlier stages put it when the loudness stage is off',
-    async () => {
-      seedDoc(stereoTake());
-      const withLoudness = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
-      const measured = withLoudness!.stages.find((s) => s.id === 'loudness')!.loudness!;
-
-      useAppStore.setState(makeInitialState());
-      seedDoc(stereoTake());
-      const without = await runPodcastChain({ enabled: defaultsWithout('loudness') });
-
-      expect(without!.applied).toBe(true);
-      expect(without!.stages.find((s) => s.id === 'loudness')!.status).toBe('off');
-      // The level the EARLIER stages left is exactly what the loudness stage
-      // measured at its own input on the other run — non-circular, because the
-      // two numbers come from two different runs.
-      expect(without!.after.lufs!).toBeCloseTo(measured.beforeLufs, 1);
-      // And it is NOT the target: the stage was doing real work.
-      expect(Math.abs(without!.after.lufs! - PODCAST_TARGET_LUFS_STEREO)).toBeGreaterThan(1);
     },
     RUN_TIMEOUT_MS
   );
@@ -531,9 +704,7 @@ describe('runPodcastChain', () => {
       expect(getHistory(docId).done.length).toBe(historyBefore);
       const after = activeDoc().channels;
       expect(after.length).toBe(3);
-      for (let c = 0; c < 3; c++) {
-        for (let i = 0; i < original[c].length; i++) expect(after[c][i]).toBe(original[c][i]);
-      }
+      for (let c = 0; c < 3; c++) expect(firstDifference(after[c], original[c])).toBe(-1);
       // Nothing measured a loudness it has no standard-accurate answer for.
       expect(report!.before.lufs).toBeNull();
       expect(report!.after.lufs).toBeNull();
@@ -576,51 +747,6 @@ describe('runPodcastChain', () => {
   );
 
   it(
-    'still gates the pauses after Shorten Pauses has cut them, and says how much it silenced',
-    async () => {
-      // The interaction the two stages have BY CONSTRUCTION, pinned on the
-      // measurement rather than on the arithmetic: Shorten Pauses leaves every
-      // gap at PODCAST_SILENCE_TARGET_MS, which is UNDER the gate's own
-      // GATE_MIN_REGION_MS minimum, and the gate applies anyway — the stretch it
-      // sees is the gap plus the margins its region edges walk out to. The first
-      // version of this file asserted the opposite from the constants alone and
-      // was wrong; this is what the fixture actually does.
-      expect(PODCAST_SILENCE_TARGET_MS).toBeLessThan(GATE_MIN_REGION_MS);
-      seedDoc(stereoTake());
-
-      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
-
-      const gate = report!.stages.find((s) => s.id === 'gate')!;
-      expect(gate.status).toBe('applied');
-      // It muted something, and not everything.
-      expect(gate.delta!.identicalFraction!).toBeLessThan(1);
-      expect(gate.delta!.identicalFraction!).toBeGreaterThan(0.5);
-      expect(gate.detail).toMatch(/digital silence/);
-      expect(report!.applied).toBe(true);
-    },
-    RUN_TIMEOUT_MS
-  );
-
-  it(
-    'earns its limiter: the loudness gain takes the peak over full scale and the limiter brings it to the ceiling',
-    async () => {
-      // Measured on this fixture: Noise Reduction raises the peak to
-      // -12.4 dBFS, the loudness gain takes it to +0.6, and the limiter lands
-      // -1.0. So the ceiling is doing real work here rather than being a
-      // decoration that never catches anything.
-      seedDoc(stereoTake());
-
-      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
-
-      const limiter = report!.stages.find((s) => s.id === 'limiter')!;
-      expect(limiter.status).toBe('applied');
-      expect(limiter.delta!.peakBeforeDb).toBeGreaterThan(PODCAST_LIMITER_CEILING_DB);
-      expect(limiter.delta!.peakAfterDb).toBeCloseTo(PODCAST_LIMITER_CEILING_DB, 1);
-    },
-    RUN_TIMEOUT_MS
-  );
-
-  it(
     'warns, with the number, when the loudness gain leaves the take over full scale and the limiter is off',
     async () => {
       // The one over-scale path this chain leaves open. Measured: on this
@@ -642,16 +768,6 @@ describe('runPodcastChain', () => {
   );
 
   it(
-    'says nothing about the peak when the limiter is ON to catch it',
-    async () => {
-      seedDoc(stereoTake());
-      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
-      expect(report!.stages.find((s) => s.id === 'loudness')!.warning).toBeUndefined();
-    },
-    RUN_TIMEOUT_MS
-  );
-
-  it(
     'reports a run where every stage was off without touching the document',
     async () => {
       const original = stereoTake().map((c) => Float32Array.from(c));
@@ -663,8 +779,7 @@ describe('runPodcastChain', () => {
       expect(report!.applied).toBe(false);
       expect(report!.refusal).toBeNull();
       expect(getHistory(docId).done.length).toBe(historyBefore);
-      const after = activeDoc().channels;
-      for (let i = 0; i < original[0].length; i++) expect(after[0][i]).toBe(original[0][i]);
+      expect(firstDifference(activeDoc().channels[0], original[0])).toBe(-1);
     },
     RUN_TIMEOUT_MS
   );
