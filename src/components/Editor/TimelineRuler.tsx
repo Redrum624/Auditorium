@@ -64,6 +64,8 @@ interface TimelineRulerProps {
  * running `PlaybackEngine` (nothing in `transportService` watches
  * `cursorSample`; the cursor is where the NEXT play starts), and inventing that
  * semantic here would be a new transport behaviour hidden inside a ruler.
+ * D2 keeps that: a click DURING playback still does not re-seek the running
+ * engine — it only moves the bar, and the next Play honours the bar.
  */
 export default function TimelineRuler({
   sampleRate,
