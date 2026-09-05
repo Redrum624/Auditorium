@@ -1,5 +1,9 @@
 import { useRef, useState } from 'react';
-import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent } from 'react';
+import type {
+  DragEvent as ReactDragEvent,
+  MouseEvent as ReactMouseEvent,
+  PointerEvent as ReactPointerEvent,
+} from 'react';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import {
   DOC_DRAG_MIME,
@@ -11,8 +15,9 @@ import {
   type DropKind,
 } from '../../multitrack/laneDrop';
 import type { Track } from '../../multitrack/session';
+import { gapAt } from '../../multitrack/gaps';
 import { useSessionStore } from '../../multitrack/sessionStore';
-import { sampleToPixel } from '../Editor/waveformRender';
+import { pixelToSample, sampleToPixel } from '../Editor/waveformRender';
 import ClipView from './ClipView';
 import { laneRawStart, snapClipStart, type ClipStartSnap } from './clipDropPosition';
 import EnvelopeLane from './EnvelopeLane';
@@ -91,7 +96,14 @@ export default function TrackLane({
   onDragOverTrack,
 }: TrackLaneProps) {
   const setSelectedClip = useSessionStore((s) => s.setSelectedClip);
+  const setSelectedGap = useSessionStore((s) => s.setSelectedGap);
   const mtEnvelope = useSessionStore((s) => s.mtEnvelope);
+  // D3 — the band this lane draws, or null. Narrowed to THIS track here rather
+  // than in the render, so a gap selected on another lane wakes no subscriber
+  // in this one.
+  const selectedGap = useSessionStore((s) =>
+    s.selectedGap !== null && s.selectedGap.trackId === track.id ? s.selectedGap : null
+  );
 
   // F11-4 — the drop in flight over THIS lane. The snap targets are captured
   // once when the drag enters (walking every clip in the session on each of
@@ -105,7 +117,35 @@ export default function TrackLane({
   const onPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
     // Only a click on empty lane space (not a clip) reaches here — clips call
     // stopPropagation — so clear the selection.
+    //
+    // D3: deliberately does NOT clear a selected gap. `setSelectedClip(null)`
+    // is not selecting anything, and this handler runs TWICE on the way to the
+    // double-click that selects a gap — clearing here would fight the gesture
+    // it precedes. Escape (`edit.deselect`) is what puts the band away.
     if (e.button === 0) setSelectedClip(null);
+  };
+
+  /** D3 — the gap gesture. A double-click on EMPTY lane space selects the gap
+   * it landed in; anything else selects nothing.
+   *
+   * `e.target === e.currentTarget` is the whole guard, and it has to be here
+   * rather than in the clip: the native `dblclick` bubbles out of a `ClipView`
+   * (which only stops POINTER events, because that is what its drag needs), so
+   * without it every double-click on a clip would ask the lane for the gap
+   * under the clip — `gapAt` would refuse the covered sample, but a clip the
+   * user double-clicked between two others would have refused it by accident
+   * rather than by rule. The lane's other children are the envelope overlay and
+   * the drop ghost, neither of which is a surface a user double-clicks for a
+   * gap.
+   *
+   * The lane's own left edge is x = 0 of its timeline — every clip in it is
+   * positioned from the same origin, and this element never scrolls (see the
+   * `overflow-clip` note above), so the border-box left is the whole
+   * conversion. */
+  const onDoubleClick = (e: ReactMouseEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget) return;
+    const x = e.clientX - e.currentTarget.getBoundingClientRect().left;
+    setSelectedGap(gapAt(track, pixelToSample(x, zoom.scrollSample, zoom.samplesPerPixel)));
   };
 
   /** What this drag is, or null for anything the lane does not accept. Read
@@ -201,6 +241,7 @@ export default function TrackLane({
       data-track-id={track.id}
       data-testid="track-lane"
       onPointerDown={onPointerDown}
+      onDoubleClick={onDoubleClick}
       onDragEnter={onDragEnter}
       onDragOver={onDragOver}
       onDragLeave={onDragLeave}
@@ -229,6 +270,28 @@ export default function TrackLane({
           onDragOverTrack={onDragOverTrack}
         />
       ))}
+      {/* D3 — the selected GAP: a translucent band over the span `closeGap`
+          will remove, full lane height so it reads as "this stretch of the
+          timeline" rather than as a clip. The clip selection's own tokens at
+          the lower alpha of the pair — `--accent-soft` fill inside an
+          `--accent-ring` hairline, where a selected clip wears the full
+          `--accent` border — so the band is unmistakably the same selection
+          colour and unmistakably not a clip. `pointer-events-none`: the
+          gesture that made it is a double-click on the LANE, and a band that
+          ate the next press would make its own lane un-clickable. */}
+      {selectedGap !== null && (
+        <div
+          data-testid="gap-selection"
+          className="pointer-events-none absolute top-0 bottom-0"
+          style={{
+            left: sampleToPixel(selectedGap.startSample, zoom.scrollSample, zoom.samplesPerPixel),
+            width:
+              (selectedGap.endSample - selectedGap.startSample) / zoom.samplesPerPixel,
+            backgroundColor: 'var(--accent-soft)',
+            boxShadow: 'inset 0 0 0 1px var(--accent-ring)',
+          }}
+        />
+      )}
       {/* F0 — the envelope editing overlay, a TrackLane child (T23/T29: it
           belongs to the TRACK's timeline, resolves for cross-lane drops via
           the data-track-id ancestor, and never rides a clip's drag

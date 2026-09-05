@@ -345,6 +345,44 @@ describe('EditToolbar — per-button enablement, each predicate both ways', () =
     expect(mockRunCommand).toHaveBeenCalledWith('multitrack.mergeClips');
   });
 
+  it('D3 — Delete lights up for a selected GAP alone, and says what it will do', () => {
+    lastDocId = addDoc().id;
+    act(() => useAppStore.getState().setView('multitrack'));
+    // The clips are placed BEFORE the render, so the only thing that changes
+    // afterwards is `selectedGap` — which is the point: a double-click on empty
+    // lane space writes that field and nothing else, so the pill must subscribe
+    // to it or the button stays grey until some unrelated state moves.
+    let trackId = '';
+    act(() => {
+      useSessionStore.getState().addTrack();
+      trackId = useSessionStore.getState().session.tracks[0].id;
+      for (const startSample of [1000, 2000]) {
+        useSessionStore.getState().addClip(
+          trackId,
+          createClip({ documentId: 'x', startSample, offsetSample: 64, lengthSample: 500 })
+        );
+      }
+    });
+    render(<EditToolbar />);
+    expect(btn('Delete')).toBeDisabled();
+
+    act(() => {
+      useSessionStore.getState().setSelectedGap({ trackId, startSample: 1500, endSample: 2000 });
+    });
+
+    expect(btn('Delete')).toBeEnabled();
+    expect(btn('Delete').title).toContain('closes the selected gap');
+  });
+
+  it('D3 — the editor views keep the plain Delete tooltip, with no gap in it', () => {
+    lastDocId = addDoc().id;
+    act(() => useAppStore.getState().setView('waveform'));
+    render(<EditToolbar />);
+
+    expect(btn('Delete').title).toBe('Delete (Del)');
+    expect(btn('Delete').title).not.toContain('gap');
+  });
+
   it('routes Delete to the clip selection in Multitrack (both ways)', () => {
     lastDocId = addDoc().id;
     act(() => useAppStore.getState().setView('multitrack'));

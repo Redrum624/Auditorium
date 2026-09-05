@@ -112,7 +112,18 @@ export const EDIT_TOOLBAR_ITEMS: EditToolbarItem[] = [
     multitrackReason: 'needs a clip clipboard',
     title: 'Paste (Ctrl+V)',
   },
-  { label: 'Delete', commandId: 'edit.delete', Icon: Trash2, title: 'Delete (Del)' },
+  {
+    label: 'Delete',
+    commandId: 'edit.delete',
+    Icon: Trash2,
+    title: 'Delete (Del)',
+    // D3 — in the multitrack Delete has two jobs, and a button that does two
+    // things has to name both: it removes the selected clips, or, when the
+    // selection is a GAP (double-click empty lane space), closes it — every
+    // clip after it on THAT track moves up by the gap's length.
+    multitrackTitle:
+      'Delete (Del) — removes the selected clips, or closes the selected gap: the clips after it on that track move up',
+  },
   {
     label: 'Trim',
     commandId: 'edit.trim',
@@ -182,6 +193,10 @@ export default function EditToolbar() {
   useSessionStore((s) => s.session);
   useSessionStore((s) => s.selectedClipIds);
   useSessionStore((s) => s.mtCursorSample);
+  // D3: a double-click on empty lane space writes `selectedGap` and NOTHING
+  // else, so without this the Delete/Ripple Delete predicates would light one
+  // unrelated render late — the same argument as the three above.
+  useSessionStore((s) => s.selectedGap);
   const documentCount = useAppStore((s) => s.documents.length);
   const isMultitrack = useAppStore((s) => s.view) === 'multitrack';
 

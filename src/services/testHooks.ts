@@ -15,6 +15,7 @@ import {
   crossfadableOverlap,
   DEFAULT_FADE_CURVE,
 } from '../multitrack/session';
+import { gapAt, type TrackGap } from '../multitrack/gaps'; // D3
 import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { withSessionGesture } from '../multitrack/sessionUndo';
@@ -221,6 +222,17 @@ export interface TestApi {
    * own rules apply (dangling ids dropped, duplicates collapsed), and echoes
    * what was stored. */
   selectClips(ids: string[]): { selectedClipId: string | null; selectedClipIds: string[] };
+  /** D3: selects the GAP at `sample` on `tracks[trackIndex]` — the outcome of a
+   * double-click on empty lane space, through the same resolver and the same
+   * setter the lane uses, since the harness cannot double-click. Returns the
+   * gap it selected, or `null` for a sample no gap covers (inside a clip, on a
+   * boundary, past the last clip) or a track index the session does not have —
+   * and a refusal CLEARS any standing gap, so this hook and the store never
+   * disagree. */
+  selectGapAt(trackIndex: number, sample: number): TrackGap | null;
+  /** D3: reads the selected gap back (`getStateSummary` carries no session
+   * selection). */
+  getSelectedGap(): TrackGap | null;
   /** Merge Clips (`multitrack.mergeClips`) on the current clip selection,
    * through the menu action itself — so the harness sees the SAME baked
    * document and the same single undo entry the menu row writes. Reports the
@@ -1366,6 +1378,24 @@ export function installTestHooks(): void {
       useSessionStore.getState().setSelectedClips(ids);
       const { selectedClipId, selectedClipIds } = useSessionStore.getState();
       return { selectedClipId, selectedClipIds: [...selectedClipIds] };
+    },
+
+    // D3. `gapAt` is the lane's own resolver, so a sample the UI would refuse
+    // is refused identically here — the smoke can assert the boundary cases
+    // without a pointer.
+    selectGapAt: (trackIndex, sample) => {
+      const track = useSessionStore.getState().session.tracks[trackIndex];
+      const gap = track === undefined ? null : gapAt(track, sample);
+      useSessionStore.getState().setSelectedGap(gap);
+      return gap;
+    },
+
+    getSelectedGap: () => {
+      const gap = useSessionStore.getState().selectedGap;
+      // A COPY: the smoke reads this across the structured-clone boundary, and
+      // handing out the store's own object would let a harness-side mutation
+      // reach into the store (trap T16's argument, one object at a time).
+      return gap === null ? null : { ...gap };
     },
 
     // The menu action verbatim (not a re-implementation): one `Merge N`

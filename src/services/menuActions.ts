@@ -3,6 +3,7 @@ import type { AppState, Marker } from '../stores/appStore';
 import { applyEditorZoom, useAppStore } from '../stores/appStore';
 import {
   applySessionZoom,
+  closeGap, // D3
   removeClips,
   rippleDeleteClips,
   splitClipsAt,
@@ -415,13 +416,20 @@ function registerSelectionAndTransportCommands(): void {
       id: 'edit.deselect',
       label: 'Deselect',
       shortcut: 'Esc',
+      // D3: the multitrack's selection is now a clip selection OR a gap, so
+      // Escape answers for both — it is the ONLY way to put a selected gap
+      // away without selecting something else, since a press on empty lane
+      // space deliberately leaves the band up (the double-click that made it
+      // is two presses).
       enabled: (s) =>
         s.view === 'multitrack'
-          ? useSessionStore.getState().selectedClipId !== null
+          ? useSessionStore.getState().selectedClipId !== null ||
+            useSessionStore.getState().selectedGap !== null
           : s.selection !== null,
       run: async () => {
         if (useAppStore.getState().view === 'multitrack') {
           useSessionStore.getState().setSelectedClip(null);
+          useSessionStore.getState().setSelectedGap(null);
           return;
         }
         useAppStore.getState().setSelection(null);
@@ -672,12 +680,21 @@ function registerEditCommands(): void {
       id: 'edit.delete',
       label: 'Delete',
       shortcut: 'Del',
+      // D3: a GAP arms it too, and closes instead of removing. The store keeps
+      // the two selections mutually exclusive, so this reads the gap first and
+      // never has to arbitrate.
       enabled: (s) =>
         s.view === 'multitrack'
-          ? useSessionStore.getState().selectedClipId !== null
+          ? useSessionStore.getState().selectedClipId !== null ||
+            useSessionStore.getState().selectedGap !== null
           : hasSelection(s),
       run: async () => {
         if (useAppStore.getState().view === 'multitrack') {
+          const gap = useSessionStore.getState().selectedGap;
+          if (gap !== null) {
+            closeGap(gap);
+            return;
+          }
           removeClips(useSessionStore.getState().selectedClipIds);
           return;
         }
@@ -697,12 +714,23 @@ function registerEditCommands(): void {
       id: 'edit.rippleDelete',
       label: 'Ripple Delete',
       shortcut: 'Shift+Del',
+      // D3: same arming, same act. Closing a gap IS the ripple's second half
+      // (remove nothing, close the hole), so the two verbs deliberately agree
+      // rather than inventing a second meaning for a span that is empty
+      // already — `menuActions.gaps.test.ts` pins that they land the same
+      // session.
       enabled: (s) =>
         s.view === 'multitrack'
-          ? useSessionStore.getState().selectedClipId !== null
+          ? useSessionStore.getState().selectedClipId !== null ||
+            useSessionStore.getState().selectedGap !== null
           : hasSelection(s),
       run: async () => {
         if (useAppStore.getState().view === 'multitrack') {
+          const gap = useSessionStore.getState().selectedGap;
+          if (gap !== null) {
+            closeGap(gap);
+            return;
+          }
           rippleDeleteClips(useSessionStore.getState().selectedClipIds);
           return;
         }

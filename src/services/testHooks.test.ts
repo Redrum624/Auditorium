@@ -909,3 +909,72 @@ describe('merge clips hooks', () => {
     expect(useSessionStore.getState().session.tracks[0].clips).toHaveLength(2);
   });
 });
+
+describe('gap hooks', () => {
+  /**
+   * D3 — the two hooks Task 7's smoke drives the gap gesture through. The
+   * harness cannot double-click a lane through `page.evaluate`, so
+   * `selectGapAt` states the gesture's OUTCOME through the shipped resolver
+   * and the shipped setter: what it selects is what a double-click at that
+   * sample would have selected, refusals included.
+   */
+  function seedGapTrack(): { trackId: string; ids: string[] } {
+    const t = createTrack('Track 1');
+    t.clips = [
+      createClip({ documentId: 'doc-1', startSample: 1000, offsetSample: 128, lengthSample: 500 }),
+      createClip({ documentId: 'doc-1', startSample: 2000, offsetSample: 256, lengthSample: 500 }),
+    ];
+    useSessionStore.setState({
+      session: { name: 'Gap Hook Fixture', sampleRate: 44100, tracks: [t] },
+      selectedClipId: null,
+      selectedClipIds: [],
+      selectedGap: null,
+      mtCursorSample: 0,
+    });
+    return { trackId: t.id, ids: t.clips.map((c) => c.id) };
+  }
+
+  it('selectGapAt names the gap under the sample and reads back through getSelectedGap', () => {
+    const t = api();
+    const { trackId } = seedGapTrack();
+
+    const gap = t.selectGapAt(0, 1700);
+
+    expect(gap).toEqual({ trackId, startSample: 1500, endSample: 2000 });
+    expectPlainJson(gap);
+    expect(t.getSelectedGap()).toEqual(gap);
+    expectPlainJson(t.getSelectedGap());
+  });
+
+  it('selects nothing over a clip, past the last clip, or on a track that is not there', () => {
+    const t = api();
+    seedGapTrack();
+
+    expect(t.selectGapAt(0, 1200)).toBeNull(); // inside a clip
+    expect(t.selectGapAt(0, 9000)).toBeNull(); // the open end
+    expect(t.selectGapAt(7, 1700)).toBeNull(); // no such track
+    expect(t.getSelectedGap()).toBeNull();
+  });
+
+  it('clears a standing gap when the next call refuses — the harness sees one truth', () => {
+    const t = api();
+    seedGapTrack();
+    expect(t.selectGapAt(0, 1700)).not.toBeNull();
+
+    expect(t.selectGapAt(0, 1200)).toBeNull();
+
+    expect(t.getSelectedGap()).toBeNull();
+  });
+
+  it('the gap and the clip selection are mutually exclusive, through the hooks', () => {
+    const t = api();
+    const { ids } = seedGapTrack();
+    t.selectClips([ids[0]]);
+
+    expect(t.selectGapAt(0, 1700)).not.toBeNull();
+    expect(useSessionStore.getState().selectedClipIds).toEqual([]);
+
+    t.selectClips([ids[1]]);
+    expect(t.getSelectedGap()).toBeNull();
+  });
+});

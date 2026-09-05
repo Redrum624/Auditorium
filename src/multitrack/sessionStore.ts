@@ -1420,7 +1420,13 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       // subscription to see.
       if (same || (gap === null && s.selectedGap === null)) return s;
       if (gap === null) return { selectedGap: null };
-      return { selectedGap: gap, selectedClipId: null, selectedClipIds: [] };
+      // The clip fields are written only when there is something to clear — a
+      // fresh `[]` over an already-empty set is a new value for every clip's
+      // subscription to see, which is the repaint the K1 writers' own no-op
+      // guards exist to avoid.
+      return s.selectedClipId === null && s.selectedClipIds.length === 0
+        ? { selectedGap: gap }
+        : { selectedGap: gap, selectedClipId: null, selectedClipIds: [] };
     });
   },
 
