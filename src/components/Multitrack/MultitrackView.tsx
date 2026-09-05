@@ -116,6 +116,25 @@ export default function MultitrackView() {
   const playheadX =
     HEADER_W + sampleToPixel(mtPlayheadSample, mtZoom.scrollSample, mtZoom.samplesPerPixel);
 
+  // Task 8 — "the bar goes over and off the track instead of disappearing."
+  // The overlay wrapper clips on the right, but the header column sits INSIDE
+  // it, so nothing hid an x below HEADER_W; and nothing hid a sample scrolled
+  // past the right edge either. Exact-edge cull, the DOM twin of the canvas's
+  // own `cx >= 0 && cx <= width` for its cursor/playhead lines (`waveformRender`
+  // renderWaveform, ~:257/266) — the handle keeps its OWN wider cull below
+  // (`cursorHandleVisible`, matching the canvas's `drawCursorHandle`), so this
+  // is deliberately a second, stricter rule rather than a shared one.
+  //
+  // `sessionLaneWidth()` never actually returns <= 0 (it falls back to
+  // `FALLBACK_SESSION_LANE_WIDTH` before the first measurement) — the `<= 0`
+  // arm is belt-and-suspenders against that contract ever changing, so the
+  // cursor at sample 0 still paints at HEADER_W rather than the guard
+  // collapsing to "nothing visible" on an unmeasured lane.
+  const laneVisible = (x: number): boolean => {
+    const laneWidth = sessionLaneWidth();
+    return x >= HEADER_W && (laneWidth <= 0 || x <= HEADER_W + laneWidth);
+  };
+
   // T7 — the session cursor's grab handle, the multitrack sibling of F11-1.
   // The editor's handle is canvas paint hit-tested by `isOnCursorHandle`; this
   // overlay is DOM, so the hit band IS the element (± CURSOR_HANDLE_HIT_PX ×
@@ -190,9 +209,11 @@ export default function MultitrackView() {
   // row floating as a glass card. The horizontal geometry inside the relative
   // wrapper is untouched — rows still start at x=0 with the lane at exactly
   // HEADER_W, so the cursor/playhead overlay math and the wheel-zoom anchor
-  // (useMultitrackZoom reads the scroller's own rect) hold unchanged; the
-  // stage padding lives OUTSIDE the wrapper, shifting ruler and lanes
-  // together. Rows are separated by vertical gaps only (x-neutral).
+  // (D1: `useMultitrackZoom` anchors on `mtCursorSample` through the pure
+  // `anchoredZoom` helper, using `sessionLaneWidth()` for the lane width — it
+  // reads no rect at all) hold unchanged; the stage padding lives OUTSIDE the
+  // wrapper, shifting ruler and lanes together. Rows are separated by
+  // vertical gaps only (x-neutral).
   return (
     <div
       className="stage-inset flex min-h-0 min-w-0 flex-1 flex-col"
@@ -333,12 +354,16 @@ export default function MultitrackView() {
 
         {/* Multitrack cursor (white) — where playback will start. The LINE
             stays inert; only the handle below is grabbable, the same split as
-            the editor's hit rule. */}
-        <div
-          data-testid="mt-cursor-line"
-          className="pointer-events-none absolute top-0 bottom-0 w-px bg-[#d4d4d8]/70"
-          style={{ left: cursorX }}
-        />
+            the editor's hit rule. Task 8: culled by `laneVisible` — a bar off
+            the lane disappears instead of painting over the header column or
+            trailing off the right edge. */}
+        {laneVisible(cursorX) && (
+          <div
+            data-testid="mt-cursor-line"
+            className="pointer-events-none absolute top-0 bottom-0 w-px bg-[#d4d4d8]/70"
+            style={{ left: cursorX }}
+          />
+        )}
         {/* T7: the cursor's red grab handle, riding the top of the lanes area
             just as the editor's rides the canvas top. */}
         {handleVisible && (
@@ -372,8 +397,10 @@ export default function MultitrackView() {
             />
           </div>
         )}
-        {/* Playhead (accent + soft glow, G6) while playing. */}
-        {mtPlayState === 'playing' && (
+        {/* Playhead (accent + soft glow, G6) while playing. Task 8: ALSO
+            culled by `laneVisible` — playing is necessary but not sufficient,
+            the sweep must still be on-lane to paint. */}
+        {mtPlayState === 'playing' && laneVisible(playheadX) && (
           <div
             data-testid="mt-playhead"
             className="pointer-events-none absolute top-0 bottom-0 w-0.5"
