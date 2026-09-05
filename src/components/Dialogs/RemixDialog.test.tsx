@@ -161,6 +161,7 @@ function installBus(): void {
     openAlignTimingDialog: () => {},
     openVocalChainDialog: () => {},
     openCoverChainDialog: () => {},
+    openPodcastChainDialog: () => {},
     openAlignLyricsDialog: () => {},
     focusRemixPanel,
     focusTranscriptPanel: () => {},

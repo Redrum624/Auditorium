@@ -32,6 +32,35 @@ describe('pipelineTools', () => {
     expect(getPipelineGroups().map((g) => g.title)).toEqual([...PIPELINE_GROUP_TITLES]);
   });
 
+  /**
+   * D7 — the one ORDER claim this module owes the card. Membership and order
+   * are derived from the menu (the test above pins that), so this is not a
+   * second copy of the roster: it is the single user-visible consequence the
+   * ruling was made for, on the surface the user actually reads. Isolating the
+   * voice precedes reshaping it, so Separate Voice heads the group and every
+   * row under it operates on what it produced.
+   */
+  it('opens the Voice group with Separate Voice, and runs D7’s six rows in order', () => {
+    const voice = getPipelineGroups()[1];
+    expect(voice.title).toBe('Voice');
+    expect(voice.commands[0]).toEqual({ id: 'voice.separate', label: 'Separate Voice' });
+    // The WHOLE order, not just the head: D6 added a sixth row and the ruling
+    // that placed it is an adjacency (Podcast Chain immediately after Cover
+    // Chain, which is itself immediately after Vocal Chain). A head-only pin
+    // cannot see a row inserted anywhere below it.
+    expect(voice.commands.map((c) => c.id)).toEqual([
+      'voice.separate',
+      'edit.voiceChanger',
+      'effects.vocalChain',
+      'effects.coverChain',
+      'effects.podcastChain',
+      'lyrics.align',
+    ]);
+    expect(voice.commands.find((c) => c.id === 'effects.podcastChain')!.label).toBe(
+      'Podcast Chain'
+    );
+  });
+
   it('reads each label off the registry rather than restating it', () => {
     const original = getMenuSections()
       .find((s) => s.title === 'Pipeline')!

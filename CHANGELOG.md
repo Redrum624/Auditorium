@@ -5,6 +5,81 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.38.0] - 2026-09-05
+
+The edit line becomes the thing everything aims at — zoom and Play both — plus
+gaps you can select and close, and two new Pipeline tools for the voice.
+
+### Changed
+
+- **Zoom anchors on the edit line, everywhere.** Every zoom gesture on both
+  surfaces — `Ctrl`+wheel and the toolbar's `−`/`+`, in the waveform, spectral
+  and multitrack views — now keeps the edit line at its on-screen x, and centres
+  the view on it when it is off screen. The pointer is no longer a zoom anchor
+  anywhere: the four gestures used to disagree (the wheel anchored on the
+  pointer, the buttons on the line), so the same zoom step landed somewhere
+  different depending on which control you reached for. One pure helper computes
+  the request for all four callers. `Shift`+wheel scroll and **Fit** are
+  unchanged. Affects: `src/services/zoomAnchor.ts` (new),
+  `src/components/Editor/useEditorGestures.ts`,
+  `src/components/Multitrack/useMultitrackZoom.ts`,
+  `src/components/Layout/Toolbar.tsx`.
+- **Play starts at the edit line, and Pause moves the line.** In the waveform and
+  spectral views `Space` now always begins at the line — the engine's hidden
+  paused position is never consulted — and Pause writes the paused position back
+  to the line, so `Space`·`Space` is still a resume and the only mark left on
+  screen is the one playback will use. The one exception: with a selection whose
+  span the line sits outside, Play starts at `selection.start`, because the
+  region about to play is the selection. A ruler click DURING playback still
+  does not re-seek (unchanged, deliberate) — pause first, then click. Stop is
+  unchanged; the multitrack already started at its own cursor. Affects:
+  `src/services/transportService.ts`.
+- **The multitrack bar, its handle and the playhead hide when they leave the
+  lane** instead of painting over the track headers or trailing off the right
+  edge. Affects: `src/components/Multitrack/MultitrackView.tsx`.
+
+### Added
+
+- **Gaps are selectable and closable in the Multitrack view.** Double-click the
+  empty stretch on a track — between two of its clips, or between the start of
+  the timeline and its first clip — and it is selected as a translucent band the
+  full height of that lane. `Del` or `Shift+Del` then closes it: every clip on
+  **that track** starting at or after the gap's end moves left by the gap's
+  length, in one `Close gap` undo entry, and no other track moves. The band and
+  the clip selection are mutually exclusive; `Escape` clears it, and so does a
+  click on empty lane space outside it. No keyboard shortcut selects a gap, the
+  open stretch after the last clip is not one, and neither is anywhere two clips
+  overlap. Affects: `src/multitrack/gaps.ts` (new),
+  `src/multitrack/sessionStore.ts`, `src/components/Multitrack/TrackLane.tsx`,
+  `src/services/menuActions.ts`.
+- **Separate Voice (Pipeline → Voice).** The same separation as Separate into
+  Stems, landed as **two** tracks instead of five: `<name> — Voice` and
+  `<name> — Backing` (drums + bass + everything else + residual). Same model,
+  same download/progress/cancel, same landing shape. The two add back up to the
+  source **within float32 rounding** — measured worst 4.32e-7, never claimed as
+  bit-exact; the five-stem landing keeps that claim. It opens the Voice group.
+  Affects: `src/services/menuActions.ts`, `src/services/stemLanding.ts`
+  (`landVoice`), `src/components/Dialogs/SeparateDialog.tsx` (a `mode` prop).
+- **Podcast Chain (Pipeline → Voice, after Cover Chain).** Ten speech-tuned
+  stages in one pass and one undo entry: DC removal · noise reduction (only when
+  the take has a quiet passage to learn a print from) · de-hum · shortened pauses
+  (to 400 ms) · noise gate · compressor (3:1, threshold placed for ~6 dB of gain
+  reduction on the loud passages) · de-esser · parametric EQ (80 Hz high-pass,
+  −2 dB at 250 Hz, +2 dB at 3 kHz) · **loudness** to −16.0 LUFS stereo /
+  −19.0 LUFS mono · limiter at −1.0 dBFS **sample peak** (not oversampled, so
+  never a true-peak figure). Every stage is switchable and reports what it
+  derived or the measurement that made it decline; the gate has no manual
+  threshold here and its decline points at the Vocal Chain's. Documents with more
+  than two channels are refused ("convert to stereo first") rather than
+  mis-measured. Affects: `src/services/podcastChain.ts` (new),
+  `src/components/Dialogs/PodcastChainDialog.tsx` (new),
+  `src/services/menuActions.ts`.
+- **Integrated loudness measurement (ITU-R BS.1770-4).** K-weighting derived for
+  the document's own sample rate (not the 48 kHz coefficient table copied),
+  400 ms blocks at 75 % overlap, absolute −70 LUFS then relative −10 LU gating,
+  channel weights 1.0 — mono/stereo-accurate, `null` when every block gates out.
+  Pinned against EBU Tech 3341 cases. Affects: `src/dsp/loudness.ts` (new).
+
 ## [1.37.0] - 2026-09-04
 
 One multitrack verb: Merge Clips.

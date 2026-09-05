@@ -32,8 +32,8 @@ as you left it when you clicked Apply, and says so in the card if that changed
 | `Ctrl+X` | Cut the selection (or the cursor's segment) to the clipboard, leaving the span silent at the same length |
 | `Ctrl+C` | Copy |
 | `Ctrl+V` | Paste |
-| `Delete` | Silence the selection in place at the same length (or remove every selected multitrack clip, leaving the gap) |
-| `Shift+Delete` | Ripple Delete — editor: remove the selection and close the gap; multitrack: remove the selected clip(s) and close the gap |
+| `Delete` | Silence the selection in place at the same length (or remove every selected multitrack clip, leaving the gap — and with a **gap** selected instead, close it) |
+| `Shift+Delete` | Ripple Delete — editor: remove the selection and close the gap; multitrack: remove the selected clip(s) and close the gap, or close a **selected gap** |
 | `Ctrl+A` | Select All — the whole file in the editor; **every clip on every track** in the multitrack view |
 | `Ctrl+Left` | Previous clip edge — multitrack only |
 | `Ctrl+Right` | Next clip edge — multitrack only |
@@ -46,7 +46,7 @@ as you left it when you clicked Apply, and says so in the card if that changed
 | `Ctrl+W` | Close |
 | `M` | Add Marker at the cursor (editor views only) |
 | `Ctrl+E` | Export… |
-| `Escape` | Deselect — or, with an effect card open, closes the card (see below) |
+| `Escape` | Deselect — the clip selection or a selected gap in the multitrack; or, with an effect card open, closes the card (see below) |
 
 ## The multitrack-only rows
 
@@ -64,12 +64,31 @@ where it is greyed with nothing selected.
 **Merge Clips** — Split's inverse — has **no key at all**, and no row above
 because there is nothing to put in one. You reach it through the edit pill's
 **Merge** button or **Edit → Merge Clips**; both are multitrack-only and both
-stay greyed until some track has two or more of its clips selected.
+stay greyed until some track has two or more of its clips selected. The same is
+true of the Pipeline's **Separate Voice** and **Podcast Chain**: neither binds a
+key, and both are reached from the Pipeline menu or the Pipeline module card.
+
+**Selecting a gap has no key either.** A gap — the empty stretch on one track
+between two of its clips, or between the start of the timeline and its first
+clip — is selected only by **double-clicking** it (the gesture table below), and
+put away by `Escape` or by a plain click on empty lane space outside it. Once it
+is selected, `Del` and `Shift+Del` both **close** it: every later clip on that
+track moves left by the gap's length, in one undo step, and no other track
+moves. There is deliberately no key that selects one — a key would have to guess
+which gap you meant, and the pointer already says.
+
+**Zoom anchors on the position line.** `Ctrl`+wheel in the multitrack — and in
+the waveform and spectral views, and the toolbar's `−`/`+` in all three — zooms
+toward the edit line, not the pointer: the line keeps its place on screen, and
+when it is off screen the new view is centred on it. `Shift`+wheel scrolls and
+**Fit** are unaffected.
 
 The rest of the multitrack clip verbs are mouse gestures rather than table rows:
 
 | Gesture | What it does |
 |---|---|
+| Double-click **empty lane space** | Selects the **gap** it landed in — the span between the two clips that bound it, or between sample 0 and the first clip. It draws as a translucent band the full height of that lane, and it replaces the clip selection (one selection on screen at a time). The open stretch after the last clip is not a gap, and neither is anywhere two clips overlap |
+| A plain click on **empty lane space** | Clears the clip selection, and puts a selected gap away too — unless the click lands inside that band's own span, which is the first half of the double-click that would re-select it |
 | `Ctrl+Click` on a clip | Adds it to the selection (or takes it back out). The clip you clicked last is the one the Properties panel's fields edit |
 | `Shift+Click` on a clip | Extends the selection from the last-clicked clip to this one, taking every clip between them **on that track**. Across tracks it acts as a plain click. It adds to what is already selected, so it composes with `Ctrl+Click`; with both modifiers held, `Ctrl` wins and the click is a toggle |
 | Drag any selected clip | Moves **every** selected clip by the same amount, as one undo step. Every member previews the move live, so what you see is what lands |
@@ -99,7 +118,7 @@ and over an effect card it means what it meant when the effect was a dialog:
 | Surface | What `Escape` does |
 |---|---|
 | The editor (nothing open) | Deselect, as above |
-| The **multitrack** view | Clears the clip selection — the document selection behind it is not on screen there, so clearing that instead would be an edit with no feedback anywhere |
+| The **multitrack** view | Clears the clip selection, or a selected gap — the document selection behind them is not on screen there, so clearing that instead would be an edit with no feedback anywhere |
 | A modal dialog (New File, Export, Convert, Record) | Closes the topmost one — unless it is mid-run, when it refuses |
 | A **pipeline tool** in the module column (Match Tempo, Vocal Chain, Cover Chain, Transcribe, …) | Nothing. Close it with the **✕** in its header |
 | An **effect card** in the module column, idle | **Closes the card** — the same as its **✕** or **Cancel**: a running **Preview** is stopped and the real document goes back to the engine. The selection is kept: the key does *not* fall through to Deselect |
@@ -148,7 +167,7 @@ here.
 | Every effect in the rack | Effects menu — one row per registered effect under its category heading, each opening that effect's card in the module column; no effect has a key |
 | Spatial Positioner | Effects menu, the closing Mix group |
 | Detect Tempo / Match Tempo / Align Vocal Timing / Auto-Remix | Pipeline menu, Tempo & Timing group |
-| Voice Changer / Vocal Chain / Cover Chain / Align Lyrics | Pipeline menu, Voice group |
+| Separate Voice / Voice Changer / Vocal Chain / Cover Chain / Podcast Chain / Align Lyrics | Pipeline menu, Voice group |
 | Transcribe / Separate into Stems | Pipeline menu, Analysis group |
 | Waveform / Spectral / Multitrack | View menu |
 | Spectral: Toggle Log/Linear Scale / Toggle Beat Grid / Toggle Snap to Grid | View menu |

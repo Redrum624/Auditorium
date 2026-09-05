@@ -2966,9 +2966,16 @@ async function main() {
       `the dropdown is clamped to the window (bottom ${menuOpen.bottom.toFixed(0)} <= ${menuOpen.viewportH})`
     );
 
-    // The Pipeline menu: the ten tools, in three separator-delimited groups.
+    // The Pipeline menu: the twelve tools, in three separator-delimited groups.
     // (T8 moved the Spatial Positioner to the Effects menu, taking the fourth
     // group with it — asserted on the Effects side below.)
+    //
+    // D4/D6/D7 added two rows to the Voice group and this list had gone stale
+    // against them — `Separate Voice` heads the group, `Podcast Chain` follows
+    // the Cover Chain. Jest never runs this file, so nothing but a packaged run
+    // catches the drift; the roster is spelled out here deliberately, because a
+    // roster derived from the app would agree with any order the app happened
+    // to have.
     await page.keyboard.press('Escape');
     assert(await openMenu('Pipeline'), 'the Pipeline menu opens on a real click');
     const pipeline = await page.evaluate(() => {
@@ -2988,14 +2995,16 @@ async function main() {
           'Match Tempo',
           'Align Vocal Timing',
           'Auto-Remix',
+          'Separate Voice',
           'Voice Changer',
           'Vocal Chain',
           'Cover Chain',
+          'Podcast Chain',
           'Align Lyrics',
           'Transcribe',
           'Separate into Stems',
         ]),
-      `the Pipeline menu holds the ten tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
+      `the Pipeline menu holds the twelve tools in subject order (actual ${JSON.stringify(pipeline.labels)})`
     );
     assert(
       pipeline.separators === 2,
@@ -3255,6 +3264,32 @@ async function main() {
     // DURING the drag: the lane must say it is the target, and the ghost must
     // show where the clip would land. "No highlight = no action" is the rule
     // the user has to be able to read off the screen.
+    //
+    // WAITED FOR, not read once (2026-09-05). Both the highlight and the ghost
+    // are React state written from a DRAG event, and React schedules drag
+    // events at CONTINUOUS priority — it is free to commit them in a later
+    // task rather than synchronously at the end of the handler. Reading in the
+    // next `page.evaluate` therefore races the commit, and it lost twice in
+    // three runs of this file on one machine: the lane was still `transparent`
+    // with 0 ghosts, and a re-dispatch read synchronously in the same evaluate
+    // stayed transparent for exactly the same reason. Nothing is softened by
+    // waiting — a lane that never accepts the drag still fails, one frame
+    // later, with the same message and the same numbers below.
+    await page
+      .waitForFunction(
+        () => {
+          const lane = document.querySelectorAll('[data-testid="track-lane"]')[0];
+          const bg = lane.style.backgroundColor;
+          return (
+            bg !== '' &&
+            bg !== 'transparent' &&
+            document.querySelectorAll('[data-testid="clip-drop-ghost"]').length === 1
+          );
+        },
+        null,
+        { timeout: 5000 }
+      )
+      .catch(() => {});
     const midDrag = await page.evaluate(() => {
       const lane = document.querySelectorAll('[data-testid="track-lane"]')[0];
       return {
@@ -5041,6 +5076,337 @@ async function main() {
       '  merge clips: the pill joined both halves over a new Merge document; one Ctrl+Z each, session restored'
     );
 
+    // (f) D3 — a GAP is selectable, and Delete closes it.
+    //
+    // The gesture that MAKES one is a double-click on empty lane space.
+    // Playwright can send the two clicks, but the sample they land on is a
+    // function of the zoom, the scroll and the lane rect — three things this
+    // step would then have to re-derive to know what it had selected, which is
+    // how a gap assertion ends up testing its own arithmetic. `selectGapAt`
+    // states the same OUTCOME through the resolver and the setter the lane
+    // itself calls (`TrackLane.tsx` → `gapAt` → `setSelectedGap`), so what is
+    // left under test here is everything the hook does not do: the BAND the app
+    // paints, the mutual exclusion with the clip selection, the Delete and
+    // Shift+Del the shortcut table runs, and the single undo entry each leaves.
+    // None of that is reachable in jsdom — it paints no lane — and the core's
+    // own tests hand `closeGap` a plain session with no view attached.
+    //
+    // The session is the one (e) restored: ONE clip over [0, 88200) on track 1.
+    console.log('Gaps (D3): split, delete a half, select the gap, Delete closes it...');
+    const gapBefore = await page.evaluate(() => window.__test.getStateSummary());
+    const gapCursor0 = await page.evaluate(() => window.__test.getMtCursor());
+    // Ground truth for (g)'s closing restore assertion (M17): the zoom this
+    // whole step actually found (f) in, inherited from the Fit clicked back
+    // in (d) — untouched by (d)/(e), since neither changes session duration.
+    // Read here, BEFORE the close-gap shrink below re-resolves it, so the
+    // comparison at the end of (g) is against a value Fit never touched in
+    // this sub-step — not against another Fit call made inside it.
+    const gapZoom0 = await page.evaluate(() => window.__test.getMtZoom());
+    const gapWhole = (await page.evaluate(() => window.__test.getClipFadeState())).clips[0];
+    await page.evaluate((id) => window.__test.selectClips([id]), gapWhole.clipId);
+    await page.evaluate(() => window.__test.setMtCursor(44100));
+    await page.keyboard.press('Control+k');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 2,
+      null,
+      { timeout: 10000 }
+    );
+    // Delete the LEFT half, which leaves the gap D3 is most specific about: the
+    // stretch between sample 0 and the first clip. It is also the arm a
+    // neighbouring clip cannot accidentally satisfy — there is nothing to its
+    // left but the start of the timeline.
+    const gapHalves = (await page.evaluate(() => window.__test.getClipFadeState())).clips;
+    const gapLeft = gapHalves.find((c) => c.startSample === 0);
+    const gapRight = gapHalves.find((c) => c.startSample === 44100);
+    assert(
+      gapLeft !== undefined && gapRight !== undefined,
+      `the split left two halves to work with (${JSON.stringify(gapHalves)})`
+    );
+    await page.evaluate((id) => window.__test.selectClips([id]), gapLeft.clipId);
+    await page.keyboard.press('Delete');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="clip"]').length === 1,
+      null,
+      { timeout: 10000 }
+    );
+    const afterHalfGone = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterHalfGone.clips.length === 1 &&
+        afterHalfGone.clips[0].startSample === 44100 &&
+        afterHalfGone.clips[0].lengthSample === 44100,
+      `Delete removed the left half and left the right one where it was — a leading gap ` +
+        `(${JSON.stringify(afterHalfGone.clips)})`
+    );
+    const bandsBefore = await page.evaluate(
+      () => document.querySelectorAll('[data-testid="gap-selection"]').length
+    );
+    assert(bandsBefore === 0, `no band is painted before a gap is selected (${bandsBefore})`);
+
+    // A CLIP is selected first, so "selecting a gap clears the clip selection"
+    // is a real observation rather than a reading of a selection that was
+    // already empty.
+    await page.evaluate((id) => window.__test.selectClips([id]), gapRight.clipId);
+    const clipArmed = await page.evaluate(() => window.__test.getClipFadeState().selectedClipId);
+    assert(
+      clipArmed === gapRight.clipId,
+      `the surviving clip is selected before the gap is (${clipArmed})`
+    );
+
+    const theGap = await page.evaluate(() => window.__test.selectGapAt(0, 22050));
+    assert(
+      theGap !== null && theGap.startSample === 0 && theGap.endSample === 44100,
+      `the resolver named the whole leading span (${JSON.stringify(theGap)})`
+    );
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="gap-selection"]').length === 1,
+      null,
+      { timeout: 5000 }
+    );
+    const bandBox = await page.evaluate(() => {
+      const band = document.querySelector('[data-testid="gap-selection"]');
+      const lane = band.closest('[data-testid="track-lane"]');
+      const b = band.getBoundingClientRect();
+      const l = lane.getBoundingClientRect();
+      const c = document.querySelector('[data-testid="clip"]').getBoundingClientRect();
+      return {
+        left: b.x - l.x,
+        width: b.width,
+        height: b.height,
+        laneHeight: l.height,
+        clipLeft: c.x - l.x,
+      };
+    });
+    console.log(
+      `  gap band: [${bandBox.left.toFixed(1)}, ${(bandBox.left + bandBox.width).toFixed(1)}] px ` +
+        `of a ${bandBox.laneHeight.toFixed(0)} px lane; the clip's left edge is at ` +
+        `${bandBox.clipLeft.toFixed(1)} px`
+    );
+    assert(
+      Math.abs(bandBox.left) <= 1 && Math.abs(bandBox.left + bandBox.width - bandBox.clipLeft) <= 1,
+      `the band covers exactly the empty stretch, from the lane's start to the clip's left edge ` +
+        `(band ends at ${(bandBox.left + bandBox.width).toFixed(1)}, clip starts at ${bandBox.clipLeft.toFixed(1)})`
+    );
+    assert(
+      Math.abs(bandBox.height - bandBox.laneHeight) <= 1,
+      `and it is full lane height, so it reads as a stretch of timeline rather than as a clip ` +
+        `(${bandBox.height.toFixed(1)} of ${bandBox.laneHeight.toFixed(1)} px)`
+    );
+    const gapArmed = await page.evaluate(() => ({
+      gap: window.__test.getSelectedGap(),
+      clip: window.__test.getClipFadeState().selectedClipId,
+    }));
+    assert(
+      gapArmed.gap !== null && gapArmed.clip === null,
+      `the gap is the ONE selection on screen — the clip selection went with it ` +
+        `(${JSON.stringify(gapArmed)})`
+    );
+
+    // Escape is the only key that puts a gap away; no key SELECTS one.
+    await page.keyboard.press('Escape');
+    await page.waitForFunction(
+      () => document.querySelectorAll('[data-testid="gap-selection"]').length === 0,
+      null,
+      { timeout: 5000 }
+    );
+    const afterEscape = await page.evaluate(() => window.__test.getSelectedGap());
+    assert(afterEscape === null, `Escape cleared the selected gap (${JSON.stringify(afterEscape)})`);
+
+    // Delete CLOSES it: the right half moves left by the gap's length, in one
+    // session gesture.
+    await page.evaluate(() => window.__test.selectGapAt(0, 22050));
+    await page.keyboard.press('Delete');
+    await page.waitForFunction(
+      () => window.__test.getClipFadeState().clips[0].startSample === 0,
+      null,
+      { timeout: 10000 }
+    );
+    const closed = await page.evaluate(() => ({
+      clips: window.__test.getClipFadeState().clips,
+      gap: window.__test.getSelectedGap(),
+      bands: document.querySelectorAll('[data-testid="gap-selection"]').length,
+    }));
+    assert(
+      closed.clips.length === 1 &&
+        closed.clips[0].startSample === 0 &&
+        closed.clips[0].lengthSample === 44100,
+      `Delete closed the gap — the clip moved left by its whole length and kept its length ` +
+        `(${JSON.stringify(closed.clips)})`
+    );
+    assert(
+      closed.gap === null && closed.bands === 0,
+      `the closed gap stopped being a selection, band and all ` +
+        `(${JSON.stringify(closed.gap)}, ${closed.bands} bands)`
+    );
+
+    await page.keyboard.press('Control+z');
+    const afterCloseZ = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      afterCloseZ.clips.length === 1 && afterCloseZ.clips[0].startSample === 44100,
+      `ONE Ctrl+Z re-opened the gap (start ${afterCloseZ.clips[0].startSample})`
+    );
+
+    // Shift+Del is the SAME act on a gap — closing a hole is the ripple's
+    // second half, so the two verbs deliberately agree rather than inventing a
+    // second meaning for a span that is empty already.
+    await page.evaluate(() => window.__test.selectGapAt(0, 22050));
+    await page.keyboard.press('Shift+Delete');
+    await page.waitForFunction(
+      () => window.__test.getClipFadeState().clips[0].startSample === 0,
+      null,
+      { timeout: 10000 }
+    );
+    const rippled = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      rippled.clips.length === 1 &&
+        rippled.clips[0].startSample === 0 &&
+        rippled.clips[0].lengthSample === 44100,
+      `Shift+Del closed the same gap the same way (${JSON.stringify(rippled.clips)})`
+    );
+
+    // Back to what this sub-step found: the ripple's close, the clip delete,
+    // and the split above them.
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+z');
+    await page.keyboard.press('Control+z');
+    const gapUndone = await page.evaluate(() => window.__test.getClipFadeState());
+    assert(
+      gapUndone.clips.length === 1 &&
+        gapUndone.clips[0].startSample === 0 &&
+        gapUndone.clips[0].lengthSample === 88200,
+      `close, delete and split all undone — the session exactly as (e) left it ` +
+        `(${JSON.stringify(gapUndone.clips)})`
+    );
+    const gapRestored = await page.evaluate(() => window.__test.getStateSummary());
+    assert(
+      gapRestored.docCount === gapBefore.docCount &&
+        gapRestored.activeName === gapBefore.activeName,
+      `and no document was minted or activated along the way ` +
+        `(${JSON.stringify({ docCount: gapRestored.docCount, activeName: gapRestored.activeName })} vs ` +
+        `${JSON.stringify({ docCount: gapBefore.docCount, activeName: gapBefore.activeName })})`
+    );
+    console.log(
+      '  gaps: the band covered the empty stretch; Delete and Shift+Del each closed it in one undo step'
+    );
+
+    // (g) D1 — Ctrl+wheel zooms toward the BAR, never toward the pointer.
+    //
+    // The whole of D1 is a relation between three numbers the store holds and
+    // one the DOM holds, so it is checked as one: the bar's on-screen x is
+    // `(mtCursorSample - scrollSample) / samplesPerPixel`, and the rule is that
+    // a zoom gesture leaves it where it was. `zoomAnchor.test.ts` pins the pure
+    // helper and `useMultitrackZoom`'s test drives a jsdom hook with no lane
+    // under it; what neither can show is that a REAL wheel event, with a real
+    // modifier, over the real scroller, reaches the handler at all — the
+    // listener is a `{ passive: false }` registration on an element the view
+    // mounts, and a gesture Chromium routes elsewhere fails silently and looks
+    // exactly like a no-op.
+    console.log('Zoom anchor (D1): Ctrl+wheel holds the multitrack bar under its own x...');
+    const clickFit = () =>
+      page.evaluate(() => {
+        const fit = document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Fit"]');
+        if (!fit) throw new Error('the toolbar has no Fit button');
+        fit.click();
+      });
+    // FIT FIRST, so the premise below is established rather than assumed — and
+    // measured, because the assumption was wrong the first time this ran.
+    // Closing the gap in (f) shortened the timeline to one 44100-sample clip,
+    // and a session that SHRINKS re-resolves its zoom against the new length
+    // (`resolveSessionZoom`); the three undos put the clips back but not the
+    // zoom, deliberately — only shrinking re-fits. The session therefore
+    // arrives here at half the fit it started (d) with, which put the bar at
+    // x = 1477 on a 985 px lane and skipped the arm under test.
+    // `zoomBefore` below is only the LOCAL fitted baseline the D1 anchor math
+    // in this sub-step is relative to (fitted -> zoomed in -> anchor held).
+    // It is NOT what the closing restore assertion checks against — comparing
+    // a value this sub-step got by clicking Fit against another value the
+    // SAME sub-step got by clicking Fit again would be a Fit-vs-Fit
+    // tautology, true for any pure Fit implementation regardless of whether
+    // the click at the end actually recomputed anything (M17). That
+    // assertion instead uses `gapZoom0`, captured at the top of (f) before
+    // the shrink ever happened — ground truth this sub-step did not produce.
+    const zoomEntry = await page.evaluate(() => window.__test.getMtZoom());
+    await clickFit();
+    const zoomBefore = await page.evaluate(() => window.__test.getMtZoom());
+    console.log(
+      `  entry zoom ${zoomEntry.samplesPerPixel.toFixed(2)} samples/px @ ${zoomEntry.scrollSample}` +
+        ` -> fitted ${zoomBefore.samplesPerPixel.toFixed(2)} @ ${zoomBefore.scrollSample}`
+    );
+    const ZOOM_ANCHOR = 66150; // three quarters along the 88200-sample clip
+    await page.evaluate((s) => window.__test.setMtCursor(s), ZOOM_ANCHOR);
+    const zoomLane = await page.evaluate(() => {
+      const r = document.querySelector('[data-testid="track-lane"]').getBoundingClientRect();
+      return { x: r.x, y: r.y, width: r.width, height: r.height };
+    });
+    const xOfSample = (z, sample) => (sample - z.scrollSample) / z.samplesPerPixel;
+    const sampleAtLaneX = (z, x) => z.scrollSample + x * z.samplesPerPixel;
+    const anchorXBefore = xOfSample(zoomBefore, ZOOM_ANCHOR);
+    // The pointer goes a QUARTER of the way in — nowhere near the bar — so
+    // "the bar held" and "the pointer held" are different answers, and the
+    // pointer-anchored behaviour D1 replaced could not pass this by accident.
+    const pointerX = zoomLane.width * 0.25;
+    const pointerSampleBefore = sampleAtLaneX(zoomBefore, pointerX);
+    assert(
+      anchorXBefore >= 0 && anchorXBefore <= zoomLane.width,
+      `the bar is ON SCREEN before the gesture, so D1's hold-the-x arm is the one under test ` +
+        `(x ${anchorXBefore.toFixed(1)} of a ${zoomLane.width.toFixed(0)} px lane)`
+    );
+    await page.mouse.move(zoomLane.x + pointerX, zoomLane.y + zoomLane.height / 2);
+    await page.keyboard.down('Control');
+    await page.mouse.wheel(0, -120);
+    await page.mouse.wheel(0, -120);
+    await page.keyboard.up('Control');
+    const zoomedIn = await page
+      .waitForFunction(
+        (spp) => window.__test.getMtZoom().samplesPerPixel < spp,
+        zoomBefore.samplesPerPixel,
+        { timeout: 5000 }
+      )
+      .then(() => true)
+      .catch(() => false);
+    const zoomAfter = await page.evaluate(() => window.__test.getMtZoom());
+    assert(
+      zoomedIn,
+      `two Ctrl+wheel notches over the lane reached the handler and zoomed IN ` +
+        `(${JSON.stringify(zoomAfter)} from ${JSON.stringify(zoomBefore)})`
+    );
+    const anchorXAfter = xOfSample(zoomAfter, ZOOM_ANCHOR);
+    const pointerSampleAfter = sampleAtLaneX(zoomAfter, pointerX);
+    console.log(
+      `  zoom ${zoomBefore.samplesPerPixel.toFixed(2)} -> ${zoomAfter.samplesPerPixel.toFixed(2)} samples/px; ` +
+        `bar x ${anchorXBefore.toFixed(2)} -> ${anchorXAfter.toFixed(2)} px; ` +
+        `sample under the pointer ${pointerSampleBefore.toFixed(0)} -> ${pointerSampleAfter.toFixed(0)}`
+    );
+    assert(
+      Math.abs(anchorXAfter - anchorXBefore) <= 1,
+      `the BAR stayed under its own x, within a pixel ` +
+        `(${anchorXBefore.toFixed(2)} -> ${anchorXAfter.toFixed(2)} px)`
+    );
+    assert(
+      Math.abs(pointerSampleAfter - pointerSampleBefore) > 1,
+      `…and the sample under the POINTER moved, so the pointer is not the anchor ` +
+        `(${pointerSampleBefore.toFixed(0)} -> ${pointerSampleAfter.toFixed(0)})`
+    );
+    // Fit is the app's own control for exactly this. The restore below checks
+    // against `gapZoom0` — the zoom this whole step actually found (f) in,
+    // captured before the close-gap shrink ever ran — not against
+    // `zoomBefore` above, which this SAME sub-step produced by clicking Fit
+    // a moment ago; comparing to that would only prove Fit agrees with
+    // itself on an unchanged session, true of any pure Fit regardless of
+    // whether the click at the end recomputed anything at all (M17).
+    await clickFit();
+    await page.evaluate((s) => window.__test.setMtCursor(s), gapCursor0);
+    const zoomRestored = await page.evaluate(() => window.__test.getMtZoom());
+    assert(
+      Math.abs(zoomRestored.samplesPerPixel - gapZoom0.samplesPerPixel) <=
+        1e-6 * gapZoom0.samplesPerPixel &&
+        zoomRestored.scrollSample === gapZoom0.scrollSample,
+      `Fit put the viewport back to the zoom this whole step actually found (f) in — not to the ` +
+        `stale post-shrink zoom (${JSON.stringify(zoomEntry)}) the three undos in (f) left behind ` +
+        `and which Fit does not restore on its own ` +
+        `(${JSON.stringify(zoomRestored)} vs the (f) entry ${JSON.stringify(gapZoom0)})`
+    );
+    console.log("  zoom anchor: the bar held its pixel while the pointer's sample moved under it");
+
     // 22) F4b (v1.16) — transcription with speaker separation, end to end ---
     //
     // Nothing in this feature had ever run through a real `utilityProcess`
@@ -6803,6 +7169,525 @@ async function main() {
         `(${rmsDelta.toFixed(3)} dB)`
     );
     await page.evaluate(() => window.__test.closeActive());
+
+    // L7-11) D2 — the BAR is where Play starts ---------------------------------
+    //
+    // Nothing in this file had ever pressed Space. Every transport assertion in
+    // the suite runs against `transportService` with a mocked engine, so the
+    // relation D2 is actually about — between the bar the user can see, the
+    // position the engine was handed, and the key that starts it — had never
+    // been observed with a REAL AudioContext playing a real file under it.
+    //
+    // Space rather than the toolbar button on purpose: it is the key the whole
+    // feature is reached by, it is claimed by `shortcuts.ts` before Chromium's
+    // space-scroll, and a `preventDefault` that stopped working would show up
+    // here as a focused button being re-clicked instead of a transport toggle.
+    console.log('Transport (D2): Play starts at the bar, and Pause moves the bar...');
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const barDoc = await stateOf();
+    assert(
+      barDoc.length === 88200 && barDoc.sampleRate === 44100,
+      `the 2 s tone is the document under the transport (${barDoc.length} @ ${barDoc.sampleRate})`
+    );
+    await page.evaluate(() => window.__test.clearSelection());
+    await page.evaluate(() => window.__test.setCursor(0));
+    // Focus is wherever the last click left it. Space is claimed for any target
+    // that is not a text field, so blurring first makes the premise explicit
+    // rather than lucky.
+    await page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    });
+    const bar0 = await page.evaluate(() => window.__test.getPlaybackState());
+    assert(
+      bar0.state === 'stopped' && bar0.cursorSample === 0,
+      `the transport starts stopped with the bar at 0 (${JSON.stringify(bar0)})`
+    );
+
+    // (a) Pause MOVES the bar to where playback stopped. A second of the two is
+    // let through first, so the paused position is unambiguously not 0 and the
+    // tone still has half a second left to pause inside.
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      (n) => window.__test.getPlaybackState().positionSample > n,
+      44100,
+      { timeout: 20000 }
+    );
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'paused',
+      null,
+      { timeout: 5000 }
+    );
+    const barPaused = await page.evaluate(() => window.__test.getPlaybackState());
+    console.log(`  paused: ${JSON.stringify(barPaused)}`);
+    assert(
+      barPaused.cursorSample === barPaused.positionSample,
+      `Pause wrote the paused position back to the BAR — the only line left on screen ` +
+        `(bar ${barPaused.cursorSample}, position ${barPaused.positionSample})`
+    );
+    assert(
+      barPaused.positionSample > 44100,
+      `and it really had played a way in, so the next assertion has something to differ from ` +
+        `(${barPaused.positionSample} > 44100)`
+    );
+
+    // (b) Play starts AT THE BAR — at the bar itself, not merely somewhere
+    // earlier than the engine's paused position. The bar is moved to 30 000:
+    // a value that is neither 0 (where a transport ignoring the cursor
+    // altogether would start, which every arm of this step used to allow) nor
+    // the paused position the engine still remembers. Half a second of slack
+    // above it, because the read happens while the engine is running. Both
+    // conjuncts below are required: the window alone kills "starts at 0" but
+    // is satisfied by "resumes from the pause" too, since the pause (~44 500)
+    // falls inside [30000, 52050); the strict `<` against barPaused kills
+    // that resume regression instead.
+    const BAR_REPLAY = 30000;
+    await page.evaluate((s) => window.__test.setCursor(s), BAR_REPLAY);
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'playing',
+      null,
+      { timeout: 5000 }
+    );
+    const barReplay = await page.evaluate(() => window.__test.getPlaybackState());
+    console.log(`  replay from the bar at ${BAR_REPLAY}: ${JSON.stringify(barReplay)}`);
+    assert(
+      barReplay.positionSample >= BAR_REPLAY &&
+        barReplay.positionSample < BAR_REPLAY + 22050 &&
+        barReplay.positionSample < barPaused.positionSample,
+      `Play started within half a second after the BAR (${BAR_REPLAY}) — not at 0 — and ` +
+        `strictly before the engine's paused position ${barPaused.positionSample}, so it did ` +
+        `not resume the pause (${barReplay.positionSample})`
+    );
+
+    // (c) The one exception, and it is deterministic: a selection the bar is
+    // OUTSIDE of starts at `selection.start`, because the region about to play
+    // is the selection and starting in front of it would play nothing. The
+    // engine is bounded by the region, so every position it can report lies
+    // inside it — no timing slack is involved in this one.
+    await page.evaluate(() => {
+      const stop = document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Stop"]');
+      if (!stop) throw new Error('the toolbar has no Stop button');
+      stop.click();
+    });
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'stopped',
+      null,
+      { timeout: 5000 }
+    );
+    await page.evaluate(() => window.__test.setSelection(50000, 80000));
+    await page.evaluate(() => window.__test.setCursor(0));
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'playing',
+      null,
+      { timeout: 5000 }
+    );
+    const barSelected = await page.evaluate(() => window.__test.getPlaybackState());
+    console.log(`  bar outside a selection: ${JSON.stringify(barSelected)}`);
+    assert(
+      barSelected.positionSample >= 50000,
+      `a bar OUTSIDE the selection starts the play at the selection's start ` +
+        `(${barSelected.positionSample} >= 50000)`
+    );
+
+    // (d) The documented D2 ruling, made executable: moving the bar DURING
+    // playback does not re-seek, and the next Pause overrides the move. The
+    // bar is dropped at 5000 mid-play — the same write a ruler click makes —
+    // and the pause that follows lands it where playback had actually reached,
+    // not at 5000.
+    //
+    // On a fresh whole-file play rather than inside the selection above: the
+    // region there is 0.68 s long, so a slow round trip could let it end
+    // naturally and turn the Space below into a second START instead of a
+    // pause. The whole file gives this arm a second of runway either side.
+    await page.evaluate(() => {
+      const stop = document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Stop"]');
+      if (!stop) throw new Error('the toolbar has no Stop button');
+      stop.click();
+    });
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'stopped',
+      null,
+      { timeout: 5000 }
+    );
+    await page.evaluate(() => window.__test.clearSelection());
+    await page.evaluate(() => window.__test.setCursor(0));
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      (n) => window.__test.getPlaybackState().positionSample > n,
+      22050,
+      { timeout: 20000 }
+    );
+    await page.evaluate(() => window.__test.setCursor(5000));
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'paused',
+      null,
+      { timeout: 5000 }
+    );
+    const barAfterClick = await page.evaluate(() => window.__test.getPlaybackState());
+    console.log(`  paused after a mid-play bar move: ${JSON.stringify(barAfterClick)}`);
+    assert(
+      barAfterClick.cursorSample === barAfterClick.positionSample &&
+        barAfterClick.cursorSample >= 22050,
+      `the mid-play move did NOT seek, and the Pause overrode it — the bar is where playback ` +
+        `stopped, not at the 5000 the move asked for (${JSON.stringify(barAfterClick)})`
+    );
+
+    // The same pause -> move the bar -> play cycle in the SPECTRAL view, which
+    // routes through the identical service but is a different surface the user
+    // reaches the transport from.
+    await page.evaluate(() => {
+      const stop = document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Stop"]');
+      if (stop) stop.click();
+    });
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'stopped',
+      null,
+      { timeout: 5000 }
+    );
+    await page.evaluate(() => window.__test.clearSelection());
+    await page.evaluate(() => window.__test.setView('spectral'));
+    await page.waitForSelector('[data-testid="spectrogram-view"]', { timeout: 20000 });
+    await page.evaluate(() => window.__test.setCursor(0));
+    await page.evaluate(() => {
+      if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    });
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      (n) => window.__test.getPlaybackState().positionSample > n,
+      44100,
+      { timeout: 20000 }
+    );
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'paused',
+      null,
+      { timeout: 5000 }
+    );
+    const specPaused = await page.evaluate(() => window.__test.getPlaybackState());
+    assert(
+      specPaused.cursorSample === specPaused.positionSample && specPaused.positionSample > 44100,
+      `the spectral view's Pause moves the bar too (${JSON.stringify(specPaused)})`
+    );
+    // The same non-zero bar as arm (b), and for the same reason. Both
+    // conjuncts below are required: the window alone kills "starts at 0" but
+    // is satisfied by "resumes from the pause" too, since the pause
+    // (~44 500) falls inside [30000, 52050); the strict `<` against
+    // specPaused kills that resume regression instead.
+    await page.evaluate((s) => window.__test.setCursor(s), BAR_REPLAY);
+    await page.keyboard.press('Space');
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'playing',
+      null,
+      { timeout: 5000 }
+    );
+    const specReplay = await page.evaluate(() => window.__test.getPlaybackState());
+    console.log(
+      `  spectral: paused at ${specPaused.positionSample}, replayed from the bar at ` +
+        `${BAR_REPLAY} -> ${specReplay.positionSample}`
+    );
+    assert(
+      specReplay.positionSample >= BAR_REPLAY &&
+        specReplay.positionSample < BAR_REPLAY + 22050 &&
+        specReplay.positionSample < specPaused.positionSample,
+      `and its Play starts within half a second after the bar (${BAR_REPLAY}), not at 0, and ` +
+        `strictly before the engine's paused position ${specPaused.positionSample}, so it did ` +
+        `not resume the pause (${specReplay.positionSample})`
+    );
+
+    await page.evaluate(() => {
+      const stop = document.querySelector('[data-testid="toolbar-pill"] button[aria-label="Stop"]');
+      if (stop) stop.click();
+    });
+    await page.waitForFunction(
+      () => window.__test.getPlaybackState().state === 'stopped',
+      null,
+      { timeout: 5000 }
+    );
+    await page.evaluate(() => window.__test.setView('waveform'));
+    await page.evaluate(() => window.__test.setCursor(0));
+    await page.evaluate(() => window.__test.clearSelection());
+
+    // L7-12) D6 — the Podcast Chain, end to end on a real document ------------
+    //
+    // `podcastChain.test.ts` runs the whole chain in jsdom with the DSP worker
+    // mocked; what only the packaged app can show is the chain over the REAL
+    // worker — ten stages, several of which transfer buffers — landing the
+    // delivery target it exists for. The numbers asserted are the two the
+    // feature is defined by (−16.0 LUFS for a stereo document, a −1.0 dBFS
+    // SAMPLE peak ceiling), read off the DOCUMENT rather than off the report.
+    console.log('Podcast Chain (D6): the dialog, then the chain on the tone...');
+    const podcastBefore = await stateOf();
+    /** Clicks the hosted tool's ✕ and waits for the host to go. Hosted tools
+     * install no Escape handler and raise no backdrop, so Escape closes
+     * nothing — the walker learned this the same way. */
+    const closeHostedTool = async () => {
+      await page.evaluate(() => {
+        const b = document.querySelector('[data-testid="hosted-tool-close"]');
+        if (!b || b.disabled) throw new Error('the hosted tool has no live ✕');
+        b.click();
+      });
+      await page.waitForFunction(
+        () => document.querySelector('[data-testid="tool-host"]') === null,
+        null,
+        { timeout: 10000 }
+      );
+    };
+
+    await openModuleCard(page, 'Pipeline');
+    await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 10000 });
+    await page.click('[data-testid="pipeline-item"][data-command-id="effects.podcastChain"] button');
+    await page.waitForSelector('[data-testid="podcast-chain-dialog"]', { timeout: 15000 });
+    const podcastDialog = await page.evaluate(() => {
+      const host = document.querySelector('[data-testid="tool-host"]');
+      const panel = host ? host.querySelector('[data-testid="hosted-tool"]') : null;
+      const loudness = document.querySelector('[data-testid="podcast-chain-stage-loudness"]');
+      return {
+        toolId: host ? host.getAttribute('data-tool-id') : null,
+        title: panel ? panel.getAttribute('aria-label') : null,
+        // Sliced: the stage note is a paragraph, and a failure message that
+        // carried the whole of it would bury its own numbers.
+        loudnessRow: loudness ? loudness.textContent.trim().slice(0, 60) : null,
+        toggles: document.querySelectorAll('[data-testid^="podcast-chain-toggle-"]').length,
+      };
+    });
+    console.log(
+      `  dialog: ${JSON.stringify({ toolId: podcastDialog.toolId, title: podcastDialog.title, toggles: podcastDialog.toggles })}`
+    );
+    assert(
+      podcastDialog.toolId === 'effects.podcastChain' && podcastDialog.title === 'Podcast Chain',
+      `the Pipeline card opened the Podcast Chain in the module column ` +
+        `(${JSON.stringify(podcastDialog)})`
+    );
+    assert(
+      podcastDialog.loudnessRow !== null && podcastDialog.loudnessRow.includes('Loudness'),
+      `the Loudness stage has a row of its own — the one stage with no effect behind it ` +
+        `(${JSON.stringify(podcastDialog.loudnessRow)})`
+    );
+    assert(
+      podcastDialog.toggles >= 10,
+      `every stage is switchable from the dialog (${podcastDialog.toggles} toggles)`
+    );
+    await closeHostedTool();
+    await openModuleCard(page, 'Files');
+
+    const podcast = await page.evaluate(() => window.__test.podcastChainRun());
+    console.log(
+      `  podcastChainRun: undo=${JSON.stringify(podcast.undoLabel)} ` +
+        `LUFS ${podcast.beforeLufs === null ? 'null' : podcast.beforeLufs.toFixed(2)} -> ` +
+        `${podcast.afterLufs === null ? 'null' : podcast.afterLufs.toFixed(2)}, ` +
+        `sample peak ${podcast.peakDb === null ? 'null' : podcast.peakDb.toFixed(2)} dBFS, ` +
+        `refusal ${JSON.stringify(podcast.refusal)}`
+    );
+    assert(
+      podcast.refusal === null,
+      `a stereo document is not refused (${JSON.stringify(podcast.refusal)})`
+    );
+    assert(
+      podcast.undoLabel === 'Podcast Chain',
+      `the whole chain is ONE undo entry, named for the chain (${JSON.stringify(podcast.undoLabel)})`
+    );
+    assert(
+      podcast.afterLufs !== null && Math.abs(podcast.afterLufs - -16) <= 0.5,
+      `it landed the stereo delivery target of −16.0 LUFS ` +
+        `(${podcast.afterLufs === null ? 'null' : podcast.afterLufs.toFixed(3)})`
+    );
+    assert(
+      podcast.peakDb !== null && podcast.peakDb <= -1,
+      `and the file that is now open sits at or under the −1.0 dBFS SAMPLE-peak ceiling — on ` +
+        `this tone it lands well under, so this says the ceiling was not breached, not that the ` +
+        `limiter engaged (${podcast.peakDb === null ? 'null' : podcast.peakDb.toFixed(3)} dBFS)`
+    );
+    await page.evaluate(() => window.__test.undoActive());
+    const podcastUndone = await stateOf();
+    const podcastRms = await page.evaluate(() => window.__test.getRms());
+    console.log(
+      `  after one undo: ${podcastUndone.length} samples, RMS ${podcastRms.toFixed(4)} ` +
+        `(the untouched tone is 0.5/√2 ≈ 0.3536)`
+    );
+    assert(
+      podcastUndone.length === podcastBefore.length,
+      `one undo put the document's length back (${podcastBefore.length} -> ${podcastUndone.length})`
+    );
+    assert(
+      Math.abs(podcastRms - 0.5 / Math.SQRT2) < 0.005,
+      `…and its level: the 0.5-amplitude tone is back at its own RMS, so the chain's gain went ` +
+        `with the undo (${podcastRms.toFixed(4)} vs ${(0.5 / Math.SQRT2).toFixed(4)})`
+    );
+    await page.evaluate(() => window.__test.closeActive());
+
+    // L7-13) D4 — Separate Voice: the voice-mode copy, and the two-track landing
+    //
+    // The dialog half runs on ANY machine, model or no model: the "what you
+    // get" paragraph is voice-mode copy that must name the two tracks the
+    // landing produces, and it is the sentence a user reads before committing
+    // to a run that takes minutes. The landing half goes through
+    // `separateVoiceLand`, which builds an exact partition of the open document
+    // and hands it to the shipped `landVoice` — so the two documents, the
+    // two-track session and the view switch are the real ones, without 166 MB
+    // of model and minutes of CPU (the model path itself is step 17's).
+    console.log('Separate Voice (D4): the voice-mode dialog, then the two-track landing...');
+    const preVoice = await stateOf();
+    await page.evaluate((p) => window.__test.openPath(p), TONE);
+    const voiceBefore = await stateOf();
+    await openModuleCard(page, 'Pipeline');
+    await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 10000 });
+    await page.click('[data-testid="pipeline-item"][data-command-id="voice.separate"] button');
+    await page.waitForSelector('[data-testid="separate-dialog"]', { timeout: 15000 });
+    const voiceDialog = await page.evaluate(() => {
+      const host = document.querySelector('[data-testid="tool-host"]');
+      const panel = host ? host.querySelector('[data-testid="hosted-tool"]') : null;
+      const produces = document.querySelector('[data-testid="separate-produces"]');
+      const guarantees = document.querySelector('[data-testid="separate-guarantees"]');
+      return {
+        toolId: host ? host.getAttribute('data-tool-id') : null,
+        title: panel ? panel.getAttribute('aria-label') : null,
+        produces: produces ? produces.textContent.trim() : null,
+        guarantees: guarantees ? guarantees.textContent.trim() : null,
+      };
+    });
+    console.log(`  dialog: ${voiceDialog.title} — ${JSON.stringify(voiceDialog.produces)}`);
+    // D4's DEGRADED arm, which this step used to skip entirely: on a machine
+    // without the model the dialog must show the model block and offer no live
+    // Separate button, and on one with it neither. Which branch runs is read
+    // from the app's own model state rather than assumed from step 17 having
+    // downloaded it — the packaged run has to answer for both machines, and a
+    // regression that ignored `modelMissing` passed on either before this.
+    // The model state is fetched asynchronously by the dialog, so wait until it
+    // has DECIDED — a live Separate or the model block — before reading either.
+    // A dialog still waiting on that fetch shows neither, and reading it there
+    // would fail the ready arm for a reason that has nothing to do with D4.
+    await page.waitForFunction(
+      () => {
+        const d = document.querySelector('[data-testid="separate-dialog"]');
+        if (!d) return false;
+        if (d.querySelector('[data-testid="separate-model-missing"]')) return true;
+        const b = Array.from(d.querySelectorAll('button')).find(
+          (x) => x.textContent.trim() === 'Separate'
+        );
+        return b !== undefined && !b.disabled;
+      },
+      null,
+      { timeout: 15000 }
+    );
+    const stemModel = await page.evaluate(() => window.__test.getStemModelState());
+    const stemModelUi = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('[data-testid="separate-dialog"] button'));
+      const run = buttons.find((b) => b.textContent.trim() === 'Separate');
+      return {
+        missingBlock: document.querySelector('[data-testid="separate-model-missing"]') !== null,
+        hasRun: run !== undefined,
+        runDisabled: run ? run.disabled : null,
+      };
+    });
+    console.log(
+      `  model downloaded=${stemModel.downloaded} -> ${JSON.stringify(stemModelUi)} ` +
+        `(${stemModel.downloaded ? 'ready' : 'DEGRADED'} arm)`
+    );
+    if (stemModel.downloaded) {
+      assert(
+        !stemModelUi.missingBlock && stemModelUi.hasRun && stemModelUi.runDisabled === false,
+        `with the model downloaded the dialog shows no model block and offers a live Separate ` +
+          `(${JSON.stringify(stemModelUi)})`
+      );
+    } else {
+      assert(
+        stemModelUi.missingBlock && (!stemModelUi.hasRun || stemModelUi.runDisabled === true),
+        `without the model the dialog names the download and refuses to run — the degraded path ` +
+          `D4 asks for (${JSON.stringify(stemModelUi)})`
+      );
+    }
+    assert(
+      voiceDialog.toolId === 'voice.separate' && voiceDialog.title === 'Separate Voice',
+      `the Pipeline card opened Separate Voice, not Separate into Stems ` +
+        `(${JSON.stringify(voiceDialog)})`
+    );
+    assert(
+      voiceDialog.produces !== null &&
+        voiceDialog.produces.includes('Voice') &&
+        voiceDialog.produces.includes('Backing') &&
+        voiceDialog.produces.includes('Two tracks'),
+      `and it promises the TWO tracks this mode lands (${JSON.stringify(voiceDialog.produces)})`
+    );
+    // The claim the two-track landing is NOT allowed to make. The five-stem
+    // copy says the stems add up “sample for sample”; summing two of them
+    // rounds, so the voice-mode paragraph must not repeat it.
+    assert(
+      voiceDialog.guarantees !== null && !voiceDialog.guarantees.includes('sample for sample'),
+      `…without repeating the five-stem sample-for-sample guarantee, which two tracks cannot keep ` +
+        `(${JSON.stringify(voiceDialog.guarantees)})`
+    );
+    await closeHostedTool();
+    await openModuleCard(page, 'Files');
+
+    const landed = await page.evaluate(() => window.__test.separateVoiceLand());
+    console.log(`  separateVoiceLand: ${JSON.stringify(landed)}`);
+    assert(landed.ok === true, `the landing ran (${JSON.stringify(landed)})`);
+    assert(
+      JSON.stringify(landed.trackNames) === JSON.stringify(['Voice', 'Backing']),
+      `two tracks, Voice first (${JSON.stringify(landed.trackNames)})`
+    );
+    assert(
+      JSON.stringify(landed.documentNames) ===
+        JSON.stringify([`${voiceBefore.activeName} — Voice`, `${voiceBefore.activeName} — Backing`]),
+      `both documents are named after the source (${JSON.stringify(landed.documentNames)})`
+    );
+    assert(
+      landed.lengthSamples === voiceBefore.length && landed.sampleRate === voiceBefore.sampleRate,
+      `at the source's own length and rate (${landed.lengthSamples}@${landed.sampleRate} vs ` +
+        `${voiceBefore.length}@${voiceBefore.sampleRate})`
+    );
+    const voiceAfter = await stateOf();
+    assert(
+      voiceAfter.docCount === voiceBefore.docCount + 2,
+      `exactly two documents were added (${voiceBefore.docCount} -> ${voiceAfter.docCount})`
+    );
+    const voiceLanes = await page.evaluate(() => ({
+      views: document.querySelectorAll('[data-testid="multitrack-view"]').length,
+      tracks: document.querySelectorAll('[data-testid="track-header"]').length,
+      clips: document.querySelectorAll('[data-testid="clip"]').length,
+    }));
+    assert(
+      voiceLanes.views === 1 && voiceLanes.tracks === 2 && voiceLanes.clips === 2,
+      `the app switched to a two-track session with one clip each (${JSON.stringify(voiceLanes)})`
+    );
+    // Voice + Backing reconstruct the source WITHIN FLOAT32 ROUNDING — summing
+    // two tracks rounds where summing all five does not, so this is a bound on
+    // the rounding, never a bit-exactness claim.
+    console.log(
+      `  Voice + Backing vs the source: worst |err| ${landed.worstAbsError} ` +
+        `(the float32 storage floor is 2^-24 ≈ 5.96e-8 at full scale)`
+    );
+    assert(
+      landed.worstAbsError !== null && landed.worstAbsError <= 1e-6,
+      `the two tracks add back up to the source within float32 rounding ` +
+        `(worst |err| ${landed.worstAbsError})`
+    );
+
+    // Put the app back. Closed BY NAME rather than by three `closeActive`
+    // calls: closing a document re-activates whichever one the store picks
+    // next, so “close the active one three times” is a guess about that choice
+    // and this is not.
+    for (const name of [
+      `${voiceBefore.activeName} — Voice`,
+      `${voiceBefore.activeName} — Backing`,
+      voiceBefore.activeName,
+    ]) {
+      const matches = await page.evaluate((n) => window.__test.activateDocumentByName(n), name);
+      assert(matches > 0, `the document “${name}” is open to be closed again (${matches})`);
+      await page.evaluate(() => window.__test.closeActive());
+    }
+    await page.evaluate((rate) => window.__test.newSession(rate), 44100);
+    await page.evaluate(() => window.__test.setView('waveform'));
+    const voiceRestored = await stateOf();
+    assert(
+      voiceRestored.docCount === preVoice.docCount,
+      `the Files panel is back where the step found it ` +
+        `(${preVoice.docCount} -> ${voiceRestored.docCount})`
+    );
 
     console.log('\nSMOKE PASSED');
   } finally {

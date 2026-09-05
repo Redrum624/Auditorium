@@ -24,6 +24,7 @@ import {
 } from './sessionZoom';
 import { laneWidthFromScrollerWidth, sessionLaneWidth, setSessionLaneWidth } from './sessionViewport';
 import { clampGroupDelta } from './groupDrag'; // T5
+import { closeGapShifts, gapAt, gapProbeSample, type TrackGap } from './gaps'; // D3
 
 export interface SessionState {
   session: Session;
@@ -53,6 +54,25 @@ export interface SessionState {
    * would then act on.
    */
   selectedClipIds: string[];
+  /**
+   * D3 — the selected GAP: the empty span on ONE track the user double-clicked
+   * (`gaps.ts` defines what counts), or `null`. The multitrack's second kind of
+   * selection, and deliberately never a THIRD state on screen: selecting a gap
+   * clears the clip selection and every clip-selection writer clears this, so
+   * exactly one of the two is standing at any moment. Delete / Ripple Delete
+   * read whichever it is.
+   *
+   * UI-only state, in the sense `mtEnvelope` and `groupDragPreview` already
+   * are (ruling 3): NOT in `SessionSnapshot`, so an undo neither restores nor
+   * steals it, and not on `Session`, so `serializeSession*` never writes it —
+   * the `.audm` byte-identity pins are unaffected by construction.
+   *
+   * Reconciled by the same subscriber that holds the K1 invariants above, and
+   * for the same reason: the span is derived from clips that any mutation can
+   * move, and a band drawn over a clip that has arrived under it would be a
+   * lie the delete verbs would then act on.
+   */
+  selectedGap: TrackGap | null;
   mtCursorSample: number;
   mtZoom: { samplesPerPixel: number; scrollSample: number };
   mtPlayState: 'stopped' | 'playing';
@@ -138,6 +158,30 @@ export interface SessionActions {
   addClip(trackId: string, clip: Clip): void; // inserts sorted; accepts overlap verbatim; never writes fades
   moveClip(clipId: string, toTrackId: string, newStartSample: number, opts?: { clearOverlap?: boolean }): void; // clamps >=0; commits verbatim + maintains facing fades; opts.clearOverlap = v1.8 nudge; H1 no-op guard: same track + same RESOLVED sample records nothing
   trimClip(clipId: string, edge: 'start' | 'end', newBoundarySample: number): void; // adjusts offset/length, min 32; may overlap a neighbour; re-clamps fades (X2 — see setClipFade) and maintains facing fades on the overlap it reshapes (X5)
+  /** D3 — RIGID TRANSLATION of a set of clips on ONE track by ONE delta, in ONE
+   * `set()`: every named clip keeps its length, its offset, its gain AND both
+   * fade fields verbatim, and only `startSample` moves. No `maintainFacingFades`
+   * pass runs (the reason this action exists at all — see `closeGap`): a uniform
+   * delta cannot change the geometry BETWEEN the movers, so there is no overlap
+   * among them for the maintenance to re-read, and applying the same shift one
+   * clip at a time WOULD invent one — the first mover leaves, which the second
+   * mover's per-move snapshot reads as "this overlap is new", arming a crossfade
+   * the gesture never asked for over a pair that was overlapping all along.
+   *
+   * Whatever geometry the movers form with the clips that STAY is committed
+   * verbatim, the same way `moveClip` commits a requested position verbatim: a
+   * translation that lands a mover on a stationary neighbour makes an honest raw
+   * sum, not a synthesised crossfade (v1.9 ruling 10). `closeGap`'s only new
+   * adjacency is a butt-join at the gap's start — width 0, which is not an
+   * overlap and arms nothing either way.
+   *
+   * RIGID OR NOTHING (`moveClipsBy`'s rule): if any named clip would land before
+   * sample 0 the whole call is a no-op, because a per-clip clamp would silently
+   * deform the arrangement it was asked to carry across. A zero delta, an
+   * unknown track and an empty/unmatched id set are no-ops too — same state
+   * object back, so nothing is recorded. Array order is preserved in place
+   * (`Track.clips` is insertion-ordered — trap T40). */
+  translateClips(trackId: string, clipIds: readonly string[], deltaSample: number): void;
   /** Item 1 (M2/N1-N4) - splits one clip at `sample` (session samples, consumed
    * VERBATIM: the cursor was snapped, or deliberately not, when it was placed,
    * and this action never re-snaps or rounds it). The LEFT half keeps the
@@ -271,6 +315,13 @@ export interface SessionActions {
    * another track — a range across two timelines is not a range. An id no clip
    * carries is ignored. Records no undo entry: a selection is view state. */
   extendSelectionToClip(id: string): void;
+  /** D3 — selects a gap (or clears it with `null`). Selecting one CLEARS the
+   * clip selection: the multitrack shows one selection at a time, so the
+   * Delete verbs never have to choose between two. The raw setter — the span
+   * it is handed is committed verbatim, because the only production caller
+   * resolved it through `gapAt` a moment earlier. Records no undo entry: a
+   * selection is view state. */
+  setSelectedGap(gap: TrackGap | null): void;
   /** F0 — opens/closes a track's envelope lane (see `mtEnvelope`). */
   setMtEnvelope(v: SessionState['mtEnvelope']): void;
   /** T5 — publishes (or clears, with `null`) the live group-drag preview. The
@@ -761,6 +812,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
   ...freshSessionState(44100),
   selectedClipId: null,
   selectedClipIds: [], // K1
+  selectedGap: null, // D3
   mtCursorSample: 0,
   mtPlayState: 'stopped',
   mtPlayheadSample: 0,
@@ -777,6 +829,7 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         ...freshSessionState(sampleRate),
         selectedClipId: null,
         selectedClipIds: [], // K1
+        selectedGap: null, // D3
         mtCursorSample: 0,
         mtPlayState: 'stopped',
         mtPlayheadSample: 0,
@@ -939,6 +992,36 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         tracks[targetTrackIdx].clips = insertSorted(tracks[targetTrackIdx].clips, movedClip);
 
         maintainFacingFades(tracks, targetTrackIdx, loc.trackIdx, clipId, pre);
+        return { session: { ...s.session, tracks } };
+      });
+    });
+  },
+
+  translateClips(trackId, clipIds, deltaSample) {
+    recordSessionMutation('Move clips', () => {
+      set((s) => {
+        const trackIdx = s.session.tracks.findIndex((t) => t.id === trackId);
+        if (trackIdx === -1 || deltaSample === 0) return s;
+        const ids = new Set(clipIds);
+        const movers = s.session.tracks[trackIdx].clips.filter((c) => ids.has(c.id));
+        if (movers.length === 0) return s;
+        // Rigid or nothing (moveClipsBy's rule): asked of every mover BEFORE
+        // anything is written, because a per-clip clamp would deform the
+        // arrangement this call was asked to carry across intact.
+        if (movers.some((c) => c.startSample + deltaSample < 0)) return s;
+        const tracks = s.session.tracks.map((t, i) =>
+          i === trackIdx
+            ? {
+                ...t,
+                // In place, not re-sorted: a uniform delta cannot reorder the
+                // movers among themselves, and `Track.clips` is insertion-
+                // ordered anyway (trap T40).
+                clips: t.clips.map((c) =>
+                  ids.has(c.id) ? { ...c, startSample: c.startSample + deltaSample } : c
+                ),
+              }
+            : t // untouched tracks keep their object identity
+        );
         return { session: { ...s.session, tracks } };
       });
     });
@@ -1269,8 +1352,20 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       const unchanged =
         s.selectedClipId === id &&
         s.selectedClipIds.length === (id === null ? 0 : 1) &&
-        (id === null || s.selectedClipIds[0] === id);
-      return unchanged ? s : { selectedClipId: id, selectedClipIds: id === null ? [] : [id] };
+        (id === null || s.selectedClipIds[0] === id) &&
+        // D3: selecting a clip clears a selected gap, so a press that would
+        // otherwise have been a no-op still has work to do while a band is up.
+        // Clearing with `null` is NOT selecting a clip and leaves the gap
+        // standing — `TrackLane` calls it on every press on empty lane space,
+        // including the two presses that precede the double-click that selects
+        // the gap in the first place.
+        (id === null || s.selectedGap === null);
+      if (unchanged) return s;
+      return {
+        selectedClipId: id,
+        selectedClipIds: id === null ? [] : [id],
+        ...(id === null ? null : { selectedGap: null }),
+      };
     });
   },
 
@@ -1288,7 +1383,8 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       // A set member must name a live clip: the group verbs act on this array
       // directly, and a dangling id would be a silent partial delete.
       if (!liveClipIds(s.session).has(id)) return s;
-      return { selectedClipId: id, selectedClipIds: [...s.selectedClipIds, id] };
+      // D3: one selection on screen at a time.
+      return { selectedClipId: id, selectedClipIds: [...s.selectedClipIds, id], selectedGap: null };
     });
   },
 
@@ -1315,11 +1411,16 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       // The same no-op guard the two writers above carry, and load-bearing for
       // the same reason: Ctrl+A pressed twice must not mint a fresh array for
       // every clip's subscription to see.
+      // D3: an EMPTY result is not a selection, so it leaves a standing gap
+      // alone — the same asymmetry `setSelectedClip(null)` states above.
+      const clearsGap = selectedClipIds.length > 0 && s.selectedGap !== null;
       const unchanged =
         selectedClipId === s.selectedClipId &&
         selectedClipIds.length === s.selectedClipIds.length &&
-        selectedClipIds.every((id, i) => id === s.selectedClipIds[i]);
-      return unchanged ? s : { selectedClipId, selectedClipIds };
+        selectedClipIds.every((id, i) => id === s.selectedClipIds[i]) &&
+        !clearsGap;
+      if (unchanged) return s;
+      return { selectedClipId, selectedClipIds, ...(clearsGap ? { selectedGap: null } : null) };
     });
   },
 
@@ -1338,8 +1439,9 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
         const unchanged =
           s.selectedClipId === id &&
           s.selectedClipIds.length === 1 &&
-          s.selectedClipIds[0] === id;
-        return unchanged ? s : { selectedClipId: id, selectedClipIds: [id] };
+          s.selectedClipIds[0] === id &&
+          s.selectedGap === null; // D3
+        return unchanged ? s : { selectedClipId: id, selectedClipIds: [id], selectedGap: null };
       }
       // EXTENDS, so a set built with Ctrl+Click survives: the range is unioned
       // into the standing selection in the order it was drawn, and members
@@ -1349,8 +1451,36 @@ export const useSessionStore = create<SessionState & SessionActions>()((set) => 
       const unchanged =
         s.selectedClipId === id &&
         selectedClipIds.length === s.selectedClipIds.length &&
-        selectedClipIds.every((x, i) => x === s.selectedClipIds[i]);
-      return unchanged ? s : { selectedClipId: id, selectedClipIds };
+        selectedClipIds.every((x, i) => x === s.selectedClipIds[i]) &&
+        s.selectedGap === null; // D3
+      return unchanged ? s : { selectedClipId: id, selectedClipIds, selectedGap: null };
+    });
+  },
+
+  setSelectedGap(gap) {
+    // D3 — the gap becomes THE selection: the clip selection goes with it, so
+    // the two can never be up at once and Delete never has to pick. Clearing
+    // (`null`) touches nothing else — Escape clears the band, it does not
+    // un-select clips that were not selected anyway.
+    set((s) => {
+      const same =
+        s.selectedGap !== null &&
+        gap !== null &&
+        s.selectedGap.trackId === gap.trackId &&
+        s.selectedGap.startSample === gap.startSample &&
+        s.selectedGap.endSample === gap.endSample;
+      // The no-op guard the selection writers above carry, for the same reason:
+      // re-selecting the same band must not mint a new object for every lane's
+      // subscription to see.
+      if (same || (gap === null && s.selectedGap === null)) return s;
+      if (gap === null) return { selectedGap: null };
+      // The clip fields are written only when there is something to clear — a
+      // fresh `[]` over an already-empty set is a new value for every clip's
+      // subscription to see, which is the repaint the K1 writers' own no-op
+      // guards exist to avoid.
+      return s.selectedClipId === null && s.selectedClipIds.length === 0
+        ? { selectedGap: gap }
+        : { selectedGap: gap, selectedClipId: null, selectedClipIds: [] };
     });
   },
 
@@ -1770,6 +1900,56 @@ export function rippleDeleteClips(clipIds: readonly string[]): void {
 }
 
 /**
+ * D3 — CLOSE A GAP: the localized ripple delete. Every clip on the gap's own
+ * track that starts at or after the gap's end moves left by the gap's length,
+ * in ONE undo entry. No other track moves, which is the whole request: the
+ * silence the user pointed at goes, and the arrangement around it does not.
+ *
+ * The same shape as `rippleDeleteClips` above — the shifts are resolved against
+ * the timeline the user is looking at, before anything moves — but NOT through
+ * the same door: the whole set is carried by ONE `translateClips` write instead
+ * of one `moveClip` per clip. There is deliberately no removal step either — a
+ * gap is empty by definition, so closing it is the ripple's second half alone.
+ *
+ * ONE WRITE, BECAUSE PER-CLIP MOVES INVENT CROSSFADES (final review, C3).
+ * `moveClip` runs `maintainFacingFades` on every commit against a snapshot taken
+ * at that commit, so two movers that OVERLAP EACH OTHER are pulled apart by the
+ * first move and re-joined by the second — and the second move's snapshot, which
+ * cannot see that the pair was overlapping before the gesture started, reads
+ * width 0 and arms a full-width crossfade over a legitimate raw sum (or over the
+ * user's own partial facing fade, which it overwrites; clip mutations have no
+ * undo of their own). Translating the whole set by one delta preserves the
+ * movers' relative geometry exactly, so no pair among them is ever "new"; the
+ * only new adjacency the close creates is the butt-join at the gap's start,
+ * width 0 — not an overlap, and nothing to arm.
+ *
+ * STALE GAPS ARE A NO-OP WITH NO GESTURE. The selection is reconciled on every
+ * session change, but a caller can hold a `TrackGap` across one (the Edit menu
+ * reads the store, the smoke hooks build their own), and closing a span that
+ * is no longer empty would shift clips over a gap that is not there. Re-asking
+ * `gapAt` through the same probe the reconcile uses is the check; a mismatch
+ * moves nothing and pushes no entry.
+ */
+export function closeGap(gap: TrackGap): void {
+  const track = useSessionStore.getState().session.tracks.find((t) => t.id === gap.trackId);
+  if (track === undefined) return;
+  const live = gapAt(track, gapProbeSample(gap));
+  if (live === null || live.startSample !== gap.startSample || live.endSample !== gap.endSample) {
+    return;
+  }
+  const shifts = closeGapShifts(track, live);
+  if (shifts.length === 0) return; // unreachable — a gap is bounded on its right by a clip
+  withSessionGesture('Close gap', () => {
+    useSessionStore.getState().translateClips(
+      gap.trackId,
+      shifts.map((s) => s.clipId),
+      -(live.endSample - live.startSample)
+    );
+  });
+  useSessionStore.getState().setSelectedGap(null);
+}
+
+/**
  * K1 R2 — the group drag: every member moves by the SAME delta, on its own
  * track, in one undo entry.
  *
@@ -1872,6 +2052,31 @@ let lastReconciledSession = useSessionStore.getState().session;
 useSessionStore.subscribe((s) => {
   if (s.session === lastReconciledSession) return;
   lastReconciledSession = s.session;
+  // D3 — the GAP selection is reconciled here, by the same subscriber and for
+  // the same argument: a gap is a span DERIVED from the clips beside it, so
+  // every path that can strand a clip selection can also redraw a gap under
+  // the band the user is looking at — a neighbour trimmed, a clip dropped into
+  // the space, the track removed, an undo landing on another arrangement.
+  //
+  // Re-resolved through `gapAt` rather than compared field by field, so there
+  // is one definition of "this is still a gap"; the probe is the midpoint,
+  // which is strictly inside every span the resolver can name (see
+  // `gapProbeSample`). Anything but the same span clears — a gap that merely
+  // GREW is a different gap, and closing it would swallow silence the user
+  // never selected.
+  const gap = s.selectedGap;
+  if (gap !== null) {
+    const track = s.session.tracks.find((t) => t.id === gap.trackId);
+    const live = track === undefined ? null : gapAt(track, gapProbeSample(gap));
+    if (
+      live === null ||
+      live.startSample !== gap.startSample ||
+      live.endSample !== gap.endSample
+    ) {
+      // Writes no session, so the re-entry this causes returns at the guard.
+      useSessionStore.setState({ selectedGap: null });
+    }
+  }
   if (s.selectedClipId === null && s.selectedClipIds.length === 0) return;
   const next = reconcileSelection(s.session, s.selectedClipId, s.selectedClipIds);
   if (
@@ -1932,6 +2137,17 @@ bindSessionUndo({
     useSessionStore.setState({
       session: snapshot.session,
       selectedClipId: snapshot.selectedClipId,
+      // D3 — this restore is a clip-selection writer too, so it owes the same
+      // "one selection on screen at a time" clearing every other one does
+      // (final review, C1). Without it an undo could put a clip selection back
+      // UNDER a gap band standing on another track (the reconcile subscriber
+      // deliberately keeps a gap whose own track did not change), leaving both
+      // highlighted — and `edit.delete` reads the gap first, so Delete would
+      // close the gap instead of removing the clip the user can see selected.
+      // Only a NON-NULL restored selection clears it: an undo whose snapshot
+      // carried no clip selection restores no selection either, and must leave
+      // a standing gap exactly as it was (the ruling-3 pin).
+      ...(snapshot.selectedClipId !== null ? { selectedGap: null } : null),
       ...redenominate,
     });
   },

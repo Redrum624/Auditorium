@@ -1,13 +1,12 @@
 import { useEffect, useState, type CSSProperties, type ReactNode } from 'react';
 import { Circle, Magnet, Minus, Pause, Play, Plus, Repeat, SkipBack, Square } from 'lucide-react';
-import { docLength } from '../../audio/AudioDocument';
 import type { AudioDocument } from '../../audio/AudioDocument';
 import { playbackEngine } from '../../audio/PlaybackEngine';
 import { multitrackPlayer } from '../../multitrack/MultitrackPlayer';
 import { multitrackRecorder } from '../../multitrack/multitrackRecord';
 import { applySessionZoom, useSessionStore } from '../../multitrack/sessionStore';
 import type { Session } from '../../multitrack/session';
-import { defaultSessionZoom, sessionTimelineLength } from '../../multitrack/sessionZoom';
+import { defaultSessionZoom } from '../../multitrack/sessionZoom';
 import { isCommandEnabled, runCommand, showEditorView } from '../../services/menuActions';
 import { useHistoryVersion } from '../../services/undoHistory';
 import { toggleSnap, useSnapEnabled } from '../../services/snapPreference';
@@ -15,6 +14,10 @@ import { canRecord } from '../../services/transportService';
 // F11-9: the zoom limits are the store's now, so the toolbar imports the one
 // resolver instead of re-stating MIN_SPP and a ceiling of its own.
 import { applyEditorZoom, defaultZoom, useAppStore } from '../../stores/appStore';
+// D1: the cursor-anchor rule, shared with both wheel gestures.
+import { editorLaneWidth } from '../../services/editorViewport';
+import { sessionLaneWidth } from '../../multitrack/sessionViewport';
+import { anchoredZoom } from '../../services/zoomAnchor';
 import { ZOOM_FACTOR } from '../Editor/useEditorGestures';
 import { ChromePill } from '../UI/glass';
 
@@ -132,14 +135,14 @@ function zoomPercent(doc: AudioDocument, samplesPerPixel: number): number {
   return Math.round((defaultZoom(doc).samplesPerPixel / samplesPerPixel) * 100);
 }
 
-// F11-9: still used for the cursor anchor below; the ZOOM clamps are gone.
-function clamp(v: number, lo: number, hi: number): number {
-  return Math.min(Math.max(v, lo), hi);
-}
-
-/** Zoom the single-document editor by `factor`, anchored on the cursor (the
- * only viewport-independent anchor available up here — the wheel gesture
- * anchors on the pointer instead).
+/** Zoom the single-document editor by `factor`, anchored on the cursor.
+ *
+ * D1 — the anchor rule lives in `services/zoomAnchor` now, and the wheel
+ * gestures obey it too. It used to be stated here as "keep the anchor at the
+ * same on-screen x", which is only half of it: a bar OUTSIDE the visible window
+ * still has an x, and holding it zoomed toward something the user could not
+ * see. The other half is that the wheel anchored on the POINTER, so the same
+ * document zoomed to two different places depending on which control was used.
  *
  * F11-9: no clamping here any more. This function used to re-state its own
  * `MIN_SPP` floor and `length / 50` ceiling "so the button path can never leave
@@ -151,13 +154,19 @@ function zoomEditorBy(factor: number): void {
   const s = useAppStore.getState();
   const doc = s.documents.find((d) => d.id === s.activeDocumentId) ?? null;
   if (!doc) return;
-  const anchor = clamp(s.cursorSample, 0, docLength(doc));
-  // Keep the anchor at the same on-screen x: x = (anchor - scroll) / sppOld.
-  const x = (anchor - s.zoom.scrollSample) / s.zoom.samplesPerPixel;
-  applyEditorZoom({
-    samplesPerPixel: s.zoom.samplesPerPixel * factor,
-    scrollSample: (spp) => anchor - x * spp,
-  });
+  applyEditorZoom(
+    anchoredZoom({
+      zoom: s.zoom,
+      laneWidth: editorLaneWidth(),
+      // D1 — the RAW bar, unclamped. This used to clamp to `docLength`, which
+      // made the buttons anchor on a different sample than the wheel does the
+      // moment the two disagree about where the bar is. One anchor on every
+      // path means one anchor VALUE too; `resolveZoom` still bounds the scroll
+      // that comes out, through the resolved-spp callback.
+      anchorSample: s.cursorSample,
+      factor,
+    })
+  );
 }
 
 /** F11-3: Fit means the whole track across the MEASURED lane — and, since
@@ -189,15 +198,23 @@ function sessionZoomPercent(session: Session, samplesPerPixel: number): number {
 }
 
 /** Zoom the session by `factor`, anchored on the multitrack cursor — the same
- * viewport-independent anchor `zoomEditorBy` uses, for the same reason. */
+ * D1 rule, through the same helper, against the session's own lane. */
 function zoomSessionBy(factor: number): void {
   const s = useSessionStore.getState();
-  const anchor = clamp(s.mtCursorSample, 0, sessionTimelineLength(s.session));
-  const x = (anchor - s.mtZoom.scrollSample) / s.mtZoom.samplesPerPixel;
-  applySessionZoom({
-    samplesPerPixel: s.mtZoom.samplesPerPixel * factor,
-    scrollSample: (spp) => anchor - x * spp,
-  });
+  applySessionZoom(
+    anchoredZoom({
+      zoom: s.mtZoom,
+      laneWidth: sessionLaneWidth(),
+      // D1 — the RAW bar. The clamp to `sessionTimelineLength` that used to be
+      // here was the one place the two controls genuinely diverged: the session
+      // timeline scrolls 60 s PAST the last clip (`MT_TIMELINE_TAIL_SEC`) and
+      // `setMtCursor` does not clamp, so a bar parked in that tail was anchored
+      // at the last clip's end by the buttons and at its real position by the
+      // wheel. Same bar, same notch, two destinations.
+      anchorSample: s.mtCursorSample,
+      factor,
+    })
+  );
 }
 
 /** Fit the SESSION: the longest track laid across the measured lane. Spelled as

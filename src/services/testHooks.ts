@@ -15,6 +15,7 @@ import {
   crossfadableOverlap,
   DEFAULT_FADE_CURVE,
 } from '../multitrack/session';
+import { gapAt, type TrackGap } from '../multitrack/gaps'; // D3
 import { placeDocumentsOnTrack } from '../multitrack/sessionInsert';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { withSessionGesture } from '../multitrack/sessionUndo';
@@ -72,9 +73,15 @@ import {
   runCoverChain,
   type CoverChainStageId,
 } from './coverChain';
+import { defaultPodcastStageSelection, runPodcastChain } from './podcastChain';
+import { samplePeakDb } from '../dsp/loudness';
 import { COVER_JOURNEY_STAGES, runCoverJourney } from './coverJourney';
 import { createRemixDocument, getRemixSession } from './remixService';
-import { getStemModelState as readStemModelState, separateStems as runStemSeparation } from './stemService';
+import {
+  STEM_LABELS,
+  getStemModelState as readStemModelState,
+  separateStems as runStemSeparation,
+} from './stemService';
 import {
   cancelTranscription,
   getTranscribeModelState as readTranscribeModelState,
@@ -96,12 +103,22 @@ import {
   type VoiceProgress,
 } from './voiceService';
 import { formatSrt, formatWebVtt } from './subtitleFormat';
-import { landStems } from './stemLanding';
+import { landStems, landVoice } from './stemLanding';
 import { MultitrackPlayer, multitrackPlayer } from '../multitrack/MultitrackPlayer';
 import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/firstPlayLatency';
 import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import type { FadeCurve } from '../dsp/fades';
+
+/** `samplePeakDb` reads `-Infinity` on digital silence, and that does not
+ * survive `JSON.stringify` — it arrives across Playwright's structured-clone
+ * boundary as `null` anyway, but as an UNDECLARED null the round-trip pin in
+ * `testHooks.test.ts` catches rather than a declared one. Declaring it is the
+ * fix; this is where the two meet. */
+function finitePeak(db: number): number | null {
+  return Number.isFinite(db) ? db : null;
+}
+
 
 export interface TestStateSummary {
   docCount: number;
@@ -182,6 +199,20 @@ export interface TestApi {
   setCursor(sample: number): number;
   /** Reads the document cursor back (`getStateSummary` carries no cursor). */
   getCursor(): number;
+  /** D2 — the editor transport, as the store holds it: the engine state, the
+   * position Play/Pause last wrote, and the BAR, in one read.
+   *
+   * The three have to come back together or the claim D2 makes is not
+   * checkable: "Play starts at the bar" is a relation between `cursorSample`
+   * and the `positionSample` the play wrote, and reading them through two
+   * hooks leaves a window in which a rAF pump could move one of them between
+   * the calls. Nothing here drives the transport — the smoke presses Space, so
+   * the shipped `transport.playPause` command is what runs. */
+  getPlaybackState(): {
+    state: 'stopped' | 'playing' | 'paused';
+    positionSample: number;
+    cursorSample: number;
+  };
   /** One step FORWARD through the same history Ctrl+Y drives. */
   redoActive(): { length: number };
   /** The active document's history, as the History panel renders it. */
@@ -217,10 +248,26 @@ export interface TestApi {
   setMtCursor(sample: number): number;
   /** Reads it back (`getStateSummary` carries no session cursor). */
   getMtCursor(): number;
+  /** D1 — the multitrack viewport (`mtZoom`), so a zoom gesture's ANCHOR can be
+   * checked: the bar's on-screen x is `(cursor - scrollSample) / samplesPerPixel`,
+   * and holding it across a Ctrl+wheel is the whole of D1. A COPY of the pair,
+   * for `getSelectedGap`'s reason. */
+  getMtZoom(): { samplesPerPixel: number; scrollSample: number };
   /** Lot D: names the clip selection through `setSelectedClips`, so the store's
    * own rules apply (dangling ids dropped, duplicates collapsed), and echoes
    * what was stored. */
   selectClips(ids: string[]): { selectedClipId: string | null; selectedClipIds: string[] };
+  /** D3: selects the GAP at `sample` on `tracks[trackIndex]` — the outcome of a
+   * double-click on empty lane space, through the same resolver and the same
+   * setter the lane uses, since the harness cannot double-click. Returns the
+   * gap it selected, or `null` for a sample no gap covers (inside a clip, on a
+   * boundary, past the last clip) or a track index the session does not have —
+   * and a refusal CLEARS any standing gap, so this hook and the store never
+   * disagree. */
+  selectGapAt(trackIndex: number, sample: number): TrackGap | null;
+  /** D3: reads the selected gap back (`getStateSummary` carries no session
+   * selection). */
+  getSelectedGap(): TrackGap | null;
   /** Merge Clips (`multitrack.mergeClips`) on the current clip selection,
    * through the menu action itself — so the harness sees the SAME baked
    * document and the same single undo entry the menu row writes. Reports the
@@ -445,6 +492,39 @@ export interface TestApi {
     registryStageIds: string[];
     registryManualIds: string[];
   }>;
+  // --- D6 -----------------------------------------------------------------
+  /**
+   * Runs the Podcast Chain over the ACTIVE document with the shipped stage
+   * defaults, through the same service the dialog calls — so the packaged smoke
+   * exercises the real derivations, the real worker leg, the BS.1770-4
+   * measurement and the ONE undo entry.
+   *
+   * It reports the five numbers the smoke can actually assert on: the undo
+   * label, the loudness the chain measured going in and coming out, the sample
+   * peak of what landed, and the refusal. `beforeLufs`/`afterLufs` are
+   * `number | null` because both are: a take with nothing above BS.1770-4's
+   * gate has no loudness, and a REFUSED document has none by construction — the
+   * refusal exists precisely because that measurement would be wrong there.
+   * `peakDb` is a SAMPLE peak (`samplePeakDb`), never a true-peak reading: the
+   * limiter is not oversampled. It is `number | null` for the reason this whole
+   * file exists: `samplePeakDb` answers `-Infinity` for digital silence, and
+   * `JSON.stringify(-Infinity)` is `null` — so a hook returning it would arrive
+   * on the Playwright side as a value the smoke's `<= -1` compares against
+   * `null` and silently passes. `null` is the honest answer to "what is the peak
+   * of nothing", and it is the one that survives the boundary intact.
+   *
+   * No `overrides` parameter, unlike the two chains above. This hook exists for
+   * one assertion — that a default run lands the delivery target — and a stage
+   * map the smoke could bend is a way for that assertion to pass against a run
+   * nobody ships.
+   */
+  podcastChainRun(): Promise<{
+    undoLabel: string | null;
+    beforeLufs: number | null;
+    afterLufs: number | null;
+    peakDb: number | null;
+    refusal: string | null;
+  }>;
   // --- CP1 -----------------------------------------------------------------
   /**
    * Runs the WHOLE Cover journey — separate, clean, align, match, place, smooth
@@ -570,6 +650,10 @@ export interface TestApi {
   // --- v1.7 flows ---------------------------------------------------------
   getStemModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   separateStems(): Promise<StemSeparationSummary>;
+  /** D4: lands a SYNTHETIC separation of the ACTIVE document through the
+   * shipped `landVoice` — two documents, a two-track session, the multitrack
+   * view — without the model. Synchronous, because nothing is inferred. */
+  separateVoiceLand(): VoiceLandingSummary;
   // --- F4b flows (transcription) -----------------------------------------
   getTranscribeModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
   /** Transcribes the ACTIVE document, bypassing TranscribeDialog. Pass a
@@ -758,6 +842,25 @@ export interface TranscriptionSummary {
   transcribeTotal: number;
   /** Distinct phases the service passed through, in first-seen order. */
   phasesSeen: string[];
+}
+
+/** D4 — plain-JSON result of the `separateVoiceLand` hook. */
+export interface VoiceLandingSummary {
+  /** False when there was no active document, or it held no audio. */
+  ok: boolean;
+  /** `['<source> — Voice', '<source> — Backing']`, in track order. */
+  documentNames: string[];
+  /** The landed session's track names, in order. */
+  trackNames: string[];
+  sessionName: string | null;
+  sampleRate: number;
+  lengthSamples: number;
+  /** Channel count of each landed document (a mono source lands dual-mono). */
+  channelCounts: number[];
+  monoRoutedAsDualMono: boolean;
+  /** Worst |(Voice + Backing) − source| over every channel and sample; null
+   * when the source is no longer open and the check could not be made. */
+  worstAbsError: number | null;
 }
 
 /** Plain-JSON result of the `separateStems` hook (see its implementation). */
@@ -1226,6 +1329,13 @@ export function installTestHooks(): void {
 
     getCursor: () => useAppStore.getState().cursorSample,
 
+    // D2. One read of the app store, so the bar and the position the transport
+    // wrote cannot be observed a frame apart (see the interface docblock).
+    getPlaybackState: () => {
+      const { playback, cursorSample } = useAppStore.getState();
+      return { state: playback.state, positionSample: playback.positionSample, cursorSample };
+    },
+
     redoActive: () => {
       const doc = activeDoc();
       if (doc) undoHistoryRedo(doc.id);
@@ -1362,10 +1472,38 @@ export function installTestHooks(): void {
 
     getMtCursor: () => useSessionStore.getState().mtCursorSample,
 
+    // D1. A fresh pair rather than the store's own object, for the reason
+    // `getSelectedGap` states: what crosses the Playwright boundary must not be
+    // a handle into the store.
+    getMtZoom: () => {
+      const { samplesPerPixel, scrollSample } = useSessionStore.getState().mtZoom;
+      return { samplesPerPixel, scrollSample };
+    },
+
     selectClips: (ids) => {
       useSessionStore.getState().setSelectedClips(ids);
       const { selectedClipId, selectedClipIds } = useSessionStore.getState();
       return { selectedClipId, selectedClipIds: [...selectedClipIds] };
+    },
+
+    // D3. `gapAt` is the lane's own resolver, so a sample the UI would refuse
+    // is refused identically here — the smoke can assert the boundary cases
+    // without a pointer.
+    selectGapAt: (trackIndex, sample) => {
+      const track = useSessionStore.getState().session.tracks[trackIndex];
+      const gap = track === undefined ? null : gapAt(track, sample);
+      useSessionStore.getState().setSelectedGap(gap);
+      // A COPY, for `getSelectedGap`'s reason: the store now holds this object,
+      // and a harness-side mutation of what came back would reach into it.
+      return gap === null ? null : { ...gap };
+    },
+
+    getSelectedGap: () => {
+      const gap = useSessionStore.getState().selectedGap;
+      // A COPY: the smoke reads this across the structured-clone boundary, and
+      // handing out the store's own object would let a harness-side mutation
+      // reach into the store (trap T16's argument, one object at a time).
+      return gap === null ? null : { ...gap };
     },
 
     // The menu action verbatim (not a re-implementation): one `Merge N`
@@ -2181,6 +2319,102 @@ export function installTestHooks(): void {
       return result.ok;
     },
 
+    // D4. Lands Separate Voice WITHOUT the model: the smoke must be able to
+    // assert the two-track landing without 166 MB and minutes of CPU, and the
+    // model is `separateStems`' business — already covered by the hook below.
+    //
+    // The synthetic output is an EXACT partition of the active document, built
+    // the way `partitionStems` builds a real one: four stems at four DIFFERENT
+    // weights (so a landing that grabbed the wrong stem index is visible — the
+    // Voice would be 0.37x rather than 0.19x), then a residual that is the
+    // float32 complement accumulated in the ruling-6 order the five-track
+    // landing replays. Everything after that is the shipped code path.
+    separateVoiceLand: () => {
+      const empty: VoiceLandingSummary = {
+        ok: false,
+        documentNames: [],
+        trackNames: [],
+        sessionName: null,
+        sampleRate: 0,
+        lengthSamples: 0,
+        channelCounts: [],
+        monoRoutedAsDualMono: false,
+        worstAbsError: null,
+      };
+      const source = activeDoc();
+      const length = source ? docLength(source) : 0;
+      if (!source || length === 0) return empty;
+
+      // Four DIFFERENT weights, summing to 0.90 so the residual is real audio
+      // rather than zeros: a fixture whose stems were all the same fraction
+      // would land identically with any two of them swapped.
+      const weights = [0.37, 0.23, 0.19, 0.11]; // Drums, Bass, Vocals, Other
+      const stems = weights.map((w) =>
+        source.channels.map((ch) => {
+          const out = new Float32Array(length);
+          for (let i = 0; i < length; i++) out[i] = w * ch[i];
+          return out;
+        })
+      );
+      const residual = source.channels.map((ch, c) => {
+        const out = new Float32Array(length);
+        for (let i = 0; i < length; i++) {
+          // `Math.fround` per step: the float32 accumulation in ruling-6 order
+          // that the real residual is the complement of, so this fixture has
+          // the partition's exact-sum property rather than merely resembling
+          // it.
+          let sum = 0;
+          for (const stem of stems) sum = Math.fround(sum + stem[c][i]);
+          out[i] = Math.fround(ch[i] - sum);
+        }
+        return out;
+      });
+
+      const landing = landVoice({
+        sourceDocId: source.id,
+        sourceName: source.name,
+        sampleRate: source.sampleRate,
+        channelCount: source.channels.length,
+        lengthSamples: length,
+        stems: STEM_LABELS.map((label, i) => ({ label, channels: stems[i] })),
+        residual,
+        sanitisedEstimateSamples: 0,
+      });
+
+      const store = useAppStore.getState();
+      const byId = new Map(store.documents.map((d) => [d.id, d]));
+      const landed = landing.documentIds.map((id) => byId.get(id) ?? null);
+      const live = byId.get(source.id) ?? null;
+      let worstAbsError: number | null = null;
+      if (live && landed[0] && landed[1]) {
+        let worst = 0;
+        for (let c = 0; c < live.channels.length; c++) {
+          const want = live.channels[c];
+          // A mono source landed dual-mono: both sides carry the same copy, so
+          // channel 0 of each document is the one to compare against it.
+          const voice = landed[0]!.channels[c] ?? landed[0]!.channels[0];
+          const backing = landed[1]!.channels[c] ?? landed[1]!.channels[0];
+          for (let i = 0; i < length; i++) {
+            const err = Math.abs(voice[i] + backing[i] - want[i]);
+            if (err > worst) worst = err;
+          }
+        }
+        worstAbsError = worst;
+      }
+
+      return {
+        ok: true,
+        documentNames: landed.map((d) => d?.name ?? '(missing)'),
+        trackNames: useSessionStore.getState().session.tracks.map((t) => t.name),
+        sessionName: landing.sessionName,
+        sampleRate: source.sampleRate,
+        lengthSamples: length,
+        channelCounts: landed.map((d) => d?.channels.length ?? 0),
+        monoRoutedAsDualMono: landing.monoRoutedAsDualMono,
+        worstAbsError,
+      };
+    },
+
     // Separates the ACTIVE document into stems and lands them, bypassing
     // SeparateDialog entirely — the same two calls the dialog makes
     // (`separateStems` then `landStems`), so the smoke exercises the service and
@@ -2529,6 +2763,44 @@ export function installTestHooks(): void {
         // Comparing lists also pins ORDER and MEMBERSHIP, which a count cannot.
         registryStageIds: VOCAL_CHAIN_STAGES.map((s) => s.id),
         registryManualIds: VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null).map((s) => s.id),
+      };
+    },
+
+    // D6. Drives runPodcastChain for the active document, bypassing
+    // PodcastChainDialog — so the smoke exercises the real derivations, the
+    // real worker leg, the real loudness measurement and the ONE undo entry.
+    //
+    // The peak is read off the DOCUMENT rather than off the report, deliberately:
+    // the report's `after` is measured on the region the chain held, and the
+    // claim the smoke needs is about the file that is now open. On a whole-file
+    // run the two agree; if they ever did not, the document is the one that
+    // ships.
+    podcastChainRun: async () => {
+      const before = activeDoc();
+      if (!before) {
+        return {
+          undoLabel: null,
+          beforeLufs: null,
+          afterLufs: null,
+          peakDb: null,
+          refusal: null,
+        };
+      }
+      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
+      const after = activeDoc();
+      const history = getHistory(before.id);
+      return {
+        // Only when the run actually applied: a refused or failed run must not
+        // report whatever entry happened to be on top of somebody else's
+        // history as though this chain had put it there.
+        undoLabel:
+          report?.applied === true && history.done.length > 0
+            ? history.done[history.done.length - 1]
+            : null,
+        beforeLufs: report ? report.before.lufs : null,
+        afterLufs: report ? report.after.lufs : null,
+        peakDb: finitePeak(after ? samplePeakDb(after.channels) : -Infinity),
+        refusal: report ? report.refusal : null,
       };
     },
 

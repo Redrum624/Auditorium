@@ -10,8 +10,13 @@ import { openRecordDialog } from './dialogBus';
  * View-routed transport. The transport UI and shortcuts always dispatch the
  * same `transport.playPause` / `transport.stop` command ids; this service picks
  * the engine by the active view — the single-document `PlaybackEngine` for the
- * waveform/spectral editor (behavior preserved verbatim from the original
- * menuActions implementation) or the `MultitrackPlayer` for the multitrack view.
+ * waveform/spectral editor or the `MultitrackPlayer` for the multitrack view.
+ *
+ * D2 — in the waveform/spectral editor the CURSOR BAR is where Play starts,
+ * always: Pause writes the paused position back to `cursorSample` and Play
+ * reads only the bar (never the engine's hidden paused position). The editor
+ * draws the playhead line only while playing, so after a pause the bar is the
+ * only line on screen; starting anywhere else is a start the user cannot see.
  *
  * The multitrack player has no pause (v1): play/pause toggles play↔stop and
  * always plays from the multitrack cursor. State/position are mirrored back into
@@ -49,24 +54,30 @@ export function transportPlayPause(): void {
     return;
   }
 
-  // --- Single-document (waveform/spectral) transport — unchanged semantics ---
+  // --- Single-document (waveform/spectral) transport — D2 ---
   if (!activeDoc(app)) return;
-  const { selection, cursorSample, playback, setPlayback } = app;
+  const { selection, cursorSample, playback, setCursor, setPlayback } = app;
 
-  // Playing -> pause, keeping the current position.
+  // Playing -> pause, and MOVE THE BAR to where playback stopped (D2). The bar
+  // is the only line left on screen once the playhead stops drawing, so it has
+  // to be the paused position — that is what keeps Space·Space a resume.
   if (playbackEngine.state === 'playing') {
     playbackEngine.pause();
-    setPlayback({ state: 'paused' });
+    const positionSample = playbackEngine.getPositionSample();
+    setCursor(positionSample);
+    setPlayback({ state: 'paused', positionSample });
     return;
   }
 
-  // Resume from the paused sample, else start at the selection or cursor.
+  // Start at the bar (D2) — the engine's paused position is never consulted.
+  // One exception: with a selection whose span does NOT contain the bar, Play
+  // starts at `selection.start`, because the region it is about to play is the
+  // selection and starting in front of it would play nothing. A bar INSIDE the
+  // selection starts there and still plays to the selection end.
   const from =
-    playbackEngine.state === 'paused'
-      ? playbackEngine.getPositionSample()
-      : selection
-        ? selection.start
-        : cursorSample;
+    selection && !(cursorSample >= selection.start && cursorSample < selection.end)
+      ? selection.start
+      : cursorSample;
 
   const opts: PlaybackPlayOptions = {};
   if (selection) {

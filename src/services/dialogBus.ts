@@ -5,7 +5,17 @@
 
 export type ConvertMode = 'sampleRate' | 'channels';
 
+/**
+ * D4 — which landing the Separate dialog opens on. ONE dialog and ONE
+ * separation run: `stems` lands the five tracks `edit.separateStems` has always
+ * produced, `voice` lands the same output as Voice + Backing (`voice.separate`).
+ * It rides the bus as a parameter for the reason `ConvertMode` does — the menu
+ * command must not import React to say which face of the dialog it wants.
+ */
+export type SeparateMode = 'stems' | 'voice';
+
 type OpenSetter = () => void;
+type OpenSeparateSetter = (mode: SeparateMode) => void;
 type OpenEffectSetter = (effectId: string) => void;
 type OpenConvertSetter = (mode: ConvertMode) => void;
 
@@ -16,12 +26,13 @@ let openConvert: OpenConvertSetter | null = null;
 let openRecord: OpenSetter | null = null;
 let openTempo: OpenSetter | null = null;
 let openRemix: OpenSetter | null = null;
-let openSeparate: OpenSetter | null = null;
+let openSeparate: OpenSeparateSetter | null = null;
 let openTranscribe: OpenSetter | null = null;
 let openVoiceChanger: OpenSetter | null = null;
 let openAlignTiming: OpenSetter | null = null;
 let openVocalChain: OpenSetter | null = null;
 let openCoverChain: OpenSetter | null = null;
+let openPodcastChain: OpenSetter | null = null;
 let openAlignLyrics: OpenSetter | null = null;
 let focusRemix: OpenSetter | null = null;
 let focusTranscript: OpenSetter | null = null;
@@ -35,7 +46,7 @@ export function registerDialogSetters(setters: {
   openRecordDialog: OpenSetter;
   openTempoDialog: OpenSetter;
   openRemixDialog: OpenSetter;
-  openSeparateDialog: OpenSetter;
+  openSeparateDialog: OpenSeparateSetter;
   openTranscribeDialog: OpenSetter;
   openVoiceChangerDialog: OpenSetter;
   /** F9's Align Vocal Timing dialog. */
@@ -44,6 +55,8 @@ export function registerDialogSetters(setters: {
   openVocalChainDialog: OpenSetter;
   /** F10's Cover Chain dialog. */
   openCoverChainDialog: OpenSetter;
+  /** D6's Podcast Chain dialog. */
+  openPodcastChainDialog: OpenSetter;
   /** F6's Align Lyrics dialog. */
   openAlignLyricsDialog: OpenSetter;
   /** Not a dialog: opens the Remix panel card once a remix document exists
@@ -76,6 +89,7 @@ export function registerDialogSetters(setters: {
   openAlignTiming = setters.openAlignTimingDialog;
   openVocalChain = setters.openVocalChainDialog;
   openCoverChain = setters.openCoverChainDialog;
+  openPodcastChain = setters.openPodcastChainDialog;
   openAlignLyrics = setters.openAlignLyricsDialog;
   focusRemix = setters.focusRemixPanel;
   focusTranscript = setters.focusTranscriptPanel;
@@ -94,6 +108,7 @@ export function registerDialogSetters(setters: {
     openAlignTiming = null;
     openVocalChain = null;
     openCoverChain = null;
+    openPodcastChain = null;
     openAlignLyrics = null;
     focusRemix = null;
     focusTranscript = null;
@@ -129,8 +144,8 @@ export function openRemixDialog(): void {
   openRemix?.();
 }
 
-export function openSeparateDialog(): void {
-  openSeparate?.();
+export function openSeparateDialog(mode: SeparateMode): void {
+  openSeparate?.(mode);
 }
 
 export function openTranscribeDialog(): void {
@@ -151,6 +166,10 @@ export function openVocalChainDialog(): void {
 
 export function openCoverChainDialog(): void {
   openCoverChain?.();
+}
+
+export function openPodcastChainDialog(): void {
+  openPodcastChain?.();
 }
 
 export function openAlignLyricsDialog(): void {

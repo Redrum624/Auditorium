@@ -72,6 +72,88 @@ describe('transportService', () => {
       expect(useAppStore.getState().playback.state).toBe('paused');
     });
 
+    // --- D2: the bar is where Play starts (waveform/spectral) ---
+
+    it('D2: Play starts at the bar, never at the engine paused position', () => {
+      openDoc();
+      // Paused at 5 000, then the user clicked the ruler at 12 345: the bar wins.
+      peState.mockReturnValue('paused');
+      (playbackEngine.getPositionSample as jest.Mock).mockReturnValue(5000);
+      useAppStore.setState({ cursorSample: 12345 });
+
+      transportPlayPause();
+
+      expect(playbackEngine.play).toHaveBeenCalledWith(12345, {});
+      expect(useAppStore.getState().playback).toMatchObject({
+        state: 'playing',
+        positionSample: 12345,
+      });
+    });
+
+    it('D2: Pause moves the bar to the paused position, so Space-Space resumes there', () => {
+      openDoc();
+      useAppStore.setState({ cursorSample: 1234 });
+      peState.mockReturnValue('playing');
+      (playbackEngine.getPositionSample as jest.Mock).mockReturnValue(8800);
+
+      transportPlayPause();
+
+      expect(playbackEngine.pause).toHaveBeenCalledTimes(1);
+      expect(useAppStore.getState().cursorSample).toBe(8800);
+      expect(useAppStore.getState().playback).toMatchObject({
+        state: 'paused',
+        positionSample: 8800,
+      });
+
+      // Space again resumes from the bar the pause just wrote.
+      peState.mockReturnValue('paused');
+      transportPlayPause();
+      expect(playbackEngine.play).toHaveBeenCalledWith(8800, {});
+    });
+
+    it('D2: a bar inside the selection starts there; outside it starts at selection.start', () => {
+      openDoc();
+      const selection = { start: 1000, end: 4000 };
+      useAppStore.setState({ selection, cursorSample: 2500 });
+
+      transportPlayPause();
+      expect(playbackEngine.play).toHaveBeenLastCalledWith(2500, { playRegion: selection });
+
+      useAppStore.setState({ cursorSample: 9000 });
+      transportPlayPause();
+      expect(playbackEngine.play).toHaveBeenLastCalledWith(1000, { playRegion: selection });
+    });
+
+    it('D2: selection.start counts as inside, selection.end as outside', () => {
+      openDoc();
+      const selection = { start: 1000, end: 4000 };
+      useAppStore.setState({ selection, cursorSample: 1000 });
+
+      transportPlayPause();
+      expect(playbackEngine.play).toHaveBeenLastCalledWith(1000, { playRegion: selection });
+
+      useAppStore.setState({ cursorSample: 3999 });
+      transportPlayPause();
+      expect(playbackEngine.play).toHaveBeenLastCalledWith(3999, { playRegion: selection });
+
+      useAppStore.setState({ cursorSample: 4000 });
+      transportPlayPause();
+      expect(playbackEngine.play).toHaveBeenLastCalledWith(1000, { playRegion: selection });
+    });
+
+    it('D2: loop on keeps the bar as the start and loops the selection', () => {
+      openDoc();
+      const selection = { start: 1000, end: 4000 };
+      useAppStore.setState({
+        selection,
+        cursorSample: 2500,
+        playback: { state: 'stopped', positionSample: 0, loop: true },
+      });
+
+      transportPlayPause();
+      expect(playbackEngine.play).toHaveBeenCalledWith(2500, { loopRegion: selection });
+    });
+
     it('is a no-op without an active document', () => {
       transportPlayPause();
       expect(playbackEngine.play).not.toHaveBeenCalled();

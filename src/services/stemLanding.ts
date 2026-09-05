@@ -107,6 +107,13 @@ export const STEM_TRACK_LABELS = [...STEM_LABELS, 'Residual'] as const;
 export type StemTrackLabel = (typeof STEM_TRACK_LABELS)[number];
 
 /**
+ * D4 — the two track/document labels Separate Voice lands, Voice FIRST (it is
+ * the headline output; the Backing is what is left once it is taken away).
+ */
+export const VOICE_TRACK_LABELS = ['Voice', 'Backing'] as const;
+export type VoiceTrackLabel = (typeof VOICE_TRACK_LABELS)[number];
+
+/**
  * The per-track fader that would exactly invert the constant-power pan law:
  * 20·log10(√2) = +3.0102999566398121 dB. Exported for documentation and for the
  * test that pins WHY it is not what ships — see the measurement table in the
@@ -117,6 +124,20 @@ export const MONO_PAN_COMPENSATION_DB = 20 * Math.log10(Math.SQRT2);
 /** Name given to the session that lands the stems: `<source> — Stems`. */
 export function stemSessionName(sourceName: string): string {
   return `${sourceName} — Stems`;
+}
+
+/**
+ * D4 — name given to the session Separate Voice lands:
+ * `<source> — Voice + Backing`.
+ *
+ * NOT `<source> — Voice`, which is already the name of one of the two
+ * DOCUMENTS it creates: the session name is also the default filename for the
+ * project save, and two different things called `Song — Voice` in one window is
+ * how a user overwrites the wrong one. It is the same phrase the dialog uses
+ * for what the run produces.
+ */
+export function voiceSessionName(sourceName: string): string {
+  return `${sourceName} — Voice + Backing`;
 }
 
 /**
@@ -226,18 +247,31 @@ function documentChannels(stem: Float32Array[]): Float32Array[] {
  * keeps coming from the one place that owns it.
  */
 export function createStemDocuments(output: StemSeparationOutput): StemDocumentsResult {
-  const app = useAppStore.getState();
-
-  const stemChannelSets: Float32Array[][] = [
+  return createLandingDocuments(output, STEM_TRACK_LABELS, [
     ...output.stems.map((s) => s.channels),
     output.residual,
-  ];
+  ]);
+}
 
-  const docs: AudioDocument[] = STEM_TRACK_LABELS.map((label, i) =>
+/**
+ * D4 — the body `createStemDocuments` and `landVoice` share: one document per
+ * label, first one active, each carrying the source's beat-grid provenance, and
+ * the source-peak verdict measured once. Only the LABELS and the CHANNELS
+ * differ between the two landings, so only they are parameters; everything the
+ * docblock above promises is stated here once and holds for both.
+ */
+function createLandingDocuments(
+  output: StemSeparationOutput,
+  labels: readonly string[],
+  channelSets: readonly Float32Array[][]
+): StemDocumentsResult {
+  const app = useAppStore.getState();
+
+  const docs: AudioDocument[] = labels.map((label, i) =>
     createDocument({
       name: `${output.sourceName} — ${label}`,
       sampleRate: output.sampleRate,
-      channels: documentChannels(stemChannelSets[i]),
+      channels: documentChannels(channelSets[i]),
     })
   );
   for (const doc of docs) app.addDocument(doc);
@@ -283,8 +317,29 @@ export function buildStemSession(
   output: StemSeparationOutput,
   documentIds: readonly string[]
 ): StemSessionResult {
+  return buildLandingSession(
+    output,
+    documentIds,
+    STEM_TRACK_LABELS,
+    stemSessionName(output.sourceName)
+  );
+}
+
+/**
+ * D4 — the body `buildStemSession` and `landVoice` share: one full-length clip
+ * per document on a track named after it, installed in place of whatever
+ * session was open, transients cleared, history dropped, multitrack shown. The
+ * track NAMES and the session name are the only difference between the two
+ * landings.
+ */
+function buildLandingSession(
+  output: StemSeparationOutput,
+  documentIds: readonly string[],
+  labels: readonly string[],
+  name: string
+): StemSessionResult {
   const tracks: Track[] = documentIds.map((documentId, i) => {
-    const track = createTrack(STEM_TRACK_LABELS[i]);
+    const track = createTrack(labels[i]);
     track.clips = [
       createClip({
         documentId,
@@ -299,7 +354,7 @@ export function buildStemSession(
   });
 
   const session: Session = {
-    name: stemSessionName(output.sourceName),
+    name,
     sampleRate: output.sampleRate,
     tracks,
   };
@@ -347,5 +402,82 @@ export function buildStemSession(
 export function landStems(output: StemSeparationOutput): StemLandingResult {
   const documents = createStemDocuments(output);
   const session = buildStemSession(output, documents.documentIds);
+  return { ...documents, ...session };
+}
+
+/**
+ * D4 — Drums + Bass + Other + Residual, summed sample by sample: everything the
+ * separation produced EXCEPT the voice.
+ *
+ * Accumulated in a `Float32Array` (`+=` rounds to float32 on every step), which
+ * is not a shortcut but the point: it is the same arithmetic `mixdownSession`
+ * would have done had these four stayed on four tracks, so the Backing document
+ * is what the user would have heard from the four-track mute rather than an
+ * approximation of it.
+ *
+ * The channel count is the STEMS' own — the dual-mono widening for a mono
+ * source happens later, in `documentChannels`, exactly once and in one place.
+ */
+function backingChannels(output: StemSeparationOutput): Float32Array[] {
+  const parts: Float32Array[][] = [
+    ...output.stems.filter((s) => s.label !== 'Vocals').map((s) => s.channels),
+    output.residual,
+  ];
+  const channelCount = parts[0]?.length ?? 0;
+  const backing: Float32Array[] = [];
+  for (let c = 0; c < channelCount; c++) {
+    const sum = new Float32Array(output.lengthSamples);
+    for (const part of parts) {
+      const src = part[c];
+      for (let i = 0; i < sum.length; i++) sum[i] += src[i];
+    }
+    backing.push(sum);
+  }
+  return backing;
+}
+
+/**
+ * D4 — Separate Voice: the SAME separation run as {@link landStems}, landed as
+ * TWO documents and a two-track session instead of five.
+ *
+ * `<source> — Voice` is the Vocals stem verbatim; `<source> — Backing` is the
+ * other four summed. Because the five are a partition of the source (the module
+ * header's guarantee), the two are one too — but to a TOLERANCE rather than
+ * bit-exactly: re-associating the sum into (Vocals) + (the other four) rounds
+ * where the five-track order does not, that order being precisely what makes
+ * `Σ stems + (mix − Σ stems)` collapse back to `mix` sample for sample.
+ * Measured on the acceptance fixture: 4.32e-7 worst (−127 dBFS, a seventieth
+ * of the smallest step a 16-bit file can store), 66 % of samples still
+ * bit-identical. The dialog's voice copy
+ * says exactly that — neither it nor this claims the five-stem exactness for
+ * two tracks. No second model run and no second download: the caller hands
+ * over an output it already has.
+ *
+ * Everything else is `landStems`' behaviour verbatim, through the same two
+ * halves: unsaved documents carrying the source's beat-grid provenance, a fresh
+ * session at the output rate with one full-length clip per track, the previous
+ * session and its undo history dropped, and the multitrack view.
+ */
+export function landVoice(output: StemSeparationOutput): StemLandingResult {
+  // Selected by LABEL, like the backing sum below, so neither half depends on
+  // the position of Vocals in the array (`stemService` swaps Vocals and Other
+  // out of the host's own order — the one place that swap lives). `stems` is
+  // exactly the four `STEM_LABELS` by contract, so the find always hits; the
+  // empty fallback exists only because the type is an array rather than a
+  // tuple. It is unreachable under that contract — and it is not a graceful
+  // degradation if it ever is reached: a zero-channel document would be BUILT
+  // and landed, not skipped. The point of the fallback is only that it invents
+  // no audio; the contract is what keeps it out of reach.
+  const vocals = output.stems.find((s) => s.label === 'Vocals')?.channels ?? [];
+  const documents = createLandingDocuments(output, VOICE_TRACK_LABELS, [
+    vocals,
+    backingChannels(output),
+  ]);
+  const session = buildLandingSession(
+    output,
+    documents.documentIds,
+    VOICE_TRACK_LABELS,
+    voiceSessionName(output.sourceName)
+  );
   return { ...documents, ...session };
 }

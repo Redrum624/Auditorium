@@ -6,15 +6,18 @@ import { segmentAt } from '../../services/segments';
 import { isOnCursorHandle, pixelToSample, sampleToPixel } from './waveformRender';
 import { editorSnapTargets } from './editorSnapTargets';
 import { dragToSelection, exceedsDragThreshold, shiftClickAnchor } from './selectionGestures';
+import { editorLaneWidth } from '../../services/editorViewport';
+import { anchoredZoom } from '../../services/zoomAnchor';
 
 /**
  * Shared editor pointer/wheel gestures for the waveform and spectrogram views:
- * plain/ctrl wheel zooms centered on the mouse, shift-wheel scrolls; click sets
- * the cursor, drag past 3px makes a selection, shift-click extends, double-click
- * selects the segment under the pointer (item 8 / M3: the span between the two
- * nearest markers; the whole document when there are none). All state lives in
- * the app store; the only transient (the active drag) is a ref. Reuses the pure
- * helpers in selectionGestures/waveformRender so both views behave identically.
+ * plain/ctrl wheel zooms anchored on the EDIT CURSOR (D1 — it centred on the
+ * mouse until then), shift-wheel scrolls; click sets the cursor, drag past 3px
+ * makes a selection, shift-click extends, double-click selects the segment
+ * under the pointer (item 8 / M3: the span between the two nearest markers; the
+ * whole document when there are none). All state lives in the app store; the
+ * only transient (the active drag) is a ref. Reuses the pure helpers in
+ * selectionGestures/waveformRender/zoomAnchor so both views behave identically.
  *
  * ---------------------------------------------------------------------------
  * TASK B4 — THE MAGNET
@@ -134,16 +137,19 @@ export function useEditorGestures(
         return;
       }
 
-      const rect = canvas.getBoundingClientRect();
-      const mouseX = e.clientX - rect.left;
-      const anchorSample = pixelToSample(mouseX, z.scrollSample, z.samplesPerPixel);
-      const factor = e.deltaY < 0 ? 1 / ZOOM_FACTOR : ZOOM_FACTOR;
-      applyEditorZoom({
-        samplesPerPixel: z.samplesPerPixel * factor,
-        // Anchored on the RESOLVED spp, so the sample under the pointer stays
-        // under the pointer even when the request was clamped.
-        scrollSample: (spp) => anchorSample - mouseX * spp,
-      });
+      // D1 — the zoom anchors on the BAR, not on the pointer this handler used
+      // to read out of `e.clientX`. The cursor is read from the store rather
+      // than from the hook's rendered `cursorSample`: this effect depends only
+      // on `canvasRef`, so a closed-over value would pin every zoom to wherever
+      // the bar stood when the view mounted (sample 0, for a fresh document).
+      applyEditorZoom(
+        anchoredZoom({
+          zoom: z,
+          laneWidth: editorLaneWidth(),
+          anchorSample: useAppStore.getState().cursorSample,
+          factor: e.deltaY < 0 ? 1 / ZOOM_FACTOR : ZOOM_FACTOR,
+        })
+      );
     };
 
     canvas.addEventListener('wheel', onWheel, { passive: false });

@@ -17,7 +17,7 @@ import { SectionLabel } from '../UI/glass';
  * show the same rows: the Effects card is an EFFECT browser with the tools
  * appended below a long scrolling list, so reaching Cover Chain there meant
  * scrolling past every registered effect. A module is a place you go — one
- * click on the strip and the ten tools are the whole card. Item 5 of the
+ * click on the strip and the tools are the whole card. Item 5 of the
  * 2026-08-18 program then made this card the ONLY one: a Pipeline tool no
  * longer appears in the Effects card at all ("if it is in Pipeline, remove it
  * from Effects"), and this card renders `getPipelineGroups()` alone.

@@ -2,6 +2,7 @@ import { useCallback, type ComponentType } from 'react';
 import AlignLyricsDialog from './AlignLyricsDialog';
 import AlignTimingDialog from './AlignTimingDialog';
 import CoverChainDialog from './CoverChainDialog';
+import PodcastChainDialog from './PodcastChainDialog';
 import RemixDialog from './RemixDialog';
 import SeparateDialog from './SeparateDialog';
 import TempoDialog from './TempoDialog';
@@ -13,19 +14,31 @@ import { GlassCard } from '../UI/glass';
 import { MODULE_COLUMN_WIDTH, TOOL_HOST_WIDTH } from '../Layout/ModuleStrip';
 
 /**
+ * D4 — `voice.separate` mounts the SAME `SeparateDialog` as
+ * `edit.separateStems`, in voice mode. A wrapper rather than a second entry in
+ * a props table beside the map: the map is the one answer to "which rows
+ * open a tool", and a parallel table keyed by the same ids would be a second
+ * place for that answer to go wrong.
+ */
+function SeparateVoiceDialog({ onClose }: { onClose(): void }) {
+  return <SeparateDialog mode="voice" onClose={onClose} />;
+}
+
+/**
  * U2-3 — the tool-host card: a pipeline tool rendered IN the module column
  * instead of over the stage.
  *
  * The registry below is the answer to "which Pipeline rows open a tool UI", and
  * it is the honest one: a row is hosted exactly when a component is mounted for
- * it here. The Pipeline menu has ten rows and only nine are in this map —
+ * it here. The Pipeline menu has twelve rows and only eleven are in this map —
  * `tempo.detect` runs an analysis and reports through its own channel — so
- * "every Pipeline tool" would have been wrong, and a written list of nine ids
+ * "every Pipeline tool" would have been wrong, and a written list of ids
  * somewhere else would have been a second place for it to go wrong.
  * (`spatial.position`, which puts an existing PANEL in the ordinary module
  * card, was the other unhosted row until T8 moved it to the Effects menu.)
  *
- * Every one of the nine is imported UNCHANGED. Each renders its body inside
+ * Every one of them is imported UNCHANGED (D4's `voice.separate` reaching one
+ * of them a second time, through the wrapper above). Each renders its body inside
  * `DialogShell`, and the provider below is what tells that shared shell to draw
  * card chrome rather than a modal — so the whole move cost the dialogs nothing,
  * which is also what let it happen alongside a concurrent rewrite of
@@ -37,9 +50,11 @@ const PIPELINE_TOOL_COMPONENTS: Record<string, ComponentType<{ onClose(): void }
   'timing.align': AlignTimingDialog,
   'edit.remix': RemixDialog,
   // Voice
+  'voice.separate': SeparateVoiceDialog,
   'edit.voiceChanger': VoiceChangerDialog,
   'effects.vocalChain': VocalChainDialog,
   'effects.coverChain': CoverChainDialog,
+  'effects.podcastChain': PodcastChainDialog,
   'lyrics.align': AlignLyricsDialog,
   // Analysis
   'edit.transcribe': TranscribeDialog,
@@ -59,7 +74,7 @@ export function hostedToolIds(): string[] {
 /**
  * The card's width, and why it is 640 rather than the module column's 348.
  *
- * It is measured, not chosen: 640 is the widest `width` any of the nine hands
+ * It is measured, not chosen: 640 is the widest `width` any hosted dialog hands
  * `DialogShell` (`CoverChainDialog`), with Auto-Remix and Vocal Chain at 600
  * and Align Lyrics at 560 behind it. Hosting at anything narrower would reflow
  * content laid out against those numbers, and anything wider would buy nothing
@@ -69,7 +84,7 @@ export function hostedToolIds(): string[] {
  * that would break first. That table no longer exists — the journey rewrite
  * removed both of the Cover Chain's multi-column tables — so the example was
  * describing a dialog that had not looked like that for a release. The remix
- * plan's per-run bars are now the widest laid-out content among the nine and are
+ * plan's per-run bars are now the widest laid-out content among them and are
  * what a narrower host would break.
  *
  * Which leaves 640 held by the REQUEST rather than by that request's content:

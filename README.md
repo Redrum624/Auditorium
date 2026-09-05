@@ -141,22 +141,24 @@ over the audio.
 
 - **Waveform Editor** — per-sample amplitude view with zoom, scroll, selection, cursor and playhead.
 - **Spectral Frequency Display** — off-main-thread spectrogram, log or linear axis, HiDPI-rendered.
-- **Multitrack Editor** — tracks and clips with volume/pan/mute/solo/arm, non-destructive fades and crossfades, multi-clip selection with cross-track group drag, ripple delete, merge selected clips into one (silence in the gaps), per-track automation envelopes, and one-step-per-gesture session undo.
+- **Multitrack Editor** — tracks and clips with volume/pan/mute/solo/arm, non-destructive fades and crossfades, multi-clip selection with cross-track group drag, ripple delete, merge selected clips into one (silence in the gaps), **selectable gaps** (double-click the empty stretch between two clips and `Del` closes it, moving only that track's later clips), per-track automation envelopes, and one-step-per-gesture session undo.
 - **Spatial Panel** — places a track's sound around the listener (azimuth/elevation/distance, honest stereo projection — not binaural), writing automation keys on release.
 - **Recorder** — input-device selection, channel/rate choice, live level meter; multitrack punch-in on armed tracks.
 - **Effects Rack** — categorized effects, each opening on one click as a card in the module column; the Pipeline tools have their own module.
-- **Pipeline Module & Menu** — the ten long-running tools in three groups (Tempo & Timing, Voice, Analysis); each opens as a wide card in the module column.
+- **Pipeline Module & Menu** — the twelve long-running tools in three groups (Tempo & Timing, Voice, Analysis); each opens as a wide card in the module column.
 - **Files / History / Markers / Properties Panels** — open documents, browsable undo history, the marker list, and read-only facts about the active document or clip.
 - **Module Strip** — the icon strip over the module column; the bar and the open module are always the same width.
 - **Edit Toolbar** — floating Split/Merge/Copy/Paste/Delete, Trim/Silence, Undo/Redo pill, greyed by the same rules as the menu (Split at Cursor is `Ctrl+K`; Merge Clips has no key and lights only in the Multitrack view; Cut keeps `Ctrl+X` in the Edit menu).
-- **Transport & Level Meters** — play/stop/record/loop, view toggle, zoom cluster, time readout and output meters, centred on the waveform rather than the window.
+- **Transport & Level Meters** — play/stop/record/loop, view toggle, zoom cluster, time readout and output meters, centred on the waveform rather than the window. **Play starts at the position line**, always — Pause moves the line to where playback stopped, so `Space`·`Space` still resumes; the one exception is a selection the line sits outside, which plays from the selection's start.
 - **Tempo Readout & Beat Grid** — detected BPM with confidence everywhere it matters, and the tracked beats drawn under all three editors (dimmed and dashed when stale rather than presented as fact).
 - **Match Tempo Tool** — one ratio or a per-beat tempo map from the confirmed grid; measured on accelerandi: worst interior beat 526 ms → 4.6 ms at 0.83 BPM/s drift.
 - **Align Vocal Timing Tool** — warps syllables onto the grid between anchors you confirm; defaults to 25 % strength because a fully quantised vocal sounds machine-made.
 - **Align Lyrics Tool** — places every word of known lyrics against the recording (median 20 ms word-start accuracy, measured); click a word to hear it, re-record just that word, and it splices in level- and pitch-matched, length-preserved.
 - **Vocal Chain Tool** — eleven correction stages in a measured order, each reporting its derived settings, its delta, or the measurement that made it decline. The noise gate decides *where*, not how loud — see Features.
 - **Cover Chain Tool** — the six-stage journey from original song + your take to a finished two-track session, with the caveats stated above the Run button.
+- **Podcast Chain Tool** — ten speech-tuned stages ending in a delivery target: DC removal, noise reduction, de-hum, shortened pauses, gate, compression, de-essing, EQ, **loudness to −16 LUFS (stereo) or −19 LUFS (mono)** by ITU-R BS.1770-4, and a limiter at −1.0 dBFS **sample peak**. One undo entry; documents with more than two channels are refused rather than mis-measured.
 - **Auto-Remix Tool & Remix Panel** — re-arranges a track's own bars to a target length; every splice inspectable, rejectable, pinnable (up to four pins guaranteed to survive every re-plan) and undoable.
+- **Separate Voice Tool** — the same separation landed as two tracks instead of five: `— Voice` and `— Backing` (drums + bass + everything else + residual). The two add back up to the source **within float32 rounding** (measured worst error 4.32e-7) — the five-stem landing is the bit-exact one.
 - **Separate into Stems Tool** — Drums/Bass/Vocals/Other + Residual as five documents and a session that sums back to the source **bit-exactly** (measured: worst error 0).
 - **Transcribe Tool & Transcript Panel** — timestamped speech-to-text with speaker labels, coloured timeline regions, instant speaker-count regrouping, SRT/WebVTT export.
 - **Voice Changer Tool** — re-timbres a recording toward a saved voice profile; requires an explicit rights affirmation before any reference clip is used.
@@ -171,6 +173,7 @@ over the audio.
 - Markers persist sample-accurately in every container (WAV cue, ID3 chapters, FLAC/OGG chapter tags) and survive destructive edits by remapping.
 - Snapping ("the magnet"): cursor, selections, clip drags and trims quantise to clip edges, beats, markers and the session cursor — placed geometry outranks derived; Alt suspends.
 - The draggable red cursor handle rides all three views, snap-aware, transport-neutral.
+- **Zoom anchors on the position line**, on every path and both surfaces — `Ctrl`+wheel and the toolbar's `−`/`+` alike, in the waveform, spectral and multitrack views. The line keeps its place on screen; when it is off screen the new view is centred on it. `Shift`+wheel scrolls and **Fit** are unchanged.
 - Projects save as `.audm` (binary v4, v3 still opens) carrying every open document plus the session's clips, fades, crossfades, automation and spatial lanes; Mix Down renders bit-identically to live playback.
 
 **The vocal chain, in one paragraph**

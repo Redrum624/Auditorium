@@ -265,19 +265,27 @@ describe('the handle beside the playhead and the viewport (T7)', () => {
     expect(screen.getByTestId('mt-playhead').style.left).toBe(`${MT_HEADER_W + 555}px`);
   });
 
-  it('hides when the cursor is scrolled out of view, on the canvas cull’s own boundary', () => {
-    // Left edge: the last visible position keeps a sliver of triangle in view.
+  it('hides when the cursor is scrolled out of view, on the LINE’s exact-edge boundary', () => {
+    // Task 8 review (round 1): the handle used to keep its own ±HALF_W
+    // tolerance — a sliver of triangle stayed visible up to
+    // CURSOR_HANDLE_HALF_W px beyond where the line itself disappeared,
+    // mirroring the editor's CANVAS (`waveformRender.ts`'s `drawCursorHandle`
+    // is independently culled from its plain cursor line, and is licensed to
+    // outlive it by half its own width). That tolerance is gone for THIS DOM
+    // overlay: "the handle's hit band follows the line (no handle without a
+    // line)" means a lone triangle with nothing under it would read as a
+    // rendering bug here, not a feature, so the handle now shares the line's
+    // own exact-edge `laneVisible` rule. The canvas is untouched — this pin
+    // moved only because the DOM overlay's rule did.
+    //
+    // Left edge: the last visible position is the lane origin itself.
     store().setMtCursor(0);
-    useSessionStore.setState({
-      mtZoom: { samplesPerPixel: SPP, scrollSample: CURSOR_HANDLE_HALF_W * SPP },
-    });
+    useSessionStore.setState({ mtZoom: { samplesPerPixel: SPP, scrollSample: 0 } });
     const { unmount } = render(<MultitrackView />);
     expect(screen.queryByTestId('mt-cursor-handle')).not.toBeNull();
     unmount();
 
-    useSessionStore.setState({
-      mtZoom: { samplesPerPixel: SPP, scrollSample: (CURSOR_HANDLE_HALF_W + 1) * SPP },
-    });
+    useSessionStore.setState({ mtZoom: { samplesPerPixel: SPP, scrollSample: 1 * SPP } });
     const second = render(<MultitrackView />);
     expect(screen.queryByTestId('mt-cursor-handle')).toBeNull();
     second.unmount();
@@ -285,12 +293,12 @@ describe('the handle beside the playhead and the viewport (T7)', () => {
     // Right edge: the lane width published to the store bounds the viewport.
     const laneW = sessionLaneWidth();
     useSessionStore.setState({ mtZoom: { samplesPerPixel: SPP, scrollSample: 0 } });
-    store().setMtCursor((laneW + CURSOR_HANDLE_HALF_W) * SPP);
+    store().setMtCursor(laneW * SPP);
     const third = render(<MultitrackView />);
     expect(screen.queryByTestId('mt-cursor-handle')).not.toBeNull();
     third.unmount();
 
-    store().setMtCursor((laneW + CURSOR_HANDLE_HALF_W + 1) * SPP);
+    store().setMtCursor((laneW + 1) * SPP);
     render(<MultitrackView />);
     expect(screen.queryByTestId('mt-cursor-handle')).toBeNull();
   });

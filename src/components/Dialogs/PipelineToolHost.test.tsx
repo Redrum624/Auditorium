@@ -24,11 +24,22 @@ function hostedToolSources(): { id: string; file: string; source: string }[] {
   for (const m of HOST_SRC.matchAll(/import\s+(\w+)\s+from\s+'\.\/(\w+)';/g)) {
     imports.set(m[1], m[2]);
   }
+  // D4: an id may map to a local WRAPPER declared in the host — `voice.separate`
+  // mounts `SeparateDialog` with `mode="voice"` — so the name is resolved
+  // through it to the DIALOG file. Without this the gates below would measure
+  // the wrapper (no width, no `dismissable`) instead of the tool that runs.
+  const fileFor = (name: string): string => {
+    const direct = imports.get(name);
+    if (direct) return direct;
+    const wrapper = new RegExp(`function\\s+${name}\\s*\\([\\s\\S]*?<(\\w+)[\\s/>]`).exec(HOST_SRC);
+    const inner = wrapper === null ? undefined : imports.get(wrapper[1]);
+    if (!inner) throw new Error(`no import for ${name}`);
+    return inner;
+  };
   return hostedToolIds().map((id) => {
     const entry = HOST_SRC.match(new RegExp(`'${id.replace('.', '\\.')}':\\s*(\\w+),`));
     if (!entry) throw new Error(`no component mapped for ${id}`);
-    const file = imports.get(entry[1]);
-    if (!file) throw new Error(`no import for ${entry[1]}`);
+    const file = fileFor(entry[1]);
     return { id, file, source: readFileSync(join(__dirname, `${file}.tsx`), 'utf8') };
   });
 }
@@ -36,7 +47,7 @@ function hostedToolSources(): { id: string; file: string; source: string }[] {
 /**
  * Source with block and line comments removed.
  *
- * Needed because three of the nine (`AlignLyricsDialog`, `TranscribeDialog`,
+ * Needed because three of the ten (`AlignLyricsDialog`, `TranscribeDialog`,
  * `SeparateDialog`) also QUOTE `dismissable={!busy}` in their header comment to
  * explain their lifetime. A first-match search would find the prose, so
  * deleting the real JSX attribute from one of those three would leave the gate
@@ -49,22 +60,25 @@ function stripComments(source: string): string {
 describe('PipelineToolHost — which Pipeline rows it hosts', () => {
   /**
    * U2-3: hosting is a property of the COMMAND, and the property is "the host
-   * mounts something for it". One of the Pipeline menu's ten rows opens no
+   * mounts something for it". One of the Pipeline menu's twelve rows opens no
    * tool UI at all — `tempo.detect` runs an analysis and reports through its
    * own channel — so "every Pipeline row" would have been wrong. (T8 moved
    * `spatial.position`, the other unhosted command, to the Effects menu; it
    * still puts an existing PANEL in the ordinary module card, and it still
    * must not be hosted.)
    */
-  it('claims nine of the Pipeline menu’s ten rows, and only rows that open a UI', () => {
+  it('claims eleven of the Pipeline menu’s twelve rows, and only rows that open a UI', () => {
     const ids = getPipelineGroups().flatMap((g) => g.commands.map((c) => c.id));
     expect(ids.filter(isPipelineTool)).toEqual([
       'tempo.match',
       'timing.align',
       'edit.remix',
+      // D4: hosted through the same `SeparateDialog`, in voice mode.
+      'voice.separate',
       'edit.voiceChanger',
       'effects.vocalChain',
       'effects.coverChain',
+      'effects.podcastChain',
       'lyrics.align',
       'edit.transcribe',
       'edit.separateStems',
@@ -91,7 +105,7 @@ describe('PipelineToolHost — which Pipeline rows it hosts', () => {
 /**
  * The gate on the block mechanism itself.
  *
- * `dismissable={!busy}` in these nine files IS the mid-run block. The host reads
+ * `dismissable={!busy}` in these ten files IS the mid-run block. The host reads
  * nothing else: that one expression is what greys the module strip, refuses the
  * ✕ and suspends the global shortcuts while a pass runs. Delete it from any one
  * file and `DialogShell`'s default (`dismissable = true`) takes over — that
@@ -108,17 +122,20 @@ describe('PipelineToolHost — which Pipeline rows it hosts', () => {
  * SHAPE plus the wiring: the prop appears exactly once outside comments, its
  * value is the negation of a bare identifier, and that identifier is really
  * declared in the file (a `useState` binding, or a `const` derived from
- * several — both forms are in use across the nine). A literal, an inversion or
+ * several — both forms are in use across the ten). A literal, an inversion or
  * a deletion all fail; a rename passes and stays honest.
  */
 describe('PipelineToolHost — every hosted tool publishes its busy state', () => {
-  it('hands DialogShell a `dismissable` wired to a real flag, in all nine', () => {
+  it('hands DialogShell a `dismissable` wired to a real flag, in all eleven', () => {
     const findings = hostedToolSources().map(({ id, file, source }) => {
       const code = stripComments(source);
       const all = [...code.matchAll(/dismissable(?:=\{([^}]*)\})?/g)];
       return { id, file, code, occurrences: all.length, value: all[0]?.[1]?.trim() };
     });
-    expect(findings).toHaveLength(9);
+    // Eleven hosted ids over ten dialog FILES: D4's `voice.separate` and
+    // `edit.separateStems` are the same file, checked once per id.
+    expect(findings).toHaveLength(11);
+    expect(new Set(findings.map((f) => f.file)).size).toBe(10);
 
     for (const { id, file, code, occurrences, value } of findings) {
       // Exactly one, so a second copy cannot mask a broken first.
@@ -156,7 +173,7 @@ describe('PipelineToolHost — every hosted tool publishes its busy state', () =
     const quoted = hostedToolSources().filter(({ source }) =>
       /\*.*dismissable=\{!busy\}/.test(source)
     );
-    expect(quoted.map((q) => q.file).sort()).toEqual([
+    expect([...new Set(quoted.map((q) => q.file))].sort()).toEqual([
       'AlignLyricsDialog',
       'SeparateDialog',
       'TranscribeDialog',
@@ -183,16 +200,16 @@ describe('PipelineToolHost — the card’s width is measured, not chosen', () =
       // written in prose above the attribute is read INSTEAD of the attribute.
       // Proven by a decoy — a commented `width={9999}` over an untouched
       // `width={440}` made this test demand 9999. M4's width ruling put a
-      // paragraph discussing two widths directly above one of these nine
+      // paragraph discussing two widths directly above one of these ten
       // attributes, which is exactly the shape that trips it.
       const m = stripComments(source).match(/width=\{(\d+)\}/);
       if (!m) throw new Error(`${file}.tsx passes DialogShell no explicit width (${id})`);
       return { id, width: Number(m[1]) };
     });
-    expect(widths.length).toBe(9);
+    expect(widths.length).toBe(11);
     expect(TOOL_HOST_WIDTH).toBe(Math.max(...widths.map((w) => w.width)));
-    // Not vacuous: the nine really do disagree, so "the max" is a choice
-    // between real alternatives rather than nine copies of one number.
+    // Not vacuous: the ten really do disagree, so "the max" is a choice
+    // between real alternatives rather than ten copies of one number.
     expect(new Set(widths.map((w) => w.width)).size).toBeGreaterThan(1);
   });
 

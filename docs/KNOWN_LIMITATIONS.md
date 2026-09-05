@@ -2267,3 +2267,126 @@ scaling is a deliberate choice of *which* level to preserve (centre) rather
 than a rounding error, and the crossfade and overlap cases follow from merging
 a **selection** rather than a region — widening either would silently change
 clips the user did not choose.
+
+## A selected gap is one gap, on one track, and no key selects it
+
+**Area:** gap selection and Close Gap (`src/multitrack/gaps.ts` `gapAt` /
+`closeGapShifts`, `src/multitrack/sessionStore.ts` `setSelectedGap` /
+`closeGap`, `src/components/Multitrack/TrackLane.tsx`, `edit.delete` and
+`edit.rippleDelete` in `src/services/menuActions.ts`)
+
+**Current behavior:** double-clicking empty lane space selects the gap it
+landed in, and `Del` or `Shift+Del` closes it — every clip on **that track**
+starting at or after the gap's end moves left by the gap's length, in one
+`Close gap` undo entry. Five boundaries follow from that, all deliberate:
+
+- **One gap at a time, on one track.** `SessionState.selectedGap` holds a
+  single `{ trackId, startSample, endSample }`. There is no way to select the
+  same stretch of time across several tracks and close it everywhere, and
+  closing one lane's gap moves nothing in any other lane — "localized" is the
+  feature, not a shortfall of it. The multi-track version of this verb is
+  `Edit → Ripple Delete Time Selection`, which is greyed everywhere because
+  this app has no gesture for selecting a stretch of *time* in the multitrack
+  view (see the note in `menuActions.ts`).
+- **No keyboard shortcut selects a gap.** The pointer is the only way in. A key
+  would have to guess which gap the user meant — there is no "current" gap the
+  way there is a current clip — so none is bound, and `KEYBOARD_SHORTCUTS.md`
+  says so rather than leaving the absence to be discovered.
+- **The open stretch after the last clip is not a gap**, and neither is any
+  span two clips overlap. The first has nothing on its right to close against
+  (shifting nothing is not an edit); the second is covered by the union of the
+  two clips, which is also how an overlap is refused without a second rule.
+- **The edges belong to the clips.** `gapAt` requires the sample to be
+  STRICTLY inside — a double-click on the seam between a clip and the space
+  beside it is ambiguous, so it selects nothing. One consequence: the pointer
+  rounds to whole samples, so a **one-sample** gap is unreachable by
+  double-click even at maximum zoom (32 px per sample). The hook the tests
+  drive can name it with a fractional sample and it closes correctly; a user
+  cannot, and a 32-px-wide span holding nothing is not worth a second rule.
+- **The band is UI state, never saved.** `selectedGap` is not serialized into
+  `.audm` and is not part of the session undo snapshot, so it does not survive
+  a reload and `Ctrl+Z` never brings a band back. Any session mutation
+  re-resolves it through the same `gapAt`; if the span is no longer a gap, the
+  band simply goes. An undo that RESTORES a clip selection also puts a standing
+  band away, even one on a track the undo did not touch: the snapshot carries a
+  clip selection, and one selection on screen at a time outranks leaving the
+  band where it was.
+
+**Intended behavior:** unchanged for all five in v1. A time-range selection
+spanning tracks is the feature that would subsume the first two, and it is not
+in this version.
+
+## Voice + Backing reconstruct the source within float32 rounding, not bit-for-bit
+
+**Area:** Separate Voice (`voice.separate`, `src/services/stemLanding.ts`
+`landVoice`, `src/services/stemPartition.ts`)
+
+**Current behavior:** the two-track landing sums the Drums, Bass, Other and
+Residual stems into one **Backing** document and keeps Vocals as **Voice**.
+The five-stem partition has an exact-sum property — the residual is the
+float32 complement of the other four, so the five add back up to the source
+sample for sample — but summing four of them into one buffer performs three
+float32 additions the five-track landing never performs, and each rounds.
+Measured on the test material, the worst `|(Voice + Backing) − source|` is
+**4.32e-7**: about seven times the float32 storage floor (2^-24 ≈ 5.96e-8) and
+about a seventieth of the smallest step a 16-bit file can store. The dialog, the
+User Guide and the README all state it as "within float32 rounding" and none of
+them calls the two-track landing bit-exact; **Separate into Stems** keeps the
+bit-exact claim, because it is the landing that has it.
+
+A second consequence has nothing to do with arithmetic: **Backing is the
+complement of Voice**, so any separation artefact in the Voice appears
+*inverted* in the Backing. A syllable the model over-grabbed is missing from
+the bed by exactly as much as it is present in the voice, and a cymbal that
+leaked into the Voice is a cymbal-shaped hole in the Backing. Soloing one track
+therefore does not tell you what the other is missing — compare them.
+
+One cosmetic deviation, recorded rather than left to be discovered: the
+failure, cancel and unavailable messages still read **"Stem separation …"** in
+voice mode. They come from `stemService.ts`, which both landings share and
+which knows nothing about which one asked; only the dialog's own title,
+"what you get" and guarantee copy are mode-aware. The run limit those messages
+name — 15 minutes of audio — is the shared one and is correct for both.
+
+**Intended behavior:** the rounding is unchanged. Landing Backing as four
+separate tracks would keep the exact sum and lose the point of the tool;
+rounding at the seventh decimal is the honest price of two tracks, and it is
+stated rather than hidden. The shared message text is worth a mode-aware
+sentence and has not had one yet.
+
+## The Podcast Chain's limiter is sample peak, and its gate has no manual threshold
+
+**Area:** Podcast Chain (`effects.podcastChain`, `src/services/podcastChain.ts`,
+`src/dsp/loudness.ts`)
+
+**Current behavior:** three limits, each stated in the tool as well as here.
+
+- **The ceiling is −1.0 dBFS SAMPLE peak, not true peak.** The limiter is not
+  oversampled, so it neither measures nor controls inter-sample peaks. A file
+  that reads −1.0 dBFS sample peak can exceed 0 dBFS between samples once it is
+  resampled or encoded to a lossy format, and a true-peak meter will say so.
+  Nothing in this app reports a dBTP figure, and nothing in it calls any number
+  it does report a true peak — the limiter's own stage note says so in the
+  dialog. If a platform's specification is stated in dBTP, leave extra headroom
+  and verify after export with a true-peak meter.
+- **There is no manual gate threshold.** The chain's noise-gate stage derives
+  its own decision: it mutes only stretches it MEASURES at half a second or
+  more, so it can **decline** when the pauses (with the decay and onset margins
+  its region edges walk out to) come back shorter — and it says so, with the
+  measurement that made it decline. Which way it lands is not read off the
+  constants: on the chain's own reference take it still applies after Shorten
+  Pauses and mutes 7.8 % of the take. Either way the sentence it prints points
+  at the **Vocal Chain**'s Noise Gate row, which does offer a manual threshold —
+  that is the intended route, and the Podcast Chain ships no control of its own
+  to override the decision.
+- **More than two channels is refused.** `integratedLoudness` follows
+  BS.1770-4's channel weights for mono and stereo (1.0 per channel, mono
+  counted once) and does not implement the surround weights (+1.5 dB for the
+  rear channels, LFE excluded). Rather than report a number that is wrong for a
+  5.1 file, the chain refuses the document and says to convert to stereo first.
+  The same restriction is why `integratedLoudness` is described as
+  mono/stereo-accurate everywhere it is mentioned.
+
+**Intended behavior:** an oversampled true-peak limiter and the surround weights
+are both real features and neither is in this version. Until they are, the
+numbers are named for what they actually measure.

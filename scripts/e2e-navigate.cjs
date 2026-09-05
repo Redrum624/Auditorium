@@ -2183,6 +2183,33 @@ async function main() {
         `the Pipeline card is the tools ALONE — no effect list to scroll past (${card.effects} effect rows)`
       );
 
+      // D7 — the Voice group's own order, which is a ruling rather than an
+      // accident: isolating the voice comes first, then the passes that reshape
+      // it (the Cover Chain keeping its recorded adjacency to the Vocal Chain,
+      // the Podcast Chain closing the run of multi-stage passes), then the
+      // lyric aligner. Spelled out here rather than derived from the app,
+      // because a list derived from the app agrees with whatever order the app
+      // happens to have.
+      const voiceGroup = card.sections.find((sec) => sec.title === 'Voice');
+      assert(
+        voiceGroup !== undefined,
+        `the card draws a Voice group (${JSON.stringify(card.sections.map((sec) => sec.title))})`
+      );
+      const voiceLabels = voiceGroup.rows.map((r) => r.label);
+      console.log(`  Voice group: ${JSON.stringify(voiceLabels)}`);
+      assert(
+        JSON.stringify(voiceLabels) ===
+          JSON.stringify([
+            'Separate Voice',
+            'Voice Changer',
+            'Vocal Chain',
+            'Cover Chain',
+            'Podcast Chain',
+            'Align Lyrics',
+          ]),
+        `the Voice group is D7's six rows in D7's order (${JSON.stringify(voiceLabels)})`
+      );
+
       // …and a tool really opens from it, hosted, replacing this very card.
       // Picked by id, not by label: T8 removed the trailing dots from every
       // Pipeline label, so "ends in …" no longer distinguishes the rows that
@@ -2211,10 +2238,43 @@ async function main() {
       await closeHostedTool(page);
       // Closing returns to the list it was launched from.
       await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 5000 });
+
+      // D4/D6 — the two rows this release added, each opened from the card and
+      // closed again. Opened rather than RUN on purpose: both are long passes
+      // behind a dialog (one of them a 166 MB model), and what the walk is for
+      // is the door, not the room — that a row reaches its own hosted tool, and
+      // that the tool gives the column back.
+      for (const [commandId, title] of [
+        ['voice.separate', 'Separate Voice'],
+        ['effects.podcastChain', 'Podcast Chain'],
+      ]) {
+        const listed = cardRows.find((r) => r.id === commandId);
+        assert(
+          listed !== undefined && listed.disabled === false,
+          `“${title}” is on the card and live with a document open (${JSON.stringify(listed)})`
+        );
+        await page.click(`[data-testid="pipeline-item"][data-command-id="${commandId}"] button`);
+        await page.waitForSelector('[data-testid="tool-host"]', { timeout: 15000 });
+        const opened = await openToolInfo(page);
+        assert(
+          opened.commandId === commandId && opened.label === title,
+          `“${title}” opened ITS tool in the column ` +
+            `(${JSON.stringify({ commandId: opened.commandId, label: opened.label })})`
+        );
+        assert(
+          opened.overlays === 0,
+          `…with no backdrop over the stage (${opened.overlays} overlays)`
+        );
+        await closeHostedTool(page);
+        await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 5000 });
+        record(`Pipeline > ${title}`, 'opened hosted from the card and closed back to it', 'PASS');
+      }
+
       record(
         'Module: Pipeline',
         `${cardRows.length} rows in ${card.sections.length} groups matching the menu; ` +
-          `“${row.label}” hosted from the card and closed back to it`,
+          `the Voice group in D7 order; “${row.label}”, Separate Voice and Podcast Chain ` +
+          `each hosted from the card and closed back to it`,
         'PASS'
       );
     });
@@ -2721,6 +2781,83 @@ async function main() {
             'Merge greys in the multitrack view with a single clip selected — one clip is not a merge'
           );
 
+          // D3 — a selected GAP paints a band in its own lane, and Escape is
+          // the only key that takes it down (no key selects one). Named through
+          // the hook for the reason the smoke states: the sample a double-click
+          // lands on is a function of the zoom, the scroll and the lane rect,
+          // so a walk that clicked would have to re-derive all three to know
+          // what it had selected. Nothing here mutates the session — the band
+          // goes up, is measured, and Escape puts it away.
+          const gapProbe = await page.evaluate(() => {
+            const byTrack = new Map();
+            for (const c of window.__test.getClipFadeState().clips) {
+              const list = byTrack.get(c.trackIndex) ?? [];
+              list.push(c);
+              byTrack.set(c.trackIndex, list);
+            }
+            for (const [trackIndex, list] of byTrack) {
+              list.sort((a, b) => a.startSample - b.startSample);
+              let edge = 0;
+              for (const c of list) {
+                if (c.startSample > edge) return { trackIndex, startSample: edge, endSample: c.startSample };
+                edge = Math.max(edge, c.startSample + c.lengthSample);
+              }
+            }
+            return null;
+          });
+          assert(
+            gapProbe !== null,
+            `the walk's session has a gap to select — the dropped clip landed 40 px into the ` +
+              `lane, so the stretch in front of it is one (clips ${JSON.stringify(saved.fade.clips)})`
+          );
+          const gapPicked = await page.evaluate(
+            (g) => window.__test.selectGapAt(g.trackIndex, (g.startSample + g.endSample) / 2),
+            gapProbe
+          );
+          assert(
+            gapPicked !== null &&
+              gapPicked.startSample === gapProbe.startSample &&
+              gapPicked.endSample === gapProbe.endSample,
+            `the resolver named the same span the lane draws ` +
+              `(${JSON.stringify(gapPicked)} vs ${JSON.stringify(gapProbe)})`
+          );
+          const gapBand = await page.evaluate(() => {
+            const bands = [...document.querySelectorAll('[data-testid="gap-selection"]')];
+            if (bands.length !== 1) return { count: bands.length, width: 0, height: 0, laneHeight: 0 };
+            const b = bands[0].getBoundingClientRect();
+            const lane = bands[0].closest('[data-testid="track-lane"]').getBoundingClientRect();
+            return { count: 1, width: b.width, height: b.height, laneHeight: lane.height };
+          });
+          console.log(
+            `  gap band: ${gapBand.count} band(s), ${gapBand.width.toFixed(1)}x${gapBand.height.toFixed(1)} px ` +
+              `in a ${gapBand.laneHeight.toFixed(0)} px lane`
+          );
+          assert(
+            gapBand.count === 1 && gapBand.width > 0,
+            `exactly ONE lane paints the band — the one whose gap it is — and it has a real width ` +
+              `(${JSON.stringify(gapBand)})`
+          );
+          assert(
+            Math.abs(gapBand.height - gapBand.laneHeight) <= 1,
+            `and it is full lane height, so it reads as a stretch of timeline rather than a clip ` +
+              `(${gapBand.height.toFixed(1)} of ${gapBand.laneHeight.toFixed(1)} px)`
+          );
+          await page.keyboard.press('Escape');
+          const gapCleared = await page
+            .waitForFunction(
+              () => document.querySelectorAll('[data-testid="gap-selection"]').length === 0,
+              null,
+              { timeout: 5000 }
+            )
+            .then(() => true)
+            .catch(() => false);
+          const gapAfter = await page.evaluate(() => window.__test.getSelectedGap());
+          assert(
+            gapCleared && gapAfter === null,
+            `Escape cleared the selected gap, band and all (${JSON.stringify(gapAfter)})`
+          );
+          record('Multitrack: gap selection', 'band painted on the lane, cleared by Escape', 'PASS');
+
           await page.evaluate((sample) => window.__test.setMtCursor(sample), saved.cursor);
           await page.evaluate(
             (id) => window.__test.selectClips(id === null ? [] : [id]),
@@ -2835,6 +2972,19 @@ async function main() {
     });
 
     await step(page, 'F11 — the ruler seeks, and the playhead handle drags', async () => {
+      // The rect re-read below defends against the ruler MOVING between the two
+      // reads; it does nothing about the zoom re-fitting under a rect that
+      // stayed put, which is the other half of the same layout race and the one
+      // that fired here (2026-09-05): expected ~67900 at 140.4 samples/px,
+      // actual 88231 — the sample a click at that x lands on once the lane has
+      // re-fitted about 30 % narrower. A FITTED document re-fits whenever the
+      // module column's width changes, the walker's own liveness probe opens
+      // and closes a card after every step, and that re-fit lands a frame or
+      // two later. `settleLayout` is this file's own remedy for exactly that —
+      // it waits for `samplesPerPixel`/`scrollSample` to stop moving — and it
+      // softens nothing: the arithmetic below is unchanged, it just measures a
+      // viewport that has finished moving.
+      await settleLayout(page);
       const readRuler = () =>
         page.evaluate(() => {
           const r = document

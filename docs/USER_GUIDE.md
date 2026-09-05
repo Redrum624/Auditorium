@@ -40,10 +40,10 @@ Six menus: **File**, **Edit**, **Effects**, **Pipeline**, **View** and
 - **Effects** holds **Capture Noise Print** and then every effect, grouped by
   category — the things that transform the audio you have selected — and closes
   with the **Spatial Positioner** as its own Mix group.
-- **Pipeline** holds the ten long-running tools, grouped by subject:
+- **Pipeline** holds the twelve long-running tools, grouped by subject:
   **Detect Tempo · Match Tempo · Align Vocal Timing · Auto-Remix**, then
-  **Voice Changer · Vocal Chain · Cover Chain · Align Lyrics**, then
-  **Transcribe · Separate into Stems**. These
+  **Separate Voice · Voice Changer · Vocal Chain · Cover Chain · Podcast
+  Chain · Align Lyrics**, then **Transcribe · Separate into Stems**. These
   used to be scattered between
   the Effects and Edit menus; they are in one place now, and each one is in
   exactly one place.
@@ -53,13 +53,14 @@ to be run in a particular sequence — the vocal and cover chains especially —
 the order is stated in the tool's own stage notes, not implied by the menu.
 
 Every one of these tools is also a single click in the **Pipeline** module card
-— the same ten rows in the same three groups. Both doors run the same command.
+— the same twelve rows in the same three groups. Both doors run the same command.
 (The **Effects** card lists only the effects and the Effects menu's own **Mix**
 row.)
 
-**These tools do not open a centred dialog.** Selecting one of the nine that
-have a UI — Match Tempo, Align Vocal Timing, Auto-Remix, Voice Changer, Vocal
-Chain, Cover Chain, Align Lyrics, Transcribe, Separate into Stems — opens it as
+**These tools do not open a centred dialog.** Selecting one of the eleven that
+have a UI — Match Tempo, Align Vocal Timing, Auto-Remix, Separate Voice, Voice
+Changer, Vocal Chain, Cover Chain, Podcast Chain, Align Lyrics, Transcribe,
+Separate into Stems — opens it as
 a **wider card in the module column**, in place of whatever card was open, with
 the strip showing **Pipeline** as the active module and **widening to the
 card's own width** — the bar and the open module are always exactly the same
@@ -109,6 +110,15 @@ against a waveform that had already stopped changing.
 
 The status pill also shows the zoom in samples-per-pixel, which is the exact
 figure the `%` is derived from.
+
+**Zoom anchors on the position line.** Every zoom gesture — `Ctrl`+wheel over
+the waveform or spectrogram, and the toolbar's `−` and `+` — keeps the white
+line exactly where it is on screen and pulls the audio in around it. When the
+line is off screen the new view is **centred** on it instead, so a zoom always
+brings you back to where you were working rather than to wherever the pointer
+happened to rest. The pointer is not an anchor anywhere in the app; the same
+rule holds in the multitrack view. `Shift`+wheel scrolls and **Fit** are
+unaffected.
 
 ### Opening a file
 
@@ -196,8 +206,28 @@ move it:
 
 All three obey the magnet (see *Snapping to the grid* below): the line lands on
 the nearest beat, bar or marker within 8 pixels, and holding `Alt` suspends
-that for as long as you hold it. Moving the position line while something is
-playing does not interrupt playback — the line is where the *next* play starts.
+that for as long as you hold it.
+
+**Play starts at the line, always.** `Space` (or the transport's Play button)
+begins at the position line and nowhere else — never at some hidden place
+playback last reached. **Pause moves the line to where playback stopped**, so
+`Space`·`Space` is still a resume: the line is the only mark left on screen once
+the playhead stops sweeping, and starting anywhere else would be a start you
+cannot see. **Stop** rewinds the engine and leaves the line where it is, so
+Stop·Play replays from the same place.
+
+There is one exception, and it is the one you would want: with a **selection**
+whose span the line sits **outside**, Play starts at the selection's start,
+because the region it is about to play is the selection and starting in front of
+it would play nothing. A line **inside** the selection starts there and still
+plays to the selection's end.
+
+**Moving the line while something is playing does not seek.** The click lands,
+the line moves, and playback carries on from where it was — the new position is
+where the *next* play starts. If you want to jump there now: **pause first, then
+click**, and press `Space` again. Note that a Pause after such a click
+**overrides** it — pausing writes the paused position back to the line, which is
+the whole point of the rule above.
 
 The position line is not part of the undo history: moving it is a view change,
 not an edit, and `Ctrl+Z` will not bring it back.
@@ -343,7 +373,7 @@ The order is a rule rather than a list: **Files** is always first, **History**
 is always last, and anything added later goes between them.
 
 - **Files** / **Effects** — see their own sections in this guide.
-- **Pipeline** — the ten Pipeline-menu tools, in the same three groups
+- **Pipeline** — the twelve Pipeline-menu tools, in the same three groups
   (**Tempo & Timing**, **Voice**, **Analysis**), each a single click.
   Choosing one replaces this card with the tool itself (see *The menus* above);
   closing the tool brings this list back. Greyed rows are unavailable right now
@@ -920,6 +950,64 @@ correction. It will not turn a poor take into a good one.
 **When it finishes** the `<song> — Cover` session is open in the multitrack view, ready to
 play and to **Mix Down**.
 
+### Podcast Chain (a spoken recording, ready to publish)
+
+**Pipeline → Podcast Chain** is the Vocal Chain's sibling for **speech**. It
+runs ten stages in one pass, each switchable, each reporting what it derived or
+the measurement that made it decline, and the whole pass lands as **one undo
+entry** named `Podcast Chain`.
+
+The stages, in the order they run:
+
+1. **Remove DC Offset** — first, because a DC bias skews every level
+   measurement taken after it, and this chain takes four.
+2. **Noise Reduction** — learns its print from the quietest passage of the
+   recording. A take whose quiet stretches are already exact zeros has no floor
+   to learn from; the stage says so and is skipped.
+3. **DeHum** — the mains hum and its harmonics, when the measurement finds
+   them.
+4. **Shorten Pauses** — every gap longer than the effect's minimum is shortened
+   to **400 ms**, keeping room tone at each end so the join is not a butt cut.
+   ON by default here (the Vocal Chain has it off, because a sung take has to
+   stay in sync with a backing track and a spoken one has nothing to stay in
+   sync with).
+5. **Noise Gate** — brings the stretches where nobody is talking to actual
+   silence. It decides *where*, not how loud. It mutes only a stretch it
+   **measures** at half a second or more — and that measurement is the gap plus
+   the decay and onset margins around it, not the 400 ms Shorten Pauses left, so
+   it usually still runs after that stage. When the pauses do come back shorter
+   it **declines** and says so on its own line; the sentence points you at the
+   Vocal Chain's own Noise Gate row, because **the Podcast Chain ships no manual
+   gate threshold of its own**.
+6. **Compressor** — speech settings: 3:1, with the threshold placed 6 dB under
+   the gated programme level. The compressor's detector reads a peak envelope,
+   which sits above that level, so the talking lands more than the offset alone
+   suggests — about 7 dB of gain reduction on the reference take, and more on a
+   take with a bigger crest. The stage's own row reports what it measured.
+7. **De-esser** — the harshest sibilants only, derived the way the Vocal Chain
+   derives its own.
+8. **EQ (speech)** — three fixed moves for a spoken voice: an 80 Hz
+   high-pass, −2 dB at 250 Hz where a close-miked voice builds up, +2 dB at
+   3 kHz where consonant definition lives. Everything else stays flat.
+9. **Loudness** — measures **integrated loudness** to ITU-R BS.1770-4 and
+   applies the single gain that lands the delivery target: **−16.0 LUFS** for a
+   stereo document, **−19.0 LUFS** for a mono one. The report shows the
+   before/after reading.
+10. **Limiter** — a ceiling of **−1.0 dBFS sample peak**. Sample peak, not true
+    peak: the limiter is not oversampled, so it does not measure or control
+    inter-sample peaks, and a lossy encode of the result can exceed 0 dBFS
+    between samples. If you need true-peak compliance, leave headroom and check
+    with a true-peak meter after export.
+
+**More than two channels is refused**, with the reason: the loudness
+measurement weights every channel equally, which is the standard's rule for
+mono and stereo only. Convert to stereo first (**Edit → Convert Channels…**)
+and run it again.
+
+There is no keyboard shortcut; the tool opens from the Pipeline menu or the
+Pipeline module card, hosted beside the waveform like every other pipeline
+tool.
+
 ## Tempo, remix, stems, transcription and the voice changer
 
 These features are opt-in: nothing here runs until you ask for it, so opening a
@@ -1278,6 +1366,37 @@ stems arrive as stereo documents with identical channels (use **Edit → Convert
 Channels…** if you want them mono); and the five stem documents have never been
 written to disk, so closing one — or quitting — prompts you to save it.
 
+### Separating just the voice
+
+When all you want is the singer on one track and everything else on another,
+**Pipeline → Separate Voice** runs exactly the same separation as the five-stem
+tool and lands **two** documents instead of five:
+
+- `<name> — Voice` — the vocal stem, and
+- `<name> — Backing` — the drums, the bass, everything else and whatever the
+  model could not place, summed together.
+
+Everything else is identical: the same one-time 166 MB model, the same
+per-segment progress and **Cancel**, the same ~1.5× realtime, the same
+15-minute limit per run, and the same landing — the multitrack view, a
+two-track session, both documents open with Voice active. A **mono** source
+lands as stereo documents with identical channels, exactly as the stem tool's
+do.
+
+One difference is worth stating plainly, because the dialog states it too:
+**the two tracks add back up to your original within float32 rounding, not
+bit-for-bit.** Summing four stems into one Backing track rounds where summing
+all five separately does not; measured on the test material, the worst
+difference is 4.32e-7 — about a seventieth of the smallest step a 16-bit file
+can store, and inaudible. If you need the bit-exact recombination, use **Separate
+into Stems**.
+
+And the same model caveat applies: how cleanly the voice is told apart from the
+rest is bounded by the model, so expect some bleed. Because Backing is the
+complement of Voice, **any separation artefact in the Voice appears inverted in
+the Backing** — a syllable the model over-grabbed is missing from the bed by
+exactly as much as it is present in the voice.
+
 ### Transcribing speech
 
 To turn speech into timestamped text with a speaker label per segment:
@@ -1464,8 +1583,10 @@ session already sitting exactly at Fit, which stays fitted (this is also what
 makes dropping several files at once show all of them rather than just the
 first). Resizing the window keeps a fitted session fitted.
 
-`Ctrl`+wheel zooms on the pointer and `Shift`+wheel scrolls, both bounded by the
-same limits as the buttons.
+`Ctrl`+wheel zooms **on the session's edit line** — the same rule as the
+editors: the line keeps its place on screen, and when it is off screen the new
+view is centred on it. `Shift`+wheel scrolls. Both are bounded by the same
+limits as the buttons.
 
 - **Tracks**: each has a name (double-click to rename), Mute/Solo/Arm toggles,
   a volume slider (−60..+12 dB) and a pan slider (−1..1). **Add Track** adds
@@ -1702,6 +1823,40 @@ The whole thing is **one undo step** however many tracks merged, and undo puts
 the original clips back exactly as they were. It does not remove the `Merge N`
 file, though: like every computed document it stays open in the Files panel,
 and it will ask before closing because its audio has never been on disk.
+
+### Closing a gap
+
+A **gap** is the empty stretch on **one track** between two of its clips — or
+between the start of the timeline and its first clip. **Double-click** it and it
+is selected: a translucent band the full height of that lane, over exactly the
+span that would go. `Del` or `Shift+Del` then **closes** it — every clip on that
+track that starts at or after the gap's end moves left by the gap's length, in
+**one undo step**. Nothing on any other track moves; closing a hole in one lane
+is a local edit, and the whole point of it is that the rest of the arrangement
+stays where you put it.
+
+What is *not* a gap, and why:
+
+- **The open stretch after the last clip.** There is nothing on its right to
+  close it against, and shifting nothing is not an edit.
+- **Anywhere two clips overlap.** The union of the two covers it, so there is no
+  empty span there to name.
+- **The seam itself.** You have to double-click *inside* the span, not on the
+  edge where a clip ends — a click on the boundary is ambiguous between the clip
+  and the space beside it.
+
+The band replaces the clip selection and the clip selection replaces the band:
+there is one selection on screen at a time. `Escape` puts the band away, and so
+does a plain click on empty lane space **outside** it (a click *inside* it is the
+first half of the double-click that would re-select the same gap, so it leaves
+the band alone). **No keyboard shortcut selects a gap** — a key would have to
+guess which one you meant. If the track changes underneath a selected gap, the
+band is re-resolved: if the span it named is no longer a gap it simply goes —
+and an undo that brings a clip selection back takes the band away with it,
+because only one of the two is ever on screen.
+
+Silence *inside* a clip is a different thing entirely — that is **Remove
+Silence** on the document (see the Effects chapter), not this.
 
 ### Undo in the multitrack (session history)
 

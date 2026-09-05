@@ -12,6 +12,7 @@
  */
 
 import { installTestHooks, type TestApi } from './testHooks';
+import { registerAllEffects } from '../effects/registerAll';
 import { createDocument, type AudioDocument } from '../audio/AudioDocument';
 import { makeInitialState, useAppStore } from '../stores/appStore';
 import type { TempoEntry } from './tempoAnalysis';
@@ -27,7 +28,9 @@ import { CONFIDENCE_LOW } from '../dsp/tempoCore';
 import { useSessionStore } from '../multitrack/sessionStore';
 import { createClip, createTrack, type Session } from '../multitrack/session';
 import { serializeSession, serializeSessionV4 } from '../multitrack/sessionFile';
-import { _resetSessionUndo, isSessionDirty } from '../multitrack/sessionUndo';
+import { SESSION_UNDO_KEY, _resetSessionUndo, isSessionDirty } from '../multitrack/sessionUndo';
+import { closeGap } from '../multitrack/sessionStore'; // D3
+import { getHistory } from './undoHistory';
 import { mixdownSession } from '../multitrack/mixdown';
 import { decodeWav } from '../audio/wavCodec';
 import { defaultSessionZoom } from '../multitrack/sessionZoom';
@@ -805,6 +808,23 @@ describe('lot D session hooks', () => {
     expect(useSessionStore.getState().mtCursorSample).toBe(1234);
   });
 
+  it('getMtZoom reports the multitrack viewport, as a COPY', () => {
+    // D1 — the pair the smoke computes the bar's on-screen x from. Non-default
+    // values on purpose: a hook that answered `defaultSessionZoom` regardless
+    // would pass against the store's own initial state.
+    const t = api();
+    seedClips();
+    useSessionStore.setState({ mtZoom: { samplesPerPixel: 64, scrollSample: 12800 } });
+
+    const zoom = t.getMtZoom();
+
+    expect(zoom).toEqual({ samplesPerPixel: 64, scrollSample: 12800 });
+    expectPlainJson(zoom);
+
+    zoom.scrollSample = -1;
+    expect(useSessionStore.getState().mtZoom.scrollSample).toBe(12800);
+  });
+
   it('selectClips names the clip selection, dropping dangling ids and duplicates', () => {
     const t = api();
     const [a] = seedClips();
@@ -907,5 +927,391 @@ describe('merge clips hooks', () => {
 
     expect(t.mergeSelectedClips()).toEqual({ clipIds: [], docCount: before });
     expect(useSessionStore.getState().session.tracks[0].clips).toHaveLength(2);
+  });
+});
+
+describe('gap hooks', () => {
+  /**
+   * D3 — the two hooks Task 7's smoke drives the gap gesture through. The
+   * harness cannot double-click a lane through `page.evaluate`, so
+   * `selectGapAt` states the gesture's OUTCOME through the shipped resolver
+   * and the shipped setter: what it selects is what a double-click at that
+   * sample would have selected, refusals included.
+   */
+  function seedGapTrack(): { trackId: string; ids: string[] } {
+    const t = createTrack('Track 1');
+    t.clips = [
+      createClip({ documentId: 'doc-1', startSample: 1000, offsetSample: 128, lengthSample: 500 }),
+      createClip({ documentId: 'doc-1', startSample: 2000, offsetSample: 256, lengthSample: 500 }),
+    ];
+    useSessionStore.setState({
+      session: { name: 'Gap Hook Fixture', sampleRate: 44100, tracks: [t] },
+      selectedClipId: null,
+      selectedClipIds: [],
+      selectedGap: null,
+      mtCursorSample: 0,
+    });
+    return { trackId: t.id, ids: t.clips.map((c) => c.id) };
+  }
+
+  it('selectGapAt names the gap under the sample and reads back through getSelectedGap', () => {
+    const t = api();
+    const { trackId } = seedGapTrack();
+
+    const gap = t.selectGapAt(0, 1700);
+
+    expect(gap).toEqual({ trackId, startSample: 1500, endSample: 2000 });
+    expectPlainJson(gap);
+    expect(t.getSelectedGap()).toEqual(gap);
+    expectPlainJson(t.getSelectedGap());
+  });
+
+  it('a ONE-SAMPLE gap selected through the hook still closes', () => {
+    // Review round 1, I1. `gapAt` refuses both edges, so only a FRACTIONAL
+    // sample is strictly inside a one-sample span — which the hook allows and
+    // the lane (which rounds) does not. The floored probe used to land on the
+    // start edge here, so `closeGap` refused its own selection and Delete did
+    // nothing at all.
+    const t = api();
+    const track = createTrack('Tight');
+    track.clips = [
+      createClip({ documentId: 'doc-1', startSample: 100, offsetSample: 16, lengthSample: 400 }),
+      createClip({ documentId: 'doc-1', startSample: 501, offsetSample: 32, lengthSample: 400 }),
+    ];
+    useSessionStore.setState({
+      session: { name: 'One Sample Gap', sampleRate: 44100, tracks: [track] },
+      selectedClipId: null,
+      selectedClipIds: [],
+      selectedGap: null,
+      mtCursorSample: 0,
+    });
+    _resetSessionUndo();
+
+    const gap = t.selectGapAt(0, 500.5);
+    expect(gap).toEqual({ trackId: track.id, startSample: 500, endSample: 501 });
+
+    closeGap(gap!);
+
+    const clips = useSessionStore.getState().session.tracks[0].clips;
+    expect(clips.map((c) => c.startSample).sort((a, b) => a - b)).toEqual([100, 500]);
+    expect(getHistory(SESSION_UNDO_KEY).done).toEqual(['Close gap']);
+    expect(t.getSelectedGap()).toBeNull();
+  });
+
+  it('selectGapAt hands out a COPY too', () => {
+    const t = api();
+    seedGapTrack();
+
+    const gap = t.selectGapAt(0, 1700)!;
+    gap.endSample = -1;
+
+    expect(useSessionStore.getState().selectedGap!.endSample).toBe(2000);
+  });
+
+  it('getSelectedGap hands out a COPY — a harness-side mutation cannot reach the store', () => {
+    const t = api();
+    seedGapTrack();
+    t.selectGapAt(0, 1700);
+
+    const read = t.getSelectedGap()!;
+    read.startSample = -1;
+
+    expect(useSessionStore.getState().selectedGap!.startSample).toBe(1500);
+  });
+
+  it('selects nothing over a clip, past the last clip, or on a track that is not there', () => {
+    const t = api();
+    seedGapTrack();
+
+    expect(t.selectGapAt(0, 1200)).toBeNull(); // inside a clip
+    expect(t.selectGapAt(0, 9000)).toBeNull(); // the open end
+    expect(t.selectGapAt(7, 1700)).toBeNull(); // no such track
+    expect(t.getSelectedGap()).toBeNull();
+  });
+
+  it('clears a standing gap when the next call refuses — the harness sees one truth', () => {
+    const t = api();
+    seedGapTrack();
+    expect(t.selectGapAt(0, 1700)).not.toBeNull();
+
+    expect(t.selectGapAt(0, 1200)).toBeNull();
+
+    expect(t.getSelectedGap()).toBeNull();
+  });
+
+  it('the gap and the clip selection are mutually exclusive, through the hooks', () => {
+    const t = api();
+    const { ids } = seedGapTrack();
+    t.selectClips([ids[0]]);
+
+    expect(t.selectGapAt(0, 1700)).not.toBeNull();
+    expect(useSessionStore.getState().selectedClipIds).toEqual([]);
+
+    t.selectClips([ids[1]]);
+    expect(t.getSelectedGap()).toBeNull();
+  });
+});
+
+/**
+ * D4 — `separateVoiceLand`, the Separate Voice landing WITHOUT the model.
+ *
+ * The smoke cannot run HT-Demucs (166 MB, minutes of CPU) just to see two
+ * tracks land, and it must not have to: the model is `separateStems`' business
+ * and is already exercised by its own hook. So this one synthesises the output
+ * the model would have produced — four distinct stems plus the float32
+ * complement residual, an exact partition of the ACTIVE document — and hands it
+ * to the shipped `landVoice`. What the smoke asserts is therefore the landing,
+ * which is the part D4 added.
+ */
+describe('separateVoiceLand (D4)', () => {
+  /** Distinct, non-trivial content per channel — a landing measured on silence
+   *  would pass with every stem index swapped. */
+  function addVoiceDoc(name = 'song.wav', channelCount = 2): AudioDocument {
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < channelCount; c++) {
+      const ch = new Float32Array(2048);
+      for (let i = 0; i < ch.length; i++) {
+        ch[i] = 0.4 * Math.sin((2 * Math.PI * (110 + 70 * c) * i) / 44100) + (c === 0 ? 0.05 : -0.03);
+      }
+      channels.push(ch);
+    }
+    const doc = createDocument({ name, sampleRate: 44100, channels });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it('lands two named documents and a two-track session, with no model run', () => {
+    const t = api();
+    addVoiceDoc('song.wav');
+
+    const summary = t.separateVoiceLand();
+
+    expect(summary.ok).toBe(true);
+    expect(summary.documentNames).toEqual(['song.wav — Voice', 'song.wav — Backing']);
+    expect(summary.trackNames).toEqual(['Voice', 'Backing']);
+    expect(summary.sessionName).toBe('song.wav — Voice + Backing');
+    expect(summary.sampleRate).toBe(44100);
+    expect(summary.lengthSamples).toBe(2048);
+    expect(useSessionStore.getState().session.tracks).toHaveLength(2);
+    expect(useAppStore.getState().view).toBe('multitrack');
+  });
+
+  it('reports the measured Voice + Backing error against the source it started from', () => {
+    const t = api();
+    addVoiceDoc();
+
+    const summary = t.separateVoiceLand();
+
+    // The synthetic stems are an exact partition, so the two tracks add back up
+    // to within float32 re-association — the same claim `landVoice` makes.
+    expect(summary.worstAbsError).not.toBeNull();
+    expect(summary.worstAbsError!).toBeLessThan(1e-6);
+  });
+
+  it('routes a MONO source as dual-mono, and says so', () => {
+    const t = api();
+    addVoiceDoc('mono.wav', 1);
+
+    const summary = t.separateVoiceLand();
+
+    expect(summary.monoRoutedAsDualMono).toBe(true);
+    expect(summary.channelCounts).toEqual([2, 2]);
+  });
+
+  it('refuses an empty document and a bare app, landing nothing', () => {
+    const t = api();
+    expect(t.separateVoiceLand().ok).toBe(false);
+
+    const empty = createDocument({ name: 'empty.wav', sampleRate: 44100, channels: [new Float32Array(0)] });
+    useAppStore.getState().addDocument(empty);
+    const summary = t.separateVoiceLand();
+
+    expect(summary.ok).toBe(false);
+    expect(summary.documentNames).toEqual([]);
+    expect(useAppStore.getState().documents).toHaveLength(1);
+  });
+
+  it('hands back plain JSON (T16)', () => {
+    const t = api();
+    addVoiceDoc();
+    const summary = t.separateVoiceLand();
+    expect(JSON.parse(JSON.stringify(summary))).toStrictEqual(summary);
+  });
+});
+
+/**
+ * D6 — the Podcast Chain hook.
+ *
+ * Task 7's packaged smoke calls this on the generated tone and asserts the undo
+ * label, a finite `afterLufs` near the target for the document's channel count,
+ * and a sample peak at or under the ceiling. What the smoke cannot see from
+ * outside is the plumbing: whether the hook drove the REAL chain with the
+ * shipped stage map, whether it reports the document's own peak, and whether
+ * every field survives the structured-clone boundary. That is what is here.
+ */
+describe('podcast chain hooks (D6)', () => {
+  // The chain reads each effect's OWN declared defaults through
+  // `defaultParamsFor`, on the main thread, before the worker sees anything —
+  // so the registry has to be filled here. Nothing else in this file needs it,
+  // which is why it is scoped to this block rather than to the file.
+  beforeAll(() => {
+    registerAllEffects();
+  });
+
+  /** Speech-shaped and deliberately off every identity: two DIFFERENT channels,
+   * bursts of two tones over a real floor, and pauses long enough for the chain
+   * to have something to measure and something to shorten. Three seconds, which
+   * is the shortest take that still gives every stage real work. */
+  function addSpeechDoc(channelCount = 2): AudioDocument {
+    const SR = 44100;
+    const pause = Math.round(0.8 * SR);
+    const burst = Math.round(0.7 * SR);
+    const total = 2 * pause + 2 * burst;
+    const channels: Float32Array[] = [];
+    for (let c = 0; c < channelCount; c++) {
+      const ch = new Float32Array(total);
+      let seed = (11 + 18 * c) >>> 0;
+      const rnd = (): number => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return (seed / 0xffffffff) * 2 - 1;
+      };
+      // A -60 dBFS floor everywhere, so a noise print and a pause threshold
+      // both exist to be measured.
+      for (let i = 0; i < total; i++) ch[i] = rnd() * Math.pow(10, -60 / 20) * Math.sqrt(3);
+      const amplitude = 0.1 - 0.01 * c;
+      for (let b = 0; b < 2; b++) {
+        const at = (b + 1) * pause + b * burst;
+        for (let i = 0; i < burst; i++) {
+          const t = (at + i) / SR;
+          ch[at + i] +=
+            (amplitude / 2) *
+            (Math.sin(2 * Math.PI * 200 * t) + Math.sin(2 * Math.PI * 2000 * t));
+        }
+      }
+      channels.push(ch);
+    }
+    const doc = createDocument({ name: 'episode.wav', sampleRate: SR, channels });
+    useAppStore.getState().addDocument(doc);
+    return doc;
+  }
+
+  it(
+    'runs the REAL chain on the active document and reports the landing',
+    async () => {
+      const t = api();
+      const doc = addSpeechDoc(2);
+      const depthBefore = getHistory(doc.id).done.length;
+
+      const result = await t.podcastChainRun();
+
+      // One undo entry, under the chain's own label — the claim the whole
+      // design rests on, asserted as a DELTA rather than as a depth.
+      expect(getHistory(doc.id).done.length).toBe(depthBefore + 1);
+      expect(result.undoLabel).toBe('Podcast Chain');
+      expect(result.refusal).toBeNull();
+
+      // It measured a loudness going in and coming out, and the second one is
+      // the stereo target. Tolerance is the service suite's own.
+      expect(result.beforeLufs).not.toBeNull();
+      expect(result.afterLufs).not.toBeNull();
+      expect(Number.isFinite(result.afterLufs as number)).toBe(true);
+      expect(Math.abs((result.afterLufs as number) - -16)).toBeLessThan(0.5);
+      // ...and it MOVED the level rather than reporting the same number twice.
+      expect(result.afterLufs).not.toBe(result.beforeLufs);
+
+      // SAMPLE peak, at or under the ceiling.
+      expect(result.peakDb).not.toBeNull();
+      expect(result.peakDb as number).toBeLessThanOrEqual(-1);
+
+      expect(JSON.parse(JSON.stringify(result))).toStrictEqual(result);
+    },
+    120_000
+  );
+
+  it(
+    'targets -19 LUFS on a MONO document — the target follows the channel count',
+    async () => {
+      const t = api();
+      addSpeechDoc(1);
+
+      const result = await t.podcastChainRun();
+
+      expect(result.refusal).toBeNull();
+      expect(Math.abs((result.afterLufs as number) - -19)).toBeLessThan(0.5);
+      expect(JSON.parse(JSON.stringify(result))).toStrictEqual(result);
+    },
+    120_000
+  );
+
+  it('reports the refusal, and NO undo label, on a document with more than two channels', async () => {
+    const t = api();
+    const doc = addSpeechDoc(3);
+    const depthBefore = getHistory(doc.id).done.length;
+
+    const result = await t.podcastChainRun();
+
+    // The refusal returns before a single stage runs, so this costs nothing.
+    expect(result.refusal).not.toBeNull();
+    expect(result.refusal).toContain('Convert Channels');
+    // Nothing was applied, so nothing may be reported as an undo entry — not
+    // even whatever was already on top of this document's history.
+    expect(getHistory(doc.id).done.length).toBe(depthBefore);
+    expect(result.undoLabel).toBeNull();
+    // And no loudness was measured, because measuring one here is the very
+    // thing being refused.
+    expect(result.beforeLufs).toBeNull();
+    expect(result.afterLufs).toBeNull();
+
+    expect(JSON.parse(JSON.stringify(result))).toStrictEqual(result);
+  });
+
+  it('answers with nulls rather than a fake peak when no document is open', async () => {
+    const t = api();
+
+    const result = await t.podcastChainRun();
+
+    expect(result).toEqual({
+      undoLabel: null,
+      beforeLufs: null,
+      afterLufs: null,
+      // `-Infinity` here would arrive across the Playwright boundary as `null`
+      // anyway — undeclared. Declared, it survives the round trip below.
+      peakDb: null,
+      refusal: null,
+    });
+    expect(JSON.parse(JSON.stringify(result))).toStrictEqual(result);
+  });
+});
+
+describe('getPlaybackState (D2)', () => {
+  /**
+   * D2 — the one read the packaged smoke checks "Play starts at the bar"
+   * against. It is deliberately a READ ONLY: the smoke presses Space, so the
+   * shipped `transport.playPause` is what writes these fields, and a hook that
+   * drove the transport itself would be pinning its own arithmetic.
+   */
+  it('reports the engine state, the position the transport wrote, and the bar together', () => {
+    const t = api();
+    addDoc('Tone');
+    // Values nothing defaults to, and three DIFFERENT ones, so a hook reading
+    // the wrong field or aliasing two of them is visible.
+    useAppStore.getState().setCursor(44100);
+    useAppStore.getState().setPlayback({ state: 'paused', positionSample: 22050 });
+
+    const state = t.getPlaybackState();
+
+    expect(state).toEqual({ state: 'paused', positionSample: 22050, cursorSample: 44100 });
+    expectPlainJson(state);
+  });
+
+  it('reads the stopped default before anything has played', () => {
+    const t = api();
+    addDoc('Tone');
+
+    expect(t.getPlaybackState()).toEqual({
+      state: 'stopped',
+      positionSample: 0,
+      cursorSample: 0,
+    });
   });
 });
