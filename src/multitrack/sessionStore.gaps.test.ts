@@ -106,6 +106,29 @@ describe('one selection on screen at a time', () => {
     }
   });
 
+  it('re-selecting the SAME span is a no-op — the same state object comes back', () => {
+    store().setSelectedGap(theGap());
+    const held = useSessionStore.getState();
+
+    store().setSelectedGap(theGap()); // a fresh object naming the same span
+
+    // The guard the K1 writers carry: a new object here would be a new value
+    // for every lane's subscription to see, for a gesture that changed nothing.
+    expect(useSessionStore.getState()).toBe(held);
+  });
+
+  it('clearing an already-clear gap is a no-op too', () => {
+    const held = useSessionStore.getState();
+    store().setSelectedGap(null);
+    expect(useSessionStore.getState()).toBe(held);
+  });
+
+  it('selecting a gap over an EMPTY clip selection mints no fresh array', () => {
+    const before = store().selectedClipIds;
+    store().setSelectedGap(theGap());
+    expect(store().selectedClipIds).toBe(before);
+  });
+
   it('clearing the gap with null leaves the clip selection alone', () => {
     store().setSelectedGap(theGap());
     store().setSelectedGap(null);

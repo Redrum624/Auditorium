@@ -946,6 +946,17 @@ describe('gap hooks', () => {
     expectPlainJson(t.getSelectedGap());
   });
 
+  it('getSelectedGap hands out a COPY — a harness-side mutation cannot reach the store', () => {
+    const t = api();
+    seedGapTrack();
+    t.selectGapAt(0, 1700);
+
+    const read = t.getSelectedGap()!;
+    read.startSample = -1;
+
+    expect(useSessionStore.getState().selectedGap!.startSample).toBe(1500);
+  });
+
   it('selects nothing over a clip, past the last clip, or on a track that is not there', () => {
     const t = api();
     seedGapTrack();
