@@ -2307,7 +2307,10 @@ starting at or after the gap's end moves left by the gap's length, in one
   `.audm` and is not part of the session undo snapshot, so it does not survive
   a reload and `Ctrl+Z` never brings a band back. Any session mutation
   re-resolves it through the same `gapAt`; if the span is no longer a gap, the
-  band simply goes.
+  band simply goes. An undo that RESTORES a clip selection also puts a standing
+  band away, even one on a track the undo did not touch: the snapshot carries a
+  clip selection, and one selection on screen at a time outranks leaving the
+  band where it was.
 
 **Intended behavior:** unchanged for all five in v1. A time-range selection
 spanning tracks is the feature that would subsume the first two, and it is not

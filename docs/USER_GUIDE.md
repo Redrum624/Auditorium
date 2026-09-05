@@ -1851,7 +1851,9 @@ does a plain click on empty lane space **outside** it (a click *inside* it is th
 first half of the double-click that would re-select the same gap, so it leaves
 the band alone). **No keyboard shortcut selects a gap** — a key would have to
 guess which one you meant. If the track changes underneath a selected gap, the
-band is re-resolved: if the span it named is no longer a gap it simply goes.
+band is re-resolved: if the span it named is no longer a gap it simply goes —
+and an undo that brings a clip selection back takes the band away with it,
+because only one of the two is ever on screen.
 
 Silence *inside* a clip is a different thing entirely — that is **Remove
 Silence** on the document (see the Effects chapter), not this.
