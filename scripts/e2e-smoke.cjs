@@ -5310,8 +5310,16 @@ async function main() {
     // x = 1477 on a 985 px lane and skipped the arm under test. Fit is also
     // exactly what this whole step found, so pressing it here is the restore
     // as well as the setup.
+    // Captured BEFORE the fit as well as after it: the restore assertion below
+    // compares against the FITTED state, and reading `zoomBefore` after the
+    // click left no record of what the step actually arrived at (minor M17).
+    const zoomEntry = await page.evaluate(() => window.__test.getMtZoom());
     await clickFit();
     const zoomBefore = await page.evaluate(() => window.__test.getMtZoom());
+    console.log(
+      `  entry zoom ${zoomEntry.samplesPerPixel.toFixed(2)} samples/px @ ${zoomEntry.scrollSample}` +
+        ` -> fitted ${zoomBefore.samplesPerPixel.toFixed(2)} @ ${zoomBefore.scrollSample}`
+    );
     const ZOOM_ANCHOR = 66150; // three quarters along the 88200-sample clip
     await page.evaluate((s) => window.__test.setMtCursor(s), ZOOM_ANCHOR);
     const zoomLane = await page.evaluate(() => {
@@ -5376,8 +5384,9 @@ async function main() {
       Math.abs(zoomRestored.samplesPerPixel - zoomBefore.samplesPerPixel) <=
         1e-6 * zoomBefore.samplesPerPixel &&
         zoomRestored.scrollSample === zoomBefore.scrollSample,
-      `Fit put the viewport back where the sub-step found it ` +
-        `(${JSON.stringify(zoomRestored)} vs ${JSON.stringify(zoomBefore)})`
+      `Fit put the viewport back to the FITTED state this arm was set up in — not to the zoom ` +
+        `the step arrived at (${JSON.stringify(zoomEntry)}), which Fit deliberately does not ` +
+        `restore (${JSON.stringify(zoomRestored)} vs ${JSON.stringify(zoomBefore)})`
     );
     console.log("  zoom anchor: the bar held its pixel while the pointer's sample moved under it");
 
@@ -7206,11 +7215,14 @@ async function main() {
         `(${barPaused.positionSample} > 44100)`
     );
 
-    // (b) Play starts at the BAR, never at the engine's paused position. The
-    // bar goes BACK to 0 while the engine still remembers ~1 s in; a resume
-    // would come back somewhere past `barPaused.positionSample`, and a start at
-    // the bar cannot.
-    await page.evaluate(() => window.__test.setCursor(0));
+    // (b) Play starts AT THE BAR — at the bar itself, not merely somewhere
+    // earlier than the engine's paused position. The bar is moved to 30 000:
+    // a value that is neither 0 (where a transport ignoring the cursor
+    // altogether would start, which every arm of this step used to allow) nor
+    // the paused position the engine still remembers. Half a second of slack
+    // above it, because the read happens while the engine is running.
+    const BAR_REPLAY = 30000;
+    await page.evaluate((s) => window.__test.setCursor(s), BAR_REPLAY);
     await page.keyboard.press('Space');
     await page.waitForFunction(
       () => window.__test.getPlaybackState().state === 'playing',
@@ -7218,11 +7230,11 @@ async function main() {
       { timeout: 5000 }
     );
     const barReplay = await page.evaluate(() => window.__test.getPlaybackState());
-    console.log(`  replay from the bar at 0: ${JSON.stringify(barReplay)}`);
+    console.log(`  replay from the bar at ${BAR_REPLAY}: ${JSON.stringify(barReplay)}`);
     assert(
-      barReplay.positionSample < barPaused.positionSample,
-      `Play restarted at the bar rather than resuming the engine's paused position ` +
-        `(${barReplay.positionSample} < ${barPaused.positionSample})`
+      barReplay.positionSample >= BAR_REPLAY && barReplay.positionSample < BAR_REPLAY + 22050,
+      `Play started at the BAR (${BAR_REPLAY}) — not at 0, and not resuming the engine's ` +
+        `paused position ${barPaused.positionSample} (${barReplay.positionSample})`
     );
 
     // (c) The one exception, and it is deterministic: a selection the bar is
@@ -7336,7 +7348,8 @@ async function main() {
       specPaused.cursorSample === specPaused.positionSample && specPaused.positionSample > 44100,
       `the spectral view's Pause moves the bar too (${JSON.stringify(specPaused)})`
     );
-    await page.evaluate(() => window.__test.setCursor(0));
+    // The same non-zero bar as arm (b), and for the same reason.
+    await page.evaluate((s) => window.__test.setCursor(s), BAR_REPLAY);
     await page.keyboard.press('Space');
     await page.waitForFunction(
       () => window.__test.getPlaybackState().state === 'playing',
@@ -7346,12 +7359,12 @@ async function main() {
     const specReplay = await page.evaluate(() => window.__test.getPlaybackState());
     console.log(
       `  spectral: paused at ${specPaused.positionSample}, replayed from the bar at ` +
-        `${specReplay.positionSample}`
+        `${BAR_REPLAY} -> ${specReplay.positionSample}`
     );
     assert(
-      specReplay.positionSample < specPaused.positionSample,
-      `and its Play starts at the bar, not at the engine's paused position ` +
-        `(${specReplay.positionSample} < ${specPaused.positionSample})`
+      specReplay.positionSample >= BAR_REPLAY && specReplay.positionSample < BAR_REPLAY + 22050,
+      `and its Play starts AT the bar (${BAR_REPLAY}), not at 0 and not at the engine's ` +
+        `paused position ${specPaused.positionSample} (${specReplay.positionSample})`
     );
 
     await page.evaluate(() => {
@@ -7453,8 +7466,9 @@ async function main() {
     );
     assert(
       podcast.peakDb !== null && podcast.peakDb <= -1,
-      `and the limiter's −1.0 dBFS SAMPLE-peak ceiling holds on the file that is now open ` +
-        `(${podcast.peakDb === null ? 'null' : podcast.peakDb.toFixed(3)} dBFS)`
+      `and the file that is now open sits at or under the −1.0 dBFS SAMPLE-peak ceiling — on ` +
+        `this tone it lands well under, so this says the ceiling was not breached, not that the ` +
+        `limiter engaged (${podcast.peakDb === null ? 'null' : podcast.peakDb.toFixed(3)} dBFS)`
     );
     await page.evaluate(() => window.__test.undoActive());
     const podcastUndone = await stateOf();
@@ -7505,6 +7519,56 @@ async function main() {
       };
     });
     console.log(`  dialog: ${voiceDialog.title} — ${JSON.stringify(voiceDialog.produces)}`);
+    // D4's DEGRADED arm, which this step used to skip entirely: on a machine
+    // without the model the dialog must show the model block and offer no live
+    // Separate button, and on one with it neither. Which branch runs is read
+    // from the app's own model state rather than assumed from step 17 having
+    // downloaded it — the packaged run has to answer for both machines, and a
+    // regression that ignored `modelMissing` passed on either before this.
+    // The model state is fetched asynchronously by the dialog, so wait until it
+    // has DECIDED — a live Separate or the model block — before reading either.
+    // A dialog still waiting on that fetch shows neither, and reading it there
+    // would fail the ready arm for a reason that has nothing to do with D4.
+    await page.waitForFunction(
+      () => {
+        const d = document.querySelector('[data-testid="separate-dialog"]');
+        if (!d) return false;
+        if (d.querySelector('[data-testid="separate-model-missing"]')) return true;
+        const b = Array.from(d.querySelectorAll('button')).find(
+          (x) => x.textContent.trim() === 'Separate'
+        );
+        return b !== undefined && !b.disabled;
+      },
+      null,
+      { timeout: 15000 }
+    );
+    const stemModel = await page.evaluate(() => window.__test.getStemModelState());
+    const stemModelUi = await page.evaluate(() => {
+      const buttons = Array.from(document.querySelectorAll('[data-testid="separate-dialog"] button'));
+      const run = buttons.find((b) => b.textContent.trim() === 'Separate');
+      return {
+        missingBlock: document.querySelector('[data-testid="separate-model-missing"]') !== null,
+        hasRun: run !== undefined,
+        runDisabled: run ? run.disabled : null,
+      };
+    });
+    console.log(
+      `  model downloaded=${stemModel.downloaded} -> ${JSON.stringify(stemModelUi)} ` +
+        `(${stemModel.downloaded ? 'ready' : 'DEGRADED'} arm)`
+    );
+    if (stemModel.downloaded) {
+      assert(
+        !stemModelUi.missingBlock && stemModelUi.hasRun && stemModelUi.runDisabled === false,
+        `with the model downloaded the dialog shows no model block and offers a live Separate ` +
+          `(${JSON.stringify(stemModelUi)})`
+      );
+    } else {
+      assert(
+        stemModelUi.missingBlock && (!stemModelUi.hasRun || stemModelUi.runDisabled === true),
+        `without the model the dialog names the download and refuses to run — the degraded path ` +
+          `D4 asks for (${JSON.stringify(stemModelUi)})`
+      );
+    }
     assert(
       voiceDialog.toolId === 'voice.separate' && voiceDialog.title === 'Separate Voice',
       `the Pipeline card opened Separate Voice, not Separate into Stems ` +

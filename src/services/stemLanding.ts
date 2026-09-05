@@ -464,7 +464,10 @@ export function landVoice(output: StemSeparationOutput): StemLandingResult {
   // out of the host's own order — the one place that swap lives). `stems` is
   // exactly the four `STEM_LABELS` by contract, so the find always hits; the
   // empty fallback exists only because the type is an array rather than a
-  // tuple, and it lands nothing rather than inventing audio.
+  // tuple. It is unreachable under that contract — and it is not a graceful
+  // degradation if it ever is reached: a zero-channel document would be BUILT
+  // and landed, not skipped. The point of the fallback is only that it invents
+  // no audio; the contract is what keeps it out of reach.
   const vocals = output.stems.find((s) => s.label === 'Vocals')?.channels ?? [];
   const documents = createLandingDocuments(output, VOICE_TRACK_LABELS, [
     vocals,
