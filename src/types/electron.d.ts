@@ -52,6 +52,20 @@ export interface ElectronAPI {
   voiceProfilesLoad(): Promise<{ ok: true; profiles: unknown[] } | { ok: false; error: string }>;
   voiceProfilesSave(req: { profiles: unknown[] }): Promise<{ ok: true } | { ok: false; error: string }>;
 
+  // Speaker diarization (Separate Speakers, D2). Renderer code goes through
+  // `src/services/diarizeService.ts`, never these directly. `samples` is
+  // 16 kHz mono float32 (the Vocals stem, resampled); `labels` is 589 bytes,
+  // one powerset class (0..6) per frame; `vector` is 256 float32 (1024 bytes),
+  // L2-normalised.
+  diarizeModelState(): Promise<{ downloaded: boolean; bytes: number | null; expectedBytes: number }>;
+  diarizeEnsureModels(): Promise<{ ok: true } | { ok: false; error: string }>;
+  onDiarizeModelProgress(cb: (p: { received: number; total: number }) => void): () => void; // returns unsubscribe
+  diarizeRun(req: { sampleRate: number; samples: ArrayBuffer }): Promise<{ ok: true; windowCount: number } | { ok: false; cancelled?: true; error?: string }>;
+  diarizeCancel(): Promise<{ cancelled: boolean }>;
+  onDiarizeProgress(cb: (p: { stage: 'segment' | 'embed'; done: number; total: number }) => void): () => void; // returns unsubscribe
+  onDiarizeWindow(cb: (w: { index: number; labels: ArrayBuffer }) => void): () => void; // returns unsubscribe
+  onDiarizeEmbedding(cb: (e: { windowIndex: number; localSpeaker: number; activeFrames: number; vector: ArrayBuffer }) => void): () => void; // returns unsubscribe
+
   pathBasename(p: string): string;      // implemented in preload (string ops only, no IPC)
   // F11: async since the fix round — the preload also registers the dropped
   // path as read-approved in main before handing it back, and the caller must

@@ -10,6 +10,7 @@ const { createStemManager, registerStemIpc } = require('./stemManager.cjs');
 const { createTranscribeManager, registerTranscribeIpc } = require('./transcribeManager.cjs');
 const { createVoiceManager, registerVoiceIpc } = require('./voiceManager.cjs');
 const { createAlignManager, registerAlignIpc } = require('./alignManager.cjs');
+const { createDiarizeManager, registerDiarizeIpc } = require('./diarizeManager.cjs');
 const { runStemSelftest, parseStemSelftestArgs } = require('./stemSelftest.cjs');
 const { createSplashController } = require('./splash.cjs');
 
@@ -227,8 +228,17 @@ app.whenReady().then(() => {
   registerAlignIpc({ ipcMain, manager: alignManager, getWin: () => mainWindow });
   app.on('will-quit', () => alignManager.dispose());
 
+  // Speaker diarization (Separate Speakers, D2): same shape again, a fifth
+  // independent manager. Its own utility process and its own model directory
+  // (userData/models/diarization); Separate Voice runs it AFTER the stem host
+  // in the same dialog run, and the two never share a child, so cancelling
+  // the speaker step cannot touch a stem separation or a transcription.
+  const diarizeManager = createDiarizeManager({ userDataDir: app.getPath('userData') });
+  registerDiarizeIpc({ ipcMain, manager: diarizeManager, getWin: () => mainWindow });
+  app.on('will-quit', () => diarizeManager.dispose());
+
   // The ONE milestone main can honestly send. Everything above — the splash,
-  // the editor window, the IPC, the four managers — happens in this single
+  // the editor window, the IPC, the five managers — happens in this single
   // synchronous block, and the main process cannot dispatch the splash page's
   // 'did-finish-load' while it runs: only the last value written here can ever
   // reach the page. So it is written once, after the work it names. The stages
