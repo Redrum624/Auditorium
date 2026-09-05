@@ -972,13 +972,18 @@ The stages, in the order they run:
    stay in sync with a backing track and a spoken one has nothing to stay in
    sync with).
 5. **Noise Gate** — brings the stretches where nobody is talking to actual
-   silence. It decides *where*, not how loud. On a take whose gaps come back
-   tighter than half a second it **declines** and says so; the sentence points
-   you at the Vocal Chain's own Noise Gate row, because **the Podcast Chain
-   ships no manual gate threshold of its own**.
-6. **Compressor** — speech settings: 3:1, with the threshold placed under the
-   gated programme level so about 6 dB of gain reduction lands on the loud
-   passages.
+   silence. It decides *where*, not how loud. It mutes only a stretch it
+   **measures** at half a second or more — and that measurement is the gap plus
+   the decay and onset margins around it, not the 400 ms Shorten Pauses left, so
+   it usually still runs after that stage. When the pauses do come back shorter
+   it **declines** and says so on its own line; the sentence points you at the
+   Vocal Chain's own Noise Gate row, because **the Podcast Chain ships no manual
+   gate threshold of its own**.
+6. **Compressor** — speech settings: 3:1, with the threshold placed 6 dB under
+   the gated programme level. The compressor's detector reads a peak envelope,
+   which sits above that level, so the talking lands more than the offset alone
+   suggests — about 7 dB of gain reduction on the reference take, and more on a
+   take with a bigger crest. The stage's own row reports what it measured.
 7. **De-esser** — the harshest sibilants only, derived the way the Vocal Chain
    derives its own.
 8. **EQ (speech)** — three fixed moves for a spoken voice: an 80 Hz

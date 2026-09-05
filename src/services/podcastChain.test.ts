@@ -29,8 +29,10 @@ import { getHistory, undo } from './undoHistory';
 import { gatedLevelDb } from '../dsp/coverMatch';
 import { integratedLoudness, samplePeakDb } from '../dsp/loudness';
 import { detectSilentRuns } from '../dsp/silenceDetect';
+import { envelopeFollower, maxAcrossChannels } from '../dsp/envelope';
+import { reductionDb } from '../effects/dynamics/CompressorEffect';
 import { GATE_HEADROOM_DB, GATE_MIN_REGION_MS, deriveRemoveSilence } from './vocalChain';
-import { _resetDspWorkerTestState } from '../__mocks__/createDspWorkerMock';
+import { _resetDspWorkerTestState, _setDspWorkerLoadFailure } from '../__mocks__/createDspWorkerMock';
 import { readFileSync } from 'fs';
 import { join } from 'path';
 
@@ -246,6 +248,51 @@ describe('the podcast settings resolution', () => {
     expect(Number(resolved.params.ratio)).toBe(PODCAST_COMPRESSOR_RATIO);
     expect(Number(resolved.params.thresholdDb)).toBeCloseTo(level + PODCAST_COMPRESSOR_OFFSET_DB, 6);
     expect(resolved.derived.length).toBeGreaterThan(0);
+  });
+
+  /**
+   * C4 — the reduction the Compressor's note claims, MEASURED through the
+   * shipped detector rather than derived from the threshold offset.
+   *
+   * The offset alone says 4 dB (6 dB over the threshold at 3:1), and that is
+   * wrong: the threshold is placed under the GATED RMS level, while the effect's
+   * detector is an envelope follower on max|x| — a peak-ish quantity that sits
+   * ABOVE that RMS, so the sounding material runs further over the threshold
+   * than the offset says and lands more reduction. This runs the effect's own
+   * `reductionDb` over the effect's own detector, on the burst windows only
+   * (the pauses are what the gate is for), so the note's figure is pinned to
+   * something the code actually does.
+   */
+  it('lands the gain reduction its note claims — measured through the shipped detector', () => {
+    const channels = stereoTake();
+    const resolved = resolvePodcastStage(podcastStageById('compressor'), channels, SR);
+    expect(resolved.run).toBe(true);
+    if (!resolved.run) return;
+    const thresholdDb = Number(resolved.params.thresholdDb);
+    const env = envelopeFollower(
+      maxAcrossChannels(channels),
+      SR,
+      Number(resolved.params.attackMs),
+      Number(resolved.params.releaseMs)
+    );
+    const fade = Math.round(0.01 * SR); // the fixture's own burst fades
+    const reductions: number[] = [];
+    for (let b = 0; b < BURSTS; b++) {
+      const at = (b + 1) * PAUSE_SAMPLES + b * BURST_SAMPLES;
+      for (let i = fade; i < BURST_SAMPLES - fade; i++) {
+        const envDb = 20 * Math.log10(Math.max(env[at + i], 1e-6));
+        reductions.push(
+          reductionDb(envDb - thresholdDb, Number(resolved.params.ratio), Number(resolved.params.kneeDb))
+        );
+      }
+    }
+    reductions.sort((a, b) => a - b);
+    const median = reductions[Math.floor(reductions.length / 2)];
+    // 6.82 dB when this was written — the note says "about 7 dB", and the band
+    // is wide enough that a rounding change in the fixture does not fail it and
+    // narrow enough that the offset-only 4 dB would.
+    expect(median).toBeGreaterThan(5.5);
+    expect(median).toBeLessThan(7.5);
   });
 
   it('declines the compressor when nothing sounds — a gated level of nothing is not a threshold', () => {
@@ -763,6 +810,43 @@ describe('runPodcastChain', () => {
       expect(loudness.warning).toMatch(/full scale/i);
       expect(loudness.warning).toContain('Limiter');
       expect(samplePeakDb(activeDoc().channels)).toBeGreaterThan(0);
+    },
+    RUN_TIMEOUT_MS
+  );
+
+  /**
+   * C6 — the abort path, which had no test at all: `catch (err) {
+   * reportEffectFailure(err); return null; }` could have been a `continue` and
+   * every other test here stayed green, because nothing made a stage fail. What
+   * the docblock promises is that a failure aborts the REMAINING stages and
+   * leaves the document exactly as it was — a ten-stage destructive chain that
+   * committed a half-processed region under one "Podcast Chain" undo entry would
+   * be the worst outcome this module has. Both siblings pin it the same way
+   * (`vocalChain.test.ts`, `coverChain.test.ts`).
+   */
+  it(
+    'aborts without touching the document when a stage fails',
+    async () => {
+      const original = stereoTake().map((c) => Float32Array.from(c));
+      const docId = seedDoc(stereoTake());
+      const historyBefore = getHistory(docId).done.length;
+      const showMessageBox = jest.fn();
+      (window as { electronAPI?: unknown }).electronAPI = { showMessageBox };
+      _setDspWorkerLoadFailure('worker exploded');
+
+      const report = await runPodcastChain({ enabled: only('dc', 'limiter') });
+
+      // Resolves null rather than rejecting — the dialog awaits this, and a
+      // rejection would leave it busy for ever.
+      expect(report).toBeNull();
+      // No undo entry, and not one sample changed in EITHER channel.
+      expect(getHistory(docId).done.length).toBe(historyBefore);
+      const after = activeDoc().channels;
+      expect(after.length).toBe(2);
+      for (let c = 0; c < 2; c++) expect(firstDifference(after[c], original[c])).toBe(-1);
+      // Reported ONCE, on the FIRST failing stage, rather than once per
+      // remaining stage — which is what `return null` buys over `continue`.
+      expect(showMessageBox).toHaveBeenCalledTimes(1);
     },
     RUN_TIMEOUT_MS
   );

@@ -2367,11 +2367,15 @@ sentence and has not had one yet.
   dialog. If a platform's specification is stated in dBTP, leave extra headroom
   and verify after export with a true-peak meter.
 - **There is no manual gate threshold.** The chain's noise-gate stage derives
-  its own decision and, on a take whose gaps come back tighter than half a
-  second, **declines** with the measurement that made it decline. The sentence
-  it prints points at the **Vocal Chain**'s Noise Gate row, which does offer a
-  manual threshold — that is the intended route, and the Podcast Chain ships no
-  control of its own to override the decision.
+  its own decision: it mutes only stretches it MEASURES at half a second or
+  more, so it can **decline** when the pauses (with the decay and onset margins
+  its region edges walk out to) come back shorter — and it says so, with the
+  measurement that made it decline. Which way it lands is not read off the
+  constants: on the chain's own reference take it still applies after Shorten
+  Pauses and mutes 7.8 % of the take. Either way the sentence it prints points
+  at the **Vocal Chain**'s Noise Gate row, which does offer a manual threshold —
+  that is the intended route, and the Podcast Chain ships no control of its own
+  to override the decision.
 - **More than two channels is refused.** `integratedLoudness` follows
   BS.1770-4's channel weights for mono and stereo (1.0 per channel, mono
   counted once) and does not implement the surround weights (+1.5 dB for the

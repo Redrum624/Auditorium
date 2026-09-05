@@ -251,7 +251,7 @@ export const PODCAST_CHAIN_STAGES: readonly PodcastChainStage[] = [
     label: 'Noise Gate',
     effectId: 'noise-gate',
     defaultEnabled: true,
-    note: `Brings the stretches where nobody is talking to actual silence, which Noise Reduction cannot: it lowers a floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting. It decides WHERE, not how loud: a stretch is muted only when the evidence says no voice lives in it, so pause noise louder than your quietest word still goes. It works on what Shorten Pauses left, and the two sit close together by design — that stage leaves every gap at ${PODCAST_SILENCE_TARGET_MS} ms and this one only mutes a stretch of at least 500 ms, the shortest gap this app calls a pause rather than articulation. On a take whose gaps come back tighter than that this stage DECLINES and says so, which is the reason to read its line rather than assume it ran; switching Shorten Pauses off gives it full-length pauses again.`,
+    note: `Brings the stretches where nobody is talking to actual silence, which Noise Reduction cannot: it lowers a floor by at most 12 dB and leaves it there. Length-preserving — it mutes in place rather than cutting. It decides WHERE, not how loud: a stretch is muted only when the evidence says no voice lives in it, so pause noise louder than your quietest word still goes. It works on what Shorten Pauses left, and the two sit close together by design — that stage leaves every gap at ${PODCAST_SILENCE_TARGET_MS} ms and this one only mutes a stretch it MEASURES at 500 ms or more, the shortest gap this app calls a pause rather than articulation. Which way that lands is not read off the two numbers: the stretch it measures is the gap plus the decay and onset margins its region edges walk out to, so on this chain's own reference take it still applies (it mutes 7.8 % of it) and on a take whose gaps come back shorter it declines — and says so on its line, which is the reason to read that line rather than assume either. Switching Shorten Pauses off gives it full-length pauses again.`,
     weight: 8,
   },
   {
@@ -259,7 +259,7 @@ export const PODCAST_CHAIN_STAGES: readonly PodcastChainStage[] = [
     label: 'Compressor',
     effectId: 'compressor',
     defaultEnabled: true,
-    note: `Speech compression at ${PODCAST_COMPRESSOR_RATIO}:1, with the threshold set ${-PODCAST_COMPRESSOR_OFFSET_DB} dB below the GATED programme level — the level measured over the parts that are actually sounding, so the pauses cannot drag it down and the setting does not change because a take has more silence in it. At ${PODCAST_COMPRESSOR_RATIO}:1 a passage n dB over the threshold comes back 2n/3 dB quieter, so the level the voice sits at while someone is talking lands 4 dB of gain reduction and the loudest syllables, which run 8–12 dB over it, land 5–8. It derives NO makeup gain: the Loudness stage below sets the delivery level from a measurement, and a makeup gain here would only be something for it to take back out.`,
+    note: `Speech compression at ${PODCAST_COMPRESSOR_RATIO}:1, with the threshold set ${-PODCAST_COMPRESSOR_OFFSET_DB} dB below the GATED programme level — the level measured over the parts that are actually sounding, so the pauses cannot drag it down and the setting does not change because a take has more silence in it. At ${PODCAST_COMPRESSOR_RATIO}:1 a DETECTOR reading n dB over the threshold comes back 2n/3 dB quieter, and this compressor's detector is a peak envelope follower, not the gated RMS the threshold was placed under — it sits above that level, so the sounding material runs further over the threshold than the ${-PODCAST_COMPRESSOR_OFFSET_DB} dB offset by itself suggests. On this chain's reference take that is about 7 dB of gain reduction while someone is talking, and every extra dB a passage carries lands another 2/3 dB. It derives NO makeup gain: the Loudness stage below sets the delivery level from a measurement, and a makeup gain here would only be something for it to take back out.`,
     weight: 11,
   },
   {
@@ -332,9 +332,17 @@ const lufsStr = (v: number): string => `${v.toFixed(1)} LUFS`;
  * where it found it, and this chain has a loudness stage whose whole job is to
  * move the level somewhere specific.
  *
- * RATIO 3:1, so a passage n dB over the threshold comes back 2n/3 dB quieter:
- * 4 dB of gain reduction at the sounding level itself, 5-8 dB on syllables
- * running 8-12 dB over it.
+ * RATIO 3:1, so a DETECTOR reading n dB over the threshold comes back 2n/3 dB
+ * quieter. That is NOT 4 dB at the sounding level, which is what the 6 dB offset
+ * says on its own (final review, C4): the threshold is placed under the gated
+ * RMS, while the effect's detector is an envelope follower on max|x| — a
+ * peak-ish quantity that sits ABOVE that RMS — so the sounding material runs
+ * further over the threshold than the offset suggests. Measured through the
+ * shipped detector on this chain's own speech fixture, the bursts land about
+ * 6.8 dB (`podcastChain.test.ts`, "lands the gain reduction its note claims");
+ * a louder passage lands 2/3 dB more for every extra dB it carries. The figure
+ * follows the take's crest, which is why the stage reports its own measured
+ * before/after rather than promising one.
  *
  * MAKEUP is left at the effect's own default (0 dB), and that is the point of
  * having the loudness stage: a makeup gain here would be a second, unmeasured
@@ -368,7 +376,7 @@ export function derivePodcastCompressor(
       {
         label: 'Ratio',
         value: `${PODCAST_COMPRESSOR_RATIO}:1`,
-        from: `speech; at this ratio the sounding level lands 4 dB of gain reduction and the loudest syllables 5–8 dB`,
+        from: `speech; at this ratio a detector reading n dB over the threshold comes back 2n/3 dB quieter, and the detector sits above the gated level the threshold was placed under`,
       },
     ],
   };
