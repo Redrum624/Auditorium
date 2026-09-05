@@ -446,8 +446,9 @@ function backingChannels(output: StemSeparationOutput): Float32Array[] {
  * bit-exactly: re-associating the sum into (Vocals) + (the other four) rounds
  * where the five-track order does not, that order being precisely what makes
  * `Σ stems + (mix − Σ stems)` collapse back to `mix` sample for sample.
- * Measured on the acceptance fixture: 4.32e-7 worst (−127 dBFS, a fortieth of
- * a 16-bit step), 66 % of samples still bit-identical. The dialog's voice copy
+ * Measured on the acceptance fixture: 4.32e-7 worst (−127 dBFS, a seventieth
+ * of the smallest step a 16-bit file can store), 66 % of samples still
+ * bit-identical. The dialog's voice copy
  * says exactly that — neither it nor this claims the five-stem exactness for
  * two tracks. No second model run and no second download: the caller hands
  * over an output it already has.
@@ -458,6 +459,12 @@ function backingChannels(output: StemSeparationOutput): Float32Array[] {
  * session and its undo history dropped, and the multitrack view.
  */
 export function landVoice(output: StemSeparationOutput): StemLandingResult {
+  // Selected by LABEL, like the backing sum below, so neither half depends on
+  // the position of Vocals in the array (`stemService` swaps Vocals and Other
+  // out of the host's own order — the one place that swap lives). `stems` is
+  // exactly the four `STEM_LABELS` by contract, so the find always hits; the
+  // empty fallback exists only because the type is an array rather than a
+  // tuple, and it lands nothing rather than inventing audio.
   const vocals = output.stems.find((s) => s.label === 'Vocals')?.channels ?? [];
   const documents = createLandingDocuments(output, VOICE_TRACK_LABELS, [
     vocals,
