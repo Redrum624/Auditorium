@@ -184,6 +184,31 @@ describe('integratedLoudness — EBU Tech 3341 compliance cases', () => {
     expect(lufs as number).toBeLessThan(-25.9);
   });
 
+  /**
+   * D5 scopes the measurement to mono/stereo: every channel weighs 1.0 and none
+   * is excluded, which is NOT what BS.1770-4 does for surround (Ls/Rs at 1.41,
+   * LFE dropped). >2-channel documents are reachable — `decodeAudio.ts` passes a
+   * multichannel WAV through undownmixed — so the equal weighting is pinned
+   * here rather than assumed, and D6's Podcast Chain refuses such documents.
+   */
+  it('a silent third channel adds nothing: 3ch reads the same as the stereo pair', () => {
+    const sine = sineSegment(48000, 20, -23);
+    const silence = new Float32Array(sine.length);
+    const stereo = integratedLoudness([sine, sine], 48000) as number;
+    const threeCh = integratedLoudness([sine, sine, silence], 48000) as number;
+    expect(threeCh).toBeGreaterThan(-23.1);
+    expect(threeCh).toBeLessThan(-22.9);
+    expect(threeCh).toBeCloseTo(stereo, 9);
+  });
+
+  it('a third channel carrying the same tone is weighted 1.0: -23 + 10*log10(3/2)', () => {
+    const sine = sineSegment(48000, 20, -23);
+    const threeCh = integratedLoudness([sine, sine, sine], 48000) as number;
+    const expected = -23 + 10 * Math.log10(3 / 2); // -21.2394
+    expect(threeCh).toBeGreaterThan(expected - 0.1);
+    expect(threeCh).toBeLessThan(expected + 0.1);
+  });
+
   it('200 ms of signal is shorter than one 400 ms block and reads null', () => {
     const short = sineSegment(48000, 0.2, -23);
     expect(integratedLoudness([short, short], 48000)).toBeNull();
@@ -249,7 +274,10 @@ describe('samplePeakDb', () => {
 
   it('reads the magnitude, so a negative peak counts', () => {
     const only = Float32Array.from([0.01, -0.5011872336272722]); // -6 dBFS
-    expect(samplePeakDb([only])).toBeCloseTo(-6, 6);
+    // 5 digits, not 6: the literal is a double and the array is float32, so the
+    // stored value is quantised. Deterministic, but not worth pinning to the
+    // last bit of that rounding.
+    expect(samplePeakDb([only])).toBeCloseTo(-6, 5);
   });
 });
 

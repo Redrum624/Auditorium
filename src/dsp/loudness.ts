@@ -152,11 +152,28 @@ function segmentEnergies(
  * Integrated loudness of `channels` in LUFS, or `null` when no 400 ms block
  * survives gating — an all-silent take, or anything shorter than one block.
  *
- * Channel weights are 1.0 throughout: BS.1770-4 gives L, R and C a weight of 1
- * and only the surround pair Ls/Rs the +1.5 dB (1.41) weight, and this app's
- * documents are mono or stereo. A mono document therefore reads 3.01 LU below
- * the same signal in both channels of a stereo pair — which is exactly why D6's
- * podcast target is -19 LUFS mono against -16 LUFS stereo.
+ * ACCURATE FOR MONO AND STEREO ONLY — deliberately, per D5.
+ *
+ * Every channel is weighted 1.0 and none is excluded. BS.1770-4 instead weights
+ * the surround pair Ls/Rs at 1.41 (+1.5 dB) and leaves the LFE out of the sum
+ * entirely, so on a surround document this reads low on the surrounds and counts
+ * an LFE that should not count. That is a real reachable case, not a hypothetical
+ * one: `decodeAudio.ts` hands a multichannel WAV's channels through WITHOUT a
+ * downmix (only the non-WAV path folds to stereo), and `documentTools.ts`'s
+ * `convertChannels` makes >2ch -> stereo an explicit user action — so a 5.1
+ * document can be open and edited.
+ *
+ * D5 scopes this function to mono and stereo rather than carrying a channel
+ * table, because `Float32Array[]` says nothing about which channel is Ls or LFE;
+ * the layout lives in the document's `channelMask`, not here. A caller holding a
+ * surround document must downmix first. D6's Podcast Chain, this measurement's
+ * only consumer, refuses documents with more than two channels for exactly this
+ * reason.
+ *
+ * Within that scope the equal weighting is the standard's: L and R both weigh 1,
+ * so a mono document reads 3.01 LU below the same signal in both channels of a
+ * stereo pair — which is exactly why D6's podcast target is -19 LUFS mono against
+ * -16 LUFS stereo.
  *
  * Channels of unequal length are measured over their common span.
  */
