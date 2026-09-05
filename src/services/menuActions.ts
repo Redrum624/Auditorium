@@ -51,6 +51,7 @@ import {
   openAlignTimingDialog,
   openVocalChainDialog,
   openCoverChainDialog,
+  openPodcastChainDialog,
   focusSpatialPanel,
   focusTranscriptPanel,
 } from './dialogBus';
@@ -240,6 +241,9 @@ const LAYOUT: { title: MenuSection['title']; itemIds: (string | 'separator')[] }
       'edit.voiceChanger',
       'effects.vocalChain',
       'effects.coverChain',
+      // D7: the Podcast Chain follows the Cover Chain, closing the run of
+      // multi-stage passes before Align Lyrics.
+      'effects.podcastChain',
       'lyrics.align',
       'separator',
       // Analysis — whole-file model runs that produce new material.
@@ -1609,6 +1613,27 @@ function registerCoverChainCommands(): void {
   ]);
 }
 
+/** D6 — the Podcast Chain. It sits in the Pipeline menu's Voice group
+ * immediately after 'Cover Chain', which is D7's placement and also the only
+ * order this group could put it in: the three multi-stage passes run together,
+ * and this one is the spoken-word member of the set. Like both chains before it
+ * it is a command rather than an `effect.<id>` entry, because it is not one
+ * `EffectDefinition`: it composes nine of them, derives each one's settings from
+ * the audio that reaches it, and adds a stage that is no effect at all — the
+ * BS.1770-4 loudness measurement and the one gain that lands the delivery
+ * target. Same `enabled` rule as the other two, and no shortcut: a ten-stage
+ * pass should never be one keystroke away. */
+function registerPodcastChainCommands(): void {
+  registerCommands([
+    {
+      id: 'effects.podcastChain',
+      label: 'Podcast Chain',
+      enabled: (s) => activeDoc(s) !== null,
+      run: async () => openPodcastChainDialog(),
+    },
+  ]);
+}
+
 /** F6 — Align Lyrics. F11-7: it CLOSES the Pipeline menu's Voice group. F6 had
  * placed it in the Effects menu between 'Align Vocal Timing…' and 'Vocal
  * Chain…' because that is the order the three are RUN in — both manual steps
@@ -1689,5 +1714,6 @@ registerTranscribeCommands();
 registerVoiceCommands();
 registerVocalChainCommands();
 registerCoverChainCommands();
+registerPodcastChainCommands();
 registerAlignLyricsCommands();
 registerSpatialCommands();

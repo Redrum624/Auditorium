@@ -73,6 +73,8 @@ import {
   runCoverChain,
   type CoverChainStageId,
 } from './coverChain';
+import { defaultPodcastStageSelection, runPodcastChain } from './podcastChain';
+import { samplePeakDb } from '../dsp/loudness';
 import { COVER_JOURNEY_STAGES, runCoverJourney } from './coverJourney';
 import { createRemixDocument, getRemixSession } from './remixService';
 import {
@@ -107,6 +109,16 @@ import { measureFirstPlayLatency as runFirstPlayLatency } from '../multitrack/fi
 import type { FirstPlayLatencyReport } from '../multitrack/firstPlayLatency';
 import { multitrackRecorder } from '../multitrack/multitrackRecord';
 import type { FadeCurve } from '../dsp/fades';
+
+/** `samplePeakDb` reads `-Infinity` on digital silence, and that does not
+ * survive `JSON.stringify` — it arrives across Playwright's structured-clone
+ * boundary as `null` anyway, but as an UNDECLARED null the round-trip pin in
+ * `testHooks.test.ts` catches rather than a declared one. Declaring it is the
+ * fix; this is where the two meet. */
+function finitePeak(db: number): number | null {
+  return Number.isFinite(db) ? db : null;
+}
+
 
 export interface TestStateSummary {
   docCount: number;
@@ -460,6 +472,39 @@ export interface TestApi {
      * moment a stage is added, and it has, twice. */
     registryStageIds: string[];
     registryManualIds: string[];
+  }>;
+  // --- D6 -----------------------------------------------------------------
+  /**
+   * Runs the Podcast Chain over the ACTIVE document with the shipped stage
+   * defaults, through the same service the dialog calls — so the packaged smoke
+   * exercises the real derivations, the real worker leg, the BS.1770-4
+   * measurement and the ONE undo entry.
+   *
+   * It reports the five numbers the smoke can actually assert on: the undo
+   * label, the loudness the chain measured going in and coming out, the sample
+   * peak of what landed, and the refusal. `beforeLufs`/`afterLufs` are
+   * `number | null` because both are: a take with nothing above BS.1770-4's
+   * gate has no loudness, and a REFUSED document has none by construction — the
+   * refusal exists precisely because that measurement would be wrong there.
+   * `peakDb` is a SAMPLE peak (`samplePeakDb`), never a true-peak reading: the
+   * limiter is not oversampled. It is `number | null` for the reason this whole
+   * file exists: `samplePeakDb` answers `-Infinity` for digital silence, and
+   * `JSON.stringify(-Infinity)` is `null` — so a hook returning it would arrive
+   * on the Playwright side as a value the smoke's `<= -1` compares against
+   * `null` and silently passes. `null` is the honest answer to "what is the peak
+   * of nothing", and it is the one that survives the boundary intact.
+   *
+   * No `overrides` parameter, unlike the two chains above. This hook exists for
+   * one assertion — that a default run lands the delivery target — and a stage
+   * map the smoke could bend is a way for that assertion to pass against a run
+   * nobody ships.
+   */
+  podcastChainRun(): Promise<{
+    undoLabel: string | null;
+    beforeLufs: number | null;
+    afterLufs: number | null;
+    peakDb: number | null;
+    refusal: string | null;
   }>;
   // --- CP1 -----------------------------------------------------------------
   /**
@@ -2684,6 +2729,44 @@ export function installTestHooks(): void {
         // Comparing lists also pins ORDER and MEMBERSHIP, which a count cannot.
         registryStageIds: VOCAL_CHAIN_STAGES.map((s) => s.id),
         registryManualIds: VOCAL_CHAIN_STAGES.filter((s) => s.effectId === null).map((s) => s.id),
+      };
+    },
+
+    // D6. Drives runPodcastChain for the active document, bypassing
+    // PodcastChainDialog — so the smoke exercises the real derivations, the
+    // real worker leg, the real loudness measurement and the ONE undo entry.
+    //
+    // The peak is read off the DOCUMENT rather than off the report, deliberately:
+    // the report's `after` is measured on the region the chain held, and the
+    // claim the smoke needs is about the file that is now open. On a whole-file
+    // run the two agree; if they ever did not, the document is the one that
+    // ships.
+    podcastChainRun: async () => {
+      const before = activeDoc();
+      if (!before) {
+        return {
+          undoLabel: null,
+          beforeLufs: null,
+          afterLufs: null,
+          peakDb: null,
+          refusal: null,
+        };
+      }
+      const report = await runPodcastChain({ enabled: defaultPodcastStageSelection() });
+      const after = activeDoc();
+      const history = getHistory(before.id);
+      return {
+        // Only when the run actually applied: a refused or failed run must not
+        // report whatever entry happened to be on top of somebody else's
+        // history as though this chain had put it there.
+        undoLabel:
+          report?.applied === true && history.done.length > 0
+            ? history.done[history.done.length - 1]
+            : null,
+        beforeLufs: report ? report.before.lufs : null,
+        afterLufs: report ? report.after.lufs : null,
+        peakDb: finitePeak(after ? samplePeakDb(after.channels) : -Infinity),
+        refusal: report ? report.refusal : null,
       };
     },
 

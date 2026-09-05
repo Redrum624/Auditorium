@@ -40,10 +40,25 @@ describe('pipelineTools', () => {
    * voice precedes reshaping it, so Separate Voice heads the group and every
    * row under it operates on what it produced.
    */
-  it('opens the Voice group with Separate Voice (D7)', () => {
+  it('opens the Voice group with Separate Voice, and runs D7’s six rows in order', () => {
     const voice = getPipelineGroups()[1];
     expect(voice.title).toBe('Voice');
     expect(voice.commands[0]).toEqual({ id: 'voice.separate', label: 'Separate Voice' });
+    // The WHOLE order, not just the head: D6 added a sixth row and the ruling
+    // that placed it is an adjacency (Podcast Chain immediately after Cover
+    // Chain, which is itself immediately after Vocal Chain). A head-only pin
+    // cannot see a row inserted anywhere below it.
+    expect(voice.commands.map((c) => c.id)).toEqual([
+      'voice.separate',
+      'edit.voiceChanger',
+      'effects.vocalChain',
+      'effects.coverChain',
+      'effects.podcastChain',
+      'lyrics.align',
+    ]);
+    expect(voice.commands.find((c) => c.id === 'effects.podcastChain')!.label).toBe(
+      'Podcast Chain'
+    );
   });
 
   it('reads each label off the registry rather than restating it', () => {

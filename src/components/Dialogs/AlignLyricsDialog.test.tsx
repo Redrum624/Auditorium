@@ -305,6 +305,7 @@ beforeEach(() => {
     openAlignTimingDialog: () => {},
     openVocalChainDialog: () => {},
     openCoverChainDialog: () => {},
+    openPodcastChainDialog: () => {},
     openAlignLyricsDialog: () => {},
     focusRemixPanel: () => {},
     focusTranscriptPanel: () => {},

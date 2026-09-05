@@ -489,6 +489,7 @@ export default function App() {
         openAlignTimingDialog: () => openTool('timing.align'),
         openVocalChainDialog: () => openTool('effects.vocalChain'),
         openCoverChainDialog: () => openTool('effects.coverChain'),
+        openPodcastChainDialog: () => openTool('effects.podcastChain'),
         openAlignLyricsDialog: () => openTool('lyrics.align'),
         // U2-3: hand-offs from a tool that has just finished — never refused.
         focusRemixPanel: () => showPanel('remix'),

@@ -2,6 +2,7 @@ import { useCallback, type ComponentType } from 'react';
 import AlignLyricsDialog from './AlignLyricsDialog';
 import AlignTimingDialog from './AlignTimingDialog';
 import CoverChainDialog from './CoverChainDialog';
+import PodcastChainDialog from './PodcastChainDialog';
 import RemixDialog from './RemixDialog';
 import SeparateDialog from './SeparateDialog';
 import TempoDialog from './TempoDialog';
@@ -29,7 +30,7 @@ function SeparateVoiceDialog({ onClose }: { onClose(): void }) {
  *
  * The registry below is the answer to "which Pipeline rows open a tool UI", and
  * it is the honest one: a row is hosted exactly when a component is mounted for
- * it here. The Pipeline menu has eleven rows and only ten are in this map —
+ * it here. The Pipeline menu has twelve rows and only eleven are in this map —
  * `tempo.detect` runs an analysis and reports through its own channel — so
  * "every Pipeline tool" would have been wrong, and a written list of ids
  * somewhere else would have been a second place for it to go wrong.
@@ -53,6 +54,7 @@ const PIPELINE_TOOL_COMPONENTS: Record<string, ComponentType<{ onClose(): void }
   'edit.voiceChanger': VoiceChangerDialog,
   'effects.vocalChain': VocalChainDialog,
   'effects.coverChain': CoverChainDialog,
+  'effects.podcastChain': PodcastChainDialog,
   'lyrics.align': AlignLyricsDialog,
   // Analysis
   'edit.transcribe': TranscribeDialog,
