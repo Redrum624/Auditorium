@@ -199,6 +199,20 @@ export interface TestApi {
   setCursor(sample: number): number;
   /** Reads the document cursor back (`getStateSummary` carries no cursor). */
   getCursor(): number;
+  /** D2 — the editor transport, as the store holds it: the engine state, the
+   * position Play/Pause last wrote, and the BAR, in one read.
+   *
+   * The three have to come back together or the claim D2 makes is not
+   * checkable: "Play starts at the bar" is a relation between `cursorSample`
+   * and the `positionSample` the play wrote, and reading them through two
+   * hooks leaves a window in which a rAF pump could move one of them between
+   * the calls. Nothing here drives the transport — the smoke presses Space, so
+   * the shipped `transport.playPause` command is what runs. */
+  getPlaybackState(): {
+    state: 'stopped' | 'playing' | 'paused';
+    positionSample: number;
+    cursorSample: number;
+  };
   /** One step FORWARD through the same history Ctrl+Y drives. */
   redoActive(): { length: number };
   /** The active document's history, as the History panel renders it. */
@@ -234,6 +248,11 @@ export interface TestApi {
   setMtCursor(sample: number): number;
   /** Reads it back (`getStateSummary` carries no session cursor). */
   getMtCursor(): number;
+  /** D1 — the multitrack viewport (`mtZoom`), so a zoom gesture's ANCHOR can be
+   * checked: the bar's on-screen x is `(cursor - scrollSample) / samplesPerPixel`,
+   * and holding it across a Ctrl+wheel is the whole of D1. A COPY of the pair,
+   * for `getSelectedGap`'s reason. */
+  getMtZoom(): { samplesPerPixel: number; scrollSample: number };
   /** Lot D: names the clip selection through `setSelectedClips`, so the store's
    * own rules apply (dangling ids dropped, duplicates collapsed), and echoes
    * what was stored. */
@@ -1310,6 +1329,13 @@ export function installTestHooks(): void {
 
     getCursor: () => useAppStore.getState().cursorSample,
 
+    // D2. One read of the app store, so the bar and the position the transport
+    // wrote cannot be observed a frame apart (see the interface docblock).
+    getPlaybackState: () => {
+      const { playback, cursorSample } = useAppStore.getState();
+      return { state: playback.state, positionSample: playback.positionSample, cursorSample };
+    },
+
     redoActive: () => {
       const doc = activeDoc();
       if (doc) undoHistoryRedo(doc.id);
@@ -1445,6 +1471,14 @@ export function installTestHooks(): void {
     },
 
     getMtCursor: () => useSessionStore.getState().mtCursorSample,
+
+    // D1. A fresh pair rather than the store's own object, for the reason
+    // `getSelectedGap` states: what crosses the Playwright boundary must not be
+    // a handle into the store.
+    getMtZoom: () => {
+      const { samplesPerPixel, scrollSample } = useSessionStore.getState().mtZoom;
+      return { samplesPerPixel, scrollSample };
+    },
 
     selectClips: (ids) => {
       useSessionStore.getState().setSelectedClips(ids);

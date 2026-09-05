@@ -808,6 +808,23 @@ describe('lot D session hooks', () => {
     expect(useSessionStore.getState().mtCursorSample).toBe(1234);
   });
 
+  it('getMtZoom reports the multitrack viewport, as a COPY', () => {
+    // D1 — the pair the smoke computes the bar's on-screen x from. Non-default
+    // values on purpose: a hook that answered `defaultSessionZoom` regardless
+    // would pass against the store's own initial state.
+    const t = api();
+    seedClips();
+    useSessionStore.setState({ mtZoom: { samplesPerPixel: 64, scrollSample: 12800 } });
+
+    const zoom = t.getMtZoom();
+
+    expect(zoom).toEqual({ samplesPerPixel: 64, scrollSample: 12800 });
+    expectPlainJson(zoom);
+
+    zoom.scrollSample = -1;
+    expect(useSessionStore.getState().mtZoom.scrollSample).toBe(12800);
+  });
+
   it('selectClips names the clip selection, dropping dangling ids and duplicates', () => {
     const t = api();
     const [a] = seedClips();
@@ -1263,5 +1280,38 @@ describe('podcast chain hooks (D6)', () => {
       refusal: null,
     });
     expect(JSON.parse(JSON.stringify(result))).toStrictEqual(result);
+  });
+});
+
+describe('getPlaybackState (D2)', () => {
+  /**
+   * D2 — the one read the packaged smoke checks "Play starts at the bar"
+   * against. It is deliberately a READ ONLY: the smoke presses Space, so the
+   * shipped `transport.playPause` is what writes these fields, and a hook that
+   * drove the transport itself would be pinning its own arithmetic.
+   */
+  it('reports the engine state, the position the transport wrote, and the bar together', () => {
+    const t = api();
+    addDoc('Tone');
+    // Values nothing defaults to, and three DIFFERENT ones, so a hook reading
+    // the wrong field or aliasing two of them is visible.
+    useAppStore.getState().setCursor(44100);
+    useAppStore.getState().setPlayback({ state: 'paused', positionSample: 22050 });
+
+    const state = t.getPlaybackState();
+
+    expect(state).toEqual({ state: 'paused', positionSample: 22050, cursorSample: 44100 });
+    expectPlainJson(state);
+  });
+
+  it('reads the stopped default before anything has played', () => {
+    const t = api();
+    addDoc('Tone');
+
+    expect(t.getPlaybackState()).toEqual({
+      state: 'stopped',
+      positionSample: 0,
+      cursorSample: 0,
+    });
   });
 });
