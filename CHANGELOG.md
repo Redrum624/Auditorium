@@ -5,7 +5,7 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.38.0] - 2026-09-05
 
 The edit line becomes the thing everything aims at — zoom and Play both — plus
 gaps you can select and close, and two new Pipeline tools for the voice.
