@@ -12,6 +12,9 @@
  * and "unchanged inside" are both real claims, and a `keepSpans` that returned
  * its input, or silence, fails immediately.
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
 import { fadeInGainAt, fadeOutGainAt } from './fades';
 import { MIN_EDGE_RAMP_SAMPLES, SPEAKER_EDGE_FADE_MS, keepSpans } from './spanMask';
 
@@ -81,6 +84,44 @@ describe('D4 SPEAKER_EDGE_FADE_MS — one constant, two rates', () => {
   });
 });
 
+describe('D4 SPEAKER_EDGE_FADE_MS — the header claims only what remixRender measured', () => {
+  // The constant is a boundary value borrowed from another module's
+  // measurement, so the thing that can rot is not the arithmetic (pinned
+  // above) but the SENTENCE: a citation that drifts off the docblock it names,
+  // or a paraphrase that turns "where a fade-out becomes audible" into "the
+  // longest ramp that is not". Both are checked against `remixRender.ts` itself
+  // rather than against a copy of its wording kept here.
+  const source = readFileSync(join(__dirname, 'spanMask.ts'), 'utf8');
+  const remixLines = readFileSync(join(__dirname, 'remixRender.ts'), 'utf8').split(/\r?\n/);
+  /** Comment text as prose: leading ` * ` gone, wrapping collapsed, so a
+   * sentence broken across three comment lines reads as one. */
+  const prose = (text: string): string => text.replace(/^[ \t]*\*[ \t]?/gm, '').replace(/\s+/g, ' ');
+
+  it('cites the exact lines that hold the bound, and no unrelated constant', () => {
+    const cites = [...source.matchAll(/remixRender\.ts:(\d+)-(\d+)/g)];
+    expect(cites.length).toBeGreaterThan(0);
+    for (const [, from, to] of cites) {
+      const slice = remixLines.slice(Number(from) - 1, Number(to));
+      // A citation that opens on the docblock and closes on the declaration it
+      // documents is the whole measurement and nothing else; one that starts a
+      // few lines early sweeps in a neighbouring constant (`SHAPE_RHO_THRESHOLD`,
+      // `TAIL_FADE_SECONDS`) and stops pointing at what it claims to point at.
+      expect(slice[0].trim().startsWith('/**')).toBe(true);
+      expect(slice[slice.length - 1].trim()).toBe('const MIN_TAIL_FADE_MS = 2;');
+      expect(prose(slice.join('\n'))).toContain('a fade-out becomes audible as a level change');
+    }
+  });
+
+  it('does not read the bound as a licence to call 10 ms inaudible', () => {
+    // remixRender measured where a fade-out STARTS to read as a level change.
+    // That makes ~10 ms the first audible length, not the last inaudible one,
+    // so nothing here may place this module's own 10 ms ramp under the bound or
+    // present it as the longest ramp that stays below it.
+    const text = prose(source);
+    expect(text).not.toMatch(/longest[^.]{0,100}(?:audib|inaudib)/i);
+    expect(text).not.toMatch(/(?:under|below|beneath)[^.]{0,60}(?:audib|inaudib)/i);
+  });
+});
 describe('D4 keepSpans — a 1 s ramp, two overlapping spans', () => {
   // [10000, 20000) and [15000, 30000) overlap, so they are ONE kept region
   // [10000, 30000) with a ramp only at its two outer edges. Handed over out of

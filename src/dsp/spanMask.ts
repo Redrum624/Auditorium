@@ -16,17 +16,26 @@
  * straight into silence puts a full-amplitude step at both ends of every turn,
  * which is a click, once per turn, on every speaker track.
  *
- * `remixRender.ts:207-219` states this app's measured bound for the other
- * direction: a fade-out becomes audible AS A LEVEL CHANGE at around 10 ms, and
- * its own tail taper is floored at 2 ms precisely to stay under it. 10 ms is
- * therefore the LONGEST ramp that does not start shortening the turn audibly,
- * and the longest is what a speech boundary wants: the step to remove is
- * full-scale, and a 2 ms ramp against speech that has been cut mid-syllable is
- * still a perceptible edge. It gets its own constant instead of borrowing
- * `MIN_TAIL_FADE_MS` or `EXACT_TRIM_FADE_MS` because it answers a different
- * question — those two taper material into ADJACENT material, this one takes
- * speech to silence — and one shared number would tie three unrelated
- * decisions together.
+ * `remixRender.ts:210-219` carries the only measurement this app has anywhere
+ * near this question: ~10 ms is where a fade-out becomes audible as a level
+ * change. That is where audibility BEGINS — 10 ms is the first length that
+ * reads as a level change, not the last one that does not — so this constant
+ * sits exactly AT that bound rather than short of it, and that is a deliberate
+ * trade worth naming rather than a number to hide behind. What it buys: the
+ * step being removed here is full-scale, and speech cut mid-syllable is a
+ * harder edge than the tail overflow `remixRender` tapers, so the 2 ms that
+ * costs nothing musically there is still a perceptible edge here. What it
+ * costs: a level taper as long as 10 ms at each end of every turn. The dialog's
+ * own copy (D5) states that cost to the user — the speaker tracks "carry that
+ * speaker's turns with short fades at each edge, so they do not add back sample
+ * for sample" — and no claim is made anywhere that these edges cannot be heard.
+ * Moving the number in either direction needs a new measurement, not an edit
+ * here.
+ *
+ * It gets its own constant instead of borrowing `MIN_TAIL_FADE_MS` or
+ * `EXACT_TRIM_FADE_MS` because it answers a different question — those two
+ * taper material into ADJACENT material, this one takes speech to silence —
+ * and one shared number would tie three unrelated decisions together.
  *
  * ---------------------------------------------------------------------------
  * WHAT THE OUTPUT IS NOT
@@ -50,7 +59,7 @@ export interface SampleSpan {
 
 /**
  * D4 — the edge fade for a kept span, in milliseconds. See the module header
- * for the measurement it is set against (`remixRender.ts:207-219`); it is a
+ * for the measurement it is set against (`remixRender.ts:210-219`); it is a
  * boundary value, not a taste setting.
  */
 export const SPEAKER_EDGE_FADE_MS = 10;
