@@ -7583,6 +7583,32 @@ async function main() {
 
     await page.evaluate((p) => window.__test.openPath(p), TONE);
     const voiceBefore = await stateOf();
+    // A per-document IDENTITY for the copy this step just opened, planted
+    // before anything else touches it.
+    //
+    // Every earlier step opens its own `tone.wav`; a full run reaches the
+    // landings below with well over a hundred of them, and they share the
+    // name, the file path, the length, the rate and the channel count — so
+    // none of those can tell THIS step's document apart from a copy some
+    // earlier step edited in place. A marker can: markers are stored per
+    // document id, no other step writes this name, and `getActiveMarkers`
+    // reads the ACTIVE document, which is precisely the thing the by-index
+    // re-activation below is claiming to have chosen. Without an identity
+    // that differs between copies, that claim is unfalsifiable.
+    //
+    // The position is an arbitrary interior sample — not 0, not the length,
+    // not any position an earlier step uses — so a read that returned a
+    // marker but lost its position cannot pass either.
+    const SOURCE_MARK = 'L7-13 source';
+    const SOURCE_MARK_AT = 31777;
+    /** True when the given `getActiveMarkers` list carries this step's mark. */
+    const hasSourceMark = (list) =>
+      Array.isArray(list) &&
+      list.some((m) => m.name === SOURCE_MARK && m.positionSample === SOURCE_MARK_AT);
+    await page.evaluate((m) => window.__test.addMarkerToActive(m.at, m.name), {
+      at: SOURCE_MARK_AT,
+      name: SOURCE_MARK,
+    });
     await openModuleCard(page, 'Pipeline');
     await page.waitForSelector('[data-testid="pipeline-panel"]', { timeout: 10000 });
     await page.click('[data-testid="pipeline-item"][data-command-id="voice.separate"] button');
@@ -7895,6 +7921,75 @@ async function main() {
           `(${voiceBefore.docCount} -> ${afterClose.docCount}, active ` +
           `${JSON.stringify(afterClose.activeName)})`
       );
+
+      // What the dialog run above CANNOT prove on this fixture, and the reason
+      // this block exists.
+      //
+      // A 2 s sine reaches the ZERO-EVIDENCE review deterministically: no
+      // embeddings, so no rows, no per-document size line, a dead count
+      // select. Every assertion just made is therefore satisfied by a
+      // diarization that returned `{windows: [], embeddings: []}` without ever
+      // spawning the host — the review branch is identical either way. The
+      // stage labels do not close that hole and are deliberately NOT pinned:
+      // "Listening for speakers — window 0 of 0" is the renderer's PRE-SPAWN
+      // placeholder, published immediately before the invoke, and "Comparing
+      // voices" never appears at zero embeddings.
+      //
+      // So the host is asked for its own numbers, through the hook Task 6
+      // built for exactly this. `windowCount` counts the `window` events the
+      // CHILD posted and `totalSamples16k` is the length the child was fed;
+      // both are 0 for a stub, a skip, or a spawn that failed, and neither can
+      // be produced by a renderer that decided there was nothing to do.
+      const diar = await page.evaluate(() => window.__test.diarizeActive());
+      console.log(`  diarizeActive — the speaker host's own numbers: ${JSON.stringify(diar)}`);
+      assert(
+        diar.ok === true && diar.status === 'ok',
+        `a direct pass through the REAL speaker host succeeds: the utilityProcess spawned, both ` +
+          `ONNX sessions loaded and the job ran to 'done' ` +
+          `(${diar.status}${diar.message === null ? '' : `: ${JSON.stringify(diar.message)}`})`
+      );
+      // D1's resample, re-derived from the document the app actually holds
+      // rather than written down: `modelLength16k` is
+      // round(length · 16000 / rate), so 2 s at 44.1 kHz is 32,000 samples at
+      // 16 kHz. Both sides move together if the fixture ever changes.
+      const expected16k = Math.round(voiceBefore.length * (16000 / voiceBefore.sampleRate));
+      assert(
+        diar.totalSamples16k === expected16k &&
+          diar.lengthSamples === voiceBefore.length &&
+          diar.sampleRate === voiceBefore.sampleRate,
+        `…on THIS document, resampled to the host's 16 kHz: ${expected16k} samples from ` +
+          `${voiceBefore.length}@${voiceBefore.sampleRate} (got ${diar.totalSamples16k} from ` +
+          `${diar.lengthSamples}@${diar.sampleRate})`
+      );
+      // D2's window plan, computed from the two window constants rather than
+      // asserted as a number: windows are 160,000 samples (10 s) shifted by
+      // 16,000 (1 s), and a signal shorter than one window still gets one
+      // zero-padded window — 32,000 samples give exactly 1. A host that never
+      // ran gives 0, which is the whole point of the pin.
+      const SEG_WINDOW_16K = 160000;
+      const SEG_SHIFT_16K = 16000;
+      const expectedWindows =
+        expected16k < SEG_WINDOW_16K
+          ? 1
+          : Math.floor((expected16k - SEG_WINDOW_16K) / SEG_SHIFT_16K) +
+            1 +
+            ((expected16k - SEG_WINDOW_16K) % SEG_SHIFT_16K > 0 ? 1 : 0);
+      assert(
+        diar.windowCount >= 1 && diar.windowCount === expectedWindows,
+        `…and the child delivered D2's own window plan for that length — ${expectedWindows} ` +
+          `window(s) of ${SEG_WINDOW_16K} samples shifted by ${SEG_SHIFT_16K}, not the 0 a ` +
+          `stubbed, skipped or crashed host returns (got ${diar.windowCount})`
+      );
+      // And the stream ran rather than the result arriving in one lump.
+      // `embeddingCount` is NOT pinned: a tone legitimately yields none (no
+      // local speaker clears MIN_EMBED_FRAMES), which is why the window count
+      // above is the artifact this block leans on.
+      assert(
+        diar.progressEvents >= 1 && diar.maxFraction === 1,
+        `…and the run streamed progress and closed its bar at 1 rather than stalling ` +
+          `(${diar.progressEvents} events, max fraction ${diar.maxFraction}, phases ` +
+          `${JSON.stringify(diar.phasesSeen)})`
+      );
     } else {
       await closeHostedTool();
     }
@@ -7957,23 +8052,57 @@ async function main() {
     // copy — and `activateDocumentByName`'s default index 0 would pick the
     // oldest of them, which is some other step's document and may have been
     // edited in place. The store keeps documents in insertion order, so the one
-    // THIS step opened is the newest; its length and rate are re-asserted after
-    // the switch as well.
+    // THIS step opened is the newest.
+    //
+    // Which is checked by the MARKER planted at the top of the step, not by
+    // name/length/rate: those three are identical across every copy, so an
+    // assertion on them would hold just as well if the `index` argument were
+    // dropped on the floor and the index-0 document stayed active. The
+    // index-0 markers are read FIRST, before the by-index selection, as the
+    // control: on a full run that document is an earlier step's and carries no
+    // such mark, which is what makes the positive assertion below able to
+    // fail.
     const sourceMatches = await page.evaluate(
       (n) => window.__test.activateDocumentByName(n),
       voiceBefore.activeName
     );
+    const oldestMarks = await page.evaluate(() => window.__test.getActiveMarkers());
     const backToSource = await page.evaluate(
       (a) => window.__test.activateDocumentByName(a.name, a.index),
       { name: voiceBefore.activeName, index: sourceMatches - 1 }
     );
-    assert(backToSource > 0, `the source is still open to land from (${backToSource} match(es))`);
+    const sourceMarks = await page.evaluate(() => window.__test.getActiveMarkers());
+    console.log(
+      `  re-activated the source: ${sourceMatches} document(s) named ` +
+        `“${voiceBefore.activeName}”; index 0 carries this step's mark=` +
+        `${hasSourceMark(oldestMarks)}, index ${sourceMatches - 1} carries it=` +
+        `${hasSourceMark(sourceMarks)}`
+    );
+    assert(
+      sourceMatches >= 1 && backToSource === sourceMatches,
+      `the source is still open to land from, and the match count did not move between the two ` +
+        `selections (${sourceMatches} then ${backToSource})`
+    );
+    assert(
+      hasSourceMark(sourceMarks),
+      `…and the document the by-index selection made active is the copy THIS step opened, named ` +
+        `by the marker it planted at sample ${SOURCE_MARK_AT} ` +
+        `(${JSON.stringify(sourceMarks)})`
+    );
+    if (sourceMatches > 1) {
+      assert(
+        !hasSourceMark(oldestMarks),
+        `…and the index genuinely chose it: the FIRST of the ${sourceMatches} matches is an ` +
+          `earlier step's copy and carries no such marker, so an ignored index argument would ` +
+          `have failed the assertion above (${JSON.stringify(oldestMarks)})`
+      );
+    }
     const sourceAgain = await stateOf();
     assert(
       sourceAgain.activeName === voiceBefore.activeName &&
         sourceAgain.length === voiceBefore.length &&
         sourceAgain.sampleRate === voiceBefore.sampleRate,
-      `…and it is the same document this step opened (${JSON.stringify(sourceAgain.activeName)}, ` +
+      `…at the name, length and rate the step opened it with (${JSON.stringify(sourceAgain.activeName)}, ` +
         `${sourceAgain.length}@${sourceAgain.sampleRate} vs ${voiceBefore.length}@${voiceBefore.sampleRate})`
     );
     const speakers = await page.evaluate(() => window.__test.separateSpeakersLand(2));
@@ -8065,7 +8194,10 @@ async function main() {
     // The five landed names are this step's alone, so index 0 is the only
     // match and picks itself. The SOURCE is not: `last: true` closes the newest
     // `tone.wav`, which is the one this step opened and landed from, and leaves
-    // the hundred-odd copies the earlier steps opened exactly where they were.
+    // the hundred-odd copies the earlier steps opened exactly where they were —
+    // and that one close is checked against the planted marker before it fires,
+    // for the reason the landing above gives: nothing else distinguishes the
+    // copies, so “it closed the right one” is otherwise unfalsifiable.
     const restoreOrder = [
       { name: `${voiceBefore.activeName} — Voice`, expect: 1 },
       { name: `${voiceBefore.activeName} — Backing`, expect: 2 },
@@ -8097,6 +8229,12 @@ async function main() {
         await page.evaluate(
           (a) => window.__test.activateDocumentByName(a.name, a.index),
           { name: entry.name, index: matches - 1 }
+        );
+        const closing = await page.evaluate(() => window.__test.getActiveMarkers());
+        assert(
+          hasSourceMark(closing),
+          `…and the copy about to be closed is the one THIS step opened and marked, not one of ` +
+            `the ${matches - 1} the earlier steps left open (${JSON.stringify(closing)})`
         );
       }
       await page.evaluate(() => window.__test.closeActive());
