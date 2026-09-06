@@ -476,6 +476,15 @@ describe('SeparateDialog', () => {
     expect(note).toHaveTextContent(/peaks above full scale/i);
     expect(note).toHaveTextContent('2.40');
     expect(note).toHaveTextContent(/will not add back/i);
+    // The stems half of `exactnessNote`'s voice ternary, pinned in BOTH
+    // directions. Without the negatives the whole branch is free: the note
+    // could tell a five-stem user that "the two tracks will not add back" and
+    // that "The Voice and the Backing themselves are complete" — two lanes
+    // that only exist in voice mode. VR9 pins the mirror image.
+    expect(note).toHaveTextContent(/five tracks/i);
+    expect(note).not.toHaveTextContent(/two tracks/i);
+    expect(note).toHaveTextContent(/The stems themselves are complete/);
+    expect(note).not.toHaveTextContent(/Voice and the Backing/);
     expect(note).toHaveClass('text-[#e0a458]');
     // The result has to stay readable, so this one does NOT auto-close.
     expect(onClose).not.toHaveBeenCalled();
@@ -1019,7 +1028,20 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     // dialog that passed the document's would put every window index and every
     // returned span out by 8.8 % on a 48 kHz source.
     seedDoc();
-    const output = makeVoiceOutput({ sampleRate: 48_000 });
+    // And the stems arrive SHUFFLED, on purpose. The dialog selects Vocals by
+    // LABEL because `stemService` does not guarantee the host's order, and
+    // every other fixture here emits Drums, Bass, Vocals, Other — an order in
+    // which `stems[2]` and the label agree, so an index-based pick would read
+    // as correct. Here Vocals is last and index 2 is Other: a dialog that
+    // indexed would hand the diarizer the wrong hundreds of megabytes and
+    // split the wrong audio.
+    const base = makeVoiceOutput({ sampleRate: 48_000 });
+    const output: StemSeparationOutput = {
+      ...base,
+      stems: [base.stems[0], base.stems[1], base.stems[3], base.stems[2]],
+    };
+    const vocals = output.stems.find((s) => s.label === 'Vocals')!;
+    expect(output.stems.map((s) => s.label)).toEqual(['Drums', 'Bass', 'Other', 'Vocals']);
     mockSeparate.mockResolvedValue({ ok: true, output });
     await renderVoice();
 
@@ -1030,8 +1052,10 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(mockDiarize).toHaveBeenCalledTimes(1);
     const req = mockDiarize.mock.calls[0][0];
     // By REFERENCE: the Vocals stem is hundreds of megabytes and is read, not
-    // copied — and it is Vocals, not the first stem in the array.
-    expect(req.channels).toBe(output.stems[2].channels);
+    // copied — and it is Vocals BY LABEL, not whatever sits at a fixed index.
+    expect(req.channels).toBe(vocals.channels);
+    expect(req.channels).not.toBe(output.stems[0].channels);
+    expect(req.channels).not.toBe(output.stems[2].channels);
     expect(req.sampleRate).toBe(48_000);
     expect(req.sampleRate).toBe(output.sampleRate);
     expect(req.sampleRate).not.toBe(SR);
@@ -1162,6 +1186,15 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     const note = screen.getByTestId('separate-note-exactness');
     expect(note).toHaveTextContent(/peaks above full scale/i);
     expect(note).toHaveTextContent('2.40');
+    // "Today's note" is the VOICE wording, not just the peak figure: two
+    // tracks, and the Voice and the Backing named as the complete pair. The
+    // peak assertions alone leave `exactnessNote`'s whole voice branch free to
+    // say "the five tracks" and "The stems themselves are complete" to someone
+    // who has neither in their session. Stems test 13 pins the mirror.
+    expect(note).toHaveTextContent(/two tracks/i);
+    expect(note).not.toHaveTextContent(/five tracks/i);
+    expect(note).toHaveTextContent(/The Voice and the Backing themselves are complete/);
+    expect(note).not.toHaveTextContent(/The stems themselves are complete/);
     expect(onClose).not.toHaveBeenCalled();
   });
 
@@ -1205,28 +1238,40 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     expect(screen.queryByTestId('separate-note-exactness')).not.toBeInTheDocument();
   });
 
-  it('VR11b. spans are CLAMPED to the document length, and one that ends inside it is untouched', async () => {
-    // The model's own segments may run past the audio (D1: a closing run
-    // overshoots by up to half a receptive field, and a re-cluster inherits
-    // that), so the dialog hands `segmentsToDocSamples` the OUTPUT's length as
-    // the clamp bound. Every other voice fixture is 15 minutes long against
-    // segments that end 5 seconds in, so the clamp never bites and the bound
-    // could be anything at all — `Number.MAX_SAFE_INTEGER` included. This one
-    // is short enough that it does: one span ends past the document (and comes
-    // back exactly AT the bound) while another ends two samples inside it (and
+  it('VR11b. the spans land at the OUTPUT rate, clamped to the output length', async () => {
+    // Both arguments the dialog chooses for `segmentsToDocSamples` are pinned
+    // here, and both are invisible everywhere else in this suite.
+    //
+    // The RATE: `stemService` sets the run's rate to the document's, so a
+    // 48 kHz source produces a 48 kHz output and the 16 kHz model positions
+    // have to be mapped through THAT. Every other voice fixture is 44.1 kHz,
+    // where `output.sampleRate`, the document's rate and a hardcoded 44100 are
+    // one number — the definition of measuring the identity. At 48 kHz a
+    // dialog that passed 44,100 would land every speaker span 8.1 % early and
+    // 8.1 % short, silently.
+    //
+    // The BOUND: the model's own segments may run past the audio (D1: a
+    // closing run overshoots by up to half a receptive field, and a re-cluster
+    // inherits that), so the OUTPUT's length is the clamp. Every other fixture
+    // is 15 minutes long against segments that end 5 seconds in, so the clamp
+    // never bites and the bound could be `Number.MAX_SAFE_INTEGER`. This
+    // document is short enough that it does: one span ends past it (and comes
+    // back exactly AT the bound) while another ends one sample inside it (and
     // must come back untouched), so the clamp is pinned on both sides.
     seedDoc();
-    const output = makeVoiceOutput({ lengthSamples: 400_000 });
+    const output = makeVoiceOutput({ sampleRate: 48_000, lengthSamples: 400_000 });
     mockSeparate.mockResolvedValue({ ok: true, output });
     const diarization = makeDiarization({
       segments: [
-        // 8,000 → 56,000 at 16 kHz is 22,050 → 154,350 at 44.1 kHz: well inside.
+        // 8,000 → 56,000 at 16 kHz is 24,000 → 168,000 at 48 kHz: well inside.
+        // (At 44.1 kHz it would be 22,050 → 154,350, so the rate shows here.)
         { startSample16k: 8_000, endSample16k: 56_000, speaker: 0 },
-        // 145,124 maps to 399,998 — two samples short of the end, so a clamp at
+        // 133,333 maps to 399,999 — one sample short of the end, so a clamp at
         // the document length must leave it exactly where it is.
-        { startSample16k: 136_000, endSample16k: 145_124, speaker: 0 },
-        // 232,000 maps to 639,450, past the end of a 400,000-sample document.
-        { startSample16k: 140_000, endSample16k: 232_000, speaker: 1 },
+        { startSample16k: 130_000, endSample16k: 133_333, speaker: 0 },
+        // 232,000 maps to 696,000, past the end of a 400,000-sample document;
+        // its start (396,000) is inside, so the span survives the clamp.
+        { startSample16k: 132_000, endSample16k: 232_000, speaker: 1 },
       ],
     });
     mockDiarize.mockResolvedValue({ ok: true, evidence: makeEvidence(), diarization });
@@ -1240,15 +1285,15 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     });
 
     // Written out rather than recomputed through `segmentsToDocSamples`: the
-    // point of the test is the ARGUMENT the dialog chooses for the bound, and
-    // a re-run of the same function with the same bound would agree with any
-    // bound the dialog picked.
+    // point of the test is the ARGUMENTS the dialog chooses, and a re-run of
+    // the same function with the same rate and bound would agree with whatever
+    // the dialog picked.
     expect(mockLandSpeakers).toHaveBeenCalledWith(output, [
       [
-        { startSample: 22_050, endSample: 154_350 },
-        { startSample: 374_850, endSample: 399_998 },
+        { startSample: 24_000, endSample: 168_000 },
+        { startSample: 390_000, endSample: 399_999 },
       ],
-      [{ startSample: 385_875, endSample: 400_000 }],
+      [{ startSample: 396_000, endSample: 400_000 }],
     ]);
   });
 
@@ -1515,7 +1560,9 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     });
 
     expect(mockDiarize).toHaveBeenCalledTimes(1);
-    expect(mockDiarize.mock.calls[0][0].channels).toBe(output.stems[2].channels);
+    expect(mockDiarize.mock.calls[0][0].channels).toBe(
+      output.stems.find((s) => s.label === 'Vocals')!.channels
+    );
     // The predicate `diarizeChannels` polls reads false again, so the service
     // is not asked to cancel itself before it spawns.
     expect(mockDiarize.mock.calls[0][0].shouldCancel!()).toBe(false);
