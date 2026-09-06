@@ -669,12 +669,20 @@ describe('registerDiarizeIpc', () => {
     };
   }
 
-  test('registers exactly the five invoke channels', () => {
+  test('registers exactly the four invoke channels (the event ids are not handlers)', () => {
     const { ipcMain, handlers } = fakeIpc();
     registerDiarizeIpc({ ipcMain, manager: {}, getWin: () => null });
     expect([...handlers.keys()].sort()).toEqual(
       [DIARIZE_IPC.modelState, DIARIZE_IPC.ensureModels, DIARIZE_IPC.run, DIARIZE_IPC.cancel].sort()
     );
+    // D2 lists eight 'diarize:*' ids but only four are invoke channels; the
+    // other four travel the other way, as webContents.send events. Pinning the
+    // count AND their absence catches a stray ipcMain.handle on an event id
+    // (which would answer the renderer on a channel it only ever listens on).
+    expect(handlers.size).toBe(4);
+    for (const ch of [DIARIZE_IPC.modelProgress, DIARIZE_IPC.progress, DIARIZE_IPC.window, DIARIZE_IPC.embedding]) {
+      expect(handlers.has(ch)).toBe(false);
+    }
   });
 
   test('run validates the request and forwards events; labels and vectors cross as ArrayBuffers', async () => {
