@@ -204,12 +204,20 @@ describe('diarizeChannels', () => {
     for (const e of result.evidence.embeddings) expect(e.vector).toHaveLength(WIRE_EMBED_DIMS);
 
     // Hand-derived from the fixture, not read back from the subject. Window i
-    // starts at global frame trunc(i*16000/270 + 0.5) = 0 / 59 / 119, and each
-    // frame's winner is the cluster with the most votes (ties to the lower id,
-    // and voice A is id 0 because its fragment arrives first):
-    //   frames   0..258 -> A (w0 slot 0, then w0 slot 0 + w1 slot 0; at
-    //                      200..258 A and B tie 1-1 and A takes it)
-    //   frames 259..707 -> B (two or three B slots against at most one A)
+    // starts at global frame trunc(i*16000/270 + 0.5) = 0 / 59 / 119, every
+    // frame's winner is the cluster with the most votes across the windows
+    // covering it, and voice A is cluster 0 because its fragment arrives
+    // first. Replaying that vote (diarization.ts assembleLabels) over the
+    // three windows gives, as A votes / B votes:
+    //     0.. 58  1/0     59..118  2/0    119..199  3/0    200..258  2/1
+    //   259..318  1/2    319..399  0/3    400..588  1/2    589..647  0/2
+    //   648..707  0/1    708..711  0/0  (covered by no window, so silent)
+    // A leads every frame through 258 and B every frame from 259 on. Two
+    // details the arithmetic settles: A's pair at 200..258 is w1 slot 0 +
+    // w2 slot 0 (w0's slot 0 has already ended at frame 200 and w0 votes B
+    // there), and the fixture never produces an EQUAL vote at all — the
+    // lowest-id tie-break is not exercised here, and is pinned instead by the
+    // twin-slot fixture in `src/dsp/diarization.test.ts`.
     // A run closes at the frame where it stops, so the segments are
     // [frame 0, frame 259) and [frame 259, frame 708) in frame-centre samples.
     expect(result.diarization.speakerCount).toBe(2);
@@ -363,6 +371,29 @@ describe('cancellation', () => {
     expect(backend.cancelCalls).toBe(1);
   });
 
+  it('maps a host-initiated cancelled settlement to cancelled, with nobody having asked', async () => {
+    // The app-quit path (D2): `diarizeManager.dispose()` latches and calls
+    // `cancel()` (diarizeManager.cjs:436-439), which settles the in-flight
+    // entry `{ok:false,cancelled:true}` at :431 without the renderer ever
+    // calling `cancelDiarization` — so `run.cancelled` is false here and the
+    // status can only come from the SETTLEMENT. The host's own soft cancel
+    // between windows arrives by the same door (diarizeManager.cjs:405-406).
+    // Without this test the settlement branch is dead: every other cancel
+    // test sets `run.cancelled` first and returns one guard earlier.
+    const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    backend.settle({ ok: false, cancelled: true });
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('cancelled');
+    // Nobody in the renderer asked for it, and it is still not a failure.
+    expect(backend.cancelCalls).toBe(0);
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
+    expect(getDiarizeBusyCount()).toBe(0);
+    expect(backend.liveListeners).toBe(0);
+  });
+
   it('honours shouldCancel before the model probe, spawning nothing', async () => {
     const result = await diarizeChannels({
       channels: makeChannels(),
@@ -390,6 +421,34 @@ describe('cancellation', () => {
     expect(result.status).toBe('cancelled');
     expect(backend.modelStateCalls).toBe(1);
     expect(backend.runCalls).toBe(0);
+    expect(getDiarizeBusyCount()).toBe(0);
+  });
+
+  it('honours shouldCancel at the last look before the invoke, and tears the listeners down', async () => {
+    // Door 3 (D5): false at the pre-probe and post-resample looks, true at the
+    // third. Nothing asynchronous separates door 2 from door 3 — the lines
+    // between them are the three `on*` subscriptions — so a STATELESS
+    // predicate that was false at door 2 is false at door 3 and this door is
+    // reachable only by a predicate whose answer can change between two
+    // synchronous reads. The dialog's `cancelledRef` is exactly that: it is
+    // re-read at each door and a Cancel click lands between them. Deleting
+    // door 3 would leave doors 1 and 2 green, so the count below is the pin:
+    // D5 says the predicate is consulted at EXACTLY three points.
+    let calls = 0;
+    const result = await diarizeChannels({
+      channels: makeChannels(),
+      sampleRate: SOURCE_RATE,
+      shouldCancel: () => calls++ >= 2,
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('cancelled');
+    expect(calls).toBe(3);
+    expect(backend.modelStateCalls).toBe(1);
+    expect(backend.runCalls).toBe(0);
+    // Door 3 sits BEHIND the three subscriptions, so it is the only path that
+    // proves they are unsubscribed when the run never reaches the host.
+    expect(backend.liveListeners).toBe(0);
     expect(getDiarizeBusyCount()).toBe(0);
   });
 });

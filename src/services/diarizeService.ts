@@ -105,12 +105,18 @@ export const DIARIZE_MODEL_BYTES = 32523463;
  * Time-estimate seed for the SEGMENTATION stage: milliseconds of wall clock
  * per audio second.
  *
- * MEASURED, not chosen (D5): the spike measured 5.5-8.6 ms per audio second on
- * this machine, and 8 is the top of that range — an estimate that runs long is
- * a bar that finishes early, which is the failure direction to prefer. Used
- * only until the host's first progress event lands, after which the estimate
- * comes from THIS run's own measured rate. Task 8 re-measures it on the bench;
- * re-tuning it here without that run is not allowed.
+ * MEASURED, not chosen (D5): the spike's four recordings segmented at 5.50 /
+ * 8.12 / 8.01 / 8.58 ms per audio second on this machine
+ * (`spike-results.json`, `segmentation_ms / duration_s`). 8 is the top of that
+ * range only for the SHORTEST file and sits just under the three longer ones,
+ * so this seed reads a little short rather than long — it is not the
+ * finishes-early direction, and it is not pretended to be. Two things make
+ * that acceptable: the seed is used only until the host's first progress
+ * event lands, after which the estimate comes from THIS run's own measured
+ * rate, and segmentation owns about 1 % of the overall bar (`stageWeights`),
+ * so the worst shortfall in the set — 0.58 ms per audio second, on the
+ * 56.9 s file — is invisible next to Demucs. Task 8 re-measures it on the
+ * bench; re-tuning it here without that run is not allowed.
  */
 export const MEASURED_SEGMENT_MS_PER_S = 8;
 
@@ -118,8 +124,16 @@ export const MEASURED_SEGMENT_MS_PER_S = 8;
  * Time-estimate seed for the EMBEDDING stage: milliseconds of wall clock per
  * audio SECOND (not per fragment).
  *
- * MEASURED (D5): the spike measured 29-73 ms per audio second, of which 55 is
- * the middle. Per audio second rather than per fragment because the fragment
+ * MEASURED (D5): the spike's four recordings embedded at 29.13 / 45.71 /
+ * 65.29 / 72.51 ms per audio second (`spike-results.json`,
+ * `embedding_ms / duration_s`), and 55 is the MEDIAN of that spread — the
+ * middle two straddle it — not the midpoint of the 29-73 range (~51) and not
+ * its top. The spread is wide (the slowest file costs 2.5x the fastest), so a
+ * seed at the top would over-state the wait on half the set; the median is the
+ * honest first guess, and it too is replaced by this run's own measured rate
+ * at the first embed event.
+ *
+ * Per audio second rather than per fragment because the fragment
  * count is not known until segmentation finishes, while the relationship D5
  * records — every audio second lies in ~10 windows and carries 1-3 fragments —
  * is what makes an audio-second seed usable before the first embed event.
