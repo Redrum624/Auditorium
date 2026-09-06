@@ -171,7 +171,16 @@ export interface StemDocumentsResult {
   /**
    * Whether mixing the untouched session down reproduces the source exactly.
    * `false` when `sourcePeak > 1`: the master bus's ±1 clamp flat-tops the sum
-   * (see the module header). `null` when it could not be determined.
+   * (see the module header).
+   *
+   * `null` in TWO cases, and a caller must not read the second as the first:
+   * the verdict could not be determined (`sourcePeak` is `null` — the source
+   * document was closed), OR the landing makes no exact-sum claim at all.
+   * `landSpeakers` (D4) is the second: its documents are not a partition of the
+   * source — the edge fades remove audio and an overlapping turn is carried
+   * twice — so it returns `null` with a perfectly good `sourcePeak` beside it.
+   * `null` therefore does NOT imply `sourcePeak === null`, and a UI that
+   * explains this field must say "no claim", not "the check could not be made".
    */
   exactSumHolds: boolean | null;
 }
@@ -206,7 +215,16 @@ export interface StemLandingResult {
   /**
    * Whether mixing the untouched session down reproduces the source exactly.
    * `false` when `sourcePeak > 1`: the master bus's ±1 clamp flat-tops the sum
-   * (see the module header). `null` when it could not be determined.
+   * (see the module header).
+   *
+   * `null` in TWO cases, and a caller must not read the second as the first:
+   * the verdict could not be determined (`sourcePeak` is `null` — the source
+   * document was closed), OR the landing makes no exact-sum claim at all.
+   * `landSpeakers` (D4) is the second: its documents are not a partition of the
+   * source — the edge fades remove audio and an overlapping turn is carried
+   * twice — so it returns `null` with a perfectly good `sourcePeak` beside it.
+   * `null` therefore does NOT imply `sourcePeak === null`, and a UI that
+   * explains this field must say "no claim", not "the check could not be made".
    */
   exactSumHolds: boolean | null;
 }

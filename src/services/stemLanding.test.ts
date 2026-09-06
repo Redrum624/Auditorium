@@ -13,6 +13,9 @@
  * carried through the real `mixdownSession`. No arithmetic of S5's own ever
  * touches the numbers.
  */
+import { readFileSync } from 'fs';
+import { join } from 'path';
+
 import { createDocument, docLength, type AudioDocument } from '../audio/AudioDocument';
 import { partitionStems } from '../dsp/stemPartition';
 import { mixdownSession } from '../multitrack/mixdown';
@@ -1187,6 +1190,39 @@ describe('D4 landSpeakers — one document per speaker plus the Backing', () => 
     expect(result.sessionName).toBe('Track A — Speakers');
   });
 
+  it('masks at the DOCUMENT’s own rate — 480-sample ramps at 48 kHz, not 441', () => {
+    // The rate is the one parameter of `keepSpans` that changes the samples it
+    // writes (`spanMask.test.ts` pins 441 @ 44.1 kHz against 480 @ 48 kHz), and
+    // every other assertion in this describe runs at 44,100 — where a landing
+    // that passed a hardcoded 44,100 instead of `output.sampleRate` is
+    // indistinguishable from the shipped one. This case is that mutant's only
+    // executioner, so it pins the ramp on the landed samples themselves as well
+    // as against `keepSpans` at the document's rate.
+    const source = addSourceDocument(2, 48000, 'At 48k');
+    const output = makeOutput(source);
+    const result = landSpeakers(output, SPEAKER_SPANS);
+    const vocals = vocalsOf(output);
+
+    for (let k = 0; k < SPEAKER_SPANS.length; k++) {
+      expect(docById(result.documentIds[k]).channels).toEqual(
+        keepSpans(vocals, SPEAKER_SPANS[k], 48000)
+      );
+    }
+
+    // Speaker 2's span opens at 6000, so its fade-in reaches unity on its LAST
+    // ramp sample: 6000 + 480 − 1 here, and 6000 + 441 − 1 at 44.1 kHz.
+    const second = docById(result.documentIds[1]).channels[0];
+    expect(second[6479]).toBe(vocals[0][6479]);
+    expect(second[6478]).not.toBe(vocals[0][6478]);
+    // The 44.1 kHz ramp would have finished 39 samples earlier — the sample
+    // that separates the two rates, still attenuated at this one.
+    expect(second[6440]).not.toBe(vocals[0][6440]);
+    // Not vacuous: real audio at both, so "not equal" means attenuated and not
+    // a pair of zeros compared against each other.
+    expect(vocals[0][6440]).not.toBe(0);
+    expect(vocals[0][6478]).not.toBe(0);
+  });
+
   it('gives each track exactly one full-length clip at offset 0', () => {
     const source = addSourceDocument(2, 44100);
     const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
@@ -1346,5 +1382,50 @@ describe('D4 the speaker landing’s memory budget', () => {
     const result = landSpeakers(output, SPEAKER_SPANS);
     expect(result.documentIds).toHaveLength(3);
     expect(docLength(docById(result.documentIds[0]))).toBe(FIXTURE_LENGTH);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// D4 — the `exactSumHolds` contract, where a reader actually meets it
+// ---------------------------------------------------------------------------
+/**
+ * `landSpeakers` returns `exactSumHolds: null` beside a fully determined
+ * `sourcePeak` (the case pinned above). Until D4 that combination could not
+ * occur: `createStemDocuments` derives the verdict as `sourcePeak === null ?
+ * null : sourcePeak <= 1`, so `null` meant one thing only — "could not be
+ * determined". The reader who has to know that meaning has changed is looking
+ * at the FIELD, not at `landSpeakers`' docblock, which is why this is asserted
+ * on the declarations themselves: a `null` documented as "unknown" and returned
+ * as "no claim" is how a caller ends up printing a clamp warning, or nothing at
+ * all, for the wrong reason.
+ */
+describe('D4 exactSumHolds — the field documents BOTH meanings of null', () => {
+  const source = readFileSync(join(__dirname, 'stemLanding.ts'), 'utf8');
+
+  it('says so on every declaration of the field, not only in landSpeakers’ own doc', () => {
+    const blocks = [
+      ...source.matchAll(/\/\*\*((?:(?!\*\/)[\s\S])*)\*\/\s*exactSumHolds: boolean \| null;/g),
+    ];
+    // Both result shapes carry it: the documents half and the full landing.
+    expect(blocks).toHaveLength(2);
+    for (const [, body] of blocks) {
+      const text = body.replace(/^[ \t]*\*[ \t]?/gm, '').replace(/\s+/g, ' ');
+      expect(text).toContain('could not be determined');
+      // …and the second meaning, named with the function that returns it.
+      expect(text).toContain('landSpeakers');
+      expect(text).toMatch(/no exact-sum claim|makes no claim/i);
+    }
+  });
+
+  it('is the behaviour the docs now describe: null WITH a measured source peak', () => {
+    const output = makeOutput(addSourceDocument(2, 44100));
+    const speakers = landSpeakers(output, SPEAKER_SPANS);
+    expect([speakers.exactSumHolds, speakers.sourcePeak === null]).toEqual([null, false]);
+
+    // The other half of the contract still holds — a landing that IS a
+    // partition answers the question — so the doc's first meaning is not
+    // rewritten by the second.
+    const voice = landVoice(makeOutput(addSourceDocument(2, 44100, 'Other')));
+    expect([voice.exactSumHolds, voice.sourcePeak === null]).toEqual([true, false]);
   });
 });

@@ -84,15 +84,16 @@ describe('D4 SPEAKER_EDGE_FADE_MS — one constant, two rates', () => {
   });
 });
 
-describe('D4 SPEAKER_EDGE_FADE_MS — the header claims only what remixRender measured', () => {
-  // The constant is a boundary value borrowed from another module's
-  // measurement, so the thing that can rot is not the arithmetic (pinned
+describe('D4 SPEAKER_EDGE_FADE_MS — the header claims only what remixRender documents', () => {
+  // The constant is a boundary value borrowed from the bound another module
+  // DOCUMENTS, so the thing that can rot is not the arithmetic (pinned
   // above) but the SENTENCE: a citation that drifts off the docblock it names,
   // or a paraphrase that turns "where a fade-out becomes audible" into "the
   // longest ramp that is not". Both are checked against `remixRender.ts` itself
   // rather than against a copy of its wording kept here.
   const source = readFileSync(join(__dirname, 'spanMask.ts'), 'utf8');
   const remixLines = readFileSync(join(__dirname, 'remixRender.ts'), 'utf8').split(/\r?\n/);
+  const silenceLines = readFileSync(join(__dirname, 'silenceDetect.ts'), 'utf8').split(/\r?\n/);
   /** Comment text as prose: leading ` * ` gone, wrapping collapsed, so a
    * sentence broken across three comment lines reads as one. */
   const prose = (text: string): string => text.replace(/^[ \t]*\*[ \t]?/gm, '').replace(/\s+/g, ' ');
@@ -103,7 +104,7 @@ describe('D4 SPEAKER_EDGE_FADE_MS — the header claims only what remixRender me
     for (const [, from, to] of cites) {
       const slice = remixLines.slice(Number(from) - 1, Number(to));
       // A citation that opens on the docblock and closes on the declaration it
-      // documents is the whole measurement and nothing else; one that starts a
+      // documents is the whole bound and nothing else; one that starts a
       // few lines early sweeps in a neighbouring constant (`SHAPE_RHO_THRESHOLD`,
       // `TAIL_FADE_SECONDS`) and stops pointing at what it claims to point at.
       expect(slice[0].trim().startsWith('/**')).toBe(true);
@@ -120,6 +121,44 @@ describe('D4 SPEAKER_EDGE_FADE_MS — the header claims only what remixRender me
     const text = prose(source);
     expect(text).not.toMatch(/longest[^.]{0,100}(?:audib|inaudib)/i);
     expect(text).not.toMatch(/(?:under|below|beneath)[^.]{0,60}(?:audib|inaudib)/i);
+  });
+
+  it('borrows the bound in the repo’s own words instead of promoting it to a measurement', () => {
+    // remixRender states ~10 ms flatly, with no source of its own; the one
+    // figure it marks as measured inside the very lines cited here belongs to a
+    // DIFFERENT claim (the 1-2 sample cliff, "measured at 27x the material's own
+    // slew"). The repo's other borrowers of the same number say so plainly —
+    // `stemPartition.ts:73` calls its own figure "the documented bound" — so
+    // this header may not upgrade a documented rule of thumb into the app's own
+    // measurement of speech-edge audibility, nor claim it is the only one there
+    // is (`silenceDetect.ts` answered a neighbouring question with it already).
+    const text = prose(source);
+    expect(text).not.toMatch(/\bonly\b[^.]{0,60}(?:measurement|measured)/i);
+    expect(text).not.toMatch(/measurement[^.]{0,60}remixRender/i);
+    expect(text).toMatch(/the bound `remixRender\.ts` documents/);
+
+    const [, from, to] = [...source.matchAll(/remixRender\.ts:(\d+)-(\d+)/g)][0];
+    const cited = remixLines.slice(Number(from) - 1, Number(to)).join(' ');
+    expect(cited).toContain("measured at 27x the material's own slew");
+    // …and nothing in those lines calls the 10 ms figure itself measured.
+    expect(cited).not.toMatch(/measured[^.]{0,40}10 ms/);
+  });
+
+  it('names the shipped 10 ms sibling rather than standing alone', () => {
+    // `SPLICE_XFADE_MS` is the nearest decision this app has already taken off
+    // the same anchor — a 10 ms fade written at a splice in speech material. A
+    // header that omits it reads as if this constant were the app's first
+    // answer to the question; naming it says the number AGREES with shipped
+    // code. Cross-file pinned so the citation cannot drift off the declaration
+    // it points at, exactly as the remixRender one is.
+    expect(prose(source)).toContain('SPLICE_XFADE_MS');
+    const cites = [...source.matchAll(/silenceDetect\.ts:(\d+)-(\d+)/g)];
+    expect(cites).toHaveLength(1);
+    const [, from, to] = cites[0];
+    const slice = silenceLines.slice(Number(from) - 1, Number(to));
+    expect(slice[0].trim().startsWith('/**')).toBe(true);
+    expect(slice[slice.length - 1].trim()).toBe('export const SPLICE_XFADE_MS = 10;');
+    expect(prose(slice.join('\n'))).toContain('Splice blend length, ms');
   });
 });
 describe('D4 keepSpans — a 1 s ramp, two overlapping spans', () => {

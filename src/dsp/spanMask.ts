@@ -16,12 +16,23 @@
  * straight into silence puts a full-amplitude step at both ends of every turn,
  * which is a click, once per turn, on every speaker track.
  *
- * `remixRender.ts:210-219` carries the only measurement this app has anywhere
- * near this question: ~10 ms is where a fade-out becomes audible as a level
- * change. That is where audibility BEGINS — 10 ms is the first length that
- * reads as a level change, not the last one that does not — so this constant
- * sits exactly AT that bound rather than short of it, and that is a deliberate
- * trade worth naming rather than a number to hide behind. What it buys: the
+ * The number is the bound `remixRender.ts` documents (`remixRender.ts:210-219`):
+ * ~10 ms is where a fade-out becomes audible as a level change. That is a
+ * documented figure rather than something this app went out and measured — the
+ * repo's other borrowers of it read it the same way (`stemPartition.ts:73`:
+ * "That is the documented bound") — and it marks where audibility BEGINS: 10 ms
+ * is the first length that reads as a level change, not the last one that does
+ * not. So this constant sits exactly AT that bound rather than short of it, and
+ * that is a deliberate trade worth naming rather than a number to hide behind.
+ *
+ * Nor is this the app's first 10 ms fade off that anchor, and the agreement is
+ * the point: `silenceDetect.ts:70-81` sets `SPLICE_XFADE_MS = 10` for the blend
+ * that closes a shortened pause — the nearest sibling this decision has, taken
+ * against the same documented figure. The two are not the same fade (that one
+ * joins two stretches of room tone across a splice, this one takes speech to
+ * silence), which is why they stay separate constants; they land on the same
+ * anchor, so the value here agrees with shipped code instead of standing on its
+ * own. What it buys: the
  * step being removed here is full-scale, and speech cut mid-syllable is a
  * harder edge than the tail overflow `remixRender` tapers, so the 2 ms that
  * costs nothing musically there is still a perceptible edge here. What it
@@ -32,10 +43,11 @@
  * Moving the number in either direction needs a new measurement, not an edit
  * here.
  *
- * It gets its own constant instead of borrowing `MIN_TAIL_FADE_MS` or
- * `EXACT_TRIM_FADE_MS` because it answers a different question — those two
- * taper material into ADJACENT material, this one takes speech to silence —
- * and one shared number would tie three unrelated decisions together.
+ * It gets its own constant instead of borrowing `MIN_TAIL_FADE_MS`,
+ * `EXACT_TRIM_FADE_MS` or `SPLICE_XFADE_MS` because each of those answers a
+ * different question — the first two taper material into ADJACENT material, the
+ * third blends the two sides of a removed pause, and this one takes speech to
+ * silence — and one shared number would tie four unrelated decisions together.
  *
  * ---------------------------------------------------------------------------
  * WHAT THE OUTPUT IS NOT
@@ -59,8 +71,9 @@ export interface SampleSpan {
 
 /**
  * D4 — the edge fade for a kept span, in milliseconds. See the module header
- * for the measurement it is set against (`remixRender.ts:210-219`); it is a
- * boundary value, not a taste setting.
+ * for the bound it is set against (`remixRender.ts:210-219`) and for the
+ * shipped sibling that already fades 10 ms off it; it is a boundary value, not
+ * a taste setting.
  */
 export const SPEAKER_EDGE_FADE_MS = 10;
 
