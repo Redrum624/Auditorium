@@ -13,7 +13,7 @@
  * its input, or silence, fails immediately.
  */
 import { fadeInGainAt, fadeOutGainAt } from './fades';
-import { SPEAKER_EDGE_FADE_MS, keepSpans } from './spanMask';
+import { MIN_EDGE_RAMP_SAMPLES, SPEAKER_EDGE_FADE_MS, keepSpans } from './spanMask';
 
 const RATE = 44100;
 const SECOND = RATE;
@@ -240,6 +240,73 @@ describe('D4 keepSpans — spans shorter than two fades', () => {
     const src = stereo(SECOND);
     const out = keepSpans(src, [{ startSample: 700, endSample: 701 }], RATE);
     expect(out[0][700]).toBe(0);
+  });
+});
+
+describe('D4 keepSpans — the ramp floor, where a compressed ramp stops being a ramp', () => {
+  it('is three samples: shorter than that an equal-gain ramp has no interior value', () => {
+    expect(MIN_EDGE_RAMP_SAMPLES).toBe(3);
+    // WHY the floor is exactly here, read off the shipped curve rather than
+    // asserted: a two-sample ramp is [0, 1] — its second sample is already at
+    // FULL scale next to the silence — while a three-sample ramp has 0.5 in
+    // between, so it is the shortest one that actually ramps.
+    expect([0, 1].map((i) => fadeInGainAt(i, 2, 'equal-gain', 0))).toEqual([0, 1]);
+    expect([0, 1, 2].map((i) => fadeInGainAt(i, MIN_EDGE_RAMP_SAMPLES, 'equal-gain', 0))).toEqual([
+      0, 0.5, 1,
+    ]);
+  });
+
+  it('silences every span below two whole ramps — the 3-, 4- and 5-sample cases', () => {
+    const src = stereo(SECOND);
+    for (const span of [3, 4, 5]) {
+      const out = keepSpans(src, [{ startSample: 700, endSample: 700 + span }], RATE);
+      // Not a plateau at unity between two zeros: the whole span is silence.
+      expect(Array.from(out[0].subarray(699, 700 + span + 1)).map(Math.abs)).toEqual(
+        new Array(span + 2).fill(0)
+      );
+      // Not vacuous — this is real, non-zero material being taken out.
+      expect(src[0][701]).not.toBe(0);
+    }
+  });
+
+  it('keeps a six-sample span — two whole ramps at the floor, meeting at unity', () => {
+    const src = stereo(SECOND);
+    const START = 700;
+    const out = keepSpans(src, [{ startSample: START, endSample: START + 6 }], RATE);
+    const N = MIN_EDGE_RAMP_SAMPLES;
+
+    let mismatch = 0;
+    for (let i = 0; i < N; i++) {
+      const gIn = fadeInGainAt(i, N, 'equal-gain', 0);
+      const gOut = fadeOutGainAt(i, N, 'equal-gain', 0);
+      for (let c = 0; c < 2; c++) {
+        if (out[c][START + i] !== Math.fround(src[c][START + i] * gIn)) mismatch++;
+        if (out[c][START + N + i] !== Math.fround(src[c][START + N + i] * gOut)) mismatch++;
+      }
+    }
+    expect(mismatch).toBe(0);
+    // The ramps meet at unity in the middle and terminate in silence at both
+    // edges — audio survives here, unlike the five-sample span above.
+    expect(out[0][START + 2]).toBe(src[0][START + 2]);
+    expect(out[0][START + 3]).toBe(src[0][START + 3]);
+    expect([out[0][START], out[0][START + 5]].map(Math.abs)).toEqual([0, 0]);
+  });
+
+  it('never steps by more than one ramp step, at any span length around the floor', () => {
+    const src = stereo(SECOND);
+    const START = 700;
+    // 1/(N-1) = 0.5 is the coarsest step the floor allows; a full-scale step of
+    // 1 is the click this module exists to remove, and D4 forbids it outright.
+    const WORST_ALLOWED = 1 / (MIN_EDGE_RAMP_SAMPLES - 1);
+    const offenders: number[] = [];
+    for (let span = 1; span <= 12; span++) {
+      const out = keepSpans(src, [{ startSample: START, endSample: START + span }], RATE);
+      const g = gainEnvelope(out[0], src[0]);
+      let worst = 0;
+      for (let i = START - 1; i <= START + span; i++) worst = Math.max(worst, Math.abs(g[i + 1] - g[i]));
+      if (worst > WORST_ALLOWED + 1e-6) offenders.push(span);
+    }
+    expect(offenders).toEqual([]);
   });
 });
 

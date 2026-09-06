@@ -55,6 +55,26 @@ export interface SampleSpan {
  */
 export const SPEAKER_EDGE_FADE_MS = 10;
 
+/**
+ * D4 — the shortest compressed ramp that is still a RAMP, in samples.
+ *
+ * `fades.ts`' `equal-gain` ramp of `n` samples takes the gains `i / (n - 1)`,
+ * so it reaches full scale at its LAST sample. `n = 1` is the `singletonGain`
+ * alone (0 here), and `n = 2` is `[0, 1]` — an unattenuated sample sitting
+ * directly against the silence, which is the full-scale step this module exists
+ * to remove, not a fade. Three is the first length with a value in between
+ * (`[0, 0.5, 1]`), so it is the shortest ramp whose worst per-sample step (0.5)
+ * is below that.
+ *
+ * A kept span consequently needs `2 ×` this to carry two of them; D4's
+ * `floor(span / 2)` rule holds from there up, and anything shorter is taken to
+ * silence rather than left standing at unity between two zeros (see
+ * {@link keepSpans}). That floor is 6 samples — 136 µs at 44.1 kHz, against the
+ * 0.3 s `MIN_ON_S` D3 gives the assembler, so a real turn is ~2,200× too long
+ * to reach it and only a segment clamped against the end of the document can.
+ */
+export const MIN_EDGE_RAMP_SAMPLES = 3;
+
 /** {@link SPEAKER_EDGE_FADE_MS} in samples at `sampleRate`: 441 at 44.1 kHz,
  * 480 at 48 kHz. Rounded, not truncated — the ramp is a duration, and the
  * nearest whole sample is the honest reading of it. */
@@ -113,10 +133,18 @@ function mergeSpans(spans: readonly SampleSpan[], length: number): SampleSpan[] 
  * A span shorter than two full ramps gets `floor(span / 2)` per side instead —
  * both ramps compressed, meeting at unity in the middle, with NO unity exception
  * for short spans: a short turn left at full gain would reintroduce the very
- * step the fades exist to remove. The one span that cannot carry that rule is a
- * single sample, where `floor(1 / 2)` is zero: it is taken to silence (a
- * one-sample ramp evaluates to `singletonGain`, i.e. 0) rather than left
- * standing at unity between two zeros, which would be the loudest click of all.
+ * step the fades exist to remove.
+ *
+ * That compression has a FLOOR, and below it the span is dropped to silence
+ * entirely. `floor(span / 2)` under {@link MIN_EDGE_RAMP_SAMPLES} is not a
+ * shorter fade, it is no fade: at 1 sample the ramp is `singletonGain` (0) and
+ * at 2 it is `[0, 1]`, so a span of 3 to 5 samples would come out as unity
+ * samples wedged between zeros — the loudest click of all, and precisely the
+ * discontinuity D4 forbids. Spans of fewer than `2 × MIN_EDGE_RAMP_SAMPLES`
+ * samples are therefore left as the zeros the output was allocated with, which
+ * is what a 1- and a 2-sample span already amounted to. Nothing audible is lost:
+ * the floor is 136 µs at 44.1 kHz (see the constant), far below any turn the
+ * assembler can emit.
  *
  * Inputs are never touched — the caller's Vocals stem is landed as its own
  * document elsewhere and is read-only here.
@@ -132,11 +160,17 @@ export function keepSpans(
 
   const fadeLen = edgeFadeSamples(sampleRate);
   for (const { startSample, endSample } of mergeSpans(spans, length)) {
+    const span = endSample - startSample;
+    // Below two whole ramps there is no fade to compress, so the span stays
+    // silent — the zeros `out` already holds. Copying it first and then trying
+    // to shape it is what leaves the full-scale step (see the docblock).
+    if (span < 2 * MIN_EDGE_RAMP_SAMPLES) continue;
+
     for (let c = 0; c < channels.length; c++) {
       out[c].set(channels[c].subarray(startSample, endSample), startSample);
     }
-    const span = endSample - startSample;
-    const ramp = span >= 2 * fadeLen ? fadeLen : Math.max(1, Math.floor(span / 2));
+    // `floor` needs no `Math.max` guard: the floor above guarantees >= 3.
+    const ramp = span >= 2 * fadeLen ? fadeLen : Math.floor(span / 2);
     applyFadeInStartingAt(out, startSample, ramp, 'equal-gain', 0);
     applyFadeOutEndingAt(out, endSample, ramp, 'equal-gain', 0);
   }

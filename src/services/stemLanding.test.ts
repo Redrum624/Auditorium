@@ -1241,11 +1241,26 @@ describe('D4 landSpeakers — one document per speaker plus the Backing', () => 
     expect(docById(result.documentIds[0]).channels[0]).toEqual(masked[0]);
   });
 
-  it('reports the source peak and the exactness verdict as the other landings do', () => {
+  it('reports the source peak but makes NO exact-sum claim — D4', () => {
     const source = addSourceDocument(2, 44100);
-    const result = landSpeakers(makeOutput(source), SPEAKER_SPANS);
+    const output = makeOutput(source);
+    const result = landSpeakers(output, SPEAKER_SPANS);
+
+    // The peak is a fact about the SOURCE and is measured for speakers exactly
+    // as for stems.
     expect(result.sourcePeak).toBeGreaterThan(0);
-    expect(result.exactSumHolds).toBe(true);
+    // The verdict is not. D4: "No exact-sum claim for speakers" — the edge
+    // fades remove audio at every turn and the overlap span is carried by BOTH
+    // documents, so the tracks cannot add back to the source whatever the peak
+    // is. `null` is this module's "could not be determined / no claim in either
+    // direction" value, and the dialog renders it as silence (S5's contract);
+    // `true` would be a false guarantee, `false` would blame a clamp that is
+    // not what is happening.
+    expect(result.exactSumHolds).toBeNull();
+    // Not vacuous: the same source through `landVoice` DOES answer the
+    // question, so the null is the speaker landing's own stance and not a peak
+    // measurement that failed.
+    expect(landVoice(makeOutput(addSourceDocument(2, 44100, 'Other'))).exactSumHolds).toBe(true);
   });
 });
 

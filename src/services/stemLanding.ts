@@ -569,6 +569,15 @@ export const SPEAKER_LANDING_BUDGET_BYTES = 1_200_000_000;
  * speaker split is not one. The Backing on its own still adds back to the
  * source as it always did — that half is untouched.
  *
+ * That is why the result's `exactSumHolds` is `null` here and not the
+ * peak-derived verdict every other landing returns (D4: "No exact-sum claim for
+ * speakers"). `null` is the field's own "no claim in either direction" value —
+ * the one S5's dialog renders as silence — and it is the only honest answer: a
+ * `true` earned by an in-range source peak would promise an identity this
+ * landing never had, while `false` would blame the master bus's ±1 clamp for a
+ * difference the fades and the shared overlap cause. `sourcePeak` is still
+ * reported, because that IS a fact about the source.
+ *
  * A confirmed count of ONE is `landVoice`, not a one-speaker mask: the whole
  * stem lands as `Voice`, unmasked and by reference, because there is nobody to
  * separate it from and the fades would only shave the edges off the user's own
@@ -601,5 +610,8 @@ export function landSpeakers(
     labels,
     speakersSessionName(output.sourceName)
   );
-  return { ...documents, ...session };
+  // The verdict `createLandingDocuments` measures is about a PARTITION of the
+  // source, which this landing is not (see the docblock): it is overridden to
+  // "no claim", never inherited.
+  return { ...documents, ...session, exactSumHolds: null };
 }
