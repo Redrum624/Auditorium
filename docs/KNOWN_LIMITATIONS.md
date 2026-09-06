@@ -1637,8 +1637,10 @@ in its own entry below. The two do not share an embedder, a clustering policy
 or a measurement, and the Transcript panel still uses the one measured here.
 **Follow-up, recorded not done:** re-measure the Transcript panel's labels with
 WeSpeaker + per-utterance mean subtraction, which is what the 2026-09-05 sweep
-found made the difference (CAM++ scored 33-62 % audio-anchored consistency on
-the same material where WeSpeaker + CMN scored 96-100 %).
+found made the difference. On the same material CAM++ scored 47.6 / 60.3 /
+53.0 / 33.1 % audio-anchored consistency (files 1, 2, 3 and the four-speaker
+file) — chance level for those cluster counts — where WeSpeaker + CMN scored
+96-100 %.
 
 **Why it is built this way:** the failure is in the count selection *and* in
 the clustering, so neither half can be patched alone — forcing k = 3 still
@@ -2398,10 +2400,13 @@ total), in the two conditions that matter:
 | `--direct` (16 kHz speech straight into the speaker step) | 2 / 2 / 2 / 4 vs 2 / 2 / 2 / 4 — **4 of 4** | 100 / 100 / 96.5 / 100 % |
 | `--full-chain` (what the tool does: HT-Demucs first, then the Vocals stem) | 2 / 2 / 2 / 4 vs 2 / 2 / 2 / 4 — **4 of 4** | 100 / 91.9 / 96.8 / 100 % |
 
-Speaker shares agree between the two modes to within a percentage point
-(45.7/54.3, 59.3/40.7 → 54.3/45.8, 43.0/57.0, and 37.0/19.3/18.7/25.0 on the
-four-speaker file). Three consecutive runs on an idle machine produced the same
-counts and shares.
+Speaker shares agree between the two modes to within a quarter of a point on
+three of the four recordings (45.7/54.3 unchanged, 43.0/57.0 within 0.02, and
+37.0/19.3/18.7/25.0 within 0.23 on the four-speaker file). On
+`2-two-speakers-en.wav` the split moves 59.3/40.7 → 54.3/45.8 — 5.0 points —
+and that is the same recording whose audio-anchored consistency falls to 91.9 %
+in the row above: it is where the stem separation shows up. Three consecutive
+runs on an idle machine produced the same counts and shares.
 
 **What that table does NOT establish, stated plainly:** the material ships a
 speaker *count* per file and no reference segmentation, so there is **no
@@ -2428,9 +2433,11 @@ its own is unchanged and still adds back to the source.
 saved.** Every speaker track is the whole voice stem with the other speakers
 zeroed, and the Backing is full length too, so a 15-minute 44.1 kHz stereo
 source costs 317.5 MB per document: 952.6 MB at two speakers, 1.3 GB at three.
-Measured, allocating those buffers at N = 4 (five documents, 1,587.6 MB
-predicted) moved process RSS by **1,590.8 MB**, and 1,946.4 MB with the source
-stem still held — arithmetic that lands within 0.2 % of what the panel quotes.
+Measured by allocating those same five buffers in a standalone node process at
+N = 4 (1,587.6 MB predicted): RSS moved by **1,590.8 MB**, and 1,946.4 MB with
+the source stem still held — within 0.2 % of what the panel quotes. That is an
+allocation measurement of the document buffers, not an instrumented renderer
+peak, and at 15 minutes the gate refuses that landing anyway.
 The dialog refuses a landing above **1.2 GB** with the figure in hand, which at
 15 minutes means three speakers or more; shorter sources reach higher counts.
 Because these documents have never been written to disk, **saving the project
@@ -2439,13 +2446,14 @@ and close the rest instead.
 
 **The time estimate assumes an otherwise idle machine, and runs short when the
 machine is busy.** Measured on this machine with nothing else running, the whole
-chain costs 583-655 ms of wall clock per audio second (the stem stage 1.9-2.1×
-realtime, segmentation 6.0-11.9 ms and embedding 39.9-110.1 ms per audio
-second), so a 15-minute recording takes about nine and a half minutes against
-the ~11 minutes the panel predicts — it reads long, which is the safe
-direction. Run the same bench with a full test suite running beside it and the
-stem stage halves to ~0.95× realtime and the chain costs 1,150-1,230 ms per
-audio second: the same 15 minutes then takes about 18, and **the estimate is
+chain costs 583-655 ms of wall clock per audio second (the stem stage 1.97-2.07×
+realtime, median 2.00×, over the four committed rows, segmentation 6.0-11.9 ms
+and embedding 39.9-110.1 ms per audio second), so a 15-minute recording takes
+about nine and a half minutes against the ~11 minutes the panel predicts — it
+reads long, which is the safe direction. The same bench run on 2026-09-06 with a
+full test suite beside it, in the superseded baseline that commit `7ff68a7`
+overwrote, put the stem stage near 0.95× realtime and the chain at 1,150-1,230 ms
+per audio second: the same 15 minutes then takes about 18, and **the estimate is
 short by roughly 40 %**. The estimate's Demucs term (`MEASURED_REALTIME_FACTOR`
 = 1.52, unchanged) is the conservative end of the app's own two stem
 measurements; re-deriving it needs a stem bench of its own, which has not been

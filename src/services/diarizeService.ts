@@ -238,7 +238,8 @@ export function limitsSentence(): string {
  * the weights come out at 0.886 / 0.013 / 0.101.
  *
  * Why the Demucs term is still 1.52 when this branch's own bench timed the
- * stem stage at 1.89-2.11x realtime over twelve idle rows (Task 8): that
+ * stem stage at 1.97-2.07x realtime (median 2.00x) over the four committed rows
+ * of that baseline, and two further idle runs agreed within 20 % (Task 8): that
  * constant predates this feature and seeds the Separate Stems, Transcribe and
  * Voice Changer estimates too, and the bench drives `stemHost.cjs` in-process
  * rather than through the Electron utility process the app uses, so it is not

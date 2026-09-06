@@ -1204,7 +1204,7 @@ describe('stageWeights', () => {
     expect(w.segment).toBeCloseTo(10 / total, 12);
     expect(w.embed).toBeCloseTo(75 / total, 12);
     // ...and the stem service's factor is the one it is derived from. Task 8
-    // measured the stem stage at 1.89-2.11x realtime over twelve idle bench
+    // measured the stem stage at 1.97-2.07x realtime over the four committed bench
     // rows and left this constant alone deliberately (it predates the feature,
     // seeds three other dialogs, and 1.52 is the conservative end): the
     // discrepancy is a ledger follow-up, not a silent retune.

@@ -472,11 +472,13 @@ export function agglomerateAverage(vectors: readonly Float32Array[], options: { 
       }
     }
     if (a < 0 || b < 0 || !(best <= threshold)) break;
-    if (b < a) {
-      const swap = a;
-      a = b;
-      b = swap;
-    }
+    // `a < b` holds without a swap, and the proof is worth writing down because
+    // the merge below is not symmetric in the two indices (it keeps `a` and
+    // retires `b`). `best` is the global minimum over the active distances, and
+    // the scan takes the FIRST index attaining it (`<`, not `<=`). Suppose the
+    // winner `a` had `nn[a] = b` with `b < a`. Then `d[b][a]` equals that same
+    // minimum, so `nnDist[b]` is the minimum too, and `b` — being the lower
+    // index — would have won the scan instead. So no such `b` exists.
 
     const nA = size[a];
     const nB = size[b];

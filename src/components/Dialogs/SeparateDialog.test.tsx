@@ -1573,10 +1573,12 @@ describe('SeparateDialog — voice mode (D5, three stages)', () => {
     // ONE. D4 prices a split at N x the document and refuses THAT; Voice +
     // Backing is the landing this dialog has always done and has never been
     // gated on memory. The `speakerCount >= 2` half of the refusal is what
-    // keeps a long recording landable at all: without it the panel refuses
-    // with "These 1 speaker tracks would need 1.2 GB" — a sentence about
-    // speaker tracks the landing does not contain — and the user has no way
-    // left to get their voice out of the dialog.
+    // keeps a long recording landable at all: without it the panel refuses a
+    // one-voice landing with a sentence about speaker tracks and a Backing that
+    // this landing does not contain — and the user has no way left to get their
+    // voice out of the dialog. (The figure is deliberately not quoted here: the
+    // refusal prices N + 1 documents, so it moves whenever the copy or the
+    // count does, and the argument does not depend on it.)
     const lengthSamples = SPEAKER_LANDING_BUDGET_BYTES / (2 * 4) + 1;
     const output = makeVoiceOutput({ lengthSamples });
     expect(speakerDocumentBytes(output)).toBeGreaterThan(SPEAKER_LANDING_BUDGET_BYTES);
