@@ -11,6 +11,7 @@ import {
   DIARIZE_SAMPLE_RATE,
   MAX_DIARIZE_SAMPLES,
   DIARIZE_MODEL_BYTES,
+  DIARIZE_EMBEDDING_DIMS,
   MEASURED_SEGMENT_MS_PER_S,
   MEASURED_EMBED_MS_PER_S,
   SPEAKER_SEPARATION_LIMITS,
@@ -146,6 +147,34 @@ function streamFixture(windowCount = 3): void {
   backend.settle({ ok: true, windowCount });
 }
 
+/**
+ * The same three windows and nine fragments, with `vectorFor` deciding each
+ * embedding's payload — the door the wire-width tests below need, since what
+ * they vary is the BYTES of one arrival, not the fixture's voices.
+ */
+function streamFixtureVectors(vectorFor: (k: number, axis: number) => Float32Array): void {
+  for (let i = 0; i < 3; i++) backend.emit.window({ index: i, labels: fixtureWindow() });
+  FIXTURE_AXES.forEach((f, k) => {
+    backend.emit.embedding({
+      windowIndex: f.windowIndex,
+      localSpeaker: f.localSpeaker,
+      activeFrames: ACTIVE_FRAMES[f.localSpeaker],
+      vector: vectorFor(k, f.axis),
+    });
+  });
+  backend.settle({ ok: true, windowCount: 3 });
+}
+
+/** The fixture's k-th vector, re-cut to `dims` floats — shorter drops the
+ * tail, longer pads with zeros (finite, so length is the only thing under
+ * test). */
+function vectorOfDims(k: number, axis: number, dims: number): Float32Array {
+  const full = speakerVector(axis, 4000 + k * 37);
+  const out = new Float32Array(dims);
+  out.set(full.subarray(0, Math.min(full.length, dims)));
+  return out;
+}
+
 async function runFixture(
   options: { onProgress?: (p: DiarizeProgress) => void; shouldCancel?: () => boolean } = {}
 ): ReturnType<typeof diarizeChannels> {
@@ -168,6 +197,15 @@ describe('constants', () => {
 
   it('mirrors the pinned two-file total (5,992,913 + 26,530,550)', () => {
     expect(DIARIZE_MODEL_BYTES).toBe(32523463);
+  });
+
+  it('mirrors the embedding wire width the host emits', () => {
+    // diarizeHost.cjs:120 EMBEDDING_DIM = 256, D2's `Float32Array(256)` /
+    // 1024 bytes. The fake declares it independently (WIRE_EMBED_DIMS), so
+    // this equality is the two halves of the contract agreeing, not one of
+    // them reading the other.
+    expect(DIARIZE_EMBEDDING_DIMS).toBe(256);
+    expect(DIARIZE_EMBEDDING_DIMS).toBe(WIRE_EMBED_DIMS);
   });
 
   it('carries the measured stage seeds by value', () => {
@@ -334,6 +372,45 @@ describe('diarizeChannels', () => {
     expect(result.status).toBe('failed');
     expect(backend.runCalls).toBe(0);
   });
+
+  it('refuses a source that resamples away to nothing, and accepts one sample more', async () => {
+    // The case the non-empty check above cannot see: one 44.1 kHz sample is a
+    // legal, non-empty source whose 16 kHz length is
+    // round(1 x 16000 / 44100) = 0 (`resample.ts:97-98` — the same rounding
+    // `modelLength16k` mirrors), so it clears both the length check and the
+    // 2-hour cap and only the POST-resample guard stops it. Without that guard
+    // a zero-length buffer reaches the host and the run is refused there, or
+    // worse, assembled from nothing.
+    expect(modelLength16k(1, SOURCE_RATE)).toBe(0);
+    const promise = diarizeChannels({ channels: [new Float32Array(1)], sampleRate: SOURCE_RATE });
+    // Settled without ever reaching the host — asserted BEFORE the await, so a
+    // missing guard reads as "the host was invoked", not as a test timeout.
+    await flushUntil(() => !isDiarizing());
+    expect(backend.runCalls).toBe(0);
+    expect(backend.isPending()).toBe(false);
+    const result = await promise;
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('failed');
+    expect(result.message).toBe('The audio is too short to separate into speakers.');
+    expect(backend.runCalls).toBe(0);
+    // Too short to analyse is a user-input condition, not a crash.
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
+    expect(getDiarizeBusyCount()).toBe(0);
+
+    // One step past the boundary: two source samples round UP to one 16 kHz
+    // sample, which is short but not nothing, so it does go to the host.
+    expect(modelLength16k(2, SOURCE_RATE)).toBe(1);
+    const shortest = diarizeChannels({ channels: [new Float32Array(2)], sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    expect(backend.runCalls).toBe(1);
+    expect(backend.lastRequest?.samples.byteLength).toBe(4);
+    backend.settle({ ok: true, windowCount: 0 });
+    const past = await shortest;
+    if (!past.ok) throw new Error(`expected ok, got ${past.status}: ${past.message}`);
+    expect(past.evidence.totalSamples16k).toBe(1);
+    expect(past.diarization.speakerCount).toBe(0);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -394,6 +471,39 @@ describe('cancellation', () => {
     expect(backend.liveListeners).toBe(0);
   });
 
+  it('catches a Cancel raised while the model probe is in flight, before the resample', async () => {
+    // `getDiarizeModelState()` is the run's FIRST await, so the dialog's
+    // Cancel really can land here — unlike door 3, which no yield precedes.
+    // The status alone does not prove the probe door fired: door 2 re-reads
+    // `run.cancelled` and would answer 'cancelled' too, one full mono mix and
+    // one windowed-sinc pass later (hundreds of megabytes on a real stem).
+    // What separates them is that the 'resampling' publish sits BETWEEN the
+    // two, so an empty progress log is the proof no work was started.
+    const seen: DiarizeProgress[] = [];
+    const promise = diarizeChannels({
+      channels: makeChannels(),
+      sampleRate: SOURCE_RATE,
+      onProgress: (p) => seen.push(p),
+    });
+    // The probe has been issued and the run is reserved, with nothing spawned.
+    expect(backend.modelStateCalls).toBe(1);
+    expect(getDiarizeBusyCount()).toBe(1);
+    expect(backend.runCalls).toBe(0);
+
+    // `abortRun` sets the flag in `cancelDiarization`'s synchronous prefix, so
+    // it is already set when the probe's promise resolves.
+    const cancelling = cancelDiarization();
+    const result = await promise;
+    expect(await cancelling).toBe(true);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.status).toBe('cancelled');
+    expect(seen).toEqual([]);
+    expect(backend.runCalls).toBe(0);
+    expect(backend.showMessageBox).not.toHaveBeenCalled();
+    expect(getDiarizeBusyCount()).toBe(0);
+  });
+
   it('honours shouldCancel before the model probe, spawning nothing', async () => {
     const result = await diarizeChannels({
       channels: makeChannels(),
@@ -426,14 +536,18 @@ describe('cancellation', () => {
 
   it('honours shouldCancel at the last look before the invoke, and tears the listeners down', async () => {
     // Door 3 (D5): false at the pre-probe and post-resample looks, true at the
-    // third. Nothing asynchronous separates door 2 from door 3 — the lines
-    // between them are the three `on*` subscriptions — so a STATELESS
-    // predicate that was false at door 2 is false at door 3 and this door is
-    // reachable only by a predicate whose answer can change between two
-    // synchronous reads. The dialog's `cancelledRef` is exactly that: it is
-    // re-read at each door and a Cancel click lands between them. Deleting
-    // door 3 would leave doors 1 and 2 green, so the count below is the pin:
-    // D5 says the predicate is consulted at EXACTLY three points.
+    // third. What is NOT true of this door, stated plainly because the obvious
+    // reading is wrong: no real Cancel can land at it. Door 2 and door 3 are
+    // separated by no yield point at all — between them sit one assignment,
+    // two length guards and the three synchronous `bridge.on*` subscriptions —
+    // so the dialog's `cancelledRef` reads identically at both, and
+    // `run.cancelled` cannot change either, since `cancelDiarization()` only
+    // ever runs from an event handler that needs a yield to be reached. The
+    // only caller that gets a different answer at door 3 than at door 2 is a
+    // predicate that counts its own calls, which is what this test uses: a
+    // test-only device that pins the COUNT D5 fixes at three, not a model of
+    // the dialog. Deleting door 3 fails exactly this test and nothing else,
+    // and that is the honest extent of the pin.
     let calls = 0;
     const result = await diarizeChannels({
       channels: makeChannels(),
@@ -549,6 +663,65 @@ describe('host failures', () => {
     const result = await promise;
     if (!result.ok) throw new Error(`expected ok, got ${result.status}: ${result.message}`);
     expect(result.evidence.embeddings).toHaveLength(FIXTURE_AXES.length - 1);
+  });
+
+  it('drops an off-dimension embedding that arrives FIRST, keeping the eight behind it', async () => {
+    // The inversion this pins: judging width against the FIRST arrival rather
+    // than against the wire constant makes one short leading payload the new
+    // truth, and the eight correct 256-d vectors behind it are then the ones
+    // dropped — a two-voice recording reported as one voice, with {ok:true}
+    // and no gate anywhere (the window path has a count gate; embeddings have
+    // none). D2 fixes the width at `Float32Array(256)` / 1024 bytes, and the
+    // host's own `EMBEDDING_DIM` (diarizeHost.cjs:120) is that 256.
+    const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    streamFixtureVectors((k, axis) =>
+      k === 0 ? vectorOfDims(k, axis, WIRE_EMBED_DIMS - 1) : speakerVector(axis, 4000 + k * 37)
+    );
+    const result = await promise;
+    if (!result.ok) throw new Error(`expected ok, got ${result.status}: ${result.message}`);
+    // Exactly the eight behind it, in arrival order, at the wire width.
+    expect(result.evidence.embeddings.map((e) => [e.windowIndex, e.localSpeaker])).toEqual(
+      FIXTURE_AXES.slice(1).map((f) => [f.windowIndex, f.localSpeaker])
+    );
+    for (const e of result.evidence.embeddings) expect(e.vector).toHaveLength(WIRE_EMBED_DIMS);
+    // No speaker count is asserted here on purpose: the dropped fragment is
+    // one of voice A's four, and three is under MIN_CLUSTER_SIZE, so the fold
+    // legitimately collapses this run to one voice. What the drop must NOT do
+    // is take the other eight with it.
+  });
+
+  it('drops an off-dimension embedding mid-stream, one float below and one above the wire width', async () => {
+    // The boundary from both sides. Fragment 4 is one of voice B's five, so
+    // losing it leaves 4 and 4 — both at MIN_CLUSTER_SIZE — and the two voices
+    // survive, which is what makes "the rest are kept" a visible claim rather
+    // than an embedding count.
+    for (const dims of [WIRE_EMBED_DIMS - 1, WIRE_EMBED_DIMS + 1]) {
+      const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+      await flushUntil(() => backend.isPending());
+      streamFixtureVectors((k, axis) =>
+        k === 4 ? vectorOfDims(k, axis, dims) : speakerVector(axis, 4000 + k * 37)
+      );
+      const result = await promise;
+      if (!result.ok) throw new Error(`expected ok at ${dims} dims, got ${result.status}: ${result.message}`);
+      expect(result.evidence.embeddings.map((e) => [e.windowIndex, e.localSpeaker])).toEqual(
+        FIXTURE_AXES.filter((_, k) => k !== 4).map((f) => [f.windowIndex, f.localSpeaker])
+      );
+      for (const e of result.evidence.embeddings) expect(e.vector).toHaveLength(WIRE_EMBED_DIMS);
+      expect(result.diarization.speakerCount).toBe(2);
+    }
+  });
+
+  it('keeps every embedding when all nine arrive at exactly the wire width', async () => {
+    // The other side of the boundary, on the same helper: 256 is accepted, and
+    // the assertion above is not passing because the guard drops everything.
+    const promise = diarizeChannels({ channels: makeChannels(), sampleRate: SOURCE_RATE });
+    await flushUntil(() => backend.isPending());
+    streamFixtureVectors((k, axis) => vectorOfDims(k, axis, WIRE_EMBED_DIMS));
+    const result = await promise;
+    if (!result.ok) throw new Error(`expected ok, got ${result.status}: ${result.message}`);
+    expect(result.evidence.embeddings).toHaveLength(FIXTURE_AXES.length);
+    expect(result.diarization.speakerCount).toBe(2);
   });
 
   it('drops an embedding pointing at a window that never arrived', async () => {

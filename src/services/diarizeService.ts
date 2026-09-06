@@ -92,6 +92,21 @@ export const DIARIZE_SAMPLE_RATE = MODEL_SAMPLE_RATE;
 export const MAX_DIARIZE_SAMPLES = DIARIZE_SAMPLE_RATE * 7200;
 
 /**
+ * Floats in one `diarize:embedding` vector — the WIRE width, 1024 bytes.
+ *
+ * MIRRORED from `diarizeHost.cjs` EMBEDDING_DIM (:120, "ResNet34-LM `embs` is
+ * [B, 256]"), which is D2's `vector: Float32Array(256)`. It is a fixed
+ * constant rather than "whatever the first payload was" on purpose: the
+ * assembly refuses a ragged set, so SOME width has to be picked, and picking
+ * the first arrival's inverts the guard — one short leading payload would
+ * become the truth and every correct vector behind it would be dropped, with
+ * the run still resolving `{ok:true}` at one speaker. The window path already
+ * validates against its own wire constant (`SEG_FRAMES`); this is the same
+ * rule for the other event.
+ */
+export const DIARIZE_EMBEDDING_DIMS = 256;
+
+/**
  * Total download size of the pinned two-file model set, used ONLY as the
  * fallback for the "no preload" model state so the dialog can still state a
  * size. The live number comes from `diarize:model-state`.
@@ -328,9 +343,6 @@ interface ActiveRun {
    * order, and events are not ordered by contract. */
   windows: Map<number, Uint8Array>;
   embeddings: DiarizationEmbedding[];
-  /** Vector length of the first accepted embedding — the assembly refuses a
-   * ragged set, so a differently-sized row is dropped rather than thrown. */
-  vectorDims: number;
   totalSamples16k: number;
   audioSeconds: number;
   cancelled: boolean;
@@ -488,6 +500,12 @@ function acceptWindow(run: ActiveRun, w: { index: number; labels: ArrayBuffer })
  * decides the cluster numbering (`relabelByFirstAppearance`) and therefore the
  * speaker numbering, so it is the host's order that is preserved, not a sort.
  *
+ * Validated at this boundary like the window payload, and against the SAME
+ * kind of thing: {@link DIARIZE_EMBEDDING_DIMS}, the wire's fixed width, not
+ * the width of whatever arrived first. A row of any other length is dropped;
+ * the assembly refuses a ragged set outright, and judging the set by its first
+ * member would let one short leading payload discard all the correct ones.
+ *
  * A non-finite component would poison every distance in the clusterer (NaN
  * propagates through the linkage and a NaN comparison is silently false), so a
  * vector carrying one is dropped whole — that fragment then falls out of the
@@ -506,9 +524,7 @@ function acceptEmbedding(
   } catch {
     return;
   }
-  if (vector.length === 0) return;
-  if (run.vectorDims === 0) run.vectorDims = vector.length;
-  else if (vector.length !== run.vectorDims) return;
+  if (vector.length !== DIARIZE_EMBEDDING_DIMS) return;
   for (let i = 0; i < vector.length; i++) {
     if (!Number.isFinite(vector[i])) return;
   }
@@ -550,7 +566,6 @@ export async function diarizeChannels(req: DiarizeRequest): Promise<DiarizeResul
     id: nextRunId++,
     windows: new Map(),
     embeddings: [],
-    vectorDims: 0,
     totalSamples16k: 0,
     audioSeconds: length / sampleRate,
     cancelled: false,
