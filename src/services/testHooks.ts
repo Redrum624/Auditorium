@@ -1543,15 +1543,25 @@ function channelsPeak(channels: readonly Float32Array[]): number {
  * gap at all and its whole evidence is head + tail.
  *
  * Spans may arrive in any ORDER and may NEST — the sort and the monotonic
- * cursor answer both, and both are pinned. They must lie WITHIN the channels:
- * the head scan runs to the span's own start, so a span past the last sample
- * would cost the span rather than the channel. Every caller satisfies that by
- * construction — `segmentsToDocSamples` clamps both edges to the document
- * length, and that document is the one that was landed. (A clamp against
- * `ch.length` used to stand in the scan; it could not change the answer, since
- * a read past a Float32Array is `undefined` and `Math.abs` of that is NaN,
- * which never beats the running peak. An unpinnable line is a line that says
- * nothing, so the guarantee is stated here instead.)
+ * cursor answer both, and both are pinned. They need NOT lie within the
+ * channels: the head scan runs to the span's own start, so a span past the
+ * last sample makes the loop read past the array, and those reads are
+ * `undefined` — `Math.abs(undefined)` is NaN and `NaN > outside` is false, so
+ * the running peak keeps whatever the real samples gave it and the answer is
+ * the in-bounds one. That is pinned in `testHooks.test.ts` (the span sets the
+ * shipped caller never sends) at `ch.length`, where nothing out of range is
+ * read yet, and one step past it, which is the first start that reads one —
+ * and it is that second case a `Math.max(outside, v)` peak returns NaN for.
+ *
+ * A `Math.min(s.startSample, ch.length)` clamp used to stand in that scan and
+ * was removed. The reason is the paragraph above and nothing else — no rule
+ * from the plan or the review is being cited here: the clamp changes how many
+ * iterations run and provably cannot change what is returned, so no test can
+ * distinguish it from its absence, and a guard that cannot fail advertises a
+ * protection this loop does not need. Nor does the shipped caller lean on it:
+ * `segmentsToDocSamples` (`src/dsp/diarization.ts`) clamps both edges to the
+ * document length before these spans exist, and that document is the one that
+ * was landed.
  */
 export function peakOutsideSpans(
   channels: readonly Float32Array[],

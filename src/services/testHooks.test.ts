@@ -1494,10 +1494,14 @@ describe('separateSpeakersLand (D4/D6)', () => {
     // The routing flag on the side the mono test cannot reach: asserted only
     // as `true` on a mono source it is the seed value of a field hardcoded to
     // `true`, and a stereo landing that claimed dual-mono routing would look
-    // exactly like this one. Two channels in, two channels out on all three
-    // documents, and the flag says so.
+    // exactly like this one.
+    //
+    // `channelCounts` is deliberately NOT asserted here. This source is stereo
+    // and the mono fixture below is widened to stereo by the dual-mono routing,
+    // so both read [2, 2, 2] and a summary answering a hardcoded 2 per document
+    // would satisfy either. The field is pinned where it can fail instead — on
+    // the three-channel landing further down.
     expect(summary.monoRoutedAsDualMono).toBe(false);
-    expect(summary.channelCounts).toEqual([2, 2, 2]);
     // D4: a speaker split is not a partition of the source, so the landing
     // makes no exact-sum claim in either direction.
     expect(summary.exactSumHolds).toBeNull();
@@ -1709,6 +1713,22 @@ describe('separateSpeakersLand (D4/D6)', () => {
     edge[39] = 0.6;
     expect(peakOutsideSpans([edge], [{ startSample: 0, endSample: 39 }])).toBeCloseTo(0.6, 6);
     expect(peakOutsideSpans([edge], [{ startSample: 0, endSample: 40 }])).toBe(0);
+
+    // A span that starts AT the last sample's end and one that starts PAST it.
+    // `segmentsToDocSamples` clamps both edges to the document length, so the
+    // shipped caller never sends either — but the head scan runs to the span's
+    // own start rather than to a clamped one, so the loop reads past the array
+    // and the function's docblock rests on what those reads do: `undefined`,
+    // `Math.abs` of that is NaN, and `NaN > outside` is false, so the running
+    // peak keeps the in-bounds answer. Pinned at `ch.length`, where the scan
+    // stops exactly at the end and reads nothing out of range, and one step
+    // past it, which is the first start that reads one — so a
+    // `Math.max(outside, v)` running peak, the same loop written the other way
+    // round, still answers 0.45 for the first and NaN for the second.
+    const past = new Float32Array(40);
+    past[7] = 0.45;
+    expect(peakOutsideSpans([past], [{ startSample: 40, endSample: 50 }])).toBeCloseTo(0.45, 6);
+    expect(peakOutsideSpans([past], [{ startSample: 41, endSample: 50 }])).toBeCloseTo(0.45, 6);
   });
 
   it('reads the ACTIVE documents rate on both sides of the chain — a 48 kHz source', () => {
@@ -1820,6 +1840,31 @@ describe('separateSpeakersLand (D4/D6)', () => {
 
     expect(summary.monoRoutedAsDualMono).toBe(true);
     expect(summary.channelCounts).toEqual([2, 2, 2]);
+  });
+
+  it('carries a THREE-channel source through at its own width, on every document', () => {
+    const t = api();
+    // The two landings above cannot pin `channelCounts` between them: the
+    // stereo source lands two channels because that is its width, and the mono
+    // source lands two because dual-mono routing widens it, so [2, 2, 2] is the
+    // answer either way and `landed.map(() => 2)` passes both. This source is
+    // THREE channels wide — `documentChannels` (`stemLanding.ts`) copies only a
+    // MONO stem and hands anything else through — so the number can only be
+    // right if the summary reads it off each landed document.
+    const source = addSpeakerDoc('surround.wav', 2 * 44100, 3);
+
+    const summary = t.separateSpeakersLand(2);
+
+    expect(source.channels).toHaveLength(3);
+    expect(summary.documentNames).toHaveLength(3);
+    expect(summary.channelCounts).toEqual([
+      source.channels.length,
+      source.channels.length,
+      source.channels.length,
+    ]);
+    // ...and the routing flag is about MONO, not about "narrower than stereo":
+    // a three-channel source is not routed either.
+    expect(summary.monoRoutedAsDualMono).toBe(false);
   });
 
   it('the auto policy keeps both voices once each has MIN_CLUSTER_SIZE fragments', () => {
