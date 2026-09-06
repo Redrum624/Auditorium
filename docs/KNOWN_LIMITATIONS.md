@@ -1598,7 +1598,7 @@ while an elevation lane is moving writes an elevation key at the value shown
 when the drag began (the frozen dot/readout), not at the value the lane
 reached by release. The panel displays exactly what will be committed.
 
-## Speaker separation is reliable for one or two voices, not three
+## Transcribe's speaker labels are reliable for one or two voices, not three
 
 **Area:** F4 transcription (`electron/transcribeHost.cjs`,
 `electron/transcribeManager.cjs`, `src/dsp/speakerClustering.ts`,
@@ -2351,10 +2351,14 @@ sample for sample — but summing four of them into one buffer performs three
 float32 additions the five-track landing never performs, and each rounds.
 Measured on the test material, the worst `|(Voice + Backing) − source|` is
 **4.32e-7**: about seven times the float32 storage floor (2^-24 ≈ 5.96e-8) and
-about a seventieth of the smallest step a 16-bit file can store. The dialog, the
-User Guide and the README all state it as "within float32 rounding" and none of
-them calls the two-track landing bit-exact; **Separate into Stems** keeps the
-bit-exact claim, because it is the landing that has it.
+about a seventieth of the smallest step a 16-bit file can store. The User Guide
+and the README state it as "within float32 rounding" and neither calls the
+two-track landing bit-exact; the dialog dropped that sentence when the speaker
+landing shipped — its voice-mode guarantee now reads "Backing adds back to your
+original as before. Speaker tracks carry that speaker's turns with short fades at
+each edge, so they do not add back sample for sample", which is true of both
+landings. **Separate into Stems** keeps the bit-exact claim, because it is the
+landing that has it.
 
 A second consequence has nothing to do with arithmetic: **Backing is the
 complement of Voice**, so any separation artefact in the Voice appears

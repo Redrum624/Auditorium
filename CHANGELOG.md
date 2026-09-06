@@ -5,7 +5,10 @@ All notable changes to Auditorium are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.39.0] - 2026-09-06
+
+Separate Voice hears the people in the room: one full-length track per speaker,
+behind a confirmation step that counts them first.
 
 ### Added
 
@@ -28,11 +31,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   panel. The two models are one 32.5 MB download, offered beside the 166 MB
   separation model. Speaker tracks carry no exact-sum claim: the fades remove a
   little audio at every turn and overlapping speech is written into both
-  speakers' tracks. New: `src/dsp/diarization.ts`, `electron/diarizeHost.cjs`,
-  `electron/diarizeManager.cjs`, `src/services/diarizeService.ts`,
-  `scripts/diarize-bench.cjs`, `scripts/fetch-diarization-assets.cjs`; changed:
+  speakers' tracks. New: `src/dsp/diarization.ts`, `src/dsp/spanMask.ts`,
+  `electron/diarizeHost.cjs`, `electron/diarizeManager.cjs`,
+  `src/services/diarizeService.ts`, `scripts/diarize-bench.cjs`,
+  `scripts/fetch-diarization-assets.cjs`; changed:
   `src/components/Dialogs/SeparateDialog.tsx`, `src/services/stemLanding.ts`,
-  `electron/main.cjs`, `electron/preload.cjs`.
+  `electron/main.cjs`, `electron/preload.cjs`, `src/App.tsx`.
 
 ### Changed
 

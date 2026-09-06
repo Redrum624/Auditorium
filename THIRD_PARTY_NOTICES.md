@@ -1,6 +1,7 @@
 # Third-Party Notices
 
-Auditorium itself is MIT licensed (see [LICENSE](LICENSE)). This file lists
+Auditorium itself is licensed under the PolyForm Noncommercial License 1.0.0
+(see [LICENSE](LICENSE)). This file lists
 everything in the shipped app that is NOT Auditorium's own code: the
 third-party components bundled into the build, the models the app downloads at
 runtime, and the code ported from other projects — each with its license and
@@ -61,8 +62,8 @@ LGPL-3.0 compliance for this static combination:
 - **Relink from source.** Both halves of the combination are publicly
   available in source form: the library's source is published at
   [`@breezystack/lamejs`](https://www.npmjs.com/package/@breezystack/lamejs),
-  and this application's complete source is published under MIT in this
-  repository. Anyone can therefore obtain the library's source, modify it,
+  and this application's complete source is published in this repository under
+  the PolyForm Noncommercial License 1.0.0. Anyone can therefore obtain the library's source, modify it,
   and rebuild the application from source against the modified library —
   satisfying the LGPL's requirement that users be able to recombine the
   application with a modified version of the library.

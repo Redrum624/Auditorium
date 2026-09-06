@@ -1368,9 +1368,10 @@ written to disk, so closing one — or quitting — prompts you to save it.
 
 ### Separating just the voice
 
-When all you want is the singer on one track and everything else on another,
+When all you want is the voice on one track and everything else on another,
 **Pipeline → Separate Voice** runs exactly the same separation as the five-stem
-tool and lands **two** documents instead of five:
+tool and lands the voice apart from the rest. With one person talking or singing
+that is **two** documents instead of five:
 
 - `<name> — Voice` — the vocal stem, and
 - `<name> — Backing` — the drums, the bass, everything else and whatever the
@@ -1378,12 +1379,14 @@ tool and lands **two** documents instead of five:
 
 Everything else is identical: the same one-time 166 MB model, the same
 per-segment progress and **Cancel**, the same ~1.5× realtime, the same
-15-minute limit per run, and the same landing — the multitrack view, a
-two-track session, both documents open with Voice active. A **mono** source
-lands as stereo documents with identical channels, exactly as the stem tool's
-do.
+15-minute limit per run, and the same landing — the multitrack view, both
+documents open with Voice active. A **mono** source lands as stereo documents
+with identical channels, exactly as the stem tool's do. When the tool hears more
+than one person it lands one track per speaker instead — see *When more than one
+person is talking* below.
 
-One difference is worth stating plainly, because the dialog states it too:
+One difference is worth stating plainly, because the dialog states the half of
+it that survives every landing ("Backing adds back to your original as before"):
 **the two tracks add back up to your original within float32 rounding, not
 bit-for-bit.** Summing four stems into one Backing track rounds where summing
 all five separately does not; measured on the test material, the worst
@@ -1416,8 +1419,8 @@ What happens when you press **Separate**:
 Then the tool stops and shows you what it found: **"Found 3 speakers"**, each
 speaker's speech time and share, the size a landing would take, and a
 **Speakers** control. Nothing has landed yet. If the count looks wrong, change
-it — the regrouping is instant, because the measurements are kept and only the
-grouping is redone. Press **Land 3 speakers + Backing** to accept, or **Close**
+it — the control offers 1 to 6 speakers, and the regrouping is instant, because
+the measurements are kept and only the grouping is redone. Press **Land 3 speakers + Backing** to accept, or **Close**
 to walk away with your session untouched.
 
 **What a speaker track holds.** Every speaker track is the *whole* voice stem at
@@ -1473,8 +1476,11 @@ the button to run a fresh one when you actually want that. (There is no
 Transcript icon in the module strip: a transcript is what the Transcribe tool
 produces, not a module of its own.)
 
-**Read this before you trust the speaker labels.** Speaker separation was
-measured on clean recordings with one voice at a time. It told **two**
+**Read this before you trust the speaker labels.** These labels come from the
+Transcribe panel's own speaker path — CAM++ embeddings over 2 s chunks, not the
+segmentation and embedder **Separate Voice** uses (see *When more than one person
+is talking* above) — and it was measured on clean recordings with one voice at a
+time. It told **two**
 speakers apart with every segment correct, and recognised a single speaker as
 one person every time. With **three** it placed only 45 % of segments
 correctly — 73 % even when told there were three. And it does not detect
