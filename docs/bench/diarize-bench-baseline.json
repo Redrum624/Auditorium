@@ -1,0 +1,433 @@
+{
+  "script": "scripts/diarize-bench.cjs",
+  "generated": "2026-09-06T02:02:44.134Z",
+  "policy": {
+    "threshold": 0.55,
+    "minClusterSize": 4,
+    "minSpeakerShare": 0.05,
+    "maxSpeakers": 6,
+    "anchorMinShare": 0.8
+  },
+  "truthSource": "the recordings’ own file names (0-four → 4, N-two → 2) — a COUNT only. Upstream ships no RTTM, so there is no per-segment truth here and no DER: a row can have the right count with the wrong turns. Four recordings, ~162 s in total, one of them four-speaker and Mandarin under an English-trained embedder, near-zero overlap.",
+  "models": [
+    {
+      "key": "segmentation",
+      "filename": "pyannote-segmentation-3.0.onnx",
+      "bytes": 5992913,
+      "sha256": "220ad67ca923bef2fa91f2390c786097bf305bceb5e261d4af67b38e938e1079"
+    },
+    {
+      "key": "embedder",
+      "filename": "wespeaker_en_voxceleb_resnet34_LM.onnx",
+      "bytes": 26530550,
+      "sha256": "e9848563da86f263117134dfd7ad63c92355b37de492b55e325400c9d9c39012"
+    }
+  ],
+  "machine": {
+    "platform": "win32",
+    "arch": "x64",
+    "cpu": "Intel(R) Core(TM) i7-10875H CPU @ 2.30GHz",
+    "cpus": 16,
+    "memGb": 64,
+    "node": "v24.13.0",
+    "onnxruntimeNode": "1.27.0"
+  },
+  "tables": {
+    "direct": {
+      "mode": "--direct",
+      "description": "--direct — 16 kHz speech straight to the diarizer (the sweep condition)",
+      "ran": true,
+      "counts": [
+        2,
+        2,
+        2,
+        4
+      ],
+      "truth": [
+        2,
+        2,
+        2,
+        4
+      ],
+      "correct": 4,
+      "measured": 4,
+      "skipped": 0,
+      "rows": [
+        {
+          "file": "1-two-speakers-en.wav",
+          "status": "ok",
+          "truth": 2,
+          "audioSeconds": 16,
+          "windowCount": 7,
+          "fragmentCount": 14,
+          "speakerCount": 2,
+          "preFoldClusterCount": 2,
+          "rawClusterCount": 2,
+          "shares": [
+            0.4573,
+            0.5427
+          ],
+          "speechSeconds": [
+            3.881,
+            4.607
+          ],
+          "segmentCount": 4,
+          "overlapCount": 0,
+          "consistency": {
+            "pairs": 42,
+            "agree": 42,
+            "rate": 1
+          },
+          "ms": {
+            "decode": 7.4,
+            "init": 956.9,
+            "stem": null,
+            "resample": 4,
+            "segment": 219.5,
+            "embed": 1173,
+            "assemble": 8.3,
+            "total": 2361.6
+          },
+          "msPerAudioSecond": {
+            "stem": null,
+            "segment": 13.7,
+            "embed": 73.3,
+            "assemble": 0.5,
+            "total": 147.6
+          }
+        },
+        {
+          "file": "2-two-speakers-en.wav",
+          "status": "ok",
+          "truth": 2,
+          "audioSeconds": 34,
+          "windowCount": 25,
+          "fragmentCount": 48,
+          "speakerCount": 2,
+          "preFoldClusterCount": 3,
+          "rawClusterCount": 2,
+          "shares": [
+            0.5928,
+            0.4072
+          ],
+          "speechSeconds": [
+            16.116,
+            11.07
+          ],
+          "segmentCount": 9,
+          "overlapCount": 1,
+          "consistency": {
+            "pairs": 136,
+            "agree": 136,
+            "rate": 1
+          },
+          "ms": {
+            "decode": 10.7,
+            "init": 197.5,
+            "stem": null,
+            "resample": 4.4,
+            "segment": 547.4,
+            "embed": 6147.6,
+            "assemble": 17.3,
+            "total": 6914.2
+          },
+          "msPerAudioSecond": {
+            "stem": null,
+            "segment": 16.1,
+            "embed": 180.8,
+            "assemble": 0.5,
+            "total": 203.4
+          }
+        },
+        {
+          "file": "3-two-speakers-en.wav",
+          "status": "ok",
+          "truth": 2,
+          "audioSeconds": 54.8,
+          "windowCount": 46,
+          "fragmentCount": 76,
+          "speakerCount": 2,
+          "preFoldClusterCount": 5,
+          "rawClusterCount": 2,
+          "shares": [
+            0.43,
+            0.57
+          ],
+          "speechSeconds": [
+            21.026,
+            27.877
+          ],
+          "segmentCount": 6,
+          "overlapCount": 0,
+          "consistency": {
+            "pairs": 283,
+            "agree": 273,
+            "rate": 0.9647
+          },
+          "ms": {
+            "decode": 23.8,
+            "init": 187.9,
+            "stem": null,
+            "resample": 5.9,
+            "segment": 934.6,
+            "embed": 12193.6,
+            "assemble": 55.1,
+            "total": 13377.1
+          },
+          "msPerAudioSecond": {
+            "stem": null,
+            "segment": 17.1,
+            "embed": 222.5,
+            "assemble": 1,
+            "total": 244.1
+          }
+        },
+        {
+          "file": "0-four-speakers-zh.wav",
+          "status": "ok",
+          "truth": 4,
+          "audioSeconds": 56.9,
+          "windowCount": 48,
+          "fragmentCount": 77,
+          "speakerCount": 4,
+          "preFoldClusterCount": 6,
+          "rawClusterCount": 4,
+          "shares": [
+            0.3701,
+            0.1931,
+            0.187,
+            0.2499
+          ],
+          "speechSeconds": [
+            11.323,
+            5.906,
+            5.721,
+            7.644
+          ],
+          "segmentCount": 10,
+          "overlapCount": 0,
+          "consistency": {
+            "pairs": 335,
+            "agree": 335,
+            "rate": 1
+          },
+          "ms": {
+            "decode": 19,
+            "init": 219.3,
+            "stem": null,
+            "resample": 9.5,
+            "segment": 989.8,
+            "embed": 7026.2,
+            "assemble": 7.7,
+            "total": 8252.5
+          },
+          "msPerAudioSecond": {
+            "stem": null,
+            "segment": 17.4,
+            "embed": 123.6,
+            "assemble": 0.1,
+            "total": 145.1
+          }
+        }
+      ]
+    },
+    "fullChain": {
+      "mode": "--full-chain",
+      "description": "--full-chain — WAV → 44.1 kHz stereo → HT-Demucs → Vocals → the diarizer (D1)",
+      "ran": true,
+      "counts": [
+        2,
+        2,
+        2,
+        4
+      ],
+      "truth": [
+        2,
+        2,
+        2,
+        4
+      ],
+      "correct": 4,
+      "measured": 4,
+      "skipped": 0,
+      "rows": [
+        {
+          "file": "1-two-speakers-en.wav",
+          "status": "ok",
+          "truth": 2,
+          "audioSeconds": 16,
+          "windowCount": 7,
+          "fragmentCount": 14,
+          "speakerCount": 2,
+          "preFoldClusterCount": 2,
+          "rawClusterCount": 2,
+          "shares": [
+            0.4573,
+            0.5427
+          ],
+          "speechSeconds": [
+            3.881,
+            4.607
+          ],
+          "segmentCount": 4,
+          "overlapCount": 0,
+          "consistency": {
+            "pairs": 42,
+            "agree": 42,
+            "rate": 1
+          },
+          "ms": {
+            "decode": 6.5,
+            "init": 172.4,
+            "stem": 26933.1,
+            "resample": 616,
+            "segment": 191.7,
+            "embed": 1176.9,
+            "assemble": 1.7,
+            "total": 29091.9
+          },
+          "msPerAudioSecond": {
+            "stem": 1683.3,
+            "segment": 12,
+            "embed": 73.6,
+            "assemble": 0.1,
+            "total": 1818.2
+          }
+        },
+        {
+          "file": "2-two-speakers-en.wav",
+          "status": "ok",
+          "truth": 2,
+          "audioSeconds": 34,
+          "windowCount": 25,
+          "fragmentCount": 50,
+          "speakerCount": 2,
+          "preFoldClusterCount": 3,
+          "rawClusterCount": 2,
+          "shares": [
+            0.5425,
+            0.4575
+          ],
+          "speechSeconds": [
+            14.766,
+            12.454
+          ],
+          "segmentCount": 11,
+          "overlapCount": 2,
+          "consistency": {
+            "pairs": 136,
+            "agree": 125,
+            "rate": 0.9191
+          },
+          "ms": {
+            "decode": 11.8,
+            "init": 245,
+            "stem": 42314.1,
+            "resample": 1580,
+            "segment": 614.8,
+            "embed": 6938.3,
+            "assemble": 19,
+            "total": 51711.3
+          },
+          "msPerAudioSecond": {
+            "stem": 1244.5,
+            "segment": 18.1,
+            "embed": 204.1,
+            "assemble": 0.6,
+            "total": 1520.9
+          }
+        },
+        {
+          "file": "3-two-speakers-en.wav",
+          "status": "ok",
+          "truth": 2,
+          "audioSeconds": 54.8,
+          "windowCount": 46,
+          "fragmentCount": 76,
+          "speakerCount": 2,
+          "preFoldClusterCount": 6,
+          "rawClusterCount": 2,
+          "shares": [
+            0.4298,
+            0.5702
+          ],
+          "speechSeconds": [
+            21.009,
+            27.877
+          ],
+          "segmentCount": 6,
+          "overlapCount": 0,
+          "consistency": {
+            "pairs": 279,
+            "agree": 270,
+            "rate": 0.9677
+          },
+          "ms": {
+            "decode": 23,
+            "init": 199.3,
+            "stem": 66182,
+            "resample": 2739.1,
+            "segment": 988.1,
+            "embed": 11011.3,
+            "assemble": 22.9,
+            "total": 81142.7
+          },
+          "msPerAudioSecond": {
+            "stem": 1207.6,
+            "segment": 18,
+            "embed": 200.9,
+            "assemble": 0.4,
+            "total": 1480.6
+          }
+        },
+        {
+          "file": "0-four-speakers-zh.wav",
+          "status": "ok",
+          "truth": 4,
+          "audioSeconds": 56.9,
+          "windowCount": 48,
+          "fragmentCount": 77,
+          "speakerCount": 4,
+          "preFoldClusterCount": 7,
+          "rawClusterCount": 4,
+          "shares": [
+            0.3692,
+            0.1954,
+            0.1871,
+            0.2483
+          ],
+          "speechSeconds": [
+            11.289,
+            5.974,
+            5.721,
+            7.594
+          ],
+          "segmentCount": 10,
+          "overlapCount": 0,
+          "consistency": {
+            "pairs": 331,
+            "agree": 331,
+            "rate": 1
+          },
+          "ms": {
+            "decode": 23.5,
+            "init": 207.8,
+            "stem": 61977.6,
+            "resample": 2516.7,
+            "segment": 976.3,
+            "embed": 6944.9,
+            "assemble": 15.9,
+            "total": 72639.1
+          },
+          "msPerAudioSecond": {
+            "stem": 1090,
+            "segment": 17.2,
+            "embed": 122.1,
+            "assemble": 0.3,
+            "total": 1277.5
+          }
+        }
+      ]
+    }
+  }
+}

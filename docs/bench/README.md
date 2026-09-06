@@ -15,6 +15,7 @@ re-measure it.
 | `mt1-play-latency-44100.json`, `mt1-play-latency-48000.json` | The same rig per session rate (MT1) | `scripts/first-play-latency-rig.cjs` |
 | `mt2-play-latency-adopted.json`, `mt2-play-latency-mixed-warm.json` | The same rig for rate adoption and mixed-warm sessions (MT2) | `scripts/first-play-latency-rig.cjs` |
 | `stem-second-pass-rejected.json` | Four real model passes answering "does a second separation pass help?" — verdict: 0.00 dB | `scripts/stem-second-pass-probe.cjs` |
+| `diarize-bench-baseline.json` | Separate Speakers: detected speaker count vs the file-name truth, pre-/post-fold clusters, per-speaker shares, audio-anchored consistency and per-stage timings on the four sherpa-onnx recordings — `--direct` (16 kHz speech) and `--full-chain` (through HT-Demucs) | `scripts/diarize-bench.cjs` |
 | `vocal-chain-uneven-floor-bias.md` | Pre-registration and verdict for the uneven-floor bias in `deriveCompressor` / `deriveNoiseReduction` | in-suite probe, method in the document |
 
 Nothing in `npm test` enumerates this directory; suites reference individual files by name.
